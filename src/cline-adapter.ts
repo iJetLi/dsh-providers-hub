@@ -1026,7 +1026,7 @@ export class ClineAdapter extends LlmAdapter {
       }
       throw new LlmError(
         `cline: ${errorDetail(errorText)}`,
-        httpErrorCode(response.status),
+        httpErrorCode(response.status, errorText),
         { status: response.status },
       )
     }

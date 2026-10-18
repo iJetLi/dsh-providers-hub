@@ -947,7 +947,7 @@ export class MinimaxAdapter extends LlmAdapter {
             { status },
           )
         }
-        const code = httpErrorCode(status)
+        const code = httpErrorCode(status, errorText)
         /**
          * 只有「真实状态没有更具体语义」的档位才让地理路由接管错误码。
          * ⚠️ 接管时一律用 `INVALID_CREDENTIAL`（不可重试，见上）；
@@ -963,7 +963,7 @@ export class MinimaxAdapter extends LlmAdapter {
       }
       // ⚠️ 402 是**余额不足**，必须原样透出 —— 它是最常见的真实失败，
       // 归成 SERVER/AUTH 会让用户看不到「去充值」这个唯一有效动作。
-      const code = status === 402 ? 'QUOTA_EXCEEDED' : httpErrorCode(status)
+      const code = status === 402 ? 'QUOTA_EXCEEDED' : httpErrorCode(status, errorText)
       throw new LlmError(
         `minimax: HTTP ${status}${errorText === '' ? '' : ` — ${errorText.slice(0, 500)}`}`,
         code,

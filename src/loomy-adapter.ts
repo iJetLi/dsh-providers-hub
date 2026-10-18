@@ -889,7 +889,7 @@ export class LoomyAdapter extends LlmAdapter {
           failureClass = classifyLoomyFailure(errorText, status)
           await markCurrentAccount()
           if (failureClass === 'other') {
-            throw new LlmError(`loomy: ${errorDetail(errorText)}`, httpErrorCode(status), { status })
+            throw new LlmError(`loomy: ${errorDetail(errorText)}`, httpErrorCode(status, errorText), { status })
           }
         }
         throw new LlmError(
@@ -900,7 +900,7 @@ export class LoomyAdapter extends LlmAdapter {
           { status },
         )
       }
-      throw new LlmError(`loomy: ${errorDetail(errorText)}`, httpErrorCode(status), { status })
+      throw new LlmError(`loomy: ${errorDetail(errorText)}`, httpErrorCode(status, errorText), { status })
     }
 
     // ⚠️ 业务失败也可能以 HTTP 200 + SSE 内嵌错误帧返回，由 consumeOpenAiSse 处理。

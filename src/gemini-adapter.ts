@@ -818,7 +818,7 @@ export class GeminiAdapter extends LlmAdapter {
     // 归成 AUTH 会把用户引向「去重新登录」这个无效动作。
     if (status === 403 || status === 404) return new LlmError(message, 'SERVER', { status })
     if (status === 401) return new LlmError(message, 'AUTH', { status })
-    return new LlmError(message, httpErrorCode(status), { status })
+    return new LlmError(message, httpErrorCode(status, text), { status })
   }
 }
 

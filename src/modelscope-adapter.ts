@@ -658,7 +658,7 @@ export class ModelscopeAdapter extends LlmAdapter {
           ? 'RATE_LIMIT'
           : info.kind === 'auth'
             ? 'AUTH'
-            : httpErrorCode(response.status)
+            : httpErrorCode(response.status, text)
       throw new LlmError(
         `modelscope: HTTP ${response.status} — ${text.slice(0, 300)}`,
         code,

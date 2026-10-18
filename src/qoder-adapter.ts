@@ -1175,7 +1175,7 @@ export class QoderAdapter extends LlmAdapter {
           credential = await this.ensureUid(refreshed)
           continue
         }
-        throw new LlmError(`qoder: ${errorDetail(errorText)}`, httpErrorCode(response.status), { status: response.status })
+        throw new LlmError(`qoder: ${errorDetail(errorText)}`, httpErrorCode(response.status, errorText), { status: response.status })
       }
 
       // 重复请求（客户端 `duplicate_request`）：凭据没问题，重发一次即可。
@@ -1186,7 +1186,7 @@ export class QoderAdapter extends LlmAdapter {
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => '')
-        throw new LlmError(`qoder: ${errorDetail(errorText)}`, httpErrorCode(response.status), { status: response.status })
+        throw new LlmError(`qoder: ${errorDetail(errorText)}`, httpErrorCode(response.status, errorText), { status: response.status })
       }
 
       // ⚠️ 消费 SSE 时**捕获流内排队错误**，走与 HTTP 层**完全相同**的等待逻辑。

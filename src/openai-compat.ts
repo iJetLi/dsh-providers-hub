@@ -434,8 +434,47 @@ function errorDetailImpl(body: string, includeDetailField: boolean): string {
   return body
 }
 
-/** 将 HTTP 状态码映射为 harness 错误码。 */
-export function httpErrorCode(status: number): string {
+/**
+ * 「与凭据无关的访问限制」在响应体里的文案特征。
+ *
+ * ⚠️ 这份表**刻意只收录确定性高的措辞**。地域封锁 / 该地区模型未开通这类
+ * 限制，各家上游一律用 **403** 下发，与「凭据真的过期」无法用状态码区分，
+ * 只能看正文。表里每一条都必须能在真实报文里找到出处，不要凭想象扩充 ——
+ * 误命中会把真实的凭据问题放过（用户被引向「换模型」而不是重新登录）。
+ */
+export const NON_CREDENTIAL_DENIAL_MARKERS: readonly string[] = [
+  'not available in your region',
+  'not available in your country',
+  'region not supported',
+  'not subscribed to required model plan',
+]
+
+/**
+ * 该 401/403 是否是**与凭据无关**的访问限制（地域封锁 / 模型未开通）。
+ *
+ * ⚠️ **不能按状态码一刀切**：同一批 403 里既有真的凭据问题，也有地域限制，
+ * 还有额度耗尽 —— 只能靠正文文案区分。正文为空时保守返回 `false`（当作凭据
+ * 问题），因为「重新登录一次」是可恢复的，而把真凭据问题误报成「换模型」会
+ * 让用户彻底无路可走。
+ */
+export function isNonCredentialDenial(status: number, body: string): boolean {
+  if (status !== 401 && status !== 403) return false
+  // 不是字符串（旧调用方没传正文）时保守放过，不抛错。
+  if (typeof body !== 'string' || body.length === 0) return false
+  const lower = body.toLowerCase()
+  return NON_CREDENTIAL_DENIAL_MARKERS.some((marker) => lower.includes(marker))
+}
+
+/**
+ * 将 HTTP 状态码映射为 harness 错误码。
+ *
+ * @param body 上游响应体。**必传** —— 故意不给默认值：401/403 的归类完全取决于
+ * 正文（见 {@link isNonCredentialDenial}），给默认值会让漏传的调用点静默保留
+ * 「非凭据 403 被报成 API 密钥无效」这个缺陷。运行时对非字符串仍做保守兜底，
+ * 以免旧调用方直接崩掉。
+ */
+export function httpErrorCode(status: number, body: string): string {
+  if (isNonCredentialDenial(status, body)) return 'PERMISSION_DENIED'
   if (status === 401 || status === 403) return 'AUTH'
   if (status === 429) return 'RATE_LIMIT'
   if (status === 400) return 'INVALID_REQUEST'

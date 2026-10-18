@@ -638,7 +638,7 @@ export class OpencodeAdapter extends LlmAdapter {
       const retryAfterMs = retryAfterMsFromResponse(response.headers)
       throw new LlmError(
         `opencode: HTTP ${response.status} — ${text.slice(0, 300)}`,
-        httpErrorCode(response.status),
+        httpErrorCode(response.status, text),
         {
           status: response.status,
           // ⚠️ 走 dsh-llm 的**官方契约**字段（`LlmErrorOptions`）：

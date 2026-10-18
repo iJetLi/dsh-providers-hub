@@ -386,7 +386,7 @@ function abortLikeOrNormal(errorText: string, status: number): LlmError {
     e.name = 'AbortError'
     return e
   }
-  return new LlmError(message, httpErrorCode(status), { status })
+  return new LlmError(message, httpErrorCode(status, message), { status })
 }
 
 /**
