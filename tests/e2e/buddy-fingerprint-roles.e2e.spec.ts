@@ -35,20 +35,83 @@ function loadTriggerLine(): string {
   if (typeof line !== 'string' || line.trim().length === 0) {
     throw new Error('在 docs/agent-notes/providers-buddy.md 里找不到触发串那一行 —— 文档被改动后请同步本探针')
   }
-  return line
+  // ⚠️ 只取**纯字面量子串**，不返回整行：文档里首次命中的是 YAML 常量展示行
+  // （`$Js="Main branch (…)"`），整行带 `"` 双引号 —— 下面角色矩阵那组会把它
+  // `replaceAll` 进 JSON 再 `JSON.parse`，带引号的行直接炸
+  // `Expected ',' or '}' after property value`（本机 2026-10-21 实测踩中）。
+  // 其余调用点也只要这句字面量本身；行首的 `$Js="` 装饰反而是垃圾内容。
+  const literal = /Main branch \(you will usually use this for PRs\)/i.exec(line)?.[0]
+  if (literal === undefined) {
+    throw new Error('命中行里提取不出纯字面量 —— 文档被改动后请同步本探针')
+  }
+  return literal
 }
 
-function firstCredential(): { ref: string; cred: Record<string, unknown> } {
-  const raw = readFileSync(join(homedir(), '.dsh', '.credentials.yaml'), 'utf8')
-  for (const line of raw.split(/\r?\n/)) {
-    const m = /^\s+(BUDDY_ACCOUNT_[0-9A-F]+|BUDDY_ACCESS_TOKEN):\s*'(.*)'\s*$/.exec(line)
-    if (m === null) continue
-    try {
-      const cred = JSON.parse(m[2]) as Record<string, unknown>
-      if (typeof cred.access_token === 'string' && cred.access_token.length > 0) return { ref: m[1], cred }
-    } catch { /* 跳过非 JSON */ }
+/**
+ * 从 `~/.dsh/.credentials.yaml` 取第一个可用的腾讯系账号凭据。
+ *
+ * ⚠️ 该文件是 **YAML**：值是单引号包裹的 JSON 字符串，且**串内可以有真实 LF**
+ * （凭据里的 `scope` 字段就是多行折叠形态）⇒ 逐行正则匹配不到（单行形态只是
+ * 序列化器的一种折叠选择，不保证出现）。按 `buddy-conversation-headers.e2e.spec.ts`
+ * 的 `credentialFor` 同款方式按 ref 定位后扫描到闭合单引号，不引 yaml 依赖：
+ * YAML 单引号串内 `''` 表示一个字面 `'`，LF 会被折叠成空格。
+ *
+ * ⚠️⚠️ **按站点选 ref 前缀**（2026-10-21 修）：`SITES` 含 workbuddy 国际站，但
+ * 两个站的 token **不通用** —— 拿 buddy 中国站的 token 打 `www.workbuddy.ai`
+ * 得到的是与指纹无关的 `HTTP 401` 身份错误，恰好踩中本文件自己警告过的
+ * 「把『风控拦截』与『请求头写错』混成同一条报错」。workbuddy 站优先取
+ * `WORKBUDDY_ACCOUNT_*`，取不到再回落 `BUDDY_*`（保持旧行为：单账号机器上
+ * 两站共用同一凭据，由调用方自己甄别 401）。buddy 站维持原顺序。
+ */
+function firstCredential(prefix: 'BUDDY' | 'WORKBUDDY' = 'BUDDY'): { ref: string; cred: Record<string, unknown> } {
+  const text = readFileSync(join(homedir(), '.dsh', '.credentials.yaml'), 'utf8')
+  const primary = prefix === 'WORKBUDDY'
+    ? [...allAccountRefs(text, 'WORKBUDDY_ACCOUNT'), 'WORKBUDDY_ACCESS_TOKEN']
+    : ['BUDDY_ACCESS_TOKEN', ...allAccountRefs(text, 'BUDDY_ACCOUNT')]
+  const fallback = prefix === 'WORKBUDDY'
+    ? ['BUDDY_ACCESS_TOKEN', ...allAccountRefs(text, 'BUDDY_ACCOUNT')]
+    : []
+  for (const ref of [...primary, ...fallback]) {
+    const cred = parseCredentialRef(text, ref)
+    if (cred !== undefined) return { ref, cred }
   }
   throw new Error('磁盘上没有 CodeBuddy 凭据（请先在 Jet Hub 登录）')
+}
+
+/** 从凭据文件原文里扫出全部 `<PREFIX>_*` 账号 ref 名（不解析值）。 */
+function allAccountRefs(text: string, prefix: string): string[] {
+  const refs: string[] = []
+  const re = new RegExp(`^(\\s+${prefix}_[0-9A-F]+):`, 'gm')
+  for (const m of text.matchAll(re)) {
+    refs.push(m[1].trim())
+  }
+  return refs
+}
+
+/** 按 ref 名取单引号 JSON 标量的解析结果；找不到或不是可用凭据时返回 undefined。 */
+function parseCredentialRef(text: string, ref: string): Record<string, unknown> | undefined {
+  const key = `${ref}:`
+  const idx = text.indexOf(key)
+  if (idx < 0) return undefined
+  const after = text.slice(idx + key.length)
+  const open = after.indexOf("'")
+  if (open < 0) return undefined
+  const body = after.slice(open + 1)
+  let i = 0
+  for (;; i += 1) {
+    if (body[i] === "'") {
+      if (body[i + 1] === "'") { i += 1; continue }
+      break
+    }
+  }
+  const raw = body.slice(0, i).replace(/''/g, "'").replace(/\r?\n\s*/g, '\\n')
+  try {
+    const cred = JSON.parse(raw) as Record<string, unknown>
+    if (typeof cred.access_token === 'string' && cred.access_token.length > 0) {
+      return cred
+    }
+  } catch { /* 跳过非 JSON */ }
+  return undefined
 }
 
 const ENDPOINT = 'https://copilot.tencent.com'
@@ -67,12 +130,23 @@ const SITES = [
 ] as const
 
 function headersOf(cred: Record<string, unknown>, site: typeof SITES[number]): Record<string, string> {
+  // 三枚 Conv 头**必须发**（对齐生产适配器 `BuddyAdapter.send()` 的出站形态）：
+  // ⚠️ 少数账号（IKM7SG 的「要求三头」族）缺任一枚即回 `400/11128 msg=request
+  // illegal` 的**渠道校验**拒绝 —— 本机 2026-10-21 踩中：不补这三枚，这类账号上
+  // 请求根本到不了内容级风控那一层，全部断言被 `CHANNEL` 污染。生产实现每次
+  // `send()` 都带三枚非空同值头（逐请求新 UUID），探针与它同形。
+  // （不校验值语义：填 `abc-123` 也 200，见 IKM7SG 的穷举。）
+  const conversationId = crypto.randomUUID().replaceAll('-', '')
   return {
     Authorization: `Bearer ${String(cred.access_token)}`,
     Accept: 'text/event-stream',
     'Content-Type': 'application/json',
     'X-Domain': site.domain,
     'X-Product-Code': site.productCode,
+    'X-Conversation-ID': conversationId,
+    'X-Conversation-Request-ID': conversationId,
+    'X-Conversation-Message-ID': conversationId,
+    'X-Agent-Purpose': 'conversation',
     'X-IDE-Name': 'CodeBuddy', 'X-IDE-Type': 'CodeBuddy', 'X-IDE-Version': '1.106.1',
     'X-Product': 'CodeBuddy', 'User-Agent': 'CodeBuddyIDE/1.106.1',
   }
@@ -89,13 +163,13 @@ function headersOf(cred: Record<string, unknown>, site: typeof SITES[number]): R
  * 且症状与「完全没修」同形）。
  *
  * ⇒ 下面 `probe()` 做三件事，缺一不可：
- *   ① **基线筛账号**：第一次调用先把 `firstCredential()` 固定下来，后续全部用**同一个**；
+ *   ① **基线筛账号**：每个站点的第一次调用把该站点的凭据固定下来，后续全用**同一个**；
  *   ② **分开计数**：`kind: 'CHANNEL'` 的结果**不算**内容级命中，断言里单列；
  *   ③ **msg 逐格可见**：报错信息里带上 `msg`，便于人核对归属。
  *
- * ⚠️ `firstCredential()` 本来就恒返回**同一个**账号（原实现已如此），所以
- * 「轮换账号」是取证脚本的做法、不是本文件的行为 —— 本文件在这三点上更强：
- * 它把 `msg` 带进断言，**从断言层面**区分两类 11128，而不只是靠人读日志。
+ * ⚠️ `firstCredential()` 恒返回**同一个**账号（每站点一个，按站点选 ref 前缀，
+ * 见其注释），所以「轮换账号」是取证脚本的做法、不是本文件的行为 —— 本文件在
+ * 这三点上更强：它把 `msg` 带进断言，**从断言层面**区分两类 11128，而不只是靠人读日志。
  */
 type ProbeKind = 'OK' | 'INLINE' | 'CONTENT' | 'CHANNEL' | 'OTHER'
 
@@ -108,8 +182,8 @@ interface ProbeResult {
   detail: string
 }
 
-/** 账号只解析一次并固定：见上方「11128 有两个子原因」的说明。 */
-let pinnedCredential: Record<string, unknown> | undefined
+/** 每站点只解析一次并固定：见上方「11128 有两个子原因」的说明（反轮换）。 */
+const pinnedCredentials = new Map<string, Record<string, unknown>>()
 
 function classifyBody(status: number, body: string): { kind: ProbeKind; code?: string; detail: string } {
   if (status === 200) {
@@ -136,9 +210,15 @@ async function probe(
   messages: unknown[],
   site: typeof SITES[number] = SITES[0],
 ): Promise<ProbeResult> {
-  pinnedCredential ??= firstCredential().cred
+  // 每站点固定一个账号（反轮换，见上方说明）；workbuddy 站优先取 workbuddy 凭据，
+  // 否则跨站 token 会以 401 身份错误污染全部断言（见 firstCredential 的注释）。
+  let credential = pinnedCredentials.get(site.name)
+  if (credential === undefined) {
+    credential = firstCredential(site.name === 'workbuddy' ? 'WORKBUDDY' : 'BUDDY').cred
+    pinnedCredentials.set(site.name, credential)
+  }
   const res = await fetch(`${site.endpoint}/v2/chat/completions`, {
-    method: 'POST', headers: headersOf(pinnedCredential, site),
+    method: 'POST', headers: headersOf(credential, site),
     // ⚠️ `stream:true` **必须发**：两端点对非流式请求都回
     // `400 / code 11101 Non-stream chat request is currently not supported`，
     // 不带它会把「不支持非流式」误读成风控拦截（IKLS2L 探针第一版就踩了）。
@@ -433,5 +513,135 @@ describe.skipIf(!ENABLED || !CONFIRMED)('腾讯系内容级风控：Claude Code 
     ]
     const r = await probe(messages)
     expect(r.blocked).toBe(false)
+  }, 60_000)
+})
+
+/**
+ * 第四条指纹：**DSH 宿主自己的 harness 身份句**（2026-10-20 晚报障，非 Gitee issue）。
+ *
+ * `You are an AI agent powered by DeepSeek Harness` —— `dsh-system-prompt` 的
+ * `harness:identity` 段（`includeHarnessIdentity` 默认开启）⇒ **每个 DSH 直连会话
+ * system 的首句**。2026-10-20 23:15~23:25 之间腾讯网关（copilot.tencent.com）新登记：
+ * 同一会话 23:10 成功、23:25 起每轮 400/11128，换号/换模型/重登全无效。
+ *
+ * ## ⚠️ 这条与前两条的探针纪律**同样适用**
+ *
+ * - 「行首锚定」的结论**必须两侧都测**（前接前言放行、裸句被拦）—— 漏测一侧会
+ *   把「锚点不吃这一口」误读成「这条已失效」并据此删登记。
+ * - ⚠️ **workbuddy 国际站当时未同步**（2026-10-21 实测裸句 200）。本节对 workbuddy
+ *   的断言因此写成「按两端点同表先例仍改写」的**实现断言**（本地函数级），而
+ *   **上游断言**（被拦格）只对 buddy 站生效；哪天国际站跟进，把 `SITES` 过滤去掉
+ *   即可 —— 那时这个注释就是提醒。
+ * - 字面量可以写在源码里：改写已覆盖 system 与 assistant 正文，探针自己不会被拦死。
+ */
+describe.skipIf(!ENABLED || !CONFIRMED)('腾讯系内容级风控：DSH harness 身份句（2026-10-20 报障实测依据）', () => {
+  const DSH_TRIGGER = 'You are an AI agent powered by DeepSeek Harness'
+  const DSH_REWRITE = 'You are an AI agent running inside DeepSeek Harness'
+  /** 上游断言只对中国站跑（国际站 2026-10-21 实测未同步；同步后去掉过滤）。 */
+  const CN_SITES = SITES.filter((s) => s.name === 'buddy')
+
+  it.each(CN_SITES.map((s) => [s.name, s] as const))(
+    '★ %s：整句被拦，改写后放行（本条登记的核心依据）',
+    async (_name, site) => {
+      const blocked = await probe(
+        [{ role: 'system', content: DSH_TRIGGER }, { role: 'user', content: 'reply OK' }], site)
+      expect(blocked.blocked, `${site.name}: 整句实测应被拦，但拿到的是 ${blocked.detail}`).toBe(true)
+      expectContentBlocked(blocked)
+      const fixed = await probe(
+        [{ role: 'system', content: DSH_REWRITE }, { role: 'user', content: 'reply OK' }], site)
+      expect(fixed.blocked, `${site.name}: 改写后应放行`).toBe(false)
+    }, 120_000)
+
+  it.each([
+    ['前接空格', ` ${DSH_TRIGGER}`],
+    ['前接换行', `\n${DSH_TRIGGER}`],
+    ['前接前言', `Note the following. ${DSH_TRIGGER}`],
+  ])('★ 锚点实测（行首锚定，与 Claude 身份句同型）：%s ⇒ **放行**', async (_label, system) => {
+    const r = await probe([{ role: 'system', content: system }, { role: 'user', content: 'reply OK' }])
+    expect(r.blocked, `行首锚定的非行首形态应放行，但拿到的是 ${r.detail}`).toBe(false)
+  }, 60_000)
+
+  it.each([
+    ['后接正文', `${DSH_TRIGGER}\n\nSome more instructions follow here.`],
+    ['全大写', DSH_TRIGGER.toUpperCase()],
+  ])('★ 锚点实测：%s ⇒ **仍被拦**（两侧都测，防「假阴性删登记」）', async (_label, system) => {
+    const r = await probe([{ role: 'system', content: system }, { role: 'user', content: 'reply OK' }])
+    expect(r.blocked, `应被拦，但拿到的是 ${r.detail}`).toBe(true)
+    expectContentBlocked(r)
+  }, 60_000)
+
+  it.each([
+    ['砍掉 "You are an"', 'AI agent powered by DeepSeek Harness'],
+    ['砍掉 "DeepSeek Harness"', 'You are an AI agent powered by'],
+    ['砍掉 "Harness"', 'You are an AI agent powered by DeepSeek'],
+    ['换厂商名（AcmeCorp）', 'You are an AI agent powered by AcmeCorp Harness'],
+    ['换厂商名（ExampleCorp）', 'You are an AI assistant powered by ExampleCorp Harness'],
+  ])('★ 逐字符实测：%s ⇒ **放行**（find 必须整句；专指 DeepSeek Harness，非泛「身份句」）', async (_label, system) => {
+    const r = await probe([{ role: 'system', content: system }, { role: 'user', content: 'reply OK' }])
+    expect(r.blocked).toBe(false)
+  }, 60_000)
+
+  it('★ assistant **正文**也被拦（历史重放路径；DSH 会话里模型复述自己的身份即触发）', async () => {
+    const r = await probe([
+      { role: 'system', content: 'You are a helpful assistant.' },
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: DSH_TRIGGER },
+      { role: 'user', content: 'reply OK' },
+    ])
+    expect(r.blocked, `assistant 正文应被拦，但拿到的是 ${r.detail}`).toBe(true)
+    expectContentBlocked(r)
+  }, 60_000)
+
+  it('★ 非首位 system 同样被拦（故所有 system 都要改）', async () => {
+    const r = await probe([
+      { role: 'system', content: 'You are a helpful assistant.' },
+      { role: 'user', content: 'x' },
+      { role: 'system', content: DSH_TRIGGER },
+      { role: 'user', content: 'reply OK' },
+    ])
+    expect(r.blocked, `非首位 system 应被拦，但拿到的是 ${r.detail}`).toBe(true)
+    expectContentBlocked(r)
+  }, 60_000)
+
+  it.each([
+    ['user', [{ role: 'user', content: `note: ${DSH_TRIGGER}` }]],
+    ['assistant 的 reasoning_content', [{ role: 'assistant', content: 'Noted.', reasoning_content: DSH_TRIGGER }]],
+  ])('★ %s 含身份句**不拦**（这两格刻意不改写，改了只是篡改证据）', async (_label, tail) => {
+    const messages: unknown[] = [
+      { role: 'system', content: 'You are a helpful assistant.' },
+      { role: 'user', content: 'hi' },
+      ...tail,
+      { role: 'user', content: 'reply OK' },
+    ]
+    const r = await probe(messages)
+    expect(r.blocked).toBe(false)
+  }, 60_000)
+
+  it('★ 真实报障形态复现：15,305 字符 DSH system 原文 → 改写后放行（端到端）', async () => {
+    // 现场形状：身份句是整个 system 的第 0 行，其后是 preset 正文 —— 这正是
+    // 报障会话逐轮重放的形态。改写后同一份 system 必须放行。
+    const realSystem = [
+      `${DSH_TRIGGER}.`,
+      '',
+      'You are a coding agent powered by the deepseek-v4.1-flash model.',
+      '',
+      'Agent Teams is available in this session',
+      'The Team Lead and all teammates share the same working directory.',
+    ].join('\n')
+    const blocked = await probe(
+      [{ role: 'system', content: realSystem }, { role: 'user', content: 'reply OK' }])
+    expect(blocked.blocked, `真实形态应被拦，但拿到的是 ${blocked.detail}`).toBe(true)
+    expectContentBlocked(blocked)
+    const fixedSystem = realSystem.replace(DSH_TRIGGER, DSH_REWRITE)
+    const fixed = await probe(
+      [{ role: 'system', content: fixedSystem }, { role: 'user', content: 'reply OK' }])
+    expect(fixed.blocked, '真实形态改写后应放行').toBe(false)
+  }, 120_000)
+
+  it('★ workbuddy 国际站（2026-10-21 实测未同步）：改写仍生效（两端点同表，无害等义）', async () => {
+    // 国际站裸句当时放行 —— 这格钉的是「我们的改写不因国际站未同步而漏发」：
+    // 同一函数对 workbuddy 一样改写（实现断言），上游断言不适用。
+    const { rewriteTencentContentFingerprints } = await import('../../src/openai-gateway/tencent-fingerprint.js')
+    expect(rewriteTencentContentFingerprints(DSH_TRIGGER, 'workbuddy')).toBe(DSH_REWRITE)
   }, 60_000)
 })

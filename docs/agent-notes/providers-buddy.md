@@ -1340,6 +1340,70 @@ review.`（**11128 各子原因共用/漂移 `displayMsg` 本仓已有先例**�
 —— 它锁的恰恰是缺陷本身。已改为断言**零冷却**，并补一格「msg 是其它 11128 子原因」
 来保住该组原本要验的「渠道校验判据不得靠 `displayTips` 认领」。
 
+### ⚠️⚠️ 第四条指纹：DSH 宿主自己的 harness 身份句（2026-10-20 晚报障）
+
+```text
+You are an AI agent powered by DeepSeek Harness
+```
+
+**这条与前三条有本质区别**：前三条都来自**外部客户端**（ZCode / Claude Code）注入的
+模板句，DSH 直连不含它们；本句是 `dsh-system-prompt` 的 `harness:identity` 段
+（`includeHarnessIdentity` 默认开启）⇒ **每个 DSH 直连会话 system 的首句** ⇒
+上游一旦登记，**所有 DSH 直连 buddy/workbuddy 请求首轮即拒**，换号/换模型/重登全无效。
+
+**报障现场（2026-10-20 晚，同一用户、同一账号、同一份 system）**：
+
+- 23:10 的 turn 完整跑完（多步工具调用，正常 completed）；
+- 23:25 起同会话同账号每轮 `400/11128`，换模型（`deepseek-v4.1-flash` /
+  `glm-5.3-flash`）无效；
+- 23:45 重新登录换**新账号**，**干净会话**（无任何历史）首轮仍被拒
+  （`llmMs=0`，无任何输出）⇒ 内容级、非账号级、非会话状态；
+- ⏇ **结论：腾讯网关在 23:15~23:25 之间新登记了这条指纹**（15 分钟窗口内生效）。
+
+**实测判据（2026-10-21 本机逐格探针，`max_tokens=16`，被拒不耗额度）**：
+
+| 探针 | 结果 |
+|---|---|
+| 裸句（带/不带尾句点） | ❌ 400/11128 |
+| 前接空格 / 换行 / 任意前言 | ✅ 200 ⇒ **行首锚定**（与 Claude 身份句同型） |
+| 后接正文 | ❌ 400/11128 |
+| 全小写 / 全大写 | ❌ 400/11128 |
+| 砍掉任一词（`You are an` / `DeepSeek Harness` / `Harness` / `powered by …`） | ✅ 200 ⇒ **逐字符，find 整句** |
+| 换成 `AcmeCorp` / `ExampleCorp` Harness | ✅ 200 ⇒ **专指 DeepSeek Harness** |
+| 同句放 `user` / `reasoning_content` | ✅ 200 |
+| 同句放 assistant 正文 / 非首位 system | ❌ 400/11128 |
+| 改写（`running inside` 等任一等义变体） | ✅ 200 |
+
+**排障陷阱（本轮亲自踩的）**：经本插件 OpenAI 网关发探针**是通的**（自造中性 system
+不含本句），极易把方向带偏成「网关好的、直连坏的 ⇒ 以为是直连路径的问题」。判别法：
+拿失败会话的**真实 system 原文**做探针即可立刻复现（本机 15,305 字符原文稳定复现）。
+
+**workbuddy 国际站当时未同步**（2026-10-21 实测裸句 200）：按「两端点同表」先例仍
+登记（改写对未拦端点是无害等义措辞），e2e 对 workbuddy 的上游断言因此只保留实现断言。
+
+**可复核凭据**：`tests/e2e/buddy-fingerprint-roles.e2e.spec.ts` 的
+「DSH harness 身份句（2026-10-20 报障实测依据）」一节（17 格：核心依据、锚点两侧、
+逐字符五格、assistant 正文、非首位 system、user/reasoning_content 放行、
+真实 system 原文端到端、workbuddy 实现断言）。回归用例在
+`tests/unit/openai-gateway-tencent-fingerprint.spec.ts` 的
+「DSH harness 身份句」一节（纯函数 7 条 + 四条互不干扰 1 条）。
+
+#### ⚠️⚠️ 同轮顺手修复的三个 e2e 存量缺陷（不修则新指纹无法复核）
+
+干净 master 上该 e2e 文件 **38/38 全红**（本机凭据形态下 `firstCredential` 一行都找不到）
+——「每条指纹必须有可复核凭据」在折叠 YAML 机器上根本跑不起来：
+
+1. **`firstCredential` 单行正则匹配不到多行折叠的 YAML 单引号标量**：凭据里
+   `scope` 字段是多行折叠形态 ⇒ 逐行正则恒 miss ⇒ 全部用例在取凭据处抛错。
+   按 `buddy-conversation-headers.e2e.spec.ts` 的 `credentialFor` 同款扫描闭合单引号。
+2. **`loadTriggerLine` 返回整行**：文档首次命中行是 YAML 常量展示行（带 `"` 双引号），
+   注进 JSON 后 `JSON.parse` 直接炸（角色矩阵的 reasoning_content / tool_calls 两格）。
+   改为只提取纯字面量子串。
+3. **workbuddy 站用 buddy 中国站 token ⇒ 恒 401**；且探针 `headersOf` **不发三枚
+   Conv 头** ⇒ 在「要求三头」账号（IKM7SG 族）上得到的是 `msg=request illegal`
+   的渠道校验拒绝，污染全部断言。改为按站点选凭据 ref 前缀 + 补齐三枚 Conv 头
+   （对齐生产适配器出站形态）。修后 **55/55 全绿**。
+
 ## 模型计费倍率与同名模型（必须写进 `name`，不是 `description`）
 
 **倍率必须拼进 `name`。** 这是被用户报障纠正过的结论：

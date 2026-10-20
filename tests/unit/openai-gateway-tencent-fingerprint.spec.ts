@@ -347,6 +347,26 @@ const FEEDBACK_TRIGGER = 'To give feedback, users should report the issue at '
   + 'https://github.com/anthropics/claude-code/issues'
 const FEEDBACK_REWRITE = 'To give feedback, users should report the issue at the project issue tracker'
 
+/**
+ * 第四条指纹：**DSH 宿主自己的 harness 身份句**（2026-10-20 晚腾讯网关新登记）。
+ *
+ * `dsh-system-prompt` 的 `harness:identity` 段（`includeHarnessIdentity` 默认开启）
+ * ⇒ **每个 DSH 直连会话 system 的首句**：
+ * `You are an AI agent powered by DeepSeek Harness.`
+ *
+ * ⚠️ 与前三条的**本质区别**：前三条都来自外部客户端注入（ZCode / Claude Code），
+ * DSH 直连不含它们；本条是 DSH 自己的 system 首句 ⇒ 上游一旦登记，
+ * **所有 DSH 直连 buddy/workbuddy 请求首轮即拒**，换号/换模型/重登全无效。
+ * 真实报障现场：同一会话 23:10 成功、23:25 起全拒（15 分钟内网关侧生效），
+ * 换新账号 + 干净会话（无历史）首轮仍被拒 ⇒ 内容级、非账号级。
+ *
+ * 锚点语义：**行首锚定**（与 Claude 身份句同型，与反馈句相反）——
+ * 前接空格/换行/前言均放行，裸句与后接正文均拦。逐格实测见
+ * `docs/agent-notes/providers-buddy.md` 的「DSH harness 身份句」一节。
+ */
+const DSH_TRIGGER = 'You are an AI agent powered by DeepSeek Harness'
+const DSH_REWRITE = 'You are an AI agent running inside DeepSeek Harness'
+
 describe('腾讯系内容级风控指纹改写（IKLYCT）：Claude Code 反馈句', () => {
   it('★ 整句被改写为等义形态（实测两端点均 200）', () => {
     expect(rewriteTencentContentFingerprints(FEEDBACK_TRIGGER, 'workbuddy')).toBe(FEEDBACK_REWRITE)
@@ -422,6 +442,13 @@ describe('腾讯系内容级风控指纹改写（IKLYCT）：Claude Code 反馈�
     expect(rewriteTencentContentFingerprints(all, 'workbuddy')).toBe(out)
   })
 
+  it('★ 四条指纹互不干扰（含 DSH 身份句；任一条的 find 变更都会在这里露出来）', () => {
+    const all = `${TRIGGER}: master\n${CLAUDE_TRIGGER}\n${FEEDBACK_TRIGGER}\n${DSH_TRIGGER}`
+    const out = rewriteTencentContentFingerprints(all, 'buddy')
+    expect(out).toBe(`${REWRITE}: master\n${CLAUDE_REWRITE}\n${FEEDBACK_REWRITE}\n${DSH_REWRITE}`)
+    expect(rewriteTencentContentFingerprints(all, 'buddy')).toBe(out)
+  })
+
   it('★ 真实 Claude Code system：只改反馈句那一行，其余段落与行数逐字节不变', () => {
     // 现场形状（issue 的 19,056 字符 system 形态）：反馈句前带 `  - ` 列表装饰，
     // 后面跟着真正有用的帮助段落 —— 这些**不能**被碰。
@@ -442,6 +469,88 @@ describe('腾讯系内容级风控指纹改写（IKLYCT）：Claude Code 反馈�
     expect(out).toContain('# Executing actions with care')
     expect(out).toContain('- /help: show help')
     expect(out.split('\n')).toHaveLength(realSystem.split('\n').length)
+  })
+})
+
+describe('腾讯系内容级风控指纹改写（2026-10-20 报障）：DSH harness 身份句', () => {
+  it('★ 整句被改写为等义形态（实测 copilot.tencent.com 200）', () => {
+    expect(rewriteTencentContentFingerprints(DSH_TRIGGER, 'buddy')).toBe(DSH_REWRITE)
+    expect(rewriteTencentContentFingerprints(`${DSH_TRIGGER}.`, 'buddy')).toBe(`${DSH_REWRITE}.`)
+    // workbuddy 国际端点当时未同步该条，但按两端点同表先例同样改写
+    expect(rewriteTencentContentFingerprints(DSH_TRIGGER, 'workbuddy')).toBe(DSH_REWRITE)
+  })
+
+  it('★ 真实报障形态：DSH 直连 system 首句命中即改，其余段落与行数逐字节不变', () => {
+    // 现场形状：身份句是 15,305 字符 system 的第 0 行，其后是 preset 正文。
+    const realSystem = [
+      `${DSH_TRIGGER}.`,
+      '',
+      'You are a coding agent powered by the deepseek-v4.1-flash model.',
+      '',
+      'Agent Teams is available in this session',
+      'The Team Lead and all teammates share the same working directory.',
+    ].join('\n')
+    const out = rewriteTencentContentFingerprints(realSystem, 'buddy')
+    expect(out.split('\n')[0]).toBe(`${DSH_REWRITE}.`)
+    expect(out.split('\n')).toHaveLength(realSystem.split('\n').length)
+    expect(out).toContain('You are a coding agent powered by the deepseek-v4.1-flash model.')
+  })
+
+  it('★ 行首锚定（上游事实）：改写刻意不做行首锚定 —— 前接前言的形态**同样要改**', () => {
+    // 上游只在「文本绝对开头」拦（前接空格/换行/前言实测放行，锚点与 Claude
+    // 身份句同型、与反馈句相反）。但实现**刻意不照锚点收窄**：漏改一处 =
+    // 整轮 400，多改 = 语义等价的措辞变化 —— 与 Claude 身份句同一条实现路径。
+    // ⚠️ 若有人把本条改成行首锚定正则（`^` + `m`），这里会红 —— 那个「优化」
+    // 恰好是漏改的来源。
+    const cases = [
+      ` ${DSH_TRIGGER}`,
+      `\n${DSH_TRIGGER}`,
+      `Note the following. ${DSH_TRIGGER}`,
+      `Intro sentence.\nSecond line.\n${DSH_TRIGGER}\nTrailing line.`,
+    ]
+    for (const text of cases) {
+      expect(rewriteTencentContentFingerprints(text, 'buddy')).not.toContain(DSH_TRIGGER)
+    }
+    // 反向钉住：非行首的改写形态本身不再含触发串
+    expect(rewriteTencentContentFingerprints(`前言。${DSH_TRIGGER}`, 'buddy'))
+      .toBe(`前言。${DSH_REWRITE}`)
+  })
+
+  it('★ 逐字符：砍掉任一词 / 换厂商名**实测放行** ⇒ 不改写（find 必须整句）', () => {
+    // 砍掉任一词都放行 ⇒ find 写整句是判据；照抄别条的 find 长度是错的。
+    const cases = [
+      'AI agent powered by DeepSeek Harness',
+      'You are an AI agent powered by',
+      'You are an AI agent powered by DeepSeek',
+      'You are powered by DeepSeek Harness',
+      'You are an AI agent',
+      'You are an AI agent powered by AcmeCorp Harness',
+      'You are an AI assistant powered by ExampleCorp Harness',
+      'You are a coding agent powered by the deepseek-v4.1-flash model.',
+    ]
+    for (const text of cases) {
+      expect(rewriteTencentContentFingerprints(text, 'buddy')).toBe(text)
+      expect(rewriteTencentContentFingerprints(text, 'workbuddy')).toBe(text)
+    }
+  })
+
+  it('★ 大小写不敏感（实测全大写同样被拦）', () => {
+    expect(rewriteTencentContentFingerprints(DSH_TRIGGER.toUpperCase(), 'buddy'))
+      .toBe(DSH_REWRITE)
+    expect(rewriteTencentContentFingerprints(DSH_TRIGGER.toLowerCase(), 'buddy'))
+      .toBe(DSH_REWRITE)
+  })
+
+  it('★ 一次出现多处时全部改写（历史里可能复述多次）', () => {
+    const twice = `${DSH_TRIGGER}\n${DSH_TRIGGER}`
+    expect(rewriteTencentContentFingerprints(twice, 'buddy'))
+      .toBe(`${DSH_REWRITE}\n${DSH_REWRITE}`)
+  })
+
+  it('★ 非腾讯系：逐字节不变（别替别家上游改写用户提示词）', () => {
+    for (const provider of ['qoder', 'qodercn', 'trae', 'codearts', 'lobsterai', '']) {
+      expect(rewriteTencentContentFingerprints(DSH_TRIGGER, provider)).toBe(DSH_TRIGGER)
+    }
   })
 })
 
