@@ -282,6 +282,43 @@ const CONTENT_FINGERPRINTS: readonly ContentFingerprint[] = [
     note: '本机 2026-10-20 对 copilot.tencent.com 实测：system 绝对行首 400/11128，'
       + '前接任意字符放行，改写后放行（含整段真实 system 8683 字符）',
   },
+      {
+        // **DSH 自己的 Web GUI 说明段前两句**（system prompt 的 web-surface 段）。
+        //
+        // ⚠️⚠️ 本条的 find **横跨两句**，与上面四条都不同（那四条各锚一句）：
+        // 两句**单独发都是 200**，只有「A + 一个空格 + B」才 400 ⇒ 只登记其中一句
+        // 是**空跑**（症状：登记了却仍每轮 400，极难归因）。
+        //
+        // 2026-10-21 本机对 copilot.tencent.com 逐格实测（2 个 buddy 账号一致）：
+        //   | 形态 | 结果 |
+        //   |---|---|
+        //   | A 单独 / B 单独 | ✅ 200 |
+        //   | A + 空格 + B | ❌ 400/11128 |
+        //   | A + 换行 + B / A + 双空格 + B | ✅ 200 |
+        //   | 前言 + A + 空格 + B | ❌ 400 ⇒ **位置无关**（与 ZCode / 反馈句同型） |
+        //   | 全小写 | ❌ 400 ⇒ 大小写不敏感 |
+        //   | 改一个词 / 去掉末尾句点 | ✅ 200 ⇒ 逐字符，find 必须含句点 |
+        //   | 放 user / reasoning_content | ✅ 200 |
+        //   | 放 assistant 正文 | ❌ 400 ⇒ 故与另四条一样，两处都改写 |
+        //
+        // ⚠️ 这不是外部客户端泄漏，而是 DSH 每轮必带的 system 段落（app.asar 内
+        // web-surface 段），故**无法靠换会话 / 清历史规避**：不登记 = buddy 渠道整条不可用。
+        // ⚠️ 整段真实 system（9,712 字符）里，把第 4 条身份首句改写掉之后**仍然 400**
+        // ⇒ 本条是**独立**的一条，不是第 4 条的变体。
+        // ⚠️ workbuddy（www.workbuddy.ai）实测**不拦**本段；改写对它是等义措辞，
+        // 与本表「宁可略宽」的既有取舍一致。
+        find: 'You are interacting with the user through the DeepSeek Harness Web GUI '
+            + 'whose URL the runtime context names. When the user refers to "this page", '
+            + '"this GUI", or "this app" without naming another target, they mean this GUI.',
+        // 只把首句 `You are interacting with` 收成 `You interact with`，其余逐字保留。
+        // 实测该形态对整段真实 system + 两张截图返回 200。
+        replace: 'You interact with the user through the DeepSeek Harness Web GUI '
+            + 'whose URL the runtime context names. When the user refers to "this page", '
+            + '"this GUI", or "this app" without naming another target, they mean this GUI.',
+        note: '本机 2026-10-21 对 copilot.tencent.com 实测：整段 221 字符（两句 + 中间空格）'
+            + '400/11128；两句单独均 200；改写首句后放行（真实 system 9,712 字符 + 两张截图）；'
+            + 'workbuddy 端点未拦',
+    },
 ]
 
 /** 正则元字符转义：把字面量安全地变成**精确**匹配，而不是模式。 */
