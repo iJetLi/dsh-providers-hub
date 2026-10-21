@@ -242,6 +242,8 @@ function lazyOpencodeUserAgent(): () => string {
  */
 const OPENCODE_CATALOG_TIMEOUT_MS = 8_000
 
+export type { CreditBalanceService, PublicCreditAccount, PublicCreditPackage } from './credit-balance-service.js'
+
 export const name = 'codearts-auth'
 // `connection` 刻意不列入静态 inject：它只由 Web bundle（dsh-client-connection）
 // 提供，headless/CLI profile 里并不存在。静态 inject 会让本插件在那些 profile

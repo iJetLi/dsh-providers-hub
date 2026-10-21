@@ -372,6 +372,7 @@ import {
   createBadgePreferenceStore,
 } from './badge-preferences.js'
 import { createUsageBadge, type BadgeRpcResult } from './usage-badge.js'
+import { createCreditBalanceService } from './credit-balance-service.js'
 import { createAutoCheckin, createAutoCheckinStore } from './auto-checkin.js'
 
 /** Jet Hub RPC API 路径 */
@@ -3524,6 +3525,13 @@ function registerJetHubEndpoints(
     readAutoCheckin: () => autoCheckin.state(),
     warn: (message) => ctx.logger?.warn?.(message),
   })
+
+  // 余额仍走本宿主的账号隔离、自愈及缓存路径；其他插件只拿脱敏后的投影。
+  // OpenCode 这里的“余额”其实是本地通道可用数，不能当作 Go 订阅额度导出。
+  ctx.provide?.('creditBalance', createCreditBalanceService({
+    providers: () => PROVIDER_REGISTRY.filter((provider) => provider.id !== OPENCODE.id),
+    read: (provider) => handleMethod('credits.balances', { provider }),
+  }))
 
   connection.fetch.register({
     path: JET_HUB_API_PATH,
