@@ -4257,6 +4257,35 @@ describe('内容级风控（11128）：不得当成账号级拦截换号/冷却'
     expect(pool.recorded).toEqual([])
   })
 
+  it('★ 出口文案：不透传「请重新发送」，改说「内容级、换号/重发无效」并带 requestId', async () => {
+    // 2026-10-21：上游 `displayMsg` 是「请求被拦截，请重新发送」，而实测重发恒败、
+    // 换号也无效（4 个 buddy 账号全拦；把 system 首句改写掉后同一账号立即 200）。
+    // 原样透传 = 诱导用户做无效动作 —— 与本文件 `redactUpstreamActionHints` 同一立场。
+    const pool = recordingPool([
+      { id: 'acct-1', token: 'AT1' },
+      { id: 'acct-2', token: 'AT2' },
+    ])
+    const adapter = makeAdapter({
+      credential: makeCredential({ access_token: 'AT1' }),
+      accountPool: pool,
+      fetchImpl: async () => new Response(unapprovedChannelBody, { status: 400 }),
+    })
+    const error = await collectChunks(adapter, streamOptions).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(LlmError)
+    const message = (error as LlmError).message
+    // ① 说清是内容级、且换号/重发都无效（文案本身就是出路）。
+    expect(message).toContain('内容级')
+    expect(message).toContain('换账号无效')
+    // ② 上游那句误导文案必须消失（这正是本条存在的理由）。
+    expect(message).not.toContain('请重新发送')
+    // ③ 唯一定位手段必须在文案里，否则「去取 requestId」这条纪律不可执行。
+    expect(message).toContain('c888aa59-d5e0-4047-a74c-6b6999f3004f')
+    // ④ 码不能取 AUTH（会被客户端换成「API 密钥无效」）、也不能取可重试集合里的码。
+    expect((error as LlmError).failure.code).toBe('PERMISSION_DENIED')
+    // ⑤ 行为不变：仍不换号、不写冷却。
+    expect(pool.recorded).toEqual([])
+  })
+
   it('★ HTTP 200 + 流内 11128 帧：同样不得标账号冷却（这条才是判据真会被用到的地方）', async () => {
     // 判据 `isContentRejection` 在**流内**那条通道（HTTP 200 + 无 choices 的
     // 错误帧）会被直接调用。若把 11128 加进去，命中后走的是

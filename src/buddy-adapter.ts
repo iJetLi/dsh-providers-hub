@@ -1507,6 +1507,55 @@ function channelVerificationError(
 }
 
 /**
+ * 「渠道校验」的**另一族**：`code 11128` + `Illegal API invocation from an unapproved channel`。
+ *
+ * ## ⚠️ 与 {@link isChannelVerificationRejection} 刻意分开
+ *
+ * 那一族（`conversation id missing` / `request illegal`）是**按账号**生效的渠道门控，
+ * 出路是换号；而本族是**内容级**（2026-10-21 实测：4 个 buddy 账号全拦，把 system
+ * 首句改写掉之后**同一个账号**立即 200）⇒ 换号只会白烧整池，并把用户引向
+ * 「停用一个好账号」（IKM7SG 那条教训的反方向）。
+ *
+ * ⇒ 本函数**只用于出口文案**，不参与换号判据 —— `isChannelVerificationRejection`
+ * 仍然刻意不认它（见那里的「按 code 会把 unapproved channel 也拖进换号」）。
+ */
+function isUnapprovedChannelBody(body: string): boolean {
+  return /"code"\s*:\s*"?11128(?![\d.])/.test(body) && /unapproved\s+channel/i.test(body)
+}
+
+/**
+ * 内容级 11128 的出口：把「请重新发送」换成**真正可行的信息**。
+ *
+ * 上游原句是「请求被拦截，请重新发送」，而实测重发恒败、换号也无效 ⇒ 原样透传
+ * 等于诱导用户做无效动作（与本文件 {@link redactUpstreamActionHints} 同一立场）。
+ * 文案要求：① 说明是内容级（换号/重发都没用）；② 指出出路（本版已改写已知指纹，
+ * 仍复现就把上游标识与 system 首行贴出来）；③ 不带 Markdown 强调符（错误 message
+ * 是纯文本渲染）。
+ */
+function unapprovedChannelError(productId: string, status: number, body: string): LlmError {
+  return new LlmError(
+    `${productId}: 请求内容被上游渠道拦下（HTTP ${status}，code 11128 的 `
+    + `unapproved channel 一支）。这是内容级拦截：换账号无效、原样重发也无效；`
+    + `出站 system 与 assistant 正文里的已知指纹（含 DSH 自己的身份首句）会自动改写，`
+    + `若仍复现请把上游标识与 system 首行贴出来。上游：${channelVerificationUpstreamId(body)}`,
+    'PERMISSION_DENIED',
+    { status },
+  )
+}
+
+/**
+ * HTTP 非 2xx 的统一出口。
+ *
+ * 存在的唯一理由是**顺序**：`unapproved channel` 这一族必须先被认成「内容级」，
+ * 否则会落到 `errorDetail` 的透传分支（那句「请重新发送」），让用户以为重发有用。
+ * 其余形态逐字节保持既有行为（`errorDetail` + `httpErrorCode`）。
+ */
+function httpRejectionError(productId: string, status: number, body: string): LlmError {
+  if (isUnapprovedChannelBody(body)) return unapprovedChannelError(productId, status, body)
+  return new LlmError(`${productId}: ${errorDetail(body)}`, httpErrorCode(status, body), { status })
+}
+
+/**
  * 纯函数：由「现在」算出策略拦截冷却的到期时刻。
  *
  * 单测靠它锁死时长（不必等真实时间流逝），也与 {@link markPolicyBlockedAccount}
@@ -3505,7 +3554,7 @@ export class BuddyAdapter extends LlmAdapter {
           //    途中**中断**，池里其余可用账号一个都试不到。
           if (!isRateLimited(errorText, response.status)) {
             // 新账号失败但不是限流：按原错误分类抛出，不要再吞成"均受限"
-            throw new LlmError(`${this.product.id}: ${errorDetail(errorText)}`, httpErrorCode(response.status, errorText), { status: response.status })
+            throw httpRejectionError(this.product.id, response.status, errorText)
           }
           // ⑤ 仍是限流 → 继续下一轮（重置时间已在上方记录）。
         }
@@ -3528,7 +3577,7 @@ export class BuddyAdapter extends LlmAdapter {
         }
         throw new LlmError(`${this.product.id}: 模型 ${options.model} 所有账号均受限，请稍后再试`, 'QUOTA_EXCEEDED')
       }
-      throw new LlmError(`${this.product.id}: ${errorDetail(errorText)}`, httpErrorCode(response.status, errorText), { status: response.status })
+      throw httpRejectionError(this.product.id, response.status, errorText)
     }
 
     // 5. 消费 SSE 流
