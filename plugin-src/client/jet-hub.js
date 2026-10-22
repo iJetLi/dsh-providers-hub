@@ -8776,6 +8776,85 @@ export function JetHubPage({ rpcCall }) {
   React.useEffect(() => () => { mounted.current = false; }, []);
 
   /**
+   * 全局统计带（页头下方、tab 按钮组与「已打开 / 已关闭」列表之间）。
+   *
+   * ⚠️ 只统计**可跨 provider 累加的计数**：账号总数、供应商开关数、已过期 / 24h 内到期账号数。
+   *    刻意**不放**「累计已用积分 / 积分总余额」—— 各家"积分"单位与价值不同，跨 provider
+   *    求和会产生一个无意义甚至误导的数字（与一键签到汇总「必须按单位分列、不得跨单位求和」
+   *    是同一条红线，2026-10-04 定）。余额类读数只出现在**单 provider** 的账号面板里。
+   *
+   * 数据源用 `account.list`：宿主侧读的是账号池**内存副本**（`pool.listAccounts`），
+   * 不触发上游请求，所以并发拉全部 provider 是安全的；任一 provider 失败只按空列表计入，
+   * 不让整条统计消失（部分失败比整条不显示更有用）。
+   *
+   * ⚠️ 本状态与 `loadGlobalStats` 必须声明在 `providerStatuses` **之后** ——
+   *    deps 数组在进入调用前就急切求值，放到前面会因 TDZ 抛
+   *    `Cannot access 'providerStatuses' before initialization`，整个 Jet Hub 白屏。
+   */
+  const [globalStats, setGlobalStats] = React.useState(null);
+
+  const loadGlobalStats = React.useCallback(async () => {
+    // 聚合是组合视图，没有自己的账号，不计入统计。
+    const targets = PROVIDERS.filter(p => p.id !== 'aggregate');
+    const lists = await Promise.all(targets.map(async (p) => {
+      try {
+        const res = await rpcCall('account.list', { provider: p.id });
+        return Array.isArray(res?.accounts) ? res.accounts : [];
+      } catch (caught) {
+        console.error('[jet-hub] global stats: account.list failed for ' + p.id + ':', caught);
+        return [];
+      }
+    }));
+    if (!mounted.current) return;
+    const all = lists.flat();
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+    // `expiresAt` 缺失（部分 provider 不返回到期时间）不当成"已过期"，只跳过 ——
+    // 把"未知"算成"过期"会让统计变成一个恒正的红字。
+    const expiryOf = (account) => (typeof account?.expiresAt === 'number' ? account.expiresAt : null);
+    setGlobalStats({
+      accounts: all.length,
+      openProviders: targets.filter(p => providerStatuses?.[p.id]?.closed !== true).length,
+      closedProviders: targets.filter(p => providerStatuses?.[p.id]?.closed === true).length,
+      expired: all.filter((a) => { const t = expiryOf(a); return t !== null && t <= now; }).length,
+      expiringSoon: all.filter((a) => { const t = expiryOf(a); return t !== null && t > now && t - now <= DAY; }).length,
+    });
+  }, [rpcCall, providerStatuses]);
+
+  React.useEffect(() => { void loadGlobalStats(); }, [loadGlobalStats]);
+
+  /**
+   * 统计带渲染。`globalStats === null`（首次读取中）时整条不渲染 ——
+   * 用骨架占位反而会让页头下方闪一次布局跳动。
+   *
+   * 色调语义：蓝=总量（中性）、绿=可用、灰=0（不值得注意）、橙/红=需要处理。
+   * 「已关闭供应商」用灰而不是红 —— 关闭是用户的正常选择，不是故障。
+   */
+  const renderGlobalStats = () => {
+    if (globalStats === null) return null;
+    const cells = [
+      { key: 'accounts', label: '账号总数', value: globalStats.accounts, unit: '个', tone: 'info' },
+      { key: 'open', label: '已打开供应商', value: globalStats.openProviders, unit: '个', tone: 'ok' },
+      { key: 'closed', label: '已关闭供应商', value: globalStats.closedProviders, unit: '个', tone: 'muted' },
+      { key: 'expired', label: '已过期账号', value: globalStats.expired, unit: '个', tone: globalStats.expired > 0 ? 'danger' : 'muted' },
+      { key: 'soon', label: '24 小时内到期', value: globalStats.expiringSoon, unit: '个', tone: globalStats.expiringSoon > 0 ? 'warn' : 'muted' },
+    ];
+    return React.createElement('div', {
+      className: 'dim-jh-globalStats',
+      role: 'group',
+      'aria-label': '全局账号与供应商统计',
+    }, cells.map(cell => React.createElement('div', {
+      key: cell.key,
+      className: 'dim-jh-globalStat',
+      'data-tone': cell.tone,
+    },
+    React.createElement('span', { className: 'dim-jh-globalStatLabel' }, cell.label),
+    React.createElement('span', { className: 'dim-jh-globalStatValue' },
+      String(cell.value),
+      React.createElement('span', { className: 'dim-jh-globalStatUnit' }, cell.unit)))));
+  };
+
+  /**
    * 读取网关状态。
    *
    * 失败**不抛**、也不把 `gatewayStatus` 置成任何「像是有值」的状态：保持
@@ -9439,6 +9518,10 @@ export function JetHubPage({ rpcCall }) {
           style: { flex: 'none', margin: '12px 24px 0' },
         }, React.createElement('div', null, providerNotice.text))
       : null,
+    // 全局统计带：与上面两条提示同位置（页头之后、layout 之前），
+    // 所以左右边距、`flex: none` 防压扁的写法也一致。读数是异步的，
+    // 首帧不渲染（见 renderGlobalStats 的 `null` 判断），避免布局先跳一次。
+    renderGlobalStats(),
     React.createElement('div', { className: 'dim-jh-layout' },
       React.createElement('nav', { className: 'dim-jh-rail', role: 'tablist', 'aria-label': 'Provider 导航' },
         renderRail()),
