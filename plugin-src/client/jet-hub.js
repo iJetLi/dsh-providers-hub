@@ -248,6 +248,50 @@ export function providerLabel(id) {
 const GROWTH_TASK_PROVIDERS = new Set(['buddy']);
 
 /**
+ * 哪些渠道的登录会把浏览器**重定向到本机回调地址**（`127.0.0.1` / `localhost`）。
+ *
+ * ## 为什么需要这张表
+ *
+ * 这类渠道的 OAuth 都把 `redirect_uri` 指向 `http://127.0.0.1:<port>/…`
+ * （见宿主 `src/oauth.ts` 的 `REDIRECT_PATH`、`src/lobsterai-oauth.ts`、
+ * `src/trae-oauth.ts` 的 `/authorize`、`src/gemini-oauth.ts` 的 `localhost`、
+ * `src/accio-auth.ts`、`src/astudio-oauth.ts`、`src/autoclaw-oauth.ts`）。
+ * 这个回环地址**只在运行 DSH 的那台机器上有效**。
+ *
+ * 用户经外网（反代 / 端口转发 / 远程桌面）访问 DSH 时，浏览器在**用户本机**，
+ * `127.0.0.1` 指向用户自己的电脑 ⇒ 授权完成后浏览器报「拒绝连接」，
+ * 宿主永远收不到 `code` ⇒ 前端只能干等 5 分钟再报「登录超时」。
+ *
+ * 出路是把浏览器地址栏里那条地址**复制回来**交给宿主代跑
+ *（`login.submitCallback`，见 `src/jet-hub-rpc.ts` 同名分支）。
+ *
+ * ## ⚠️ 判据是「是否开本地回调端口」，不是「授权页在哪」
+ *
+ * 只收**真的起了 `createServer` 等回调**的渠道。设备码 / 轮询式渠道
+ *（qoder 系、raccoon、minimax、cline、zcode、buddy 系）根本没有回调地址可粘 ——
+ * 给它们渲染输入框只会让用户去找一条不存在的地址。
+ *
+ * ⚠️ astudio / autoclaw 系的 `loginUrl` **本身就是本机载体页**
+ *（`http://127.0.0.1:<port>/…login`），远程访问时连授权页都打不开。
+ * 但它们**确实**开了回调服务器（`astudio-oauth.ts` 的 `listenOnRandomPort`、
+ * `autoclaw-oauth.ts` 的 `server.listen`），而用户完全可能已经用端口转发
+ * 把授权页那一段打通、只差最后这次回调 ⇒ 照样收进来（用户要求「全部回调式的都加」）。
+ * 它们的输入框在授权页打不开时不会被用到，但**不会误伤**：多渲染一格，
+ * 远小于「用户被挡在门外且没有任何出路」的代价。
+ */
+const PROVIDERS_WITH_LOOPBACK_CALLBACK = new Set([
+  'codearts',
+  'lobsterai',
+  'trae',
+  'gemini',
+  'accio',
+  'astudio',
+  'autoclaw',
+  'autoclawintl',
+]);
+
+
+/**
  * Accio 的「每日额度」桶名 —— 必须与宿主 `src/accio-credits.ts` 的
  * `ACCIO_CREDIT_BUCKETS` 里 `daily` 那一行**逐字一致**。
  *
@@ -2878,6 +2922,37 @@ function ProviderPanel({ provider, rpcCall }) {
    * 没必要让整个登录流程作废。
    */
   const [loginUrlForManual, setLoginUrlForManual] = React.useState(null);
+  /**
+   * 「手动提交回调地址」这一格的状态（远程访问 DSH 时的唯一登录出路）。
+   *
+   * ## 为什么需要它
+   *
+   * 回调式渠道（见 `PROVIDERS_WITH_LOOPBACK_CALLBACK`）都把浏览器重定向到
+   * `http://127.0.0.1:<port>/…`，而这个地址**只在运行 DSH 的那台机器上有效**。
+   * 用户经外网访问 DSH 时浏览器在用户本机 ⇒ 回调必然「拒绝连接」，宿主永远
+   * 收不到 `code`，前端只能干等到 5 分钟上限后报「登录超时」。
+   *
+   * 修法是让用户把浏览器地址栏里那条回调 URL 复制回来，由**宿主**代替用户
+   * 去访问（宿主就在那台机器上，回调服务器正在监听）—— 各渠道的回调处理器
+   * 一行都不用改。RPC 见宿主 `login.submitCallback`。
+   *
+   * ## ⚠️ `callbackForAccount` 是「输入框与哪一轮登录绑定」的依据
+   *
+   * 它存的是**本轮登录的 accountId**（`null` = 不渲染输入框）。没有它，用户
+   * 上一次登录的输入框会跟着新账号一起出现，粘贴后打到**已关闭**的端口上，
+   * 只会得到一句「该端口上没有服务在监听」。
+   *
+   * ⚠️ 收起的时机与 `loginUrlForManual` **完全一致**（成功 / 超时 / 失败 /
+   * 卸载），因为两者的前提是同一个：这一轮登录的本地回调端口还开着。
+   */
+  const [callbackForAccount, setCallbackForAccount] = React.useState(null);
+  /** 输入框内容（用户粘贴的完整回调 URL）。 */
+  const [callbackInput, setCallbackInput] = React.useState('');
+  /** 提交中闸门：防连点（提交是普通 RPC，不是幂等操作，连点会打两次回调）。 */
+  const [callbackSubmitting, setCallbackSubmitting] = React.useState(false);
+  /** 提交结果提示：`{tone:'ok'|'error', text}`；`null` = 未提交过。 */
+  const [callbackNotice, setCallbackNotice] = React.useState(null);
+
   /** 兜底登录链接的复制结果：null=未复制，true=已复制，false=复制失败。 */
   const [loginLinkCopied, setLoginLinkCopied] = React.useState(null);
   /**
@@ -3564,7 +3639,19 @@ function ProviderPanel({ provider, rpcCall }) {
    */
   const stopPoll = () => {
     if (pollRef.current !== 0) { clearInterval(pollRef.current); pollRef.current = 0; }
-    if (mounted.current) setCreating(false);
+    if (mounted.current) {
+      setCreating(false);
+      /**
+       * 本轮登录已结束 ⇒ **一并收起「手动提交回调地址」这一格**。
+       *
+       * ⚠️ 与 `setLoginUrlForManual(null)` 同因：本地回调服务器随登录流程结束
+       * 而 `close()`，留着输入框只会让用户把地址粘进一个**已关闭的端口**，
+       * 得到一句「该端口上没有服务在监听」，而真因是「这一轮已经结束了」。
+       * ⚠️ 放在 `stopPoll` 里而不是四个收尾点各写一遍：成功 / 超时 / 终态失败 /
+       * 卸载四条路径全都经过这里，分散写必然漏掉一条（本文件已有同类教训）。
+       */
+      setCallbackForAccount(null);
+    }
   };
 
   /**
@@ -3707,6 +3794,18 @@ function ProviderPanel({ provider, rpcCall }) {
         buildCreateAccountPayload(provider, zcodeProvider, accioRegion, astudioLoginMethod, autoclawMode));
       accountId = res.accountId;
       loginUrl = res.loginUrl;
+      /**
+       * 把「手动提交回调地址」这一格绑定到**本轮**登录的账号上。
+       *
+       * ⚠️ 必须在拿到 `accountId` 之后、开窗之前设置：之后任何一轮新登录都会
+       *    覆盖它，避免用户把上一次（端口已 `close()`）的回调地址粘进这一次。
+       * ⚠️ 只有回调式渠道才置值（见 `PROVIDERS_WITH_LOOPBACK_CALLBACK`）；
+       *    设备码 / 轮询 / 粘贴 Key 式渠道根本没有回环地址可粘，渲染输入框
+       *    只会让用户去找一条不存在的地址。
+       */
+      setCallbackForAccount(PROVIDERS_WITH_LOOPBACK_CALLBACK.has(provider) ? accountId : null);
+      setCallbackInput('');
+      setCallbackNotice(null);
       console.log('[jet-hub] account.create ok, provider =', provider, ', accountId =', accountId);
       // ⚠ **`reused` 分支必判**：后端若声明「复用了池里已有条目、新建条目与登录 URL」，
       // 它返回的是 `{reused:true, loginUrl:''}`。若只看 `loginUrl` 为空就报
@@ -3855,6 +3954,67 @@ function ProviderPanel({ provider, rpcCall }) {
       // ⚠ 只在**没有**轮询在跑时释放「新建中」。登录未完成期间按钮必须保持禁用，
       // 否则用户再点一次就是「叠加第二个轮询 + 宿主再插一条占位账号」的缺陷。
       if (pollRef.current === 0) setCreating(false);
+    }
+  };
+
+  /**
+   * 把用户粘贴的**本机回调地址**交给宿主，由宿主代为访问一次。
+   *
+   * ## 它解决的到底是什么问题
+   *
+   * 回调式渠道（`PROVIDERS_WITH_LOOPBACK_CALLBACK`）的授权完成后，浏览器会被
+   * 重定向到 `http://127.0.0.1:<port>/…?code=…`。这个回环地址**只在运行 DSH
+   * 的那台机器上有效**：
+   *
+   * - 本机用 DSH ⇒ 浏览器与宿主同机，回调自动到达，本输入框纯属多余（但无害）；
+   * - 经外网访问 DSH ⇒ 浏览器在**用户本机**，`127.0.0.1` 指向用户自己的电脑
+   *   ⇒ 浏览器报「拒绝连接」，宿主永远收不到 `code`，前端只能干等 5 分钟。
+   *
+   * 所以：用户把浏览器地址栏里那条 URL 复制回来，**宿主**去访问它（宿主就在
+   * 那台机器上、回调服务器正在监听）⇒ 回调正常落定，整条登录链路原样复用。
+   *
+   * ## ⚠️ 为什么是「宿主 fetch」而不是「客户端 fetch」
+   *
+   * 客户端跑在用户浏览器里，`fetch('http://127.0.0.1:…')` 打的是**用户自己**的
+   * 电脑（与浏览器地址栏同样失败），且会被 CORS 挡下。只有宿主能打到那个端口。
+   *
+   * ## ⚠️ 提交成功后**不**在这里做任何「已登录」判断
+   *
+   * 宿主的回调处理器可能是同步 resolve（`code` 直接换 token），也可能先回 307
+   * 再后台轮询（`secret` 旧流程），还可能因为服务端换 token 失败而 reject。
+   * 三种情形的「成功」语义各不相同 ⇒ 这里**只报告「回调已送达」**，真正的
+   * 登录结果仍由上面那个 `login.poll` 轮询判定（它是唯一权威）。
+   */
+  const submitCallbackUrl = async () => {
+    const accountIdForCallback = callbackForAccount;
+    if (!accountIdForCallback) return;
+    const raw = (callbackInput || '').trim();
+    if (!raw) {
+      setCallbackNotice({ tone: 'error', text: '请先粘贴浏览器地址栏里的完整回调地址。' });
+      return;
+    }
+    if (callbackSubmitting) return;
+    setCallbackSubmitting(true);
+    setCallbackNotice(null);
+    try {
+      await rpcCall('login.submitCallback', { url: raw });
+      // ⚠️ 文案刻意不写「登录成功」：这一步只保证「回调已送到宿主」，换 token
+      //    是否成功由 login.poll 判定（见函数头注释）。
+      setCallbackNotice({
+        tone: 'ok',
+        text: '回调已送达宿主，正在等待登录结果…（若下方一直转圈，说明授权码已失效，请重新新建账号）',
+      });
+      setCallbackInput('');
+    } catch (caught) {
+      // 宿主对「非回环地址」「URL 非法」「端口无监听」「15 秒无响应」分别给了
+      // 可操作的中文提示（见 src/jet-hub-rpc.ts 的 login.submitCallback），
+      // 原样透出即可 —— 在这里改写会丢掉真因。
+      setCallbackNotice({
+        tone: 'error',
+        text: caught?.message ? String(caught.message) : '提交回调地址失败（宿主未给出原因）。',
+      });
+    } finally {
+      setCallbackSubmitting(false);
     }
   };
 
@@ -4714,6 +4874,66 @@ function ProviderPanel({ provider, rpcCall }) {
             onClick: async () => setLoginLinkCopied(await copyToClipboard(loginUrlForManual)),
           }, loginLinkCopied === true ? '已复制 ✓'
             : loginLinkCopied === false ? '复制失败，请手动选中' : '复制链接')))
+      : null,
+    /**
+     * 「手动提交回调地址」——**远程访问 DSH 时回调式登录的唯一出路**。
+     *
+     * ## 为什么它**独立于** `loginUrlForManual` 渲染
+     *
+     * `loginUrlForManual` 只在「弹窗被拦截」时出现；而远程访问的典型故障是
+     * **弹窗正常打开、授权也完成了**，只是最后那步 `127.0.0.1` 跳转打到了用户
+     * 自己的电脑上。两者前提完全不同 ⇒ 判据必须是 `callbackForAccount`
+     * （本轮登录的 accountId，见其 state 注释），不能挂在登录链接兜底上。
+     *
+     * ## 文案为什么把「拒绝连接」写成正常现象
+     *
+     * 那是本功能**唯一**的触发场景，也是用户最容易误判成「插件坏了」的地方：
+     * 授权成功却看到浏览器报错页，直觉是重来一遍，于是永远走不到这里。
+     * 明说「这是正常的」+ 指明「复制地址栏那条完整地址」才能把用户引到正确动作。
+     */
+    callbackForAccount !== null
+      ? React.createElement('div', {
+          className: 'dim-jh-probeNotice',
+          'data-tone': 'warn',
+          role: 'status',
+        },
+        React.createElement('div', null,
+          '授权完成后浏览器会跳到 http://127.0.0.1:… 并提示「拒绝连接」—— 这是正常的：'
+          + '该地址只在运行 DSH 的那台机器上有效。请把浏览器地址栏里那条完整地址'
+          + '复制到下面，由 DSH 宿主代你完成回调。'),
+        React.createElement('textarea', {
+          className: 'dim-jh-input',
+          rows: 3,
+          spellCheck: false,
+          placeholder: 'http://127.0.0.1:端口/oauth/callback?code=…&state=…',
+          value: callbackInput,
+          disabled: callbackSubmitting,
+          // ⚠️ 不 trim、不改写：URL 里的 `+` `/` `=` 都是载荷的一部分，
+          //    任何「顺手规范化」都会让 code 失效（且失败文案完全指不到真因）。
+          onChange: (event) => setCallbackInput(event.target.value),
+          style: { fontFamily: 'monospace', resize: 'vertical' },
+        }),
+        React.createElement('div', { className: 'dim-jh-loginLinkRow' },
+          // type='button' 必须有：按钮若落在表单里，默认 submit 会连带提交表单。
+          React.createElement('button', {
+            className: 'dim-jh-btn',
+            type: 'button',
+            // 空输入时禁用：空串提交只会换来一句「请粘贴完整地址」的往返。
+            disabled: callbackSubmitting || callbackInput.trim().length === 0,
+            title: '由 DSH 宿主访问该地址，完成本机回调',
+            onClick: submitCallbackUrl,
+          }, callbackSubmitting ? '提交中…' : '提交回调地址')),
+        callbackNotice
+          ? React.createElement('div', {
+              // 复用 `dim-jh-probeNotice` 的 tone 配色（ok/warn/error 三档已定义），
+              // 不新增 CSS：本文件的样式表由 `build.mjs` 内联，新增类名还得同步改
+              // 样式文件与构建，而这里只差一个「缩进 + 上边距」的观感。
+              className: 'dim-jh-probeNotice',
+              'data-tone': callbackNotice.tone,
+              role: callbackNotice.tone === 'error' ? 'alert' : 'status',
+              style: { marginTop: 8, marginBottom: 0 },
+            }, callbackNotice.text)
+          : null)
       : null,
     compensationCard,
     phase === 'loading'

@@ -240,6 +240,8 @@ import type {
   RpcCreateAccountRequest,
   RpcPollLoginRequest,
   RpcPollLoginResponse,
+  RpcSubmitCallbackRequest,
+  RpcSubmitCallbackResponse,
   RpcUpdateAccountRequest,
   RpcDeleteAccountRequest,
   RpcReorderAccountsRequest,
@@ -4965,6 +4967,155 @@ function registerJetHubEndpoints(
           if (!isUsableZcodeCredential(parsed)) return { ok: true, value: { done: false } }
         }
         return { ok: true, value: { done: true, success: true } }
+      }
+
+      /**
+       * 手动提交 OAuth 回调地址（**远程访问 DSH 时的唯一登录出路**）。
+       *
+       * ## 为什么必须由宿主代跑
+       *
+       * 回调式 provider 都把浏览器重定向到 `http://127.0.0.1:<port>/oauth/callback?code=…`
+       * （见 `src/oauth.ts` 的 `REDIRECT_PATH` 与 `src/login.ts` 的两套回调服务器）。
+       * 这个回环地址**只在运行 DSH 的那台机器上有效**。
+       *
+       * 用户经外网（反向代理 / 端口转发 / 远程桌面）访问 DSH 时，浏览器在**用户本机**，
+       * `127.0.0.1` 指向用户自己的电脑 ⇒ 回调打到一台没有监听端口的机器上，浏览器报
+       * 「拒绝连接」，宿主永远收不到 `code` ⇒ 前端只能干等到 5 分钟上限后报「登录超时」。
+       * **这是网络拓扑问题，不是任何 provider 的协议缺陷。**
+       *
+       * ## 修法：宿主代替用户去访问那条地址
+       *
+       * 宿主就在那台机器上，回调服务器正在 `127.0.0.1:<port>` 上监听。于是各 provider 的
+       * `createServer` 处理器**一行都不用改** —— 它们本来就在等这个请求：
+       *
+       * - `code` 分支（codearts / gemini / trae / lobsterai / accio …）→ 换 token
+       * - `secret` 分支（codearts 旧流程回退）→ 轮询 ticket
+       * - `token` / `fingerprint` 分支（`startCallbackServer` 的老流程）→ 直接落凭据
+       *
+       * 换 token、写凭据、`login.poll` 报 `done` 的既有链路**原样复用**，
+       * 这也是本端点刻意做成「一次 HTTP GET」而不是「按 provider 各写一遍」的原因：
+       * 新增 provider 时它自动支持，不存在第二份需要同步维护的清单。
+       *
+       * ## ⚠️ 本端点成功 ≠ 登录成功
+       *
+       * 返回的 `status` 只是**回调服务器回给宿主的 HTTP 状态码**。真正的成功判据仍是
+       * `login.poll` 报 `{done:true, success:true}`：`code` 换 token 是异步的，
+       * 宿主这一侧只负责把请求送达。客户端**必须**继续轮询，不得据 `status` 收尾。
+       */
+      case 'login.submitCallback': {
+        const req = payload as RpcSubmitCallbackRequest
+        const raw = typeof req.url === 'string' ? req.url.trim() : ''
+        if (raw.length === 0) {
+          return {
+            ok: false,
+            error: { code: 'bad-request', message: '回调地址为空，请把浏览器地址栏里的完整地址粘贴进来' },
+          }
+        }
+        let target: URL
+        try {
+          target = new URL(raw)
+        } catch {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: '回调地址不是合法 URL（应形如 http://127.0.0.1:端口/oauth/callback?code=…）',
+            },
+          }
+        }
+        if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+          return {
+            ok: false,
+            error: { code: 'bad-request', message: `回调地址协议不支持：${target.protocol}` },
+          }
+        }
+        /**
+         * ⚠️ **只接受回环地址**，这是本端点的安全边界（它不是通用 HTTP 代理）。
+         *
+         * 不加这道闸，任何能调 RPC 的客户端都能让宿主向**任意内网/本机端口**发 GET
+         * —— 一个 SSRF 入口，且宿主的网络位置往往比浏览器更靠内。
+         *
+         * ⚠️ 逐字列出回环写法（含 IPv6 方括号形态）：`URL.hostname` 对
+         * `http://[::1]:1/` 返回 `[::1]`（**带方括号**），故两种都要收。
+         * ⚠️ 这里**不**做「认不出来就放行」——认不出来一律拒（fail-closed）。
+         */
+        const callbackHost = target.hostname.toLowerCase()
+        const isLoopback = callbackHost === '127.0.0.1'
+          || callbackHost === 'localhost'
+          || callbackHost === '::1'
+          || callbackHost === '[::1]'
+        if (!isLoopback) {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: `只接受本机回调地址（127.0.0.1 / localhost），收到的是 ${callbackHost}。`
+                + '请粘贴**授权完成后浏览器地址栏**里那条地址，不要粘贴授权页本身的地址。',
+            },
+          }
+        }
+        try {
+          /**
+           * ⚠️ `redirect: 'manual'`：回调服务器在 `secret` 分支会回 307 跳转到
+           * portal 结果页（`buildPortalLoginResultUrl`）。那个跳转对宿主毫无意义
+           *（目标是外网页面），跟随它只会多一次出站请求，还可能把状态码变成 200
+           * 从而**掩盖真实结果**。
+           */
+          const response = await fetch(target, {
+            method: 'GET',
+            redirect: 'manual',
+            signal: AbortSignal.timeout(15_000),
+          })
+          /**
+           * 回调服务器只对**路径不匹配**的请求回 404（见 `src/login.ts` 里两处
+           * `response.writeHead(404).end('Not found')`）。其余形态（200 / 204 / 307）
+           * 都表示「已交给对应分支处理」。
+           */
+          if (response.status === 404) {
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: '本地回调服务返回 404：这条地址的路径不是本次登录的回调路径，'
+                  + '请确认粘贴的是浏览器地址栏里的完整回调地址。',
+              },
+            }
+          }
+          const value: RpcSubmitCallbackResponse = { status: response.status }
+          return { ok: true, value }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          /**
+           * 最常见的三种失败必须给出**可操作**的区分提示 —— 否则用户只会看到一句
+           * `fetch failed`，无法判断是超时、贴错、还是贴了一条旧地址：
+           *
+           * 1. `ECONNREFUSED` —— 该端口没有监听。九成是**本次登录已超时**
+           *    （回调服务器随流程结束而 `close()`），需重新点「+ 新建账号」。
+           * 2. `TimeoutError` —— 端口有监听但 15 秒没响应，通常是把别的本机服务
+           *    端口贴进来了。
+           * 3. 其它 —— 原样透出，便于排障。
+           */
+          const code = error && typeof error === 'object' && 'cause' in error
+            ? (error.cause as { code?: unknown } | undefined)?.code
+            : undefined
+          const refused = code === 'ECONNREFUSED' || /ECONNREFUSED/.test(message)
+          const timedOut = (error instanceof Error && error.name === 'TimeoutError')
+            || /aborted|timeout/i.test(message)
+          let hint: string
+          if (refused) {
+            hint = '该端口上没有服务在监听：多半是本次登录已超时结束。'
+              + '请重新点「+ 新建账号」，拿到新的授权页后尽快完成授权并粘贴回调地址。'
+          } else if (timedOut) {
+            hint = '本地回调服务 15 秒内没有响应：请确认粘贴的是本次登录的回调地址'
+              + '（不是其它本机服务的地址）。'
+          } else {
+            hint = `请确认回调地址完整、且本次登录窗口仍然有效（${message}）。`
+          }
+          return {
+            ok: false,
+            error: { code: 'jet-hub/callback-unreachable', message: hint },
+          }
+        }
       }
 
       /**
