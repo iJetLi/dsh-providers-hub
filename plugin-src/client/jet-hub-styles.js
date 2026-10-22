@@ -521,11 +521,12 @@ const STYLES = `
 .dim-jh-probeDetails li { font-size: 12px; line-height: 18px; }
 
 /* 全局统计带（Jet Hub 页头下方：tab 按钮组与「已打开 / 已关闭」列表之间）。
-   ⚠️ 5 格全部是**可跨 provider 累加的计数**：账号数、供应商开关数、过期/临期账号数。
-      刻意**不放**积分余额与累计已用 —— 各家"积分"单位不同，跨 provider 求和没有意义
-      （与一键签到汇总「必须按单位分列」同一条红线）。余额类读数只出现在单 provider 面板里。 */
+   三格：总积分 / 剩余积分 / 账号数量（用户 2026-10-22 指定，其余已移除）。
+   ⚠️ 跨 provider 求和是用户明确要求的聚合口径，数值仅作总量参考；
+      「按单位分列」那条红线只约束一键签到的提示文案，不约束这里。 */
 .dim-jh-globalStats { flex: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 24px 0; }
-.dim-jh-globalStat { flex: 1 1 96px; min-width: 96px; display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); border-left-width: 3px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); }
+/* min-width 给到 120px：积分动辄 5~7 位（如 1,234,567.89），96px 会把数字挤出卡片。 */
+.dim-jh-globalStat { flex: 1 1 120px; min-width: 120px; display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); border-left-width: 3px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); }
 .dim-jh-globalStat[data-tone="info"] { border-left-color: #3370ff; }
 .dim-jh-globalStat[data-tone="ok"] { border-left-color: #22c55e; }
 .dim-jh-globalStat[data-tone="warn"] { border-left-color: #e37400; }
@@ -536,10 +537,10 @@ const STYLES = `
 .dim-jh-globalStatLabel { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dim-jh-globalStatValue { font-size: 20px; line-height: 26px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); font-variant-numeric: tabular-nums; }
 .dim-jh-globalStatUnit { margin-left: 2px; font-size: 11px; font-weight: 400; color: var(--dsw-alias-label-tertiary, #8f959e); }
-/* 窄屏（手机 / 侧栏收窄）：数值降一档；格子最小 84px 靠 wrap 自动折成两列，不出现横向溢出。 */
+/* 窄屏（手机 / 侧栏收窄）：数值降一档；格子最小 104px 靠 wrap 自动折行，不出现横向溢出。 */
 @media (max-width: 720px) {
   .dim-jh-globalStats { gap: 6px; margin: 8px 12px 0; }
-  .dim-jh-globalStat { flex: 1 1 84px; min-width: 84px; padding: 6px 10px; }
+  .dim-jh-globalStat { flex: 1 1 104px; min-width: 104px; padding: 6px 10px; }
   .dim-jh-globalStatLabel { font-size: 11px; line-height: 16px; }
   .dim-jh-globalStatValue { font-size: 16px; line-height: 22px; }
 }
