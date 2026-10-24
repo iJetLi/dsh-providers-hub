@@ -30,6 +30,17 @@
 import * as React from 'react';
 
 import { JetHubPage } from './jet-hub.js';
+// ⚠️ 与设置页同因（2026-10-22 整页白屏）：中央面板的渲染期异常同样会卸载
+//    整棵树。入口不同、组件同一个，故用同一个边界工厂、只换 label。
+import { withErrorBoundary } from './error-boundary.js';
+
+/**
+ * `main` 槽里渲染的 `JetHubPage`。
+ *
+ * ⚠️ 模块级常量而不是每次 render 新建：组件身份必须稳定，否则槽位每次重渲染
+ * 都会换一个组件类型，React 会把整棵子树卸载重挂（状态全丢）。
+ */
+const JetHubPageGuarded = withErrorBoundary(JetHubPage, { label: 'Jet Hub 面板' });
 import {
   JET_HUB_PANEL_KEY,
   JET_HUB_SIDEBAR_ORDER,
@@ -86,7 +97,7 @@ export function JetHubMainPanel({ rpcCall }) {
   return React.createElement(
     'div',
     { className: 'dim-jh-panelHost', 'data-plugin': 'dsh-providers-hub' },
-    React.createElement(JetHubPage, { rpcCall }),
+    React.createElement(JetHubPageGuarded, { rpcCall }),
   );
 }
 

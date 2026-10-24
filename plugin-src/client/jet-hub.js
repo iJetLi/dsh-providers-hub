@@ -25,6 +25,8 @@ import { OpencodeKeyModal, OpencodeProxyModal, GeminiProxyModal } from './openco
 //    ⚠️ 本 import 此前**不存在** ⇒ `modelscope-key-modal.js` 整份 140 行从未进 bundle，
 //    面板点「添加账号」无任何反应入口（症状零日志）。
 import { ModelscopeKeyModal, ModelscopeKeyEditModal } from './modelscope-key-modal.js';
+// ⚠️ 2026-10-22 整页白屏事故的兜底层（见该文件头的事故说明）。
+import { normalizeProbeNotice, safeNoticeDetails } from './notice-shape.js';
 import {
   formatExpirySplitLine,
   formatNamedPoolLine,
@@ -2869,7 +2871,20 @@ function ProviderPanel({ provider, rpcCall }) {
   // 正在进行的限流操作：null | 'one' | 'all'。用于禁用按钮并显示进度。
   const [probeBusy, setProbeBusy] = React.useState(null);
   // 上一次重测/重置的结果文案（成功或失败）。
-  const [probeNotice, setProbeNotice] = React.useState(null);
+  //
+  // ⚠️⚠️ **写入端必须经过 `normalizeProbeNotice`**（2026-10-22 整页白屏事故）：
+  //    渲染端按**对象**读 `.tone` / `.text` / `.details`，而历史上两处调用直接
+  //    传了**裸字符串** ⇒ `probeNotice.details` 是 undefined ⇒ `.length` 抛
+  //    TypeError ⇒ 插件内没有 ErrorBoundary ⇒ 整个 Jet Hub 设置页被 React
+  //    卸载成白屏，侧栏切页也失效，只能重启 DSH。用户当时的路径就是
+  //    「保存魔搭令牌」（走 `existed` 分支）。
+  //    ⇒ 归一化放在状态写入这一层，任何调用点再写错形状也不会炸掉整页。
+  //    ⚠️ 两个调用点本身也已改成对象形状；这是第二道闸（防御纵深），
+  //    不是「用兜底掩盖错误」——真正的修复在源头。
+  const [probeNotice, setProbeNoticeState] = React.useState(null);
+  const setProbeNotice = React.useCallback((next) => {
+    setProbeNoticeState(normalizeProbeNotice(next));
+  }, []);
   // 积分余额：accountId → { balance, error }。与账号列表分开加载——余额要逐
   // 账号发网络请求，不能拖慢账号列表本身的渲染。
   const [credits, setCredits] = React.useState({});
@@ -3646,9 +3661,18 @@ function ProviderPanel({ provider, rpcCall }) {
       await loadAccounts();
       // ⚠️ `renamed` = 账号 id 变了（宿主已把旧条目移除、新条目建好）。
       //    提示里**不**显示明文 Key，只说变了 —— 与卡片上的打码口径一致。
-      setProbeNotice(res?.renamed
-        ? '已更新访问令牌。该账号的标识随 Key 尾段一并更新（昵称与停用状态已保留）。'
-        : '已更新访问令牌。');
+      // ⚠️⚠️ **必须是对象，不能是裸字符串**（真实事故 2026-10-22，整页白屏）：
+      //    渲染端读 `probeNotice.details.length`，而字符串的 `.details` 是
+      //    undefined ⇒ 渲染期抛 `Cannot read properties of undefined
+      //    (reading 'length')` ⇒ 整个设置页被 React 卸载（插件内没有
+      //    ErrorBoundary），只能重启 DSH。兜底见 `normalizeProbeNotice`。
+      setProbeNotice({
+        tone: 'ok',
+        text: res?.renamed
+          ? '已更新访问令牌。该账号的标识随 Key 尾段一并更新（昵称与停用状态已保留）。'
+          : '已更新访问令牌。',
+        details: [],
+      });
     } catch (caught) {
       // ⚠️ 错误留在弹窗内（同 submitOpencodeEntry 的理由）。
       setKeyEditModal((prev) => (prev ? { ...prev, error: caught?.message ? caught.message : '未知错误' } : prev));
@@ -3667,7 +3691,15 @@ function ProviderPanel({ provider, rpcCall }) {
       await loadAccounts();
       // 重复 key 时后端返回 existed（复用已有账号）—— 这不是错误，
       // 但要明确告知，否则用户会以为第二次粘贴白费了。
-      if (res && res.existed) setProbeNotice('该 key 已存在，已为你定位到原有账号。');
+      // ⚠️ 同样必须是对象而非裸字符串 —— 这条正是用户 2026-10-22 复现白屏的
+      //    路径（理由见 submitModelscopeKeyEdit 处的事故注释）。
+      if (res && res.existed) {
+        setProbeNotice({
+          tone: 'ok',
+          text: '该 key 已存在，已为你定位到原有账号。',
+          details: [],
+        });
+      }
     } catch (caught) {
       setKeyModal({ error: caught && caught.message ? caught.message : '未知错误' });
     } finally {
@@ -4664,9 +4696,13 @@ function ProviderPanel({ provider, rpcCall }) {
           role: 'status',
         },
         React.createElement('div', null, probeNotice.text),
-        probeNotice.details.length > 0
+        // ⚠️ 不能直接读 `probeNotice.details.length`：`probeNotice` 若被写成裸
+        //    字符串（2026-10-22 整页白屏事故），`.details` 是 undefined ⇒ 抛
+        //    TypeError ⇒ 整个 Jet Hub 设置页被 React 卸载。这里按「无明细」
+        //    降级：宁可少一行明细，也不能让整页消失。
+        safeNoticeDetails(probeNotice.details).length > 0
           ? React.createElement('ul', { className: 'dim-jh-probeDetails' },
-              probeNotice.details.map((d, i) => React.createElement('li', { key: i }, d)))
+              safeNoticeDetails(probeNotice.details).map((d, i) => React.createElement('li', { key: i }, d)))
           : null)
       : null,
     lockNotice

@@ -72,7 +72,19 @@ import { installJetHubStyles } from './jet-hub-styles.js'
 import { JET_HUB_RPC_CHANNEL, JetHubPage, providerLabel } from './jet-hub.js'
 import { startCarrierContribution } from './zcode-carrier.js'
 import { UsageBadge } from './usage-badge.js'
+// ⚠️ 2026-10-22 整页白屏事故的结构性补强：任何渲染期异常只坏掉本面板，
+//    不再让整个设置页（连同侧栏）被 React 卸载。见该文件头。
+import { withErrorBoundary } from './error-boundary.js'
 import { registerJetHubSidebarEntry } from './sidebar-entry.js'
+
+/**
+ * 注册到 `settings.section` 的组件。
+ *
+ * ⚠️ 必须是**包了错误边界**的那个，不能直接注册 `JetHubPage`：直接注册时，
+ * 任何渲染期 TypeError 都会卸载整棵设置页子树，用户除了重启 DSH 没有出路
+ * （2026-10-22 真实事故的症状：「页面直接清空，切换页面无效，只能重启 dsh」）。
+ */
+const JetHubPageGuarded = withErrorBoundary(JetHubPage, { label: 'Jet Hub 设置页' })
 
 export function apply(ctx) {
   ctx.effect(() => installJetHubStyles(), 'jet-hub: install styles')
@@ -101,7 +113,7 @@ export function apply(ctx) {
     order: 50,
     label: () => 'Jet Hub',
     inject: () => ({ rpcCall }),
-  }, JetHubPage))
+  }, JetHubPageGuarded))
 
   /**
    * 主导航里的「Jet Hub」入口 + 中央主面板（`main` 槽的 `jet-hub` key）。
