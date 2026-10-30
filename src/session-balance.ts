@@ -111,3 +111,118 @@ export function shuffleAccounts<T>(accounts: readonly T[], random: () => number 
   }
   return out
 }
+
+/**
+ * 「账号今日负载」读数（供溢出均衡用）。
+ *
+ * 只取选号真正需要的两个字段：**今日请求数**与**今日输出 token**。
+ * 数据源是 token-ledger 的日聚合（`readTokenLedgerDayMap()`），**纯内存读、
+ * 零网络请求** —— 选号在推理关键路径上，绝不能在这里发余额请求。
+ */
+export interface AccountLoadReading {
+  /** 该账号今日（UTC+8 日界）的请求笔数（含失败）。 */
+  requests: number
+  /** 该账号今日的输出 token 合计（0 = 还没跑过）。 */
+  outputTokens: number
+}
+
+/**
+ * 会话负载均衡的**溢出阈值**环境变量（账号今日请求数）。
+ *
+ * ## 为什么需要溢出（2026-10-31 用户报障「每个账号的负载并不太均衡」）
+ *
+ * 会话亲和的负载由「**会话长度 × 重试**」决定：一个跑一天的会话（实测
+ * EASYTV 会话单日 820 条消息、请求数百次）会把它哈希到的那个账号独自吃满，
+ * 而没有会话落在上面的账号整天空闲 —— 账号粒度天然不均。
+ *
+ * 溢出的含义：账号今日请求量超过阈值后，**新会话**不再亲和到它（排序沉底），
+ * 已有的会话**保持亲和**（换号会让同一会话的上下文缓存失效，得不偿失）。
+ * `0` = 关闭溢出（纯哈希亲和）；负数/非法值按缺省。
+ *
+ * ⚠️ 默认值取 **600**：均匀目标是 请求总量 ÷ 账号数；实测单账号峰值日 ~1000+
+ * 次（含重试），600 约为「均匀量 ×2」再留出重试放大余量 —— 超过它说明该账号
+ * 已经比其它账号多扛了一倍以上的量。可按池大小自行调整（环境变量优先）。
+ */
+export const DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS = 'DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS'
+
+/** 缺省溢出阈值（今日请求数）。 */
+export const DEFAULT_OVERFLOW_REQUESTS = 600
+
+/** 当前生效的溢出阈值；`0` = 关闭溢出均衡（纯哈希亲和）。 */
+export function overflowRequestsThreshold(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]
+  if (typeof raw !== 'string' || raw.trim().length === 0) return DEFAULT_OVERFLOW_REQUESTS
+  const parsed = Number.parseInt(raw.trim(), 10)
+  // 非法值回落缺省；`0` 是合法值（关闭溢出），不能被 `||` 吃掉。
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_OVERFLOW_REQUESTS
+}
+
+/**
+ * 按账号 id 索引「今日负载」读数。
+ *
+ * @param days - token-ledger 日聚合表（`readTokenLedgerDayMap()` 的返回）。
+ * @param provider - provider id（只统计该渠道的桶）。
+ * @param day - UTC+8 日键（`utc8DayKey(Date.now())`，由调用方传入以便单测）。
+ */
+export function accountLoadIndex(
+  days: ReadonlyMap<string, ReadonlyMap<string, {
+    requests: number
+    outputTokens: number
+  }>>,
+  provider: string,
+  day: string,
+): Map<string, AccountLoadReading> {
+  const index = new Map<string, AccountLoadReading>()
+  const buckets = days.get(day)
+  if (buckets === undefined) return index
+  for (const [key, bucket] of buckets) {
+    // 桶键 `channel|provider|account|model`（值里的 `|` 已转义成 `/`，split 恒 4 段）。
+    const parts = key.split('|')
+    if (parts.length !== 4) continue
+    const [, bucketProvider, accountId] = parts
+    if (bucketProvider !== provider || accountId === undefined || accountId.length === 0) continue
+    const current = index.get(accountId) ?? { requests: 0, outputTokens: 0 }
+    current.requests += bucket.requests ?? 0
+    current.outputTokens += bucket.outputTokens ?? 0
+    index.set(accountId, current)
+  }
+  return index
+}
+
+/**
+ * 带**溢出**的会话排序：负载超阈值的账号沉底，其余按 rendezvous 序不变。
+ *
+ * ## 语义（三条都要成立）
+ *
+ * 1. **未超载**的账号之间：rendezvous 哈希序不变（亲和照旧，跨请求稳定）；
+ * 2. **超载**的账号整组沉到最后：新会话落到未超载账号上（负载分摊）；
+ * 3. **超载账号之间的相对次序**仍按哈希 —— 全部超载时（比如深夜只有一个
+ *    超长会话在跑）行为退化为纯哈希亲和，不会出现「都超载反而乱换号」。
+ *
+ * ⚠️ 这是**软溢出**而非硬排除：超载账号仍在候选里（排最后），只是新会话
+ * 优先绕开它。硬排除会让「5 个号全超载」时选不出号 —— 而此时正确动作是
+ * 照常发请求让上游自己限流。
+ *
+ * @param accounts - 候选账号（调用方已按 enabled / 模型限流 / tried 过滤）。
+ * @param sessionId - 非空会话标识。
+ * @param scope - 命名空间（provider id）。
+ * @param loads - 账号今日负载索引（缺账号 = 今日没跑过 = 负载 0）。
+ * @param thresholdRequests - 溢出阈值（今日请求数）；`0` = 关闭溢出。
+ * @returns 新数组，不修改入参。
+ */
+export function rankAccountsBySessionWithOverflow<T extends { id: string }>(
+  accounts: readonly T[],
+  sessionId: string,
+  scope: string,
+  loads: ReadonlyMap<string, AccountLoadReading>,
+  thresholdRequests: number,
+): T[] {
+  const ranked = rankAccountsBySession(accounts, sessionId, scope)
+  // 阈值 0 = 关闭；负数视同关闭（与 0 同语义，不抛错）。
+  if (thresholdRequests <= 0) return ranked
+  const fresh = ranked.filter(a => (loads.get(a.id)?.requests ?? 0) < thresholdRequests)
+  const overflowed = ranked.filter(a => (loads.get(a.id)?.requests ?? 0) >= thresholdRequests)
+  // 全员超载时 fresh 为空 —— 直接返回原哈希序（语义 3）。
+  if (fresh.length === 0 || overflowed.length === 0) return ranked
+  return [...fresh, ...overflowed]
+}

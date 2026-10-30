@@ -13,7 +13,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AccountPool } from '../../src/account-pool.js'
 import {
   DSH_ZCODE_SESSION_BALANCE,
+  DEFAULT_OVERFLOW_REQUESTS,
+  DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS,
+  accountLoadIndex,
+  overflowRequestsThreshold,
   rankAccountsBySession,
+  rankAccountsBySessionWithOverflow,
   sessionAccountScore,
   sessionBalanceEnabled,
   shuffleAccounts,
@@ -92,6 +97,78 @@ describe('session-balance 纯函数', () => {
     expect(new Set(shuffleAccounts(ACCOUNTS, () => 0.5).map(a => a.id)))
       .toEqual(new Set(ACCOUNTS.map(a => a.id)))
     expect(ACCOUNTS).toEqual(original)
+  })
+})
+
+describe('负载溢出均衡（长会话压号修复，2026-10-31）', () => {
+  const DAY = '2026-10-31'
+  /** 造日聚合表：`channel|provider|account|model` 桶键。 */
+  function dayMapOf(entries: Array<[string, number, number]>): Parameters<typeof accountLoadIndex>[0] {
+    const buckets = new Map<string, { requests: number; outputTokens: number }>()
+    for (const [accountId, requests, outputTokens] of entries) {
+      buckets.set(`direct|zcode|${accountId}|GLM-5.3-Flash`, { requests, outputTokens })
+    }
+    return new Map([[DAY, buckets]])
+  }
+  // ⚠️ `rankAccountsBySessionWithOverflow` 收的是 **accountLoadIndex 的产物**
+  //（按账号索引的读数表），不是日聚合表本身 —— 第一版 fixture 写错成 day map，
+  // `loads.get(accountId)` 恒 undefined ⇒ 沉底永不生效（实测打穿）。
+  const loads = accountLoadIndex(dayMapOf([
+    ['zcode-a', 800, 1_000_000],
+    ['zcode-b', 100, 200_000],
+    ['zcode-c', 0, 0],
+  ]), 'zcode', DAY)
+
+  it('accountLoadIndex 按账号聚合 requests 与 outputTokens，忽略其它 provider/未归属', () => {
+    const buckets = new Map<string, { requests: number; outputTokens: number }>([
+      ['direct|zcode|zcode-a|GLM-5.3-Flash', { requests: 5, outputTokens: 100 }],
+      ['gateway|zcode|zcode-a|GLM-5.3-Flash', { requests: 2, outputTokens: 50 }],
+      ['direct|buddy|zcode-a|x', { requests: 99, outputTokens: 99 }],
+      ['direct|zcode||GLM-5.3-Flash', { requests: 42, outputTokens: 42 }],
+    ])
+    const index = accountLoadIndex(new Map([[DAY, buckets]]), 'zcode', DAY)
+    expect(index.get('zcode-a')).toEqual({ requests: 7, outputTokens: 150 })
+    expect(index.has('')).toBe(false)
+    expect(index.size).toBe(1)
+  })
+
+  it('未超载账号间哈希序不变；超载账号整组沉底', () => {
+    const ranked = rankAccountsBySession(ACCOUNTS, 'session-x', 'zcode').map(a => a.id)
+    const ids = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', loads, 600).map(a => a.id)
+    // 哈希序里 zcode-a 原本不在末位（b,d,c,a,e），溢出后它必须沉到**末位**，
+    // 且未超载账号（b,d,c,e）保持原哈希相对顺序。
+    // 未超载账号（b,c,d,e）保持原哈希相对顺序；超载的 zcode-a 沉到**末位**。
+    expect(ids.filter(id => id !== 'zcode-a')).toEqual(ranked.filter(id => id !== 'zcode-a'))
+    expect(ids.at(-1)).toBe('zcode-a')
+  })
+
+  it('同一会话仍亲和：未超载时两次调用结果一致', () => {
+    const light = dayMapOf([['zcode-a', 1, 1]])
+    const first = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-y', 'zcode', light, 600).map(a => a.id)
+    const second = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-y', 'zcode', light, 600).map(a => a.id)
+    expect(first).toEqual(second)
+    expect(first).toEqual(rankAccountsBySession(ACCOUNTS, 'session-y', 'zcode').map(a => a.id))
+  })
+
+  it('全员超载 ⇒ 原哈希序（不乱换号，照常发请求让上游限流）', () => {
+    const allHeavy = dayMapOf(ACCOUNTS.map(a => [a.id, 900, 1] as [string, number, number]))
+    const ids = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', allHeavy, 600).map(a => a.id)
+    expect(ids).toEqual(rankAccountsBySession(ACCOUNTS, 'session-x', 'zcode').map(a => a.id))
+  })
+
+  it('阈值 0 / 负数 = 关闭溢出（纯哈希序）', () => {
+    for (const threshold of [0, -1]) {
+      const ids = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', loads, threshold).map(a => a.id)
+      expect(ids).toEqual(rankAccountsBySession(ACCOUNTS, 'session-x', 'zcode').map(a => a.id))
+    }
+  })
+
+  it('阈值判据：env 未设 = 600；显式 0 = 关闭；非法值回落 600', () => {
+    expect(overflowRequestsThreshold({} as never)).toBe(DEFAULT_OVERFLOW_REQUESTS)
+    expect(overflowRequestsThreshold({ [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: '0' } as never)).toBe(0)
+    expect(overflowRequestsThreshold({ [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: '250' } as never)).toBe(250)
+    expect(overflowRequestsThreshold({ [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: 'abc' } as never)).toBe(DEFAULT_OVERFLOW_REQUESTS)
+    expect(overflowRequestsThreshold({ [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: '-5' } as never)).toBe(DEFAULT_OVERFLOW_REQUESTS)
   })
 })
 

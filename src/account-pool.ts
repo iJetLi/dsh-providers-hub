@@ -10,7 +10,8 @@ import { normalizeOpencodeGeneration } from './opencode-auth.js'
 import { maskProxyPassword } from './proxy-mask.js'
 // ⚠️ `model-queue.ts` **零 import**（纯函数模块，见其模块头）⇒ 不引入环。
 import { nextUtc8DayStartMs } from './model-queue.js'
-import { rankAccountsBySession, shuffleAccounts } from './session-balance.js'
+import { readTokenLedgerDayMap, utc8DayKey } from './token-ledger.js'
+import { accountLoadIndex, overflowRequestsThreshold, rankAccountsBySession, rankAccountsBySessionWithOverflow, shuffleAccounts } from './session-balance.js'
 import type {
   CodeArtsCredential,
   ProviderAccountEntry,
@@ -2398,7 +2399,18 @@ export class AccountPool {
     const candidates = this.candidateAccounts(provider, modelId, excludeAccountIds)
     if (candidates.length === 0) return null
     const ordered = sessionId !== undefined && sessionId.length > 0
-      ? rankAccountsBySession(candidates, sessionId, provider)
+      ? // ⚠️ 溢出均衡（2026-10-31 用户报障「每个账号的负载并不太均衡」）：
+        // 会话亲和下账号负载 = 会话长度 × 重试，一个超长会话能把一个号独自
+        // 吃满。超阈值账号对**新会话**沉底；阈值取 env
+        // DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS（缺省 600，0=关闭）。
+        // 负载数据源 = token-ledger 日聚合（纯内存读，零网络请求）。
+        rankAccountsBySessionWithOverflow(
+          candidates,
+          sessionId,
+          provider,
+          accountLoadIndex(readTokenLedgerDayMap(), provider, utc8DayKey(Date.now())),
+          overflowRequestsThreshold(),
+        )
       : shuffleAccounts(candidates)
     return await this.resolveFirstCredential<TCredential>(provider, ordered)
   }
