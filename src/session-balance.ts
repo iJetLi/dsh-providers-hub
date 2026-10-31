@@ -7,8 +7,10 @@
  * 只要 1 号没撞限额，全部流量都压在它身上。对 ZCode 这种「一个会话会连续
  * 发很多轮请求」的 provider，用户希望：
  *
- * - **有 sessionId**：同一会话固定落到同一个账号（会话亲和），不同会话按
- *   sessionId 稳定分散到不同账号；
+ * - **有 sessionId**：同一会话**优先**落到同一个账号（会话亲和），不同会话按
+ *   sessionId 稳定分散到不同账号 —— ⚠️ 这个「优先」是有例外的：账号今日负载
+ *   达阈值后会被沉底，正在跑的会话**会迁移一次**（见
+ *   `rankAccountsBySessionWithOverflow` 的长注释，2026-10-31 审计订正）；
  * - **没有 sessionId**（本地 OpenAI 网关等一次性调用）：每次随机挑一个账号，
  *   把请求分摊开。
  *
@@ -115,45 +117,99 @@ export function shuffleAccounts<T>(accounts: readonly T[], random: () => number 
 /**
  * 「账号今日负载」读数（供溢出均衡用）。
  *
- * 只取选号真正需要的两个字段：**今日请求数**与**今日输出 token**。
+ * 只取选号真正需要的**一个**字段：今日请求笔数。
+ *
+ * ⚠️ 初版还带一个 `outputTokens`（「今日输出 token 合计」），但**全仓没有任何读点**
+ * —— 溢出的判据只看请求笔数。2026-10-31 审计实测它是死字段后删除：留着会让
+ * 「只取选号真正需要的两个字段」这句注释与实现不符，也会诱导后来者以为 token 量
+ * 参与排序。
+ *
  * 数据源是 token-ledger 的日聚合（`readTokenLedgerDayMap()`），**纯内存读、
  * 零网络请求** —— 选号在推理关键路径上，绝不能在这里发余额请求。
+ * 实测代价：真实 8 个桶 ≈ 0.9 µs/次，最坏 500 桶 ≈ 85 µs/次（与日键数量无关）。
  */
 export interface AccountLoadReading {
   /** 该账号今日（UTC+8 日界）的请求笔数（含失败）。 */
   requests: number
-  /** 该账号今日的输出 token 合计（0 = 还没跑过）。 */
-  outputTokens: number
 }
 
 /**
  * 会话负载均衡的**溢出阈值**环境变量（账号今日请求数）。
  *
- * ## 为什么需要溢出（2026-10-31 用户报障「每个账号的负载并不太均衡」）
+ * ## 它解决的问题（2026-10-31 用户报障「每个账号的负载并不太均衡」）
  *
- * 会话亲和的负载由「**会话长度 × 重试**」决定：一个跑一天的会话（实测
- * EASYTV 会话单日 820 条消息、请求数百次）会把它哈希到的那个账号独自吃满，
- * 而没有会话落在上面的账号整天空闲 —— 账号粒度天然不均。
+ * 会话亲和的账号负载 ≈ **会话长度**（一个跑整天的会话把它哈希到的那个账号独自
+ * 吃满，没有会话落上的账号整天空闲）。本机真实账本实测：
+ * `2026-10-31` 六个有量账号为 `1233 / 459 / 8 / 7 / 7 / 7`（总量 1721，
+ * 单号占 **71.6%**，max/mean = **4.30**）。
  *
- * 溢出的含义：账号今日请求量超过阈值后，**新会话**不再亲和到它（排序沉底），
- * 已有的会话**保持亲和**（换号会让同一会话的上下文缓存失效，得不偿失）。
- * `0` = 关闭溢出（纯哈希亲和）；负数/非法值按缺省。
+ * ## 语义：这是「**上限（cap）**」，不是「均衡器」，更不是「已有会话保持亲和」
  *
- * ⚠️ 默认值取 **600**：均匀目标是 请求总量 ÷ 账号数；实测单账号峰值日 ~1000+
- * 次（含重试），600 约为「均匀量 ×2」再留出重试放大余量 —— 超过它说明该账号
- * 已经比其它账号多扛了一倍以上的量。可按池大小自行调整（环境变量优先）。
+ * - 账号今日请求数 ≥ 阈值 ⇒ 在该次的排序里**整组沉底**；
+ * - 因此 **新会话**会落到未超载的账号上；
+ * - ⚠️ 但本模块**无状态**（见 `rankAccountsBySessionWithOverflow` 的长注释）：
+ *   一个**正在跑的会话**，一旦它所在账号越过阈值，它的**下一次请求就会迁移**到
+ *   别的账号 —— 本修法正是靠这次迁移把长会话摊开的。**不要**在别处声称
+ *   「已有会话保持亲和 / 已开的会话不换号」。
+ * - 全员超载 ⇒ 退回纯哈希序（照常发请求让上游自己限流，不硬失败）。
+ *
+ * ## 为什么阈值是**绝对量**而不是「当日总量的相对量」（实测否决）
+ *
+ * 初版设想过 `max(下限, ceil(k × 当日累计 / 账号数))`，**实测否决**：
+ * 阈值随总量上涨会把「已超载」的账号重新变回 fresh ⇒ 会话反复弹回原号。
+ * 真实场景（8 号池 / 1691 请求 / 1 个超长会话 + 1 个中等会话）实测：
+ *
+ * | 策略 | max/mean | 会话中途换号 |
+ * |---|---|---|
+ * | 关闭溢出 | 5.83 | 0 |
+ * | 固定 300 | **1.42** | **5** |
+ * | 相对 `max(200, 1.2×均值)` | 1.20 | **204** |
+ * | 相对 `max(200, 1.5×均值)` | 1.50 | **428** |
+ *
+ * ⇒ 相对量用 8 倍以上的换号次数只换来一点点更平的分摊，**不划算**，故保留绝对阈值。
+ *
+ * ## 默认值 300 的来源（真实账本，不是拍脑袋）
+ *
+ * 固定上限 C 的最终比值上界是 `C ÷ 当日均匀量`。按本机有量的 4 天倒推：
+ * `10-25`（总量 759 / 4 号 / 峰值 412 / 错误率 13.3%）与 `10-31`（1721 / 峰值
+ * 1233）要压到 ≈1.5 以内 ⇒ `C ≤ 300`；而 `10-24`（峰值 398 / 均值 310）本就
+ * 接近均匀，300 只会引发极少量迁移。
+ *
+ * ⚠️ 初版默认 **600** 实测**几乎不生效**：4 天里 3 天峰值 < 600 ⇒ 一个号都不会
+ * 沉底 ⇒ 零效果；且 PR 正文举证的 `322/322/306/156/34`（峰值 322）同样 < 600
+ * ⇒ **对它自己描述的报障也零效果**。600 在 10-31 只把 max/mean 从 5.83 压到 2.84。
+ *
+ * ## 已知边界（如实登记，不掩饰）
+ *
+ * - **小池 + 高量**：2 个号各 850 次、阈值 300 ⇒ 两个号长期都超载 ⇒ `fresh` 为空
+ *   ⇒ 退回哈希序 ⇒ **不生效**（此时不均衡度本身也只有 ≤2.0，可接受）。
+ * - **大池 + 高量**：20 个号均分 86 ⇒ 单号很难到 300 ⇒ **不生效**。
+ *   需要更激进时用环境变量下调（本仓库实测 5~8 号池最合适）。
+ * - 阈值按 **UTC+8 日界** 归零，跨日那一刻所有账号重新变 fresh。
  */
 export const DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS = 'DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS'
 
-/** 缺省溢出阈值（今日请求数）。 */
-export const DEFAULT_OVERFLOW_REQUESTS = 600
+/** 缺省溢出阈值（今日请求数）。取值依据见 {@link DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS}。 */
+export const DEFAULT_OVERFLOW_REQUESTS = 300
 
 /** 当前生效的溢出阈值；`0` = 关闭溢出均衡（纯哈希亲和）。 */
 export function overflowRequestsThreshold(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env[DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]
-  if (typeof raw !== 'string' || raw.trim().length === 0) return DEFAULT_OVERFLOW_REQUESTS
-  const parsed = Number.parseInt(raw.trim(), 10)
-  // 非法值回落缺省；`0` 是合法值（关闭溢出），不能被 `||` 吃掉。
+  if (typeof raw !== 'string') return DEFAULT_OVERFLOW_REQUESTS
+  const text = raw.trim()
+  if (text.length === 0) return DEFAULT_OVERFLOW_REQUESTS
+  /**
+   * ⚠️ **只认纯十进制整数**（`/^\d+$/`），不用 `Number.parseInt` 的宽松语义。
+   *
+   * 2026-10-31 对抗审计逐格实测的静默失效（两者都无日志）：
+   * - `'1e3'`（用户想设 1000）⇒ `parseInt` 得 **1** ⇒ 每个号第一次请求就算超载
+   *   ⇒ 全员超载 ⇒ 退回哈希序 ⇒ **等于没修**；
+   * - `'0x10'` / `'0b101'` ⇒ **0** ⇒ 把溢出整条**关掉**。
+   * 严格判据下这些值一律回落缺省（fail-safe 到 300），不会静默变成 1 或 0。
+   * `'0'` 仍然是合法的「关闭」值。
+   */
+  if (!/^\d+$/.test(text)) return DEFAULT_OVERFLOW_REQUESTS
+  const parsed = Number.parseInt(text, 10)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_OVERFLOW_REQUESTS
 }
 
@@ -181,27 +237,41 @@ export function accountLoadIndex(
     if (parts.length !== 4) continue
     const [, bucketProvider, accountId] = parts
     if (bucketProvider !== provider || accountId === undefined || accountId.length === 0) continue
-    const current = index.get(accountId) ?? { requests: 0, outputTokens: 0 }
+    const current = index.get(accountId) ?? { requests: 0 }
     current.requests += bucket.requests ?? 0
-    current.outputTokens += bucket.outputTokens ?? 0
     index.set(accountId, current)
   }
   return index
 }
 
 /**
- * 带**溢出**的会话排序：负载超阈值的账号沉底，其余按 rendezvous 序不变。
+ * 带**溢出**的会话排序：负载达阈值的账号沉底，其余按 rendezvous 序不变。
  *
- * ## 语义（三条都要成立）
+ * ## 语义（三条）
  *
- * 1. **未超载**的账号之间：rendezvous 哈希序不变（亲和照旧，跨请求稳定）；
- * 2. **超载**的账号整组沉到最后：新会话落到未超载账号上（负载分摊）；
- * 3. **超载账号之间的相对次序**仍按哈希 —— 全部超载时（比如深夜只有一个
- *    超长会话在跑）行为退化为纯哈希亲和，不会出现「都超载反而乱换号」。
+ * 1. **未超载**的账号之间：rendezvous 哈希序不变（跨请求稳定）；
+ * 2. **已超载**的账号整组沉到最后 ⇒ **新会话**落到未超载账号上（负载分摊）；
+ * 3. **全员超载**时退回纯哈希序（照常发请求让上游自己限流，不硬失败）。
  *
- * ⚠️ 这是**软溢出**而非硬排除：超载账号仍在候选里（排最后），只是新会话
- * 优先绕开它。硬排除会让「5 个号全超载」时选不出号 —— 而此时正确动作是
- * 照常发请求让上游自己限流。
+ * ⚠️ 这是**软溢出**而非硬排除：超载账号仍在候选里（排最后）。硬排除会让
+ * 「5 个号全超载」时选不出号 —— 而此时正确动作是照常发请求让上游限流。
+ *
+ * ## ⚠️⚠️ 它**不是**「已有会话保持亲和」——这是初版的错误表述，已订正
+ *
+ * 本函数是**无状态纯函数**，而调用方（`AccountPool.getAvailableAccountForSession`）
+ * **每个请求**都会重跑一次；池里**没有** `sessionId → accountId` 的记忆
+ * （全库只有 provider 级的 `activeZcodeAccountId`，那是记账归属，不是亲和状态）。
+ *
+ * ⇒ **一个正在跑的会话，一旦它所在账号的今日请求数达阈值，它的下一次请求就会
+ * 被排到别的账号上。** 本修法正是靠这次迁移把长会话的负载摊开的。
+ *
+ * 实测（8 号池 / 会话连跑 / 阈值 600）：第 **601** 次、第 **1201** 次各迁移一次；
+ * 阈值低于当日均匀量时还会出现两种退化：①「**为 1 次请求换号**」（如
+ * `a×148 → d×1 → e×37`），②「**越过阈值后又弹回原号**」（全员超载 ⇒ 退回哈希序）。
+ *
+ * 若将来确实需要硬亲和，必须新增 `Map<sessionId, accountId>` + TTL；而那样会让
+ * 本修法对「长会话独占一个号」**重新失效**（两个目标互斥）—— 2026-10-31 审计
+ * 记录在案：本 PR 选择了「摊平负载」，代价是会话跨越阈值时会迁移一次。
  *
  * @param accounts - 候选账号（调用方已按 enabled / 模型限流 / tried 过滤）。
  * @param sessionId - 非空会话标识。
@@ -218,11 +288,27 @@ export function rankAccountsBySessionWithOverflow<T extends { id: string }>(
   thresholdRequests: number,
 ): T[] {
   const ranked = rankAccountsBySession(accounts, sessionId, scope)
-  // 阈值 0 = 关闭；负数视同关闭（与 0 同语义，不抛错）。
-  if (thresholdRequests <= 0) return ranked
-  const fresh = ranked.filter(a => (loads.get(a.id)?.requests ?? 0) < thresholdRequests)
-  const overflowed = ranked.filter(a => (loads.get(a.id)?.requests ?? 0) >= thresholdRequests)
-  // 全员超载时 fresh 为空 —— 直接返回原哈希序（语义 3）。
+  // 阈值 0 = 关闭；负数视同关闭（与 0 同语义，不抛错）。NaN 同样按关闭处理。
+  if (!Number.isFinite(thresholdRequests) || thresholdRequests <= 0) return ranked
+  /**
+   * ⚠️ 读数**归一**后再比较，不能直接用 `loads.get(id)?.requests`：
+   * 对抗审计实测，若某账号的读数是 `NaN` / 非数字，`x < T` 与 `x >= T`
+   * **两侧都为假** ⇒ 该账号会同时从 `fresh` 与 `overflowed` 里消失
+   * （即「从候选里凭空删掉一个可用账号」，比不均衡更糟）。
+   * 这里把「读不到 / 读不懂」一律按 0 处理，保证划分是**全覆盖且互斥**的。
+   */
+  const loadOf = (account: T): number => {
+    const requests = loads.get(account.id)?.requests
+    return typeof requests === 'number' && Number.isFinite(requests) && requests > 0 ? requests : 0
+  }
+  const fresh = ranked.filter(a => loadOf(a) < thresholdRequests)
+  const overflowed = ranked.filter(a => loadOf(a) >= thresholdRequests)
+  /**
+   * ⚠️ 这条早退**删掉也和行为逐字节相同**（2026-10-31 对抗审计 5632 格穷举实测：
+   * `fresh` 为空时 `[...[], ...ranked] ≡ ranked`，`overflowed` 为空时同理）。
+   * 保留它只为「全员超载退回哈希序」这条语义在源码里可读，**不要**为它编用例
+   * 声称覆盖 —— 它是不可观测的，任何断言都只能证明它恒真。
+   */
   if (fresh.length === 0 || overflowed.length === 0) return ranked
   return [...fresh, ...overflowed]
 }

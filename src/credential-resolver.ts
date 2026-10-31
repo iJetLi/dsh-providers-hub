@@ -355,8 +355,10 @@ export interface CredentialResolverConfig<TCredential> {
   /**
    * 账号选择策略；缺省 `'manual'` = 池的手动顺序优先（既有语义）。
    *
-   * `'session-balance'`：按本次请求的 `sessionId` 做会话亲和（同一会话固定
-   * 落同一账号），没有 `sessionId` 时随机分摊。目前仅 **zcode** 启用。
+   * `'session-balance'`：按本次请求的 `sessionId` 做会话亲和（同一会话**优先**
+   * 落同一账号；账号今日请求数达阈值后会被沉底，正在跑的会话会迁移一次 —— 见
+   * `session-balance.ts` 的 `rankAccountsBySessionWithOverflow`），没有
+   * `sessionId` 时随机分摊。目前仅 **zcode** 启用。
    */
   readonly accountSelection?: 'manual' | 'session-balance'
 }

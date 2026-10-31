@@ -11,7 +11,7 @@ import { maskProxyPassword } from './proxy-mask.js'
 // ⚠️ `model-queue.ts` **零 import**（纯函数模块，见其模块头）⇒ 不引入环。
 import { nextUtc8DayStartMs } from './model-queue.js'
 import { readTokenLedgerDayMap, utc8DayKey } from './token-ledger.js'
-import { accountLoadIndex, overflowRequestsThreshold, rankAccountsBySession, rankAccountsBySessionWithOverflow, shuffleAccounts } from './session-balance.js'
+import { accountLoadIndex, overflowRequestsThreshold, rankAccountsBySessionWithOverflow, shuffleAccounts } from './session-balance.js'
 import type {
   CodeArtsCredential,
   ProviderAccountEntry,
@@ -2399,20 +2399,46 @@ export class AccountPool {
     const candidates = this.candidateAccounts(provider, modelId, excludeAccountIds)
     if (candidates.length === 0) return null
     const ordered = sessionId !== undefined && sessionId.length > 0
-      ? // ⚠️ 溢出均衡（2026-10-31 用户报障「每个账号的负载并不太均衡」）：
-        // 会话亲和下账号负载 = 会话长度 × 重试，一个超长会话能把一个号独自
-        // 吃满。超阈值账号对**新会话**沉底；阈值取 env
-        // DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS（缺省 600，0=关闭）。
-        // 负载数据源 = token-ledger 日聚合（纯内存读，零网络请求）。
+      ? // ⚠️ 溢出均衡（2026-10-31 用户报障「每个账号的负载并不太均衡」）。
+        //
+        // 语义是**上限（cap）不是均衡器**：账号今日请求数达阈值后整组沉底，
+        // 于是**新会话**落到还有余量的号上；而一个**正在跑的会话**，一旦它所在
+        // 账号越过阈值，下一次请求就会迁移 —— 本修法正是靠这次迁移把长会话摊开的
+        // （**不是**「已有会话保持亲和」，初版这么写是错的，见
+        // `session-balance.ts` 的 `rankAccountsBySessionWithOverflow` 长注释）。
+        //
+        // 阈值 env `DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS`（缺省 300，0=关闭）。
+        // 负载数据源 = token-ledger 日聚合（纯内存读，零网络请求，实测 ~1 µs）。
+        //
+        // ⚠️ 账本读取**不得反噬推理**（与 `src/index.ts` 记账处同一条纪律）：
+        // 记账后端是外部注入点，`load()` 抛错不该让选号整体失败 —— 失败时按
+        // 「读不到负载」处理，即全员 fresh，退回纯哈希亲和（与没装这个功能逐字节
+        // 同语义）。**不要**为了「看得见错误」把它改成 rethrow：那会让一次统计
+        // 故障变成整条推理链路不可用。
         rankAccountsBySessionWithOverflow(
           candidates,
           sessionId,
           provider,
-          accountLoadIndex(readTokenLedgerDayMap(), provider, utc8DayKey(Date.now())),
+          this.sessionLoadIndex(provider),
           overflowRequestsThreshold(),
         )
       : shuffleAccounts(candidates)
     return await this.resolveFirstCredential<TCredential>(provider, ordered)
+  }
+
+  /**
+   * 今日账号负载索引（`provider` 维度）；任何读取异常都退化为**空表**。
+   *
+   * 抽成方法是为了让「失败兜底」只有一份实现（`getAvailableAccountForSession`
+   * 与将来的调用点共用），也让单测能单独验证兜底语义（见
+   * `tests/unit/session-balance.spec.ts` 的「账本读取抛错」用例）。
+   */
+  private sessionLoadIndex(provider: string): ReturnType<typeof accountLoadIndex> {
+    try {
+      return accountLoadIndex(readTokenLedgerDayMap(), provider, utc8DayKey(Date.now()))
+    } catch {
+      return new Map()
+    }
   }
 
   /**

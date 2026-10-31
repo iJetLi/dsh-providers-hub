@@ -24,6 +24,7 @@ import {
   shuffleAccounts,
 } from '../../src/session-balance.js'
 import { ZCODE } from '../../src/zcode-product.js'
+import { attachTokenLedgerStore, utc8DayKey } from '../../src/token-ledger.js'
 
 const ACCOUNTS = [
   { id: 'zcode-a' },
@@ -110,16 +111,24 @@ describe('负载溢出均衡（长会话压号修复，2026-10-31）', () => {
     }
     return new Map([[DAY, buckets]])
   }
-  // ⚠️ `rankAccountsBySessionWithOverflow` 收的是 **accountLoadIndex 的产物**
-  //（按账号索引的读数表），不是日聚合表本身 —— 第一版 fixture 写错成 day map，
-  // `loads.get(accountId)` 恒 undefined ⇒ 沉底永不生效（实测打穿）。
-  const loads = accountLoadIndex(dayMapOf([
+  /**
+   * ⚠️ `rankAccountsBySessionWithOverflow` 收的是 **accountLoadIndex 的产物**
+   *（按账号索引的读数表），**不是**日聚合表本身。
+   *
+   * 2026-10-31 审计实测：初版有两条用例直接把 `dayMapOf(...)`（外层键是**日期**）
+   * 当 `loads` 传进去 ⇒ `loads.get('zcode-a')` 恒 `undefined` ⇒ 全员按负载 0 处理
+   * ⇒ 断言恒真。本文件现在**只用这个 helper 造 loads**，不要再直接传 `dayMapOf`。
+   */
+  function loadsOf(entries: Array<[string, number, number]>): Map<string, { requests: number }> {
+    return accountLoadIndex(dayMapOf(entries), 'zcode', DAY)
+  }
+  const loads = loadsOf([
     ['zcode-a', 800, 1_000_000],
     ['zcode-b', 100, 200_000],
     ['zcode-c', 0, 0],
-  ]), 'zcode', DAY)
+  ])
 
-  it('accountLoadIndex 按账号聚合 requests 与 outputTokens，忽略其它 provider/未归属', () => {
+  it('accountLoadIndex 按账号聚合 requests（跨 channel 合并），忽略其它 provider/未归属', () => {
     const buckets = new Map<string, { requests: number; outputTokens: number }>([
       ['direct|zcode|zcode-a|GLM-5.3-Flash', { requests: 5, outputTokens: 100 }],
       ['gateway|zcode|zcode-a|GLM-5.3-Flash', { requests: 2, outputTokens: 50 }],
@@ -127,49 +136,86 @@ describe('负载溢出均衡（长会话压号修复，2026-10-31）', () => {
       ['direct|zcode||GLM-5.3-Flash', { requests: 42, outputTokens: 42 }],
     ])
     const index = accountLoadIndex(new Map([[DAY, buckets]]), 'zcode', DAY)
-    expect(index.get('zcode-a')).toEqual({ requests: 7, outputTokens: 150 })
+    // ⚠️ 只聚合 requests：初版还聚合了一个 `outputTokens`，但**没有任何读点**，
+    //    2026-10-31 审计确认是死字段后删除（删掉它不影响本断言）。
+    expect(index.get('zcode-a')).toEqual({ requests: 7 })
     expect(index.has('')).toBe(false)
     expect(index.size).toBe(1)
   })
 
   it('未超载账号间哈希序不变；超载账号整组沉底', () => {
     const ranked = rankAccountsBySession(ACCOUNTS, 'session-x', 'zcode').map(a => a.id)
+    // fixture 自检：本用例的判别力**全部**压在「zcode-a 原本不在末位」这一点上
+    //（审计实测：5000 个随机 sessionId 里有 21.46% 本来就把 a 排在末位，那时断言恒真）。
+    expect(ranked.at(-1), 'fixture 失效：hash 序里 a 已在末位，本用例会退化成同义反复').not.toBe('zcode-a')
     const ids = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', loads, 600).map(a => a.id)
-    // 哈希序里 zcode-a 原本不在末位（b,d,c,a,e），溢出后它必须沉到**末位**，
-    // 且未超载账号（b,d,c,e）保持原哈希相对顺序。
-    // 未超载账号（b,c,d,e）保持原哈希相对顺序；超载的 zcode-a 沉到**末位**。
     expect(ids.filter(id => id !== 'zcode-a')).toEqual(ranked.filter(id => id !== 'zcode-a'))
     expect(ids.at(-1)).toBe('zcode-a')
   })
 
-  it('同一会话仍亲和：未超载时两次调用结果一致', () => {
-    const light = dayMapOf([['zcode-a', 1, 1]])
-    const first = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-y', 'zcode', light, 600).map(a => a.id)
-    const second = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-y', 'zcode', light, 600).map(a => a.id)
-    expect(first).toEqual(second)
-    expect(first).toEqual(rankAccountsBySession(ACCOUNTS, 'session-y', 'zcode').map(a => a.id))
+  it('★ 跨阈的那一发会换号（钉死真实语义，不是「已有会话保持亲和」）', () => {
+    // 语义订正（2026-10-31 审计）：本函数**无状态**，`sessionId → accountId` 没有
+    // 记忆，调用方每个请求都重跑一次 ⇒ 会话所在账号越阈后，下一发必然迁移。
+    // 这条用例把**真实语义**钉死；初版在这里写的是「同一会话仍亲和」且断言恒真。
+    const pureOrder = rankAccountsBySession(ACCOUNTS, 'session-x', 'zcode').map(a => a.id)
+    const home = pureOrder[0]!
+    const at599 = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', loadsOf([[home, 599, 0]]), 600)[0]!.id
+    const at600 = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', loadsOf([[home, 600, 0]]), 600)[0]!.id
+    expect(at599, '未越阈 ⇒ 仍落在亲和账号上').toBe(home)
+    // 恰好等于阈值即算超载（`>=` 而非 `>`）。
+    expect(at600, '越阈 ⇒ 同一会话的下一发必须迁移，这是修法生效的方式').toBe(pureOrder[1])
   })
 
-  it('全员超载 ⇒ 原哈希序（不乱换号，照常发请求让上游限流）', () => {
-    const allHeavy = dayMapOf(ACCOUNTS.map(a => [a.id, 900, 1] as [string, number, number]))
+  it('全员超载 ⇒ 退回纯哈希序（照常发请求让上游限流，不硬失败）', () => {
+    const allHeavy = loadsOf(ACCOUNTS.map(a => [a.id, 900, 1] as [string, number, number]))
+    // fixture 自检：初版传的是 day map，`loads.get()` 恒 undefined ⇒ 走的其实是
+    // 「全员 fresh」，从未进入本用例声称验证的分支。
+    expect([...allHeavy.values()].every(reading => reading.requests === 900)).toBe(true)
     const ids = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', allHeavy, 600).map(a => a.id)
     expect(ids).toEqual(rankAccountsBySession(ACCOUNTS, 'session-x', 'zcode').map(a => a.id))
+    // ⚠️ 如实登记：本断言**无法区分**「有没有那条 `fresh.length===0` 早退」——
+    //    `[...[], ...ranked]` 与 `ranked` 逐字节相同（对抗审计 5632 格穷举实测）。
+    //    它锁的是「全员超载不硬失败」这条**语义**，不是那段代码。
   })
 
-  it('阈值 0 / 负数 = 关闭溢出（纯哈希序）', () => {
-    for (const threshold of [0, -1]) {
+  it('阈值 0 / 负数 / NaN = 关闭溢出（纯哈希序，不抛错）', () => {
+    for (const threshold of [0, -1, Number.NaN]) {
       const ids = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', loads, threshold).map(a => a.id)
       expect(ids).toEqual(rankAccountsBySession(ACCOUNTS, 'session-x', 'zcode').map(a => a.id))
     }
   })
 
-  it('阈值判据：env 未设 = 600；显式 0 = 关闭；非法值回落 600', () => {
-    expect(overflowRequestsThreshold({} as never)).toBe(DEFAULT_OVERFLOW_REQUESTS)
-    expect(overflowRequestsThreshold({ [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: '0' } as never)).toBe(0)
-    expect(overflowRequestsThreshold({ [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: '250' } as never)).toBe(250)
-    expect(overflowRequestsThreshold({ [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: 'abc' } as never)).toBe(DEFAULT_OVERFLOW_REQUESTS)
-    expect(overflowRequestsThreshold({ [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: '-5' } as never)).toBe(DEFAULT_OVERFLOW_REQUESTS)
+  it('读数是 NaN / 非数字时按 0 处理，不会把账号从候选里弄丢', () => {
+    // 对抗审计实测：直接比较时 `x < T` 与 `x >= T` 两侧都为假 ⇒ 该账号同时从
+    // fresh 与 overflowed 消失（等于「凭空删掉一个可用账号」）。归一后必须仍全员在场。
+    const broken = new Map<string, { requests: number }>([
+      ['zcode-a', { requests: Number.NaN }],
+      ['zcode-b', { requests: 900 }],
+    ])
+    const ids = rankAccountsBySessionWithOverflow(ACCOUNTS, 'session-x', 'zcode', broken, 600).map(a => a.id)
+    expect(ids).toHaveLength(ACCOUNTS.length)
+    expect(new Set(ids)).toEqual(new Set(ACCOUNTS.map(a => a.id)))
   })
+
+  it('阈值判据：缺省 300；显式 0 = 关闭；宽松数字串一律回落缺省（不静默变 1 或 0）', () => {
+    const env = (value: string | undefined): NodeJS.ProcessEnv =>
+      (value === undefined ? {} : { [DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS]: value }) as never
+    expect(DEFAULT_OVERFLOW_REQUESTS).toBe(300)
+    expect(overflowRequestsThreshold(env(undefined))).toBe(300)
+    expect(overflowRequestsThreshold(env('0'))).toBe(0)
+    expect(overflowRequestsThreshold(env('250'))).toBe(250)
+    expect(overflowRequestsThreshold(env(' 250 '))).toBe(250)
+    expect(overflowRequestsThreshold(env('   '))).toBe(300)
+    // ⚠️ 下面四格是「宽松 parseInt」的静默失效（对抗审计逐格实测）：
+    //   `'1e3'` 旧实现得 1（= 全员瞬间超载 ⇒ 等于没修）、`'0x10'` 得 0（= 关掉溢出）、
+    //   `'600abc'` 得 600（用户以为写错了会被拒）。严格判据下全部回落缺省。
+    expect(overflowRequestsThreshold(env('1e3'))).toBe(300)
+    expect(overflowRequestsThreshold(env('0x10'))).toBe(300)
+    expect(overflowRequestsThreshold(env('600abc')), '宽松解析会静默变成 600').toBe(300)
+    expect(overflowRequestsThreshold(env('-5'))).toBe(300)
+    expect(overflowRequestsThreshold(env('abc'))).toBe(300)
+  })
+
 })
 
 describe('DSH_ZCODE_SESSION_BALANCE 开关判据', () => {
@@ -416,5 +462,119 @@ describe('AccountPool.getAvailableAccountForSession', () => {
     expect(rpcGetEnabled()).toBe(false)
     expect(await rpcSetEnabled(true as never)).toBe(true)
     expect(rpcGetEnabled()).toBe(true)
+  })
+})
+
+describe('AccountPool.getAvailableAccountForSession × 溢出均衡接线（★ 修法唯一的生产接线）', () => {
+  /**
+   * ## 为什么必须有这一组
+   *
+   * 2026-10-31 对抗审计实测：把 `src/account-pool.ts` 的溢出接线整个换回
+   * `rankAccountsBySession(...)`（= 修法**完全失效**），本文件 29 条全绿、
+   * **全仓库 11654 条也全绿**；把日键 `utc8DayKey(Date.now())` 写成
+   * `'1970-01-01'` 同样全绿。
+   *
+   * 根因：溢出分支要先读完账本才有负载，而**全部既有用例都没挂账本后端** ⇒
+   * `readTokenLedgerDayMap()` 恒返回空表 ⇒ `accountLoadIndex` 恒空 ⇒ 溢出分支
+   * 永不执行。换句话说，这个 PR 唯一的生产改动在此前是**零守卫**的
+   *（正是仓库文档里记过的「接线零守卫」形态）。
+   *
+   * 本组用**真实的 `attachTokenLedgerStore`**（不把接线抄一份进测试）挂一个
+   * 假后端，从 `AccountPool` 这一层端到端验证：负载真的被读到、日键真的取今天、
+   * 阈值真的来自 env、账本抛错真的不反噬推理。
+   */
+  const TODAY = utc8DayKey(Date.now())
+
+  /** 挂一个假账本后端，令 `readTokenLedgerDayMap()` 返回指定日的日聚合表。 */
+  function attachFakeLedger(loadByAccount: Record<string, number>, day = TODAY): () => void {
+    const buckets = new Map<string, { requests: number; outputTokens: number }>()
+    for (const [accountId, requests] of Object.entries(loadByAccount)) {
+      buckets.set(`direct|zcode|${accountId}|GLM-5.3-Flash`, { requests, outputTokens: 0 })
+    }
+    return attachTokenLedgerStore({
+      append: () => {},
+      load: () => new Map([[day, buckets]]) as never,
+    })
+  }
+
+  let detach: (() => void) | undefined
+  const originalThreshold = process.env.DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS
+  afterEach(() => {
+    detach?.()
+    detach = undefined
+    if (originalThreshold === undefined) delete process.env.DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS
+    else process.env.DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS = originalThreshold
+  })
+
+  /**
+   * 建池并**清掉同文件其它用例留下的模型限流**。
+   *
+   * ⚠️ `tests/setup-isolation.ts` 的状态目录是**按测试文件**隔离的，本文件里多个
+   * `makePool()` 共用同一份 `state.json`；前面「限流账号会被候选筛排除」那条用例
+   * 会写下 `now + 1h` 的限流，留到本组用例 ⇒ 候选集少一个号 ⇒ 断言里用
+   * `rankAccountsBySession` 算出来的 hash 序整体错位。
+   *
+   * 实测症状（不要误判成接线缺陷）：本组用例**单独跑绿**（`-t` 精确匹配）、
+   * **整个文件跑红**，且红的是「未越阈应落在亲和账号」那一格。
+   */
+  async function makeOverflowPool(): Promise<AccountPool> {
+    const { pool } = makePool()
+    for (const account of ACCOUNTS) await pool.clearModelRateLimits(account.id)
+    return pool
+  }
+
+  it('★ 会话首选号越阈 ⇒ 池必须沉底它并返回下一个号（接线回退/日键写错都会变红）', async () => {
+    const pool = await makeOverflowPool()
+    const sessionId = 'session-overflow-wiring'
+    const pureOrder = rankAccountsBySession(ACCOUNTS, sessionId, 'zcode').map(a => a.id)
+    const home = pureOrder[0]!
+
+    // ① 未越阈：仍落在亲和账号上。
+    detach = attachFakeLedger({ [home]: 0 })
+    expect((await pool.getAvailableAccountForSession('zcode', 'GLM-5.3-Flash', sessionId))?.entry.id)
+      .toBe(home)
+
+    // ② 恰好等于阈值（默认 300）⇒ 该号沉底，池必须换下一个号。
+    //    把 `account-pool.ts` 的接线换回 `rankAccountsBySession` ⇒ 这里仍返回 home ⇒ 变红。
+    detach()
+    detach = attachFakeLedger({ [home]: DEFAULT_OVERFLOW_REQUESTS })
+    expect(
+      (await pool.getAvailableAccountForSession('zcode', 'GLM-5.3-Flash', sessionId))?.entry.id,
+      '越阈后池仍返回亲和账号 ⇒ 溢出接线断言失效（接线被回退，或日键没取「今天」）',
+    ).toBe(pureOrder[1])
+  })
+
+  it('★ 只统计「今天」：负载全挂在历史日时不得生效（防漏传日键/跨日累加）', async () => {
+    const pool = await makeOverflowPool()
+    const sessionId = 'session-history-only'
+    const home = rankAccountsBySession(ACCOUNTS, sessionId, 'zcode')[0]!.id
+    detach = attachFakeLedger({ [home]: DEFAULT_OVERFLOW_REQUESTS * 10 }, '2020-01-01')
+    expect(
+      (await pool.getAvailableAccountForSession('zcode', 'GLM-5.3-Flash', sessionId))?.entry.id,
+      '历史日负载被当成今日负载 ⇒ 日键判据失效',
+    ).toBe(home)
+  })
+
+  it('★ 阈值走 env：显式 0 = 关闭溢出（池仍按纯哈希亲和选号）', async () => {
+    process.env[DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS] = '0'
+    const pool = await makeOverflowPool()
+    const sessionId = 'session-threshold-off'
+    const home = rankAccountsBySession(ACCOUNTS, sessionId, 'zcode')[0]!.id
+    detach = attachFakeLedger({ [home]: DEFAULT_OVERFLOW_REQUESTS * 10 })
+    expect((await pool.getAvailableAccountForSession('zcode', 'GLM-5.3-Flash', sessionId))?.entry.id)
+      .toBe(home)
+  })
+
+  it('★ 账本读取抛错不得反噬推理：退化为纯哈希亲和（与未装该功能逐字节同语义）', async () => {
+    const pool = await makeOverflowPool()
+    const sessionId = 'session-ledger-throws'
+    const home = rankAccountsBySession(ACCOUNTS, sessionId, 'zcode')[0]!.id
+    detach = attachTokenLedgerStore({
+      append: () => {},
+      load: () => { throw new Error('ledger boom') },
+    } as never)
+    // 不抛错 ⇒ 记账/统计故障绝不能把整条推理链路变成不可用。
+    expect((await pool.getAvailableAccountForSession('zcode', 'GLM-5.3-Flash', sessionId))?.entry.id)
+      .toBe(home)
   })
 })

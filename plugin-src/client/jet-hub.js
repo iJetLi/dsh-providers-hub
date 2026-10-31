@@ -3356,7 +3356,9 @@ function ProviderPanel({ provider, rpcCall }) {
   /**
    * 「负载均衡」开关（仅 ZCode 面板渲染）。
    *
-   * 开 = ZCode 多账号按 DSH sessionId 做会话亲和（同一会话固定落同一账号），
+   * 开 = ZCode 多账号按 DSH sessionId 做会话亲和（同一会话**优先**落同一账号，
+   *      账号今日请求数达阈值后会被沉底、正在跑的会话会迁移一次 —— 见
+   *      `src/session-balance.ts` 的 `rankAccountsBySessionWithOverflow`），
    *      没有 sessionId 的请求随机分摊；
    * 关 = 回到「手动顺序首个可用账号」的既有语义（会话不再固定账号）。
    *
@@ -5085,7 +5087,8 @@ function ProviderPanel({ provider, rpcCall }) {
               className: 'dim-jh-nativeSearch',
               title: (sessionBalanceFailed
                 ? '⚠️ 开关状态读取失败，当前显示的是默认值（开启）。点击即可重新提交一次。'
-                : '负载均衡：多账号按会话分散（同一会话固定同一账号，无会话标识的请求随机分摊）。'
+                : '负载均衡：多账号按会话分散（同一会话优先同一账号；账号今日请求数达阈值后会沉底，'
+                  + '正在跑的会话可能迁移一次以摊平负载；无会话标识的请求随机分摊）。'
                   + '关闭后回到「手动顺序优先」的选号方式。'),
             },
             React.createElement('input', {

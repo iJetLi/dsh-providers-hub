@@ -4430,9 +4430,11 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
        * 回归断言见 `buddy-ratelimit-misreport.spec.ts` 的「zcode 同型缺陷判定」段。
        */
       fallback: { kind: 'custom', resolve: async () => await zcode.current() },
-      // ZCode 用户要求（2026-10-30）：按 DSH sessionId 做账号亲和（同一会话固定
-      // 落同一账号），没有 sessionId 的请求（如本机 OpenAI 网关的一次性调用）
-      // 随机分摊。其余 provider 不设本项，继续走手动顺序。
+      // ZCode 用户要求（2026-10-30）：按 DSH sessionId 做账号亲和（同一会话
+      // **优先**落同一账号；账号今日负载达阈值后会被沉底，正在跑的会话会迁移一次
+      // 以摊平「长会话独占一个号」，见 `session-balance.ts` 的溢出均衡），没有
+      // sessionId 的请求（如本机 OpenAI 网关的一次性调用）随机分摊。
+      // 其余 provider 不设本项，继续走手动顺序。
       accountSelection: 'session-balance',
     },
   ),

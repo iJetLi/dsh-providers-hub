@@ -9175,9 +9175,10 @@ function registerJetHubEndpoints(
 
       // ── 「ZCode 会话负载均衡」总开关（Jet Hub 页头的开关）──
       //
-      // 语义：**开** = ZCode 多账号按 DSH sessionId 做会话亲和（同一会话固定落
-      // 同一账号），没有 sessionId 的请求随机分摊；**关** = 回到「手动顺序首个
-      // 可用账号」的既有语义。消费方是 `credential-resolver.ts` 与
+      // 语义：**开** = ZCode 多账号按 DSH sessionId 做会话亲和（同一会话**优先**
+      // 落同一账号；账号今日负载达阈值后会被沉底、正在跑的会话会迁移一次），
+      // 没有 sessionId 的请求随机分摊；**关** = 回到「手动顺序首个可用账号」的
+      // 既有语义。消费方是 `credential-resolver.ts` 与
       // `zcode-adapter.ts` 的选号路径（每次现读 `pool.sessionBalanceEnabled()`）。
       case 'sessionBalance.getEnabled': {
         const value: RpcSessionBalanceGetEnabledResponse = { enabled: pool.sessionBalanceEnabled() }

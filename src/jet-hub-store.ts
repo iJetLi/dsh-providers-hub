@@ -223,9 +223,9 @@ export interface JetHubState {
   /**
    * 「ZCode 会话负载均衡」开关（{@link sanitizeSessionBalanceEnabled}）。
    *
-   * 语义：**开** = ZCode 多账号按 DSH sessionId 做会话亲和（同一会话固定落
-   * 同一账号），没有 sessionId 的请求随机分摊；**关** = 回到「手动顺序首个
-   * 可用账号」的既有语义。
+   * 语义：**开** = ZCode 多账号按 DSH sessionId 做会话亲和（同一会话**优先**
+   * 落同一账号；账号今日负载达阈值后会被沉底、正在跑的会话会迁移一次），没有
+   * sessionId 的请求随机分摊；**关** = 回到「手动顺序首个可用账号」的既有语义。
    *
    * ⚠️ 与 `nativeWebSearchEnabled` 同级、**可以**住在这里：老版本代码整体
    * 重写 `state.json` 时丢掉本键，后果仅是**回到手动顺序**，用户再开一次即可

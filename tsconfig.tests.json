@@ -34,6 +34,14 @@
     "tests/unit/astudio-login-credits.spec.ts",
     "tests/unit/client-registration-id.spec.ts",
     "tests/unit/dsh-host-client.ts",
-    "tests/unit/openai-gateway-lifecycle.spec.ts"
+    "tests/unit/openai-gateway-lifecycle.spec.ts",
+    // ⚠️ 2026-10-31 审计补：本文件此前**不在任何 tsconfig 的 include 里**，
+    // 于是 `typecheck:tests` 对它恒为「0 错」—— 而它恰好是「把日聚合表当账号
+    // 负载表传」这种**形状错误**的唯一现场。纳入后立刻暴露 3 处 `TS2345`
+    //（`rankAccountsBySessionWithOverflow` 的 `loads` 实参误传 `TokenLedgerDayMap`，
+    // 运行时 `loads.get(accountId)` 恒 `undefined` ⇒ 断言恒真、用例假绿）。
+    // 初版 commit message 声称「fixture 型缺陷会被类型签名拦住」，但当时这道签名
+    // 根本没被启用 —— 该错误在两条用例里活了下来。现在它真的会被拦住。
+    "tests/unit/session-balance.spec.ts"
   ]
 }
