@@ -519,6 +519,31 @@ const STYLES = `
 .dim-jh-probeNotice[data-tone="error"] { border-color: color-mix(in srgb, #d93025 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(217 48 37 / 8%); color: #b3261e; }
 .dim-jh-probeDetails { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 2px; }
 .dim-jh-probeDetails li { font-size: 12px; line-height: 18px; }
+
+/* 全局统计带（Jet Hub 页头下方：tab 按钮组与「已打开 / 已关闭」列表之间）。
+   三格：总积分 / 剩余积分 / 账号数量（用户 2026-10-22 指定，其余已移除）。
+   ⚠️ 跨 provider 求和是用户明确要求的聚合口径，数值仅作总量参考；
+      「按单位分列」那条红线只约束一键签到的提示文案，不约束这里。 */
+.dim-jh-globalStats { flex: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 24px 0; }
+/* min-width 给到 120px：积分动辄 5~7 位（如 1,234,567.89），96px 会把数字挤出卡片。 */
+.dim-jh-globalStat { flex: 1 1 120px; min-width: 120px; display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); border-left-width: 3px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); }
+.dim-jh-globalStat[data-tone="info"] { border-left-color: #3370ff; }
+.dim-jh-globalStat[data-tone="ok"] { border-left-color: #22c55e; }
+.dim-jh-globalStat[data-tone="warn"] { border-left-color: #e37400; }
+.dim-jh-globalStat[data-tone="danger"] { border-left-color: #d93025; }
+.dim-jh-globalStat[data-tone="muted"] { border-left-color: #8f959e; }
+/* 字号取法：标签比正文小一档（12px vs 13px）、数值大两档（20px）。
+   目的是让统计带读起来是「同一层级的摘要」而不是新的一层，避免与下方账号卡片标题（16px）打架。 */
+.dim-jh-globalStatLabel { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dim-jh-globalStatValue { font-size: 20px; line-height: 26px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); font-variant-numeric: tabular-nums; }
+.dim-jh-globalStatUnit { margin-left: 2px; font-size: 11px; font-weight: 400; color: var(--dsw-alias-label-tertiary, #8f959e); }
+/* 窄屏（手机 / 侧栏收窄）：数值降一档；格子最小 104px 靠 wrap 自动折行，不出现横向溢出。 */
+@media (max-width: 720px) {
+  .dim-jh-globalStats { gap: 6px; margin: 8px 12px 0; }
+  .dim-jh-globalStat { flex: 1 1 104px; min-width: 104px; padding: 6px 10px; }
+  .dim-jh-globalStatLabel { font-size: 11px; line-height: 16px; }
+  .dim-jh-globalStatValue { font-size: 16px; line-height: 22px; }
+}
 /* 授权链接 + 复制按钮同行。链接不设 min-width: 0 时，300+ 字符的 URL 会把按钮顶出可视区。 */
 .dim-jh-loginLinkRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
 .dim-jh-loginLink { flex: 1 1 240px; min-width: 0; color: var(--dsw-alias-link); word-break: break-all; }
