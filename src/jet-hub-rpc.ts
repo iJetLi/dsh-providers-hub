@@ -9652,6 +9652,36 @@ function registerJetHubEndpoints(
             return { ok: true, value }
           }
         }
+        /**
+         * 写两个执行时刻（`HH:MM`，UTC+8）。
+         *
+         * ⚠️ 与 `enabled` / `dismiss` 一样**一次请求只做一件事**：三者同时给出时
+         * 会被误用（例如客户端将来误传 `{times, enabled}`，就分不清是「改了时段」
+         * 还是「开关也动了」）。这里先处理 `times`、直接返回，语义最窄。
+         */
+        if (req.times !== undefined || req.jitterMinutes !== undefined) {
+          try {
+            // `times` 与 `jitterMinutes` 是同一次「保存设置」的两个字段：
+            // 客户端关闭面板时一次把它们写全。`times` 省略 = 保留现有时刻。
+            const value: RpcUsageAutoCheckinResponse = {
+              autoCheckin: await autoCheckin.setTimes(
+                req.times !== undefined ? req.times : autoCheckin.state().times,
+                req.jitterMinutes,
+              ),
+            }
+            return { ok: true, value }
+          } catch (error) {
+            // 校验失败（数量不对 / 格式非法 / 重复）按 bad-request 回给客户端，
+            // **不静默回落** —— 回落会让用户以为保存成功却永远等不到那轮签到。
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: error instanceof Error ? error.message : String(error),
+              },
+            }
+          }
+        }
         if (req.enabled === undefined) {
           const value: RpcUsageAutoCheckinResponse = { autoCheckin: autoCheckin.state() }
           return { ok: true, value }

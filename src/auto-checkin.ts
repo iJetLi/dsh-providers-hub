@@ -91,8 +91,41 @@ export interface AutoCheckinDoc {
    * `enabled !== false` 惯例一致。
    */
   enabled: boolean
+  /**
+   * 每天**两个**执行时刻（`HH:MM`，UTC+8，升序、去重、恰好两个）。
+   *
+   * 用户 2026-10-18 要求：「每天几点自动启动…一天两次实现无遗漏」—— 原先的
+   * 「每日首次启动跑一次」在「早上开过 DSH 就再也不跑」时，会让 21:00 之后才刷新
+   * 额度的渠道整天漏领。两个时段各自独立记账（见 {@link lastSlot}）。
+   *
+   * ⚠️ 2026-10-31 重建：上一版实现随一次 `git reset --hard` 升级被清空，本字段
+   * 与 `lastSlot` 是按同一设计**重新实现**的（不是从 stash 恢复）。
+   */
+  times: string[]
+  /**
+   * 随机浮动幅度（分钟）：0 = 精确按 `times` 执行；>0 = 每轮在 ±N 分钟内随机偏移。
+   *
+   * 用户 2026-10-31：「搞得像真人一样有时间波动」—— 固定到分钟的签到时刻是
+   * 很明显的脚本特征。取 0 即关闭（默认，与旧行为等价）。
+   *
+   * ⚠️ 偏移**每轮重新抽**，而不是「每天固定一个偏移量」：后者的指纹仍然每天相同
+   *（例如每天都晚 7 分钟），和固定时刻一样可识别。
+   */
+  jitterMinutes: number
   /** 上次**完成**自动签到的 UTC+8 日期（`YYYY-MM-DD`）；空串 = 从未跑过。 */
   lastDate: string
+  /**
+   * 已完成时段的**水位线**（`YYYY-MM-DD#HH:MM`）。
+   *
+   * 语义：**key 不大于它的时段都算已处理**。用单条水位线而不是逐时段布尔表，
+   * 是因为时段天然单调，一条水位线就能表达「今天 09:00 跑过了、21:00 还没到」；
+   * 而逐时段表会随时间无限增长，还得写清理逻辑。
+   *
+   * ⚠️ 空串 = 从未跑过 ⇒ **已到点的时段都算待补**（见 `shouldRunNow`）。
+   * 这是「启动后补跑错过时段」的落点：DSH 没开时那一刻不会触发，下次启动看到
+   * 水位线落后就会补跑。
+   */
+  lastSlot: string
   /** 上次结果摘要（中文短句，展示在状态灯提示里）。 */
   lastResult: string
   /** 上次跑完的时刻（毫秒）；0 = 从未跑过。 */
@@ -108,10 +141,32 @@ export interface AutoCheckinDoc {
   dismissedRunAt: number
 }
 
-/** 默认：打开 + 无记录。 */
+/**
+ * 默认两个执行时刻（UTC+8）。
+ *
+ * 为什么是 09:00 / 21:00：本仓库各渠道的每日额度刷新时点集中在上午（Qoder 活动
+ * 10:00 才刷新、其余多为 00:00 或登录触发）。09:00 那轮把「00:00 刷新」的那批
+ * 领掉；21:00 那轮兜住「上午才刷新 / 上午那轮因凭据未续上而失败」的情况。
+ * 间隔 12 小时，任一轮失败都还有另一轮兜底 —— 这正是用户要的「无遗漏」。
+ */
+export const DEFAULT_AUTO_CHECKIN_TIMES: readonly string[] = ['09:00', '21:00']
+
+/** 恰好两个时段：用户明确要求「一天两次」。 */
+export const AUTO_CHECKIN_SLOT_COUNT = 2
+
+/** `HH:MM`（24 小时制，两位补零）。 */
+const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
+
+/** `YYYY-MM-DD#HH:MM`（水位线）。 */
+const SLOT_RE = /^(\d{4}-\d{2}-\d{2})#([01]\d|2[0-3]):([0-5]\d)$/
+
+/** 默认：打开 + 默认时段 + 无记录。 */
 export const DEFAULT_AUTO_CHECKIN: AutoCheckinDoc = {
   enabled: true,
+  times: [...DEFAULT_AUTO_CHECKIN_TIMES],
+  jitterMinutes: 0,
   lastDate: '',
+  lastSlot: '',
   lastResult: '',
   lastAt: 0,
   channels: [],
@@ -157,12 +212,74 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
     // 「默认保持打开状态」相反。`'false'` / `0` 这些非布尔值一律按打开处理 ——
     // 它们不是用户点出来的值。
     enabled: record.enabled !== false,
+    times: sanitizeTimes(record.times),
+    jitterMinutes: sanitizeJitter(record.jitterMinutes),
     lastDate: typeof record.lastDate === 'string' && DATE_RE.test(record.lastDate) ? record.lastDate : '',
+    lastSlot: typeof record.lastSlot === 'string' && SLOT_RE.test(record.lastSlot) ? record.lastSlot : '',
     lastResult: typeof record.lastResult === 'string' ? record.lastResult : '',
     lastAt: ms(record.lastAt),
     channels: sanitizeChannels(record.channels),
     dismissedRunAt: ms(record.dismissedRunAt),
   }
+}
+
+/**
+ * 归一化时段列表：丢掉非法项、去重、升序，**不足/超出都回落到默认两个**。
+ *
+ * ⚠️ 不能「只补到两个」：旧文档没有 `times` 字段 ⇒ 空数组 ⇒ 若原样保留，自动
+ * 签到会**永远等不到时段**（一天都不跑），而这正是本特性的核心失效形态。回落
+ * 默认值让升级后立刻按 09:00/21:00 工作，用户再改。
+ * ⚠️ 也不能保留多于两个：用户要求「一天两次」，多留的时段会变成「一天跑三次」，
+ * 与「不多次重复触发」的既有语义冲突。多余项按排序后取前两个。
+ */
+export function sanitizeTimes(raw: unknown): string[] {
+  const valid: string[] = []
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item !== 'string' || !TIME_RE.test(item)) continue
+      if (!valid.includes(item)) valid.push(item)
+    }
+  }
+  if (valid.length < AUTO_CHECKIN_SLOT_COUNT) return [...DEFAULT_AUTO_CHECKIN_TIMES]
+  return valid.sort().slice(0, AUTO_CHECKIN_SLOT_COUNT)
+}
+
+/**
+ * 严格校验用户提交的浮动幅度（RPC 写入路径专用）。
+ *
+ * ⚠️ 与 {@link sanitizeJitter} 分开：那个面对磁盘脏数据（回落 0），本函数面对
+ * 用户输入（**抛错**）。回落会让「设置没生效」看起来像「保存成功」。
+ */
+export function sanitizeJitterStrict(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    throw new Error(`jitterMinutes 必须是数字（收到：${JSON.stringify(raw)}）`)
+  }
+  if (raw < 0) throw new Error(`jitterMinutes 不能为负（收到：${raw}）`)
+  if (raw > MAX_CHECKIN_JITTER_MINUTES) {
+    throw new Error(`jitterMinutes 不能超过 ${MAX_CHECKIN_JITTER_MINUTES} 分钟（收到：${raw}）`)
+  }
+  return Math.floor(raw)
+}
+
+/** 随机浮动的上限（分钟）。超过 2 小时就不再是「波动」而是「随机跑」，会破坏「两次覆盖全天」的设计。 */
+export const MAX_CHECKIN_JITTER_MINUTES = 120
+
+/**
+ * 归一化随机浮动幅度。
+ *
+ * ⚠️ 非法值一律回落 **0**（= 关闭浮动），而不是回落默认值：读不出「用户到底要多少」
+ * 时，宁可**精确执行**（可预期）也不要随机漂移 —— 后者会让「今天怎么没跑」难以排查。
+ * ⚠️ 上限 `MAX_CHECKIN_JITTER_MINUTES`：超过 2 小时的偏移会让某个时段的执行落到
+ * 另一个时段附近，两个时段可能合并成一次，破坏「两次覆盖」的前提。
+ */
+export function sanitizeJitter(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return 0
+  return Math.min(Math.floor(raw), MAX_CHECKIN_JITTER_MINUTES)
+}
+
+/** 时段文本是否合法（`HH:MM`）。RPC 写入路径用它拒非法值。 */
+export function isLegalTimeText(value: unknown): value is string {
+  return typeof value === 'string' && TIME_RE.test(value)
 }
 
 /**
@@ -175,6 +292,157 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
  */
 export function utc8DateString(nowMs: number = Date.now()): string {
   return new Date(nowMs + QODER_BILLING_UTC_OFFSET_MS).toISOString().slice(0, 10)
+}
+
+/**
+ * 取「UTC+8 的当前时刻」（`HH:MM`）。与 `utc8DateString` 同源平移。
+ *
+ * ⚠️ 同样不能用本机时区：时段是用户按 UTC+8 心智设定的（上游额度也按 UTC+8 结算），
+ * 用本机时区会在改系统时区时整体偏移。
+ */
+export function utc8TimeString(nowMs: number = Date.now()): string {
+  return new Date(nowMs + QODER_BILLING_UTC_OFFSET_MS).toISOString().slice(11, 16)
+}
+
+/**
+ * `YYYY-MM-DD` + `HH:MM`（UTC+8）⇒ 毫秒时刻。
+ *
+ * ⚠️ 必须手动拼 UTC 再减偏移，**不能**用 `new Date('2026-10-18T09:00')`：
+ * 后者按**本机时区**解析，用户改系统时区时会算错（与 `utc8DateString` 同一条理由）。
+ */
+export function utc8MomentMs(date: string, time: string): number {
+  const [y, m, d] = date.split('-').map(Number)
+  const [hh, mm] = time.split(':').map(Number)
+  return Date.UTC(y!, m! - 1, d!, hh!, mm!, 0, 0) - QODER_BILLING_UTC_OFFSET_MS
+}
+
+/**
+ * 把「日期 + 时刻」拼成可比较的水位线 key。
+ *
+ * ⚠️ 比较必须用**字符串**而非 Date：key 的字典序恰好等于时间序（定宽
+ * `YYYY-MM-DD#HH:MM`），而跨时区用 Date 反而容易算错 —— 本模块的日界一律按
+ * UTC+8 算术平移，不需要也不应该引入本地 Date 语义。
+ */
+export function slotKey(date: string, time: string): string {
+  return `${date}#${time}`
+}
+
+/**
+ * 当前时刻落在「哪个时段区间」：返回**已到点的最大时段 key**。
+ *
+ * 例（times = 09:00 / 21:00）：
+ * - 今天 08:30 ⇒ 已到点的是**昨天 21:00**；
+ * - 今天 09:05 ⇒ 今天 09:00；
+ * - 今天 22:00 ⇒ 今天 21:00。
+ */
+export function latestDueSlotKey(nowMs: number, times: readonly string[]): string {
+  const sorted = [...times].sort()
+  if (sorted.length === 0) return ''
+  const today = utc8DateString(nowMs)
+  const hhmm = utc8TimeString(nowMs)
+  let best = ''
+  for (const time of sorted) {
+    if (time <= hhmm) best = slotKey(today, time)
+  }
+  if (best !== '') return best
+  // 今天还没有任何时段到点 ⇒ 往前推一天，取昨天最后一个时段。
+  const yesterday = utc8DateString(nowMs - 86_400_000)
+  const last = sorted[sorted.length - 1]
+  return last === undefined ? '' : slotKey(yesterday, last)
+}
+
+/**
+ * 为某个时段算一个「随机但确定」的执行偏移（毫秒）。
+ *
+ * ## 为什么要「确定」
+ *
+ * 偏移必须**同一个时段每次算出来都一样**，否则同一轮会出现两种时间：
+ * 面板显示的「下次执行」与实际触发时刻不一致（用户会发现「说 9:05 却 9:12 才跑」）。
+ * 故用 (日期, 时刻) 作为**种子**做哈希 —— 同一天同一时段恒定，换一天/换时段就变。
+ *
+ * ## 为什么不用 Math.random()
+ *
+ * `Math.random()` 每次调用都不同 ⇒ 上面那条立刻不成立；而且它不可测（单测无法固定）。
+ * 这里用一个极简的字符串哈希（FNV-1a 变体），纯函数、可复现、零依赖。
+ *
+ * ## 边界：偏移绝不许越过下一个时段
+ *
+ * ⚠️ 若 09:00 那轮被 +60 分钟推到 10:00，而下一时段是 10:30，就可能出现两轮贴着跑；
+ * 更糟的是若推到 21:00 之后，两个时段会**合并成一次**，「一天两次」就失效了。
+ * 故偏移幅度取 `min(jitter, 与下一时段间隔的一半)`。
+ *
+ * @param date - UTC+8 日期（`YYYY-MM-DD`）。
+ * @param time - 该时段的原始时刻（`HH:MM`）。
+ * @param jitterMinutes - 用户配置的浮动幅度（0 = 不浮动）。
+ * @param nextGapMinutes - 与下一时段的间隔分钟数（用于夹紧）。
+ * @returns 毫秒偏移；正负都可能。
+ */
+export function checkinJitterOffsetMs(
+  date: string,
+  time: string,
+  jitterMinutes: number,
+  nextGapMinutes: number,
+): number {
+  const jitter = sanitizeJitter(jitterMinutes)
+  if (jitter <= 0) return 0
+  // 夹紧：不许越过与下一时段间隔的一半（避免两轮合并 / 贴太近）
+  const gapHalf = Number.isFinite(nextGapMinutes) && nextGapMinutes > 0
+    ? Math.floor(nextGapMinutes / 2)
+    : jitter
+  const span = Math.min(jitter, gapHalf)
+  if (span <= 0) return 0
+  // 确定性哈希：同 (date, time) 恒定，换日期/时刻即变。
+  const seed = `${date}#${time}`
+  let hash = 2166136261
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  // 把 32 位无符号映射到 [0, 2*span] 的整数分钟，再减去 span ⇒ [-span, +span]
+  const bucket = (hash >>> 0) % (span * 2 + 1)
+  return (bucket - span) * 60_000
+}
+
+/**
+ * 该不该现在跑一轮：**水位线落后于「已到点的最大时段」**就跑。
+ *
+ * ⚠️ 这里**不是**「今天跑过没有」，而是「到点的时段都处理完没有」——
+ * 一天两个时段各自要跑一次，用「今天跑过」判会让第二个时段永远不触发。
+ * ⚠️ `lastSlot` 为空（从未跑过）⇒ 只要有到点的时段就跑：这正是「首次启用
+ * 立刻补跑」的行为。
+ */
+export function shouldRunNow(
+  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'> & { jitterMinutes?: number },
+  nowMs: number,
+): boolean {
+  if (!doc.enabled) return false
+  // ⚠️ 这里刻意**也接受 lastDate**（下面一行用 `??` 兜底不到，故单列说明）：
+  //   旧文档有 lastDate 但没有 lastSlot ⇒ 无法判断今天两个时段各自处理了没有。
+  //   取「补跑」而不是「当成已跑」：签到是幂等的（对已领的号上游返回
+  //   alreadyClaimed），代价是一轮请求；而误判成「已跑」的代价是**当天整天漏领**。
+  const due = latestDueSlotKey(nowMs, doc.times)
+  if (due === '') return false
+  if (!((doc.lastSlot ?? '') === '' || doc.lastSlot < due)) return false
+  //
+  // ★ 随机浮动（2026-10-31）：水位线落后**不等于**现在就该跑 ——
+  //   若给这个时段配了浮动，真实执行时刻是「时段时刻 + 偏移」。
+  //   例：09:00 配 ±10 分、本轮偏移 +7 ⇒ 真实执行 09:07。
+  //   在 09:05 时水位线已经落后（09:00 已到点），但**还没到** 09:07 ⇒ 不该跑。
+  //
+  // ⚠️ 但「**已过期很久**」的时段必须立刻补跑，不能因为偏移而永久卡住：
+  //   判据是「真实执行时刻已过」即可 —— 与偏移是过去还是未来无关。
+  //   这同时覆盖了「错过的时段」（真实时刻早已过去）。
+  const jitter = sanitizeJitter(doc.jitterMinutes)
+  if (jitter <= 0) return true
+  const date = due.slice(0, 10)
+  const time = due.slice(11, 16)
+  const sorted = [...doc.times].sort()
+  const index = sorted.indexOf(time)
+  const gap = index >= 0 && index + 1 < sorted.length
+    ? timeGapMinutes(time, sorted[index + 1]!)
+    : timeGapMinutes(time, sorted[0] ?? time) + 24 * 60
+  const realAt = slotMomentMs(date, time, jitter, gap)
+  return nowMs >= realAt
 }
 
 /** 环境变量：启动后延迟多久再尝试自动签到（毫秒）。 */
@@ -250,7 +518,10 @@ class FileAutoCheckinStore implements AutoCheckinStore {
     writeFileSync(tmp, JSON.stringify({
       schema: SCHEMA,
       enabled: doc.enabled,
+      times: doc.times,
+      jitterMinutes: doc.jitterMinutes,
       lastDate: doc.lastDate,
+      lastSlot: doc.lastSlot,
       lastResult: doc.lastResult,
       lastAt: doc.lastAt,
       channels: doc.channels,
@@ -445,6 +716,112 @@ export function describeChannel(summary: {
   return parts.join('，')
 }
 
+/**
+ * 严格校验用户提交的时段列表（RPC 写入路径专用）。
+ *
+ * ⚠️ 与 {@link sanitizeTimes} **刻意分开**，两者面对的数据源不同：
+ * - `sanitizeTimes` 面对**磁盘脏数据** ⇒ 必须回落默认值，因为「读不回来」不该
+ *   让整个特性失效；
+ * - 本函数面对**用户输入** ⇒ 非法值必须**抛错**。回落会让「设置没生效」看起来像
+ *   「保存成功」，用户之后永远等不到那轮签到却毫无提示。
+ *
+ * 约束（用户要求「一天两次」）：恰好 {@link AUTO_CHECKIN_SLOT_COUNT} 个、格式
+ * `HH:MM`、**不许重复**、自动升序（顺序对执行时机无影响，统一排序让水位线可比较）。
+ */
+export function sanitizeTimesStrict(raw: readonly unknown[]): string[] {
+  if (raw.length !== AUTO_CHECKIN_SLOT_COUNT) {
+    throw new Error(`需要恰好 ${AUTO_CHECKIN_SLOT_COUNT} 个时刻（收到 ${raw.length} 个）`)
+  }
+  const out: string[] = []
+  for (const item of raw) {
+    if (!isLegalTimeText(item)) {
+      throw new Error(`时刻必须是 HH:MM（24 小时制，如 09:00），收到：${JSON.stringify(item)}`)
+    }
+    if (out.includes(item)) throw new Error(`两个时刻不能相同（重复：${item}）`)
+    out.push(item)
+  }
+  return out.sort()
+}
+
+/**
+ * 下一个**尚未处理**的时段对应的毫秒时刻（UTC+8 基准）。
+ *
+ * 语义：返回「水位线之后、且还没到点的最近一个时段」。三种情形：
+ * - 有已到点但没跑的时段（水位线落后）⇒ 返回**现在**（补跑马上执行）；
+ * - 今天还有时段没到点 ⇒ 今天那个时刻；
+ * - 今天的都过完了 ⇒ 明天第一个时刻。
+ *
+ * ⚠️ 「落后即现在」这一步不能省：否则「22:00 启动、水位线停在昨天」会被算成
+ * 「下次明天 09:00」，而实际上一轮补跑马上就要执行 —— 面板会显示一个自相矛盾时间。
+ */
+/**
+ * 取某时段「加上随机浮动后」的真实执行毫秒。
+ *
+ * ⚠️ `nextGapMinutes` 由调用方算好传进来（不在这里查 `times`），是为了让本函数
+ * 成为纯函数：`checkinJitterOffsetMs` 的夹紧逻辑依赖它，而「下一时段是谁」
+ * 在跨天（最后一个时段的下一个是**明天第一个**）时要特别小心 —— 交给调用方
+ * 在明确知道上下文的地方算，比在这里猜更可靠。
+ */
+function slotMomentMs(date: string, time: string, jitterMinutes: number, gapMinutes: number): number {
+  return utc8MomentMs(date, time) + checkinJitterOffsetMs(date, time, jitterMinutes, gapMinutes)
+}
+
+/** 两个 `HH:MM` 之间的分钟差。 */
+function timeGapMinutes(from: string, to: string): number {
+  const [fh, fm] = from.split(':').map(Number)
+  const [th, tm] = to.split(':').map(Number)
+  return (th! - fh!) * 60 + (tm! - fm!)
+}
+
+export function nextRunAtOf(
+  nowMs: number,
+  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'> & { jitterMinutes?: number },
+): number {
+  if (!doc.enabled) return 0
+  const sorted = [...doc.times].sort()
+  if (sorted.length === 0) return 0
+  const jitter = sanitizeJitter(doc.jitterMinutes)
+  const due = latestDueSlotKey(nowMs, sorted)
+  // ⚠️ 「水位线落后」时**返回现在**，不要套浮动：这一轮是**补跑**，用户期待它
+  //    立刻开始；给它加个「再等 7 分钟」的偏移会让补跑看着像没生效。
+  if (due !== '' && ((doc.lastSlot ?? '') === '' || doc.lastSlot < due)) return nowMs
+  const today = utc8DateString(nowMs)
+  const hhmm = utc8TimeString(nowMs)
+  for (let i = 0; i < sorted.length; i += 1) {
+    const time = sorted[i]!
+    if (time <= hhmm) continue
+    const key = slotKey(today, time)
+    if ((doc.lastSlot ?? '') === '' || key > doc.lastSlot) {
+      // 与**下一个**时段的间隔（末尾则用「到明天第一个」的间隔）。
+      const gap = i + 1 < sorted.length
+        ? timeGapMinutes(time, sorted[i + 1]!)
+        : timeGapMinutes(time, sorted[0]!) + 24 * 60
+      return slotMomentMs(today, time, jitter, gap)
+    }
+  }
+  const tomorrow = utc8DateString(nowMs + 86_400_000)
+  const gap = timeGapMinutes(sorted[0]!, sorted.length > 1 ? sorted[1]! : sorted[0]!)
+  const effectiveGap = sorted.length > 1 ? gap : gap + 24 * 60
+  return slotMomentMs(tomorrow, sorted[0]!, jitter, effectiveGap)
+}
+
+/**
+ * 距下一次执行的毫秒数。
+ *
+ * ⚠️ 水位线落后（错过时段）时返回 **0** —— 调用方用 `Math.max(1_000, …)` 兜住，
+ * 既保证「立刻补跑」，又不会在水位线尚未写盘时形成忙循环。
+ */
+export function nextRunDelayMs(
+  nowMs: number,
+  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'>,
+): number {
+  const due = latestDueSlotKey(nowMs, doc.times)
+  if (doc.enabled && ((doc.lastSlot ?? '') === '' || doc.lastSlot < due)) return 0
+  const target = nextRunAtOf(nowMs, doc)
+  if (target === 0) return 0
+  return Math.max(0, target - nowMs)
+}
+
 /** 装配层注入的依赖（全部可替换 ⇒ 单测零网络、零文件系统、零等待）。 */
 export interface AutoCheckinDeps {
   store: AutoCheckinStore
@@ -471,8 +848,16 @@ export interface AutoCheckinDeps {
 export interface AutoCheckin {
   /** 实时状态（供 RPC 与状态灯；`enabled` 等取自内存，不重新读盘）。 */
   state(): RpcUsageAutoCheckinState
-  /** 写开关；**打开时若今天还没跑过，立刻跑一轮**（否则用户会以为开关没生效）。 */
+  /** 写开关；**打开时若有时段没跑，立刻跑一轮**（否则用户会以为开关没生效）。 */
   setEnabled(enabled: boolean): Promise<RpcUsageAutoCheckinState>
+  /**
+   * 写两个执行时刻（`HH:MM`，UTC+8）。
+   *
+   * ⚠️ 校验必须在**写入前**：非法值一律拒绝（抛错由 RPC 层转成 `bad-request`），
+   * **不做静默回落** —— 回落会让「设置没生效」看起来像「保存成功」。
+   * ⚠️ 写完要**重排定时器**：否则新的 21:00 要等到明天才生效。
+   */
+  setTimes(times: readonly string[], jitterMinutes?: number): Promise<RpcUsageAutoCheckinState>
   /**
    * 关闭面板上那行**常驻的**自动签到状态文字（用户点它上方的小按钮时调用）。
    *
@@ -503,8 +888,12 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   function state(): RpcUsageAutoCheckinState {
     return {
       enabled: doc.enabled,
+      times: [...doc.times],
+      jitterMinutes: doc.jitterMinutes,
+      lastSlot: doc.lastSlot,
       lastDate: doc.lastDate,
-      ranToday: doc.lastDate !== '' && doc.lastDate === today(),
+      ranToday: doc.lastSlot.startsWith(`${today()}#`),
+      nextRunAt: nextRunAtOf(now(), doc),
       running,
       lastResult: doc.lastResult,
       lastAt: doc.lastAt,
@@ -581,15 +970,25 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
     if (!shouldMarkToday(totals)) {
       // ⚠️ 刻意**不写** lastDate：让「凭据还没续上 / 网络不通 / 赶在渠道刷新前
       // 跑的那一轮」能在下次启动重试，而不是当天就此放弃（判据见 shouldMarkToday）。
+      //
+      // ★★ 但**必须记失败次数**（2026-11-01 修忙循环）：不记账 ⇒ 水位线不动 ⇒
+      //    `nextRunDelayMs` 恒返回 0 ⇒ 每秒重跑一轮。实测 5 轮内 claim 被调 10 次。
+      //    记次数后 `armNext` 会按指数退避排下一次（1s→2s→4s→… 封顶 30 分钟）。
+      dueFailures += 1
       deps.warn?.(
-        `[jet-hub] 自动签到未记入今日（下次启动会重试）：${describeRun(totals)}`,
+        `[jet-hub] 自动签到未记入今日（第 ${dueFailures} 次，将退避 ${Math.round(retryBackoffMs(dueFailures) / 1000)} 秒后重试）：${describeRun(totals)}`,
       )
       return
     }
 
+    // ★ 水位线取「跑完之后已到点的最大时段」而不是「跑之前那个」：
+    //   一轮可能跨过时段边界（例如 08:59 启动、跑完已 09:03），若记成跑之前的
+    //   时段，09:00 这轮会被判成「没跑过」而立刻重跑一次。
+    const finishedSlot = latestDueSlotKey(now(), doc.times)
     doc = {
       ...doc,
       lastDate: today(),
+      lastSlot: finishedSlot === '' ? doc.lastSlot : finishedSlot,
       lastResult: describeRun(totals),
       lastAt: now(),
       channels,
@@ -599,8 +998,12 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
     }
     try {
       await deps.store.save(doc)
+      // ★ 记账成功 ⇒ 清掉退避计数（下一轮是正常时段，不该带着旧退避）。
+      dueFailures = 0
     } catch (error) {
       // 写盘失败 ⇒ 今天可能再跑一次（幂等，代价是多发一轮请求），如实告警。
+      // ⚠️ 也记一次失败：否则关闭循环又变成每秒重试。
+      dueFailures += 1
       deps.warn?.(`[jet-hub] 自动签到结果写入失败（今天可能重复触发一次）: ${String(error)}`)
     }
     deps.warn?.(`[jet-hub] 自动签到完成（${today()}）：${doc.lastResult}`)
@@ -609,7 +1012,9 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   function runIfDue(): Promise<void> {
     if (inflight !== null) return inflight
     if (!doc.enabled) return Promise.resolve()
-    if (doc.lastDate !== '' && doc.lastDate === today()) return Promise.resolve()
+    // ⚠️ 判据是「到点的时段处理完没有」，不是「今天跑过没有」：
+    //   一天两个时段各自要跑一次，用「今天跑过」判会让第二个时段永不触发。
+    if (!shouldRunNow(doc, now())) return Promise.resolve()
     running = true
     const task = performRun().catch((error: unknown) => {
       deps.warn?.(`[jet-hub] 自动签到异常: ${String(error)}`)
@@ -621,15 +1026,91 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
     return task
   }
 
+  /**
+   * 排定「下一次该跑的时段」，跑完后自动续排。
+   *
+   * 语义闭环（这是「每天两次无遗漏」的落点）：
+   * 1. 启动时先延迟一轮（`start()`），到点判定是否有时段落后 ⇒ 补跑错过的时段；
+   * 2. 每轮跑完再排一次 —— 目标时刻 = **下一个尚未处理的时段**。故 09:00 跑完后
+   *    会自动排到 21:00，无需用户再做任何事；
+   * 3. 用户改时段（`setTimes`）或改开关（`setEnabled`）都会**重排**，新时间立刻生效。
+   *
+   * ⚠️ 立刻到点的时段**不能**用 0 延迟递归 —— 那会在水位线还没写盘时形成忙循环。
+   * 给 1 秒下限，让 `performRun` 有机会写盘。
+   */
+  /**
+   * 连续「跑了但没记账」的次数 —— 用于退避。
+   *
+   * ⚠️⚠️ 这个计数器修的是一个**真实的忙循环**（2026-11-01 实测）：上一版排定用
+   * `Math.max(1_000, nextRunDelayMs(...))`，而「有时段到点但没跑成」时
+   * `nextRunDelayMs` 恒返回 **0** ⇒ 每秒重跑一轮。实测 5 轮内 `claim` 被调用
+   * **10 次**（2 渠道 × 5 轮）；凭据持续失效时等于**每秒打一轮上游** ——
+   * 既烧请求也触发风控（签到是写操作）。
+   *
+   * 修法：失败后按 `RETRY_BACKOFF_BASE_MS` 指数退避（1s→2s→4s→…封顶 30 分钟），
+   * 成功记账后清零。
+   */
+  let dueFailures = 0
+
+  /** 退避起点：1 秒（保持「立刻补一次」的手感，但不至于每秒重来）。 */
+  const RETRY_BACKOFF_BASE_MS = 1_000
+
+  /** 退避上限：30 分钟。超过它就该等下一个正常时段，而不是继续重试。 */
+  const RETRY_BACKOFF_MAX_MS = 30 * 60_000
+
+  /** 按连续失败次数算退避延迟（指数退避，封顶）。 */
+  function retryBackoffMs(failures: number): number {
+    const exponent = Math.min(failures, 16)
+    return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (exponent - 1), RETRY_BACKOFF_MAX_MS)
+  }
+
+  function armNext(): void {
+    pending?.cancel()
+    pending = null
+    if (!doc.enabled) return
+    const normal = nextRunDelayMs(now(), doc)
+    // ⚠️ 判据是「**有时段待跑**（normal === 0）」而不是「到了一秒」：
+    //   只有这种情况才会形成忙循环，必须用退避延迟把它按住。
+    const ms = normal > 0
+      ? Math.max(1_000, normal)
+      : dueFailures > 0
+        ? retryBackoffMs(dueFailures)
+        : RETRY_BACKOFF_BASE_MS
+    pending = (deps.schedule ?? defaultSchedule)(() => {
+      pending = null
+      void runIfDue().finally(() => { armNext() })
+    }, ms)
+  }
+
   return {
     state,
     async setEnabled(enabled) {
       doc = { ...doc, enabled }
       await deps.store.save(doc)
-      // 打开开关时立刻尝试一轮（今天已跑过则由 runIfDue 内部拦住）。
+      // 开关一关就撤掉定时器：否则关掉之后还挂着下一轮，用户会以为「关了还在跑」。
+      if (!enabled) { armNext(); return state() }
+      // 打开开关时立刻尝试一轮（有时段没跑则由 runIfDue 内部拦住）。
       // ⚠️ 不 await：一轮要串行打十几个上游，让按钮等它会让界面像卡死；
       // `state()` 里的 `running` 会立刻变成 true，界面据此显示「进行中」。
-      if (enabled) void runIfDue()
+      // ⚠️ 跑完必须 armNext()：否则「打开开关」这条路径不会排下一轮，
+      //   09:00 打开的用户当天 21:00 那轮就永远不触发。
+      void runIfDue().finally(() => { armNext() })
+      return state()
+    },
+    async setTimes(times, jitterMinutes) {
+      // ⚠️ 校验在写入**之前**、且抛错而不是回落：回落会让「设置没生效」看起来像
+      //    「保存成功」。
+      if (!Array.isArray(times)) throw new Error('times 必须是字符串数组')
+      const cleaned = sanitizeTimesStrict(times)
+      // `jitterMinutes` 省略 = **不改动**（与 times 的语义独立：用户可能只调时刻）。
+      // 给出时必须是合法数字，否则同样抛错而不是静默回落。
+      const jitter = jitterMinutes === undefined
+        ? doc.jitterMinutes
+        : sanitizeJitterStrict(jitterMinutes)
+      doc = { ...doc, times: cleaned, jitterMinutes: jitter }
+      await deps.store.save(doc)
+      // 新时间立刻生效：撤掉按旧时刻排的那一轮，按新时刻重排。
+      armNext()
       return state()
     },
     start() {
@@ -637,7 +1118,8 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       const ms = deps.delayMs ?? autoCheckinDelayMs()
       const fire = (): void => {
         pending = null
-        void runIfDue()
+        // 跑完再排下一轮：这是「每天两次」能自动续上的关键。
+        void runIfDue().finally(() => { armNext() })
       }
       // 延迟为 0 = 立刻跑（单测的默认形态，也是用户把环境变量设成 0 时的语义）。
       if (ms <= 0) {
