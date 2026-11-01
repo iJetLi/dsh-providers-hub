@@ -60,10 +60,38 @@ function stripComments(source: string): string {
     .join('\n')
 }
 
-/** 全部适配器源文件（键 = 文件名）。 */
+/**
+ * 全部**适配器**源文件（键 = 文件名）。
+ *
+ * ⚠️ 只扫 `*-adapter.ts` —— 供 `accountPool` / `listModels` 两条**结构**判据用。
+ * 它们问的是「适配器有没有正确接线」，product 常量里自然没有这些东西，
+ * 把 `*-product.ts` 混进来源会让那两条判据对 product 文件空转。
+ *
+ * ⇒ 「某个 provider 的 id 到底声明在哪」是另一个问题，见 {@link idLiteralSources}。
+ */
 function adapterSources(): Map<string, string> {
   const out = new Map<string, string>()
   for (const file of readdirSync(REPO + 'src').filter((f) => f.endsWith('-adapter.ts'))) {
+    out.set(file, readFileSync(REPO + 'src/' + file, 'utf8'))
+  }
+  return out
+}
+
+/**
+ * 可能**声明 provider id** 的源文件：适配器 + product 常量。
+ *
+ * ⚠️ 2026-11-01 拆出来的（测试有效性审查的次要项）：原先把 `*-product.ts`
+ * 并进 `adapterSources()`，虽然判据强度没变（id 仍必须是**字符串字面量**、
+ * 仍剥注释），但**覆盖面 canary 的原意被削弱** —— 「适配器源码里找得到」
+ * 变成了「任意一处找得到」，于是新 provider 只要在 product 常量里写
+ * `id: 'x'`、**根本没有适配器文件**，这条也不再红。
+ *
+ * ⇒ 拆成两个函数：结构判据用 {@link adapterSources}，覆盖面判据用本函数。
+ */
+function idLiteralSources(): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const file of readdirSync(REPO + 'src')
+    .filter((f) => f.endsWith('-adapter.ts') || f.endsWith('-product.ts'))) {
     out.set(file, readFileSync(REPO + 'src/' + file, 'utf8'))
   }
   return out
@@ -108,8 +136,11 @@ describe('★★ 实体 provider 必须走共享骨架（虚拟的两家显式�
    * ⚠️ 这条是「家数腐坏」的防线：本仓库注释里的家数写错过多次
    * （5 → 10 → 12），故判据从 registry **派生**，不写数字。
    */
-  it('★★ 判据覆盖面：registry 的每个非虚拟 provider 都能在适配器源码里找到', () => {
-    const all = adapterSources()
+  it('★★ 判据覆盖面：registry 的每个非虚拟 provider 都能在源码里找到 id 字面量', () => {
+    // ⚠️ 用 `idLiteralSources()`（适配器 + product 常量）而**不是** `adapterSources()`：
+    //    `magicrewintl` 这类「两站共用同一个适配器、id 只在 product 常量里」的形态，
+    //    适配器里没有它的字面量是**正确**的（适配器通过 `product` 参数拿 id）。
+    const all = idLiteralSources()
     const blob = [...all.values()].map(stripComments).join('\n')
     const virtualIds = new Set(VIRTUAL_PROVIDERS.keys())
     const missing: string[] = []

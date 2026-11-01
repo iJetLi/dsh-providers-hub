@@ -917,18 +917,28 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
     ?? (showPackageList && creditsLoading ? '资源包加载中…' : undefined);
 
   const actionsNode = React.createElement('div', { className: 'dim-jh-accountActions' },
-      // 新手任务（仅 Loomy）：一次性 10000 分，每号只能领一次。
+      // 新手任务：全仓库**所有** `credits.onboardingTasks: true` 的渠道共用这一个按钮
+      //（loomy / raccoon / magicrew / magicrewintl），**不是「仅 Loomy」** ——
+      // 旧注释写「仅 Loomy」是接入 raccoon 之前的事。
       // 与「一键领取积分」（每日签到）是**不同**的操作，故独立按钮 ——
-      // 混进「一键签到」会导致每天对已领完的账号发 8 个必然 alreadyCompleted 的请求。
+      // 混进「一键签到」会导致每天对已领完的账号发 N 个必然 alreadyCompleted 的请求。
       //
       // ⚠️ **只显示礼物图标**（用户报障：「领取新手任务」文字太长、按钮溢出行尾）。
       // 该行有 5 个按钮且 `flex-wrap: nowrap`，多一个宽按钮就会被挤出容器。
       // 文案移到 `title`（hover tooltip）与 `aria-label`（无障碍）里。
+      //
+      // ⚠️⚠️ **tooltip 不得写死金额**（2026-11-01 二审发现，用户可见的假数字）：
+      // 原先写「合计 10000 积分」，而那是 **Loomy 一家**的总额 ——
+      // raccoon 是 3000、magicrew 由上游 `tasks[].points` 现场累加、
+      // **magicrewintl 恒为 0**（该站不把账号登记进引导计划）。
+      // 于是国际站用户 hover 看到「合计 10000 积分」、点下去显示「无任务可领」，
+      // 与 `src/magicrew-checkin.ts` 那条「0 项不得报已全部完成」的纪律正相反。
+      // ⇒ 改成不带金额的通用文案。
       onClaimOnboarding
         ? React.createElement('button', {
             className: 'dim-jh-btn dim-jh-iconBtn',
-            // tooltip 说明「是什么 + 一次性 + 多少分」，因为图标本身不自解释
-            title: '领取新手任务（合计 10000 积分，每个账号仅能领取一次）',
+            // tooltip 说明「是什么 + 一次性」，金额由点开后的结果面板给（那里是实测值）
+            title: '领取新手任务（一次性奖励，每个账号仅能领取一次；具体金额以领取结果为准）',
             'aria-label': '领取新手任务',
             disabled: busy || onboardingBusy,
             onClick: () => onClaimOnboarding(account.id),
@@ -3711,12 +3721,35 @@ function ProviderPanel({ provider, rpcCall }) {
         parts.push(`本次领取 ${res.claimed.length} 个任务（+${gained} 积分）`);
       }
       if (res.skipped.length > 0) parts.push(`${res.skipped.length} 个此前已完成`);
+      /**
+       * ⚠️ `manualRequired`（2026-11-01）：**需要用户自己去做**的任务。
+       *
+       * 目前只有 Magicrew 的 `first_ai_work` —— 服务端固定回 `9303`
+       * 「该新人引导任务不支持手动完成」，必须真发一条消息才置位。
+       *
+       * ⚠️⚠️ **不能把它并进 `skipped`**：`skipped` 的语义是「此前已完成」
+       *    （见 `src/types.ts` 的 `RpcOnboardingClaimResponse`），把「没做」写成
+       *    「已完成」就是报假账 —— 用户会以为那项的分已经拿到了。
+       *    所以单独一条提示，且**不加**到 `onboarding.skipped` 里（那个 state 驱动
+       *    「已全部领取」的按钮禁用判据）。
+       *
+       * ⚠️ 若这里不渲染，宿主侧算出来的 `manualRequired` 就**没有任何消费者**
+       *    （测试有效性审查点名的「把没做写成做过已修」形态）。
+       */
+      const manual = Array.isArray(res.manualRequired) ? res.manualRequired : [];
+      if (manual.length > 0) parts.push(`${manual.length} 个需你手动完成`);
+      if (Array.isArray(res.errors) && res.errors.length > 0) {
+        parts.push(`${res.errors.length} 个失败`);
+      }
       setOnboardingNotice({
-        tone: 'ok',
+        tone: manual.length > 0 || (Array.isArray(res.errors) && res.errors.length > 0)
+          ? 'warn' : 'ok',
         text: parts.length > 0 ? parts.join('，') : '没有可领取的任务',
         details: [
           `累计已领 ${res.earned} / ${res.total}`,
           ...res.claimed.map((item) => `${item.title} +${item.points}`),
+          ...manual.map((key) => `${key}：需在网页里完成（发一条消息）后才能领`),
+          ...(Array.isArray(res.errors) ? res.errors : []).map((item) => `失败：${item}`),
         ],
       });
       setOnboarding({ earned: res.earned, total: res.total, skipped: res.skipped });
@@ -4108,14 +4141,19 @@ function ProviderPanel({ provider, rpcCall }) {
    *
    * @returns {Promise<void>}
    */
-  const submitMagicrewLocalImport = async (mode = 'local-browser') => {
+  /**
+   * @param {string} provider 提供者 id（`magicrew` 国内 / `magicrewintl` 国际）
+   * @param {string} [mode] `local-browser`（读本机浏览器登录态）或 `browser`（开窗让用户登）
+   * @returns {Promise<void>}
+   */
+  const submitMagicrewLocalImport = async (provider, mode = 'local-browser') => {
     if (magicrewInFlightRef.current) return;
     magicrewInFlightRef.current = true;
     setCreating(true);
     setError(null);
     try {
       // ⚠️ 响应里只有 accountId —— 不打日志（同「凭据不进 console」口径）。
-      const created = await rpcCall('account.create', { provider: 'magicrew', mode });
+      const created = await rpcCall('account.create', { provider, mode });
       if (mounted.current) setCredentialModal(null);
       /**
        * ⚠️⚠️ **两条腿的等待语义完全不同**（别合并成一次 `loadAccounts`）：
@@ -4143,11 +4181,11 @@ function ProviderPanel({ provider, rpcCall }) {
           text: '浏览器窗口已打开，请在窗口里完成登录（完成后会自动读取登录态）。',
           details: [],
         });
-        startLoginPoll({ accountId, provider: 'magicrew' });
+        startLoginPoll({ accountId, provider });
         return;
       }
       await loadAccounts();
-      setProbeNotice({ tone: 'ok', text: '已从本机浏览器导入超级麦吉账号。', details: [] });
+      setProbeNotice({ tone: 'ok', text: `已从本机浏览器导入${provider === 'magicrewintl' ? 'MagiCrew 国际版' : '超级麦吉'}账号。`, details: [] });
     } catch (caught) {
       // ⚠️ 错误**留在弹窗内**（同 submitOpencodeEntry）：把整个账号列表切成
       //    错误态会让用户刚看的说明与失败原因一起消失，只能刷新重试。
@@ -4204,6 +4242,17 @@ function ProviderPanel({ provider, rpcCall }) {
     //    ⇒ 本弹窗提供两条**无门槛**的路：读本机浏览器登录态（`local-browser`）、
     //    或开一个干净窗口让用户自己登（`browser`，走两步式 + login.poll）。
     if (provider === 'magicrew') {
+      setCredentialModal({ provider, error: '' });
+      return;
+    }
+    // MagiCrew **国际站**（2026-11-01）：与国内站完全同款的两条无门槛路径
+    //（读本机浏览器登录态 / 开窗让用户登），只是打开的网页不同
+    //（`www.magicrew.ai` 而不是 `www.letsmagic.cn`）。
+    // ⚠️ **单独一条 if，不合并成 `provider === 'magicrew' || provider === 'magicrewintl'`**：
+    //    本仓库记录过合并成 `||` 之后「守卫正则只匹配到前一站、第二站从此不设防」
+    //    的事故（见 `proxyModalComponent` 的逐分支注释）。各占一条 = 每条都能被
+    //    逐分支配对的用例单独钉住。
+    if (provider === 'magicrewintl') {
       setCredentialModal({ provider, error: '' });
       return;
     }
@@ -5858,10 +5907,17 @@ function ProviderPanel({ provider, rpcCall }) {
     // 组件的 hook 算进 ProviderPanel（该文件头记录过 hook #310 事故，整页白屏）。
     credentialModal
       ? React.createElement(MagicrewImportModal, {
+          // ⚠️ **必须传 provider**（2026-11-01 接线审查）：本弹窗同时服务
+          //    `magicrew`（超级麦吉 / www.letsmagic.cn）与 `magicrewintl`
+          //    （MagiCrew 国际版 / www.magicrew.ai）。不传的话标题与引导文案
+          //    恒为国内站 ⇒ 国际站用户被指引去登 letsmagic.cn，而读取器找的是
+          //    magicrew.ai 的登录态 ⇒ 必然失败；宿主错误文案又反过来让他去登
+          //    magicrew.ai ⇒ **引导自相矛盾的死循环**。
+          provider: credentialModal.provider,
           error: credentialModal.error || '',
           busy: creating,
-          onSubmit: () => void submitMagicrewLocalImport('local-browser'),
-          onBrowse: () => void submitMagicrewLocalImport('browser'),
+          onSubmit: () => void submitMagicrewLocalImport(credentialModal.provider, 'local-browser'),
+          onBrowse: () => void submitMagicrewLocalImport(credentialModal.provider, 'browser'),
           onClose: () => setCredentialModal(null),
         })
       : null);
@@ -5896,9 +5952,17 @@ function ProviderPanel({ provider, rpcCall }) {
  * 「没登录」而是「这个入口看不见那份凭据」⇒ 必须有一条能**自己登一次**的路，
  * 那就是「网页登录」。
  *
- * @param props `{ error, busy, onSubmit(), onBrowse(), onClose() }`
+ * @param props `{ provider, error, busy, onSubmit(), onBrowse(), onClose() }`
+ *   ⚠️ `provider` 必传：本弹窗服务 `magicrew` 与 `magicrewintl` 两个站，
+ *      标题与「去哪个域名登录」的引导必须跟着走（见调用点的长注释）。
  */
-function MagicrewImportModal({ error, busy, onSubmit, onBrowse, onClose }) {
+function MagicrewImportModal({ provider, error, busy, onSubmit, onBrowse, onClose }) {
+  // ⚠️ 两站的展示名与登录域名。与 `src/magicrew-product.ts` 的
+  //    `displayName` / `webOrigin` 必须一致（客户端无法直接 import TS 常量，
+  //    故这里是**唯一**的复制点，两处改其一都要同步）。
+  const isIntl = provider === 'magicrewintl'
+  const siteName = isIntl ? 'MagiCrew (国际版)' : '超级麦吉'
+  const webHost = isIntl ? 'www.magicrew.ai' : 'www.letsmagic.cn'
   return React.createElement('div', {
     className: 'dim-jh-modalOverlay',
     onClick: (e) => { if (e.target === e.currentTarget && !busy && onClose) onClose(); },
@@ -5907,16 +5971,16 @@ function MagicrewImportModal({ error, busy, onSubmit, onBrowse, onClose }) {
       className: 'dim-jh-modal',
       role: 'dialog',
       'aria-modal': 'true',
-      'aria-label': '导入超级麦吉',
+      'aria-label': `导入${siteName}`,
       style: { maxWidth: '460px' },
     },
       React.createElement('div', { className: 'dim-jh-modalHead' },
-        React.createElement('div', { className: 'dim-jh-modalTitle' }, '导入超级麦吉'),
+        React.createElement('div', { className: 'dim-jh-modalTitle' }, `导入${siteName}`),
       ),
       React.createElement('div', { className: 'dim-jh-modalBody' },
         React.createElement('p', { className: 'dim-jh-modalHint' },
           // ⚠️ 纯文本（不走 markdown 渲染），不要写 `**强调**`。
-          '「导入」：先用 Edge / Chrome 打开 www.letsmagic.cn 登录，然后回到这里点「导入」。'
+          `「导入」：先用 Edge / Chrome 打开 ${webHost} 登录，然后回到这里点「导入」。`
           + '插件会直接读取该浏览器的登录态，不需要再输一次密码。'),
         React.createElement('p', { className: 'dim-jh-modalHint' },
           '「网页登录」：插件会另开一个干净的浏览器窗口，你在里面完成登录即可'
@@ -7884,7 +7948,7 @@ const AGG_WIRED_CHANNEL_IDS = [
   'accio', 'officeace', 'modelscope', 'autoclaw', 'autoclawintl',
   'qoder', 'qodercn',
   'astudio', 'minimax', 'minimaxintl',
-  'magicrew',
+  'magicrew', 'magicrewintl',
 ];
 
 /**

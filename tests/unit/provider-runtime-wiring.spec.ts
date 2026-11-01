@@ -103,6 +103,11 @@ const AUTH_SERVICE_OF: ReadonlyArray<readonly [string, string]> = [
   ['qiniu', 'qiniuAuth'],
   // ⚠️ 超级麦吉（Magicrew，2026-10-29）：服务名由 `${product.id}Auth` 派生 ⇒ `magicrewAuth`。
   ['magicrew', 'magicrewAuth'],
+  // ⚠️ MagiCrew 国际版（2026-11-01）：服务名同理由派生 ⇒ `magicrewintlAuth`。
+  //    它必须是**独立实例的服务名** —— 若误写成 `magicrewAuth`，按 id 查表会把
+  //    国际站账号分派到国内站实例（续期打错基址 + 凭据 ref 串号）。
+  //    （与 `autoclawintl` / `minimaxintl` 同型同因。）
+  ['magicrewintl', 'magicrewintlAuth'],
 ]
 
 /**
@@ -430,7 +435,8 @@ describe('★ index.ts 的能力注册表接线（行为断言，替代源码文
     // ⚠️ 2026-10-20 加 autoclawintl（AutoClaw 国际版）：19 → 20 个 auth 键。
     // ⚠️ 2026-10-22（A6）：codely 翻 `channel: true`：20 → 21。
     // ⚠️ 2026-10-29 加 qiniu（七牛云）+ magicrew：21 → 22 → 23 个 auth 键。
-    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(23)
+    // ⚠️ 2026-11-01 加 magicrewintl（MagiCrew 国际版）：23 → 24 个 auth 键。
+    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(24)
     expect(
       registeredRuntimeIds().sort(),
       'registry 里有账号的 provider 必须都注册进能力注册表（左侧多出 = 清单里多了僵尸项，' +

@@ -98,6 +98,13 @@ const AUTH_SERVICE: Readonly<Record<string, string>> = {
   // ⚠️ 超级麦吉（Magicrew，2026-10-29）：服务名由 `${product.id}Auth` 派生
   //    ⇒ `magicrewAuth`（`MagicrewAuth` 是 `extends Service`，构造时自 provide）。
   magicrew: 'magicrewAuth',
+  // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：服务名同样由
+  //    `${product.id}Auth` 派生 ⇒ **`magicrewintlAuth`**（全小写、不带连字符）。
+  //    ⚠️ **不是** `magicrewIntlAuth`（按变量名驼峰惯例拼会恒 undefined）——
+  //    与上面 `minimaxintlAuth` / `autoclawintlAuth` 同款的坑。
+  //    ⚠️ 它必须是**独立实例的服务名** —— 若误写成 `magicrewAuth`，
+  //    按 id 查表会把国际账号分派到国内实例（续期打错 host）。
+  magicrewintl: 'magicrewintlAuth',
 }
 
 /**
@@ -324,7 +331,8 @@ describe('★ registerJetHubRpc 的命名对象接线（真跑 apply + account.r
     // ⚠️ 2026-10-20 加 autoclawintl（AutoClaw 国际版）：19 → 20。
     // ⚠️ 2026-10-22（A6）：codely 已接入 auth（`CodelyAuth` 改为 Service + 接进 auths）：20 → 21。
     // ⚠️ 2026-10-29 加 qiniu（七牛云）+ magicrew：21 → 22 → 23 个 auth 键。
-    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(23)
+    // ⚠️ 2026-11-01 加 magicrewintl（MagiCrew 国际版）：23 → 24。
+    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(24)
     // 另一方向（原断言的**全部**证明力都在这条上，单独留着免得它随上面那条一起消失）：
     // 表里的每个键都必须是 registry 里真实存在的 provider id（防拼写错误造成的僵尸项）。
     for (const id of Object.keys(AUTH_SERVICE)) {

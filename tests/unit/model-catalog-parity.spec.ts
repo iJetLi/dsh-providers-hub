@@ -68,7 +68,7 @@ import { AutoclawAdapter } from '../../src/autoclaw-adapter.js'
 import { AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
 // ⚠️ **本 fork 独有**（modelscope，2026-10-16）。
 import { MagicrewAdapter } from '../../src/magicrew-adapter.js'
-import { MAGICREW_FALLBACK_CONTEXT_WINDOW } from '../../src/magicrew-product.js'
+import { MAGICREW_FALLBACK_CONTEXT_WINDOW, MAGICREW_INTL } from '../../src/magicrew-product.js'
 import { ModelscopeAdapter } from '../../src/modelscope-adapter.js'
 // ⚠️ **本 fork 独有**（qiniu/七牛云，2026-10-29）。
 import { QiniuAdapter } from '../../src/qiniu-adapter.js'
@@ -678,6 +678,19 @@ id: 'autoclaw',
         resolveCredential: async () => ({ jwt: 'J', organizationCode: 'org1' } as never),
       } as never),
     },
+    // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：`channel: true` ⇒ 必须进本表，
+    //    否则它不过本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
+    //    ⚠️ 必须显式传 `product: MAGICREW_INTL` —— 用默认值会拿国内站的
+    //    `fallbackModels` 与 host 去构造一个「看起来对、实际是另一站」的适配器
+    //    （本段只对拍跨家契约，但 product 传错会让档位/窗口的判据失去意义）。
+    {
+      id: 'magicrewintl',
+      make: () => new MagicrewAdapter({
+        ...NO_CRED,
+        product: MAGICREW_INTL,
+        resolveCredential: async () => ({ jwt: 'J', organizationCode: 'org1' } as never),
+      } as never),
+    },
     // ⚠️ Codely（Unity，2026-10-22 A6）：`channel` 已翻 true ⇒ 必须进本表，
     //    否则它不过本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
     {
@@ -764,7 +777,7 @@ id: 'autoclaw',
    *（比「臆造档位」更实际的损失），而本家只两档、且上行前按
    * `MAGICREW_REASONING_EFFORTS` 过滤（非法值本就不会发出）。
    */
-  const DECLARE_UNKNOWN_REASONING: ReadonlySet<string> = new Set(['cline', 'codearts', 'magicrew'])
+  const DECLARE_UNKNOWN_REASONING: ReadonlySet<string> = new Set(['cline', 'codearts', 'magicrew', 'magicrewintl'])
 
   it('⚠️ 表的家数 == 全部对外注册的 LLM provider（漏一家 ⇒ 它不过本段任何断言）', async () => {
     // ⚠️ 判据来自 **PROVIDER_REGISTRY**（唯一的 provider 真源），不手抄。
@@ -782,7 +795,8 @@ id: 'autoclaw',
     expect(CASES.map(c => c.id).sort()).toEqual(channels)
     // ⚠️ 2026-10-22（A6）：codely 翻 `channel: true` ⇒ 进本表：21 → 22。
     // ⚠️ 2026-10-29 **本 fork** 并入 qiniu（七牛云）+ master 并入 magicrew：22 → 23 → 24。
-    expect(CASES).toHaveLength(24)
+    // ⚠️ 2026-11-01 加 magicrewintl（MagiCrew 国际版）：24 → 25。
+    expect(CASES).toHaveLength(25)
   })
 
   it('★★ `catalog` 具备 `refresh` 的家，适配器上必须**存在** `refresh` 成员（转发接线）', () => {
@@ -837,10 +851,11 @@ id: 'autoclaw',
     //       **共用适配器类**，因此同样继承了 config 回调与转发（实测由本断言自己找出）。
     expect(
       forwarding.sort(),
-      '这 15 家必须都接入后台刷新（改这条名单前请先读 be42b25 与本轮修正的注释）',
+      '这 16 家必须都接入后台刷新（改这条名单前请先读 be42b25 与本轮修正的注释）',
     ).toEqual([
       'accio', 'astudio', 'buddy', 'codearts', 'lobsterai', 'loomy', 'magicrew',
-      'minimax', 'minimaxintl', 'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy', 'zcode',
+      'magicrewintl', 'minimax', 'minimaxintl', 'qoder', 'qodercn', 'raccoon', 'trae',
+      'workbuddy', 'zcode',
     ])
   })
 
@@ -952,7 +967,7 @@ id: 'autoclaw',
         unknown.context,
         `${id} 对未知 id 必须给具名兜底窗口（否则手填模型永远没有上下文占用条）`,
       ).toEqual({ contextWindow: CODEARTS_FALLBACK_CONTEXT_WINDOW })
-    } else if (id === 'magicrew') {
+    } else if (id === 'magicrew' || id === 'magicrewintl') {
       // ⚠️ 超级麦吉（Magicrew，2026-10-29）与 codearts **同因**：两个目录端点都
       //    **不下发** ctx ⇒ 手填/新上的模型若不给兜底窗口，上下文占用条会**整条不渲染**
       //   （`ContextMeter` 在 `contextWindow === undefined` 时 `return null`）。

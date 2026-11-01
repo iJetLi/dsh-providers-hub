@@ -293,6 +293,12 @@ export const WIRED_EXPIRY_PROVIDERS: readonly string[] = Object.freeze([
   //    只加 `AGGREGATE_CHANNELS` 而不加这里 ⇒ 折算恒 UNUSABLE（静默少一个候选）。
   //    折算原语：`provider-expiry.ts` 的 `magicrew` 条目 → `magicrew-credits.ts` 的 `magicrewExpiry`。
   'magicrew',
+  // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：**决定聚合候选表可见性
+  //    的就是本表**。只加 `AGGREGATE_CHANNELS` 而不加这里 ⇒ 折算恒 UNUSABLE
+  //    ⇒ 国际站候选从轮换表里静默消失（与 minimaxintl / autoclawintl 同款）。
+  //    折算原语：`provider-expiry.ts` 的 `magicrewintl` 条目 → 同一个 `magicrewExpiry`，
+  //    但**必须传 `MAGICREW_INTL`**（传国内版会拿国内基址查国际账号余额）。
+  'magicrewintl',
 ])
 
 /**

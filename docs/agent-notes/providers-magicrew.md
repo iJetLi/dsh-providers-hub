@@ -56,3 +56,80 @@ profile 目录名是 `Default` / `Profile N` 就**同构**。
 
 ⚠️ **未修已登记**：leveldb **单文件**读失败被静默跳过（可能只剩半条记录）⇒
 「读不到」与「用户没登录」同形且零日志（U1）。
+
+## ★★ 两站：国内站与**国际站**（2026-11-01 接入）
+
+本 provider 实际覆盖**两个站**，是**同一个 Go 服务的两个数据面**（协议逐字符同构），
+但**账号体系物理隔离** ⇒ 两个独立 provider，实现**零复制**（只差一个 product 常量）。
+
+| | 国内站 | 国际站 |
+|---|---|---|
+| provider id | `magicrew` | **`magicrewintl`** |
+| 展示名 | 超级麦吉 | **MagiCrew**（registry 里作「MagiCrew (国际版)」） |
+| 网页 | `www.letsmagic.cn` | `www.magicrew.ai` |
+| 业务 API host | `i-magic-service.letsmagic.cn` | **`magic-service.magicrew.ai`** |
+| 每日签到金额 | **+200 / 天** | **+50 / 天** |
+| 强制 `organization-code` | 否（缺了仍 200） | **是**（缺了业务 API 实测回 `code 2182`「用户所在组织不存在」；聊天网关的形态**未定** —— 参考说 500，实测 apiKey 形态下仍 200） |
+| 凭据 ref 前缀 | `MAGICREW_ACCOUNT_*` | **`MAGICREWINTL_ACCOUNT_*`** |
+| 新人引导任务 | 8 项，**实测 total 450** | **接口恒返回空数组**（见下） |
+| 2026-11-01 真实账号实测 | 余额 2661 / 8 项已领完 | 余额 300 →（签到 +50）→ 350（另有推理消耗），目录 27 个模型 |
+
+### ⚠️ `api.magicrew.ai` **不是**这套 API
+
+它是 teamshare 网关（`MAGIC_GATEWAY_ADDRESS`），对 `/v1/models`、`/api/v1/*`
+一律回 `not match rule path`。真实业务 API 是 **`magic-service.magicrew.ai`** ——
+来源：`GET https://www.magicrew.ai/workspace` 的 HTML 里内嵌的运行时配置
+`"MAGIC_SERVICE_BASE_URL":"https://magic-service.magicrew.ai"`
+（`MAGIC_APP_ENV: "international-prod"`）。
+
+### 签到（`credits.claim`）
+
+`POST <host>/api/v1/login-gift`，**请求体存在且为空串**（不是省略 body）。
+幂等：当天已领回 `granted:false` + 「今日已领取登录积分」，**HTTP 仍 200** ——
+所以可以每天无脑调用；本插件把 `granted:false` 映射成 `already-claimed`
+（**不是** `claimed`，否则用户会以为每天真的在加积分）。
+实现：`src/magicrew-checkin.ts` 的 `claimMagicrewLoginGift()`。
+
+### 新人奖励（`onboarding` 域）
+
+`GET /api/v1/onboarding/tasks` + `PUT /api/v1/onboarding/tasks/<code>/completion`。
+国内站 8 项，其中 7 项 PUT 即完成。
+
+### ⚠️⚠️ **总额到底是 450 还是 500 —— 实测是 450**
+
+参考实现 `magpie-magicrew-auth/README.md:179` 的**标题**写「8 项，合计 500 积分」，
+而**同一页的逐项表相加只有 450**（100 + 7×50）—— 两个数字自相矛盾。
+
+**2026-11-01 用真实账号实测国内站**：`GET /api/v1/onboarding/tasks` 返回
+`total = 450`、`earned = 450`（8 项，已全部领完）⇒ **450 是对的，README 标题写错了**。
+
+⇒ 本仓**一律不写死金额**，以 `tasks[].points` 现场累加为准
+（`magicrew-checkin.ts` 的 `fetchMagicrewOnboardingStatus`）。
+任何注释与用户文案（含卡片 tooltip）都不得写死数字 —— 那条 tooltip 曾经写
+「合计 10000 积分」（那是 **Loomy 一家**的总额），对国际站用户就是假账。
+
+⚠️ **`first_ai_work` 回 `9303`「该新人引导任务不支持手动完成」** —— 必须真发一条
+消息（走话题 Socket.IO）才置位，且那也正是**邀请奖励**的触发条件。
+本插件**不做**那条腿 ⇒ 该项的分与邀请奖励**拿不到**，但会通过
+`RpcOnboardingClaimResponse.manualRequired` 如实告诉用户「需你手动完成」，
+**不写成** `skipped`（那是「此前已完成」的语义）。
+
+⚠️⚠️ **国际站 `onboarding/tasks` 恒返回 `{participant_type:null, tasks:[]}`** ——
+那是「该账号没被登记进引导计划」，**不是**「已经领完了」。所以国际版如实回
+`total: 0`，UI 显示「无新人任务」。别把它当成功上报「0 项已全部完成」
+（magpie 0.3.7 犯过这个错）。
+
+### ⚠️⚠️ 加国际站时**必须成对登记**的位置（漏一处即静默失效）
+
+`src/index.ts`（auth / resolver / service / adapter / 剪枝 / auths）·
+`src/provider-registry.ts` · `src/provider-credits.ts` · `src/provider-onboarding.ts` ·
+**`src/provider-expiry.ts`（必须显式传 `product: MAGICREW_INTL`）** ·
+`src/canonical-models.ts`（`qwen-3.8-flash` 补丁两站共用同一常量）·
+`src/aggregate-adapter.ts` · `src/aggregate-expiry.ts` · `src/jet-hub-rpc.ts` ·
+`src/jet-hub-store.ts`（REF_PREFIX）· 客户端 `provider-icons.js` / `jet-hub.js`
+
+⚠️ 其中 `provider-expiry.ts` 漏传 product 的症状最隐蔽：用国内基址查国际账号余额
+⇒ 恒失败 ⇒ 折算恒 `UNUSABLE` ⇒ **国际站候选从聚合轮换表里静默消失**
+（与 `autoclawintl` 那次同型）。
+⚠️ `canonical-models.ts` 漏登记的症状同样静默：国际站自成一个孤立虚拟模型，
+聚合的「Qwen3.8-Flash 轮换列表」里永远看不到它（与 `accio` 那次同型）。

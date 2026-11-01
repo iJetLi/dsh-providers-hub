@@ -761,6 +761,9 @@ describe('AStudio Provider Credits & Jet Hub RPC 接线验证', () => {
       //    结构化类型，漏一个即 TS2741 —— 本用例只验 astudio 那条链，故给空桩即可。
       qiniu: blank(),
       magicrew: blank(),
+      // ⚠️ **MagiCrew 国际版**（2026-11-01）：与 `magicrew` 是两个实例、两个
+      //    provider id，`JetHubAuths` 因此各占一个键 —— 漏掉同样报 TS2741。
+      magicrewintl: blank(),
       astudio: astudioAuth,
     }
 

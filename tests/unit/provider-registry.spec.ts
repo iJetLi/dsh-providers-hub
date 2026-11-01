@@ -47,10 +47,10 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
     //    数字必须跟着注册表走，不能反向改注册表凑数。
     // ⚠️ 2026-10-29 加 magicrew（超级麦吉国内站，第 23 个真渠道）：位置有硬要求
     //    （**紧邻 aggregate 之前 = 倒数第二**），由下面「声明序在 aggregate 之前」那条守着。
-    expect(PROVIDER_REGISTRY).toHaveLength(25)
+    expect(PROVIDER_REGISTRY).toHaveLength(26)
     // ⚠️ 2026-10-22（A6）：codely **已翻 `channel: true`** —— 它的推理 / 目录 / 余额 / 签到 / 续期全部已接线，
     //    而 `channel` 在生产代码里**零个读取点** ⇒ 原来那个 `false` 只是为了让守卫不变红而选的，它同时把 codely 挡在聚合目录之外。现在真实接线已完成，翻正。
-    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(24)
+    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(25)
     expect(
       PROVIDER_REGISTRY.find((d) => d.id === 'codely')?.channel,
       'codely 已接线完成，必须是 channel: true（否则它的模型永不进聚合目录）',
@@ -85,15 +85,22 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
    * 与 modelscope 那条同因同形（未自定义 `providerOrder` 时，左栏完全按
    * `PROVIDER_REGISTRY` 的**声明序**渲染）。守相对位置而非绝对下标。
    */
-  it('★ magicrew 的声明序在 aggregate 之前（= 倒数第二）', () => {
+  it('★ magicrew / magicrewintl 的声明序在 aggregate 之前（= 倒数第二、倒数第三）', () => {
     const ids = PROVIDER_REGISTRY.map((d) => d.id)
     const im = ids.indexOf('magicrew')
+    const ii = ids.indexOf('magicrewintl')
     const ia = ids.indexOf('aggregate')
     expect(im, 'registry 里找不到 magicrew').toBeGreaterThan(-1)
+    expect(ii, 'registry 里找不到 magicrewintl').toBeGreaterThan(-1)
     expect(ia, 'registry 里找不到 aggregate').toBeGreaterThan(-1)
     expect(im, 'Magicrew 必须排在聚合之上，否则它在左栏会被排到聚合下面').toBeLessThan(ia)
-    // 反面：它必须是**紧邻**的倒数第二（不是「排在前面某处」）
-    expect(ia - im).toBe(1)
+    // ⚠️ 2026-11-01 加国际版后，两站都必须排在聚合之上（左栏按声明序渲染）。
+    expect(ii, 'MagiCrew 国际版必须排在聚合之上').toBeLessThan(ia)
+    // 反面：两站必须**紧邻**地贴在 aggregate 之前（不是「排在前面某处」）——
+    // 国际版紧邻 aggregate（倒数第二），国内版紧邻国际版（两站成组）。
+    // ⚠️ 守的是**相对位置**而非绝对下标：新增 provider 时下标必然漂移。
+    expect(ia - ii, 'MagiCrew 国际版必须紧邻 aggregate 之前').toBe(1)
+    expect(ii - im, '国际版必须紧邻国内版之后（两站成组）').toBe(1)
   })
 
   it('★ 真实排出的左栏顺序与声明序一致（复刻客户端排序口径，非源码断言）', async () => {
@@ -112,6 +119,55 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
   it('descriptorOf 按 id 取；未知返回 undefined', () => {
     expect(descriptorOf('buddy')?.label).toBe('CodeBuddy (腾讯)')
     expect(descriptorOf('nope')).toBeUndefined()
+  })
+})
+
+describe('★★ 同族两站必须成对同构（国内站 / 国际站）', () => {
+  /**
+   * ## 为什么有这条（2026-11-01 三审实测发现）
+   *
+   * `magicrew` 的 JSDoc **从 2026-10-29 起就写着**「已登记 `creditPackages: true`」，
+   * 但那个**字段本身根本不存在** —— 于是国内站账号卡片 hover 看不到资源包明细，
+   * 而新接入的国际站因为登记了所以看得到。**两站不同构 + 注释与实现分家**，
+   * 两个问题叠在一起，读注释的人以为一切正常。
+   *
+   * 这一类缺陷（「同族两站只改一边」）在本仓已复发多次
+   *（`minimaxintl` / `autoclawintl` / `magicrewintl` 都记过），故这里**成对派生出判据**，
+   * 而不是给每家手写一份快照（手写快照会把「漏项」固化成期望值 —— 见 autoclaw 那次）。
+   */
+  const PAIRS: readonly (readonly [string, string])[] = [
+    ['magicrew', 'magicrewintl'],
+    ['minimax', 'minimaxintl'],
+    ['autoclaw', 'autoclawintl'],
+    ['qoder', 'qodercn'],
+  ]
+
+  /**
+   * 这些字段**必须两站一致**：它们描述的是「同一份实现、同一个上游」的能力，
+   * 与站点（host）无关 ⇒ 不一致就是漏登记。
+   */
+  const SAME_FIELDS = ['creditPackages', 'usesExpiryWindow', 'permanentLock', 'rateLimit', 'channel'] as const
+
+  it.each(PAIRS)('★★ %s 与 %s 的能力位逐项一致', (cn, intl) => {
+    const a = descriptorOf(cn)
+    const b = descriptorOf(intl)
+    expect(a, `${cn} 不在 registry 里`).toBeDefined()
+    expect(b, `${intl} 不在 registry 里`).toBeDefined()
+    if (a === undefined || b === undefined) return
+    for (const field of SAME_FIELDS) {
+      expect(
+        b[field],
+        `${intl}.${field} 与 ${cn}.${field} 不一致（同族两站只登记了一边 ⇒ 有一站的 UI 会缺能力）`,
+      ).toBe(a[field])
+    }
+    // `credits` 三格也必须一致（签到 / 余额 / 新人奖励是同一份协议）。
+    expect(b.credits, `${intl} 的 credits 与 ${cn} 不一致`).toEqual(a.credits)
+  })
+
+  it('★ 反向自检：PAIRS 里每个 id 都真的在 registry 里（改名即红）', () => {
+    for (const [, id] of PAIRS) {
+      expect(descriptorOf(id), `${id} 不在 registry 里 —— 改名了要同步改本用例`).toBeDefined()
+    }
   })
 })
 
@@ -229,7 +285,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     ])
   })
 
-  it('rateLimit === false 恰好是 8 家（magicrew 2026-10-29 加入；codely 2026-10-20 接线后退出）', () => {
+  it('rateLimit === false 恰好是 9 家（magicrewintl 2026-11-01 加入；codely 2026-10-20 接线后退出）', () => {
     const off = PROVIDER_REGISTRY.filter((d) => d.rateLimit === false)
       .map((d) => d.id).sort()
     // ⚠️ **理由各不相同**（见 registry 里各自的字段注释）：
@@ -269,7 +325,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     // - magicrew（2026-10-29）：**与 astudio 同族** —— 零 `updateModelRateLimit` 写点、
   //   也不在 `probeById` 里 ⇒「重测 / 重置」两个按钮点下去是**零请求、零清除**
   //   （`account.retest` 走 `adapterForProbe` 会抛「magicrew 没有探测适配器」）。
-  expect(off).toEqual(['astudio', 'autoclaw', 'autoclawintl', 'gemini', 'loomy', 'magicrew', 'modelscope', 'officeace'])
+  expect(off).toEqual(['astudio', 'autoclaw', 'autoclawintl', 'gemini', 'loomy', 'magicrew', 'magicrewintl', 'modelscope', 'officeace'])
   })
 
   it('accountTest === true 恰好是 gemini', () => {
