@@ -2336,14 +2336,23 @@ export class AccountPool {
     const idx = accounts.findIndex(a => a.id === accountId)
     if (idx === -1) return
     const current = accounts[idx]!
-    const atMs = isValidResetAtMs(current.policyBlockedAtMs) ? current.policyBlockedAtMs : Date.now()
+    const wasBlocked = isValidResetAtMs(current.policyBlockedAtMs)
+    const trimmed = typeof message === 'string' && message.trim().length > 0 ? message.trim().slice(0, 200) : undefined
+    /**
+     * 已标记且报文未变 ⇒ **直接返回，不写盘**。
+     *
+     * ⚠️ 这是响应写放大的（对抗审计 E4 实测：同一账号连撞 3 次 11140 = **6 次落盘**，
+     * 每次事件两笔账各写一次，且第 2 次起状态根本没变）。封禁账号虽已被选号侧排除，
+     * 但「手动探活 / 多实例并发」仍可能重复命中同一条报文 —— 每次都是全量
+     * accounts 的读-改-写，没必要为「同一个事实」重复付。
+     */
+    if (wasBlocked && (trimmed === undefined || trimmed === current.policyBlockedMessage)) return
+    const atMs = wasBlocked ? current.policyBlockedAtMs : Date.now()
     const next = [...accounts]
     next[idx] = {
       ...current,
       policyBlockedAtMs: atMs,
-      ...typeof message === 'string' && message.trim().length > 0
-        ? { policyBlockedMessage: message.trim().slice(0, 200) }
-        : {},
+      ...trimmed === undefined ? {} : { policyBlockedMessage: trimmed },
     }
     await this.writeAccounts(next)
     this.ctx.logger?.warn?.(
@@ -2356,8 +2365,11 @@ export class AccountPool {
    * 清除封号标记。
    *
    * 三个调用点（与 `ProviderAccountEntry.policyBlockedAtMs` 的注释一一对应）：
-   * 实测成功（`account.test` / `account.retest` / 适配器拿到 2xx）、
+   * 实测成功（`account.retest` 的「全部标记模型都通过」判据）、
    * 用户手动重置（`account.reset` / `account.resetAll`）、账号删除（随条目一起没了）。
+   *
+   * ⚠️ **不含 `account.test`**：它只测一个模型（且优先挑最老的那个限流键），
+   * 判据强度不足以证明「账号没被封」（2026-11-01 对抗审计实测会洗白）。
    *
    * @returns 是否真的清掉了一条标记（没有标记时 `false`，调用方可据此决定要不要写日志）。
    */
@@ -2533,8 +2545,11 @@ export class AccountPool {
     return this.readAccounts()
       .filter(a => a.provider === provider && a.enabled)
       .filter(a => excludeAccountIds === undefined || !excludeAccountIds.has(a.id))
-      // 封禁是**账号级**：一旦被上游 11140 限制，换任何模型都必然 403
-      // （实测：同一账号 2 个模型 200、4 个模型 403/11140）⇒ 整个排除。
+      // 封禁是**账号级**：11140 判的是账号（issue IKS2MV 的实测表：11 个账号里
+      // 8 个被 11140 限制、1 个 429、2 个正常；报文语义是「账号存在异常行为」）。
+      // 故这里**不看模型**，只要标记存在就排除整个账号。
+      // ⚠️ 该判据有**两份**实现：本方法与 `credential-resolver.ts` 的 `candidatesOf`
+      //    （主请求路径走后者），改动必须同步（对抗审计 E8 实测过只改一份的后果）。
       // 清除路径见 `clearAccountPolicyBlocked`（实测通过 / 手动重置）。
       .filter(a => !isPolicyBlockedAccount(a))
       .filter(a => {

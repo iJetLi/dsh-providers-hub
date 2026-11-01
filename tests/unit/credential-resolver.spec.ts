@@ -48,6 +48,8 @@ function poolOf(entries: Array<{
   credentialRef: string
   enabled?: boolean
   modelRateLimits?: Record<string, number>
+  /** 账号级封禁标记（issue IKS2MV）：与真实池一致 —— 整个账号出局。 */
+  policyBlockedAtMs?: number
 }>, raw: Record<string, string>, locked = false): ResolverPool & { calls: string[] } {
   const calls: string[] = []
   return {
@@ -56,12 +58,15 @@ function poolOf(entries: Array<{
       entries.filter(e => e.provider === provider).map(e => ({
         id: e.id, credentialRef: e.credentialRef, enabled: e.enabled !== false,
         ...e.modelRateLimits === undefined ? {} : { modelRateLimits: e.modelRateLimits },
+        ...e.policyBlockedAtMs === undefined ? {} : { policyBlockedAtMs: e.policyBlockedAtMs },
       })),
     permanentLocked: () => locked,
     getAvailableAccount: async (provider, modelId, exclude) => {
       calls.push(`${provider}|${modelId}|${[...(exclude ?? [])].join(',')}`)
       for (const e of entries) {
         if (e.provider !== provider || e.enabled === false) continue
+        // 账号级封禁：整号出局（与真实池同判据，issue IKS2MV）
+        if (e.policyBlockedAtMs !== undefined) continue
         if (exclude?.has(e.id) === true) continue
         if (modelId.length > 0 && e.modelRateLimits !== undefined) {
           const resetAt = e.modelRateLimits[modelId]
@@ -81,6 +86,33 @@ function poolOf(entries: Array<{
 const PRODUCT = { id: 'raccoon', displayName: 'Raccoon (商汤)' }
 
 describe('createCredentialResolver · 骨架 A（纯池选号）', () => {
+  it('★ 账号级封禁的账号**不得**进候选（`candidatesOf` 是主请求路径的第二份选号判据，issue IKS2MV）', async () => {
+    // ⚠️ 对抗审计 E8 实测打穿过：`getAvailableAccount`（池）与 `candidatesOf`（本文件）
+    //    是**两份**选号判据，只改池那一份的话带余额档的渠道（buddy 系就是这么走的）
+    //    照样把封禁账号选出来 —— 每一发都先撞一次 403 再换号，并顺带写两次盘。
+    const pool = poolOf([
+      { id: 'blocked', provider: 'raccoon', credentialRef: 'R1', policyBlockedAtMs: 1_700_000_000_000 },
+    ], { R1: '{"t":1}' })
+    const resolve = createCredentialResolver(
+      { pool },
+      {
+        product: PRODUCT,
+        readCredential: async (ref) => ref === 'R1' ? { t: 1 } : undefined,
+        fallback: { kind: 'ref', refName: 'FALLBACK' },
+        // 走 buddy 余额档：只有这条路径读 `candidatesOf`（骨架 A 直接问池）。
+        // `isFreeModel` 恒真 ⇒ 先试免费分支（它按候选逐个解析凭据）。
+        balance: {
+          kind: 'buddy',
+          selector: { select: async () => ({ ok: false, reason: { kind: 'no-candidates' } }) } as never,
+          lockedError: () => new Error('locked'),
+          reportPickedAccount: false,
+          isFreeModel: async () => true,
+        },
+      },
+    )
+    expect(await resolve('m')).toBeUndefined()
+  })
+
   it('池命中 ⇒ 返回该凭据，且回报该账号 id', async () => {
     // 变异：把 `deps.reportAccount?.(available?.entry.id ?? undefined)` 删掉 ⇒ 红。
     const pool = poolOf([{ id: 'a1', provider: 'raccoon', credentialRef: 'R1' }], { R1: '{"t":1}' })

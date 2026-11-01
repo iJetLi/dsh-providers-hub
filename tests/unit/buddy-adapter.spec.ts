@@ -5,7 +5,7 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  CHAT_API_BASE, BuddyAdapter, DEFAULT_MODEL, policyBlockResetAtMs, registerBuddyLlm,
+  CHAT_API_BASE, BuddyAdapter, DEFAULT_MODEL, isAccountLevelPolicyBlock, policyBlockResetAtMs, registerBuddyLlm,
 } from '../../src/buddy-adapter.js'
 import type { BuddyCredential, BuddyRemoteModel } from '../../src/buddy.js'
 import { CODEBUDDY, WORKBUDDY, type BuddyProduct } from '../../src/product.js'
@@ -1206,9 +1206,6 @@ describe('BuddyAdapter credential handling', () => {
       markAccountPolicyBlocked: async (accountId: string, message?: string) => {
         policyRecorded.push({ accountId, message })
       },
-      markAccountPolicyBlocked: async (accountId: string, message?: string) => {
-        policyRecorded.push({ accountId, message })
-      },
       disabledModelsFor: () => new Set<string>(),
     }
   }
@@ -1596,52 +1593,64 @@ describe('BuddyAdapter credential handling', () => {
     expect(pool.policyRecorded[0]!.message).toContain('账号存在异常行为')
   })
 
-  it('★ 拿到 2xx 时自愈清掉封禁标记（否则账号只能靠用户手动捞回，issue IKS2MV）', async () => {
-    // 封禁标记**不自动过期**、且选号侧按账号排除 ⇒ 若「实测成功」这条腿不存在，
-    // 账号一旦被误标就永久不可用（用户只能点「重置」，而那不会验证账号是否真恢复）。
-    // ⚠️ 这条守的是 `consumeSse` 开头的 `clearPolicyBlockedIfAny`：删掉它本用例才红。
-    const clearedCalls: string[] = []
-    const pool = {
-      findAccountIdByCredential: async () => 'acc-1',
-      getAvailableAccount: async () => null,
-      updateModelRateLimit: async () => {},
-      disabledModelsFor: () => new Set<string>(),
-      // 该账号带着封禁标记（模拟上一次 11140 留下的账）
-      findAccount: (id: string) => (id === 'acc-1' ? { id, policyBlockedAtMs: Date.now() - 60_000 } : undefined),
-      clearAccountPolicyBlocked: async (id: string) => {
-        clearedCalls.push(id)
-        return true
-      },
-    }
-    const adapter = makeAdapter({
-      credential: makeCredential({ access_token: 'AT1' }),
-      accountPool: pool as never,
-      fetchImpl: async () => sseResponse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })]),
-    })
-    await collectChunks(adapter, streamOptions)
-    expect(clearedCalls).toEqual(['acc-1'])
+  /**
+   * ★★ 账号级封禁判据的**取值域**（2026-11-01 对抗审计实测打穿的那一格）。
+   *
+   * 旧写法把「换号 + 30 分钟冷却」的判据（`isContentRejection`，三条腿）直接接到了
+   * **永不自动过期 + 按账号排除选号**的封禁标记上 ⇒ 下面 4 族**内容级/非账号级**
+   * 报文会把好账号永久踢出可用池，面板还写「需重新登录」。
+   */
+  it('★★ 只有真·账号级 11140 才算封禁：内容级 / HTML / 共用措辞一律不算', () => {
+    // 正例
+    expect(isAccountLevelPolicyBlock('{"code":11140,"msg":"request illegal"}')).toBe(true)
+    expect(isAccountLevelPolicyBlock('{"code":"11140","message":"x"}')).toBe(true)
+    // 上游那句账号级文案（码缺失时留的腿）
+    expect(isAccountLevelPolicyBlock('{"displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}')).toBe(true)
+    expect(isAccountLevelPolicyBlock('{"msg":"account has been restricted"}')).toBe(true)
+
+    // 反例（全都是**内容级**或非账号级，本该只有 30 分钟冷却）
+    expect(isAccountLevelPolicyBlock('{"code":11128,"msg":"内容未通过安全审核，请修改后重试"}')).toBe(false)
+    expect(isAccountLevelPolicyBlock('{"code":11115,"msg":"The prompt did not pass the safety review."}')).toBe(false)
+    expect(isAccountLevelPolicyBlock('<html><body>conversation id missing · 内容未通过安全审核</body></html>')).toBe(false)
+    expect(isAccountLevelPolicyBlock('{"code":10085,"msg":"request illegal"}')).toBe(false)
+    expect(isAccountLevelPolicyBlock('{"code":11140}')).toBe(true)
+    // 前缀相邻码不得被命中（`(?!\d)` 腿）
+    expect(isAccountLevelPolicyBlock('{"code":111401,"msg":"x"}')).toBe(false)
   })
 
-  it('★ 没有封禁标记时不写盘（正常账号每轮都清一次会把写队列打满）', async () => {
-    const clearedCalls: string[] = []
-    const pool = {
-      findAccountIdByCredential: async () => 'acc-1',
-      getAvailableAccount: async () => null,
-      updateModelRateLimit: async () => {},
-      disabledModelsFor: () => new Set<string>(),
-      findAccount: (id: string) => ({ id }),
-      clearAccountPolicyBlocked: async (id: string) => {
-        clearedCalls.push(id)
-        return true
-      },
-    }
+  it('★★ 内容级 11128 只写冷却、**不写账号级封禁**（否则好账号被永久踢出）', async () => {
+    const pool = makeCooldownAwarePool([
+      { id: 'acc-1', credential: makeCredential({ access_token: 'AT1' }) },
+    ])
     const adapter = makeAdapter({
       credential: makeCredential({ access_token: 'AT1' }),
-      accountPool: pool as never,
-      fetchImpl: async () => sseResponse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })]),
+      accountPool: pool,
+      fetchImpl: async () => new Response(
+        '{"code":11128,"msg":"内容未通过安全审核，请修改后重试"}',
+        { status: 400 },
+      ),
     })
-    await collectChunks(adapter, streamOptions)
-    expect(clearedCalls).toEqual([])
+    await collectChunks(adapter, streamOptions).catch(() => undefined)
+    // 冷却照写（既有行为不变）
+    expect(pool.recorded).toHaveLength(1)
+    // 账号级标记一个字都不能写
+    expect(pool.policyRecorded).toEqual([])
+  })
+
+  it('★★ HTML 形态的 400（内容级）同样不得写账号级封禁', async () => {
+    const pool = makeCooldownAwarePool([
+      { id: 'acc-1', credential: makeCredential({ access_token: 'AT1' }) },
+    ])
+    const adapter = makeAdapter({
+      credential: makeCredential({ access_token: 'AT1' }),
+      accountPool: pool,
+      fetchImpl: async () => new Response(
+        '<html><body>conversation id missing · 内容未通过安全审核</body></html>',
+        { status: 400 },
+      ),
+    })
+    await collectChunks(adapter, streamOptions).catch(() => undefined)
+    expect(pool.policyRecorded).toEqual([])
   })
 
   it('400 换号途中末位撞 401/403 也不丢 11140 根因（2026-10-17 对抗审计阻断项）', async () => {

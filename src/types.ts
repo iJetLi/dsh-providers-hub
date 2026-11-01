@@ -112,7 +112,8 @@ export interface ProviderAccountEntry {
    *
    * ## 清除路径（**不自动过期**）
    *
-   * 1. 该账号**实测成功**（`account.test` / `account.retest` / 任一真实请求返回 2xx）；
+   * 1. 该账号**实测成功**：`account.retest`（要求**所有**带标记的模型都通过 ——
+   *    证据强度足够的那一条）；
    * 2. 用户点「重置」（`account.reset` / `account.resetAll`，清限流标记时一并清它）；
    * 3. 账号被删除。
    *
