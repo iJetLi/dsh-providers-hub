@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -1383,6 +1383,33 @@ describe('AccountPool', () => {
      * 「磁盘存在就以磁盘为准」把内存整份丢掉，并**连同 .bak** 一起写成新的小表
      * ⇒ 用户再锁任意一家，其余几家的锁定静默消失且不可恢复（重启后 fail-open）。
      */
+    /**
+     * ★ 落盘失败必须**回滚内存**（2026-11-02，对抗审计 B4）。
+     *
+     * 旧实现先改内存再落盘：两进程共用 `$DSH_HOME` 时 EPERM/ENOENT 真实存在
+     * ⇒ 一次失败后内存领先磁盘，用户再动任意一家的锁，那条「内存有、磁盘没有」
+     * 的记录就被「磁盘优先」删掉 ⇒ 锁定静默失效。
+     */
+    it('★ 落盘失败 ⇒ 内存回滚（否则下次写会把这条锁删掉）', async () => {
+      await pool.setPermanentLocked('magicrew', true)
+      // 把权威文档的位置换成**目录** ⇒ 原子写的 rename 必然失败（跨平台稳定）
+      const file = LOCK_DOC()
+      // ⚠️ 必须**原样还原**：这个路径是 afterAll 之前所有用例共享的隔离 home，
+      //    留一个目录在那儿会让后续 100+ 条用例全红（我第一版就这么挂的）。
+      const original = existsSync(file) ? readFileSync(file, 'utf8') : undefined
+      try {
+        rmSync(file, { force: true })
+        mkdirSync(file, { recursive: true })
+        await expect(pool.setPermanentLocked('buddy', true)).rejects.toThrow()
+        // 回滚后：buddy 不该「内存里锁着、磁盘上没有」
+        expect(pool.permanentLocked('buddy'), '失败的锁定不得留在内存里').toBe(false)
+        expect(pool.permanentLocked('magicrew')).toBe(true)
+      } finally {
+        rmSync(file, { recursive: true, force: true })
+        if (original !== undefined) writeFileSync(file, original, 'utf8')
+      }
+    })
+
     it('★★ 锁表双损坏 ⇒ 以内存为基线，不静默解锁（对抗审计 B3）', async () => {
       await pool.setPermanentLocked('magicrew', true)
       const file = LOCK_DOC()
