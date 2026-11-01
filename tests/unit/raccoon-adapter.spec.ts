@@ -1132,6 +1132,31 @@ describe('★ max_tokens 收敛到上游上限（issue IKS1L5）', () => {
     expect(body.max_tokens).toBe(1024)
   })
 
+  it('★★ 会话标题请求（DSH 给 64）不得被抬高到 65536 —— 那会让标题烧钱', async () => {
+    // ⚠️ 夹子是 `Math.min`，天然不会抬高；这条钉的是「将来有人把夹子写成
+    //    『统一改成上限』」那种改动（`max_tokens = MAX` 的写法也能让 100000 变合法，
+    //    但会把 64 token 的标题请求放大 1024 倍）。
+    const bodies: Array<Record<string, unknown>> = []
+    const fetcher = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: '标题' } }] })])
+    }) as unknown as typeof fetch
+    const adapter = makeAdapter({ fetcher, models: [remoteModel()] })
+    await collect(adapter, { maxTokens: 64, purpose: 'session-title' })
+    expect(bodies[0]!.max_tokens).toBe(64)
+  })
+
+  it('★★ 网关塞 999_999 也不会漏出去（边界大于上限的那个方向）', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    const fetcher = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })])
+    }) as unknown as typeof fetch
+    const adapter = makeAdapter({ fetcher, models: [remoteModel()] })
+    await collect(adapter, { maxTokens: 999_999 })
+    expect(bodies[0]!.max_tokens).toBe(RACCOON_MAX_OUTPUT_TOKENS)
+  })
+
   it('★ 请求体：调用方没指定 ⇒ 不下发该字段（与服务端默认一致）', async () => {
     const body = await bodyOf(undefined)
     expect('max_tokens' in body).toBe(false)
