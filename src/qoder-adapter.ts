@@ -40,6 +40,7 @@ import { classifyNativeAbort, NativeSearchCodes, WebNativeError, type NativeSour
 //    实现，PR95 审计时确认为「该腿的唯一实现」，新代码一律从这里取
 //    （与 `detailFieldText` 同一条铁律，见 `buddy-adapter.ts` 的同款注释）。
 import { errorMessage } from './openai-compat.js'
+import { maskProxyPassword } from './proxy-mask.js'
 import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
@@ -231,6 +232,19 @@ export function looksLikeUpstreamProviderError(text: string): boolean {
  * | `auth`     | `AUTH` / 401 / 403 | ✅ | ❌ **绝不** |
  * | `upstream` | `SERVER` **且** {@link looksLikeUpstreamProviderError} | ✅ | ❌ **绝不** |
  * | `other`    | 其余（400 参数错、风控页、空响应…） | ❌ | ❌ |
+ * | `transport`| **不来自 {@link classifyQoderFailure}**：由适配器在 `fetch` 抛
+ *               传输错误时（`sendEncrypted`）**直接传入** | ✅ | ❌ **绝不**
+ *              （连不上是出口/网络问题，写冷却会把健康号封到当天 24 点） |
+ *
+ * ## ⚠️ `transport` 是**内部入参**，不是分类结果
+ *
+ * {@link classifyQoderFailure} **永不返回** `'transport'`（实测：喂
+ * `('TRANSPORT', <含 UND_ERR 的 detail>)` 得 `'other'`）。原因：这条类别只在
+ * 「建连/首包」这条腿上有意义，而 `fetch` 的传输错误在进入任何分类器**之前**
+ * 就已被 `sendEncrypted` 包成 `LlmError(code='TRANSPORT')` 并直接送进换号分支。
+ *
+ * ⚠️ **SSE 中途**的 `sse transport error` 因此**不换号**（被归 `other`）——
+ * 那是刻意的：那时正文可能已吐了一半，换号重发会重复内容。
  *
  * ## ⚠️ `auth` / `upstream` 只换号、绝不写冷却
  *
@@ -247,7 +261,93 @@ export function looksLikeUpstreamProviderError(text: string): boolean {
  * 后者是**额度专用**判据（含文案兜底），保留原样不动（既有调用方与测试
  * 依赖它）。本函数是**更宽**的分类入口，额度也在其中。
  */
-export type QoderFailureClass = 'quota' | 'rate' | 'auth' | 'upstream' | 'other'
+export type QoderFailureClass = 'quota' | 'rate' | 'auth' | 'upstream' | 'other' | 'transport'
+
+/**
+ * 单次 `stream()` 里，**传输级失败**最多允许的额外尝试次数（不含首发）。
+ *
+ * ## 为什么要有上限（而不是「换到没号为止」）
+ *
+ * 每一次尝试都要等一个 **10 秒 connect 超时**（undici 默认 `connectTimeout`，
+ * 实测 10,713ms）。若不设上限：5 个账号 × 10s = 50s，而宿主对 `TRANSPORT` 还有
+ * 5 次重试（`DEFAULT_RETRYABLE_CODES`，退避 500ms→10s）⇒ 最坏 6 × 50s ≈ 5 分钟
+ * 才报错，用户只看到「卡住」。
+ *
+ * ## 为什么不「同号退避重试」
+ *
+ * 同号重试只对瞬时的 socket 重置有意义，而那件事**宿主已经在做**（`TRANSPORT`
+ * 在 `DEFAULT_RETRYABLE_CODES` 里，5 次、退避 500ms→10s）。再叠一层只是把
+ * 「完全离线」的最坏耗时成倍放大（10s → 30s/轮），换不来任何新路径。
+ *
+ * ⇒ 每次重试**必须换一个账号**（换号 = 换出口：每账号可配独立代理，见 `618a090`
+ * 「国际版 SNI 阻断下唯一出路」）；换不到号就**立即抛原错误**，交给宿主退避。
+ * 预算只给 **2** 次 ⇒ 单轮最坏 3 发 ≈ 30s（宿主再退避重试 5 次的总时长仍可控）。
+ */
+export const QODER_TRANSPORT_MAX_RETRIES = 2
+
+/**
+ * 把一次传输失败的**可操作信息**拼成一句话（沿 `cause` 链取更深几层）。
+ *
+ * ## 为什么必须拼（issue IKR5ZD，2026-10-28）
+ *
+ * 用户看到的只有 `qoder: transport error: fetch failed` —— 而真正能定位问题的
+ * 东西全在 `cause` 链里：
+ *
+ * ```
+ * TypeError: fetch failed
+ *   └ cause: UND_ERR_CONNECT_TIMEOUT
+ *            Connect Timeout Error (attempted address: 1.2.3.4:443, timeout: 10000ms)
+ * ```
+ *
+ * 「连到哪个 IP / 是超时还是被重置 / 超时多少毫秒」直接决定处置方式
+ *（换 IP、换出口代理、改超时），缺了它这条报错**等于没有信息**。
+ *
+ * ⚠️ 链长有界（4 层）+ 去重，避免自引用 `cause` 造成死循环。
+ * ⚠️ 结果经 {@link maskProxyPassword} 脱敏：代理故障的 message 里可能带 userinfo。
+ */
+export function transportErrorDetail(error: unknown): string {
+  const top = error instanceof Error ? error.message : String(error)
+  const pieces: string[] = []
+  let current: unknown = (error as { cause?: unknown } | undefined)?.cause
+  for (let depth = 0; depth < 4 && current !== undefined && current !== null; depth += 1) {
+    const piece = (() => {
+      if (!(current instanceof Error)) {
+        // ⚠️ `String(x)` 对 Symbol 会**抛**（`Cannot convert a Symbol value to a
+        // string`）—— 装饰函数自己抛错会顶替原始错误，与本仓库「清理失败不得改写
+        // 原错误」同型。故先试，失败就退回固定文案。
+        try {
+          // 形如 `{ code, message }` 的普通对象（某些库就这么抛）要先取 message，
+          // 否则只会得到一句无信息的 `[object Object]`。
+          if (current !== null && typeof current === 'object') {
+            const message = (current as { message?: unknown }).message
+            const code = (current as { code?: unknown }).code
+            if (typeof message === 'string' && message.length > 0) {
+              return typeof code === 'string' && code.length > 0 ? `${code}: ${message}` : message
+            }
+          }
+          return String(current)
+        } catch {
+          return '<unprintable cause>'
+        }
+      }
+      const raw = (current as NodeJS.ErrnoException).code
+      let code: string
+      try {
+        code = raw === undefined ? '' : String(raw)
+      } catch {
+        code = ''
+      }
+      return code.length === 0 ? current.message : `${code}: ${current.message}`
+    })()
+    if (piece.length > 0 && piece !== top && !pieces.includes(piece)) pieces.push(piece)
+    current = (current as { cause?: unknown }).cause
+  }
+  const joined = pieces.length === 0 ? top : `${top} ← ${pieces.join(' ← ')}`
+  // ⚠️ 长度上限：`cause.message` 可以是任意长（实测 10 万字符的会原样进日志与
+  //    UI）。截断到 512 字符 —— 地址/错误码/超时值都在前 200 字内，够定位。
+  const capped = joined.length > 512 ? `${joined.slice(0, 512)}…` : joined
+  return maskProxyPassword(capped)
+}
 
 /**
  * 把一次失败归类。
@@ -276,13 +376,20 @@ export function classifyQoderFailure(code: string, text: string): QoderFailureCl
  * 风控拦截页、空响应这些是**请求本身或环境**的问题，换号只会白烧整池。
  */
 export function shouldRotateQoderAccount(cls: QoderFailureClass): boolean {
+  // ⚠️ `transport` 在本表里是 `true`（类型完备性），但**当前没有调用方会拿它来问**
+  // —— `classifyQoderFailure` 永不返回 `'transport'`，而 transport 那条换号路径
+  // 在 `stream()` 里是**直接调** `switchAccountOnQuota` 的。别把它当承重件
+  //（2026-10-31 对抗审计：删掉本行对 transport 的判断没有任何用例会红）。
   return cls !== 'other'
 }
 
 /**
  * 该类别是否**写冷却标记**。
  *
- * ⚠️ **`auth` 与 `upstream` 恒 false**（见 {@link QoderFailureClass} 的语义表）。
+ * ⚠️ **`auth` / `upstream` / `transport` 恒 false**（见 {@link QoderFailureClass}
+ * 的语义表）。`transport` 尤其不能记：连不上是**出口/网络**的问题，写冷却会把
+ * 一个可能完全健康的账号封到当天 24 点 —— 那正是「换了号还是超时、第二天才好」
+ * 这类最难查的症状（issue IKR5ZD 的处置必须避开它）。
  * 这条是「一个请求封死整池」与「坏账号永远轮不到」之间的取舍点。
  */
 export function recordsQoderRateLimit(cls: QoderFailureClass): boolean {
@@ -1735,8 +1842,115 @@ export class QoderAdapter extends LlmAdapter {
     // ⇒ 用 `this.product.id`（取值恰好是 `'qoder'` / `'qodercn'`），
     //   国际版的输出**逐字节不变**，中国版从此说自己的名字。
     const label = this.product.id
+    /**
+     * 本轮已用掉的**传输级**额外尝试次数（每次换一个账号，见
+     * {@link QODER_TRANSPORT_MAX_RETRIES}）。
+     *
+     * ⚠️ **已知语义变化**（2026-10-31 审计登记）：换号会把上一个账号塞进
+     * `triedAccounts`，于是同一请求内**后续**的额度/上游换号会少一个候选 ——
+     * 极端情况下（传输失败 + 后续额度错）可能因为「池已试空」提前抛
+     * `QUOTA_EXCEEDED`，而那个被传输失败换下的号不会被回试。
+     * 方向是刻意的（刚连不上的号在本次请求里不值得再试），且**不是永久损失**：
+     * transport 不写冷却，宿主整请求重试时它仍在池里。
+     *
+     * ⚠️ 与 `queueAttempts` / `triedAccounts` 分开计数：排队是「服务端让我等」，
+     * 传输失败是「这条出口不通」，两者的上限语义与代价完全不同。
+     */
+    let transportRetries = 0
     for (;;) {
-      response = await this.sendEncrypted(await buildRequest(credential), options, fetcherForCurrentAccount())
+      /**
+       * ⚠️⚠️ **传输级失败必须能换号**（issue IKR5ZD，2026-10-28 现场取证）。
+       *
+       * 修前：这条 `sendEncrypted` 不在任何 `try` 里，`fetch` 抛出的
+       * `fetch failed` 直接冒出整个重试循环 ⇒ 后面的 `switchAccountOnQuota`
+       * **一次都执行不到**。而宿主把 `TRANSPORT` 当作可重试码（`DEFAULT_RETRYABLE_CODES`，
+       * 5 次、退避 500ms→10s），于是 6 发全部回到**同一个账号、同一条出口、
+       * 同一个 IP** —— 实测该域名有 2 个 A 记录、`dns.lookup` 只回第一个，
+       * 连打 8 次建连**全部**落在 `47.57.188.188`。对「某条路由被阻断」而言，
+       * 这等于**零重试**。
+       *
+       * 修法：每次重试都**换一个账号**（换号 = 换出口；每账号可配独立代理，见
+       * `618a090`「国际版 SNI 阻断下唯一出路」）；**换不到号立即抛**（同号重连对
+       * 阻断的路由无效，而瞬时抖动宿主已用退避重试 5 次兜了）；预算耗尽后同样
+       * **抛出带 cause 链的原错误**。
+       *
+       * ⚠️ 覆盖范围仅**建连腿**（`sendEncrypted` 这一发）。**SSE 中途**的
+       * `sse transport error` 由 `openai-compat.ts` 抛出、经
+       * `classifyQoderFailure` 归 `other` ⇒ **不换号**：那时正文可能已吐了一半，
+       * 换号重发会重复内容（与 zcode/accio 对「已产出内容后不换号」的取舍同向）。
+       * 这是**刻意的边界**，不是漏做。
+       *
+       * ⚠️ 三类边界与 minimax 的 `minimaxFetchWithRetry` 同款：
+       * ① **只处理传输错误**（HTTP 4xx/5xx 是服务端的明确答复，重试只会掩盖真因，
+       *    那条路径在下面各自的分支里已处理，绝不能走到这里）；
+       * ② **abort 绝不重试**（用户点了停止还继续发是不可接受的行为）；
+       * ③ **耗尽后抛原错误**，保住 `cause`（上层要能程序化取真因）。
+       */
+      try {
+        response = await this.sendEncrypted(await buildRequest(credential), options, fetcherForCurrentAccount())
+      } catch (error) {
+        if (!(error instanceof LlmError) || error.code !== 'TRANSPORT') throw error
+        /**
+         * ⚠️ 这里**不重复**判 `signal.aborted`：`sendEncrypted` 在转换前已经做过
+         * 一次早退，abort 时它抛的是**原始错误**（非 `LlmError`）⇒ 上一行的
+         * 类型/码判据必然先把它 rethrow 出去，本行之后不可能看到已 abort 的
+         * `TRANSPORT`。写两处会让「删掉这一处」变成不可观测的等价变异
+         *（2026-10-31 实测：加这行时删掉它全绿）。abort 的**唯一判据**留在
+         * `sendEncrypted`，并由「abort ⇒ 只发一发」的行为用例守住。
+         */
+        if (transportRetries >= QODER_TRANSPORT_MAX_RETRIES) throw error
+        /**
+         * ⚠️ **不知道「当前是哪个账号」时直接抛**：换号要靠 `tried` 排除自己，
+         * 而 `switchAccountOnQuota` 只有在 `activeAccountId` 非空时才 `tried.add`
+         * —— 否则池可能把**同一个号**再给回来，白等一个 10s connect 超时。
+         * 可达路径：探测适配器 `currentAccountId: () => entry?.id ?? ''`
+         *（`src/index.ts` 的 `createProbeAdapter`）。生产推理路径恒有 id。
+         */
+        if (activeAccountId === undefined || activeAccountId.length === 0) throw error
+        transportRetries += 1
+        /**
+         * ⚠️ **换号失败不得顶掉原始错误**（P2-8，2026-10-31 审计）：`getAvailableAccount`
+         * 是池的读盘/内存路径，它抛错时若原样冒出，用户看到的是裸 `Error`
+         *（无 `code`、无 `cause`）—— 与本修法「保住 cause 让人能排查」的主旨相反。
+         * ⇒ 隔离它，失败就按「没有别的号可换」处理。
+         */
+        let switched: { credential: QoderCredential; accountId: string } | undefined
+        try {
+          switched = await this.switchAccountOnQuota(
+            options,
+            triedAccounts,
+            activeAccountId,
+            'transport',
+          )
+        } catch (switchError) {
+          /**
+           * ⚠️ **只吞「池读不出来」这类裸错误**：`LlmError` 是刻意的判断
+           *（例如换到的新账号缺 `uid` ⇒ `MISSING_CREDENTIAL`），把它压成
+           * 「没号可换」会让用户永远看不到「这个号没法用」—— 那是数据问题，
+           * 必须如实报出来（本仓库「缺失必须显式」纪律）。
+           */
+          if (switchError instanceof LlmError) throw switchError
+          switched = undefined
+        }
+        // 换不到号（池空 / 全是已试过的）⇒ **立即抛**，别在原地空转 10 秒：
+        // 同号重连对「路由被阻断」无效，而宿主已经会用退避再试 5 次。
+        if (switched === undefined) throw error
+        /**
+         * ⚠️ **这一行无法用行为用例守住，如实登记**（2026-10-31 对抗审计 m20）：
+         * 把 `credential = switched.credential` 删掉后，第二发仍会**用旧凭据**
+         * 发出（而 `activeAccountId` 已更新、出口也换了），但**所有 127 条用例仍绿**。
+         * 原因是两份凭据的差异只体现在 WASM 生成的 `COSY` 签名内部（uid / machine
+         * 加密后不可读），外部唯一能看到的 `Authorization` 每次请求都带新
+         * `requestId` ⇒ 无法区分。实测过的两条替代判据也都失败：
+         * ① 新凭据 `machine_id: ''` ⇒ 请求照常成功；② 缺 `uid` ⇒ 抛点发生在
+         * `switchAccountOnQuota` **内部**的 `ensureUid`，与「是否采纳」无关。
+         * ⇒ 保留本行，靠代码评审；**不要**为它编一条恒真用例。
+         */
+        credential = switched.credential
+        activeAccountId = switched.accountId
+        authRefreshed = false // 新账号可再续期一次
+        continue
+      }
 
       if (!response.ok && (response.status === 401 || response.status === 403)) {
         // ⚠️ 必须**先读体再判断**，且 body 只能读一次 —— 排队信息就藏在
@@ -2076,7 +2290,15 @@ export class QoderAdapter extends LlmAdapter {
     } catch (error) {
       if (options.signal?.aborted) throw error
       if (isTransportError(error)) {
-        throw new LlmError(`qoder: transport error: ${error instanceof Error ? error.message : String(error)}`,
+        /**
+         * ⚠️ 文案必须带**沿 `cause` 链的可操作信息**（issue IKR5ZD）：
+         * 只写 `fetch failed` 时用户拿不到「连到哪个 IP / 是超时还是被重置 /
+         * 超时多少毫秒」，也就无法判断该换 IP、换出口代理还是改超时。
+         *
+         * ⚠️ `cause` 仍原样挂上（`transportErrorDetail` 只影响 message）——
+         * 上层若想程序化取原始错误，链路不能断。
+         */
+        throw new LlmError(`qoder: transport error: ${transportErrorDetail(error)}`,
           'TRANSPORT', { cause: error as Error })
       }
       throw error

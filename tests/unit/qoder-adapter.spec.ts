@@ -5,7 +5,9 @@ import { dirname, resolve } from 'node:path'
 import {
   QoderAdapter,
   QODER_QUEUE_MAX_ATTEMPTS,
+  QODER_TRANSPORT_MAX_RETRIES,
   classifyQoderFailure,
+  transportErrorDetail,
   isBillingBusinessCode,
   looksLikeBillingError,
   nextUtc8DayStartMs,
@@ -2281,5 +2283,321 @@ describe('报错前缀必须取自 product.id（不许硬编码 qoder）', () =>
       .not.toMatch(/label:\s*'qoder'/)
     // 且必须真的从 product.id 取（正向断言，否则删掉那一行也会全绿）
     expect(code, '必须从 product.id 取标签').toContain('const label = this.product.id')
+  })
+})
+
+/**
+ * issue IKR5ZD（2026-10-28）：`qoder: transport error: fetch failed`。
+ *
+ * 三条指控与本地取证：
+ * 1. 到 `api2.qoder.sh` 的 **10s 超时** —— 不是插件设的，是 undici 的默认
+ *    `connectTimeout`（实测 10,713ms，`UND_ERR_CONNECT_TIMEOUT`）；
+ * 2. **重试不换 IP** —— 成立且更硬：该域名 2 个 A 记录，但 `dns.lookup` 只回第一个，
+ *    连打 8 次建连全部落在同一 IP；而适配器对 transport 错误**零换号**，
+ *    宿主又把 `TRANSPORT` 当可重试码（5 次）⇒ 6 发全打同一条出口；
+ * 3. **错误丢失 cause** —— `LlmError.cause` 一直挂着，但 message 只有
+ *    `fetch failed`，可操作的 `attempted address / timeout` 在两级 `cause` 之下。
+ *
+ * 本组锁住修法：**先换号（换出口）→ 换不到才同号退避 → 预算耗尽抛原错误**，
+ * 并把 `cause` 链拼进 message。
+ */
+describe('传输级失败：换号优先 + 同号退避 + cause 可读（issue IKR5ZD）', () => {
+  /** Node/undici 在 connect 超时时抛的真实形态。 */
+  const connectTimeout = (ip = '47.57.188.188'): TypeError => new TypeError('fetch failed', {
+    cause: Object.assign(
+      new Error(`Connect Timeout Error (attempted address: ${ip}:443, timeout: 10000ms)`),
+      { code: 'UND_ERR_CONNECT_TIMEOUT' },
+    ),
+  })
+  const specCredB = buildQoderCredential(
+    parseQoderTokenPayload({ token: 'tok-b', refresh_token: 'ref-b', user_id: 'uid-2' }),
+    { machineId: 'm-2' })
+
+  it('★ 传输失败 ⇒ 换第二个账号重发（换号 = 换出口），且不写冷却标记', async () => {
+    let calls = 0
+    const fetchImpl = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) throw connectTimeout()
+      return envelopeResponse([textFrame('好的'), finishFrame])
+    })
+    const rateLimited: string[] = []
+    let poolQueries = 0
+    let askedTried: Set<string> | undefined
+    const adapter = makeAdapter({
+      fetchImpl: fetchImpl as never,
+      currentAccountId: () => 'acct-A',
+      accountPool: {
+        getAvailableAccount: async (
+          _provider: string,
+          _model: string,
+          tried?: Set<string>,
+        ) => {
+          poolQueries += 1
+          askedTried = tried
+          return { entry: { id: 'acct-B' }, credential: specCredB }
+        },
+        updateModelRateLimit: async (id: string) => { rateLimited.push(id) },
+      } as never,
+    })
+
+    const chunks = await collect(adapter)
+    expect(calls, '传输失败后应换号重发一次').toBe(2)
+    expect(askedTried?.has('acct-A'), '换号时必须把上一个账号放进 tried（否则会拿回同一个）').toBe(true)
+    expect(rateLimited, 'transport 是出口问题，写冷却会把健康账号封到当天 24 点').toEqual([])
+    expect(poolQueries, '换号必须真的问过池').toBe(1)
+    expect(chunks.length).toBeGreaterThan(0)
+    /**
+     * ⚠️ **不要**用「两发 `Authorization` 不同」当换号判据（2026-10-31 审计打穿）：
+     * COSY 载荷每次带新的 `requestId`，**同一账号连发两次也必然不同** ⇒ 断言恒真，
+     * 连「换回同一个号」的变异都能过。真正证明「用的是池返回的那份凭据」靠下面
+     * 那条缺 `uid` 的用例（`ensureUid` 会抛 MISSING_CREDENTIAL）。
+     */
+  })
+
+  it('★ 换号必须换出口：`fetchFor` 依次收到 acct-A / acct-B（生产的 per-账号代理腿）', async () => {
+    /**
+     * ⚠️ 必要性（2026-10-31 对抗审计 m12）：本文件其余用例都注入 `fetchImpl`
+     * ——它的优先级**压过** `fetchFor`，于是「换号后出口跟不跟着换」这条**生产腿
+     * 从来没被执行过**。把那行 `fetcherForCurrentAccount()` 提到循环外固化，
+     * 全部 124 条仍绿，而线上症状是「换了号还走旧账号的代理，照样超时」且**零报错**。
+     * ⇒ 这里刻意**不注入 `fetchImpl`**，只给 `fetchFor`，直接观测出口。
+     */
+    const seen: string[] = []
+    let calls = 0
+    const perAccountFetch = async () => {
+      calls += 1
+      if (calls === 1) throw connectTimeout()
+      return envelopeResponse([textFrame('好的'), finishFrame])
+    }
+    const adapter = makeAdapter({
+      fetchFor: (accountId: string) => { seen.push(accountId); return perAccountFetch as never },
+      currentAccountId: () => 'acct-A',
+      accountPool: {
+        getAvailableAccount: async () => ({ entry: { id: 'acct-B' }, credential: specCredB }),
+        updateModelRateLimit: async () => {},
+      } as never,
+    })
+
+    await collect(adapter)
+    expect(seen, '换号后 fetcher 必须按新账号现取（否则出口没换）').toEqual(['acct-A', 'acct-B'])
+  })
+
+  it('★ 换号后真的使用池返回的那份凭据（缺 uid ⇒ 抛 MISSING_CREDENTIAL，而非继续用旧号）', async () => {
+    // 判别力：`switchAccountOnQuota` 会对**池返回的**凭据跑 `ensureUid`。给它一份
+    // **没有 uid** 的凭据、且不提供 `resolveUid` ⇒ 必然抛 MISSING_CREDENTIAL。
+    // 若变异成「不换号」，这里会抛 TRANSPORT 而不是这个码 ⇒ 变红。
+    // （加密头带随机 requestId，没法用 Authorization 区分两份凭据。）
+    const noUid = buildQoderCredential(
+      parseQoderTokenPayload({ token: 'tok-c', refresh_token: 'ref-c' }), // 无 user_id
+      { machineId: 'm-3' })
+    let calls = 0
+    const adapter = makeAdapter({
+      fetchImpl: (async () => { calls += 1; throw connectTimeout() }) as never,
+      currentAccountId: () => 'acct-A',
+      accountPool: {
+        getAvailableAccount: async () => ({ entry: { id: 'acct-C' }, credential: noUid }),
+        updateModelRateLimit: async () => {},
+      } as never,
+    })
+
+    const error = await collect(adapter).then(() => undefined, (e: unknown) => e)
+    expect(calls, '第一发之后就换号，不该有第二发').toBe(1)
+    expect((error as { code?: string }).code).toBe('MISSING_CREDENTIAL')
+  })
+
+  it('★ 无第二个账号 ⇒ 立即抛原错误（不原地空转），message 带 cause 详情', async () => {
+    let calls = 0
+    let poolQueries = 0
+    // 固定一个实例，供「cause 必须是同一个对象」断言。
+    const thrown = connectTimeout()
+    const fetchImpl = vi.fn(async () => {
+      calls += 1
+      throw thrown
+    })
+    const adapter = makeAdapter({
+      fetchImpl: fetchImpl as never,
+      currentAccountId: () => 'acct-A',
+      accountPool: {
+        getAvailableAccount: async () => { poolQueries += 1; return null },
+        updateModelRateLimit: async () => {},
+      } as never,
+    })
+
+    const error = await collect(adapter).then(() => undefined, (e: unknown) => e)
+    expect(error, '应当抛错').toBeInstanceOf(Error)
+    expect(poolQueries, '换不到号也必须**先问过池**，不能跳过换号直接抛').toBe(1)
+    // ⚠️ `cause` 必须是**最初那个错误对象本身**（不是同类型的新对象）——
+    //    否则「重新包一层」的变异也能过（对抗审计 m16 实测全绿）。
+    expect((error as { cause?: unknown }).cause, 'cause 必须是原始错误对象').toBe(thrown)
+    const err = error as Error & { code?: string; cause?: unknown }
+    expect(calls, '换不到号就只发一发（同号空转对阻断路由无效，宿主会退避重试）').toBe(1)
+    expect(err.code).toBe('TRANSPORT')
+    expect(err.message, '消息必须带可操作信息，不能只有 fetch failed').toContain('UND_ERR_CONNECT_TIMEOUT')
+    expect(err.message).toContain('attempted address: 47.57.188.188:443')
+    expect(err.cause, '原始错误必须挂在 cause 上（程序化排查要用）').toBeInstanceOf(TypeError)
+  })
+
+  it('★ 换号期间池自己抛错 ⇒ 仍抛原始 TRANSPORT（pool 的错误不得顶掉 cause）', async () => {
+    let calls = 0
+    const thrown = connectTimeout()
+    const adapter = makeAdapter({
+      fetchImpl: (async () => { calls += 1; throw thrown }) as never,
+      currentAccountId: () => 'acct-A',
+      accountPool: {
+        getAvailableAccount: async () => { throw new Error('pool read failed') },
+        updateModelRateLimit: async () => {},
+      } as never,
+    })
+
+    const error = await collect(adapter).then(() => undefined, (e: unknown) => e)
+    expect((error as { code?: string }).code, '用户看到的必须是 TRANSPORT，不是裸 pool Error').toBe('TRANSPORT')
+    expect((error as { cause?: unknown }).cause, 'cause 必须保住最初的错误对象').toBe(thrown)
+  })
+
+  it('★ 连续换号仍失败 ⇒ 用满预算就抛（3 发封顶），不会换到没号为止', async () => {
+    let calls = 0
+    let next = 1
+    const fetchImpl = vi.fn(async () => {
+      calls += 1
+      throw connectTimeout()
+    })
+    const adapter = makeAdapter({
+      fetchImpl: fetchImpl as never,
+      currentAccountId: () => 'acct-A',
+      accountPool: {
+        getAvailableAccount: async () => {
+          next += 1
+          return { entry: { id: `acct-${next}` }, credential: specCredB }
+        },
+        updateModelRateLimit: async () => {},
+      } as never,
+    })
+
+    const error = await collect(adapter).then(() => undefined, (e: unknown) => e)
+    expect((error as { code?: string }).code).toBe('TRANSPORT')
+    // ⚠️ 期望值必须写字面量：写 `1 + QODER_TRANSPORT_MAX_RETRIES` 会与实现**同源**
+    //    —— 把常量改成 20 时两边一起变、断言恒真（对抗审计实测该变异绿）。
+    expect(QODER_TRANSPORT_MAX_RETRIES, '预算值本身也要被锁住').toBe(2)
+    expect(calls, '首发 + 预算 2 次换号 = 3 发；再多就会让「完全离线」拖成分钟级').toBe(3)
+  })
+
+  it('★ abort 后一发都不重试（用户点了停止还继续发是不可接受的）', async () => {
+    const controller = new AbortController()
+    let calls = 0
+    const fetchImpl = vi.fn(async () => {
+      calls += 1
+      // ⚠️ 必须**在 fetch 内部** abort 再抛传输错误，才能观测到那条早退：
+      //    若在调用前就 abort，`sendEncrypted` 自己会先 rethrow 原错误
+      //    （非 TRANSPORT）⇒ 适配器根本走不到重试分支 ⇒ 该守卫不可观测
+      //    （对抗审计实测：那种写法下「删掉 abort 早退」仍全绿）。
+      controller.abort()
+      throw connectTimeout()
+    })
+    const adapter = makeAdapter({
+      fetchImpl: fetchImpl as never,
+      currentAccountId: () => 'acct-A',
+      accountPool: {
+        getAvailableAccount: async () => ({ entry: { id: 'acct-B' }, credential: specCredB }),
+        updateModelRateLimit: async () => {},
+      } as never,
+    })
+
+    await collectWith(adapter, {
+      model: 'auto',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      signal: controller.signal,
+    }).catch(() => undefined)
+    expect(calls, 'abort 后不得重试').toBe(1)
+  })
+
+  it('★ 非传输错误不得被当成传输失败重发（只重试「连不上」，不重试「连上了但错」）', async () => {
+    /**
+     * ⚠️ 原先这里写的是「HTTP 500 不重试」—— **没有判别力**（2026-10-31 审计实测）：
+     * `Response('boom',{status:500})` 被 `classifyQoderFailure('SERVER','boom')` 归
+     * `other` ⇒ 本来就不换号；且 500 的 `LlmError` 是在新 `try` **之外**的 status
+     * 分支抛的，新的 catch 根本看不到它。真正该锁的不变式在**更内层**：`fetch`
+     * 抛出**非传输**错误时，`sendEncrypted` 不得把它包装成 TRANSPORT，也就不会进
+     * 重试分支。
+     */
+    let calls = 0
+    const adapter = makeAdapter({
+      fetchImpl: (async () => { calls += 1; throw new Error('boom') }) as never,
+      currentAccountId: () => 'acct-A',
+      accountPool: {
+        getAvailableAccount: async () => ({ entry: { id: 'acct-B' }, credential: specCredB }),
+        updateModelRateLimit: async () => {},
+      } as never,
+    })
+
+    const error = await collect(adapter).then(() => undefined, (e: unknown) => e)
+    expect((error as Error).message, '普通 Error 必须原样冒出去，不能被包装成 TRANSPORT').toBe('boom')
+    expect((error as { code?: string }).code, '不得变成 TRANSPORT').not.toBe('TRANSPORT')
+    expect(calls, '非传输错误一发即止').toBe(1)
+  })
+
+  it('transportErrorDetail：沿 cause 链拼装、去重、限深、自引用不死循环、代理口令脱敏', () => {
+    const deep = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('Connect Timeout Error (attempted address: 8.8.8.8:443, timeout: 10000ms)'),
+        { code: 'UND_ERR_CONNECT_TIMEOUT' }),
+    })
+    expect(transportErrorDetail(deep)).toBe(
+      'fetch failed ← UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error '
+      + '(attempted address: 8.8.8.8:443, timeout: 10000ms)')
+
+    // 自引用 cause：必须收敛，不能死循环
+    const loop = new Error('self') as Error & { cause?: unknown }
+    loop.cause = loop
+    expect(transportErrorDetail(loop)).toBe('self')
+
+    // 无 cause 时原样返回
+    expect(transportErrorDetail(new Error('boom'))).toBe('boom')
+    // cause 是字符串 / 普通对象（非 Error）：不得抛，且要带上
+    const strCause = new TypeError('fetch failed') as Error & { cause?: unknown }
+    strCause.cause = 'raw string cause'
+    expect(transportErrorDetail(strCause)).toBe('fetch failed ← raw string cause')
+    const objCause = new TypeError('fetch failed') as Error & { cause?: unknown }
+    objCause.cause = { code: 'E' }
+    expect(transportErrorDetail(objCause)).toBe('fetch failed ← [object Object]')
+    // 深链只取 4 层
+    const chain = (n: number): Error => {
+      const e = new Error(`L${n}`) as Error & { cause?: unknown }
+      if (n > 1) e.cause = chain(n - 1)
+      return e
+    }
+    expect(transportErrorDetail(chain(6))).toBe('fetch failed ← L5 ← L4 ← L3 ← L2'.replace('fetch failed', 'L6'))
+    // 相邻重复去重
+    const dup = new Error('A') as Error & { cause?: unknown }
+    dup.cause = new Error('B') as Error & { cause?: unknown }
+    ;(dup.cause as Error & { cause?: unknown }).cause = new Error('B')
+    expect(transportErrorDetail(dup)).toBe('A ← B')
+    // 2 跳自引用不发散
+    const two = new Error('A') as Error & { cause?: unknown }
+    const mid = new Error('B') as Error & { cause?: unknown }
+    two.cause = mid
+    mid.cause = two
+    expect(transportErrorDetail(two)).toBe('A ← B')
+    // code 是 Symbol：装饰函数自己不能抛（否则会顶替原始错误）
+    const symCode = new TypeError('fetch failed') as Error & { cause?: unknown }
+    symCode.cause = Object.assign(new Error('weird'), { code: Symbol('S') })
+    expect(() => transportErrorDetail(symCode)).not.toThrow()
+    // 超长 message 截断（否则 10 万字符会原样进日志/UI）
+    const longCause = new TypeError('fetch failed') as Error & { cause?: unknown }
+    longCause.cause = new Error('x'.repeat(100_000))
+    expect(transportErrorDetail(longCause).length).toBeLessThanOrEqual(513)
+
+    // 代理口令必须脱敏（哪怕地址夹在句子中间 —— 锚定版会在这里静默漏网）
+    const withProxy = new TypeError('fetch failed', {
+      cause: new Error('proxy refused: http://alice:s3cr3t@10.0.0.1:8080'),
+    })
+    expect(transportErrorDetail(withProxy)).not.toContain('s3cr3t')
+    expect(transportErrorDetail(withProxy)).toContain('http://alice:***@10.0.0.1:8080')
+    // ⚠️ **含空白的脏值也必须遮**（2026-10-31 审计实测的安全回退：把字符类写成
+    //    `[^:@/\s]` 会让 `http://a b:s3cr3t@h:1` 明文泄漏；池的 `proxyLogText`
+    //    明确接收「备份文件原样透传的脏值」）。
+    const dirty = new TypeError('fetch failed', {
+      cause: new Error('proxy: http://a b:s3cr3t@h:1 与 http://u:p a@h'),
+    })
+    expect(transportErrorDetail(dirty)).not.toContain('s3cr3t')
+    expect(transportErrorDetail(dirty)).not.toContain('p a@')
   })
 })
