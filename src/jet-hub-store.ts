@@ -952,6 +952,20 @@ export function sanitizeAccounts(raw: unknown): ProviderAccountEntry[] {
       // 无有效项时写 `undefined`：`JSON.stringify` 会整个丢弃该键，
       // 故落盘/传输形态与「从未有过标记」完全一致（不留 `{}` 噪音）。
       modelRateLimits: limits,
+      /**
+       * 封号标记（issue IKS2MV）：时刻走与 `modelRateLimits` **同一个**谓词
+       * （有限、正、Date 范围内 —— 它会进 `new Date()`，脏值抛 `RangeError`），
+       * 报文只保留非空字符串并截断到 200 字符。
+       *
+       * ⚠️ 同样**显式写键名并置于 `...candidate` 之后**：备份文件是用户可编辑输入，
+       * 原样透传会让脏的 `policyBlockedAtMs` 直达选号判据 —— 而封号是**账号级**，
+       * 一条脏值就会让整个账号永久不可选（比逐模型的限流脏值更狠）。
+       */
+      policyBlockedAtMs: isValidResetAtMs(candidate.policyBlockedAtMs) ? candidate.policyBlockedAtMs : undefined,
+      policyBlockedMessage: typeof candidate.policyBlockedMessage === 'string'
+        && candidate.policyBlockedMessage.trim().length > 0
+        ? candidate.policyBlockedMessage.slice(0, 200)
+        : undefined,
       // ⚠️ 四个代理字段统一过闸（2026-10-25 审计 B2-1，见 `PROXY_FIELDS` 的注释）。
       // 与 `modelRateLimits` 同款：**显式写键名并置于展开之后**，否则
       // `candidate` 里的脏值会把清理结果整个覆盖回去（本文件第一版正是如此）。

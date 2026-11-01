@@ -120,6 +120,7 @@
 import type { BuddyNoAccountReason, BuddySelectorLike } from './buddy-balance-selector.js'
 import { pickBuddyAccount } from './buddy-balance-selector.js'
 import { sessionBalanceEnabled } from './session-balance.js'
+import { isPolicyBlockedAccount } from './account-pool.js'
 import type {
   LoomyCandidateAccount,
   LoomyNoAccountReason,
@@ -151,6 +152,15 @@ export interface ResolverPool<TCredential = unknown> {
     credentialRef: string
     enabled: boolean
     modelRateLimits?: Record<string, number>
+    /**
+     * 账号级**封禁**标记（Gitee issue IKS2MV）。
+     *
+     * ⚠️ 必须在这里声明并参与过滤：`getAvailableAccount` 与 `candidatesOf` 是
+     * **两份**选号判据（下文 `candidatesOf` 的注释已警告「必须逐字一致」），
+     * 只改池那一份的话，主请求路径照样会把封禁账号选出来 —— 每一发都先撞一次
+     * 403 再换号，并顺带写两次盘（2026-11-01 对抗审计实测 E8）。
+     */
+    policyBlockedAtMs?: number
   }>
   /** 该 provider 是否处于「锁定永久积分」状态。 */
   permanentLocked(provider: string): boolean
@@ -396,6 +406,10 @@ function candidatesOf(
   return pool
     .listAccountsByProvider(providerId)
     .filter(a => a.enabled)
+    // 账号级封禁：整个账号排除（与 `AccountPool.candidateAccounts` 同一条判据，
+    // 见 `isPolicyBlockedAccount`）。⚠️ 这两份判据必须同步改，否则「永久排除」
+    // 只在池那条路径上生效，而真实请求走的是本函数（对抗审计 E8 实测的形态）。
+    .filter(a => !isPolicyBlockedAccount(a))
     .filter((a) => {
       const key = modelId ?? ''
       if (key.length === 0) return true

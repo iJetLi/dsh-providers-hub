@@ -1040,6 +1040,82 @@ describe('AccountPool', () => {
     })
   })
 
+  /**
+   * ★ 账号级封禁标记（Gitee issue IKS2MV）。
+   *
+   * 与 `modelRateLimits` 是**两笔账**，三条判据缺一不可：
+   * ① 写入幂等（保留**首次**观测时刻，反复撞 11140 不会把那一刻冲掉）；
+   * ② 清除后字段整个消失（不留 undefined 噪音）；
+   * ③ **选号按账号排除**（不是按模型）—— 11140 是账号级，换模型也必然 403。
+   */
+  describe('★ 账号级封禁标记（issue IKS2MV）', () => {
+    it('★★ 写入后整个账号从选号里消失（与「逐模型限流」不同）', async () => {
+      // ⚠️ 选号会去解析凭据：没有凭据的账号恒返回 null（那是「凭据坏」，
+      //    不是「封禁」）—— 先把凭据放好，判据才打在过滤逻辑上。
+      await ctx.credentials.set(credentialRef('BUDDY_ACC_A'), JSON.stringify({ access_token: 'AT' }))
+      // 模型限流：只挡那一个模型
+      await pool.addAccount(makeMockAccount({
+        credentialRef: 'BUDDY_ACC_A',
+        modelRateLimits: { 'model-a': Date.now() + 3_600_000 },
+      }))
+      expect(await pool.getAvailableAccount('buddy', 'model-a')).toBeNull()
+      // 换一个模型仍可用 —— 这正是 issue 问题 2 的实测结论
+      expect(await pool.getAvailableAccount('buddy', 'model-b')).not.toBeNull()
+
+      // 封禁：换任何模型都不可用
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为，已被限制使用')
+      expect(await pool.getAvailableAccount('buddy', 'model-b')).toBeNull()
+      expect(await pool.getAvailableAccount('buddy', 'another-model')).toBeNull()
+      // 空 modelId（未知目标模型）也挡 —— 封禁与模型无关
+      expect(await pool.getAvailableAccount('buddy', '')).toBeNull()
+    })
+
+    it('★ 写入幂等：保留**首次**观测时刻，报文可更新', async () => {
+      await pool.addAccount(makeMockAccount())
+      await pool.markAccountPolicyBlocked('buddy-001', '第一次')
+      const first = (await pool.listAccounts('buddy'))[0]
+      expect(first.policyBlockedAtMs).toBeGreaterThan(0)
+      const at = first.policyBlockedAtMs
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      await pool.markAccountPolicyBlocked('buddy-001', '第二次')
+      const second = (await pool.listAccounts('buddy'))[0]
+      expect(second.policyBlockedAtMs).toBe(at)
+      expect(second.policyBlockedMessage).toBe('第二次')
+    })
+
+    it('★ 已标记且报文未变 ⇒ 不再写盘（写放大：连撞 3 次 = 6 次落盘）', async () => {
+      // 对抗审计 E4 实测：修复前每事件 2 笔账各写一次、第 2 次起状态没变仍照写。
+      // 现在 early-return ⇒ 「同一个事实」不重复付费。
+      await pool.addAccount(makeMockAccount())
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
+      const writesAfterFirst = ctx.replaceCalls.length
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
+      expect(ctx.replaceCalls.length, '同一报文重复标记不应再写盘').toBe(writesAfterFirst)
+      // 但报文**变了** ⇒ 仍要写（面板红字要跟着更新）
+      await pool.markAccountPolicyBlocked('buddy-001', '第二次的报文')
+      expect(ctx.replaceCalls.length).toBe(writesAfterFirst + 1)
+      expect((await pool.listAccounts('buddy'))[0].policyBlockedMessage).toBe('第二次的报文')
+    })
+
+    it('★ 清除后两个字段都消失，且再次清除返回 false', async () => {
+      await pool.addAccount(makeMockAccount())
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
+      expect(await pool.clearAccountPolicyBlocked('buddy-001')).toBe(true)
+      const entry = (await pool.listAccounts('buddy'))[0]
+      expect(entry.policyBlockedAtMs).toBeUndefined()
+      expect(entry.policyBlockedMessage).toBeUndefined()
+      expect(await pool.clearAccountPolicyBlocked('buddy-001')).toBe(false)
+    })
+
+    it('★ 封禁账号在列表里沉底（可用在前），且不影响限流排序', async () => {
+      await pool.addAccount(makeMockAccount({ id: 'buddy-good' }))
+      await pool.addAccount(makeMockAccount({ id: 'buddy-blocked', credentialRef: 'BUDDY_ACCOUNT_B' }))
+      await pool.markAccountPolicyBlocked('buddy-blocked', '账号存在异常行为')
+      const list = await pool.listAccounts('buddy')
+      expect(list.map((a) => a.id)).toEqual(['buddy-good', 'buddy-blocked'])
+    })
+  })
+
   describe('resolveCredentialForAccount（含停用账号）', () => {
     it('停用账号凭据仍可按 id 解析（重测需要）', async () => {
       await ctx.credentials.set(credentialRef('CA_OFF'), JSON.stringify({ access_key_id: 'off' }))

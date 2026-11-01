@@ -2,7 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { RACCOON, RACCOON_TEXT_ONLY_MODELS, raccoonSupportsImageWith } from '../../src/raccoon-product.js'
-import { RaccoonAdapter, classifyRaccoonFailure, registerRaccoonLlm } from '../../src/raccoon-adapter.js'
+import { RACCOON_MAX_OUTPUT_TOKENS, RaccoonAdapter, clampRaccoonMaxTokens, classifyRaccoonFailure, registerRaccoonLlm } from '../../src/raccoon-adapter.js'
 import type { RaccoonRemoteModel } from '../../src/raccoon-adapter.js'
 import type { RaccoonCredential } from '../../src/raccoon.js'
 import { raccoonDisplayName } from '../../src/raccoon.js'
@@ -245,7 +245,8 @@ describe('resolveModel', () => {
   it('声明 contextWindow 与 defaultMaxTokens', async () => {
     const resolved = await makeAdapter().resolveModel('raccoon', 'sn-glm-5-3')
     expect(resolved.context?.contextWindow).toBe(1_000_000)
-    expect(resolved.defaultMaxTokens).toBe(100_000)
+    // ⚠️ issue IKS1L5：声明值要夹到上游硬校验上限，否则每轮请求都带 100000
+    expect(resolved.defaultMaxTokens).toBe(65_536)
   })
 
   it('未知模型不编造 context', async () => {
@@ -1088,5 +1089,84 @@ describe('★★ raccoon 网关 499 必须归 aborted 形态（PR #87 c411fa8，
       'SSE 内嵌帧路径当前归 SERVER（已知缺口）。若此处变成 ABORTED，说明该层已统一修复，'
       + '请改写本用例而不是回退修复。',
     ).toBe('SERVER')
+  })
+})
+
+/**
+ * issue IKS1L5：上游网关对 `max_tokens` **硬校验 1..65536**，命中即整轮 400，
+ * 且该 model group **没有配 fallback** ⇒ 没有任何重试机会。
+ *
+ * ⚠️ 两处都必须夹（只夹一处会漏）：
+ * - **声明值**（`toCatalogEntry` → DSH 的 `defaultMaxTokens`）：DSH 每轮都会把这个
+ *   声明值**回传**进请求，所以只夹请求体的话第二轮及以后照样带 100000；
+ * - **请求体**（`buildBody` 的 `max_tokens`）：来自 `titlePlan.maxTokens`，
+ *   非标题请求时是原样透传调用方（用户 / OpenAI 兼容网关都能塞 999999）。
+ */
+describe('★ max_tokens 收敛到上游上限（issue IKS1L5）', () => {
+  it('★ 远端声明 100_000 ⇒ 声明值被夹到 65_536（否则 DSH 每轮回传 100000）', async () => {
+    const adapter = makeAdapter({ models: [remoteModel({ params: { context_window: 1_000_000, max_tokens: 100_000 } })] })
+    const resolved = await adapter.resolveModel('raccoon', 'sn-glm-5-3')
+    expect(resolved.defaultMaxTokens).toBe(RACCOON_MAX_OUTPUT_TOKENS)
+  })
+
+  /** 驱动一次 stream，把抓到的请求体解析出来。 */
+  async function bodyOf(maxTokens: number | undefined): Promise<Record<string, unknown>> {
+    const bodies: Array<Record<string, unknown>> = []
+    const fetcher = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })])
+    }) as unknown as typeof fetch
+    const adapter = makeAdapter({ fetcher, models: [remoteModel()] })
+    await collect(adapter, maxTokens === undefined ? {} : { maxTokens })
+    expect(bodies.length).toBeGreaterThan(0)
+    return bodies[0]!
+  }
+
+  it('★★ 请求体：调用方给 100_000 ⇒ 下发 65_536（这道是「网关塞 999999」的防线）', async () => {
+    const body = await bodyOf(100_000)
+    expect(body.max_tokens).toBe(RACCOON_MAX_OUTPUT_TOKENS)
+  })
+
+  it('★ 请求体：调用方给 1024 ⇒ 保持 1024（**不许抬高**）', async () => {
+    const body = await bodyOf(1024)
+    expect(body.max_tokens).toBe(1024)
+  })
+
+  it('★★ 会话标题请求（DSH 给 64）不得被抬高到 65536 —— 那会让标题烧钱', async () => {
+    // ⚠️ 夹子是 `Math.min`，天然不会抬高；这条钉的是「将来有人把夹子写成
+    //    『统一改成上限』」那种改动（`max_tokens = MAX` 的写法也能让 100000 变合法，
+    //    但会把 64 token 的标题请求放大 1024 倍）。
+    const bodies: Array<Record<string, unknown>> = []
+    const fetcher = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: '标题' } }] })])
+    }) as unknown as typeof fetch
+    const adapter = makeAdapter({ fetcher, models: [remoteModel()] })
+    await collect(adapter, { maxTokens: 64, purpose: 'session-title' })
+    expect(bodies[0]!.max_tokens).toBe(64)
+  })
+
+  it('★★ 网关塞 999_999 也不会漏出去（边界大于上限的那个方向）', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    const fetcher = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })])
+    }) as unknown as typeof fetch
+    const adapter = makeAdapter({ fetcher, models: [remoteModel()] })
+    await collect(adapter, { maxTokens: 999_999 })
+    expect(bodies[0]!.max_tokens).toBe(RACCOON_MAX_OUTPUT_TOKENS)
+  })
+
+  it('★ 请求体：调用方没指定 ⇒ 不下发该字段（与服务端默认一致）', async () => {
+    const body = await bodyOf(undefined)
+    expect('max_tokens' in body).toBe(false)
+  })
+
+  it('★ 夹子对非法值仍返回 undefined（0 / 负数 / 非整数 / NaN 不得被夹成「合法小数字」）', () => {
+    for (const bad of [0, -1, Number.NaN, 1.5, undefined, '999999']) {
+      expect(clampRaccoonMaxTokens(bad), String(bad)).toBeUndefined()
+    }
+    expect(clampRaccoonMaxTokens(65_536)).toBe(65_536)
+    expect(clampRaccoonMaxTokens(999_999)).toBe(65_536)
   })
 })
