@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -1373,6 +1373,28 @@ describe('AccountPool', () => {
       ])
       expect(pool.disabledModelsFor('buddy').has('glm-5.2')).toBe(true)
       expect(pool.permanentLocked('buddy')).toBe(true)
+    })
+
+    /**
+     * ★★ 锁表**主文件与 .bak 都读不出来**时，绝不能把内存里的锁定当成「磁盘说没有锁」
+     * （2026-11-02，PR #168 对抗审计 B3 实测）。
+     *
+     * 旧行为：`load()` 返回 `{exists:true, locks:{}}` ⇒ `setPermanentLocked` 的
+     * 「磁盘存在就以磁盘为准」把内存整份丢掉，并**连同 .bak** 一起写成新的小表
+     * ⇒ 用户再锁任意一家，其余几家的锁定静默消失且不可恢复（重启后 fail-open）。
+     */
+    it('★★ 锁表双损坏 ⇒ 以内存为基线，不静默解锁（对抗审计 B3）', async () => {
+      await pool.setPermanentLocked('magicrew', true)
+      const file = LOCK_DOC()
+      writeFileSync(file, 'not-json', 'utf8')
+      writeFileSync(`${file}.bak`, 'not-json', 'utf8')
+
+      // 用户此时再锁另一家 —— 内存里 magicrew 还在，不得被「读不出来的空表」覆盖
+      await pool.setPermanentLocked('buddy', true)
+
+      expect(pool.permanentLocked('magicrew'), '主文件+.bak 双坏时内存里的锁定必须保留').toBe(true)
+      expect(pool.permanentLocked('buddy')).toBe(true)
+      expect(readLockDoc()?.locks, '落盘内容必须同时含两家').toEqual({ magicrew: true, buddy: true })
     })
 
     it('mergeAccounts 归一化坏条目并丢弃（与 replaceAll 同口径）', async () => {

@@ -118,10 +118,27 @@ export type BuddyBalanceTier = (typeof BUDDY_BALANCE_TIER)[keyof typeof BUDDY_BA
 
 /** 两类余额的拆分结果。 */
 export interface BuddyCreditSplit {
-  /** 15 天内到期的积分合计（本计费周期口径）。 */
+  /** 15 天内到期、**且尚未作废**的积分合计（本计费周期口径）。 */
   expiring: number
   /** 其余积分合计（≥ 15 天后到期，或到期时间未知）。 */
   permanent: number
+  /**
+   * **已经作废**的额度（`deductionEndTime <= now` 但 `active` 仍为 true）。
+   *
+   * ⚠️⚠️ **必须从 `expiring` 里摘出来**（2026-11-02 修，PR #168 对抗审计 B1）：
+   * TRAE / Qoder 的 `active` 是**硬编码 true**（`trae-credits.ts` 从不反映是否过期），
+   * 所以这类包一定会出现。旧行为把它算进 `expiring` ⇒
+   * ① `buddyBalanceTier` 判 `expiring` = **可用**（锁定永久积分下也照发）；
+   * ② `sharedPackageExpiry` 把它的过去时刻当最早 ⇒ 聚合**排第一**、先被烧；
+   * ③ 请求必然失败（那些积分扣不到）。
+   *
+   * 摘出来之后：只剩作废额度的账号 ⇒ `expiring=0 permanent=0` ⇒ 档位 `none`（不可用），
+   * 这正是「钱已经没了」的正确表示。
+   *
+   * 只在 `> 0` 时出现在返回值里（与前端 `splitCreditsByExpiry` 同款，避免给每个
+   * 调用方加一个恒 0 的键）。
+   */
+  expired?: number
 }
 
 /** 参与分档的账号（两个字段缺失表示查询失败）。 */
@@ -161,6 +178,7 @@ export function splitBuddyCreditsByExpiry(
   if (balance === null || balance === undefined) return undefined
   let expiring = 0
   let permanent = 0
+  let expired = 0
   for (const pkg of balance.packages) {
     /**
      * ⚠️ **必须挡 `null`/`undefined` 元素**（2026-10-21 对抗性审计发现，P2）。
@@ -297,10 +315,16 @@ export function splitBuddyCreditsByExpiry(
     // ⚠️ 用 `endMs`（已归一）而不是原始 `endTime` —— 后者可能是**数字字符串**，
     //    而 `"1760432000000" - now` 会走 JS 的字符串减数字转换（恰好也能算对），
     //    但那是隐式依赖、且与上面的 `known` 判据不同源。显式用 `endMs` 消除歧义。
+    /**
+     * ⚠️ **已作废 ⇒ 单独一桶**（2026-11-02，对抗审计 B1）：
+     * `endMs <= now` 的额度**扣不到**，不能再算「临期可用」——
+     * 否则它会同时骗过 `buddyBalanceTier`（判可用）与聚合排序（排第一先烧）。
+     */
+    if (endMs <= now) { expired += remaining; continue }
     if (endMs - now < windowMs) expiring += remaining
     else permanent += remaining
   }
-  return { expiring, permanent }
+  return { expiring, permanent, ...expired > 0 ? { expired } : {} }
 }
 
 /** 分档选项。 */

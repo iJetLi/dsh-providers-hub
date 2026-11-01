@@ -119,18 +119,24 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
   const at = typeof now === 'number' && Number.isFinite(now) ? now : Date.now();
   let expiring = 0;
   /**
-   * `expiring` 里**已经作废**的那部分（`deductionEndTime <= now` 但 `active` 仍为 true）。
+   * **已经作废**的额度（`deductionEndTime <= now` 但 `active` 仍为 true）。
    *
-   * ⚠️⚠️ **这是 `expiring` 的子集，不是第四档**（2026-11-02 修）：
-   * - **为什么仍然计入 `expiring`**：三档合计 === `total` 是 `0dd86f8` 立的硬
-   *   不变量（用户会自己加一遍，少一分就报障）；且**后端/聚合**侧
-   *   （`sharedPackageExpiry` / `splitBuddyCreditsByExpiry`）也把这类包按
-   *   「窗口内」处理 —— 前端若把它挪出 `expiring`，就变成「面板说已过期、
-   *   聚合说临期」的新分叉（PR #168 的 §三.4 刚把这种事修掉）。
-   * - **为什么还要单独记**：`expiryBucketLabel` / `formatExpiryHint` 对同一个包
-   *   已经写「已过期」，而分桶行却显示「临期 7（无倒计时）」——
-   *   同一条数据两个说法，且那个 7 **根本用不了**。
-   *   ⇒ 展示层用 `expiring - expired` 显示「临期」，剩下的显示「已过期」。
+   * ⚠️⚠️ **独立一桶，不再计入 `expiring`**（2026-11-02，对抗审计 B1 后修正）。
+   *
+   * 第一版（同一天的 `7a567d4`）把它留在 `expiring` 里、只让**展示层**减掉，
+   * 理由是「三档合计 === total 的守恒」与「与聚合/后端同判」。审计打穿了这个理由：
+   * 后端 `splitBuddyCreditsByExpiry` 与聚合 `sharedPackageExpiry` 当时同样把它算
+   * 可用 ⇒ 面板说「已过期 7」而**选号判它可用、聚合把它排第一先烧** ⇒
+   * 从「说法含糊」升级成「面板与行为相反」。⇒ 现在**三处同时修**，判据一致：
+   *
+   * | 层 | 判据 |
+   * |---|---|
+   * | 前端（本函数） | `end <= now` ⇒ `expired` 桶，不进 `expiring` |
+   * | 后端 `splitBuddyCreditsByExpiry` | 同上（`expired` 可选键 + 不计 `expiring`）|
+   * | 聚合 `sharedPackageExpiry` / `magicrewExpiry` | `end <= now` 不参与 `earliest`、且不算「有可用额度」|
+   *
+   * 守恒随之变成**四段**：`permanent + longTerm + expiring + expired === total`
+   * （用户照样能加平，只是第 4 段的名字叫「已过期」）。
    *
    * 可达性：TRAE / Qoder 的 `active` 是**硬编码 true**（`trae-credits.ts`），
    * 从不反映是否过期 —— 所以这类包**一定会**出现，不是理论值。
@@ -221,10 +227,13 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
       }
       continue;
     }
+    if (end <= at) {
+      // 已作废（但 active 仍 true）⇒ 单独一桶：这些额度**扣不到**。
+      expired += remaining;
+      continue;
+    }
     if (end - at < windowMs) {
       expiring += remaining;
-      // 已作废（end <= now）但仍 active：计入 expiring 保守恒，同时单独标记。
-      if (end <= at) expired += remaining;
       // ⚠️⚠️ **必须排除已过期的包**（2026-10-13 审计修正）：这里取的是临期桶里
       //    **最早**的作废时刻用于倒计时，而 `end` 若不约束 `> at`，那么
       //    「一个已过期但 `active` 仍为 true 的包」会**恒定当选**（它比任何
@@ -310,12 +319,10 @@ export function formatExpirySplitLine(split, format) {
   // 只显示**非零**桶：0 值进文案只会让一行变长而无信息（用户看不到「永久 0」的价值）。
   const permanent = split.permanent > 0 ? format(split.permanent) : null;
   const longTerm = split.longTerm > 0 ? format(split.longTerm) : null;
-  // ⚠️ **临期只显示「还能用」的那部分**（`expiring - expired`），已作废的单独写
-  //    「已过期」（2026-11-02 修）。见 `splitCreditsByExpiry` 里 `expired` 的注释：
-  //    两者相加仍 === `expiring` ⇒ 三档合计 === `total` 的不变量不变。
+  // ⚠️ `expiring` 已由 `splitCreditsByExpiry` 排除掉已作废部分（2026-11-02），
+  //    这里直接用；「已过期」是独立的第 4 段。
   const expiredAmount = Number.isFinite(split.expired) && split.expired > 0 ? split.expired : 0;
-  const usableExpiring = Math.max(0, split.expiring - expiredAmount);
-  const expiring = usableExpiring > 0 ? format(usableExpiring) : null;
+  const expiring = split.expiring > 0 ? format(split.expiring) : null;
   const expired = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push(`永久 ${permanent}`);
   if (longTerm !== null) parts.push(`长期 ${longTerm}`);
@@ -347,10 +354,9 @@ export function expirySplitParts(split, format, now) {
   // ⚠️ 数值与格式化文本分成两个变量：临期段要用**数值**做比较
   //    （`earliestAmount < expiringAmount`）。拿格式化后的字符串做 `<`
   //    依赖隐式转换 —— 一旦 `format` 带上千分位（`"3,500"` → `NaN`）就静默出错。
-  // 已作废的那部分单独成段（见 `splitCreditsByExpiry` 的 `expired` 注释）：
-  // 它**仍在** `split.expiring` 里（保守恒、与后端/聚合同源），展示时拆开。
+  // 已作废额度单独成段（`splitCreditsByExpiry` 已把它从 `expiring` 里摘出）。
   const expiredAmount = Number.isFinite(split.expired) && split.expired > 0 ? split.expired : 0;
-  const expiringAmount = Math.max(0, (split.expiring > 0 ? split.expiring : 0) - expiredAmount);
+  const expiringAmount = split.expiring > 0 ? split.expiring : 0;
   const expiring = expiringAmount > 0 ? format(expiringAmount) : null;
   const expiredText = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push({ key: 'permanent', text: `永久 ${permanent}`, tone: 'ok' });

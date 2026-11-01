@@ -378,14 +378,17 @@ describe('magicrew 临期折算', () => {
     })
     expect(mixed).toBe(EXPIRES_AT)
 
-    // 全是过期批次 ⇒ 没有有效到期批次 ⇒ NEVER（余额本身仍在，不是 UNUSABLE）。
+    // ⚠️ **2026-11-02 改（PR #168 对抗审计 B1）**：原先断言 NEVER（「有余额但无临期」）。
+    //    但全是过期批次 ⇒ 那 100 分**一分也扣不到** ⇒ 必须判 UNUSABLE（渠道退出轮换），
+    //    与 `sharedPackageExpiry` / `splitBuddyCreditsByExpiry` / 前端 `expired` 桶同判；
+    //    否则锁定态下这个零可用额度的号仍会被选中、请求必失败。
     const onlyPast = await magicrewExpiry({
       jwt: 'j.w.t',
       organizationCode: 'org1',
       now: NOW,
       cachedBalance: async () => balance([packageOf({ deductionEndTime: past })]),
     })
-    expect(onlyPast).toBe(NEVER)
+    expect(onlyPast).toBe(UNUSABLE)
   })
 })
 
@@ -678,5 +681,34 @@ describe('magicrew 余额取数：类型漂移与越界日期（真缺陷回归�
     const balance = await balanceOf(fetchImpl)
     expect(balance?.total).toBe(0)
     expect(balance?.packages).toHaveLength(0)
+  })
+})
+
+describe('欠费（total < 0）与批次并存时不得丢弃明细（对抗审计 B5）', () => {
+  const balanceWith = async (totalPoints: number) => await fetchMagicrewBalance({
+    jwt: 'j.w.t',
+    organizationCode: 'org1',
+    fetchImpl: (async () => jsonResponse({
+      code: 1000,
+      data: {
+        total_points: totalPoints,
+        expiring_quota_details: [
+          { quota_id: 1, expires_at: '2027-01-01 00:00:00', remaining_points: 100 },
+        ],
+      },
+    })) as unknown as typeof fetch,
+  })
+
+  it('★ total=-31 且上游给了正批次 ⇒ 批次仍保留（不再整条丢弃）', async () => {
+    const out = await balanceWith(-31)
+    expect(out?.total).toBe(-31)
+    // ⚠️ 旧实现 `budget = total = -31` ⇒ 首轮 break ⇒ packages=[] ⇒ 面板只剩「积分 -31」。
+    expect(out?.packages.length, '批次明细必须保留').toBe(1)
+    expect(out?.packages[0]?.remaining).toBe(100)
+  })
+
+  it('★ total=0 且批次和 > 0 ⇒ 仍然全部裁掉（与既有语义一致）', async () => {
+    const out = await balanceWith(0)
+    expect(out?.packages).toHaveLength(0)
   })
 })

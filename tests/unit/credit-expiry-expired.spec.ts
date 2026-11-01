@@ -1,15 +1,22 @@
 /**
- * 已作废额度**不得**被算进「临期」（2026-11-02 修）。
+ * 已作废额度**不得**被算进「临期可用」（2026-11-02 修，两版）。
  *
  * 背景：TRAE / Qoder 的 `active` 是**硬编码 true**（从不反映是否过期），
  * 所以「`deductionEndTime` 已过、`active` 仍 true、`remaining > 0`」的包一定会出现。
- * 旧行为：它被累加进 `expiring` ⇒ 面板显示「临期 7」却**没有倒计时**
- * （`earliestExpiringAt` 只取未来时刻），而同一个包的标签/提示写「已过期」——
- * 同一条数据两个说法，且那个 7 根本扣不到。
  *
- * 修法（**不改数据语义**）：`expiring` 里仍然包含它（三档合计 === `total` 是硬
- * 不变量，且后端/聚合也按「窗口内」处理这类包），另记一个 `expired` **子集**，
- * 展示层用 `expiring - expired` 显示「临期」、剩下的单独写「已过期」。
+ * ## 第一版（`7a567d4`）错在哪
+ *
+ * 只让**展示层**把已作废额度从「临期」里减掉，数据上它仍是 `expiring` 的一部分。
+ * 对抗审计打穿：后端 `splitBuddyCreditsByExpiry` 与聚合 `sharedPackageExpiry`
+ * 当时都把它算**可用** ⇒ 面板写「已过期 7」而选号判它可用、聚合把它排第一先烧
+ * ⇒ 从「说法含糊」升级成**「面板与行为相反」**。
+ *
+ * ## 现在（三处同判）
+ *
+ * `end <= now` ⇒ 独立 `expired` 桶：不进 `expiring`（前端 + 后端），
+ * 不参与 `earliest`、不算「有可用额度」（聚合 / `magicrewExpiry`）。
+ * ⇒ 只剩作废额度的账号档位 `none`（不可用），聚合判 `UNUSABLE` —— 钱确实没了。
+ * 守恒变成**四段**：`permanent + longTerm + expiring + expired === total`。
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -29,9 +36,9 @@ const farPkg = { name: '长期包', remaining: 500, total: 500, active: true, de
 const permPkg = { name: '永久积分', remaining: 1000, total: 1000, active: true }
 
 describe('已作废额度（issue：面板「临期 7」但标签写「已过期」）', () => {
-  it('★ 只作废包：expiring 仍含它（保守恒），expired 标出子集', () => {
+  it('★★ 只作废包：**不**计入 expiring（那 7 扣不到），只进 expired', () => {
     const split = splitCreditsByExpiry([expiredPkg], 30, NOW)
-    expect(split.expiring).toBe(7)
+    expect(split.expiring).toBe(0)
     expect(split.expired).toBe(7)
   })
 
@@ -50,8 +57,10 @@ describe('已作废额度（issue：面板「临期 7」但标签写「已过期
     const byKey = Object.fromEntries(parts.map((p) => [p.key, p.text]))
     expect(byKey.expiring).toBe('临期 300')
     expect(byKey.expired).toBe('已过期 7')
-    // 三档 + 已过期 === total（守恒不变量没被破坏）
-    expect(split.permanent + split.longTerm + split.expiring).toBe(1807)
+    // 四段合计 === total（守恒改成四段，用户照样能加平）
+    expect(split.permanent + split.longTerm + split.expiring + split.expired).toBe(1807)
+    // 且「临期」不再含那 7
+    expect(split.expiring).toBe(300)
     expect(byKey.permanent).toBe('永久 1000')
     expect(byKey.longTerm).toBe('长期 500')
   })

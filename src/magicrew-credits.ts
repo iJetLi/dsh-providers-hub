@@ -234,12 +234,26 @@ export async function fetchMagicrewBalance(params: {
    * 不裁的后果：三档合计 **大于** 账户实际余额（实测 350 vs 100），用户无法判断哪个是真的。
    */
   const rawListed = packages.reduce((sum, item) => sum + item.remaining, 0)
-  if (rawListed > total) {
+  /**
+   * ⚠️⚠️ **`total <= 0` 时不做裁剪**（2026-11-02，PR #168 对抗审计 B5 实测）。
+   *
+   * 上游可以回**负数** `total_points`（欠费，实测 −31）。旧写法 `budget = total`
+   * ⇒ 循环首轮就 `budget <= 0` ⇒ **break** ⇒ 它的正批次被**整条丢弃**、
+   * `packages = []` ⇒ 面板只剩「积分 -31」（无包、三档行不渲染），
+   * 而同一份报文里其实给了可用批次。
+   *
+   * 语义上「欠费」与「批次额度」是两件事：`total` 是净额、批次是各项余额。
+   * 报文自相矛盾时**如实两样都显示**（合计 −31 + 批次明细），比把明细删掉
+   * 让用户以为「什么都没有」更可诊断。
+   */
+  const trimBudget = Math.max(0, total)
+  // ⚠️ 只在 total >= 0 时裁剪：total < 0 是「欠费净额」，与批次是两件事（见上）。
+  if (total >= 0 && rawListed > trimBudget) {
     const byExpiry = [...packages].sort(
       (a, b) => (a.deductionEndTime ?? Number.POSITIVE_INFINITY) - (b.deductionEndTime ?? Number.POSITIVE_INFINITY),
     )
     packages.length = 0
-    let budget = total
+    let budget = trimBudget
     for (const item of byExpiry) {
       if (budget <= 0) break
       const keep = Math.min(item.remaining, budget)
@@ -430,15 +444,47 @@ export async function magicrewExpiry(params: {
   if (!(balance.total > 0)) return UNUSABLE
   const now = params.now ?? Date.now()
   let earliest = Number.POSITIVE_INFINITY
+  /**
+   * 是否存在**任何可用**批次（含「有额度但无到期时刻」= 永久）。
+   *
+   * ⚠️ 没有它的话，「只剩已作废批次」会走到 `return NEVER`（长期）——
+   * 而那是「有额度」的意思 ⇒ 该渠道被排进候选、每轮先失败一次
+   * （2026-11-02，对抗审计 B1 的同族；buddy 系与 `sharedPackageExpiry` 已修）。
+   */
+  let hasUsable = false
+  /** 是否**存在任何**（`remaining > 0` 的）批次 —— 用于区分「无批次」与「批次全作废」。 */
+  let sawBatch = false
   for (const item of balance.packages) {
     if (item.remaining <= 0) continue
+    sawBatch = true
     const at = item.deductionEndTime
-    const atMs = typeof at === 'number' && Number.isFinite(at) ? at : undefined
+    /**
+     * ⚠️ **判据与其余三处同一份**（`buddy-balance-rank.ts` 的
+     * `splitBuddyCreditsByExpiry` / `aggregate-expiry.ts` 的 `sharedPackageExpiry` /
+     * 前端 `credit-expiry.js`）：接受 **number 或数字字符串**，其余（`true` / `[ms]` /
+     * `{valueOf}`）一律当「未知」。
+     *
+     * 2026-11-02 审计实测：本原语原先只认 `typeof === 'number'` ⇒ 数字字符串在
+     * **聚合侧判「永久」**而在**面板判「临期」** —— 与 PR #168 §三.4 判为
+     * 「同一语义两套判据」的那格同型，只是换到了 magicrew 自己这一家。
+     * 生产主路径不可达（`fetchMagicrewBalance` 恒写 number），可达面是旧缓存 /
+     * 备份导入 / 手改 `state.json`。
+     */
+    const atIsNumeric = typeof at === 'number' || typeof at === 'string'
+    const atMs = atIsNumeric && Number.isFinite(Number(at)) && Number(at) > 0 ? Number(at) : undefined
     // ⚠️ 批次有效性按**时刻**判，不是硬编码 `active: true`：若上游过期后仍回该批次
     //（`deductionEndTime` 是**过去**时刻）而不判，该账号永远被判「最早作废」⇒
     //    聚合里每轮排最前。参考 `src/credits.ts:676-678`。
+    // 已作废 ⇒ 扣不到，既不算可用、也不参与排序。
     if (atMs !== undefined && atMs <= now) continue
+    hasUsable = true
     if (atMs !== undefined && atMs < earliest) earliest = atMs
   }
+  // ⚠️ 两种「不可用」要分开：
+  // ① **一个批次都没给**（`packages: []`）但 `total > 0`：上游只说有余额、不说批次
+  //    ⇒ 如实当「长期」（排最后但不剔除）—— 这是既有语义，别改成 UNUSABLE。
+  // ② **有批次但全作废**：那些额度扣不到 ⇒ `UNUSABLE`（钱已经没了）。
+  if (!sawBatch) return NEVER
+  if (!hasUsable) return UNUSABLE
   return Number.isFinite(earliest) ? earliest : NEVER
 }

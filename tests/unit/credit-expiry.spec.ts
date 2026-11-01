@@ -75,8 +75,14 @@ function backendSplit(packages: CreditPackage[], windowDays = WINDOW_DAYS, now =
  * `permanent + longTerm` 恰好等于后端的 `permanent`（同一个集合的两种切法）。
  * 故对账时按此归约 —— 这样「前端多算/少算临时积分」这类真实漂移仍会被抓住。
  */
-function reduceFrontendToBackend(frontend: { expiring: number; longTerm: number; permanent: number }) {
-  return { expiring: frontend.expiring, permanent: frontend.permanent + frontend.longTerm }
+function reduceFrontendToBackend(frontend: { expiring: number; longTerm: number; permanent: number; expired?: number }) {
+  // ⚠️ `expired` 也要带过去（2026-11-02）：两边都把它从 `expiring` 摘出来了，
+  //    对账时不带上就会「前端 0 / 后端 0 但键多一个」地假红。
+  return {
+    expiring: frontend.expiring,
+    permanent: frontend.permanent + frontend.longTerm,
+    ...frontend.expired === undefined ? {} : { expired: frontend.expired },
+  }
 }
 
 describe('splitCreditsByExpiry（前端三档分桶）', () => {
@@ -364,7 +370,9 @@ describe('splitCreditsByExpiry（前端三档分桶）', () => {
       pkg({ remaining: 100, deductionEndTime: NOW - 5 * DAY }), // 已过期但 active 仍为 true
       pkg({ remaining: 50, deductionEndTime: NOW + 3 * DAY }),
     ], WINDOW_DAYS, NOW)
-    expect(split?.expiring, '两笔都计入临期桶（它确实会作废）').toBe(150)
+    // ⚠️ **2026-11-02 改**：已过期那笔**不再**计入 `expiring`（扣不到），单独进 `expired`。
+    expect(split?.expiring, '只有未过期那笔还算「临期可用」').toBe(50)
+    expect(split?.expired, '已过期那笔单列').toBe(100)
     // ⚠️ 关键：取未过期那笔，而不是那个 5 天前的。
     expect(split?.earliestExpiringAt, '已过期包会让倒计时恒空，必须被排除').toBe(NOW + 3 * DAY)
   })

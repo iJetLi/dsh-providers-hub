@@ -1418,15 +1418,21 @@ describe('★★ sharedPackageExpiry：数字字符串的到期时间必须与 n
       async () => ({ total: 100, remaining: 100, packages: [pkg(deductionEndTime)] }) as never,
     )
 
-  it('★★ 数字字符串 `"1791072000000"` ⇒ 当临期折算，不是 NEVER', async () => {
-    const at = await expiryOf('1791072000000')
-    expect(at, '字符串被当「未知」⇒ 返回 NEVER，聚合会把它排到最后').toBe(1791072000000)
+  /**
+   * ⚠️ 用**未来**时刻：`sharedPackageExpiry` 内部取 `Date.now()`，而 2026-11-02 起
+   * 「已作废」的额度被排除（对抗审计 B1）⇒ 写死的历史时刻会变成 UNUSABLE。'
+   */
+  const FUTURE_AT = Date.now() + 3 * 86_400_000
+
+  it('★★ 数字字符串到期时刻 ⇒ 当临期折算，不是 NEVER', async () => {
+    const at = await expiryOf(String(FUTURE_AT))
+    expect(at, '字符串被当「未知」⇒ 返回 NEVER，聚合会把它排到最后').toBe(FUTURE_AT)
     expect(at === NEVER, 'NEVER 的语义是「可用但无临期」，与本意相反').toBe(false)
   })
 
   it('★ 同一个时刻用 number 与字符串给出**完全相同**的结果', async () => {
-    const asNumber = await expiryOf(1791072000000)
-    const asString = await expiryOf('1791072000000')
+    const asNumber = await expiryOf(FUTURE_AT)
+    const asString = await expiryOf(String(FUTURE_AT))
     expect(asString).toBe(asNumber)
   })
 
@@ -1434,5 +1440,36 @@ describe('★★ sharedPackageExpiry：数字字符串的到期时间必须与 n
     for (const bogus of [true, 'abc', 0, null]) {
       expect(await expiryOf(bogus), `${String(bogus)} 不应被当成有效到期时刻`).toBe(NEVER)
     }
+  })
+})
+
+
+describe('已作废额度不得让渠道「看起来可用」（对抗审计 B1）', () => {
+  const pastPkg = () => ({
+    name: 'p', unit: 'u', remaining: 100, total: 100, used: 0, active: true,
+    cycleStartTime: '', cycleEndTime: '', expiredTime: '',
+    deductionEndTime: Date.now() - 3 * 86_400_000,
+  })
+
+  it('★ 只剩已作废批次 ⇒ UNUSABLE（不再返回过去时刻、更不再被排最前）', async () => {
+    const at = await lobsteraiExpiry(
+      { access_token: 't' } as never,
+      LOBSTERAI,
+      async () => ({ total: 100, remaining: 100, packages: [pastPkg()] }) as never,
+    )
+    expect(at).toBe(UNUSABLE)
+  })
+
+  it('★ 已作废 + 真临期 ⇒ 只取真临期那个时刻', async () => {
+    const future = Date.now() + 3 * 86_400_000
+    const at = await lobsteraiExpiry(
+      { access_token: 't' } as never,
+      LOBSTERAI,
+      async () => ({
+        total: 200, remaining: 200,
+        packages: [pastPkg(), { ...pastPkg(), deductionEndTime: future }],
+      }) as never,
+    )
+    expect(at).toBe(future)
   })
 })

@@ -1681,11 +1681,32 @@ export class AccountPool {
      * 「文档被删」，按「钱不可逆」的方向保留内存里的锁，绝不静默解锁。
      */
     const disk = this.reloadLocksFromDisk()
-    const next: PermanentLockMap = disk.exists ? { ...disk.locks } : { ...this.permanentLockCache }
+    /**
+     * ⚠️⚠️ **`degraded` 时以内存为基线**（2026-11-02，PR #168 对抗审计 B3 实测）：
+     * 主文件与 `.bak` 都读不出来时，那份空表**不是事实**。旧实现只看 `disk.exists`
+     * ⇒ 用户再锁任意一家，其余几家的锁定就被这份空表覆盖，**并连同 `.bak` 一起**
+     * 写死 ⇒ 重启后 fail-open 被持久化、不可恢复（症状：永久积分照烧、无提示）。
+     */
+    const useDisk = disk.exists && disk.degraded !== true
+    const next: PermanentLockMap = useDisk ? { ...disk.locks } : { ...this.permanentLockCache }
     if (locked) next[provider] = true
     else delete next[provider]
+    /**
+     * ⚠️⚠️ **落盘失败必须回滚内存**（2026-11-02，对抗审计 B4 实测）：
+     * 旧实现先改内存再 `await persistLocks()`，一次并发写失败（`EPERM`/`ENOENT`，
+     * 两进程共用 `$DSH_HOME` 时真实存在）会让内存**领先磁盘**；用户随后再动
+     * 任意一家的锁，那条「内存有、磁盘没有」的记录就被「磁盘优先」删掉
+     * ⇒ 锁定静默失效（实测：`magicrew` 从 `true` 变 `false`）。
+     * 回滚后磁盘与内存始终一致，失败的锁定对用户是**可见的报错**而不是隐身状态。
+     */
+    const previous = this.permanentLockCache
     this.permanentLockCache = next
-    await this.persistLocks()
+    try {
+      await this.persistLocks()
+    } catch (error) {
+      this.permanentLockCache = previous
+      throw error
+    }
   }
 
   /**

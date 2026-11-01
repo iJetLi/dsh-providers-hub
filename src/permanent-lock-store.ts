@@ -33,6 +33,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PermanentLockMap } from './jet-hub-store.js'
@@ -48,7 +49,17 @@ export type PermanentLockStoreKind = 'file' | 'memory'
 /** 读取结果：区分「文档不存在」与「存在但是空表」—— 见文件头的迁移判据。 */
 export type PermanentLockRead =
   | { exists: false; locks: PermanentLockMap }
-  | { exists: true; locks: PermanentLockMap }
+  | {
+    exists: true
+    locks: PermanentLockMap
+    /**
+     * **主文件与 .bak 都读不出来**（不是「文件里确实没锁」）。
+     *
+     * ⚠️ 写侧必须据此**以内存为基线**：把这份空表当成事实会连同 `.bak`
+     *    一起覆盖掉，用户其余几家的锁定就永久消失了（对抗审计 B3 实测）。
+     */
+    degraded?: boolean
+  }
 
 /**
  * 独立文档的读写接口（同步读、异步写，与 `JetHubStore` 同款约定）。
@@ -112,8 +123,20 @@ class FileLockStore implements PermanentLockStore {
       this.logger?.warn(`[jet-hub] ${this.path} 已损坏，已回落到 .bak（锁定状态以备份为准）`)
       return { exists: true, locks: backup }
     }
-    this.logger?.warn(`[jet-hub] ${this.path} 与 .bak 均不可读，按未锁定处理（请检查文件）`)
-    return { exists: true, locks: {} }
+    /**
+     * ⚠️⚠️ **双损坏时不能只 warn 就交空表**（2026-11-02，PR #168 对抗审计 B3 实测）：
+     * 旧实现返回 `{exists:true, locks:{}}` ⇒ 写侧的「磁盘存在就以磁盘为准」
+     * 会把**内存里还在的锁定**整份丢掉，并且**连同 `.bak` 一起**写成新的小表
+     * ⇒ 用户再锁任意一家，其余几家的锁定静默消失且**不可恢复**（重启后连 warn 都没了）。
+     *
+     * ⇒ 用 `degraded` 告诉写侧「这份空表不是事实，而是读不出来」，
+     *   写侧据此**以内存为基线**（见 `AccountPool.setPermanentLocked`）。
+     */
+    this.logger?.warn(
+      `[jet-hub] ${this.path} 与 .bak 均不可读 ⇒ 本次以**内存里的锁定**为准`
+      + '（请检查该文件；损坏期间不要依赖另一条工作区的面板）',
+    )
+    return { exists: true, locks: {}, degraded: true }
   }
 
   /** 读一个文件并解析；不存在或损坏都返回 `undefined`（由调用方决定回落顺序）。 */
@@ -130,7 +153,16 @@ class FileLockStore implements PermanentLockStore {
 
   async save(locks: PermanentLockMap): Promise<void> {
     mkdirSync(join(this.path, '..'), { recursive: true })
-    const tmp = `${this.path}.tmp`
+    /**
+     * ⚠️⚠️ **临时文件名必须唯一**（2026-11-02，PR #168 对抗审计 B4 实测）：
+     * 原先用**固定**的 `${path}.tmp`，而本文件的立论场景正是「两个进程共用同一个
+     * `$DSH_HOME`」—— 实测两进程各跑 6 秒：`ok=572 fail=35` / `ok=579 fail=29`，
+     * 错误是 `ENOENT`（改名时对方的 tmp 已被抢走）与 `EPERM`（Windows 上对方
+     * 正在写）。**写直接丢**，而内存已经先改了 ⇒ 磁盘/内存分叉。
+     *
+     * 照 `token-ledger-store.ts` 的写法：`pid + randomUUID()`。
+     */
+    const tmp = `${this.path}.${process.pid}.${randomUUID()}.tmp`
     // 带 schema 标记：与本仓库其它状态文档同惯例，便于将来演进时判别。
     writeFileSync(tmp, JSON.stringify({ schema: SCHEMA, locks }, null, 2), 'utf-8')
     renameSync(tmp, this.path)
