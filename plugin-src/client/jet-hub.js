@@ -8760,6 +8760,16 @@ export function JetHubPage({ rpcCall }) {
    */
   const autoCheckinRef = React.useRef(autoCheckin);
   React.useEffect(() => { autoCheckinRef.current = autoCheckin }, [autoCheckin]);
+  /** 正在保存（单飞闸门）：防止「连点关闭」发出两条相同的写请求。 */
+  const checkinSavingRef = React.useRef(false);
+  /**
+   * 上一次保存**失败过**（面板已把错误显示出来）。
+   *
+   * ⚠️ 存在的理由（2026-11-01 第二轮审计 P2-3）：修好「失败保住面板」之后，面板
+   * 会变成**关不掉** —— 每次关闭手势都重试保存、都失败。这里的闸门让「失败过一次」
+   * 之后的关闭手势直接关掉面板（错误已提示过），用户仍有唯一的逃生出口。
+   */
+  const checkinSaveFailedRef = React.useRef(false);
   /**
    * 供应商级状态（provider id → ProviderStatus），driving 左侧分组与页头弹窗里的开关。
    *
@@ -9237,15 +9247,33 @@ export function JetHubPage({ rpcCall }) {
       setShowCheckinPanel(false);
       return;
     }
+    // ★ 单飞：上一次保存还没回来时，忽略重复的关闭手势（audit2 P2-3）。
+    //   否则「点外部关闭 + 再点一次」会发出**两条相同 payload** 的写请求。
+    if (checkinSavingRef.current) return;
+    // ★ 上一次保存**已经失败过**且用户没再改 ⇒ 这次直接关：错误已经显示过，
+    //   不能把面板变成关不掉的死锁（audit2 P2-3）。用户的改动仍是「未保存」，
+    //   重开面板时草稿会被宿主值覆盖 —— 这是「已经提示过失败」的代价，比卡死好。
+    if (checkinSaveFailedRef.current) {
+      setShowCheckinPanel(false);
+      return;
+    }
     // 有改动 ⇒ 提交；**成功才关**，失败则把面板留在打开状态（否则错误文案渲染在
     // 一个已经关闭的面板里，用户永远看不到 —— 2026-11-01 审计 P2-4）。
+    checkinSavingRef.current = true;
     void saveCheckinTimesWith(plan.times, plan.jitterMinutes > 0, plan.jitterMinutes)
-      .then((okSaved) => { if (okSaved) setShowCheckinPanel(false); });
+      .then((okSaved) => {
+        checkinSavingRef.current = false;
+        if (okSaved) setShowCheckinPanel(false);
+        else checkinSaveFailedRef.current = true;
+      });
   };
 
   const toggleCheckinPanel = () => {
     if (showCheckinPanel) { closeCheckinPanel(); return }
     setAutoCheckinError('');
+    // 重新打开 = 重新给一次机会：清掉「上次保存失败」的闸门（否则用户改完再关会
+    // 走「直接关」分支，改动又一次静默丢弃）。
+    checkinSaveFailedRef.current = false;
     setShowCheckinPanel(true);
     // 与其它页头浮层互斥：它们都是 position:fixed，同时开会叠在一起。
     setShowProviderSwitches(false);
@@ -9600,6 +9628,8 @@ export function JetHubPage({ rpcCall }) {
           onChange: (event) => {
             const next = [...timeDraft];
             next[index] = event.target.value;
+            // 用户又改了 ⇒ 允许下一次关闭再试一次保存（清掉失败闸门）。
+            checkinSaveFailedRef.current = false;
             setTimeDraft(next);
           },
         }))),
@@ -9616,7 +9646,10 @@ export function JetHubPage({ rpcCall }) {
             className: 'dim-jh-switch',
             checked: jitterOn,
             disabled: busy,
-            onChange: (event) => setJitterOn(event.target.checked),
+            onChange: (event) => {
+              checkinSaveFailedRef.current = false;
+              setJitterOn(event.target.checked);
+            },
           }),
           React.createElement('span', null, '随机浮动')),
         React.createElement('input', {
@@ -9628,7 +9661,10 @@ export function JetHubPage({ rpcCall }) {
           value: jitterMinutes,
           disabled: busy || !jitterOn,
           'aria-label': '随机浮动分钟数',
-          onChange: (event) => setJitterMinutes(Number(event.target.value)),
+          onChange: (event) => {
+            checkinSaveFailedRef.current = false;
+            setJitterMinutes(Number(event.target.value));
+          },
         }),
         React.createElement('span', null, '分钟')),
       React.createElement('div', { className: 'dim-jh-checkinHint' },

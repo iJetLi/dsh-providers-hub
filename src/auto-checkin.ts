@@ -23,7 +23,7 @@
  *    若抢在续期之前签到，过期凭据会让整轮变成失败。
  * 即便如此仍可能抢在续期完成前（多账号时续期本身就要几秒到几十秒），故**再加
  * 一道保险**：整轮跑完**没有任何一条能证明「今天已被处理」**时**不记日期**，
- * 下次启动会重试（见 `shouldMarkToday`）。延迟可用
+ * 下次启动会重试（见 {@link runnableSlotKey} 与逐渠道水位线）。延迟可用
  * `DSH_JET_HUB_AUTO_CHECKIN_DELAY_MS` 覆盖，`0` 合法（表示立刻跑，单测用它）。
  *
  * ## 什么算「今天已被处理」
@@ -170,22 +170,23 @@ export interface AutoCheckinDoc {
 /**
  * 默认两个执行时刻（UTC+8）。
  *
- * ## 为什么第一轮是 **10:05** 而不是 09:00（2026-11-01 审计 P1-5，用户实测报障）
+ * ## 为什么保持 **09:00 / 21:00**（2026-11-01 第二轮审计推翻了「改成 10:05」）
  *
  * 本仓库各渠道的每日额度刷新时点**不统一**：多数在 00:00，而 Qoder 活动要
- * **10:00（UTC+8）** 才刷新（见 `src/auto-checkin.ts` 文件头与 `credits.ts`）。
- * 09:00 那轮对 Qoder 拿到的是**昨天**的 `CLAIMED`：`coversToday === 0`，
- * 但混合渠道池里别的渠道会证明今天 ⇒ 整轮记账、停止重试 ⇒ **10:00 刷出来的
- * 额度当天再也不会被领**（只有 21:00 那轮兜，而用户白天用完就关 DSH 时它不会发生）。
+ * **10:00（UTC+8）** 才刷新（见文件头与 `credits.ts`）。09:00 那轮对 Qoder 拿到的是
+ * **昨天**的 `CLAIMED`（`coversToday === 0`）——旧实现因此整天漏领。
  *
- * 改成 10:05：① 晚于全部已知刷新点；② 给上游 5 分钟缓冲（刷新瞬间打过去容易
- * 拿到「未刷新」的痕迹）；③ 仍是「上午一次、晚上一次」，任一轮失败还有另一轮兜底。
+ * 曾经把默认改成 10:05 来回避，但那有两个真问题：
+ * ① **修不到存量用户**：`FileAutoCheckinStore.save` 每轮都会把 `times` 写盘，跑过一轮的
+ *   文档里 09:00 已被固化 ⇒ 只有「从没跑过的新装」才变成 10:05，两批用户行为不一致；
+ * ② **多跑一整轮**：工作日 09:00–18:00 的用户会看到「每天两轮全渠道扫」（12 渠道
+ *   24 次写请求），而某些开关机组合会从「1 轮/天」变成「某天 0 轮」。
  *
- * ⚠️ 即使时段设在 10:05，负偏移（浮动）仍可能把它提前到 10:00 之前 —— 故另有
- * 逐渠道水位线兜底（见 {@link AutoCheckinDoc.pendingSlot}）：没领到的渠道会留在
- * 待补队列里按退避重试，而不是等下一个时段。
+ * 真正的修法是**逐渠道水位线 + 补领**（见 {@link AutoCheckinDoc.pendingSlot}）：
+ * 09:00 那轮 Qoder 没证明今天 ⇒ 只重试 Qoder，10:00 刷新后自然领到；
+ * 窗口 3 小时（`LAG_RETRY_WINDOW_MS`）覆盖「浮动把 09:00 提前到 07:00」的最坏情形。
  */
-export const DEFAULT_AUTO_CHECKIN_TIMES: readonly string[] = ['10:05', '21:00']
+export const DEFAULT_AUTO_CHECKIN_TIMES: readonly string[] = ['09:00', '21:00']
 
 /** 恰好两个时段：用户明确要求「一天两次」。 */
 export const AUTO_CHECKIN_SLOT_COUNT = 2
@@ -282,13 +283,15 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
 }
 
 /**
- * 归一化时段列表：丢掉非法项、去重、升序，**不足/超出都回落到默认两个**。
+ * 归一化时段列表：丢掉非法项、去重、升序，**不足回落到默认两个**、**多于保留首尾**。
  *
  * ⚠️ 不能「只补到两个」：旧文档没有 `times` 字段 ⇒ 空数组 ⇒ 若原样保留，自动
  * 签到会**永远等不到时段**（一天都不跑），而这正是本特性的核心失效形态。回落
  * 默认值让升级后立刻按 09:00/21:00 工作，用户再改。
- * ⚠️ 也不能保留多于两个：用户要求「一天两次」，多留的时段会变成「一天跑三次」，
- * 与「不多次重复触发」的既有语义冲突。多余项按排序后取前两个。
+ * ⚠️ 也不能保留多于两个：用户要求「一天两次」，多留的时段会变成「一天跑三次」。
+ * ⚠️ 但**多余项要留首尾**，不是「排序后前两个」（2026-11-01 第二轮审计 P3）：
+ * 取前两个会把**最晚那一轮**静默丢掉（`["09:00","14:00","21:00"]` ⇒ 只剩
+ * 09:00/14:00，晚上那次没了）。留首尾至少保住全天的覆盖跨度。
  */
 export function sanitizeTimes(raw: unknown): string[] {
   const valid: string[] = []
@@ -298,8 +301,10 @@ export function sanitizeTimes(raw: unknown): string[] {
       if (!valid.includes(item)) valid.push(item)
     }
   }
-  if (valid.length < AUTO_CHECKIN_SLOT_COUNT) return [...DEFAULT_AUTO_CHECKIN_TIMES]
-  return valid.sort().slice(0, AUTO_CHECKIN_SLOT_COUNT)
+  const sorted = valid.sort()
+  if (sorted.length < AUTO_CHECKIN_SLOT_COUNT) return [...DEFAULT_AUTO_CHECKIN_TIMES]
+  if (sorted.length === AUTO_CHECKIN_SLOT_COUNT) return sorted
+  return [sorted[0]!, sorted[sorted.length - 1]!]
 }
 
 /**
@@ -677,7 +682,7 @@ interface RunTotals {
   /**
    * 其中**能证明「今天这一轮已被处理」**的账号数（来自 `summary.coversToday`）。
    *
-   * ⚠️ 这是 {@link shouldMarkToday} **唯一**该看的口径 —— 不能用
+   * ⚠️ 这是**唯一**该看的口径（逐渠道判据也用它）—— 不能用
    * `claimed + alreadyClaimed`：那两项里混着「刷新前那一轮」的痕迹
    * （Qoder 活动 10:00 UTC+8 才刷新），拿它们记账会让当天新额度整天漏领。
    * 字段语义见 `src/credits.ts` 的 `ClaimOutcomeCommon.coversToday`。
@@ -757,31 +762,6 @@ export function describeRun(totals: RunTotals): string {
   if (totals.skipped > 0) parts.push(`${totals.skipped} 个渠道不支持签到`)
   if (parts.length === 0) return `${totals.providers} 个渠道：没有需要领取的账号`
   return `${totals.providers} 个渠道：${parts.join('，')}`
-}
-
-/**
- * 这一轮该不该把「今天」记为已跑。
- *
- * 判据：**至少有一个账号能证明「今天这一轮已被处理」**（`coversToday > 0`）才记。
- *
- * ⚠️⚠️ **为什么不能看 `claimed + alreadyClaimed`**（真实缺陷，2026-10-02 审查
- * PR !33 定位）：那两项里混着「**刷新前那一轮**」的痕迹。Qoder 的活动每日
- * 10:00（UTC+8）才刷新，于是上午 9 点跑的那一轮看到的是**昨天**那条 `CLAIMED`
- * —— 记成「今天已跑」之后，当天 10 点刷新出来的新额度**整天不会再被领**，
- * 而且界面还显示「1 个今天已领」，用户毫无提示。渠道自己用
- * `ClaimOutcome.coversToday` 标出「这条不算今天」，本函数只负责数。
- *
- * 反例（不记、下次启动重试）：
- * - 整轮零成功零已领（凭据全过期 / 网络不通 / 启动太早抢在续期之前）——
- *   若记了，用户当天就再也不会自动签到，且界面只说「上次：N 个失败」；
- * - 跑完但**没有一条能证明今天**（例如只有 Qoder 且赶在 10:00 之前）——
- *   同理不记，当天稍后还有机会；
- * - 一个渠道都没跑（全被跳过）：没有意义，不记。
- * 反之「有成功也有失败」要记：否则一个坏账号会让插件每次启动都把好账号再领一遍
- * （虽然幂等，但白白多发请求）。
- */
-export function shouldMarkToday(totals: RunTotals): boolean {
-  return totals.coversToday > 0
 }
 
 /**
@@ -1057,9 +1037,24 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
      * 否则一个 zcode 账号会让整条链永远在重试（而它每次都是零请求，纯浪费）。
      */
     const unretryable = new Set<string>()
+    /**
+     * 逐渠道水位线的**当前有效值**：只保留池里还存在的渠道。
+     *
+     * ⚠️ 为什么会残留（2026-11-01 第二轮审计 P3）：渠道被删 / 改名后，键还留在文档里；
+     * 用户再把同一渠道加回来时，那条**旧水位线**会让它被判成「本轮已处理」而跳过
+     * 上游签到（实测：池空 → 加回同一渠道 ⇒ 12:00 那次 `claim` 调用次数 = 0）。
+     * 故每轮开始时按当前池**重建**这张表。
+     */
+    const prunedSlots: Record<string, string> = {}
+    for (const provider of providers) {
+      const value = doc.providerSlots?.[provider] ?? ''
+      if (value !== '') prunedSlots[provider] = value
+    }
+    const prunedChanged = Object.keys(prunedSlots).length !== Object.keys(doc.providerSlots ?? {}).length
+    if (prunedChanged) doc = { ...doc, providerSlots: prunedSlots }
     for (const provider of providers) {
       // 逐渠道水位线：该渠道在这个时段已经处理过 ⇒ 跳过（重试时不再重复打上游）。
-      if (targetSlot !== '' && (doc.providerSlots?.[provider] ?? '') >= targetSlot) {
+      if (targetSlot !== '' && (prunedSlots[provider] ?? '') >= targetSlot) {
         channels.push({ provider, text: '本轮已处理' })
         proven.add(provider)
         continue
@@ -1124,17 +1119,43 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       // 一个渠道都没有：没有可领的东西，也不该推进水位线（用户随时可能加账号）。
       // 与旧行为一致地记账失败 ⇒ 走退避（此时**零上游请求**，不会轰炸）。
       dueFailures += 1
+      // ⚠️ 但**要把清掉的逐渠道水位线落盘**：否则「渠道被删 → 又加回来」时，
+      //   磁盘上那条旧水位线会让它被判成「本轮已处理」而跳过签到（第二轮审计 P3）。
+      if (prunedChanged) {
+        try {
+          await deps.store.save(doc)
+        } catch (error) {
+          deps.warn?.(`[jet-hub] 自动签到：清理逐渠道水位线写入失败: ${String(error)}`)
+        }
+      }
       deps.warn?.(`[jet-hub] 自动签到：账号池里没有可签到的渠道（第 ${dueFailures} 次）`)
       return
     }
 
     if (proven.size === 0) {
-      // ⚠️ **整轮没有任何一条渠道能证明「今天已被处理」** ⇒ 不记账（保留旧语义，
-      //   由 `shouldMarkToday` 的判据演化而来）：
+      // ⚠️ **整轮没有任何一条渠道能证明「今天已被处理」** ⇒ **不推进**水位线（保留
+      //   旧语义，当时由「整轮 coversToday>0」判 —— 现在逐渠道判）：
       //   - 凭据全过期 / 网络不通 / 启动太早抢在续期之前；
       //   - 「只有 zcode」这类**全部被跳过**的池子：跳过不构成「今天跑过」。
       //   下一次按退避重试（`dueFailures` 记账，避免退回每秒一轮的忙循环）。
+      //
+      // ★ 但**必须**把这轮的可读结果写下来（2026-11-01 第二轮审计 P2-8）：旧实现
+      //   在这里直接 return，`lastResult` / `channels` 停在几天前那一轮 ⇒ 凭据全过期
+      //   时面板永远显示「上次：昨天的成功」，用户看不到「今天一直在失败」。
       dueFailures += 1
+      doc = {
+        ...doc,
+        lastResult: `${describeRun(totals)}（本轮未计入今日，稍后重试）`,
+        lastAt: now(),
+        channels,
+        // 与成功路径同一条理由：新一轮结果出来，之前「已关闭」的标记要失效。
+        dismissedRunAt: 0,
+      }
+      try {
+        await deps.store.save(doc)
+      } catch (error) {
+        deps.warn?.(`[jet-hub] 自动签到失败结果写入失败: ${String(error)}`)
+      }
       deps.warn?.(
         `[jet-hub] 自动签到未记入今日（第 ${dueFailures} 次，将退避 ${Math.round(retryBackoffMs(dueFailures) / 1000)} 秒后重试）：${describeRun(totals)}`,
       )
@@ -1143,16 +1164,29 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
 
     const nextProviderSlots: Record<string, string> = {}
     for (const provider of providers) {
-      const value = proven.has(provider) ? targetSlot : (doc.providerSlots?.[provider] ?? '')
+      const value = proven.has(provider) ? targetSlot : (prunedSlots[provider] ?? '')
       if (value !== '') nextProviderSlots[provider] = value
     }
     // ★ 待补 = 「有渠道证明了今天，但这个渠道还没有，且它**有可能**领到」。
     //   设计上不该重试的（排除表 / 无签到接口）不算待补，否则它们会拖住水位线。
     const lagging = providers.filter((provider) => !proven.has(provider) && !unretryable.has(provider))
-    // 同一时段最多重试 `LAG_RETRY_MAX` 次（1s→…→30 分钟，累计约 1.5 小时）：
-    // 够覆盖「10:00 才刷新额度」这类延迟，又不会因为一个坏账号永远不记账。
-    const attempts = dueFailures + 1
-    const giveUp = lagging.length > 0 && attempts > LAG_RETRY_MAX
+    // 补领预算：**按时间**而不是按次数（2026-11-01 第二轮审计 P2-1）。
+    //
+    // ⚠️ 旧实现按「14 次」算 ⇒ 累计只有 7447 秒（124 分钟），而最坏情况需要
+    //   「09:00 时段被 -120 分钟浮动推到 07:00，等 Qoder 10:00 刷新」= **180 分钟**
+    //   ⇒ 预算先耗尽，当天 Qoder 仍然漏领。改成时间窗 3 小时后覆盖得住；
+    //   次数上限只作为「时间不可信（时钟回拨）」时的兜底。
+    if (lagSince === 0 || doc.pendingSlot !== targetSlot) {
+      // 换了一个时段、或**本进程刚接手**（`lagSince` 还是 0，例如重启后文档里
+      // 已带着 `pendingSlot`）⇒ 预算从这一刻重新计 3 小时窗。
+      // ⚠️ 少了 `lagSince === 0` 这一腿，重启后的补领会**永远不计时**、也就永远不会
+      //    放弃（实测：3h05m 后仍在重试）。
+      lagSince = now()
+      lagAttempts = 0
+    }
+    lagAttempts += 1
+    const overWindow = lagSince > 0 && now() - lagSince > LAG_RETRY_WINDOW_MS
+    const giveUp = lagging.length > 0 && (overWindow || lagAttempts > LAG_RETRY_MAX)
 
     if (lagging.length > 0 && !giveUp) {
       // ★ 部分完成：**不动** `lastSlot`（这个时段还没处理完），改用 `pendingSlot`
@@ -1174,7 +1208,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       }
       deps.warn?.(
         `[jet-hub] 自动签到部分完成（${targetSlot}）：${lagging.join('、')} 还没证明今天，`
-        + `第 ${dueFailures} 次重试将在 ${Math.round(retryBackoffMs(dueFailures) / 1000)} 秒后`,
+        + `第 ${lagAttempts} 次重试将在 ${Math.round(retryBackoffMs(dueFailures) / 1000)} 秒后`,
       )
       return
     }
@@ -1198,8 +1232,11 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
     }
     try {
       await deps.store.save(doc)
-      // ★ 记账成功 ⇒ 清掉退避计数（下一轮是正常时段，不该带着旧退避）。
+      // ★ 记账成功 ⇒ 清掉退避计数（下一轮是正常时段，不该带着旧退避），
+      //   同时把**补领预算**归零（下一个时段重新计 3 小时窗）。
       dueFailures = 0
+      lagAttempts = 0
+      lagSince = 0
     } catch (error) {
       // 写盘失败 ⇒ 今天可能再跑一次（幂等，代价是多发一轮请求），如实告警。
       // ⚠️ 也记一次失败：否则关闭循环又变成每秒重试。
@@ -1250,13 +1287,28 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   const RETRY_BACKOFF_MAX_MS = 30 * 60_000
 
   /**
-   * 同一时段最多补领几次。
+   * 同一时段的补领**时间窗**：3 小时。
    *
-   * 1s→2s→…→ 封顶 30 分钟，累计约 **1.5 小时**：够覆盖「10:00 才刷新额度」这类
-   * 延迟（例：09:00 那轮对 Qoder 拿不到今天的痕迹 ⇒ 之后每小时重试一次，
-   * 到 10:00 之后自然领到），又不至于因为一个坏账号永远不记账。
+   * 最坏情况是「09:00 时段被浮动（上限 120 分钟）推到 07:00，而 Qoder 10:00 才刷新」
+   * ⇒ 需要等 **180 分钟**。窗口按时间算（而不是按次数）才覆盖得住。
+   * ⚠️ 第一版按「14 次」估算，实际累计只有 7447 秒（124 分钟），少算 40% ——
+   *   第二轮审计实测那条路径仍然漏领。改时间窗后不再取决于退避曲线怎么长。
    */
-  const LAG_RETRY_MAX = 14
+  const LAG_RETRY_WINDOW_MS = 3 * 3_600_000
+
+  /**
+   * 补领次数上限（兜底）。
+   *
+   * 时间窗在「时钟回拨 / 系统休眠导致 `now()` 不前进」时可能永远不到期，
+   * 故再加一道次数闸：40 次 ×（最长 30 分钟）远大于 3 小时窗，正常路径不会先撞到它。
+   */
+  const LAG_RETRY_MAX = 40
+
+  /** 当前时段已补领了几次（与 `dueFailures` 分开：后者是「整轮失败」的退避计数）。 */
+  let lagAttempts = 0
+
+  /** 当前时段的补领起点（换时段时重置）。 */
+  let lagSince = 0
 
   /** 按连续失败次数算退避延迟（指数退避，封顶）。 */
   function retryBackoffMs(failures: number): number {

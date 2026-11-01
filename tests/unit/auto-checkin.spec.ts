@@ -13,10 +13,10 @@ import {
   latestDueSlotKey,
   nextRunAtOf,
   nextRunDelayMs,
+  runnableSlotKey,
   sanitizeAutoCheckin,
   sanitizeTimes,
   sanitizeTimesStrict,
-  shouldMarkToday,
   shouldRunNow,
   slotKey,
   checkinJitterOffsetMs,
@@ -276,7 +276,11 @@ describe('自动签到：执行判据', () => {
       claim: async () => ({ ok: false, error: { code: 'unauthorized', message: '凭据已过期' } }),
     })
     await runner.runIfDue()
-    expect(store.saves).toEqual([])
+    // ⚠️ 2026-11-01 第二轮审计 P2-8：失败轮**也要**把可读结果写下来（否则面板永远
+    //    显示几天前的「上次」）。判据改成「水位线不动」，不再要求「完全不写盘」。
+    expect(store.current().lastSlot).toBe('')
+    expect(store.current().lastDate).toBe('')
+    expect(store.current().lastResult).toContain('未计入今日')
     expect(runner.state().ranToday).toBe(false)
     expect(warnings.some((w) => w.includes('未记入今日'))).toBe(true)
   })
@@ -356,9 +360,8 @@ describe('自动签到：开关与启动排定', () => {
     })
     await runner.runIfDue()
     expect(calls).toEqual(['buddy', 'qoder'])
-    // ⚠️ 默认第一个时段是 10:05（不是 09:00）：见 `DEFAULT_AUTO_CHECKIN_TIMES` 的
-    //    说明 —— 09:00 那轮对「10:00 才刷新额度」的渠道拿不到今天的额度。
-    expect(store.current().lastSlot).toBe('2026-10-02#10:05')
+    // NOON_UTC8 是 UTC+8 的 12:00 ⇒ 已到点的是今天第一个时段 09:00（不是 21:00）
+    expect(store.current().lastSlot).toBe('2026-10-02#09:00')
     calls.length = 0
     await runner.runIfDue()
     expect(calls).toEqual([])
@@ -513,18 +516,6 @@ describe('自动签到：摘要与判据的纯函数', () => {
     })).toBe('2 个渠道：没有需要领取的账号')
   })
 
-  it('shouldMarkToday：只看「能证明今天已被处理」的条数（`coversToday`）', () => {
-    const base = {
-      providers: 1, claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 0, failed: 0, skipped: 0, errors: 0, coversToday: 0,
-    }
-    expect(shouldMarkToday({ ...base, coversToday: 1 })).toBe(true)
-    expect(shouldMarkToday({ ...base, claimed: 1, coversToday: 1 })).toBe(true)
-    expect(shouldMarkToday({ ...base, alreadyClaimed: 1, coversToday: 1 })).toBe(true)
-    expect(shouldMarkToday({ ...base, failed: 2 })).toBe(false)
-    expect(shouldMarkToday({ ...base, errors: 1 })).toBe(false)
-    expect(shouldMarkToday(base)).toBe(false)
-  })
-
   /**
    * ⚠️⚠️ **真实缺陷回归（2026-10-02 审查 PR !33 定位）**：`claimed` / `alreadyClaimed`
    * 为正但 `coversToday` 为 0 时**不得**记账。
@@ -534,10 +525,22 @@ describe('自动签到：摘要与判据的纯函数', () => {
    * `claimed + alreadyClaimed` 记账 ⇒ 当天新额度**整天不会再被领**，而面板
    * 还显示「1 个今天已领」，用户毫无提示。
    */
-  it('只有「非今日轮次」的痕迹时 ⇒ 不记账（否则当天刷新后的额度整天漏领）', () => {
-    const base = { providers: 1, totalCredit: 0, inactive: 0, failed: 0, skipped: 0, errors: 0 }
-    expect(shouldMarkToday({ ...base, claimed: 0, alreadyClaimed: 1, coversToday: 0 })).toBe(false)
-    expect(shouldMarkToday({ ...base, claimed: 1, totalCredit: 100, alreadyClaimed: 0, coversToday: 0 })).toBe(false)
+  it('只有「非今日轮次」的痕迹时 ⇒ 不推进水位线（否则当天刷新后的额度整天漏领）', async () => {
+    // ⚠️ 这条原本打在纯函数 `shouldMarkToday` 上；该函数已被逐渠道判据取代并删除，
+    //    判据本身改由**行为**验证：跑完一轮后水位线不动 ⇒ 还会再试。
+    let claims = 0
+    const { runner, store } = makeRunner({
+      providers: ['qoder'],
+      claim: async () => { claims += 1; return ok({ alreadyClaimed: 1, coversToday: 0 }) },
+    })
+    await runner.runIfDue()
+    expect(store.current().lastSlot).toBe('')
+    expect(store.current().lastDate).toBe('')
+    // 结果本身要写下来（P2-8），面板才不会显示几天前的「上次」
+    expect(store.current().lastResult).toContain('未计入今日')
+    // 且下一轮仍会真的再打上游（而不是被误判成「今天已跑」）
+    await runner.runIfDue()
+    expect(claims).toBe(2)
   })
 
   it('describeChannel 会标出「非今日轮次」，不把昨天的痕迹说成「今天已领」', () => {
@@ -558,7 +561,9 @@ describe('自动签到：摘要与判据的纯函数', () => {
       claim: async () => ok({ alreadyClaimed: 1, coversToday: 0 }),
     })
     await runner.runIfDue()
-    expect(store.saves).toEqual([])
+    // 水位线不动（刷新后还有机会），但**结果要写下来**（P2-8）。
+    expect(store.current().lastSlot).toBe('')
+    expect(store.current().lastDate).toBe('')
     expect(runner.state().ranToday).toBe(false)
     expect(warnings.some((w) => w.includes('未记入今日'))).toBe(true)
   })
@@ -624,7 +629,9 @@ describe('自动签到：排除「签到有代价」的渠道', () => {
     const { runner, calls, store } = makeRunner({ providers: ['zcode'] })
     await runner.runIfDue()
     expect(calls).toEqual([])
-    expect(store.saves).toEqual([])
+    // 跳过不构成「今天跑过」⇒ 水位线不动（结果本身会写下来，见 P2-8）
+    expect(store.current().lastSlot).toBe('')
+    expect(store.current().lastDate).toBe('')
     expect(runner.state().ranToday).toBe(false)
   })
 
@@ -733,11 +740,14 @@ describe('★ 自动签到：每天两次定时', () => {
     expect(sanitizeTimes('nonsense')).toEqual([...DEFAULT_AUTO_CHECKIN_TIMES])
   })
 
-  it('sanitizeTimes：合法输入去重、升序；非法项丢弃；多于两个截断', () => {
+  it('sanitizeTimes：合法输入去重、升序；非法项丢弃；多于两个**留首尾**', () => {
     expect(sanitizeTimes(['21:00', '09:00'])).toEqual(['09:00', '21:00'])
     expect(sanitizeTimes(['09:00', '09:00', '21:00'])).toEqual(['09:00', '21:00'])
     expect(sanitizeTimes(['09:00', '25:00', 'aa'])).toEqual([...DEFAULT_AUTO_CHECKIN_TIMES])
-    expect(sanitizeTimes(['21:00', '03:00', '09:00'])).toEqual(['03:00', '09:00'])
+    // ⚠️ 留**首尾**而不是「排序后前两个」：后者会把最晚那一轮静默丢掉
+    //    （第二轮审计 P3：[09:00,14:00,21:00] 曾被截成 09:00/14:00）。
+    expect(sanitizeTimes(['21:00', '03:00', '09:00'])).toEqual(['03:00', '21:00'])
+    expect(sanitizeTimes(['09:00', '14:00', '21:00'])).toEqual(['09:00', '21:00'])
   })
 
   it('sanitizeTimesStrict：用户输入路径必须**抛错**而不是回落（回落=静默失效）', () => {
@@ -831,7 +841,7 @@ describe('★ 自动签到：每天两次定时', () => {
     expect(calls).toEqual([])
   })
 
-  it('★ 端到端：DSH 没开错过了第一个时段（10:05）⇒ 11:00 启动补跑', async () => {
+  it('★ 端到端：DSH 没开错过了 09:00 ⇒ 11:00 启动补跑', async () => {
     const { runner, calls, store } = makeRunner({
       now: () => at('2026-10-18', '11:00'),
       providers: ['buddy'],
@@ -839,7 +849,7 @@ describe('★ 自动签到：每天两次定时', () => {
     })
     await runner.runIfDue()
     expect(calls).toEqual(['buddy'])
-    expect(store.current().lastSlot).toBe('2026-10-18#10:05')
+    expect(store.current().lastSlot).toBe('2026-10-18#09:00')
   })
 
   it('★ 端到端：关机一整天回来只补一次（不会连发两轮）', async () => {
@@ -1339,5 +1349,68 @@ describe('★★ 自动签到：时段记账与逐渠道补领', () => {
     expect(scheduled).toHaveLength(1)
     // 到 21:00 的毫秒差（判据是「排到的确实是将来的时段」，不是「排了就算」）
     expect(scheduled[0]!.ms).toBe(utc8MomentMs('2026-10-18', '21:00') - time.now())
+  })
+
+  it('★ pendingSlot 落后于当前时段 ⇒ 判据改打**新**时段（pending 分支，第二轮审计 P3）', () => {
+    // ⚠️ 直接打 `runnableSlotKey`：真机上 `pending≠'' ⇒ lastSlot<pending` 的不变量会让
+    //    「pending 落后」这个分支很难走到，但它是**显式的安全网**（重试拖过下一个时段时
+    //    必须改打新时段，而不是继续打那个已经无意义的旧时段）。删掉它会零红 ⇒ 这条钉住它。
+    const times = ['09:00', '21:00']
+    const late = at('2026-10-18', '21:05')
+    // 场景：upstream 一直在补昨天 09:00 那个时段，但现在已经 21:05
+    expect(runnableSlotKey({
+      enabled: true,
+      times,
+      lastSlot: slotKey('2026-10-17', '21:00'),
+      pendingSlot: slotKey('2026-10-18', '09:00'),
+    }, late)).toBe(slotKey('2026-10-18', '21:00'))
+    // 对照：pending 仍是最新那个时段 ⇒ 就打 pending（补领优先）
+    expect(runnableSlotKey({
+      enabled: true,
+      times,
+      lastSlot: slotKey('2026-10-17', '21:00'),
+      pendingSlot: slotKey('2026-10-18', '21:00'),
+    }, late)).toBe(slotKey('2026-10-18', '21:00'))
+  })
+
+  it('★ 补领预算按**时间**算（3 小时窗），覆盖「09:00 被 -120 浮动推到 07:00 等 10:00 刷新」', async () => {
+    // 第二轮审计 P2-1：按「14 次」算只有 124 分钟，而最坏需要 180 分钟 ⇒ 当天仍漏领。
+    const time = clock(at('2026-10-18', '09:05'))
+    let qoderProves = false
+    const store = memoryStore({
+      enabled: true,
+      times: ['09:00', '21:00'],
+      lastSlot: slotKey('2026-10-17', '21:00'),
+      providerSlots: { buddy: slotKey('2026-10-18', '09:00') },
+      pendingSlot: slotKey('2026-10-18', '09:00'),
+    })
+    const runner = createAutoCheckin({
+      store: store.store,
+      listProviderIds: async () => ['buddy', 'qoder'],
+      claim: async (provider) => (provider === 'qoder'
+        ? ok({ alreadyClaimed: 1, coversToday: qoderProves ? 1 : 0 })
+        : ok({ claimed: 1, totalCredit: 1, coversToday: 1 })),
+      now: time.now,
+      delayMs: 1,
+      schedule: () => ({ cancel: () => {} }),
+      warn: () => {},
+    })
+    // 09:05：部分完成；buddy 已处理 ⇒ 不会重复打它
+    await runner.runIfDue()
+    expect(store.current().pendingSlot).toBe(slotKey('2026-10-18', '09:00'))
+
+    // +2h55m（仍 < 3h 窗）：必须继续补领，**不能**放弃
+    time.set(at('2026-10-18', '12:00'))
+    await runner.runIfDue()
+    expect(store.current().pendingSlot, '2 小时 55 分就放弃 ⇒ 覆盖不了 180 分钟的场景')
+      .toBe(slotKey('2026-10-18', '09:00'))
+    expect(store.current().lastSlot).toBe(slotKey('2026-10-17', '21:00'))
+
+    // +3h05m（超窗）：放弃并把水位线推到该时段，留一行可读结果
+    time.set(at('2026-10-18', '12:10'))
+    await runner.runIfDue()
+    expect(store.current().pendingSlot).toBe('')
+    expect(store.current().lastSlot).toBe(slotKey('2026-10-18', '09:00'))
+    expect(store.current().lastResult).toContain('放弃补领')
   })
 })

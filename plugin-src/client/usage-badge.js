@@ -1584,7 +1584,7 @@ function UsageBadgeActive(props) {
           // 的家数）—— 加一个支持签到的渠道就必须改这里。
           // 2026-10-16 合并审计发现：加 `minimaxintl` 后能力表已 9 → **10**，
           // 而此处仍写 9（**零守卫**：全仓没有断言这个数字的用例）。
-          title: `串行签到全部支持签到的渠道（10 个；WorkBuddy 国际版 / Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻（默认 10:05 / 21:00）自动执行' : ''}`,
+          title: `串行签到全部支持签到的渠道（10 个；WorkBuddy 国际版 / Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻自动执行' : ''}`,
           onClick: () => { void onClaimAll(); },
         }, allBusy
           ? (claimProgress === null ? '签到中…' : `签到中 ${claimProgress.done}/${claimProgress.total}…`)

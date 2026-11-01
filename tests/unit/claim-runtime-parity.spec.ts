@@ -894,7 +894,7 @@ describe('★ loomy 的 claim 返回 coversToday 语义与旧循环一致', () =
    *
    * ⚠️ 若将来 loomy 加了一个 `coversToday: false` 的分支（例如「活动尚未开始」
    * 与「今天已领」须区分），本用例会红，提醒把它接进 `summary.coversToday` 口径
-   *（见 `auto-checkin.ts` 的 `shouldMarkToday`：**不是** claimed+alreadyClaimed，
+   *（见 `auto-checkin.ts` 的逐渠道水位线判据：**不是** claimed+alreadyClaimed，
    *  而是各渠道用 `coversToday` 声明出来的 summary.coversToday）。
    */
   it('claimed 与 already-claimed 两条分支都不带 coversToday:false', async () => {

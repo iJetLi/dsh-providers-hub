@@ -25,7 +25,7 @@
  * hooks 按调用序槽位化、`useEffect(fn, deps)` 与**上一次提交的 deps** 逐项比较，
  * 变了才重跑。于是「闭包停在注册那一拍」这件事被如实还原。
  */
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 /** hooks 槽位（跨渲染保留，顺序即调用顺序）。 */
 let slots: Array<{ v?: unknown; cur?: unknown }> = []
@@ -216,6 +216,16 @@ async function editThenClose(
 }
 
 describe('定时签到面板：关闭即保存（接线层，行为级）', { timeout: 60_000 }, () => {
+  // ⚠️ hooks 槽位是**文件级**的（替身要跨渲染保留），故每个用例必须重置 ——
+  //    否则上一个用例的 `showCheckinPanel=true` 会漏到下一个（实测第一个受影响
+  //    的用例就是「面板已经在开着的状态」）。
+  beforeEach(() => {
+    slots = []
+    committed = []
+    cursor = 0
+    pendingEffects = []
+    root = undefined
+  })
   it('★★ 首次打开 → 改时刻 → **点面板外部**关闭 ⇒ 必须写回宿主（审计 P1-1）', async () => {
     page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
     expect(typeof page).toBe('function')
@@ -263,5 +273,87 @@ describe('定时签到面板：关闭即保存（接线层，行为级）', { ti
     const alert = find((node) => node.props?.role === 'alert'
       && (node.children ?? []).some((child) => typeof child === 'string' && child.includes('HH:MM')))
     expect(alert, '★ 保存失败时必须把面板留着并显示原始错误，否则用户看不到任何提示').toBeTruthy()
+  })
+
+  it('★ 保存失败后再关一次 ⇒ 必须能关掉（否则面板死锁，用户没有出口）', async () => {
+    // 2026-11-01 第二轮审计 P2-3：修好「失败保住面板」之后，面板会变成**关不掉** ——
+    // 每次关闭手势都重试保存、都失败（实测 4 次关闭动作全部重试，可关闭 = false）。
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+    const { calls, rpcCall } = makeRpc()
+    let failWrites = true
+    const rpc = {
+      calls,
+      rpcCall: async (method: string, payload?: unknown) => {
+        if (method === 'usage.autoCheckin' && payload !== undefined && typeof payload === 'object' && payload !== null && 'times' in payload) {
+          calls.push({ method, payload })
+          if (failWrites) throw new Error('bad-request: 时刻必须是 HH:MM')
+          return { autoCheckin: { ...HOST_STATE, times: (payload as { times?: string[] }).times } }
+        }
+        return rpcCall(method, payload)
+      },
+    }
+    const { listeners } = installDocument()
+    await render({ rpcCall: rpc.rpcCall })
+    ;(find((node) => node.props?.className === 'dim-jh-btn dim-jh-checkinCaret')!.props.onClick as () => void)()
+    await render({ rpcCall: rpc.rpcCall })
+    await render({ rpcCall: rpc.rpcCall })
+    ;(findAll((node) => node.props?.['aria-label'] === '第 1 个执行时刻')[0]!.props.onChange as (e: unknown) => void)({ target: { value: '10:00' } })
+    await render({ rpcCall: rpc.rpcCall })
+    const outside = (): void => {
+      const down = listeners.filter((listener) => listener.type === 'mousedown')
+      down[down.length - 1]!.fn({ target: (globalThis as Record<string, unknown>).document })
+    }
+    outside()
+    await flush(10)
+    await render({ rpcCall: rpc.rpcCall })
+    const writesAfterFirst = timeWrites(calls).length
+    expect(writesAfterFirst).toBe(1)
+    // 第二次关闭手势：必须真的关掉，且**不再**发写请求
+    outside()
+    await flush(10)
+    await render({ rpcCall: rpc.rpcCall })
+    expect(timeWrites(calls).length, '第二次关闭又重试了一次保存 ⇒ 面板会永远关不掉').toBe(1)
+    expect(findAll((node) => node.props?.['aria-label'] === '第 1 个执行时刻').length,
+      '★ 第二次关闭手势后 `showCheckinPanel` 仍为 true ⇒ 面板死锁').toBe(0)
+  })
+
+  it('★ 保存进行中连点关闭 ⇒ 只发一次请求（不许重复提交）', async () => {
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+    const { calls, rpcCall } = makeRpc()
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const rpc = {
+      calls,
+      rpcCall: async (method: string, payload?: unknown) => {
+        if (method === 'usage.autoCheckin' && payload !== undefined && typeof payload === 'object' && payload !== null && 'times' in payload) {
+          calls.push({ method, payload })
+          await gate
+          return { autoCheckin: { ...HOST_STATE, times: (payload as { times?: string[] }).times } }
+        }
+        return rpcCall(method, payload)
+      },
+    }
+    const { listeners } = installDocument()
+    await render({ rpcCall: rpc.rpcCall })
+    ;(find((node) => node.props?.className === 'dim-jh-btn dim-jh-checkinCaret')!.props.onClick as () => void)()
+    await render({ rpcCall: rpc.rpcCall })
+    await render({ rpcCall: rpc.rpcCall })
+    ;(findAll((node) => node.props?.['aria-label'] === '第 1 个执行时刻')[0]!.props.onChange as (e: unknown) => void)({ target: { value: '10:00' } })
+    await render({ rpcCall: rpc.rpcCall })
+    const outside = (): void => {
+      const down = listeners.filter((listener) => listener.type === 'mousedown')
+      down[down.length - 1]!.fn({ target: (globalThis as Record<string, unknown>).document })
+    }
+    outside()
+    await flush(3)
+    // 第一次写还没回来，再点一次外部
+    outside()
+    await flush(3)
+    expect(timeWrites(calls).length, '★ 慢 RPC 下连点会发出两条相同 payload 的写请求').toBe(1)
+    release!()
+    await flush(10)
+    await render({ rpcCall: rpc.rpcCall })
+    expect(findAll((node) => node.props?.['aria-label'] === '第 1 个执行时刻').length,
+      '保存成功后应当关闭面板').toBe(0)
   })
 })
