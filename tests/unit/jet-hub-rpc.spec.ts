@@ -4910,6 +4910,16 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
   function setup(options: {
     /** 初始限流标记；省略 = 账号**没有**任何标记（这正是测试按钮要覆盖的场景）。 */
     modelRateLimits?: Record<string, number>
+    /**
+     * 初始的**账号级封禁**标记（Gitee issue IKS2MV）。
+     *
+     * ⚠️ 这一格是本组用例的**承重断言**：`account.test` 探活成功**不得**把它清掉
+     * —— 探活只测**一个**模型（且优先挑最老的限流键），判据强度不足以证明
+     * 「账号没被封」。第一版实现写成「成功即清」，被对抗审计实测打穿
+     * （`pickTestModel` 选中 `glm-5.2` 这个可用模型 ⇒ 整号封禁被洗白
+     *   ⇒ 池立刻选回它 ⇒ 下一发再 403）。
+     */
+    policyBlockedAtMs?: number
     /** 该 provider 的全量目录；省略则模拟「适配器缺失」（退化到 llm.listModels）。 */
     catalog?: Array<{ id: string; name: string }>
     /** 省略 llm 服务，验证「目录读不出来」的降级路径。 */
@@ -4933,6 +4943,7 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
         createdAt: 1,
         refreshable: true,
         ...(options.modelRateLimits === undefined ? {} : { modelRateLimits: options.modelRateLimits }),
+        ...(options.policyBlockedAtMs === undefined ? {} : { policyBlockedAtMs: options.policyBlockedAtMs }),
       }],
     }
     let handler: Handler | undefined
@@ -5009,7 +5020,12 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
     //    否则本文件 40+ 个调用点都要加 `await`。
     registerProbeRuntimesForTests()
 
-    return { call, storedLimits: () => (stored.accounts as Array<{ modelRateLimits?: Record<string, number> }>)[0]?.modelRateLimits }
+    return {
+      call,
+      storedLimits: () => (stored.accounts as Array<{ modelRateLimits?: Record<string, number> }>)[0]?.modelRateLimits,
+      /** 读回账号级封禁标记（Gitee issue IKS2MV）。 */
+      storedPolicyBlockedAtMs: () => (stored.accounts as Array<{ policyBlockedAtMs?: number }>)[0]?.policyBlockedAtMs,
+    }
   }
 
   afterEach(() => {
@@ -5062,6 +5078,24 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
     // ⚠️ 这是与重测的硬性分野：重测成功会清标记、失败会写回上游新时刻；
     // 测试必须一个字节都不改（它只是「手动探活」，不改变选号状态）。
     expect(storedLimits()).toEqual({ 'gemini-3.8-flash': marker })
+  })
+
+  it('★ 探活成功**不得**清掉账号级封禁标记（issue IKS2MV：单模型探活证明不了整号）', async () => {
+    // ⚠️ 判据强度：`testAccount` 只测**一个**模型，而 `pickTestModel` 取的是
+    //    `Object.keys(modelRateLimits)[0]`（**插入序最老的键**，常是历史 429 的可用模型）
+    //    ⇒ 那次探测成功**与「账号被封」无关**。
+    //    清除权只留给 `account.retest`（要求所有带标记的模型都通过）与 `account.reset`。
+    const blockedAt = 1_700_000_000_000
+    stubFetch()
+    const { call, storedPolicyBlockedAtMs } = setup({
+      modelRateLimits: { 'gemini-3.8-flash': Date.now() + 3_600_000 },
+      policyBlockedAtMs: blockedAt,
+      catalog: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }],
+    })
+
+    await call('account.test', { accountId: 'gemini-1' })
+
+    expect(storedPolicyBlockedAtMs(), '探活一次就把整号封禁洗白 ⇒ 池会选回它 ⇒ 下一发再 403').toBe(blockedAt)
   })
 
   it('有标记时优先测标记里的模型，且**不**去读目录（目录不可用也能测）', async () => {
