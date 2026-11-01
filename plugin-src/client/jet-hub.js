@@ -50,8 +50,8 @@ import {
   formatPackageTooltip,
   splitCreditsByExpiry,
   expirySplitParts,
-  expiryBucketLabel,
   daysUntilExpiry,
+  formatExpiryHint,
   exclusivePoolRemainingOf,
   isExclusivePool,
 } from './credit-expiry.js';
@@ -446,8 +446,14 @@ function formatPackageLine(pkg, windowDays, now) {
   const daysLeft = daysUntilExpiry(pkg, now);
   if (!pkg.active && pkg.expiredTime) parts.push(`失效于 ${pkg.expiredTime}`);
   else if (daysLeft !== null) {
-    const label = expiryBucketLabel(pkg, windowDays, now);
-    parts.push(`距到期 ${Math.ceil(daysLeft)} 天${label ? `（${label}）` : ''}`);
+    /**
+     * ⚠️⚠️ **这里原先自己拼了一遍「距到期 N 天（label）」**，与 `credit-expiry.js` 的
+     * `formatExpiryHint` **逐字重复**（同一语义两套实现）⇒ 2026-11-01 四审实测：
+     * 把 `expiryBucketLabel` 的「已过期」分支修好之后，**本行仍输出「距到期 -3 天（已过期）」**
+     * —— 修了一半。改成复用同一个函数：文案逐字节不变（已核对：`days` 同为
+     * `Math.ceil(left)`、label 为空时同样省略括号），且自动继承那边的修复。
+     */
+    parts.push(formatExpiryHint(pkg, windowDays, now));
   } else if (pkg.cycleEndTime) parts.push(`本周期至 ${pkg.cycleEndTime}`);
   return parts.join(' · ');
 }

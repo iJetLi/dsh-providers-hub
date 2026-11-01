@@ -419,7 +419,14 @@ describe('★★ AutoClaw：锁定文案不得点名未实测的池名', () => {
   it('exhausted 档的 message 拼接段里不得出现「活动赠送」「注册奖励」', () => {
     const start = indexCode.indexOf("const autoclawLockedError")
     expect(start, '找不到 autoclawLockedError').toBeGreaterThan(-1)
-    const block = indexCode.slice(start, indexCode.indexOf('\n  /**', start + 10))
+    // ⚠️ 终点必须用「下一个同级声明」，**不能**用 `/**`：
+    //    `indexCode` 是 `codeOnly()` 剥过注释的文本，`'/**'` 在里面**根本不存在**
+    //    ⇒ `indexOf` 返回 `-1` ⇒ `slice(start, -1)` 一直切到**文件末尾**。
+    //    此前恰好只有 autoclaw 这一家在用 `'QUOTA_EXCEEDED'`，所以「四档」碰巧成立；
+    //    2026-11-01 加上 magicrew（四档同样是 `QUOTA_EXCEEDED`，写在它**之后**）
+    //    才让这条抓出 8 段。修成 `'\n  const '` 后切片真的止于本构造器。
+    const end = indexCode.indexOf('\n  const ', start + 10)
+    const block = indexCode.slice(start, end > start ? end : indexCode.length)
     // 只取 `new LlmError(` 之后、`'QUOTA_EXCEEDED'` 之前的**文案拼接段**。
     const messages = [...block.matchAll(/new LlmError\(([\s\S]*?)'QUOTA_EXCEEDED'/g)].map((m) => m[1]!)
     expect(messages.length, '应找到四档文案').toBe(4)

@@ -200,6 +200,27 @@ const LOCK_EXECUTION_PATHS: Record<
     drives: 'autoclawLockedError',
     anchor: "lockedError: autoclawLockedError('AutoClaw (国际版)'),",
   },
+  // ⚠️ magicrew / magicrewintl（2026-11-01，用户要求「加永久/长期/临期和锁定永久积分」）：
+  //    与 astudio / minimax / autoclaw 同一条执行路径（`createCredentialResolver`
+  //    的 `kind: 'buddy'` 分支 ⇒ `pickBuddyAccount({ allowPermanent })`）。
+  //    判别符号取 `magicrewLockedError` —— 它本家独有（共用 `buddyLockedError`
+  //    等于没点名）。
+  //    ⚠️ **两站的锚点必须带各自的 `displayName`**：两站共用同一个构造器，
+  //    只查裸符号会让「一站的接线在」使另一站也绿。
+  //    ⚠️ 国际站的 label 是 `MagiCrew (国际版)`（**不是** `超级麦吉 (国际版)`），
+  //    锚点必须逐字对应 `src/index.ts` 里那行。
+  magicrew: {
+    module: 'src/index.ts',
+    spec: 'tests/unit/magicrew-lock-wiring.spec.ts',
+    drives: 'magicrewLockedError',
+    anchor: "lockedError: magicrewLockedError('超级麦吉'),",
+  },
+  magicrewintl: {
+    module: 'src/index.ts',
+    spec: 'tests/unit/magicrew-lock-wiring.spec.ts',
+    drives: 'magicrewLockedError',
+    anchor: "lockedError: magicrewLockedError('MagiCrew (国际版)'),",
+  },
 }
 
 describe('★ 普查：凡登记 permanentLock 的渠道，都必须有一条执行路径', () => {

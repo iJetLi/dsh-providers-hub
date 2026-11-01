@@ -33,6 +33,10 @@ import { MINIMAX, MINIMAX_INTL } from '../../src/minimax-product.js'
 // ⚠️ AutoClaw 两站（2026-10-21，用户要求「补锁定开关」）：本家**确实有**永久桶
 //    （活动赠送的永久分不带 `deductionEndTime`）⇒ 两站各占一项。
 import { AUTOCLAW, AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
+// ⚠️ Magicrew 两站（2026-11-01，用户要求「加永久/长期/临期和锁定永久积分」）：
+//    本家**确实有**永久桶（`total_points` 减 `expiring_quota_details` 之和的
+//    残差 = 上游不下发到期时间的积分）⇒ 两站各占一项（账号不互通）。
+import { MAGICREW, MAGICREW_INTL } from '../../src/magicrew-product.js'
 
 /**
  * 积分能力矩阵的回归测试。
@@ -744,6 +748,11 @@ describe('永久积分锁定能力', () => {
     //    本家批次映射里「无到期字段的发放（活动赠送的永久分）」⇒ 永久桶存在
     //    ⇒ 需要锁定能力。两站**各占一项**（账号不互通）。
     AUTOCLAW.id, AUTOCLAW_INTL.id,
+    // ⚠️ magicrew / magicrewintl（2026-11-01）：`/api/v1/quota/points/total` 的
+    //    `expiring_quota_details[]` 带 `expires_at`（无时区串），残差是永久积分
+    //    ⇒ 三档齐；且已接上 `createCredentialResolver` 的 `kind: 'buddy'` 选号
+    //    （锁定才真能拦）。两站**各占一项**（账号不互通）。
+    MAGICREW.id, MAGICREW_INTL.id,
   ]
   const UNSUPPORTED = [
     'codearts', 'cline', 'raccoon',

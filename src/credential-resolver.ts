@@ -256,6 +256,24 @@ export interface LoomySelectorLike {
  *
  * ⚠️ 只有**核实过**该家确实不存在模型级免费概念时才可以用它。判据是「产品/
  * 兜底表里没有任何 `isFree: true`，且上游目录不返回 `is_free`」，不是「懒得查」。
+ *
+ * ## ⚠️ 已登记的例外（2026-11-01，magicrew / magicrewintl）
+ *
+ * 两站**确实有**模型级免费概念（`src/magicrew-adapter.ts` 按 `magicrewIsFree(wirePoints)`
+ * 产出 `isFree: true`），却仍用了本常量 —— 这是**退让**，不是「确认没有」：
+ * `isFreeModel(modelId)` 是**同步 + 单个 id** 的判据，而 magicrew 的免费与否取决于
+ * `fetchMagicrewModelPoints()` 异步取回、缓存在**适配器实例私有字段** `modelPoints`
+ * 里的 `input_points`；resolver 与适配器是**两个对象**、装配顺序还是 resolver 在前
+ * ⇒ 没有可注入的同步查询口。
+ *
+ * **后果（已知、已取证）**：`allowPermanent` 为 `false`（用户锁了永久积分）且池里
+ * 只剩永久积分时，用户挑一个 0 点数的**免费**模型也会被拒，文案还会把用户推向
+ * 「解锁永久积分」（不可逆地开始烧永久积分）。触发面很窄（必须同时满足锁 + 只剩永久 +
+ * 选免费模型），且上游到底有没有 `input_points === 0` 的模型**尚未取证**。
+ *
+ * ⇒ 若要收紧：给适配器加一个同步查询 `isFreeModelById(id)`，并在 `src/index.ts`
+ * 用 late-bound 引用接上（首次调用时适配器可能还没建 ⇒ 仍退化成非免费，方向保守）。
+ * 在那之前**不得**把这行文档读成「magicrew 没有免费模型」。
  */
 export const NO_FREE_MODEL = (): false => false
 

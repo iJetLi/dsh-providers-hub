@@ -230,7 +230,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     expect(Object.isFrozen(PROVIDER_REGISTRY), 'registry 数组应冻结').toBe(true)
   })
 
-  it('permanentLock 恰好是 13 家（officeace 2026-10-12、astudio/minimax/minimaxintl/qoder/qodercn/autoclaw/autoclawintl 2026-10-2x 加入）', () => {
+  it('permanentLock 恰好是 15 家（officeace 2026-10-12、astudio/minimax/minimaxintl/qoder/qodercn/autoclaw/autoclawintl 2026-10-2x、magicrew/magicrewintl 2026-11-01 加入）', () => {
     const locked = PROVIDER_REGISTRY.filter((d) => d.permanentLock === true)
       .map((d) => d.id).sort()
     // ⚠️ qoder / qodercn 2026-10-20 加入（用户要求补齐三档分档 + 永久锁）。判据见
@@ -251,13 +251,20 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     //    永久分）⇒ 不带 `deductionEndTime`（= 永久桶）」⇒ 本家**确实有**永久桶。
     //    ⚠️ 与 buddy 系**不同源**：本家 `rateLimit: false`、刻意不做请求级换号，
     //    锁定只作用于「按余额分档选号」这一层。**两站各占一项**。
+    // ⚠️ magicrew / magicrewintl 2026-11-01 加入（用户要求「加永久/长期/临期和锁定
+    //    永久积分」）：`total_points − Σ(expiring_quota_details[].remaining_points)` 的
+    //    **残差**是上游**不下发到期时间**的那部分（真实账号实测：国内 2661−1661=1000、
+    //    国际 347−247=100），由 `magicrew-credits.ts` 合成一条**不带
+    //    `deductionEndTime`** 的「永久积分」包 ⇒ 永久桶**真实存在**；两站各接一个
+    //    `kind: 'buddy'` 选号器，锁定才真能拦。**两站各占一项**（账号物理隔离）。
     expect(locked).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'lobsterai', 'loomy',
-      'minimax', 'minimaxintl', 'officeace', 'qoder', 'qodercn', 'trae', 'workbuddy',
+      'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
+      'qodercn', 'trae', 'workbuddy',
     ])
   })
 
-  it('usesExpiryWindow 恰好是 13 家（loomy 不在内，它没有窗口概念；autoclaw 2026-10-17、qoder/qodercn/astudio/minimax/minimaxintl/codearts 2026-10-20 加入）', () => {
+  it('usesExpiryWindow 恰好是 15 家（loomy 不在内，它没有窗口概念；autoclaw 2026-10-17、qoder/qodercn/astudio/minimax/minimaxintl/codearts 2026-10-20、magicrew/magicrewintl 2026-11-01 加入）', () => {
     const win = PROVIDER_REGISTRY.filter((d) => d.usesExpiryWindow === true)
       .map((d) => d.id).sort()
     // ⚠️ autoclaw 2026-10-17 加入：流水每笔发放带 `wallet_expires_at`，未过期批次
@@ -278,10 +285,15 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     //    到期）；赠送/按需包没有逐包到期字段，走 `expiringTotal` 单独提示。
     //    ⚠️ 与其余 6 家**不同**：它不开 `permanentLock` —— CodeArts 没有任何
     //    「永不作废」的池，开锁会与「锁住就不作废」的语义错位。
+    // ⚠️ magicrew / magicrewintl 2026-11-01 加入（与本表第 233 行的 `permanentLock`
+    //    同一批）：`expiring_quota_details[].expires_at` 是**无时区**的本地时间串
+    //    （`magicrewParseExpiresAt` 按 UTC+8 解析到 `deductionEndTime`），而合成包
+    //    **不带**到期时间 ⇒ 「有到期时间」与「没有到期时间」两种包同时存在，
+    //    正是三档判据要的那组输入。⚠️ 两站各占一项。
     expect(win).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
-      'minimax', 'minimaxintl', 'officeace', 'qoder', 'qodercn', 'trae',
-      'workbuddy',
+      'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
+      'qodercn', 'trae', 'workbuddy',
     ])
   })
 

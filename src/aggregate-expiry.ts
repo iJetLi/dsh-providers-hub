@@ -1295,9 +1295,39 @@ async function sharedPackageExpiry(
      * `isExclusiveCreditPool`）⇒ 两侧口径一致。
      */
     if (isExclusiveCreditPool(pkg)) continue
+    const end: unknown = pkg.deductionEndTime
+    /**
+     * ⚠️⚠️ **判据必须与 `src/buddy-balance-rank.ts` 的 `splitBuddyCreditsByExpiry` 同一份**
+     * （2026-11-01 四审）：那边已把 `deductionEndTime` 收窄成「**number 或数字字符串**」，
+     * 而这里曾只认 `typeof === 'number'`。
+     *
+     * 后果（结构可达、生产零实测 —— 目前所有生产者都写 number）：外部写入
+     * （`state.json` / 备份导入 / 旧缓存里的 `"1791072000000"`）会让**面板判「临期」**
+     * 而**聚合轮换把它当「未知」= 长期、排到最后** ⇒ 用户看到的「马上到期」与
+     * 自动选择顺序相反。这正是本仓红线「同一语义不得两套判据」。
+     */
+    const endIsNumeric = typeof end === 'number' || typeof end === 'string'
+    const endMs = endIsNumeric ? Number(end) : Number.NaN
+    /**
+     * ⚠️⚠️ **已作废的额度不参与「可用额度」与排序**（2026-11-02，对抗审计 B1）。
+     *
+     * TRAE / Qoder 的 `active` 是**硬编码 true**，所以「`deductionEndTime` 已过、
+     * `remaining > 0`」的包一定会出现。旧行为把它的**过去时刻**当 `earliest`
+     * ⇒ 聚合按「越早到期越优先」把它排**第一** ⇒ 请求必失败，而同池里真正
+     * 3 天后到期的渠道被排在后面。
+     *
+     * ⇒ 与 `buddy-balance-rank.ts` 的 `splitBuddyCreditsByExpiry`（`endMs <= now`
+     *   单列 `expired`、不计入 `expiring`）保持**同一判据**。
+     *   只剩作废额度 ⇒ `hasAnyCredit` 保持 false ⇒ 本渠道判 `UNUSABLE`（钱已经没了）。
+     */
+    if (Number.isFinite(endMs) && endMs > 0) {
+      if (endMs <= Date.now()) continue
+      hasAnyCredit = true
+      if (endMs < earliest) earliest = endMs
+      continue
+    }
+    // 到期时间未知（无字段 / 脏值）⇒ 算「有余额但不知道什么时候过期」= 长期。
     hasAnyCredit = true
-    const end = pkg.deductionEndTime
-    if (typeof end === 'number' && Number.isFinite(end) && end > 0 && end < earliest) earliest = end
   }
   // 有余额但都没给到期时间 ⇒ 长期（排最后，不剔除）。
   if (hasAnyCredit) return earliest
