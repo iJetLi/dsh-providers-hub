@@ -342,6 +342,11 @@ export const PROVIDER_ICONS = {
   modelscope: MODELSCOPE_ICON,
   // ⚠️ 与 registry 的声明序一致：magicrew 紧邻 aggregate 之前（倒数第二）。
   magicrew: MAGICREW_ICON,
+  // ⚠️ **MagiCrew 国际版**（2026-11-01）：与国内版**共用同一个图标**
+  //    （同一个 Go 服务、同一个品牌的两个站点）。但键必须存在：
+  //    `PROVIDER_ICONS` 的键集合与 registry 的 id 集合必须完全相等
+  //    （`provider-registry.spec.ts` 有行为断言）。与 `autoclawintl` / `minimaxintl` 同型。
+  magicrewintl: MAGICREW_ICON,
   // ⚠️ **本 fork 独有**（七牛云）：占位图标（见 QINI_ICON 注释，待替换官方 SVG）。
   qiniu: QINI_ICON,
   aggregate: AGGREGATE_ICON,

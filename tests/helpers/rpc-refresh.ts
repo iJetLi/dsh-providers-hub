@@ -107,6 +107,11 @@ export const REFRESH_PROVIDERS = [
   //    （`PUT /api/v1/model-gateway/tokens`，`refreshMagicrewKey` 是 refresh_token 的唯一出口），
   //    `refreshAccountCredential` 续期并回写池内 `expiresAt` ⇒ 不属 loomy / zcode 那类豁免。
   'magicrew',
+  // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：与 `magicrew` 共用同一个
+  //    `MagicrewAuth` 类与同一条续期通路（`PUT /api/v1/model-gateway/tokens`），
+  //    只是 host 不同 ⇒ 必须各占一项，漏了它国际站账号的 `account.refresh`
+  //    行为覆盖为零（与 minimaxintl 同型）。
+  'magicrewintl',
 ] as const
 
 /**

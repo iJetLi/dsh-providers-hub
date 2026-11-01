@@ -104,6 +104,9 @@ describe('registerJetHubRpc：auths 是命名对象（类型层守卫）', () =>
       //    漏掉会让本行报 TS2345 —— 正是本用例想守的不变式。
       qiniu: stub,
       magicrew: stub,
+      // ⚠️ **MagiCrew 国际版**（2026-11-01）：与 `magicrew` 是两个实例、两个
+      //    provider id ⇒ `JetHubAuths` 各占一个键 —— 漏掉会让本行报 TS2345。
+      magicrewintl: stub,
     })
     // 运行时只要求端点真的注册了（证明桩搭对了，上面那行的类型检查才有意义）。
     expect(registered.length).toBeGreaterThan(0)

@@ -26,12 +26,24 @@
  * 公共字段），且 `raccoon` 的「已领时 `earned` 报满分」这条语义**只有在这个形状上**
  * 才表达得出来 —— 压成 `ClaimOutcome` 会丢掉它（见 `ProviderOnboarding.claim`）。
  * 与 `ProviderBalanceDetail` 复用 `CreditsEndpointDeps` 的形状同款理由。
+ *
+ * ## Magicrew（2026-11-01 接入，用户要求）
+ *
+ * `magicrew`（国内）与 `magicrewintl`（国际）两站**共用**同一份协议实现
+ * （`src/magicrew-checkin.ts`），只有 `product` 常量不同。
+ *
+ * ⚠️⚠️ **国际站 `GET /onboarding/tasks` 恒返回 `{participant_type:null, tasks:[]}`**
+ * —— 那是「该账号没被登记进引导计划」，**不是**「已经领完了」。所以国际版
+ * `status` 会如实回 `total: 0`，UI 显示「无新人任务」而不是「已全部完成」。
+ * 代码照样登记（能领就领），只是**预期拿不到**。
  */
 
 import { LOOMY_TASK_POINTS, LOOMY_TASK_TITLES, claimAllLoomyOnboardingTasks, fetchLoomyOnboardingTasks } from './loomy-onboarding.js'
 import { LOOMY } from './loomy-product.js'
 import { RACCOON } from './raccoon-product.js'
 import { claimRaccoonLoginReward, fetchRaccoonOnboardingStatus } from './raccoon-credits.js'
+import { claimMagicrewOnboardingTasks, fetchMagicrewOnboardingStatus } from './magicrew-checkin.js'
+import { MAGICREW, MAGICREW_INTL, type MagicrewProduct } from './magicrew-product.js'
 import type { ClaimOutcome } from './credits.js'
 import type { LoomyCredential } from './loomy.js'
 import type { RaccoonCredential } from './raccoon.js'
@@ -201,6 +213,66 @@ export function createProviderOnboarding(
           total: points,
         }
       },
+    },
+
+    /**
+     * 超级麦吉（Magicrew 国内站）新人奖励 —— 8 项新手引导任务，
+     * 每个账号**一辈子一次**。
+     *
+     * ⚠️ `first_ai_work` 服务端固定回 `9303`「不支持手动完成」⇒ 原语**不发请求**
+     * 并把它归 `manualRequired`（**不是** `skipped` —— 那个字段的契约是
+     * 「此前已完成」，而它既没完成也没领到分；见 `src/types.ts` 的同名字段注释），
+     * 否则既拿不到该任务的分，又会把它写成「已完成」= 报假账。
+     */
+    magicrew: magicrewOnboardingOf(MAGICREW),
+
+    /**
+     * **MagiCrew 国际站**新人奖励。
+     *
+     * ⚠️⚠️ 预期拿不到：该站 `onboarding/tasks` **恒返回空数组**（账号没被登记进
+     * 引导计划）⇒ `status` 回 `total: 0`，UI 显示「无新人任务」。
+     * 登记它是为了「万一登记了就能领」，以及让 UI 不至于因为缺这个 provider
+     * 而把整个新人奖励入口隐藏掉。
+     */
+    magicrewintl: magicrewOnboardingOf(MAGICREW_INTL),
+  }
+}
+
+/**
+ * Magicrew 两站共用的一次性奖励实现（国内 `MAGICREW` / 国际 `MAGICREW_INTL`）。
+ *
+ * ⚠️ **零复制**：两站是同一个 Go 服务的两个数据面，协议**逐字符同构**，
+ * 只有 `product.host` / `webOrigin` 不同 ⇒ 一个工厂 + 两个常量，
+ * 复制两份会让同类缺陷修两遍（与 `autoclawintl` 同纪律）。
+ *
+ * ⚠️ 凭据形状校验必须与 `magicrew-checkin.ts` 一致（判 `typeof jwt === 'string'`）：
+ * 裸 `JSON.parse` 会让 `{"foo":1}` 这种损坏凭据被当成有效凭据，
+ * 随后 `jwt.length` 抛 **TypeError**（不可诊断，且不在 RPC 的 try/catch 覆盖范围内）。
+ */
+function magicrewOnboardingOf(product: MagicrewProduct): ProviderOnboarding {
+  /** 从凭据里安全取 `{jwt, organizationCode}`；取不到返回 `undefined`。 */
+  const paramsOf = (credential: unknown): { jwt: string, organizationCode: string } | undefined => {
+    const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
+    if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) return undefined
+    return {
+      jwt: parsed.jwt,
+      organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+    }
+  }
+  const missing = (): never => {
+    // ⚠️ 上抛（而不是回空状态）：`onboarding.status` 的失败会在 RPC 层转成
+    // `ok:false` + 原因，用户能看到「需要重新登录」；回空状态会让面板显示
+    // 「0 项任务」，把一个凭据问题伪装成「你这个号没有新人奖励」。
+    throw new Error(`${product.displayName}账号未登录（缺少 JWT），请重新登录`)
+  }
+  return {
+    status: async (credential) => {
+      const params = paramsOf(credential) ?? missing()
+      return await fetchMagicrewOnboardingStatus({ ...params, product })
+    },
+    claim: async (credential) => {
+      const params = paramsOf(credential) ?? missing()
+      return await claimMagicrewOnboardingTasks({ ...params, product })
     },
   }
 }

@@ -38,7 +38,25 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+  /**
+   * ⚠️ 清理临时目录**必须容错**（2026-11-01 二审修）。
+   *
+   * `rmSync` 在 Windows 上偶发 `ENOTEMPTY: Directory not empty` —— 本仓库的
+   * 状态文件写入是**异步**的（`replace()` 走 `writeFile` + `rename`），
+   * afterEach 跑的时候可能还有一个 rename 在路上 ⇒ 目录刚被删空、新文件又落了进去。
+   * 症状是**整条用例组的 afterEach 抛错**（用例本身是绿的），看起来像随机 red。
+   * 实测：它单独跑 3/3 绿、全量并发下必红。
+   *
+   * ⇒ `maxRetries` + `retryDelay` 让 Node 自己重试（这是官方为此提供的参数），
+   *   并在最后一次仍失败时**吞掉** —— 临时目录残留不影响任何断言。
+   */
+  for (const dir of dirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    } catch {
+      // 残留只会占一点 %TEMP%，不影响结论：本文件的断言全部在用例体内。
+    }
+  }
   dirs.length = 0
 })
 

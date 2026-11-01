@@ -150,6 +150,22 @@ export function normalizeNameKey(name: string): string {
 }
 
 /**
+ * Magicrew **两站共用**的规范键补丁（国内 `magicrew` / 国际 `magicrewintl`）。
+ *
+ * ⚠️ 抽成常量的理由：两站共用同一份 `MAGICREW_FALLBACK_MODELS`（`magicrew-product.ts`
+ * 里 `qwen-3.8-flash` 那条 id **带连字符**）⇒ 补丁必须**逐个相同**。
+ * 复制两份会让「加一条补丁只改了一边」变成静默缺陷（国际站自成一个孤立虚拟模型，
+ * 聚合轮换列表里永远看不到它，零报错零日志 —— 与 `accio` 那次完全同型）。
+ *
+ * ⚠️ 放在 `CANONICAL_OVERRIDES` **之前**且各自带自己的 JSDoc —— 否则会把
+ * 上面那一整块「## 什么时候需要它 / 每条都必须有实测依据」的文档顶掉，
+ * 变成孤儿注释（2026-11-01 二审查出的形态：声明插在两个注释块之间）。
+ */
+const MAGICREW_CANONICAL_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
+  'qwen-3.8-flash': 'qwen3-8-flash',
+})
+
+/**
  * 显式映射补丁：`provider → realId → 规范键`。
  *
  * ## 什么时候需要它
@@ -244,9 +260,22 @@ export const CANONICAL_OVERRIDES: Readonly<Record<string, Readonly<Record<string
      * `normalizeModelKey` / `canonicalKeyFor`，`via` 全是 `id` 且键与 buddy 等家
      * 逐字相同），加补丁是多此一举，且会遮住将来真实的对不上。
      */
-    magicrew: Object.freeze({
-      'qwen-3.8-flash': 'qwen3-8-flash',
-    }),
+    magicrew: MAGICREW_CANONICAL_OVERRIDES,
+    /**
+     * **MagiCrew 国际站**（`magicrewintl`，2026-11-01）。
+     *
+     * ⚠️⚠️ 必须**与国内站逐个相同**，且必须**单独登记**（不能指望某种继承）：
+     * 两个 provider 共用同一份 `MAGICREW_FALLBACK_MODELS`（`magicrew-product.ts`
+     * 里 `qwen-3.8-flash` 那条 id **带连字符**），漏登记的症状与 `accio` 那次
+     * 完全同型且**静默**：`canonicalKeyFor('magicrewintl','qwen-3.8-flash',…)`
+     * 走 `via: 'id'` 得到 `qwen3-8-flash` 之外的另一个键 ⇒ 国际站自成一个孤立的
+     * 虚拟模型 ⇒ 聚合的「Qwen3.8-Flash 轮换列表」里**永远没有国际站**，
+     * 且模型选择器里 qwen3.8-flash 相关会出现两条。零报错、零日志。
+     *
+     * ⇒ 两站共用同一个常量对象（上面那个 `MAGICREW_CANONICAL_OVERRIDES`），
+     *   这样「加一条补丁只改一处」—— 复制两份必然漂移。
+     */
+    magicrewintl: MAGICREW_CANONICAL_OVERRIDES,
   })
 
 /**

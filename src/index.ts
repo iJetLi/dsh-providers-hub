@@ -100,7 +100,7 @@ import { fetchQoderBalanceDetailed, fetchQoderCreditBalance } from './qoder-cred
 import { MagicrewAuth } from './magicrew-auth.js'
 import type { MagicrewCredential } from './magicrew-auth.js'
 import { MagicrewService } from './magicrew.js'
-import { MAGICREW } from './magicrew-product.js'
+import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { fetchAstudioBalanceDetailed, fetchAstudioCreditBalance } from './astudio-credits.js'
 // ⚠️ MiniMax 两站的 `fetchMinimaxCreditBalance`（2026-10-20，同为「永久积分锁定」新增）：
@@ -3871,6 +3871,37 @@ export function apply(ctx: Context): void {
   // 超级麦吉（Magicrew 国内站，2026-10-29）。MagicrewAuth 构造时自 provide（服务名 magicrewAuth）。
   const magicrewAuth = new MagicrewAuth(ctx)
   /**
+   * **MagiCrew 国际站**（`magicrewintl`，2026-11-01 用户要求）。
+   *
+   * ⚠️ 服务名由 `MagicrewAuth` 构造里 `super(ctx, `${product.id}Auth`)` **自动派生**
+   *    为 `magicrewintlAuth` ⇒ 这里**不需要**再 `ctx.provide`。
+   * ⚠️ 两站是同一个 Go 服务的两个**数据面**（账号体系物理隔离）⇒ 必须是两个实例：
+   *    共用一个实例会让 `states` 按 ref 串号、`currentCredential()` 互相覆盖。
+   */
+  const magicrewIntlAuth = new MagicrewAuth(ctx, { product: MAGICREW_INTL })
+  /**
+   * 两站共用的**读图桥接**（`ctx.attachments.readImage` → 适配器的
+   * `{data, mediaType}`）。
+   *
+   * ⚠️ 必须**惰性** `ctx.get('attachments')`，不能写 `ctx.attachments` ——
+   *    后者是 cordis 的 inject 服务，在同步代码里直接访问会抛
+   *    `cannot get property "…" without inject` 并**打断整个 `apply()`**
+   *    （实测：`ctx.provide('accountPool', …)` 在 5977 行，被打断后 minimax 的
+   *    巡检定时器读不到它 ⇒ `wiring-lifecycle-guards.spec.ts` 两条红）。
+   *    惰性取时缺服务返回 `undefined` ⇒ 适配器抛 `INVALID_REQUEST`（可见失败，
+   *    不是静默降级：静默降级会让模型「看不到图却以为看到了」，那是幻觉源）。
+   */
+  const magicrewReadImage = async (attachment: unknown) => {
+    const attachments = ctx.get('attachments') as
+      | { readImage?: (a: unknown) => Promise<{ ref: { mediaType: string }, data: Uint8Array }> }
+      | undefined
+    if (attachments?.readImage === undefined) return undefined
+    const stored = await attachments.readImage(attachment)
+    if (stored === undefined) return undefined
+    // 形状转换：宿主给 `{ ref, data }`，适配器要 `{ data, mediaType }`（拼 data URL 用）。
+    return { data: stored.data, mediaType: stored.ref.mediaType }
+  }
+  /**
    * 适配器**必须**拿到 `resolveCredential` 与 `fetchRemoteModels`：
    * 缺前者 ⇒ 每条请求抛 `AUTH`「账号未登录」（已登录用户也看到，且 AUTH 吞文案）；
    * 缺后者 ⇒ 目录只剩静态兜底（静默退化，用户看到的是过期 ctx/档位）。
@@ -3916,16 +3947,7 @@ export function apply(ctx: Context): void {
      *    惰性取时缺服务返回 `undefined` ⇒ 适配器抛 `INVALID_REQUEST`（可见失败，
      *    不是静默降级）。
      */
-    readImage: async (attachment: unknown) => {
-      const attachments = ctx.get('attachments') as
-        | { readImage?: (a: unknown) => Promise<{ ref: { mediaType: string }, data: Uint8Array }> }
-        | undefined
-      if (attachments?.readImage === undefined) return undefined
-      const stored = await attachments.readImage(attachment)
-      if (stored === undefined) return undefined
-      // 形状转换：宿主给 `{ ref, data }`，适配器要 `{ data, mediaType }`（拼 data URL 用）。
-      return { data: stored.data, mediaType: stored.ref.mediaType }
-    },
+    readImage: magicrewReadImage,
     fetchRemoteModels: async () => {
       const credential = await magicrewAuth.currentCredential()
       if (credential === undefined) return []
@@ -3949,6 +3971,44 @@ export function apply(ctx: Context): void {
   const magicrewAdapter = magicrewService.adapter
   // 与 accio / aggregate 同款幂等注册（`llm-register-compat.ts` 负责记账与剔除包装）。
   registerAdapterIdempotent(ctx.llm, [MAGICREW.id], magicrewAdapter)
+  /**
+   * ## MagiCrew 国际站（`magicrewintl`，2026-11-01 用户要求）
+   *
+   * 与国内版**共用全部实现**，只有 `product` 常量不同 —— 判据与理由见
+   * `src/magicrew-product.ts` 的 `MAGICREW_INTL` 注释（账号体系物理隔离、
+   * host 不同、网关强制 org）。
+   *
+   * 下面这一整块与国内版逐行同构，**故意不抽公共工厂**：两处差异点（product /
+   * auth 实例）都出现 5 次以上，抽工厂会让「哪一处漏改」变得不可见 ——
+   * 而本仓库记录过多次「一份语义两处实现，改一处漏一处」的缺陷
+   *（`minimaxintl` / `autoclawintl` 都选了同样的显式两份，见 `index.ts:850` / `:1819`）。
+   */
+  const magicrewIntlResolver = createCredentialResolver<MagicrewCredential>(
+    { pool: pool as never },
+    {
+      product: MAGICREW_INTL,
+      readCredential: (refName) => magicrewIntlAuth.currentCredential(refName),
+      fallback: { kind: 'ref', refName: MAGICREW_INTL.defaultCredentialRef },
+      // ⚠️ 同上：不传会把「全部账号被限流」误报成「未登录」。
+      throwIfAllRateLimited: throwIfAllAccountsRateLimited,
+    },
+  )
+  const magicrewIntlService = new MagicrewService({
+    product: MAGICREW_INTL,
+    auth: magicrewIntlAuth,
+    resolveCredential: magicrewIntlResolver,
+    readImage: magicrewReadImage,
+    fetchRemoteModels: async () => {
+      const credential = await magicrewIntlAuth.currentCredential()
+      if (credential === undefined) return []
+      return await magicrewIntlAuth.fetchCatalogModels(credential.jwt, credential.organizationCode)
+    },
+    // ⚠️ 必须传（与国内版同因）：缺了会让「关掉的模型照样出现在选择器里」，
+    //    且在构造期读 `ctx.accountPool` 会抛错打断整个 `apply()`。
+    accountPool: pool,
+  })
+  const magicrewIntlAdapter = magicrewIntlService.adapter
+  registerAdapterIdempotent(ctx.llm, [MAGICREW_INTL.id], magicrewIntlAdapter)
   /**
    * 按凭据 ref 解析 AStudio 凭据（供**选号器查余额**与最终取凭据共用）。
    *
@@ -5501,6 +5561,8 @@ async function fetchBalanceReading(
     //    时漏写黑名单 ⇒「provider 显示已关闭、模型却仍可选用」的矛盾态。
     qiniu: pruned(QINIU.id, qiniuAdapter),
     magicrew: pruned(MAGICREW.id, magicrewAdapter),
+    // MagiCrew 国际站（2026-11-01）：与国内版同款剪枝，目录/黑名单逻辑共用。
+    magicrewintl: pruned(MAGICREW_INTL.id, magicrewIntlAdapter),
     // OfficeAce（华为 MaaS 云端直连）：目录静态 + 平台侧可用性，同其余渠道。
     officeace: pruned(OFFICEACE.id, officeAceAdapter),
     // AStudio（上游 MAAS 云端直连）：目录来自 model-manager 远端 + 兜底表，同其余渠道。
@@ -5889,6 +5951,10 @@ async function fetchBalanceReading(
       //    收不到本循环的调用（本仓库复发过 6 次）。
       //    漏加这一行 = 它不进注册表 ⇒ 续期/积分/探测三条链路全部静默失效。
       ['magicrew', magicrewAuth],
+      // ⚠️ 国际站必须**单独一行**（2026-11-01）：`provider-runtime-wiring.spec.ts`
+      //    与续期/积分/探测三条链路都按 provider id 取实例，漏了它 = 国际站账号
+      //    的 token 永不过期检测、积分永不刷新、重测按钮点了没反应（全静默）。
+      ['magicrewintl', magicrewIntlAuth],
     ]
     for (const [id, auth] of registry) {
       const descriptor = descriptorOf(id)
@@ -6084,6 +6150,9 @@ async function fetchBalanceReading(
     //    registry 数组里 `['magicrew', magicrewAuth]` 的**同一个实例**，否则
     //    `provider-runtime-wiring.spec.ts` 布在该实例上的 spy 收不到调用。
     magicrew: magicrewAuth,
+    // ⚠️ MagiCrew 国际站（2026-11-01）：必须与上面 `['magicrewintl', magicrewIntlAuth]`
+    //    是**同一个实例**，否则 spec 布在该实例上的 spy 收不到调用。
+    magicrewintl: magicrewIntlAuth,
   }, modelAdapters)
 
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已

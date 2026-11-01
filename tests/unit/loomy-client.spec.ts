@@ -81,7 +81,19 @@ describe('Loomy 客户端接线', () => {
     expect(body).toContain("createElement('rect'")
     // ③ tooltip 说明用途与「一次性」
     expect(body).toContain('title:')
-    expect(body).toMatch(/新手任务[\s\S]{0,40}10000/)
+    /**
+     * ⚠️ **tooltip 不得写死金额**（2026-11-01 二审修）。
+     *
+     * 该按钮对**所有** `onboardingTasks: true` 的渠道渲染
+     *（loomy / raccoon / magicrew / magicrewintl），而原先这里断言
+     * 「`新手任务` 后 40 字符内出现 `10000`」—— 那是把 **Loomy 一家**的总额
+     * 固化成了通用文案的期望值，与 `src/magicrew-checkin.ts` 那条
+     * 「0 项不得报已全部完成」的纪律正相反（国际站恒 0 项、raccoon 3000）。
+     * ⇒ 改成断言「说明用途 + 一次性」，金额交给领取结果面板（那里是实测值）。
+     */
+    expect(body).toMatch(/新手任务/)
+    expect(body).toMatch(/一次性/)
+    expect(body, 'tooltip 写死了金额 —— 对各渠道都显示错的数字').not.toMatch(/合计 \d+ 积分/)
     expect(body).toMatch(/仅能领取一次|只能领取一次/)
     // ④ 无障碍标签（图标按钮必需，否则屏幕阅读器读不出用途）
     expect(body).toContain("'aria-label'")

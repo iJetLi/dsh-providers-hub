@@ -141,6 +141,9 @@ import {
   type MagicrewAuth,
   type MagicrewCredential,
 } from './magicrew-auth.js'
+// ⚠️ 2026-11-01：MagiCrew 国际版（`magicrewintl`）接入 —— 登录/导入/轮询分支
+//    两站共用同一份实现，只差这个 `product` 常量（host / webOrigin / 凭据 ref 前缀）。
+import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 import { isAstudioRefreshable, type AstudioCredential } from './astudio.js'
 import { loginNeedsExternalAction } from './login-failure.js'
 import {
@@ -1631,6 +1634,20 @@ export interface JetHubAuths {
    * spy 收不到注册循环的调用（本仓库复发过 6 次）。
    */
   readonly magicrew: MagicrewAuth
+  /**
+   * **MagiCrew 国际站**（`magicrewintl`，2026-11-01 用户要求）。
+   *
+   * ⚠️ 与 `magicrew` **共用同一个 `MagicrewAuth` 类**（两站只差产品配置），
+   * 故类型相同、只是**另一个实例** —— 与 `minimax` / `minimaxintl`、
+   * `qoder` / `qodercn` 同型。
+   * ⚠️ 两站账号体系**物理隔离**（同一个 Go 服务的两个数据面）、凭据 ref 前缀不同
+   * （`MAGICREW_*` / `MAGICREWINTL_*`）。若这里的**键与值接错**，症状是
+   * 「国际站账号的续期去刷了国内站凭据」，而 `authOf` 会把国际站账号
+   * 分派到**国内站实例**上。
+   * ⚠️ 值必须是 `index.ts` 里 `registerProviderRuntime` 的 `registry` 数组中
+   * `['magicrewintl', magicrewIntlAuth]` 的**同一个对象**（同 `magicrew` 那条）。
+   */
+  readonly magicrewintl: MagicrewAuth
   readonly autoclaw: AutoclawAuth
   /**
    * **AutoClaw 国际版**（`autoclawintl`）。
@@ -1706,8 +1723,12 @@ function magicrewExpiresAtPatch(credential: MagicrewCredential): { expiresAt?: n
  *    在本仓库已复发多次。
  * 2. **ref 名不参与判据**：`importFromLocalBrowser` 会把凭据写到默认 ref
  *    （`MAGICREW_ACCESS_TOKEN`），若池里恰好有一条账号用的就是那个 ref / 那份凭据，
- *    它**照样是命中** —— 因为本函数遍历的是**全部** `provider === 'magicrew'` 的条目
- *    并各自 resolve，而不是只看 `MAGICREW_ACCOUNT_*` 形态的 ref。
+ *    它**照样是命中** —— 因为本函数遍历的是**该 provider 名下全部**条目
+ *    （`pool.listAccountsByProvider(provider)`，`provider` 由调用方按站传入）并各自
+ *    resolve，而不是只看 `MAGICREW_ACCOUNT_*` 形态的 ref。
+ *    ⚠️ 2026-11-01 二审更正：本段此前写「遍历**全部** `provider === 'magicrew'` 的条目」，
+ *    那是接入国际站**之前**的描述。现在按传入的 provider 过滤，两站互不可见
+ *    —— 否则国际站账号会被国内站那条腿判成「已存在」而不落库。
  * 3. `skipAccountId` 只给**网页版登录**腿用：那条腿先登记了自己的占位条目
  *    （`login.poll` 要靠它知道这个 id 存在），判重时必须把它自己排除，
  *    否则「新建的占位条目」会被判成「已存在的同账号」。
@@ -1719,13 +1740,20 @@ function magicrewExpiresAtPatch(credential: MagicrewCredential): { expiresAt?: n
 async function findMagicrewAccountByFingerprint(params: {
   ctx: Context
   pool: AccountPool
+  /**
+   * ⚠️ **必填**（2026-11-01 接入国际站时补）：按 provider 分别判重。
+   * 两站的 jwt 来自不同 host（`i-magic-service.letsmagic.cn` / `magic-service.magicrew.ai`），
+   * 指纹本来不会撞；但**不限定 provider 就会跨站扫池** —— 一旦将来指纹口径变化
+   * （例如都退化成「同手机号」），就会出现「登录国际站却把国内站的卡改掉」这种错位。
+   */
+  provider: string
   fingerprint: string
   /** 网页版登录腿：跳过**本次自己**的占位条目（见上面边界 ③）。 */
   skipAccountId?: string
 }): Promise<ProviderAccountEntry | undefined> {
-  const { ctx, pool, fingerprint, skipAccountId } = params
+  const { ctx, pool, provider, fingerprint, skipAccountId } = params
   if (fingerprint.length === 0) return undefined
-  for (const existing of pool.listAccountsByProvider('magicrew')) {
+  for (const existing of pool.listAccountsByProvider(provider)) {
     if (existing.id === skipAccountId) continue
     const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
       .catch(() => undefined)
@@ -2646,6 +2674,12 @@ function registerJetHubEndpoints(
     //    ⚠️ 与 `JetHubAuths.magicrew` 必须**同时**到位（`credits-balance-self-heal.spec.ts`
     //    有正反两条守卫，只做一个会红另一条）。
     'magicrew',
+    // ⚠️ MagiCrew 国际版（`magicrewintl`，2026-11-01）：与国内站**同一份实现、
+    //    同一个 2 小时 `mgw_` api_key 寿命、同一个 refresh 端点**
+    //    ⇒ 必须与 `JetHubAuths.magicrewintl` **同时**到位。
+    //    漏登记的症状与国内站逐字相同：积分行报「未登录」而上游其实只需一次
+    //    refresh，且**日志零字**（issue IKKHL5 的形态）。
+    'magicrewintl',
     // ⚠️ **本 fork 独有**（modelscope，2026-10-17 改判）**仍刻意不在本表里**：
     //    ⚠️ 原注释写「它是 `balance: false`（魔搭没有额度 API）⇒ 积分端点压根不会
     //    为它走这条链」——**那条已被证伪**：魔搭**有**魔粒余额端点
@@ -3122,7 +3156,9 @@ function registerJetHubEndpoints(
     }
     const at = now()
     for (const entry of accounts) {
-      if (entry.provider !== 'magicrew') continue
+      // ⚠️ 两站都要扫（2026-11-01 接入国际站）：占位条目是**按 provider 建的**，
+      //    只扫国内站会让国际站的「网页登录中途关窗」留下永久幽灵卡片。
+      if (entry.provider !== 'magicrew' && entry.provider !== 'magicrewintl') continue
       // 判据 1：有在途任务 ⇒ 用户可能正在窗口里登录，绝不碰。
       if (magicrewBrowserLoginInFlight.has(entry.id)) continue
       const pendingAt = magicrewBrowserLoginPendingAt.get(entry.id)
@@ -4353,7 +4389,7 @@ function registerJetHubEndpoints(
          * ⚠️ 同样放在 `pool.listAccounts` **之前**：用户刷新一次就该看到收口后的列表。
          * ⚠️ 只在查 magicrew 时跑（别的面板不该付代价）。
          */
-        if (req.provider === 'magicrew') {
+        if (req.provider === 'magicrew' || req.provider === 'magicrewintl') {
           await sweepAbandonedMagicrewBrowserLogins()
         }
         const accounts = await pool.listAccounts(req.provider)
@@ -4460,7 +4496,7 @@ function registerJetHubEndpoints(
          * ⚠️ 回填**只写 `nickname`**，不写 `phone`：上游给的 phone 是 **10 位本地号**，
          * 与 `magicrewDisplayNickname` 的 11 位脱敏判据**不同形**，写进去会得到错位掩码。
          */
-        if (req.provider === 'magicrew') {
+        if (req.provider === 'magicrew' || req.provider === 'magicrewintl') {
           for (const account of accounts) {
             const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
               .catch(() => undefined)
@@ -4485,14 +4521,24 @@ function registerJetHubEndpoints(
               //    `fetchMagicrewProfile`：单测要能注入假取数器，且超时/告警纪律
               //    与登录那条腿只有**一份**（本仓库「一语义一套判据」的红线）。
               // ⚠️ 它自己不抛（读不到 ⇒ `undefined`），并已留痕 ⇒ 这里不需要 catch。
-              const got = await auths.magicrew.readProfileNickname({
+              //
+              // ⚠️⚠️ **必须按灶取实例**（2026-11-01 接入国际站时补）：此前写死
+              //    `auths.magicrew`，而本分支现在同时服务 `magicrewintl` ——
+              //    用国内站的实例去取国际账号的昵称，打的是
+              //    `i-magic-service.letsmagic.cn`（两个数据面账号体系隔离）⇒
+              //    恒 401、昵称永远回填不上，而且**没有任何报错**（该函数读不到
+              //    只返回 `undefined`）⇒ 症状是「国际站卡片一直是默认名」。
+              const profileAuth = req.provider === 'magicrewintl'
+                ? auths.magicrewintl
+                : auths.magicrew
+              const got = await profileAuth.readProfileNickname({
                 jwt: credential.jwt,
                 organizationCode: credential.organizationCode,
               })
               if (got !== undefined) {
                 const enriched = { ...credential, nickname: got }
                 await ctx.credentials.set(credentialRef(account.credentialRef), JSON.stringify(enriched))
-                const nickname = magicrewDisplayNickname(enriched)
+                const nickname = magicrewDisplayNickname(enriched, req.provider === MAGICREW_INTL.id ? MAGICREW_INTL : MAGICREW)
                 account.nickname = nickname
                 void pool.updateAccount(account.id, { nickname }).catch(() => undefined)
               }
@@ -4508,6 +4554,40 @@ function registerJetHubEndpoints(
         const id = `${provider}-${shortId()}`
         const suffix = shortId().toUpperCase()
         const refName = `${provider.toUpperCase()}_ACCOUNT_${suffix}`
+        /**
+         * ## Magicrew 两站（2026-11-01）
+         *
+         * 国内站（`magicrew` / `MAGICREW`）与国际站（`magicrewintl` / `MAGICREW_INTL`）
+         * 的登录 / 导入 / 轮询**协议完全相同**（同一个 Go 服务的两个数据面），
+         * 只有 host、webOrigin、凭据 ref 前缀不同 ⇒ 下面各分支全部按这几个派生
+         * 变量分流，**不复制两份代码**（复制会让「改一处漏一处」变成必然，
+         * 本仓库已记录过多次同型事故）。
+         *
+         * ⚠️ `magicrewSite` 为 `undefined` 表示「不是 Magicrew 系」，下方各分支一律跳过。
+         * ⚠️ 两个 id 与展示名**都从 product 常量派生**（`MAGICREW_INTL.id` /
+         *    `.displayName`），不写字面量：本文件的纪律是「两站只差一个 product 常量」，
+         *    把 id 写死成 `'magicrewintl'` 会让「改常量时漏改这里」变成静默缺陷。
+         */
+        const magicrewIntlId = MAGICREW_INTL.id
+        const magicrewSite: 'magicrew' | 'magicrewintl' | undefined
+          = provider === 'magicrew' || provider === magicrewIntlId
+            ? provider as 'magicrew' | 'magicrewintl'
+            : undefined
+        const magicrewIntl = magicrewSite === magicrewIntlId
+        const magicrewAuthOf: MagicrewAuth | undefined = magicrewSite === undefined
+          ? undefined
+          : magicrewIntl ? auths.magicrewintl : auths.magicrew
+        /**
+         * 展示名（错误文案用）—— 两站必须可区分，否则用户不知道是哪个站没登。
+         *
+         * ⚠️ **两站都从 product 常量取**（2026-11-01 二审）：原先国内那一支写死
+         * `'超级麦吉'`，与上面「两个 id 与展示名都从 product 常量派生」的自述不符。
+         * 今天两处恰好相等所以看不出问题，但 `displayName` 一改就会**静默分叉**
+         *（错误文案还叫旧名，用户按旧名去找不到站点）。
+         */
+        const magicrewSiteName = magicrewIntl ? MAGICREW_INTL.displayName : MAGICREW.displayName
+        /** 展示名回落用（无 nickname / 无 11 位手机号时）—— 两站必须各自取值。 */
+        const magicrewDisplayProduct = magicrewIntl ? MAGICREW_INTL : MAGICREW
 
         /**
          * ⚠️⚠️ **超级麦吉：从本机浏览器导入已登录态**（`mode: 'local-browser'`）。
@@ -4527,23 +4607,23 @@ function registerJetHubEndpoints(
          * 会把同一个账号认成新账号）。命中既有账号时把新凭据写回**它自己的 ref**
          * 并回填昵称 / 有效期，返回**原来的** `accountId`。
          */
-        if (provider === 'magicrew' && req.mode === 'local-browser') {
+        if (magicrewSite !== undefined && magicrewAuthOf !== undefined && req.mode === 'local-browser') {
           let credential: MagicrewCredential | undefined
           try {
-            credential = await auths.magicrew.importFromLocalBrowser()
+            credential = await magicrewAuthOf.importFromLocalBrowser()
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error)
             // ⚠️ 读盘 / 签发失败与「本机没有登录态」是两件事，文案必须分开
             //    （否则用户被引导去重新登录一个其实已经登录过的站点）。
-            throw new Error(`超级麦吉：读取本机浏览器登录态失败：${reason}`)
+            throw new Error(`${magicrewSiteName}：读取本机浏览器登录态失败：${reason}`)
           }
           if (credential === undefined) {
             return {
               ok: false,
               error: {
                 code: 'bad-request',
-                message: '未在本机浏览器里找到超级麦吉的登录态'
-                  + '（请先在 Edge/Chrome 里登录 www.letsmagic.cn 后重试）',
+                message: `未在本机浏览器里找到${magicrewSiteName}的登录态`
+                  + `（请先在 Edge/Chrome 里登录 ${magicrewIntl ? 'www.magicrew.ai' : 'www.letsmagic.cn'} 后重试）`,
               },
             }
           }
@@ -4558,6 +4638,7 @@ function registerJetHubEndpoints(
           const existing = await findMagicrewAccountByFingerprint({
             ctx,
             pool,
+            provider: magicrewSite,
             fingerprint: magicrewCredentialFingerprint(credential.jwt),
           })
           if (existing !== undefined) {
@@ -4567,7 +4648,7 @@ function registerJetHubEndpoints(
               JSON.stringify(credential),
             )
             await pool.updateAccount(existing.id, {
-              nickname: magicrewDisplayNickname(credential),
+              nickname: magicrewDisplayNickname(credential, magicrewDisplayProduct),
               ...magicrewExpiresAtPatch(credential),
             })
             return { ok: true, value: { accountId: existing.id, loginUrl: '' } }
@@ -4577,8 +4658,8 @@ function registerJetHubEndpoints(
           await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
           await pool.addAccount({
             id,
-            provider: 'magicrew',
-            nickname: magicrewDisplayNickname(credential),
+            provider: magicrewSite,
+            nickname: magicrewDisplayNickname(credential, magicrewDisplayProduct),
             enabled: true,
             credentialRef: refName,
             refreshable: true,
@@ -4617,12 +4698,12 @@ function registerJetHubEndpoints(
          * ⚠️ **单飞**：同一 `accountId` 只会有一轮（`account.create` 每次新生成 id，
          * 故这里防的是「同一 id 被重复创建」这种异常路径 —— 幂等保护，不是正常流）。
          */
-        if (provider === 'magicrew' && req.mode === 'browser') {
+        if (magicrewSite !== undefined && magicrewAuthOf !== undefined && req.mode === 'browser') {
           // ① 占位条目：**先登记再开窗**。顺序不可颠倒 —— `login.poll` 在这之后
           //    任何一刻到达都必须能查到它（客户端 1 秒一拍，而开浏览器要几百毫秒）。
           await pool.addAccount({
             id,
-            provider: 'magicrew',
+            provider: magicrewSite,
             nickname: id,
             enabled: true,
             credentialRef: refName,
@@ -4641,7 +4722,7 @@ function registerJetHubEndpoints(
           const task = (async (): Promise<{ done: boolean, success?: boolean, error?: string }> => {
             let credential: MagicrewCredential | undefined
             try {
-              credential = await auths.magicrew.loginViaBrowser()
+              credential = await magicrewAuthOf.loginViaBrowser()
             } catch (error) {
               /**
                * ⚠️ 抛错 = **真失败**（浏览器起不来 / 签发网络异常）。文案要可读：
@@ -4679,6 +4760,7 @@ function registerJetHubEndpoints(
             const existing = await findMagicrewAccountByFingerprint({
               ctx,
               pool,
+              provider: magicrewSite,
               fingerprint: magicrewCredentialFingerprint(credential.jwt),
               skipAccountId: id,
             })
@@ -4693,7 +4775,7 @@ function registerJetHubEndpoints(
                */
               await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
               await pool.updateAccount(existing.id, {
-                nickname: magicrewDisplayNickname(credential),
+                nickname: magicrewDisplayNickname(credential, magicrewDisplayProduct),
                 ...magicrewExpiresAtPatch(credential),
               })
               await ctx.credentials.unset(credentialRef(refName)).catch(() => undefined)
@@ -4703,7 +4785,7 @@ function registerJetHubEndpoints(
             // 新账号：凭据写到它**自己的** ref（与 `local-browser` 分支同形）。
             await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
             await pool.updateAccount(id, {
-              nickname: magicrewDisplayNickname(credential),
+              nickname: magicrewDisplayNickname(credential, magicrewDisplayProduct),
               ...magicrewExpiresAtPatch(credential),
             })
             return { done: true, success: true }
@@ -4738,12 +4820,12 @@ function registerJetHubEndpoints(
          *    · `mode: 'browser'` —— 开窗让用户在网页里登录，再读回来
          * 不带 `mode` 落到这里 ⇒ 明确报错，不要静默降级成别的登录方式。
          */
-        if (provider === 'magicrew') {
+        if (magicrewSite !== undefined) {
           return {
             ok: false,
             error: {
               code: 'bad-request',
-              message: '超级麦吉请用「从本机浏览器导入」或「网页登录」，不支持手机号密码登录',
+              message: `${magicrewSiteName}请用「从本机浏览器导入」或「网页登录」，不支持手机号密码登录`,
             },
           }
         }
@@ -6376,7 +6458,8 @@ function registerJetHubEndpoints(
            * ⚠️ 顺序：本格必须在「凭据缺失 ⇒ 直接 `{done:false}`」那行**之前**判，
            * 否则它永远轮不到（占位条目按定义就没有凭据）。
            */
-          if (entry.provider === 'magicrew') {
+          // ⚠️ 两站共用同一张在途表（键是 `accountId`，两站 id 前缀不同不会撞）。
+          if (entry.provider === 'magicrew' || entry.provider === 'magicrewintl') {
             const shared = magicrewBrowserLoginInFlight.get(req.accountId)
             if (shared !== undefined) return { ok: true, value: await shared }
             /**
