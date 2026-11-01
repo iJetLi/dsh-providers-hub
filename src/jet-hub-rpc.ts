@@ -9655,11 +9655,22 @@ function registerJetHubEndpoints(
         /**
          * 写两个执行时刻（`HH:MM`，UTC+8）。
          *
-         * ⚠️ 与 `enabled` / `dismiss` 一样**一次请求只做一件事**：三者同时给出时
-         * 会被误用（例如客户端将来误传 `{times, enabled}`，就分不清是「改了时段」
-         * 还是「开关也动了」）。这里先处理 `times`、直接返回，语义最窄。
+         * ⚠️ 与 `enabled` / `dismiss` 一样**一次请求只做一件事**：三类字段同时给出
+         * 时无法分辨「用户到底改了什么」，故**直接拒绝**（`bad-request`）而不是
+         * 静默丢弃后面的字段 —— 静默丢弃会让客户端以为两项都保存成功
+         * （2026-11-01 审计 P3：旧实现只处理 `times` 就 return，`enabled` 与
+         * `dismiss` 被无声吞掉，调用方无从发现）。
          */
         if (req.times !== undefined || req.jitterMinutes !== undefined) {
+          if (req.enabled !== undefined || req.dismiss !== undefined) {
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: '一次请求只能改一件事：times / jitterMinutes 不能与 enabled / dismiss 同时下发',
+              },
+            }
+          }
           try {
             // `times` 与 `jitterMinutes` 是同一次「保存设置」的两个字段：
             // 客户端关闭面板时一次把它们写全。`times` 省略 = 保留现有时刻。
