@@ -4907,6 +4907,32 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
     return calls
   }
 
+  /**
+   * 桩一个**成功**的探测（200 + 合法 SSE 帧）。
+   *
+   * ⚠️ 为什么需要它：默认的 `stubFetch` 恒回 429 ⇒ `testAccount` 的 `ok` 恒 false
+   *    ⇒ 「成功即清封禁」那条分支**根本走不到** ⇒ 那条守卫是无牙的
+   *    （2026-11-01 审计 M12 实测：把它改回去，全量仍绿）。
+   *    这正是本仓库记过的那条教训：「判据没抓住变异，先怀疑判据本身」。
+   */
+  function stubFetchOk(): string[] {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      const frame = JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1, totalTokenCount: 4 },
+        },
+      })
+      return new Response(`data: ${frame}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    })
+    return calls
+  }
+
   function setup(options: {
     /** 初始限流标记；省略 = 账号**没有**任何标记（这正是测试按钮要覆盖的场景）。 */
     modelRateLimits?: Record<string, number>
@@ -5086,15 +5112,19 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
     //    ⇒ 那次探测成功**与「账号被封」无关**。
     //    清除权只留给 `account.retest`（要求所有带标记的模型都通过）与 `account.reset`。
     const blockedAt = 1_700_000_000_000
-    stubFetch()
+    // ⚠️ 必须桩**成功**：默认桩恒回 429 ⇒ `ok` 恒 false ⇒ 变异那条分支走不到
+    //    ⇒ 守卫会是无牙的（M12 实测）。
+    stubFetchOk()
     const { call, storedPolicyBlockedAtMs } = setup({
       modelRateLimits: { 'gemini-3.8-flash': Date.now() + 3_600_000 },
       policyBlockedAtMs: blockedAt,
       catalog: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }],
     })
 
-    await call('account.test', { accountId: 'gemini-1' })
+    const result = await call('account.test', { accountId: 'gemini-1' })
 
+    // 前提：这次探活**真的成功了**（否则那条分支走不到，守卫会是无牙的）。
+    expect((result.value as { ok: boolean }).ok, '本用例的前提是探活成功').toBe(true)
     expect(storedPolicyBlockedAtMs(), '探活一次就把整号封禁洗白 ⇒ 池会选回它 ⇒ 下一发再 403').toBe(blockedAt)
   })
 
