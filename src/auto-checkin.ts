@@ -1019,7 +1019,6 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
 
   async function performRun(): Promise<void> {
     const startedAt = now()
-    const jitter = sanitizeJitter(doc.jitterMinutes)
     /**
      * ★ 本轮的**目标时段**在起跑时就定死（2026-11-01 审计 P1-6）。
      *
@@ -1027,10 +1026,12 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
      * 09:05 跑完」会把 **09:00 那轮**标成已完成 —— 它从未单独执行过。
      * 改成起跑时的时段后：跑完只推进到「这轮本来为哪个时段跑」，
      * 09:00 那轮该跑还是会跑（多跑一轮幂等，漏一轮可能丢一天额度）。
+     *
+     * ⚠️ 必须复用 {@link runnableSlotKey}（**唯一**判据），不要在这里再写一遍
+     * 「pendingSlot 优先」：两处判据一旦漂移，就会出现「判据说跑 A、这轮打的是 B」
+     * ⇒ 水位线推错、或同一时段被反复打。
      */
-    const targetSlot = doc.pendingSlot !== ''
-      ? doc.pendingSlot
-      : latestDueSlotKey(startedAt, doc.times, jitter)
+    const targetSlot = runnableSlotKey(doc, startedAt)
     const totals = emptyTotals()
     let providers: string[] = []
     try {
@@ -1373,6 +1374,9 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
     stop() {
       pending?.cancel()
       pending = null
+      // ⚠️ 也要清掉「下一次尝试时刻」：否则面板会显示一个**已经不会再发生**的时间
+      //    （`state().nextRunAt` 读的就是它）。与 `armNext` 里的清零同一条理由。
+      nextAttemptAt = 0
     },
   }
 }
