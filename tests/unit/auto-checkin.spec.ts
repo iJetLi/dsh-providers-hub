@@ -185,6 +185,28 @@ describe('自动签到：日界与配置', () => {
     expect(sanitizeAutoCheckin({ lastDate: '' }).lastDate).toBe('')
   })
 
+  it('★ 逐渠道水位线与 pendingSlot 的归一化（脏数据不该让「跳过上游」误成立）', () => {
+    // `providerSlots` 是 2026-11-01 新增的：值只认 `YYYY-MM-DD#HH:MM`。
+    // ⚠️ 这条判据**有牙**：脏值若被原样保留，字符串比较会把「一个月前的乱码」
+    // 判成「已处理」，该渠道就再也不会上游签到（静默漏领）。
+    const doc = sanitizeAutoCheckin({
+      providerSlots: {
+        buddy: '2026-11-01#10:05',
+        qoder: 'yesterday', // 非 SLOT_RE ⇒ 丢
+        cline: '',          // 空串 ⇒ 丢
+        zcode: '2026-11-01', // 缺时刻 ⇒ 丢
+        '': '2026-11-01#10:05', // 空 key ⇒ 丢
+      },
+      pendingSlot: '2026-11-01#09:00',
+    })
+    expect(doc.providerSlots).toEqual({ buddy: '2026-11-01#10:05' })
+    expect(doc.pendingSlot).toBe('2026-11-01#09:00')
+    // 非对象 / 脏外形 ⇒ 空表，绝不能把字符串当对象用
+    expect(sanitizeAutoCheckin({ providerSlots: 'oops' }).providerSlots).toEqual({})
+    expect(sanitizeAutoCheckin({ providerSlots: ['x'] }).providerSlots).toEqual({})
+    expect(sanitizeAutoCheckin({ pendingSlot: 'now' }).pendingSlot).toBe('')
+  })
+
   it('延迟配置：0 是合法值（不能被 || 吃掉），非法值回落默认', () => {
     expect(autoCheckinDelayMs({})).toBe(AUTO_CHECKIN_DELAY_MS)
     expect(autoCheckinDelayMs({ [DSH_JET_HUB_AUTO_CHECKIN_DELAY_MS]: '0' })).toBe(0)
