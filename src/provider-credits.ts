@@ -75,6 +75,10 @@ import type { ModelscopeCredential } from './modelscope.js'
 import { MODELSCOPE } from './modelscope-product.js'
 // ⚠️ **本 fork 独有**（超级麦吉 Magicrew，2026-10-29）：积分余额原语。
 import { fetchMagicrewBalance } from './magicrew-credits.js'
+// ⚠️ **本 fork 独有**（Magicrew 每日签到，2026-11-01 用户要求接入）：
+//    `POST /login-gift`，国内 +200/天、国际 +50/天，两站逐字符同构。
+import { claimMagicrewLoginGift } from './magicrew-checkin.js'
+import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 // ⚠️ **本 fork 独有**（Codely/Unity，2026-10-19）：积分余额原语。
 // 2026-10-20 起接每日签到（`/api/points/check-in`，实测 200）。
 import { claimCodelyDailyCheckIn, fetchCodelyBalanceDetailed } from './codely-credits.js'
@@ -966,7 +970,18 @@ export function createProviderCredits(
      * （见 {@link ProviderCredits.fetchBalanceDetailed} 的注释）。
      * ⚠️ `?? null`：原语用 `undefined` 表达「读不到」，而本接口契约是 `null`
      * —— 两者**同义**，但 `undefined` 会被上层当成「没实现」。
-     * ⚠️ 没有 `claim`：本家**有**签到端点，但刻意不接（会消耗真实积分，用户未要求）。
+     * ## ✅ `claim`（2026-11-01 用户要求接入）
+     *
+     * `POST /api/v1/login-gift`，**请求体存在且为空串**（`body: ''` ——
+     * ⚠️ **不是省略 body**：参考实现也显式发空串，删掉它就是协议回归），
+     * 幂等（当天已领回 `granted:false`，HTTP 仍 200）。
+     * 国内站 **+200/天**、国际站 **+50/天**，两站逐字符同构 ⇒
+     * 两家共用 `claimMagicrewLoginGift`，只差传进来的 `product`。
+     *
+     * ⚠️ **不会重复扣/领**：端点本身幂等，且 `granted:false` 被映射成
+     * `already-claimed`（**不是** `claimed`）—— 后者会让用户以为每天真的加了积分。
+     * ⚠️ 原先这里写「刻意不接（会消耗真实积分）」是**误判**：`login-gift` 是
+     * **发放**登录积分，不消耗任何东西。用户 2026-11-01 明确要求接上。
      */
     magicrew: {
       fetchBalance: async (credential) => {
@@ -975,10 +990,64 @@ export function createProviderCredits(
         return await fetchMagicrewBalance({
           jwt: parsed.jwt,
           organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+          // ⚠️ **显式传**（2026-11-01 三审）：原靠 `?? MAGICREW` 缺省，而国际站
+          //    条目显式传 ⇒ 两条腿不对称，后人照抄国内条目到新站就会静默打错 host。
+          product: MAGICREW,
         }) ?? null
       },
+      claim: async (credential) => {
+        const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
+        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) {
+          return { kind: 'failed', code: -1, message: '账号未登录（缺少 JWT），请重新登录' }
+        }
+        return await claimMagicrewLoginGift({
+          jwt: parsed.jwt,
+          organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+          product: MAGICREW,
+        })
+      },
+      /**
+       * ⚠️ `precheckStatus: false` —— 本家**没有**与 `CheckinStatus` 同构的
+       * 状态端点（`login-gift` 的响应只在调用时才知道今天领没领）。
+       * 置 `true` 会让运行时先去调 `fetchStatus` 拿幂等判据，而它不存在
+       * ⇒ 每次签到都先报一条「未实现状态查询」的错（见 `claim-runtime-parity.spec.ts`）。
+       */
       precheckStatus: false,
-      claimUnavailableReason: '超级麦吉暂不支持每日签到（本插件未接该端点）',
+    },
+
+    /**
+     * **MagiCrew 国际站**（`magicrewintl`，2026-11-01 接入）。
+     *
+     * 与国内版**共用全部实现**，只有 `product` 常量不同（判据与理由见
+     * `src/magicrew-product.ts` 的 `MAGICREW_INTL` 注释）。
+     *
+     * ⚠️ 两站必须**各自登记一项**：`creditsOf` 按 provider id 取值，
+     * 漏了 `magicrewintl` 的症状是「只登国际站的用户没有一键签到按钮」。
+     * ⚠️ 国际站签到的金额是 **+50/天**（国内 +200），但这个差异由**服务端**
+     * 决定，本层不做任何金额假设 —— 只如实回传上游的 `point_amount`。
+     */
+    magicrewintl: {
+      fetchBalance: async (credential) => {
+        const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
+        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) return null
+        return await fetchMagicrewBalance({
+          jwt: parsed.jwt,
+          organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+          product: MAGICREW_INTL,
+        }) ?? null
+      },
+      claim: async (credential) => {
+        const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
+        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) {
+          return { kind: 'failed', code: -1, message: '账号未登录（缺少 JWT），请重新登录' }
+        }
+        return await claimMagicrewLoginGift({
+          jwt: parsed.jwt,
+          organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+          product: MAGICREW_INTL,
+        })
+      },
+      precheckStatus: false,
     },
   }
 }

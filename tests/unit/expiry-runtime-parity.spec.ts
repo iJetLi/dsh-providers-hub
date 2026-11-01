@@ -32,7 +32,7 @@
  * ⚠️ 哨兵**逐个渠道互不相同**：这样「A 渠道拿到了 B 渠道的实现」
  *（本仓库自陈复发 6 次的位置参数错位形态）也会红，而不只是「有没有查表」。
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { NEVER, UNUSABLE } from '../../src/aggregate-core.js'
 import { WIRED_EXPIRY_PROVIDERS, createExpiryProbe } from '../../src/aggregate-expiry.js'
@@ -85,9 +85,12 @@ const EXPECTED_WIRED = [
   //    ⚠️ 本清单必须与本 PR 的 `WIRED_EXPIRY_PROVIDERS` / `createProviderExpiry()`
   //    三处同步 —— 且本文件末尾另有**逐 id 点名**用例（`★ magicrew 三处同时接线`），
   //    漏加时报告里能直接看到「magicrew」而不是一条集合差。
+  // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：与 `magicrew` 逐字同构
+  //    （同一个折算原语 `magicrewExpiry`，只差 product 常量 ⇒ 打的是国际站 host）。
+  //    ⚠️ 三处必须同改：本清单 + `WIRED_EXPIRY_PROVIDERS` + `createProviderExpiry()`。
   'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts',
-  'lobsterai', 'loomy', 'magicrew', 'minimax', 'minimaxintl', 'modelscope',
-  'officeace', 'qoder', 'qodercn', 'trae', 'workbuddy', 'zcode',
+  'lobsterai', 'loomy', 'magicrew', 'magicrewintl', 'minimax', 'minimaxintl',
+  'modelscope', 'officeace', 'qoder', 'qodercn', 'trae', 'workbuddy', 'zcode',
 ]
 
 class FakeCredentials {
@@ -341,7 +344,9 @@ const NOT_EXPIRY_WIRED = new Map<string, string>([
    * ⚠️ 抽不到字面量时**必须报红**（fail-closed）：改名/重构会让本守卫恒真。
    */
   it('★ magicrew 三处同时接线（漏任一处 ⇒ 聚合里静默看不到它）', () => {
-    // ① `AGGREGATE_CHANNELS`（模型层归并 —— 只加它不够，但缺了它连目录都进不来）
+    // ⚠️ 2026-11-01：本用例改成**两家一起走**（`magicrew` + `magicrewintl`）——
+    //    它们逐字同构，只差 product 常量。原先只守国内站，加国际站时
+    //    「三处各漏一处」的组合会静默通过（第 8 次复发的同型）。
     const source = readFileSync(
       new URL('../../src/aggregate-adapter.ts', import.meta.url),
       'utf8',
@@ -350,15 +355,56 @@ const NOT_EXPIRY_WIRED = new Map<string, string>([
     expect(start, '抽不到 AGGREGATE_CHANNELS 定义（改名/重构会让本守卫恒真）').toBeGreaterThan(-1)
     const block = source.slice(start, source.indexOf('])', start))
     const channels = [...block.matchAll(/'([a-z][a-z0-9]*)'/gi)].map((m) => m[1]!)
-    expect(channels, '① aggregate-adapter.ts 的 AGGREGATE_CHANNELS 缺 magicrew').toContain('magicrew')
-    // ② 决定**候选表可见性**的那张表（只加 ① 而漏它就是本陷阱的形态）
-    expect(WIRED_EXPIRY_PROVIDERS, '② aggregate-expiry.ts 的 WIRED_EXPIRY_PROVIDERS 缺 magicrew')
-      .toContain('magicrew')
-    // ③ 折算原语真的挂进了表（`createProviderExpiry()` 是纯表，拿不到 service 实例）
-    expect(
-      Object.hasOwn(createProviderExpiry(), 'magicrew'),
-      '③ provider-expiry.ts 的 createProviderExpiry() 缺 magicrew',
-    ).toBe(true)
+    for (const id of ['magicrew', 'magicrewintl']) {
+      expect(channels, `① aggregate-adapter.ts 的 AGGREGATE_CHANNELS 缺 ${id}`).toContain(id)
+      // ② 决定**候选表可见性**的那张表（只加 ① 而漏它就是本陷阱的形态）
+      expect(WIRED_EXPIRY_PROVIDERS, `② aggregate-expiry.ts 的 WIRED_EXPIRY_PROVIDERS 缺 ${id}`)
+        .toContain(id)
+      // ③ 折算原语真的挂进了表（`createProviderExpiry()` 是纯表，拿不到 service 实例）
+      expect(
+        Object.hasOwn(createProviderExpiry(), id),
+        `③ provider-expiry.ts 的 createProviderExpiry() 缺 ${id}`,
+      ).toBe(true)
+    }
+  })
+
+  /**
+   * ★★ **`magicrewintl` 的折算必须打到国际站 host**（2026-11-01 测试有效性审查的
+   * **重要项**，变异 M2）。
+   *
+   * 上面那条只断「表里有这个 id」，而**不断** `credentialExpiry` 里
+   * `product: MAGICREW_INTL` 传没传 —— 实测把那一行删掉后，452 条折算用例**全绿**。
+   *
+   * 生产症状正是 `src/provider-expiry.ts` 那段注释自己写的：漏传 ⇒ 用国内基址
+   * （`i-magic-service.letsmagic.cn`）查国际账号余额 ⇒ 恒失败 ⇒ 折算恒 `UNUSABLE`
+   * ⇒ 国际站候选从轮换表里**静默消失**（与 `autoclawintl` 那条同型）。
+   *
+   * ⚠️ 判据必须是**行为**（真发一次请求、断完整 URL），不能是源码文本匹配
+   *   —— 后者对「product 改成 MAGICREW 而常量名仍出现」无牙。
+   */
+  it('★★ magicrewintl 的折算打国际站 host（漏传 product ⇒ 折算恒 UNUSABLE）', async () => {
+    const seen: string[] = []
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      seen.push(String(input))
+      // 回一个「有余额」的最小信封，避免走 UNUSABLE 分支掩盖请求本身。
+      return new Response(
+        JSON.stringify({ code: 1000, data: { total_points: 100, expiring_quota_details: [] } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    })
+    try {
+      const entry = createProviderExpiry().magicrewintl
+      expect(entry?.credentialExpiry, 'magicrewintl 的 credentialExpiry 没挂上').toBeDefined()
+      await entry!.credentialExpiry!(
+        { jwt: 'JWT-SPEC', organizationCode: 'org-spec' } as never,
+        undefined as never,
+      )
+      expect(seen.length, '折算一个请求都没发（被 cachedBalance 短路了？）').toBeGreaterThan(0)
+      expect(seen[0], 'magicrewintl 的折算打到了国内站 host ⇒ 恒失败 ⇒ 候选静默消失')
+        .toBe('https://magic-service.magicrew.ai/api/v1/quota/points/total')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 

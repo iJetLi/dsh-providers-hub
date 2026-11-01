@@ -31,6 +31,7 @@ import {
 // ⚠️ 两个哨兵**定义在 `aggregate-core.ts`**（`NEVER = Number.POSITIVE_INFINITY`、
 //    `UNUSABLE = -1`），不在 `provider-expiry.ts` —— 后者只是消费它们。
 import { NEVER, UNUSABLE } from './aggregate-core.js'
+import { magicrewDecimalOf } from './magicrew-number.js'
 import type { CreditBalance, CreditPackage } from './credits.js'
 
 const USER_AGENT =
@@ -43,7 +44,19 @@ const MAGICREW_RATE_BASE = 2000
 /** 北京时间相对 UTC 的偏移（毫秒）。 */
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000
 
-function headersOf(params: {
+/**
+ * Magicrew 业务 API 的请求头 —— **全仓唯一一份**。
+ *
+ * ⚠️ 导出（2026-11-01）：签到（`magicrew-checkin.ts`）与积分走同一个 Go 服务、
+ * 同一套网关校验。此前 `magicrew-auth.ts` 与本文各有一份私有实现
+ *（`magicrewHeaders` / `headersOf`），形状已经**几乎**一样但 UA 取值不同 ——
+ * 再复制第三份就是「一份语义三处实现」。签到侧复用本函数。
+ *
+ * ⚠️ `origin` 必带：网关会看 Origin，缺了偶发 403。
+ * ⚠️ `organization-code` 只在非空时附 —— 国际站缺了会回 HTTP 500 + 裸文本，
+ * 所以**调用方**必须保证 `organizationCode` 真的取到了（不是这里补空串）。
+ */
+export function magicrewApiHeaders(params: {
   jwt: string
   organizationCode: string
   product: MagicrewProduct
@@ -88,7 +101,7 @@ export async function fetchMagicrewBalance(params: {
     // ⚠️ 超时（2026-10-29 最终审查 I5）：其余每家 `*-credits.ts` 都有；零超时会让积分面板
     //    转圈到 undici 默认 ~300s（本家 `requestTimeoutMs` 是业务 API 口径）。
     signal: AbortSignal.timeout(product.requestTimeoutMs),
-    headers: headersOf({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
+    headers: magicrewApiHeaders({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
   })
   const text = await response.text()
   let parsed: unknown
@@ -172,16 +185,15 @@ export async function fetchMagicrewBalance(params: {
  *
  * ⚠️ 入参是 `unknown`，强转有洞：`Number([]) === 0`、`Number(true) === 1`、
  * `Number(null) === 0` ⇒ 原本会把 `[]` 判成「0 积分 = 免费」、把 `true` 判成
- * 0.0005 倍率。故只放行 **`number`** 与 **非空数字字符串**，其余一律「未知」。
+ * 0.0005 倍率。故只放行 **`number`** 与 **十进制数字字符串**，其余一律「未知」。
+ *
+ * ⚠️⚠️ **判据已抽到 `magicrew-number.ts`**（2026-11-01 三审）：本文件此前自带一份
+ * 同名实现、**没有**「只认十进制」的约束，于是 `input_points: "0x10"` 在这里被
+ * 当成 **16**（倍率 0.008），而签到侧的同名字段被当成 **0** —— 同一个上游字段
+ * 在两个模块解释不同。现在统一走 `magicrewDecimalOf`（契约同为 `number | undefined`）。
  */
 function magicrewPointsOf(entry: { input_points?: unknown }): number | undefined {
-  const raw = entry.input_points
-  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined
-  if (typeof raw !== 'string') return undefined
-  const trimmed = raw.trim()
-  if (trimmed === '') return undefined
-  const points = Number(trimmed)
-  return Number.isFinite(points) ? points : undefined
+  return magicrewDecimalOf(entry.input_points)
 }
 
 /** 从计费条目算倍率；缺价格返回 `undefined`（**不猜**）。 */
@@ -231,7 +243,7 @@ export async function fetchMagicrewModelPoints(params: {
     // ⚠️ 超时（I5）：同上一处。
     signal: AbortSignal.timeout(product.requestTimeoutMs),
     method: 'POST',
-    headers: headersOf({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
+    headers: magicrewApiHeaders({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
     body: JSON.stringify({ model_ids: [...params.modelIds] }),
   })
   const text = await response.text()

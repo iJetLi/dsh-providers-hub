@@ -13,7 +13,7 @@
  * ⚠️ 本文件**不**重复 `balance-cache.spec.ts` 的缓存行为（TTL / 串行 / abort）——
  *    那些已在那里逐格覆盖。这里只测**装配接线**。
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBalanceCache } from '../../src/balance-cache.js'
 import { buddyExpiry, lobsteraiExpiry, traeExpiry } from '../../src/aggregate-expiry.js'
 import type { CreditBalance } from '../../src/credits.js'
@@ -207,6 +207,10 @@ describe('★★ 接线的**透传**腿（`provider-expiry.ts` 的 `context.cach
     // ⚠️ 2026-10-29：magicrew 的 `provider-expiry.ts` 条目也接了 `context.cachedBalance`
     //    透传（`magicrewExpiry` 的取数腿契约要求它）。漏登记 ⇒ 本表与生产漂移。
     'magicrew',
+    // ⚠️ 2026-11-01：MagiCrew 国际版（`magicrewintl`）在 `provider-expiry.ts` 里
+    //    也接了 `context.cachedBalance` 透传（与 `magicrew` 逐字同构，只差 product 常量）。
+    //    漏登记 ⇒ 本表与生产漂移（本用例即清单，多一个少一个都红）。
+    'magicrewintl',
   ] as const
 
   it('★★ 所有接了 `cachedBalance` 透传的渠道都必须真的透传（本表即清单）', async () => {
@@ -226,32 +230,67 @@ describe('★★ 接线的**透传**腿（`provider-expiry.ts` 的 `context.cach
     //    收进本表」也能被下面的集合比对抓到 —— 只遍历本表就看不见多出来的那家。
     const unregistered: string[] = []
     const registered = CACHED_BALANCE_PROVIDERS as readonly string[]
-    for (const [id, impl] of Object.entries(table)) {
-      // ⚠️ 凭据给一个**会解析失败**的形状：原语随后会走「回落取数」并失败，
-      //    但**透传是否发生**在失败之前就已经可观测（`cachedBalance` 被调用）。
-      let called = 0
-      // ⚠️ **必须有界**：漏透传时原语会真的去打上游（本机 `openapi.qoder.sh`
-      //    不可达，实测 ~10.7s）⇒ 不加闸的话本用例会以 vitest 的
-      //    「Test timed out in 5000ms」收场 —— 虽然同样是红，但报的是超时而不是
-      //    「qoder 必须透传 cachedBalance」，排查时看不出真正原因。
-      //    实测（2026-10-20）：把 `qoderFamilyExpiry` 的判据改成恒 `true` 后，
-      //    加闸版本给出的是**带渠道名字的断言失败**。
-      let done = false
-      await Promise.race([
-        impl.credentialExpiry({ access_token: 't' } as never, {
-          accountId: 'a1',
-          cachedBalance: async () => { called += 1; return null },
-        }).catch(() => undefined).then(() => { done = true }),
-        new Promise((r) => setTimeout(r, 2000)),
-      ])
-      if (registered.includes(id)) {
-        expect(called, `★ ${id} 必须透传 cachedBalance（漏了 ⇒ 它永远自己打上游）`).toBe(1)
-        // 闸门本身不得掩盖结论：透传正确时原语应当**立刻**返回（共享读数为
-        // null ⇒ 无需再去上游），故这里必须已经结束。
-        expect(done, `★ ${id} 透传之后原语应当立刻返回（不应再去上游）`).toBe(true)
-      } else if (called > 0) {
-        unregistered.push(id)
+    /**
+     * ## ⚠️ 「`cachedBalance` 返回 null 后**仍会回落自取**」的家（2026-11-01）
+     *
+     * 下面那条 `done` 断言的前提是「共享读数为 null ⇒ 原语立刻返回」。**这个前提
+     * 对 magicrew 系不成立** —— `magicrewExpiry` 的契约是「缺席**与 null** 都必须
+     * 自己发请求取」（`src/provider-runtime.ts:218-231`：折算可用性不得依赖缓存，
+     * 而 `null` 表示「查询失败」，不是「不可用」）。
+     *
+     * ⚠️ 这些家的 `done` 取决于**上游多快失败**，而不是取决于透传是否正确 ⇒
+     * 留着那条断言会让本用例变成「网络快就绿」的侥幸判据（`magicrew` 国内站
+     * 一直靠 DNS 失败得快侥幸绿，`magicrewintl` 打国际站挂到 2s 闸门就红了）。
+     * ⇒ 对它们**只断言 `called === 1`**（那才是「透传是否发生」的真判据），
+     * `done` 不断言。
+     *
+     * ⚠️ 这**不是放宽判据**：`called` 的断言一字未动，而 `done` 本来就只是
+     * 「别把超时误报成透传缺失」的辅助闸门（见上方注释）。
+     */
+    /**
+     * ## ⚠️ 必须先把 `fetch` 钉成「立刻失败」（2026-11-01 测试有效性审查的次要项）
+     *
+     * 原先没有这一步 ⇒ 各家原语**真的发网络请求**，`done` 由**上游多久失败**决定
+     * （实测本机该用例耗时 871ms ~ 2884ms 波动）。于是「`cachedBalance: null`
+     * 之后是否立刻返回」这条辅助闸门变成了「网络快就绿」的侥幸判据。
+     *
+     * 更糟的是它掩盖了一个**真语义**：`magicrew` 系对 `null` 也**必须**自取
+     * （`src/provider-runtime.ts:218-231`：折算可用性不得依赖缓存，`null` 表示
+     * 「查询失败」而不是「不可用」）⇒ 它的 `done` 本来就该是「自取失败后返回」。
+     * 之前为此加了 `SELF_FETCH_ON_NULL` 豁免；现在 stub 掉网络后**所有家都会
+     * 立即失败并返回**，那条豁免就没有存在理由了。
+     *
+     * ⇒ 去掉豁免集，恢复**全表** `done` 断言（判据变强，不是变弱）。
+     */
+    vi.stubGlobal('fetch', () => { throw new Error('no-network-in-this-spec') })
+    try {
+      for (const [id, impl] of Object.entries(table)) {
+        // ⚠️ 凭据给一个**会解析失败**的形状：原语随后会走「回落取数」并失败，
+        //    但**透传是否发生**在失败之前就已经可观测（`cachedBalance` 被调用）。
+        let called = 0
+        // ⚠️ **必须有界**：漏透传时原语会真的去打上游 ⇒ 不加闸的话本用例会以
+        //    vitest 的「Test timed out in 5000ms」收场 —— 虽然同样是红，但报的是
+        //    超时而不是「xx 必须透传 cachedBalance」，排查时看不出真正原因。
+        let done = false
+        await Promise.race([
+          impl.credentialExpiry({ access_token: 't' } as never, {
+            accountId: 'a1',
+            cachedBalance: async () => { called += 1; return null },
+          }).catch(() => undefined).then(() => { done = true }),
+          new Promise((r) => setTimeout(r, 2000)),
+        ])
+        if (registered.includes(id)) {
+          expect(called, `★ ${id} 必须透传 cachedBalance（漏了 ⇒ 它永远自己打上游）`).toBe(1)
+          // ⚠️ `fetch` 已被钉成立刻抛错 ⇒ 无论该家对 `null` 是「立刻返回」还是
+          //    「回落自取再失败」，都必须在 2s 闸门内结束。仍 `done === false`
+          //    说明**真卡住了**（死循环 / 无界重试），而不是「网络慢」。
+          expect(done, `★ ${id} 透传之后原语应当立刻返回（不应卡住）`).toBe(true)
+        } else if (called > 0) {
+          unregistered.push(id)
+        }
       }
+    } finally {
+      vi.unstubAllGlobals()
     }
     // ⚠️ 反向：生产里接了透传却不在本表的，必须点名 —— 否则那一家从此零守卫
     //    （2026-10-20 实测的原始缺口正是这个形态：`modelscope` / `autoclaw` /

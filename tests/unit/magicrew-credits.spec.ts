@@ -102,6 +102,46 @@ describe('magicrew 积分', () => {
     expect(magicrewRateOf({ input_points: Number.NaN })).toBeUndefined()
   })
 
+  /**
+   * ★★ **`Number()` 的进制陷阱**（2026-11-01 三审）。
+   *
+   * 本文件此前自带一份「只放行 number 与非空字符串」的实现，**没有**限定十进制
+   * ⇒ `"0x10"` 被 `Number()` 解析成 **16**、`"1e3"` 成 **1000**，
+   * 而签到侧的同名字段被解析成 0 ⇒ 同一个上游字段在两个模块解释不同。
+   *
+   * 现在两处共用 `magicrew-number.ts` 的 `magicrewDecimalOf`（只认十进制），
+   * 本用例钉住积分侧这一半（签到侧见 `magicrew-checkin.spec.ts` 的 points 边界组）。
+   */
+  it('★★ 倍率：十六进制 / 科学计数 / 千分位 ⇒ undefined（只认十进制字面量）', () => {
+    expect(magicrewRateOf({ input_points: '0x10' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '0b11' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '1e3' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '1,234' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '1,234 积分' })).toBeUndefined()
+    // 反向：**真正的十进制字符串必须放行**（收得太紧会让所有正常响应读不到）。
+    expect(magicrewRateOf({ input_points: '200' })).toBeCloseTo(0.1)
+    expect(magicrewRateOf({ input_points: ' 200 ' })).toBeCloseTo(0.1)
+    expect(magicrewRateOf({ input_points: '200.0' })).toBeCloseTo(0.1)
+  })
+
+  /**
+   * ★★ **负单价一律读不到**（2026-11-01 三审：原先 `'-5'` 会得到 **-0.0025 负倍率**）。
+   *
+   * 负倍率会直接显示在模型列表的「倍率」列上，用户看到「-0.0025×」只会困惑；
+   * 而这个值还会参与排序/比较逻辑。单价不可能为负 ⇒ 读不到（`undefined`）。
+   *
+   * ⚠️ 与**余额**的区别：`total_points` 可以是负数（欠费，上游实测 `-31`），
+   * 但它走 `fetchMagicrewBalance` 的直接读取，**不经这里** ⇒ 不会误伤。
+   */
+  it('★★ 倍率：负单价 ⇒ undefined（不许算出负倍率）', () => {
+    expect(magicrewRateOf({ input_points: '-5' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: -5 })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '-0.5' })).toBeUndefined()
+    // 反向：0 与正数照常（0 = 免费是合法值）。
+    expect(magicrewRateOf({ input_points: 0 })).toBe(0)
+    expect(magicrewRateOf({ input_points: '0' })).toBe(0)
+  })
+
   it('★ 倍率：**数字字符串**仍照旧可算（收紧不得连合法输入一起废掉）', () => {
     expect(magicrewRateOf({ input_points: '200' })).toBeCloseTo(0.1)
     expect(magicrewRateOf({ input_points: ' 0 ' })).toBe(0)
