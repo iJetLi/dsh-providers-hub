@@ -1596,6 +1596,54 @@ describe('BuddyAdapter credential handling', () => {
     expect(pool.policyRecorded[0]!.message).toContain('账号存在异常行为')
   })
 
+  it('★ 拿到 2xx 时自愈清掉封禁标记（否则账号只能靠用户手动捞回，issue IKS2MV）', async () => {
+    // 封禁标记**不自动过期**、且选号侧按账号排除 ⇒ 若「实测成功」这条腿不存在，
+    // 账号一旦被误标就永久不可用（用户只能点「重置」，而那不会验证账号是否真恢复）。
+    // ⚠️ 这条守的是 `consumeSse` 开头的 `clearPolicyBlockedIfAny`：删掉它本用例才红。
+    const clearedCalls: string[] = []
+    const pool = {
+      findAccountIdByCredential: async () => 'acc-1',
+      getAvailableAccount: async () => null,
+      updateModelRateLimit: async () => {},
+      disabledModelsFor: () => new Set<string>(),
+      // 该账号带着封禁标记（模拟上一次 11140 留下的账）
+      findAccount: (id: string) => (id === 'acc-1' ? { id, policyBlockedAtMs: Date.now() - 60_000 } : undefined),
+      clearAccountPolicyBlocked: async (id: string) => {
+        clearedCalls.push(id)
+        return true
+      },
+    }
+    const adapter = makeAdapter({
+      credential: makeCredential({ access_token: 'AT1' }),
+      accountPool: pool as never,
+      fetchImpl: async () => sseResponse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })]),
+    })
+    await collectChunks(adapter, streamOptions)
+    expect(clearedCalls).toEqual(['acc-1'])
+  })
+
+  it('★ 没有封禁标记时不写盘（正常账号每轮都清一次会把写队列打满）', async () => {
+    const clearedCalls: string[] = []
+    const pool = {
+      findAccountIdByCredential: async () => 'acc-1',
+      getAvailableAccount: async () => null,
+      updateModelRateLimit: async () => {},
+      disabledModelsFor: () => new Set<string>(),
+      findAccount: (id: string) => ({ id }),
+      clearAccountPolicyBlocked: async (id: string) => {
+        clearedCalls.push(id)
+        return true
+      },
+    }
+    const adapter = makeAdapter({
+      credential: makeCredential({ access_token: 'AT1' }),
+      accountPool: pool as never,
+      fetchImpl: async () => sseResponse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })]),
+    })
+    await collectChunks(adapter, streamOptions)
+    expect(clearedCalls).toEqual([])
+  })
+
   it('400 换号途中末位撞 401/403 也不丢 11140 根因（2026-10-17 对抗审计阻断项）', async () => {
     // ⚠️⚠️ 阻断级真缺陷。出口判据原先只读循环结束后**最后一次**的 `errorText`，
     // 而 401/403 腿会把它刷成认证失败的报文 ⇒ 已记账的 11140 变成死变量。
