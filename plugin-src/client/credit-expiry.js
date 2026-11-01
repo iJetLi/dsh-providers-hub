@@ -118,6 +118,24 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
   const windowMs = days * DAY_MS;
   const at = typeof now === 'number' && Number.isFinite(now) ? now : Date.now();
   let expiring = 0;
+  /**
+   * `expiring` 里**已经作废**的那部分（`deductionEndTime <= now` 但 `active` 仍为 true）。
+   *
+   * ⚠️⚠️ **这是 `expiring` 的子集，不是第四档**（2026-11-02 修）：
+   * - **为什么仍然计入 `expiring`**：三档合计 === `total` 是 `0dd86f8` 立的硬
+   *   不变量（用户会自己加一遍，少一分就报障）；且**后端/聚合**侧
+   *   （`sharedPackageExpiry` / `splitBuddyCreditsByExpiry`）也把这类包按
+   *   「窗口内」处理 —— 前端若把它挪出 `expiring`，就变成「面板说已过期、
+   *   聚合说临期」的新分叉（PR #168 的 §三.4 刚把这种事修掉）。
+   * - **为什么还要单独记**：`expiryBucketLabel` / `formatExpiryHint` 对同一个包
+   *   已经写「已过期」，而分桶行却显示「临期 7（无倒计时）」——
+   *   同一条数据两个说法，且那个 7 **根本用不了**。
+   *   ⇒ 展示层用 `expiring - expired` 显示「临期」，剩下的显示「已过期」。
+   *
+   * 可达性：TRAE / Qoder 的 `active` 是**硬编码 true**（`trae-credits.ts`），
+   * 从不反映是否过期 —— 所以这类包**一定会**出现，不是理论值。
+   */
+  let expired = 0;
   let longTerm = 0;
   let permanent = 0;
   /** 临期桶里**最早**的作废时刻（倒计时用）；无临期包时 `null`。 */
@@ -205,6 +223,8 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
     }
     if (end - at < windowMs) {
       expiring += remaining;
+      // 已作废（end <= now）但仍 active：计入 expiring 保守恒，同时单独标记。
+      if (end <= at) expired += remaining;
       // ⚠️⚠️ **必须排除已过期的包**（2026-10-13 审计修正）：这里取的是临期桶里
       //    **最早**的作废时刻用于倒计时，而 `end` 若不约束 `> at`，那么
       //    「一个已过期但 `active` 仍为 true 的包」会**恒定当选**（它比任何
@@ -225,7 +245,9 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
       longTerm += remaining;
     }
   }
-  return { expiring, longTerm, permanent, earliestExpiringAt, earliestExpiringAmount, exclusivePoolRemaining };
+  // ⚠️ `expired` 只在**有已作废额度时**才出现（与 `modelRateLimits` 那类「无值即不写键」
+  //    同款式）：否则每个调用方都要为「多一个恒 0 的键」改断言，而它对 0 值毫无信息量。
+  return { expiring, ...(expired > 0 ? { expired } : {}), longTerm, permanent, earliestExpiringAt, earliestExpiringAmount, exclusivePoolRemaining };
 }
 
 /** 这个包属于哪一桶的中文标签（tooltip 前缀用）。 */
@@ -288,13 +310,17 @@ export function formatExpirySplitLine(split, format) {
   // 只显示**非零**桶：0 值进文案只会让一行变长而无信息（用户看不到「永久 0」的价值）。
   const permanent = split.permanent > 0 ? format(split.permanent) : null;
   const longTerm = split.longTerm > 0 ? format(split.longTerm) : null;
-  const expiring = split.expiring > 0 ? format(split.expiring) : null;
+  // ⚠️ **临期只显示「还能用」的那部分**（`expiring - expired`），已作废的单独写
+  //    「已过期」（2026-11-02 修）。见 `splitCreditsByExpiry` 里 `expired` 的注释：
+  //    两者相加仍 === `expiring` ⇒ 三档合计 === `total` 的不变量不变。
+  const expiredAmount = Number.isFinite(split.expired) && split.expired > 0 ? split.expired : 0;
+  const usableExpiring = Math.max(0, split.expiring - expiredAmount);
+  const expiring = usableExpiring > 0 ? format(usableExpiring) : null;
+  const expired = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push(`永久 ${permanent}`);
   if (longTerm !== null) parts.push(`长期 ${longTerm}`);
-  // ⚠️ 临期显示**窗口内总额**（「窗口内共有多少会作废」）。
-  //    与 `expirySplitParts` 同口径 —— 两者都必须是总额，否则三档合计
-  //    不等于 `total`，用户一加就发现数字丢了（2026-10-21 报障）。
   if (expiring !== null) parts.push(`临期 ${expiring}`);
+  if (expired !== null) parts.push(`已过期 ${expired}`);
   return parts.length === 0 ? null : parts.join(' · ');
 }
 
@@ -321,8 +347,12 @@ export function expirySplitParts(split, format, now) {
   // ⚠️ 数值与格式化文本分成两个变量：临期段要用**数值**做比较
   //    （`earliestAmount < expiringAmount`）。拿格式化后的字符串做 `<`
   //    依赖隐式转换 —— 一旦 `format` 带上千分位（`"3,500"` → `NaN`）就静默出错。
-  const expiringAmount = split.expiring > 0 ? split.expiring : 0;
+  // 已作废的那部分单独成段（见 `splitCreditsByExpiry` 的 `expired` 注释）：
+  // 它**仍在** `split.expiring` 里（保守恒、与后端/聚合同源），展示时拆开。
+  const expiredAmount = Number.isFinite(split.expired) && split.expired > 0 ? split.expired : 0;
+  const expiringAmount = Math.max(0, (split.expiring > 0 ? split.expiring : 0) - expiredAmount);
   const expiring = expiringAmount > 0 ? format(expiringAmount) : null;
+  const expiredText = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push({ key: 'permanent', text: `永久 ${permanent}`, tone: 'ok' });
   if (longTerm !== null) parts.push({ key: 'longTerm', text: `长期 ${longTerm}`, tone: 'warn' });
   if (expiring !== null) {
@@ -384,6 +414,19 @@ export function expirySplitParts(split, format, now) {
       tone: 'error',
       ...(countdownText.length > 0 ? { countdown: countdownText } : {}),
     });
+  }
+  /**
+   * ★ 「已过期」单列一段（2026-11-02）。
+   *
+   * 这些额度**已经扣不到了**，但 `active` 仍是 true（TRAE / Qoder 硬编码），
+   * 所以它们会一直出现在 `packages` 里。旧实现把它们混进「临期」⇒ 面板写
+   * 「临期 7」却没有倒计时（`earliestExpiringAt` 只取未来时刻），
+   * 而同一个包的标签写「已过期」—— 一条数据两个说法。
+   *
+   * tone 用 `warn` 而不是 `error`：它已经作废，不需要抢「马上要作废」的红色注意力。
+   */
+  if (expiredText !== null) {
+    parts.push({ key: 'expired', text: `已过期 ${expiredText}`, tone: 'warn' });
   }
   return parts;
 }
