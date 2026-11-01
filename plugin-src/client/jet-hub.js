@@ -13,6 +13,7 @@ import {
   checkinProviders,
 } from './credits-capabilities.js';
 import { orderAfterDrop, dropPositionFromPointer } from './account-order.js';
+import { checkinCommitPlan, formatNextRunAt, isInsideCheckinDock, needsHostRestartNotice } from './checkin-panel-logic.js';
 // ⚠️ 冲突解法（PR !144 × origin/master × 本 fork 的 qoder 代理）：
 //    - HEAD（PR !144）：删掉了旧侧栏入口 store（那个 `sidebar-entry` 前缀的
 //      老 store 模块，上游已整块删除）的四个符号 —— 侧栏入口改由
@@ -8771,6 +8772,75 @@ export function JetHubPage({ rpcCall }) {
   const [checkinBusy, setCheckinBusy] = React.useState(false);
   const [checkinNotice, setCheckinNotice] = React.useState(null);
   /**
+   * 「一键签到 ▾」展开的**定时签到配置面板**（用户 2026-10-18 需求）。
+   *
+   * 语义：原先只有「每日首次启动跑一次」，用户要的是**每天固定两个时刻**自动跑，
+   * 且配置入口放在原一键签到按钮上。面板里管：开关、两个时刻、下次执行、上次结果。
+   *
+   * ⚠️ `autoCheckin` 是**宿主实时状态**（含 `nextRunAt` / `times`），不落缓存 ——
+   * 每次打开面板都重新读一次，否则改完时刻后显示的「下次执行」会停在旧值上。
+   */
+  const [showCheckinPanel, setShowCheckinPanel] = React.useState(false);
+  /**
+   * 下拉面板与触发按钮的引用 —— 「点击外部关闭」需要它。
+   *
+   * ⚠️ 必须把**触发按钮**也包在「内部」的范围里：只判面板本身的话，点那个 ▾
+   * 会先被 document 上的监听判成「外部」而关闭，紧接着按钮自己的 onClick 又把它
+   * 打开 ⇒ 表现为**点一次闪一下、关不掉**（典型的下拉陷阱）。
+   */
+  const checkinWrapRef = React.useRef(null);
+  const [autoCheckin, setAutoCheckin] = React.useState(null);
+  const [autoCheckinError, setAutoCheckinError] = React.useState('');
+  const [autoCheckinBusy, setAutoCheckinBusy] = React.useState(false);
+  /** 面板里正在编辑的两个时刻（提交前不写宿主）。 */
+  const [timeDraft, setTimeDraft] = React.useState(['09:00', '21:00']);
+  /**
+   * 随机浮动开关与幅度（分钟）。
+   *
+   * 用户 2026-10-31：「加入随机签到（定时就灰色了）或者在我选择的时间搞一个上下
+   * 浮动一些时间。搞得像真人一样有时间波动。」
+   * 语义：勾上后每个时段在 [时刻 - N, 时刻 + N] 内**随机**偏移一次（每轮重新抽），
+   * 关掉则精确按时刻执行。**刻意不做成百分比**：用户能直观理解「±10 分钟」。
+   */
+  const [jitterOn, setJitterOn] = React.useState(false);
+  const [jitterMinutes, setJitterMinutes] = React.useState(10);
+  /**
+   * 上面三者「最新值」的同步副本。
+   *
+   * ⚠️ 存在的唯一理由：`closeCheckinPanel` 可能被**早期注册的监听**调用
+   *（document 上的 mousedown 捕获监听），那个闭包捕获的是注册时的旧 state。
+   * 直接读 state 会拿到上一次渲染的值 ⇒ 关闭时保存的是**旧草稿**（真实缺陷，
+   * 2026-11-01 实测：改完时刻点外部关闭，改动静默丢失）。
+   */
+  const timeDraftRef = React.useRef(timeDraft);
+  const jitterOnRef = React.useRef(jitterOn);
+  const jitterMinutesRef = React.useRef(jitterMinutes);
+  React.useEffect(() => { timeDraftRef.current = timeDraft }, [timeDraft]);
+  React.useEffect(() => { jitterOnRef.current = jitterOn }, [jitterOn]);
+  React.useEffect(() => { jitterMinutesRef.current = jitterMinutes }, [jitterMinutes]);
+  /**
+   * 宿主状态的「最新值」同步副本。
+   *
+   * ⚠️⚠️ **这条是 2026-11-01 审计打穿的那个真缺陷的修法**：上面三个 ref 只解决了
+   * 「草稿」的陈旧闭包，而提交判据还要读**宿主基线**（`autoCheckin.times`）。
+   * `document` 上的监听注册在 `useEffect(..., [showCheckinPanel])` 里，它的闭包里
+   * `autoCheckin` 永远是**打开那一刻**的值 —— 首次打开时它是 `null`
+   * ⇒ `checkinCommitPlan` 走「读不到宿主就不提交」⇒ 改完时刻点外部关闭、**静默丢失**。
+   * （实测：首次打开 + 点外部关闭 = 0 次写请求；同一份草稿用 ▾ 关闭却能存。）
+   */
+  const autoCheckinRef = React.useRef(autoCheckin);
+  React.useEffect(() => { autoCheckinRef.current = autoCheckin }, [autoCheckin]);
+  /** 正在保存（单飞闸门）：防止「连点关闭」发出两条相同的写请求。 */
+  const checkinSavingRef = React.useRef(false);
+  /**
+   * 上一次保存**失败过**（面板已把错误显示出来）。
+   *
+   * ⚠️ 存在的理由（2026-11-01 第二轮审计 P2-3）：修好「失败保住面板」之后，面板
+   * 会变成**关不掉** —— 每次关闭手势都重试保存、都失败。这里的闸门让「失败过一次」
+   * 之后的关闭手势直接关掉面板（错误已提示过），用户仍有唯一的逃生出口。
+   */
+  const checkinSaveFailedRef = React.useRef(false);
+  /**
    * 供应商级状态（provider id → ProviderStatus），driving 左侧分组与页头弹窗里的开关。
    *
    * `null` = 尚未读取成功（分组退化为不分组平铺，弹窗里的开关全部禁用）——
@@ -9133,6 +9203,202 @@ export function JetHubPage({ rpcCall }) {
    * 单渠道失败只计入 failed，**不中断后续渠道**（与后端「单账号失败不中断
    * 整体」同型）。但后端对**无账号**的渠道本就是零请求，故不额外预查账号。
    */
+  /**
+   * 下拉面板的「点击外部 / ESC 关闭」。
+   *
+   * 为什么不像其它弹窗那样「点击遮罩关闭」：那些是 `position: fixed` 的全屏遮罩，
+   * 有一个明确的表层可点；本面板是**锚定在按钮下方的下拉卡**（`position: absolute`），
+   * 没有遮罩层 —— 若也做成遮罩，会把整个设置页压暗、且与其它弹窗互斥逻辑打架。
+   * 故改用 document 级监听 + 命中测试。
+   *
+   * ⚠️ 用 `mousedown` 而不是 `click`：`click` 要等 mouseup 才触发，用户点空白处后
+   * 若手指稍有位移就不触发；`mousedown` 更接近「点到了别处」的直觉，也与浏览器
+   * 原生下拉的行为一致。
+   * ⚠️ 命中测试必须用 `contains()`（DOM 层级），**不能**用坐标判断：面板会被
+   * 窗口尺寸、滚动、缩放影响，坐标判据必然漂移。
+   * ⚠️ `checkinWrapRef` 覆盖**按钮 + 面板**两者：只判面板会让「点 ▾」自我关闭再重开。
+   */
+  React.useEffect(() => {
+    if (!showCheckinPanel) return undefined;
+    const onPointerDown = (event) => {
+      const wrap = checkinWrapRef.current;
+      // 点在容器（含按钮与面板）之内 ⇒ 不关。判据在 checkin-panel-logic.js
+      //（抽成纯函数是为了能测；这里只负责把 DOM 能力传进去）。
+      const inside = isInsideCheckinDock({
+        contains: (node) => wrap !== null && wrap.contains(node),
+        target: event.target,
+        isNode: typeof Node !== 'undefined' && event.target instanceof Node,
+      });
+      if (inside) return;
+      // ⚠️⚠️ **不能直接 `setShowCheckinPanel(false)`**（真实缺陷，2026-11-01 实测）：
+      //    那样会绕开 `toggleCheckinPanel` 里的「关闭即保存」分支，用户改了时刻/
+      //    浮动后点外部关闭 ⇒ 改动**静默丢失**，界面看着一切正常。
+      //    必须走同一个关闭入口，让保存只有一条腿。
+      closeCheckinPanel();
+    };
+    // 捕获阶段监听：避免被内部某个 stopPropagation 截断。
+    //
+    // ⚠️ **刻意不绑 ESC**（用户 2026-10-31 明确要求「按 ESC 关闭这个没必要」）：
+    //    本面板是按钮的附属下拉，不是模态框 —— 它不抢焦点、不遮页面、不改输入流。
+    //    用户在这里通常正拿着鼠标点时刻/开关，按 ESC 多半是想取消上游某个操作
+    //    （例如输入框的撤销），顺手把面板也关掉反而是干扰。
+    //    「移除」而非「保留但无害」：留着监听会让 ESC 同时做两件事，行为难预期。
+    document.addEventListener('mousedown', onPointerDown, true);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown, true);
+    };
+  }, [showCheckinPanel]);
+
+  /**
+   * 读取宿主侧的**定时签到**状态（开关 / 两个时刻 / 下次执行 / 上次结果）。
+   *
+   * ⚠️ 每次打开面板都读，不复用缓存：`nextRunAt` 是宿主按当前时刻算出来的，
+   * 缓存会让「改完时刻」后的显示停在旧值上（用户会以为没保存成功）。
+   */
+  const loadAutoCheckin = React.useCallback(async () => {
+    try {
+      const res = await rpcCall('usage.autoCheckin', {});
+      const next = res?.autoCheckin || null;
+      setAutoCheckin(next);
+      if (Array.isArray(next?.times) && next.times.length === 2) setTimeDraft([...next.times]);
+      if (typeof next?.jitterMinutes === 'number') {
+        setJitterOn(next.jitterMinutes > 0);
+        if (next.jitterMinutes > 0) setJitterMinutes(next.jitterMinutes);
+      }
+      setAutoCheckinError('');
+    } catch (error) {
+      // 读取失败**不清空**已有状态：抖动一次就把面板变空会让人以为配置丢了。
+      setAutoCheckinError(error?.message || '定时签到状态读取失败');
+    }
+  }, [rpcCall]);
+
+  /**
+   * 展开/收起配置面板。
+   *
+   * ⚠️⚠️ **打开时不要清空 `autoCheckin`、也不要在无数据时渲染「状态读取中…」**
+   *（用户 2026-10-31 报障：「我点击一按钮这个小弹窗文字会闪一下好难受」）。
+   * 根因是上一版每次打开都把状态当成空，于是面板先渲染「状态读取中…」、
+   * 几百毫秒后再换成真实文案 —— 这一下**文字替换**就是「闪」。修法两条腿：
+   * 1. 打开时**保留**上一次读到的状态（它只是稍旧，不是错的）；
+   * 2. 状态区在「还没读到」时渲染**固定高度的骨架占位**（无文字），而不是
+   *    一句会消失的文案。
+   * ⚠️ 后台仍然照常刷新一次（`loadAutoCheckin`），数据会悄悄更新 ——
+   *    只要形状不变，用户就看不到跳动。
+   */
+  /**
+   * **唯一**的关闭入口 —— 任何关闭路径都必须走这里，保证「关闭即保存」。
+   *
+   * ⚠️⚠️ 这不是洁癖（真实缺陷，2026-11-01 实测）：上一版有两处关闭 —— 滚轮按钮走
+   * `toggleCheckinPanel`（会保存），点外部走裸的 `setShowCheckinPanel(false)`（不保存）
+   * ⇒ 用户改完设置点外面关闭时，改动**静默丢失**，而界面看不出任何异常。
+   * 同义语义只留一条实现，是本仓库反复记录的一条纪律。
+   */
+  const closeCheckinPanel = () => {
+    // ★ 关闭即保存（用户 2026-10-31：「退出这个小弹窗自动保存就行」）。
+    //
+    // ⚠️⚠️ **一律读 ref，不读闭包里的 state**（真实缺陷，2026-11-01 两轮审计各自
+    //    实测打穿）：本函数可能被**早于最后一次 setState 注册的监听**调用
+    //    （document 的 mousedown 捕获监听注册在 `useEffect(..., [showCheckinPanel])`，
+    //    闭包停在打开那一刻）⇒ 读到的是旧值。**草稿三个 ref + 宿主状态一个 ref
+    //    缺一不可**：只修前者时，首次打开（autoCheckin 还是 null）点外部关闭会走
+    //    `checkinCommitPlan` 的「读不到宿主」分支 ⇒ 改动**静默丢失**，而用 ▾ 关闭
+    //    却能存（同一份草稿两条路径相反）。
+    const plan = checkinCommitPlan({
+      hostTimes: autoCheckinRef.current?.times,
+      hostJitter: autoCheckinRef.current?.jitterMinutes,
+      draftTimes: timeDraftRef.current,
+      draftJitterOn: jitterOnRef.current,
+      draftJitterMinutes: jitterMinutesRef.current,
+    });
+    if (plan === null) {
+      // 没改动（或宿主状态还没读回来）⇒ 直接关。
+      // ⚠️ 宿主状态读不到时**不提交**：那时草稿只是本地默认值，写进去会把用户的
+      //   真实设置覆盖成默认两个时刻。
+      setShowCheckinPanel(false);
+      return;
+    }
+    // ★ 单飞：上一次保存还没回来时，忽略重复的关闭手势（audit2 P2-3）。
+    //   否则「点外部关闭 + 再点一次」会发出**两条相同 payload** 的写请求。
+    if (checkinSavingRef.current) return;
+    // ★ 上一次保存**已经失败过**且用户没再改 ⇒ 这次直接关：错误已经显示过，
+    //   不能把面板变成关不掉的死锁（audit2 P2-3）。用户的改动仍是「未保存」，
+    //   重开面板时草稿会被宿主值覆盖 —— 这是「已经提示过失败」的代价，比卡死好。
+    if (checkinSaveFailedRef.current) {
+      setShowCheckinPanel(false);
+      return;
+    }
+    // 有改动 ⇒ 提交；**成功才关**，失败则把面板留在打开状态（否则错误文案渲染在
+    // 一个已经关闭的面板里，用户永远看不到 —— 2026-11-01 审计 P2-4）。
+    checkinSavingRef.current = true;
+    void saveCheckinTimesWith(plan.times, plan.jitterMinutes > 0, plan.jitterMinutes)
+      .then((okSaved) => {
+        checkinSavingRef.current = false;
+        if (okSaved) setShowCheckinPanel(false);
+        else checkinSaveFailedRef.current = true;
+      });
+  };
+
+  const toggleCheckinPanel = () => {
+    if (showCheckinPanel) { closeCheckinPanel(); return }
+    setAutoCheckinError('');
+    // 重新打开 = 重新给一次机会：清掉「上次保存失败」的闸门（否则用户改完再关会
+    // 走「直接关」分支，改动又一次静默丢弃）。
+    checkinSaveFailedRef.current = false;
+    setShowCheckinPanel(true);
+    // 与其它页头浮层互斥：它们都是 position:fixed，同时开会叠在一起。
+    setShowProviderSwitches(false);
+    setShowGateway(false);
+    setShowTokenLedger(false);
+    // ⚠️ 不清空 autoCheckin：保留旧值，避免 null → 真值 的文字替换。
+    void loadAutoCheckin();
+  };
+
+  /** 开关自动签到。宿主在「打开」时会立刻尝试一轮（有时段没跑则补）。 */
+  const toggleAutoCheckin = async (enabled) => {
+    setAutoCheckinBusy(true);
+    setAutoCheckinError('');
+    try {
+      const res = await rpcCall('usage.autoCheckin', { enabled });
+      const next = res?.autoCheckin || null;
+      setAutoCheckin(next);
+      if (Array.isArray(next?.times) && next.times.length === 2) setTimeDraft([...next.times]);
+    } catch (error) {
+      setAutoCheckinError(error?.message || '定时签到开关保存失败');
+    } finally {
+      setAutoCheckinBusy(false);
+    }
+  };
+
+  /**
+   * 保存两个时刻（用户在面板里改过才写）。
+   *
+   * ⚠️ 非法值由**宿主**拒绝并回 `bad-request`，这里只负责把那条文案显示出来 ——
+   * 客户端**不重复实现**校验（两处判据必然漂移，本仓库已有该类真实缺陷）。
+   *
+   * ★ 用户 2026-10-31：「这个二按钮没必要存在，退出这个小弹窗自动保存就行」
+   *   ⇒ 面板不再有「保存时刻」按钮，改为**关闭时自动提交**。
+   *   ⚠️ 必须**只在真的改过时**才发请求（见 `commitTimesIfDirty`）：关闭面板是
+   *   高频动作，每次都写盘会让宿主反复保存、也让「时刻」被无谓地重置。
+   */
+  const saveCheckinTimesWith = async (draft, jOn, jMin) => {
+    setAutoCheckinBusy(true);
+    setAutoCheckinError('');
+    try {
+      const res = await rpcCall('usage.autoCheckin', { times: [...draft], jitterMinutes: jOn ? jMin : 0 });
+      const next = res?.autoCheckin || null;
+      setAutoCheckin(next);
+      if (Array.isArray(next?.times) && next.times.length === 2) setTimeDraft([...next.times]);
+      return true;
+    } catch (error) {
+      // 错误文案由面板渲染（`renderCheckinPanel` 的 role="alert" 那一行）——
+      // 调用方负责在失败时**把面板留着**，否则这句看不见。
+      setAutoCheckinError(error?.message || '时刻保存失败');
+      return false;
+    } finally {
+      setAutoCheckinBusy(false);
+    }
+  };
+
   const checkinAll = async () => {
     setCheckinBusy(true);
     setCheckinNotice(null);
@@ -9384,6 +9650,142 @@ export function JetHubPage({ rpcCall }) {
   //    「一份状态两套判据」，而且页头那个开关只能表达两态、无法承载互斥语义。
   //    卡片实现见 `plugin-src/client/settings-card.js`。
 
+  /**
+   * 定时签到配置面板（下拉卡）。
+   *
+   * ⚠️ 内容必须是**受控**的：`timeDraft` 与宿主状态分开存 —— 直接绑定宿主值会让
+   * 用户每次按键都触发一次写盘（且中途状态非法）。
+   * ⚠️ **没有「保存」按钮**（用户 2026-10-31：「这个二按钮没必要存在，退出这个小
+   *   弹窗自动保存就行」）⇒ 提交发生在面板**关闭**时（`commitTimesIfDirty`）。
+   */
+  function renderCheckinPanel() {
+    const a = autoCheckin;
+    const busy = autoCheckinBusy;
+    return React.createElement('div', {
+      className: 'dim-jh-checkinPanel',
+      role: 'dialog',
+      'aria-label': '定时签到设置',
+      // ⚠️ 阻止冒泡：外层页头没有点击关闭逻辑，但将来若给它加，这里不该被连带触发。
+      onClick: (event) => event.stopPropagation(),
+    },
+      React.createElement('div', { className: 'dim-jh-checkinPanelTitle' }, '定时签到'),
+      // ⚠️⚠️ **不能让 `<label>` 包住整行**（用户 2026-10-31：「按钮范围有点大啊」）：
+      //    `label` 的语义是「点它任意位置都切换那个 input」⇒ 整行 300px 全成了
+      //    命中区，用户点行尾空白也会把开关切走。
+      //    修法：容器改 `div`，只有**开关 + 紧邻文字**包在 label 里。
+      //    ⚠️ 也不能干脆不要 label：那样键盘 Tab 到 checkbox 时没有可读的关联文字。
+      React.createElement('div', { className: 'dim-jh-checkinRow' },
+        React.createElement('label', { className: 'dim-jh-checkinToggle' },
+          React.createElement('input', {
+            type: 'checkbox',
+            className: 'dim-jh-switch',
+            checked: a?.enabled === true,
+            // ⚠️ 只在 `autoCheckinBusy` 时禁用，**不再**因 `a === null` 禁用：
+            //   那会让面板刚打开的一瞬间开关是灰的，用户点了没反应（也是「闪」的一种）。
+            disabled: busy,
+            onChange: (event) => void toggleAutoCheckin(event.target.checked),
+          }),
+          React.createElement('span', null, '每天自动签到（两次）'))),
+      React.createElement('div', { className: 'dim-jh-checkinRow' },
+        React.createElement('label', null, '执行时刻'),
+        timeDraft.map((value, index) => React.createElement('input', {
+          key: `t-${index}`,
+          type: 'time',
+          className: 'dim-jh-checkinTime',
+          value,
+          disabled: busy,
+          'aria-label': `第 ${index + 1} 个执行时刻`,
+          onChange: (event) => {
+            const next = [...timeDraft];
+            next[index] = event.target.value;
+            // 用户又改了 ⇒ 允许下一次关闭再试一次保存（清掉失败闸门）。
+            checkinSaveFailedRef.current = false;
+            setTimeDraft(next);
+          },
+        }))),
+      // ★ 随机浮动（用户 2026-10-31：「搞得像真人一样有时间波动」）。
+      //   勾上 = 每个时段在 ±jitter 分钟内随机偏移；关掉 = 精确按时刻跑。
+      //
+      // ⚠️ 同「每天自动签到」那行：`label` **只**包开关 + 紧邻文字，
+      //    数字框与「分钟」在 label 外面 —— 否则点数字框附近也会切换开关
+      //    （用户 2026-10-31：「按钮范围有点大啊」）。
+      React.createElement('div', { className: 'dim-jh-checkinRow' },
+        React.createElement('label', { className: 'dim-jh-checkinToggle' },
+          React.createElement('input', {
+            type: 'checkbox',
+            className: 'dim-jh-switch',
+            checked: jitterOn,
+            disabled: busy,
+            onChange: (event) => {
+              checkinSaveFailedRef.current = false;
+              setJitterOn(event.target.checked);
+            },
+          }),
+          React.createElement('span', null, '随机浮动')),
+        React.createElement('input', {
+          type: 'number',
+          className: 'dim-jh-checkinJitter',
+          min: 0,
+          max: 120,
+          step: 5,
+          value: jitterMinutes,
+          disabled: busy || !jitterOn,
+          'aria-label': '随机浮动分钟数',
+          onChange: (event) => {
+            checkinSaveFailedRef.current = false;
+            setJitterMinutes(Number(event.target.value));
+          },
+        }),
+        React.createElement('span', null, '分钟')),
+      React.createElement('div', { className: 'dim-jh-checkinHint' },
+        jitterOn
+          ? '每个时刻会在 ±' + String(jitterMinutes) + ' 分钟内随机偏移（两个时刻挨得近时，幅度会被夹到间隔的一半），'
+            + '避免固定时刻被识别为脚本；改完关闭面板自动保存。'
+          : '固定时刻执行；改完关闭面板自动保存。'),
+      renderCheckinStatus(a),
+      autoCheckinError === ''
+        ? null
+        : React.createElement('div', { className: 'dim-jh-checkinHint', role: 'alert', style: { color: '#d93025' } }, autoCheckinError),
+    );
+  }
+
+  /**
+   * 状态区：下次执行 + 待补渠道 + 上次结果。
+   *
+   * ⚠️ **旧宿主**（插件已更新、进程还在跑旧代码）必须显式说出来：那时响应里
+   * 没有 `times`/`nextRunAt`，若把「字段缺失」当成「开关已关闭」，面板就会同时
+   * 显示「开关勾着」与「不会执行（开关已关闭）」—— 用户 2026-10-18 报障的
+   * 正是这一格。判据与文案都在 `checkin-panel-logic.js`（那里有回归用例）。
+   *
+   * ⚠️ **还没读回来时渲染固定高度的骨架，不渲染文字**（2026-11-01 审计 P3-1）：
+   * 用户报障「点开小弹窗文字会闪一下」的成因就是「状态读取中…」→ 真值这一次
+   * 文字替换。留空白骨架 ⇒ 形状不变，不会跳。
+   */
+  function renderCheckinStatus(a) {
+    if (a === null) {
+      return React.createElement('div', {
+        className: 'dim-jh-checkinStatus dim-jh-checkinStatusLoading',
+        'aria-hidden': 'true',
+      });
+    }
+    if (needsHostRestartNotice(a)) {
+      return React.createElement('div', { className: 'dim-jh-checkinStatus', role: 'alert' },
+        '⚠️ 宿主仍在运行旧代码（没有定时签到接口）。请完全退出并重新打开 DSH，'
+        + '之后这里才会显示「下次执行」时间。');
+    }
+    return React.createElement('div', { className: 'dim-jh-checkinStatus' },
+      React.createElement('div', null, `下次执行：${formatNextRunAt(a.nextRunAt, Date.now())}`),
+      // ★ 逐渠道水位线：这个时段还有渠道没领到（典型：10:00 才刷新额度的渠道）。
+      //   宿主会按退避重试它们，界面必须说出来 —— 否则用户只看到「下次执行 21:00」
+      //   却不知道 10:00 那批还要再过一会儿才会领到。
+      typeof a.pendingSlot === 'string' && a.pendingSlot !== ''
+        ? React.createElement('div', null, `有渠道待补（${a.pendingSlot.slice(11, 16)} 那一轮），正在自动重试`)
+        : null,
+      a.lastResult === ''
+        ? null
+        : React.createElement('div', null, `上次：${a.lastResult}`));
+  }
+
   return React.createElement('section', { className: 'dim-jh-page', 'aria-label': 'Jet Hub Provider 设置' },
     // ⚠️ 页头左侧的「Jet Hub」标题块已**整块删除**（用户 2026-10-07 要求：
     // 标题只占宽度、不带任何操作，空间全给按钮行）。这里先后删过两样东西，
@@ -9415,14 +9817,31 @@ export function JetHubPage({ rpcCall }) {
             setShowProviderSwitches(true);
           },
         }, '供应商'),
-        // 一键签到在备份/恢复**左侧**（需求指定位置）
-        React.createElement('button', {
-          className: 'dim-jh-btn',
-          title: '依次签到全部支持签到的渠道（CodeBuddy / LobsterAI / CodeArts / Qoder / TRAE）。'
-            + '串行执行以避免触发风控。',
-          disabled: checkinBusy,
-          onClick: () => void checkinAll(),
-        }, checkinBusy ? '签到中…' : '一键签到'),
+        // 一键签到在备份/恢复**左侧**（需求指定位置）。
+        //
+        // ★ 2026-10-18：按钮改成「[一键签到][▾]」两段式 —— 主按钮仍是**立刻签到**
+        //   （高频动作，不该多点一次），右侧小箭头展开**定时签到配置面板**。
+        //   用户原话：「在原来的一键签到那里加一个展开页面里面进行配置」。
+        //   ⚠️ 不做成「点主按钮即展开」：那会让「立刻签到」多一步，且与用户
+        //   「不是手动点击、要自动」的诉求相反 —— 手动入口必须保留且零成本。
+        React.createElement('span', { className: 'dim-jh-checkinWrap', ref: checkinWrapRef },
+          React.createElement('button', {
+            className: 'dim-jh-btn dim-jh-checkinMain',
+            title: '依次签到全部支持签到的渠道（CodeBuddy / LobsterAI / CodeArts / Qoder / TRAE）。'
+              + '串行执行以避免触发风控。',
+            disabled: checkinBusy,
+            onClick: () => void checkinAll(),
+          }, checkinBusy ? '签到中…' : '一键签到'),
+          React.createElement('button', {
+            className: 'dim-jh-btn dim-jh-checkinCaret',
+            title: '定时签到：设置每天两个自动执行的时刻',
+            'aria-haspopup': 'dialog',
+            'aria-expanded': showCheckinPanel ? 'true' : 'false',
+            'aria-label': '定时签到设置',
+            onClick: toggleCheckinPanel,
+          }, '▾'),
+          showCheckinPanel ? renderCheckinPanel() : null,
+        ),
         React.createElement(BackupPanel, {
           rpcCall,
           // 导入成功会整体替换账号，ProviderPanel 只在挂载时拉列表；

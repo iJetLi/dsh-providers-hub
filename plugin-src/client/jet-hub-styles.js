@@ -360,6 +360,32 @@ const STYLES = `
 .dim-jh-btn[data-kind="danger"]:hover:not(:disabled) { color: #b3261e; border-color: #d93025; background: rgb(217 48 37 / 6%); }
 .dim-jh-btn:disabled { opacity: 0.5; cursor: default; }
 
+/* 「一键签到 ▾」的展开配置面板（用户 2026-10-18 要求：每天两次定时签到，
+   配置入口就放在原一键签到按钮上）。
+   ⚠️ 用**绝对定位的下拉卡**而不是居中模态框：它是按钮的附属配置，不是独立任务，
+   模态框会把用户的注意力与页面滚动静止，而这里改完还要顺手点旁边的「一键签到」。
+   ⚠️ 必须 position: relative 挂在容器上（.dim-jh-checkinWrap），否则下拉会以
+   最近的非 static 祖先定位 —— 实测会跑到页头外面去。 */
+.dim-jh-checkinWrap { position: relative; display: inline-flex; align-items: center; }
+.dim-jh-checkinMain { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.dim-jh-checkinCaret { padding: 4px 7px; border-left: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
+.dim-jh-checkinPanel { position: absolute; top: calc(100% + 6px); left: 0; z-index: 40; width: 300px; padding: 12px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 10px; background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: 0 8px 24px rgb(15 23 42 / 12%); display: flex; flex-direction: column; gap: 10px; }
+.dim-jh-checkinPanelTitle { font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); }
+.dim-jh-checkinRow { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #4e5969); }
+.dim-jh-checkinRow > label { flex: none; }
+/* 开关 + 紧邻文字的可点区（用户 2026-10-31：「按钮范围有点大啊」）。
+   ⚠️ 只包开关和文字、**不包整行**：label 的语义是「点任意位置都切换 input」，
+   包整行会让行尾空白也变成命中区。inline-flex 让可点区贴合内容。 */
+.dim-jh-checkinToggle { flex: none; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.dim-jh-checkinTime { width: 92px; padding: 4px 8px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: var(--dsw-alias-label-primary, #1f2329); font: inherit; font-size: 12px; }
+.dim-jh-checkinTime:focus { outline: none; border-color: #1677ff; box-shadow: 0 0 0 2px color-mix(in srgb, #1677ff 20%, transparent); }
+.dim-jh-checkinHint { font-size: 11px; line-height: 1.6; color: var(--dsw-alias-label-tertiary, #8f959e); }
+.dim-jh-checkinStatus { margin-top: 2px; padding: 6px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); font-size: 11px; line-height: 1.6; color: var(--dsw-alias-label-secondary, #4e5969); }
+/* 「还没读回来」的骨架：**固定高度、无文字**（2026-11-01 审计 P3-1）。
+   旧实现渲染一句「状态读取中…」，RPC 回来后替换成真值 ⇒ 用户看到文字闪一下
+   （原始报障）。骨架保持同样高度，替换时不产生跳动。 */
+.dim-jh-checkinStatusLoading { min-height: 34px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); opacity: 0.6; }
+
 
 /* 纯图标按钮（如「领取新手任务」的礼物图标）。
    ⚠️ 存在的理由：.dim-jh-accountActions 是 flex-wrap: nowrap，
