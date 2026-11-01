@@ -1351,6 +1351,38 @@ describe('★★ 自动签到：时段记账与逐渠道补领', () => {
     expect(scheduled[0]!.ms).toBe(utc8MomentMs('2026-10-18', '21:00') - time.now())
   })
 
+  it('★ 渠道被删掉再加回来 ⇒ 旧水位线必须失效（否则当天不再签到，第二轮审计 P3）', async () => {
+    // 场景：早上 09:00 跑过（providerSlots.buddy = 今天 09:00）→ 用户把 buddy 的账号
+    // 全删了（池里 0 个渠道，这一轮会走 early return）→ 11:00 又把账号加回来。
+    // 若旧的 providerSlots.buddy 还在，它会被判成「本轮已处理」而**跳过上游**。
+    const time = clock(at('2026-10-18', '09:00'))
+    let providers: string[] = []
+    const claims: string[] = []
+    const store = memoryStore({
+      enabled: true,
+      times: ['09:00', '21:00'],
+      lastSlot: slotKey('2026-10-17', '21:00'),
+      providerSlots: { buddy: slotKey('2026-10-18', '09:00') },
+    })
+    const runner = createAutoCheckin({
+      store: store.store,
+      listProviderIds: async () => providers,
+      claim: async (provider) => { claims.push(provider); return ok({ claimed: 1, totalCredit: 1, coversToday: 1 }) },
+      now: time.now,
+      delayMs: 1,
+      schedule: () => ({ cancel: () => {} }),
+      warn: () => {},
+    })
+    // 池被清空的那一轮：应当把残留的逐渠道水位线清掉并落盘
+    await runner.runIfDue()
+    expect(store.current().providerSlots).toEqual({})
+    // 账号加回来、到 11:00（仍在今天 09:00 那个时段内）⇒ 必须真的打上游
+    providers = ['buddy']
+    time.set(at('2026-10-18', '11:00'))
+    await runner.runIfDue()
+    expect(claims, '★ 旧水位线没清 ⇒ 加回来的渠道被判成「已处理」，当天一次都不签到').toEqual(['buddy'])
+  })
+
   it('★ pendingSlot 落后于当前时段 ⇒ 判据改打**新**时段（pending 分支，第二轮审计 P3）', () => {
     // ⚠️ 直接打 `runnableSlotKey`：真机上 `pending≠'' ⇒ lastSlot<pending` 的不变量会让
     //    「pending 落后」这个分支很难走到，但它是**显式的安全网**（重试拖过下一个时段时
