@@ -8749,6 +8749,18 @@ export function JetHubPage({ rpcCall }) {
   React.useEffect(() => { jitterOnRef.current = jitterOn }, [jitterOn]);
   React.useEffect(() => { jitterMinutesRef.current = jitterMinutes }, [jitterMinutes]);
   /**
+   * 宿主状态的「最新值」同步副本。
+   *
+   * ⚠️⚠️ **这条是 2026-11-01 审计打穿的那个真缺陷的修法**：上面三个 ref 只解决了
+   * 「草稿」的陈旧闭包，而提交判据还要读**宿主基线**（`autoCheckin.times`）。
+   * `document` 上的监听注册在 `useEffect(..., [showCheckinPanel])` 里，它的闭包里
+   * `autoCheckin` 永远是**打开那一刻**的值 —— 首次打开时它是 `null`
+   * ⇒ `checkinCommitPlan` 走「读不到宿主就不提交」⇒ 改完时刻点外部关闭、**静默丢失**。
+   * （实测：首次打开 + 点外部关闭 = 0 次写请求；同一份草稿用 ▾ 关闭却能存。）
+   */
+  const autoCheckinRef = React.useRef(autoCheckin);
+  React.useEffect(() => { autoCheckinRef.current = autoCheckin }, [autoCheckin]);
+  /**
    * 供应商级状态（provider id → ProviderStatus），driving 左侧分组与页头弹窗里的开关。
    *
    * `null` = 尚未读取成功（分组退化为不分组平铺，弹窗里的开关全部禁用）——
@@ -9202,16 +9214,33 @@ export function JetHubPage({ rpcCall }) {
    * 同义语义只留一条实现，是本仓库反复记录的一条纪律。
    */
   const closeCheckinPanel = () => {
-    setShowCheckinPanel(false);
     // ★ 关闭即保存（用户 2026-10-31：「退出这个小弹窗自动保存就行」）。
     //
-    // ⚠️⚠️ **必须用 ref 里最新的草稿，不能依赖闭包里的 `timeDraft`**（真实缺陷，
-    //    2026-11-01 实测：改完时刻点外部关闭，改动静默丢失）。原因是本函数可能
-    //    被**早于最后一次 setState 注册的监听**调用（document 上的 mousedown
-    //    捕获监听在 effect 里注册，其闭包捕获的是当时那一拍的 state）⇒
-    //    读到的 `timeDraft` 是**上一次渲染的旧值**。
-    //    修法：草稿同步写一份到 ref，关闭时以 ref 为准。
-    void commitTimesIfDirty(timeDraftRef.current, jitterOnRef.current, jitterMinutesRef.current);
+    // ⚠️⚠️ **一律读 ref，不读闭包里的 state**（真实缺陷，2026-11-01 两轮审计各自
+    //    实测打穿）：本函数可能被**早于最后一次 setState 注册的监听**调用
+    //    （document 的 mousedown 捕获监听注册在 `useEffect(..., [showCheckinPanel])`，
+    //    闭包停在打开那一刻）⇒ 读到的是旧值。**草稿三个 ref + 宿主状态一个 ref
+    //    缺一不可**：只修前者时，首次打开（autoCheckin 还是 null）点外部关闭会走
+    //    `checkinCommitPlan` 的「读不到宿主」分支 ⇒ 改动**静默丢失**，而用 ▾ 关闭
+    //    却能存（同一份草稿两条路径相反）。
+    const plan = checkinCommitPlan({
+      hostTimes: autoCheckinRef.current?.times,
+      hostJitter: autoCheckinRef.current?.jitterMinutes,
+      draftTimes: timeDraftRef.current,
+      draftJitterOn: jitterOnRef.current,
+      draftJitterMinutes: jitterMinutesRef.current,
+    });
+    if (plan === null) {
+      // 没改动（或宿主状态还没读回来）⇒ 直接关。
+      // ⚠️ 宿主状态读不到时**不提交**：那时草稿只是本地默认值，写进去会把用户的
+      //   真实设置覆盖成默认两个时刻。
+      setShowCheckinPanel(false);
+      return;
+    }
+    // 有改动 ⇒ 提交；**成功才关**，失败则把面板留在打开状态（否则错误文案渲染在
+    // 一个已经关闭的面板里，用户永远看不到 —— 2026-11-01 审计 P2-4）。
+    void saveCheckinTimesWith(plan.times, plan.jitterMinutes > 0, plan.jitterMinutes)
+      .then((okSaved) => { if (okSaved) setShowCheckinPanel(false); });
   };
 
   const toggleCheckinPanel = () => {
@@ -9261,33 +9290,15 @@ export function JetHubPage({ rpcCall }) {
       const next = res?.autoCheckin || null;
       setAutoCheckin(next);
       if (Array.isArray(next?.times) && next.times.length === 2) setTimeDraft([...next.times]);
+      return true;
     } catch (error) {
+      // 错误文案由面板渲染（`renderCheckinPanel` 的 role="alert" 那一行）——
+      // 调用方负责在失败时**把面板留着**，否则这句看不见。
       setAutoCheckinError(error?.message || '时刻保存失败');
+      return false;
     } finally {
       setAutoCheckinBusy(false);
     }
-  };
-
-  /**
-   * 面板关闭时调用：只有草稿**与宿主当前值不同**才提交。
-   *
-   * ⚠️ 判据用「与 `autoCheckin.times` 比对」而不是一个 dirty 布尔：
-   *   用户可能改完又改回去，此时不该写盘（写一次等于把宿主时刻重置成同一个值，
-   *   白跑一次 RPC；若宿主刚好在那一轮算下次执行，还会造成一次无谓的重排）。
-   * ⚠️ `autoCheckin` 为 null（还没读到）时**不提交**：那时 `timeDraft` 只是本地
-   *   默认值，拿它写盘会把用户的真实设置覆盖成 09:00/21:00。
-   */
-  const commitTimesIfDirty = async (draft = timeDraft, jOn = jitterOn, jMin = jitterMinutes) => {
-    // 判据在 checkin-panel-logic.js（纯函数，可测）——这里只负责把数据传进去。
-    const plan = checkinCommitPlan({
-      hostTimes: autoCheckin?.times,
-      hostJitter: autoCheckin?.jitterMinutes,
-      draftTimes: draft,
-      draftJitterOn: jOn,
-      draftJitterMinutes: jMin,
-    });
-    if (plan === null) return;
-    await saveCheckinTimesWith(plan.times, plan.jitterMinutes > 0, plan.jitterMinutes);
   };
 
   const checkinAll = async () => {
@@ -9622,7 +9633,8 @@ export function JetHubPage({ rpcCall }) {
         React.createElement('span', null, '分钟')),
       React.createElement('div', { className: 'dim-jh-checkinHint' },
         jitterOn
-          ? '每个时刻会在 ±' + String(jitterMinutes) + ' 分钟内随机偏移，避免固定时刻被识别为脚本；改完关闭面板自动保存。'
+          ? '每个时刻会在 ±' + String(jitterMinutes) + ' 分钟内随机偏移（两个时刻挨得近时，幅度会被夹到间隔的一半），'
+            + '避免固定时刻被识别为脚本；改完关闭面板自动保存。'
           : '固定时刻执行；改完关闭面板自动保存。'),
       renderCheckinStatus(a),
       autoCheckinError === ''
@@ -9632,16 +9644,23 @@ export function JetHubPage({ rpcCall }) {
   }
 
   /**
-   * 状态区：下次执行 + 上次结果。
+   * 状态区：下次执行 + 待补渠道 + 上次结果。
    *
    * ⚠️ **旧宿主**（插件已更新、进程还在跑旧代码）必须显式说出来：那时响应里
    * 没有 `times`/`nextRunAt`，若把「字段缺失」当成「开关已关闭」，面板就会同时
    * 显示「开关勾着」与「不会执行（开关已关闭）」—— 用户 2026-10-18 报障的
    * 正是这一格。判据与文案都在 `checkin-panel-logic.js`（那里有回归用例）。
+   *
+   * ⚠️ **还没读回来时渲染固定高度的骨架，不渲染文字**（2026-11-01 审计 P3-1）：
+   * 用户报障「点开小弹窗文字会闪一下」的成因就是「状态读取中…」→ 真值这一次
+   * 文字替换。留空白骨架 ⇒ 形状不变，不会跳。
    */
   function renderCheckinStatus(a) {
     if (a === null) {
-      return React.createElement('div', { className: 'dim-jh-checkinStatus' }, '状态读取中…');
+      return React.createElement('div', {
+        className: 'dim-jh-checkinStatus dim-jh-checkinStatusLoading',
+        'aria-hidden': 'true',
+      });
     }
     if (needsHostRestartNotice(a)) {
       return React.createElement('div', { className: 'dim-jh-checkinStatus', role: 'alert' },
@@ -9650,6 +9669,12 @@ export function JetHubPage({ rpcCall }) {
     }
     return React.createElement('div', { className: 'dim-jh-checkinStatus' },
       React.createElement('div', null, `下次执行：${formatNextRunAt(a.nextRunAt, Date.now())}`),
+      // ★ 逐渠道水位线：这个时段还有渠道没领到（典型：10:00 才刷新额度的渠道）。
+      //   宿主会按退避重试它们，界面必须说出来 —— 否则用户只看到「下次执行 21:00」
+      //   却不知道 10:00 那批还要再过一会儿才会领到。
+      typeof a.pendingSlot === 'string' && a.pendingSlot !== ''
+        ? React.createElement('div', null, `有渠道待补（${a.pendingSlot.slice(11, 16)} 那一轮），正在自动重试`)
+        : null,
       a.lastResult === ''
         ? null
         : React.createElement('div', null, `上次：${a.lastResult}`));

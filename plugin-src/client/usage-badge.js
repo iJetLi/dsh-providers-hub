@@ -889,14 +889,20 @@ function UsageBadgeActive(props) {
    */
   const autoTitle = (() => {
     const what = '自动签到开关';
+    // ★ 2026-11-01：语义已从「每天首次启动跑一次」改成「每天两个固定时刻」
+    //   （默认 10:05 / 21:00，用户可改）。文案必须跟着改 —— 旧文案会让人以为
+    //   「今天启动过一次就够了」，而实际上 21:00 那轮还没跑。
+    const slots = Array.isArray(auto?.times) && auto.times.length === 2
+      ? auto.times.join(' / ')
+      : '设定时刻';
     if (auto === undefined) return `${what}：状态读取中…`;
     if (auto.enabled !== true) {
-      return `${what}（当前：关闭）—— 点击开启后，每天首次启动 DSH 时会自动为全部渠道签到一次`;
+      return `${what}（当前：关闭）—— 点击开启后，每天 ${slots} 会自动为全部渠道签到`;
     }
     if (auto.running === true) return `${what}（当前：开启，正在执行）—— 串行遍历有账号的渠道，请稍候`;
     const last = auto.lastResult === '' ? '' : `；上次：${auto.lastResult}`;
-    if (auto.ranToday === true) return `${what}（当前：开启，今天已完成）${last} —— 点击关闭`;
-    return `${what}（当前：开启，今天尚未执行）—— 每天首次启动 DSH 时自动签到${last}；点击关闭`;
+    if (auto.ranToday === true) return `${what}（当前：开启，今天已跑过；每天 ${slots}）${last} —— 点击关闭`;
+    return `${what}（当前：开启，今天尚未执行）—— 每天 ${slots} 自动签到${last}；点击关闭`;
   })();
   const autoState = auto === undefined || auto.enabled !== true
     ? 'off'
@@ -1578,7 +1584,7 @@ function UsageBadgeActive(props) {
           // 的家数）—— 加一个支持签到的渠道就必须改这里。
           // 2026-10-16 合并审计发现：加 `minimaxintl` 后能力表已 9 → **10**，
           // 而此处仍写 9（**零守卫**：全仓没有断言这个数字的用例）。
-          title: `串行签到全部支持签到的渠道（10 个；WorkBuddy 国际版 / Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天首次启动 DSH 时会自动执行一次' : ''}`,
+          title: `串行签到全部支持签到的渠道（10 个；WorkBuddy 国际版 / Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻（默认 10:05 / 21:00）自动执行' : ''}`,
           onClick: () => { void onClaimAll(); },
         }, allBusy
           ? (claimProgress === null ? '签到中…' : `签到中 ${claimProgress.done}/${claimProgress.total}…`)

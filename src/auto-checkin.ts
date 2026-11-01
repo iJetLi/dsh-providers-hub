@@ -126,6 +126,32 @@ export interface AutoCheckinDoc {
    * 水位线落后就会补跑。
    */
   lastSlot: string
+  /**
+   * 正在**补领**的时段（`YYYY-MM-DD#HH:MM`）；空串 = 没有待补的渠道。
+   *
+   * ## 为什么需要它（2026-11-01 审计 P1-5）
+   *
+   * 水位线是**整轮**粒度：一轮里只要**有一个**渠道证明「今天已处理」，整轮就记账，
+   * 于是「10:00 才刷新额度」的渠道（Qoder 活动）在 09:00 那轮拿到的是昨天的痕迹
+   * 却**再也不会被单独重试** ⇒ 当天漏领。实测：混合池 + 21:00 前关 DSH，
+   * Qoder 在 10:00 之后的调用次数为 **0**。
+   *
+   * 修法：把「哪个渠道已经处理到哪个时段」记成逐渠道水位线
+   *（{@link providerSlots}），本轮没领到的渠道留在 `pendingSlot` 上按退避重试，
+   * 重试时**只打**那些渠道（`performRun` 会跳过已处理的）。
+   */
+  pendingSlot: string
+  /**
+   * **逐渠道**水位线：该渠道已处理到哪个时段 key。
+   *
+   * 语义与 `lastSlot` 同构，只是粒度是渠道：
+   * - 缺失 / 空串 ⇒ 该渠道还没处理过任何时段；
+   * - `>= 目标时段` ⇒ 本轮跳过它（不重复打上游）。
+   *
+   * ⚠️ 只保留**当前池里出现过的**渠道键（`performRun` 每轮用 `listProviderIds()`
+   * 的结果重建），故不会无限增长 —— 渠道总数就 12 个。
+   */
+  providerSlots: Record<string, string>
   /** 上次结果摘要（中文短句，展示在状态灯提示里）。 */
   lastResult: string
   /** 上次跑完的时刻（毫秒）；0 = 从未跑过。 */
@@ -144,12 +170,22 @@ export interface AutoCheckinDoc {
 /**
  * 默认两个执行时刻（UTC+8）。
  *
- * 为什么是 09:00 / 21:00：本仓库各渠道的每日额度刷新时点集中在上午（Qoder 活动
- * 10:00 才刷新、其余多为 00:00 或登录触发）。09:00 那轮把「00:00 刷新」的那批
- * 领掉；21:00 那轮兜住「上午才刷新 / 上午那轮因凭据未续上而失败」的情况。
- * 间隔 12 小时，任一轮失败都还有另一轮兜底 —— 这正是用户要的「无遗漏」。
+ * ## 为什么第一轮是 **10:05** 而不是 09:00（2026-11-01 审计 P1-5，用户实测报障）
+ *
+ * 本仓库各渠道的每日额度刷新时点**不统一**：多数在 00:00，而 Qoder 活动要
+ * **10:00（UTC+8）** 才刷新（见 `src/auto-checkin.ts` 文件头与 `credits.ts`）。
+ * 09:00 那轮对 Qoder 拿到的是**昨天**的 `CLAIMED`：`coversToday === 0`，
+ * 但混合渠道池里别的渠道会证明今天 ⇒ 整轮记账、停止重试 ⇒ **10:00 刷出来的
+ * 额度当天再也不会被领**（只有 21:00 那轮兜，而用户白天用完就关 DSH 时它不会发生）。
+ *
+ * 改成 10:05：① 晚于全部已知刷新点；② 给上游 5 分钟缓冲（刷新瞬间打过去容易
+ * 拿到「未刷新」的痕迹）；③ 仍是「上午一次、晚上一次」，任一轮失败还有另一轮兜底。
+ *
+ * ⚠️ 即使时段设在 10:05，负偏移（浮动）仍可能把它提前到 10:00 之前 —— 故另有
+ * 逐渠道水位线兜底（见 {@link AutoCheckinDoc.pendingSlot}）：没领到的渠道会留在
+ * 待补队列里按退避重试，而不是等下一个时段。
  */
-export const DEFAULT_AUTO_CHECKIN_TIMES: readonly string[] = ['09:00', '21:00']
+export const DEFAULT_AUTO_CHECKIN_TIMES: readonly string[] = ['10:05', '21:00']
 
 /** 恰好两个时段：用户明确要求「一天两次」。 */
 export const AUTO_CHECKIN_SLOT_COUNT = 2
@@ -167,10 +203,30 @@ export const DEFAULT_AUTO_CHECKIN: AutoCheckinDoc = {
   jitterMinutes: 0,
   lastDate: '',
   lastSlot: '',
+  pendingSlot: '',
+  providerSlots: {},
   lastResult: '',
   lastAt: 0,
   channels: [],
   dismissedRunAt: 0,
+}
+
+/** 逐渠道水位线的上限（渠道共 12 个，留余量；脏数据不该撑大文档）。 */
+const MAX_PROVIDER_SLOTS = 64
+
+/** 归一化逐渠道水位线：丢掉非法项（只认 `YYYY-MM-DD#HH:MM`），限制条数。 */
+function sanitizeProviderSlots(raw: unknown): Record<string, string> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const out: Record<string, string> = {}
+  let count = 0
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 64) continue
+    if (typeof value !== 'string' || !SLOT_RE.test(value)) continue
+    out[key] = value
+    count += 1
+    if (count >= MAX_PROVIDER_SLOTS) break
+  }
+  return out
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -216,6 +272,8 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
     jitterMinutes: sanitizeJitter(record.jitterMinutes),
     lastDate: typeof record.lastDate === 'string' && DATE_RE.test(record.lastDate) ? record.lastDate : '',
     lastSlot: typeof record.lastSlot === 'string' && SLOT_RE.test(record.lastSlot) ? record.lastSlot : '',
+    pendingSlot: typeof record.pendingSlot === 'string' && SLOT_RE.test(record.pendingSlot) ? record.pendingSlot : '',
+    providerSlots: sanitizeProviderSlots(record.providerSlots),
     lastResult: typeof record.lastResult === 'string' ? record.lastResult : '',
     lastAt: ms(record.lastAt),
     channels: sanitizeChannels(record.channels),
@@ -328,27 +386,79 @@ export function slotKey(date: string, time: string): string {
 }
 
 /**
- * 当前时刻落在「哪个时段区间」：返回**已到点的最大时段 key**。
+ * 一个时段的解析结果：`key` 用于水位线比较，`realAt` 是**真实执行时刻**
+ * （= 时段时刻 + 该轮确定性偏移）。
+ */
+export interface CheckinSlot {
+  key: string
+  realAt: number
+}
+
+/**
+ * 枚举 [昨天, 今天, 明天] 三天的全部时段，按 `realAt` 升序。
  *
- * 例（times = 09:00 / 21:00）：
- * - 今天 08:30 ⇒ 已到点的是**昨天 21:00**；
+ * ## 为什么把「偏移」算进时段本身（2026-11-01 审计 P1-2）
+ *
+ * 旧实现先按**时段时刻**取 `due`，再拿 `realAt` 比 `now`。偏移为负时
+ * （真实执行时刻在时段**之前**），`due` 还没轮到那个时段 ⇒ `shouldRunNow`
+ * 恒 false ⇒ **负偏移是死代码**，「±N 浮动」实际只有 `[0, +N]`。
+ * 实测：全年 730 个时段里负偏移占 49.7%、**提前执行 0 次**；而且约一半的日子
+ * 精确在 `HH:MM:00` 执行 —— 正是浮动想消掉的那个脚本指纹。
+ *
+ * 把 `realAt` 作为**唯一**判据（「到点」= `realAt <= now`）之后：
+ * - 负偏移的时段会在时段**之前**被判为到点 ⇒ `±N` 真的是双向的；
+ * - 「已到点但真实时刻未到」这个中间态**不存在**了 ⇒ `nextRunDelayMs` 不再
+ *   恒返回 0，`armNext` 的每秒空转自动消失（审计 P1-3）。
+ *
+ * ⚠️ 偏移的夹紧保证 `span <= 与下一时段间隔的一半` ⇒ `realAt` 的先后顺序与
+ * 时段 key 的字典序**一致**，故水位线仍可用字符串比较。
+ */
+export function checkinSlotsAround(nowMs: number, times: readonly string[], jitterMinutes = 0): CheckinSlot[] {
+  const sorted = [...times].sort()
+  if (sorted.length === 0) return []
+  const jitter = sanitizeJitter(jitterMinutes)
+  const out: CheckinSlot[] = []
+  for (const dayShift of [-1, 0, 1]) {
+    const date = utc8DateString(nowMs + dayShift * 86_400_000)
+    for (let i = 0; i < sorted.length; i += 1) {
+      const time = sorted[i]!
+      // 与**下一个**时段的间隔（末尾用「到明天第一个」），用于夹紧浮动幅度。
+      const gap = i + 1 < sorted.length
+        ? timeGapMinutes(time, sorted[i + 1]!)
+        : timeGapMinutes(time, sorted[0]!) + 24 * 60
+      out.push({ key: slotKey(date, time), realAt: slotMomentMs(date, time, jitter, gap) })
+    }
+  }
+  return out.sort((a, b) => a.realAt - b.realAt)
+}
+
+/**
+ * 当前时刻**已经真的到点**的最大时段 key（含浮动偏移）。
+ *
+ * 例（times = 09:00 / 21:00，jitter = 0）：
+ * - 今天 08:30 ⇒ **昨天 21:00**；
  * - 今天 09:05 ⇒ 今天 09:00；
  * - 今天 22:00 ⇒ 今天 21:00。
+ *
+ * 配了浮动后判据换成「时段时刻 + 偏移 <= now」：偏移为负 ⇒ 会在时段之前到点。
+ *
+ * @param jitterMinutes - 浮动幅度（分钟）；省略 = 0（与旧签名兼容）。
  */
-export function latestDueSlotKey(nowMs: number, times: readonly string[]): string {
-  const sorted = [...times].sort()
-  if (sorted.length === 0) return ''
-  const today = utc8DateString(nowMs)
-  const hhmm = utc8TimeString(nowMs)
+export function latestDueSlotKey(nowMs: number, times: readonly string[], jitterMinutes = 0): string {
+  const slots = checkinSlotsAround(nowMs, times, jitterMinutes)
   let best = ''
-  for (const time of sorted) {
-    if (time <= hhmm) best = slotKey(today, time)
+  for (const slot of slots) {
+    if (slot.realAt <= nowMs) best = slot.key
   }
-  if (best !== '') return best
-  // 今天还没有任何时段到点 ⇒ 往前推一天，取昨天最后一个时段。
-  const yesterday = utc8DateString(nowMs - 86_400_000)
-  const last = sorted[sorted.length - 1]
-  return last === undefined ? '' : slotKey(yesterday, last)
+  return best
+}
+
+/** 下一个**真实执行时刻还没到**的时段；没有（`times` 为空）⇒ `null`。 */
+export function nextSlotRef(nowMs: number, times: readonly string[], jitterMinutes = 0): CheckinSlot | null {
+  for (const slot of checkinSlotsAround(nowMs, times, jitterMinutes)) {
+    if (slot.realAt > nowMs) return slot
+  }
+  return null
 }
 
 /**
@@ -404,45 +514,49 @@ export function checkinJitterOffsetMs(
 }
 
 /**
- * 该不该现在跑一轮：**水位线落后于「已到点的最大时段」**就跑。
+ * 现在该为**哪个时段**跑一轮：`''` = 不用跑。
  *
- * ⚠️ 这里**不是**「今天跑过没有」，而是「到点的时段都处理完没有」——
- * 一天两个时段各自要跑一次，用「今天跑过」判会让第二个时段永远不触发。
+ * 判据优先级：
+ * 1. `pendingSlot`（上一轮还有渠道没领到，例如 10:00 才刷新额度的渠道）——
+ *    只要它还没被新时段顶掉，就继续打它（审计 P1-5：旧实现只认「整轮是否
+ *    证明今天」，混合渠道池里只要别的渠道证明过今天，Qoder 这类 10:00 才刷新
+ *    的渠道就再也不会被单独重试 ⇒ 当天漏领）；
+ * 2. 水位线落后于**已到点的最大时段** ⇒ 跑那个时段。
+ *
+ * ⚠️ 这里**不是**「今天跑过没有」：一天两个时段各自要跑一次，用「今天跑过」
+ * 判会让第二个时段永远不触发。
  * ⚠️ `lastSlot` 为空（从未跑过）⇒ 只要有到点的时段就跑：这正是「首次启用
  * 立刻补跑」的行为。
  */
-export function shouldRunNow(
-  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'> & { jitterMinutes?: number },
+export function runnableSlotKey(
+  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'> & {
+    jitterMinutes?: number
+    pendingSlot?: string
+  },
   nowMs: number,
-): boolean {
-  if (!doc.enabled) return false
-  // ⚠️ 这里刻意**也接受 lastDate**（下面一行用 `??` 兜底不到，故单列说明）：
+): string {
+  if (!doc.enabled) return ''
+  // ⚠️ 这里刻意**也接受 lastDate** 的旧语义（文档字段仍在写）：
   //   旧文档有 lastDate 但没有 lastSlot ⇒ 无法判断今天两个时段各自处理了没有。
   //   取「补跑」而不是「当成已跑」：签到是幂等的（对已领的号上游返回
   //   alreadyClaimed），代价是一轮请求；而误判成「已跑」的代价是**当天整天漏领**。
-  const due = latestDueSlotKey(nowMs, doc.times)
-  if (due === '') return false
-  if (!((doc.lastSlot ?? '') === '' || doc.lastSlot < due)) return false
-  //
-  // ★ 随机浮动（2026-10-31）：水位线落后**不等于**现在就该跑 ——
-  //   若给这个时段配了浮动，真实执行时刻是「时段时刻 + 偏移」。
-  //   例：09:00 配 ±10 分、本轮偏移 +7 ⇒ 真实执行 09:07。
-  //   在 09:05 时水位线已经落后（09:00 已到点），但**还没到** 09:07 ⇒ 不该跑。
-  //
-  // ⚠️ 但「**已过期很久**」的时段必须立刻补跑，不能因为偏移而永久卡住：
-  //   判据是「真实执行时刻已过」即可 —— 与偏移是过去还是未来无关。
-  //   这同时覆盖了「错过的时段」（真实时刻早已过去）。
-  const jitter = sanitizeJitter(doc.jitterMinutes)
-  if (jitter <= 0) return true
-  const date = due.slice(0, 10)
-  const time = due.slice(11, 16)
-  const sorted = [...doc.times].sort()
-  const index = sorted.indexOf(time)
-  const gap = index >= 0 && index + 1 < sorted.length
-    ? timeGapMinutes(time, sorted[index + 1]!)
-    : timeGapMinutes(time, sorted[0] ?? time) + 24 * 60
-  const realAt = slotMomentMs(date, time, jitter, gap)
-  return nowMs >= realAt
+  const due = latestDueSlotKey(nowMs, doc.times, doc.jitterMinutes ?? 0)
+  const pending = doc.pendingSlot ?? ''
+  // ⚠️「还有渠道没领到」优先（`pendingSlot`），但**不许**比当前已到点的时段还旧：
+  //   若重试拖过了下一个时段，旧的那个已无意义 ⇒ 直接改打新时段。
+  if (pending !== '' && due !== '' && pending >= due) return pending
+  if (due !== '' && ((doc.lastSlot ?? '') === '' || doc.lastSlot < due)) return due
+  return ''
+}
+
+export function shouldRunNow(
+  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'> & {
+    jitterMinutes?: number
+    pendingSlot?: string
+  },
+  nowMs: number,
+): boolean {
+  return runnableSlotKey(doc, nowMs) !== ''
 }
 
 /** 环境变量：启动后延迟多久再尝试自动签到（毫秒）。 */
@@ -522,6 +636,8 @@ class FileAutoCheckinStore implements AutoCheckinStore {
       jitterMinutes: doc.jitterMinutes,
       lastDate: doc.lastDate,
       lastSlot: doc.lastSlot,
+      pendingSlot: doc.pendingSlot,
+      providerSlots: doc.providerSlots,
       lastResult: doc.lastResult,
       lastAt: doc.lastAt,
       channels: doc.channels,
@@ -744,17 +860,6 @@ export function sanitizeTimesStrict(raw: readonly unknown[]): string[] {
 }
 
 /**
- * 下一个**尚未处理**的时段对应的毫秒时刻（UTC+8 基准）。
- *
- * 语义：返回「水位线之后、且还没到点的最近一个时段」。三种情形：
- * - 有已到点但没跑的时段（水位线落后）⇒ 返回**现在**（补跑马上执行）；
- * - 今天还有时段没到点 ⇒ 今天那个时刻；
- * - 今天的都过完了 ⇒ 明天第一个时刻。
- *
- * ⚠️ 「落后即现在」这一步不能省：否则「22:00 启动、水位线停在昨天」会被算成
- * 「下次明天 09:00」，而实际上一轮补跑马上就要执行 —— 面板会显示一个自相矛盾时间。
- */
-/**
  * 取某时段「加上随机浮动后」的真实执行毫秒。
  *
  * ⚠️ `nextGapMinutes` 由调用方算好传进来（不在这里查 `times`），是为了让本函数
@@ -773,50 +878,52 @@ function timeGapMinutes(from: string, to: string): number {
   return (th! - fh!) * 60 + (tm! - fm!)
 }
 
+/**
+ * 下一个**尚未处理**的时段对应的毫秒时刻（UTC+8 基准）。
+ *
+ * 三种情形：
+ * - 有时段待跑（水位线落后，或上一轮还有渠道没领到）⇒ 返回**现在**；
+ * - 下一个时段的**真实执行时刻**还没到 ⇒ 返回那一刻（含浮动偏移）；
+ * - `times` 为空 / 开关关 ⇒ 0。
+ *
+ * ⚠️ 「待跑即现在」这一步不能省：否则「22:00 启动、水位线停在昨天」会被算成
+ * 「下次明天 10:05」，而实际上一轮补跑马上就要执行 —— 面板会显示自相矛盾的时间。
+ * ⚠️ 但它**只覆盖「马上要跑」这一格**：退避重试期间真实的下一次尝试由
+ * `state().nextRunAt` 取 `armNext` 排定的时刻（见 `nextAttemptAt`），不再在这里
+ * 编一个「现在」（审计 P1-4：旧实现在退避期间一直显示「马上执行」，实际 30 分钟后）。
+ */
 export function nextRunAtOf(
   nowMs: number,
-  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'> & { jitterMinutes?: number },
+  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'> & {
+    jitterMinutes?: number
+    pendingSlot?: string
+  },
 ): number {
   if (!doc.enabled) return 0
-  const sorted = [...doc.times].sort()
-  if (sorted.length === 0) return 0
-  const jitter = sanitizeJitter(doc.jitterMinutes)
-  const due = latestDueSlotKey(nowMs, sorted)
-  // ⚠️ 「水位线落后」时**返回现在**，不要套浮动：这一轮是**补跑**，用户期待它
-  //    立刻开始；给它加个「再等 7 分钟」的偏移会让补跑看着像没生效。
-  if (due !== '' && ((doc.lastSlot ?? '') === '' || doc.lastSlot < due)) return nowMs
-  const today = utc8DateString(nowMs)
-  const hhmm = utc8TimeString(nowMs)
-  for (let i = 0; i < sorted.length; i += 1) {
-    const time = sorted[i]!
-    if (time <= hhmm) continue
-    const key = slotKey(today, time)
-    if ((doc.lastSlot ?? '') === '' || key > doc.lastSlot) {
-      // 与**下一个**时段的间隔（末尾则用「到明天第一个」的间隔）。
-      const gap = i + 1 < sorted.length
-        ? timeGapMinutes(time, sorted[i + 1]!)
-        : timeGapMinutes(time, sorted[0]!) + 24 * 60
-      return slotMomentMs(today, time, jitter, gap)
-    }
-  }
-  const tomorrow = utc8DateString(nowMs + 86_400_000)
-  const gap = timeGapMinutes(sorted[0]!, sorted.length > 1 ? sorted[1]! : sorted[0]!)
-  const effectiveGap = sorted.length > 1 ? gap : gap + 24 * 60
-  return slotMomentMs(tomorrow, sorted[0]!, jitter, effectiveGap)
+  if (doc.times.length === 0) return 0
+  if (runnableSlotKey(doc, nowMs) !== '') return nowMs
+  const next = nextSlotRef(nowMs, doc.times, doc.jitterMinutes ?? 0)
+  return next === null ? 0 : next.realAt
 }
 
 /**
  * 距下一次执行的毫秒数。
  *
- * ⚠️ 水位线落后（错过时段）时返回 **0** —— 调用方用 `Math.max(1_000, …)` 兜住，
- * 既保证「立刻补跑」，又不会在水位线尚未写盘时形成忙循环。
+ * ⚠️ 待跑（水位线落后 / 有渠道没领到）时返回 **0** —— 调用方用
+ * `Math.max(1_000, …)` 兜住，既保证「立刻补跑」，又不会在水位线尚未写盘时形成忙循环。
+ *
+ * ⚠️⚠️ 旧实现在这里留了一个坑（审计 P1-3）：「时段已到点、但浮动后的真实时刻还没到」
+ * 也会返回 0 ⇒ `armNext` 每秒醒一次（实测 2 小时 2653 次唤醒）。现在「到点」的判据
+ * 本身含偏移（见 `checkinSlotsAround`），这个中间态不存在了 ⇒ 会返回正的等待时长。
  */
 export function nextRunDelayMs(
   nowMs: number,
-  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'>,
+  doc: Pick<AutoCheckinDoc, 'enabled' | 'times' | 'lastSlot'> & {
+    jitterMinutes?: number
+    pendingSlot?: string
+  },
 ): number {
-  const due = latestDueSlotKey(nowMs, doc.times)
-  if (doc.enabled && ((doc.lastSlot ?? '') === '' || doc.lastSlot < due)) return 0
+  if (runnableSlotKey(doc, nowMs) !== '') return 0
   const target = nextRunAtOf(nowMs, doc)
   if (target === 0) return 0
   return Math.max(0, target - nowMs)
@@ -886,14 +993,21 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   const today = (): string => utc8DateString(now())
 
   function state(): RpcUsageAutoCheckinState {
+    const nowMs = now()
+    const todayKey = `${today()}#`
     return {
       enabled: doc.enabled,
       times: [...doc.times],
       jitterMinutes: doc.jitterMinutes,
       lastSlot: doc.lastSlot,
       lastDate: doc.lastDate,
-      ranToday: doc.lastSlot.startsWith(`${today()}#`),
-      nextRunAt: nextRunAtOf(now(), doc),
+      // ⚠️ 判据是**水位线落在今天**，不是「今天有没有写盘」：补跑昨天 21:00 那轮会
+      //   更新 `lastAt`，但今天自己的时段还一个都没跑 ⇒ 仍该说「今天尚未执行」。
+      ranToday: doc.lastSlot.startsWith(todayKey),
+      // ★ 用 `armNext` 实际排定的时刻（含退避），不要用 `nextRunAtOf` 的「现在」：
+      //   退避重试期间后者恒等于 now，面板会一直显示「马上执行」却什么都不发生。
+      nextRunAt: doc.enabled ? (nextAttemptAt > 0 ? nextAttemptAt : nextRunAtOf(nowMs, doc)) : 0,
+      pendingSlot: doc.pendingSlot,
       running,
       lastResult: doc.lastResult,
       lastAt: doc.lastAt,
@@ -904,6 +1018,19 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   }
 
   async function performRun(): Promise<void> {
+    const startedAt = now()
+    const jitter = sanitizeJitter(doc.jitterMinutes)
+    /**
+     * ★ 本轮的**目标时段**在起跑时就定死（2026-11-01 审计 P1-6）。
+     *
+     * 旧实现取「跑完那一刻已到点的最大时段」，于是「08:58 启动补跑昨天 21:00、
+     * 09:05 跑完」会把 **09:00 那轮**标成已完成 —— 它从未单独执行过。
+     * 改成起跑时的时段后：跑完只推进到「这轮本来为哪个时段跑」，
+     * 09:00 那轮该跑还是会跑（多跑一轮幂等，漏一轮可能丢一天额度）。
+     */
+    const targetSlot = doc.pendingSlot !== ''
+      ? doc.pendingSlot
+      : latestDueSlotKey(startedAt, doc.times, jitter)
     const totals = emptyTotals()
     let providers: string[] = []
     try {
@@ -914,13 +1041,35 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       return
     }
     const channels: Array<{ provider: string; text: string }> = []
+    /**
+     * 本轮已确认「这个时段处理过了」的渠道 —— 逐渠道水位线的写入集。
+     *
+     * ⚠️ 判据是**逐渠道**的 `coversToday`，不是整轮合计（审计 P1-5）：
+     * 混合池里只要有别的渠道证明今天，整轮就会记账，Qoder 这类 **10:00 才刷新
+     * 额度**的渠道于是再也不会被单独重试 ⇒ 当天漏领。
+     */
+    const proven = new Set<string>()
+    /**
+     * 「设计上就不该重试」的渠道（排除表 / 无签到接口）。
+     *
+     * ⚠️ 它们既不构成「今天跑过」（`proven`），也不该拖住水位线（`lagging`）——
+     * 否则一个 zcode 账号会让整条链永远在重试（而它每次都是零请求，纯浪费）。
+     */
+    const unretryable = new Set<string>()
     for (const provider of providers) {
+      // 逐渠道水位线：该渠道在这个时段已经处理过 ⇒ 跳过（重试时不再重复打上游）。
+      if (targetSlot !== '' && (doc.providerSlots?.[provider] ?? '') >= targetSlot) {
+        channels.push({ provider, text: '本轮已处理' })
+        proven.add(provider)
+        continue
+      }
       // ⚠️ 排除表先于**任何**上游请求生效（见 isAutoCheckinExcluded 的说明）：
       // zcode 的代价发生在**调用期间**（拉起浏览器产 captcha），事后再判断已经
       // 太晚 —— 必须在调 `claim` 之前就把它摘掉。
       if (isAutoCheckinExcluded(provider)) {
         totals.skipped += 1
         channels.push({ provider, text: '需手动签到' })
+        unretryable.add(provider)
         continue
       }
       let result: BadgeRpcResult<RpcCreditsClaimAllResponse>
@@ -937,6 +1086,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
         if (isUnsupportedCheckin(message)) {
           totals.skipped += 1
           channels.push({ provider, text: '无签到接口' })
+          unretryable.add(provider)
           continue
         }
         totals.errors += 1
@@ -963,17 +1113,26 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       // ⚠️ 记账口径**只认**这一项：渠道用 `coversToday` 自己声明「这条痕迹是不是
       // 今天这一轮的」。缺省回落到 `claimed + alreadyClaimed`，是为了兼容尚未
       // 上报该字段的旧响应（缺字段 ≠ 0，否则整轮会被判成「什么都没证明」）。
-      totals.coversToday += summary.coversToday ?? (summary.claimed + summary.alreadyClaimed)
+      const coversToday = summary.coversToday ?? (summary.claimed + summary.alreadyClaimed)
+      totals.coversToday += coversToday
       channels.push({ provider, text: describeChannel(summary) })
+      if (coversToday > 0) proven.add(provider)
     }
 
-    if (!shouldMarkToday(totals)) {
-      // ⚠️ 刻意**不写** lastDate：让「凭据还没续上 / 网络不通 / 赶在渠道刷新前
-      // 跑的那一轮」能在下次启动重试，而不是当天就此放弃（判据见 shouldMarkToday）。
-      //
-      // ★★ 但**必须记失败次数**（2026-11-01 修忙循环）：不记账 ⇒ 水位线不动 ⇒
-      //    `nextRunDelayMs` 恒返回 0 ⇒ 每秒重跑一轮。实测 5 轮内 claim 被调 10 次。
-      //    记次数后 `armNext` 会按指数退避排下一次（1s→2s→4s→… 封顶 30 分钟）。
+    if (providers.length === 0) {
+      // 一个渠道都没有：没有可领的东西，也不该推进水位线（用户随时可能加账号）。
+      // 与旧行为一致地记账失败 ⇒ 走退避（此时**零上游请求**，不会轰炸）。
+      dueFailures += 1
+      deps.warn?.(`[jet-hub] 自动签到：账号池里没有可签到的渠道（第 ${dueFailures} 次）`)
+      return
+    }
+
+    if (proven.size === 0) {
+      // ⚠️ **整轮没有任何一条渠道能证明「今天已被处理」** ⇒ 不记账（保留旧语义，
+      //   由 `shouldMarkToday` 的判据演化而来）：
+      //   - 凭据全过期 / 网络不通 / 启动太早抢在续期之前；
+      //   - 「只有 zcode」这类**全部被跳过**的池子：跳过不构成「今天跑过」。
+      //   下一次按退避重试（`dueFailures` 记账，避免退回每秒一轮的忙循环）。
       dueFailures += 1
       deps.warn?.(
         `[jet-hub] 自动签到未记入今日（第 ${dueFailures} 次，将退避 ${Math.round(retryBackoffMs(dueFailures) / 1000)} 秒后重试）：${describeRun(totals)}`,
@@ -981,15 +1140,55 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       return
     }
 
-    // ★ 水位线取「跑完之后已到点的最大时段」而不是「跑之前那个」：
-    //   一轮可能跨过时段边界（例如 08:59 启动、跑完已 09:03），若记成跑之前的
-    //   时段，09:00 这轮会被判成「没跑过」而立刻重跑一次。
-    const finishedSlot = latestDueSlotKey(now(), doc.times)
+    const nextProviderSlots: Record<string, string> = {}
+    for (const provider of providers) {
+      const value = proven.has(provider) ? targetSlot : (doc.providerSlots?.[provider] ?? '')
+      if (value !== '') nextProviderSlots[provider] = value
+    }
+    // ★ 待补 = 「有渠道证明了今天，但这个渠道还没有，且它**有可能**领到」。
+    //   设计上不该重试的（排除表 / 无签到接口）不算待补，否则它们会拖住水位线。
+    const lagging = providers.filter((provider) => !proven.has(provider) && !unretryable.has(provider))
+    // 同一时段最多重试 `LAG_RETRY_MAX` 次（1s→…→30 分钟，累计约 1.5 小时）：
+    // 够覆盖「10:00 才刷新额度」这类延迟，又不会因为一个坏账号永远不记账。
+    const attempts = dueFailures + 1
+    const giveUp = lagging.length > 0 && attempts > LAG_RETRY_MAX
+
+    if (lagging.length > 0 && !giveUp) {
+      // ★ 部分完成：**不动** `lastSlot`（这个时段还没处理完），改用 `pendingSlot`
+      //   记住它，并按退避只重试没领到的渠道（`providerSlots` 让已领的跳过）。
+      dueFailures += 1
+      doc = {
+        ...doc,
+        pendingSlot: targetSlot,
+        providerSlots: nextProviderSlots,
+        lastResult: `${describeRun(totals)}（${lagging.length} 个渠道待补）`,
+        lastAt: now(),
+        channels,
+        dismissedRunAt: 0,
+      }
+      try {
+        await deps.store.save(doc)
+      } catch (error) {
+        deps.warn?.(`[jet-hub] 自动签到部分结果写入失败: ${String(error)}`)
+      }
+      deps.warn?.(
+        `[jet-hub] 自动签到部分完成（${targetSlot}）：${lagging.join('、')} 还没证明今天，`
+        + `第 ${dueFailures} 次重试将在 ${Math.round(retryBackoffMs(dueFailures) / 1000)} 秒后`,
+      )
+      return
+    }
+
+    // 全部渠道都处理完（或放弃重试）：推进水位线。
+    const finishedSlot = targetSlot === '' ? doc.lastSlot : targetSlot
     doc = {
       ...doc,
       lastDate: today(),
-      lastSlot: finishedSlot === '' ? doc.lastSlot : finishedSlot,
-      lastResult: describeRun(totals),
+      lastSlot: finishedSlot,
+      pendingSlot: '',
+      providerSlots: nextProviderSlots,
+      lastResult: giveUp
+        ? `${describeRun(totals)}（${lagging.length} 个渠道放弃补领，等下一个时段）`
+        : describeRun(totals),
       lastAt: now(),
       channels,
       // ⚠️ 新一轮跑完要**清掉上一次的「已关闭」标记**：否则用户关过一次后，
@@ -1006,7 +1205,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       dueFailures += 1
       deps.warn?.(`[jet-hub] 自动签到结果写入失败（今天可能重复触发一次）: ${String(error)}`)
     }
-    deps.warn?.(`[jet-hub] 自动签到完成（${today()}）：${doc.lastResult}`)
+    deps.warn?.(`[jet-hub] 自动签到完成（${finishedSlot || today()}）：${doc.lastResult}`)
   }
 
   function runIfDue(): Promise<void> {
@@ -1017,7 +1216,10 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
     if (!shouldRunNow(doc, now())) return Promise.resolve()
     running = true
     const task = performRun().catch((error: unknown) => {
-      deps.warn?.(`[jet-hub] 自动签到异常: ${String(error)}`)
+      // ⚠️ 抛错也必须记账（2026-11-01 审计）：否则 `dueFailures` 不动 ⇒ `armNext`
+      //    恒走 1 秒分支 ⇒「每秒重跑一轮」的忙循环会从「异常」这个入口原样复发。
+      dueFailures += 1
+      deps.warn?.(`[jet-hub] 自动签到异常（第 ${dueFailures} 次）: ${String(error)}`)
     }).finally(() => {
       running = false
       inflight = null
@@ -1058,15 +1260,34 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   /** 退避上限：30 分钟。超过它就该等下一个正常时段，而不是继续重试。 */
   const RETRY_BACKOFF_MAX_MS = 30 * 60_000
 
+  /**
+   * 同一时段最多补领几次。
+   *
+   * 1s→2s→…→ 封顶 30 分钟，累计约 **1.5 小时**：够覆盖「10:00 才刷新额度」这类
+   * 延迟（例：09:00 那轮对 Qoder 拿不到今天的痕迹 ⇒ 之后每小时重试一次，
+   * 到 10:00 之后自然领到），又不至于因为一个坏账号永远不记账。
+   */
+  const LAG_RETRY_MAX = 14
+
   /** 按连续失败次数算退避延迟（指数退避，封顶）。 */
   function retryBackoffMs(failures: number): number {
     const exponent = Math.min(failures, 16)
     return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (exponent - 1), RETRY_BACKOFF_MAX_MS)
   }
 
+  /**
+   * 下一次真实尝试的毫秒时刻（0 = 没有排定）。
+   *
+   * ⚠️ 存在的理由（2026-11-01 审计 P1-4）：`nextRunAtOf` 在「有时段待跑」时
+   * 返回**现在**，而退避重试期间真实的下一次可能在 30 分钟后 ⇒ 面板会一直写
+   * 「马上执行」却什么都不发生。故把 `armNext` 实际排定的时刻记下来供 `state()` 用。
+   */
+  let nextAttemptAt = 0
+
   function armNext(): void {
     pending?.cancel()
     pending = null
+    nextAttemptAt = 0
     if (!doc.enabled) return
     const normal = nextRunDelayMs(now(), doc)
     // ⚠️ 判据是「**有时段待跑**（normal === 0）」而不是「到了一秒」：
@@ -1076,6 +1297,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       : dueFailures > 0
         ? retryBackoffMs(dueFailures)
         : RETRY_BACKOFF_BASE_MS
+    nextAttemptAt = now() + ms
     pending = (deps.schedule ?? defaultSchedule)(() => {
       pending = null
       void runIfDue().finally(() => { armNext() })
@@ -1089,11 +1311,14 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       await deps.store.save(doc)
       // 开关一关就撤掉定时器：否则关掉之后还挂着下一轮，用户会以为「关了还在跑」。
       if (!enabled) { armNext(); return state() }
+      // ★ 用户手点「打开」= 想让 **现在** 试一轮，不该带着上一轮的退避计数
+      //   （否则刚打开就显示「30 分钟后重试」）。
+      dueFailures = 0
       // 打开开关时立刻尝试一轮（有时段没跑则由 runIfDue 内部拦住）。
       // ⚠️ 不 await：一轮要串行打十几个上游，让按钮等它会让界面像卡死；
       // `state()` 里的 `running` 会立刻变成 true，界面据此显示「进行中」。
       // ⚠️ 跑完必须 armNext()：否则「打开开关」这条路径不会排下一轮，
-      //   09:00 打开的用户当天 21:00 那轮就永远不触发。
+      //   10:05 打开的用户当天 21:00 那轮就永远不触发。
       void runIfDue().finally(() => { armNext() })
       return state()
     },
@@ -1107,7 +1332,12 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       const jitter = jitterMinutes === undefined
         ? doc.jitterMinutes
         : sanitizeJitterStrict(jitterMinutes)
-      doc = { ...doc, times: cleaned, jitterMinutes: jitter }
+      // ★ 改时段 = 重新开始记账：
+      //   - `pendingSlot` 是**旧时刻表**下的时段 key，留着会指向一个不存在的时刻；
+      //   - `dueFailures` 不清零的话，改完时刻后的第一次重试还要等 30 分钟
+      //     （审计 P1-4 的附带症状：用户改完设置却半小时没动静）。
+      doc = { ...doc, times: cleaned, jitterMinutes: jitter, pendingSlot: '' }
+      dueFailures = 0
       await deps.store.save(doc)
       // 新时间立刻生效：撤掉按旧时刻排的那一轮，按新时刻重排。
       armNext()

@@ -381,7 +381,10 @@ const STYLES = `
 .dim-jh-checkinTime:focus { outline: none; border-color: #1677ff; box-shadow: 0 0 0 2px color-mix(in srgb, #1677ff 20%, transparent); }
 .dim-jh-checkinHint { font-size: 11px; line-height: 1.6; color: var(--dsw-alias-label-tertiary, #8f959e); }
 .dim-jh-checkinStatus { margin-top: 2px; padding: 6px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); font-size: 11px; line-height: 1.6; color: var(--dsw-alias-label-secondary, #4e5969); }
-.dim-jh-checkinActions { display: flex; justify-content: flex-end; gap: 8px; }
+/* 「还没读回来」的骨架：**固定高度、无文字**（2026-11-01 审计 P3-1）。
+   旧实现渲染一句「状态读取中…」，RPC 回来后替换成真值 ⇒ 用户看到文字闪一下
+   （原始报障）。骨架保持同样高度，替换时不产生跳动。 */
+.dim-jh-checkinStatusLoading { min-height: 34px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); opacity: 0.6; }
 
 
 /* 纯图标按钮（如「领取新手任务」的礼物图标）。

@@ -636,7 +636,10 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(styles).not.toContain('.dim-jh-badgeAutoTag')
     // 状态灯的悬停提示必须说清「这个按钮是干什么的」
     expect(badge).toContain("const what = '自动签到开关';")
-    expect(badge).toMatch(/点击开启后，每天首次启动 DSH 时会自动为全部渠道签到一次/)
+    // ⚠️ 2026-11-01 审计：语义已从「每天首次启动跑一次」改成「每天两个固定时刻」
+    //   （默认 10:05/21:00），文案里凡出现「首次启动」都是过期的自相矛盾描述。
+    expect(badge).toMatch(/点击开启后，每天 \$\{slots\} 会自动为全部渠道签到/)
+    expect(badge).not.toContain('每天首次启动 DSH')
     expect(badge).toMatch(/title: autoTitle/)
   })
 

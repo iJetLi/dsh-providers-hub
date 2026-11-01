@@ -59,6 +59,12 @@ function clock(start: number) {
 /** 2026-10-02 12:00（UTC+8）= 04:00Z。 */
 const NOON_UTC8 = Date.UTC(2026, 9, 2, 4, 0, 0)
 
+/** 前一天的 `YYYY-MM-DD`（UTC+8 日界下用正午取，避开夏时制式的边界歧义）。 */
+function dayBefore(date: string): string {
+  const noon = utc8MomentMs(date, '12:00')
+  return utc8DateString(noon - 86_400_000)
+}
+
 /** 内存文档后端（记录写入次数，便于断言「今天只记一次」）。 */
 function memoryStore(initial: Partial<AutoCheckinDoc> = {}) {
   let doc: AutoCheckinDoc = { ...DEFAULT_AUTO_CHECKIN, ...initial }
@@ -328,8 +334,9 @@ describe('自动签到：开关与启动排定', () => {
     })
     await runner.runIfDue()
     expect(calls).toEqual(['buddy', 'qoder'])
-    // NOON_UTC8 是 UTC+8 的 12:00，已到点的是 09:00（不是 21:00）
-    expect(store.current().lastSlot).toBe('2026-10-02#09:00')
+    // ⚠️ 默认第一个时段是 10:05（不是 09:00）：见 `DEFAULT_AUTO_CHECKIN_TIMES` 的
+    //    说明 —— 09:00 那轮对「10:00 才刷新额度」的渠道拿不到今天的额度。
+    expect(store.current().lastSlot).toBe('2026-10-02#10:05')
     calls.length = 0
     await runner.runIfDue()
     expect(calls).toEqual([])
@@ -773,8 +780,14 @@ describe('★ 自动签到：每天两次定时', () => {
   })
 
   it('★ 端到端：一天两个时段各跑一次（第二次在 21:00 到点后）', async () => {
+    // ⚠️ 这里**显式**给 times：默认值已经改成 10:05/21:00（为覆盖 10:00 刷新额度的
+    //   渠道），而本用例验的是「两个时段各自跑一次」这条逻辑，不该跟着默认值漂。
     const time = clock(at('2026-10-18', '09:00'))
-    const { runner, calls, store } = makeRunner({ now: time.now, providers: ['buddy'] })
+    const { runner, calls, store } = makeRunner({
+      now: time.now,
+      providers: ['buddy'],
+      initial: { times: ['09:00', '21:00'] },
+    })
 
     await runner.runIfDue()
     expect(calls).toEqual(['buddy'])
@@ -796,7 +809,7 @@ describe('★ 自动签到：每天两次定时', () => {
     expect(calls).toEqual([])
   })
 
-  it('★ 端到端：DSH 没开错过了 09:00 ⇒ 11:00 启动补跑', async () => {
+  it('★ 端到端：DSH 没开错过了第一个时段（10:05）⇒ 11:00 启动补跑', async () => {
     const { runner, calls, store } = makeRunner({
       now: () => at('2026-10-18', '11:00'),
       providers: ['buddy'],
@@ -804,7 +817,7 @@ describe('★ 自动签到：每天两次定时', () => {
     })
     await runner.runIfDue()
     expect(calls).toEqual(['buddy'])
-    expect(store.current().lastSlot).toBe('2026-10-18#09:00')
+    expect(store.current().lastSlot).toBe('2026-10-18#10:05')
   })
 
   it('★ 端到端：关机一整天回来只补一次（不会连发两轮）', async () => {
@@ -928,7 +941,7 @@ describe('★ 自动签到：随机浮动', () => {
     expect(() => sanitizeJitterStrict(MAX_CHECKIN_JITTER_MINUTES + 1)).toThrow(/不能超过/)
   })
 
-  it('★ shouldRunNow：配了浮动且真实执行时刻未到 ⇒ 先不跑（到点后也不跑）', () => {
+  it('★ shouldRunNow：正偏移 ⇒ 到「时段+偏移」才跑（提前一分钟不跑）', () => {
     const times = ['09:00', '21:00']
     // 找一个偏移为**正**的日期（真实执行晚于 09:00）
     let date = ''
@@ -940,10 +953,42 @@ describe('★ 自动签到：随机浮动', () => {
     }
     expect(date).not.toBe('')
     const realAt = at(date, '09:00') + offset
-    // 09:00 已到点但真实执行时刻还没到 ⇒ 不跑
-    expect(shouldRunNow({ enabled: true, times, lastSlot: '', jitterMinutes: 10 }, realAt - 60_000)).toBe(false)
+    // ⚠️ 水位线必须**已经停在昨天最后一个时段**：`lastSlot: ''`（从未跑过）时
+    //    昨天 21:00 那轮本身就是待补的，判据会（正确地）返回 true —— 那是补跑，
+    //    不是「今天这一轮提前跑了」。
+    const lastSlot = slotKey(dayBefore(date), '21:00')
+    const doc = { enabled: true, times, lastSlot, jitterMinutes: 10 }
+    // 时段整点已过、但真实执行时刻还没到 ⇒ 不跑
+    expect(shouldRunNow(doc, realAt - 60_000)).toBe(false)
     // 到了真实执行时刻 ⇒ 跑
-    expect(shouldRunNow({ enabled: true, times, lastSlot: '', jitterMinutes: 10 }, realAt)).toBe(true)
+    expect(shouldRunNow(doc, realAt)).toBe(true)
+  })
+
+  it('★★ 负偏移必须**真的提前**执行（2026-11-01 审计 P1-2：旧实现里这是死代码）', () => {
+    const times = ['09:00', '21:00']
+    let date = ''
+    let offset = 0
+    for (let d = 1; d <= 28; d += 1) {
+      const candidate = `2026-11-${String(d).padStart(2, '0')}`
+      const o = checkinJitterOffsetMs(candidate, '09:00', 10, 720)
+      if (o < 0) { date = candidate; offset = o; break }
+    }
+    expect(date).not.toBe('')
+    const slotAt = at(date, '09:00')
+    const doc = {
+      enabled: true,
+      times,
+      lastSlot: slotKey(dayBefore(date), '21:00'),
+      jitterMinutes: 10,
+    }
+    // 判别力：先断言这个时段**确实是负偏移**（否则用例变成恒真）
+    expect(offset).toBeLessThan(0)
+    // 「时段 + 偏移」这一刻（**早于** 09:00）就必须判跑 —— 这正是旧实现恒 false 的那一格
+    expect(shouldRunNow(doc, slotAt + offset)).toBe(true)
+    // 更早一分钟还不该跑
+    expect(shouldRunNow(doc, slotAt + offset - 60_000)).toBe(false)
+    // 而且「已到点的时段」也要跟着提前：水位线推进到**今天 09:00**
+    expect(latestDueSlotKey(slotAt + offset, times, 10)).toBe(slotKey(date, '09:00'))
   })
 
   it('★ shouldRunNow：错过的时段（真实时刻早已过去）必须立刻补跑，不能因浮动卡住', () => {
@@ -982,7 +1027,14 @@ describe('★★ 自动签到：失败必须退避，不许每秒重跑', () => 
   /** 起一个用「手动调度」的执行体（scheduled 收集延迟，queued 收集回调）。 */
   function makeProbe(claimImpl, startDate = '2026-11-01') {
     const time = clock(utc8MomentMs(startDate, '09:00'))
-    const store = memoryStore({ enabled: true, lastSlot: slotKey('2026-10-31', '21:00') })
+    // ⚠️ 显式给 `times: ['09:00','21:00']`：默认值已改成 10:05/21:00（覆盖 10:00
+    //    才刷新额度的渠道），而本组用例的时钟是 09:00 —— 用默认值会**根本没到时段**
+    //    （排定的第一项变成「到 10:05 的 65 分钟」而不是退避序列）。
+    const store = memoryStore({
+      enabled: true,
+      times: ['09:00', '21:00'],
+      lastSlot: slotKey('2026-10-31', '21:00'),
+    })
     const scheduled: number[] = []
     const queued: Array<() => void> = []
     const runner = createAutoCheckin({
@@ -1041,7 +1093,12 @@ describe('★★ 自动签到：失败必须退避，不许每秒重跑', () => 
     //    删掉 `dueFailures = 0` 仍全绿）。改为断言可观测的部分 —— 退避次数写进了告警。
     const warnings: string[] = []
     const time = clock(utc8MomentMs('2026-11-01', '09:00'))
-    const store = memoryStore({ enabled: true, lastSlot: slotKey('2026-10-31', '21:00') })
+    const store = memoryStore({
+      enabled: true,
+      // 同上：显式时段，别让默认值（10:05）把「09:00 到点」这件事变成「还没到」。
+      times: ['09:00', '21:00'],
+      lastSlot: slotKey('2026-10-31', '21:00'),
+    })
     const queued: Array<() => void> = []
     const runner = createAutoCheckin({
       store: store.store,
@@ -1065,5 +1122,200 @@ describe('★★ 自动签到：失败必须退避，不许每秒重跑', () => 
     expect(counts.length).toBeGreaterThanOrEqual(2)
     // ★ 次数必须递增（退避的依据；恒为 1 说明没在累加）
     expect(counts[counts.length - 1]).toBeGreaterThan(counts[0]!)
+  })
+
+  it('★★ 成功一次就必须清零退避（否则下一个时段的首次失败直接等几十秒）', async () => {
+    // ⚠️ 2026-11-01 审计证伪了旧注释里的「清零对外不可观测」：它**可观测** ——
+    //    清零后下一轮的首次失败退避从 1000ms 起；不清零会接着上一次的 4000/16000ms。
+    const time = clock(utc8MomentMs('2026-11-01', '10:05'))
+    let fail = true
+    const store = memoryStore({
+      enabled: true,
+      times: ['10:05', '21:00'],
+      lastSlot: slotKey('2026-10-31', '21:00'),
+    })
+    const scheduled: Array<{ ms: number; fn: () => void }> = []
+    const runner = createAutoCheckin({
+      store: store.store,
+      listProviderIds: async () => ['buddy'],
+      claim: async () => (fail
+        ? { ok: false, error: { code: 'unauthorized', message: '过期' } }
+        : ok({ claimed: 1, totalCredit: 10, coversToday: 1 })),
+      now: time.now,
+      delayMs: 1,
+      schedule: (fn, ms) => { scheduled.push({ ms, fn }); return { cancel: () => {} } },
+      warn: () => {},
+    })
+    /** 推进到**这一项自己的**排定时刻再触发（不能用「最后一项」的 ms，会错位）。 */
+    const tick = async (): Promise<void> => {
+      const entry = scheduled.shift()
+      if (entry === undefined) return
+      time.set(time.now() + entry.ms)
+      entry.fn()
+      await new Promise((resolve) => setTimeout(resolve, 15))
+    }
+    runner.start()
+    await tick()
+    await tick()          // 失败两次 ⇒ 排定 2000ms
+    const before = scheduled[0]?.ms ?? 0
+    expect(before).toBe(2_000)
+    fail = false
+    await tick()          // 成功 ⇒ 记账 + 清零；下一项被排到 21:00
+    fail = true
+    // 把时钟拨到 21:00，触发下一项（那一项是「到 21:00」）⇒ 再失败一次
+    time.set(utc8MomentMs('2026-11-01', '21:00'))
+    await tick()
+    // ★ 判别力：清零过 ⇒ 首个退避必须是 1_000ms；不清零会接着 4_000/8_000
+    expect(scheduled[0]?.ms).toBe(1_000)
+    expect(before).toBeGreaterThan(1_000)
+  })
+})
+
+/**
+ * 2026-11-01 审计打穿的三条 P1 的回归（不放上网也修不掉的形态：
+ * 吞时段 / 面板时间撒谎 / 10:00 刷新渠道漏领）。
+ */
+describe('★★ 自动签到：时段记账与逐渠道补领', () => {
+  const at = (date: string, time: string): number => utc8MomentMs(date, time)
+
+  it('★ 跨时段边界的补跑不得吞掉下一个时段（审计 P1-6）', async () => {
+    // 场景：昨天 21:00 那轮 DSH 没开（水位线停在昨天 09:00）⇒ 今天 08:58 启动补跑，
+    // 一轮跑到 09:05 才结束。旧实现把水位线记成「跑完那一刻已到点的最大时段」
+    // = 今天 09:00 ⇒ 09:00 那轮被吞（它从未单独执行）。
+    const time = clock(at('2026-10-18', '08:58'))
+    const calls: string[] = []
+    const { runner, store } = makeRunner({
+      now: time.now,
+      providers: ['buddy'],
+      initial: { times: ['09:00', '21:00'], lastSlot: slotKey('2026-10-17', '09:00') },
+      claim: async (provider) => {
+        calls.push(provider)
+        // 一轮历时 7 分钟，跨过 09:00
+        time.set(at('2026-10-18', '09:05'))
+        return ok({ claimed: 1, totalCredit: 10 })
+      },
+    })
+    await runner.runIfDue()
+    // 判别力：这轮是为**昨天 21:00** 跑的，水位线只能推到那里
+    expect(store.current().lastSlot).toBe('2026-10-17#21:00')
+    // ⇒ 09:00 那轮仍然待跑
+    calls.length = 0
+    await runner.runIfDue()
+    expect(calls).toEqual(['buddy'])
+    expect(store.current().lastSlot).toBe('2026-10-18#09:00')
+  })
+
+  it('★ 部分渠道没领到 ⇒ 记 pendingSlot 且重试**只打**没领到的那个（审计 P1-5）', async () => {
+    // 混合池：buddy 能证明今天，qoder 拿到的还是昨天的痕迹（10:00 才刷新额度）。
+    let qoderRefreshed = false
+    const calls: string[] = []
+    const time = clock(at('2026-10-18', '09:00'))
+    const { runner, store } = makeRunner({
+      now: time.now,
+      providers: ['buddy', 'qoder'],
+      initial: { times: ['09:00', '21:00'], lastSlot: slotKey('2026-10-17', '21:00') },
+      claim: async (provider) => {
+        calls.push(provider)
+        if (provider === 'qoder') {
+          return qoderRefreshed
+            ? ok({ claimed: 1, totalCredit: 5, coversToday: 1 })
+            : ok({ alreadyClaimed: 1, coversToday: 0 })
+        }
+        return ok({ claimed: 1, totalCredit: 100, coversToday: 1 })
+      },
+    })
+    await runner.runIfDue()
+    // buddy 已证明今天、qoder 还没 ⇒ 整轮**不**记账，改为 pendingSlot
+    expect(store.current().pendingSlot).toBe('2026-10-18#09:00')
+    expect(store.current().lastSlot).toBe('2026-10-17#21:00')
+    expect(store.current().providerSlots).toMatchObject({ buddy: '2026-10-18#09:00' })
+    expect(store.current().providerSlots.qoder).toBeUndefined()
+
+    // 到 10:05（Qoder 刷新后）重试一次：**只打 qoder**（buddy 已处理 ⇒ 不再重复请求）
+    calls.length = 0
+    qoderRefreshed = true
+    time.set(at('2026-10-18', '10:05'))
+    await runner.runIfDue()
+    expect(calls).toEqual(['qoder'])
+    // 补完 ⇒ 水位线推进、待补清空
+    expect(store.current().lastSlot).toBe('2026-10-18#09:00')
+    expect(store.current().pendingSlot).toBe('')
+  })
+
+  it('★ state().nextRunAt 必须是**真实的下一次尝试**，不能恒等于「现在」（审计 P1-4）', async () => {
+    const time = clock(at('2026-10-18', '12:00'))
+    const scheduled: Array<{ ms: number }> = []
+    const queued: Array<() => void> = []
+    const store = memoryStore({ enabled: true, times: ['10:05', '21:00'], lastSlot: slotKey('2026-10-17', '21:00') })
+    const runner = createAutoCheckin({
+      store: store.store,
+      listProviderIds: async () => ['buddy'],
+      claim: async () => ({ ok: false, error: { code: 'unauthorized', message: '过期' } }),
+      now: time.now,
+      delayMs: 1,
+      schedule: (fn, ms) => { scheduled.push({ ms }); queued.push(fn); return { cancel: () => {} } },
+      warn: () => {},
+    })
+    runner.start()
+    for (let i = 0; i < 4; i += 1) {
+      const fire = queued.shift()
+      if (fire === undefined) break
+      fire()
+      await new Promise((resolve) => setTimeout(resolve, 15))
+    }
+    const ms = scheduled[scheduled.length - 1]!.ms
+    const state = runner.state()
+    // 判别力：旧实现这里恒等于 now（面板写「马上执行」），实际还要等 ms
+    expect(ms).toBeGreaterThanOrEqual(4_000)
+    expect(state.nextRunAt - time.now()).toBe(ms)
+  })
+
+  it('★ setTimes 清掉退避计数（改完时刻不该还等 30 分钟）', async () => {
+    const time = clock(at('2026-10-18', '12:00'))
+    const queued: Array<() => void> = []
+    const store = memoryStore({ enabled: true, times: ['10:05', '21:00'], lastSlot: slotKey('2026-10-17', '21:00') })
+    const runner = createAutoCheckin({
+      store: store.store,
+      listProviderIds: async () => ['buddy'],
+      claim: async () => ({ ok: false, error: { code: 'unauthorized', message: '过期' } }),
+      now: time.now,
+      delayMs: 1,
+      schedule: (fn) => { queued.push(fn); return { cancel: () => {} } },
+      warn: () => {},
+    })
+    runner.start()
+    for (let i = 0; i < 8; i += 1) {
+      const fire = queued.shift()
+      if (fire === undefined) break
+      fire()
+      await new Promise((resolve) => setTimeout(resolve, 15))
+    }
+    // 此刻 nextRunAt 在几分钟之后（退避到 30 分钟档）
+    expect(runner.state().nextRunAt - time.now()).toBeGreaterThan(60_000)
+    await runner.setTimes(['10:05', '21:00'])
+    // 改完时刻后第一轮马上可跑（不再沿用旧退避）—— 1 秒下限由 armNext 给
+    expect(runner.state().nextRunAt - time.now()).toBeLessThanOrEqual(1_000)
+  })
+
+  it('★★ setEnabled(true) 必须续排下一轮（否则当天第二个时段永不触发）', async () => {
+    // 这是审计里「删掉 armNext 后 86 条全绿」的那一格 —— 补上行为级守卫。
+    const time = clock(at('2026-10-18', '10:05'))
+    const scheduled: Array<{ ms: number }> = []
+    const store = memoryStore({ enabled: false, times: ['10:05', '21:00'], lastSlot: slotKey('2026-10-17', '21:00') })
+    const runner = createAutoCheckin({
+      store: store.store,
+      listProviderIds: async () => ['buddy'],
+      claim: async () => ok({ claimed: 1, totalCredit: 10, coversToday: 1 }),
+      now: time.now,
+      // delayMs: 0 ⇒ start() 不经过调度器；下面只看 setEnabled 之后是否排了下一轮
+      delayMs: 0,
+      schedule: (_fn, ms) => { scheduled.push({ ms }); return { cancel: () => {} } },
+      warn: () => {},
+    })
+    await runner.setEnabled(true)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(scheduled).toHaveLength(1)
+    // 到 21:00 的毫秒差（判据是「排到的确实是将来的时段」，不是「排了就算」）
+    expect(scheduled[0]!.ms).toBe(utc8MomentMs('2026-10-18', '21:00') - time.now())
   })
 })
