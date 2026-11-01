@@ -5,7 +5,7 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  CHAT_API_BASE, BuddyAdapter, DEFAULT_MODEL, policyBlockResetAtMs, registerBuddyLlm,
+  CHAT_API_BASE, BuddyAdapter, DEFAULT_MODEL, isAccountLevelPolicyBlock, policyBlockResetAtMs, registerBuddyLlm,
 } from '../../src/buddy-adapter.js'
 import type { BuddyCredential, BuddyRemoteModel } from '../../src/buddy.js'
 import { CODEBUDDY, WORKBUDDY, type BuddyProduct } from '../../src/product.js'
@@ -1180,8 +1180,16 @@ describe('BuddyAdapter credential handling', () => {
   function makePool(accounts: Array<{ id: string; credential: BuddyCredential }>) {
     /** 记录 `updateModelRateLimit` 的调用，供「安全策略拦截冷却标记」用例断言。 */
     const recorded: Array<{ accountId: string; modelId: string; resetAtMs: number }> = []
+    /**
+     * 记录**账号级封禁标记**的写入（Gitee issue IKS2MV）。
+     *
+     * ⚠️ 与上面的 `recorded` 分开记：这两笔账语义不同（限流会自己好、封禁只能重新登录），
+     * 合并成一个数组就分不清「写的是哪一笔」，正是本 issue 的缺陷形态。
+     */
+    const policyRecorded: Array<{ accountId: string; message?: string }> = []
     return {
       recorded,
+      policyRecorded,
       findAccountIdByCredential: async (_provider: string, token: string) =>
         accounts.find(a => a.credential.access_token === token)?.id ?? '',
       getAvailableAccount: async (
@@ -1194,6 +1202,9 @@ describe('BuddyAdapter credential handling', () => {
       },
       updateModelRateLimit: async (accountId: string, modelId: string, resetAtMs: number) => {
         recorded.push({ accountId, modelId, resetAtMs })
+      },
+      markAccountPolicyBlocked: async (accountId: string, message?: string) => {
+        policyRecorded.push({ accountId, message })
       },
       disabledModelsFor: () => new Set<string>(),
     }
@@ -1369,8 +1380,11 @@ describe('BuddyAdapter credential handling', () => {
     /** `账号 id → (模型 id → 冷却到期时刻)`，与真实池的 `modelRateLimits` 同形。 */
     const limits = new Map<string, Record<string, number>>()
     const recorded: Array<{ accountId: string; modelId: string; resetAtMs: number }> = []
+    /** 账号级封禁标记的写入（IKS2MV），与限流分开记。 */
+    const policyRecorded: Array<{ accountId: string; message?: string }> = []
     return {
       recorded,
+      policyRecorded,
       findAccountIdByCredential: async (_provider: string, token: string) =>
         accounts.find(a => a.credential.access_token === token)?.id ?? '',
       getAvailableAccount: async (
@@ -1389,6 +1403,9 @@ describe('BuddyAdapter credential handling', () => {
       updateModelRateLimit: async (accountId: string, modelId: string, resetAtMs: number) => {
         recorded.push({ accountId, modelId, resetAtMs })
         limits.set(accountId, { ...limits.get(accountId), [modelId]: resetAtMs })
+      },
+      markAccountPolicyBlocked: async (accountId: string, message?: string) => {
+        policyRecorded.push({ accountId, message })
       },
       disabledModelsFor: () => new Set<string>(),
     }
@@ -1546,6 +1563,94 @@ describe('BuddyAdapter credential handling', () => {
     // ⚠️ **刻意不写冷却**：饱和是模型级的，写 30 分钟账号级冷却会封死好账号
     // （饱和分支的注释正是为此反对复用限流标记）。只 acc-1（11140）该被标记。
     expect(pool.recorded.map((r) => r.accountId)).toEqual(['acc-1'])
+    // ★ 同一处还必须写**账号级封禁标记**（issue IKS2MV）：30 分钟冷却过期后
+    //   面板会恢复「已就绪」，而 11140 只能靠重新登录恢复 —— 两笔账分开记。
+    expect(pool.policyRecorded.map((r) => r.accountId)).toEqual(['acc-1'])
+  })
+
+  it('★ 11140 同时写「账号级封禁」且带上报文原文（issue IKS2MV）', async () => {
+    const pool = makeCooldownAwarePool([
+      { id: 'acc-1', credential: makeCredential({ access_token: 'AT1' }) },
+    ])
+    const adapter = makeAdapter({
+      credential: makeCredential({ access_token: 'AT1' }),
+      accountPool: pool,
+      fetchImpl: async () => new Response(
+        JSON.stringify({
+          code: 11140,
+          msg: 'request illegal',
+          displayMsg: { zh: '账号存在异常行为，已被限制使用', en: 'account restricted' },
+        }),
+        { status: 403 },
+      ),
+    })
+    await collectChunks(adapter, streamOptions).catch(() => undefined)
+    // 判别力：
+    // ① 既写冷却（限流账）又写封禁（账号账）—— 只写前者正是本 issue 的缺陷形态；
+    expect(pool.recorded).toHaveLength(1)
+    expect(pool.policyRecorded).toHaveLength(1)
+    // ② 封禁标记必须带上游原文（面板红字展示它），不能只记一个时间戳。
+    expect(pool.policyRecorded[0]!.message).toContain('账号存在异常行为')
+  })
+
+  /**
+   * ★★ 账号级封禁判据的**取值域**（2026-11-01 对抗审计实测打穿的那一格）。
+   *
+   * 旧写法把「换号 + 30 分钟冷却」的判据（`isContentRejection`，三条腿）直接接到了
+   * **永不自动过期 + 按账号排除选号**的封禁标记上 ⇒ 下面 4 族**内容级/非账号级**
+   * 报文会把好账号永久踢出可用池，面板还写「需重新登录」。
+   */
+  it('★★ 只有真·账号级 11140 才算封禁：内容级 / HTML / 共用措辞一律不算', () => {
+    // 正例
+    expect(isAccountLevelPolicyBlock('{"code":11140,"msg":"request illegal"}')).toBe(true)
+    expect(isAccountLevelPolicyBlock('{"code":"11140","message":"x"}')).toBe(true)
+    // 上游那句账号级文案（码缺失时留的腿）
+    expect(isAccountLevelPolicyBlock('{"displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}')).toBe(true)
+    expect(isAccountLevelPolicyBlock('{"msg":"account has been restricted"}')).toBe(true)
+
+    // 反例（全都是**内容级**或非账号级，本该只有 30 分钟冷却）
+    expect(isAccountLevelPolicyBlock('{"code":11128,"msg":"内容未通过安全审核，请修改后重试"}')).toBe(false)
+    expect(isAccountLevelPolicyBlock('{"code":11115,"msg":"The prompt did not pass the safety review."}')).toBe(false)
+    expect(isAccountLevelPolicyBlock('<html><body>conversation id missing · 内容未通过安全审核</body></html>')).toBe(false)
+    expect(isAccountLevelPolicyBlock('{"code":10085,"msg":"request illegal"}')).toBe(false)
+    expect(isAccountLevelPolicyBlock('{"code":11140}')).toBe(true)
+    // 前缀相邻码不得被命中（`(?!\d)` 腿）
+    expect(isAccountLevelPolicyBlock('{"code":111401,"msg":"x"}')).toBe(false)
+  })
+
+  it('★★ 内容级 11128 只写冷却、**不写账号级封禁**（否则好账号被永久踢出）', async () => {
+    const pool = makeCooldownAwarePool([
+      { id: 'acc-1', credential: makeCredential({ access_token: 'AT1' }) },
+    ])
+    const adapter = makeAdapter({
+      credential: makeCredential({ access_token: 'AT1' }),
+      accountPool: pool,
+      fetchImpl: async () => new Response(
+        '{"code":11128,"msg":"内容未通过安全审核，请修改后重试"}',
+        { status: 400 },
+      ),
+    })
+    await collectChunks(adapter, streamOptions).catch(() => undefined)
+    // 冷却照写（既有行为不变）
+    expect(pool.recorded).toHaveLength(1)
+    // 账号级标记一个字都不能写
+    expect(pool.policyRecorded).toEqual([])
+  })
+
+  it('★★ HTML 形态的 400（内容级）同样不得写账号级封禁', async () => {
+    const pool = makeCooldownAwarePool([
+      { id: 'acc-1', credential: makeCredential({ access_token: 'AT1' }) },
+    ])
+    const adapter = makeAdapter({
+      credential: makeCredential({ access_token: 'AT1' }),
+      accountPool: pool,
+      fetchImpl: async () => new Response(
+        '<html><body>conversation id missing · 内容未通过安全审核</body></html>',
+        { status: 400 },
+      ),
+    })
+    await collectChunks(adapter, streamOptions).catch(() => undefined)
+    expect(pool.policyRecorded).toEqual([])
   })
 
   it('400 换号途中末位撞 401/403 也不丢 11140 根因（2026-10-17 对抗审计阻断项）', async () => {
@@ -2797,16 +2902,22 @@ describe('BuddyAdapter 账号池限流切换', () => {
     candidates: Array<{ id: string; token: string }>,
   ) {
     const recorded: Array<{ accountId: string; modelId: string; resetAtMs: number }> = []
+    /** 账号级封禁标记的写入（IKS2MV），与限流分开记。 */
+    const policyRecorded: Array<{ accountId: string; message?: string }> = []
     const known = [current, ...candidates]
     const queue = [...candidates]
     return {
       recorded,
+      policyRecorded,
       /** 适配器用凭据内容反查账号 id。 */
       async findAccountIdByCredential(_provider: string, identity: string) {
         return known.find((a) => a.token === identity)?.id ?? ''
       },
       async updateModelRateLimit(accountId: string, modelId: string, resetAtMs: number) {
         recorded.push({ accountId, modelId, resetAtMs })
+      },
+      async markAccountPolicyBlocked(accountId: string, message?: string) {
+        policyRecorded.push({ accountId, message })
       },
       async getAvailableAccount() {
         const next = queue.shift()

@@ -42,13 +42,17 @@ function makePool(entries: ProviderAccountEntry[]) {
   const accounts = new Map(entries.map(e => [e.id, { ...e }]))
   const cleared: Array<{ accountId: string; modelIds?: readonly string[] }> = []
   const updated: Array<{ accountId: string; modelId: string; resetAtMs: number }> = []
+  /** 账号级封禁标记的清除记录（IKS2MV）。 */
+  const policyCleared: string[] = []
   const pool: ProbePool & {
     cleared: typeof cleared
     updated: typeof updated
+    policyCleared: typeof policyCleared
     get(id: string): ProviderAccountEntry | undefined
   } = {
     cleared,
     updated,
+    policyCleared,
     get: (id) => accounts.get(id),
     findAccount: (id) => accounts.get(id),
     listAccountsByProvider: (provider) => [...accounts.values()].filter(a => a.provider === provider),
@@ -83,6 +87,16 @@ function makePool(entries: ProviderAccountEntry[]) {
         modelRateLimits: { ...entry.modelRateLimits, [modelId]: resetAtMs },
       })
       updated.push({ accountId, modelId, resetAtMs })
+    },
+    async clearAccountPolicyBlocked(accountId) {
+      const entry = accounts.get(accountId)
+      if (entry === undefined || entry.policyBlockedAtMs === undefined) return false
+      const next = { ...entry }
+      delete next.policyBlockedAtMs
+      delete next.policyBlockedMessage
+      accounts.set(accountId, next)
+      policyCleared.push(accountId)
+      return true
     },
   }
   return pool
@@ -392,5 +406,45 @@ describe('pickTestModel', () => {
     // 猜一个名字发出去会得到 404，与「账号不可用」无法区分。
     const entry = makeEntry({ modelRateLimits: undefined })
     expect(pickTestModel(entry, [])).toBe('')
+  })
+})
+
+
+/**
+ * ★ 账号级封禁标记的清除路径（Gitee issue IKS2MV）。
+ *
+ * 封禁与限流是**两笔账**：限流 30 分钟后自动过期，而封禁不自动过期、
+ * 只能靠「实测通过 / 手动重置 / 重新登录」清除。若「重置」只清限流，
+ * 用户点了按钮后面板仍红、选号仍排除该账号 —— 按钮看起来就是失灵。
+ */
+describe('★ 账号级封禁标记的清除（issue IKS2MV）', () => {
+  it('★ 重置会连带清掉封禁标记（即使一条限流标记都没有）', async () => {
+    const pool = makePool([makeEntry({
+      modelRateLimits: undefined,
+      policyBlockedAtMs: Date.now() - 60_000,
+      policyBlockedMessage: '账号存在异常行为，已被限制使用',
+    })])
+    const res = await resetAccount(pool, 'buddy-1')
+    expect(res.clearedCount).toBe(0)
+    // 判据：accountCount 必须为 1 —— 那才是「按钮真的生效了」。
+    expect(res.accountCount).toBe(1)
+    expect(pool.get('buddy-1')?.policyBlockedAtMs).toBeUndefined()
+    expect(pool.policyCleared).toEqual(['buddy-1'])
+  })
+
+  it('★ 重测全通过 ⇒ 清掉封禁标记（账号显然没被封）', async () => {
+    const pool = makePool([makeEntry({ policyBlockedAtMs: Date.now() - 60_000 })])
+    await retestAccount(pool, 'buddy-1', {
+      probe: async (_entry, modelId) => ({ modelId, ok: true }),
+    })
+    expect(pool.get('buddy-1')?.policyBlockedAtMs).toBeUndefined()
+  })
+
+  it('★ 重测仍受限 ⇒ 保留封禁标记（不能因为「测过一次」就洗白）', async () => {
+    const pool = makePool([makeEntry({ policyBlockedAtMs: Date.now() - 60_000 })])
+    await retestAccount(pool, 'buddy-1', {
+      probe: async (_entry, modelId) => ({ modelId, ok: false, message: '仍受限：403 11140' }),
+    })
+    expect(pool.get('buddy-1')?.policyBlockedAtMs).toBeDefined()
   })
 })
