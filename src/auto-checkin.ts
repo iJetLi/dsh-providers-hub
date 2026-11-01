@@ -1426,8 +1426,10 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
     stop() {
       pending?.cancel()
       pending = null
-      // ⚠️ 也要清掉「下一次尝试时刻」：否则面板会显示一个**已经不会再发生**的时间
-      //    （`state().nextRunAt` 读的就是它）。与 `armNext` 里的清零同一条理由。
+      // 清掉「已排定时刻」的记录：之后 `state().nextRunAt` 会**回落到**「按当前时刻
+      // 算出的下一时段」，而不是一个本进程已经取消掉的时刻。
+      // ⚠️ 别指望它变 0：开关仍是开着的，回落值可能是「现在（有待跑时段）」也可能是
+      //   下一个时段的时刻。0 只在开关关闭时才出现（`armNext` 的清零 + `state()` 判 enabled）。
       nextAttemptAt = 0
     },
   }
