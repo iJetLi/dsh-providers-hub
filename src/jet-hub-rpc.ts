@@ -4782,6 +4782,48 @@ function registerJetHubEndpoints(
             // 续期定时器归属该产品自己的服务实例
             ;(product.id === CODEBUDDY.id ? buddy : workbuddy).scheduleRefresh()
             const credential = parseBuddyCredential(flow.access)
+            /**
+             * ★★ **重复账号去重**（与 zcode 2026-10-02、autoclaw 2026-10-19 同型的真实缺陷）。
+             *
+             * ## 症状
+             *
+             * 同一账号点两次「添加账号」（或授权页复用已有会话直接放行）会得到
+             * **两条独立条目**：各自参与选号、各自消耗额度，UI 上昵称一样无从分辨。
+             * zcode / autoclaw / officeace / magicrew 四家都有登录后判重，
+             * **buddy 系（codebuddy / workbuddy）是唯一没有的**。
+             *
+             * ## 判据必须是 `user_id`
+             *
+             * `buildCredential` 已把服务端下发的 `account.uid` 存进凭据
+             * （JWT `sub` 兜底，见 `buddy.ts`），它与 access_token 的轮换无关，
+             * 是稳定身份；access_token 每次登录都换 ⇒ 不可作判据。
+             *
+             * ## 处置：照抄 zcode 的「停用 + 改名」，**不删条目**
+             *
+             * 前端 `login.poll` 靠「条目还在 + 凭据已写入」判断登录成功，
+             * 删条目会被显示成「登录失败」误导用户重试。停用则：
+             * ① 仍如实报成功；② `enabled:false` ⇒ 不参与自动选号（去重的实际效果）；
+             * ③ 昵称写明「重复」⇒ 用户可自行删除。保留**原来那条**继续可用。
+             */
+            const userId = credential?.user_id
+            if (typeof userId === 'string' && userId.length > 0) {
+              const existingId = await pool.findAccountIdByIdentityField(
+                product.id,
+                'user_id',
+                userId,
+              )
+              if (existingId.length > 0 && existingId !== id) {
+                ctx.logger.warn(
+                  `[jet-hub] ${product.id} 该账号（user_id=${userId}）已存在于 ${existingId}，`
+                  + `新条目 ${id} 已自动停用（不参与选号）`,
+                )
+                await pool.updateAccount(id, {
+                  nickname: `（重复，已停用）${credential?.nickname ?? id}`,
+                  enabled: false,
+                })
+                return
+              }
+            }
             await pool.updateAccount(id, {
               nickname: credential?.nickname ?? id,
               // Buddy 的 expires_at 是字符串形式的毫秒时间戳，
