@@ -17,7 +17,7 @@ import {
   LlmAdapter, LlmError,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
-import { AccountPool } from './account-pool.js'
+import { AccountPool, isPolicyBlockedAccount } from './account-pool.js'
 import { createModelCatalog, isCatalogFreshFor, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
 import { RemoteCatalogGate, REMOTE_CATALOG_COOLDOWN_MS } from './remote-catalog-gate.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
@@ -1550,12 +1550,28 @@ async function markPolicyBlockedAccount(
   productId: string,
   accountId: string,
   modelId: string,
+  /**
+   * 上游报文原文（进面板的红字）。**可为空** —— 判据只看「有没有被拦」，
+   * 不靠这条文案（文案是给用户看的，不是用来分类的）。
+   */
+  message?: string,
 ): Promise<void> {
   if (pool === undefined || accountId.length === 0 || modelId.length === 0) return
   try {
+    // ① 30 分钟逐模型冷却：解决「本轮别反复重撞」（issue 作者明确要求保留这段）。
     await pool.updateModelRateLimit(accountId, modelId, policyBlockResetAtMs(Date.now()))
   } catch (error) {
     console.warn(`[${productId}] 安全策略拦截的冷却标记写入失败（不影响本次请求）:`, error)
+  }
+  try {
+    // ② **账号级**封禁状态：11140 是账号级、不给重置时刻、只能重新登录才恢复
+    //    （Gitee issue IKS2MV）。它**不自动过期**，并在面板上渲染红色徽标；
+    //    选号侧据它排除整个账号（见 `AccountPool.candidateAccounts`）。
+    //    ⚠️ 两笔账必须分开记：混进 `modelRateLimits` 的话，30 分钟一过
+    //    标记就消失，面板又显示「已就绪」—— 那正是用户报障的形态。
+    await pool.markAccountPolicyBlocked(accountId, message)
+  } catch (error) {
+    console.warn(`[${productId}] 封禁状态写入失败（不影响本次请求）:`, error)
   }
 }
 
@@ -2907,6 +2923,7 @@ export class BuddyAdapter extends LlmAdapter {
         )
         await markPolicyBlockedAccount(
           this.options.accountPool, this.product.id, currentAccountId, options.model,
+          errorDetail(rejectedBody).slice(0, 200),
         )
       }
       // ⚠️ 真实缺陷（2026-09-26，用户报障「账号池里明明有 3~4 个账号没被限流，
@@ -3041,6 +3058,7 @@ export class BuddyAdapter extends LlmAdapter {
             // 刚换到就是这个账号被拦：同样要冷却，否则下一轮它还是第一候选。
             await markPolicyBlockedAccount(
               this.options.accountPool, this.product.id, currentAccountId, options.model,
+              errorDetail(rotatedBody).slice(0, 200),
             )
           }
           // ⚠️ 渠道校验拒绝（403 形态）同样继续换号、且**刻意不写冷却**
@@ -3197,6 +3215,7 @@ export class BuddyAdapter extends LlmAdapter {
         )
         await markPolicyBlockedAccount(
           this.options.accountPool, this.product.id, currentAccountId, options.model,
+          errorDetail(errorText).slice(0, 200),
         )
         if (this.options.accountPool !== undefined) {
           const triedPolicy = new Set<string>()
@@ -3277,6 +3296,7 @@ export class BuddyAdapter extends LlmAdapter {
               // 刚换到就被拦：同样要冷却，否则下一轮它还是第一候选。
               await markPolicyBlockedAccount(
                 this.options.accountPool, this.product.id, currentAccountId, options.model,
+                errorDetail(errorText).slice(0, 200),
               )
               continue
             }
@@ -3594,6 +3614,7 @@ export class BuddyAdapter extends LlmAdapter {
             // 会返回 `null`，走它的兜底等于把「策略拦截」冒充成「限流」。
             await markPolicyBlockedAccount(
               this.options.accountPool, this.product.id, currentAccountId, options.model,
+              errorDetail(errorText).slice(0, 200),
             )
             continue
           }
@@ -3883,6 +3904,36 @@ export class BuddyAdapter extends LlmAdapter {
    * 流式工具调用仅首个分片携带真实 id（chatcmpl-tool-xxx），后续参数分片
    * 只有 index——按 index 缓存 id 保证同一工具的所有分片 id 一致。
    */
+  /**
+   * 「该账号刚刚正常返回」⇒ 清掉它的封禁标记（自愈，Gitee issue IKS2MV）。
+   *
+   * ⚠️ 只在该账号**确实带标记**时才读池 + 写盘：正常路径下封禁账号已被选号侧排除，
+   * 这里几乎不会命中；真正会走到的是「用户手动探测成功」与「旧文档里的残留标记」。
+   *
+   * ⚠️ 判据用 `isPolicyBlockedAccount`（共享谓词），不要内联 `> 0` —— 备份文件里的
+   * 脏值形态不止一种。
+   */
+  private clearPolicyBlockedIfAny(accountId: string): void {
+    const pool = this.options.accountPool
+    if (pool === undefined || accountId.length === 0) return
+    // ⚠️ 替身池（单测）与未来可能的结构型池未必实现这两个方法：缺方法时**静默跳过**，
+    //    绝不能让「清理一个展示用标记」把整轮请求打挂。
+    const candidate = pool as unknown as {
+      findAccount?: (id: string) => { policyBlockedAtMs?: number } | undefined
+      clearAccountPolicyBlocked?: (id: string) => Promise<boolean>
+    }
+    if (typeof candidate.findAccount !== 'function' || typeof candidate.clearAccountPolicyBlocked !== 'function') return
+    try {
+      const entry = candidate.findAccount(accountId)
+      if (entry === undefined || !isPolicyBlockedAccount(entry)) return
+      void candidate.clearAccountPolicyBlocked(accountId).catch((error: unknown) => {
+        console.warn(`[${this.product.id}] 清除账号 ${accountId} 的封禁标记失败（不影响本次请求）:`, error)
+      })
+    } catch (error) {
+      console.warn(`[${this.product.id}] 检查封禁标记失败（不影响本次请求）:`, error)
+    }
+  }
+
   private async *consumeSse(
     response: Response,
     options: GenerateOptions,
@@ -3894,6 +3945,12 @@ export class BuddyAdapter extends LlmAdapter {
     policyBlockedAccountId: string,
   ): AsyncIterable<StreamChunk> {
     if (!response.body) throw new LlmError(`${this.product.id}: empty model response body`, 'EMPTY_RESPONSE')
+
+    // ★ **自愈**：拿到 2xx 就说明这个账号没被封（Gitee issue IKS2MV）。
+    //   封禁是账号级、且会被选号侧排除，所以正常路径下这里几乎不会命中；
+    //   真正会走到的是「用户手动『测试』/『重测』探测成功」与「旧文档里残留的标记」。
+    //   只在该账号**确实带标记**时才读池 + 写盘（否则每次请求都多一次读）。
+    this.clearPolicyBlockedIfAny(policyBlockedAccountId)
 
     const blocks: Array<{ index: number; kind: 'text' | 'reasoning'; text: string }> = []
     let nextIndex = 0
@@ -4053,6 +4110,7 @@ export class BuddyAdapter extends LlmAdapter {
             // 账号标了冷却，下一轮选号就会绕开它，不再反复重撞。
             await markPolicyBlockedAccount(
               this.options.accountPool, this.product.id, policyBlockedAccountId, options.model,
+              errorDetail(payload).slice(0, 200),
             )
             throw contentRejectionError(this.product.id, 200, payload, false)
           }

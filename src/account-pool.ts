@@ -290,6 +290,23 @@ export function proxyLogText(value: unknown): string {
   return maskProxyPassword(raw)
 }
 
+/**
+ * 该账号是否**被上游策略封禁**（账号级，Gitee issue IKS2MV）。
+ *
+ * ⚠️ 判据与 `modelRateLimits` **刻意不同**：
+ * - 限流是**逐模型**的（`candidateAccounts` 按目标模型比对 `modelRateLimits[modelId]`）；
+ * - 封禁是**整个账号**的（11140 的实测语义：同一账号在 2 个模型上 200、在 4 个模型上
+ *   403/11140 —— 拦截按账号生效）。故这里**不看任何模型**，只要标记存在就排除。
+ *
+ * ⚠️ 值域走 `isValidResetAtMs`：备份文件可编辑，脏值（`'x'` / `1e308`）若被当成
+ * 真值会让账号**永久不可选**（比逐模型脏值更狠）。
+ */
+export function isPolicyBlockedAccount(
+  entry: Pick<ProviderAccountEntry, 'policyBlockedAtMs'>,
+): boolean {
+  return isValidResetAtMs(entry.policyBlockedAtMs)
+}
+
 export class AccountPool {
   /** 持久化后端；两个后端都不可用时是仅内存实现。 */
   private readonly store: JetHubStore
@@ -1704,10 +1721,11 @@ export class AccountPool {
       }
       results.push(status)
     }
-    // 稳定视图排序：可用在前、限流中沉底（Array.prototype.sort 在现代引擎是稳定的）。
+    // 稳定视图排序：可用在前、限流中与**被封禁**沉底（Array.prototype.sort 在现代引擎是稳定的）。
     const now = Date.now()
     const isLimited = (a: ProviderAccountStatus) =>
-      Object.values(a.modelRateLimits ?? {}).some(resetAtMs => resetAtMs > now)
+      isPolicyBlockedAccount(a)
+      || Object.values(a.modelRateLimits ?? {}).some(resetAtMs => resetAtMs > now)
     return results.sort((a, b) => Number(isLimited(a)) - Number(isLimited(b)))
   }
 
@@ -2300,6 +2318,66 @@ export class AccountPool {
   }
 
   /**
+   * 记账：该账号**被上游策略封禁**（Gitee issue IKS2MV）。
+   *
+   * 与 {@link updateModelRateLimit} 的**分工**（别合并）：
+   * - 限流 = 单个模型、会自己好、有明确重置时刻 ⇒ 写 `modelRateLimits` 那本账；
+   * - 封禁 = 整个账号、只能重新登录 / 人工解封、上游**不给时刻** ⇒ 写本方法。
+   *
+   * 调用点在 `buddy-adapter.ts` 的 `markPolicyBlockedAccount`（6 处 11140 命中）。
+   * 那里**同时**保留 30 分钟逐模型冷却 —— 那个解决「本轮别反复重撞」，
+   * 与「状态展示 / 账号级排除」是两件事（issue 作者明确要求不要动冷却）。
+   *
+   * ⚠️ `policyBlockedAtMs` 取**首次**观测时刻（幂等）：用户排查时最需要知道
+   * 「什么时候开始被封的」，反复写入会把那一刻冲掉。
+   */
+  async markAccountPolicyBlocked(accountId: string, message?: string): Promise<void> {
+    const accounts = this.readAccounts()
+    const idx = accounts.findIndex(a => a.id === accountId)
+    if (idx === -1) return
+    const current = accounts[idx]!
+    const atMs = isValidResetAtMs(current.policyBlockedAtMs) ? current.policyBlockedAtMs : Date.now()
+    const next = [...accounts]
+    next[idx] = {
+      ...current,
+      policyBlockedAtMs: atMs,
+      ...typeof message === 'string' && message.trim().length > 0
+        ? { policyBlockedMessage: message.trim().slice(0, 200) }
+        : {},
+    }
+    await this.writeAccounts(next)
+    this.ctx.logger?.warn?.(
+      `[jet-hub] 账号 ${accountId} 被上游策略封禁（${message ?? '上游未给原因'}）`
+      + ' —— 已标记为「需重新登录」，面板会显示红色徽标；实测通过或手动重置后自动清除。',
+    )
+  }
+
+  /**
+   * 清除封号标记。
+   *
+   * 三个调用点（与 `ProviderAccountEntry.policyBlockedAtMs` 的注释一一对应）：
+   * 实测成功（`account.test` / `account.retest` / 适配器拿到 2xx）、
+   * 用户手动重置（`account.reset` / `account.resetAll`）、账号删除（随条目一起没了）。
+   *
+   * @returns 是否真的清掉了一条标记（没有标记时 `false`，调用方可据此决定要不要写日志）。
+   */
+  async clearAccountPolicyBlocked(accountId: string): Promise<boolean> {
+    const accounts = this.readAccounts()
+    const idx = accounts.findIndex(a => a.id === accountId)
+    if (idx === -1) return false
+    const current = accounts[idx]!
+    if (!isPolicyBlockedAccount(current)) return false
+    const next = [...accounts]
+    const updated = { ...current }
+    delete updated.policyBlockedAtMs
+    delete updated.policyBlockedMessage
+    next[idx] = updated
+    await this.writeAccounts(next)
+    this.ctx.logger?.info?.(`[jet-hub] 已清除账号 ${accountId} 的封禁标记（实测通过 / 手动重置）`)
+    return true
+  }
+
+  /**
    * 获取指定 provider + 模型的下一个可用账号。
    *
    * `modelId` 为空串时**不做限流过滤**——调用方（provider 的
@@ -2455,6 +2533,10 @@ export class AccountPool {
     return this.readAccounts()
       .filter(a => a.provider === provider && a.enabled)
       .filter(a => excludeAccountIds === undefined || !excludeAccountIds.has(a.id))
+      // 封禁是**账号级**：一旦被上游 11140 限制，换任何模型都必然 403
+      // （实测：同一账号 2 个模型 200、4 个模型 403/11140）⇒ 整个排除。
+      // 清除路径见 `clearAccountPolicyBlocked`（实测通过 / 手动重置）。
+      .filter(a => !isPolicyBlockedAccount(a))
       .filter(a => {
         // 空 modelId（未知目标模型）：无可比对的键，保持候选不变。
         if (modelId.length === 0) return true

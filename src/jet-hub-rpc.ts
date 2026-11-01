@@ -6940,6 +6940,22 @@ function registerJetHubEndpoints(
         }
 
         const value: RpcTestAccountResponse = await testAccount(pool, accountId, modelId)
+        /**
+         * ★ 「测试」探活成功 ⇒ 清掉**账号级封禁标记**（Gitee issue IKS2MV）。
+         *
+         * ⚠️ 这是对上面「测试不写任何存储」那条纪律的**唯一例外**，且必须存在：
+         * 封禁标记不自动过期、又会让选号侧排除整个账号 ⇒ 若这里也不清，用户
+         * 唯一能自救的入口只剩「重置」（而「重置」不会真正验证账号是否恢复）。
+         * 反过来说，把**限流**标记一起清掉才是错的 —— 那会让一次探活变成
+         * 「改变选号状态」，正是原注释要防的事。故这里只清 policy 那一笔账。
+         */
+        if (value.ok === true) {
+          try {
+            await pool.clearAccountPolicyBlocked(accountId)
+          } catch {
+            // 清标记失败不影响本次探活结论（下次成功还会再清一次）。
+          }
+        }
         return { ok: true, value }
       }
 

@@ -94,6 +94,40 @@ export interface ProviderAccountEntry {
    */
   modelRateLimits?: Record<string, number>
   /**
+   * 「账号被上游策略封禁」的**首次观测时刻**（毫秒）；缺省/0 = 未封禁。
+   *
+   * ## 为什么必须与 `modelRateLimits` 分开（Gitee issue IKS2MV）
+   *
+   * 两者的**恢复方式**完全不同，混在一张表里必然出事：
+   *
+   * | | `modelRateLimits` | 本字段 |
+   * |---|---|---|
+   * | 语义 | 限流（**单个模型**） | 封号（**整个账号**） |
+   * | 上游形态 | HTTP 429 + `code 6004` + **明确的重置时刻** | HTTP 403（2026-10-16 起也可能是 400）+ `code 11140` + `账号存在异常行为`，**不给时刻** |
+   * | 能否自愈 | 等时间到 | **只能重新登录 / 人工解封** |
+   *
+   * 旧实现把 11140 也写进 `modelRateLimits`（30 分钟冷却），于是：30 分钟后标记
+   * 自动过期 ⇒ 面板恢复「已就绪」⇒ 用户以为账号好了 ⇒ 下一轮再撞 403 ⇒ 循环。
+   * 用户报障原话：「11 个账号 8 个被封，面板上全部绿色『已就绪』」。
+   *
+   * ## 清除路径（**不自动过期**）
+   *
+   * 1. 该账号**实测成功**（`account.test` / `account.retest` / 任一真实请求返回 2xx）；
+   * 2. 用户点「重置」（`account.reset` / `account.resetAll`，清限流标记时一并清它）；
+   * 3. 账号被删除。
+   *
+   * 选号侧也据此**排除整个账号**（封号是账号级）—— 与 `modelRateLimits` 的
+   * 逐模型过滤不同，见 `AccountPool.candidateAccounts`。
+   */
+  policyBlockedAtMs?: number
+  /**
+   * 上游封禁报文的原文（`displayMsg`，如「账号存在异常行为，已被限制使用」）。
+   *
+   * 仅用于**展示**（面板上那行红字），不参与任何判据 —— 判据只看
+   * {@link policyBlockedAtMs}。值域由 `sanitizeAccounts` 截断到 200 字符。
+   */
+  policyBlockedMessage?: string
+  /**
    * TRAE 签到设备轮换代次（仅 `trae` provider 使用）。
    *
    * 业务码 `9074`（签到人数过多）的限流范围是 **device_id 而非账号**：
