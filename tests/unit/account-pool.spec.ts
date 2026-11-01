@@ -1078,6 +1078,20 @@ describe('AccountPool', () => {
       expect(second.policyBlockedMessage).toBe('第二次')
     })
 
+    it('★ 已标记且报文未变 ⇒ 不再写盘（写放大：连撞 3 次 = 6 次落盘）', async () => {
+      // 对抗审计 E4 实测：修复前每事件 2 笔账各写一次、第 2 次起状态没变仍照写。
+      // 现在 early-return ⇒ 「同一个事实」不重复付费。
+      await pool.addAccount(makeMockAccount())
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
+      const writesAfterFirst = ctx.replaceCalls.length
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
+      expect(ctx.replaceCalls.length, '同一报文重复标记不应再写盘').toBe(writesAfterFirst)
+      // 但报文**变了** ⇒ 仍要写（面板红字要跟着更新）
+      await pool.markAccountPolicyBlocked('buddy-001', '第二次的报文')
+      expect(ctx.replaceCalls.length).toBe(writesAfterFirst + 1)
+      expect((await pool.listAccounts('buddy'))[0].policyBlockedMessage).toBe('第二次的报文')
+    })
+
     it('★ 清除后两个字段都消失，且再次清除返回 false', async () => {
       await pool.addAccount(makeMockAccount())
       await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
