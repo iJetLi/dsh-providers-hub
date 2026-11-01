@@ -148,6 +148,8 @@ describe('脏数据与容错', () => {
   /**
    * ⚠️ 文档损坏时按「存在但空表」处理，**不**回落到老的镜像字段：
    * 那条路会把用户已解除的锁定重新打开（保守方向在这里是反的）。
+   * ⚠️ 但这只适用于「主文件与 `.bak` 都读不出来」这一格 —— 只要 `.bak` 还在，
+   * 就必须用它（见下面两条 D2 用例）。
    */
   it('文档损坏时按空表处理且不报 exists:false', () => {
     mkdirSync(join(dir, 'jet-hub'), { recursive: true })
@@ -155,6 +157,86 @@ describe('脏数据与容错', () => {
     const read = createPermanentLockStore(makeCtx()).load()
     expect(read.exists).toBe(true)
     expect(read.locks).toEqual({})
+  })
+
+  /**
+   * ⚠️⚠️ **D2（2026-11-01 三审实测）：损坏时绝不 fail-open**。
+   *
+   * 修前：`load()` 的 catch 直接返回空表 ⇒ 文件被写坏（并发写 / 断电 / 手工编辑）
+   * 的唯一后果是**所有 provider 静默解锁**，选号继续烧永久积分 —— 而积分烧掉
+   * **不可撤销**。方向必须与「钱不可逆」一致：宁可维持上一次已知的锁定。
+   *
+   * 修后：主文件解析失败 ⇒ 回落 `.bak`。
+   *
+   * ⚠️⚠️ **`.bak` 的语义在四审改过一次**：它曾经是「上一次写入**前**的版本」（备份在
+   * `rename` **之前**复制），那就是**落后一版**。实测由此产生的三个方向：最后一版新增的
+   * 锁会丢；用户**刚解锁**后主文件损坏会被备份拉回锁定（= 解不掉的开关）；回落后再写一次
+   * 会把坏主文件复制成 `.bak`（恢复只有一次机会）。现在备份在 `rename` **之后**刷新 ⇒
+   * `.bak` = 「最近一次成功发布的完整内容」⇒ 本条期望值也从「上一版」变成「最新一版」。
+   */
+  it('★★ 主文件损坏时回落到 .bak（绝不静默解锁，且是**最新**一版）', async () => {
+    const store = createPermanentLockStore(makeCtx())
+    await store.save({ magicrew: true })
+    await store.save({ magicrew: true, magicrewintl: true })
+    // 把主文件写成半截 JSON（模拟并发写 / 断电 / 手工编辑）
+    writeFileSync(docPath(), '{"schema":"x","locks":{"magicrew":tr', 'utf-8')
+    const read = createPermanentLockStore(makeCtx()).load()
+    expect(read.exists).toBe(true)
+    // ⚠️ 两个锁都要在：落后一版的备份只会有 { magicrew: true }（四审前就是这个值）
+    expect(read.locks).toEqual({ magicrew: true, magicrewintl: true })
+  })
+
+  /**
+   * ⚠️⚠️ **四审新增方向：用户刚解锁后主文件损坏，不得把锁拉回来**。
+   *
+   * 这是「备份落后一版」最坏的一格：先 `{loomy:true}`，用户解锁成 `{}`，主文件随后损坏
+   * ⇒ 旧语义会回落到 `{loomy:true}`，等于一个**用户再也解不掉的开关**（与文件头
+   * 「文档一旦存在就是唯一权威」直接冲突）。
+   */
+  it('★★ 用户解锁后主文件损坏，.bak 不得把锁拉回来', async () => {
+    const store = createPermanentLockStore(makeCtx())
+    await store.save({ loomy: true })
+    await store.save({})
+    writeFileSync(docPath(), '{"schema":"x","locks":{"loomy":tr', 'utf-8')
+    const read = createPermanentLockStore(makeCtx()).load()
+    expect(read.exists).toBe(true)
+    expect(read.locks).toEqual({})
+  })
+
+  /**
+   * 主文件消失了但 `.bak` 还在（例如 `rename` 之前崩溃、或有人删了主文件）。
+   *
+   * ⚠️ 这里 `exists` 必须是 **true**：返回 false 会触发「从 state.json 老字段
+   * 迁移」，而那个老字段可能是陈旧的 `true`，会把用户已经解开的锁重新打开
+   * （见 `loadLocks` 与文件头的迁移判据）。
+   */
+  it('★★ 主文件缺失但 .bak 还在 ⇒ 用 .bak，且不触发迁移（exists: true）', async () => {
+    const store = createPermanentLockStore(makeCtx())
+    await store.save({ loomy: true })
+    await store.save({ loomy: true, magicrew: true })
+    rmSync(docPath())
+    const read = createPermanentLockStore(makeCtx()).load()
+    expect(read.exists).toBe(true)
+    // `.bak` 现在是「最近一次成功发布的内容」⇒ 两个锁都在（改前只会剩 loomy）
+    expect(read.locks).toEqual({ loomy: true, magicrew: true })
+  })
+
+  /**
+   * ⚠️ **语义**：`.bak` = 「最近一次成功发布的完整内容」，**首次写入就有**（四审改）。
+   * 旧语义是「上一次写入前的上一版」，且首次没有备份 —— 那样主文件首写后一旦损坏
+   * 就没有任何可恢复的内容。
+   */
+  it('★ 每次成功写入后 .bak 与主文件同内容（首次就有）', async () => {
+    const store = createPermanentLockStore(makeCtx())
+    await store.save({ buddy: true })
+    expect(existsSync(`${docPath()}.bak`)).toBe(true)
+    const first = JSON.parse(readFileSync(`${docPath()}.bak`, 'utf-8')) as { locks: unknown }
+    expect(first.locks).toEqual({ buddy: true })
+    await store.save({ buddy: true, loomy: true })
+    const second = JSON.parse(readFileSync(`${docPath()}.bak`, 'utf-8')) as { locks: unknown }
+    expect(second.locks).toEqual({ buddy: true, loomy: true })
+    // 与主文件逐字节同内容（不是「上一版」）
+    expect(readFileSync(`${docPath()}.bak`, 'utf-8')).toBe(readFileSync(docPath(), 'utf-8'))
   })
 
   it('顶层是数组时不抛错，按空表处理', () => {

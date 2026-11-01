@@ -174,7 +174,12 @@ const LOCK_DOC = (): string => join(isolatedHome!, 'jet-hub', 'permanent-locks.j
 beforeEach(() => {
   // 每个用例从干净的锁定文档开始：残留会让「首次迁移」路径被跳过，
   // 于是本应验证迁移的用例其实测的是「读已有文档」。
+  //
+  // ⚠️ `.bak` 也必须删（2026-11-01 三审 D2 之后）：`FileLockStore.load()` 在
+  // 主文件不存在时会回落到 `.bak`，只删主文件的话上一个用例的锁定会从备份里
+  // 复活，把后续「默认未锁定」的用例全部打成假红。
   rmSync(LOCK_DOC(), { force: true })
+  rmSync(`${LOCK_DOC()}.bak`, { force: true })
 })
 
 /** 读临时 home 里的锁定表文档（不存在返回 undefined）。 */
@@ -2101,6 +2106,95 @@ describe('AccountPool 模型黑名单', () => {
 
       expect(pool.permanentLocked('buddy')).toBe(false)
       expect(readLockDoc()?.locks).toEqual({})
+    })
+
+    /**
+     * ⚠️⚠️ **D1（2026-11-01 三审实测）：多进程（多 profile）写锁表不得互相覆盖**。
+     *
+     * 同机 desktop + web 共用一个 `$DSH_HOME` 是 `permanent-lock-store.ts` 文件头
+     * 自述的既定场景。两个实例各自载入锁定表之后，旧实现「读内存 → 改 → 整份写」
+     * 会让**后写者用自己那份陈旧内存覆盖先写者**：实测 A 锁 `magicrew`、B 锁
+     * `magicrewintl`，最终文件只剩后者 ⇒ 另一站的锁定**静默消失** ⇒ 选号继续烧
+     * 永久积分（烧掉不可撤销）。
+     *
+     * 修法：`setPermanentLocked` 写前重读权威文档并按 provider 合并。
+     */
+    it('★★ 两个池实例各锁一个 provider ⇒ 两个键都保留', async () => {
+      const first = new AccountPool(createMockContext() as never)
+      const second = new AccountPool(createMockContext() as never)
+      // 复刻「两边各自开机载入」的时序（载入后内存里都是空表）
+      expect(first.permanentLocked('magicrew')).toBe(false)
+      expect(second.permanentLocked('magicrewintl')).toBe(false)
+
+      await second.setPermanentLocked('magicrewintl', true)
+      await first.setPermanentLocked('magicrew', true)
+
+      // 磁盘上两键都在（修前这里只剩 `{ magicrew: true }`）
+      expect(readLockDoc()?.locks).toEqual({ magicrew: true, magicrewintl: true })
+      // 以磁盘为准：新进程（模拟重启）读回来也是两键
+      expect(new AccountPool(createMockContext() as never).listPermanentLocked().sort())
+        .toEqual(['magicrew', 'magicrewintl'])
+    })
+
+    /**
+     * 上一条的**更尖锐形态**：合并的基线必须来自**磁盘**，不能只来自本进程内存。
+     *
+     * 这里第一实例的内存里从来没有 `buddy` 这个键 —— 若基线取内存，它解锁 Loomy
+     * 时的整份写会把另一实例刚写上去的 `buddy` 抹掉。
+     */
+    it('★★ 一个实例解锁时不得连带丢掉另一个实例刚写的锁', async () => {
+      const first = new AccountPool(createMockContext() as never)
+      const second = new AccountPool(createMockContext() as never)
+      expect(first.permanentLocked('loomy')).toBe(false)
+      expect(second.permanentLocked('buddy')).toBe(false)
+
+      await first.setPermanentLocked('loomy', true)
+      await second.setPermanentLocked('buddy', true)
+      await first.setPermanentLocked('loomy', false)
+
+      expect(readLockDoc()?.locks).toEqual({ buddy: true })
+    })
+
+    /**
+     * ⚠️⚠️ **四审新增：合并必须**不复活**别的进程刚解开的锁**（方向判据）。
+     *
+     * 前两条守的是「别丢锁」（钱的方向）。这一条守**相反**的方向 —— 它们**不能互相替代**：
+     * 把 `setPermanentLocked` 的合并方向反转（`{ ...disk, ...memory }` ↔ 反）后，
+     * 前两条**仍然全绿**（2026-11-01 四审实测），只有本条会红。
+     *
+     * 场景：A 进程刚把 `buddy` 解锁（磁盘 `{}`），B 进程按自己那份陈旧内存（里面还有
+     * `buddy: true`）再锁别的 provider ⇒ 旧方向会把 `buddy` 写回去 ⇒ 用户**解不开**。
+     */
+    it('★★ 另一个进程刚解开的锁不得被复活', async () => {
+      const first = new AccountPool(createMockContext() as never)
+      const second = new AccountPool(createMockContext() as never)
+      // 先让两边的内存都载入「buddy 是锁着的」
+      await first.setPermanentLocked('buddy', true)
+      expect(second.permanentLocked('buddy')).toBe(true)
+
+      // A（first）解锁 buddy ⇒ 磁盘变成 {}
+      await first.setPermanentLocked('buddy', false)
+      expect(readLockDoc()?.locks).toEqual({})
+
+      // B（second）的**内存里还记着 buddy: true**，此时它锁别的 provider
+      await second.setPermanentLocked('magicrew', true)
+
+      // ⚠️ 磁盘上只应有 magicrew：buddy 必须保持解锁（旧方向会写成 {buddy:true, magicrew:true}）
+      expect(readLockDoc()?.locks).toEqual({ magicrew: true })
+    })
+
+    /**
+     * 对照组：磁盘上有、本进程内存里**没有**的键必须保留（钱的方向）。
+     * 与上一条一起，把「并集」与「复活」两件事分开钉住。
+     */
+    it('★★ 磁盘上有、本进程内存里没有的锁必须保留', async () => {
+      const first = new AccountPool(createMockContext() as never)
+      const second = new AccountPool(createMockContext() as never)
+      expect(first.permanentLocked('workbuddy')).toBe(false)
+      await second.setPermanentLocked('workbuddy', true)
+      // first 从未见过 workbuddy，它锁别的 provider 时不得把它抹掉
+      await first.setPermanentLocked('magicrew', true)
+      expect(readLockDoc()?.locks).toEqual({ workbuddy: true, magicrew: true })
     })
 
     it('空 provider 名被忽略（不写入无意义的键）', async () => {

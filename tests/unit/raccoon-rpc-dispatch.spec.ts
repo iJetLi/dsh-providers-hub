@@ -115,8 +115,13 @@ describe('Raccoon 的 RPC 分派', () => {
    */
   it('onboarding 的能力表含 loomy 与 raccoon（共用端点，判据由表给出）', async () => {
     const onboarding = createProviderOnboarding()
-    expect(Object.keys(onboarding).sort(), '能力表漏了某一家的新手任务').toEqual(['loomy', 'raccoon'])
-    for (const id of ['loomy', 'raccoon']) {
+    // ⚠️ 2026-11-01 加 magicrew / magicrewintl（超级麦吉 + MagiCrew 国际版）：
+    //    两家共用 `src/magicrew-checkin.ts` 的 onboarding 实现，只差 product 常量。
+    //    ⚠️ 国际站 `onboarding/tasks` **恒返回空数组**（账号没被登记进引导计划），
+    //    但代码照样登记 —— 能领就领，领不到如实报 0 项。
+    expect(Object.keys(onboarding).sort(), '能力表漏了某一家的新手任务')
+      .toEqual(['loomy', 'magicrew', 'magicrewintl', 'raccoon'])
+    for (const id of ['loomy', 'raccoon', 'magicrew', 'magicrewintl']) {
       expect(onboarding[id]?.status, `${id} 缺少 status`).toBeTypeOf('function')
       expect(onboarding[id]?.claim, `${id} 缺少 claim`).toBeTypeOf('function')
     }

@@ -5,7 +5,7 @@ import type { BuddyProduct } from './product.js'
 import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizeProviderClosed, withAllowed, withoutAllowed } from './jet-hub-store.js'
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, ProviderClosedMap } from './jet-hub-store.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
-import type { PermanentLockStore } from './permanent-lock-store.js'
+import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
 import { maskProxyPassword } from './proxy-mask.js'
 // ⚠️ `model-queue.ts` **零 import**（纯函数模块，见其模块头）⇒ 不引入环。
@@ -1635,11 +1635,56 @@ export class AccountPool {
   async setPermanentLocked(provider: string, locked: boolean): Promise<void> {
     if (provider.length === 0) return
     this.ensureLoaded()
-    const next: PermanentLockMap = { ...this.permanentLockCache }
+    /**
+     * ⚠️⚠️ **写前重读磁盘并按 provider 合并**（2026-11-01 三审实测的 D1）：
+     * 同机多 profile（desktop + web 共用一个 `$DSH_HOME`，正是本文件拆出独立
+     * 文档的既定场景）各自载入后，直接「读内存 → 改 → 整份写」会让**后写者
+     * 用自己那份陈旧内存覆盖先写者**。
+     *
+     * 实测（两个真实 node 进程）：A 锁 `magicrew`、B 锁 `magicrewintl`，后写的
+     * 一方把文件写成只剩自己那一个键 ⇒ **另一站的锁定静默消失**。而锁定消失
+     * 的后果不是显示问题，是**继续消耗永久积分，且烧掉不可撤回**。
+     *
+     * 故基线 = 磁盘现值 ∪ 本进程内存（本进程刚改的键可能还没被别的进程看到），
+     * 冲突时以**本次操作的那个 provider** 为准。
+     *
+     * ⚠️ 刻意**只解决写**、不加周期重读：让 `permanentLocked` 去 stat/读文件会
+     * 把「内存里刚改的新值」在落盘失败后被磁盘旧值覆盖（方向又反了）。
+     * 跨进程**读**的可见性仍是已知边界，见 `docs/agent-notes/protocol-wire.md`。
+     *
+     * ⚠️⚠️ **方向在四审改过一次，别改回去**（2026-11-01）：早先写的是
+     * `{ ...disk, ...memory }` —— 锁定值时域只有字面 `true`（`sanitizePermanentLocks`
+     * 只留 `true`、解锁是删键），所以那样合并恒等于**并集**：钱的方向安全
+     *（磁盘上的锁永不丢），但会**复活别的进程刚删掉的键** —— 实测：
+     * A 进程刚把 `buddy` 解锁 ⇒ 磁盘 `{}`；B 进程再锁别的 provider 时按自己那份
+     * 陈旧内存合并 ⇒ 磁盘又变回 `{ buddy: true }` ⇒ **用户解不开**。
+     *
+     * 现在的规则：**磁盘存在就以磁盘为准**（它是最新事实，能反映别的进程的解锁），
+     * 本进程内存只在「文档不存在」时兜底 —— 那时无法判断是「真的没锁」还是
+     * 「文档被删」，按「钱不可逆」的方向保留内存里的锁，绝不静默解锁。
+     */
+    const disk = this.reloadLocksFromDisk()
+    const next: PermanentLockMap = disk.exists ? { ...disk.locks } : { ...this.permanentLockCache }
     if (locked) next[provider] = true
     else delete next[provider]
     this.permanentLockCache = next
     await this.persistLocks()
+  }
+
+  /**
+   * 直接读一次权威文档（不触碰内存表、不做迁移）。
+   *
+   * 存在的唯一理由是 `setPermanentLocked` 的写前合并；读失败返回空表 ——
+   * 合并语义下「读不到 = 没有别人的键可保留」，比抛错让按钮失败更合适
+   * （真正的落盘保护在 `FileLockStore`：损坏时回落 `.bak`）。
+   */
+  private reloadLocksFromDisk(): PermanentLockRead {
+    try {
+      return this.lockStore.load()
+    } catch (error) {
+      this.ctx.logger?.warn?.(`[jet-hub] 锁定表重读失败（按本进程内存处理）: ${String(error)}`)
+      return { exists: false, locks: {} }
+    }
   }
 
   /**

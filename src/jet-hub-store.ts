@@ -1350,6 +1350,13 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   // 漏加 = `MAGICREW_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
   //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新导入）。
   ['MAGICREW', 'magicrew'],
+  // ⚠️ MagiCrew 国际站（`magicrewintl`，2026-11-01）—— 同款坑第 **九** 次。
+  // 漏加 = `MAGICREWINTL_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
+  //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新导入）。
+  // ⚠️ 与 `MAGICREW` 是**超串关系**（`MAGICREWINTL` 以 `MAGICREW` 开头）——
+  //    顺序由 `ACCOUNT_REF_RE` 内部的**长度降序排序**保证，与本数组书写顺序无关
+  //    （与 `MINIMAX` / `MINIMAXINTL`、`AUTOCLAW` / `AUTOCLAWINTL` 同型）。
+  ['MAGICREWINTL', 'magicrewintl'],
   // ⚠️ 第 19 个 provider（autoclawintl，2026-10-20）—— 同款坑第 **七** 次。
   // 漏加 = `AUTOCLAWINTL_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
   //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新导入）。

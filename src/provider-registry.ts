@@ -990,21 +990,59 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     label: '超级麦吉',
     displayName: '超级麦吉',
     logoClass: 'magicrew',
-    // 余额来自 `quota/points/total`；签到端点**存在**但本轮刻意不接
-    //（会消耗真实积分，且用户未要求）。
-    credits: { balance: true },
+    // 余额来自 `quota/points/total`。
+    // ⚠️ 2026-11-01 用户要求：补上**签到**（`POST /api/v1/login-gift`）与
+    //    **新人奖励**（`onboarding/tasks`）。原先这里写「刻意不接，会消耗真实积分」
+    //    是**误判** —— `login-gift` 是发放登录积分，不消耗东西。
+    credits: { balance: true, dailyCheckin: true, onboardingTasks: true },
     /**
      * ⚠️ `creditPackages: true`（2026-10-29，I3）：本家余额**确实**由多个包构成、
-     * 且临期批次带 `deductionEndTime` ⇒ 账号卡片 hover 该列包。
-     * `fetchMagicrewBalance` 会**合成一个「长期积分」包**让 `sum(remaining) === total`
-     * （上游只下发临期批次，实测 total 1093 / 批次和 93），否则 hover 会显示
-     * 「只列 93、合计 1093」让用户以为丢了积分。
-     * ⚠️ **刻意不登记**另外两项：
-     *   · `usesExpiryWindow` —— 判据是「是否走 `splitBuddyCreditsByExpiry`」，
-     *     本家不走那个函数（用自己的 `packages`），登记了会让锁定路径读到错误的 `windowDays`；
-     *   · `permanentLock` —— 本家**没有**「锁定永久积分」这个能力
-     *     （上游端点里没有对应概念），登记了等于凭空给用户一个点了会失败的操作。
+     * 且批次带 `deductionEndTime` ⇒ 账号卡片 hover 该列包。
+     * `fetchMagicrewBalance` 会**合成一个「永久积分」包**让 `sum(remaining) === total`
+     *（上游的 `expiring_quota_details` 只覆盖**带到期时间的批次**：国内实测
+     *  total 2661 / 批次和 1661 / 残差 1000，国际 347 / 247 / 100 ——
+     *  残差就是上游不给到期时间的永久积分，取证见 `magicrew-credits.ts`）。
+     * 否则 hover 会显示「只列 1661、合计 2661」让用户以为丢了积分。
+     *
+     * ⚠️⚠️ **字段本身原先漏了**（2026-11-01 三审实测发现）：上面这段注释从
+     * 2026-10-29 起就写着「已登记 `creditPackages: true`」，但**字段根本不存在**
+     * ⇒ `supportsCreditPackageList('magicrew')` 恒 false ⇒ 国内站账号卡片 hover
+     * **看不到**资源包明细（国际站因为登记了所以看得到 —— 两站此前不同构）。
+     * 「注释说已登记、实现里没有」比单纯漏登记更难查：读注释的人以为已经有了。
      */
+    creditPackages: true,
+    /**
+     * ✅ `usesExpiryWindow: true` + `permanentLock: true`（2026-11-01 用户要求）。
+     *
+     * ## 为什么现在**能**登记（原先两条拒绝理由都已被取证推翻）
+     *
+     * · 旧理由「本家不走 `splitBuddyCreditsByExpiry`，登记了会让锁定路径读到
+     *   错误的 `windowDays`」—— 现在是**真的走**：两站都接 `BuddyBalanceSelector`
+     *  （泛型化，非 buddy product **必填** `fetchBalance`），而
+     *   `fetchMagicrewBalance` 返回的正是它要的 `CreditBalance`，判据
+     *  （`packages[].deductionEndTime` 距今天数）与 buddy 系**逐格一致**
+     *   ⇒ 窗口天数对它同样成立。原先「用自己的 `packages`」只是**没接线**，不是不适用。
+     * · 旧理由「本家没有锁定永久积分这个能力」—— 已实测**证伪**：上游确实存在
+     *   「没有到期时间」的积分（见 `creditPackages` 那段的两站残差 1000 / 100），
+     *   而锁定要保护的正是它。
+     *
+     * ## 三档在两站怎么落地
+     *
+     * | 桶 | 判据 | 前端 |
+     * |---|---|---|
+     * | 永久 | **没有** `deductionEndTime`（合成的「永久积分」包） | 绿（`permanent`） |
+     * | 长期 | 有到期时间，且距扣费截止 **≥ 窗口**（默认 15 天） | 黄（`longTerm`） |
+     * | 临期 | 有到期时间，且距扣费截止 **< 窗口** | 红 + 倒计时（`expiring`） |
+     *
+     * ⚠️ 后端只分**两桶**（`splitBuddyCreditsByExpiry` 的 expiring / permanent，
+     *    longTerm 被并进 permanent），三档是**前端**用同一份 `packages` 再拆的
+     *    —— 与 buddy 系完全同构。故 `windowDays` 必须由 `credits.balances` 与
+     *    `credits.permanentLock` **两个 RPC 都回传**（缺一个 ⇒ 该行静默不渲染）。
+     * ⚠️ 两个 id **各自登记**：白名单 `PERMANENT_LOCK_PROVIDERS` 由本表派生，
+     *    漏一个的症状是「那一站的按钮不渲染、`credits.permanentLock` 直接 bad-request」。
+     */
+    usesExpiryWindow: true,
+    permanentLock: true,
     // ⚠️⚠️ **`rateLimit: false` 必须显式写**（2026-10-29 最终审查 I1）：本家
     //    **零 `updateModelRateLimit` 写点**、也不在 `probeById` 里 ⇒「重测 / 重置」
     //    两个按钮点下去是**零请求、零清除**（`account.retest` 走 `adapterForProbe`
@@ -1012,7 +1050,75 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //    ⚠️ 原先省略它的理由是「默认关闭会让老用户失去按钮」—— 那条**对全新
     //    provider 不成立**（无存量用户、无功能回退可言，见 providers-accio 笔记）。
     rateLimit: false,
-    // ⚠️ 不登记 `onboardingTasks`：新手奖励是 magpie 侧功能，本轮不做。
+    // ⚠️ 2026-11-01 用户要求补上签到与新人奖励 ⇒ 现在**两个能力都登记**
+    //   （原先这两格都缺，注释写的是「刻意不接 / 本轮不做」）：
+    //   · `dailyCheckin` —— `POST /api/v1/login-gift`（**请求体存在且为空串**、幂等、
+    //     国内 +200/天）。原先记的理由「会消耗真实积分」是**误判**：该端点是**发放**
+    //     登录积分，不消耗任何东西（见 `provider-credits.ts` 的 magicrew 段注释）。
+    //   · `onboardingTasks` —— 8 项新手引导任务，每号一辈子一次；
+    //     第 8 项 `first_ai_work` 不支持手动完成（服务端 9303），原语归 `manualRequired`
+    //     （**不是** `skipped` —— 那个语义是「此前已完成」）。
+    //     ⚠️⚠️ **刻意不写总分**：参考实现 `magpie-magicrew-auth/README.md:179` 的标题
+    //     写「8 项，合计 500 积分」，而**同一页的逐项表相加只有 450**（100 + 7×50）
+    //     —— 两个数字自相矛盾，无法判定哪个对。
+    //     ⇒ 本仓一律以**上游 `tasks[].points` 现场累加**为准（见
+    //     `magicrew-checkin.ts` 的 `fetchMagicrewOnboardingStatus`），
+    //     任何注释与用户文案都不得写死金额。
+    //   上面 `credits` 字段的 `balance: true` 保持不变。
+    channel: true,
+  },
+  {
+    /**
+     * **MagiCrew 国际站**（`magicrewintl`，2026-11-01 用户要求）。
+     *
+     * ⚠️⚠️ **为什么是独立 provider 而不是 magicrew 的站点参数**
+     *    （判据与 `minimaxintl` / `autoclawintl` 完全同款）：
+     *
+     * | 判据 | 国内（超级麦吉） | 国际（MagiCrew） |
+     * |---|---|---|
+     * | 网页 | `www.letsmagic.cn` | `www.magicrew.ai` |
+     * | API host | `i-magic-service.letsmagic.cn` | `magic-service.magicrew.ai` |
+     * | 登录体系 | 手机号 / 短信验证码 | 邮箱 / OAuth |
+     * | 每日签到 | +200 / 天 | **+50 / 天** |
+     * | 强制 org | 否 | **是**（业务 API 缺了回 `code 2182`） |
+     *
+     *    两站是同一个 Go 服务的两个**数据面**，账号体系物理隔离（凭据前缀
+     *    `MAGICREW_*` / `MAGICREWINTL_*` 也不同）⇒ 合并成一个 provider 会让
+     *    选号器与余额按错误的 host 取数。
+     *
+     * ⚠️ **实现零复制**：`MagicrewAuth` / `MagicrewService` / 目录 / 积分 / 签到 /
+     *    新人奖励全部复用国内版那一套，只有 `MAGICREW_INTL` 常量不同
+     *    （与 `autoclawintl` 同纪律：复制会让同类缺陷修两遍）。
+     *
+     * ⚠️⚠️ **国际站新人奖励预期拿不到**：该站 `GET /onboarding/tasks` 恒返回
+     *    `{participant_type: null, tasks: []}` —— 是「账号没被登记进引导计划」，
+     *    **不是**「已领完」⇒ UI 会显示「无新人任务」（如实，不是失败）。
+     *    代码照样登记，因为「万一登记了就能领」。
+     */
+    id: 'magicrewintl',
+    label: 'MagiCrew (国际版)',
+    displayName: 'MagiCrew (国际版)',
+    // ⚠️ 与国内版共用同一份图标资产（同一个 Go 服务、同一个品牌的两个站点）。
+    logoClass: 'magicrew',
+    credits: { balance: true, dailyCheckin: true, onboardingTasks: true },
+    /**
+     * ⚠️ `creditPackages: true` 必须与国内版同格：两站共用同一份
+     *    `magicrew-credits.ts`，`fetchMagicrewBalance` 同样会合成「永久积分」包
+     *    （国际站实测 total 347 / 批次和 247 / 残差 100）。
+     *    漏了它 ⇒ 国际站账号卡片 hover 看不到资源包明细（与 `autoclawintl`
+     *    2026-10-20 那次用户报障同型）。
+     * ⚠️ `usesExpiryWindow` / `permanentLock` **与国内版同格登记**（2026-11-01
+     *    用户要求）：两站共用同一个余额原语与同一个选号器类，判据逐格一致；
+     *    「为什么原先两条拒绝理由已被推翻」见国内版那一段的长注释，不重复。
+     *    ⚠️ 两站**必须各写一行**（不能靠国内版继承）：`PERMANENT_LOCK_PROVIDERS`
+     *    是 `PROVIDER_REGISTRY.filter(permanentLock === true)` 派生的 ⇒
+     *    漏一站的症状是「那一站按钮不渲染 + `credits.permanentLock` bad-request」。
+     */
+    creditPackages: true,
+    usesExpiryWindow: true,
+    permanentLock: true,
+    // ⚠️ 同国内版：本家零 `updateModelRateLimit` 写点、不在 `probeById` 里。
+    rateLimit: false,
     channel: true,
   },
   {

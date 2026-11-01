@@ -33,6 +33,10 @@ import { MINIMAX, MINIMAX_INTL } from '../../src/minimax-product.js'
 // ⚠️ AutoClaw 两站（2026-10-21，用户要求「补锁定开关」）：本家**确实有**永久桶
 //    （活动赠送的永久分不带 `deductionEndTime`）⇒ 两站各占一项。
 import { AUTOCLAW, AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
+// ⚠️ Magicrew 两站（2026-11-01，用户要求「加永久/长期/临期和锁定永久积分」）：
+//    本家**确实有**永久桶（`total_points` 减 `expiring_quota_details` 之和的
+//    残差 = 上游不下发到期时间的积分）⇒ 两站各占一项（账号不互通）。
+import { MAGICREW, MAGICREW_INTL } from '../../src/magicrew-product.js'
 
 /**
  * 积分能力矩阵的回归测试。
@@ -338,7 +342,9 @@ describe('模型限流按钮门控（重测 / 重置）', () => {
     //    ⚠️ codely 同日退出：它的换号 + 探测已接线（见 provider-registry.spec 同源注释）。
     // - magicrew（2026-10-29）：**与 astudio 同族** —— 零 `updateModelRateLimit`
     //   写点、不在 `probeById` 里 ⇒ 两个按钮恒为惰性（点了零请求、零清除）。
-    expect(disabled).toEqual(['astudio', 'autoclaw', 'autoclawintl', 'gemini', 'loomy', 'magicrew', 'officeace'])
+    // - magicrewintl（2026-11-01）：与 magicrew **同一份实现、同一份 registry 字段语义**
+    //   ⇒ 必然一起为 false（漏登记会让本条理由失真，与 autoclawintl 同型）。
+    expect(disabled).toEqual(['astudio', 'autoclaw', 'autoclawintl', 'gemini', 'loomy', 'magicrew', 'magicrewintl', 'officeace'])
   })
 
   it('★ 「产品取舍」那一类也必须被点名（不得悄悄混进「管辖不到」里）', () => {
@@ -742,6 +748,11 @@ describe('永久积分锁定能力', () => {
     //    本家批次映射里「无到期字段的发放（活动赠送的永久分）」⇒ 永久桶存在
     //    ⇒ 需要锁定能力。两站**各占一项**（账号不互通）。
     AUTOCLAW.id, AUTOCLAW_INTL.id,
+    // ⚠️ magicrew / magicrewintl（2026-11-01）：`/api/v1/quota/points/total` 的
+    //    `expiring_quota_details[]` 带 `expires_at`（无时区串），残差是永久积分
+    //    ⇒ 三档齐；且已接上 `createCredentialResolver` 的 `kind: 'buddy'` 选号
+    //    （锁定才真能拦）。两站**各占一项**（账号不互通）。
+    MAGICREW.id, MAGICREW_INTL.id,
   ]
   const UNSUPPORTED = [
     'codearts', 'cline', 'raccoon',

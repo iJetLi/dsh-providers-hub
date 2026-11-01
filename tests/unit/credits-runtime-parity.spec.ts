@@ -58,6 +58,8 @@ import { MINIMAX_CREDIT_DETAILS_PATH } from '../../src/minimax-product.js'
 import { GEMINI_QUOTA_PATH } from '../../src/gemini.js'
 import { ACCIO_SUBSCRIPTION_PATH } from '../../src/accio-product.js'
 import { createProviderCredits } from '../../src/provider-credits.js'
+// ⚠️ 2026-11-01：Magicrew 两站的**完整 URL** 断言（只断路径片段区分不了两站）。
+import { MAGICREW, MAGICREW_INTL } from '../../src/magicrew-product.js'
 import { expectedProviderIdsInCreditsTable } from '../helpers/provider-sets.js'
 
 /**
@@ -432,9 +434,17 @@ describe('★ windowDays 由 registry 的 usesExpiryWindow 驱动（不是「是
     //    的每条 `details[]` 带 `expire_at_ms`（**毫秒时间戳**，无需换算），
     //    直接写进 `deductionEndTime` —— 与 astudio 那条的形态差异是本条的价值所在
     //    （两种输入形态都能落进同一个分桶判据）。
+    // ⚠️ magicrew / magicrewintl 2026-11-01 加入：`/api/v1/quota/points/total`
+    //    的 `expiring_quota_details[]` 每条带 `expires_at`（**无时区**的
+    //    `YYYY-MM-DD HH:mm:ss`，按 UTC+8 解析），而 `total_points` 减批次和
+    //    的残差是**上游不下发到期时间**的永久积分（合成包**不写**到期时刻）
+    //    —— 「有到期时间」与「没有到期时间」两种包同时出现，正是分桶判据
+    //    需要的那组输入。
+    //    ⚠️ `codearts` 在这张表里但**不是**本家端点下发到期时间（它靠静态校准）。
     expect(withWindow).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
-      'minimax', 'minimaxintl', 'officeace', 'qoder', 'qodercn', 'trae', 'workbuddy',
+      'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace',
+      'qoder', 'qodercn', 'trae', 'workbuddy',
     ])
   })
 })
@@ -599,6 +609,10 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   autoclawintl: '/agent-assetmgr/api/v2/wallets',
   // ⚠️ 超级麦吉（Magicrew，2026-10-29）：`GET /api/v1/model-gateway/tokens`（`MAGICREW_POINTS_PATH`）。
   magicrew: '/api/v1/quota/points/total',
+  // ⚠️ **MagiCrew 国际版**（2026-11-01）：同一个 Go 服务的另一个数据面，
+  //    路径**逐字符相同**（只有 host 不同：`magic-service.magicrew.ai`）。
+  //    ⚠️ 两站必须各登记一项 —— 漏了会让国际站的行为覆盖静默降到零。
+  magicrewintl: '/api/v1/quota/points/total',
   // ⚠️ **本 fork 独有**（魔搭，2026-10-17）：魔粒余额端点。
   //    ⚠️ 只写**路径片段**（与本表其余项同口径）：域名在 product 的 `balanceUrl`
   //    里，而它**刻意不是** `baseUrl` 那个 host（见 modelscope-product.ts 的字段注释）。
@@ -675,6 +689,50 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
   })
 })
 
+/**
+ * ★★ **Magicrew 两站的余额必须打到各自的 host**（国际站串号守卫，2026-11-01 补）。
+ *
+ * ## 为什么必须有这条（测试有效性审查的**阻断项**）
+ *
+ * 上面那张 `BALANCE_PATH_OF` 只存**路径片段**，而两站路径**逐字符相同**
+ * （`/api/v1/quota/points/total`）⇒ 原理上无法区分两站。实测：把
+ * `src/provider-credits.ts` 里 `magicrewintl` 的 `fetchBalance` 改成
+ * `product: MAGICREW`，**25 个 spec / 859 条用例全绿**。
+ *
+ * 生产症状：国际站账号的 JWT 打到国内 host ⇒ 余额恒读不到 ⇒ 卡片显示
+ * 「余额查询失败」、聚合临期折算恒 `UNUSABLE` ⇒ 国际站模型从轮换表静默消失。
+ *
+ * ⚠️ 本用例**不改** `BALANCE_PATH_OF` 的形状（那会让 20 项全改，且那张表守的是
+ * 另一个语义「请求打到自己的端点」）；这里单独断**完整 URL**。
+ */
+describe('★★ Magicrew 两站的余额打到各自的 host（国际站串号守卫）', () => {
+  it.each([
+    { provider: 'magicrew', product: MAGICREW },
+    { provider: 'magicrewintl', product: MAGICREW_INTL },
+  ])('$provider 的余额 URL host 是 $product.host', async ({ provider, product }) => {
+    const ref = `${provider.toUpperCase()}_ACCOUNT_SPEC`
+    const { call, pool, credentials } = makeRpc()
+    await seed(pool, provider, `${provider}-1`, ref)
+    await credentials.set(ref, JSON.stringify({ jwt: 'JWT-SPEC', organizationCode: 'org-spec' }))
+
+    const seen: string[] = []
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      seen.push(String(input))
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+
+    const result = await call('credits.balances', { provider })
+    expect(result.ok, `${provider} 应被接受`).toBe(true)
+    expect(seen.length, `${provider} 的余额请求一个都没发`).toBeGreaterThan(0)
+    expect(seen[0], `${provider} 的余额没有打到自己的 host（国内/国际串号会让余额恒失败）`)
+      .toBe(`${product.host}/api/v1/quota/points/total`)
+  })
+
+  it('两站的 host 互不相同（fixture 自检：相同则上面那条恒真）', () => {
+    expect(MAGICREW.host).not.toBe(MAGICREW_INTL.host)
+  })
+})
+
 describe('★★ 生产积分表的内容（源码文本断言的行为替代）', () => {
   it('★ 表里的渠道集合 === registry 里有余额能力、且非特例的渠道', () => {
     // ⚠️ 特例是**形态不匹配**的两类（见 `provider-credits.ts` 文件头）：
@@ -700,7 +758,9 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     // ⚠️ 2026-10-19 **本 fork** 并入 codely（Unity，usage/summary）⇒ 15 → 16。
     //    它是全仓首例 balance:true + channel:false（登录/余额均为自由函数，
     //    无 auth 服务；runtime 守卫只查已注册 runtime，codely 被跳过）。
-    expect(expected.length).toBe(19)
+    // ⚠️ 2026-11-01 并入 magicrewintl（MagiCrew 国际版）⇒ 19 → 20。
+    //    它与 magicrew 同形（balance + dailyCheckin + onboardingTasks 全开）。
+    expect(expected.length).toBe(20)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
     //    都是 `createProviderCredits({ loomy, raccoon, zcode })`。deps 只应影响**实现**，

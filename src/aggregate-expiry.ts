@@ -293,6 +293,12 @@ export const WIRED_EXPIRY_PROVIDERS: readonly string[] = Object.freeze([
   //    只加 `AGGREGATE_CHANNELS` 而不加这里 ⇒ 折算恒 UNUSABLE（静默少一个候选）。
   //    折算原语：`provider-expiry.ts` 的 `magicrew` 条目 → `magicrew-credits.ts` 的 `magicrewExpiry`。
   'magicrew',
+  // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：**决定聚合候选表可见性
+  //    的就是本表**。只加 `AGGREGATE_CHANNELS` 而不加这里 ⇒ 折算恒 UNUSABLE
+  //    ⇒ 国际站候选从轮换表里静默消失（与 minimaxintl / autoclawintl 同款）。
+  //    折算原语：`provider-expiry.ts` 的 `magicrewintl` 条目 → 同一个 `magicrewExpiry`，
+  //    但**必须传 `MAGICREW_INTL`**（传国内版会拿国内基址查国际账号余额）。
+  'magicrewintl',
 ])
 
 /**
@@ -1290,8 +1296,20 @@ async function sharedPackageExpiry(
      */
     if (isExclusiveCreditPool(pkg)) continue
     hasAnyCredit = true
-    const end = pkg.deductionEndTime
-    if (typeof end === 'number' && Number.isFinite(end) && end > 0 && end < earliest) earliest = end
+    const end: unknown = pkg.deductionEndTime
+    /**
+     * ⚠️⚠️ **判据必须与 `src/buddy-balance-rank.ts` 的 `splitBuddyCreditsByExpiry` 同一份**
+     * （2026-11-01 四审）：那边已把 `deductionEndTime` 收窄成「**number 或数字字符串**」，
+     * 而这里曾只认 `typeof === 'number'`。
+     *
+     * 后果（结构可达、生产零实测 —— 目前所有生产者都写 number）：外部写入
+     * （`state.json` / 备份导入 / 旧缓存里的 `"1791072000000"`）会让**面板判「临期」**
+     * 而**聚合轮换把它当「未知」= 长期、排到最后** ⇒ 用户看到的「马上到期」与
+     * 自动选择顺序相反。这正是本仓红线「同一语义不得两套判据」。
+     */
+    const endIsNumeric = typeof end === 'number' || typeof end === 'string'
+    const endMs = endIsNumeric ? Number(end) : Number.NaN
+    if (Number.isFinite(endMs) && endMs > 0 && endMs < earliest) earliest = endMs
   }
   // 有余额但都没给到期时间 ⇒ 长期（排最后，不剔除）。
   if (hasAnyCredit) return earliest

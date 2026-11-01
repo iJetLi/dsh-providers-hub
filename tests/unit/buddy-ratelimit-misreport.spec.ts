@@ -495,6 +495,13 @@ describe('全部账号被模型限流时，报限流而非「未登录」', () =
       //    ⇒ 池被筛空时会误报误导性的「请先登录」。且它的 `mgw_` key 只活 2 小时，
       //    该误报会让用户去重登一个本来没问题的号。
       'MAGICREW',
+      // ⚠️ **MAGICREW_INTL 必须在内**（2026-11-01）：MagiCrew 国际版，与 `MAGICREW`
+      //    **同一形态**（同一份适配器工厂、固定 ref 兜底
+      //    `MAGICREWINTL_ACCESS_TOKEN`、池被筛空时会误报「请先登录」）。
+      // ⚠️ 常量名带下划线，与 `src/index.ts` 里的 `product: MAGICREW_INTL,`
+      //    **逐字相同**（本用例按该字段匹配工厂配置块，写成 `MAGICREWINTL`
+      //    会「找不到块」而不是「少一家」—— 两种红的原因不同，别混淆）。
+      'MAGICREW_INTL',
       // ⚠️ **刻意不含 ZCODE** —— 它是唯一「不接判定也算对」的一家，
       // 见下方「zcode 同型缺陷判定」段。
     ]
@@ -535,6 +542,54 @@ describe('全部账号被模型限流时，报限流而非「未登录」', () =
         block,
         `${product} 未接限流判定（池被筛空时会误报「请先登录」）`,
       ).toContain('throwIfAllRateLimited: throwIfAllAccountsRateLimited')
+    })
+
+    /**
+     * ★★ **工厂的兜底 `refName` 必须来自块内那个 `product` 常量**（2026-11-01 二审）。
+     *
+     * 实测：把 `src/index.ts` 里 `magicrewIntlResolver` 的
+     * `fallback: { kind: 'ref', refName: MAGICREW_INTL.defaultCredentialRef }`
+     * 改成 `MAGICREW.defaultCredentialRef`，**491 条相关用例全绿** ——
+     * 而生产后果是：账号池被限流/关闭筛空时，国际站适配器回落到
+     * **国内站的固定 ref**（`MAGICREW_ACCESS_TOKEN`）⇒ 拿国内 JWT 打国际 host，
+     * 或误报「请先登录」。
+     *
+     * ⚠️ 判据从**源码形态派生**：工厂块的 `product: <CONST>` 与
+     * `refName: <CONST>.defaultCredentialRef` 必须是**同一个常量**。
+     * `fallback` 为 `kind: 'custom'` 的渠道（zcode）不适用本判据。
+     */
+    it.each(WIRING)('$product：兜底 refName 不得指向**另一个** provider 的常量', (product) => {
+      const all = factoryBlocks()
+      const block = all.get(product)
+      expect(block, `${product} 的工厂配置块没找到`).toBeDefined()
+      if (block === undefined) return
+      // `custom` 兜底（zcode）没有 refName，跳过。
+      if (block.includes("kind: 'custom'")) return
+      const refMatch = /refName: (\w+(?:\.\w+)*)/.exec(block)
+      expect(refMatch, `${product} 的工厂块里找不到 refName（形态变了要同步改本用例）`).not.toBeNull()
+      const refExpr = refMatch![1]!
+      /**
+       * ⚠️ **只判「指向另一个 product 常量」**（2026-11-01 二审）。
+       *
+       * 不能要求 `refName === '<product 常量>.defaultCredentialRef'`：本仓有一批渠道
+       * 用的是**独立的 ref 常量**（`BUDDY_CREDENTIAL_REF` / `CODECARTS_…`），
+       * 那些与 product 常量无派生关系，硬套会让 12 家全红。
+       *
+       * 真正的缺陷形态是「A 站的块里写了 B 站的 defaultCredentialRef」——
+       * 因为只有 product 常量带 `.defaultCredentialRef`，所以判据是：
+       * **refName 的宿主若是（别的）product 常量 ⇒ 红**。
+       */
+      const owner = refExpr.endsWith('.defaultCredentialRef')
+        ? refExpr.slice(0, -'.defaultCredentialRef'.length)
+        : undefined
+      if (owner === undefined) return
+      const productConsts = new Set(all.keys())
+      if (!productConsts.has(owner)) return
+      expect(
+        owner,
+        `${product} 的 fallback.refName 指向 ${owner}.defaultCredentialRef，`
+        + '那是**另一个站**的固定凭据 ⇒ 池被筛空时会拿它兜底（或误报「请先登录」）',
+      ).toBe(product)
     })
 
     it('名单覆盖全部走工厂取号的 provider（新增 provider 记得加进来）', () => {

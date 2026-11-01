@@ -99,8 +99,10 @@ import { fetchQoderBalanceDetailed, fetchQoderCreditBalance } from './qoder-cred
 //    `CreditBalance | null`）。两个变体**都接**（见上方长注释），选号器优先用 Detailed。
 import { MagicrewAuth } from './magicrew-auth.js'
 import type { MagicrewCredential } from './magicrew-auth.js'
+import { fetchMagicrewBalance } from './magicrew-credits.js'
 import { MagicrewService } from './magicrew.js'
-import { MAGICREW } from './magicrew-product.js'
+import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
+import type { MagicrewProduct } from './magicrew-product.js'
 import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { fetchAstudioBalanceDetailed, fetchAstudioCreditBalance } from './astudio-credits.js'
 // ⚠️ MiniMax 两站的 `fetchMinimaxCreditBalance`（2026-10-20，同为「永久积分锁定」新增）：
@@ -1929,10 +1931,16 @@ export function apply(ctx: Context): void {
    *
    * ## ⚠️ 位置约束（与 astudio 那处同理）
    *
-   * 本函数放在 `loomyLockedError` **之前**是有意的：`loomy-balance-error-contract.spec.ts`
-   * 用「`const loomyLockedError` 到 `const buddy = new BuddyAuth`」切片来核对 Loomy 的
-   * 错误码（Loomy 用可重试的 `TRANSPORT`，本家必须用不可重试的 `QUOTA_EXCEEDED`）。
-   * 插进那个区间会让该用例把本家的码当成 Loomy 的核对而**必然变红**。
+   * 本函数放在 `loomyLockedError` **之前**，理由是**可读性**（同一屏内与 autoclaw 等
+   * 同样使用 `QUOTA_EXCEEDED` 的锁定错误排在一起），**不是**为了躲某个切片。
+   *
+   * ⚠️⚠️ **原先这里写的是「插进 Loomy 区间会让 `loomy-balance-error-contract.spec.ts`
+   * 必然变红」—— 那是错的**（2026-11-01 二审实测）：该 spec 的终点锚点早在
+   * 2026-10-20 就从 `const buddy = new BuddyAuth` 换成了 `'\n  const '`（下一个同级
+   * 声明），它自己的注释 `:35-47` 明写「就是为了别人插 const 时不再被迫挪顺序」。
+   * 实测在该区间插一个用 `'QUOTA_EXCEEDED'` 的同级 const，那个切片**逐字节不变**。
+   * ⇒ 位置的真正守卫是 `tests/unit/magicrew-lock-wiring.spec.ts` 的
+   * `expect(mine).toBeLessThan(loomy)`，不要再靠「会变红」这种口耳相传的理由排序。
    */
   const autoclawLockedError = (displayName: string) =>
     (reason: BuddyNoAccountReason): Error => {
@@ -2010,6 +2018,116 @@ export function apply(ctx: Context): void {
         + '积分（AutoClaw 的**带到期时间的发放批次** —— 钱包流水里那些'
         + '带有效期的「每日签到 / 登录奖励」等发放）都已用尽。'
         + '**永久桶**（流水里**不带到期时间**的那些发放）在锁定状态下动不到它们'
+        + ' —— 这是锁定的预期效果。'
+        + `请在 Jet Hub 的 ${displayName} 面板解锁永久积分，或等待下一次签到 / 活动发放。`,
+        'QUOTA_EXCEEDED',
+      )
+    }
+
+  /**
+   * Magicrew（国内 `magicrew` / 国际版 `magicrewintl`）的
+   * 「锁定永久积分 + 无可用账号」报错文案（2026-11-01 用户要求加锁定）。
+   *
+   * ## 本家的积分形状（决定文案能说什么、不能说什么）
+   *
+   * `GET /api/v1/quota/points/total` 只给两样东西：`total_points` 与
+   * `expiring_quota_details[]`（**带到期时间**的批次）。两者的差额是上游
+   * **不下发任何到期时间**的积分 —— 也就是用户口径的**永久积分**
+   *（取证：国内 2661 total / 1661 批次 / 残差 1000；国际 347 / 247 / 100，
+   * 见 `magicrew-credits.ts` 的合成包注释）。⇒ 文案里可以说「永久积分」
+   *（判据是**有没有到期时间**，不是某个池名），但**不得**点名任何积分池
+   *（上游不下发池名，那会是 AutoClaw 那次「编池名」的同型缺陷）。
+   *
+   * ## 与领居家四份的差异（**不是漏抽公共函数**）
+   *
+   * buddy / qoder / astudio / minimax / autoclaw 五家的 `exhausted` 文案都在描述
+   * 「活动赠送 / 签到包」这类**有名字的桶**。本家**没有桶名**，只有一个
+   * 「到期时间有无」的判据 ⇒ 强行共用会写出一句无从核实的话
+   *（`foldReasonErrors` 那类公共部分已复用，`lockedError` 文案逐家独有是本仓惯例）。
+   *
+   * ## 错误码取 `QUOTA_EXCEEDED`
+   *
+   * 与其余五家一致：这确实是额度问题，且它**不在**宿主
+   * `DEFAULT_RETRYABLE_CODES` 里 ⇒ 不会被白重试（锁定是**确定性**结果）。
+   * ⚠️ `unknown` 档文案写「请重试」而该码不可重试 —— 这是**全仓既有**的自相矛盾
+   *（`autoclawLockedError` 的注释里已登记过同样的六家口径），本次**跟随多数派、
+   * 不单独开例外**；要修应六家一起改，属独立任务。
+   *
+   * ## 位置约束
+   *
+   * 本函数放在 `loomyLockedError` **之前**，理由是**可读性**（同一屏内与 autoclaw 等
+   * 同样使用 `QUOTA_EXCEEDED` 的锁定错误排在一起），**不是**为了躲某个切片。
+   *
+   * ⚠️⚠️ **原先这里写的是「插进 Loomy 区间会让 `loomy-balance-error-contract.spec.ts`
+   * 必然变红」—— 那是错的**（2026-11-01 二审实测）：该 spec 的终点锚点早在
+   * 2026-10-20 就从 `const buddy = new BuddyAuth` 换成了 `'\n  const '`（下一个同级
+   * 声明），它自己的注释 `:35-47` 明写「就是为了别人插 const 时不再被迫挪顺序」。
+   * 实测在该区间插一个用 `'QUOTA_EXCEEDED'` 的同级 const，那个切片**逐字节不变**。
+   * ⇒ 位置的真正守卫是 `tests/unit/magicrew-lock-wiring.spec.ts` 的
+   * `expect(mine).toBeLessThan(loomy)`，不要再靠「会变红」这种口耳相传的理由排序。
+   */
+  const magicrewLockedError = (displayName: string) =>
+    (reason: BuddyNoAccountReason): Error => {
+      const days = buddyExpiringWindowDays()
+      if (reason.kind === 'unknown') {
+        return new LlmError(
+          `${displayName}：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能全部完成`
+          + `（${foldReasonErrors(reason.errors)}）。这些账号**可能仍有**「${days} 天内到期」`
+          + '的积分 —— 请重试。'
+          + `⚠️ 若持续失败，请在 Jet Hub 的 ${displayName} 面板检查凭据是否失效`
+          + '（本家的推理凭据是定期轮换的 `mgw_` key，JWT 过期后需要重新登录）；'
+          // ⚠️ 点名 `organizationCode` 是可诊断性的唯一出路：`fetchMagicrewBalance`
+          //    没有「缺组织码」前置守卫（签到侧有，用的是 `product.needsOrgOnGateway`）
+          //    ⇒ 缺组织码时请求照发、上游回 `code 2182`（用户所在组织不存在）⇒ 落到本档，
+          + '需要网关组织码的站点，还要确认该账号登录时选过组织（`organizationCode` 已记录）。',
+          'QUOTA_EXCEEDED',
+        )
+      }
+      if (reason.kind === 'no-candidates') {
+        // ⚠️ **不得照抄 buddy 系那句「或全部账号都在本次请求的模型上受限」**（2026-11-01 二审）：
+        //    `candidatesOf()` 只用两个条件筛候选 —— `a.enabled` 与
+        //    `modelRateLimits[modelId]` 未过期。而本家**从不写** `modelRateLimits`：
+        //    写它的是各适配器里的 `updateModelRateLimit()` 调用，而
+        //    `src/magicrew-adapter.ts` / `src/magicrew.ts` / `src/magicrew-credits.ts`
+        //    里该调用 **0 处** ⇒ 第二个条件恒放行 ⇒ 本档只可能是「没有启用中的账号」。
+        //
+        //    ⚠️ **不要**用 `rateLimit` 当理由：两站在 `src/provider-registry.ts` 里
+        //    都写的是 `rateLimit: false`（2026-11-01 三审更正 —— 本条原写「国内站
+        //    省略该字段」，实测已不成立），而该字段管辖的是「重测 / 重置」按钮，
+        //    **不驱动** `modelRateLimits` 的写入。写进文案就是让用户排查一个不可能
+        //    存在的方向。
+        return new LlmError(
+          `${displayName}：没有可用账号。已锁定永久积分，而本次**没有任何候选账号**`
+          + '（该 provider 下没有**启用中**的账号）。'
+          + `请在 Jet Hub 的 ${displayName} 面板确认至少有一个账号处于启用状态；`
+          + '或改用其它 provider / 模型，或解锁永久积分后重试。',
+          'QUOTA_EXCEEDED',
+        )
+      }
+      if (reason.kind === 'credential-only') {
+        // ⚠️ **必须与「积分用尽」逐字分开**，且要**明确劝阻解锁**：解锁会不可
+        //    撤回地消耗永久积分，而本情形的根因在凭据、与积分无关。
+        return new LlmError(
+          `${displayName}：无法使用任何账号。已锁定永久积分，而余额分档**确实选出了**`
+          + '有可用积分的账号 —— 但它们的**凭据读不出来**（凭据缺失 / 已失效 / 被并发续期覆盖）。'
+          + '⚠️ 这与「积分用尽」是两件事，**不要去解锁永久积分**（解锁会不可撤回地消耗它们）。'
+          + `请在 Jet Hub 的 ${displayName} 面板检查这些账号的凭据，必要时重新登录。`,
+          'QUOTA_EXCEEDED',
+        )
+      }
+      /**
+       * ⚠️⚠️ **穷尽性守卫**（与 buddy / Loomy / AStudio / MiniMax / AutoClaw 五份同型）：
+       * 走到这里**只允许**是 `{ kind: 'exhausted' }`。把 `reason` 赋给单成员类型，
+       * 将来 `BuddyNoAccountReason` 加了新档位却忘写文案时，`tsc` 当场报
+       * `TS2322`，而不是静默落进「积分都已用尽」—— 那句会把用户推向
+       * **不可撤回**的解锁操作。
+       */
+      const exhaustedOnly: { kind: 'exhausted' } = reason
+      void exhaustedOnly
+      return new LlmError(
+        `${displayName}：没有可用账号。已锁定永久积分，而所有账号的「${days} 天内到期」`
+        + '积分（上游 `expiring_quota_details` 里那些**带到期时间**的批次）都已用尽。'
+        + '**永久积分**（上游**不下发到期时间**的那部分）在锁定状态下动不到它们'
         + ' —— 这是锁定的预期效果。'
         + `请在 Jet Hub 的 ${displayName} 面板解锁永久积分，或等待下一次签到 / 活动发放。`,
         'QUOTA_EXCEEDED',
@@ -3871,6 +3989,37 @@ export function apply(ctx: Context): void {
   // 超级麦吉（Magicrew 国内站，2026-10-29）。MagicrewAuth 构造时自 provide（服务名 magicrewAuth）。
   const magicrewAuth = new MagicrewAuth(ctx)
   /**
+   * **MagiCrew 国际站**（`magicrewintl`，2026-11-01 用户要求）。
+   *
+   * ⚠️ 服务名由 `MagicrewAuth` 构造里 `super(ctx, `${product.id}Auth`)` **自动派生**
+   *    为 `magicrewintlAuth` ⇒ 这里**不需要**再 `ctx.provide`。
+   * ⚠️ 两站是同一个 Go 服务的两个**数据面**（账号体系物理隔离）⇒ 必须是两个实例：
+   *    共用一个实例会让 `states` 按 ref 串号、`currentCredential()` 互相覆盖。
+   */
+  const magicrewIntlAuth = new MagicrewAuth(ctx, { product: MAGICREW_INTL })
+  /**
+   * 两站共用的**读图桥接**（`ctx.attachments.readImage` → 适配器的
+   * `{data, mediaType}`）。
+   *
+   * ⚠️ 必须**惰性** `ctx.get('attachments')`，不能写 `ctx.attachments` ——
+   *    后者是 cordis 的 inject 服务，在同步代码里直接访问会抛
+   *    `cannot get property "…" without inject` 并**打断整个 `apply()`**
+   *    （实测：在 `ctx.provide('accountPool', …)` 之后被打断，minimax 的
+   *    巡检定时器读不到它 ⇒ `wiring-lifecycle-guards.spec.ts` 两条红）。
+   *    惰性取时缺服务返回 `undefined` ⇒ 适配器抛 `INVALID_REQUEST`（可见失败，
+   *    不是静默降级：静默降级会让模型「看不到图却以为看到了」，那是幻觉源）。
+   */
+  const magicrewReadImage = async (attachment: unknown) => {
+    const attachments = ctx.get('attachments') as
+      | { readImage?: (a: unknown) => Promise<{ ref: { mediaType: string }, data: Uint8Array }> }
+      | undefined
+    if (attachments?.readImage === undefined) return undefined
+    const stored = await attachments.readImage(attachment)
+    if (stored === undefined) return undefined
+    // 形状转换：宿主给 `{ ref, data }`，适配器要 `{ data, mediaType }`（拼 data URL 用）。
+    return { data: stored.data, mediaType: stored.ref.mediaType }
+  }
+  /**
    * 适配器**必须**拿到 `resolveCredential` 与 `fetchRemoteModels`：
    * 缺前者 ⇒ 每条请求抛 `AUTH`「账号未登录」（已登录用户也看到，且 AUTH 吞文案）；
    * 缺后者 ⇒ 目录只剩静态兜底（静默退化，用户看到的是过期 ctx/档位）。
@@ -3886,6 +4035,36 @@ export function apply(ctx: Context): void {
    *
    * 走 resolver 还白拿**请求级换号**与**限流排除**（其余 23 家同款）。
    */
+  /**
+   * Magicrew 国内站的**余额分档选号器**（2026-11-01 用户要求「加锁定 / 解锁永久积分」）。
+   *
+   * ## 为什么复用 `BuddyBalanceSelector` 而不是新写一个
+   *
+   * 分档判据只读通用的 `packages[].{ active, remaining, deductionEndTime }`，
+   * 而 `fetchMagicrewBalance` 返回的**就是** `CreditBalance` —— 天生满足它要的形状。
+   * 本仓库对这类「同族判定」既有明确裁定：**优先扩 `buddy-balance-rank.ts`，
+   * 不要再开第三份**（见该文件头部）。TRAE / LobsterAI / Qoder / AStudio / MiniMax /
+   * AutoClaw 六家走的就是这条复用路线，magicrew 只是第七家。
+   *
+   * ⚠️ **非 buddy product 时 `fetchBalance` 是编译期必填的**（`FetchBalanceRule`）：
+   *    漏传 `tsc` 会报错。这是刻意的 —— 缺省实现会拿 `TraeProduct` 那类没有
+   *    `endpoint` 的 `product` 拼出 `undefined/...` 的畸形 URL，症状是
+   *    「余额恒查不到 ⇒ 锁定时永远报无法确认」且**零日志**。
+   * ⚠️ **第三参 `ctx`（出口代理）本家不需要**：magicrew 两站都不按出口 IP 分流，
+   *    故只写两参。若将来接入按账号代理，必须同时补这里与
+   *    `BuddySelectionDeps.fetchFor`，否则只有 `fetchBalance` 那条腿有出口。
+   * ⚠️ **`?? null` 是契约差异**：`fetchMagicrewBalance` 用 `undefined` 表达「读不到」，
+   *    而选号器契约是 `null`（两者同义，但 `undefined` 会被当成「没实现」）。
+   */
+  const magicrewBalanceSelector = new BuddyBalanceSelector<MagicrewProduct, MagicrewCredential>({
+    product: MAGICREW,
+    resolveCredential: (refName) => magicrewAuth.currentCredential(refName),
+    fetchBalance: async (credential, product) => await fetchMagicrewBalance({
+      jwt: credential.jwt,
+      organizationCode: credential.organizationCode,
+      product,
+    }) ?? null,
+  })
   const magicrewResolver = createCredentialResolver<MagicrewCredential>(
     { pool: pool as never },
     {
@@ -3901,9 +4080,44 @@ export function apply(ctx: Context): void {
        *    的「走了工厂却没接限流判定」那条守卫会直接点名 magicrew。
        */
       throwIfAllRateLimited: throwIfAllAccountsRateLimited,
+      /**
+       * ## `balance` —— 锁定永久积分的**唯一执行路径**（2026-11-01）
+       *
+       * ⚠️⚠️ **没有这一段就是「假开关」**：`provider-registry.ts` 的
+       * `permanentLock: true` 只让面板渲染出按钮、让 `credits.permanentLock`
+       * RPC 接受写入，**没有任何代码去执行那张锁定表** —— 用户点了锁定，
+       * 凭据照旧烧永久积分，且**没有任何用例会红**（officeace 的原始缺陷，
+       * 见 Gitee IKLTHB 与 `permanent-lock-execution.spec.ts` 的文件头）。
+       *
+       * `kind: 'buddy'` 的含义是「沿用 `pickBuddyAccount` 的编排」：
+       * `credential-resolver.ts` 读 `pool.permanentLocked(providerId)` ⇒
+       * 传 `allowPermanent` ⇒ 只剩永久桶时 `select()` 返回不可用 ⇒
+       * 落到本行的 `lockedError` 报错（**绝不**回落 `getAvailableAccount`）。
+       *
+       * ⚠️ **`isFreeModel: NO_FREE_MODEL` 是刻意的保守取舍**：免费模型
+       *    （`input_points === 0`）本不该受锁定约束，但本家的免费判定在**适配器**
+       *    内部（远端计费表 `magicrewIsFree(wirePoints)`），没有可注入的
+       *    「modelId → 是否免费」查询点。宁可让免费模型也走一次余额分档
+       *    （代价：一次余额请求；锁定 + 只剩永久时会被误拦），也不在这里
+       *    猜一个判据 —— 猜错的代价是免费模型静默绕开锁定、真烧掉永久积分。
+       *    将来适配器若暴露倍率查询，这里应改成真实判据（与 buddy 系同款）。
+       */
+      balance: {
+        kind: 'buddy',
+        selector: magicrewBalanceSelector,
+        lockedError: magicrewLockedError('超级麦吉'),
+        isFreeModel: NO_FREE_MODEL,
+      },
     },
   )
   const magicrewService = new MagicrewService({
+    /**
+     * ⚠️ **必须显式传**（2026-11-01 三审 D5）：`src/magicrew.ts` 的构造器有
+     * `?? MAGICREW` 缺省，省略在这里**行为正确但形态不对称** —— 后人照着国内站
+     * 抄去接第三个站点时会**静默打回国内基址**（与 `src/provider-expiry.ts`
+     * 「漏传 product ⇒ 恒 UNUSABLE ⇒ 聚合候选静默消失」是同型风险）。
+     */
+    product: MAGICREW,
     // ⚠️ 必填：`login()` 的实现在 auth 层（`account.create` 只拿得到 `JetHubAuths`）。
     auth: magicrewAuth,
     resolveCredential: magicrewResolver,
@@ -3911,21 +4125,12 @@ export function apply(ctx: Context): void {
      * ⚠️ 桥接宿主读图入口。**必须用 `ctx.get()` 惰性取**，不能写 `ctx.attachments` ——
      *    后者是 cordis 的 inject 服务，在同步代码里直接访问会抛
      *    `cannot get property "…" without inject` 并**打断整个 `apply()`**
-     *    （实测：`ctx.provide('accountPool', …)` 在 5977 行，被打断后 minimax 的
+     *    （实测：在 `ctx.provide('accountPool', …)` 之后被打断，minimax 的
      *    巡检定时器读不到它 ⇒ `wiring-lifecycle-guards.spec.ts` 两条红）。
      *    惰性取时缺服务返回 `undefined` ⇒ 适配器抛 `INVALID_REQUEST`（可见失败，
      *    不是静默降级）。
      */
-    readImage: async (attachment: unknown) => {
-      const attachments = ctx.get('attachments') as
-        | { readImage?: (a: unknown) => Promise<{ ref: { mediaType: string }, data: Uint8Array }> }
-        | undefined
-      if (attachments?.readImage === undefined) return undefined
-      const stored = await attachments.readImage(attachment)
-      if (stored === undefined) return undefined
-      // 形状转换：宿主给 `{ ref, data }`，适配器要 `{ data, mediaType }`（拼 data URL 用）。
-      return { data: stored.data, mediaType: stored.ref.mediaType }
-    },
+    readImage: magicrewReadImage,
     fetchRemoteModels: async () => {
       const credential = await magicrewAuth.currentCredential()
       if (credential === undefined) return []
@@ -3949,6 +4154,76 @@ export function apply(ctx: Context): void {
   const magicrewAdapter = magicrewService.adapter
   // 与 accio / aggregate 同款幂等注册（`llm-register-compat.ts` 负责记账与剔除包装）。
   registerAdapterIdempotent(ctx.llm, [MAGICREW.id], magicrewAdapter)
+  /**
+   * ## MagiCrew 国际站（`magicrewintl`，2026-11-01 用户要求）
+   *
+   * 与国内版**共用全部实现**，只有 `product` 常量不同 —— 判据与理由见
+   * `src/magicrew-product.ts` 的 `MAGICREW_INTL` 注释（账号体系物理隔离、
+   * host 不同、网关强制 org）。
+   *
+   * 下面这一整块与国内版逐行同构，**故意不抽公共工厂**：两处差异点（product /
+   * auth 实例）都出现 5 次以上，抽工厂会让「哪一处漏改」变得不可见 ——
+   * 而本仓库记录过多次「一份语义两处实现，改一处漏一处」的缺陷
+   *（`minimaxintl` / `autoclawintl` 都选了同样的显式两份，见 `index.ts:850` / `:1819`）。
+   */
+  /**
+   * MagiCrew 国际站的余额分档选号器 —— 与国内版**逐行同构**，只有 `product`
+   * 与 auth 实例不同（判据见 `magicrew-product.ts` 的 `MAGICREW_INTL` 注释）。
+   *
+   * ⚠️ **不能两站共用一个 selector 实例**：`BuddyBalanceSelector` 的缓存按
+   * `account.id` 索引、且 `product` 在构造期固定 ⇒ 共用会让国际站账号用国内
+   * 基址查余额（症状：国际站余额恒查不到 ⇒ 锁定时永远报「无法确认」，
+   * 面板却还能刷新 —— 与 `provider-expiry.ts` 那次漏传 `product` 同型）。
+   */
+  const magicrewIntlBalanceSelector = new BuddyBalanceSelector<MagicrewProduct, MagicrewCredential>({
+    product: MAGICREW_INTL,
+    resolveCredential: (refName) => magicrewIntlAuth.currentCredential(refName),
+    fetchBalance: async (credential, product) => await fetchMagicrewBalance({
+      jwt: credential.jwt,
+      organizationCode: credential.organizationCode,
+      product,
+    }) ?? null,
+  })
+  const magicrewIntlResolver = createCredentialResolver<MagicrewCredential>(
+    { pool: pool as never },
+    {
+      product: MAGICREW_INTL,
+      readCredential: (refName) => magicrewIntlAuth.currentCredential(refName),
+      fallback: { kind: 'ref', refName: MAGICREW_INTL.defaultCredentialRef },
+      // ⚠️ 同上：不传会把「全部账号被限流」误报成「未登录」。
+      throwIfAllRateLimited: throwIfAllAccountsRateLimited,
+      /**
+       * ⚠️ **必须与国内版同格**（2026-11-01）：两站各自登记 `permanentLock: true`
+       * ⇒ 各自的 `lockedError` 缺一段就是**假开关**（面板有按钮、点了没用）。
+       * `displayName` 必须**逐站区分**：两站账号体系物理隔离，用户要知道去
+       * 哪个面板解锁（`credits.permanentLock` 也是按 provider id 写同一张锁定表）。
+       * `isFreeModel` 取 `NO_FREE_MODEL` 的取舍与后果（免费模型也会走一次余额
+       * 分档、锁定 + 只剩永久时会被误拦）见国内版那段注释 —— 两站同源，这里不重复。
+       */
+      balance: {
+        kind: 'buddy',
+        selector: magicrewIntlBalanceSelector,
+        lockedError: magicrewLockedError('MagiCrew (国际版)'),
+        isFreeModel: NO_FREE_MODEL,
+      },
+    },
+  )
+  const magicrewIntlService = new MagicrewService({
+    product: MAGICREW_INTL,
+    auth: magicrewIntlAuth,
+    resolveCredential: magicrewIntlResolver,
+    readImage: magicrewReadImage,
+    fetchRemoteModels: async () => {
+      const credential = await magicrewIntlAuth.currentCredential()
+      if (credential === undefined) return []
+      return await magicrewIntlAuth.fetchCatalogModels(credential.jwt, credential.organizationCode)
+    },
+    // ⚠️ 必须传（与国内版同因）：缺了会让「关掉的模型照样出现在选择器里」，
+    //    且在构造期读 `ctx.accountPool` 会抛错打断整个 `apply()`。
+    accountPool: pool,
+  })
+  const magicrewIntlAdapter = magicrewIntlService.adapter
+  registerAdapterIdempotent(ctx.llm, [MAGICREW_INTL.id], magicrewIntlAdapter)
   /**
    * 按凭据 ref 解析 AStudio 凭据（供**选号器查余额**与最终取凭据共用）。
    *
@@ -5501,6 +5776,8 @@ async function fetchBalanceReading(
     //    时漏写黑名单 ⇒「provider 显示已关闭、模型却仍可选用」的矛盾态。
     qiniu: pruned(QINIU.id, qiniuAdapter),
     magicrew: pruned(MAGICREW.id, magicrewAdapter),
+    // MagiCrew 国际站（2026-11-01）：与国内版同款剪枝，目录/黑名单逻辑共用。
+    magicrewintl: pruned(MAGICREW_INTL.id, magicrewIntlAdapter),
     // OfficeAce（华为 MaaS 云端直连）：目录静态 + 平台侧可用性，同其余渠道。
     officeace: pruned(OFFICEACE.id, officeAceAdapter),
     // AStudio（上游 MAAS 云端直连）：目录来自 model-manager 远端 + 兜底表，同其余渠道。
@@ -5889,6 +6166,10 @@ async function fetchBalanceReading(
       //    收不到本循环的调用（本仓库复发过 6 次）。
       //    漏加这一行 = 它不进注册表 ⇒ 续期/积分/探测三条链路全部静默失效。
       ['magicrew', magicrewAuth],
+      // ⚠️ 国际站必须**单独一行**（2026-11-01）：`provider-runtime-wiring.spec.ts`
+      //    与续期/积分/探测三条链路都按 provider id 取实例，漏了它 = 国际站账号
+      //    的 token 永不过期检测、积分永不刷新、重测按钮点了没反应（全静默）。
+      ['magicrewintl', magicrewIntlAuth],
     ]
     for (const [id, auth] of registry) {
       const descriptor = descriptorOf(id)
@@ -6084,6 +6365,9 @@ async function fetchBalanceReading(
     //    registry 数组里 `['magicrew', magicrewAuth]` 的**同一个实例**，否则
     //    `provider-runtime-wiring.spec.ts` 布在该实例上的 spy 收不到调用。
     magicrew: magicrewAuth,
+    // ⚠️ MagiCrew 国际站（2026-11-01）：必须与上面 `['magicrewintl', magicrewIntlAuth]`
+    //    是**同一个实例**，否则 spec 布在该实例上的 spy 收不到调用。
+    magicrewintl: magicrewIntlAuth,
   }, modelAdapters)
 
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已

@@ -224,6 +224,16 @@ async function magicrewCall(params: {
   headers: Record<string, string>
   body?: string
   fetchImpl: typeof fetch
+  /**
+   * 本次调用的业务超时（毫秒）。
+   *
+   * ⚠️ 2026-11-01 二审：原先写死 `MAGICREW.requestTimeoutMs`（= **国内站**的常量），
+   * 于是**国际站**也沿用国内站的值 —— 两站当前同为 30_000 所以看不出问题，
+   * 但将来任一站调整超时就会静默失效，且「两站只差一个 product 常量」这条纪律被破坏
+   *（本文件是全部 auth 网络调用的唯一出口 ⇒ 它一错，登录/签发/续期三条腿一起错）。
+   * ⇒ 由调用方按 `product.requestTimeoutMs` 显式传入。
+   */
+  timeoutMs: number
 }): Promise<unknown> {
   const response = await params.fetchImpl(params.url, {
     method: params.method,
@@ -235,8 +245,9 @@ async function magicrewCall(params: {
      * 后排队的所有账号续期一起卡住（且它在 `refreshAll` 的 per-account try 之外
      * 没有第二道闸）。其余每家 `*-credits.ts` 都有 `AbortSignal.timeout`。
      * 用 `requestTimeoutMs`（业务 API 口径）；**不要**用推理那三个超时。
+     * ⚠️ 2026-11-01 二审：值改由调用方按 `product` 传入（不再写死 `MAGICREW`）。
      */
-    signal: AbortSignal.timeout(MAGICREW.requestTimeoutMs),
+    signal: AbortSignal.timeout(params.timeoutMs),
   })
   const text = await response.text()
   let parsed: unknown
@@ -358,6 +369,7 @@ export async function issueMagicrewGatewayKey(params: {
     }),
     body: '{}',
     fetchImpl,
+    timeoutMs: product.requestTimeoutMs,
   }) as { data?: Record<string, unknown> }
   const data = (parsed.data ?? {}) as Record<string, unknown>
   const apiKey = readString(data, 'api_key')
@@ -399,6 +411,7 @@ export async function refreshMagicrewKey(params: {
     headers: magicrewHeaders({ webOrigin: product.webOrigin }),
     body: JSON.stringify({ refresh_token: params.refreshToken }),
     fetchImpl,
+    timeoutMs: product.requestTimeoutMs,
   }) as { data?: Record<string, unknown> }
   const data = (parsed.data ?? {}) as Record<string, unknown>
   const apiKey = readString(data, 'api_key')

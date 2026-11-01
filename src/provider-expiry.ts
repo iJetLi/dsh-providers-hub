@@ -108,6 +108,7 @@ import type { ZcodeCredential } from './zcode.js'
 //    （`magicrew-credits.ts` 的 `magicrewExpiry`）—— 本表只做「凭据 → 它要的入参」
 //    这一层映射，**绝不重算折算**（本仓库红线：折算映射只许有一份）。
 import { magicrewExpiry } from './magicrew-credits.js'
+import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 import { parseMagicrewCredential } from './magicrew-auth.js'
 import type { ProviderRuntime } from './provider-runtime.js'
 // ⚠️ 只导入**类型**（`CreditBalance` 是取数原语的返回形状）：本表只是「选哪个原语」，
@@ -338,6 +339,38 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
         return await magicrewExpiry({
           jwt: credential?.jwt ?? '',
           organizationCode: credential?.organizationCode ?? '',
+          /**
+           * ⚠️ **显式传 `product`**（2026-11-01 二审补）：原先靠 `magicrewExpiry` 的
+           * `?? MAGICREW` 缺省，而国际站条目显式传 `MAGICREW_INTL` ⇒ 两条腿**不对称**。
+           * 行为上正确（默认值恰好就是本国站），但形态上极易被后人误读成
+           * 「本国站也漏传了 product，照抄一份到新站就会静默打错 host」
+           * —— 而那个症状正是国际站那条注释里写的「折算恒 UNUSABLE ⇒ 候选静默消失」。
+           * ⇒ 两站都显式传，判据同形。
+           */
+          product: MAGICREW,
+          ...context?.cachedBalance === undefined
+            ? {}
+            : {
+                cachedBalance: () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+              },
+        })
+      },
+    },
+    /**
+     * **MagiCrew 国际版**（`magicrewintl`，2026-11-01）。
+     *
+     * ⚠️ 与 `magicrew` 逐字同构，但**必须显式传 `product: MAGICREW_INTL`** ——
+     *    漏传会用国内基址（`i-magic-service.letsmagic.cn`）去查国际账号余额，
+     *    恒失败 ⇒ 折算恒 `UNUSABLE` ⇒ 国际站候选从轮换表里**静默消失**
+     *    （与 `autoclawintl` 那条注释记录的同类缺陷完全同型）。
+     */
+    magicrewintl: {
+      credentialExpiry: async (c, context) => {
+        const credential = parseMagicrewCredential(c)
+        return await magicrewExpiry({
+          jwt: credential?.jwt ?? '',
+          organizationCode: credential?.organizationCode ?? '',
+          product: MAGICREW_INTL,
           ...context?.cachedBalance === undefined
             ? {}
             : {

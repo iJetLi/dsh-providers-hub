@@ -30,6 +30,8 @@ import {
   type MagicrewAuthOptions,
 } from '../../src/magicrew-auth.js'
 import type { ProviderAccountEntry } from '../../src/types.js'
+// ⚠️ 2026-11-01 二审：两站串号守卫要用到国际站常量。
+import { MAGICREW_INTL } from '../../src/magicrew-product.js'
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -111,7 +113,14 @@ class FakePool {
 
   listAccountsByProvider(provider: string): ProviderAccountEntry[] {
     this.listCalls.push(provider)
-    return this.accounts
+    /**
+     * ⚠️ **必须真的按 provider 过滤**（2026-11-01 二审）：
+     * 原先恒返回 `this.accounts` ⇒ 「`refreshAll` 写死 `listAccountsByProvider('magicrew')`」
+     * 这种串号缺陷**完全测不出来**（实测：把它改成写死 `'magicrew'`，133 条用例全绿）。
+     * 而生产后果是国际站账号**永不自动续期**（2 小时的 `mgw_` key 一死就 401），
+     * 且国内账号被两个实例各刷一遍（一次性 refresh_token 会被二次消费）。
+     */
+    return this.accounts.filter((entry) => entry.provider === provider)
   }
 
   async updateAccount(id: string, patch: { expiresAt?: number }): Promise<void> {
@@ -354,6 +363,50 @@ describe('MagicrewAuth（账号池适配）', () => {
     for (const update of pool.updates) expect(update.patch).toEqual({ expiresAt })
     // 池是按 `product.id` 查的（写错 provider ⇒ 恒空列表，静默零续期）
     expect(pool.listCalls).toEqual(['magicrew'])
+  })
+
+  /**
+   * ★★ **国际站实例只续期国际站账号**（2026-11-01 二审补）。
+   *
+   * 实测：把 `src/magicrew-auth.ts` 的 `refreshAll` 里
+   * `pool.listAccountsByProvider(this.product.id)` 写死成 `'magicrew'`，
+   * **133 条相关用例全绿** —— 而生产后果两条：
+   *
+   * 1. 国际站账号**永不自动续期** ⇒ 2 小时的 `mgw_` key 一死就 401，
+   *    用户只能手动重登；
+   * 2. 国内账号被**两个实例各刷一遍** ⇒ 一次性 `refresh_token` 二次消费
+   *    （第二次必然失败，还会把第一次成功换来的 token 关系弄乱）。
+   *
+   * ⚠️ 这条能成立的前提是 `FakePool.listAccountsByProvider` **真的按 provider 过滤**
+   *    （上面刚补的），否则「写死」与「正确」都返回同一份列表。
+   */
+  it('★★ 国际站实例只续期自己的账号（写死 magicrew 即红）', async () => {
+    const { ctx, store } = makeContext()
+    const expiresAt = 1_760_000_000_000
+    const accounts = [
+      account('cn-a', 'MAGICREW_ACCOUNT_A'),
+      account('intl-a', 'MAGICREWINTL_ACCOUNT_A', { provider: 'magicrewintl' }),
+    ]
+    for (const entry of accounts) store.seed(entry.credentialRef, credentialJson())
+    let calls = 0
+    const fetchImpl = vi.fn(async () => {
+      calls += 1
+      return refreshEnvelope(`mgw_${calls}`, `rt_${calls}`, expiresAt)
+    })
+    const auth = new MagicrewAuth(ctx, {
+      product: MAGICREW_INTL,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    const pool = new FakePool(accounts)
+
+    await auth.refreshAll(pool.asPool())
+
+    // ① 只查国际站（写死 'magicrew' ⇒ 这一条立刻红）
+    expect(pool.listCalls, 'refreshAll 查的不是自己那个 product 的账号').toEqual(['magicrewintl'])
+    // ② 只续期国际站那一个账号（国内账号一次都不该被这个实例碰）
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(store.setCalls).toEqual(['MAGICREWINTL_ACCOUNT_A'])
+    expect(pool.updates.map((update) => update.id)).toEqual(['intl-a'])
   })
 
   it('★ refreshAll 带 lead-time：距过期 >1 小时 ⇒ **零请求**，≤1 小时 ⇒ 续期', async () => {

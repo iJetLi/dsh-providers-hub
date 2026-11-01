@@ -1408,6 +1408,14 @@ export class AggregateAdapter extends LlmAdapter {
     //    **只加本数组不够** —— 决定候选表可见性的是 `aggregate-expiry.ts` 的
     //    `WIRED_EXPIRY_PROVIDERS`，漏了它 ⇒ 折算恒 UNUSABLE ⇒ 该渠道静默消失。
     'magicrew',
+    // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：与 `magicrew` 是
+    //    **两个 provider**（host 不同、账号体系物理隔离）⇒ 必须各自登记，
+    //    否则国际站的模型**永不进聚合目录、静默不可见**
+    //    （同款陷阱已复发五次：cline → accio → officeace → autoclaw → magicrew）。
+    //    ⚠️ 与 `magicrew` 一样**不只加本数组**：还要进 `aggregate-expiry.ts` 的
+    //    `WIRED_EXPIRY_PROVIDERS` 与 `provider-expiry.ts` 的条目，
+    //    且后者必须传 `MAGICREW_INTL`（传国内版会拿国内基址查国际账号余额）。
+    'magicrewintl',
   ])
 
   /**
