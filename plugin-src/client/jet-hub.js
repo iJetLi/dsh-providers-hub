@@ -14,7 +14,7 @@ import {
 } from './credits-capabilities.js';
 import { orderAfterDrop, dropPositionFromPointer } from './account-order.js';
 import { checkinCommitPlan, formatNextRunAt, isInsideCheckinDock, needsHostRestartNotice } from './checkin-panel-logic.js';
-import { accountLimitActionState, policyBlockedInfo } from './account-status.js';
+import { accountLimitActionState, policyBlockedHint, policyBlockedInfo } from './account-status.js';
 // ⚠️ 冲突解法（PR !144 × origin/master × 本 fork 的 qoder 代理）：
 //    - HEAD（PR !144）：删掉了旧侧栏入口 store（那个 `sidebar-entry` 前缀的
 //      老 store 模块，上游已整块删除）的四个符号 —— 侧栏入口改由
@@ -1278,18 +1278,13 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
                 className: 'dim-jh-policyBlockedMsg',
                 title: policyBlockedMessage,
               }, policyBlockedMessage),
+          // ⚠️⚠️ 文案里的入口**必须与真实存在的按钮同源**（对抗审计 E9）：
+          //   「测试」只在登记了能力位的 provider 上渲染（当前只有 gemini），
+          //   而本 issue 的 buddy / workbuddy **没有这个按钮** —— 让用户「点测试」
+          //   等于指一个不存在的入口，比不写更糟。
+          //   `onTest` 就是那个能力位在客户端的落点（`undefined` = 没登记）。
           React.createElement('span', { className: 'dim-jh-policyBlockedHint' },
-            '上游以「账号存在异常行为」拒绝了该账号（code 11140，全部模型都不可用）。'
-            /**
-             * ⚠️⚠️ 文案里的入口**必须与真实存在的按钮同源**（对抗审计 E9）：
-             * 「测试」只在登记了能力位的 provider 上渲染（当前只有 gemini），
-             * 而本 issue 的 buddy / workbuddy **没有这个按钮** —— 让用户「点测试」
-             * 等于指一个不存在的入口，比不写更糟。
-             * `onTest` 就是那个能力位在客户端的落点（`undefined` = 没登记）。
-             */
-            + (onTest === undefined
-              ? '点「重置」清除这条标记（本渠道没有探活按钮，重置不会验证账号是否真的恢复）。'
-              : '点「测试」确认已恢复（会用掉一点额度），或「重置」直接清除这条标记。')))
+            policyBlockedHint(onTest !== undefined)))
       : null,
     rateLimits.length > 0
       ? React.createElement('div', { className: 'dim-jh-rateLimits' },

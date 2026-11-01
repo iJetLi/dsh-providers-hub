@@ -84,3 +84,22 @@ export function accountLimitActionState(account, nowMs = Date.now()) {
     policyBlocked: blocked,
   }
 }
+
+/**
+ * 封禁红条的自救提示文案。
+ *
+ * ## ⚠️⚠️ 入口必须与**真实存在的按钮**同源（对抗审计 E9 实测打穿）
+ *
+ * 第一版文案恒写「点『测试』确认已恢复」，而「测试」按钮由 `onTest` 门控
+ * —— `supportsAccountTest` **只在 gemini 登记** ⇒ buddy / workbuddy（也就是
+ * 本 issue 的 provider）**根本没有那个按钮**。用户照着文案找会以为面板坏了。
+ *
+ * @param canTest - 面板上**是否真的渲染了「测试」按钮**（= `onTest` 是否存在）。
+ * @returns 该行提示文案。
+ */
+export function policyBlockedHint(canTest) {
+  const base = '上游以「账号存在异常行为」拒绝了该账号（code 11140，全部模型都不可用）。'
+  return base + (canTest
+    ? '点「测试」确认已恢复（会用掉一点额度），或「重置」直接清除这条标记。'
+    : '点「重置」清除这条标记（本渠道没有探活按钮，重置不会验证账号是否真的恢复）。')
+}
