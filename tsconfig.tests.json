@@ -42,6 +42,45 @@
     // 运行时 `loads.get(accountId)` 恒 `undefined` ⇒ 断言恒真、用例假绿）。
     // 初版 commit message 声称「fixture 型缺陷会被类型签名拦住」，但当时这道签名
     // 根本没被启用 —— 该错误在两条用例里活了下来。现在它真的会被拦住。
-    "tests/unit/session-balance.spec.ts"
+    "tests/unit/session-balance.spec.ts",
+    // ⚠️ 2026-11-02 二审 C🟢 补、四审 H-4 **更正归因**：这里是 monkeycode /
+    // monkeycodeintl / baizhi 三个 provider 新增 spec 中**需要类型层检查**的那部分。
+    // 二审时本段写成「下面这批是**全部** spec」，实际 13 份只点名了 7 份 —— 措辞已更正。
+    //
+    // ⚠️ **暂不纳入的 5 份，原因分两类，别再混为一谈**：
+    //   ① `baizhi.spec.ts` / `baizhi-adapter.spec.ts` / `baizhi-credits.spec.ts` /
+    //      `monkeycode-expiry.spec.ts` —— **替身写法的锅**：直接写了宽松字面量
+    //      （`content: '你好'`、`attachment: { attachmentId }`、`effort: 'low'`），
+    //      纳入会一次性冒出 40+ 个 `TS2322/TS2345`。要纳入得先批量改造替身。
+    //   ② `monkeycode-rpc.spec.ts` —— **生产类型的锅，与替身无关**（四审 H-4 实测）：
+    //      它的 22 个 `TS2339` 来自 `src/monkeycode-rpc.ts:131-137` 的 handler 返回
+    //      `Promise<unknown>`，而 spec 直接写 `result?.ok`。这是全仓 `*-rpc` 的
+    //      惯例（`qiniu-rpc.spec.ts` 同样从未进 include），要修得改 RPC 的返回类型，
+    //      属独立任务；**不要**为了把它塞进来而给 spec 加 `as` 断言。
+    //
+    // ⚠️ 四审 H-4 实测**零错误、可直接纳入**的三份（本次已加）：
+    //      `monkeycode-auth.spec.ts` / `monkeycode-browser-login.spec.ts` /
+    //      `monkeycode-credits.spec.ts`。
+    //
+    // ⚠️ 五审收口再纳入 `baizhi-rpc.spec.ts`（2026-11-02）：它用 `RpcEnvelope<T>`
+    //      显式断言 handler 返回值，所以**不受** monkeycode-rpc 那条 `Promise<unknown>`
+    //      的影响，实测 `tsc -p tsconfig.tests.json --noEmit` 零诊断。
+    //      注意 `baizhi.spec.ts` / `baizhi-credits.spec.ts` 仍属「替身宽松字面量」那一类，
+    //      **不要**因为 baizhi-rpc 进来了就顺手把那两份也塞进来。
+    "tests/unit/monkeycode-adapter.spec.ts",
+    "tests/unit/monkeycode-messages.spec.ts",
+    "tests/unit/monkeycode-auth.spec.ts",
+    "tests/unit/monkeycode-browser-login.spec.ts",
+    "tests/unit/monkeycode-credits.spec.ts",
+    "tests/unit/baizhi-rpc.spec.ts",
+    // ⚠️ 2026-11-02 三审新增的两份**刻意不纳入**（同一条判据：不碰生产类型的细节）：
+    //   · `monkeycode-client-wiring.spec.ts` 是**源码字符串断言** —— 读
+    //     `plugin-src/client/jet-hub.js` 与两个弹窗文件后做 `indexOf` / `slice`，
+    //     全程不 import 任何生产类型 ⇒ 纳入只增加编译时间。
+    //   · `monkeycode-credential-modals.spec.ts` 用**替身 React**（`createElement`
+    //     返回结构对象、`useState` 用 stateBox），Props 都是宽松字面量 ⇒
+    //     纳入会冒出与该替身写法同源的 `TS2322`。
+    // 若将来把替身换成真实类型（`import type { … } from '../../src/…'`），
+    // 再一并纳入 —— 不要在这里半途而废地只纳一半。
   ]
 }

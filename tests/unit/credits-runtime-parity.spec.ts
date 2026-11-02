@@ -612,6 +612,22 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   // ⚠️ **本 fork 独有**（Codely/Unity，2026-10-19）：积分余额端点（真凭据实测 200，
   //    `remaining_points` 是字符串；同域 /api/user/info 等候选均已 404）。
   codely: '/api/user/usage/summary',
+  // ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）：余额走**平台侧**的
+  //    `GET /api/v1/users/wallet`（Cookie 认证）。⚠️ 它**不是**推理端点：
+  //    推理走白泽 `ai-models.app.baizhi.cloud/api/anthropic/v1/messages` 或
+  //    网关 `proxy.monkeycode-ai.com/v1/messages`，那两条都与余额无关。
+  monkeycode: '/api/v1/users/wallet',
+  // ⚠️ 国际站（2026-11-02）：与国内站**同一条路径**（两站的平台 API 逐字节同形，
+  //    只有 host 不同）。清单里必须单列 —— 本表按 provider id 比对，缺了它
+  //    国际站的「余额请求打到自己端点」这条行为覆盖会静默降到零。
+  monkeycodeintl: '/api/v1/users/wallet',
+  // ⚠️ **本 fork 独有**（百智云，2026-11-02）：余额走**控制台**（`baizhi.cloud`）的
+  //    钱包接口，**Cookie 认证**（`sl-session` + `baizhi_session`）。
+  //    ⚠️ 它**不是**推理端点：推理走 `ai-models.app.baizhi.cloud/api/anthropic`
+  //    的 `/v1/messages`（`x-api-key` 认证），那条网关**没有任何余额路由**
+  //    （`/v1/credits`、`/v1/balance`、`/v1/usage` 实测全 404「Gateway 路由不存在」）。
+  //    ⚠️ 单位是 **1/100 积分**（23505 ⇒ 235.05），换算在 buildBaizhiBalance 里做。
+  baizhi: '/api/v1/user/wallet/balance',
 }
 
 /**
@@ -641,6 +657,11 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     //    那是刻意的不浪费 —— 故共享 fixture 必须带上它们，否则本表那条
     //    「余额请求打到自己端点」会对 magicrew 恒读过）。
     jwt: 'j.w.t', organization_code: 'org1',
+    // ⚠️ MonkeyCode（2026-11-02）的余额**早退**条件：没有 `session_cookie` 时
+    //    `fetchMonkeycodeWallet` 直接回「未配置会话」、**一个请求都不发**
+    //    （那是刻意的降级，不是缺陷）⇒ 超集必须带上它，否则下面那张
+    //    「余额请求打到自己端点」的表会对 monkeycode 恒读过。
+    session_cookie: 'spec_session=1',
   })
 
   it('手写端点清单与 registry 逐项对齐（漏一家即红并点名）', () => {
@@ -752,7 +773,14 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    无 auth 服务；runtime 守卫只查已注册 runtime，codely 被跳过）。
     // ⚠️ 2026-11-01 并入 magicrewintl（MagiCrew 国际版）⇒ 19 → 20。
     //    它与 magicrew 同形（balance + dailyCheckin + onboardingTasks 全开）。
-    expect(expected.length).toBe(20)
+    // ⚠️ 2026-11-02 并入 monkeycode（MonkeyCode）⇒ 20 → 21。
+    //    它是 balance + dailyCheckin（无 onboardingTasks），余额走平台 wallet 端点。
+    // ⚠️ 2026-11-02 并入 monkeycodeintl（MonkeyCode 国际站）⇒ 21 → 22。
+    // ⚠️ 2026-11-02 并入 baizhi（百智云）⇒ 22 → 23。
+    //    它是全仓首例「**同一家 provider 的两套凭据分走两个域**」：`sk-` 走
+    //    推理网关（`x-api-key`），控制台 cookie 走积分（cookie）。只有后者能查
+    //    余额 ⇒ 只填 Key 的账号会走 401 降级路径，不会被当成「零余额」。
+    expect(expected.length).toBe(23)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
     //    都是 `createProviderCredits({ loomy, raccoon, zcode })`。deps 只应影响**实现**，

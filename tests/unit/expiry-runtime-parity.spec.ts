@@ -88,9 +88,20 @@ const EXPECTED_WIRED = [
   // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：与 `magicrew` 逐字同构
   //    （同一个折算原语 `magicrewExpiry`，只差 product 常量 ⇒ 打的是国际站 host）。
   //    ⚠️ 三处必须同改：本清单 + `WIRED_EXPIRY_PROVIDERS` + `createProviderExpiry()`。
-  'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts',
+  // ⚠️ monkeycode / monkeycodeintl / baizhi 2026-11-02 加入（**第 9 次复发**，
+  //    同一成因：只加 `AGGREGATE_CHANNELS` 不加清单 ⇒ 候选层被闸门剔掉）。
+  //    它们属「**有余额但不下发到期时间**」那一类（与 modelscope / autoclaw 同格）：
+  //    monkeycode 走 `/api/v1/users/wallet`、baizhi 走控制台
+  //    `/api/v1/user/wallet/balance`，都是 cookie 认证 ⇒ 折算原语
+  //    `monkeycodeExpiry` / `baizhiExpiry` 里**缺会话直接 `NEVER`**（读不到 ≠
+  //    不可用，否则手填 Key 的账号会被静默踢出轮换），有会话则按
+  //    「有 `active && remaining > 0` 的包 ⇒ NEVER、一个都没有 ⇒ UNUSABLE」。
+  //    ⚠️ 两站账号池不互通 ⇒ 折算原语必须各传各的 product（国际站 cookie 打
+  //    国内站回 401，传错则恒 UNUSABLE）。
+  'accio', 'astudio', 'autoclaw', 'autoclawintl', 'baizhi', 'buddy', 'codearts',
   'lobsterai', 'loomy', 'magicrew', 'magicrewintl', 'minimax', 'minimaxintl',
-  'modelscope', 'officeace', 'qoder', 'qodercn', 'trae', 'workbuddy', 'zcode',
+  'modelscope', 'monkeycode', 'monkeycodeintl', 'officeace', 'qoder', 'qodercn',
+  'trae', 'workbuddy', 'zcode',
 ]
 
 class FakeCredentials {
@@ -273,6 +284,24 @@ const NOT_EXPIRY_WIRED = new Map<string, string>([
   //    ⚠️ 上游一旦开放额度端点，从本表删掉它并补三处（清单 +
   //    `createProviderExpiry()` + 折算原语）—— 走法与 codely 那条相同。
   ['qiniu', '无余额端点（七牛云用量只在控制台可见）⇒ credits.balance: false，折算层读不到任何额度 ⇒ 无临期档可折算'],
+  // ── 2026-11-02 审查 B🟡-9：下面三家**已从本表移除**并真的接进清单 ──
+  // ⚠️ 留这段是因为原豁免理由**本身是错的**，删掉会让后人重复同一个推理错误。
+  //
+  // 原理由：「上游不下发到期时间 ⇒ 强行加进清单只能编一个假数字」。
+  // 反例就在同一个文件的 `modelscope` / `autoclaw` 条目里：**折算不一定要时刻**。
+  // `sharedPackageExpiry` 判的是「有没有 `active === true && remaining > 0` 的包」
+  // —— 有 ⇒ `NEVER`（可用、无临期额度），一个都没有 ⇒ `UNUSABLE`（现在烧不了）。
+  // 这条判据只依赖**余额本身**，不依赖任何时刻字段 ⇒ 对
+  // `monkeycode` / `monkeycodeintl` / `baizhi` 同样成立（三家都实测能读到余额：
+  // monkeycode 走 `/api/v1/users/wallet`、baizhi 走控制台的
+  // `/api/v1/user/wallet/balance`，都是 cookie 认证）。
+  //
+  // 取舍（已在折算原语的注释里写明）：**额度烧光不会被提前剔出轮换**
+  // （平台不下发重置时刻）⇒ 耗尽后仍会被选中并失败一次。与 modelscope 同型，
+  // 且**不许**用「猜一个 UTC+8 零点」消除它。
+  //
+  // 另注：三家「读余额」要会话 cookie、「发消息」只要主凭据 ⇒ 缺会话时折算原语
+  // 直接返回 `NEVER`（读不到 ≠ 不可用），否则手填 Key 的账号会被静默踢出轮换。
 ])
 
   it('每个进了 AGGREGATE_CHANNELS 的真渠道都在 WIRED_EXPIRY_PROVIDERS 里（或已显式豁免）', () => {

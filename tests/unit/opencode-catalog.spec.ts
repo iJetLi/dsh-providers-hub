@@ -3,14 +3,34 @@ import {
   OpencodeAdapter, clearOpencodeCatalogCache, loadOpencodeCatalog, pickSlot,
 } from '../../src/opencode-adapter.js'
 import { listIdentitySlots, type IdentitySlot } from '../../src/opencode-auth.js'
-import { OPENCODE, isFreeOpencodeModel } from '../../src/opencode-product.js'
+import {
+  OPENCODE, isFreeOpencodeModel, setRemoteOpencodeFreeFlags, setRemoteOpencodeReachability,
+} from '../../src/opencode-product.js'
 import { setModelsDevForTest } from '../../src/models-dev-cache.js'
 
 // ⚠️ 目录缓存是**模块级**的（按槽 id 分桶），不清会让前一个用例的目录
 // 泄漏到后一个 —— 表现为「明明给了自定义 fetchRemoteCatalog，
 // resolveModel 却拿到别的目录」。这也正是修复「适配器永久 memoize」
 // 后必须配套的隔离手段。
-beforeEach(() => clearOpencodeCatalogCache())
+beforeEach(() => {
+  clearOpencodeCatalogCache()
+  /**
+   * ⚠⚠ 2026-11-03（六审期间捕获）：可达性与免费判定会**同步读共享磁盘缓存**
+   * `$DSH_HOME/cache/models-dev.json`（`isReachableOpencodeModel` →
+   * `ensureRemoteTables()` → `OPENCODE_CAPABILITY_HOOK`）。只要开发机上的 DSH
+   * 跑过一次刷新，磁盘上就有一份 52 KB、opencode 130 条的真实目录，
+   * 于是下面那两条「不可达模型一律过滤」的用例**依赖开发机环境**：
+   * 有缓存时 `ling-3.0-flash-fin-free` 被 models.dev 判成可达 ⇒ 红；
+   * 无缓存（CI / 全新 clone）时 ⇒ 绿。**同一份代码两种结论**。
+   *
+   * ⇒ 每条用例都从「能力表为空」开始，让可达性**只**看本地兜底表
+   * （`REACHABLE_IDS`）—— 正好与本文件要守的那段逻辑一一对应。需要远端数据的用例
+   * 自己 `setModelsDevForTest({ ... })` 显式种一份（见「catalog 给 0 窗口」那条）。
+   */
+  setModelsDevForTest({})
+  setRemoteOpencodeReachability(undefined)
+  setRemoteOpencodeFreeFlags(undefined)
+})
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })

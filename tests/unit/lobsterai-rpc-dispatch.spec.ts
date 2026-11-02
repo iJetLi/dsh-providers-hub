@@ -118,7 +118,9 @@ describe('account.refresh 分派（T7 回归）', () => {
     // ⚠️ 2026-10-22（A6）：codely 翻 `channel: true`：20 → 21。
     // 2026-10-29 fork: qiniu + magicrew added -> 22 -> 23.
     // 2026-11-01 fork: magicrewintl (channel:true) added -> 23 -> 24.
-    ).toHaveLength(24)
+    // 2026-11-02 fork: monkeycode (channel:true) added -> 24 -> 25.
+    // 2026-11-02 fork: monkeycodeintl + baizhi (channel:true) -> 25 -> 27.
+    ).toHaveLength(27)
   })
 
   it('buddy 账号刷新**自己的** credentialRef，而不是默认单凭据 ref', async () => {

@@ -47,10 +47,26 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
     //    数字必须跟着注册表走，不能反向改注册表凑数。
     // ⚠️ 2026-10-29 加 magicrew（超级麦吉国内站，第 23 个真渠道）：位置有硬要求
     //    （**紧邻 aggregate 之前 = 倒数第二**），由下面「声明序在 aggregate 之前」那条守着。
-    expect(PROVIDER_REGISTRY).toHaveLength(26)
+    // ⚠️ 2026-11-02 并入 **monkeycode（MonkeyCode）** ⇒ 26 → 27（同批 channel 25 → 26）。
+    //    ⚠️ 它的**声明位置刻意放在 magicrewintl 之前**（不是 aggregate 之前）：
+    //    上面那条「MagiCrew 国际版必须紧邻 aggregate 之前（= 倒数第二）」是硬断言，
+    //    把新 provider 插在两者之间会把它挤成倒数第三 ⇒ 直接变红。
+    //    新增 provider 一律插在**最后一个「紧邻 aggregate」的条目之前**。
+    // ⚠️ 2026-11-02 并入 **monkeycodeintl（MonkeyCode 国际站）** ⇒ 27 → 28
+    //    （同批 channel 26 → 27）。它是**独立部署**（国内 cookie 打国际站回 401）
+    //    ⇒ 必须是独立 provider id，不能靠凭据字段区分。
+    // ⚠️ 2026-11-02 并入 **baizhi（百智云）** ⇒ 28 → 29（channel 27 → 28）。
+    //    ⚠️ 它**不是** MonkeyCode 的第三站：认证是 `x-api-key: sk-…`、计费是
+    //    按量付费（没有每日 token 额度、没有签到）。
+    //    `credits` 是 `{ balance: true, dailyCheckin: false }` —— 余额能读
+    //    （控制台 `GET /api/v1/user/wallet/balance`，**cookie 认证**），
+    //    签到不能做（每日临时积分领取要过验证码，实测 400
+    //    `captcha binding mismatch`）⇒ 与两站的 `{balance:true,dailyCheckin:true}`
+    //    只差签到一项（2026-11-02 同日二版更正：一版曾写 `balance: false`）。
+    expect(PROVIDER_REGISTRY).toHaveLength(29)
     // ⚠️ 2026-10-22（A6）：codely **已翻 `channel: true`** —— 它的推理 / 目录 / 余额 / 签到 / 续期全部已接线，
     //    而 `channel` 在生产代码里**零个读取点** ⇒ 原来那个 `false` 只是为了让守卫不变红而选的，它同时把 codely 挡在聚合目录之外。现在真实接线已完成，翻正。
-    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(25)
+    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(28)
     expect(
       PROVIDER_REGISTRY.find((d) => d.id === 'codely')?.channel,
       'codely 已接线完成，必须是 channel: true（否则它的模型永不进聚合目录）',

@@ -108,6 +108,20 @@ const AUTH_SERVICE_OF: ReadonlyArray<readonly [string, string]> = [
   //    国际站账号分派到国内站实例（续期打错基址 + 凭据 ref 串号）。
   //    （与 `autoclawintl` / `minimaxintl` 同型同因。）
   ['magicrewintl', 'magicrewintlAuth'],
+  // ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）。服务名由 `${product.id}Auth`
+  //    派生 ⇒ `monkeycodeAuth`。它是**静态 API Key 型**渠道（白泽 sk- / 网关 oma_），
+  //    `refreshable` 恒 false，但 `refreshAccountCredential` 仍要做有效期对账
+  //    （把凭据里的 expires_at 回写到账号池），所以必须注册 auth 实例。
+  ['monkeycode', 'monkeycodeAuth'],
+  // ⚠️ MonkeyCode 国际站（2026-11-02）：服务名由 `${product.id}Auth` 派生
+  //    ⇒ `monkeycodeintlAuth`。与国内站是**同一个类的两个实例**，同样必须注册
+  //    （有效期对账要回写池内 `expiresAt`；漏注册 = 国际站账号的过期检测静默失效）。
+  ['monkeycodeintl', 'monkeycodeintlAuth'],
+  // 百智云（2026-11-02）：`channel: true` 的静态 `sk-…` 渠道，服务名由
+  // `${product.id}Auth` 派生 ⇒ `baizhiAuth`。`refreshable` 恒 false（无续期端点），
+  // 但 `refreshAccountCredential` 要做有效期对账回写池内 `expiresAt`，
+  // 所以必须注册 auth 实例（漏注册 = 注册表与 registry 漂移，本用例点名变红）。
+  ['baizhi', 'baizhiAuth'],
 ]
 
 /**
@@ -436,7 +450,12 @@ describe('★ index.ts 的能力注册表接线（行为断言，替代源码文
     // ⚠️ 2026-10-22（A6）：codely 翻 `channel: true`：20 → 21。
     // ⚠️ 2026-10-29 加 qiniu（七牛云）+ magicrew：21 → 22 → 23 个 auth 键。
     // ⚠️ 2026-11-01 加 magicrewintl（MagiCrew 国际版）：23 → 24 个 auth 键。
-    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(24)
+    // ⚠️ 2026-11-02 加 monkeycode（MonkeyCode）：24 → 25 个 auth 键。
+    //    它有 auth 实例（`MonkeycodeAuth`，静态 Key 无续期、但仍做有效期对账），
+    //    故只需登记 `AUTH_SERVICE_OF`，不需动 `AUTH_EXEMPT`。
+    // ⚠️ 2026-11-02 加 monkeycodeintl：25 → 26 个 auth 键。
+    // 2026-11-02: baizhi 接入后 26 -> 27。
+    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(27)
     expect(
       registeredRuntimeIds().sort(),
       'registry 里有账号的 provider 必须都注册进能力注册表（左侧多出 = 清单里多了僵尸项，' +
@@ -534,10 +553,24 @@ describe('★ index.ts 的 probe 域接线（Task 8 复审补齐：此前零守�
     //    「登记为不写标记的确实没有写点」用例**红**出来的，与 minimax 2026-10-11、
     //    accio 2026-10-18 两次同型。用户报障「用完积分怎么不自动切账号」即由此而来。
     ['codely-adapter.ts', ['codely']],
+    // ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）：它会写 `modelRateLimits`
+    //    （`monkeycode-adapter.ts` 的 `markLimited` 里直接调
+    //    `pool.updateModelRateLimit`：额度 24h / 429 1h）⇒ 与 registry 里
+    //    **省略 `rateLimit`（= true）** 自洽，且必须同时进
+    //    `WRITES_RATE_LIMIT_PROVIDERS` 与 `probeById`（否则标记永远清不掉）。
+    // ⚠️ 2026-11-02 拆站后同一个 adapter 服务两站（同一份 `markLimited` 实现、
+    //    同一套 `pool.updateModelRateLimit` 调用）⇒ 两站都要登记，漏一家即红。
+    ['monkeycode-adapter.ts', ['monkeycode', 'monkeycodeintl']],
     // ⚠️ 超级麦吉（Magicrew，2026-10-29）**不写** `modelRateLimits`：
     //    本家没有请求级换号/冷却（单账号直连，key 由 `MagicrewAuth` 续期管理）
     //    ⇒ 留空是**被验证的声明**（下面那条「登记为不写的确实没有写点」会真跑）。
     ['magicrew-adapter.ts', []],
+    // ⚠️ 百智云（`baizhi`，2026-11-02）**会写** `modelRateLimits`：
+    //    `baizhi-adapter.ts` 在 429 / 402 时调注入的 `markLimited`（未注入时回退
+    //    `accountPool.updateModelRateLimit`；额度耗尽对齐 UTC+8 次日零点）⇒ 与
+    //    registry 里**省略 `rateLimit`（= true）**自洽，且必须同时进
+    //    `WRITES_RATE_LIMIT_PROVIDERS` 与 `probeById`（否则标记永远清不掉）。
+    ['baizhi-adapter.ts', ['baizhi']],
   ]
 
   /**
@@ -564,7 +597,11 @@ describe('★ index.ts 的 probe 域接线（Task 8 复审补齐：此前零守�
    * 判「那段代码是否可达」需要**控制流分析**，不是正则能做到的。
    * ⇒ 这条缺口应由**行为用例**兜（真实 adapter + 限流响应 + 断言池被写入）。
    */
-  const WRITE_SITE_PATTERN = /\.markLimited\?\.\(|await\s+markLimited\(|updateModelRateLimit\(/
+  // ⚠️ 2026-11-02 扩一条分支：`baizhi-adapter.ts` 把写点包成了成员方法
+  //    `await this.markLimited(...)`（定义体是 `private async markLimited(`，
+  //    没有 `await ` 前缀，不会误命中）⇒ 原来的两条都够不着它，派生集合
+  //    比清单少一家。判据仍是「调用形」，只是多认一种本地包装。
+  const WRITE_SITE_PATTERN = /\.markLimited\?\.\(|await\s+(?:this\.)?markLimited\(|updateModelRateLimit\(/
 
   /** 剥掉块注释与行注释（避免「注释满足正则」的假绿）。 */
   const stripComments = (text: string): string =>
