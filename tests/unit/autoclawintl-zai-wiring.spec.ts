@@ -93,12 +93,15 @@ function makeFetcher(capture: Capture, mode: { fail?: boolean; omitExpiry?: bool
  * ⚠️ **必须从登录页的 `href` 取授权 URL**，不能自己拼 —— 自己拼就绕过了
  * 「实现是否真的把 `redirect_uri` 写进授权链接」这条判据。
  */
-function zaiRedirectUriOf(page: string): string {
-  const href = /href="(https:\/\/chat\.z\.ai\/auth[^"]*)"/.exec(page)?.[1]
+function zaiAuthUrlOf(page: string): URL {
+  const href = /href="(https:\/\/chat\.z\.ai\/api\/oauth\/authorize[^"]*)"/.exec(page)?.[1]
   if (href === undefined) throw new Error('登录页里没有 Z.ai 授权链接')
   // HTML 属性里的 `&` 允许裸写（HTML5 规则），也兼容转义写法
-  const authUrl = new URL(href.replace(/&amp;/g, '&'))
-  const redirectUri = authUrl.searchParams.get('redirect_uri')
+  return new URL(href.replace(/&amp;/g, '&'))
+}
+
+function zaiRedirectUriOf(page: string): string {
+  const redirectUri = zaiAuthUrlOf(page).searchParams.get('redirect_uri')
   if (redirectUri === null) throw new Error('授权 URL 里没有 redirect_uri')
   return redirectUri
 }
@@ -112,7 +115,19 @@ describe('★★ 登录页按站点分裂', () => {
     const page = await (await fetch(flow.loginUrl)).text()
 
     expect(page, '国际版必须有 Z.ai 授权入口').toContain('chat.z.ai')
-    expect(page, 'Z.ai 是浏览器跳转，必须是 <a href>').toMatch(/href="https:\/\/chat\.z\.ai\/auth/)
+    expect(page, 'Z.ai 是浏览器跳转，必须是 <a href>').toMatch(/href="https:\/\/chat\.z\.ai\/api\/oauth\/authorize\?/)
+    // ⚠️⚠️ 授权端点**必须是 `/api/oauth/authorize`**，不能是 `/auth`：后者只是它的前端登录页路由，
+    // 只拿 `redirect_uri` 判断「我在 OAuth 流程里」，真正的回跳目标走 `redirect` 参数/sessionStorage
+    // ⇒ 直接打开 `/auth` 时用户登录完会落回首页、回调永不发生（2026-11-02 真机报障）。
+    expect(page, '`/auth` 是登录页路由，不是授权端点').not.toMatch(/href="https:\/\/chat\.z\.ai\/auth\?/)
+    // ⚠️⚠️ `state` **必填**：`/api/oauth/authorize` 缺它直接回 422（实测），
+    //    而 `state` 留空时整条流程会在用户登录完成后静默落回首页。判据必须是「非空 + aosi. 前缀」，
+    //    不能只断言参数存在（空串也能让 `searchParams.get` 返回 `''`）。
+    const authUrl = zaiAuthUrlOf(page)
+    expect(authUrl.searchParams.get('response_type'), '必须是授权码模式').toBe('code')
+    const state = authUrl.searchParams.get('state') ?? ''
+    expect(state.length, '`state` 不得为空（空 state 会让授权端点 422）').toBeGreaterThan(0)
+    expect(state.startsWith('aosi.'), '`state` 用官方前缀').toBe(true)
     // ⚠️ 强于 `id="phone"`：换 id 也躲不过
     expect(page, '国际账号没绑手机，页面上不该出现任何输入框').not.toContain('<input')
     expect(page).not.toContain('type="tel"')

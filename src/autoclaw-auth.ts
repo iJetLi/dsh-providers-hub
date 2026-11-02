@@ -783,13 +783,18 @@ export class AutoclawAuth extends Service {
    *    服务端回 `631001 User login error`（= 进了登录逻辑、code 无效），
    *    **不是**「state 无效」⇒ 服务端不硬校验 `state` 内容。
    *
-   * ⇒ 本方法**只拼 `client_id` / `redirect_uri` / `response_type`**，
-   *   `state` 留给授权页填，回调时原样透传给 {@link loginWithZaiCode}。
+   * ⇒ 本方法**只拼 `client_id` / `redirect_uri` / `response_type` / `state`**。
    *
-   * @param redirectUri - 回调地址（`http://localhost:<port>/auth/callback-zai`）。
+   * ⚠️⚠️ `state` **不再是「留给授权页填」**（2026-11-02 真机推翻，见
+   *    `buildAutoclawZaiAuthUrl` 上方那张服务端探针表）：`/api/oauth/authorize`
+   *    **缺 state 直接 422**，把它留空会让整条流程在用户登录完成后静默落回首页。
+   *    调用方若没有既有 state，就传 `autoclawZaiState()` 现生成一个。
+   *
+   * @param redirectUri - 回调地址（`http://127.0.0.1:<port>/auth/callback-zai`）。
+   * @param state - OAuth `state`（**必填**，回调时原样带回）。
    */
-  buildZaiAuthUrl(redirectUri: string): string {
-    return buildAutoclawZaiAuthUrl(redirectUri)
+  buildZaiAuthUrl(redirectUri: string, state: string): string {
+    return buildAutoclawZaiAuthUrl(redirectUri, state)
   }
 
   /**

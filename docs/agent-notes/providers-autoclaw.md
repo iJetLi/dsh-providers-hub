@@ -445,3 +445,42 @@ AutoClaw 自己的词汇（`Invalid token`）在调用点显式声明。
 **变异复验（全部打红，恢复逐字节一致）**：`<input>` 换 id（2 红）／`code` 写死（2 红）／失败即 `settleErr`（红）／删站点门控（1 红）／恢复编造 7 天（1 红）／zai 挂错条件（1 红）／默认值改回 `local`（1 红）／`startLogin` 写死国内（1 红）／去重 `provider` 写死国内（1 红）／整段删去重（2 红）。
 
 **接线后的事实**（与上表对照）：`AUTOCLAW_OAUTH_CALLBACK_PATH` 已在 3 处被使用（登录页拼 URL、路由判路、回调拼 `redirect_uri`）；`exchangeAutoclawZaiCode` 由回调直接调用；`buildZaiAuthUrl` / `loginWithZaiCode` 仍 0 调用（见上「遗留」表）。
+
+## ⚠️⚠️⚠️ 第二轮真机报障：`/auth` **不是授权端点**，缺 `state` 直接走不下去（2026-11-02，已修）
+
+### 现象（用户截图 + 复述）
+点「🌐 使用 Z.ai 账号继续」⇒ 浏览器里 Z.ai 登录**成功**（已经能看到 GLM-5.3 首页）⇒ **停在 `chat.z.ai` 首页**，我们本地 `/auth/callback-zai` **一个请求都没收到** ⇒ 面板一直等，最后超时；用户看到的永远是「尚未配置账号」。
+
+### 服务端探针（全部**匿名** GET，无凭据，可复现）
+
+| 请求 | 响应 |
+|---|---|
+| `GET /api/oauth/authorize?client_id=…&response_type=code&redirect_uri=…`（**无 state**） | **422 Unprocessable Entity** |
+| 同上 **+ `state=aosi.probe-…`** | **307** → `/auth?response_type=code&client_id=…&redirect_uri=…&state=aosi.probe-…` |
+| 同上但 `client_id` 换成 `client_bogus000` | 307（**不校验 client_id**） |
+| 同上但 `redirect_uri` 换成 `https://evil.example.com/cb` | 307（**不校验 redirect_uri**） |
+| `GET /auth/oauth/authorize?…` | 200（前端路由，不是端点） |
+
+⇒ 两条独立根因：
+
+1. **入口用错了端点**。`https://chat.z.ai/auth` 是它**登录页的前端路由**，不是授权端点。它读 `redirect_uri` **只是为了判断「我在 OAuth 流程里」**（客户端 bundle：`Hht = () => !!t.get("redirect_uri") || gJ() || !!t.get("sso_redirect")`），真正的回跳目标走 `redirect` 参数 / sessionStorage（`L9 = () => IL(new URLSearchParams(location.search).get("redirect"))`，而 `IL` 只认 `/auth/oauth/authorize?` 前缀）⇒ **直接打开 `/auth?...&redirect_uri=...` 时，登录完没有可回的目标，落回首页**。
+2. **`state` 一个都没带**。上一轮的设计假设是「`state` 留给官方授权页生成」，但实际是 OAuth 的标准语义：**`state` 由客户端生成、授权端原样回传**。`/api/oauth/authorize` 缺它 **直接 422**；就算用 `/auth` 绕过端点，后面那步 `authorize` 仍会拒绝。
+
+### 修法（四处，缺一不可）
+| 文件 | 改动 |
+|---|---|
+| `src/autoclaw-oauth.ts` | `AUTOCLAW_ZAI_AUTH_URL` → `https://chat.z.ai/api/oauth/authorize` |
+| 同上，新增 `autoclawZaiState(now?)` | 生成 `aosi.<base64url(JSON)>`（`{n: 随机, t: 时间}`）；`nh` 仍未知但服务端不硬校验内容 |
+| 同上，`buildAutoclawZaiAuthUrl(redirectUri, state)` | 参数从 1 个变 2 个，把 `state` 写进 URL |
+| flow 的 GET 处理器 | `buildAutoclawZaiAuthUrl(redirectUri, (pendingZaiState = autoclawZaiState()))` —— 每渲染一次登录页换一个；回调里比对 `pendingZaiState`，**不一致只 `console.warn` 不拒绝**（用户刷新过页面时旧标签页的回调仍应被认领；`state` 在这里是诊断线索，不是防伪） |
+
+### 守卫（`tests/unit/autoclawintl-zai-wiring.spec.ts`）
+- 授权链接必须匹配 `href="https://chat.z.ai/api/oauth/authorize?`；
+- **不得**出现 `href="https://chat.z.ai/auth?`（端点写回去就红）；
+- `response_type === 'code'`；`state` **非空**且以 `aosi.` 开头（只断言「参数存在」不够：空串也能让 `searchParams.get` 返回 `''`）。
+
+### 变异（`C:/Users/Betsy/AppData/Local/Temp/mut-zai-state.cjs`，三条全红、恢复 `IDENTICAL`）
+删 `url.searchParams.set('state', state)` ⇒ 1 红；`AUTOCLAW_ZAI_AUTH_URL` 改回 `/auth` ⇒ 3 红；`autoclawZaiState` 返回空串 ⇒ 1 红。
+
+### 可推广的教训
+**「把某个参数留给对方填」在 OAuth 里是错误假设。** `state` 的语义就是「本端生成、对端原样回传」；指望授权页替我们生成，等价于把一个必需参数留空 —— 而服务端的表现是 422（明确）或「登录完落回首页」（静默），后者极难归因：**回调端零请求**，面板端只有「等待超时」这一种可观测形态。
