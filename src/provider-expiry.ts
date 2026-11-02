@@ -75,6 +75,9 @@ import {
   // ⚠️ MiniMax Code（中国版 / 国际版共用，2026-10-20 新增）
   minimaxExpiry,
   zcodeExpiry,
+  // ⚠️ MonkeyCode 国内站 / 国际站 + 百智云（本 fork 独有，2026-11-02 新增）
+  monkeycodeExpiry,
+  baizhiExpiry,
 } from './aggregate-expiry.js'
 // ⚠️ Qoder（国际版 / 中国版，2026-10-20 新增）：与 minimax 同款 —— 两站共用
 //    同一套 `src/qoder*.ts` 实现，差异全在 `src/qoder-product.ts` 的
@@ -83,6 +86,12 @@ import { QODER, QODER_CN, type QoderProduct } from './qoder-product.js'
 import type { QoderCredential } from './qoder.js'
 // ⚠️ **本 fork 独有**（魔搭，2026-10-17）
 import { MODELSCOPE } from './modelscope-product.js'
+// ⚠️ MonkeyCode 两站 + 百智云（本 fork 独有，2026-11-02）：折算原语吃 product，
+//    两站必须各传各的（账号池不互通、域名不同：国际站 cookie 打国内站回 401）。
+import { MONKEYCODE, MONKEYCODE_INTL } from './monkeycode-product.js'
+import type { MonkeycodeCredential } from './monkeycode.js'
+import { BAIZHI } from './baizhi-product.js'
+import type { BaizhiCredential } from './baizhi.js'
 import type { ModelscopeCredential } from './modelscope.js'
 // ⚠️ AutoClaw（智谱，2026-10-17 审计 P0 修复新增）
 import { AUTOCLAW, AUTOCLAW_INTL } from './autoclaw-product.js'
@@ -300,6 +309,45 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
       credentialExpiry: (c, context) => autoclawExpiry(
         c as AutoclawCredential,
         AUTOCLAW_INTL,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
+    // ⚠️ **MonkeyCode 国内站 / 国际站 / 百智云**（本 fork 独有，2026-11-02 审查
+    //    B🟡-9 补齐）：三家的余额接口都**要会话 cookie**，而推理只要主凭据
+    //    （monkeycode 是 `oma_` + `signing_secret`、baizhi 是 `sk-`）⇒ 折算原语
+    //    `monkeycodeExpiry` / `baizhiExpiry` 在入口先判 `session_cookie`：
+    //    **缺会话直接 `NEVER`**（读不到 ≠ 不可用，否则手填 Key 的账号会被静默
+    //    踢出轮换）。有会话时走 `sharedPackageExpiry` 的如实判据。
+    //    ⚠️ 三处必须同改（本表 + `WIRED_EXPIRY_PROVIDERS` + 折算原语）——
+    //    本仓库该陷阱已复发 5 次，漏任何一处症状都是**静默**的。
+    //    ⚠️ **必须走 `cachedBalance`**：与 buddy / trae / modelscope 同款 ——
+    //    聚合每轮折算会对同一账号反复提问，没有共享读数就白发大量重复请求。
+    //    ⚠️⚠️ `monkeycodeintl` **必须传 `MONKEYCODE_INTL`**：传国内站会让国际账号
+    //    折算恒 `UNUSABLE`（它的 cookie 打国内站回 401）⇒ 静默不可见。
+    monkeycode: {
+      credentialExpiry: (c, context) => monkeycodeExpiry(
+        c as MonkeycodeCredential,
+        MONKEYCODE,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
+    monkeycodeintl: {
+      credentialExpiry: (c, context) => monkeycodeExpiry(
+        c as MonkeycodeCredential,
+        MONKEYCODE_INTL,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
+    baizhi: {
+      credentialExpiry: (c, context) => baizhiExpiry(
+        c as BaizhiCredential,
+        BAIZHI,
         context?.cachedBalance === undefined
           ? undefined
           : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,

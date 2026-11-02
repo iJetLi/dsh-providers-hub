@@ -979,6 +979,143 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     credits: { balance: true, dailyCheckin: true },
   },
   {
+    /**
+     * **MonkeyCode 国内站**（`monkeycode`，`monkeycode-ai.com`，2026-11-02）。
+     *
+     * ⚠️⚠️ **这里只有一条通道**：`proxy.monkeycode-ai.com` + `oma_…`（36 位）
+     *    + `signing_secret`（48 位）+ `X-OhMyAgent-Signature`（HMAC-SHA256）。
+     *    本 provider **不认识** `sk-` 开头的白泽 Key —— 白泽已独立成
+     *    `baizhi` provider（见本文件末尾那条）。2026-11-02 拆站前这里曾是
+     *    「双通道 + `channel` 字段」，那套设计连同 `channel` 一起删除了。
+     *
+     * ⚠️ 只提供 Anthropic Messages（`POST /v1/messages`）：网关的
+     *    `/v1/chat/completions` 与 `/v1/responses` 实测 404、`GET /v1/models`
+     *    返回 405（SPEC §2）。故协议层直接复用 `src/minimax-messages.ts` 的
+     *    SSE 解析与消息序列化（本仓唯一一份 Anthropic Messages 实现）。
+     *
+     * ⚠️ `credits.balance: true` 的依据：平台有 `GET /api/v1/users/wallet`
+     *    （余额、当日额度、额度上限）与 `GET /api/v1/users/subscription`
+     *    （`basic` / `pro` / `ultra` 档位）。
+     * ⚠️ **但这两个接口只认 web 会话 cookie，不认 API Key**（带 Key 请求
+     *    恒 401）⇒ 凭据里的 `session_cookie` **可缺省**：缺省时推理照常、
+     *    余额读取如实返回「未配置会话」。**别把「没 cookie」写成「没有余额
+     *    接口」** —— 那是两件事，前者用户能自己补。
+     *
+     * ⚠️ `credits.dailyCheckin: true` 的依据：`POST /api/v1/users/wallet/checkin`
+     *    带 `captcha_token`（PoW 验证凭证）。PoW 是**纯本地计算**
+     *    （`challenge` → 解 50 个子谜题 → `redeem`），实测约 0.12s，
+     *    不拉起浏览器、也不吃第三方 captcha 配额 ⇒ **不登记**
+     *    `autoCheckinExcluded`（与 zcode 的阿里云 captcha 不同源）。
+     */
+    id: 'monkeycode',
+    label: 'MonkeyCode',
+    displayName: 'MonkeyCode',
+    logoClass: 'monkeycode',
+    credits: { balance: true, dailyCheckin: true },
+    /**
+     * ⚠️ **rateLimit 省略（= true）**：适配器**确实会写** `modelRateLimits`
+     *    （`src/monkeycode-adapter.ts` 的 `markLimited`：429 冷却 1 小时、
+     *    额度耗尽对齐**次 UTC+8 零点**，`nextUtc8DayStartMs`）⇒ 账号卡片上的
+     *    「重测 / 重置」两个按钮都该保留。与 modelscope 的 `rateLimit: false`
+     *    （用户取舍关闭入口）**不同源**，不要照抄成 false。
+     *
+     * ⚠️ 2026-11-02 三审 F🟡-3 更正：此处原写「接线层注入了 `markLimited`」，
+     *    **不准确** —— `MonkeycodeAdapterOptions` 根本没有这个字段，适配器只认
+     *    `accountPool` 并直接调 `pool.updateModelRateLimit`（`src/index.ts:4458`）。
+     *    baizhi 那个 `markLimited?` 只是**单测注入通道**，生产同样走 `accountPool`
+     *    回退。⇒ 不要照 baizhi 的样子给 monkeycode 加一个 `markLimited` 再注入，
+     *    那会变成「同一语义两套判据」。
+     *
+     * ⚠️ 不登记 `accountTest`：探活要真发一次补全请求（会消耗额度）。
+     * ⚠️ 不登记 `creditPackages` / `permanentLock` / `usesExpiryWindow`：
+     *    平台只下发一个总余额读数，**没有**资源包/到期分桶信息 —— 登记了
+     *    会让卡片 hover 显示我们编造的明细。
+     * ⚠️ 不登记 `subscriptionQuota`：它的语义是 Cline 那种「5 小时 / 周 / 月」
+     *    多窗口配额；MonkeyCode 的档位（basic/pro/ultra）是**每日总额度**，
+     *    形状不同，硬套会渲染成错误的窗口数。档位改由余额读数的副标题体现。
+     * ⚠️ 不登记 `settingsNamespace`：它不在老契约（≤0.1.6）的 namespace 清单里。
+     */
+    channel: true,
+  },
+
+  {
+    /**
+     * MonkeyCode 国际站（`monkeycode-ai.net`，2026-11-02）。
+     *
+     * ⚠️ 与国内站是**独立部署**（2026-11-02 实测）：国内 cookie 打国际站回 401、
+     *    两站的账号池与网关凭据互不通用 ⇒ **必须两个 provider id**。实现完全
+     *    共用（`MonkeycodeAuth` / `MonkeycodeAdapter` / `monkeycode-credits`），
+     *    只在 `product` 上分叉 —— `MONKEYCODE_PRODUCTS` 是唯一真相源。
+     *
+     * ⚠️ 除 id / label / displayName 外，**所有能力标记与国内站逐项一致**：
+     *    积分端点（wallet / checkin）、签到（PoW 50 题）、推理（Anthropic
+     *    Messages + `X-OhMyAgent-Signature`）是同一套代码。
+     * ⚠️ 两站必须**各自一行**：`provider-runtime-wiring.spec.ts` 与续期 /
+     *    积分 / 探测三条链路都按 provider id 取实例（与 minimaxintl 同型）。
+     */
+    id: 'monkeycodeintl',
+    label: 'MonkeyCode 国际站',
+    displayName: 'MonkeyCode 国际站',
+    logoClass: 'monkeycode',
+    credits: { balance: true, dailyCheckin: true },
+    channel: true,
+  },
+
+  {
+    /**
+     * 百智云（`ai-models.app.baizhi.cloud`，2026-11-02）。
+     *
+     * ⚠️ 与 MonkeyCode 两站是**不同产品线**，只是共用 Anthropic Messages 协议：
+     *    · 认证是 `x-api-key: sk-…`（**不**用 web cookie、**不**签 HMAC）；
+     *    · 计费是**按量付费**（`/v1/messages` 的 usage 直接结算），
+     *      **没有**每日额度、没有积分、没有签到接口。
+     *
+     * ⚠️ **刻意不登记**下面这些格（登记了都是「点了必然失败」的假入口）：
+     *    · `creditPackages` / `permanentLock` / `usesExpiryWindow` —— 无分桶余额；
+     *    · `subscriptionQuota` —— 无配额窗口概念。
+     *
+     * 📌 2026-11-02 三审 F🟡-2 更正（原文自相矛盾）：本段原写
+     *    「`credits` 刻意不登记 —— 三家格全无接口」，与下面 `credits:` 字段
+     *    （`balance: true`）以及「二版更正」整段**正面冲突**。真相是
+     *    **balance 已接**（主站控制台 × 钱包接口），只有 `dailyCheckin` 无接口
+     *    （需验证码）；`onboardingTasks` 确实不登记。
+     *    原文还说「聚合**不进** `AGGREGATE_CHANNELS`」—— 也已过期：
+     *    `AGGREGATE_CHANNELS`（`aggregate-adapter.ts`）与本表
+     *    `WIRED_EXPIRY_PROVIDERS` 均已含 `'baizhi'`。
+     *
+     * ⚠️ **rateLimit 省略（= true）**：`src/baizhi-adapter.ts` **确实会写**
+     *    `modelRateLimits`（429 冷却 / 402 额度耗尽对齐 UTC+8 次日零点），
+     *    ⇒ 账号卡片的「重测 / 重置」两个按钮都该保留。
+     *    ⚠️ 四审自查：本处原写「接线层注入了 `markLimited`」—— **生产不注入**，
+     *    适配器自己回退到 `accountPool.updateModelRateLimit`（注入只是单测通道）。
+     *    不要照抄 modelscope / magicrew 的 `rateLimit: false`。
+     *
+     * ⚠️ 不登记 `accountTest`：探活要真发一次补全请求（会消耗真实额度）。
+     */
+    id: 'baizhi',
+    label: '百智云',
+    displayName: '百智云',
+    logoClass: 'baizhi',
+    // ⚠️ `credits` 是 `ProviderDescriptor` 的必填字段（省略会直接类型错）。
+    //    2026-11-02 **二版更正**：百智云确实有积分，但不在模型网关 ——
+    //    `ai-models.app.baizhi.cloud` 除了 `/v1/models` / `/v1/messages` 全 404
+    //    （那条实测没错），积分在**主站控制台** `baizhi.cloud`：
+    //    `GET /api/v1/user/wallet/balance` →
+    //    `{available_credit_cents:23505, temporary_credit_cents:9821,
+    //      permanent_credit_cents:13684, frozen_credit_cents:0}`（单位 1/100 积分，
+    //    与用户控制台截图 235.05 / 98.21 / 136.84 逐位吻合）。
+    //    ⚠️ 控制台接口只认**网页登录态 cookie**；`x-api-key` 打过去 401
+    //    ⇒ 只填了 `sk-` 的账号能发消息但查不到积分（降级成可行动提示，不报错）。
+    //    ⚠️ `dailyCheckin: false`：每日临时积分领取要过验证码
+    //    （实测 400 `captcha binding mismatch`），做不成幂等的「一键签到」。
+    credits: { balance: true, dailyCheckin: false },
+    // ⚠️ `channel: true`（**不是** false）：它真的持有账号与凭据、是一个普通渠道
+    //    —— `false` 只留给 `aggregate`（聚合层不持有账号）。`AGGREGATE_CHANNELS`
+    //    是按 id 显式列出的另一张表，两者不是一回事。
+    channel: true,
+  },
+
+  {
     // Magicrew（超级麦吉国内站，2026-10-29 接入）。
     // ⚠️ 位置要求（用户明确）：**排在 aggregate 之前 = 倒数第二**。
     //    守因为未自定义 `providerOrder` 时，左栏完全按本表的**声明序**渲染
@@ -1037,6 +1174,7 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //   上面 `credits` 字段的 `balance: true` 保持不变。
     channel: true,
   },
+
   {
     /**
      * **MagiCrew 国际站**（`magicrewintl`，2026-11-01 用户要求）。

@@ -113,6 +113,22 @@ import type { RaccoonCredential } from './raccoon.js'
 import type { TraeCredential } from './trae.js'
 import { participateTraeLottery } from './trae-lottery.js'
 import type { ZcodeCredential } from './zcode.js'
+// ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）：平台侧读数（积分余额 / 每日额度 /
+//    订阅档位 / 每日签到）。⚠️ 它的读数走**网页 Cookie**（`session_cookie`），
+//    与推理用的 `sk-` / `oma_` API Key 是两套凭据 —— 没配会话时一律降级成
+//    一句可行动的说明，**绝不抛错**（见 `monkeycode-credits.ts` 模块头）。
+import {
+  claimMonkeycodeDailyCheckin,
+  fetchMonkeycodeBalanceDetailed,
+} from './monkeycode-credits.js'
+// 百智云（2026-11-02）：积分在**主站控制台**（`baizhi.cloud`），不在模型网关。
+//   钱包接口只认网页登录态 cookie；`x-api-key` 打过去一律 401。
+//   两套凭据的分工与实测报文见 `baizhi-credits.ts` 模块头。
+import { fetchBaizhiBalanceDetailed } from './baizhi-credits.js'
+import type { BaizhiCredential } from './baizhi.js'
+import { BAIZHI } from './baizhi-product.js'
+import type { MonkeycodeCredential } from './monkeycode.js'
+import { MONKEYCODE, MONKEYCODE_INTL } from './monkeycode-product.js'
 
 /**
  * 三家「余额查询挂在 auth 实例上」的渠道所需的最小接口。
@@ -1047,6 +1063,115 @@ export function createProviderCredits(
           product: MAGICREW_INTL,
         })
       },
+      precheckStatus: false,
+    },
+
+    /**
+     * MonkeyCode：**本 fork 独有**（2026-11-02 用户要求接入）。
+     *
+     * ## 为什么用 `fetchBalanceDetailed` 而不是 `fetchBalance`
+     *
+     * 它有三种**用户动作完全不同**的失败：
+     * 1. **没配会话**（`session_cookie` 为空）⇒ 用户要用「浏览器登录」重新添加，
+     *    或点卡片上的「改 Key」只补 session cookie；
+     *    （⚠️ 2026-11-02 四审自查：原写「去粘贴 Cookie」——那枚 cookie
+     *    是 **HttpOnly**，`document.cookie` 读不到。）
+     * 2. **会话过期**（401/403）⇒ 用户要重新登录网页再更新 Cookie；
+     * 3. 平台改版 / 网络故障 ⇒ 什么都不用做，等修复。
+     *
+     * `fetchBalance` 的 `null` 会被共享骨架统一补一句「余额查询失败」——
+     * 前两种最关键的分流就没了（这正是 minimax 2026-10-17 那次审计的同款缺陷）。
+     *
+     * ## ⚠️ 为什么 `dailyCheckin: true` 却仍要 `precheckStatus: false`
+     *
+     * `claimMonkeycodeDailyCheckin` **内部第一步就是** `GET /wallet/checkin`
+     * 判 `checked_in`（幂等 + 省一次 50 题的 PoW）。骨架的默认预检会拿
+     * `fetchStatus` **再打一遍同一个端点** ⇒ 多一次请求、多一次会话失效的
+     * 失败面，换不到任何信息。⇒ 显式关掉，预检职责由 claim 自己承担。
+     *
+     * ## ⚠️⚠️ 为什么**刻意不登记 `fetchStatus`**
+     *
+     * 那个端点只回一个布尔 `{ checked_in }` —— 没有连续天数、没有每日奖励、
+     * 没有活动期（详见 `monkeycode-credits.ts` 的
+     * `fetchMonkeycodeCheckinStatus` 注释）。而 `CheckinStatus` 契约要求
+     * `streakDays` / `dailyCredit` / `checkinDates` 等字段存在 ⇒ 只能填 0 / 空串，
+     * 面板于是显示「连续 0 天」「每日 +0」这种**看起来像真实读数**的假数据。
+     *
+     * 这正是本表那条守卫（`credits-runtime-parity.spec.ts` 的
+     * 「fetchStatus 只登记在真有同构状态端点的渠道上」）要防的形态
+     * ⇒ 与 codearts / lobsterai / trae 同型：`credits.status` 如实回 `null`，
+     * 面板不显示签到状态行，「一键签到」按钮照常工作（幂等由 claim 自己判）。
+     */
+    monkeycode: {
+      fetchBalanceDetailed: async (credential, call) =>
+        fetchMonkeycodeBalanceDetailed(
+          credential as MonkeycodeCredential,
+          MONKEYCODE,
+          { warn: call.warn },
+        ),
+      claim: (credential, _entry, call) =>
+        claimMonkeycodeDailyCheckin(
+          credential as MonkeycodeCredential,
+          MONKEYCODE,
+          { warn: call.warn },
+        ),
+      precheckStatus: false,
+    },
+    /**
+     * MonkeyCode 国际站（2026-11-02）—— 与国内站**同一个实现**，只换 product。
+     *
+     * ⚠️ 这不是「复制一份判据」：`fetchMonkeycodeBalanceDetailed` /
+     *    `claimMonkeycodeDailyCheckin` 的第二个参数就是站点，两站共用同一套
+     *    wallet / checkin / PoW 代码（`MONKEYCODE_PRODUCTS` 是唯一真相源）。
+     * ⚠️ `precheckStatus: false` 的理由与国内站相同：上游 `wallet/checkin`
+     *    只回一个布尔，凑不出「连续 N 天」的读数字段。
+     */
+    monkeycodeintl: {
+      fetchBalanceDetailed: async (credential, call) =>
+        fetchMonkeycodeBalanceDetailed(
+          credential as MonkeycodeCredential,
+          MONKEYCODE_INTL,
+          { warn: call.warn },
+        ),
+      claim: (credential, _entry, call) =>
+        claimMonkeycodeDailyCheckin(
+          credential as MonkeycodeCredential,
+          MONKEYCODE_INTL,
+          { warn: call.warn },
+        ),
+      precheckStatus: false,
+    },
+    /**
+     * 百智云（2026-11-02 二版）—— **有积分，但要网页登录态**。
+     *
+     * 第一版把它登记成「无积分渠道」（`credits: { balance: false, … }` + 进
+     * `CREDITS_TABLE_EXEMPT`），理由是模型网关 `ai-models.app.baizhi.cloud`
+     * 除了 `/v1/models` / `/v1/messages` 全 404。那个实测没错，但结论错了：
+     * 积分在**主站** `baizhi.cloud`：
+     *
+     * - `GET /api/v1/user/wallet/balance` →
+     *   `{available_credit_cents:23505, temporary_credit_cents:9821,
+     *     permanent_credit_cents:13684, frozen_credit_cents:0,
+     *     daily_temporary_credit_claimed:true}`（单位 1/100 积分）
+     * - `GET /api/v1/user/wallet/app-credit-usage?period=month` →
+     *   `{items:[{period:'2026-11-02', app_id:22, call_count:31, credit:364.95}]}`
+     *
+     * 与用户控制台截图逐位吻合（235.05 / 98.21 / 136.84 / 364.95 / 31 次）。
+     *
+     * ⚠️ `claim` **不登记**：每日临时积分领取端点是
+     *    `POST /api/v1/user/wallet/daily-temporary-credit`，实测 400
+     *    `captcha binding mismatch`（要过验证码）⇒ 不是可幂等的「一键签到」，
+     *    登记了只会每次都失败并弹一条红字。
+     * ⚠️ `precheckStatus: false`：控制台只回 `daily_temporary_credit_claimed`
+     *    一个布尔，凑不出「连续 N 天」的状态读数（与 monkeycode 同型）。
+     */
+    baizhi: {
+      fetchBalanceDetailed: async (credential, call) =>
+        fetchBaizhiBalanceDetailed(
+          credential as BaizhiCredential,
+          BAIZHI,
+          { warn: call.warn },
+        ),
       precheckStatus: false,
     },
   }

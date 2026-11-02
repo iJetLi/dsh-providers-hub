@@ -1320,6 +1320,24 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   //    `${provider.toUpperCase()}_ACCOUNT_${suffix}`（见 `qiniu-rpc.ts` 的
   //    `qiniuSlotNamesOf`），两者必须对上，否则本表认不出它。
   ['QINIU', 'qiniu'],
+  // ⚠️ **本 fork 独有**的 provider（monkeycode，2026-11-02）—— 同款坑又一次。
+  // 漏加 = `MONKEYCODE_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
+  //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新粘贴 Key）。
+  //
+  // ⚠️ 前缀取 `MONKEYCODE`：`monkeycode-rpc.ts` 的 `monkeycodeSlotNamesOf`
+  //    生成的 ref 恒为 `MONKEYCODE_ACCOUNT_${suffix}`，两者必须对上。
+  ['MONKEYCODE', 'monkeycode'],
+  // ⚠️ 国际站（2026-11-02，2026-11-02 接入）—— script 同款坑第 **八** 次。
+  //    与 `MONKEYCODE` 是**超串关系**（`MONKEYCODEINTL` 以 `MONKEYCODE` 开头）——
+  //    顺序由 `ACCOUNT_REF_RE` 内部的**长度降序排序**保证，与本数组书写顺序无关
+  //    （与 `MINIMAX` / `MINIMAXINTL`、`AUTOCLAW` / `AUTOCLAWINTL` 同型）。
+  //    漏加 = 国际站账号在 `state.json` 缺失时**静默消失**（凭据还在
+  //    `.credentials.yaml` 里，只是索引建不出来，用户只能重新登录）。
+  ['MONKEYCODEINTL', 'monkeycodeintl'],
+  // ⚠️ 百智云（`BAIZHI_ACCOUNT_*`，2026-11-02）：与 MONKEYCODE 系列**无前缀关系**，
+  //    但同样必须登记 —— 漏了它，`state.json` 里的账号列表损坏/缺失时，
+  //    从凭据 ref 反推 provider 会失败 ⇒ 账号在重启后**静默消失**。
+  ['BAIZHI', 'baizhi'],
   // ⚠️ 第 14 个 provider（gemini，2026-10-03）—— 同款坑第 **三** 次。
   // 漏加 = `GEMINI_ACCOUNT_*` 的账号在 `state.json` 缺失时静默消失
   //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新授权）。

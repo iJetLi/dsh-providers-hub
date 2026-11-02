@@ -203,6 +203,32 @@ import { QiniuAuth } from './qiniu-auth.js'
 import { QiniuAdapter, registerQiniuLlm } from './qiniu-adapter.js'
 import { QINIU } from './qiniu-product.js'
 import { qiniuModelsUrl, qiniuHeaders, type QiniuCredential } from './qiniu.js'
+// MonkeyCode（`monkeycode` / `monkeycodeintl`，2026-11-02）：**本 fork 独有**。
+// 无 OAuth，但**主路径是浏览器登录**（`loginViaBrowser()` 开窗读 cookie；四审
+// H-3 更正：此前这里写成「粘贴静态 Key、无登录」），粘贴 Key 只是备用入口。
+// 协议层是 **Anthropic Messages**（两条通道都是），故消息/SSE 复用
+// `src/minimax-messages.ts`。
+// ⚠️ 两条通道的**模型清单来源不同**：白泽有 `GET /v1/models`（动态拉、
+// 失败回退内置表），网关**没有列出接口**（405）⇒ 用 `MONKEYCODE_GATEWAY_MODELS`。
+import { MonkeycodeAuth } from './monkeycode-auth.js'
+import { MonkeycodeAdapter, registerMonkeycodeLlm } from './monkeycode-adapter.js'
+import { MONKEYCODE, MONKEYCODE_INTL, type MonkeycodeProduct } from './monkeycode-product.js'
+// 百智云（`baizhi`，2026-11-02）：凭据是长期静态 `sk-…`（实测 67 位），**主路径**
+// 是浏览器登录后从「大模型商店」取
+// （`https://ai-models.app.baizhi.cloud/console/api-keys`，四审 H-3 更正：此前
+// 这里写成「用户手工粘贴」），手工粘贴只是备用；直连
+// `https://ai-models.app.baizhi.cloud/api/anthropic`（Anthropic Messages 协议），
+// **按量计费**、无每日额度/签到 —— 与 MonkeyCode 两站是不同产品线。
+import { BaizhiAuth } from './baizhi-auth.js'
+import { BaizhiAdapter, registerBaizhiLlm } from './baizhi-adapter.js'
+import { BAIZHI } from './baizhi-product.js'
+import type { BaizhiCredential } from './baizhi.js'
+import {
+  monkeycodeHeaders,
+  monkeycodeGatewaySignature,
+  monkeycodeSigningPrompt,
+  type MonkeycodeCredential,
+} from './monkeycode.js'
 import type { ZcodeCredential } from './zcode.js'
 import { GEMINI_DEFAULT_PROJECT, GEMINI_SESSION_LANE_SMOKE } from './gemini.js'
 import { createProviderCredits, creditsOf } from './provider-credits.js'
@@ -732,6 +758,59 @@ export const probeById: Record<string, NonNullable<ProviderRuntime['probe']>> = 
       credentialRef: credentialRef(ref),
       slots: async () => [{ id: QINIU.id, apiKey: (credential as QiniuCredential).access_token }],
       product: QINIU,
+    }),
+  },
+  // MonkeyCode（**本 fork 独有**）—— 粘贴静态 Key 型渠道，探测只喂**这一份凭据**。
+  //
+  // ⚠️ **不传 `fetchRemoteModels`**：探测要判的是「这份凭据能不能推理」，而
+  //    白泽模型目录**实测免鉴权也回 200**（与 qiniu `/v1/models` 同款性质）
+  //    ⇒ 目录能读到**不构成**凭据有效的证据。探测直接用内置清单 + 真实补全请求。
+  // ⚠️ 不传 `warn`：`probeById` 是**模块级**常量（在 `apply()` 之前求值），
+  //    此处**没有 `ctx`**。
+  monkeycode: {
+    createProbeAdapter: (ref, credential) => new MonkeycodeAdapter({
+      credentialRef: credentialRef(ref),
+      slots: async () => [{
+        // ⚠️ `accountId` 只用于限流标记；探测路径没有池，给一个固定占位
+        //    （不会写进任何池 —— 适配器只在 `accountPool !== undefined` 时才写）。
+        accountId: MONKEYCODE.id,
+        credential: credential as MonkeycodeCredential,
+      }],
+      product: MONKEYCODE,
+    }),
+  },
+  // MonkeyCode 国际站（`monkeycodeintl`）—— 与国内站逐行同构，只差 `product`。
+  //
+  // ⚠️ 必须**单独一条**：`probeById` 是按 provider id 取工厂的，漏了这一条
+  //    ⇒ 国际站账号卡片上的「重测」按钮点了没反应（`probeAdapter` 查不到
+  //    就直接回「不支持探测」，全程静默）。
+  monkeycodeintl: {
+    createProbeAdapter: (ref, credential) => new MonkeycodeAdapter({
+      credentialRef: credentialRef(ref),
+      slots: async () => [{
+        accountId: MONKEYCODE_INTL.id,
+        credential: credential as MonkeycodeCredential,
+      }],
+      product: MONKEYCODE_INTL,
+    }),
+  },
+  // 百智云（`baizhi`）—— 静态 `sk-` Key 直连，无平台登录态、无每日额度。
+  //
+  // ⚠️ 必须**单独一条**：`probeById` 是按 provider id 取工厂的，漏了这一条
+  //    ⇒ 百智云账号卡片上的「重测」按钮点了没反应（查不到就直接回「不支持
+  //    探测」，全程静默）。
+  // ⚠️ 不传 `warn`：`probeById` 是**模块级**常量（在 `apply()` 之前求值），
+  //    此处**没有 `ctx`**。
+  baizhi: {
+    createProbeAdapter: (ref, credential) => new BaizhiAdapter({
+      credentialRef: credentialRef(ref),
+      slots: async () => [{
+        // ⚠️ `accountId` 只用于限流标记；探测路径没有池，给一个固定占位
+        //    （不会写进任何池 —— 适配器只在 `accountPool !== undefined` 时才写）。
+        id: BAIZHI.id,
+        apiKey: (credential as BaizhiCredential).access_token,
+      }],
+      product: BAIZHI,
     }),
   },
   // ZCode（智谱）→ Anthropic Messages 体 + 阿里云 captcha 参数。
@@ -3982,7 +4061,7 @@ export function apply(ctx: Context): void {
    * 下面这一整块与国内版逐行同构，**故意不抽公共工厂**：两处差异点（product /
    * auth 实例）都出现 5 次以上，抽工厂会让「哪一处漏改」变得不可见 ——
    * 而本仓库记录过多次「一份语义两处实现，改一处漏一处」的缺陷
-   *（`minimaxintl` / `autoclawintl` 都选了同样的显式两份，见 `index.ts:850` / `:1819`）。
+   *（`minimaxintl` / `autoclawintl` 都选了同样的显式两份 —— 各有一份 resolver 工厂）。
    */
   const magicrewIntlResolver = createCredentialResolver<MagicrewCredential>(
     { pool: pool as never },
@@ -4331,6 +4410,109 @@ export function apply(ctx: Context): void {
     //    2026-10-23 迁移同款）：不要在这里加回 `disabledModels` /
     //    `providerClosed` 两个回调 —— 那会让「同一语义两套判据」重现（本仓库红线），
     //    且会掩盖池没接上的缺陷。
+  })
+
+  // ===== MonkeyCode（`monkeycode` + `monkeycodeintl`）—— **本 fork 独有** =====
+  //
+  // 两个**独立部署**的站点（2026-11-02 实测）：国内 `monkeycode-ai.com` 与国际
+  // `monkeycode-ai.net` 各有独立账号池 —— 国内 cookie 打国际站回 401、两站的
+  // 网关路径（`/v1/messages`）逐字节同形但凭据互不通用 ⇒ **必须两个 provider
+  // id**，不能靠凭据里的字段区分（同一张卡片混着两站的号，额度/签到会串）。
+  //
+  // 实现完全共用（`MonkeycodeAuth` / `MonkeycodeAdapter` / `monkeycode-credits`），
+  // 只在 `product` 上分叉：`MONKEYCODE_PRODUCTS` 是站点清单的唯一真相源。
+  //
+  // 与 qiniu **同格**的部分：粘贴静态 Key 建账号、没有 OAuth、没有 refresh 端点。
+  // ⚠️ 与 qiniu 的**实质差异**：协议是 **Anthropic Messages**（`POST /v1/messages`
+  //    + SSE），不是 OpenAI 兼容（网关的 `/v1/chat/completions` 实测 404）；
+  //    且网关通道每个请求都要 `X-OhMyAgent-Signature`（HMAC-SHA256 over prompt），
+  //    缺它恒 403 —— 签名在适配器里算。
+  //
+  // 服务名由 MonkeycodeAuth 依 product.id 派生 ⇒ 分别注册为
+  // `ctx.monkeycodeAuth` / `ctx.monkeycodeintlAuth`。
+  const createMonkeycode = (product: MonkeycodeProduct) => {
+    const auth = new MonkeycodeAuth(ctx, { product })
+    const adapter = registerMonkeycodeLlm(ctx, {
+      // 单凭据回退 ref：池里没有该站账号时用它（与其余 provider 同约定）。
+      credentialRef: credentialRef(product.defaultCredentialRef),
+      // 槽序列由**接线层**解析好传进来（适配器不直接读凭据）。
+      // `modelId` 透传：据此过滤「该模型正处于限流窗口」的账号。
+      slots: async (modelId?: string) => {
+        const entries = await pool.listAccounts(product.id)
+        const usable = await Promise.all(entries.map(async (entry) => {
+          if (!entry.enabled) return undefined
+          // ⚠️ 模型级限流标记：`modelId` 缺省时**不查** —— 传了会让被限流的账号
+          //    把整个目录一起拖空（与 qiniu / modelscope 同款判据）。
+          if (modelId !== undefined && modelId.length > 0) {
+            const resetAt = entry.modelRateLimits?.[modelId]
+            if (typeof resetAt === 'number' && resetAt > Date.now()) return undefined
+          }
+          const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+          if (!resolved) return undefined
+          try {
+            const parsed = JSON.parse(resolved.value) as MonkeycodeCredential
+            if (typeof parsed.access_token !== 'string' || parsed.access_token.length === 0) return undefined
+            return { accountId: entry.id, credential: parsed }
+          } catch {
+            // ⚠️ 坏 JSON 不该让整个 provider 不可用：跳过这一槽，其余账号照常轮换。
+            return undefined
+          }
+        }))
+        return usable.filter((slot): slot is { accountId: string; credential: MonkeycodeCredential } => slot !== undefined)
+      },
+      accountPool: pool,
+      product,
+      // 图片：网关模型在内置清单里都不声明 `supportsImage`（`GET /v1/models`
+      // 实测 405，拿不到能力表）⇒ 适配器会显式抛 `UNSUPPORTED_CONTENT`，
+      // 而不是把图片静默丢掉。
+      readImage: makeReadImage(ctx),
+    })
+    return { auth, adapter }
+  }
+  const { auth: monkeycode, adapter: monkeycodeAdapter } = createMonkeycode(MONKEYCODE)
+  const { auth: monkeycodeIntl, adapter: monkeycodeIntlAdapter } = createMonkeycode(MONKEYCODE_INTL)
+
+  // ===== 百智云（`baizhi`）—— 静态 Key 直连，**按量计费** =====
+  //
+  // 与 MonkeyCode 的关键差别（都是实测结论，不是设计偏好）：
+  //   * 认证：`x-api-key: sk-…`（**不用** cookie、**不签** HMAC）；
+  //   * 额度：没有每日额度、没有积分、没有签到接口 ⇒ 注册表里**不写
+  //     `credits`**，积分面板不出现这一家；
+  //   * 目录：`GET /api/anthropic/v1/models` 实测可用（45 条），故走
+  //     `RemoteCatalogGate` 动态拉取 + 内置 15 条兜底；
+  //   * 续期：Key 是静态材料 ⇒ `isBaizhiRefreshable()` 恒 false，不进
+  //     `SELF_HEAL_REFRESHABLE_PROVIDERS`。
+  const baizhi = new BaizhiAuth(ctx)
+  const baizhiAdapter = registerBaizhiLlm(ctx, {
+    credentialRef: credentialRef(BAIZHI.defaultCredentialRef),
+    // 槽序列由**接线层**解析好传进来（适配器不直接读凭据）。
+    // `modelId` 透传：据此过滤「该模型正处于限流窗口」的账号。
+    slots: async (modelId?: string) => {
+      const entries = await pool.listAccounts(BAIZHI.id)
+      const usable = await Promise.all(entries.map(async (entry) => {
+        if (!entry.enabled) return undefined
+        // ⚠️ 模型级限流标记：`modelId` 缺省时**不查** —— 传了会让被限流的账号
+        //    把整个目录一起拖空（与 monkeycode / qiniu 同款判据）。
+        if (modelId !== undefined && modelId.length > 0) {
+          const resetAt = entry.modelRateLimits?.[modelId]
+          if (typeof resetAt === 'number' && resetAt > Date.now()) return undefined
+        }
+        const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+        if (!resolved) return undefined
+        try {
+          const parsed = JSON.parse(resolved.value) as BaizhiCredential
+          if (typeof parsed.access_token !== 'string' || parsed.access_token.length === 0) return undefined
+          return { id: entry.id, apiKey: parsed.access_token }
+        } catch {
+          // ⚠️ 坏 JSON 不该让整个 provider 不可用：跳过这一槽，其余账号照常轮换。
+          return undefined
+        }
+      }))
+      return usable.filter((slot): slot is { id: string; apiKey: string } => slot !== undefined)
+    },
+    accountPool: pool,
+    product: BAIZHI,
+    readImage: makeReadImage(ctx),
   })
 
   // 一次性修复**老账号**的昵称与凭据字段（与上面 WorkBuddy 的启动清理同类）。
@@ -4899,6 +5081,11 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     zcodeAdapter.stop()
     // AStudio（讯飞）的 stop() 置 active=false，阻止在途刷新回写凭据。
     astudio.stop()
+    // MonkeyCode 两站 + 百智云：`stop()` 置 `active=false`，阻止在途的
+    // 浏览器登录在卸载之后继续收窗/写回凭据（`loginViaBrowser` 每轮都判它）。
+    monkeycode.stop()
+    monkeycodeIntl.stop()
+    baizhi.stop()
   }, 'jet-hub: multi-account refresh scheduler')
 
   // 保留旧的 stop scheduler（兼容旧命令）
@@ -4917,6 +5104,11 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     zcodeAdapter.stop()
     // 同上：AStudio 的在途刷新必须随插件一起回收。
     astudio.stop()
+    // MonkeyCode 两站 + 百智云：`stop()` 置 `active=false`，阻止在途的
+    // 浏览器登录在卸载之后继续收窗/写回凭据（`loginViaBrowser` 每轮都判它）。
+    monkeycode.stop()
+    monkeycodeIntl.stop()
+    baizhi.stop()
   }, 'codearts-auth.scheduler (legacy)')
 
   // ===== OfficeAce（华为 ModelArts MaaS，云端直连）=====
@@ -5561,6 +5753,22 @@ async function fetchBalanceReading(
     //    目录。表里缺它 ⇒ 退化到已过滤的 `llm.listModels` ⇒「关闭整个 provider」
     //    时漏写黑名单 ⇒「provider 显示已关闭、模型却仍可选用」的矛盾态。
     qiniu: pruned(QINIU.id, qiniuAdapter),
+    // ⚠️ MonkeyCode（2026-11-02）：必须进这张表，理由与 modelscope / qiniu 逐条
+    //    相同 —— `provider.status` 的「已关闭」判据是 `total > 0 &&
+    //    disabled === total`，读的是 `listAllModels()` 那份**不套黑名单**的全量
+    //    目录。表里缺它 ⇒ 退化到已过滤的 `llm.listModels` ⇒「关闭整个 provider」
+    //    时漏写黑名单 ⇒「provider 显示已关闭、模型却仍可选用」的矛盾态。
+    //    ⚠️ 它的目录是「白泽远端 + 网关常量」两段合并（`mergeWithGatewayModels`）
+    //    ⇒ 即便白泽目录拉失败也有 9 条网关常量兜底，不会出现 `total === 0`。
+    monkeycode: pruned(MONKEYCODE.id, monkeycodeAdapter),
+    // ⚠️ 国际站同样必须进这张表：理由与国内站逐条相同 —— 「关闭整个 provider」
+    //    依赖 `listAllModels()` 那份**不套黑名单**的全量目录，漏了会漏写黑名单。
+    monkeycodeintl: pruned(MONKEYCODE_INTL.id, monkeycodeIntlAdapter),
+    // ⚠️ 百智云同样必须进这张表：理由与 monkeycode 逐条相同 ——
+    //    `provider.status` 的「已关闭」判据读的是 `listAllModels()` 那份
+    //    **不套黑名单**的全量目录，表里缺它 ⇒「关闭整个 provider」时漏写
+    //    黑名单 ⇒「provider 显示已关闭、模型却仍可选用」的矛盾态。
+    baizhi: pruned(BAIZHI.id, baizhiAdapter),
     magicrew: pruned(MAGICREW.id, magicrewAdapter),
     // MagiCrew 国际站（2026-11-01）：与国内版同款剪枝，目录/黑名单逻辑共用。
     magicrewintl: pruned(MAGICREW_INTL.id, magicrewIntlAdapter),
@@ -5947,6 +6155,19 @@ async function fetchBalanceReading(
       //    （`provider-runtime.ts` 的注册表是按本数组逐个 `registerProviderRuntime`
       //    建的；主循环本身不需要改）。
       ['qiniu', qiniu],
+      // ⚠️ MonkeyCode（2026-11-02）：漏加这一行 = 它不出现在注册表里 ⇒
+      //    续期 / 积分 / 探测三条链路全部**静默失效**（`provider-runtime.ts` 的
+      //    注册表是按本数组逐个 `registerProviderRuntime` 建的，主循环本身
+      //    不需要改）。
+      ['monkeycode', monkeycode],
+      // ⚠️ 国际站必须**单独一行**（2026-11-02）：`provider-runtime-wiring.spec.ts`
+      //    与续期/积分/探测三条链路都按 provider id 取实例，漏了它 = 国际站账号
+      //    的过期检测、积分刷新、重测按钮全部静默失效（与 magicrewintl 同型）。
+      ['monkeycodeintl', monkeycodeIntl],
+      // ⚠️ 百智云（2026-11-02）：漏加这一行 = 它不出现在注册表里 ⇒
+      //    续期 / 积分 / 探测三条链路全部**静默失效**（`provider-runtime.ts`
+      //    的注册表是按本数组逐个 `registerProviderRuntime` 建的）。
+      ['baizhi', baizhi],
       // ⚠️ 超级麦吉（Magicrew，2026-10-29）：值必须是 `registerJetHubRpc` 的
       //    `auths.magicrew` 是**同一个对象**，否则守卫用例布在该实例上的 spy
       //    收不到本循环的调用（本仓库复发过 6 次）。
@@ -6147,6 +6368,19 @@ async function fetchBalanceReading(
     //    `credits-balance-self-heal.spec.ts` 的反向守卫（JetHubAuths 每个键
     //    必须在自愈表或豁免表里）会红。
     qiniu,
+    // ⚠️ MonkeyCode（2026-11-02）：值必须是 `registerProviderRuntime` 那个
+    //    registry 数组里 `['monkeycode', monkeycode]` 的**同一个实例**，否则
+    //    `provider-runtime-wiring.spec.ts` 布在该实例上的 spy 收不到调用。
+    //    漏加 ⇒ 客户端的 monkeycode 面板所有 RPC 报 `unknown provider`。
+    monkeycode,
+    // ⚠️ 国际站同款陷阱：值必须是 `registerProviderRuntime` 那个 registry 数组里
+    //    `['monkeycodeintl', monkeycodeIntl]` 的**同一个实例**，否则
+    //    `provider-runtime-wiring.spec.ts` 布在该实例上的 spy 收不到调用。
+    monkeycodeintl: monkeycodeIntl,
+    // ⚠️ 百智云：值必须是上面 registry 数组里 `['baizhi', baizhi]` 的**同一个
+    //    实例**，否则 `provider-runtime-wiring.spec.ts` 布在该实例上的 spy
+    //    收不到调用。漏加 ⇒ 客户端的 baizhi 面板所有 RPC 报 `unknown provider`。
+    baizhi,
     // ⚠️ 超级麦吉（Magicrew，2026-10-29）：值必须是 `registerProviderRuntime` 那个
     //    registry 数组里 `['magicrew', magicrewAuth]` 的**同一个实例**，否则
     //    `provider-runtime-wiring.spec.ts` 布在该实例上的 spy 收不到调用。

@@ -250,6 +250,45 @@ export interface ProviderAccountStatus extends ProviderAccountEntry {
    * devtools / 日志 / 崩溃上报里）。与 `modelscopeKeyMask` 同款。
    */
   qiniuKeyMask?: string
+  /**
+   * MonkeyCode API Key 的**打码串**（宿主侧 `maskMonkeycodeKey` 生成，形如
+   * `oma_…wxyz`）。
+   *
+   * ⚠️ 只下发打码串，**绝不下发明文**（同 `qiniuKeyMask` / `modelscopeKeyMask` /
+   * `baizhiKeyMask`）—— 打码由宿主算好，客户端拿不到凭据，两端各写一份判据必然漂移。
+   *
+   * ⚠️ 这里**没有**、也不再有 `channel` 字段：2026-11-02 拆站后 `monkeycode`
+   * 与 `monkeycodeintl` 是两个独立 provider，一个账号只可能属于其中一个，
+   * 「这个账号走哪条通道」不再存在（拆站前那个 `monkeycodeChannel` 已删）。
+   */
+  monkeycodeKeyMask?: string
+  /**
+   * 该账号凭据里是否带了平台会话 cookie（决定额度行渲染「未配置会话」还是读数）。
+   *
+   * ⚠️ 额度/积分/签到需要 web 会话 cookie，没有它时卡片要给出「未配置会话」提示，
+   * 而不是显示一个假的 0。
+   *
+   * ⚠️ 2026-11-02 三审 F🟡-9：本处原有一段讲 `monkeycodeChannel`（`baizhi` 白泽直连 /
+   * `gateway` 网关）的注释 —— 那个字段在 2026-11-02 拆站时**已删**（现在
+   * `monkeycode` 与 `monkeycodeintl` 是两个独立 provider），而注释没同步删。
+   * → 已删除该段，字段本体（`monkeycodeHasSession`）保留。
+   */
+  monkeycodeHasSession?: boolean
+  /**
+   * 百智云账号的**打码** API Key（形如 `sk-a…wxyz`）。
+   *
+   * ⚠️ 只下发打码串，**绝不下发明文**（同 `qiniuKeyMask` / `monkeycodeKeyMask`）。
+   * ⚠️ 打码由宿主 `maskBaizhiKey` 算好：客户端拿不到凭据，两端各写一份判据必然漂移。
+   */
+  baizhiKeyMask?: string
+  /**
+   * 是否存有百智云**控制台**网页登录态（`session_cookie`）。
+   *
+   * 卡片据此决定积分行的显示方式：没有会话时不该报「查询失败」红字，而应
+   * 显示「用浏览器登录后可查看积分」（2026-11-02 用户报障：只填 Key 的账号
+   * 积分行空白且没有任何引导）。
+   */
+  baizhiHasSession?: boolean
 }
 
 /** Jet Hub 在 ctx.settings 中的 schema */

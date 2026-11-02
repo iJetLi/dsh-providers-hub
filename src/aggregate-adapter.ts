@@ -1336,6 +1336,33 @@ export class AggregateAdapter extends LlmAdapter {
     //    `expiry-runtime-parity.spec.ts` 的 `NOT_EXPIRY_WIRED` 豁免表里，
     //    由「豁免理由被验证」那条用例钉住。
     'qiniu',
+    // ⚠️ monkeycode（MonkeyCode，2026-11-02）：`channel: true` ⇒ 必须进本清单，
+    //    否则它的模型**永不进聚合目录、静默不可见**。
+    //
+    // ⚠️⚠️ **本数组只是第一道门**（模型层归并）。决定「在不在候选表里」的是
+    //    `aggregate-expiry.ts` 的 `WIRED_EXPIRY_PROVIDERS`。
+    //
+    //    📌 **2026-11-02 三审 F🟡-1 更正**：这段注释原写「monkeycode **刻意不
+    //    进**那张表」，**已过期** —— 三家（`monkeycode` / `monkeycodeintl` /
+    //    `baizhi`）早已补进 `WIRED_EXPIRY_PROVIDERS`（`aggregate-expiry.ts:259-261`）
+    //    与 `provider-expiry.ts` 的 `createProviderExpiry()`（折算原语
+    //    `monkeycodeExpiry`）。当时的理由「wallet 报文只有标量、没有到期时刻」只对
+    //    一半：真正接入的是**每日额度的重置时刻**（次 UTC+8 零点，`nextUtc8DayStartMs`），
+    //    不是积分包的到期时间 ⇒ 属「有余额但不下发到期时间」那一类：有额度即
+    //    `NEVER`、烧光即 `UNUSABLE`。
+    //    ⚠️ 该陷阱（只改本数组、忘了那张表 ⇒ 候选层被静默剔掉）在本仓库已复发 5 次。
+    'monkeycode',
+    // ⚠️ monkeycodeintl（MonkeyCode 国际站，2026-11-02 拆站）：与 `monkeycode`
+    //    **逐字同构** —— 同一套代码的另一部署（`proxy.monkeycode-ai.net` 实测
+    //    与 .com 一样对 `GET /v1/models` 回 405），`channel: true` ⇒ 必须进本清单。
+    //    ⚠️ **已进** `WIRED_EXPIRY_PROVIDERS`（同上，2026-11-02 三审 F🟡-1 更正），
+    //    折算原语与国内站共用（`monkeycodeExpiry`），但必须传 `MONKEYCODE_INTL`
+    //    —— 两站账号池不互通、域名不同（国际站 cookie 打国内站回 401）。
+    'monkeycodeintl',
+    // 百智云（2026-11-02）：`channel: true` ⇒ 必须进本清单，否则它在聚合目录里
+    // 永远不可见（**静默**）。它是 `x-api-key: sk-…` 的按量付费网关，
+    // 与 MonkeyCode 两站的 oma_ 凭据/每日额度完全无关，只是同源上游。
+    'baizhi',
     // officeace（2026-10-12）：华为 MaaS 云端直连渠道，`channel: true`
     // ⇒ 必须进聚合目录，否则它的模型**永不进聚合、静默不可见**。
     // ⚠️ 本数组**只是第一道门**（模型层归并）。真正决定「在不在候选表里」的是
