@@ -1133,9 +1133,13 @@ export async function collectCreditsStatus<TCredential = BuddyCredential, TProdu
         accountId = entry.id
         nickname = entry.nickname
         let resolved = await deps.resolve(credentialRef(entry.credentialRef))
-        // ⚠️ `product` 恒为 `undefined`（调用点都传 `undefined`）⇒ 必须可选链，
-        //    否则「凭据未配置」那一格会抛 `Cannot read properties of undefined (reading 'id')`
-        //    （详见 `collectCreditBalances` 同名处的长注释；两处同因，必须同修）。
+        // ⚠️ `product` 在生产调用点是 `undefined` ⇒ 必须可选链，否则「凭据未配置」那一格会抛
+        //    `Cannot read properties of undefined (reading 'id')`。**旧码**
+        //    （变异验证时还原成这个）：`(product as { id?: string }).id === ASTUDIO.id`。
+        //    ⚠️ 本处症状**在界面上看不出来**：下面的 `catch` 把异常吞成 `status = null`
+        //    + 一条 warn，与「查询失败」同形 ⇒ 判据只能打在 `deps.warn` 上
+        //    （断言 `status === null` 在变异态下恒绿，实测过）。
+        //    长注释与影响面见 `collectCreditBalances` 同名处。
         if (resolved === undefined && (product as { id?: string } | undefined)?.id === ASTUDIO.id) {
           resolved = await deps.resolve(credentialRef(ASTUDIO.defaultCredentialRef))
         }
@@ -1379,19 +1383,25 @@ export async function collectCreditBalances<TCredential = BuddyCredential, TProd
         /**
          * ⚠️⚠️ **`product` 是 `undefined`，必须用可选链读 `.id`**（2026-11-02 真机报障修）。
          *
-         * 所有调用点都传 `collectCreditBalances(accounts, undefined, {...})`（各 impl
-         * 自己闭包住 product），所以这里的 `product` **恒为 `undefined`**。
-         * 而 `resolved === undefined` 恰恰是「**凭据未配置**」那一格 —— 最典型的来源是
+         * **`src/` 里的生产调用点都传 `undefined`**（`collectCreditBalances(accounts, undefined, {...})`，
+         * product 由各 provider 的 impl 闭包住）。⚠️ 别写成「所有调用点」——
+         * `tests/unit/jet-hub-rpc.spec.ts` 里有一批老用例传的是 `WORKBUDDY`（真值），
+         * 正因为如此这个缺陷**逃过了既有用例**（它们走不进 `resolved === undefined` 那一格）。
+         * 而 `resolved === undefined` 恰恰是「**凭据未配置**」—— 最典型的来源是
          * **新建账号时的占位条目（面板显示「登录中…」）**：它已经在池里、但凭据还没落盘。
          *
-         * 旧码是 `(product as { id?: string } | undefined)?.id === ASTUDIO.id`，短路求值到右边就抛
+         * **旧码**（变异验证时还原成这个）：
+         * `(product as { id?: string }).id === ASTUDIO.id` —— 短路求值到右边就抛
          * `Cannot read properties of undefined (reading 'id')` ⇒ 被下面 `catch` 转成
          * 「积分：Cannot read properties of undefined (reading 'id')」直接显示在面板上
          * （用户 2026-11-02 的截图：AutoClaw 国际版「登录中…」卡片，积分行就是这串）。
-         * **影响面是全部 15 家**：任何「占位条目 / 凭据丢失」的账号都会这样，
-         * 只是以前没人盯着 pending 卡片的积分行看。
+         * 影响面 = **所有经本函数取余额的 provider**（任何「占位条目 / 凭据丢失」的账号都会这样），
+         * 只是以前没人盯着 pending 卡片的积分行看。⚠️ 别在这里写具体家数：
+         * 本文件的「家数」随 `PROVIDER_REGISTRY` 变动，写死必然腐坏。
          *
-         * ⚠️ 同因的另一处：`collectClaimResults`（签到）里逐字相同的写法，已同修。
+         * ⚠️ 同因的另一处是 `collectCreditsStatus`（**签到状态**，不是 `collectClaimResults` ——
+         * 后者体内没有这个写法，别照着改错地方）。那处的症状不同：`catch` 把它吞成
+         * `status = null` + 一条 warn，界面上与「查询失败」同形 ⇒ 它的判据只能打在 warn 上。
          */
         if (resolved === undefined && (product as { id?: string } | undefined)?.id === ASTUDIO.id) {
           resolved = await deps.resolve(credentialRef(ASTUDIO.defaultCredentialRef))

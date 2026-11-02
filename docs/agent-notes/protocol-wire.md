@@ -689,17 +689,23 @@ const claim = deps.claim ?? (claimDailyCheckin as unknown as NonNullable<…>)
 - 失败时 `balance` 为 `null` + `error`，卡片显示原因而非 0
 - RPC：`credits.balances`；前端 `AccountCard` 的 `CreditBalanceRow`，面板有「刷新积分」按钮
 
-### ⚠️⚠️ `product` 形参是 `undefined`：读它必须可选链（2026-11-02 真机报障，影响全部 15 家）
+### ⚠️⚠️ `product` 形参是 `undefined`：读它必须可选链（2026-11-02 真机报障）
 
-`collectCreditBalances` / `collectCreditsStatus` / `collectClaimResults` 的**第 2 个形参 `product`**，所有调用点都传 `undefined`（各 provider 的 impl 自己把 product 闭包住了，形参只剩历史包袱）。而函数体里有两处按它判特殊兜底：
+`collectCreditBalances` / `collectCreditsStatus` 的**第 2 个形参 `product`**：**`src/` 里的生产调用点全部传 `undefined`**（product 由各 provider 的 impl 闭包住）。而函数体里有两处按它判 ASTUDIO 的特殊兜底：
 
 ```ts
+// 旧码（变异验证时还原成这个）
 if (resolved === undefined && (product as { id?: string }).id === ASTUDIO.id) { … }
 ```
 
 `resolved === undefined` 恰恰是**「凭据未配置」**那一格 —— 最典型的来源是**新建账号时的占位条目**（面板显示「登录中…」，条目已在池里、凭据还没落盘）。短路求值到右边就抛 `TypeError: Cannot read properties of undefined (reading 'id')`。
 
 用户 2026-11-02 的截图就是它：AutoClaw（国际版）「登录中…」卡片，**积分行直接显示这串英文**（不是「凭据未配置」）。**与本轮任何接线无关**，是既有缺陷被占位卡片暴露；任何「占位 / 凭据丢失」的账号都会这样。
+
+⚠️ 三处措辞必须精确，写错了会误导后人：
+1. **范围是「`src/` 里的生产调用点」**，不是「所有调用点」——`tests/unit/jet-hub-rpc.spec.ts` 里有一批老用例传的是 `WORKBUDDY`（真值），**正因为如此这个缺陷逃过了既有用例**（走不进那一格）。后来人做这条的变异时也别把用例的第二参改回真值，否则判据立刻失效。
+2. **第二处是 `collectCreditsStatus`（签到状态），不是 `collectClaimResults`** —— 后者函数体内没有这个写法。
+3. **别写死家数**：写「N 家」必然随 `PROVIDER_REGISTRY` 腐坏（家数随 registry 变动，且 `qoder` / `qodercn` 并不走这个收集器）。写「所有经该收集器取数的 provider」即可。
 
 两处的**吞法不同，判据必须分开写**：
 
@@ -708,7 +714,11 @@ if (resolved === undefined && (product as { id?: string }).id === ASTUDIO.id) { 
 | `collectCreditBalances` | `error = caught.message` 直接上屏 ⇒ 用户看到 TypeError | 断言 `error === '凭据未配置'` |
 | `collectCreditsStatus` | `catch` 吞成 `status = null` + 一条 `deps.warn` ⇒ **界面两态同形** | **只能断言 `warn` 未被调用**；断言 `status === null` 变异后恒绿（实测） |
 
+⚠️ `product` 形参**不是**可以随手删的「历史包袱」：它仍被转发给 `fetchStatus` / `claim` / `fetchBalance`（以及 `src/buddy-balance-selector.ts` 里读 `deps.product.id` 的那条腿）。删形参要连调用点与 impl 签名一起改，别只改一处。
+
 ⇒ 修法是 `(product as { id?: string } | undefined)?.id === ASTUDIO.id`（两处同修）。守卫：`tests/unit/jet-hub-rpc.spec.ts` 两条「★★ product 为 undefined …」；变异回 `.id` ⇒ 恰好这 2 条红。
+
+⚠️ 教训可推广：**`as` 断言不改变运行时的 `undefined`**。凡是「调用点传 `undefined` 但类型上写着必有」的形参，`as { x }` 只是骗过编译器 —— 这类位置在**错误分支**里最危险（正常路径不执行，只有异常场景才炸，而异常场景本来就是用户最需要看文案的时候）。
 
 ⚠️ 教训可推广：**`as` 断言不改变运行时的 `undefined`**。凡是「调用点传 `undefined` 但类型上写着必有」的形参，`as { x }` 只是骗过编译器 —— 这类位置在**错误分支**里最危险（正常路径不执行，只有异常场景才炸，而异常场景本来就是用户最需要看文案的时候）。
 
