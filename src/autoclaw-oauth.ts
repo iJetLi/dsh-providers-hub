@@ -911,6 +911,31 @@ export async function startAutoclawSmsLoginFlow(
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${(req.socket as any).localPort ?? 0}`)
 
     if (req.method === 'GET' && (url.pathname === '/autoclaw/login' || url.pathname === '/')) {
+      /**
+       * ⚠️⚠️ **登录方式按站点分裂**（2026-11-02 接线，此前这里写死国内形态）。
+       *
+       * | 站点 | 登录方式 | 依据 |
+       * |---|---|---|
+       * | 国内 `autoclaw` | 手机短信验证码 | `agent-send-code` / `agent-login` |
+       * | 国际 `autoclawintl` | **Z.ai OAuth** | 国际账号是邮箱 + OAuth 创建、`phone` 为 null、无绑手机端点 ⇒ 短信必然失败 |
+       *
+       * 依据见 `src/autoclaw-product.ts` 那张「为什么是两个 provider」的表，
+       * 以及 `autoclaw-oauth.ts` 文件头的实测记录。
+       *
+       * ## 为什么这里必须算 `redirectUri`
+       *
+       * OAuth 要求「授权时的 `redirect_uri`」与「换 token 时的 `navigate_uri`」**逐字节相同**
+       * （`exchangeAutoclawZaiCode` 的入参）。两处都从 `req.socket.localPort` 取 ——
+       * 端口是 `listen(0)` 分配的，**只有收到请求时才知道**，所以不能提前算。
+       */
+      const smsLogin = product.id === AUTOCLAW.id
+      const localPort = (req.socket as { localPort?: number }).localPort ?? 0
+      const redirectUri = `http://127.0.0.1:${localPort}${AUTOCLAW_OAUTH_CALLBACK_PATH}`
+      const zaiAuthUrl = buildAutoclawZaiAuthUrl(redirectUri)
+      const pageTitle = smsLogin ? 'AutoClaw 账号登录' : `${product.displayName ?? 'AutoClaw'} 账号登录`
+      const pageDesc = smsLogin
+        ? '支持一键读取本机桌面端凭据，或通过手机验证码快速登录。'
+        : '支持一键读取本机桌面端凭据，或使用 Z.ai 账号授权登录。'
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
       res.end(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -947,10 +972,11 @@ export async function startAutoclawSmsLoginFlow(
 </head>
 <body>
   <div class="card">
-    <h2>AutoClaw 账号登录</h2>
-    <p class="desc">支持一键读取本机桌面端凭据，或通过手机验证码快速登录。</p>
-    <button type="button" class="btn-secondary" id="btnLocal">⚡ 一键读取本机 AutoClaw 桌面端凭据</button>
-    <div class="divider">或者使用手机验证码登录</div>
+    <h2>${pageTitle}</h2>
+    <p class="desc">${pageDesc}</p>
+    <button type="button" class="btn-secondary" id="btnLocal">⚡ 一键读取本机桌面端凭据</button>
+${smsLogin
+      ? `    <div class="divider">或者使用手机验证码登录</div>
     <div class="input-group">
       <label for="phone">手机号</label>
       <input type="tel" id="phone" placeholder="请输入 11 位手机号" maxlength="11" />
@@ -962,7 +988,10 @@ export async function startAutoclawSmsLoginFlow(
         <button type="button" class="btn-code" id="btnSend">获取验证码</button>
       </div>
     </div>
-    <button type="button" class="btn-primary" id="btnLogin">登录并绑定账号</button>
+    <button type="button" class="btn-primary" id="btnLogin">登录并绑定账号</button>`
+      : `    <div class="divider">或者使用 Z.ai 账号登录</div>
+    <a class="btn-primary" id="btnZai" href="${zaiAuthUrl}"
+       style="display:block;text-align:center;text-decoration:none;box-sizing:border-box;">🌐 使用 Z.ai 账号继续</a>`}
     <div class="msg" id="msgBox"></div>
   </div>
   <script>
@@ -983,7 +1012,7 @@ export async function startAutoclawSmsLoginFlow(
           showMsg('success', '✅ 成功读取本机已登录凭据（' + (data.phone || 'AutoClaw账号') + '）！已自动绑定，请关闭本窗口返回 IDE。');
           btnLocal.style.display = 'none';
         } else {
-          showMsg('error', data.error || '未检测到本地 AutoClaw 桌面端有效登录凭据，请使用下方手机验证码登录。');
+          showMsg('error', data.error || '${smsLogin ? '未检测到本地 AutoClaw 桌面端有效登录凭据，请使用下方手机验证码登录。' : '未检测到本地 AutoClaw 桌面端有效登录凭据，请改用下方的 Z.ai 账号登录。'}');
           btnLocal.disabled = false;
           btnLocal.textContent = '⚡ 一键读取本机 AutoClaw 桌面端凭据';
         }
@@ -993,6 +1022,7 @@ export async function startAutoclawSmsLoginFlow(
         btnLocal.textContent = '⚡ 一键读取本机 AutoClaw 桌面端凭据';
       }
     });
+    if (btnSend && btnLogin) {
     let countdown = 0;
     btnSend.addEventListener('click', async () => {
       const phone = phoneInput.value.trim();
@@ -1046,9 +1076,73 @@ export async function startAutoclawSmsLoginFlow(
         btnLogin.textContent = '登录并绑定账号';
       }
     });
+    }
   </script>
 </body>
 </html>`)
+      return
+    }
+
+    /**
+     * ⚠️⚠️ **Z.ai OAuth 回调**（2026-11-02 接线；此前是纯死代码）。
+     *
+     * 接之前的事实：`buildZaiAuthUrl` / `loginWithZaiCode` /
+     * `AUTOCLAW_OAUTH_CALLBACK_PATH` 三样都在，但**零调用方** ——
+     * 本地服务的路由只有 `/autoclaw/login`、`send-code`、`submit-code`、
+     * `import-local` 四条，登录页也只有短信 + 一键读本机。
+     * 后果：国际版**没有任何可用的登录入口**（短信对国际账号必然失败、
+     * Z.ai 按钮不存在），只剩「一键导入本机桌面端凭据」。
+     *
+     * ## 两个必须对齐的点
+     *
+     * 1. `redirect_uri`（授权时）与 `navigate_uri`（换 token 时）**必须逐字节相同**，
+     *    两处都从 `req.socket.localPort` 现算 —— 端口是 `listen(0)` 分配的。
+     * 2. **失败不要 `settleErr`**：那会立刻结束整个 flow（`result` 变成 reject），
+     *    用户连重试都不行。这里只回一个错误页，flow 继续等用户再点一次。
+     */
+    if (req.method === 'GET' && url.pathname === AUTOCLAW_OAUTH_CALLBACK_PATH) {
+      const escapeHtml = (text: string): string => text
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+      const renderCallbackPage = (ok: boolean, text: string): string => `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><title>Z.ai 授权</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 32px; width: 100%; max-width: 420px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5); }
+  h2 { margin: 0 0 12px 0; font-size: 19px; color: ${ok ? '#4ade80' : '#f87171'}; }
+  p { color: #cbd5e1; font-size: 13px; line-height: 1.6; margin: 0; word-break: break-all; }
+</style></head><body><div class="card"><h2>${ok ? '✅ 登录成功' : '❌ 授权失败'}</h2><p>${escapeHtml(text)}</p></div></body></html>`
+
+      const localPort = (req.socket as { localPort?: number }).localPort ?? 0
+      const redirectUri = `http://127.0.0.1:${localPort}${AUTOCLAW_OAUTH_CALLBACK_PATH}`
+      const code = url.searchParams.get('code') ?? ''
+      const state = url.searchParams.get('state') ?? ''
+      if (code === '') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end(renderCallbackPage(false, `回调没带授权码。请回到登录页重新点击「使用 Z.ai 账号继续」。（${url.search}）`))
+        return
+      }
+      void (async () => {
+        try {
+          const exchanged = await exchangeAutoclawZaiCode(code, state, redirectUri, {
+            product,
+            fetchImpl: options?.fetchImpl,
+            deviceId: options?.deviceId,
+          })
+          if (!exchanged.ok || exchanged.credential === undefined) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+            res.end(renderCallbackPage(false, `${exchanged.error ?? 'Z.ai 授权失败（未返回凭据）'}。请回到登录页重试。`))
+            return
+          }
+          settleOk({ credential: exchanged.credential, phone: exchanged.credential.user_phone ?? '' })
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          res.end(renderCallbackPage(true, '已绑定 AutoClaw（国际版）账号，可以关闭本窗口返回 IDE。'))
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          res.end(renderCallbackPage(false, `授权过程出错：${reason}`))
+        }
+      })()
       return
     }
 

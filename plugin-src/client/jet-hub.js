@@ -3103,7 +3103,11 @@ function ProviderPanel({ provider, rpcCall }) {
    */
   const [accioRegion, setAccioRegion] = React.useState('cn');
   const [astudioLoginMethod, setAstudioLoginMethod] = React.useState('local');
-  const [autoclawMode, setAutoclawMode] = React.useState('local');
+  // ⚠️ 国际版默认选 Z.ai（2026-11-02）：`local` 要求本机装了 AutoClaw 国际版客户端
+  //    并已登录，而 Z.ai 授权**不需要装任何东西** ⇒ 默认值应落在最可能成功的那条路上。
+  const [autoclawMode, setAutoclawMode] = React.useState(
+    provider === 'autoclawintl' ? 'zai' : 'local',
+  );
   /**
    * ★ 弹窗是否开着（`false` = 关着）。
    *
@@ -3351,7 +3355,22 @@ function ProviderPanel({ provider, rpcCall }) {
    *    ⚠️ 这与「按钮必须按 provider 分支」同源：同一个弹窗在两家语义不同。
    *    ⚠️ 将来若 Z.ai OAuth 接上 RPC，这里要换成三条路（导入 / OAuth / —）。
    */
+  /**
+   * AutoClaw 的**登录方式按站点分裂**（2026-11-02 接线）：
+   *
+   * | 站点 | 登录方式 | 依据 |
+   * |---|---|---|
+   * | 国内 `autoclaw` | 手机短信验证码 | `agent-send-code` / `agent-login` |
+   * | 国际 `autoclawintl` | **Z.ai OAuth** | 国际账号是邮箱 + OAuth 创建、`phone` 为 null、
+   *   无绑手机端点（`bind-phone` 全 404）⇒ 短信必然失败。实测记录见 `src/autoclaw-oauth.ts` 文件头 |
+   *
+   * ⚠️⚠️ 改前**两个都不渲染**：国际版弹窗只剩「一键导入本机桌面端凭据」，
+   *    而说明文字还承诺「或使用手机短信验证码快速登录」—— 文案与选项自相矛盾，
+   *    且那唯一一条路要求本机装了客户端并登录。用户（2026-11-02 报障）
+   *    两个前提都不满足 ⇒ **完全无法添加国际版账号**。
+   */
   const autoclawSmsAvailable = provider === 'autoclaw';
+  const autoclawZaiAvailable = provider === 'autoclawintl';
   // 支持每日签到积分的 provider 才渲染领取按钮。
   const supportsCredits = supportsDailyCheckin(provider);
   // 有成长中心的 provider 才传 runTasks（见 GROWTH_TASK_PROVIDERS 的注释：
@@ -5334,7 +5353,9 @@ function ProviderPanel({ provider, rpcCall }) {
                 astudioDialog
                   ? '支持导入本机桌面端已登录会话，或在浏览器中打开三合一登录页（支持手机短信/账号密码/微信扫码）。'
                   : autoclawDialog
-                    ? '请选择登录方式：可直接读取本机已安装并登录的桌面端凭据，或使用手机短信验证码快速登录。'
+                    ? (autoclawZaiAvailable
+                        ? '请选择登录方式：可直接读取本机已安装并登录的桌面端凭据，或使用 Z.ai 账号在浏览器中授权登录。'
+                        : '请选择登录方式：可直接读取本机已安装并登录的桌面端凭据，或使用手机短信验证码快速登录。')
                     : (accioDialog
                         ? 'Accio 的登录页按区域分域名，且区域由服务端按账号下发 —— 登录前'
                           + '无法自动判断。请选择该账号所属的区域，否则会打开打不开的登录页。'
@@ -5499,6 +5520,12 @@ function ProviderPanel({ provider, rpcCall }) {
                           //    `autoclawSmsAvailable` 的注释）。
                           ...(autoclawSmsAvailable
                             ? [{ value: 'sms', label: '📱 手机验证码快速登录', desc: '免安装桌面端，支持输入任意手机号登录' }]
+                            : []),
+                          // ⚠️ 国际版**只有**这一条能走通（短信对国际账号必然失败）：
+                          //    非 local 的取值会落到 RPC 的「其它情况」分支 ⇒ startLogin
+                          //    ⇒ 返回的登录页对国际版渲染 Z.ai 授权按钮。
+                          ...(autoclawZaiAvailable
+                            ? [{ value: 'zai', label: '🌐 使用 Z.ai 账号登录', desc: '在浏览器里用 Z.ai 账号授权（国际版唯一可用方式）' }]
                             : []),
                         ].map((opt) => {                          const active = autoclawMode === opt.value;
                           return React.createElement('div', {

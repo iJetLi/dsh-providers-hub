@@ -314,3 +314,80 @@ AutoClaw 自己的词汇（`Invalid token`）在调用点显式声明。
 2. **必须钉死请求用哪个号**：若让 `resolveCredential` 自然选，两条规则都选 A
    ⇒ 「续错号」这个缺陷根本不会暴露。用例里改成直接覆盖
    `adapter.options.resolveCredential` 返回 B 的凭据。
+
+## ⚠️⚠️⚠️ 国际版**没有任何可用的登录入口**：Z.ai OAuth 三样全写了但零调用（2026-11-02 真实报障，已修）
+
+### 现象
+
+「AutoClaw（国际版）账号管理」点「+」新建账号，弹窗里**只有一个**选项
+「⚡ 一键导入本机桌面端凭据」，而弹窗说明同时写着「**或使用手机短信验证码快速登录**」
+—— 承诺的第二个选项根本不存在。用户本机没装客户端 ⇒ 唯一那条路也走不通
+⇒ **国际版完全无法添加账号**。（顺带：那条路失败时错误还被吞成
+`connection: invalid server-response failure`，见 `protocol-wire.md` 同名小节。）
+
+### 为什么短信对国际版不可用（这是事实，不是缺陷）
+
+国际版后端**也接受**短信（`/userapi/v1/agent-send-code` 在国际基址回 `code=0 SUCCESS`），
+但国际账号是**邮箱 + OAuth 创建**的：`account-profile.json` 里 `phone: null`，
+且**没有绑手机号的端点**（`agent-bind-phone` / `bind-phone` 全 404）。
+依据：`src/autoclaw-product.ts` 那张「为什么是两个 provider」的表（登录方式一行写的就是
+「国内：短信验证码 / 国际：**Z.ai OAuth**」）+ `src/autoclaw-oauth.ts` 文件头。
+
+⇒ 客户端 `autoclawSmsAvailable = provider === 'autoclaw'` 是**对的**，但那意味着
+**国际版一个登录分支都不渲染**。
+
+### 真正的缺陷：Z.ai OAuth 这条路是**死代码**
+
+三样都在，但**零调用方**（2026-11-02 `grep` 实测）：
+
+| 存在的东西 | 调用方 |
+|---|---|
+| `AutoclawAuth.buildZaiAuthUrl()` | **0** |
+| `AutoclawAuth.loginWithZaiCode()` | **0**（只有定义与文档引用） |
+| `AUTOCLAW_OAUTH_CALLBACK_PATH = '/auth/callback-zai'` | 只出现在常量定义与注释 |
+| `exchangeAutoclawZaiCode()` | 只被上面那个零调用的 `loginWithZaiCode` 调 |
+
+本地登录服务的路由当时只有 4 条：`GET /autoclaw/login`、`POST /autoclaw/send-code`、
+`POST /autoclaw/submit-code`、`POST /autoclaw/import-local` —— **没有回调路由**；
+登录页 HTML 写死国内形态（短信 + 一键读本机），**不区分站点**。
+
+⚠️⚠️ **方法可推广**：本仓已多次出现「写了但没接」的形态
+（`SELF_HEAL_REFRESHABLE_PROVIDERS` 漏登记、`WIRED_EXPIRY_PROVIDERS` 漏一家、
+`AGGREGATE_CHANNELS` 加错表）。**判据永远是 `grep` 调用方，不是「方法存在」** ——
+这次就是三个方法 + 一个常量整整齐齐摆着，功能却完全不可达。
+
+### 修法（四处，缺一不可）
+
+| 位置 | 改动 |
+|---|---|
+| 登录页（`startAutoclawSmsLoginFlow`） | 按 `product.id` 分裂：国内渲染短信表单；**国际渲染 `<a href="{buildAutoclawZaiAuthUrl(redirectUri)}">` 授权按钮**，且**不渲染** `id="phone"`（否则用户白试一次） |
+| `redirectUri` | 两处都从 `req.socket.localPort` **现算** —— 端口是 `listen(0)` 分配的，只有收到请求时才知道；OAuth 要求授权时的 `redirect_uri` 与换 token 时的 `navigate_uri` **逐字节相同** |
+| 新增 `GET /auth/callback-zai` | `code` + `state` → `exchangeAutoclawZaiCode(..., redirectUri)` → `settleOk({ credential, phone })`。⚠️ **失败不要 `settleErr`**：那会立刻结束整个 flow（user 连重试都不行），只回错误页让用户再点一次 |
+| 客户端 `plugin-src/client/jet-hub.js` | 新增 `autoclawZaiAvailable`；国际版渲染 `{ value: 'zai', label: '🌐 使用 Z.ai 账号登录' }`（非 `local` 的取值会落到 RPC 的「其它情况」分支 ⇒ `startLogin` ⇒ 打开登录页）；说明文案按站分；**默认值国际版落 `zai`**（`local` 要求本机装了客户端，默认选它等于默认走最可能失败的路） |
+
+### 守卫与变异验证
+
+`tests/unit/autoclawintl-zai-wiring.spec.ts`（5 条，**不连外网**：假 `fetch` 接住换 token 请求）：
+
+| 变异 | 结果 |
+|---|---|
+| 登录页不再按站点分裂（`smsLogin = true \|\| …`） | **3 红** |
+| 删掉回调路由（回到死代码状态） | **2 红** |
+| 换 token 时把 `navigate_uri` 加个后缀 | **1 红**（逐字节断言） |
+| 客户端选项值改成 `zai-disabled` | **1 红** |
+
+⚠️ **第四条第一次是假绿**：我原本断言 `toContain("value: 'zai'")`，而 `jet-hub.js` 里
+**zcode 的登录渠道**也有一处 `{ value: 'zai', label: '🌐 z.ai（chat.z.ai，国际版）' }`
+⇒ 裸断言被它兜住，五条用例全绿。改成锚定整段
+`"value: 'zai', label: '🌐 使用 Z.ai 账号登录'"` 后才有牙。
+**这就是「源码级断言必须锚定片段」的第 N 次实证。**
+
+### 未验证（如实登记）
+
+- **真实 Z.ai 授权页的端到端**：需要人工在浏览器里点授权（自动化会弹真窗口，本仓纪律禁止在单测里做）。
+  已用假 `fetch` 验证了「登录页 → 授权 URL → 回调 → 换 token → settle」的**全部接缝**，
+  唯一没验的是 `chat.z.ai` 真实授权页把 `code`/`state` 带回来的那一步。
+- `AutoclawAuth.loginWithZaiCode()` 仍是**零调用**：flow 里走的是 `exchangeAutoclawZaiCode`
+  （`loginWithZaiCode` 内部要 `ctx.credentials` 自落盘 + 领积分，而 flow 的职责是
+  「返回凭据、由 RPC 侧落盘」—— 与短信路径同形）。留着不删是因为它是已导出的公开方法，
+  但**登记在此：它不在任何生产路径上**。
