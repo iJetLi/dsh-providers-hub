@@ -484,3 +484,52 @@ AutoClaw 自己的词汇（`Invalid token`）在调用点显式声明。
 
 ### 可推广的教训
 **「把某个参数留给对方填」在 OAuth 里是错误假设。** `state` 的语义就是「本端生成、对端原样回传」；指望授权页替我们生成，等价于把一个必需参数留空 —— 而服务端的表现是 422（明确）或「登录完落回首页」（静默），后者极难归因：**回调端零请求**，面板端只有「等待超时」这一种可观测形态。
+
+## ⚠️⚠️⚠️ 第三轮真机报障：`redirect_uri` 的**端口必须是注册过的**（2026-11-02，已修）
+
+### 现象（用户截图）
+上一轮修好端点与 `state` 之后，浏览器地址栏已经是对的
+（`chat.z.ai/api/oauth/authorize?response_type=code&client_id=client_EnD0QI8bLRFT8cciLp389Q&redirect_uri=http%3A%2F%2F127.0.0.1%3A60768%2Fauth%2Fcallback-zai&state=aosi.…`），
+但页面正文只有一行：
+
+```
+{"detail":"Redirect URI not registered for this client"}
+```
+
+### 根因
+回调地址的**端口**是 `listen(0)` 随机分配的（这次是 `60768`）。已登录用户请求
+`/api/oauth/authorize` 时，服务端**校验 `redirect_uri` 白名单** —— 未注册的端口直接拒绝。
+
+`AUTOCLAW_OAUTH_CALLBACK_PORTS = [18432, 19654, 19723, 53699]` 本来就是这个用途
+（官方客户端注册的那几个），但在本次接线之前它是**零消费**常量（审查员已登记「与 `listen(0)` 设计冲突」）
+⇒ 缺陷一直在，只是走到真机才暴露。
+
+### ⚠️ 探针陷阱：未登录时的 307 **不能**证明端口没问题
+上一轮的服务端探针表里，`redirect_uri` 换成 `https://evil.example.com/cb` 也是 **307** ⇒ 我当时据此认为
+「未登录时不校验 `redirect_uri`」。**但那只对未登录态成立**：登录后同一个端点会硬校验白名单。
+⇒ **凡「某一格在未登录态放行」的结论，都不能外推到登录态**。这条比端口本身更容易再犯。
+
+### 修法（`src/autoclaw-oauth.ts`）
+| 改动 | 说明 |
+|---|---|
+| 新增 `AutoclawCallbackListenable`（结构类型） | `listen` / `once` / `removeListener` 三方法，便于单测注入替身 |
+| 新增 `listenOnCallbackPorts(server, candidates = AUTOCLAW_OAUTH_CALLBACK_PORTS)` | 逐个试，成功即返回；**全失败才**回退 `listen(0)` |
+| 私有 `tryListen(server, port)` | 挂一次 `listening`/`error`，占用时 `resolve(false)` 不抛 |
+| flow 的启动处 | `await listenOnCallbackPorts(server)` 取代 `server.listen(0, …)` |
+
+回退 `listen(0)` 那一支是**刻意的**：4 个端口都被占时（同机开了两个 IDE / 残留进程），
+OAuth 反正登不上（未注册端口必被拒），但**本地登录页仍要能打开** —— 至少用户能看到页面与错误。
+
+### 守卫（`tests/unit/autoclawintl-zai-wiring.spec.ts`，14 条）
+- 集成格：`AUTOCLAW_OAUTH_CALLBACK_PORTS` 必须 `toContain(new URL(redirectUri).port)`；
+- 3 条端口选择用例（`fakeServer(busy)` 替身 + `queueMicrotask` 派发）：第一个可用 ⇒ `calls === [ports[0]]`；
+  前两个占用 ⇒ `[...busy, ports[2]]` 且不含 `0`；全占用 ⇒ `[...全部, 0]`。
+
+### 变异（`C:/Users/Betsy/AppData/Local/Temp/mut-autoclaw-port.cjs`，两条全红、恢复 `IDENTICAL`）
+直接 `listen(0)` ⇒ **4 红**（含集成那条）；只试第一个候选 ⇒ **2 红**。
+
+### 可推广的教训
+1. **「随机端口」在 OAuth 里是错的默认值。** 回调端口是**在对方那里注册过的常量**，不是随便挑一个；
+   随机端口只在「对端不校验」时才碰巧能用。
+2. **一个参数的前置条件可能只在「已登录」分支里生效**（见上面的探针陷阱）。
+   诊断这类问题不能只打一次匿名请求，要区分「未登录 / 已登录」两种状态。

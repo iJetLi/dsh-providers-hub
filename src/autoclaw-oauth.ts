@@ -121,6 +121,69 @@ export function autoclawZaiState(now: number = Date.now()): string {
 }
 
 /**
+ * 按顺序尝试监听**注册过的回调端口**（{@link AUTOCLAW_OAUTH_CALLBACK_PORTS}）。
+ *
+ * ## ⚠️⚠️ 为什么不能 `listen(0)` 随机端口（2026-11-02 真机，第二处报障）
+ *
+ * Z.ai 的 `/api/oauth/authorize` 对**已登录**用户会校验 `redirect_uri` 白名单，
+ * 未注册的端口直接回一段 JSON：
+ *
+ * ```
+ * {"detail":"Redirect URI not registered for this client"}
+ * ```
+ *
+ * 实测端点是随机端口 `60768`。而 `AUTOCLAW_OAUTH_CALLBACK_PORTS` 正是官方客户端
+ * 注册的那几个 —— 它在本次接线之前是**零消费**常量（审查员登记过「与 `listen(0)`
+ * 冲突，若服务端做端口白名单会直接死在授权页」，现在被真机证实）。
+ *
+ * ⚠️ 未登录时**看不出**这个问题：那时 `/api/oauth/authorize` 一律 307 到登录页，
+ * 不做白名单校验 ⇒ 「curl 探针 307」**不能**当成「端口没问题」的证据。
+ *
+ * ## 回退策略
+ *
+ * 4 个端口全被占用 ⇒ 回退 `listen(0)`。此时 OAuth 一定登不上（未注册），但本地页
+ * 仍能打开 —— 用户至少能看到授权页并拿到一条可诊断的失败，而不是「窗口都起不来」。
+ * 回调里对这种情况已经会返回「授权失败」的可见文案。
+ *
+ * @param server - 只需 `listen` / `once` / `removeListener`（单测因此可以注入替身）。
+ * @param candidates - 候选端口，按顺序尝试。
+ */
+export async function listenOnCallbackPorts(
+  server: AutoclawCallbackListenable,
+  candidates: readonly number[] = AUTOCLAW_OAUTH_CALLBACK_PORTS,
+): Promise<void> {
+  for (const candidate of candidates) {
+    const ok = await tryListen(server, candidate)
+    if (ok) return
+  }
+  await tryListen(server, 0)
+}
+
+/** `listenOnCallbackPorts` 需要的最小 server 面（结构类型，便于单测注入替身）。 */
+export interface AutoclawCallbackListenable {
+  listen: (port: number, host: string) => unknown
+  once: (event: 'listening' | 'error', listener: () => void) => unknown
+  removeListener: (event: 'listening' | 'error', listener: () => void) => unknown
+}
+
+/** 尝试监听一个端口；`EADDRINUSE` 等错误返回 `false`（不抛）。 */
+function tryListen(server: AutoclawCallbackListenable, port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const onError = (): void => {
+      server.removeListener('listening', onListening)
+      resolve(false)
+    }
+    const onListening = (): void => {
+      server.removeListener('error', onError)
+      resolve(true)
+    }
+    server.once('error', onError)
+    server.once('listening', onListening)
+    server.listen(port, '127.0.0.1')
+  })
+}
+
+/**
  * 构造 Z.ai 授权 URL。
  *
  * @param redirectUri - 回调地址（`http://127.0.0.1:<port>/auth/callback-zai`）。
@@ -997,7 +1060,9 @@ export async function startAutoclawSmsLoginFlow(
        *
        * OAuth 要求「授权时的 `redirect_uri`」与「换 token 时的 `navigate_uri`」**逐字节相同**
        * （`exchangeAutoclawZaiCode` 的入参）。两处都从 `req.socket.localPort` 取 ——
-       * 端口是 `listen(0)` 分配的，**只有收到请求时才知道**，所以不能提前算。
+       * 端口由 {@link listenOnCallbackPorts} 按**注册过的回调端口**选定（不是 `listen(0)`
+       * 随机端口，那种端口会被 Z.ai 以「Redirect URI not registered」拒绝），
+       * 但处理器拿到的是 `req`，闭包里没有 port 变量，所以仍从 socket 现算。
        */
       const smsLogin = product.id === AUTOCLAW.id
       const localPort = (req.socket as { localPort?: number }).localPort ?? 0
@@ -1169,7 +1234,8 @@ ${smsLogin
      * ## 两个必须对齐的点
      *
      * 1. `redirect_uri`（授权时）与 `navigate_uri`（换 token 时）**必须逐字节相同**，
-     *    两处都从 `req.socket.localPort` 现算 —— 端口是 `listen(0)` 分配的。
+     *    两处都从 `req.socket.localPort` 现算 —— 端口由 `listenOnCallbackPorts`
+     *    按**注册过的回调端口**选定（`AUTOCLAW_OAUTH_CALLBACK_PORTS`）。
      * 2. **失败不要 `settleErr`**：那会立刻结束整个 flow（`result` 变成 reject），
      *    用户连重试都不行。这里只回一个错误页，flow 继续等用户再点一次。
      */
@@ -1343,9 +1409,9 @@ ${smsLogin
     res.writeHead(404).end('Not Found')
   })
 
-  await new Promise<void>((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve())
-  })
+  // ⚠️ 必须优先用**注册过的回调端口**（`listen(0)` 的随机端口会被 Z.ai 以
+  //    `{"detail":"Redirect URI not registered for this client"}` 拒绝，2026-11-02 真机）。
+  await listenOnCallbackPorts(server)
 
   const addr = server.address()
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0

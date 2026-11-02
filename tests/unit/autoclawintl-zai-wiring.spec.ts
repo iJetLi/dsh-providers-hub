@@ -40,8 +40,11 @@ import { AutoclawAuth } from '../../src/autoclaw-auth.js'
 import { AUTOCLAW, AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
 import {
   AUTOCLAW_OAUTH_CALLBACK_PATH,
+  AUTOCLAW_OAUTH_CALLBACK_PORTS,
   exchangeAutoclawZaiCode,
+  listenOnCallbackPorts,
   startAutoclawSmsLoginFlow,
+  type AutoclawCallbackListenable,
 } from '../../src/autoclaw-oauth.js'
 
 const live: Array<{ close: () => Promise<void> }> = []
@@ -133,6 +136,14 @@ describe('★★ 登录页按站点分裂', () => {
     expect(page).not.toContain('type="tel"')
     const redirectUri = zaiRedirectUriOf(page)
     expect(redirectUri).toContain(AUTOCLAW_OAUTH_CALLBACK_PATH)
+    // ⚠️⚠️ 真机回归（2026-11-02 第二处报障）：**随机端口会被 Z.ai 拒绝** ——
+    //     已登录用户打 `/api/oauth/authorize` 时，服务端校验 `redirect_uri` 白名单，
+    //     未注册的端口直接回 `{"detail":"Redirect URI not registered for this client"}`
+    //     （实测端口 60768）。`AUTOCLAW_OAUTH_CALLBACK_PORTS` 就是官方客户端注册的那几个。
+    expect(
+      AUTOCLAW_OAUTH_CALLBACK_PORTS,
+      '回调端口必须是注册过的那几个（随机端口会被 Z.ai 以「Redirect URI not registered」拒绝）',
+    ).toContain(Number(new URL(redirectUri).port))
   })
 
   it('★ 对照：国内版仍是短信表单，且**不得**出现 Z.ai', async () => {
@@ -307,5 +318,62 @@ describe('★★ 客户端入口（源码锚点必须跨「条件展开 + 字面
     expect(source, '默认值必须与 provider 绑定，不能写死 local').toMatch(
       /React\.useState\(\s*provider === 'autoclawintl' \? 'zai' : 'local',?\s*\)/,
     )
+  })
+})
+
+/**
+ * ★★ 回调端口必须优先用**注册过的**那几个（2026-11-02 第二处真机报障）。
+ *
+ * 真机证据：随机端口 `60768` 打 `/api/oauth/authorize`（已登录）⇒ 服务端回
+ * `{"detail":"Redirect URI not registered for this client"}`。
+ * 而 `AUTOCLAW_OAUTH_CALLBACK_PORTS` 是官方客户端注册的那几个。
+ *
+ * ⚠️ 未登录时**看不出**这个问题（那时一律 307 到登录页，不校验白名单）
+ * ⇒ 「curl 探针 307」不能当成「端口没问题」的证据 —— 判据只能打在选择逻辑上。
+ */
+describe('★★ 回调端口优先用注册过的（随机端口会被 Z.ai 拒绝）', () => {
+  /** 极简 server 替身：`listen` 时同步记录，microtask 后按 `busy` 派发 listening/error。 */
+  function fakeServer(busy: readonly number[]): { calls: number[]; server: AutoclawCallbackListenable } {
+    const calls: number[] = []
+    let onListening: (() => void) | undefined
+    let onError: (() => void) | undefined
+    const server: AutoclawCallbackListenable = {
+      listen(port: number) {
+        calls.push(port)
+        queueMicrotask(() => {
+          // 端口 0 = 由系统随机分配，永远可用
+          if (port !== 0 && busy.includes(port)) onError?.()
+          else onListening?.()
+        })
+        return server
+      },
+      once(event: 'listening' | 'error', listener: () => void) {
+        if (event === 'listening') onListening = listener
+        else onError = listener
+        return server
+      },
+      removeListener() { return server },
+    }
+    return { calls, server }
+  }
+
+  it('★★ 第一个候选可用时，必须只监听它（不能先随机再改）', async () => {
+    const { calls, server } = fakeServer([])
+    await listenOnCallbackPorts(server)
+    expect(calls).toEqual([AUTOCLAW_OAUTH_CALLBACK_PORTS[0]])
+  })
+
+  it('★★ 前几个被占用时必须依次往后试（不能直接回退随机端口）', async () => {
+    const busy = AUTOCLAW_OAUTH_CALLBACK_PORTS.slice(0, 2)
+    const { calls, server } = fakeServer(busy)
+    await listenOnCallbackPorts(server)
+    expect(calls).toEqual([...busy, AUTOCLAW_OAUTH_CALLBACK_PORTS[2]])
+    expect(calls).not.toContain(0)
+  })
+
+  it('★ 全部被占用时才回退端口 0（此时 OAuth 必失败，但本地页仍要能打开）', async () => {
+    const { calls, server } = fakeServer(AUTOCLAW_OAUTH_CALLBACK_PORTS)
+    await listenOnCallbackPorts(server)
+    expect(calls).toEqual([...AUTOCLAW_OAUTH_CALLBACK_PORTS, 0])
   })
 })
