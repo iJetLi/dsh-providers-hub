@@ -1402,6 +1402,14 @@ export async function collectCreditBalances<TCredential = BuddyCredential, TProd
          * ⚠️ 同因的另一处是 `collectCreditsStatus`（**签到状态**，不是 `collectClaimResults` ——
          * 后者体内没有这个写法，别照着改错地方）。那处的症状不同：`catch` 把它吞成
          * `status = null` + 一条 warn，界面上与「查询失败」同形 ⇒ 它的判据只能打在 warn 上。
+         *
+         * ⚠️⚠️ **这个 ASTUDIO 兜底分支本身当前恒不可达**（2026-11-02 审查用 git 证实）：
+         * 调用点早在 `ea5e64d`（2026-10-10）就改成传 `undefined`，而兜底是
+         * `96f2001`（2026-10-17）才引入 ⇒ **自引入起就永远进不去**；一旦被触及
+         * （product 为 `undefined` / `null`）它只会抛，正是这次的报障。所以本次 `?.`
+         * 的净效果是「把抛中止」，**不是**「让兜底生效」—— 要不要恢复兜底是另一个决定
+         * （得让调用点把 product 传进来；通用分派路径上它不可得，见调用点注释）。
+         * 刻意保留死分支而不是删掉：删了将来恢复就没有落点，且删它要动所有调用点。
          */
         if (resolved === undefined && (product as { id?: string } | undefined)?.id === ASTUDIO.id) {
           resolved = await deps.resolve(credentialRef(ASTUDIO.defaultCredentialRef))

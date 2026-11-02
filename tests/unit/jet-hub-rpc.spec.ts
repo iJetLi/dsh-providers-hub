@@ -472,6 +472,12 @@ describe('credits.status 单账号异常隔离', () => {
    * ⚠️ 既有的 `:450` 那条「凭据解析为 undefined 时状态为 null」**传的是 `WORKBUDDY`（真值）**
    * ⇒ 走不进 `resolved === undefined && (product as …).id` 这一格，所以它漏网了。
    * 后来人别「顺手改回 WORKBUDDY」：本用例的全部价值就在 `undefined as never` 这个第二参。
+   *
+   * ⚠️⚠️ **本用例只有 `warnings` 那一条承重**：红队实测 —— 删掉它之后（且代码处于变异态）
+   * 本用例**照绿**，因为 `status === null` 与 `statusCalls === 0` 在「抛 TypeError」与
+   * 「静默跳过」两态下**都成立**（TypeError 在调用 `fetchStatus` **之前**就抛了）。
+   * 同理 `collectCreditBalances` 那条只有 `error === '凭据未配置'` 承重。⇒ 这几条
+   * 「不许发请求」的断言是**表达意图的文档性断言，不是守卫**，别把它们当覆盖证据。
    */
   it('★★ product 为 undefined 时，凭据未配置不得抛 TypeError（否则被吞成一条假告警）', async () => {
     const warnings: string[] = []
@@ -762,6 +768,11 @@ describe('credits.balances 逐账号余额收集', () => {
    * ⚠️ 既有的 `:764` 那条「凭据未配置时给出原因」**传的是 `WORKBUDDY`（真值）**
    * ⇒ 走不进 `resolved === undefined && (product as …).id`，所以它漏网了。
    * 本用例的全部价值就在 `undefined as never` 这个第二参，别「顺手改回 WORKBUDDY」。
+   *
+   * ⚠️⚠️ **本用例只有 `error === '凭据未配置'` 一条承重**：红队实测 —— 删掉它之后
+   * （且代码处于变异态）本用例**照绿**，因为 `balance === null` 与 `touched === 0` 在
+   * 「抛 TypeError」与「静默跳过」两态下**都成立**（TypeError 在调用 `fetchBalance`
+   * 之前就抛）。它们是文档性断言，不是守卫。
    *
    * 判据：product 传 `undefined`（**真实调用形态**）+ 凭据读不到 ⇒ 必须是「凭据未配置」。
    */
