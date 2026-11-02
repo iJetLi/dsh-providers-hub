@@ -5090,7 +5090,8 @@ function ProviderPanel({ provider, rpcCall }) {
               className: 'dim-jh-btn',
               title: supportsGrowthTasks
                 ? `领取全部 ${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号（含已停用）的每日签到积分，**并完成成长中心任务**。`
-                  + '成长一轮单账号实测 90～270s 且全串行，账号多时可能需多点几次；'
+                  + '成长一轮单账号可达数分钟（小程序族任务有 45s/条的反作弊节奏）且全串行，账号多时可能需多点几次；'
+                  + '同时自动领取连登兑换、补签、抽奖、首Buddy 与新手礼包；'
                   + '受客户端动作限制的项（微信、夜猫子窗口、判据推不动）会如实标为「需客户端」。'
                 : `领取全部 ${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号（含已停用）的每日签到积分`,
               disabled: claiming || accounts.length === 0,
