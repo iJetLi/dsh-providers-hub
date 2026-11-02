@@ -55,8 +55,8 @@ function makeFakeFetch(capture: { bodies: Array<Record<string, unknown>> }): typ
       return new Response(JSON.stringify({
         code: 0,
         data: {
-          access_token: 'zai-access-token',
-          refresh_token: 'zai-refresh-token',
+          access_token: 'stub-access',
+          refresh_token: 'stub-refresh',
           expires_in: 3600,
           user_id: 'u-1',
         },
@@ -118,7 +118,7 @@ describe('★★ AutoClaw 国际版：Z.ai OAuth 登录入口（此前是死代�
 
     // 3) flow 必须 settle 出凭据
     const settled = await flow.result
-    expect(settled.credential.access_token).toBe('zai-access-token')
+    expect(settled.credential.access_token).toBe('stub-access')
 
     // 4) 关键：换 token 时的 navigate_uri 与授权时**逐字节相同**
     expect(capture.bodies, '换 token 请求没打出去').toHaveLength(1)
