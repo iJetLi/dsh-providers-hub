@@ -5946,9 +5946,23 @@ function registerJetHubEndpoints(
              *    **不猜**（与短信路径同口径）。
              */
             const identity = credential.user_id === undefined ? '' : String(credential.user_id).trim()
-            const duplicateId = identity === ''
-              ? ''
-              : await pool.findAccountIdByIdentityField(autoclawProduct.id, 'user_id', identity)
+            /**
+             * ⚠️⚠️ **读池失败必须与「无重复」分开**（2026-11-02 自查补；与 officeace 那条同款教训）：
+             * 这里在 `started.result.then(...)` 链上，**任何抛错都会走 `.catch` ⇒ `failLogin(id)` ⇒ 删账号**。
+             * 而此刻凭据**已经换到手了** —— 把「查重时依赖不可用」判成「登录失败」，用户会看到
+             * 「登录失败」而实际授权成功，且占位条目连同凭据一起被清掉，只能重来一次。
+             * ⇒ 读池失败记 warn 后**照常落库**（读不到 ≠ 没有，与 `poolEntryOf` 的 `'unknown'` 同取向）。
+             */
+            let duplicateId = ''
+            if (identity !== '') {
+              try {
+                duplicateId = await pool.findAccountIdByIdentityField(autoclawProduct.id, 'user_id', identity)
+              } catch (error) {
+                ctx.logger.warn(
+                  `[jet-hub] ${autoclawProduct.id} 查重失败（按 user_id 读账号池）⇒ 本次**不去重**、照常落库：${String(error)}`,
+                )
+              }
+            }
             if (duplicateId !== '' && duplicateId !== id) {
               /**
                * 把**本次的新凭据**写到已存在那条的 ref 上，再删掉本次的占位条目。
@@ -5964,11 +5978,30 @@ function registerJetHubEndpoints(
                 .find((entry) => entry.id === duplicateId)
               if (existing !== undefined) {
                 await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+                /**
+                 * ⚠️⚠️ **命中一张「已被用户停用」的原卡时，必须把它重新启用**（2026-11-02 自查补；
+                 * 与 officeace 那条 P2 同型，是同一个坑的第二个入口）。
+                 *
+                 * 症状：用户手动停用某张国际版卡片 → 用**同一个 Z.ai 账号**重新授权 ⇒
+                 * 本段把新卡并入老卡并删掉新卡 ⇒ **老卡仍是停用** ⇒ 面板上「新卡片消失、老卡片
+                 * 依旧灰着」，用户以为没登上；若那是唯一账号，还会因「无已启用账号」整组隐藏。
+                 *
+                 * 处置口径与 officeace 一致：**语义 = 用户刚刚主动用这个号登录过，就是想让它可用**
+                 * ⇒ 并入时一并启用（并留 warn 说明这处被动改写）。
+                 */
+                const wasDisabled = existing.enabled === false
                 await pool.updateAccount(existing.id, {
                   nickname: autoclawDisplayNickname(credential, existing.id),
                   expiresAt: credential.expires_at,
                   refreshable: isAutoclawRefreshable(credential),
+                  ...(wasDisabled ? { enabled: true } : {}),
                 })
+                if (wasDisabled) {
+                  ctx.logger.warn(
+                    `[jet-hub] ${autoclawProduct.id} 的账号 ${identity} 原卡片 ${existing.id} 处于**停用**状态，`
+                    + '本次登录已一并重新启用（否则会出现「登录成功但该渠道零可用卡」）',
+                  )
+                }
                 await pool.removeAccount(id)
                 ctx.logger?.info?.(
                   `[jet-hub] ${autoclawProduct.id} 的账号 ${identity} 已存在（${duplicateId}），`

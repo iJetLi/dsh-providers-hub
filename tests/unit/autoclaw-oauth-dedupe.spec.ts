@@ -186,6 +186,69 @@ describe('★★ OAuth 登录去重：同一个 user_id 第二次授权不得产
     expect(h.pool.listAccountsByProvider('autoclawintl')).toHaveLength(2)
   })
 
+  /**
+   * ⚠️⚠️ **读池失败 ≠ 登录失败**（2026-11-02 自查补的必修）。
+   *
+   * 去重这一步跑在 `started.result.then(...)` 链上，而该链有
+   * `.catch(error => failLogin(id, error))` —— **任何抛错都会删账号**。
+   * 但此处凭据**已经换到手了**：若把「查重的依赖挂了」判成「登录失败」，
+   * 用户会看到「登录失败」，而占位条目连同刚拿到的凭据一起被清掉 ⇒ 只能重来一次。
+   * 这与 officeace 那条注释的教训同型（「读不到 ≠ 没有」）。
+   *
+   * 判据设计：让 `findAccountIdByIdentityField` 直接抛错，然后断言
+   * ① 账号**还在**（没走 failLogin）② 凭据**落盘**。
+   */
+  it('★★ 查重时读池抛错 ⇒ 记 warn 后照常落库，绝不删账号', async () => {
+    const h = makeHarness()
+    const created = await h.call('account.create', { provider: 'autoclawintl', autoclawMode: 'zai' })
+    expect(created.ok).toBe(true)
+
+    // 让查重读池直接炸（模拟池后端不可用 / 替身池没这个方法）
+    Object.defineProperty(h.pool, 'findAccountIdByIdentityField', {
+      configurable: true,
+      value: () => { throw new Error('pool unavailable') },
+    })
+
+    h.finishLogin(credential('dave'))
+    await h.waitFor(() => [...h.credentials.values()].some((value) => value.includes('stub-dave')))
+
+    const entries = h.pool.listAccountsByProvider('autoclawintl')
+    expect(entries, '读池失败被当成登录失败 ⇒ 占位条目连同凭据一起被删').toHaveLength(1)
+    expect(entries[0].nickname, '照常落库时昵称必须按本次凭据刷新').toBe('dave')
+  })
+
+  /**
+   * ⚠️⚠️ **命中「已停用」的原卡时必须一并启用**（2026-11-02 自查补；officeace P2 的第二个入口）。
+   *
+   * 症状：用户手动停用某张国际版卡片 → 用同一个 Z.ai 账号重新授权 ⇒ 新卡并入老卡并删除
+   * 新卡 ⇒ 老卡**仍是停用** ⇒ 面板上「新卡片消失、老卡片依旧灰着」= 用户以为没登上；
+   * 若那是唯一账号，还会因「无已启用账号」整组隐藏。
+   * 语义与 officeace 一致：**用户刚刚主动用这个号登录过，就是想让它可用**。
+   */
+  it('★★ 命中的原卡已被停用 ⇒ 并入时必须重新启用（否则「登录成功但零可用卡」）', async () => {
+    const h = makeHarness()
+    await h.call('account.create', { provider: 'autoclawintl', autoclawMode: 'zai' })
+    h.finishLogin(credential('erin'))
+    await h.waitFor(() => [...h.credentials.values()].some((value) => value.includes('stub-erin')))
+
+    const first = h.pool.listAccountsByProvider('autoclawintl')[0]
+    await h.pool.updateAccount(first.id, { enabled: false })
+    expect(h.pool.listAccountsByProvider('autoclawintl')[0].enabled).toBe(false)
+
+    // 同一账号再登一次
+    await h.call('account.create', { provider: 'autoclawintl', autoclawMode: 'zai' })
+    h.finishLogin(credential('erin-again'))
+    await h.waitFor(() => {
+      const entries = h.pool.listAccountsByProvider('autoclawintl')
+      return entries.length === 1 && entries[0].nickname === 'erin-again'
+    })
+
+    const entries = h.pool.listAccountsByProvider('autoclawintl')
+    expect(entries).toHaveLength(1)
+    expect(entries[0].id).toBe(first.id)
+    expect(entries[0].enabled, '原卡停用着 ⇒ 用户会以为没登上，且该渠道零可用卡').toBe(true)
+  })
+
   afterEach(() => {
     // 池是每用例新建的，无需清理
   })

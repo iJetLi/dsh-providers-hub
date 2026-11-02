@@ -431,6 +431,17 @@ AutoClaw 自己的词汇（`Invalid token`）在调用点显式声明。
 | 10 | 判据假绿：客户端四条断言只锚字面量 | 锚点跨「条件展开 + 字面量」：`...(autoclawZaiAvailable ? [{ value: 'zai' …`，另加 sms 侧同款与「不得用或式」互斥判据 |
 | 11 | 真实用户路径零覆盖：`startLogin` 里把 `product` 写成国内 `AUTOCLAW` **零红** | 新增「`new AutoclawAuth(AUTOCLAW_INTL).startLogin()` 的页面必须含 Z.ai」 |
 
+### ⚠️⚠️ 自查追加的两条（2026-11-02，写完全部必修后自己复审去重块时发现）
+
+两条都**不在审查员的清单里**，是把去重块逐行过一遍才发现的：
+
+| # | 缺陷 | 症状 | 修法 |
+|---|---|---|---|
+| 12 | **查重时读池抛错 ⇒ 走 `.catch` ⇒ `failLogin` ⇒ 删账号** | 去重跑在 `started.result.then(...)` 链上，而该链统一 `.catch(error => failLogin(id, error))`。可此刻**凭据已经换到手了** ⇒ 把「查重依赖不可用」判成「登录失败」⇒ 用户看到「登录失败」而实际授权成功、占位条目连同刚拿到的凭据一起被清掉，只能重来一次 | 包 `try/catch`，读池失败记 warn 后**照常落库**（「读不到 ≠ 没有」，与 `poolEntryOf` 返回 `unknown` 同取向；与 officeace 那条注释同一个教训） |
+| 13 | **命中的原卡已被用户停用 ⇒ 并入后仍是停用** | 用户手动停用某张国际版卡片 → 用同一个 Z.ai 账号重新授权 ⇒ 新卡并入老卡并删除新卡 ⇒ 老卡**依旧停用** ⇒ 面板「新卡片消失、老卡片灰着」= 用户以为没登上；若那是唯一账号，还会因「无已启用账号」整组隐藏 | 并入时若 `existing.enabled === false` ⇒ 一并 `enabled: true` 并记 warn（语义与 officeace 的 P2 同口径：**用户刚主动用这个号登录过，就是想让它可用**） |
+
+**守卫**：`tests/unit/autoclaw-oauth-dedupe.spec.ts` 各加一条（读池抛错 ⇒ 条目还在 + 凭据落盘；原卡停用 ⇒ 并入后 `enabled === true`）。
+**变异**：去掉 `try/catch` ⇒ 该条红（1s 超时形态 = 账号被删、永远等不到凭据）；去掉 `...(wasDisabled ? { enabled: true } : {})` ⇒ 红；判据反向（`enabled === true`）⇒ 红。三条均恢复 `IDENTICAL`。
 **变异复验（全部打红，恢复逐字节一致）**：`<input>` 换 id（2 红）／`code` 写死（2 红）／失败即 `settleErr`（红）／删站点门控（1 红）／恢复编造 7 天（1 红）／zai 挂错条件（1 红）／默认值改回 `local`（1 红）／`startLogin` 写死国内（1 红）／去重 `provider` 写死国内（1 红）／整段删去重（2 红）。
 
 **接线后的事实**（与上表对照）：`AUTOCLAW_OAUTH_CALLBACK_PATH` 已在 3 处被使用（登录页拼 URL、路由判路、回调拼 `redirect_uri`）；`exchangeAutoclawZaiCode` 由回调直接调用；`buildZaiAuthUrl` / `loginWithZaiCode` 仍 0 调用（见上「遗留」表）。
