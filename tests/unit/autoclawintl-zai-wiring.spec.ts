@@ -41,6 +41,7 @@ import { AUTOCLAW, AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
 import {
   AUTOCLAW_OAUTH_CALLBACK_PATH,
   AUTOCLAW_OAUTH_CALLBACK_PORTS,
+  AUTOCLAW_ZAI_CLIENT_ID,
   exchangeAutoclawZaiCode,
   listenOnCallbackPorts,
   startAutoclawSmsLoginFlow,
@@ -61,15 +62,41 @@ const nonce = (prefix: string): string => {
 
 interface Capture { bodies: Array<Record<string, unknown>> }
 
+/** 服务端签发授权地址的请求体（`navigate_uri` 必须逐字节等于回调地址）。 */
+interface AuthCapture { requests: Array<Record<string, unknown>> }
+
 /**
- * 假上游：只认 Z.ai 换 token 端点。
+ * 假上游：认两个端点 —— 换 token（`zai-oauth-login`）与**下发授权地址**（`zai-oauth-url`）。
+ *
+ * ⚠️ 授权地址**必须由服务端下发**（2026-11-02 第三轮真机报障）：自己拼的 URL 在真机上
+ *    被 Z.ai 以 `Redirect URI not registered for this client` 拒绝。所以假上游也必须
+ *    模拟这一层，否则用例测的是「降级路径」而不是生产路径。
  *
  * ⚠️ 桩值**必须 < 16 位**：`tests/unit/repo-pii-guard.spec.ts` 拦「凭据字段名 + ≥16 位高熵字面量」
  *    ⇒ `access_token: 'stub-access'`（11 位）通过，`'stub-access-token'`（17 位）会被拦。
  */
-function makeFetcher(capture: Capture, mode: { fail?: boolean; omitExpiry?: boolean } = {}): typeof fetch {
+function makeFetcher(
+  capture: Capture,
+  mode: { fail?: boolean; omitExpiry?: boolean; authUrlFail?: boolean } = {},
+  authRequests?: AuthCapture,
+): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(typeof input === 'string' ? input : (input as Request).url ?? input)
+    if (url.includes('/userapi/overseasv1/zai-oauth-url')) {
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      authRequests?.requests.push(body)
+      if (mode.authUrlFail === true) {
+        return new Response('boom', { status: 500 })
+      }
+      const navigateUri = String(body.navigate_uri ?? '')
+      // 服务端签发的形态：`state` 与 `redirect_uri` 都是它自己写进去的。
+      const oauthUrl = 'https://chat.z.ai/api/oauth/authorize?response_type=code'
+        + `&client_id=client_stub&redirect_uri=${encodeURIComponent(navigateUri)}`
+        + '&state=aosi.server-issued'
+      return new Response(JSON.stringify({ code: 0, data: { oauth_url: oauthUrl, state: 'aosi.server-issued' } }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    }
     if (url.includes('/userapi/overseasv1/zai-oauth-login')) {
       capture.bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
       if (mode.fail === true) {
@@ -285,6 +312,50 @@ describe('★★ 凭据有效期不得编造（IKOYEG 的第四处写入点）',
     })
     const credential = result.credential!
     expect(credential.expires_at).toBeGreaterThanOrEqual(startedAt + 3600_000 - 5_000)
+  })
+})
+
+describe('★★★ 授权地址必须由服务端签发（自己拼会被 Z.ai 拒绝）', () => {
+  it('★★★ 必须向 `zai-oauth-url` 申请，并用它返回的 URL 与 state', async () => {
+    const capture: Capture = { bodies: [] }
+    const authRequests: AuthCapture = { requests: [] }
+    const flow = await startAutoclawSmsLoginFlow({
+      product: AUTOCLAW_INTL,
+      fetchImpl: makeFetcher(capture, {}, authRequests),
+      deviceId: 'dev-test',
+      timeoutMs: 5_000,
+    })
+    live.push(flow)
+    const page = await (await fetch(flow.loginUrl)).text()
+    const href = zaiAuthUrlOf(page)
+
+    // 1) 必须先申请：body 的 `navigate_uri` 就是回调地址（服务端拿它注册 redirect_uri）
+    expect(authRequests.requests, '必须先向服务端申请授权地址').toHaveLength(1)
+    expect(authRequests.requests[0].navigate_uri).toBe(zaiRedirectUriOf(page))
+
+    // 2) 页面必须用服务端返回的那一组（client_id / state 都是它的）
+    expect(href.searchParams.get('client_id'), '必须用服务端下发的 client_id').toBe('client_stub')
+    expect(href.searchParams.get('state'), '必须用服务端签发的 state').toBe('aosi.server-issued')
+    expect(href.searchParams.get('redirect_uri')).toBe(zaiRedirectUriOf(page))
+
+    // 3) 反向：不得回落到自拼常量（那正是被 `Redirect URI not registered` 拒掉的组合）
+    expect(page, '不得回落到自拼的 client_id').not.toContain(AUTOCLAW_ZAI_CLIENT_ID)
+  })
+
+  it('★ 申请失败时必须降级并**把原因显示出来**（不能静默回落到自拼）', async () => {
+    const capture: Capture = { bodies: [] }
+    const flow = await startAutoclawSmsLoginFlow({
+      product: AUTOCLAW_INTL,
+      fetchImpl: makeFetcher(capture, { authUrlFail: true }),
+      deviceId: 'dev-test',
+      timeoutMs: 5_000,
+    })
+    live.push(flow)
+    const page = await (await fetch(flow.loginUrl)).text()
+    expect(page, '降级必须显式告知，否则用户只会看到 Z.ai 那句误导性的报错')
+      .toContain('未能从 AutoClaw 服务端申请授权地址')
+    // 降级也要能点（本地页不能白屏）
+    expect(zaiAuthUrlOf(page).toString()).toContain('/api/oauth/authorize?')
   })
 })
 

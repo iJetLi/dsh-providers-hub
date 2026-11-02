@@ -533,3 +533,50 @@ OAuth 反正登不上（未注册端口必被拒），但**本地登录页仍要
    随机端口只在「对端不校验」时才碰巧能用。
 2. **一个参数的前置条件可能只在「已登录」分支里生效**（见上面的探针陷阱）。
    诊断这类问题不能只打一次匿名请求，要区分「未登录 / 已登录」两种状态。
+
+### 追加：端口只是第一层 —— 真正的机制是**服务端签发**（同日第二次修复）
+
+端口改对之后（真机地址栏已经是 `127.0.0.1:18432`），**报错一字未变**：
+`{"detail":"Redirect URI not registered for this client"}`。
+
+⇒ 说明「未注册」指的不是端口，而是**这一组 `(client_id, redirect_uri, state)` 没在服务端登记**。
+
+**客户端 `dist/main.cjs` 里根本没有 `client_id` 常量。** 它的顺序是：
+
+```js
+// 1) 先起 loopback（端口 18432/19654/19723/53699，路径 /auth/callback-zai）
+// 2) 向**服务端**要授权地址
+const t = await this.post('/userapi/overseasv1/zai-oauth-url', { navigate_uri });
+const oauthUrl = a.data.oauth_url, state = a.data.state;   // ← 由服务端签发
+// 3) 打开 oauthUrl → 回调拿 code+state → 4) POST zai-oauth-login
+```
+
+我们此前是**照抄**一次真实 URL 里的 `client_id`（`client_EnD0QI8bLRFT8cciLp389Q`）
+自己拼 URL + 自造 `aosi.xxx` 的 `state`。抄来的那组 `state` 早已随上一轮流程失效，
+服务端找不到「这个 `redirect_uri` 属于哪次注册」⇒ 报成「redirect_uri 未注册」。
+**这个报错文案极具误导性**：它让人以为是端口/路径问题（两者其实都已经对了）。
+
+#### 修法
+| 改动 | 说明 |
+|---|---|
+| 新增 `AUTOCLAW_ZAI_AUTH_URL_PATH = '/userapi/overseasv1/zai-oauth-url'` | 服务端签发端点（`overseasv1`） |
+| 新增 `fetchAutoclawZaiAuthUrl(navigateUri, options)` | POST `{navigate_uri, source_id, device_id}`（管理头与 `zai-oauth-login` 同一组）；解析 `data.{oauth_url,state}`；失败**不抛**，返回 `{ok:false,error}` |
+| 登录页 GET 处理器 | 改为 `async`（`createServer` 里 `void handleRequest(req,res)`）；先申请，成功用它给的 `authUrl`/`state`，失败**降级**为自拼并在页面上显示原因 |
+| `handleRequest` | 从 `createServer` 的内联回调抽成具名函数（异步体不能写在内联回调里还能 `await`） |
+| `escapeHtml` | 从回调分支的局部函数提升为模块级（登录页也要用） |
+
+#### 守卫（新增 2 条，共 16 条）
+- ★★★「必须向 `zai-oauth-url` 申请，并用它返回的 URL 与 state」：断言请求体 `navigate_uri` 等于回调地址、
+  页面 `href` 的 `client_id`/`state` 来自假上游（`client_stub`/`aosi.server-issued`）、
+  且**页面不含**自拼常量 `AUTOCLAW_ZAI_CLIENT_ID`；
+- ★「申请失败时必须降级并**把原因显示出来**」（否则用户只会看到 Z.ai 那句误导性报错）。
+
+#### 变异（全部打红、恢复 `IDENTICAL`）
+跳过服务端签发 ⇒ 2 红；申请时不带 `navigate_uri` ⇒ 3 红；`zaiIssue` 恒为空（告警永不显示）⇒ 1 红。
+
+#### 可推广的教训
+1. **「抄一个真实 URL 的参数」不等于「复刻协议」。** 那段 URL 里的 `client_id` 是常量没错，
+   但 `state` 是一次性的、且与 `redirect_uri` 在服务端**成组注册**。照抄静态部分、自己编动态部分，
+   得到的是一组「自洽但不合法」的参数，服务端报错却指向静态部分（`redirect_uri`）。
+2. **同一句报错可能有两个独立成因。** 端口修好后报错逐字不变，就该立刻怀疑「报错指的不是我以为的那件事」，
+   而不是继续在同一条腿上找。
