@@ -8,7 +8,7 @@
  * —— 文案承诺的第二个选项根本不存在。用户本机没装客户端 ⇒ 唯一那条路也走不通
  * ⇒ **国际版完全无法添加账号**。
  *
- * ## 为什么短信对国际版不可用（这不是缺陷，是事实）
+ * ## 为什么短信对国际版不可用（事实，不是缺陷）
  *
  * 国际版后端**也接受**短信（`/userapi/v1/agent-send-code` 在国际基址回 `code=0`），
  * 但国际账号是**邮箱 + OAuth 创建**的：`account-profile.json` 里 `phone: null`，
@@ -16,28 +16,31 @@
  * ⇒ 短信对国际账号必然失败。依据见 `src/autoclaw-product.ts` 的
  * 「为什么是两个 provider」表与 `src/autoclaw-oauth.ts` 的文件头。
  *
- * ## 真正的缺陷：Z.ai OAuth 这条路是**死代码**
+ * ## 真正的缺陷：Z.ai OAuth 是**死代码**
  *
  * `buildZaiAuthUrl()` / `loginWithZaiCode()` / `AUTOCLAW_OAUTH_CALLBACK_PATH`
- * 三样都写了，但**零调用方**：本地登录服务的路由只有
- * `GET /autoclaw/login`、`POST /autoclaw/send-code`、`POST /autoclaw/submit-code`、
- * `POST /autoclaw/import-local` —— **没有回调路由**；
- * 登录页 HTML 写死国内形态（短信 + 一键读本机），**不区分站点**。
+ * 三样都写了但**零调用方**：本地登录服务只有 4 条路由（没有回调），
+ * 登录页 HTML 写死国内形态（不区分站点）。
  *
- * ## 判据分三层（每层都能单独打红）
+ * ## 判据为什么长这样（每条都对应一次对抗审查打穿）
  *
- * 1. **登录页按站点渲染** —— 国际版含 Z.ai 授权链接、不含手机号输入框；国内版反之。
- * 2. **回调闭环真跑** —— 起真 flow、真请求登录页、取授权 URL 里的 `redirect_uri`、
- *    真打回调，断言 `settleOk` 拿到凭据**且**换 token 时的 `navigate_uri` 与授权时
- *    逐字节相同（OAuth 的硬要求，写错就是 `631001`）。
- * 3. **客户端入口** —— 国际版渲染 `zai` 选项、国内版渲染 `sms` 选项，两者不得同时出现。
+ * | 判据 | 打穿的形态 |
+ * |---|---|
+ * | 国际版页 `not.toContain('<input')` + `not.toContain('type="tel"')` | 只断言 `id="phone"` 时，把表单 id 改成 `phoneIntl` 就**假绿** |
+ * | `code`/`state` 用**随机 nonce** | 用固定字面量时，实现把值写死在代码里也照样绿（判据打在自己的字面量上） |
+ * | 失败 → **再重试一次成功**（确定性） | 「仍 pending」只用 120ms race：抓不到延迟 settle，也分不清「刻意不 settleErr」与「什么都没写」 |
+ * | 源码锚点**跨条件展开 + 字面量** | 只锚字面量时，把展开条件换成 `autoclawSmsAvailable`、或把默认值 `useState` 注释掉，全都**假绿** |
+ * | 真实用户路径 `new AutoclawAuth(AUTOCLAW_INTL).startLogin()` | 全直接调 flow 函数时，`startLogin` 里把 `product` 写成国内 `AUTOCLAW` **零红**（而那正是报障那条路） |
  */
 
+import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { AutoclawAuth } from '../../src/autoclaw-auth.js'
 import { AUTOCLAW, AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
 import {
   AUTOCLAW_OAUTH_CALLBACK_PATH,
+  exchangeAutoclawZaiCode,
   startAutoclawSmsLoginFlow,
 } from '../../src/autoclaw-oauth.js'
 
@@ -46,126 +49,248 @@ afterEach(async () => {
   while (live.length > 0) await live.pop()!.close()
 })
 
-/** 假上游：只认 Z.ai 换 token 端点，返回一份可控凭据。 */
-function makeFakeFetch(capture: { bodies: Array<Record<string, unknown>> }): typeof fetch {
+/** 每次运行都不同的 nonce —— 让「实现把值写死」也能被打红。 */
+let nonceSeq = 0
+const nonce = (prefix: string): string => {
+  nonceSeq += 1
+  return `${prefix}-${Date.now().toString(36)}-${nonceSeq}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+interface Capture { bodies: Array<Record<string, unknown>> }
+
+/**
+ * 假上游：只认 Z.ai 换 token 端点。
+ *
+ * ⚠️ 桩值**必须 < 16 位**：`tests/unit/repo-pii-guard.spec.ts` 拦「凭据字段名 + ≥16 位高熵字面量」
+ *    ⇒ `access_token: 'stub-access'`（11 位）通过，`'stub-access-token'`（17 位）会被拦。
+ */
+function makeFetcher(capture: Capture, mode: { fail?: boolean; omitExpiry?: boolean } = {}): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(typeof input === 'string' ? input : (input as Request).url ?? input)
     if (url.includes('/userapi/overseasv1/zai-oauth-login')) {
       capture.bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
-      return new Response(JSON.stringify({
-        code: 0,
-        data: {
-          access_token: 'stub-access',
-          refresh_token: 'stub-refresh',
-          expires_in: 3600,
-          user_id: 'u-1',
-        },
-      }), { status: 200, headers: { 'content-type': 'application/json' } })
+      if (mode.fail === true) {
+        return new Response(JSON.stringify({ code: 631001, msg: 'User login error' }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        })
+      }
+      const data: Record<string, unknown> = {
+        access_token: 'stub-access',
+        refresh_token: 'stub-refresh',
+        user_id: 'u-1',
+      }
+      // ⚠️ 默认给 `expires_in`；`omitExpiry` 用来打「编造 7 天」那一格。
+      if (mode.omitExpiry !== true) data.expires_in = 3600
+      return new Response(JSON.stringify({ code: 0, data }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
     }
     return new Response('unexpected endpoint: ' + url, { status: 500 })
   }) as unknown as typeof fetch
 }
 
-describe('★★ AutoClaw 国际版：Z.ai OAuth 登录入口（此前是死代码）', () => {
-  it('★★ 国际版登录页必须给 Z.ai 授权链接，且**不得**出现手机号输入框', async () => {
+/**
+ * ⚠️ **必须从登录页的 `href` 取授权 URL**，不能自己拼 —— 自己拼就绕过了
+ * 「实现是否真的把 `redirect_uri` 写进授权链接」这条判据。
+ */
+function zaiRedirectUriOf(page: string): string {
+  const href = /href="(https:\/\/chat\.z\.ai\/auth[^"]*)"/.exec(page)?.[1]
+  if (href === undefined) throw new Error('登录页里没有 Z.ai 授权链接')
+  // HTML 属性里的 `&` 允许裸写（HTML5 规则），也兼容转义写法
+  const authUrl = new URL(href.replace(/&amp;/g, '&'))
+  const redirectUri = authUrl.searchParams.get('redirect_uri')
+  if (redirectUri === null) throw new Error('授权 URL 里没有 redirect_uri')
+  return redirectUri
+}
+
+describe('★★ 登录页按站点分裂', () => {
+  it('★★ 国际版：给 Z.ai 授权链接，且**整页没有任何 input**（不能只有手机表单换个 id）', async () => {
     const flow = await startAutoclawSmsLoginFlow({
-      product: AUTOCLAW_INTL, fetchImpl: makeFakeFetch({ bodies: [] }), deviceId: 'dev-test', timeoutMs: 5_000,
+      product: AUTOCLAW_INTL, fetchImpl: makeFetcher({ bodies: [] }), deviceId: 'dev-test', timeoutMs: 5_000,
     })
     live.push(flow)
     const page = await (await fetch(flow.loginUrl)).text()
 
-    expect(page, '国际版页面必须有 Z.ai 授权入口').toContain('chat.z.ai')
-    expect(page, 'Z.ai 是浏览器跳转，必须是 <a href> 而不是一个死按钮').toMatch(/href="https:\/\/chat\.z\.ai\/auth/)
-    expect(page, '国际账号没有绑定手机号，短信表单只会让用户白试一次').not.toContain('id="phone"')
-    expect(page).not.toContain('id="btnSend"')
+    expect(page, '国际版必须有 Z.ai 授权入口').toContain('chat.z.ai')
+    expect(page, 'Z.ai 是浏览器跳转，必须是 <a href>').toMatch(/href="https:\/\/chat\.z\.ai\/auth/)
+    // ⚠️ 强于 `id="phone"`：换 id 也躲不过
+    expect(page, '国际账号没绑手机，页面上不该出现任何输入框').not.toContain('<input')
+    expect(page).not.toContain('type="tel"')
+    const redirectUri = zaiRedirectUriOf(page)
+    expect(redirectUri).toContain(AUTOCLAW_OAUTH_CALLBACK_PATH)
   })
 
-  it('★ 对照：国内版登录页仍是短信，且**不得**出现 Z.ai', async () => {
+  it('★ 对照：国内版仍是短信表单，且**不得**出现 Z.ai', async () => {
     const flow = await startAutoclawSmsLoginFlow({
-      product: AUTOCLAW, fetchImpl: makeFakeFetch({ bodies: [] }), deviceId: 'dev-test', timeoutMs: 5_000,
+      product: AUTOCLAW, fetchImpl: makeFetcher({ bodies: [] }), deviceId: 'dev-test', timeoutMs: 5_000,
     })
     live.push(flow)
     const page = await (await fetch(flow.loginUrl)).text()
     expect(page).toContain('id="phone"')
-    expect(page).toContain('id="btnSend"')
+    expect(page).toContain('type="tel"')
     expect(page, '国内版不该出现 Z.ai（那会让用户以为国内也能 OAuth）').not.toContain('chat.z.ai')
   })
 
-  it('★★ 回调闭环：授权 URL 里的 redirect_uri 必须与换 token 的 navigate_uri **逐字节相同**', async () => {
-    const capture = { bodies: [] as Array<Record<string, unknown>> }
-    const flow = await startAutoclawSmsLoginFlow({
-      product: AUTOCLAW_INTL,
-      fetchImpl: makeFakeFetch(capture),
-      deviceId: 'dev-test',
-      timeoutMs: 5_000,
-    })
+  it('★★ 真实用户路径：`AutoclawAuth(AUTOCLAW_INTL).startLogin()` 拿到的必须是国际版页面', async () => {
+    // ⚠️ 守的是 RPC 那条路：`account.create` → `startLogin` → 登录页。
+    //    前两条直接调 flow 函数，把「`startLogin` 到底传了哪个 product」当成既成事实
+    //    ⇒ 把 `product: this.product` 写成国内 `AUTOCLAW` 时它们**零红**。
+    const ctx = new Context()
+    ctx.provide('credentials', {
+      resolve: async () => undefined,
+      describe: async () => ({ configured: false, writable: true }),
+      set: async () => {},
+      unset: async () => {},
+    } as never)
+    ctx.provide('commands', { register: () => () => {} } as never)
+    const auth = new AutoclawAuth(ctx, { product: AUTOCLAW_INTL })
+    const flow = await auth.startLogin()
     live.push(flow)
-
-    // 1) 从登录页里取授权 URL（= 用户点了「使用 Z.ai 账号继续」会去的地方）
     const page = await (await fetch(flow.loginUrl)).text()
-    const href = /href="(https:\/\/chat\.z\.ai\/auth[^"]*)"/.exec(page)?.[1]
-    expect(href, '登录页里找不到 Z.ai 授权链接 ⇒ 国际版又只能靠一键导入了').toBeDefined()
-    const authUrl = new URL(href!.replace(/&amp;/g, '&'))
-    const redirectUri = authUrl.searchParams.get('redirect_uri')
-    expect(redirectUri, 'OAuth 必须带 redirect_uri').toBeTruthy()
-    expect(redirectUri).toContain(AUTOCLAW_OAUTH_CALLBACK_PATH)
-    expect(authUrl.searchParams.get('client_id')).toBeTruthy()
-
-    // 2) 真打回调（等价于授权页把用户送回来）
-    const callbackRes = await fetch(`${redirectUri}?code=auth-code-1&state=state-abc`)
-    const callbackPage = await callbackRes.text()
-    expect(callbackPage, '回调失败页会把原因写在页面里').toContain('登录成功')
-
-    // 3) flow 必须 settle 出凭据
-    const settled = await flow.result
-    expect(settled.credential.access_token).toBe('stub-access')
-
-    // 4) 关键：换 token 时的 navigate_uri 与授权时**逐字节相同**
-    expect(capture.bodies, '换 token 请求没打出去').toHaveLength(1)
-    expect(capture.bodies[0].code).toBe('auth-code-1')
-    expect(capture.bodies[0].state, 'state 必须原样透传（不解析、不重建）').toBe('state-abc')
-    expect(capture.bodies[0].navigate_uri, 'OAuth 要求两次的 redirect 逐字节相同，否则上游回 631001').toBe(redirectUri)
-  })
-
-  it('★ 回调失败（上游拒绝）时**不得**结束整个 flow —— 用户还能回登录页重试', async () => {
-    const failingFetch = (async () => new Response(JSON.stringify({
-      code: 631001, msg: 'User login error',
-    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
-    const flow = await startAutoclawSmsLoginFlow({
-      product: AUTOCLAW_INTL, fetchImpl: failingFetch, deviceId: 'dev-test', timeoutMs: 5_000,
-    })
-    live.push(flow)
-
-    const page = await (await fetch(flow.loginUrl)).text()
-    const href = /href="(https:\/\/chat\.z\.ai\/auth[^"]*)"/.exec(page)?.[1]!
-    const redirectUri = new URL(href.replace(/&amp;/g, '&')).searchParams.get('redirect_uri')!
-    const callbackPage = await (await fetch(`${redirectUri}?code=bad&state=s`)).text()
-
-    expect(callbackPage).toContain('授权失败')
-    // flow 仍处于 pending —— 用「race 到超时标记」证明它没有 reject
-    const stillPending = await Promise.race([
-      flow.result.then(() => 'settled').catch(() => 'rejected'),
-      new Promise((resolve) => setTimeout(() => resolve('pending'), 120)),
-    ])
-    expect(stillPending, '回调失败就 settleErr 会让用户连重试都不行').toBe('pending')
+    expect(page, 'startLogin 必须用实例自己的 product，不能写死国内').toContain('chat.z.ai')
+    expect(page).not.toContain('<input')
   })
 })
 
-describe('★★ AutoClaw 国际版：客户端入口（面板源码）', () => {
-  it('★★ 国际版必须渲染 zai 选项、国内版必须渲染 sms 选项，且互斥', async () => {
-    const { readFileSync } = await import('node:fs')
-    const source = readFileSync('plugin-src/client/jet-hub.js', 'utf8')
+describe('★★ Z.ai OAuth 回调闭环', () => {
+  it('★★ 回调必须真的读 query 里的 code/state，且 navigate_uri 与 redirect_uri 逐字节相同', async () => {
+    const capture: Capture = { bodies: [] }
+    const flow = await startAutoclawSmsLoginFlow({
+      product: AUTOCLAW_INTL, fetchImpl: makeFetcher(capture), deviceId: 'dev-test', timeoutMs: 5_000,
+    })
+    live.push(flow)
 
-    expect(source, '站点判据必须按 provider 分').toContain("const autoclawZaiAvailable = provider === 'autoclawintl';")
-    // ⚠️⚠️ **必须锚定整段**，不能只断言 `value: 'zai'`：`jet-hub.js` 里 zcode 的登录
-    //    渠道也有一处 `{ value: 'zai', label: '🌐 z.ai（chat.z.ai，国际版）' }`
-    //    ⇒ 裸断言会被它兜住（实测：把 autoclaw 的选项值改成 `zai-disabled` 后
-    //    五条用例**全绿**，判据打偏到 zcode 上去了）。
-    expect(source, '国际版的选项值必须是 zai（非 local 才会走 startLogin 打开登录页）')
-      .toContain("value: 'zai', label: '🌐 使用 Z.ai 账号登录'")
-    expect(source, '国际版文案不得再承诺手机短信（国际账号没绑手机）')
-      .toContain('或使用 Z.ai 账号在浏览器中授权登录。')
-    // 默认值：国际版落 zai（local 要求本机装了客户端）
-    expect(source).toContain("provider === 'autoclawintl' ? 'zai' : 'local'")
+    const page = await (await fetch(flow.loginUrl)).text()
+    const redirectUri = zaiRedirectUriOf(page)
+
+    // ⚠️ **每次跑都生成新 nonce**：用固定字面量时，实现把值写死也照样绿。
+    const code = nonce('code')
+    const state = nonce('state')
+    const callbackPage = await (await fetch(`${redirectUri}?code=${code}&state=${state}`)).text()
+    expect(callbackPage, '回调页要说「授权已完成」').toContain('授权已完成')
+
+    const settled = await flow.result
+    expect(settled.credential.access_token).toBe('stub-access')
+
+    expect(capture.bodies, '换 token 必须只打一次').toHaveLength(1)
+    expect(capture.bodies[0].code, '实现必须从 query 取 code，不能写死').toBe(code)
+    expect(capture.bodies[0].state, 'state 必须原样透传（不解析、不重建）').toBe(state)
+    expect(capture.bodies[0].navigate_uri, 'OAuth 要求两次 redirect 逐字节相同，否则上游回 631001').toBe(redirectUri)
+  })
+
+  it('★★ 失败后**必须还能重试成功**（比「仍 pending」强：后者分不清「不 settleErr」与「什么都没写」）', async () => {
+    const capture: Capture = { bodies: [] }
+    const mode = { fail: true }
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(typeof input === 'string' ? input : (input as Request).url ?? input)
+      if (url.includes('/userapi/overseasv1/zai-oauth-login')) {
+        capture.bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+        if (mode.fail) {
+          return new Response(JSON.stringify({ code: 631001, msg: 'User login error' }), {
+            status: 200, headers: { 'content-type': 'application/json' },
+          })
+        }
+        return new Response(JSON.stringify({
+          code: 0, data: { access_token: 'stub-access', refresh_token: 'stub-refresh', expires_in: 3600 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('unexpected', { status: 500 })
+    }) as unknown as typeof fetch
+
+    const flow = await startAutoclawSmsLoginFlow({
+      product: AUTOCLAW_INTL, fetchImpl: fetcher, deviceId: 'dev-test', timeoutMs: 5_000,
+    })
+    live.push(flow)
+    const page = await (await fetch(flow.loginUrl)).text()
+    const redirectUri = zaiRedirectUriOf(page)
+
+    const badCode = nonce('bad')
+    const failPage = await (await fetch(`${redirectUri}?code=${badCode}&state=s`)).text()
+    expect(failPage).toContain('授权失败')
+
+    // 第二次：上游放行 ⇒ 必须成功，且 flow 仍可用
+    mode.fail = false
+    const goodCode = nonce('good')
+    const okPage = await (await fetch(`${redirectUri}?code=${goodCode}&state=s`)).text()
+    expect(okPage, '失败后必须能重试（若失败就 settleErr，这里连页面都打不开）').toContain('授权已完成')
+    const settled = await flow.result
+    expect(settled.credential.access_token).toBe('stub-access')
+    expect(capture.bodies.map((b) => b.code)).toEqual([badCode, goodCode])
+  })
+
+  it('★★ 站点门控：国内版 flow 上这条回调腿必须**不可达**（否则能把凭据写进错误槽位）', async () => {
+    const capture: Capture = { bodies: [] }
+    const flow = await startAutoclawSmsLoginFlow({
+      product: AUTOCLAW, fetchImpl: makeFetcher(capture), deviceId: 'dev-test', timeoutMs: 5_000,
+    })
+    live.push(flow)
+    const base = new URL(flow.loginUrl).origin
+    const res = await fetch(`${base}${AUTOCLAW_OAUTH_CALLBACK_PATH}?code=x&state=y`)
+    expect(res.status, '国内 flow 不该注册 Z.ai 回调').toBe(404)
+    expect(capture.bodies, '被门控挡住时**不得**去打换 token').toHaveLength(0)
+  })
+})
+
+describe('★★ 凭据有效期不得编造（IKOYEG 的第四处写入点）', () => {
+  it('★★ 上游不给 expires_at / expires_in、token 也不是 JWT ⇒ expires_at 必须缺席，不能是「现在 +7 天」', async () => {
+    const capture: Capture = { bodies: [] }
+    const result = await exchangeAutoclawZaiCode('code-x', 'state-y', 'http://127.0.0.1:1/auth/callback-zai', {
+      product: AUTOCLAW_INTL,
+      fetchImpl: makeFetcher(capture, { omitExpiry: true }),
+      deviceId: 'dev-test',
+    })
+    expect(result.ok).toBe(true)
+    const credential = result.credential!
+    // ⚠️ 旧实现 `Date.now() + 7 * 86400_000`：一个编造的值同时是续期 lead-time 与
+    //    积分自愈的唯一判据 ⇒ 过期前后都**不自愈**、日志零字（IKOYEG 那次 P0 同型）。
+    expect(credential.expires_at, '读不到就必须缺席，绝不编造').toBeUndefined()
+    // 反向守卫：即使实现改成「随便给个未来值」，也不能是 7 天量级
+    if (credential.expires_at !== undefined) {
+      const sevenDays = 7 * 86400_000
+      expect(Math.abs(credential.expires_at - Date.now() - sevenDays)).toBeGreaterThan(3600_000)
+    }
+  })
+
+  it('★ 对照：上游给了 expires_in 时必须用它（别把兜底滤波做成「永远不带有效期」）', async () => {
+    const capture: Capture = { bodies: [] }
+    const startedAt = Date.now()
+    const result = await exchangeAutoclawZaiCode('code-x', 'state-y', 'http://127.0.0.1:1/auth/callback-zai', {
+      product: AUTOCLAW_INTL, fetchImpl: makeFetcher(capture), deviceId: 'dev-test',
+    })
+    const credential = result.credential!
+    expect(credential.expires_at).toBeGreaterThanOrEqual(startedAt + 3600_000 - 5_000)
+  })
+})
+
+describe('★★ 客户端入口（源码锚点必须跨「条件展开 + 字面量」）', () => {
+  const readClient = async (): Promise<string> => {
+    const { readFileSync } = await import('node:fs')
+    return readFileSync('plugin-src/client/jet-hub.js', 'utf8')
+  }
+
+  it('★★ 国际版 zai 选项必须**由 autoclawZaiAvailable 门控**（只锚字面量会被「挂错条件」绕过）', async () => {
+    const source = await readClient()
+    expect(source).toContain("const autoclawZaiAvailable = provider === 'autoclawintl';")
+    // ⚠️ 锚点跨过 `...(条件 ?` 与字面量 —— 把条件换成 autoclawSmsAvailable 时必红
+    expect(source, 'zai 选项必须挂在 autoclawZaiAvailable 的条件展开里').toMatch(
+      /\.\.\.\(autoclawZaiAvailable\s*\?\s*\[\{ value: 'zai', label: '🌐 使用 Z\.ai 账号登录'/,
+    )
+  })
+
+  it('★★ 国内版 sms 选项必须由 autoclawSmsAvailable 门控，且两站**互斥**', async () => {
+    const source = await readClient()
+    expect(source).toContain("const autoclawSmsAvailable = provider === 'autoclaw';")
+    expect(source).toMatch(/\.\.\.\(autoclawSmsAvailable\s*\?\s*\[\{ value: 'sms',/)
+    // 互斥：sms 判据不得写成「或」式（会让国际版同时渲染两条腿）
+    expect(source, 'sms 判据不得包含「或」式写法').not.toMatch(
+      /const autoclawSmsAvailable = provider === 'autoclaw'\s*\|\|/,
+    )
+  })
+
+  it('★ 默认值按站分（国际版落 zai，因为 local 要求本机装了客户端）', async () => {
+    const source = await readClient()
+    expect(source, '默认值必须与 provider 绑定，不能写死 local').toMatch(
+      /React\.useState\(\s*provider === 'autoclawintl' \? 'zai' : 'local',?\s*\)/,
+    )
   })
 })

@@ -9,6 +9,7 @@ import http from 'node:http'
 import { execFileSync } from 'node:child_process'
 import {
   AUTOCLAW,
+  AUTOCLAW_INTL,
   AUTOCLAW_SOURCE_ID,
   AUTOCLAW_CLIENT_VERSION,
   type AutoclawProduct,
@@ -182,11 +183,28 @@ export async function exchangeAutoclawZaiCode(
 
     const cleanAccess = cleanBearerToken(rawAccess)
     const cleanRefresh = data.refresh_token === undefined ? '' : cleanBearerToken(data.refresh_token)
-    const expiresAt = typeof data.expires_at === 'number'
-      ? autoclawExpiresAtMs(data.expires_at)
-      : typeof data.expires_in === 'number'
-        ? Date.now() + data.expires_in * 1000
-        : Date.now() + 7 * 86400_000
+    /**
+     * ⚠️⚠️ **沿用 IKOYEG 的修法：JWT 优先、声明值兜底、都读不到就 `undefined`**
+     * （2026-11-02 由 doc-wiring 审查打穿 —— 本轮之前这一行还是「编造 7 天」）。
+     *
+     * 旧实现写的是 `Date.now() + 7 * 86400_000`，与 `src/autoclaw.ts:227-246` 记录的
+     * 那次 P0 **逐字同型**：一个编造的有效期同时是「续期 lead-time」与「积分按需自愈」
+     * 的唯一判据 ⇒ 过期前不自愈、过期后也不自愈、**日志零字**。
+     *
+     * 它此前一直**不可达**（只有零调用的 `loginWithZaiCode` 会走到），所以历次审计都没
+     * 抓到；2026-11-02 把 Z.ai OAuth 接成生产路径后，这个 P0 立刻复活。
+     *
+     * ⚠️ 新测试的假上游固定回 `expires_in: 3600`，恰好把 7 天分支绕开 ⇒ 用例**恒绿**。
+     *    「被兜底分支掩盖的缺陷」要单独一格用例（`expires_at`/`expires_in` 都不给）。
+     */
+    const expiresAt = autoclawAccessTokenExpiresAtMs(
+      cleanAccess,
+      typeof data.expires_at === 'number'
+        ? autoclawExpiresAtMs(data.expires_at)
+        : typeof data.expires_in === 'number'
+          ? Date.now() + data.expires_in * 1000
+          : undefined,
+    )
 
     // ⚠️ 身份字段：优先服务端 `user_id`，其次 JWT 的 `user_id`（numericUserId）。
     //    与国内版同口径（见 `autoclawIdentityOf` 的注释：UUID 与 numericUserId
@@ -1101,6 +1119,22 @@ ${smsLogin
      *    用户连重试都不行。这里只回一个错误页，flow 继续等用户再点一次。
      */
     if (req.method === 'GET' && url.pathname === AUTOCLAW_OAUTH_CALLBACK_PATH) {
+      /**
+       * ⚠️⚠️ **只有国际版注册这条腿**（2026-11-02 审查打穿）。
+       *
+       * 实测缺陷：不门控时，以 `product: AUTOCLAW`（国内）起的 flow 上，
+       * 直接 GET 本端点会**真的**走一遍换 token 并把凭据 settle 进**国内**占位账号，
+       * 页面还写着「已绑定 AutoClaw（国际版）账号」—— 与「登录页按站点分裂」自相矛盾，
+       * 且给「任意本机进程往 loopback 投递 code」开了一条无入口但可达的路。
+       *
+       * 同源问题：`/autoclaw/send-code` 与 `/autoclaw/submit-code` 对国际版也仍可达。
+       * 那两条**保留**（国际站后端确实接受短信，只是账号没绑手机；UI 已不渲染入口），
+       * 因为它们不会把凭据写进错误站点的槽位 —— 而这条会。
+       */
+      if (product.id !== AUTOCLAW_INTL.id) {
+        res.writeHead(404).end('Not Found')
+        return
+      }
       const escapeHtml = (text: string): string => text
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
@@ -1111,15 +1145,24 @@ ${smsLogin
   .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 32px; width: 100%; max-width: 420px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5); }
   h2 { margin: 0 0 12px 0; font-size: 19px; color: ${ok ? '#4ade80' : '#f87171'}; }
   p { color: #cbd5e1; font-size: 13px; line-height: 1.6; margin: 0; word-break: break-all; }
-</style></head><body><div class="card"><h2>${ok ? '✅ 登录成功' : '❌ 授权失败'}</h2><p>${escapeHtml(text)}</p></div></body></html>`
+</style></head><body><div class="card"><h2>${ok ? '✅ 授权已完成' : '❌ 授权失败'}</h2><p>${escapeHtml(text)}</p></div></body></html>`
 
       const localPort = (req.socket as { localPort?: number }).localPort ?? 0
       const redirectUri = `http://127.0.0.1:${localPort}${AUTOCLAW_OAUTH_CALLBACK_PATH}`
       const code = url.searchParams.get('code') ?? ''
       const state = url.searchParams.get('state') ?? ''
       if (code === '') {
+        // ⚠️ 用户点「拒绝授权」时，授权页回的是 `?error=access_denied&error_description=…`
+        //    （实测形态）。原文案会把整串 query 甩给用户，等于让人自己读协议。
+        const providerError = url.searchParams.get('error') ?? ''
+        const providerErrorDesc = url.searchParams.get('error_description') ?? ''
+        const hint = providerError === ''
+          ? `回调没带授权码。请回到登录页重新点击「使用 Z.ai 账号继续」。（${url.search}）`
+          : providerError === 'access_denied'
+            ? '你拒绝了授权。请回到登录页重新点击「使用 Z.ai 账号继续」并允许访问。'
+            : `授权页返回了错误：${providerError}${providerErrorDesc === '' ? '' : `（${providerErrorDesc}）`}。请回到登录页重试。`
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end(renderCallbackPage(false, `回调没带授权码。请回到登录页重新点击「使用 Z.ai 账号继续」。（${url.search}）`))
+        res.end(renderCallbackPage(false, hint))
         return
       }
       void (async () => {
@@ -1136,7 +1179,19 @@ ${smsLogin
           }
           settleOk({ credential: exchanged.credential, phone: exchanged.credential.user_phone ?? '' })
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-          res.end(renderCallbackPage(true, '已绑定 AutoClaw（国际版）账号，可以关闭本窗口返回 IDE。'))
+          /**
+           * ⚠️⚠️ **文案必须中性，不能写「已绑定」**（2026-11-02 审查）。
+           *
+           * 此刻 `settleOk` 只是 resolve 了 Promise；真正的「这凭据能不能用」发生在
+           * RPC 侧的 `verifyCredentialSite()`（它要打一次余额端点），失败就 `failLogin`
+           * 并**删账号**。原文案会在浏览器上显示「✅ 已绑定」、IDE 里同时显示
+           * 「导入的凭据无法通过校验」然后卡片消失 —— 两句互相打脸。
+           *
+           * 而且 `Z.ai OAuth 换出的 token 是否等价于 AutoClaw access_token`
+           * 至今**零验证**（见 `docs/agent-notes/providers-autoclaw.md` 的「未验证」），
+           * 所以这不是理论瑕疵。
+           */
+          res.end(renderCallbackPage(true, '授权已完成，正在绑定账号 —— 请返回 IDE 查看结果。本窗口可以关闭。'))
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error)
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })

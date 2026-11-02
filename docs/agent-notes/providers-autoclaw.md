@@ -322,8 +322,13 @@ AutoClaw 自己的词汇（`Invalid token`）在调用点显式声明。
 「AutoClaw（国际版）账号管理」点「+」新建账号，弹窗里**只有一个**选项
 「⚡ 一键导入本机桌面端凭据」，而弹窗说明同时写着「**或使用手机短信验证码快速登录**」
 —— 承诺的第二个选项根本不存在。用户本机没装客户端 ⇒ 唯一那条路也走不通
-⇒ **国际版完全无法添加账号**。（顺带：那条路失败时错误还被吞成
-`connection: invalid server-response failure`，见 `protocol-wire.md` 同名小节。）
+⇒ **国际版完全无法添加账号**。
+
+⚠️ **另一处独立缺陷（不在本节范围内）**：同一场景下错误还会被吞成
+`connection: invalid server-response failure` —— 根因是 `reply()` 把**字符串** `error`
+展开成了字符索引对象（`{0:'未',1:'检',…}`），宿主判 `typeof error.code !== 'string'` 就抛。
+修法在**另一个分支**（`fix/rpc-error-shape`：`reply()` 出口归一化 + 源码普查），
+**本分支不含**，所以这里不写「见某处」的悬空引用。
 
 ### 为什么短信对国际版不可用（这是事实，不是缺陷）
 
@@ -338,7 +343,7 @@ AutoClaw 自己的词汇（`Invalid token`）在调用点显式声明。
 
 ### 真正的缺陷：Z.ai OAuth 这条路是**死代码**
 
-三样都在，但**零调用方**（2026-11-02 `grep` 实测）：
+三样都在，但**零调用方**（2026-11-02 接线前的 `grep` 实测；下表的「0」是**当时**的数字，现在见文末「接线后」表）：
 
 | 存在的东西 | 调用方 |
 |---|---|
@@ -382,6 +387,13 @@ AutoClaw 自己的词汇（`Invalid token`）在调用点显式声明。
 `"value: 'zai', label: '🌐 使用 Z.ai 账号登录'"` 后才有牙。
 **这就是「源码级断言必须锚定片段」的第 N 次实证。**
 
+### ⚠️ 两处「仍是死代码 / 未消费」的遗留（已登记，本轮刻意不动）
+
+| 符号 | 现状 | 为什么不动 |
+|---|---|---|
+| `AUTOCLAW_OAUTH_CALLBACK_PORTS = [18432, 19654, 19723, 53699]` | **零消费**（只有定义） | 注释自称「与官方客户端 `OAUTH_CALLBACK_PORTS` 逐字相同」，但新实现用 `listen(0)` 随机端口 ⇒ 两套设计并存。**若 Z.ai 对 `redirect_uri` 做端口/主机名白名单，功能会直接死在授权页**（见「未验证」第 1 条）。改成消费它（按候选端口逐个 `listen`、全占用再退随机）需要真实上游才能判断哪种更稳，**先登记** |
+| `AutoclawAuth.buildZaiAuthUrl()` | **零调用** | flow 里用的是**模块级** `buildAutoclawZaiAuthUrl`（它不依赖 `AutoclawAuth` 实例）。两个同义入口并存 = 下一个维护者可能改一个忘另一个。**登记：改授权 URL 拼法时两处一起改**（或直接删掉类方法） |
+
 ### 未验证（如实登记）
 
 - **真实 Z.ai 授权页的端到端**：需要人工在浏览器里点授权（自动化会弹真窗口，本仓纪律禁止在单测里做）。
@@ -391,3 +403,34 @@ AutoClaw 自己的词汇（`Invalid token`）在调用点显式声明。
   （`loginWithZaiCode` 内部要 `ctx.credentials` 自落盘 + 领积分，而 flow 的职责是
   「返回凭据、由 RPC 侧落盘」—— 与短信路径同形）。留着不删是因为它是已导出的公开方法，
   但**登记在此：它不在任何生产路径上**。
+- **`redirect_uri` 是否被上游按端口/主机名白名单校验**：官方客户端用 4 个**固定端口**
+  （见上表），而本实现用 `listen(0)` 随机端口 + `127.0.0.1`。公开 OAuth client 做严格
+  字符串匹配是常见做法 ⇒ **若匹配，功能直接不可用**。不碰真实上游无法判断。
+- **`verifyCredentialSite` 会不会拒掉 Z.ai 换出的 token**：回调 `settleOk` 之后，RPC 还要
+  打一次余额端点（`fetchAutoclawBalanceDetailed`）校验归属，失败就 `failLogin` 删账号。
+  单测里的假 `fetch` 只认换 token 端点、其余返 500 ⇒ **这条真实网络请求零覆盖**。
+  若 Z.ai OAuth 返回的是 z.ai 平台 token 而非 AutoClaw access_token，整条路径会在最后一步被拦下
+  （有防线、但功能不通）。
+- **我们并不发送 `state`**：`buildAutoclawZaiAuthUrl` 只设 `response_type` / `client_id` /
+  `redirect_uri`（刻意不生成 state，见文件头「关于 state.nh」）⇒ 真实回调很可能**没有**
+  `state` 参数，此时透传空串。单测用伪造的 `state` 让「原样透传」断言成立，**不能**证明真实链路。
+
+### 审查后追加的修复（2026-11-02，两路只读审查 + 红队，共 11 条必修）
+
+| # | 必修 | 处置 |
+|---|---|---|
+| 1 | **回调路由未按站点门控** —— 国内版 flow 上 `/auth/callback-zai` 竟可 settle（实测会把 Z.ai 凭据写进国内槽位），成功页还写「国际版」 | 路由开头加 `product.id !== AUTOCLAW_INTL.id ⇒ 404`；成功文案中性化 |
+| 2 | **180s 等待窗口偏短**（buddy 5min / accio 10min / astudio 5min）—— 超时后关窗口、删账号、回跳 `ECONNREFUSED` | `startLogin` 按站点给：国际版 **600 秒**，国内仍 180 秒 |
+| 3 | **成功页在 `verifyCredentialSite` 之前宣告「已绑定」** —— 浏览器说成功、IDE 说失败 | 改成「授权已完成，正在绑定账号 —— 请返回 IDE 查看结果」 |
+| 4 | **`exchangeAutoclawZaiCode` 仍编造 7 天有效期**（IKOYEG 的第四处写入点，本轮把它接成生产路径 ⇒ P0 复活） | 改用 `autoclawAccessTokenExpiresAtMs(accessToken, 声明值)`：JWT 优先、都读不到就 `undefined`；补「上游不给 expires_*」用例 |
+| 5 | **OAuth 路径缺同账号去重** —— 同一账号授权两次会出现两张卡片、积分翻倍（2026-10-19 那次 62416 的同型） | 落库前按 `user_id` 去重：新凭据写给已存在那条 → 删本次占位 → 留 info 日志；`provider` 用 `autoclawProduct.id`（短信那条硬编码 `AUTOCLAW.id`，对国际版恒查不到） |
+| 6 | **三处注释仍写「国际版登录尚未接入 / 只能手工注入 token」**（`autoclaw-product.ts` / `provider-registry.ts` / `index.ts`，其中 `index.ts` 还预告了一个不存在的 `login.startOAuth` 分支） | 三处同批改成「已于 2026-11-02 接入」，并写明实现形态 |
+| 7 | 判据假绿：`not.toContain('id="phone"')` 挡不住「换个 id 的表单」 | 改断言「国际版页 **`<input>` 计数为 0**」+ `type="tel"` 也为 0 |
+| 8 | 判据假绿：`code`/`state` 断言打在**用例自己的字面量**上（实现写死也绿） | 每次运行生成**随机 nonce** |
+| 9 | 判据无牙：「仍 pending」只用 120ms race（抓不到延迟 settle，也分不清「不 settleErr」与「什么都没写」） | 改成**失败后重试一次必须成功**（确定性），并断言 `bodies` 依次是坏 code → 好 code |
+| 10 | 判据假绿：客户端四条断言只锚字面量 | 锚点跨「条件展开 + 字面量」：`...(autoclawZaiAvailable ? [{ value: 'zai' …`，另加 sms 侧同款与「不得用或式」互斥判据 |
+| 11 | 真实用户路径零覆盖：`startLogin` 里把 `product` 写成国内 `AUTOCLAW` **零红** | 新增「`new AutoclawAuth(AUTOCLAW_INTL).startLogin()` 的页面必须含 Z.ai」 |
+
+**变异复验（全部打红，恢复逐字节一致）**：`<input>` 换 id（2 红）／`code` 写死（2 红）／失败即 `settleErr`（红）／删站点门控（1 红）／恢复编造 7 天（1 红）／zai 挂错条件（1 红）／默认值改回 `local`（1 红）／`startLogin` 写死国内（1 红）／去重 `provider` 写死国内（1 红）／整段删去重（2 红）。
+
+**接线后的事实**（与上表对照）：`AUTOCLAW_OAUTH_CALLBACK_PATH` 已在 3 处被使用（登录页拼 URL、路由判路、回调拼 `redirect_uri`）；`exchangeAutoclawZaiCode` 由回调直接调用；`buildZaiAuthUrl` / `loginWithZaiCode` 仍 0 调用（见上「遗留」表）。

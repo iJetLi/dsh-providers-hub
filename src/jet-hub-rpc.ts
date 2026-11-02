@@ -5928,6 +5928,55 @@ function registerJetHubEndpoints(
              */
             await autoclawAuthForProvider.verifyCredentialSite(credential)
             const ref = credentialRef(refName)
+            /**
+             * ⚠️⚠️ **同账号去重**（2026-11-02 加，接的是 2026-10-19 那次真机报障的同款防线）。
+             *
+             * 历史事故（`login.poll` 那条腿的注释）：同一个手机号出现 **3 次**、积分被
+             * **重复累加 62416**。根因是 `access_token` 是 JWT、**每次登录都轮换** ⇒
+             * 拿它当身份判据时同一账号每登一次就算新账号；而 `user_id` 是稳定值。
+             *
+             * 短信路径之所以兜住了，是因为它有「用户再提交一次验证码」这**第二次交互**
+             * （去重写在 `login.submitSms` 分支里）；而 **OAuth 在回调里一次做完，
+             * 没有第二次机会** ⇒ 必须在这里补一份，否则用户连点两次「+ 新建账号」
+             * 并用同一个 Z.ai 账号授权，就会得到两张卡片、两份凭据、积分翻倍。
+             *
+             * ⚠️ provider 必须用 `autoclawProduct.id`：短信那条硬编码了 `AUTOCLAW.id`，
+             *    对国际版**恒查不到**（这正是本仓「同一事实抄两份」的老形态）。
+             * ⚠️ 判据缺失（老凭据没 `user_id`）时 `identity` 为空 ⇒ 退化成「不去重」，
+             *    **不猜**（与短信路径同口径）。
+             */
+            const identity = credential.user_id === undefined ? '' : String(credential.user_id).trim()
+            const duplicateId = identity === ''
+              ? ''
+              : await pool.findAccountIdByIdentityField(autoclawProduct.id, 'user_id', identity)
+            if (duplicateId !== '' && duplicateId !== id) {
+              /**
+               * 把**本次的新凭据**写到已存在那条的 ref 上，再删掉本次的占位条目。
+               *
+               * 顺序不能反：先删占位会把 `refName` 那份凭据一并清掉（`removeAccount`
+               * 会清理它自己的凭据），但此时新凭据还没写给老条目 ⇒ 老条目拿着**旧 token**、
+               * 新 token 也没了 ⇒ 账号永久失效且用户看不到原因。
+               *
+               * ⚠️ OAuth 是后台完成的，没有「向用户返回错误」的机会 ⇒ 这里**静默并入**并
+               *    留一条 info 日志（面板上表现为「新卡片消失、老卡片刷新」）。
+               */
+              const existing = pool.listAccountsByProvider(autoclawProduct.id)
+                .find((entry) => entry.id === duplicateId)
+              if (existing !== undefined) {
+                await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+                await pool.updateAccount(existing.id, {
+                  nickname: autoclawDisplayNickname(credential, existing.id),
+                  expiresAt: credential.expires_at,
+                  refreshable: isAutoclawRefreshable(credential),
+                })
+                await pool.removeAccount(id)
+                ctx.logger?.info?.(
+                  `[jet-hub] ${autoclawProduct.id} 的账号 ${identity} 已存在（${duplicateId}），`
+                  + `新凭据已并入该条目并删除占位 ${id}`,
+                )
+                return
+              }
+            }
             await ctx.credentials.set(ref, JSON.stringify(credential))
             const nickname = autoclawDisplayNickname(credential, id)
             await pool.updateAccount(id, {

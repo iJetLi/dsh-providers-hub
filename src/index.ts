@@ -3706,9 +3706,10 @@ export function apply(ctx: Context): void {
   //    实测佐证：拿国内签发的 token 打国际基址，`wallets` / `user-profile`
   //    一律 `410000 用户未登录`、推理 `401 Invalid token` ⇒ 用户体系物理隔离。
   //
-  // ⚠️ **当前登录**：Z.ai OAuth 尚未接入（`state.nh` 来源未知，
-  //    见 `AUTOCLAW_INTL` 的注释）⇒ 本 provider 目前只能手工注入 token 使用。
-  //    接入后它会自己有一条 `login.startOAuth` 分支。
+  // ⚠️ **登录**：Z.ai OAuth **已于 2026-11-02 接入**（接入前本渠道只能手工注入 token）。
+  //    实现形态是**本地 flow 页里的授权链接 + `/auth/callback-zai` 回调**
+  //    （见 `AUTOCLAW_INTL` 的注释与 `src/autoclaw-oauth.ts`），
+  //    ⚠️ **不是** `login.startOAuth` 分支 —— 原先这里预告的形态是错的。
   const autoclawIntl = new AutoclawAuth(ctx, { product: AUTOCLAW_INTL })
   const autoclawIntlAdapter = registerAutoclawLlm(ctx, {
     resolveCredential: createCredentialResolver<AutoclawCredential>(

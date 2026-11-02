@@ -775,9 +775,8 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
      *    全部复用国内版那一套，只有 `AUTOCLAW_INTL` 配置不同
      *    （与 `minimaxintl` 同纪律：复制会让同类缺陷修两遍）。
      *
-     * ⚠️ **当前登录尚未接入**：Z.ai OAuth 的 `state.nh` 来源未知
-     *    （`client_id` 与 `state.dh = SHA256(deviceId)` 已逆向确认）。
-     *    在打通之前本渠道只能手工注入 token 使用。
+     * ⚠️ **登录**：Z.ai OAuth，**已于 2026-11-02 接入**（此前写的是「尚未接入、只能手工注入 token」）。
+     *    `state.nh` 仍未解，实现改为不生成 state、只透传（见 `AUTOCLAW_INTL` 的注释）。
      */
     id: 'autoclawintl',
     label: 'AutoClaw (国际版)',
