@@ -66,6 +66,13 @@ const STYLES = `
 .dim-jh-providerIcon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; box-shadow: 0 1px 3px rgb(31 35 41 / 7%); overflow: hidden; }
 .dim-jh-providerIcon img { display: block; width: 20px; height: 20px; border-radius: 2px; }
 .dim-jh-providerIcon.codearts { background: white; }
+/* MonkeyCode（国内站 / 国际站）：官方 logo 是透明底 + 黑绿猴子头像 ⇒ 白底容器。
+   ⚠️ 两个站点共用同一个 logoClass 之外的图标素材，但 logoClass 各自是
+      monkeycode / monkeycode —— 国际站的 logoClass 也是 monkeycode（见 registry），
+      故这里一条规则覆盖两行。 */
+.dim-jh-providerIcon.monkeycode { background: white; }
+/* 百智云：官方 favicon 是透明底 + 深灰单色图形（已去掉 dark-mode 变白）⇒ 白底容器。 */
+.dim-jh-providerIcon.baizhi { background: white; }
 .dim-jh-providerIcon.buddy { background: white; }
 .dim-jh-providerIcon.workbuddy { background: white; }
 .dim-jh-providerIcon.lobsterai { background: white; }
@@ -267,6 +274,8 @@ const STYLES = `
 .dim-jh-creditPoolSep { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 已失效额度：弱化的橙色提示，与主数值的蓝色明确区分 */
 .dim-jh-creditExpired { font-size: 11px; color: #b45309; }
+/* 用量（本月消耗）—— 三审 F🟡-8：与「已失效额度」同级但中性色，不得混成橙色警告 */
+.dim-jh-creditUsage { font-size: 11px; color: #6b7280; }
 /* 独立池（AStudio 星火积分等）：与上方三档分桶并列的事实标注。
    用中性灰而**不是** warn 橙 —— 它不是「快过期」的告警，而是「这笔钱不能混用」
    的说明；用橙色会与临期档抢注意力。 */
