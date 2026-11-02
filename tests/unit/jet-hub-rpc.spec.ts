@@ -457,6 +457,28 @@ describe('credits.status 单账号异常隔离', () => {
     expect(results[0]?.status).toBeNull()
     expect(statusCalls).toBe(0)
   })
+
+  /**
+   * ⚠️⚠️ **同一根缺陷的第二处**（2026-11-02 真机报障的连带修复）：
+   * `collectCreditsStatus` 里逐字相同的 `(product as { id?: string }).id === ASTUDIO.id`。
+   *
+   * 这一处**在用户界面上看不出来** —— 它的 per-account `catch` 把异常吞成
+   * `status = null`，于是「凭据未配置」与「查询失败」同形（都显示成没有签到状态）。
+   * ⇒ 唯一可观测的差异是 `deps.warn` 有没有被调用（异常路径会告警，正常路径不会），
+   * 判据就打在那里。**别改成断言 `status === null`** —— 那样变异后恒绿（两态同形），
+   * 实测过（变异注入后该断言照绿）。
+   */
+  it('★★ product 为 undefined 时，凭据未配置不得抛 TypeError（否则被吞成一条假告警）', async () => {
+    const warnings: string[] = []
+    const results = await collectCreditsStatus(
+      [makeEntry({ id: 'pending' })],
+      undefined as never,
+      makeDeps({ resolve: async () => undefined, warn: (msg) => warnings.push(msg) }),
+    )
+
+    expect(warnings, '旧码在这里抛 TypeError 并被 catch 成一条告警').toEqual([])
+    expect(results[0]?.status).toBeNull()
+  })
 })
 
 describe('credits.claimAll 单账号异常隔离与顺序性', () => {
@@ -714,6 +736,29 @@ describe('credits.balances 逐账号余额收集', () => {
     // 第二个查不到：balance 为 null 且带原因，UI 不能显示成 0
     expect(results[1]!.balance).toBeNull()
     expect(results[1]!.error).toBe('余额查询失败')
+  })
+
+  /**
+   * ⚠️⚠️ **真实报障**（2026-11-02）：面板上一个「登录中…」的 AutoClaw 国际版占位卡片，
+   * 积分行显示 `Cannot read properties of undefined (reading 'id')`。
+   *
+   * 根因：所有调用点都是 `collectCreditBalances(accounts, undefined, …)`（product 由各 impl
+   * 闭包住），而旧码写的是 `(product as { id?: string }).id === ASTUDIO.id` ——
+   * 「凭据未配置」这一格（占位条目正是）短路求值到右边就抛 TypeError，被本函数的
+   * per-account `catch` 转成错误文案。**影响全部 15 家**，只是以前没人盯着 pending 卡片的积分行看。
+   *
+   * 判据：product 传 `undefined`（**真实调用形态**）+ 凭据读不到 ⇒ 必须是「凭据未配置」。
+   */
+  it('★★ product 为 undefined（真实调用形态）时，凭据未配置不得抛 TypeError', async () => {
+    const deps = makeDeps({ resolve: async () => undefined })
+    const results = await collectCreditBalances(
+      [makeEntry({ id: 'pending' })],
+      undefined as never,
+      deps,
+    )
+
+    expect(results[0]!.error, '旧码在这里抛 Cannot read properties of undefined').toBe('凭据未配置')
+    expect(results[0]!.balance).toBeNull()
   })
 
   it('凭据未配置时给出原因，且不发起余额请求', async () => {
