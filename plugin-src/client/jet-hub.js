@@ -4027,10 +4027,24 @@ function ProviderPanel({ provider, rpcCall }) {
     //   本行原写作 `+${...} ${unitLabel(unit)}`（**带空格**）—— 后果是**同一次
     //   签到**的逐账号明细显示 `+100.00M Token`、而汇总行显示 `+100.00MToken`，
     //   两行并列却像两种单位（2026-10-05 复审修正）。
-    details.push(
-      `${item.nickname || item.accountId}：领取成功 `
-      + `+${formatUnits(outcome.credit, unit)}${unitLabel(unit)}`,
-    )
+    //
+    // ⚠️⚠️ **`credit === 0` 不能拼成「+0积分」**（2026-11-03 合并审计 P1）：
+    //   上游不返回奖励金额的渠道（MonkeyCode / AutoClaw / Codely）会按契约给
+    //   `credit: 0 + delayedMessage`，而 `formatUnits(0)` 渲染成 `+0积分` ——
+    //   用户读到的是「签到成功，但一分没到账」。有 `delayedMessage` 时必须
+    //   换成**那句说明**（它才是「钱到账了、数量稍后看余额」这一事实）。
+    const claimedCredit = Number(outcome.credit) || 0;
+    const delayedMessage = typeof outcome.delayedMessage === 'string' ? outcome.delayedMessage : '';
+    if (claimedCredit > 0) {
+      details.push(
+        `${item.nickname || item.accountId}：领取成功 `
+        + `+${formatUnits(claimedCredit, unit)}${unitLabel(unit)}`,
+      );
+    } else if (delayedMessage !== '') {
+      details.push(`${item.nickname || item.accountId}：${delayedMessage}`);
+    } else {
+      details.push(`${item.nickname || item.accountId}：领取成功`);
+    }
         } else if (outcome.kind === 'already-claimed') {
           details.push(`${item.nickname || item.accountId}：${outcome.message || '今天已领取'}`);
         } else if (outcome.kind === 'inactive') {
@@ -4665,6 +4679,36 @@ function ProviderPanel({ provider, rpcCall }) {
     //    的事故（见 `proxyModalComponent` 的逐分支注释）。各占一条 = 每条都能被
     //    逐分支配对的用例单独钉住。
     if (provider === 'magicrewintl') {
+      setCredentialModal({ provider, error: '' });
+      return;
+    }
+    /**
+     * ⚠️⚠️ **MonkeyCode 两站 + 百智云（2026-11-03 合并审计 P0）**：
+     *
+     * 这三家的凭据**只能由浏览器登录产出**（网页会话 → 换网关 Key / 控制台 Key），
+     * 既没有 OAuth 授权页、也没有可粘贴的现成凭据入口 ⇒ 必须走自绘登录弹窗，
+     * 与 magicrew 同款改道。
+     *
+     * 原实现**漏了这三条分支**：`createAccount()` 直接落到通用 `account.create`，
+     * 而 `new-account.js` 的载荷早退成 `{ provider }`、不带 `mode: 'browser'`
+     * ⇒ 宿主 `jet-hub-rpc.ts` 的两条 browser 分支都不进，最终回
+     * `unknown provider: monkeycode`。症状是**0 账号时没有任何添加入口**，
+     * 而空态文案还在说「点击「+ 新建账号」进行浏览器登录」。
+     *
+     * ⚠️ 两站**各占一条 if**（不合并成 `MONKEYCODE_PROVIDER_IDS.includes`）：
+     *    本仓库记录过合并后「守卫只覆盖前一站、第二站从此不设防」的事故
+     *    （见 `proxyModalComponent` 的逐分支注释）。
+     */
+    if (provider === 'monkeycode') {
+      setCredentialModal({ provider, error: '' });
+      return;
+    }
+    if (provider === 'monkeycodeintl') {
+      setCredentialModal({ provider, error: '' });
+      return;
+    }
+    // 百智云：控制台网页登录一次拿到 `sk-` + 积分 cookie（`baizhi.startSession` 只补会话）。
+    if (provider === 'baizhi') {
       setCredentialModal({ provider, error: '' });
       return;
     }
@@ -10069,6 +10113,14 @@ export function JetHubPage({ rpcCall }) {
           //   回归由 `tests/unit/claim-unit-callsites.spec.ts` 的源码级断言锁死。
           const amount = formatClaimGains(byUnit);
           if (amount !== null) bits.push(amount);
+          else {
+            // ⚠️⚠️ **「签到了但收益读数为 0」不等于「没有账号」**（2026-11-03
+            //   合并审计 P1）：`formatClaimGains` 在全零时返回 `null`，原实现
+            //   直接跳过 ⇒ 本渠道 `bits` 为空 ⇒ 下行拼出「MonkeyCode 无账号」，
+            //   而用户刚刚**确实签到成功**。上游不回奖励金额的渠道
+            //   （MonkeyCode / AutoClaw / Codely）常态走到这里。
+            bits.push(`${s.claimed} 个签到成功`);
+          }
         }
         if (s.alreadyClaimed > 0) bits.push(`${s.alreadyClaimed} 个今日已领`);
         if (s.inactive > 0) bits.push(`${s.inactive} 个暂无活动`);

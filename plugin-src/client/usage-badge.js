@@ -1042,6 +1042,12 @@ function UsageBadgeActive(props) {
             //   与 `jet-hub.js` 同因（2026-10-05 复审实测），详见该处注释。
             const amount = formatClaimGains(byUnit);
             if (amount !== null) bits.push(amount);
+            else {
+              // ⚠️ 与 `jet-hub.js` 同因（2026-11-03 合并审计 P1）：全零时
+              //    `formatClaimGains` 返回 `null`，跳过会让本渠道 `bits` 为空 ⇒
+              //    拼出「无账号」，而用户刚签到成功（MonkeyCode 不回奖励金额）。
+              bits.push(`${summary.claimed} 个签到成功`);
+            }
           }
           if (summary.alreadyClaimed > 0) bits.push(`${summary.alreadyClaimed} 个今日已领`);
           if (summary.inactive > 0) bits.push(`${summary.inactive} 个暂无活动`);
