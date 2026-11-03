@@ -604,6 +604,14 @@ export async function claimBaizhiDailyCheckin(
       if (after.ok && after.wallet.dailyClaimed) {
         return { kind: 'already-claimed', message: '今天已经领取过每日积分' }
       }
+      if (!after.ok) {
+        // 复核本身失败 ⇒ 不能断言「未发放」；把不确定如实说出来，让用户刷新核对。
+        return {
+          kind: 'failed',
+          code: -1,
+          message: `领取结果无法确认（复核钱包失败：${after.error}）—— 请刷新余额核对是否到账`,
+        }
+      }
       return {
         kind: 'failed',
         code: -1,

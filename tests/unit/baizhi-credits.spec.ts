@@ -546,4 +546,18 @@ describe('claimBaizhiDailyCheckin（challenge → PoW → redeem → daily-tempo
     expect(outcome).toMatchObject({ kind: 'claimed', credit: 0 })
     expect(outcome.kind === 'claimed' ? outcome.delayedMessage : '').toContain('余额')
   })
+
+  it('claimed:false 且复核钱包也失败 ⇒ 文案说「无法确认」，不说「未发放」', async () => {
+    const { fetchImpl } = routeFetch([
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      { match: BAIZHI.walletBalancePath, status: 500, body: '{}', once: true },
+      { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
+      { match: BAIZHI.captchaRedeemPath, body: JSON.stringify({ code: 0, data: { token: 'deadbeef:1234567890abcde', success: true } }) },
+      { match: BAIZHI.dailyTemporaryCreditPath, body: JSON.stringify({ code: 0, data: { claimed: false } }) },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    expect(outcome.kind).toBe('failed')
+    expect(outcome.kind === 'failed' ? outcome.message : '').toContain('无法确认')
+    expect(outcome.kind === 'failed' ? outcome.message : '').not.toContain('未发放')
+  })
 })
