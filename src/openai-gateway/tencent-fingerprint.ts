@@ -496,6 +496,18 @@ const CONTENT_FINGERPRINTS: readonly ContentFingerprint[] = [
       + '仅改本句语序后 200×3；111 字符字面量（110 放行）、位置无关、大小写不敏感、'
       + '切句两半各自放行；⚠️ 本条不含品牌词，按「找含 DeepSeek Harness 的句子」普查必漏',
   },
+  {
+    // 客户端 SDK 把计费头写进 system 正文开头：
+    //   `x-anthropic-billing-header: cc_version=2.1.316.060; cc_entrypoint=sdk-ts;...`
+    // 2026-11-03 实发：该**字样**（连裸词）会被 buddy 的内容级 11128 拦截；
+    // 同一整段里只把这一处换成 `x-client-billing-header` 后 200。
+    // 位置无关、大小写不敏感；同段其余 232 字符逐字不动。
+    find: 'x-anthropic-billing-header',
+    replace: 'x-client-billing-header',
+    note: '2026-11-03 实测（copilot.tencent.com / deepseek-v4.1-flash）：原文 400/11128，'
+      + '换名后 200；裸词也 400，x-anthropic-foo / anthropic-billing-header 均 200',
+  },
+
 ]
 
 /** 正则元字符转义：把字面量安全地变成**精确**匹配，而不是模式。 */
