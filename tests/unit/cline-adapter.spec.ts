@@ -2007,3 +2007,43 @@ describe('ClineAdapter 残缺目录自愈（★ IKJVTF 缺陷②）', () => {
     expect((adapter as unknown as { remoteComplete: boolean }).remoteComplete).toBe(true)
   })
 })
+
+/**
+ * issue #18 的适配器侧：`inputModalitiesFor` 必须对带快照后缀的模型
+ * 回退到基底条目（apply 层已继承，但目录可能来自注入/历史缓存而未经 apply）。
+ */
+describe('快照后缀模态回退（issue #18）', () => {
+  it('★★ 后缀模型自身无 supportsImage ⇒ 回退基底（否则宿主会放行图片）', async () => {
+    const adapter = makeAdapter({
+      loadModels: async () => ({
+        models: [
+          { id: 'cline-pass/base-model', name: 'Base', isFree: false, supportsImage: true },
+          { id: 'cline-pass/base-model-1017', name: 'Base 1017', isFree: false },
+        ],
+        warnings: [],
+      }),
+    })
+    const resolved = await adapter.resolveModel('cline', 'cline-pass/base-model-1017')
+    expect(resolved.inputModalities).toContain('image')
+  })
+})
+
+describe('stream 门禁的后缀回退（issue #18 的第二条腿）', () => {
+  it('★★ inputModalitiesFor 对后缀模型回退基底（删掉该回退会门禁误报）', async () => {
+    const adapter = makeAdapter({
+      loadModels: async () => ({
+        models: [
+          { id: 'cline-pass/base-model', name: 'Base', isFree: false, supportsImage: true },
+          { id: 'cline-pass/base-model-1017', name: 'Base 1017', isFree: false },
+        ],
+        warnings: [],
+      }),
+    })
+    // 触发目录加载（remoteModels 就位）后再直接调私有门禁。
+    await adapter.resolveModel('cline', 'cline-pass/base-model-1017')
+    const mods = (adapter as unknown as {
+      inputModalitiesFor(id: string): readonly string[] | undefined
+    }).inputModalitiesFor('cline-pass/base-model-1017')
+    expect(mods).toContain('image')
+  })
+})
