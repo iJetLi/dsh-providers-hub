@@ -52,7 +52,12 @@ export type MinimaxDedupOutcome =
 
 export interface MinimaxDedupDeps {
   pool: {
-    findAccountIdByIdentityField(provider: string, field: string, identity: string): Promise<string>
+    findAccountIdByIdentityField(
+      provider: string,
+      field: string,
+      identity: string,
+      excludeAccountId?: string,
+    ): Promise<string>
     /** 含已停用账号的按 id 查询（`AccountPool.findAccount` 是**同步**的）。 */
     findAccount?(id: string): ProviderAccountEntry | undefined
     updateAccount(
@@ -100,7 +105,7 @@ export async function dedupeMinimaxAccount(
 
   let existingId = ''
   try {
-    existingId = await deps.pool.findAccountIdByIdentityField(args.providerId, 'user_id', identity)
+    existingId = await deps.pool.findAccountIdByIdentityField(args.providerId, 'user_id', identity, args.newAccountId)
   } catch (error) {
     // ⚠️ 读不到池 ≠ 没有重复 ⇒ 绝不做任何破坏性动作（删号/清凭据都是不可逆的）。
     deps.logger?.warn?.(

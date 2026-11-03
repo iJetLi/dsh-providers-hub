@@ -3974,7 +3974,7 @@ function registerJetHubEndpoints(
     let existingDuplicateId = ''
     if (cloudId.length > 0) {
       try {
-        existingDuplicateId = await pool.findAccountIdByIdentityField(OFFICEACE.id, 'accountId', cloudId)
+        existingDuplicateId = await pool.findAccountIdByIdentityField(OFFICEACE.id, 'accountId', cloudId, accountId)
       } catch (error) {
         ctx.logger.warn(
           `[jet-hub] officeace 查重失败（按 accountId 读账号池）⇒ 本次**不做去重**、照常回填：${String(error)}`,
@@ -5483,45 +5483,124 @@ function registerJetHubEndpoints(
             ;(product.id === CODEBUDDY.id ? buddy : workbuddy).scheduleRefresh()
             const credential = parseBuddyCredential(flow.access)
             /**
-             * ★★ **重复账号去重**（与 zcode 2026-10-02、autoclaw 2026-10-19 同型的真实缺陷）。
+             * ★★ **同账号去重**（2026-11-03 合并 PR #30 时按审计重写）。
              *
              * ## 症状
              *
              * 同一账号点两次「添加账号」（或授权页复用已有会话直接放行）会得到
              * **两条独立条目**：各自参与选号、各自消耗额度，UI 上昵称一样无从分辨。
-             * zcode / autoclaw / officeace / magicrew 四家都有登录后判重，
-             * **buddy 系（codebuddy / workbuddy）是唯一没有的**。
              *
-             * ## 判据必须是 `user_id`
+             * ## 判据：`user_id`（稳定身份），不是 `access_token`
              *
              * `buildCredential` 已把服务端下发的 `account.uid` 存进凭据
-             * （JWT `sub` 兜底，见 `buddy.ts`），它与 access_token 的轮换无关，
-             * 是稳定身份；access_token 每次登录都换 ⇒ 不可作判据。
+             * （JWT `sub` 兜底，见 `buddy.ts`）；`access_token` **每次登录都换**，
+             * 拿它判重等于「每次登录都是一张新卡」（autoclaw 的原始缺陷形态）。
              *
-             * ## 处置：照抄 zcode 的「停用 + 改名」，**不删条目**
+             * ## 处置：**把新凭据并入旧卡、删除占位**（与 monkeycode / baizhi /
+             * autoclaw 同型），不改用 zcode 的「停用 + 改名」
              *
-             * 前端 `login.poll` 靠「条目还在 + 凭据已写入」判断登录成功，
-             * 删条目会被显示成「登录失败」误导用户重试。停用则：
-             * ① 仍如实报成功；② `enabled:false` ⇒ 不参与自动选号（去重的实际效果）；
-             * ③ 昵称写明「重复」⇒ 用户可自行删除。保留**原来那条**继续可用。
+             * PR #30 原实现是「停用新卡、保留旧卡」，审计实测三个后果：
+             * 1. **旧卡不吃新 token**：用户按 `refreshAll` 的「refresh_token 已失效，
+             *    请重新登录」重登后，旧卡凭据逐字节不变 ⇒ 这条唯一出路变成空操作；
+             * 2. **旧卡已被用户停用 ⇒ 两条都停用**（`findAccountIdByIdentityField`
+             *    刻意不看 `enabled`）⇒ 登录成功却零可用号；删掉旧卡后，剩下的停用
+             *    重复卡仍会被判重命中 ⇒ **每次重登再停用一次**，死循环；
+             * 3. 停用卡仍会被 `credits.balances` / `claimAll` 覆盖 ⇒ 同一上游账号
+             *    在积分面板出现两行、一键签到打两次。
+             *
+             * ⇒ 采用仓库已用三次的「合并进旧卡」语义：
+             * ① 先把**新凭据写到旧卡的 ref**（顺序不能反：`removeAccount` 会清掉
+             *    占位自己的 ref，先删就丢掉唯一的新 token）；
+             * ② 旧卡更新 `nickname` / `expiresAt` / `refreshable`，若它被用户停用过
+             *    则**反转**（重新启用）——用户刚主动登录这个号，语义就是「想让它可用」；
+             * ③ `rememberLoginMergedRedirect` 让 `login.poll` 对**占位 id** 仍报成功
+             *    （条目已删，poll 靠重定向判成功，不会转圈 5 分钟）；
+             * ④ 最后删占位条目。
+             *
+             * ⚠️ 查重**必须排除本次占位 id**：凭据在查重前已写入（上一行 set），
+             *    不排除就会「自己匹配自己」，而方法只返回第一个匹配 ⇒ 判重退化成
+             *    「旧卡恰好排在新卡前面」（一次拖动排序即静默失效，对抗审计实测）。
              */
             const userId = credential?.user_id
             if (typeof userId === 'string' && userId.length > 0) {
-              const existingId = await pool.findAccountIdByIdentityField(
-                product.id,
-                'user_id',
-                userId,
-              )
-              if (existingId.length > 0 && existingId !== id) {
-                ctx.logger.warn(
-                  `[jet-hub] ${product.id} 该账号（user_id=${userId}）已存在于 ${existingId}，`
-                  + `新条目 ${id} 已自动停用（不参与选号）`,
+              let duplicateId = ''
+              try {
+                duplicateId = await pool.findAccountIdByIdentityField(
+                  product.id,
+                  'user_id',
+                  userId,
+                  id,
                 )
-                await pool.updateAccount(id, {
-                  nickname: `（重复，已停用）${credential?.nickname ?? id}`,
-                  enabled: false,
-                })
-                return
+              } catch (error) {
+                // ⚠️ 读不到池 ≠ 没有重复 ⇒ 不做任何破坏性动作，照常回填。
+                ctx.logger.warn(
+                  `[jet-hub] ${product.id} 查重失败（按 user_id 读账号池）`
+                  + `⇒ 本次不去重、照常回填：${String(error)}`,
+                )
+              }
+              if (duplicateId.length > 0) {
+                const existing = pool.listAccountsByProvider(product.id)
+                  .find((entry) => entry.id === duplicateId)
+                if (existing !== undefined) {
+                  /**
+                   * ⚠️⚠️ **合并段必须有失败补偿**（2026-11-03 对抗审计 P1）：
+                   * 这一段里任何一步抛错都会冒到外层 `.catch → failLogin`，而
+                   * `failLogin` 看到占位自己的凭据早已落库（`loginCredentialLanded
+                   * === 'yes'`）会按「登录成功」处理、**不删占位** ⇒ 结果是
+                   * 「旧卡 + 占位都启用、都持新凭据」，判重白做且用户无感。
+                   * ⇒ 自己接住：已把凭据交给旧卡就**无条件删占位**；没交出去则
+                   * 保留占位（它是唯一活凭据）但标注失败原因，绝不静默。
+                   */
+                  let handedOver = false
+                  try {
+                    // ① 新凭据写到旧卡（先写，后删占位）。
+                    await ctx.credentials.set(credentialRef(existing.credentialRef), flow.access)
+                    handedOver = true
+                    // ② 旧卡承接到期/续期/昵称；被停用过则反转启用。
+                    const wasDisabled = existing.enabled === false
+                    const expiresAt = credential ? credentialExpiresAtMs(credential) : undefined
+                    const hasRefreshToken = typeof credential?.refresh_token === 'string'
+                      && credential.refresh_token.length > 0
+                    await pool.updateAccount(existing.id, {
+                      ...(typeof credential?.nickname === 'string' && credential.nickname.length > 0
+                        ? { nickname: credential.nickname }
+                        : {}),
+                      // ⚠️ 只在**算得出来**时才写：`updateAccount` 是浅合并，
+                      //    显式 `undefined` 会冲掉旧卡原本有效的 `expiresAt`
+                      //    （2026-11-03 功能审计 P2）。
+                      ...expiresAt === undefined ? {} : { expiresAt },
+                      // 同理：新凭据没有 refresh_token 时**不要**把它改回 false，
+                      // 否则旧卡可能握着可续期的新凭据却被静默标成不可续期。
+                      ...hasRefreshToken ? { refreshable: true } : {},
+                      ...(wasDisabled ? { enabled: true } : {}),
+                    })
+                    // ③ 占位 id 的 login.poll 走重定向报成功。
+                    rememberLoginMergedRedirect(id, existing.id)
+                    // ④ 删占位（会清掉占位自己的 ref；新凭据已在旧卡上）。
+                    await pool.removeAccount(id)
+                    ctx.logger.info?.(
+                      `[jet-hub] ${product.id} 该账号（user_id=${userId}）已存在于 ${existing.id}，`
+                      + `新凭据已并入该条目并删除占位 ${id}`
+                      + `${wasDisabled ? '（原卡此前被停用，已重新启用）' : ''}`,
+                    )
+                    return
+                  } catch (error) {
+                    ctx.logger.warn(
+                      `[jet-hub] ${product.id} 该账号（user_id=${userId}）合并到 ${existing.id} 失败：${String(error)}`,
+                    )
+                    if (handedOver) {
+                      // 旧卡已拿到新凭据 ⇒ 占位必须删，否则两张同凭据启用卡。
+                      await pool.removeAccount(id).catch(() => undefined)
+                      rememberLoginMergedRedirect(id, existing.id)
+                    } else {
+                      // 凭据没搬走 ⇒ 占位是唯一活凭据，保留；但标注原因，不静默。
+                      await pool.updateAccount(id, {
+                        nickname: `（合并失败，请重试）${credential?.nickname ?? id}`,
+                      }).catch(() => undefined)
+                    }
+                    return
+                  }
+                }
               }
             }
             await pool.updateAccount(id, {
@@ -6323,6 +6402,7 @@ function registerJetHubEndpoints(
                 ZCODE.id,
                 'user_id',
                 userId,
+                id,
               )
               if (existingId.length > 0 && existingId !== id) {
                 ctx.logger.warn(
@@ -6616,7 +6696,7 @@ function registerJetHubEndpoints(
             let duplicateId = ''
             if (identity !== '') {
               try {
-                duplicateId = await pool.findAccountIdByIdentityField(autoclawProduct.id, 'user_id', identity)
+                duplicateId = await pool.findAccountIdByIdentityField(autoclawProduct.id, 'user_id', identity, id)
               } catch (error) {
                 ctx.logger.warn(
                   `[jet-hub] ${autoclawProduct.id} 查重失败（按 user_id 读账号池）⇒ 本次**不去重**、照常落库：${String(error)}`,
@@ -7355,7 +7435,7 @@ function registerJetHubEndpoints(
             const identity = cred.user_id === undefined ? '' : String(cred.user_id).trim()
             const duplicateId = identity === ''
               ? ''
-              : await pool.findAccountIdByIdentityField(AUTOCLAW.id, 'user_id', identity)
+              : await pool.findAccountIdByIdentityField(AUTOCLAW.id, 'user_id', identity, req.accountId)
             if (duplicateId !== '' && duplicateId !== req.accountId) {
               /**
                * ⚠️⚠️ **必须真删占位条目，并把新凭据交给已存在的那条**

@@ -2263,16 +2263,23 @@ export class AccountPool {
    * @param provider - provider id（如 `zcode`）。
    * @param field - 凭据里用作身份判据的字段名（如 `user_id`）。
    * @param identity - 要比对的值（空串直接返回 `''`，调用方据空串放弃去重）。
+   * @param excludeAccountId - 可选：跳过这个账号 id。
+   *   ⚠️ **登录后判重的调用点必须传本次新建的占位 id**：新条目的凭据在查重
+   *   **之前**就已写入，不排除它会「自己匹配自己」，而本方法只返回**第一个**
+   *   匹配 ⇒ 判重是否成立取决于条目顺序（一次拖动排序就静默失效，2026-11-03
+   *   对抗审计实测：新条目被重排到前面后两条同账号卡片都保持启用）。
    * @returns 匹配到的账号 id；无匹配返回空串。
    */
   async findAccountIdByIdentityField(
     provider: string,
     field: string,
     identity: string,
+    excludeAccountId?: string,
   ): Promise<string> {
     if (identity.length === 0) return ''
     for (const entry of this.readAccounts()) {
       if (entry.provider !== provider) continue
+      if (excludeAccountId !== undefined && entry.id === excludeAccountId) continue
       const resolved = await this.resolveCredentialByRef(entry.credentialRef)
       if (resolved === undefined) continue
       const value = resolved[field]
