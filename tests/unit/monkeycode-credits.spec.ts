@@ -6,11 +6,14 @@ import {
   claimMonkeycodeDailyCheckin,
   fetchMonkeycodeBalanceDetailed,
   fetchMonkeycodeCheckinStatus,
+  exchangeMonkeycodeSessionForKey,
+  fetchMonkeycodeProfile,
+  monkeycodeInviteLink,
   prng,
   solveChallenge,
   type MonkeycodeChallenge,
 } from '../../src/monkeycode-credits.js'
-import { MONKEYCODE } from '../../src/monkeycode-product.js'
+import { MONKEYCODE, MONKEYCODE_INTL } from '../../src/monkeycode-product.js'
 import type { MonkeycodeCredential } from '../../src/monkeycode.js'
 
 /**
@@ -20,6 +23,11 @@ import type { MonkeycodeCredential } from '../../src/monkeycode.js'
  *
  * 它与其余 26 家有两个结构性差异，都**没有真实凭据可实测**（桌面客户端重开时
  * 把 cookie 删了 ⇒ 本轮只能靠报文形状 + 算法同构来保证正确）：
+ *
+ * ⚠️ 2026-11-03 更新：已用本机真实账号做过真机验收（浏览器登录 → 换 Key →
+ * 钱包 / 签到状态 → `challenge → solve → redeem`（201 success）→ 签到前后
+ * 余额差 **+100 积分**）。下面的固定向量仍以「独立实现」为准，真机结论另记在
+ * `docs/audit/pr171-monkeycode-baizhi-audit.md`。
  *
  * 1. **两套凭据、两个数据面**：推理用 `sk-…` / `oma_…`（API Key），额度 / 积分 /
  *    签到只认网页 Cookie。⇒ 「没配 cookie」是最常见的状态，必须是**有话说**的
@@ -300,24 +308,30 @@ describe('claimMonkeycodeDailyCheckin（challenge → PoW → redeem → checkin
   it('★ 完整四步：challenge → redeem → checkin，且 captcha_token 取自 redeem 响应', async () => {
     const { impl, calls } = routeFetch([
       { match: MONKEYCODE.checkinPath, body: walletBody({ checked_in: false }) },
+      // ⚠️ 签到前后各读一次钱包（用于「上游不回奖励金额时用余额差」口径）。
+      //    两次都命中同一条静态路由 ⇒ 差值为 0 ⇒ 走 delayedMessage 分支。
+      { match: MONKEYCODE.walletPath, body: walletBody({ balance: 1000 }) },
       { match: MONKEYCODE.captchaChallengePath, body: walletBody({ token: 'abc', challenge: { c: 2, s: 32, d: 3 } }) },
       { match: MONKEYCODE.captchaRedeemPath, body: walletBody({ token: 'deadbeef:1234567890abcde', success: true }) },
     ])
     const outcome = await claimMonkeycodeDailyCheckin(CRED, MONKEYCODE, { fetchImpl: impl })
     expect(outcome.kind).toBe('claimed')
-    // 上游不回奖励金额 ⇒ 用 delayedMessage 说明，而不是让界面显示「+0 积分」。
+    // 上游不回奖励金额、余额差也为 0 ⇒ 用 delayedMessage 说明，而不是「+0 积分」。
     expect(outcome.kind === 'claimed' ? outcome.delayedMessage : '').toContain('不返回积分数量')
 
-    // 顺序：先 GET 判已签，再 challenge，再 redeem，最后 checkin。
+    // 顺序：先 GET 判已签，再读签到前余额，再 challenge，再 redeem，最后 checkin，
+    // 收尾再读一次余额用于算「签到前后差」（本用例两次余额相同 ⇒ 差 0 ⇒ delayedMessage）。
     expect(calls.map((c) => `${c.init.method} ${c.url}`)).toEqual([
       `GET ${MONKEYCODE.platformBaseUrl}${MONKEYCODE.checkinPath}`,
+      `GET ${MONKEYCODE.platformBaseUrl}${MONKEYCODE.walletPath}`,
       `POST ${MONKEYCODE.platformBaseUrl}${MONKEYCODE.captchaChallengePath}`,
       `POST ${MONKEYCODE.platformBaseUrl}${MONKEYCODE.captchaRedeemPath}`,
       `POST ${MONKEYCODE.platformBaseUrl}${MONKEYCODE.checkinPath}`,
+      `GET ${MONKEYCODE.platformBaseUrl}${MONKEYCODE.walletPath}`,
     ])
 
     // redeem 的 body 必须带上题目解的数组（长度 == c）。
-    const redeemBody = JSON.parse(String(calls[2]!.init.body)) as { token?: unknown, solutions?: unknown }
+    const redeemBody = JSON.parse(String(calls[3]!.init.body)) as { token?: unknown, solutions?: unknown }
     expect(redeemBody.token).toBe('abc')
     expect(Array.isArray(redeemBody.solutions)).toBe(true)
     expect((redeemBody.solutions as number[]).length).toBe(2)
@@ -325,8 +339,42 @@ describe('claimMonkeycodeDailyCheckin（challenge → PoW → redeem → checkin
     // checkin 的 body 必须是 redeem 回来的**验证 token**，不是原始题面 token。
     // ⚠️ 把两者搞混是本流程最隐蔽的错误形态：checkin 会回 400，
     //    而文案只有「验证失败」。
-    const checkinBody = JSON.parse(String(calls[3]!.init.body)) as { captcha_token?: unknown }
+    const checkinBody = JSON.parse(String(calls[4]!.init.body)) as { captcha_token?: unknown }
     expect(checkinBody.captcha_token).toBe('deadbeef:1234567890abcde')
+  })
+
+  it('★★ 响应不含奖励 ⇒ 用「签到前后余额差」报真实数额（2026-11-03 真机 +100）', async () => {
+    // ⚠️ 这条用例锁的是**用户能看到 100**：上游签到接口只回
+    //    `{checked_in:true}`（真机实测），奖励数额必须靠余额差实测出来。
+    //    两次钱包读数必须不同，静态 routeFetch 做不到 ⇒ 用计数替身。
+    let walletReads = 0
+    const calls: string[] = []
+    const impl = (async (input: string | URL | Request) => {
+      const url = String(input)
+      calls.push(url)
+      const reply = (data: unknown) => new Response(JSON.stringify(walletBody(data)), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+      if (url.includes(MONKEYCODE.checkinPath)) {
+        return reply({ checked_in: url.includes(MONKEYCODE.checkinPath) && calls.filter((u) => u.includes(MONKEYCODE.checkinPath)).length > 1 })
+      }
+      if (url.includes(MONKEYCODE.walletPath)) {
+        walletReads += 1
+        // 签到前 5 积分、签到后 105 积分 ⇒ 增量 100。
+        return reply({ balance: walletReads === 1 ? 5000 : 105000 })
+      }
+      if (url.includes(MONKEYCODE.captchaChallengePath)) {
+        return reply({ token: 'abc', challenge: { c: 1, s: 32, d: 2 } })
+      }
+      if (url.includes(MONKEYCODE.captchaRedeemPath)) {
+        return reply({ token: 'deadbeef:1234567890abcde', success: true })
+      }
+      throw new Error(`未预期的请求：${url}`)
+    }) as unknown as typeof fetch
+    const outcome = await claimMonkeycodeDailyCheckin(CRED, MONKEYCODE, { fetchImpl: impl })
+    expect(outcome).toMatchObject({ kind: 'claimed', credit: 100, unit: 'credit' })
+    // 两次钱包读数（前/后）都要发生，否则「差值」是编的。
+    expect(walletReads).toBe(2)
   })
 
   it('★ redeem 没有 token ⇒ failed 并且文案指向「验证题过期、重试一次」', async () => {
@@ -350,5 +398,131 @@ describe('claimMonkeycodeDailyCheckin（challenge → PoW → redeem → checkin
     const outcome = await claimMonkeycodeDailyCheckin(CRED, MONKEYCODE, { fetchImpl: impl })
     expect(outcome.kind).toBe('failed')
     expect(outcome.kind === 'failed' ? outcome.message : '').toContain('上游形态可能已变')
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * 平台用户资料 / 邀请链接（2026-11-03 真机取证：上游 `?ic=<user.id>`）
+ * ------------------------------------------------------------------ */
+
+describe('fetchMonkeycodeProfile（稳定账号身份）', () => {
+  it('★★ 从 /users/status 的 data.user 取 id 与昵称（真机响应形状）', async () => {
+    const { impl, calls } = routeFetch([
+      {
+        match: MONKEYCODE.profilePath,
+        body: walletBody({
+          // 真机报文：data.user.id 是 ULID 形态（01a19fa3-05eb-71a7-…），昵称是中文。
+          user: { id: '01a19fa3-05eb-71a7-8cb3-55b9c9751f04', nickname: '水' },
+          teams: [],
+        }),
+      },
+    ])
+    await expect(fetchMonkeycodeProfile('spec=1', MONKEYCODE, { fetchImpl: impl })).resolves.toEqual({
+      userId: '01a19fa3-05eb-71a7-8cb3-55b9c9751f04',
+      nickname: '水',
+    })
+    expect(calls[0]?.url).toBe(`${MONKEYCODE.platformBaseUrl}${MONKEYCODE.profilePath}`)
+  })
+
+  it('读不到 user.id ⇒ 省略 userId（不得用换 Key 的 keyId 顶替）', async () => {
+    const { impl } = routeFetch([
+      { match: MONKEYCODE.profilePath, body: walletBody({ user: { nickname: '无 id' } }) },
+    ])
+    await expect(fetchMonkeycodeProfile('spec=1', MONKEYCODE, { fetchImpl: impl })).resolves.toEqual({
+      nickname: '无 id',
+    })
+  })
+
+  it('401 / 报文异常 ⇒ undefined（辅助读数失败不得把登录判死）', async () => {
+    const { impl } = routeFetch([
+      { match: MONKEYCODE.profilePath, status: 401, body: { code: 401, message: 'Unauthorized' } },
+    ])
+    await expect(fetchMonkeycodeProfile('spec=1', MONKEYCODE, { fetchImpl: impl })).resolves.toBeUndefined()
+  })
+})
+
+describe('monkeycodeInviteLink（邀请链接口径）', () => {
+  it('★★ 上游口径 = 站点根 + ?ic=<平台用户 id>（2026-11-03 真机 / 前端 bundle 取证）', () => {
+    expect(monkeycodeInviteLink('01a19fa3-05eb-71a7-8cb3-55b9c9751f04', MONKEYCODE))
+      .toBe('https://monkeycode-ai.com/?ic=01a19fa3-05eb-71a7-8cb3-55b9c9751f04')
+    // 国际站必须用 .net 的域名，否则邀请链接会把好友带到另一套账号系统。
+    expect(monkeycodeInviteLink('u-1', MONKEYCODE_INTL))
+      .toBe('https://monkeycode-ai.net/?ic=u-1')
+  })
+
+  it('缺 user id ⇒ undefined（绝不拼出空 ?ic= 的假链接）', () => {
+    expect(monkeycodeInviteLink(undefined)).toBeUndefined()
+    expect(monkeycodeInviteLink('')).toBeUndefined()
+    expect(monkeycodeInviteLink('   ')).toBeUndefined()
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * 换 Key 的信封 / 签到报文闸门（红队 2026-11-03 打穿过的那几条）
+ * ------------------------------------------------------------------ */
+
+describe('exchangeMonkeycodeSessionForKey（失败形态必须判失败）', () => {
+  it('★★ 业务失败信封（code≠0）不得被当成成功（红队删掉解包后 42 条全绿）', async () => {
+    const { impl } = routeFetch([
+      { match: MONKEYCODE.apiKeysPath, body: { code: 403, message: 'forbidden' } },
+    ])
+    const res = await exchangeMonkeycodeSessionForKey('spec=1', { fetchImpl: impl }, MONKEYCODE)
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.error).toContain('forbidden')
+  })
+
+  it('裸对象（无信封）也能读；`id` 只作为 keyId，不是账号身份', async () => {
+    const { impl } = routeFetch([
+      {
+        match: MONKEYCODE.apiKeysPath,
+        body: { id: 'key-record-1', api_key: 'oma_abc', signing_secret: 'sec-1', created_at: 1 },
+      },
+    ])
+    const res = await exchangeMonkeycodeSessionForKey('spec=1', { fetchImpl: impl }, MONKEYCODE)
+    expect(res).toEqual({
+      ok: true,
+      key: { apiKey: 'oma_abc', signingSecret: 'sec-1', keyId: 'key-record-1', createdAt: 1 },
+    })
+  })
+
+  it('★★ 缺 api_key / signing_secret ⇒ 判失败并指出上游形态变化', async () => {
+    const { impl } = routeFetch([
+      { match: MONKEYCODE.apiKeysPath, body: { code: 0, data: { api_key: 'oma_abc' } } },
+    ])
+    const res = await exchangeMonkeycodeSessionForKey('spec=1', { fetchImpl: impl }, MONKEYCODE)
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.error).toContain('signing_secret')
+  })
+})
+
+describe('签到报文闸门', () => {
+  it('★★ redeem 明确 `success:false`（但带 token）⇒ 不得当成成功', async () => {
+    const { impl } = routeFetch([
+      { match: MONKEYCODE.checkinPath, body: walletBody({ checked_in: false }) },
+      { match: MONKEYCODE.walletPath, body: walletBody({ balance: 1000 }) },
+      { match: MONKEYCODE.captchaChallengePath, body: walletBody({ token: 'abc', challenge: { c: 1, s: 32, d: 2 } }) },
+      { match: MONKEYCODE.captchaRedeemPath, body: walletBody({ token: 'deadbeef:1234567890abcde', success: false }) },
+    ])
+    const outcome = await claimMonkeycodeDailyCheckin(CRED, MONKEYCODE, { fetchImpl: impl })
+    expect(outcome.kind).toBe('failed')
+  })
+
+  it('★★ 题面参数越界（c 巨大）⇒ 明确拒绝，绝不开始算（红队删掉闸门后仍 16 绿）', async () => {
+    const { impl, calls } = routeFetch([
+      { match: MONKEYCODE.checkinPath, body: walletBody({ checked_in: false }) },
+      { match: MONKEYCODE.walletPath, body: walletBody({ balance: 1000 }) },
+      { match: MONKEYCODE.captchaChallengePath, body: walletBody({ token: 'abc', challenge: { c: 100000, s: 32, d: 3 } }) },
+    ])
+    const outcome = await claimMonkeycodeDailyCheckin(CRED, MONKEYCODE, { fetchImpl: impl })
+    expect(outcome.kind).toBe('failed')
+    expect(outcome.kind === 'failed' ? outcome.message : '').toContain('超出合理范围')
+    // 关键：没有进入 redeem（本地连一道题都不该算）。
+    expect(calls.some((c) => c.url.includes(MONKEYCODE.captchaRedeemPath))).toBe(false)
+  })
+
+  it('★★ 总尝试预算耗尽 ⇒ 抛可读错误（不得把宿主事件循环冻住数小时）', () => {
+    // 预算 1 次、而 d=3 期望 4096 次 ⇒ 第一题就超预算。
+    const challenge: MonkeycodeChallenge = { count: 50, saltLength: 32, targetLength: 3 }
+    expect(() => solveChallenge('abc', challenge, { remaining: 1 })).toThrow(/累计求解超过/)
   })
 })

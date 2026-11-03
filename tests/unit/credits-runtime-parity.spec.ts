@@ -60,6 +60,8 @@ import { ACCIO_SUBSCRIPTION_PATH } from '../../src/accio-product.js'
 import { createProviderCredits } from '../../src/provider-credits.js'
 // ⚠️ 2026-11-01：Magicrew 两站的**完整 URL** 断言（只断路径片段区分不了两站）。
 import { MAGICREW, MAGICREW_INTL } from '../../src/magicrew-product.js'
+// ⚠️ 2026-11-03：MonkeyCode 两站同款守卫（两站余额路径逐字节相同，只差 host）。
+import { MONKEYCODE, MONKEYCODE_INTL } from '../../src/monkeycode-product.js'
 import { expectedProviderIdsInCreditsTable } from '../helpers/provider-sets.js'
 
 /**
@@ -751,6 +753,57 @@ describe('★★ Magicrew 两站的余额打到各自的 host（国际站串号�
 
   it('两站的 host 互不相同（fixture 自检：相同则上面那条恒真）', () => {
     expect(MAGICREW.host).not.toBe(MAGICREW_INTL.host)
+  })
+})
+
+/**
+ * ★★ **MonkeyCode 两站的余额必须打到各自的 host**（2026-11-03 合并审计补牙）。
+ *
+ * ## 为什么必须补（红队实测的阻断项）
+ *
+ * 上面那张 `BALANCE_PATH_OF` 只存**路径片段**，而两站路径逐字节相同
+ * （`/api/v1/users/wallet`），只有 host 不同（`monkeycode-ai.com` / `.net`）。
+ * 红队实测：把 `src/provider-credits.ts` 里 monkeycode 的 `fetchBalanceDetailed`
+ * 换成 `MONKEYCODE_INTL`（及反向、claim 同理）⇒ **19 个 spec / 433 条全绿**。
+ *
+ * 生产症状与 magicrew 逐字同型：国际站 cookie 打国内站恒 401 ⇒ 余额恒
+ * 「网页登录态未生效」⇒ 聚合折算恒 `UNUSABLE` ⇒ 国际站从轮换表**静默消失**。
+ *
+ * ⚠️ 与上面 Magicrew 那条**判据同构**（完整 URL，不是片段），但**不能合并**成
+ * 一张参数表：两家的凭据形状不同（MonkeyCode 需要 `session_cookie`），
+ * 合并会让某个 fixture 缺字段变成恒真。
+ */
+describe('★★ MonkeyCode 两站的余额打到各自的 host（国际站串号守卫）', () => {
+  it.each([
+    { provider: 'monkeycode', product: MONKEYCODE },
+    { provider: 'monkeycodeintl', product: MONKEYCODE_INTL },
+  ])('$provider 的余额 URL host 是 $product.platformBaseUrl', async ({ provider, product }) => {
+    const ref = `${provider.toUpperCase()}_ACCOUNT_SPEC`
+    const { call, pool, credentials } = makeRpc()
+    await seed(pool, provider, `${provider}-1`, ref)
+    // ⚠️ 必须带 `session_cookie`：缺它时 `fetchMonkeycodeWallet` 会**早退**
+    //    （一个请求都不发），那条用例就会变成「因为没发请求而恒真」。
+    await credentials.set(ref, JSON.stringify({
+      access_token: 'oma_spec', signing_secret: 'sec_spec', session_cookie: 'spec_session=1',
+    }))
+
+    const seen: string[] = []
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      seen.push(String(input))
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+
+    const result = await call('credits.balances', { provider })
+    expect(result.ok, `${provider} 应被接受`).toBe(true)
+    expect(seen.length, `${provider} 的余额请求一个都没发`).toBeGreaterThan(0)
+    expect(
+      seen[0],
+      `${provider} 的余额没有打到自己的 host（国内/国际串号会让余额恒 401、聚合折算恒 UNUSABLE）`,
+    ).toBe(`${product.platformBaseUrl}${product.walletPath}`)
+  })
+
+  it('两站的 host 互不相同（fixture 自检：相同则上面那条恒真）', () => {
+    expect(MONKEYCODE.platformBaseUrl).not.toBe(MONKEYCODE_INTL.platformBaseUrl)
   })
 })
 

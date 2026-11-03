@@ -37,19 +37,28 @@ describe('MonkeycodeAuth.loginViaBrowser', () => {
     const { login, close } = fakeLogin('sess-1')
     const exchangeKey = vi.fn(async () => ({
       ok: true as const,
-      key: { apiKey: 'oma_abc', signingSecret: 'sec-1', userId: 'u-1' },
+      // ⚠️ `keyId` 是**每签发一把 Key 就变**的记录 id，不是账号身份；
+      //    账号身份走 `profileOf`（见下一条断言）。
+      key: { apiKey: 'oma_abc', signingSecret: 'sec-1', keyId: 'k-1' },
     }))
+    const profileOf = vi.fn(async () => ({ userId: 'u-1', nickname: '水' }))
     const auth = makeAuth({
       browserLoginFactory: async () => login,
       exchangeKey,
+      profileOf,
     })
 
     await expect(auth.loginViaBrowser()).resolves.toEqual({
       access_token: 'oma_abc',
       signing_secret: 'sec-1',
       session_cookie: 'sess-1',
+      // ⚠️ ★★ `user_id` 必须来自 `/users/status` 的稳定 id，**不是**换 Key 响应
+      //    的 `keyId`（真机实测同一账号两次兑换得到两个不同 id ⇒ 取错会让
+      //    「同账号第二次登录」被判成新账号）。
       user_id: 'u-1',
+      nickname: '水',
     })
+    expect(profileOf).toHaveBeenCalledWith('sess-1', MONKEYCODE, expect.anything())
     // ⚠️ 第三个参数是 `product`，**不能省**（2026-11-02 国际站真机 bug）：
     //    省掉就落到缺省 `MONKEYCODE`（国内站），国际站的 cookie 会打到 `.com`
     //    的换 Key 接口 ⇒ 恒 401 ⇒ 被判成「还没登进去」⇒ 重试到超时。
@@ -68,6 +77,8 @@ describe('MonkeycodeAuth.loginViaBrowser', () => {
       product: MONKEYCODE_INTL,
       browserLoginFactory: async () => login,
       exchangeKey,
+      // 登录成功后还会读一次平台用户资料（稳定 user_id）——注入，绝不发真网络。
+      profileOf: async () => ({ userId: 'u-intl' }),
     })
 
     await expect(auth.loginViaBrowser()).resolves.toMatchObject({
@@ -117,6 +128,8 @@ describe('MonkeycodeAuth.loginViaBrowser', () => {
         if (attempt === 1) return { ok: false as const, error: '网页登录态未生效（HTTP 401）' }
         return { ok: true as const, key: { apiKey: 'oma_test', signingSecret: 'sec_test' } }
       },
+      // 成功路径会再读一次用户资料；注入以免单测真发网络。
+      profileOf: async () => ({ userId: 'u-1' }),
     })
 
     await expect(auth.loginViaBrowser()).resolves.toMatchObject({
