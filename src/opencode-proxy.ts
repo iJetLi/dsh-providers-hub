@@ -33,7 +33,8 @@
 
 import { Agent, Pool, ProxyAgent, fetch as undiciFetch } from 'undici'
 import type { Dispatcher } from 'undici'
-import { connect as netConnect, type Socket } from 'node:net'
+import { connect as netConnect, isIP, type Socket } from 'node:net'
+import { checkServerIdentity, connect as tlsConnect, type PeerCertificate, type TLSSocket } from 'node:tls'
 import { URL } from 'node:url'
 import type { NormalizedProxy } from './opencode.js'
 
@@ -353,19 +354,112 @@ async function openSocks5Tunnel(proxy: NormalizedProxy, host: string, port: numb
  *
  * ⇒ 判据必须同时覆盖「空串」与「非法值」，回退到按协议推出的默认端口。
  */
+export interface SocksConnectDeps {
+  tunnel?: (proxy: NormalizedProxy, host: string, port: number) => Promise<Socket>
+  wrapTls?: (options: {
+    socket: Socket
+    servername?: string
+    // ⚠️ IP 目标没有 SNI 时 Node 会拿**底层 socket 的 _host**（= 代理地址）去比
+    // 证书 ⇒ ERR_TLS_CERT_ALTNAME_INVALID；必须显式用目标 host 校验。
+    checkServerIdentity?: (hostname: string, cert: PeerCertificate) => Error | undefined
+  }) => TLSSocket
+}
+
+interface SocksConnectOptions {
+  hostname?: string
+  host?: string
+  port?: number | string
+  protocol?: string
+  /** undici 可能带上 SNI override（内置 connector 也读它）。 */
+  servername?: string
+}
+
+/** 该目标是否需要在 SOCKS5 隧道上再做 TLS（`https:`/`wss:`，或未给协议但端口 443）。 */
+function needsTls(opts: SocksConnectOptions): boolean {
+  const protocol = String(opts.protocol ?? '').toLowerCase()
+  if (protocol.length > 0) return protocol.startsWith('https') || protocol.startsWith('wss')
+  return resolveConnectPort(opts) === 443
+}
+
+/**
+ * 构造 undici 的 `connect` 钩子：SOCKS5 握手后按目标协议**再做 TLS**。
+ *
+ * ## ⚠️⚠️ 为什么必须自己包 TLS（真实缺陷，Gitee/GitHub issue #19）
+ *
+ * undici 的 `connect` 选项**整体替换**内置 connector —— 内置 connector 在
+ * `protocol === 'https:'` 时会自己 `tls.connect`，而自定义钩子返回的 socket
+ * 会被当作**已就绪**直接写 HTTP。只返回裸 TCP 隧道 ⇒ TLS ClientHello 被当成
+ * HTTP 明文发给上游 ⇒ `https://opencode.ai/...` 经 SOCKS5 必然失败
+ * （HTTP 代理不走这条 connector，所以只有 SOCKS5 用户中招）。
+ *
+ * ⇒ 握手成功后：https/wss 目标用 `tls.connect({ socket, servername })` 包一层，
+ * 等 `secureConnect` 再交给 undici；`servername` 只对域名设置（IP 不发 SNI）。
+ */
+export function createSocksConnect(
+  proxy: NormalizedProxy,
+  deps: SocksConnectDeps = {},
+): (opts: SocksConnectOptions, callback: (error: Error | null, socket?: Socket) => void) => void {
+  const tunnel = deps.tunnel ?? openSocks5Tunnel
+  const wrapTls = deps.wrapTls ?? ((options) => tlsConnect(options))
+  return (opts, callback) => {
+    const host = String(opts.hostname ?? opts.host ?? '')
+    const port = resolveConnectPort(opts)
+    if (host.length === 0) {
+      callback(new Error('SOCKS5 代理：目标 host 为空'), undefined)
+      return
+    }
+    tunnel(proxy, host, port)
+      .then((socket) => {
+        if (!needsTls(opts)) {
+          callback(null, socket)
+          return
+        }
+        let settled = false
+        /**
+         * SNI 只对域名设置；但**证书校验的主机名必须始终是目标 host** ——
+         * 不设 servername 时 Node 会退回 `options.socket._host`，而该 socket 连的
+         * 是**代理** ⇒ 拿代理的 IP/域名去比目标证书，IP 目标恒
+         * `ERR_TLS_CERT_ALTNAME_INVALID`（2026-11-03 审计 P1）。
+         */
+        const serverName = opts.servername !== undefined && opts.servername.length > 0
+          ? opts.servername
+          : isIP(host) === 0 ? host : undefined
+        let secure: TLSSocket
+        try {
+          secure = wrapTls({
+            socket,
+            ...serverName === undefined ? {} : { servername: serverName },
+            checkServerIdentity: (_hostname, cert) => checkServerIdentity(serverName ?? host, cert),
+          })
+        } catch (error) {
+          // wrapTls 同步抛错：底层隧道必须销毁，否则泄漏。
+          socket.destroy()
+          callback(error as Error, undefined)
+          return
+        }
+        // 保底：settled 之后再来 error 不能让 EventEmitter 变成 uncaught。
+        secure.on('error', () => { secure.destroy() })
+        secure.once('secureConnect', () => {
+          if (settled) return
+          settled = true
+          callback(null, secure)
+        })
+        secure.once('error', (error: Error) => {
+          if (settled) return
+          settled = true
+          // TLS 握手失败：TLS socket 与底层隧道都销毁，否则泄漏。
+          secure.destroy()
+          socket.destroy()
+          callback(error, undefined)
+        })
+      })
+      .catch((error: Error) => { callback(error, undefined) })
+  }
+}
+
 function buildSocksDispatcher(proxy: NormalizedProxy): Dispatcher {
   return new Agent({
-    connect: ((opts: { hostname?: string; host?: string; port?: number | string; protocol?: string }, callback: (err: Error | null, socket?: unknown) => void) => {
-      const host = String(opts.hostname ?? opts.host ?? '')
-      const port = resolveConnectPort(opts)
-      if (host.length === 0) {
-        callback(new Error('SOCKS5 代理：目标 host 为空'), undefined)
-        return
-      }
-      openSocks5Tunnel(proxy, host, port)
-        .then((socket) => { callback(null, socket) })
-        .catch((error: Error) => { callback(error, undefined) })
-    }) as never,
+    connect: createSocksConnect(proxy) as never,
   } as never)
 }
 
