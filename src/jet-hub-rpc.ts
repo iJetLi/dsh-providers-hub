@@ -7678,6 +7678,24 @@ function registerJetHubEndpoints(
         }
 
         const value: RpcTestAccountResponse = await testAccount(pool, accountId, modelId)
+        /**
+         * ⚠️⚠️ **不要**在这里清任何标记 —— 包括账号级封禁标记（2026-11-01 对抗
+         * 审计打穿了第一版「成功即清」的写法）。
+         *
+         * 原因不是「少一个便利」，而是**判据强度不够**：
+         * - `testAccount` 只测**一个**模型（`pickTestModel` = 请求里的 modelId >
+         *   `Object.keys(modelRateLimits)[0]`（**插入序最老的那个键**）> 目录第一个）；
+         * - 客户端「测试」按钮**从不传 modelId**（`rpcCall('account.test', { accountId })`）；
+         * - 而封禁与限流是两笔账：最老的键可能是历史 429 的模型，与被 11140 拦下的
+         *   模型无关。实测（对抗审计 `zzatk3.spec.ts`）：`modelRateLimits = {glm-5.2:
+         *   旧429, deepseek-v4.1-flash: 11140}` 时 `pickTestModel ⇒ glm-5.2`，那个
+         *   模型换模型立刻 200 ⇒ `ok:true` ⇒ **整号封禁被洗白** ⇒ 池立刻选回它 ⇒
+         *   下一发再 403（mark/clear 抖动，每次烧一发真实请求 + 2 次写盘）。
+         *
+         * 清除只留给**证据强度足够**的路径：`account.retest`（要求**所有**带标记的
+         * 模型都实测通过）与 `account.reset`（用户显式「我确认它好了」，不做验证）。
+         * 这与上面「它不写任何存储」的原有纪律一致 —— 第一版把它破例了，现撤销。
+         */
         return { ok: true, value }
       }
 

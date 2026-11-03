@@ -37,6 +37,12 @@ import {
 } from '../../src/baizhi-credits.js'
 import { BAIZHI } from '../../src/baizhi-product.js'
 
+/**
+ * 测试用假 Key（**构造式**，不含任何形似真实的字面量）：
+ * repo-pii-guard 的 sk- 形态判据连 tests/ 一起扫，硬编码 51 位密钥会让全量测试变红。
+ */
+const FAKE_API_KEY = `sk-${'a'.repeat(48)}`
+
 /** 造一个只回一次的 fetch 替身，并记录它收到的 URL/headers。 */
 function makeFetch(
   reply: { readonly status?: number; readonly body: string },
@@ -283,7 +289,7 @@ describe('exchangeBaizhiSessionForKey（网页登录态 ⇒ 自动取回 sk-）'
     const { fetchImpl, calls } = makeFetch({
       body: JSON.stringify({
         code: 0,
-        data: { items: [{ id: 'acct-0001', name: 'demo-account', api_key: 'sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', status: 'active' }] },
+        data: { items: [{ id: 'acct-0001', name: 'demo-account', api_key: FAKE_API_KEY, status: 'active' }] },
       }),
     })
     const res = await exchangeBaizhiSessionForKey(COOKIE, BAIZHI, { fetchImpl })
@@ -293,7 +299,7 @@ describe('exchangeBaizhiSessionForKey（网页登录态 ⇒ 自动取回 sk-）'
     expect(calls[0].url).toBe(`${BAIZHI.consoleBaseUrl}${BAIZHI.consoleApiKeysPath}`)
     expect(res.ok).toBe(true)
     if (res.ok) {
-      expect(res.key.apiKey).toBe('sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      expect(res.key.apiKey).toBe(FAKE_API_KEY)
       expect(res.key.keyName).toBe('demo-account')
     }
   })

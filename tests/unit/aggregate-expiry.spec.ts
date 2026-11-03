@@ -1371,3 +1371,105 @@ describe('★★ 预算真的封顶，且**每个账号都有机会**（回归�
     20_000,
   )
 })
+
+/**
+ * ⚠️⚠️ `sharedPackageExpiry` 的到期判据必须与 `src/buddy-balance-rank.ts` 的
+ * `splitBuddyCreditsByExpiry` **同一份**（2026-11-01 四审）。
+ *
+ * ## 为什么要单独守
+ *
+ * 本函数曾只认 `typeof pkg.deductionEndTime === 'number'`，而面板那一侧
+ * （`plugin-src/client/credit-expiry.js:packageExpiryMs`）与后端选号那一侧
+ * （`splitBuddyCreditsByExpiry`）都已在三审收窄成「**number 或数字字符串**」。
+ * 三者对同一份 `state.json` 给出不同答案：
+ *
+ * - 面板：「3 天后到期」⇒ 临期（红）；
+ * - 聚合轮换：判「未知」⇒ `NEVER` ⇒ 当作长期、**排到最后**；
+ *
+ * 后果是「用户看到马上作废，自动选择却把它压在最后」。这正是本仓红线
+ * 「同一语义不得两套判据」的最典型形态。
+ *
+ * ## 可达性如实标注
+ *
+ * **结构可达、生产零实测**：目前所有 `CreditPackage` 生产者都写 number。
+ * 触发面是**外部写入**（`state.json` 手改 / 备份导入 / 旧缓存里的
+ * `"1791072000000"`），以及将来任何一家从 JSON 直取的实现。
+ *
+ * ## 判别力
+ *
+ * 三条用例分别钉「数字字符串算数值」「与 number 等价」「真不可解析才算未知」。
+ * 把 `endIsNumeric` 退回 `typeof end === 'number'` ⇒ 前两条**必红**（第三条仍绿，
+ * 它本来就是「不可解析」的正例）。
+ */
+describe('★★ sharedPackageExpiry：数字字符串的到期时间必须与 number 同判（四审）', () => {
+  const pkg = (deductionEndTime: unknown) => ({
+    name: '限时积分',
+    remaining: 100,
+    total: 100,
+    used: 0,
+    active: true,
+    deductionEndTime,
+  })
+
+  const expiryOf = async (deductionEndTime: unknown) =>
+    await lobsteraiExpiry(
+      { access_token: 't' } as never,
+      LOBSTERAI,
+      async () => ({ total: 100, remaining: 100, packages: [pkg(deductionEndTime)] }) as never,
+    )
+
+  /**
+   * ⚠️ 用**未来**时刻：`sharedPackageExpiry` 内部取 `Date.now()`，而 2026-11-02 起
+   * 「已作废」的额度被排除（对抗审计 B1）⇒ 写死的历史时刻会变成 UNUSABLE。'
+   */
+  const FUTURE_AT = Date.now() + 3 * 86_400_000
+
+  it('★★ 数字字符串到期时刻 ⇒ 当临期折算，不是 NEVER', async () => {
+    const at = await expiryOf(String(FUTURE_AT))
+    expect(at, '字符串被当「未知」⇒ 返回 NEVER，聚合会把它排到最后').toBe(FUTURE_AT)
+    expect(at === NEVER, 'NEVER 的语义是「可用但无临期」，与本意相反').toBe(false)
+  })
+
+  it('★ 同一个时刻用 number 与字符串给出**完全相同**的结果', async () => {
+    const asNumber = await expiryOf(FUTURE_AT)
+    const asString = await expiryOf(String(FUTURE_AT))
+    expect(asString).toBe(asNumber)
+  })
+
+  it('★ 真不可解析（`true` / 非数字串 / 0）才算「未知」⇒ NEVER', async () => {
+    for (const bogus of [true, 'abc', 0, null]) {
+      expect(await expiryOf(bogus), `${String(bogus)} 不应被当成有效到期时刻`).toBe(NEVER)
+    }
+  })
+})
+
+
+describe('已作废额度不得让渠道「看起来可用」（对抗审计 B1）', () => {
+  const pastPkg = () => ({
+    name: 'p', unit: 'u', remaining: 100, total: 100, used: 0, active: true,
+    cycleStartTime: '', cycleEndTime: '', expiredTime: '',
+    deductionEndTime: Date.now() - 3 * 86_400_000,
+  })
+
+  it('★ 只剩已作废批次 ⇒ UNUSABLE（不再返回过去时刻、更不再被排最前）', async () => {
+    const at = await lobsteraiExpiry(
+      { access_token: 't' } as never,
+      LOBSTERAI,
+      async () => ({ total: 100, remaining: 100, packages: [pastPkg()] }) as never,
+    )
+    expect(at).toBe(UNUSABLE)
+  })
+
+  it('★ 已作废 + 真临期 ⇒ 只取真临期那个时刻', async () => {
+    const future = Date.now() + 3 * 86_400_000
+    const at = await lobsteraiExpiry(
+      { access_token: 't' } as never,
+      LOBSTERAI,
+      async () => ({
+        total: 200, remaining: 200,
+        packages: [pastPkg(), { ...pastPkg(), deductionEndTime: future }],
+      }) as never,
+    )
+    expect(at).toBe(future)
+  })
+})

@@ -22,6 +22,15 @@ import { LOBSTERAI } from '../../src/lobsterai-product.js'
 import { TRAE } from '../../src/trae-product.js'
 
 /** 造一份「有临期包」的余额（判据与 `sharedPackageExpiry` 的输入同形）。 */
+/**
+ * ⚠️ **未来**的到期时刻（相对当前、且只取一次）。
+ *
+ * 2026-11-02 起「已作废的额度」被排除（PR #168 对抗审计 B1）⇒ 写死的历史时刻会折算成
+ * UNUSABLE；而每次调用 `Date.now()` 取样的毫秒差，会让「同一份余额两次折算结果相同」
+ * 这类断言假红。
+ */
+const FUTURE_AT = Date.now() + 3 * 86_400_000
+
 const balanceWith = (deductionEndTime: number, remaining = 100): CreditBalance => ({
   total: remaining,
   packages: [{
@@ -69,7 +78,7 @@ describe('★ buddy 系四家吃共享读数（命中时不再打上游）', () 
     //      `fetchBalanceWithCache` 是四家共用的那一份实现，它接收 `cached` 与 `fallback`
     //      两个参数，其行为由下面「★ 共享读数缺席 ⇒ 回落自己发请求」等同文件用例覆盖
     //      （那些用例传的是 `cached` 桩，能精确控制「有没有共享读数」）。
-    const expiry = 1_700_000_000_000
+    const expiry = FUTURE_AT
     const result = await buddyExpiry(
       CODEBUDDY,
       credential,
@@ -92,7 +101,7 @@ describe('★ buddy 系四家吃共享读数（命中时不再打上游）', () 
 
     // 折算侧：`cached` 返回 undefined ⇒ 必须回落（这里用一个真实值证明回落生效）
     let fallbackCalls = 0
-    const expiry = 1_700_000_000_001
+    const expiry = FUTURE_AT + 1
     const result = await buddyExpiry(CODEBUDDY, credential, async () => {
       fallbackCalls += 1
       return balanceWith(expiry)
@@ -116,7 +125,7 @@ describe('★ buddy 系四家吃共享读数（命中时不再打上游）', () 
     const shared = reading.error === undefined ? reading.value as CreditBalance : undefined
     expect(shared).toBeUndefined()
 
-    const expiry = 1_700_000_000_002
+    const expiry = FUTURE_AT + 2
     const result = await buddyExpiry(CODEBUDDY, credential, async () => balanceWith(expiry))
     expect(result, '★ 失败读数必须让折算回落，而不是判死').toBe(expiry)
   })
@@ -127,9 +136,9 @@ describe('★ buddy 系四家吃共享读数（命中时不再打上游）', () 
     let fallbackCalls = 0
     const result = await buddyExpiry(CODEBUDDY, credential, async () => {
       fallbackCalls += 1
-      return balanceWith(1)
+      return balanceWith(FUTURE_AT)
     })
-    expect(result).toBe(1)
+    expect(result).toBe(FUTURE_AT)
     // 下面这条才是 `null` 的判据
     const withNull = await buddyExpiry(CODEBUDDY, credential, async () => null)
     expect(withNull, 'null ⇒ sharedPackageExpiry 判 UNUSABLE').toBe(-1)
@@ -139,7 +148,7 @@ describe('★ buddy 系四家吃共享读数（命中时不再打上游）', () 
   it('★★ 判据零改动：同一个 CreditBalance 得出的到期时刻与「不传 cached」时一致', async () => {
     // ⚠️ 本任务只换「怎么拿到余额」，**不改**折算判据 —— 逐格对照三份余额。
     const cases: CreditBalance[] = [
-      balanceWith(1_700_000_000_000),
+      balanceWith(FUTURE_AT),
       exhausted(),
       // 有余额但**无**到期时间（永久积分）⇒ NEVER（不剔除）
       { total: 5, packages: [{ name: 'p', unit: 'u', remaining: 5, total: 5, used: 0, active: true, cycleStartTime: '', cycleEndTime: '', expiredTime: '' }] } as unknown as CreditBalance,
@@ -156,7 +165,7 @@ describe('★ buddy 系四家吃共享读数（命中时不再打上游）', () 
       void withoutCache
       void viaFallback
       // ★ 核心断言：cached 路径的返回值 = 该余额本应得出的值
-      const expected = index === 1 ? -1 : (index === 2 ? Number.POSITIVE_INFINITY : 1_700_000_000_000)
+      const expected = index === 1 ? -1 : (index === 2 ? Number.POSITIVE_INFINITY : FUTURE_AT)
       expect(withCache, `第 ${index} 份余额`).toBe(expected)
     }
   })
@@ -164,13 +173,13 @@ describe('★ buddy 系四家吃共享读数（命中时不再打上游）', () 
 
 describe('★ 另外两家（lobsterai / trae）同样接线（同族不得分叉）', () => {
   it('★ lobsterai：cached 命中 ⇒ 用共享读数', async () => {
-    const expiry = 1_700_000_000_100
+    const expiry = FUTURE_AT + 100
     expect(await lobsteraiExpiry(credential, LOBSTERAI as never, async () => balanceWith(expiry)))
       .toBe(expiry)
   })
 
   it('★ trae：cached 命中 ⇒ 用共享读数', async () => {
-    const expiry = 1_700_000_000_200
+    const expiry = FUTURE_AT + 200
     expect(await traeExpiry(credential, TRAE as never, async () => balanceWith(expiry)))
       .toBe(expiry)
   })
@@ -319,12 +328,12 @@ describe('★★ 两条消费路径共用同一份缓存（回写 → 折算命�
       ttlMs: 120_000,
       fetch: async (provider, entry) => {
         upstreamCalls.push(`${provider}:${entry.id}`)
-        return balanceWith(1_700_000_000_300)
+        return balanceWith(FUTURE_AT + 300)
       },
     })
 
     // ① 模拟 `credits.balances` 的**回写**（它自己取数、把结果写进共享缓存）
-    cache.write('buddy', 'a1', { at: Date.now(), value: balanceWith(1_700_000_000_300) })
+    cache.write('buddy', 'a1', { at: Date.now(), value: balanceWith(FUTURE_AT + 300) })
     expect(upstreamCalls, '回写不该触发取数').toEqual([])
 
     // ② 折算侧读同一份缓存 ⇒ 命中（零上游）
@@ -392,7 +401,7 @@ describe('★★ 两条消费路径共用同一份缓存（回写 → 折算命�
         return async () => {
           call += 1
           if (call === 2) throw new Error('上游挂了')
-          return balanceWith(1_700_000_000_400) as never
+          return balanceWith(FUTURE_AT + 400) as never
         }
       })(),
       writeBalance: (id: string, balance: { total: number }) => { written.push({ id, total: balance.total }) },

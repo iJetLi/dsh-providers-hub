@@ -235,6 +235,12 @@ export interface RaccoonProduct {
  * ⚠️ **不含** `Raccoon-Auto`：它是客户端 i18n 条目（`modelPicker.auto`）渲染的
  * 「自动选模」入口，不是远端模型 —— 直接发给 `chat/completions` 会 404。
  * ⚠️ 也不含 3 个 `visible:false` 的 `raccoon-*` 内部模型。
+ *
+ * ⚠️⚠️ **`maxTokens` 不是远端原值**（issue IKS1L5）：远端目录对这几个模型发的是
+ * `100_000`，而上游网关对 `max_tokens` **硬校验 1..65536**（命中即整轮 400，
+ * 且该 model group 没有 fallback）。这里统一写 `65_536` = 上游能接受的上限。
+ * 适配器侧还有两道夹子（声明值 + 请求体，见 `clampRaccoonMaxTokens`），
+ * 表里的值只是「不要再把已知会 400 的数字写回来」。
  */
 const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
   {
@@ -255,7 +261,7 @@ const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
     id: 'sn-glm-5-3',
     name: 'GLM-5-3 · x0.75',
     contextWindow: 1_000_000,
-    maxTokens: 100_000,
+    maxTokens: 65_536,
     supportsImage: true,
   },
   {
@@ -264,14 +270,14 @@ const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
     // 1 倍也要显示倍率」）—— 见 `raccoonDisplayName` 的注释。
     name: 'Kimi-K3 · x1',
     contextWindow: 1_000_000,
-    maxTokens: 100_000,
+    maxTokens: 65_536,
     supportsImage: true,
   },
   {
     id: 'sn-glm-5-3-flash',
     name: 'GLM-5-3-Flash · x0.2→x0.1',
     contextWindow: 1_000_000,
-    maxTokens: 100_000,
+    maxTokens: 65_536,
     // ⚠️ 远端 tags 不含 `vision`，但**实测能看图**（tags 不是能力契约，见
     // `RACCOON_TEXT_ONLY_MODELS` 的注释）。
     supportsImage: true,
@@ -280,7 +286,7 @@ const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
     id: 'sn-deepseek-v4-1-flash',
     name: 'DeepSeek-V4.1-Flash · x0.25',
     contextWindow: 1_000_000,
-    maxTokens: 100_000,
+    maxTokens: 65_536,
     // ⚠️ 同上：远端 tags 不含 `vision`，实测 5/5 读对随机数字。
     supportsImage: true,
   },

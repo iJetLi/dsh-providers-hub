@@ -285,6 +285,16 @@ const STYLES = `
 .dim-jh-rateLimits { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .dim-jh-rateLimitsLabel { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 
+/* 账号级封禁横幅（Gitee issue IKS2MV，2026-11-01）。
+   ⚠️ 必须与「限流」视觉上**明显不同**：限流是黄字徽章（.dim-jh-ttlBadge，会自己好），
+   封禁是**整块红色**底纹（整个账号不可用、只能重新登录）—— 用户报障的核心就是
+   「8 个被封的号在面板上和好号长得一样」。
+   ⚠️ 危险色用设计变量而不是硬编码红，深色模式下才不刺眼。 */
+.dim-jh-policyBlocked { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-top: 8px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-danger, #f3b1ad); background: var(--dsw-alias-bg-danger, #fdecea); }
+.dim-jh-policyBlockedLabel { font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-danger, #b3261e); }
+.dim-jh-policyBlockedMsg { font-size: 11px; line-height: 18px; color: var(--dsw-alias-label-danger, #b3261e); opacity: 0.85; }
+.dim-jh-policyBlockedHint { flex-basis: 100%; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #8f959e); }
+
 /* 操作按钮：横向一行，右对齐。
    ⚠️ flex-wrap: nowrap 是**有意**的（2026-10-26 之前就是），理由是账号卡片
    在侧栏里足够宽、行内按钮排成一条更好看。但它在**窄容器**（仅设置页那种

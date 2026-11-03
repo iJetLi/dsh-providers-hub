@@ -1133,15 +1133,12 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     credits: { balance: true, dailyCheckin: true, onboardingTasks: true },
     /**
      * ⚠️ `creditPackages: true`（2026-10-29，I3）：本家余额**确实**由多个包构成、
-     * 且临期批次带 `deductionEndTime` ⇒ 账号卡片 hover 该列包。
-     * `fetchMagicrewBalance` 会**合成一个「长期积分」包**让 `sum(remaining) === total`
-     * （上游只下发临期批次，实测 total 1093 / 批次和 93），否则 hover 会显示
-     * 「只列 93、合计 1093」让用户以为丢了积分。
-     * ⚠️ **刻意不登记**另外两项：
-     *   · `usesExpiryWindow` —— 判据是「是否走 `splitBuddyCreditsByExpiry`」，
-     *     本家不走那个函数（用自己的 `packages`），登记了会让锁定路径读到错误的 `windowDays`；
-     *   · `permanentLock` —— 本家**没有**「锁定永久积分」这个能力
-     *     （上游端点里没有对应概念），登记了等于凭空给用户一个点了会失败的操作。
+     * 且批次带 `deductionEndTime` ⇒ 账号卡片 hover 该列包。
+     * `fetchMagicrewBalance` 会**合成一个「永久积分」包**让 `sum(remaining) === total`
+     *（上游的 `expiring_quota_details` 只覆盖**带到期时间的批次**：国内实测
+     *  total 2661 / 批次和 1661 / 残差 1000，国际 347 / 247 / 100 ——
+     *  残差就是上游不给到期时间的永久积分，取证见 `magicrew-credits.ts`）。
+     * 否则 hover 会显示「只列 1661、合计 2661」让用户以为丢了积分。
      *
      * ⚠️⚠️ **字段本身原先漏了**（2026-11-01 三审实测发现）：上面这段注释从
      * 2026-10-29 起就写着「已登记 `creditPackages: true`」，但**字段根本不存在**
@@ -1150,6 +1147,38 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
      * 「注释说已登记、实现里没有」比单纯漏登记更难查：读注释的人以为已经有了。
      */
     creditPackages: true,
+    /**
+     * ✅ `usesExpiryWindow: true` + `permanentLock: true`（2026-11-01 用户要求）。
+     *
+     * ## 为什么现在**能**登记（原先两条拒绝理由都已被取证推翻）
+     *
+     * · 旧理由「本家不走 `splitBuddyCreditsByExpiry`，登记了会让锁定路径读到
+     *   错误的 `windowDays`」—— 现在是**真的走**：两站都接 `BuddyBalanceSelector`
+     *  （泛型化，非 buddy product **必填** `fetchBalance`），而
+     *   `fetchMagicrewBalance` 返回的正是它要的 `CreditBalance`，判据
+     *  （`packages[].deductionEndTime` 距今天数）与 buddy 系**逐格一致**
+     *   ⇒ 窗口天数对它同样成立。原先「用自己的 `packages`」只是**没接线**，不是不适用。
+     * · 旧理由「本家没有锁定永久积分这个能力」—— 已实测**证伪**：上游确实存在
+     *   「没有到期时间」的积分（见 `creditPackages` 那段的两站残差 1000 / 100），
+     *   而锁定要保护的正是它。
+     *
+     * ## 三档在两站怎么落地
+     *
+     * | 桶 | 判据 | 前端 |
+     * |---|---|---|
+     * | 永久 | **没有** `deductionEndTime`（合成的「永久积分」包） | 绿（`permanent`） |
+     * | 长期 | 有到期时间，且距扣费截止 **≥ 窗口**（默认 15 天） | 黄（`longTerm`） |
+     * | 临期 | 有到期时间，且距扣费截止 **< 窗口** | 红 + 倒计时（`expiring`） |
+     *
+     * ⚠️ 后端只分**两桶**（`splitBuddyCreditsByExpiry` 的 expiring / permanent，
+     *    longTerm 被并进 permanent），三档是**前端**用同一份 `packages` 再拆的
+     *    —— 与 buddy 系完全同构。故 `windowDays` 必须由 `credits.balances` 与
+     *    `credits.permanentLock` **两个 RPC 都回传**（缺一个 ⇒ 该行静默不渲染）。
+     * ⚠️ 两个 id **各自登记**：白名单 `PERMANENT_LOCK_PROVIDERS` 由本表派生，
+     *    漏一个的症状是「那一站的按钮不渲染、`credits.permanentLock` 直接 bad-request」。
+     */
+    usesExpiryWindow: true,
+    permanentLock: true,
     // ⚠️⚠️ **`rateLimit: false` 必须显式写**（2026-10-29 最终审查 I1）：本家
     //    **零 `updateModelRateLimit` 写点**、也不在 `probeById` 里 ⇒「重测 / 重置」
     //    两个按钮点下去是**零请求、零清除**（`account.retest` 走 `adapterForProbe`
@@ -1211,14 +1240,20 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     credits: { balance: true, dailyCheckin: true, onboardingTasks: true },
     /**
      * ⚠️ `creditPackages: true` 必须与国内版同格：两站共用同一份
-     *    `magicrew-credits.ts`，`fetchMagicrewBalance` 同样会合成「长期积分」包
-     *    （上游只下发临期批次，实测 total 1093 / 批次和 93）。
+     *    `magicrew-credits.ts`，`fetchMagicrewBalance` 同样会合成「永久积分」包
+     *    （国际站实测 total 347 / 批次和 247 / 残差 100）。
      *    漏了它 ⇒ 国际站账号卡片 hover 看不到资源包明细（与 `autoclawintl`
      *    2026-10-20 那次用户报障同型）。
-     * ⚠️ 同国内版：**刻意不登记** `usesExpiryWindow` / `permanentLock`
-     *    （理由见国内版那一段的长注释，不重复）。
+     * ⚠️ `usesExpiryWindow` / `permanentLock` **与国内版同格登记**（2026-11-01
+     *    用户要求）：两站共用同一个余额原语与同一个选号器类，判据逐格一致；
+     *    「为什么原先两条拒绝理由已被推翻」见国内版那一段的长注释，不重复。
+     *    ⚠️ 两站**必须各写一行**（不能靠国内版继承）：`PERMANENT_LOCK_PROVIDERS`
+     *    是 `PROVIDER_REGISTRY.filter(permanentLock === true)` 派生的 ⇒
+     *    漏一站的症状是「那一站按钮不渲染 + `credits.permanentLock` bad-request」。
      */
     creditPackages: true,
+    usesExpiryWindow: true,
+    permanentLock: true,
     // ⚠️ 同国内版：本家零 `updateModelRateLimit` 写点、不在 `probeById` 里。
     rateLimit: false,
     channel: true,

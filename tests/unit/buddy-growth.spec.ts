@@ -1133,3 +1133,649 @@ describe('claimBase 与 webBase 各自生效（防止死配置复发）', () => 
     ).toBe(true)
   })
 })
+
+// ══════════════ 2026-11-01 增补：体验专家族 / 小程序族 / 连登链 ══════════════
+//
+// 判据来源：workbuddy2api 面板 2026-09~10 实测（autotask.go / mp_events.go /
+// streak.go / scheduler/streak.go）。这里锁的仍是**服务端判据**，改动断言前先跑
+// 真实账号确认。
+
+import {
+  claimStreakExtras,
+  FIXED_EXPERT_TASKS,
+  isMpTaskCode,
+  MP_CHAT_EVENT_GAP_MS,
+  MP_CHAT_JITTER_MAX_MS,
+} from '../../src/buddy-growth.js'
+
+/** 构造单条任务项（成长族形状）。 */
+function growthTask(taskCode: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { task_code: taskCode, accept_status: 'not_accepted', progress: { current: 0, target: 1 }, ...extra }
+}
+
+/** SSE 响应体（chatRealSession 从 text 里抓 32 位 hex 的服务端 requestId）。 */
+const SSE_ID = '0123456789abcdef0123456789abcdef'
+const SSE_TEXT = `data: {"id":"${SSE_ID}","object":"chat.completion.chunk"}\n\n`
+/** 一次被记录的请求。 */
+interface RecordedCall {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body: string
+}
+
+/**
+ * 路由式 fetcher：按「URL 精确匹配（或 `*` 前缀）+ 方法」分发响应，记录全部调用。
+ * `body` 可传函数（入参为本次调用，可读请求头/请求体，读用例内可变状态），
+ * 供「accept 后列表翻转」「web/mp 同 URL 按头分发」之类的有状态用例。
+ */
+function routingFetcher(
+  routes: {
+    /** URL 精确匹配；以 `*` 结尾则按前缀匹配。 */
+    match: string
+    method?: string
+    status?: number
+    body?: unknown | ((call: RecordedCall) => unknown)
+    text?: string
+  }[],
+): { fetcher: typeof fetch; calls: RecordedCall[] } {
+  const calls: RecordedCall[] = []
+  const fetcher = (async (url: string, init?: RequestInit) => {
+    const rawHeaders = (init?.headers ?? {}) as unknown
+    const headers: Record<string, string> = {}
+    if (rawHeaders instanceof Headers) {
+      rawHeaders.forEach((v, k) => {
+        headers[k.toLowerCase()] = v
+      })
+    } else if (typeof rawHeaders === 'object' && rawHeaders !== null) {
+      for (const [k, v] of Object.entries(rawHeaders as Record<string, unknown>)) {
+        headers[k.toLowerCase()] = String(v)
+      }
+    }
+    const method = String(init?.method ?? 'GET')
+    const call: RecordedCall = {
+      url: String(url), method, headers,
+      body: typeof init?.body === 'string' ? init.body : '',
+    }
+    calls.push(call)
+    const route = routes.find((r) => {
+      const hit = r.match.endsWith('*')
+        ? String(url).startsWith(r.match.slice(0, -1))
+        : String(url) === r.match
+      return hit && (r.method === undefined || r.method === method)
+    })
+    const spec = route ?? {}
+    const resolvedBody = typeof spec.body === 'function' ? (spec.body as (c: RecordedCall) => unknown)(call) : spec.body
+    return {
+      ok: (spec.status ?? 200) >= 200 && (spec.status ?? 200) < 300,
+      status: spec.status ?? 200,
+      json: async () => resolvedBody ?? {},
+      text: async () => (spec.text !== undefined ? spec.text : JSON.stringify(resolvedBody ?? {})),
+      // keepStreakActive 走 response.body.getReader() 读 SSE 流；立即 done 即「流已收」。
+      body: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+    } as unknown as Response
+  }) as unknown as typeof fetch
+  return { fetcher, calls }
+}
+
+const EP = 'https://copilot.tencent.com'
+const WB = 'https://www.workbuddy.cn'
+/** web 口径的空任务列表（成长族两路 + 等级族共用）。 */
+const EMPTY_TASKS = { code: 0, data: { tasks: [] } }
+/** 推动真实时钟的 fake-timer 驱动器（与上文 runWithClock 同型，上限提到 600s）。 */
+async function driveWithClock<T>(work: Promise<T>): Promise<T> {
+  let done = false
+  const settled = work.then(
+    (v) => {
+      done = true
+      return v
+    },
+    (e) => {
+      done = true
+      throw e
+    },
+  )
+  for (let i = 0; i < 6_000 && !done; i += 1) {
+    await vi.advanceTimersByTimeAsync(100)
+  }
+  return settled
+}
+
+describe('体验专家族（WorkBuddy_Valorant / expert_use_*）', () => {
+  it('FIXED_EXPERT_TASKS 的专家 id 与昵称/职业名不可互换（判据双字段校验）', () => {
+    // 昵称（name）与职业名（title）都参与服务端校验，来自任务 jump_url 的权威口径。
+    expect(FIXED_EXPERT_TASKS['WorkBuddy_Valorant']).toMatchObject({
+      expertId: 'ex_xQHHD1u5Jkua', name: '无畏契约拼豆专家',
+    })
+    expect(FIXED_EXPERT_TASKS['expert_use_maidehao']).toMatchObject({
+      expertId: 'ex_GDl31WahyIH0', name: '卖得好', title: '中国电商运营专家',
+    })
+    expect(FIXED_EXPERT_TASKS['expert_use_douyinyin']).toMatchObject({
+      expertId: 'ex_FbY5nlWTqDod', name: '斗音音', title: '抖音策略师',
+    })
+    expect(FIXED_EXPERT_TASKS['expert_use_shangjia_xuanchuan']).toMatchObject({
+      expertId: 'ex_Weo3x2EZuSDm', name: '商家宣传设计师', title: '商家宣传页与海报设计师',
+    })
+    expect(FIXED_EXPERT_TASKS['expert_use_bowangwang']).toMatchObject({
+      expertId: 'ex_WZY136wV5aMt', name: '播旺旺', title: '直播电商教练',
+    })
+    // 白名单必须包含全部固定专家任务（否则完成动作不会进 actionable）。
+    for (const code of Object.keys(FIXED_EXPERT_TASKS)) {
+      expect(AUTOMATABLE_TASK_CODES.has(code)).toBe(true)
+      expect(GROWTH_TASK_COMPLETION[code]).toBeDefined()
+    }
+  })
+
+  it('WorkBuddy_Valorant：真实会话带 X-Expert-Id，召唤链 + LOCAL actual_use（type 空、cost 0），达标即领奖', async () => {
+    vi.useFakeTimers()
+    // 有状态：使用链上报（第二次 /v2/report）后 progress 翻为达标（1/1）。
+    const reportedUse = { done: false }
+    const taskList = () => ({
+      code: 0,
+      data: {
+        tasks: [growthTask('WorkBuddy_Valorant', {
+          progress: { current: reportedUse.done ? 1 : 0, target: 1 },
+        })],
+      },
+    })
+    const { fetcher, calls } = routingFetcher([
+      { match: `${EP}/v2/activity/growth/tasks`, method: 'GET', body: taskList },
+      { match: `${EP}/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      { match: `${EP}/activity/growth/tasks/accept`, method: 'POST', body: { code: 0, data: {} } },
+      {
+        match: `${EP}/portal/operation-platform/market/expert/list`, method: 'POST',
+        body: {
+          code: 0,
+          data: {
+            experts: [{
+              expert_id: 'ex_xQHHD1u5Jkua', expert_type: 'agent',
+              display_name_zh: '无畏契约拼豆专家', profession_zh: '无畏契约拼豆专家', version: '1.2.1',
+            }],
+          },
+        },
+      },
+      { match: `${EP}/v2/chat/completions`, method: 'POST', text: SSE_TEXT },
+      {
+        match: `${EP}/v2/report`, method: 'POST',
+        body: () => {
+          reportedUse.done = true
+          return { code: 0, data: {} }
+        },
+      },
+      { match: `${WB}/v2/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      {
+        match: `${WB}/activity/growth/tasks/WorkBuddy_Valorant/claim`, method: 'POST',
+        body: { code: 0, data: { credit: 100 } },
+      },
+    ])
+    const report = await driveWithClock(runGrowthTaskCompletions(CRED, PRODUCT, fetcher, { budgetMs: 600_000 }))
+    vi.useRealTimers()
+
+    const reportCalls = calls.filter((c) => c.url === `${EP}/v2/report`)
+    const allEvents: Record<string, unknown>[] = []
+    for (const c of reportCalls) {
+      const parsed = JSON.parse(c.body) as Record<string, unknown>[]
+      allEvents.push(...(Array.isArray(parsed) ? parsed : [parsed]))
+    }
+    const chatReal = calls.find((c) => c.url === `${EP}/v2/chat/completions`)
+    expect(chatReal).toBeDefined()
+    expect(chatReal?.headers['x-expert-id']).toBe('ex_xQHHD1u5Jkua')
+    // 召唤链三事件（expertEventChain 前 3 条）。
+    const codes = allEvents.map((e) => e['eventCode'])
+    expect(codes).toContain('expert_summon_click')
+    expect(codes).toContain('expert_summoned')
+    expect(codes).toContain('expert_actual_use')
+    // 使用链：agent_task_created 带 has_expert + 固定专家 id。
+    const created = allEvents.find((e) => e['eventCode'] === 'agent_task_created')
+    expect(created).toMatchObject({ has_expert: true, expert_id: 'ex_xQHHD1u5Jkua', expert_name: '无畏契约拼豆专家' })
+    // actual_use 为 LOCAL 变体（type 空、cost 0，轻量云/体验族同款细节）。
+    const use = allEvents.find((e) => e['eventCode'] === 'expert_actual_use')
+    expect(use).toMatchObject({ mode: 'LOCAL', type: '', cost: 0, id: 'ex_xQHHD1u5Jkua' })
+    // 达标后自动领奖。
+    expect(report.results.some((r) => r.taskCode === 'WorkBuddy_Valorant' && /已领取/.test(r.message))).toBe(true)
+    expect(calls.some((c) => c.url === `${WB}/activity/growth/tasks/WorkBuddy_Valorant/claim`)).toBe(true)
+  })
+})
+
+describe('小程序任务族（Sequential_*）', () => {
+  it('isMpTaskCode 只认登记过的 mp 码', () => {
+    expect(isMpTaskCode('Sequential_Tasks_1')).toBe(true)
+    expect(isMpTaskCode('Sequential_Tasks_7')).toBe(true)
+    expect(isMpTaskCode('chat_5')).toBe(false)
+    expect(isMpTaskCode('WorkBuddy_Valorant')).toBe(false)
+  })
+
+  it('fetchGrowthTaskCodes 合并 mp 口径列表（带 miniprogram 头），locked 不进待办', async () => {
+    // ⚠ web 与 mp 口径的列表 URL 相同（都打 product.endpoint），只能按请求头分发。
+    const { fetcher, calls } = routingFetcher([
+      {
+        match: `${EP}/v2/activity/growth/tasks`, method: 'GET',
+        body: (call) => (call.headers['x-client-platform'] === 'miniprogram'
+          ? {
+              code: 0,
+              data: {
+                tasks: [
+                  growthTask('Sequential_Tasks_1'),
+                  growthTask('Sequential_Tasks_4', { locked: true }),
+                ],
+              },
+            }
+          : { code: 0, data: { tasks: [growthTask('chat_5')] } }),
+      },
+      { match: `${EP}/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+    ])
+    const query = await fetchGrowthTaskCodes(CRED, PRODUCT, fetcher, { includeInProgress: true })
+    expect(query.ok).toBe(true)
+    expect(query.codes).toContain('chat_5')
+    expect(query.codes).toContain('Sequential_Tasks_1')
+    expect(query.codes).not.toContain('Sequential_Tasks_4')
+    // mp 口径那发 GET 必须带 miniprogram 头（缺头 Sequential 族整族拿不到）。
+    const mpCall = calls.find(
+      (c) => c.url === `${EP}/v2/activity/growth/tasks` && c.headers['x-client-platform'] === 'miniprogram',
+    )
+    expect(mpCall).toBeDefined()
+  })
+
+  it('claimGrowthTaskReward 对 mp 码带 miniprogram 头；HTTP 400 非 JSON 时降级 web 头重试', async () => {
+    // 场景一：HTTP 400 + 可解析业务信封（code 400）⇒ 正常判失败，不降级。
+    const bizFail = routingFetcher([
+      {
+        match: `${WB}/activity/growth/tasks/Sequential_Tasks_1/claim`, method: 'POST',
+        body: { code: 400, msg: 'gateway reject' },
+      },
+    ])
+    const first = await claimGrowthTaskReward(CRED, PRODUCT, bizFail.fetcher, 'Sequential_Tasks_1')
+    expect(first.ok).toBe(false)
+    expect(first.message).toContain('gateway reject')
+    // 业务信封失败只发一次（不降级重试）。
+    expect(bizFail.calls.filter((c) => c.url.endsWith('/claim')).length).toBe(1)
+    expect(bizFail.calls[0]?.headers['x-client-platform']).toBe('miniprogram')
+
+    // 场景二：HTTP 400 + 非 JSON 体 ⇒ mp 头降级为 web 头再试，拿到 credit。
+    const calls: RecordedCall[] = []
+    let n = 0
+    const stateful = (async (url: string, init?: RequestInit) => {
+      n += 1
+      const headers: Record<string, string> = {}
+      const raw = (init?.headers ?? {}) as unknown
+      if (raw instanceof Headers) {
+        raw.forEach((v, k) => {
+          headers[k.toLowerCase()] = v
+        })
+      } else if (typeof raw === 'object' && raw !== null) {
+        for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+          headers[k.toLowerCase()] = String(v)
+        }
+      }
+      calls.push({ url: String(url), method: String(init?.method ?? 'GET'), headers, body: '' })
+      if (n === 1) {
+        return { ok: false, status: 400, json: async () => ({}), text: async () => 'Bad Request' } as unknown as Response
+      }
+      const body = { code: 0, data: { credit: 200, energy: 5 } }
+      return {
+        ok: true, status: 200,
+        json: async () => body, text: async () => JSON.stringify(body),
+      } as unknown as Response
+    }) as unknown as typeof fetch
+    const second = await claimGrowthTaskReward(CRED, PRODUCT, stateful, 'Sequential_Tasks_1')
+    expect(second.ok).toBe(true)
+    expect(second.credit).toBe(200)
+    const claimCalls = calls.filter((c) => c.url === `${WB}/activity/growth/tasks/Sequential_Tasks_1/claim`)
+    expect(claimCalls.length).toBe(2)
+    expect(claimCalls[0]?.headers['x-client-platform']).toBe('miniprogram')
+    expect(claimCalls[1]?.headers['x-client-platform']).toBe('web')
+  })
+
+  it('Sequential_Tasks_1 闭环：web/mp accept 分流 + mp 指纹上报 + 达标领奖', async () => {
+    vi.useFakeTimers()
+    const state = { accepted: false, current: 0 }
+    const mpList = () => ({
+      code: 0,
+      data: {
+        tasks: [growthTask('Sequential_Tasks_1', {
+          accept_status: state.accepted ? 'accepted' : 'not_accepted',
+          progress: { current: state.current, target: 1 },
+        })],
+      },
+    })
+    const { fetcher, calls } = routingFetcher([
+      // web / mp 口径共用 URL，按头分发。
+      {
+        match: `${EP}/v2/activity/growth/tasks`, method: 'GET',
+        body: (call) => (call.headers['x-client-platform'] === 'miniprogram' ? mpList() : EMPTY_TASKS),
+      },
+      { match: `${EP}/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      {
+        match: `${EP}/activity/growth/tasks/accept`, method: 'POST',
+        body: (call) => {
+          if (call.headers['x-client-platform'] === 'miniprogram') {
+            state.accepted = true
+          }
+          return { code: 0, data: {} }
+        },
+      },
+      {
+        match: `${WB}/v2/report`, method: 'POST',
+        body: () => {
+          state.current = 1
+          return { code: 0, data: {} }
+        },
+      },
+      {
+        match: `${WB}/activity/growth/tasks/Sequential_Tasks_1/claim`, method: 'POST',
+        body: { code: 0, data: { credit: 100, energy: 5 } },
+      },
+    ])
+    const report = await driveWithClock(runGrowthTaskCompletions(CRED, PRODUCT, fetcher, {
+      budgetMs: 600_000, mpChatGapMs: 0, mpJitterMaxMs: 0, mpActionGapMs: 0,
+    }))
+    vi.useRealTimers()
+
+    // accept 分流：Sequential 码必须单独走 miniprogram 头那批。
+    const acceptCalls = calls.filter((c) => c.url === `${EP}/activity/growth/tasks/accept`)
+    expect(acceptCalls.length).toBeGreaterThanOrEqual(1)
+    const mpAccept = acceptCalls.find((c) => c.headers['x-client-platform'] === 'miniprogram')
+    expect(mpAccept).toBeDefined()
+    expect(JSON.parse(mpAccept?.body ?? '{}')).toMatchObject({ task_codes: ['Sequential_Tasks_1'] })
+    // mp 指纹上报：ideType WorkBuddy_MP + agentName mp（打 webBase）。
+    const mpReport = calls.find((c) => c.url === `${WB}/v2/report`)
+    expect(mpReport).toBeDefined()
+    const events = JSON.parse(mpReport?.body ?? '[]') as Record<string, unknown>[]
+    expect(events[0]).toMatchObject({ ideType: 'WorkBuddy_MP', agentName: 'mp', eventCode: 'chat_request_send' })
+    expect(events[0]['agentType']).toBe('main')
+    // 达标领奖。
+    expect(report.results.some((r) => r.taskCode === 'Sequential_Tasks_1' && /领取/.test(r.message))).toBe(true)
+  })
+
+  it('Sequential_Tasks_2：专家市场不可用时不 accept（防半程态）', async () => {
+    vi.useFakeTimers()
+    const { fetcher, calls } = routingFetcher([
+      {
+        match: `${EP}/v2/activity/growth/tasks`, method: 'GET',
+        body: (call) => (call.headers['x-client-platform'] === 'miniprogram'
+          ? { code: 0, data: { tasks: [growthTask('Sequential_Tasks_2')] } }
+          : EMPTY_TASKS),
+      },
+      { match: `${EP}/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      {
+        match: `${EP}/portal/operation-platform/market/expert/list`, method: 'POST',
+        status: 500, body: { code: 500, msg: 'market down' },
+      },
+      { match: `${EP}/activity/growth/tasks/accept`, method: 'POST', body: { code: 0, data: {} } },
+    ])
+    const report = await driveWithClock(runGrowthTaskCompletions(CRED, PRODUCT, fetcher, {
+      budgetMs: 600_000, mpChatGapMs: 0, mpJitterMaxMs: 0, mpActionGapMs: 0,
+    }))
+    vi.useRealTimers()
+    const row = report.results.find((r) => r.taskCode === 'Sequential_Tasks_2')
+    expect(row).toBeDefined()
+    expect(row?.ok).toBe(false)
+    expect(row?.message).toContain('专家市场不可用')
+    // 关键：没有对 Sequential_Tasks_2 的 accept（避免留下已登记未上报的半程态）。
+    const mpAccepts = calls.filter(
+      (c) => c.url === `${EP}/activity/growth/tasks/accept` && c.headers['x-client-platform'] === 'miniprogram',
+    )
+    expect(mpAccepts.length).toBe(0)
+  })
+})
+
+describe('连登链（claimStreakExtras：补签/兑换/抽奖/首Buddy/礼包/保连胜）', () => {
+  /** 全链路响应（可按用例覆盖个别路由）。 */
+  function streakRoutes(overrides: {
+    streakBody?: unknown
+    giftBody?: unknown
+    firstBody?: unknown
+    summaryBody?: unknown
+  } = {}) {
+    return [
+      {
+        match: `${EP}/activity/growth/streak`, method: 'GET',
+        body: overrides.streakBody ?? {
+          code: 0,
+          data: {
+            streak: { days: 9 },
+            makeup_cards: { balance: 1, max: 2 },
+            redemption_status: {
+              tier_7d_status: 'claimable', tier_14d_status: 'locked', tier_28d_status: 'locked',
+              tiers: [{ tier: '7d', days: 7, credit: 100, energy: 10, cards: 1, chances: 2 }],
+            },
+          },
+        },
+      },
+      {
+        match: `${EP}/activity/growth/heatmap`, method: 'GET',
+        body: {
+          code: 0,
+          data: {
+            today: { date: '2026-11-05' },
+            cells: [
+              { date: '2026-11-03', score: 0 },
+              { date: '2026-10-30', score: 0 }, // 上月：不补
+              { date: '2026-11-04', score: 100 }, // 已签：不补
+            ],
+          },
+        },
+      },
+      { match: `${EP}/activity/growth/makeup-cards/use`, method: 'POST', body: { code: 0, data: {} } },
+      { match: `${EP}/activity/growth/redeem`, method: 'POST', body: { code: 0, data: {} } },
+      {
+        match: `${EP}/activity/growth/lottery/summary`, method: 'GET',
+        body: overrides.summaryBody ?? { code: 0, data: { chances: 2, module: { enabled: true } } },
+      },
+      { match: `${EP}/activity/growth/lottery/draw`, method: 'POST', body: { code: 0, data: { prize: 'credit' } } },
+      { match: `${EP}/activity/growth/buddy/agreement`, method: 'POST', body: { code: 0, data: {} } },
+      {
+        match: `${EP}/activity/growth/buddy/first`, method: 'POST',
+        body: overrides.firstBody ?? { code: 0, data: { reward_credit: 300 } },
+      },
+      {
+        match: `${WB}/billing/meter/check-gift-claimed`, method: 'POST',
+        body: overrides.giftBody ?? { code: 0, data: { active: true, claimed: false, credit_num: 1500 } },
+      },
+      { match: `${WB}/billing/meter/claim-gift`, method: 'POST', body: { code: 0, data: { credit: 1500 } } },
+      { match: `${EP}/v2/chat/completions`, method: 'POST', text: SSE_TEXT },
+    ]
+  }
+
+  it('全链路：补签 1 天、兑换 7d 档、抽 2 次、领养首 Buddy、领礼包、保连胜', async () => {
+    const { fetcher, calls } = routingFetcher(streakRoutes())
+    const report = await claimStreakExtras(CRED, PRODUCT, fetcher)
+    expect(report.credit).toBe(100 + 300 + 1500)
+    expect(report.claimedCount).toBe(3)
+    expect(report.drewCount).toBe(2)
+    expect(report.makeupUsed).toBe(1)
+    const codes = report.rows.map((r) => r.taskCode)
+    expect(codes).toContain('(补签)')
+    expect(codes).toContain('(连登兑换:7d)')
+    expect(codes).toContain('(抽奖)')
+    expect(codes).toContain('(首Buddy)')
+    expect(codes).toContain('(新手礼包)')
+    expect(codes).toContain('(保连胜)')
+    // 补签只打本月漏签日（2026-11-03），不碰上月与已签日。
+    const makeupCalls = calls.filter((c) => c.url === `${EP}/activity/growth/makeup-cards/use`)
+    expect(makeupCalls.length).toBe(1)
+    expect(JSON.parse(makeupCalls[0]?.body ?? '{}')).toMatchObject({ target_date: '2026-11-03' })
+    // 兑换带 client_token 幂等令牌。
+    const redeem = calls.find((c) => c.url === `${EP}/activity/growth/redeem`)
+    expect(JSON.parse(redeem?.body ?? '{}')).toMatchObject({ tier: '7d' })
+    expect(String(JSON.parse(redeem?.body ?? '{}')['client_token']).length).toBeGreaterThan(0)
+    // 首Buddy 前置协议：agreement 先于 first。
+    const agreeAt = calls.findIndex((c) => c.url === `${EP}/activity/growth/buddy/agreement`)
+    const firstAt = calls.findIndex((c) => c.url === `${EP}/activity/growth/buddy/first`)
+    expect(agreeAt).toBeGreaterThanOrEqual(0)
+    expect(firstAt).toBeGreaterThan(agreeAt)
+    // 抽奖按 chances 恰好 2 次。
+    expect(calls.filter((c) => c.url === `${EP}/activity/growth/lottery/draw`).length).toBe(2)
+  })
+
+  it('无可领对象：locked/已领档位不兑换、chances=0 不抽、礼包已领不重复领', async () => {
+    const { fetcher, calls } = routingFetcher(streakRoutes({
+      streakBody: {
+        code: 0,
+        data: {
+          streak: { days: 3 },
+          makeup_cards: { balance: 0, max: 2 },
+          redemption_status: {
+            tier_7d_status: 'claimed', tier_14d_status: 'locked',
+            tiers: [{ tier: '7d', days: 7, credit: 100, energy: 10, cards: 1, chances: 2 }],
+          },
+        },
+      },
+      giftBody: { code: 0, data: { active: true, claimed: true, credit_num: 1500 } },
+      summaryBody: { code: 0, data: { chances: 0, module: { enabled: true } } },
+      firstBody: { code: 400, msg: 'please accept buddy adoption agreement first' },
+    }))
+    const report = await claimStreakExtras(CRED, PRODUCT, fetcher)
+    expect(report.credit).toBe(0)
+    expect(report.claimedCount).toBe(0)
+    expect(report.drewCount).toBe(0)
+    expect(report.makeupUsed).toBe(0)
+    expect(calls.some((c) => c.url === `${EP}/activity/growth/redeem`)).toBe(false)
+    expect(calls.some((c) => c.url === `${EP}/activity/growth/lottery/draw`)).toBe(false)
+    expect(calls.some((c) => c.url === `${WB}/billing/meter/claim-gift`)).toBe(false)
+  })
+})
+
+describe('collectBuddyGrowth 合并连登链结果', () => {
+  it('连登链积分并入 claimedCredit，合成行进入 tasks 明细', async () => {
+    const { fetcher } = routingFetcher([
+      { match: `${EP}/v2/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      { match: `${EP}/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      {
+        match: `${EP}/activity/growth/streak`, method: 'GET',
+        body: {
+          code: 0,
+          data: {
+            streak: { days: 9 },
+            makeup_cards: { balance: 0, max: 2 },
+            redemption_status: {
+              tier_7d_status: 'claimable',
+              tiers: [{ tier: '7d', days: 7, credit: 100, energy: 10, cards: 1, chances: 0 }],
+            },
+          },
+        },
+      },
+      { match: `${EP}/activity/growth/heatmap`, method: 'GET', body: { code: 0, data: { today: { date: '2026-11-05' }, cells: [] } } },
+      { match: `${EP}/activity/growth/redeem`, method: 'POST', body: { code: 0, data: {} } },
+      { match: `${EP}/activity/growth/lottery/summary`, method: 'GET', body: { code: 0, data: { chances: 0, module: { enabled: true } } } },
+      { match: `${EP}/activity/growth/buddy/agreement`, method: 'POST', body: { code: 0, data: {} } },
+      { match: `${EP}/activity/growth/buddy/first`, method: 'POST', body: { code: 0, data: { reward_credit: 300 } } },
+      { match: `${WB}/billing/meter/check-gift-claimed`, method: 'POST', body: { code: 0, data: { active: false, claimed: true, credit_num: 0 } } },
+      { match: `${EP}/v2/chat/completions`, method: 'POST', text: SSE_TEXT },
+    ])
+    const stub = vi.stubGlobal('fetch', fetcher)
+    try {
+      const outcome = await collectBuddyGrowth(
+        CRED,
+        PRODUCT,
+        { id: 'acct-9', nickname: '连登号', credentialRef: 'buddy:ref' } as never,
+        undefined,
+        undefined,
+      )
+      expect(outcome.claimedCredit).toBe(100 + 300)
+      expect(outcome.claimedCount).toBe(2)
+      const codes = (outcome.tasks ?? []).map((t) => t.taskCode)
+      expect(codes).toContain('(连登兑换:7d)')
+      expect(codes).toContain('(首Buddy)')
+      expect(codes).toContain('(保连胜)')
+      expect(outcome.ok).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+
+describe('生产口径锁定（2026-11-01 审计补）', () => {
+  it('mp 对话节奏的默认值必须是 45s + 0~10s 抖动（反作弊口径，测试注入 0 不得覆盖默认）', () => {
+    // 单测里为了速度把 gap 注入成 0；生产代码不传 options 时必须落到实测口径。
+    // 这里把常量锁死，防止有人「顺手」调小默认值触发上游反作弊回滚。
+    expect(MP_CHAT_EVENT_GAP_MS).toBe(45_000)
+    expect(MP_CHAT_JITTER_MAX_MS).toBe(10_000)
+  })
+
+  it('连登链 401 时 collectBuddyGrowth 报「凭据已失效」而非静默成普通失败', async () => {
+    const { fetcher } = routingFetcher([
+      { match: `${EP}/v2/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      { match: `${EP}/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      // 连登链第一发（streak）就 401：响应是非 JSON 的网关页（实测形态）。
+      { match: `${EP}/activity/growth/streak`, method: 'GET', status: 401, text: 'Unauthorized' },
+    ])
+    const stub = vi.stubGlobal('fetch', fetcher)
+    try {
+      const outcome = await collectBuddyGrowth(
+        CRED,
+        PRODUCT,
+        { id: 'acct-401', nickname: '僵尸号', credentialRef: 'buddy:ref' } as never,
+        undefined,
+        undefined,
+      )
+      expect(outcome.error).toContain('凭据已失效')
+      expect(outcome.ok).toBe(true) // 僵尸账号不染黄（既有口径）
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('mp claim 业务信封 msg=task not found（口径不认）时降级 web 头重试', async () => {
+    const calls: RecordedCall[] = []
+    let n = 0
+    const stateful = (async (url: string, init?: RequestInit) => {
+      n += 1
+      const headers: Record<string, string> = {}
+      const raw = (init?.headers ?? {}) as unknown
+      if (raw instanceof Headers) {
+        raw.forEach((v, k) => {
+          headers[k.toLowerCase()] = v
+        })
+      } else if (typeof raw === 'object' && raw !== null) {
+        for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+          headers[k.toLowerCase()] = String(v)
+        }
+      }
+      calls.push({ url: String(url), method: String(init?.method ?? 'GET'), headers, body: '' })
+      if (n === 1) {
+        const body = { code: 400, msg: 'task not found' }
+        return {
+          ok: false, status: 400, json: async () => body, text: async () => JSON.stringify(body),
+        } as unknown as Response
+      }
+      const body = { code: 0, data: { credit: 200, energy: 5 } }
+      return {
+        ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body),
+      } as unknown as Response
+    }) as unknown as typeof fetch
+    const result = await claimGrowthTaskReward(CRED, PRODUCT, stateful, 'Sequential_Tasks_1')
+    expect(result.ok).toBe(true)
+    expect(result.credit).toBe(200)
+    expect(calls.length).toBe(2)
+    expect(calls[0]?.headers['x-client-platform']).toBe('miniprogram')
+    expect(calls[1]?.headers['x-client-platform']).toBe('web')
+  })
+
+  it('mp claim 业务信封 msg=task not completed（真失败）时不降级、只发一次', async () => {
+    const calls: RecordedCall[] = []
+    const stateful = (async (url: string, init?: RequestInit) => {
+      const headers: Record<string, string> = {}
+      const raw = (init?.headers ?? {}) as unknown
+      if (raw instanceof Headers) {
+        raw.forEach((v, k) => {
+          headers[k.toLowerCase()] = v
+        })
+      } else if (typeof raw === 'object' && raw !== null) {
+        for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+          headers[k.toLowerCase()] = String(v)
+        }
+      }
+      calls.push({ url: String(url), method: String(init?.method ?? 'GET'), headers, body: '' })
+      const body = { code: 400, msg: 'task not completed' }
+      return {
+        ok: false, status: 400, json: async () => body, text: async () => JSON.stringify(body),
+      } as unknown as Response
+    }) as unknown as typeof fetch
+    const result = await claimGrowthTaskReward(CRED, PRODUCT, stateful, 'Sequential_Tasks_1')
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('task not completed')
+    expect(calls.length).toBe(1)
+  })
+})

@@ -14,6 +14,7 @@ import {
 } from './credits-capabilities.js';
 import { orderAfterDrop, dropPositionFromPointer } from './account-order.js';
 import { checkinCommitPlan, formatNextRunAt, isInsideCheckinDock, needsHostRestartNotice } from './checkin-panel-logic.js';
+import { accountLimitActionState, policyBlockedHint, policyBlockedInfo } from './account-status.js';
 // ⚠️ 冲突解法（PR !144 × origin/master × 本 fork 的 qoder 代理）：
 //    - HEAD（PR !144）：删掉了旧侧栏入口 store（那个 `sidebar-entry` 前缀的
 //      老 store 模块，上游已整块删除）的四个符号 —— 侧栏入口改由
@@ -55,8 +56,8 @@ import {
   formatPackageTooltip,
   splitCreditsByExpiry,
   expirySplitParts,
-  expiryBucketLabel,
   daysUntilExpiry,
+  formatExpiryHint,
   exclusivePoolRemainingOf,
   isExclusivePool,
 } from './credit-expiry.js';
@@ -452,8 +453,14 @@ function formatPackageLine(pkg, windowDays, now) {
   const daysLeft = daysUntilExpiry(pkg, now);
   if (!pkg.active && pkg.expiredTime) parts.push(`失效于 ${pkg.expiredTime}`);
   else if (daysLeft !== null) {
-    const label = expiryBucketLabel(pkg, windowDays, now);
-    parts.push(`距到期 ${Math.ceil(daysLeft)} 天${label ? `（${label}）` : ''}`);
+    /**
+     * ⚠️⚠️ **这里原先自己拼了一遍「距到期 N 天（label）」**，与 `credit-expiry.js` 的
+     * `formatExpiryHint` **逐字重复**（同一语义两套实现）⇒ 2026-11-01 四审实测：
+     * 把 `expiryBucketLabel` 的「已过期」分支修好之后，**本行仍输出「距到期 -3 天（已过期）」**
+     * —— 修了一半。改成复用同一个函数：文案逐字节不变（已核对：`days` 同为
+     * `Math.ceil(left)`、label 为空时同样省略括号），且自动继承那边的修复。
+     */
+    parts.push(formatExpiryHint(pkg, windowDays, now));
   } else if (pkg.cycleEndTime) parts.push(`本周期至 ${pkg.cycleEndTime}`);
   return parts.join(' · ');
 }
@@ -929,13 +936,23 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
   // ⚠️ **本 fork 独有**（MonkeyCode 两站 / 百智云）：两个「改 Key」+ 一个「登录」。
   // 同为 props 存在性开关（而非 provider 硬判断），见各自按钮处注释。
   onEditMonkeycodeKey, onEditBaizhiKey, onReadSession }) {
-  const rateLimits = account.modelRateLimits
-    ? Object.entries(account.modelRateLimits).filter(([, v]) => v > Date.now())
-    : [];
+  /**
+   * 「这个号还能不能用」的判据全部收在 `account-status.js`（纯函数，有单测）：
+   * 那里区分了**逐模型限流**（会自己好）与**账号级封禁**（只能重新登录），
+   * 两者的字段、展示、能否重测都不同 —— Gitee issue IKS2MV。
+   *
+   * ⚠️ 别把这三行改回「内联判据」：这一片的缺陷形态恰恰是「看起来正常」，
+   * 只有能被单测钉住的纯函数才守得住。
+   */
+  const limitState = accountLimitActionState(account);
+  const rateLimits = limitState.activeRateLimits.map(({ modelId, resetAt }) => [modelId, resetAt]);
+  const policyBlocked = limitState.policyBlocked;
+  const policyBlockedMessage = policyBlockedInfo(account).message;
   const expired = typeof account.expiresAt === 'number' && account.expiresAt > 0 && account.expiresAt <= Date.now();
-  // 只要存在**任何**标记（即使已过期）就允许重测/重置——过期记录正是
-  // 用户最想清理的对象，而 UI 的 rateLimits 只显示未到期的。
-  const hasAnyLimit = Boolean(account.modelRateLimits && Object.keys(account.modelRateLimits).length > 0);
+  /** 「重置」可用：任一标记（含已过期）+ 封禁。 */
+  const hasAnyLimit = limitState.canReset;
+  /** 「重测」可用：只对**逐模型**标记有意义（纯封禁账号上它按了没反应）。 */
+  const hasAnyModelLimit = limitState.canRetest;
   // 拖拽相关的状态与回调由 ProviderPanel 统一管理（它掌握整个列表顺序）。
   const dragProps = drag || {};
 
@@ -1043,8 +1060,11 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
       showRateLimitActions
         ? React.createElement('button', {
             className: 'dim-jh-btn',
+            // ⚠️ 「重测」只测**已有模型标记**的模型（`retestAccount` 在零标记时
+            //    一次请求都不发）。封禁标记不算模型标记 ⇒ 纯封禁账号上它按了也没反应，
+            //    故禁用并让用户走「测试」（无条件探活）。判据与实现同源，别只看 hasAnyLimit。
             title: RETEST_HELP,
-            disabled: busy || !hasAnyLimit,
+            disabled: busy || !hasAnyModelLimit,
             onClick: () => onRetest(account.id),
           }, '重测')
         : null,
@@ -1353,15 +1373,36 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
             actions: actionsNode,
           })
         : null),
+    // ★ 封禁（账号级）必须排在限流（模型级）**前面**、且用红色：它才是「这个号废了」。
+    policyBlocked
+      ? React.createElement('div', { className: 'dim-jh-policyBlocked', role: 'alert' },
+          React.createElement('span', { className: 'dim-jh-policyBlockedLabel' }, '已限制 · 需重新登录'),
+          policyBlockedMessage === ''
+            ? null
+            : React.createElement('span', {
+                className: 'dim-jh-policyBlockedMsg',
+                title: policyBlockedMessage,
+              }, policyBlockedMessage),
+          // ⚠️⚠️ 文案里的入口**必须与真实存在的按钮同源**（对抗审计 E9）：
+          //   「测试」只在登记了能力位的 provider 上渲染（当前只有 gemini），
+          //   而本 issue 的 buddy / workbuddy **没有这个按钮** —— 让用户「点测试」
+          //   等于指一个不存在的入口，比不写更糟。
+          //   `onTest` 就是那个能力位在客户端的落点（`undefined` = 没登记）。
+          React.createElement('span', { className: 'dim-jh-policyBlockedHint' },
+            policyBlockedHint(onTest !== undefined)))
+      : null,
     rateLimits.length > 0
       ? React.createElement('div', { className: 'dim-jh-rateLimits' },
-          React.createElement('span', { className: 'dim-jh-rateLimitsLabel' }, '限额重置'),
+          // ⚠️ 文案要说清「**只影响这个模型**」（issue IKS2MV 问题 2）：上游报文自己
+          //    就写着「您也可以切换其他模型继续使用」。笼统写「限流」会让用户以为
+          //    整个账号废了 —— 实测同一账号同一秒：flash 连续 6 次 429，pro 立刻 200。
+          React.createElement('span', { className: 'dim-jh-rateLimitsLabel' }, '限流（仅该模型）'),
           rateLimits.map(([modelId, resetAt]) =>
             React.createElement('span', {
               key: modelId,
               className: 'dim-jh-ttlBadge',
-              title: `模型 ${modelId}`,
-            }, `${modelId} · ${formatTime(resetAt)}`)))
+              title: `模型 ${modelId} 限流中（仅此模型；换其它模型仍可用）`,
+            }, `${modelId} · 至 ${formatTime(resetAt)}`)))
       : null,
     // 不支持积分余额的 provider 没有积分行可挂按钮 ⇒ 退回原来的独立行。
     // 否则那个账号卡片上就再也没有「重测 / 重置 / 停用 / 删除」入口了。
@@ -5419,7 +5460,8 @@ function ProviderPanel({ provider, rpcCall }) {
               className: 'dim-jh-btn',
               title: supportsGrowthTasks
                 ? `领取全部 ${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号（含已停用）的每日签到积分，**并完成成长中心任务**。`
-                  + '成长一轮单账号实测 90～270s 且全串行，账号多时可能需多点几次；'
+                  + '成长一轮单账号可达数分钟（小程序族任务有 45s/条的反作弊节奏）且全串行，账号多时可能需多点几次；'
+                  + '同时自动领取连登兑换、补签、抽奖、首Buddy 与新手礼包；'
                   + '受客户端动作限制的项（微信、夜猫子窗口、判据推不动）会如实标为「需客户端」。'
                 : `领取全部 ${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号（含已停用）的每日签到积分`,
               disabled: claiming || accounts.length === 0,

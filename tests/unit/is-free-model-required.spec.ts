@@ -45,6 +45,33 @@ function readSrc(name: string): string {
   return readFileSync(join(SRC, name), 'utf8')
 }
 
+/**
+ * 剥掉注释（块注释 + 整行注释）。
+ *
+ * ⚠️ **必须剥**：本文件的两条计数判据（块内 `has`、全局 `total`）若把注释算进去，
+ * 就会**双向出错** —— 注释里写一句「`isFreeModel:` 见某处」⇒ `total` 假红（2026-11-01
+ * 实测撞到：在 `:4170` 的注释里提起该字段，`total` 从 13 变 15）；
+ * 反过来把真代码删掉、只留注释 ⇒ 块内 `has` 假绿（缺陷原地复发而用例全绿）。
+ * 实现与 `tests/unit/autoclaw-lock-wiring.spec.ts:63` 的 `codeOnly()` 逐字同款。
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+    // ⚠️ **行尾注释也必须剥**（2026-11-01 二审实测的两个漏洞）：
+    //   ① **假绿**：把真代码整行注释掉、再在同块某行的**行尾**注释里提一句
+    //      `isFreeModel:` ⇒ 行尾那个把被删的那个抵消 ⇒ strip 后计数不变 ⇒ 11/11 全绿；
+    //   ② **假红**：完全不动代码、只在两行行尾各提一次 ⇒ `total` 15 > 14 ⇒ 红。
+    //   用 `[ \t]+` 而不是 `\s+`：`\s` 含换行，会把注释**前面的空行**一起吞掉。
+    //
+    // ⚠️ **已知残留风险**：这条规则无法区分「字符串里写了 ` // `」与真注释 ——
+    //    若有朝一日 `src/index.ts` 出现 `const x = 'a // b'` 这种写法，它会被误剥、
+    //    进而让大括号配平炸掉（症状是 `buddyPlanBlocks` 的 expect 失败，不是静默）。
+    //    当前该文件 0 处此形态（二审用 TS AST 逐节点查过 599 个字面量）；
+    //    真出现时请把本函数换成 AST 判据，**不要**再往正则上打补丁。
+    .replace(/[ \t]+\/\/[^\n]*$/gm, '')
+}
+
 /** 把 `src/index.ts` 里每个 `kind: 'buddy'` 对象块切出来（按大括号配平）。 */
 function buddyPlanBlocks(code: string): Array<{ start: number; body: string }> {
   const blocks: Array<{ start: number; body: string }> = []
@@ -187,23 +214,29 @@ describe('③ 接线层：src/index.ts 每一处 balance 块都显式声明了 i
   const code = readSrc('index.ts')
   const blocks = buddyPlanBlocks(code)
 
-  it('buddy 协议的 balance 块恰好 11 处（新增渠道时本数字会变，届时一并补声明）', () => {
-    expect(blocks.length).toBe(11)
+  it('buddy 协议的 balance 块恰好 13 处（新增渠道时本数字会变，届时一并补声明）', () => {
+    // ⚠️ 2026-11-01 magicrew / magicrewintl 加入（用户要求「加永久/长期/临期和
+    //    锁定永久积分」）：两站各一个 `kind: 'buddy'` 的 `balance` 块 ⇒ 11 → 13。
+    expect(blocks.length).toBe(13)
   })
 
   it('★★ 每一处都有 isFreeModel（漏一处 = 该家免费模型被锁定误拦）', () => {
     // 变异：删掉任一处 `isFreeModel:` 行 ⇒ 红（并报出是哪一处）。
+    // ⚠️ 必须 `stripComments`：否则「删掉代码、只在原位留一行注释提起该字段」
+    //    会被判成「有」⇒ 假绿（与 `total` 那条的假红是同一个根源）。
     const missing = blocks
-      .map((b, i) => ({ i, has: /\bisFreeModel\s*:/.test(b.body) }))
+      .map((b, i) => ({ i, has: /\bisFreeModel\s*:/.test(stripComments(b.body)) }))
       .filter((x) => !x.has)
     expect(missing.map((x) => x.i), '以下 balance 块缺少 isFreeModel').toEqual([])
   })
 
-  it('★ 不该有 11 处以外的散落写法（防止有人绕过 balance 块另起一份）', () => {
-    const total = (code.match(/\bisFreeModel\s*:/g) ?? []).length
-    // 11 处 balance 块 + 2 处 import 类型（实际上 index.ts 不 import 该类型）
-    // ⇒ 允许 11~12。多出来说明有别的装配路径没被上面的块扫描覆盖。
-    expect(total).toBeLessThanOrEqual(12)
+  it('★ 不该有 13 处以外的散落写法（防止有人绕过 balance 块另起一份）', () => {
+    const total = (stripComments(code).match(/\bisFreeModel\s*:/g) ?? []).length
+    // 13 处 balance 块 + 1 处余量（`index.ts` 目前不 import 该类型）
+    // ⇒ 允许 13~14。多出来说明有别的装配路径没被上面的块扫描覆盖。
+    // ⚠️ 2026-11-01：magicrew 两站加入后 11 → 13，上限同步 12 → 14。
+    // ⚠️ 计数前必须 `stripComments`（否则注释里提起该字段就假红，实测过一次）。
+    expect(total).toBeLessThanOrEqual(14)
   })
 
   it('★ 没有把 NO_FREE_MODEL 用在有免费模型的那几家身上', () => {

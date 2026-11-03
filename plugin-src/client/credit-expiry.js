@@ -50,13 +50,34 @@ function normalizeWindowDays(windowDays) {
 /**
  * 该包距扣费截止还剩多少天；`null` = 服务端没给到期时间。
  *
- * ⚠️ 用 `deductionEndTime`，**不是** `expiredTime`（有效包那字段一律是空串，
- * 只在真正失效后才回填）也不是 `cycleEndTime`（套餐是月度值，会把长期积分误判
- * 成快到期）。理由与实测对照见 `src/buddy-balance-rank.ts` 的文件头。
+ * ⚠️ 优先 `deductionEndTime`；**缺失时才回落到 `expiredTime`**（见 {@link packageExpiryMs}）。
+ * 不要读 `cycleEndTime`（套餐是月度值，会把长期积分误判成快到期）。
+ * 理由与实测对照见 `src/buddy-balance-rank.ts` 的文件头。
+ *
+ * ⚠️ **「`expiredTime` 在有效包里恒为空串」这个前提不成立**（2026-11-01 四审更正，
+ * 本节初稿如此写）：`src/provider-credits.ts` 的 `buildZcodeBalance` **恒写 ISO**、
+ * `src/lobsterai-credits.ts` 与 `src/astudio-credits.ts` 也写真实值 ⇒ 别因为
+ * 「那个字段是空的」就去清理这条兜底。逐渠道核对结论：15 家锁定渠道里，
+ * `expiredTime` 与 `deductionEndTime` 要么同源、要么恒空 ⇒ 兜底**不改变任何一家的
+ * 分桶**；唯一结构性命中的是 ZCode，而 ZCode 不在 `PERMANENT_LOCK_PROVIDERS`
+ * 里、也不回传 `windowDays` ⇒ 锁定语义零影响。
+ *
+ * ⚠️⚠️ **判据必须与 {@link packageExpiryMs} 同一份**（2026-11-01 三审：此前本函数
+ * 自带一份更严格的判据，于是**同一个包**在三个出口给出三种结论）：
+ *
+ * | 出口 | 判据 | `deductionEndTime: "1791072000000"`（数字字符串）|
+ * |---|---|---|
+ * | 分桶（`splitCreditsByExpiry`）| `packageExpiryMs` | **临期** |
+ * | 日期列（`formatPackageExpiry`）| `packageExpiryMs` | 正常显示日期 |
+ * | 标签（本函数）| 旧的 `typeof === 'number'` | **「到期时间未知」** |
+ *
+ * 用户看到的是「分到临期桶、日期列也对、标签却说不知道」——三处自相矛盾。
+ * 改用 `packageExpiryMs` 后三个出口同判，且顺带让 `expiredTime` 兜底的包
+ * （`deductionEndTime` 缺失、`expiredTime` 有值）的标签与分桶一致。
  */
 export function daysUntilExpiry(pkg, now) {
-  const end = pkg && typeof pkg.deductionEndTime === 'number' ? pkg.deductionEndTime : null;
-  if (end === null || !Number.isFinite(end) || end <= 0) return null;
+  const end = packageExpiryMs(pkg);
+  if (end === null) return null;
   const at = typeof now === 'number' && Number.isFinite(now) ? now : Date.now();
   return (end - at) / DAY_MS;
 }
@@ -97,6 +118,30 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
   const windowMs = days * DAY_MS;
   const at = typeof now === 'number' && Number.isFinite(now) ? now : Date.now();
   let expiring = 0;
+  /**
+   * **已经作废**的额度（`deductionEndTime <= now` 但 `active` 仍为 true）。
+   *
+   * ⚠️⚠️ **独立一桶，不再计入 `expiring`**（2026-11-02，对抗审计 B1 后修正）。
+   *
+   * 第一版（同一天的 `7a567d4`）把它留在 `expiring` 里、只让**展示层**减掉，
+   * 理由是「三档合计 === total 的守恒」与「与聚合/后端同判」。审计打穿了这个理由：
+   * 后端 `splitBuddyCreditsByExpiry` 与聚合 `sharedPackageExpiry` 当时同样把它算
+   * 可用 ⇒ 面板说「已过期 7」而**选号判它可用、聚合把它排第一先烧** ⇒
+   * 从「说法含糊」升级成「面板与行为相反」。⇒ 现在**三处同时修**，判据一致：
+   *
+   * | 层 | 判据 |
+   * |---|---|
+   * | 前端（本函数） | `end <= now` ⇒ `expired` 桶，不进 `expiring` |
+   * | 后端 `splitBuddyCreditsByExpiry` | 同上（`expired` 可选键 + 不计 `expiring`）|
+   * | 聚合 `sharedPackageExpiry` / `magicrewExpiry` | `end <= now` 不参与 `earliest`、且不算「有可用额度」|
+   *
+   * 守恒随之变成**四段**：`permanent + longTerm + expiring + expired === total`
+   * （用户照样能加平，只是第 4 段的名字叫「已过期」）。
+   *
+   * 可达性：TRAE / Qoder 的 `active` 是**硬编码 true**（`trae-credits.ts`），
+   * 从不反映是否过期 —— 所以这类包**一定会**出现，不是理论值。
+   */
+  let expired = 0;
   let longTerm = 0;
   let permanent = 0;
   /** 临期桶里**最早**的作废时刻（倒计时用）；无临期包时 `null`。 */
@@ -182,6 +227,11 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
       }
       continue;
     }
+    if (end <= at) {
+      // 已作废（但 active 仍 true）⇒ 单独一桶：这些额度**扣不到**。
+      expired += remaining;
+      continue;
+    }
     if (end - at < windowMs) {
       expiring += remaining;
       // ⚠️⚠️ **必须排除已过期的包**（2026-10-13 审计修正）：这里取的是临期桶里
@@ -204,7 +254,9 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
       longTerm += remaining;
     }
   }
-  return { expiring, longTerm, permanent, earliestExpiringAt, earliestExpiringAmount, exclusivePoolRemaining };
+  // ⚠️ `expired` 只在**有已作废额度时**才出现（与 `modelRateLimits` 那类「无值即不写键」
+  //    同款式）：否则每个调用方都要为「多一个恒 0 的键」改断言，而它对 0 值毫无信息量。
+  return { expiring, ...(expired > 0 ? { expired } : {}), longTerm, permanent, earliestExpiringAt, earliestExpiringAmount, exclusivePoolRemaining };
 }
 
 /** 这个包属于哪一桶的中文标签（tooltip 前缀用）。 */
@@ -212,6 +264,15 @@ export function expiryBucketLabel(pkg, windowDays, now) {
   const days = normalizeWindowDays(windowDays);
   const left = daysUntilExpiry(pkg, now);
   if (left === null) return '到期时间未知';
+  /**
+   * ⚠️ **已过期要先判**（2026-11-01 三审实测）：`active: true` 但到期时刻已过的包
+   * 会走到这里（`jet-hub.js` 的 `all = balance?.packages || []` **不过滤**），
+   * 而旧实现直接 `${Math.ceil(left)} 天内到期` ⇒ 渲染出 **「-3 天内到期」**，
+   * `-0.5 天` 更会因 `Math.ceil` 变成「0 天内到期」。
+   * 顺序不能反：先判「未知」，再判「已过期」，最后才按窗口分档（否则已过期的包
+   * 在窗口为 null 时仍返回 null、整行不渲染，把已过期的包藏起来）。
+   */
+  if (left <= 0) return '已过期';
   if (days === null) return null;
   return left < days ? `${Math.ceil(left)} 天内到期` : `还有 ${Math.ceil(left)} 天`;
 }
@@ -225,6 +286,14 @@ export function expiryBucketLabel(pkg, windowDays, now) {
 export function formatExpiryHint(pkg, windowDays, now) {
   const left = daysUntilExpiry(pkg, now);
   if (left === null) return '';
+  /**
+   * ⚠️⚠️ **已过期必须在这里就截住**（2026-11-01 四审）：`expiryBucketLabel` 修好
+   * 「已过期」之后，本函数仍会拼出 **「距到期 -3 天（已过期）」** —— 同一个字符串里
+   * 一半修好一半没修，比全错更难看；`Math.ceil(-0.5) = -0` 还会变成
+   * 「距到期 0 天（已过期）」。
+   * ⇒ 「还有几天到期」这个语义只在**未过期**时成立，已过期就直接回「已过期」。
+   */
+  if (left <= 0) return '已过期';
   const days = Math.ceil(left);
   const label = expiryBucketLabel(pkg, windowDays, now);
   return label ? `距到期 ${days} 天（${label}）` : `距到期 ${days} 天`;
@@ -250,13 +319,15 @@ export function formatExpirySplitLine(split, format) {
   // 只显示**非零**桶：0 值进文案只会让一行变长而无信息（用户看不到「永久 0」的价值）。
   const permanent = split.permanent > 0 ? format(split.permanent) : null;
   const longTerm = split.longTerm > 0 ? format(split.longTerm) : null;
+  // ⚠️ `expiring` 已由 `splitCreditsByExpiry` 排除掉已作废部分（2026-11-02），
+  //    这里直接用；「已过期」是独立的第 4 段。
+  const expiredAmount = Number.isFinite(split.expired) && split.expired > 0 ? split.expired : 0;
   const expiring = split.expiring > 0 ? format(split.expiring) : null;
+  const expired = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push(`永久 ${permanent}`);
   if (longTerm !== null) parts.push(`长期 ${longTerm}`);
-  // ⚠️ 临期显示**窗口内总额**（「窗口内共有多少会作废」）。
-  //    与 `expirySplitParts` 同口径 —— 两者都必须是总额，否则三档合计
-  //    不等于 `total`，用户一加就发现数字丢了（2026-10-21 报障）。
   if (expiring !== null) parts.push(`临期 ${expiring}`);
+  if (expired !== null) parts.push(`已过期 ${expired}`);
   return parts.length === 0 ? null : parts.join(' · ');
 }
 
@@ -283,8 +354,11 @@ export function expirySplitParts(split, format, now) {
   // ⚠️ 数值与格式化文本分成两个变量：临期段要用**数值**做比较
   //    （`earliestAmount < expiringAmount`）。拿格式化后的字符串做 `<`
   //    依赖隐式转换 —— 一旦 `format` 带上千分位（`"3,500"` → `NaN`）就静默出错。
+  // 已作废额度单独成段（`splitCreditsByExpiry` 已把它从 `expiring` 里摘出）。
+  const expiredAmount = Number.isFinite(split.expired) && split.expired > 0 ? split.expired : 0;
   const expiringAmount = split.expiring > 0 ? split.expiring : 0;
   const expiring = expiringAmount > 0 ? format(expiringAmount) : null;
+  const expiredText = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push({ key: 'permanent', text: `永久 ${permanent}`, tone: 'ok' });
   if (longTerm !== null) parts.push({ key: 'longTerm', text: `长期 ${longTerm}`, tone: 'warn' });
   if (expiring !== null) {
@@ -346,6 +420,19 @@ export function expirySplitParts(split, format, now) {
       tone: 'error',
       ...(countdownText.length > 0 ? { countdown: countdownText } : {}),
     });
+  }
+  /**
+   * ★ 「已过期」单列一段（2026-11-02）。
+   *
+   * 这些额度**已经扣不到了**，但 `active` 仍是 true（TRAE / Qoder 硬编码），
+   * 所以它们会一直出现在 `packages` 里。旧实现把它们混进「临期」⇒ 面板写
+   * 「临期 7」却没有倒计时（`earliestExpiringAt` 只取未来时刻），
+   * 而同一个包的标签写「已过期」—— 一条数据两个说法。
+   *
+   * tone 用 `warn` 而不是 `error`：它已经作废，不需要抢「马上要作废」的红色注意力。
+   */
+  if (expiredText !== null) {
+    parts.push({ key: 'expired', text: `已过期 ${expiredText}`, tone: 'warn' });
   }
   return parts;
 }
@@ -595,7 +682,17 @@ export function exclusivePoolRemainingOf(packages) {
  * @returns 毫秒时间戳；`null` = 没有到期时间（显示「长期」）。
  */
 export function packageExpiryMs(pkg) {
-  const dedEnd = Number(pkg && pkg.deductionEndTime);
+  /**
+   * ⚠️⚠️ **只认 `number` 与数字字符串，不许裸 `Number()`**（2026-11-01 三审实测）：
+   * 后端 `src/buddy-balance-rank.ts` 的 `splitBuddyCreditsByExpiry` 早已收窄成
+   * `number | string`（那处的注释逐字记载了同一条教训），而这里仍是裸 `Number(…)`
+   * ⇒ 强转有洞：`Number(true) === 1`、`Number([ms]) === ms`、
+   * `Number({ valueOf: () => ms }) === ms` ⇒ **同一条数据前后端落不同桶**：
+   * 前端判「临期 100」、后端判「永久 100」。用户看到的档位与真正选号用的档位不一致。
+   * 三格都已实测复现（见 `tests/unit/credit-expiry.spec.ts` 的「与后端逐格同判」段）。
+   */
+  const raw = pkg && pkg.deductionEndTime;
+  const dedEnd = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : Number.NaN;
   if (Number.isFinite(dedEnd) && dedEnd > 0) return dedEnd;
   const exp = pkg && pkg.expiredTime ? String(pkg.expiredTime) : '';
   if (exp.length > 0) {
@@ -624,7 +721,30 @@ export function formatPackageExpiry(pkg, now) {
   const end = packageExpiryMs(pkg);
   if (end === null) return '长期';
   const at = Number.isFinite(now) ? now : Date.now();
-  const date = new Date(end).toISOString().slice(0, 10);
+  /**
+   * ⚠️⚠️ **日期按本地时区取，不能用 `toISOString()`**（2026-11-01 三审实测）：
+   * `toISOString()` 给的是 UTC ⇒ 东八区用户看到**早一天**的到期日。
+   * 实测：上游给「北京 `2026-10-04 00:00:00` 到期」⇒ 旧实现显示 `2026-10-03（3 天后）`；
+   * 北京 `07:59:59` 与 `08:00:00`（只差 1 秒）会被显示成**两个不同日期**。
+   *
+   * 为什么不写死「+8 小时」：本函数被**所有**渠道共用，到期时刻是绝对毫秒 ⇒
+   * 「到期日」对用户就是他**本地**的那一天；写死东八区会把 UTC-8 用户的日期又推错。
+   * 用 `getFullYear/getMonth/getDate`（本地分量）两种时区都对。
+   *
+   * ⚠️ 连带约束：同一时刻在不同时区的机器上显示不同日期是**正确**行为 ⇒
+   * 相关断言必须按「本地分量」算期望值，**不能硬编码日期字符串**（否则 UTC 机器上红）。
+   */
+  const local = new Date(end);
+  /**
+   * ⚠️ **有限但超出 `Date` 表示范围的值要挡掉**（2026-11-01 四审）：`packageExpiryMs`
+   * 只保证「有限且 > 0」，而 `new Date(1e16)` 是 **Invalid Date** ⇒ 下面的
+   * `getFullYear()` 全给 `NaN`，拼出 **「NaN-NaN-NaN（115720014 天后）」**。
+   * （旧的 `toISOString()` 会直接抛 `RangeError` —— 更糟。）
+   * 降级成「长期」与「到期时间未知」同档；可达性 0（生产者都写真实毫秒），
+   * 属于「别让一条坏数据把整列渲染成 NaN」的兜底。
+   */
+  if (Number.isNaN(local.getTime())) return '长期';
+  const date = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`;
   const days = Math.ceil((end - at) / DAY_MS);
   if (days <= 0) return `${date}（已过期）`;
   return `${date}（${days} 天后）`;

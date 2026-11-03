@@ -434,9 +434,17 @@ describe('★ windowDays 由 registry 的 usesExpiryWindow 驱动（不是「是
     //    的每条 `details[]` 带 `expire_at_ms`（**毫秒时间戳**，无需换算），
     //    直接写进 `deductionEndTime` —— 与 astudio 那条的形态差异是本条的价值所在
     //    （两种输入形态都能落进同一个分桶判据）。
+    // ⚠️ magicrew / magicrewintl 2026-11-01 加入：`/api/v1/quota/points/total`
+    //    的 `expiring_quota_details[]` 每条带 `expires_at`（**无时区**的
+    //    `YYYY-MM-DD HH:mm:ss`，按 UTC+8 解析），而 `total_points` 减批次和
+    //    的残差是**上游不下发到期时间**的永久积分（合成包**不写**到期时刻）
+    //    —— 「有到期时间」与「没有到期时间」两种包同时出现，正是分桶判据
+    //    需要的那组输入。
+    //    ⚠️ `codearts` 在这张表里但**不是**本家端点下发到期时间（它靠静态校准）。
     expect(withWindow).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
-      'minimax', 'minimaxintl', 'officeace', 'qoder', 'qodercn', 'trae', 'workbuddy',
+      'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace',
+      'qoder', 'qodercn', 'trae', 'workbuddy',
     ])
   })
 })

@@ -405,3 +405,84 @@ describe('负载均衡开关的 zcode 门控（仅 zcode 渲染）', () => {
     ).toEqual([])
   })
 })
+
+/**
+ * 「锁定永久积分」按钮的**端到端接线**（2026-11-01 二审收尾）。
+ *
+ * ## 为什么必须补这一条
+ *
+ * magicrew 两站刚接上这个能力，此前的验证止步于**静态核对**：
+ * 「`jet-hub.js` 里 `rpcCall('credits.permanentLock', { provider })` 的 provider
+ * 来自 props，三处调用点没有字面量」。但静态核对抓不到两类真实回归：
+ * ① 按钮**根本没渲染**（`supportsPermanentLock` 的判据被改坏 ⇒ 用户看不见入口）；
+ * ② 按钮渲染了但 `onClick` 没接（或接成了别的方法 ⇒ 点下去零请求、零提示）。
+ * 这两类在源码文本上都是「字面量还在」，只有**真渲染 + 真调用**才测得动。
+ *
+ * ## 判据打在哪
+ *
+ * 1. 两站各自渲染出**一个** `aria-label` 含「永久积分」的 `button`；
+ * 2. 真调用它的 `onClick` ⇒ `rpcCall` 收到 `credits.permanentLock`，
+ *    且 `provider` 是**当前那站**（不是另一站、不是字面量）、`locked === true`
+ *    （未锁定态点一次 = 上锁）；
+ * 3. 对照：不支持该能力的 provider（`opencode`）**一个按钮都不许渲染**，
+ *    且**零** `credits.permanentLock` 请求（对不支持的 provider 发会拿到
+ *    `bad-request`，控制台留下必然失败的报错）。
+ *
+ * ⚠️ **挂载时的读请求不会干扰计数**：本文件的 `useEffect` 桩是空实现（`useEffect() {}`），
+ * 所以 `credits.permanentLock` 的**读**分支不执行 —— 收到的每一次都是**点击**触发的写。
+ * 若哪天把这个桩改成真执行 effect，本用例的计数会变成 2，届时**要改的是断言而不是实现**。
+ */
+describe('锁定永久积分按钮的接线（magicrew 两站真渲染）', () => {
+  /** 拿本次渲染产物里那个「永久积分」按钮（没有则 `undefined`）。 */
+  function lockButton(): { props: Record<string, unknown> } | undefined {
+    return elements.find((element) => {
+      if (element.type !== 'button') return false
+      const props = element.props as Record<string, unknown> | null | undefined
+      const label = props?.['aria-label']
+      return typeof label === 'string' && label.includes('永久积分')
+    }) as { props: Record<string, unknown> } | undefined
+  }
+
+  /** 渲染一个 provider 的面板，返回它收到的 RPC 调用（按顺序）。 */
+  async function renderAndRecord(provider: string) {
+    const calls: Array<{ method: string; payload?: unknown }> = []
+    const rpcCall = async (method: string, payload?: unknown) => {
+      calls.push({ method, payload })
+      if (method === 'credits.permanentLock') {
+        return { ok: true, provider, locked: true, windowDays: 15 }
+      }
+      return { ok: true, order: [], statuses: {} }
+    }
+    const result = await renderPanel(rpcCall, provider)
+    expect(result.ok, `${provider} 渲染抛错：${result.ok ? '' : String((result as { error: unknown }).error)}`).toBe(true)
+    return calls
+  }
+
+  for (const provider of ['magicrew', 'magicrewintl'] as const) {
+    it(`★★ 真渲染 + 真点击「${provider}」⇒ 发 credits.permanentLock，provider 原样透传且 locked: true`, async () => {
+      const calls = await renderAndRecord(provider)
+      const button = lockButton()
+      expect(button, `${provider} 面板没有渲染锁定按钮（supportsPermanentLock 判据被改坏？）`).toBeDefined()
+      // 未锁定态 ⇒ 按钮表达的动作是「锁定」，且 title 是整句文案（按钮上只有四个字）
+      expect(button?.props['aria-label']).toBe('锁定永久积分')
+      expect(typeof button?.props.title).toBe('string')
+      expect(button?.props.title).not.toBe('')
+
+      const onClick = button?.props.onClick as (() => unknown) | undefined
+      expect(typeof onClick, '按钮没有 onClick（渲染了但点不动）').toBe('function')
+      await onClick?.()
+      // `onClick` 是 `() => void togglePermanentLock()`（fire-and-forget）⇒ 等一拍让它跑完
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      const writes = calls.filter((call) => call.method === 'credits.permanentLock')
+      expect(writes, `点击后应恰好发一次 credits.permanentLock，实际 ${writes.length} 次`).toHaveLength(1)
+      expect(writes[0]?.payload).toEqual({ provider, locked: true })
+    })
+  }
+
+  it('★★ 对照：不支持该能力的 provider 一个按钮都不渲染，且零请求（门控真的在）', async () => {
+    const calls = await renderAndRecord('opencode')
+    expect(lockButton(), 'opencode 不该有锁定按钮（会拿到 bad-request）').toBeUndefined()
+    expect(calls.filter((call) => call.method === 'credits.permanentLock')).toEqual([])
+  })
+})

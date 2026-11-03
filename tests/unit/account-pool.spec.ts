@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -174,7 +174,12 @@ const LOCK_DOC = (): string => join(isolatedHome!, 'jet-hub', 'permanent-locks.j
 beforeEach(() => {
   // 每个用例从干净的锁定文档开始：残留会让「首次迁移」路径被跳过，
   // 于是本应验证迁移的用例其实测的是「读已有文档」。
+  //
+  // ⚠️ `.bak` 也必须删（2026-11-01 三审 D2 之后）：`FileLockStore.load()` 在
+  // 主文件不存在时会回落到 `.bak`，只删主文件的话上一个用例的锁定会从备份里
+  // 复活，把后续「默认未锁定」的用例全部打成假红。
   rmSync(LOCK_DOC(), { force: true })
+  rmSync(`${LOCK_DOC()}.bak`, { force: true })
 })
 
 /** 读临时 home 里的锁定表文档（不存在返回 undefined）。 */
@@ -1035,6 +1040,82 @@ describe('AccountPool', () => {
     })
   })
 
+  /**
+   * ★ 账号级封禁标记（Gitee issue IKS2MV）。
+   *
+   * 与 `modelRateLimits` 是**两笔账**，三条判据缺一不可：
+   * ① 写入幂等（保留**首次**观测时刻，反复撞 11140 不会把那一刻冲掉）；
+   * ② 清除后字段整个消失（不留 undefined 噪音）；
+   * ③ **选号按账号排除**（不是按模型）—— 11140 是账号级，换模型也必然 403。
+   */
+  describe('★ 账号级封禁标记（issue IKS2MV）', () => {
+    it('★★ 写入后整个账号从选号里消失（与「逐模型限流」不同）', async () => {
+      // ⚠️ 选号会去解析凭据：没有凭据的账号恒返回 null（那是「凭据坏」，
+      //    不是「封禁」）—— 先把凭据放好，判据才打在过滤逻辑上。
+      await ctx.credentials.set(credentialRef('BUDDY_ACC_A'), JSON.stringify({ access_token: 'AT' }))
+      // 模型限流：只挡那一个模型
+      await pool.addAccount(makeMockAccount({
+        credentialRef: 'BUDDY_ACC_A',
+        modelRateLimits: { 'model-a': Date.now() + 3_600_000 },
+      }))
+      expect(await pool.getAvailableAccount('buddy', 'model-a')).toBeNull()
+      // 换一个模型仍可用 —— 这正是 issue 问题 2 的实测结论
+      expect(await pool.getAvailableAccount('buddy', 'model-b')).not.toBeNull()
+
+      // 封禁：换任何模型都不可用
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为，已被限制使用')
+      expect(await pool.getAvailableAccount('buddy', 'model-b')).toBeNull()
+      expect(await pool.getAvailableAccount('buddy', 'another-model')).toBeNull()
+      // 空 modelId（未知目标模型）也挡 —— 封禁与模型无关
+      expect(await pool.getAvailableAccount('buddy', '')).toBeNull()
+    })
+
+    it('★ 写入幂等：保留**首次**观测时刻，报文可更新', async () => {
+      await pool.addAccount(makeMockAccount())
+      await pool.markAccountPolicyBlocked('buddy-001', '第一次')
+      const first = (await pool.listAccounts('buddy'))[0]
+      expect(first.policyBlockedAtMs).toBeGreaterThan(0)
+      const at = first.policyBlockedAtMs
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      await pool.markAccountPolicyBlocked('buddy-001', '第二次')
+      const second = (await pool.listAccounts('buddy'))[0]
+      expect(second.policyBlockedAtMs).toBe(at)
+      expect(second.policyBlockedMessage).toBe('第二次')
+    })
+
+    it('★ 已标记且报文未变 ⇒ 不再写盘（写放大：连撞 3 次 = 6 次落盘）', async () => {
+      // 对抗审计 E4 实测：修复前每事件 2 笔账各写一次、第 2 次起状态没变仍照写。
+      // 现在 early-return ⇒ 「同一个事实」不重复付费。
+      await pool.addAccount(makeMockAccount())
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
+      const writesAfterFirst = ctx.replaceCalls.length
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
+      expect(ctx.replaceCalls.length, '同一报文重复标记不应再写盘').toBe(writesAfterFirst)
+      // 但报文**变了** ⇒ 仍要写（面板红字要跟着更新）
+      await pool.markAccountPolicyBlocked('buddy-001', '第二次的报文')
+      expect(ctx.replaceCalls.length).toBe(writesAfterFirst + 1)
+      expect((await pool.listAccounts('buddy'))[0].policyBlockedMessage).toBe('第二次的报文')
+    })
+
+    it('★ 清除后两个字段都消失，且再次清除返回 false', async () => {
+      await pool.addAccount(makeMockAccount())
+      await pool.markAccountPolicyBlocked('buddy-001', '账号存在异常行为')
+      expect(await pool.clearAccountPolicyBlocked('buddy-001')).toBe(true)
+      const entry = (await pool.listAccounts('buddy'))[0]
+      expect(entry.policyBlockedAtMs).toBeUndefined()
+      expect(entry.policyBlockedMessage).toBeUndefined()
+      expect(await pool.clearAccountPolicyBlocked('buddy-001')).toBe(false)
+    })
+
+    it('★ 封禁账号在列表里沉底（可用在前），且不影响限流排序', async () => {
+      await pool.addAccount(makeMockAccount({ id: 'buddy-good' }))
+      await pool.addAccount(makeMockAccount({ id: 'buddy-blocked', credentialRef: 'BUDDY_ACCOUNT_B' }))
+      await pool.markAccountPolicyBlocked('buddy-blocked', '账号存在异常行为')
+      const list = await pool.listAccounts('buddy')
+      expect(list.map((a) => a.id)).toEqual(['buddy-good', 'buddy-blocked'])
+    })
+  })
+
   describe('resolveCredentialForAccount（含停用账号）', () => {
     it('停用账号凭据仍可按 id 解析（重测需要）', async () => {
       await ctx.credentials.set(credentialRef('CA_OFF'), JSON.stringify({ access_key_id: 'off' }))
@@ -1292,6 +1373,55 @@ describe('AccountPool', () => {
       ])
       expect(pool.disabledModelsFor('buddy').has('glm-5.2')).toBe(true)
       expect(pool.permanentLocked('buddy')).toBe(true)
+    })
+
+    /**
+     * ★★ 锁表**主文件与 .bak 都读不出来**时，绝不能把内存里的锁定当成「磁盘说没有锁」
+     * （2026-11-02，PR #168 对抗审计 B3 实测）。
+     *
+     * 旧行为：`load()` 返回 `{exists:true, locks:{}}` ⇒ `setPermanentLocked` 的
+     * 「磁盘存在就以磁盘为准」把内存整份丢掉，并**连同 .bak** 一起写成新的小表
+     * ⇒ 用户再锁任意一家，其余几家的锁定静默消失且不可恢复（重启后 fail-open）。
+     */
+    /**
+     * ★ 落盘失败必须**回滚内存**（2026-11-02，对抗审计 B4）。
+     *
+     * 旧实现先改内存再落盘：两进程共用 `$DSH_HOME` 时 EPERM/ENOENT 真实存在
+     * ⇒ 一次失败后内存领先磁盘，用户再动任意一家的锁，那条「内存有、磁盘没有」
+     * 的记录就被「磁盘优先」删掉 ⇒ 锁定静默失效。
+     */
+    it('★ 落盘失败 ⇒ 内存回滚（否则下次写会把这条锁删掉）', async () => {
+      await pool.setPermanentLocked('magicrew', true)
+      // 把权威文档的位置换成**目录** ⇒ 原子写的 rename 必然失败（跨平台稳定）
+      const file = LOCK_DOC()
+      // ⚠️ 必须**原样还原**：这个路径是 afterAll 之前所有用例共享的隔离 home，
+      //    留一个目录在那儿会让后续 100+ 条用例全红（我第一版就这么挂的）。
+      const original = existsSync(file) ? readFileSync(file, 'utf8') : undefined
+      try {
+        rmSync(file, { force: true })
+        mkdirSync(file, { recursive: true })
+        await expect(pool.setPermanentLocked('buddy', true)).rejects.toThrow()
+        // 回滚后：buddy 不该「内存里锁着、磁盘上没有」
+        expect(pool.permanentLocked('buddy'), '失败的锁定不得留在内存里').toBe(false)
+        expect(pool.permanentLocked('magicrew')).toBe(true)
+      } finally {
+        rmSync(file, { recursive: true, force: true })
+        if (original !== undefined) writeFileSync(file, original, 'utf8')
+      }
+    })
+
+    it('★★ 锁表双损坏 ⇒ 以内存为基线，不静默解锁（对抗审计 B3）', async () => {
+      await pool.setPermanentLocked('magicrew', true)
+      const file = LOCK_DOC()
+      writeFileSync(file, 'not-json', 'utf8')
+      writeFileSync(`${file}.bak`, 'not-json', 'utf8')
+
+      // 用户此时再锁另一家 —— 内存里 magicrew 还在，不得被「读不出来的空表」覆盖
+      await pool.setPermanentLocked('buddy', true)
+
+      expect(pool.permanentLocked('magicrew'), '主文件+.bak 双坏时内存里的锁定必须保留').toBe(true)
+      expect(pool.permanentLocked('buddy')).toBe(true)
+      expect(readLockDoc()?.locks, '落盘内容必须同时含两家').toEqual({ magicrew: true, buddy: true })
     })
 
     it('mergeAccounts 归一化坏条目并丢弃（与 replaceAll 同口径）', async () => {
@@ -2101,6 +2231,95 @@ describe('AccountPool 模型黑名单', () => {
 
       expect(pool.permanentLocked('buddy')).toBe(false)
       expect(readLockDoc()?.locks).toEqual({})
+    })
+
+    /**
+     * ⚠️⚠️ **D1（2026-11-01 三审实测）：多进程（多 profile）写锁表不得互相覆盖**。
+     *
+     * 同机 desktop + web 共用一个 `$DSH_HOME` 是 `permanent-lock-store.ts` 文件头
+     * 自述的既定场景。两个实例各自载入锁定表之后，旧实现「读内存 → 改 → 整份写」
+     * 会让**后写者用自己那份陈旧内存覆盖先写者**：实测 A 锁 `magicrew`、B 锁
+     * `magicrewintl`，最终文件只剩后者 ⇒ 另一站的锁定**静默消失** ⇒ 选号继续烧
+     * 永久积分（烧掉不可撤销）。
+     *
+     * 修法：`setPermanentLocked` 写前重读权威文档并按 provider 合并。
+     */
+    it('★★ 两个池实例各锁一个 provider ⇒ 两个键都保留', async () => {
+      const first = new AccountPool(createMockContext() as never)
+      const second = new AccountPool(createMockContext() as never)
+      // 复刻「两边各自开机载入」的时序（载入后内存里都是空表）
+      expect(first.permanentLocked('magicrew')).toBe(false)
+      expect(second.permanentLocked('magicrewintl')).toBe(false)
+
+      await second.setPermanentLocked('magicrewintl', true)
+      await first.setPermanentLocked('magicrew', true)
+
+      // 磁盘上两键都在（修前这里只剩 `{ magicrew: true }`）
+      expect(readLockDoc()?.locks).toEqual({ magicrew: true, magicrewintl: true })
+      // 以磁盘为准：新进程（模拟重启）读回来也是两键
+      expect(new AccountPool(createMockContext() as never).listPermanentLocked().sort())
+        .toEqual(['magicrew', 'magicrewintl'])
+    })
+
+    /**
+     * 上一条的**更尖锐形态**：合并的基线必须来自**磁盘**，不能只来自本进程内存。
+     *
+     * 这里第一实例的内存里从来没有 `buddy` 这个键 —— 若基线取内存，它解锁 Loomy
+     * 时的整份写会把另一实例刚写上去的 `buddy` 抹掉。
+     */
+    it('★★ 一个实例解锁时不得连带丢掉另一个实例刚写的锁', async () => {
+      const first = new AccountPool(createMockContext() as never)
+      const second = new AccountPool(createMockContext() as never)
+      expect(first.permanentLocked('loomy')).toBe(false)
+      expect(second.permanentLocked('buddy')).toBe(false)
+
+      await first.setPermanentLocked('loomy', true)
+      await second.setPermanentLocked('buddy', true)
+      await first.setPermanentLocked('loomy', false)
+
+      expect(readLockDoc()?.locks).toEqual({ buddy: true })
+    })
+
+    /**
+     * ⚠️⚠️ **四审新增：合并必须**不复活**别的进程刚解开的锁**（方向判据）。
+     *
+     * 前两条守的是「别丢锁」（钱的方向）。这一条守**相反**的方向 —— 它们**不能互相替代**：
+     * 把 `setPermanentLocked` 的合并方向反转（`{ ...disk, ...memory }` ↔ 反）后，
+     * 前两条**仍然全绿**（2026-11-01 四审实测），只有本条会红。
+     *
+     * 场景：A 进程刚把 `buddy` 解锁（磁盘 `{}`），B 进程按自己那份陈旧内存（里面还有
+     * `buddy: true`）再锁别的 provider ⇒ 旧方向会把 `buddy` 写回去 ⇒ 用户**解不开**。
+     */
+    it('★★ 另一个进程刚解开的锁不得被复活', async () => {
+      const first = new AccountPool(createMockContext() as never)
+      const second = new AccountPool(createMockContext() as never)
+      // 先让两边的内存都载入「buddy 是锁着的」
+      await first.setPermanentLocked('buddy', true)
+      expect(second.permanentLocked('buddy')).toBe(true)
+
+      // A（first）解锁 buddy ⇒ 磁盘变成 {}
+      await first.setPermanentLocked('buddy', false)
+      expect(readLockDoc()?.locks).toEqual({})
+
+      // B（second）的**内存里还记着 buddy: true**，此时它锁别的 provider
+      await second.setPermanentLocked('magicrew', true)
+
+      // ⚠️ 磁盘上只应有 magicrew：buddy 必须保持解锁（旧方向会写成 {buddy:true, magicrew:true}）
+      expect(readLockDoc()?.locks).toEqual({ magicrew: true })
+    })
+
+    /**
+     * 对照组：磁盘上有、本进程内存里**没有**的键必须保留（钱的方向）。
+     * 与上一条一起，把「并集」与「复活」两件事分开钉住。
+     */
+    it('★★ 磁盘上有、本进程内存里没有的锁必须保留', async () => {
+      const first = new AccountPool(createMockContext() as never)
+      const second = new AccountPool(createMockContext() as never)
+      expect(first.permanentLocked('workbuddy')).toBe(false)
+      await second.setPermanentLocked('workbuddy', true)
+      // first 从未见过 workbuddy，它锁别的 provider 时不得把它抹掉
+      await first.setPermanentLocked('magicrew', true)
+      expect(readLockDoc()?.locks).toEqual({ workbuddy: true, magicrew: true })
     })
 
     it('空 provider 名被忽略（不写入无意义的键）', async () => {

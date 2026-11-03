@@ -141,6 +141,13 @@ export interface ProbePool {
    * **新**时刻写回，否则存储停在旧值、UI 不再显示限流。
    */
   updateModelRateLimit(accountId: string, modelId: string, resetAtMs: number): Promise<void>
+  /**
+   * 清除账号级**封禁**标记（Gitee issue IKS2MV）。
+   *
+   * 与限流标记是**两笔账**：封禁只能靠「实测通过 / 人工重置 / 重新登录」清除，
+   * 不随时间过期。可选 —— 单测的替身池可能不实现它（缺了就跳过，不影响探测结论）。
+   */
+  clearAccountPolicyBlocked?(accountId: string): Promise<boolean>
 }
 
 /** 探测依赖注入点（测试可覆盖）。 */
@@ -451,6 +458,17 @@ export async function retestAccount(
     if (outcome.resetTimeMs === undefined) continue
     await pool.updateModelRateLimit(accountId, outcome.modelId, outcome.resetTimeMs)
   }
+  /**
+   * ★ 全部被测模型**都通过** ⇒ 这个账号显然没被封（Gitee issue IKS2MV）：
+   * 清掉账号级封禁标记，否则它会被选号侧永久排除、只能靠用户手动「重置」捞回来。
+   *
+   * ⚠️ 判据是 `tested > 0 && stillLimited.length === 0`：一次都没测（`tested === 0`）
+   * 不能证明任何事；有一个模型仍受限也说明账号还没恢复（封禁是账号级，但
+   * 「仍受限」也可能是限流，两者都该保守处理）。
+   */
+  if (result.tested > 0 && result.stillLimited.length === 0 && typeof pool.clearAccountPolicyBlocked === 'function') {
+    await pool.clearAccountPolicyBlocked(accountId)
+  }
   return result
 }
 
@@ -558,19 +576,32 @@ export async function testAccount(
  * 重置单个账号：不测试，直接清除该账号的全部限流标记。
  * @returns 清除的标记条数与涉及的账号数（此处恒为 0 或 1）。
  */
+/**
+ * 重置单个账号的限流标记。
+ *
+ * ⚠️ 同时清掉**账号级封禁标记**（Gitee issue IKS2MV）：这是「重置」按钮的语义
+ * ——「我确认这个账号现在是好的，把它的坏状态全清掉」。只清限流而留下封禁，
+ * 会让用户点了重置、面板仍红、选号仍排除它（按钮看起来失灵）。
+ */
 export async function resetAccount(pool: ProbePool, accountId: string): Promise<RpcResetResponse> {
   const cleared = await pool.clearModelRateLimits(accountId)
-  return { clearedCount: cleared, accountCount: cleared > 0 ? 1 : 0 }
+  const policyCleared = typeof pool.clearAccountPolicyBlocked === 'function'
+    ? await pool.clearAccountPolicyBlocked(accountId)
+    : false
+  return { clearedCount: cleared, accountCount: cleared > 0 || policyCleared ? 1 : 0 }
 }
 
-/** 重置某 provider 下全部账号（含已停用账号）的限流标记。 */
+/** 重置某 provider 下全部账号（含已停用账号）的限流标记与封禁标记。 */
 export async function resetAllAccounts(pool: ProbePool, provider: string): Promise<RpcResetResponse> {
   const entries = pool.listAccountsByProvider(provider)
   let clearedCount = 0
   let accountCount = 0
   for (const entry of entries) {
     const cleared = await pool.clearModelRateLimits(entry.id)
-    if (cleared > 0) {
+    const policyCleared = typeof pool.clearAccountPolicyBlocked === 'function'
+      ? await pool.clearAccountPolicyBlocked(entry.id)
+      : false
+    if (cleared > 0 || policyCleared) {
       clearedCount += cleared
       accountCount++
     }
