@@ -5229,6 +5229,12 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   const refreshScheduler = new MultiAccountRefreshScheduler({
     refresh: refreshAllCredentials,
     intervalMs: REFRESH_INTERVAL_MS,
+    /**
+     * 首轮延后 15s（issue #20）：宿主启动时插件并发初始化，立即对全量账号
+     * 发续期会和启动路径抢网络/凭据存储，日志里常见一串冷启动 `fetch failed`。
+     * 周期定时器仍然立刻武装；只有首轮让路。
+     */
+    initialDelayMs: 15_000,
     isPoolEmpty: async () => (await pool.listAllAccounts()).length === 0,
     // ⚠️ 可选链：`logger` 在极简 profile 下可能缺席，而日志不该成为续期的
     // 单点故障（与仓库既有的 `ctx.logger?.warn?.()` 一致）。

@@ -93,6 +93,10 @@ describe('续期调度器：启动必须先跑一轮', () => {
       /if\s*\(\s*accounts\.length\s*===\s*0\s*\)/,
     )
     expect(gate, 'isPoolEmpty 必须仍然接上（空池要有可观测日志）').toContain('isPoolEmpty')
+    // issue #20：生产必须把首轮延后 15s（否则冷启动与宿主初始化抢网络/存储）。
+    // 这一行是接线的一部分，删掉后调度器会退回「立即全量续期」而没有任何测试会红。
+    expect(gate, '生产未设置 initialDelayMs（首轮会与宿主启动抢资源）')
+      .toContain('initialDelayMs: 15_000')
   })
 
   it('账号入库时补武装（issue IKJOZB 点名缺失的那条路径）', () => {
