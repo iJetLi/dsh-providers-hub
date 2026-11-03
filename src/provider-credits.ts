@@ -124,7 +124,7 @@ import {
 // 百智云（2026-11-02）：积分在**主站控制台**（`baizhi.cloud`），不在模型网关。
 //   钱包接口只认网页登录态 cookie；`x-api-key` 打过去一律 401。
 //   两套凭据的分工与实测报文见 `baizhi-credits.ts` 模块头。
-import { fetchBaizhiBalanceDetailed } from './baizhi-credits.js'
+import { claimBaizhiDailyCheckin, fetchBaizhiBalanceDetailed } from './baizhi-credits.js'
 import type { BaizhiCredential } from './baizhi.js'
 import { BAIZHI } from './baizhi-product.js'
 import type { MonkeycodeCredential } from './monkeycode.js'
@@ -1158,16 +1158,23 @@ export function createProviderCredits(
      *
      * 与用户控制台截图逐位吻合（235.05 / 98.21 / 136.84 / 364.95 / 31 次）。
      *
-     * ⚠️ `claim` **不登记**：每日临时积分领取端点是
-     *    `POST /api/v1/user/wallet/daily-temporary-credit`，实测 400
-     *    `captcha binding mismatch`（要过验证码）⇒ 不是可幂等的「一键签到」，
-     *    登记了只会每次都失败并弹一条红字。
-     * ⚠️ `precheckStatus: false`：控制台只回 `daily_temporary_credit_claimed`
-     *    一个布尔，凑不出「连续 N 天」的状态读数（与 monkeycode 同型）。
+     * ⚠️ `claim` 登记（2026-11-03 真机取证）：每日临时积分领取
+     *    `POST /api/v1/user/wallet/daily-temporary-credit` 要先过 Cap 验证码，
+     *    但那是**纯本地 PoW**（`challenge → 解 50 题 → redeem`），不是图形码。
+     *    `claimBaizhiDailyCheckin` 复用 `src/cap-pow.ts`（与 MonkeyCode 同协议），
+     *    实测完整跑通并到账 100 积分，故不再以「400 captcha binding mismatch」拒绝。
+     * ⚠️ `precheckStatus: false`：预检已在 `claimBaizhiDailyCheckin` 内部用
+     *    钱包的 `daily_temporary_credit_claimed` 完成（与 monkeycode 同型）。
      */
     baizhi: {
       fetchBalanceDetailed: async (credential, call) =>
         fetchBaizhiBalanceDetailed(
+          credential as BaizhiCredential,
+          BAIZHI,
+          { warn: call.warn },
+        ),
+      claim: (credential, _entry, call) =>
+        claimBaizhiDailyCheckin(
           credential as BaizhiCredential,
           BAIZHI,
           { warn: call.warn },

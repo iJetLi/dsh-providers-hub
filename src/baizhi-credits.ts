@@ -29,8 +29,12 @@
  * - `GET /api/v1/user/api-keys` → `{"items":[{"id":…,"name":"demo-user",
  *   "key":"sk-…","created_at":…}]}` ⇒ **网页登录后可以自动取到 sk- Key**，
  *   不需要用户手抄。
- * - `POST /api/v1/user/wallet/daily-temporary-credit` → 400
- *   `captcha binding mismatch`（每日临时积分领取要过验证码，暂不实现）。
+ * - `POST /api/v1/user/wallet/daily-temporary-credit` → 每日临时积分领取。
+ *   2026-11-02 首次实测时直接 POST 得 400 `captcha binding mismatch`；2026-11-03
+ *   补全 Cap 验证码流程（`challenge → 本地 PoW → redeem`）后实测 HTTP 200：
+ *   `{"code":0,"message":"success","data":{"claimed":false,"amount_credit_cents":10000,
+ *   "expires_at":"2026-11-04T00:00:00+08:00"}}`（`claimed:false` = 当日已领过；
+ *   首次领取应为 `true`）。签到入口就是控制台顶栏「每日领积分 +100」按钮。
  *
  * ## 两套凭据（关键）
  *
@@ -46,9 +50,10 @@
  * @module src/baizhi-credits.ts
  */
 
-import type { CreditBalance, CreditPackage } from './credits.js'
+import type { ClaimOutcome, CreditBalance, CreditPackage } from './credits.js'
 import type { BaizhiCredential } from './baizhi.js'
 import { BAIZHI, type BaizhiProduct } from './baizhi-product.js'
+import { readCapChallenge, readCapToken, solveChallengeYielding } from './cap-pow.js'
 import { normalizeSessionCookie } from './session-cookie.js'
 
 /** 控制台会话 cookie 名（`baizhi.cloud` 上实测有两枚，两枚都要带）。 */
@@ -478,5 +483,136 @@ export async function fetchBaizhiProfile(
     ok: true,
     ...(id === undefined ? {} : { userId: String(id) }),
     ...(name === undefined ? {} : { name }),
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 每日签到（每日临时积分）
+ * ------------------------------------------------------------------ */
+
+/** 从领取响应里读本次到账积分（上游单位 1/100 积分 ⇒ 除以 100）。 */
+function readClaimedCredit(data: unknown): number | undefined {
+  if (data === null || typeof data !== 'object') return undefined
+  const record = data as Record<string, unknown>
+  const cents = readNumber(record, 'amount_credit_cents')
+  if (cents === undefined || cents <= 0) return undefined
+  return cents / 100
+}
+
+/**
+ * 一键领取每日临时积分：`challenge → 本地求解 → redeem → daily-temporary-credit`。
+ *
+ * ## 来源（2026-11-03 真机取证）
+ *
+ * 签到入口是控制台顶栏的「每日领积分 +100」按钮（`daily_temporary_credit_claimed
+ * === false` 时才渲染），不是独立签到页。点一次走四步：
+ *
+ * 1. `GET /api/v1/user/wallet/balance`（本函数用作**幂等预检**）；
+ * 2. `POST /api/v1/public/captcha/challenge` → `{token, challenge:{c,s,d}}`；
+ * 3. 本地解 Cap PoW（与 MonkeyCode 同协议，见 `src/cap-pow.ts`）；
+ * 4. `POST /api/v1/public/captcha/redeem` → `{token:'<8hex>:<15hex>'}`；
+ * 5. `POST /api/v1/user/wallet/daily-temporary-credit` `{captcha_token}` →
+ *    `{claimed:true, amount_credit_cents:10000, expires_at:'…+08:00'}`（100 积分）。
+ *
+ * ## 幂等
+ *
+ * 先读钱包的 `daily_temporary_credit_claimed`：已领 ⇒ 直接 `already-claimed`，
+ * **不发 PoW、不发写请求**。即便预检与领取之间被别人抢先，领取响应里的
+ * `claimed:false` 也会被翻译成 `already-claimed`（不是失败）。
+ *
+ * ⚠️ `precheckStatus: false`：预检已在本函数内部完成，外部再查一次就是
+ * 同一端点打两遍（与 MonkeyCode 同型）。
+ */
+export async function claimBaizhiDailyCheckin(
+  credential: BaizhiCredential,
+  product: BaizhiProduct = BAIZHI,
+  deps: BaizhiCreditsDeps = {},
+): Promise<ClaimOutcome> {
+  const cookie = cookieOf(credential)
+  if (cookie === undefined) {
+    return {
+      kind: 'failed',
+      code: -1,
+      message: '未配置会话（session_cookie）—— 签到接口只认网页登录态，'
+        + '请用「浏览器登录」添加账号；已建的账号可点卡片上的「登录」补填 session cookie',
+    }
+  }
+  try {
+    const before = await fetchBaizhiWallet(credential, product, deps)
+    if (before.ok && before.wallet.dailyClaimed) {
+      return { kind: 'already-claimed', message: '今天已经领取过每日积分' }
+    }
+    // 预检失败（网络/上游抖动）不阻止真正的领取尝试：它只是省一次 PoW 的优化。
+    if (!before.ok) deps.warn?.(`百智云签到预检失败（继续尝试领取）：${before.error}`)
+
+    const challengeResult = await platformRequest(
+      product.captchaChallengePath, cookie, product, deps, { method: 'POST', body: '{}' },
+    )
+    if (!challengeResult.ok) {
+      return { kind: 'failed', code: challengeResult.status, message: `获取签到验证题失败：${challengeResult.error}` }
+    }
+    const challenge = readCapChallenge(unwrapEnvelope(challengeResult.data))
+    if ('error' in challenge) {
+      return { kind: 'failed', code: -1, message: challenge.error }
+    }
+    // `solveChallengeYielding` 每解完一题让出一次事件循环，避免宿主被 PoW 冻住。
+    const solutions = await solveChallengeYielding(challenge.token, challenge.challenge)
+
+    const redeemResult = await platformRequest(
+      product.captchaRedeemPath,
+      cookie,
+      product,
+      deps,
+      { method: 'POST', body: JSON.stringify({ token: challenge.token, solutions }) },
+    )
+    if (!redeemResult.ok) {
+      return { kind: 'failed', code: redeemResult.status, message: `提交签到验证答案失败：${redeemResult.error}` }
+    }
+    const captchaToken = readCapToken(unwrapEnvelope(redeemResult.data))
+    if (captchaToken === undefined) {
+      return {
+        kind: 'failed',
+        code: -1,
+        message: '签到验证没有通过（redeem 响应里没有 token）—— 可能是验证题已过期，请重试一次',
+      }
+    }
+
+    const claimResult = await platformRequest(
+      product.dailyTemporaryCreditPath,
+      cookie,
+      product,
+      deps,
+      { method: 'POST', body: JSON.stringify({ captcha_token: captchaToken }) },
+    )
+    if (!claimResult.ok) {
+      return { kind: 'failed', code: claimResult.status, message: `领取每日积分失败：${claimResult.error}` }
+    }
+    const claimData = unwrapEnvelope(claimResult.data)
+    const record = claimData !== null && typeof claimData === 'object'
+      ? (claimData as Record<string, unknown>)
+      : undefined
+    const claimed = readBool(record, 'claimed')
+    if (claimed === false) {
+      // 预检与领取之间被别人领掉（或预检失败）⇒ 今天已经领过，不是错误。
+      return { kind: 'already-claimed', message: '今天已经领取过每日积分' }
+    }
+    if (claimed === undefined) {
+      return { kind: 'failed', code: -1, message: '每日积分领取响应里没有 claimed 字段（上游形态可能已变）' }
+    }
+    const credit = readClaimedCredit(claimData)
+    if (credit !== undefined) {
+      return { kind: 'claimed', credit, unit: 'credit', streakDays: 0, isStreakDay: false }
+    }
+    return {
+      kind: 'claimed',
+      credit: 0,
+      streakDays: 0,
+      isStreakDay: false,
+      delayedMessage: '领取成功（上游不返回积分数量，请查看刷新后的余额）',
+    }
+  } catch (error) {
+    // PoW 的硬上限抛错走这里：它是**可预期的**上游形态变化，不是崩溃。
+    const reason = error instanceof Error ? error.message : String(error)
+    return { kind: 'failed', code: -1, message: `签到失败：${reason}` }
   }
 }
