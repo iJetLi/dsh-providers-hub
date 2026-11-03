@@ -748,3 +748,33 @@ billing 文案**恒走 `(110/model_error)` 即 HTTP 200 + SSE 通道**；
 - 换号期间池自己抛错（如 `pool read failed`）会顶掉原始 `TRANSPORT`、`cause` 也没了 ——
   与「保住 cause」主旨相反。现在**只吞非 `LlmError`**（`LlmError` 是刻意的判断，如
   `MISSING_CREDENTIAL`，必须如实报出）。
+
+## ⚠️ 多账号同机的「物理设备锁」（issue #17，2026-11-03 核对）
+
+Qoder 服务端按**设备指纹**（`Cosy-MachineToken` + `Cosy-MachineType`）限制每日领取：
+同一台机器上第一个账号领完后，其余账号的 claim 会回
+
+```json
+{ "status": "BLOCKED", "failureCode": "SAME_PERSON_ALREADY_CLAIMED" }
+```
+
+**这不是登录失效，也不是本插件的缺陷**：设备身份由 Qoder 桌面端的 UMID 生成，
+同一台机器天然只有一套；重新登录、删卡重加、换账号都**无法绕过**（服务端就是
+按设备计数）。⚠️ 仓库的 `QODER_MACHINE_TOKEN_PATH` 可以把身份指向另一份 token 文件，
+但它只用于**单测隔离/排查**（生产不会自动切换设备身份），不要用它来规避设备锁。插件现在把该 failureCode 翻成「同一设备今日已由其它 Qoder 账号领取
+（上游设备锁），换设备或明日再试」，避免用户误以为是登录坏了。
+
+⚠️ **不要**为了「让多账号都能领」而给每个账号伪造不同的 `Cosy-MachineToken` ——
+那是规避上游反滥用设备锁，既不稳定也可能违反服务条款；多账号需求应分设备。
+
+### 与 issue 里另外两条的关系（均已核对）
+
+- **`/claim` 请求体**：本仓 `claimQoderCampaign` 一直是 `body: ''`（`content-length: 0`），
+  issue 说的「必须发空串」**已经是现状**，无需改。
+- **Linux 路径**：`findRuntimeInfoExecutable` 走 `<home>/.qoder{,-cn}/.bin/umid-*/runtime-info`
+  （非 Windows 用无 `.exe` 的名字），磁盘退路是
+  `~/.config/Qoder{," CN"}/SharedClientCache/cache/machine_token.json`。issue 提到的
+  `~/.local/opt/qoder` / `~/.config/com.qoder.app.stable` 不在现有候选里；但它们是否是
+  Linux 上 UMID 的真实数据目录**尚未在 Linux 实测**，不能断言「不需要追加」——
+  若 Linux 用户拿不到身份，应先用 `QODER_RUNTIME_INFO` 指向真实可执行文件验证。若 Linux 用户仍拿不到身份，
+  应先用 `QODER_RUNTIME_INFO` 指向真实的 `runtime-info` 验证，再谈路径扩展。
