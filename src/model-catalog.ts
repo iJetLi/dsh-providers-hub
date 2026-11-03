@@ -42,6 +42,20 @@ import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { providerCatalogVisible, type AccountPool } from './account-pool.js'
 
 /**
+ * `listModels` 实际返回的模型信息：宿主契约 + **附加的 `contextWindow`**。
+ *
+ * ⚠️ 宿主 `LlmModelInfo` 没有该字段（窗口只在 `resolveModel` 的 `context` 里）。
+ * ⚠️⚠️ **不能只靠它给网关供数**：宿主 `LlmRuntime.listModels()` 会按白名单
+ * 重建对象（只留 provider/id/name/description/inputModalities），这个附加字段
+ * 到网关时已经被剥掉。网关的 `/v1/models` 实际走 `resolveModelInfo().context`
+ * （见 `openai-gateway/models.ts` 的 `collectGatewayModelDetails`）。
+ * 此处保留是给**直接消费适配器 `listModels`** 的调用方与将来宿主扩展契约用。
+ */
+export interface CatalogModelInfo extends LlmModelInfo {
+  readonly contextWindow?: number
+}
+
+/**
  * 各家的**中间结构** —— 只承载「DSH 契约需要什么」，不承载私有信息。
  *
  * ⚠️ 缺省语义全部是「**省略即不声明**」（而不是给一个默认值）：
@@ -559,18 +573,29 @@ export function createModelCatalog(
    */
   let cached: readonly CatalogEntry[] | undefined
 
-  /** 把 `CatalogEntry` 摊成 `LlmModelInfo` 的公共字段（三态在这里落实）。 */
-  function toModelInfo(entry: CatalogEntry): LlmModelInfo {
+  /**
+   * 把 `CatalogEntry` 摊成 `LlmModelInfo` 的公共字段（三态在这里落实）。
+   *
+   * ⚠️ `contextWindow` **不在宿主 `LlmModelInfo` 契约里**（窗口在
+   * `LlmResolvedModelInfo.context`，需逐模型 `resolveModel`）。这里作为
+   * **附加字段**带出，供直接消费适配器返回值的调用方使用。
+   * ⚠️⚠️ 它**到不了网关**：宿主 `LlmRuntime.listModels()` 会按白名单重建对象；
+   * 网关的 `/v1/models` 走 `collectGatewayModelDetails` 的 `resolveModelInfo`
+   * （见 `openai-gateway/models.ts`），不要以为本字段能修 issue #36。
+   */
+  function toModelInfo(entry: CatalogEntry): CatalogModelInfo {
     const info: {
       provider: string
       id: string
       name: string
       description?: string
       inputModalities?: readonly ('text' | 'image')[]
+      contextWindow?: number
     } = { provider: providerId, id: entry.id, name: entry.name }
     // ⚠️ 三态：只有 `!== undefined` 才写入 —— 写 `['text']` 会明确声明不支持图片。
     if (entry.inputModalities !== undefined) info.inputModalities = entry.inputModalities
     if (entry.description !== undefined) info.description = entry.description
+    if (entry.contextWindow !== undefined) info.contextWindow = entry.contextWindow
     return info
   }
 

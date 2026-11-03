@@ -61,6 +61,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { createModelCatalog, type CatalogEntry } from '../../src/model-catalog.js'
+import { toOpenAiModels } from '../../src/openai-gateway/models.js'
 import { BuddyAdapter } from '../../src/buddy-adapter.js'
 import { AccioAdapter } from '../../src/accio-adapter.js'
 import { AutoclawAdapter } from '../../src/autoclaw-adapter.js'
@@ -190,9 +191,24 @@ describe('createModelCatalog 对拍：① 枚举字段在 listModels 上逐项�
     expect(info.id).toBe('MiniMax-M3')
     expect(info.provider).toBe('demo')
     expect(info.inputModalities).toEqual(['text', 'image'])
-    // ⚠️ `LlmModelInfo` 只有这四个字段 —— `bareName` / `contextWindow` /
-    //    `reasoning` **不得**出现在 `listModels` 的输出里（它们属于 resolveModel）。
-    expect(Object.keys(info).sort()).toEqual(['id', 'inputModalities', 'name', 'provider'])
+    // ⚠️ `bareName` / `reasoning` 仍**不得**出现在 `listModels` 的输出里
+    //（它们属于 resolveModel）；但 `contextWindow` 自 issue #36 起**必须**带出
+    //（网关 `/v1/models` 的 `context_window` 唯一来源）。
+    expect(Object.keys(info).sort()).toEqual(['contextWindow', 'id', 'inputModalities', 'name', 'provider'])
+    expect((info as { contextWindow?: number }).contextWindow).toBe(1_048_576)
+  })
+
+  it('★★ 条目没有窗口时不得凭空造一个（`contextWindow` 字段必须缺席）', async () => {
+    const catalog = makeCatalog([BUDDY_UNKNOWN_MODALITY])
+    const listed = await catalog.listModels('demo')
+    expect('contextWindow' in listed[0]!).toBe(false)
+  })
+
+  it('★★ 带窗口的目录经网关投影后 `/v1/models` 有 context_window（issue #36 全链路）', async () => {
+    const catalog = makeCatalog([LOOMY_ENTRY])
+    const listed = await catalog.listModels('demo')
+    const models = toOpenAiModels([{ provider: 'demo', models: listed as never }])
+    expect(models[0]?.context_window).toBe(1_048_576)
   })
 
   it('⚠️ 倍率名绝不能被当成裸名下发（` · x4.0` 必须留在 name 里）', async () => {

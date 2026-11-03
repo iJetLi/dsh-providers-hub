@@ -9,7 +9,7 @@ import { gatewayHttpUrl, isLoopbackHost, resolveGatewayConfig, type OpenAiGatewa
 import { markGatewayChannel } from './channel.js'
 import { toGenerateOptions, OpenAiGatewayError, parseModelRoute, normalizeReasoningEffort, normalizeMaxTokens, type OpenAiChatRequest, type ReasoningEffortNotice } from './messages.js'
 import type { AttachmentBridge, ImageLimits } from './images.js'
-import { collectGatewayEffortViews, collectGatewayModelIds, collectGatewayModels, toGatewayModelIds, toOpenAiModels } from './models.js'
+import { applyGatewayContextWindows, collectGatewayEffortViews, collectGatewayModelDetails, collectGatewayModelIds, collectGatewayModels, toGatewayModelIds, toOpenAiModels } from './models.js'
 import { effortResolutions } from './effort-view.js'
 import { CANONICAL_REASONING_EFFORTS } from '../reasoning-ladder.js'
 import { findCaseInsensitiveSuggestion, looksLikeMissingModel } from './model-errors.js'
@@ -343,10 +343,13 @@ export function createOpenAiGateway(options: OpenAiGatewayOptions): OpenAiGatewa
     })
     // 档位视图是**附加信息**：某个模型解析不出来就只是它没有该字段，
     // 绝不能让整份目录跟着失败（同理，见 collectGatewayEffortViews 的注释）。
-    const effortViews = await collectGatewayEffortViews(options.llm, groups, (provider, error) => {
+    const { effortViews, contextWindows } = await collectGatewayModelDetails(options.llm, groups, (provider, error) => {
       logger.warn(`[openai-gateway] ${provider}：${describe(error)}`)
     })
-    jsonResponse(response, 200, { object: 'list', data: toOpenAiModels(groups, effortViews) })
+    jsonResponse(response, 200, {
+      object: 'list',
+      data: toOpenAiModels(applyGatewayContextWindows(groups, contextWindows), effortViews),
+    })
   }
 
   /**

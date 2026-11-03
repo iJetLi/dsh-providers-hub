@@ -1511,7 +1511,21 @@ export class AggregateAdapter extends LlmAdapter {
       if (disabled.has(model.key)) continue
       // ⚠️ 见方法头那张表：**只有**「所有候选都 default-rejected」才跳过。
       if (this.isAllDefaultsUnopened(model)) continue
-      entries.push({ provider, id: model.key, name: this.pickerNameOf(model), inputModalities: ['text', 'image'] })
+      /**
+       * issue #36：把**已经算出来**的窗口带上（供 OpenAI 网关 `/v1/models`
+       * 使用）。这里**刻意不触发新的解析** —— `contextWindowFor()` 可能要打
+       * 全部候选的上游，放在目录列表里会拖慢每一次 `listModels`；只读缓存，
+       * 未命中就不声明（与「未知」同义，不猜）。
+       */
+      const contextWindow = this.cachedContextWindowOf(model.key)
+      const entry: LlmModelInfo & { contextWindow?: number } = {
+        provider,
+        id: model.key,
+        name: this.pickerNameOf(model),
+        inputModalities: ['text', 'image'],
+        ...contextWindow === undefined ? {} : { contextWindow },
+      }
+      entries.push(entry)
     }
     return entries
   }
@@ -2673,6 +2687,26 @@ export class AggregateAdapter extends LlmAdapter {
    * @param modelKey - 虚拟模型 id（含 `auto`），仅用于记忆化。
    * @param candidates - 该虚拟模型的候选表（`auto` 传全池候选）。
    */
+  /**
+   * 只读缓存里的窗口判决；未命中或已过期返回 `undefined`（不触发解析）。
+   *
+   * 供 `listModels` 带出 `contextWindow` 用（issue #36）：目录列表要快，
+   * 不能为了窗口去逐候选打上游。
+   */
+  private cachedContextWindowOf(modelKey: string): number | undefined {
+    const remembered = this.contextWindowCache.get(modelKey)
+    if (remembered === undefined) return undefined
+    const now = this.options.now?.() ?? Date.now()
+    const ttl = remembered.degraded
+      ? this.options.contextWindowDegradedTtlMs ?? AGGREGATE_CONTEXT_WINDOW_DEGRADED_TTL_MS
+      : this.options.catalogTtlMs ?? AGGREGATE_CATALOG_TTL_MS
+    if (now - remembered.at >= ttl) {
+      this.contextWindowCache.delete(modelKey)
+      return undefined
+    }
+    return remembered.window
+  }
+
   private async contextWindowFor(
     modelKey: string,
     candidates: readonly { provider: string; realId: string }[],
