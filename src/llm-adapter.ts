@@ -4,7 +4,14 @@ import {
   attributionHeaders, CONTEXT_WINDOW_EXCEEDED_CODE, isContextWindowExceededError,
   isQuotaExceededError, LlmAdapter, LlmError,
 } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type {
+  GenerateOptions,
+  LlmModelInfo,
+  LlmProviderInfo,
+  LlmResolvedModelInfo,
+  ResolvedRetryPolicy,
+  StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import { ReasoningEffortId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { AccountPool } from './account-pool.js'
 import { createModelCatalog, isCatalogFreshFor, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
@@ -1433,6 +1440,36 @@ function readCodeArtsChunk(
 
 /** 兼容 OpenAI 格式的 CodeArts 模型适配器，使用华为请求签名。 */
 export class CodeArtsAdapter extends LlmAdapter {
+  /**
+   * 声明宿主级重试策略（issue #21）。
+   *
+   * CodeArts 的失败面里 `TRANSPORT` / `TIMEOUT` / `EMPTY_RESPONSE` / `SERVER`
+   * 都是**瞬态**（网关抖动、长上下文偶发空响应），交给宿主按指数退避重试，
+   * 而不是把一次抖动直接抛给用户（长任务被迫手动重跑）。
+   *
+   * ⚠️ **必须显式保留 `RATE_LIMIT`**：不声明策略时宿主 fallback 的默认集合
+   * 含它（TPM/并发 429 是瞬态，退避后大概率可过）；一旦声明就**替换**默认集，
+   * 漏掉它会让 429 从「重试 5 次」变成「立即失败」——这是无意的收窄。
+   *
+   * ⚠️ 不动 `AUTH` / `QUOTA` / `INVALID_REQUEST`：这些重试只会白烧账号。
+   * ⚠️ 只对自己这一路 provider 生效；未注册的 provider 返回 undefined。
+   */
+  override providerRetryPolicy(provider: string): ResolvedRetryPolicy | undefined {
+    if (provider !== PROVIDER) return undefined
+    // `satisfies` 让编译器按宿主契约逐字段校验（比 `as` 强），
+    // 同时把数组也冻上（浅 freeze 只冻外层，调用方仍可 push）。
+    return Object.freeze({
+      mode: 'normal',
+      maxRetries: 5,
+      retryableCodes: Object.freeze([
+        'TRANSPORT', 'TIMEOUT', 'EMPTY_RESPONSE', 'SERVER', 'RATE_LIMIT',
+      ]),
+      initialDelayMs: 2_000,
+      maxDelayMs: 10_000,
+      jitterRatio: 0.25,
+    }) satisfies ResolvedRetryPolicy
+  }
+
   private readonly fetchImpl: typeof fetch
   private readonly chatId: string
   private readonly sessionId: string
