@@ -197,9 +197,9 @@ describe('★★ X-Session-Id 必须按账号分开（不能全池共用一个�
 
 describe('★★ 版本号：门控口径与凭据口径各司其职，且脏值不得出网', () => {
   it('★★ 门控版 = max(凭据, 门槛值)，且是语义化比较不是字符串比较', () => {
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe('3.17.1')
     // 字符串比较会在这里判错（'3.9.0' > '3.16.3'）⇒ 会**降级**
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.9.0' })).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.9.0' })).toBe('3.17.1')
     expect(zcodeVersionGatedAppVersion({ app_version: '3.17.2' })).toBe('3.17.2')
     // 语义化比较（与门槛值无关）：3.16.10 的 patch 比 3.16.3 大，但按字符串比 '3.16.10' < '3.16.3'
     expect(compareZcodeAppVersion('3.16.10', '3.16.3')).toBe(1)
@@ -219,7 +219,7 @@ describe('★★ 版本号：门控口径与凭据口径各司其职，且脏值
     for (const value of dirty) {
       // 门控口径：回落门槛值（绝不让预发布号「看起来更大」而绕过门控）
       expect(zcodeVersionGatedAppVersion({ app_version: value }), `门控口径漏了 ${JSON.stringify(value)}`)
-        .toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
+        .toBe('3.17.1')
       // 非门控口径：回落兜底值（绝不让脏值进 URL/头）
       const plain = zcodeCredentialAppVersion({ app_version: value })
       expect(plain, `凭据口径放行了脏值 ${JSON.stringify(value)}`).not.toContain('\r')
@@ -233,7 +233,7 @@ describe('★★ 版本号：门控口径与凭据口径各司其职，且脏值
   it('★★ 头里的版本可以被显式覆盖成与 query 一致（同一请求只有一个版本号）', () => {
     const credential = { device_mid: 'mid-A', app_version: '3.14.3' }
     // 默认：门控口径（405 的修法）
-    expect(buildZcodeHeaders(credential)['X-ZCode-App-Version']).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
+    expect(buildZcodeHeaders(credential)['X-ZCode-App-Version']).toBe('3.16.3')
     // 带 query app_version 的站点必须显式传同一个值，否则同请求两个版本号
     const pinned = buildZcodeHeaders(credential, { appVersion: zcodeCredentialAppVersion(credential) })
     expect(pinned['X-ZCode-App-Version']).toBe('3.14.3')

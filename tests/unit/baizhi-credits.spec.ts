@@ -62,12 +62,19 @@ function makeFetch(
 
 /** 造一个按路径分发的 fetch 替身（签到是一条多请求链路，单响应替身不够用）。 */
 function routeFetch(
-  routes: readonly { readonly match: string; readonly status?: number; readonly body: string }[],
+  routes: readonly {
+    readonly match: string
+    readonly status?: number
+    readonly body: string
+    /** 只匹配一次（用于「同一路径前后返回不同报文」，如预检 / 复核）。 */
+    readonly once?: boolean
+  }[],
 ): {
   readonly fetchImpl: typeof fetch
   readonly calls: { url: string; headers: Record<string, string>; init: RequestInit }[]
 } {
   const calls: { url: string; headers: Record<string, string>; init: RequestInit }[] = []
+  const used = new Set<number>()
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     calls.push({
@@ -75,8 +82,11 @@ function routeFetch(
       headers: (init?.headers ?? {}) as Record<string, string>,
       init: init ?? {},
     })
-    const route = routes.find((candidate) => url.includes(candidate.match))
+    const index = routes.findIndex((candidate, i) =>
+      url.includes(candidate.match) && (candidate.once !== true || !used.has(i)))
+    const route = routes[index]
     if (route === undefined) throw new Error(`未预期的请求：${url}`)
+    if (route.once === true) used.add(index)
     return new Response(route.body, {
       status: route.status ?? 200,
       headers: { 'content-type': 'application/json' },
@@ -460,15 +470,31 @@ describe('claimBaizhiDailyCheckin（challenge → PoW → redeem → daily-tempo
     expect(claimBody.captcha_token).toBe('deadbeef:1234567890abcde')
   })
 
-  it('★ 预检后被人抢先领掉（claimed:false）⇒ already-claimed，不是 failed', async () => {
+  it('★ 预检后被人抢先领掉（claimed:false + 复核钱包已领）⇒ already-claimed，不是 failed', async () => {
     const { fetchImpl } = routeFetch([
-      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }) },
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: true }), once: true },
       { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
       { match: BAIZHI.captchaRedeemPath, body: JSON.stringify({ code: 0, data: { token: 'deadbeef:1234567890abcde', success: true } }) },
       { match: BAIZHI.dailyTemporaryCreditPath, body: JSON.stringify({ code: 0, data: { claimed: false, amount_credit_cents: 10000 } }) },
     ])
     const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
     expect(outcome.kind).toBe('already-claimed')
+  })
+
+  it('★★ claimed:false 但复核钱包仍「未领取」⇒ failed（不得静默报已领）', async () => {
+    const { fetchImpl, calls } = routeFetch([
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
+      { match: BAIZHI.captchaRedeemPath, body: JSON.stringify({ code: 0, data: { token: 'deadbeef:1234567890abcde', success: true } }) },
+      { match: BAIZHI.dailyTemporaryCreditPath, body: JSON.stringify({ code: 0, data: { claimed: false } }) },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    expect(outcome.kind).toBe('failed')
+    expect(outcome.kind === 'failed' ? outcome.message : '').toContain('未发放')
+    // 预检 + 复核 = 两次钱包 GET。
+    expect(calls.filter((c) => c.url.includes(BAIZHI.walletBalancePath))).toHaveLength(2)
   })
 
   it('★ redeem 没有 token ⇒ failed 并且文案指向「过期、重试一次」，绝不发领取请求', async () => {
@@ -491,5 +517,33 @@ describe('claimBaizhiDailyCheckin（challenge → PoW → redeem → daily-tempo
     const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
     expect(outcome.kind).toBe('failed')
     expect(outcome.kind === 'failed' ? outcome.message : '').toContain('上游形态可能已变')
+  })
+
+  it('★ redeem 429 ⇒ failed 且带 HTTP 状态，不发领取请求', async () => {
+    const { fetchImpl, calls } = routeFetch([
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }) },
+      { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
+      { match: BAIZHI.captchaRedeemPath, status: 429, body: JSON.stringify({ code: 429, message: 'rate limited' }) },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    expect(outcome).toMatchObject({ kind: 'failed', code: 429 })
+    expect(calls.some((c) => c.url.includes(BAIZHI.dailyTemporaryCreditPath))).toBe(false)
+  })
+
+  /**
+   * ⚠️ 软 fail-open 的**显式登记**（2026-11-03 对抗审计）：`claimed:true` 但
+   * 上游没给 `amount_credit_cents` 时按成功处理，只在文案里提示「看余额」。
+   * 这里锁住这个取舍 —— 若将来改成 failed，必须同步改本用例。
+   */
+  it('claimed:true 但没有 amount ⇒ claimed(0) + 延迟提示（不是静默成功）', async () => {
+    const { fetchImpl } = routeFetch([
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }) },
+      { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
+      { match: BAIZHI.captchaRedeemPath, body: JSON.stringify({ code: 0, data: { token: 'deadbeef:1234567890abcde', success: true } }) },
+      { match: BAIZHI.dailyTemporaryCreditPath, body: JSON.stringify({ code: 0, data: { claimed: true } }) },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    expect(outcome).toMatchObject({ kind: 'claimed', credit: 0 })
+    expect(outcome.kind === 'claimed' ? outcome.delayedMessage : '').toContain('余额')
   })
 })

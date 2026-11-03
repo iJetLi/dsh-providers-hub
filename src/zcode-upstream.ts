@@ -156,6 +156,17 @@ export const ZCODE_MARKETING_ACTION_URL = `${ZCODE_ORIGIN}/api/v1/marketing/touc
 export const ZCODE_VERSION_GATED_MIN_APP_VERSION = '3.17.1'
 
 /**
+ * **推理路径**的版本下限（与营销/领取的逐期门控**分开**）。
+ *
+ * ⚠️ 为什么不能共用：`buildZcodeHeaders` 的默认值同时服务推理请求
+ * （`zcode-transport.ts` 的 `buildChannelRequest`），而推理路径的 405
+ * `unusual activity` 结论是在 **3.16.3** 上验收的（2026-10-25 真机）。
+ * 营销/领取的门控逐期漂移（1103 期已到 3.17.1），无证据地把推理头一起抬
+ * 会把那条验收作废。
+ */
+export const ZCODE_INFERENCE_MIN_APP_VERSION = '3.16.3'
+
+/**
  * 合法的客户端版本号形态（`major.minor.patch`，纯数字、**无前导零**）。
  *
  * ⚠ 它**是安全闸，不只是格式偏好**（2026-10-25 审计实测）：`app_version` 会原样
@@ -296,7 +307,7 @@ export function buildZcodeHeaders(
     platform?: { platform: string; osCategory: string; osVersion: string }
   } = {},
 ): Record<string, string> {
-  const appVersion = options.appVersion ?? zcodeVersionGatedAppVersion(credential)
+  const appVersion = options.appVersion ?? zcodeVersionGatedAppVersion(credential, ZCODE_INFERENCE_MIN_APP_VERSION)
   const platform = options.platform ?? zcodeClientPlatform()
   const headers: Record<string, string> = {
     'User-Agent': `ZCode/${appVersion}`,
@@ -903,11 +914,14 @@ export function compareZcodeAppVersion(a: string, b: string): number {
  * 登录（凭据里写着 3.17.x），就用它自己的版本号，而不是把它降级成 3.16.3。
  * 依据与「为什么不能改凭据本身」见 {@link ZCODE_VERSION_GATED_MIN_APP_VERSION}。
  */
-export function zcodeVersionGatedAppVersion(credential: Pick<ZcodeCredential, 'app_version'>): string {
+export function zcodeVersionGatedAppVersion(
+  credential: Pick<ZcodeCredential, 'app_version'>,
+  minAppVersion: string = ZCODE_VERSION_GATED_MIN_APP_VERSION,
+): string {
   const stored = typeof credential.app_version === 'string' ? credential.app_version.trim() : ''
-  if (!ZCODE_APP_VERSION_PATTERN.test(stored)) return ZCODE_VERSION_GATED_MIN_APP_VERSION
-  return compareZcodeAppVersion(stored, ZCODE_VERSION_GATED_MIN_APP_VERSION) < 0
-    ? ZCODE_VERSION_GATED_MIN_APP_VERSION
+  if (!ZCODE_APP_VERSION_PATTERN.test(stored)) return minAppVersion
+  return compareZcodeAppVersion(stored, minAppVersion) < 0
+    ? minAppVersion
     : stored
 }
 

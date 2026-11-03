@@ -118,6 +118,19 @@ describe('签到 PoW 的算法同构性', () => {
     expect(prng('abc1', 8)).not.toBe(prng('abc2', 8))
   })
 
+  /**
+   * ⚠️ **非 ASCII seed 的固定向量**（2026-11-03 对抗审计：所有既有向量都是
+   * ASCII，把实现从 UTF-16 code unit 改成 UTF-8 字节时 57 条全绿）。
+   *
+   * 上游 token 可能含中文（内容指纹里的 seed），注释也宣称「按 UTF-8 会漂」——
+   * 这里用一个中文 seed 把编码口径钉死。期望值由独立的 `charCodeAt` 版
+   * FNV/xorshift 实现算出（非 Math.imul 版），两者一致才算通过。
+   */
+  it('★ 非 ASCII seed 按 UTF-16 code unit 派生（不是 UTF-8 字节）', () => {
+    expect(prng('签到', 32)).toBe('95a8c731249a9356a8fd6deead55468e')
+    expect(prng('中文seed-测试', 16)).toBe('5f89bdf66ede744d')
+  })
+
   it('★ solveChallenge 的解自洽且是**最小**解（题号 1-based / 服务端按 1-based 校验）', () => {
     const challenge: MonkeycodeChallenge = { count: 2, saltLength: 32, targetLength: 3 }
     const solutions = solveChallenge('abc', challenge)

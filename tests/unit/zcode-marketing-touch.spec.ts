@@ -260,7 +260,7 @@ describe('★ 营销投放解析（纯函数，判定打在实测报文的真实
 
 describe('★ 版本门控（实测 2026-11-03：3.14.3/3.16.3 均空，3.17.1 起才有投放）', () => {
   it('凭据里的 3.14.3 被抬到门槛值', () => {
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe('3.17.1')
     expect(ZCODE_VERSION_GATED_MIN_APP_VERSION).toBe('3.17.1')
   })
 
@@ -270,8 +270,8 @@ describe('★ 版本门控（实测 2026-11-03：3.14.3/3.16.3 均空，3.17.1 �
   })
 
   it('缺版本/空串 ⇒ 用最低版本（不是空串，那会让服务端按未知版本处理）', () => {
-    expect(zcodeVersionGatedAppVersion({})).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
-    expect(zcodeVersionGatedAppVersion({ app_version: '   ' })).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
+    expect(zcodeVersionGatedAppVersion({})).toBe('3.17.1')
+    expect(zcodeVersionGatedAppVersion({ app_version: '   ' })).toBe('3.17.1')
   })
 
   it('点分版本比较', () => {
@@ -436,7 +436,7 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
      * ★★ 版本门控的**接线**判据：凭据里写的是 3.14.3，但营销请求必须带门控版
      *（本机实测：带 3.14.3 时服务端回 `deliveries: []` ⇒ 这条不成立就等于没集成）。
      */
-    expect(net.marketingVersions).toEqual([ZCODE_VERSION_GATED_MIN_APP_VERSION])
+    expect(net.marketingVersions).toEqual(['3.17.1'])
   })
 
   it('★★ **claim 也必须带门控版本** —— 真机实测：3.14.3 ⇒ `1004 no permission`，3.16.2 ⇒ `code 0`', async () => {
@@ -463,8 +463,8 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
 
     expect(net.claimVersions).toHaveLength(net.claimPlanIds.length)
     expect(net.claimVersions).toEqual([
-      ZCODE_VERSION_GATED_MIN_APP_VERSION,
-      ZCODE_VERSION_GATED_MIN_APP_VERSION,
+      '3.17.1',
+      '3.17.1',
     ])
     // 反向对照：凭据里只有 3.14.3 —— 若实现没覆盖，上面两格会变成 '3.14.3'
     expect(CREDENTIAL.app_version).toBe('3.14.3')

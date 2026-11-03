@@ -504,8 +504,8 @@ describe('ZCode 请求头与错误映射', () => {
     // 反面：改回 `credential.app_version ?? ZCODE_APP_VERSION_FALLBACK`
     // 会让本用例变红（凭据写的是 3.14.3）。
     const headers = buildZcodeHeaders({ ...credential, app_version: '3.14.3' })
-    expect(headers['X-ZCode-App-Version']).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
-    expect(headers['User-Agent']).toBe(`ZCode/${ZCODE_VERSION_GATED_MIN_APP_VERSION}`)
+    expect(headers['X-ZCode-App-Version']).toBe('3.16.3')
+    expect(headers['User-Agent']).toBe('ZCode/3.16.3')
   })
 
   it('凭据版本比门槛高时用凭据自己的（向前兼容，不把用户降级）', () => {
