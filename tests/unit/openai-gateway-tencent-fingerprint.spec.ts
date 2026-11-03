@@ -1133,3 +1133,57 @@ describe('OpenAI 网关 Responses 路径：与 Chat 同一判据', () => {
     expect(texts).toContain(`keep ${FEEDBACK_TRIGGER}`)
   })
 })
+
+/**
+ * 腾讯系内容级风控指纹改写：客户端计费头。
+ *
+ * ## 现象（2026-11-03 实发）
+ *
+ * Claude Code SDK 入口会把一段计费头写进 system 正文最前面：
+ * ```
+ * x-anthropic-billing-header: cc_version=2.1.316.060; cc_entrypoint=sdk-ts;...
+ * ```
+ * `copilot.tencent.com` 对该请求稳定返回 400 / 11128
+ * （`Illegal API invocation from an unapproved channel`），
+ * 而同一账号、同一模型用普通 OpenAI 客户端调用正常。
+ *
+ * ## 实测（buddy / deepseek-v4.1-flash）
+ *
+ * - 真实整段（18 KB，含计费头）→ 400
+ * - 只发计费头一行 → 400
+ * - 只发裸词 `x-anthropic-billing-header` → 400
+ * - `x-anthropic-foo` / `anthropic-billing-header` → 200
+ * - 同一整段里只把该词换成 `x-client-billing-header` → 200
+ *
+ * ⇒ 触发词精确到字面量 `x-anthropic-billing-header`；其余字段（`cc_version` /
+ * `cc_entrypoint`）原样保留。
+ */
+describe('腾讯系内容级风控指纹改写（ccs 计费头）：x-anthropic-billing-header', () => {
+  const BILLING_TRIGGER = 'x-anthropic-billing-header'
+  const BILLING_REWRITE = 'x-client-billing-header'
+
+  it('★ 计费头被改写为等义形态（实测替换后 200）', () => {
+    for (const provider of ['buddy', 'workbuddy']) {
+      expect(rewriteTencentContentFingerprints(BILLING_TRIGGER, provider)).toBe(BILLING_REWRITE)
+    }
+  })
+
+  it('★ 裸词即可触发 ⇒ 不影响后面的字段，逐字保留', () => {
+    const text = `${BILLING_TRIGGER}: cc_version=2.1.316.060; cc_entrypoint=sdk-ts;`
+    expect(rewriteTencentContentFingerprints(text, 'buddy'))
+      .toBe(`${BILLING_REWRITE}: cc_version=2.1.316.060; cc_entrypoint=sdk-ts;`)
+  })
+
+  it('★ 不泛化：只差前缀 / 只差 x- 的串都**不动**', () => {
+    for (const text of ['x-anthropic-foo: bar', 'anthropic-billing-header: cc_version=1;']) {
+      expect(rewriteTencentContentFingerprints(text, 'buddy')).toBe(text)
+      expect(rewriteTencentContentFingerprints(text, 'workbuddy')).toBe(text)
+    }
+  })
+
+  it('★ 非腾讯系 provider 逐字节不变', () => {
+    for (const provider of ['qoder', 'qodercn', 'trae', 'codearts', 'lobsterai', '']) {
+      expect(rewriteTencentContentFingerprints(BILLING_TRIGGER, provider)).toBe(BILLING_TRIGGER)
+    }
+  })
+})
