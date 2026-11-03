@@ -56,7 +56,7 @@ import {
   type MonkeycodeBrowserLogin,
   type MonkeycodeBrowserLoginStartOptions,
 } from './monkeycode-browser-login.js'
-import { exchangeMonkeycodeSessionForKey, isMonkeycodeSessionExpiredError } from './monkeycode-credits.js'
+import { exchangeMonkeycodeSessionForKey, fetchMonkeycodeProfile, isMonkeycodeSessionExpiredError } from './monkeycode-credits.js'
 import { AccountPool } from './account-pool.js'
 import { syncAccountExpiry, type ExpiryAccessors } from './expiry-sync.js'
 
@@ -159,6 +159,15 @@ export interface MonkeycodeAuthOptions {
    * {@link exchangeMonkeycodeSessionForKey}）。
    */
   exchangeKey?: typeof exchangeMonkeycodeSessionForKey
+  /**
+   * 平台用户资料读取（单测注入；生产缺省
+   * {@link fetchMonkeycodeProfile}）。
+   *
+   * ⚠️ 必须有注入点：它是登录成功后额外一次**真网络请求**，单测若不注入就会
+   * 真发到 `monkeycode-ai.com`（本仓库红线「单测不许发真网络」；本轮实测
+   * 一条用例因此从 2ms 变成 4.4s）。
+   */
+  profileOf?: typeof fetchMonkeycodeProfile
 }
 
 /**
@@ -171,6 +180,7 @@ export class MonkeycodeAuth extends Service {
   readonly credentialRefName: string
   private readonly browserLoginFactory: (options: MonkeycodeBrowserLoginStartOptions) => Promise<MonkeycodeBrowserLogin>
   private readonly exchangeKey: typeof exchangeMonkeycodeSessionForKey
+  private readonly profileOf: typeof fetchMonkeycodeProfile
   /**
    * 本实例是否仍在服役（登出 / 插件被停用时置 false）。
    *
@@ -187,6 +197,7 @@ export class MonkeycodeAuth extends Service {
     this.credentialRefName = product.defaultCredentialRef
     this.browserLoginFactory = options.browserLoginFactory ?? startMonkeycodeBrowserLogin
     this.exchangeKey = options.exchangeKey ?? exchangeMonkeycodeSessionForKey
+    this.profileOf = options.profileOf ?? fetchMonkeycodeProfile
   }
 
   /**
@@ -244,11 +255,21 @@ export class MonkeycodeAuth extends Service {
             ? {} : { warn: (message: string) => this.ctx.logger?.warn?.(message) },
         }, this.product)
         if (issued.ok) {
+          // ⚠️⚠️ **稳定的 `user_id` 必须取自 `/users/status`，不能取兑换响应的
+          // `id`**（2026-11-03 真机取证：同一账号连续兑换两次，`id` 从
+          // `2b37a3dd…` 变成 `0848857d…`，而 `data.user.id` 恒为 `01a19fa3…`）。
+          // 取错会让「同一账号第二次浏览器登录」被判成新账号（重复卡片 + 多签发
+          // Key），也会让邀请链接拼出一个无效的 `?ic=`。
+          const profile = await this.profileOf(cookie, this.product, {
+            ...this.ctx.logger === undefined
+              ? {} : { warn: (message: string) => this.ctx.logger?.warn?.(message) },
+          })
           return {
             access_token: issued.key.apiKey,
             signing_secret: issued.key.signingSecret,
             session_cookie: cookie,
-            ...issued.key.userId === undefined ? {} : { user_id: issued.key.userId },
+            ...profile?.userId === undefined ? {} : { user_id: profile.userId },
+            ...profile?.nickname === undefined ? {} : { nickname: profile.nickname },
           }
         }
         /**

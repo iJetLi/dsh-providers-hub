@@ -402,13 +402,20 @@ export interface BaizhiIssuedKey {
 /**
  * 用控制台网页登录态换 `sk-` API Key（**浏览器登录的最后一环**）。
  *
- * `GET /api/v1/user/api-keys` 实测直接返回明文 `items[].key`
- * （`{"items":[{"id":188069570000001,"name":"demo-user","key":"sk-…"}]}`）
+ * ⚠️ 打的是**大模型商店**的 console 接口：
+ * `GET https://ai-models.app.baizhi.cloud/api/console/api-keys`（cookie 认证），
+ * 响应 `{"items":[{"id":…,"name":"demo-account","api_key":"sk-…","status":"active"}]}`。
+ *
+ * ⚠️ 2026-11-03 合并审计更正：本节原写「`GET /api/v1/user/api-keys` 返回
+ * `items[].key`」——那是**控制台**（`baizhi.cloud`）的接口，只发 `bzy_` 前缀的
+ * Key（15 位），拿它打模型网关恒 401「API Key 无效」。真正的推理 Key 是
+ * console 接口下发的 `sk-…`，字段名是 **`api_key`**（下划线）而不是 `key`。
+ *
  * ⇒ 用户只要在浏览器里登进控制台，插件就能自动建号，不需要手抄 Key。
  *
- * 一个账号可以有多把 Key：取**第一把**（列表按创建时间倒序，第一把就是
- * 用户最近用的那把）。没有 Key 时返回可行动的提示 —— 用户需要先去
- * 控制台「API Keys」页点一次「新建」。
+ * 一个账号可以有多把 Key：取**第一把 `status === 'active'` 的**（列表按创建
+ * 时间倒序，第一把就是用户最近用的那把；停用/删除的跳过）。没有可用 Key 时
+ * 返回可行动的提示 —— 用户需要先去控制台「API Keys」页点一次「新建」。
  */
 export async function exchangeBaizhiSessionForKey(
   sessionCookie: string,

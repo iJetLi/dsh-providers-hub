@@ -66,6 +66,13 @@ export interface MonkeycodeProduct {
   readonly platformBaseUrl: string
   readonly walletPath: string
   readonly subscriptionPath: string
+  /**
+   * 平台用户资料（`GET /api/v1/users/status`）→ `data.user.{id,nickname}`。
+   *
+   * ⚠️ 这是**稳定账号身份**的唯一来源：兑换 Key 的响应里的 `id` 是「每签发
+   * 一把 Key 就变」的记录 id，拿它判重会导致「同账号每登一次多一张卡」。
+   */
+  readonly profilePath: string
   readonly checkinPath: string
   readonly transactionPath: string
   readonly captchaChallengePath: string
@@ -103,6 +110,7 @@ export const MONKEYCODE: MonkeycodeProduct = {
   platformBaseUrl: 'https://monkeycode-ai.com',
   walletPath: '/api/v1/users/wallet',
   subscriptionPath: '/api/v1/users/subscription',
+  profilePath: '/api/v1/users/status',
   checkinPath: '/api/v1/users/wallet/checkin',
   transactionPath: '/api/v1/users/wallet/transaction',
   captchaChallengePath: '/api/v1/public/captcha/challenge',
@@ -130,6 +138,7 @@ export const MONKEYCODE_INTL: MonkeycodeProduct = {
   platformBaseUrl: 'https://monkeycode-ai.net',
   walletPath: '/api/v1/users/wallet',
   subscriptionPath: '/api/v1/users/subscription',
+  profilePath: '/api/v1/users/status',
   checkinPath: '/api/v1/users/wallet/checkin',
   transactionPath: '/api/v1/users/wallet/transaction',
   captchaChallengePath: '/api/v1/public/captcha/challenge',

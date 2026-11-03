@@ -1514,7 +1514,21 @@ function accountFromCredentialRef(ref: string): ProviderAccountEntry | undefined
     enabled: true,
     credentialRef: ref,
     createdAt: Date.now(),
-    refreshable: true,
+    /**
+     * ⚠️ 恢复路径**不能一律写 `true`**（2026-11-03 PR #171 合并审计）。
+     *
+     * 这个值是「凭据能不能自动续期」的镜像：静态 Key 渠道（MonkeyCode 两站 /
+     * 百智云）在上游**没有任何 refresh 端点**，正常建号时都写 `false`
+     * （`monkeycode-rpc.ts` / `baizhi-rpc.ts` / `jet-hub-rpc.ts:5179,5339`）。
+     * 从残留凭据恢复时写 `true` ⇒ 卡片会显示「· 自动续期」，与事实相反，
+     * 且会把「凭据已过期」的排查方向带偏。
+     *
+     * 其余 provider 保持 `true`（绝大多数确有 refresh 端点）；将来新增
+     * 「静态材料」渠道时要把 id 一并加进来 —— 这是一张**只增不改**的例外表。
+     */
+    refreshable: provider !== 'monkeycode'
+      && provider !== 'monkeycodeintl'
+      && provider !== 'baizhi',
   }
 }
 

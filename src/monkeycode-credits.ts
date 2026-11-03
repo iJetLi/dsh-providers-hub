@@ -228,8 +228,13 @@ export interface MonkeycodeIssuedKey {
   readonly apiKey: string
   /** 请求签名密钥（48 位）。 */
   readonly signingSecret: string
-  /** 平台用户 id（诊断用）。 */
-  readonly userId?: string
+  /**
+   * **这把 Key 的记录 id**（诊断用）。
+   *
+   * ⚠️ 它**不是**平台用户 id（每次兑换都变），**不得**写入凭据的 `user_id`。
+   * 稳定身份见 {@link MonkeycodeProfile.userId}。
+   */
+  readonly keyId?: string
   /** 签发时间（**秒**，上游原样返回；毫秒换算由调用方按契约做）。 */
   readonly createdAt?: number
 }
@@ -239,6 +244,14 @@ export interface MonkeycodeIssuedKey {
  *
  * 上游是 `POST /api/v1/users/ohmyagent/api-keys`（body `{}`，Cookie 认证）：
  * 成功回 `{ id, api_key, signing_secret, created_at }`，GET 同路径是 404。
+ *
+ * ⚠️⚠️ **返回里的 `id` 是「这把 API Key 的记录 id」，不是平台用户 id**
+ * （2026-11-03 真机取证：同一账号连续兑换两次得到 `2b37a3dd-…` 与 `0848857d-…`
+ * 两个不同 id，而 `GET /api/v1/users/status` 的 `data.user.id` 恒为
+ * `01a19fa3-…`）。把它当账号身份写入 `user_id` 会让「同一账号第二次浏览器登录
+ * 必然被判成新账号」（每登一次多一张卡 + 多签发一把 Key）。
+ * ⇒ 本函数只回 `keyId`（诊断用）；稳定的 `user_id` 必须走
+ * {@link fetchMonkeycodeProfile}。
  *
  * ⚠️ **不抛错**：这与本模块其余入口同口径 —— 兑换失败只是「这次登录没拿到
  * 网关凭据」，调用方可以退回到「只有会话、没有 key」的状态（额度与签到照样能用），
@@ -271,16 +284,88 @@ export async function exchangeMonkeycodeSessionForKey(
   if (apiKey.length === 0 || signingSecret.length === 0) {
     return { ok: false, error: '平台未返回 api_key / signing_secret（上游形态可能已变）' }
   }
-  const userId = readText(value.id)
+  const keyId = readText(value.id)
   const createdAt = readNumber(value.created_at)
   return {
     ok: true,
     key: {
       apiKey,
       signingSecret,
-      ...userId.length === 0 ? {} : { userId },
+      ...keyId.length === 0 ? {} : { keyId },
       ...createdAt === undefined ? {} : { createdAt },
     },
+  }
+}
+
+/** 平台用户资料（稳定身份 + 昵称 + 邀请链接所需的用户 id）。 */
+export interface MonkeycodeProfile {
+  /** 平台用户 id（`data.user.id`，同一账号恒定）。 */
+  readonly userId?: string
+  /** 昵称（`data.user.nickname`，作展现名用）。 */
+  readonly nickname?: string
+}
+
+/**
+ * 读平台用户资料：`GET /api/v1/users/status` → `data.user.{id,nickname}`。
+ *
+ * ⚠️ 这是**稳定账号身份**的唯一来源（浏览器登录判重、邀请链接都靠它）：
+ * 兑换接口回的 `id` 是「每签发一把 Key 就变」的记录 id（见
+ * {@link exchangeMonkeycodeSessionForKey} 的实测）。
+ *
+ * ⚠️ 失败**不抛错**：调用方拿到 `undefined` 时按「身份未知」处理（不做判重），
+ * 不能让一次辅助读数把已经成功的登录判死。
+ */
+export async function fetchMonkeycodeProfile(
+  sessionCookie: string,
+  product: MonkeycodeProduct = MONKEYCODE,
+  deps: MonkeycodeCreditsDeps = {},
+): Promise<MonkeycodeProfile | undefined> {
+  const cookie = normalizeCookie(sessionCookie)
+  if (cookie === undefined) return undefined
+  const result = await platformRequest(
+    cookie, `${product.platformBaseUrl}${product.profilePath}`, { method: 'GET' }, product, deps,
+  )
+  if (!result.ok) {
+    deps.warn?.(`[monkeycode] 用户资料读取失败：${result.error}`)
+    return undefined
+  }
+  const unwrapped = unwrapEnvelope(result.data)
+  if (!unwrapped.ok) {
+    deps.warn?.(`[monkeycode] 用户资料读取失败：${unwrapped.error}`)
+    return undefined
+  }
+  const user = unwrapped.value.user
+  if (user === null || typeof user !== 'object') return {}
+  const record = user as Record<string, unknown>
+  const userId = typeof record.id === 'string' && record.id.trim().length > 0 ? record.id.trim() : undefined
+  const nickname = typeof record.nickname === 'string' && record.nickname.trim().length > 0
+    ? record.nickname.trim()
+    : undefined
+  return {
+    ...userId === undefined ? {} : { userId },
+    ...nickname === undefined ? {} : { nickname },
+  }
+}
+
+/**
+ * 生成**邀请链接**（上游口径：`https://<平台主机>/?ic=<平台用户 id>`）。
+ *
+ * 2026-11-03 从官网 bundle 逐字取证：`const g = \`https://monkeycode-ai.com/?ic=${user.id}\``
+ * —— 参数名是 `ic`，值是**平台用户 id**（不是邀请码、不是 Key id），
+ * 邀请记录接口是 `GET /api/v1/users/invitations?page=1&size=20`。
+ *
+ * ⚠️ 用户 id 缺失时返回 `undefined`，**绝不**拼一个空 `?ic=` 的链接
+ * （那会让用户把无效链接发给朋友，且看起来「生成成功」）。
+ */
+export function monkeycodeInviteLink(
+  userId: string | undefined,
+  product: MonkeycodeProduct = MONKEYCODE,
+): string | undefined {
+  if (typeof userId !== 'string' || userId.trim().length === 0) return undefined
+  try {
+    return `${new URL(product.platformBaseUrl).origin}/?ic=${encodeURIComponent(userId.trim())}`
+  } catch {
+    return undefined
   }
 }
 
@@ -418,9 +503,13 @@ export async function fetchMonkeycodePlan(
  * ⚠️ 两个包的 `expiredTime` / `cycleEndTime` 必须写**空串**：
  * 平台 wallet 报文只有标量余额，**没有任何到期时间或重置时刻字段**
  *（每日额度是隐式的「次日 0 点重置」，但上游不下发时刻，编一个就是编造）。
- * 这一点同时是 `tests/unit/expiry-runtime-parity.spec.ts` 里
- * `monkeycode` 不进 `WIRED_EXPIRY_PROVIDERS` 的**唯一**理由 —— 改成有值会让那条
- * 豁免变成假话。
+ *
+ * ⚠️ 2026-11-03 合并审计更正：这里原写「这也是 monkeycode **不进**
+ * `WIRED_EXPIRY_PROVIDERS` 的唯一理由」——**事实错误**。三家实际都**已接进**
+ * 聚合折算（`aggregate-expiry.ts` 的 `WIRED_EXPIRY_PROVIDERS` 含 `monkeycode`
+ * / `monkeycodeintl` / `baizhi`，折算原语是 `monkeycodeExpiry` / `baizhiExpiry`）。
+ * 空的到期字段只影响**面板展示**；折算层用的是「有 `active && remaining > 0`
+ * 的包 ⇒ `NEVER`，全空才 `UNUSABLE`」（`sharedPackageExpiry`），两者并不冲突。
  */
 export function buildMonkeycodeBalance(
   wallet: MonkeycodeWallet,
@@ -526,17 +615,33 @@ export interface MonkeycodeChallenge {
 }
 
 /**
- * FNV-1a 32 位哈希（与平台前端逐字节同构）。
+ * FNV-1a 32 位哈希（与上游 cap.js 前端**逐字符同构**）。
  *
- * ⚠️ JS 没有无符号 32 位乘法，直接 `h * 16777619` 会丢精度（超过 2^53 才丢，
- * 但中间值早就超了）⇒ 必须用 `Math.imul`，它正是「32 位整数乘法取低 32 位」。
- * `>>> 0` 把结果转成无符号，否则 `toString(16)` 会输出负号。
+ * 上游（`@cap.js/core` 的 `fnv1a`，2026-11-03 从 `index-0rgNk17_.js` 逐行取证）是：
+ *
+ * ```js
+ * let f = 2166136261
+ * for (let g = 0; g < p.length; g++) {
+ *   f ^= p.charCodeAt(g)
+ *   f += (f << 1) + (f << 4) + (f << 7) + (f << 8) + (f << 24)
+ * }
+ * return f >>> 0
+ * ```
+ *
+ * ⚠️ 三点与「教科书 FNV-1a」不同，改任一处都会让**全部签到失败**：
+ * 1. 输入是 **UTF-16 code unit**（`charCodeAt`），不是 UTF-8 字节；
+ * 2. 乘法写成**五次移位相加**，且中间值不 `>>> 0`（依赖 JS 的 ToInt32 截断）；
+ * 3. 只有返回时才 `>>> 0`。
+ *
+ * ⚠️ 这里用 `Math.imul` 代替「移位相加」是**数学等价**的：移位相加的值等于
+ * `f * 16777619`，而 `Math.imul` 正是「32 位整数乘法取低 32 位」；只要输入是
+ * code unit，两者对全部 2^32 输入逐值相同。**但不要顺手改成 UTF-8 字节**——
+ * 那对非 ASCII 的 seed（含中文的 token）会漂。2026-11-03 真机 redeem 200 验证。
  */
 function fnv1a32(data: string): number {
   let hash = 2166136261
-  const bytes = Buffer.from(data, 'utf8')
-  for (const byte of bytes) {
-    hash ^= byte
+  for (let index = 0; index < data.length; index += 1) {
+    hash ^= data.charCodeAt(index)
     hash = Math.imul(hash, 16777619) >>> 0
   }
   return hash >>> 0
@@ -564,14 +669,40 @@ export function prng(seed: string, length: number): string {
 }
 
 /**
+ * 一次签到的**总**尝试预算（所有题合计）。
+ *
+ * ⚠️⚠️ 2026-11-03 合并审计 P1：原先只有「每题 2000 万次」的上限，而上游下发的
+ * `c` 最大允许 500、`d` 最大允许 16 ⇒ 理论最坏 `500 × 2000 万 = 100 亿`次
+ * SHA-256（本机实测约 73 万次/秒 ⇒ **数小时**同步阻塞）。这不是假设：`d` 是
+ * **服务端下发**的，上游一旦调难度或报文被篡改，宿主的事件循环会被整条冻住，
+ * 所有 provider 调度与面板心跳一起停摆。
+ *
+ * 现网实测 `c=50, s=32, d=3`（50 题合计约 0.2s）。这里留 500 万次（≈7s）的
+ * 总量：比真实形态宽 20 倍以上，又不可能把宿主冻住数小时。超限时**抛错并说清
+ * 楚**，绝不静默降级成「签到失败」。
+ */
+const MAX_POW_ATTEMPTS_TOTAL = 5_000_000
+
+/**
  * 解一道题：找最小的 `n`，使 `sha256(salt + n)` 的十六进制前缀等于 `target`。
  *
- * 期望尝试次数 = `16 ** targetLength`（d=3 ⇒ 4096 次），实测 50 题合计约 0.12s。
- * ⚠️ 硬上限 `MAX_POW_ATTEMPTS_PER_QUESTION`：若上游把 `d` 调大（难度提升），
- * 这里必须**抛错并说明**，而不是无限循环把插件的定时器拖死。
+ * 期望尝试次数 = `16 ** targetLength`（d=3 ⇒ 4096 次），实测 50 题合计约 0.2s。
+ *
+ * ⚠️ 比较口径是**十六进制前缀**（`digest.startsWith(target)`），不是「前
+ * `target.length/2` 个字节」。上游浏览器走 WASM 求解器（`solve_pow`），它与
+ * 这句 JS 同口径；前端那份**字节比较**的 fallback 只在 WASM 不可用时生效，
+ * 且对奇数 `d` 会少比较半个字节 —— 不要照抄它（2026-11-03 实测：按字节比较
+ * 会被 redeem 判 `invalid solutions`，按 hex 前缀则 200）。
  */
-function solveOne(salt: string, target: string): number {
+function solveOne(salt: string, target: string, budget: { remaining: number }): number {
   for (let n = 0; n < MAX_POW_ATTEMPTS_PER_QUESTION; n += 1) {
+    budget.remaining -= 1
+    if (budget.remaining < 0) {
+      throw new Error(
+        `签到验证题累计求解超过 ${MAX_POW_ATTEMPTS_TOTAL} 次（target=${target}，`
+        + '上游可能提高了难度）—— 已放弃本次签到，请稍后重试',
+      )
+    }
     const digest = createHash('sha256').update(salt + String(n)).digest('hex')
     if (digest.startsWith(target)) return n
   }
@@ -590,14 +721,47 @@ function solveOne(salt: string, target: string): number {
  *
  * ⚠️ `i+1` 是**题号从 1 开始**，与前端一致；写成 `i` 会让 redeem 必然失败
  *（服务端按 1-based 校验），而失败文案只会说「验证失败」，极难反推。
+ *
+ * ⚠️ 本函数是**同步**的（纯计算，便于单测与固定向量）。生产路径请用
+ * {@link solveChallengeYielding}：它每解完一题让出一次事件循环，且共用
+ * {@link MAX_POW_ATTEMPTS_TOTAL} 预算。
  */
-export function solveChallenge(token: string, challenge: MonkeycodeChallenge): number[] {
+export function solveChallenge(
+  token: string,
+  challenge: MonkeycodeChallenge,
+  budget: { remaining: number } = { remaining: MAX_POW_ATTEMPTS_TOTAL },
+): number[] {
   const solutions: number[] = []
   for (let index = 0; index < challenge.count; index += 1) {
     const ordinal = index + 1
     const target = prng(`${token}${ordinal}d`, challenge.targetLength)
     const salt = prng(`${token}${ordinal}`, challenge.saltLength)
-    solutions.push(solveOne(salt, target))
+    solutions.push(solveOne(salt, target, budget))
+  }
+  return solutions
+}
+
+/**
+ * 与 {@link solveChallenge} 同算法，但**每解完一题 `await` 一次**。
+ *
+ * ⚠️ 目的是**不让宿主的单条事件循环被 PoW 独占**：现网 50 题约 0.2s，一次同步
+ * 跑完通常无感；但「上游调高难度 / 报文被篡改」时同步版本会冻结数秒到数小时
+ * （见 {@link MAX_POW_ATTEMPTS_TOTAL} 的推导）。分片后即使命中总预算上限，
+ * 期间其余 provider 的调度与面板心跳仍能推进。
+ */
+export async function solveChallengeYielding(
+  token: string,
+  challenge: MonkeycodeChallenge,
+  budget: { remaining: number } = { remaining: MAX_POW_ATTEMPTS_TOTAL },
+): Promise<number[]> {
+  const solutions: number[] = []
+  for (let index = 0; index < challenge.count; index += 1) {
+    const ordinal = index + 1
+    const target = prng(`${token}${ordinal}d`, challenge.targetLength)
+    const salt = prng(`${token}${ordinal}`, challenge.saltLength)
+    solutions.push(solveOne(salt, target, budget))
+    // 让出事件循环：`setImmediate` 在 Node 里每轮只排一次，不会把定时器饿死。
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
   }
   return solutions
 }
@@ -682,6 +846,19 @@ function readCaptchaToken(data: unknown): string | undefined {
   return token.length === 0 ? undefined : token
 }
 
+/** 从签到响应里 best-effort 取「本次到账积分」；读不到返回 `undefined`。 */
+function readRewardedCredit(data: unknown): number | undefined {
+  if (data === null || typeof data !== 'object') return undefined
+  const record = data as Record<string, unknown>
+  // ⚠️ 只认**明确的奖励字段名**：`balance` 之类是「余额」不是「本次到账」，
+  //    拿它当奖励会显示成「签到 +100积分」而实际是账户总额（本仓库红线）。
+  for (const key of ['credit', 'credits', 'reward', 'reward_credit', 'amount', 'points'] as const) {
+    const value = readNumber(record[key])
+    if (value !== undefined && value > 0) return value
+  }
+  return undefined
+}
+
 /**
  * 一键签到：`challenge → 本地求解 → redeem → checkin`。
  *
@@ -689,9 +866,27 @@ function readCaptchaToken(data: unknown): string | undefined {
  *
  * 先 `GET /wallet/checkin` 判 `checked_in`：已签则直接回 `already-claimed`
  * **不发任何写请求**。这一步既是幂等判据，也省掉一次 PoW 计算
- *（50 道题约 0.1s，纯 CPU，但没必要白发）。
+ *（50 道题约 0.2s，纯 CPU，但没必要白发）。
  * ⇒ `provider-credits.ts` 里因此可以声明 `precheckStatus: false`：
  * 预检已在本函数内部完成，外部再查一次就是**同一端点打两遍**。
+ *
+ * ## 奖励金额：优先读响应，其次用「签到前后余额差」
+ *
+ * ⚠️⚠️ 2026-11-03 真机实测（账号 `01a19fa3…`，国内站）：上游签到接口只回
+ * `{ code: 0, data: { checked_in: true } }`，**不含奖励金额**；而网页文案写死
+ * 「已领取 100 积分」——那 100 是前端常量，不是接口字段。
+ *
+ * 原实现写死 `credit: 0` + `delayedMessage`，后果是签到成功的那次批量领取在
+ * 汇总行里显示成「MonkeyCode 无账号」（`formatClaimGains` 全零返回 null），
+ * 用户会以为**根本没签到**。现改为：
+ * 1. 响应里真有 `credit/reward/amount` ⇒ 直接用；
+ * 2. 否则读一次签到后钱包，与签到前余额求差 ⇒ 用**实测增量**（真机为 +100）；
+ * 3. 两次读余额有一次失败 ⇒ 才回落 `0 + delayedMessage`（并已修客户端
+ *    不再把 0 渲染成「+0积分」/「无账号」）。
+ *
+ * ⚠️ 差值口径的边界：签到与读余额之间若有**并发的模型调用**，差值会被扣费
+ * 抵消。这只影响展示数字、不影响签到本身；拿不到正数时按第 3 条降级，绝不
+ * 编造一个「100」。
  *
  * ## 为什么每一步失败都单独给文案
  *
@@ -720,6 +915,8 @@ export async function claimMonkeycodeDailyCheckin(
     if (status !== null && status.todayCheckedIn) {
       return { kind: 'already-claimed', message: '今天已经签到过了' }
     }
+    // 签到前余额（读不到不影响签到本身，只是拿不到「增量」这个口径）。
+    const walletBefore = await fetchMonkeycodeWallet(credential, product, deps)
 
     const challengeResult = await platformRequest(
       cookie, `${base}${product.captchaChallengePath}`, { method: 'POST', body: {} }, product, deps,
@@ -739,7 +936,9 @@ export async function claimMonkeycodeDailyCheckin(
     if ('error' in challenge) {
       return { kind: 'failed', code: -1, message: challenge.error }
     }
-    const solutions = solveChallenge(challenge.token, challenge.challenge)
+    // ⚠️ 用 `solveChallengeYielding`（每解完一题让出事件循环）而不是同步版本：
+    //    上游调高难度时同步版本会独占宿主事件循环（见 `MAX_POW_ATTEMPTS_TOTAL`）。
+    const solutions = await solveChallengeYielding(challenge.token, challenge.challenge)
 
     const redeemResult = await platformRequest(
       cookie,
@@ -775,9 +974,31 @@ export async function claimMonkeycodeDailyCheckin(
     if (!checkinResult.ok) {
       return { kind: 'failed', code: checkinResult.status, message: `签到失败：${checkinResult.error}` }
     }
-    // ⚠️ 上游**不回传奖励金额**（与 autoclaw 同型）：`credited: 0` 会被界面读成
-    // 「签到成功，+0 积分」⇒ 用契约里专为此存在的 `delayedMessage` 说明，
-    // 并让调用方在成功后刷新余额（`afterClaim` / 客户端刷新都是既有机制）。
+    // ① 先看响应里有没有明确的奖励金额（不同版本/站点可能下发）。
+    const checkinEnvelope = unwrapEnvelope(checkinResult.data)
+    const responseCredit = checkinEnvelope.ok ? readRewardedCredit(checkinEnvelope.value) : undefined
+    // ② 响应没给 ⇒ 用「签到前后余额差」实测（2026-11-03 真机为 +100 积分）。
+    let measuredCredit: number | undefined
+    if (responseCredit === undefined && walletBefore.ok) {
+      const walletAfter = await fetchMonkeycodeWallet(credential, product, deps)
+      if (walletAfter.ok) {
+        const delta = walletAfter.wallet.balance - walletBefore.wallet.balance
+        // 浮点尾数（余额按 1/1000 换算）先归整到 3 位小数，再判正负。
+        const normalized = Math.round(delta * 1000) / 1000
+        if (normalized > 0) measuredCredit = normalized
+      }
+    }
+    const credited = responseCredit ?? measuredCredit
+    if (credited !== undefined) {
+      return {
+        kind: 'claimed',
+        credit: credited,
+        unit: 'credit',
+        streakDays: 0,
+        isStreakDay: false,
+      }
+    }
+    // ③ 两条口径都拿不到 ⇒ 如实回 0 + 说明（客户端已不会渲染成「+0积分」）。
     return {
       kind: 'claimed',
       credit: 0,
