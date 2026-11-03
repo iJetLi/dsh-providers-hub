@@ -42,6 +42,7 @@ import {
   zcodeClientPlatform,
   zcodeCredentialAppVersion,
   zcodeVersionGatedAppVersion,
+  compareZcodeAppVersion,
   fetchZcodeModels,
 } from '../../src/zcode-upstream.js'
 import { withCallerSystem } from '../../src/zcode-identity.js'
@@ -195,12 +196,14 @@ describe('★★ X-Session-Id 必须按账号分开（不能全池共用一个�
 /* ────────────────── 三、版本号：同一请求一个口径 + 脏值闸 ────────────────── */
 
 describe('★★ 版本号：门控口径与凭据口径各司其职，且脏值不得出网', () => {
-  it('★★ 门控版 = max(凭据, 3.16.3)，且是语义化比较不是字符串比较', () => {
+  it('★★ 门控版 = max(凭据, 门槛值)，且是语义化比较不是字符串比较', () => {
     expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
     // 字符串比较会在这里判错（'3.9.0' > '3.16.3'）⇒ 会**降级**
     expect(zcodeVersionGatedAppVersion({ app_version: '3.9.0' })).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.17.0' })).toBe('3.17.0')
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.16.10' })).toBe('3.16.10')
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.17.2' })).toBe('3.17.2')
+    // 语义化比较（与门槛值无关）：3.16.10 的 patch 比 3.16.3 大，但按字符串比 '3.16.10' < '3.16.3'
+    expect(compareZcodeAppVersion('3.16.10', '3.16.3')).toBe(1)
+    expect(compareZcodeAppVersion('3.17.10', '3.17.1')).toBe(1)
   })
 
   it('★★ 脏版本一律不许进请求（空串 / 换行注入 / 预发布号 / 非 semver）', () => {

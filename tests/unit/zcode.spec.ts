@@ -509,9 +509,9 @@ describe('ZCode 请求头与错误映射', () => {
   })
 
   it('凭据版本比门槛高时用凭据自己的（向前兼容，不把用户降级）', () => {
-    const headers = buildZcodeHeaders({ ...credential, app_version: '3.17.0' })
-    expect(headers['X-ZCode-App-Version']).toBe('3.17.0')
-    expect(headers['User-Agent']).toBe('ZCode/3.17.0')
+    const headers = buildZcodeHeaders({ ...credential, app_version: '3.17.2' })
+    expect(headers['X-ZCode-App-Version']).toBe('3.17.2')
+    expect(headers['User-Agent']).toBe('ZCode/3.17.2')
   })
 
   it('显式 appVersion 覆盖优先于凭据与门槛两者', () => {

@@ -141,11 +141,19 @@ export const ZCODE_MARKETING_ACTION_URL = `${ZCODE_ORIGIN}/api/v1/marketing/touc
  *   推理路径的既有实测结论（含 `3012` 的消融矩阵）都是在 3.14.3 上取到的，
  *   无证据地整体抬版本会把这些结论一起作废。
  *
- * ⚠ **下限未二分**：营销侧只测了 `3.14.3` 空 / `3.16.3` 有；领取侧测了
- *   `3.14.3` 失败 / `3.16.2` 成功。取 `3.16.3` 是该区间内的保守上界，
- *   **不声称它是最低下限**。
+ * ⚠ **下限逐期漂移，不是固定值**（2026-11-03 实测，用户报障「怎么领不到了」）：
+ *   同一账号、同一套头，**只改** `X-ZCode-App-Version`，间隔 3 秒避 429：
+ *
+ *   | `X-ZCode-App-Version` | `GET /marketing/touch` 的 `data.deliveries` |
+ *   |---|---|
+ *   | `3.14.3` / `3.15.0` / `3.16.0` / **`3.16.3`** / `3.17.0` | **`[]`（空）** |
+ *   | **`3.17.1`** | `[{… plan_id:"zcode-v3-start-plan-1103", grant_units:300000000 …}]` ★ |
+ *
+ *   ⇒ 1024 那期（2026-10-23）在 `3.16.3` 能拿到；1103 这期（ZCODE GLOBAL BUILD）
+ *   把门槛抬到了 `3.17.1` —— 服务端是**按活动**下发门控的，定值必然腐坏。
+ *   **下期若再抬，这里要重新二分**（别当成一次性结论）。
  */
-export const ZCODE_VERSION_GATED_MIN_APP_VERSION = '3.16.3'
+export const ZCODE_VERSION_GATED_MIN_APP_VERSION = '3.17.1'
 
 /**
  * 合法的客户端版本号形态（`major.minor.patch`，纯数字、**无前导零**）。

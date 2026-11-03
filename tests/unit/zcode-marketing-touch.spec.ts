@@ -258,14 +258,14 @@ describe('★ 营销投放解析（纯函数，判定打在实测报文的真实
   })
 })
 
-describe('★ 版本门控（实测：3.14.3 拿不到投放，3.16.3 才拿到）', () => {
-  it('凭据里的 3.14.3 被抬到 3.16.3', () => {
+describe('★ 版本门控（实测 2026-11-03：3.14.3/3.16.3 均空，3.17.1 起才有投放）', () => {
+  it('凭据里的 3.14.3 被抬到门槛值', () => {
     expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
-    expect(ZCODE_VERSION_GATED_MIN_APP_VERSION).toBe('3.16.3')
+    expect(ZCODE_VERSION_GATED_MIN_APP_VERSION).toBe('3.17.1')
   })
 
   it('凭据里是更新版本时**不降级**（向前兼容）', () => {
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.17.0' })).toBe('3.17.0')
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.17.2' })).toBe('3.17.2')
     expect(zcodeVersionGatedAppVersion({ app_version: '4.0.0' })).toBe('4.0.0')
   })
 
@@ -423,7 +423,7 @@ beforeEach(() => {
 })
 
 describe('★★ 接线：签到真的会去领营销投放里的 plan（防「原语写好但没接上」）', () => {
-  it('★ 1024 活动被领掉：claim 收到 `zcode-v3-start-plan-1024`，且请求头版本被抬到 3.16.3', async () => {
+  it('★ 1024 活动被领掉：claim 收到 `zcode-v3-start-plan-1024`，且请求头版本被抬到门控版', async () => {
     const net = makeClaimFetch({ deliveries: [DELIVERY_1024] })
     const auth = await makeAuth(net.fetchImpl)
 
@@ -433,7 +433,7 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
     // ★ 判据打在「真的把那个 plan_id 发出去了」上，而不是「函数返回值好看」
     expect(net.claimPlanIds).toEqual(['zcode-v3-start-plan-1024'])
     /**
-     * ★★ 版本门控的**接线**判据：凭据里写的是 3.14.3，但营销请求必须带 3.16.3
+     * ★★ 版本门控的**接线**判据：凭据里写的是 3.14.3，但营销请求必须带门控版
      *（本机实测：带 3.14.3 时服务端回 `deliveries: []` ⇒ 这条不成立就等于没集成）。
      */
     expect(net.marketingVersions).toEqual([ZCODE_VERSION_GATED_MIN_APP_VERSION])
@@ -552,7 +552,7 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
 
 describe('★ 请求层：失败一律降级，且不谎报', () => {
   it('fetchZcodeMarketingPlans：HTTP 500 / 非 JSON / 抛错 ⇒ 空数组', async () => {
-    const version = { app_version: '3.16.3' }
+    const version = { app_version: '3.17.1' }
     const bad = (async () => new Response('boom', { status: 500 })) as unknown as typeof fetch
     expect(await fetchZcodeMarketingPlans(CREDENTIAL, bad)).toEqual([])
 
@@ -563,7 +563,7 @@ describe('★ 请求层：失败一律降级，且不谎报', () => {
     const throwing = (async () => { throw new Error('network down') }) as unknown as typeof fetch
     expect(await fetchZcodeMarketingPlans(CREDENTIAL, throwing)).toEqual([])
     // 版本对象本身不参与断言，仅确认工具函数不抛
-    expect(zcodeVersionGatedAppVersion(version)).toBe('3.16.3')
+    expect(zcodeVersionGatedAppVersion(version)).toBe('3.17.1')
   })
 
   it('reportZcodeMarketingAction：只有 `{code:0}` 算成功', async () => {
