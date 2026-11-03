@@ -457,6 +457,19 @@ describe('credits.status 单账号异常隔离', () => {
     expect(results[0]?.status).toBeNull()
     expect(statusCalls).toBe(0)
   })
+
+  it('未传 product 时回落为「无凭据」，而不是读取 undefined 的属性', async () => {
+    const warnings: string[] = []
+    const results = await collectCreditsStatus(
+      [makeEntry({ id: 'astudio-fallback' })],
+      undefined as never,
+      makeDeps({ resolve: async () => undefined, warn: (msg) => warnings.push(msg) }),
+    )
+
+    expect(results[0]?.status).toBeNull()
+    // 聚合侧调用恒不传 product；修复前此处会抛 TypeError 并被兜底成一条告警。
+    expect(warnings.join('\n')).not.toContain("reading 'id'")
+  })
 })
 
 describe('credits.claimAll 单账号异常隔离与顺序性', () => {
@@ -801,6 +814,18 @@ describe('credits.balances 逐账号余额收集', () => {
     )
 
     expect(results.map(r => r.accountId)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('未传 product 时给出「凭据未配置」，而不是抛出 TypeError', async () => {
+    const results = await collectCreditBalances(
+      [makeEntry({ id: 'astudio-fallback' })],
+      undefined as never,
+      makeDeps({ resolve: async () => undefined }),
+    )
+
+    expect(results[0]!.balance).toBeNull()
+    // 修复前 error 是 "Cannot read properties of undefined (reading 'id')"，用户看不懂。
+    expect(results[0]!.error).toBe('凭据未配置')
   })
 })
 

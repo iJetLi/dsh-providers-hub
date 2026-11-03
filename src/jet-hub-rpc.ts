@@ -1130,7 +1130,7 @@ export async function collectCreditsStatus<TCredential = BuddyCredential, TProdu
         accountId = entry.id
         nickname = entry.nickname
         let resolved = await deps.resolve(credentialRef(entry.credentialRef))
-        if (resolved === undefined && (product as { id?: string }).id === ASTUDIO.id) {
+        if (resolved === undefined && (product as { id?: string } | undefined)?.id === ASTUDIO.id) {
           resolved = await deps.resolve(credentialRef(ASTUDIO.defaultCredentialRef))
         }
         if (resolved !== undefined) {
@@ -1370,7 +1370,7 @@ export async function collectCreditBalances<TCredential = BuddyCredential, TProd
     if (balance === null) {
       try {
         let resolved = await deps.resolve(credentialRef(entry.credentialRef))
-        if (resolved === undefined && (product as { id?: string }).id === ASTUDIO.id) {
+        if (resolved === undefined && (product as { id?: string } | undefined)?.id === ASTUDIO.id) {
           resolved = await deps.resolve(credentialRef(ASTUDIO.defaultCredentialRef))
         }
         if (resolved === undefined) {
