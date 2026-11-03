@@ -1067,8 +1067,8 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
      *
      * ⚠️ 与 MonkeyCode 两站是**不同产品线**，只是共用 Anthropic Messages 协议：
      *    · 认证是 `x-api-key: sk-…`（**不**用 web cookie、**不**签 HMAC）；
-     *    · 计费是**按量付费**（`/v1/messages` 的 usage 直接结算），
-     *      **没有**每日额度、没有积分、没有签到接口。
+     *    · 模型网关按量付费（`/v1/messages` 的 usage 直接结算），网关本身没有积分接口；
+     *    · **但主站控制台** `baizhi.cloud` 有完整积分体系（钱包 / 每日临时积分），见下。
      *
      * ⚠️ **刻意不登记**下面这些格（登记了都是「点了必然失败」的假入口）：
      *    · `creditPackages` / `permanentLock` / `usesExpiryWindow` —— 无分桶余额；
@@ -1077,8 +1077,8 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
      * 📌 2026-11-02 三审 F🟡-2 更正（原文自相矛盾）：本段原写
      *    「`credits` 刻意不登记 —— 三家格全无接口」，与下面 `credits:` 字段
      *    （`balance: true`）以及「二版更正」整段**正面冲突**。真相是
-     *    **balance 已接**（主站控制台 × 钱包接口），只有 `dailyCheckin` 无接口
-     *    （需验证码）；`onboardingTasks` 确实不登记。
+     *    **balance 已接**（主站控制台 × 钱包接口）；`dailyCheckin` 于
+     *    2026-11-03 补全 Cap 验证码后也已接（见下）；`onboardingTasks` 确实不登记。
      *    原文还说「聚合**不进** `AGGREGATE_CHANNELS`」—— 也已过期：
      *    `AGGREGATE_CHANNELS`（`aggregate-adapter.ts`）与本表
      *    `WIRED_EXPIRY_PROVIDERS` 均已含 `'baizhi'`。
@@ -1106,9 +1106,11 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //    与用户控制台截图 235.05 / 98.21 / 136.84 逐位吻合）。
     //    ⚠️ 控制台接口只认**网页登录态 cookie**；`x-api-key` 打过去 401
     //    ⇒ 只填了 `sk-` 的账号能发消息但查不到积分（降级成可行动提示，不报错）。
-    //    ⚠️ `dailyCheckin: false`：每日临时积分领取要过验证码
-    //    （实测 400 `captcha binding mismatch`），做不成幂等的「一键签到」。
-    credits: { balance: true, dailyCheckin: false },
+    //    ⚠️ `dailyCheckin: true`（2026-11-03 真机取证）：签到入口就是控制台
+    //    顶栏「每日领积分 +100」按钮；领取要过 Cap 验证码，但那是**纯本地
+    //    PoW**（`challenge → 解 50 题 → redeem`，与 MonkeyCode 同一套协议），
+    //    实测完整跑通、到账 100 积分 ⇒ 不再是「做不成一键签到」。
+    credits: { balance: true, dailyCheckin: true },
     // ⚠️ `channel: true`（**不是** false）：它真的持有账号与凭据、是一个普通渠道
     //    —— `false` 只留给 `aggregate`（聚合层不持有账号）。`AGGREGATE_CHANNELS`
     //    是按 id 显式列出的另一张表，两者不是一回事。

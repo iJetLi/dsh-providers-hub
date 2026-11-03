@@ -8,7 +8,8 @@
  * - Anthropic 兼容端点 `https://ai-models.app.baizhi.cloud/api/anthropic/v1/messages`，
  *   头 `x-api-key` + `anthropic-version: 2023-06-01`，返回标准 Anthropic SSE；
  * - 凭据是**长期静态 Key**（无 refresh 端点、无 expires_at），与 MonkeyCode
- *   平台完全独立（独立账号、独立凭据、按量计费、无每日额度/积分/签到）；
+ *   平台完全独立（独立账号、独立凭据、按量计费）；主站控制台另有积分体系，
+ *   每日临时积分需过 Cap 验证码领取（见 `src/baizhi-credits.ts`）；
  * - 账号级上下文硬上限 1,048,576 tokens（400 原文
  *   `This model's maximum context length is 1048576 tokens`）；
  * - `max_tokens=100000` 实测可成功；
@@ -52,6 +53,17 @@ export interface BaizhiProduct {
   /** 控制台用户资料（GET `data.id` 是数字 user_id）。 */
   readonly profilePath: string
   /**
+   * 每日临时积分领取（**写操作**）。
+   *
+   * 实测 `POST` body `{captcha_token}` → `{claimed, amount_credit_cents, expires_at}`；
+   * `claimed: false` 表示**今天已经领过**（不是失败）。
+   */
+  readonly dailyTemporaryCreditPath: string
+  /** Cap 验证题下发（实测 201）。 */
+  readonly captchaChallengePath: string
+  /** Cap 验证题兑换（body `{token, solutions}`，回 `{token, success}`）。 */
+  readonly captchaRedeemPath: string
+  /**
    * **推理 Key 的真正来源** —— 大模型商店（`ai-models.app.baizhi.cloud`）的
    * console 接口，不是 `baizhi.cloud` 控制台。
    *
@@ -82,6 +94,9 @@ export const BAIZHI: BaizhiProduct = {
   walletBalancePath: '/api/v1/user/wallet/balance',
   walletUsagePath: '/api/v1/user/wallet/app-credit-usage',
   profilePath: '/api/v1/user/profile',
+  dailyTemporaryCreditPath: '/api/v1/user/wallet/daily-temporary-credit',
+  captchaChallengePath: '/api/v1/public/captcha/challenge',
+  captchaRedeemPath: '/api/v1/public/captcha/redeem',
   consoleBaseUrl: 'https://ai-models.app.baizhi.cloud',
   consoleApiKeysPath: '/api/console/api-keys',
 }

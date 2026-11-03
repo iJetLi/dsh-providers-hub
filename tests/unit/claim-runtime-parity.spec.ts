@@ -251,7 +251,10 @@ describe('签到能力：registry 声明与 runtime 实现必须一致', () => {
     // ⚠️ 2026-11-02 拆站：monkeycodeintl 与 monkeycode **逐字同构**（同一套代码的
     //    另一部署），`claim` 同样在 `provider-credits.ts` 的 monkeycodeintl 条目里
     //    ⇒ 14 → 15。
-    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(15)
+    // ⚠️ 2026-11-03 加 baizhi（百智云，Cap 验证码补全后声明可签到）：`claim` 在
+    //    `provider-credits.ts` 的 baizhi 条目里（challenge → 本地 PoW → redeem →
+    //    daily-temporary-credit）⇒ 15 → 16。
+    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(16)
   })
 
   /**
