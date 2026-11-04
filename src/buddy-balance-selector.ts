@@ -622,6 +622,15 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
     resolveCredential: (credentialRef: string) => Promise<TCredential | undefined>
     /** 分档选项透传（测试注入时间用）。 */
     tierOptions?: BuddyTierOptions
+    /**
+     * 锁定态下「余额查不到」时是否降级放行（**默认不降级**）。
+     *
+     * ⚠️ 默认 `false` 是刻意的：既有语义「锁定时任何不可用都必须报错」是用户
+     * 明确要的确定性结果，改它需要逐家确认。只有确认「余额接口自己也会被上游
+     * 网关整片拒绝」的渠道（超级麦吉两站，2026-11-04 真机 403/405）才开这个开关 ——
+     * 否则一次网关抖动会把整条渠道的模型列表清空，用户一个模型都选不了。
+     */
+    degradeOnUnknown?: boolean
   },
 ): Promise<
   | {
@@ -645,7 +654,7 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
   }
 > {
   const tried = new Set<string>()
-  const allowPermanent = options.allowPermanent !== false
+  let allowPermanent = options.allowPermanent !== false
   /**
    * ⚠️ **候选为空必须当场定因**（真实报障 2026-10-13，CodeBuddy）：
    * 下面的循环上界是候选数，空候选时**一次都不执行**，`reason` 会保持
@@ -662,6 +671,32 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
       { ...options.tierOptions, allowPermanent },
     )
     if (!picked.ok) {
+      /**
+       * ⚠️⚠️ **「余额查不到」≠「没有可用积分」，锁定时必须降级放行**（2026-11-04 真机报障）。
+       *
+       * 症状（用户原话「模型都选不了了」）：面板上「永久积分」锁定开着，而余额接口
+       * 被上游网关拒（真机 HTTP 403/405）⇒ 每个账号都 `ok:false` ⇒ `noAccountReason`
+       * 给出 `unknown` ⇒ 调用方 `plan.lockedError(reason)` 抛错 ⇒ **整个 provider
+       * 的模型列表被清空**，模型选择器里只剩一大段错误文案，用户一个模型都选不了。
+       *
+       * 语义上 `unknown` 只说明「**我们不知道**这个号有没有积分」，它既不等于
+       * 「积分用尽」（`exhausted`），也不等于「全是永久积分」（`locked` 的本意）。
+       * 把它当成硬拒绝，等于让一次网关抖动把整条渠道打掉 —— 代价远大于收益：
+       * 降级只是「可能消耗临期积分」，而不降级是「完全用不了」。
+       *
+       * ⇒ 锁定态遇到 `unknown` 时**放宽一次**（`allowPermanent = true`）重跑同一个
+       * 候选集：只要余额是查得到的，档位判定照旧生效，锁定语义不变；只有在
+       * 「查不到」这一格才退化成「允许消耗永久积分」。
+       *
+       * ⚠️ 不会死循环：`allowPermanent` 置真后 `!allowPermanent` 恒假，本分支只进一次。
+       * ⚠️ 放开后若仍失败，`kind` 由 `allowPermanent` 决定 ⇒ 变 `exhausted`
+       *    （走池兜底），不再是「锁定拒绝」—— 与「真的没有可用账号」如实对应。
+       */
+      if (!allowPermanent && picked.reason.kind === 'unknown'
+        && options.degradeOnUnknown === true) {
+        allowPermanent = true
+        continue
+      }
       reason = picked.reason
       break
     }

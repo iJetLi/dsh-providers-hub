@@ -4232,6 +4232,19 @@ export function apply(ctx: Context): void {
         selector: magicrewBalanceSelector,
         lockedError: magicrewLockedError('超级麦吉'),
         isFreeModel: NO_FREE_MODEL,
+        /**
+         * ⚠️⚠️ **本家是本开关唯一的开启者**（2026-11-04 真机报障「模型都选不了了」）。
+         *
+         * 本家的余额接口会被上游网关**整片拒绝**（真机国内站 HTTP 403 空 body、
+         * 国际站 405 + WAF 页，九个账号无一幸免，官方 magpie 同时刻也 403/405）。
+         * 此时锁定态下每个账号都落到 `unknown` ⇒ 抛 `lockedError` ⇒ **整个 provider
+         * 的模型列表被清空**，模型选择器里只剩一大段错误文案，用户一个模型都选不了。
+         *
+         * 开这个开关的含义：**查不到余额时放宽一次**（允许消耗永久积分），
+         * 余额查得到时锁定语义逐字不变。取舍是「可能消耗临期积分」换「渠道可用」——
+         * 不降级的代价是「完全用不了」，明显更坏。
+         */
+        degradeLockedWhenUnknown: true,
       },
     },
   )
@@ -4341,6 +4354,8 @@ export function apply(ctx: Context): void {
         selector: magicrewIntlBalanceSelector,
         lockedError: magicrewLockedError('MagiCrew (国际版)'),
         isFreeModel: NO_FREE_MODEL,
+        /** ⚠️ 与国内站成对存在，理由见上方国内站那段注释（国际站 405）。 */
+        degradeLockedWhenUnknown: true,
       },
     },
   )

@@ -707,6 +707,52 @@ describe('BuddyBalanceSelector：fetchBalanceDetailed（锁定时必须说出「
   })
 })
 
+/**
+ * ⚠️⚠️ 2026-11-04 真机报障「**模型都选不了了**」的直接成因：
+ * 面板上「永久积分」锁定开着 + 余额接口被上游网关整片拒绝（真机国内站 403、
+ * 国际站 405，九个账号无一幸免）⇒ 每个账号都 `unknown` ⇒ 调用方抛 `lockedError`
+ * ⇒ **整个 provider 的模型列表被清空**，模型选择器里只剩一大段错误文案。
+ *
+ * 判据必须**两向**：开了开关时「查不到」要放行；但「查得到且只剩永久桶」
+ * **仍必须报 locked** —— 否则这个开关就成了绕过锁定的后门。
+ */
+describe('★★ 锁定 + 余额查不到：degradeOnUnknown 开关', () => {
+  const makeSelector = (fetchBalance: () => Promise<CreditBalance | null>) =>
+    new BuddyBalanceSelector({
+      product: CODEBUDDY,
+      now: () => NOW,
+      resolveCredential: async () => ({ access_token: 'tok' }) as BuddyCredential,
+      fetchBalance,
+    })
+
+  const pick = async (
+    fetchBalance: () => Promise<CreditBalance | null>,
+    degradeOnUnknown: boolean,
+  ) => await pickBuddyAccount(makeSelector(fetchBalance), [account('a1')], {
+    allowPermanent: false,
+    resolveCredential: async () => ({ access_token: 'tok' }) as BuddyCredential,
+    degradeOnUnknown,
+  })
+
+  it('默认（不传开关）：锁定 + 查不到 ⇒ locked —— 既有语义逐字不变', async () => {
+    const result = await pick(async () => null, false)
+    expect(result.kind).toBe('locked')
+  })
+
+  it('★★ 开关打开：锁定 + 查不到 ⇒ 放宽一次、返回账号（渠道不再整条不可用）', async () => {
+    const result = await pick(async () => null, true)
+    expect(result.kind).toBe('account')
+    expect(result.kind === 'account' ? result.account.id : undefined).toBe('a1')
+  })
+
+  it('★★ ★★ 余额**查得到**且只剩永久桶 ⇒ 即使开了开关也必须 locked（降级不得绕过锁定）', async () => {
+    const permanentOnly = async () =>
+      balance(pkg({ remaining: 800, deductionEndTime: '2099-01-01T00:00:00.000Z' }))
+    const result = await pick(permanentOnly, true)
+    expect(result.kind).toBe('locked')
+  })
+})
+
 /** 只注入 `fetchBalanceDetailed` 的选号器（`balanceImpl` 为 `Error` 时抛错）。 */
 function makeDetailedSelector(
   balanceImpl: { balance: CreditBalance | null; error?: string } | Error,
