@@ -99,7 +99,7 @@ import { fetchQoderBalanceDetailed, fetchQoderCreditBalance } from './qoder-cred
 //    `CreditBalance | null`）。两个变体**都接**（见上方长注释），选号器优先用 Detailed。
 import { MagicrewAuth } from './magicrew-auth.js'
 import type { MagicrewCredential } from './magicrew-auth.js'
-import { fetchMagicrewBalance } from './magicrew-credits.js'
+import { fetchMagicrewBalance, fetchMagicrewBalanceDetailed } from './magicrew-credits.js'
 import { MagicrewService } from './magicrew.js'
 import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 import type { MagicrewProduct } from './magicrew-product.js'
@@ -2153,7 +2153,23 @@ export function apply(ctx: Context): void {
           `${displayName}：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能全部完成`
           + `（${foldReasonErrors(reason.errors)}）。这些账号**可能仍有**「${days} 天内到期」`
           + '的积分 —— 请重试。'
-          + `⚠️ 若持续失败，请在 Jet Hub 的 ${displayName} 面板检查凭据是否失效`
+          /**
+           * ⚠️⚠️ **「先按括号里的原因办」，不要把用户第一时间引向凭据**（2026-11-04 真机）。
+           *
+           * 原句只有「若持续失败…检查凭据是否失效」，而真机上九个账号全部是
+           * **HTTP 403**（本机代理出口在境外，火山 WAF 拒绝）—— 凭据一个都没坏。
+           * 用户照着那句去重登，做完仍然报错，**且看不出自己白做了一轮**。
+           *
+           * 本档的 `errors` 现在来自详细变体（`fetchMagicrewBalanceDetailed`），
+           * 含状态码 / 「网络异常」/ 上游业务码 ⇒ 括号里**已经**是原因。
+           * 于是把凭据与组织码两条**降级为「原因不明确时」的兜底**，并点明
+           * 403/405 这一格的正确动作（改代理 / 直连，不要重登）。
+           */
+          + '⚠️ 处理顺序：括号里的原因**来自余额接口本身**，请先按它办 —— '
+          + '若写的是 HTTP 403 / 405 或网络异常，多为**代理 / 出口地区**问题'
+          + `（本家接口对境外出口返回 403），把 ${displayName} 的服务域名设为**直连**即可，`
+          + '凭据大概率是好的，**不用重新登录**，也不是积分用尽。'
+          + `原因不明确时，再在 Jet Hub 的 ${displayName} 面板检查凭据是否失效`
           + '（本家的推理凭据是定期轮换的 `mgw_` key，JWT 过期后需要重新登录）；'
           // ⚠️ 点名 `organizationCode` 是可诊断性的唯一出路：`fetchMagicrewBalance`
           //    没有「缺组织码」前置守卫（签到侧有，用的是 `product.needsOrgOnGateway`）
@@ -4144,6 +4160,23 @@ export function apply(ctx: Context): void {
       organizationCode: credential.organizationCode,
       product,
     }) ?? null,
+    /**
+     * ⚠️⚠️ **详细变体必接**（2026-11-04 真机报障）：只接 `fetchBalance` 时，
+     * 锁定永久积分的那句报错拿到的是 `null` ⇒ 说成「余额查询失败（凭据失效或
+     * 响应异常）」，把用户引去重登一个本来没问题的号。真机取证：本机代理全局
+     * 模式把流量送出国境，上游火山 WAF 回 **HTTP 403**（国际站 405），九个账号
+     * 全中 —— 与凭据、组织码都无关。
+     * ⇒ 详细变体把「HTTP 403 / 网络异常 / 上游业务码」原样带进报错。
+     * 同款教训见 `src/index.ts:76` 那段长注释（Qoder `!136` 的回归）。
+     *
+     * ⚠️ 接口注释里「两个变体必须同时收 `ctx`」那条规则对本家不适用：
+     *    这两站都不按出口 IP 分流，故两参写法与上面的 `fetchBalance` 一致。
+     */
+    fetchBalanceDetailed: async (credential, product) => await fetchMagicrewBalanceDetailed({
+      jwt: credential.jwt,
+      organizationCode: credential.organizationCode,
+      product,
+    }),
   })
   const magicrewResolver = createCredentialResolver<MagicrewCredential>(
     { pool: pool as never },
@@ -4263,6 +4296,17 @@ export function apply(ctx: Context): void {
       organizationCode: credential.organizationCode,
       product,
     }) ?? null,
+    /**
+     * ⚠️⚠️ **两站必须各接一份**（同国内站，2026-11-04 真机报障）：
+     * 国际站在同一台机器上回的是 **HTTP 405 + WAF 错误页**（国内站是 403 空 body），
+     * 只接 `fetchBalance` 时用户同样只看到「凭据失效或响应异常」而无从下手。
+     * ⚠️ 漏接不会有任何用例变红（锁定时只是文案退化）⇒ 与国内站成对存在。
+     */
+    fetchBalanceDetailed: async (credential, product) => await fetchMagicrewBalanceDetailed({
+      jwt: credential.jwt,
+      organizationCode: credential.organizationCode,
+      product,
+    }),
   })
   const magicrewIntlResolver = createCredentialResolver<MagicrewCredential>(
     { pool: pool as never },

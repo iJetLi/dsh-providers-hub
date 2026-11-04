@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createProviderCredits } from '../../src/provider-credits.js'
 import {
   fetchMagicrewBalance,
+  fetchMagicrewBalanceDetailed,
   fetchMagicrewModelPoints,
   magicrewExpiry,
   magicrewIsFree,
@@ -710,5 +712,180 @@ describe('欠费（total < 0）与批次并存时不得丢弃明细（对抗审�
   it('★ total=0 且批次和 > 0 ⇒ 仍然全部裁掉（与既有语义一致）', async () => {
     const out = await balanceWith(0)
     expect(out?.packages).toHaveLength(0)
+  })
+})
+
+/**
+ * `fetchMagicrewBalanceDetailed` —— **带原因**的余额变体（2026-11-04 新增）。
+ *
+ * ## 为什么必须有它（真机报障，不是理论问题）
+ *
+ * 用户报「超级麦吉两个供应商读不到积分和模型」。真机取证：本机代理全局模式把
+ * `i-magic-service.letsmagic.cn` 的流量送到境外出口，火山引擎 WAF 回
+ * **HTTP 403 + 空 body**（国际站回 **405 + WAF 错误页**），九个账号全中。
+ * 而选号器当时只接了 `fetchBalance` ⇒ `null` ⇒ 锁定态那句报错说成
+ * 「余额查询失败（凭据失效或响应异常）」⇒ 用户去重登、去查组织码，
+ * **真因是网络出口**。这正是 `src/index.ts:76` 记录的 Qoder `!136` 同型缺陷。
+ *
+ * ⚠️ 断言一律打在**具体原因**上（状态码 / 业务码 / 原文），不要只断言
+ * 「有 error」—— 那是恒真的（任何失败都非空），等于没有判据。
+ */
+describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原因（2026-11-04 真机）', () => {
+  const detailedOf = (fetchImpl: unknown) => fetchMagicrewBalanceDetailed({
+    jwt: 'j.w.t',
+    organizationCode: 'org1',
+    fetchImpl: fetchImpl as typeof fetch,
+  })
+
+  it('★★★ HTTP 403 ⇒ 原因含 403 且必须指向「代理/直连」（真机那一格）', async () => {
+    const fetchImpl = vi.fn(async () => new Response('', { status: 403 }))
+    const out = await detailedOf(fetchImpl)
+    expect(out.balance).toBeNull()
+    // 状态码是唯一能让人想到「网络层被拒」的线索，缺了就是又一句「响应异常」。
+    expect(out.error).toContain('403')
+    // 出路必须可操作：真机上这一格的确切成因是代理出口在境外。
+    expect(out.error).toContain('直连')
+    expect(out.error).toContain('letsmagic.cn')
+  })
+
+  it('★★ 同一份 403 报文下 fetchMagicrewBalance 仍返回 undefined（两变体契约不同）', async () => {
+    const fetchImpl = vi.fn(async () => new Response('', { status: 403 }))
+    // ⚠️ 这条是对照：`magicrewExpiry` 依赖 `undefined` 判 `UNUSABLE`，
+    //    若有人把旧变体也改成抛异常/返回对象，折算会整轮 reject。
+    expect(await fetchMagicrewBalance({
+      jwt: 'j.w.t', organizationCode: 'org1', fetchImpl: fetchImpl as typeof fetch,
+    })).toBeUndefined()
+    expect((await detailedOf(fetchImpl)).error).toContain('403')
+  })
+
+  it('★ HTTP 401 ⇒ 原因含 401 且指向重新登录', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('', { status: 401 })))
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('401')
+    expect(out.error).toContain('重新登录')
+  })
+
+  it('★ 其它非 2xx（如 405，国际站真机那一格）⇒ 原因带状态码', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('<html>405</html>', { status: 405 })))
+    expect(out.error).toContain('405')
+  })
+
+  it('★ 传输层失败 ⇒ 原因含「网络异常」与原 message（不吞根因）', async () => {
+    const out = await detailedOf(vi.fn(async () => { throw new Error('getaddrinfo ENOTFOUND') }))
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('网络异常')
+    expect(out.error).toContain('ENOTFOUND')
+  })
+
+  it('★ 上游业务码 2182（组织不存在）必须原样带出（唯一指向「没选组织」的线索）', async () => {
+    const out = await detailedOf(vi.fn(async () => jsonResponse({ code: 2182, message: '用户所在组织不存在' })))
+    expect(out.error).toContain('2182')
+  })
+
+  it('★ 200 但不是 JSON ⇒ 原因说「不是 JSON」而不是笼统的「响应异常」', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('<html>oops</html>', { status: 200 })))
+    expect(out.error).toContain('不是 JSON')
+  })
+
+  it('★ 成功时 balance 有值且不带 error（两变体对同一报文结论一致）', async () => {
+    const body = {
+      code: 1000,
+      data: { total_points: 1093, expiring_quota_details: [] },
+    }
+    const out = await fetchMagicrewBalanceDetailed({
+      jwt: 'j.w.t', organizationCode: 'org1',
+      fetchImpl: vi.fn(async () => jsonResponse(body)) as unknown as typeof fetch,
+    })
+    expect(out.balance?.total).toBe(1093)
+    expect(out.error).toBeUndefined()
+    const plain = await fetchMagicrewBalance({
+      jwt: 'j.w.t', organizationCode: 'org1',
+      fetchImpl: vi.fn(async () => jsonResponse(body)) as unknown as typeof fetch,
+    })
+    // ⚠️ 口径一致性：两条腿对**同一份报文**必须给出同样的余额（防「一份语义两处实现」）。
+    expect(plain?.total).toBe(out.balance?.total)
+  })
+})
+
+/**
+ * `createProviderCredits()` 里两站的积分条目：**必须用详细变体**。
+ *
+ * ## 为什么这条必须行为级（不能只断言源码里有 `fetchBalanceDetailed`）
+ *
+ * 账号卡片上的「余额查询失败」来自 `credits.balances` ⇒ 它读的是
+ * `ProviderCredits.fetchBalance` / `fetchBalanceDetailed`（后者优先），
+ * **不是**选号器那条腿。若只改选号器，弹窗里的文案会变好、卡片上仍然是那句
+ * 会把人引向凭据的概括文案 —— 2026-11-04 真机报障的表面症状正是卡片。
+ *
+ * ⚠️ 上游一律用 `vi.stubGlobal('fetch', …)` 替身：`magicrewBalanceOf` 在**调用时**
+ * 读全局 `fetch`（`params.fetchImpl ?? fetch`），故替身生效、且本文件**不发任何
+ * 真实网络请求**（本仓库铁律：单测不得依赖真实上游，否则用例变成随机真值）。
+ */
+describe('★★ ProviderCredits 两站必须用详细变体（卡片那句也要能指路）', () => {
+  const callCtx = { accountId: 'a1' } as never
+
+  const withFakeFetch = async <T>(
+    fetchImpl: () => Promise<Response>,
+    run: (table: ReturnType<typeof createProviderCredits>) => Promise<T>,
+  ): Promise<T> => {
+    const spy = vi.fn(fetchImpl)
+    vi.stubGlobal('fetch', spy)
+    try {
+      return await run(createProviderCredits())
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }
+
+  it('★★★ 两站都必须注册 `fetchBalanceDetailed`，且**不得**再留 `fetchBalance`（后者塌成概括文案）', () => {
+    const table = createProviderCredits()
+    for (const id of ['magicrew', 'magicrewintl']) {
+      const credits = table[id]
+      expect(credits, `${id} 必须在积分表里`).toBeDefined()
+      expect(credits?.fetchBalanceDetailed, `${id} 必须实现详细变体`).toBeTypeOf('function')
+      // 反向判据：两条腿都在时 `fetchBalanceDetailed` 优先，但留着 `fetchBalance`
+      // 意味着同一份语义两处实现 —— 后人只改一处就会静默分叉。
+      expect(credits?.fetchBalance, `${id} 不得再留 fetchBalance（一份语义两处实现）`)
+        .toBeUndefined()
+    }
+  })
+
+  it('★★★ 国内站 403 ⇒ error 必须含 403 与「直连」（真机那一格）', async () => {
+    const out = await withFakeFetch(
+      async () => new Response('', { status: 403 }),
+      async (table) => await table.magicrew!.fetchBalanceDetailed!(
+        { jwt: 'j.w.t', organizationCode: 'org1' }, callCtx,
+      ),
+    )
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('403')
+    expect(out.error).toContain('直连')
+    expect(out.error).toContain('letsmagic.cn')
+  })
+
+  it('★★ 国际站 405 ⇒ error 必须含状态码（国际站真机形态）', async () => {
+    const out = await withFakeFetch(
+      async () => new Response('<html>405</html>', { status: 405 }),
+      async (table) => await table.magicrewintl!.fetchBalanceDetailed!(
+        { jwt: 'j.w.t', organizationCode: 'org-j' }, callCtx,
+      ),
+    )
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('405')
+    expect(out.error).toContain('magicrew.ai')
+  })
+
+  it('★ 缺 jwt ⇒ 原因说「重新登录」，且**一个请求都不发**（不浪费一次 401）', async () => {
+    let calls = 0
+    await withFakeFetch(
+      async () => { calls += 1; return new Response('', { status: 200 }) },
+      async (table) => {
+        const out = await table.magicrew!.fetchBalanceDetailed!({ organizationCode: 'org1' }, callCtx)
+        expect(out.balance).toBeNull()
+        // 原实现这一格是 `return null` ⇒ 卡片只显示「余额查询失败」，用户看不出是「没登录」。
+        expect(out.error).toContain('重新登录')
+      },
+    )
+    expect(calls, '缺凭据时不得发出请求').toBe(0)
   })
 })

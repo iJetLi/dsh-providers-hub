@@ -113,35 +113,119 @@ export function magicrewParseExpiresAt(text: string): number | undefined {
   return utcMs - BEIJING_OFFSET_MS
 }
 
-export async function fetchMagicrewBalance(params: {
+/** `fetchMagicrewBalance*` 两兄弟的入参（**唯一**一份定义）。 */
+export interface MagicrewBalanceParams {
   jwt: string
   organizationCode: string
   product?: MagicrewProduct
   fetchImpl?: typeof fetch
-}): Promise<CreditBalance | undefined> {
+}
+
+/**
+ * 一次余额查询的**完整结果** —— 成功给余额，失败给**能指路的原因**。
+ *
+ * ⚠️ 之所以要这个联合类型，而不是继续用 `undefined`：`undefined` 把
+ * **四种完全不同的失败**（网络不通 / HTTP 403 / 凭据失效 / 响应畸形）
+ * 抹成同一格，而锁定永久积分时那句报错拿到的正是它 ⇒ 用户只看到
+ * 「凭据失效或响应异常」，被引去重登一个本来没问题的号。
+ * 这正是 `src/index.ts:76` 那段长注释（Qoder 的 `!136` 回归）已经点名的形态。
+ */
+type MagicrewBalanceOutcome =
+  | { ok: true; balance: CreditBalance }
+  | { ok: false; error: string }
+
+/**
+ * 发请求并**只做**「网络异常 ⇒ 原因」的归一（不解析、不判状态码）。
+ *
+ * ⚠️ 单独抽出来的理由：`try` 只需要包住 `fetchImpl` 这一个调用。
+ * 若把整段（含后面的解析）包进 `try`，坏 JSON 与网络错误会落进同一格 ⇒
+ * 又回到「四种失败抹成一格」。
+ */
+async function magicrewPointsRequest(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: { signal: AbortSignal; headers: Record<string, string> },
+): Promise<{ response: Response } | { error: string }> {
+  try {
+    return { response: await fetchImpl(url, init) }
+  } catch (error) {
+    return { error: `积分查询失败（网络异常）：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+/**
+ * 一次余额请求 + 解析的完整实现 —— **全仓唯一**的一份。
+ *
+ * `fetchMagicrewBalance`（只要余额）与 `fetchMagicrewBalanceDetailed`
+ *（余额 + 原因）都是它的薄包装。⚠️ 不得各自复制一份解析逻辑：
+ * 「一份语义两处实现」在改口径时必然漂移（AGENTS.md 首条红线）。
+ */
+async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<MagicrewBalanceOutcome> {
   const product = params.product ?? MAGICREW
   const fetchImpl = params.fetchImpl ?? fetch
-  const response = await fetchImpl(`${product.host}${MAGICREW_POINTS_PATH}`, {
+  const requested = await magicrewPointsRequest(fetchImpl, `${product.host}${MAGICREW_POINTS_PATH}`, {
     // ⚠️ 超时（2026-10-29 最终审查 I5）：其余每家 `*-credits.ts` 都有；零超时会让积分面板
     //    转圈到 undici 默认 ~300s（本家 `requestTimeoutMs` 是业务 API 口径）。
     signal: AbortSignal.timeout(product.requestTimeoutMs),
     headers: magicrewApiHeaders({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
   })
+  if ('error' in requested) return { ok: false, error: requested.error }
+  const response = requested.response
+  /**
+   * ⚠️⚠️ **非 2xx 必须带状态码说清**（2026-11-04 真机取证）。
+   *
+   * 真机：本机 Clash 全局模式把 `i-magic-service.letsmagic.cn` 的流量送到
+   * **美国出口**，火山引擎 WAF 回 `HTTP 403` + 空 body（`X-TT-System-Error: 3`），
+   * 国际站回 `HTTP 405` + WAF 错误页。旧实现把这两格都变成 `undefined` ⇒
+   * 面板「余额查询失败」、锁定态报「凭据失效或响应异常」⇒ 用户去重登、去查组织码，
+   * **而真因在网络出口**（同一台机器当时 `www.letsmagic.cn` 能 200）。
+   *
+   * ⇒ 403 单独一档并**只说可能性、不断言机制**：出口代理、风控都可能，
+   * 主机名由 `product.host` 点名，出路（设直连）必须可操作。
+   */
+  if (!response.ok) {
+    const status = response.status
+    if (status === 401) {
+      return {
+        ok: false,
+        error: `积分查询失败（HTTP 401，登录已失效）：请删除该账号后重新登录 ${product.displayName}`,
+      }
+    }
+    if (status === 403) {
+      return {
+        ok: false,
+        error: `积分查询失败（HTTP 403，上游拒绝）：若你在用代理 / VPN，`
+          + `请把 ${product.host} 设为**直连**（本家接口对境外出口返回 403）；`
+          + '否则可能是账号被风控或该接口暂时不可用',
+      }
+    }
+    /**
+     * ⚠️ **其余状态码必须点名 host**（2026-11-04）：面板上国内 / 国际是**两张
+     * 独立卡片**，而这条文案是逐账号的 —— 只说「HTTP 405」时用户不知道是哪一站
+     * 打不通（真机上海外出口下国内回 403、国际回 **405**，两个数字完全不同）。
+     * `product.host` 是唯一能把码与站点对应起来的线索。
+     */
+    return { ok: false, error: `积分查询失败（HTTP ${status}）：${product.host}` }
+  }
   const text = await response.text()
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
-    return undefined
+    return { ok: false, error: '积分查询失败（响应不是 JSON）' }
   }
   // ⚠️ `JSON.parse('null') === null` ⇒ **信封本身**可能是 `null`，直接读 `.code`
   //    会抛 `TypeError: Cannot read properties of null`（2026-10-29 实测）。
   //    契约是「取数失败 ⇒ `undefined`」（调用方 `magicrewExpiry` 据它判 `UNUSABLE`），
   //    抛出去会变成「折算整轮 reject」，与「取数失败」不同形。
   //    同型守卫见 `src/credits.ts:526-529`。
-  if (typeof parsed !== 'object' || parsed === null) return undefined
+  if (typeof parsed !== 'object' || parsed === null) return { ok: false, error: '积分查询失败（响应不是对象）' }
   const envelope = parsed as { code?: unknown, data?: Record<string, unknown> }
-  if (typeof envelope.code === 'number' && envelope.code !== 1000) return undefined
+  if (typeof envelope.code === 'number' && envelope.code !== 1000) {
+    // ⚠️ 业务码原样带出：`2182`（用户所在组织不存在）是**唯一**能把用户引向
+    //    「登录时没选组织」的线索，吞掉它等于让这一档永远不可诊断。
+    return { ok: false, error: `积分查询失败（上游业务码 ${envelope.code}）` }
+  }
   const data = envelope.data ?? {}
   /**
    * ⚠️ **`total_points` 必须容错解析，不能要求 `typeof === 'number'`**（2026-11-01 二审）：
@@ -151,7 +235,7 @@ export async function fetchMagicrewBalance(params: {
    * 上游实测过 `total_points: -31`（欠费），拒绝负数会让整条余额消失。
    */
   const total = magicrewSignedDecimalOf(data.total_points)
-  if (total === undefined) return undefined
+  if (total === undefined) return { ok: false, error: '积分查询失败（响应缺少可解析的 total_points）' }
   const rawBatches = Array.isArray(data.expiring_quota_details) ? data.expiring_quota_details : []
   const packages: CreditPackage[] = []
   for (const raw of rawBatches) {
@@ -278,7 +362,37 @@ export async function fetchMagicrewBalance(params: {
   }
   // ⚠️ `expiredTotal` = 0：上游**不下发**失效额度（既无 frozen 字段、也不回已失效桶），
   //    如实为 0 并在此注明「**不是**算出来的 0」（口径同 `src/astudio-credits.ts:166-167`）。
-  return { total, packages, expiredTotal: 0 }
+  return { ok: true, balance: { total, packages, expiredTotal: 0 } }
+}
+
+/**
+ * 余额查询（**只要余额**）—— 失败一律 `undefined`。
+ *
+ * ⚠️ 这是**既有契约**（`magicrewExpiry` 据 `undefined` 判 `UNUSABLE`），
+ * 不要改成抛异常：抛出去会成为「折算整轮 reject」，与「取数失败」不同形。
+ * 需要**原因**的调用方（选号器锁定时那句报错）请用
+ * {@link fetchMagicrewBalanceDetailed}。
+ */
+export async function fetchMagicrewBalance(params: MagicrewBalanceParams): Promise<CreditBalance | undefined> {
+  const outcome = await magicrewBalanceOf(params)
+  return outcome.ok ? outcome.balance : undefined
+}
+
+/**
+ * 余额查询（**余额 + 原因**）—— 契约：`{ balance: null, error }`，**本身不抛**。
+ *
+ * ⚠️⚠️ **选号器必须接这个变体**（`BuddyBalanceSelector` 的 `fetchBalanceDetailed`）：
+ * 只接 `fetchBalance` 时，锁定永久积分的那句报错只能拿到 `null` ⇒ 说成
+ * 「余额查询失败（凭据失效或响应异常）」，把用户引向凭据；而真因可能是
+ * 网络出口被拒（2026-11-04 真机：代理走境外 ⇒ WAF 403）。
+ * 同款教训见 `src/index.ts:76`（Qoder 的 `!136`）。
+ */
+export async function fetchMagicrewBalanceDetailed(
+  params: MagicrewBalanceParams,
+): Promise<{ balance: CreditBalance | null; error?: string }> {
+  const outcome = await magicrewBalanceOf(params)
+  if (outcome.ok) return { balance: outcome.balance }
+  return { balance: null, error: outcome.error }
 }
 
 /**

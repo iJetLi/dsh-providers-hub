@@ -48,7 +48,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { PROVIDER_REGISTRY, descriptorOf } from '../../src/provider-registry.js'
 import { PERMANENT_LOCK_PROVIDERS } from '../../src/jet-hub-rpc.js'
-import { fetchMagicrewBalance } from '../../src/magicrew-credits.js'
+import { fetchMagicrewBalance, fetchMagicrewBalanceDetailed } from '../../src/magicrew-credits.js'
 import { BuddyBalanceSelector } from '../../src/buddy-balance-selector.js'
 import {
   BUDDY_BALANCE_TIER,
@@ -303,6 +303,66 @@ describe('★ Magicrew：`index.ts` 的接线（源码级，按站切片）', ()
     }
   })
 
+  it('★★★ 两站都必须接 `fetchBalanceDetailed`（只接 `fetchBalance` ⇒ 403 被说成「凭据失效」）', () => {
+    /**
+     * ⚠️⚠️ 这条是 2026-11-04 真机报障的直接守卫。
+     *
+     * 只接 `fetchBalance` 时，取数失败一律塌成 `null`，而选号器对 `null` 只有一句
+     * 概括文案「余额查询失败（凭据失效或响应异常）」——**那是确定的错误归因**：
+     * 真机上九个账号全部返回 HTTP 403（本机代理出口在境外，上游火山 WAF 拒），
+     * 凭据一个都没坏，而用户被指向「重新登录 / 检查组织码」。
+     *
+     * 详细变体把「HTTP 状态码 / 网络异常 / 上游业务码」原样带进 `errors[]`，
+     * 再由 `magicrewLockedError` 的 `unknown` 档拼进最终文案。
+     */
+    for (const name of ['magicrewBalanceSelector', 'magicrewIntlBalanceSelector']) {
+      const ctor = ctorBlock(name)
+      expect(
+        ctor,
+        `${name} 必须注入 fetchBalanceDetailed（否则锁定态拿不到真因，只能报「凭据失效」）`,
+      ).toContain('fetchBalanceDetailed:')
+      // 形参名必须就叫 `product`：写死站点常量会打到对方 host（与上一条同因），
+      // 而这里一旦写错，详细变体就成了「更精确但打错站」的假进步。
+      expect(
+        ctor,
+        `${name} 的 fetchBalanceDetailed 必须透传 product 形参`,
+      ).toMatch(/fetchBalanceDetailed: async \(credential, product\) => await fetchMagicrewBalanceDetailed\(\{/)
+    }
+  })
+
+  it('★★ 行为级：详细变体返回 403 时，选号器必须把 403 带进 reason（而不是那句概括文案）', async () => {
+    const makeSelector = () => new BuddyBalanceSelector<
+      MagicrewProduct,
+      { jwt: string, organizationCode: string }
+    >({
+      product: MAGICREW,
+      resolveCredential: async () => ({ jwt: 'j.w.t', organizationCode: 'org' }),
+      // 两条腿都给：选号器必须**优先**走详细变体（详细是 `fetchBalance` 的严格超集）。
+      fetchBalance: async () => null,
+      fetchBalanceDetailed: async (credential, resolvedProduct) => await fetchMagicrewBalanceDetailed({
+        jwt: credential.jwt,
+        organizationCode: credential.organizationCode,
+        product: resolvedProduct,
+        fetchImpl: (async () => new Response('', { status: 403 })) as unknown as typeof fetch,
+      }),
+    })
+    const out = await makeSelector().select(
+      [{ id: 'a', credentialRef: 'R1' }],
+      { allowPermanent: false },
+    )
+    expect(out.ok, '查不到余额 + 锁定 ⇒ 必须拒绝选号').toBe(false)
+    if (out.ok) return
+    expect(out.reason.kind, '是「查不到」不是「用尽了」').toBe('unknown')
+    if (out.reason.kind !== 'unknown') return
+    const joined = out.reason.errors.join('\n')
+    // 承重断言：状态码 + 出路都必须到得了最终文案。
+    expect(joined).toContain('403')
+    expect(joined, '必须指向「直连」（真机成因就是代理出口）').toContain('直连')
+    // 反向对照：概括文案不得**取代**真因（两条同时出现 = 详细变体被绕过）。
+    expect(joined, '不得只剩那句会把人引向凭据的概括文案')
+      .not.toBe('余额查询失败（凭据失效或响应异常）')
+  })
+
   it('★ `magicrewLockedError` 的四档都用 `QUOTA_EXCEEDED`（不得落成 AUTH / TRANSPORT）', () => {
     const at = indexCode.indexOf('const magicrewLockedError')
     expect(at, '找不到 magicrewLockedError').toBeGreaterThan(-1)
@@ -320,6 +380,41 @@ describe('★ Magicrew：`index.ts` 的接线（源码级，按站切片）', ()
     // 四档必须穷尽 `BuddyNoAccountReason`：漏一档会让该情形落到 `undefined`
     // 分支（`throw undefined` ⇒ 用户看到的是「Unknown error」）。
     expect(block, '必须含穷尽性守卫').toContain('const exhaustedOnly: { kind: \'exhausted\' } = reason')
+  })
+
+  it('★★ ★★ `unknown` 档必须让用户**先按括号里的原因办**（403 那一格别去重登）', () => {
+    /**
+     * ⚠️⚠️ 2026-11-04 真机报障的直接守卫。
+     *
+     * 原 `unknown` 档只有一句「若持续失败…检查凭据是否失效」，而真机九个账号
+     * 全部是 **HTTP 403**（本机代理出口在境外，火山 WAF 拒绝）—— 凭据一个都没坏。
+     * 用户照着那句去重登，做完仍然报错，**且看不出自己白做了一轮**。
+     *
+     * 射程如实标注：这是**源码级**判据（`magicrewLockedError` 是 `src/index.ts`
+     * 内的局部函数，未导出 ⇒ 拿不到行为级入口）。它锁的是**文案里的事实与顺序**，
+     * 不是运行时行为；运行时那一半由 `fetchMagicrewBalanceDetailed` 的用例
+     * （状态码进 `errors`）与上面那条行为级用例（403 进 `reason`）承担。
+     */
+    const at = indexCode.indexOf('const magicrewLockedError')
+    expect(at, '找不到 magicrewLockedError').toBeGreaterThan(-1)
+    const unk = indexCode.indexOf("if (reason.kind === 'unknown') {", at)
+    expect(unk, '找不到 unknown 档').toBeGreaterThan(at)
+    const end = indexCode.indexOf("if (reason.kind === 'no-candidates') {", unk)
+    expect(end, '找不到 no-candidates 档（切片终点）').toBeGreaterThan(unk)
+    const block = indexCode.slice(unk, end)
+
+    // ① 原因必须先被指认（「先按它办」而非「若持续失败才去看」）。
+    expect(block, '必须请用户先按括号里的原因处置').toContain('先按它办')
+    // ② 403/405 这一格的**正确动作**必须写出来（改直连，绕开境外出口）。
+    expect(block, '必须给出 403/405 的正确动作（直连）').toContain('直连')
+    // ③ 必须明确劝阻重登 —— 真机上凭据全是好的，重登是纯白做。
+    expect(block, '必须明确写「不用重新登录」').toContain('不用重新登录')
+    // ④ **顺序判据**（本条的承重件）：凭据建议必须排在「按原因办」之后，
+    //    否则用户仍然先看到「检查凭据是否失效」，等于没改。
+    const first = block.indexOf('先按它办')
+    const cred = block.indexOf('检查凭据是否失效')
+    expect(cred, '凭据建议不得被整段删掉（原因不明确时它仍是兜底）').toBeGreaterThan(-1)
+    expect(first, '「先按原因办」必须排在「检查凭据」之前').toBeLessThan(cred)
   })
 
   it('★★ `no-candidates` 档不得提「被模型限流」—— 本家从不写 modelRateLimits，这一成因不存在', () => {

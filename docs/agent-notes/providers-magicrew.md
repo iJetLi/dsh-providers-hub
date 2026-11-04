@@ -633,3 +633,86 @@ officeace / astudio / autoclaw / autoclawintl / magicrew / magicrewintl）。这
 
 ⚠️ **教训**：文档里的**绝对行号**在多人/多 agent 并发编辑时必然腐坏，且腐坏后**没有任何守卫能发现**
 （`check-refs.cjs` 只验路径存在、不验行号）。本批之后 magicrew 相关章节一律用**符号锚 + 函数名**。
+
+## ⚠️⚠️⚠️ 五审（2026-11-04）：真机「两站都读不到积分和模型」—— 根因是**代理出口在境外**，不是凭据
+
+用户贴截图：Jet Hub → 超级麦吉面板两张账号卡（国内 `MAGICREW_ACCOUNT_*`、国际
+`MAGICREWINTL_ACCOUNT_*`）积分列都写「余额查询失败」，点「模型列表」弹窗直接报
+「读取模型列表失败：超级麦吉：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能
+全部完成（余额查询失败（凭据失效或响应异常）（共 2 个账号））…」。
+
+### 取证链（全部只读，脚本留在 `%TEMP%`，可复现）
+
+| 步骤 | 动作 | 结果 |
+|---|---|---|
+| 1 | 用凭据里真实的 `authorization` 头发 `GET /api/v1/quota/points/total` | 国内 **403 + 空 body**；国际 **405 + 阿里 WAF 页**（`data-spm="a3c0e"`） |
+| 2 | 换成仓库的完整浏览器头（`origin` = `product.webOrigin`、Chrome 141 UA、`sec-ch-ua`、`referer`） | **完全相同** ⇒ 不是请求头问题 |
+| 3 | 三组头（仓库头 / 完整浏览器头 / 只有 `authorization`） | 三组**全 403** |
+| 4 | **不带任何凭据**请求站点首页 | 国内仍是 **403**（响应头 `Server: nginx` / `X-TT-System-Error: 3` / `Proxy-Status: 9999999403061000` = 火山引擎 WAF），国际仍是 405 |
+| 5 | 对照 `https://www.letsmagic.cn/` | **200**（Next.js 站点正常）⇒ 不是整站不可达 |
+| 6 | 查本机出口 IP（`ip-api.com`，直连与经 `127.0.0.1:7897` 各一次） | `160.202.167.53` = United States / New York / GSL Networks ⇒ **代理 / TUN 全局模式，出口在境外** |
+| 7 | DoH 查 `i-magic-service.letsmagic.cn` 真实 A 记录 | `180.184.69.224`（CNAME `…volcwaf.com`）；本地解析到 fake-ip `198.18.0.46` |
+| 8 | `curl --resolve i-magic-service.letsmagic.cn:443:180.184.69.224`（绕过 TUN 的 DNS） | **仍 403** ⇒ 拦截判据是**来源地区**，不是 DNS 污染 |
+
+⚠️ **凭据侧全部排除**：所有 JWT 的 `exp` 都在 2026-11-26 ~ 2026-12-01（无一过期），
+`organizationCode` 齐全（国内 `2l8soit5f85b`、国际 `j4dvseteff9j`）。
+
+### 代码侧的真缺陷：失败原因被塌成一句会误导人的概括文案
+
+`BuddyBalanceSelector.balanceOf()` 里 `fetchBalance` 返回 `null` 时只有一句
+**「余额查询失败（凭据失效或响应异常）」** —— 而这是**确定的错误归因**：真机上凭据一个都没坏。
+详细原因走的是可选字段 `fetchBalanceDetailed`，而**本家两站都没接**（两个 selector 都只注入
+`fetchBalance`）⇒ 403 / 405 / 网络异常 / 业务码全部塌进同一格。
+
+⚠️ 这条缺陷**本仓库自己已经登记过一次**（`src/index.ts` 顶部那段长注释，Qoder `!136` 回归）：
+「用户看到『余额查询失败（凭据失效或响应异常）』于是去查凭据，真实原因却是网络不通」。
+同一形态复发，说明**只登记注释、不接详细变体，等于没修**。
+
+### 修法（四条）
+
+1. `src/magicrew-credits.ts`：把唯一的取数实现抽成 `magicrewBalanceOf(params)`（返回
+   `{ ok: true, balance } | { ok: false, error }`），失败**分档**：
+   - 401 ⇒ 「登录已失效，请删除该账号后重新登录 …」
+   - **403 ⇒ 「若你在用代理 / VPN，请把 `<host>` 设为**直连**（本家接口对境外出口返回 403）」**
+   - 其它非 2xx ⇒ 带**状态码**（405 这一格就是国际站的真机形态）
+   - 业务码 ⇒ 带**码值**（`2182` 是唯一指向「登录时没选组织」的线索，不得吞）
+   - 解析失败分档：「不是 JSON」/「不是对象」/「缺少可解析的 total_points」；
+     网络异常单独一档（带原 `message`，如 `ENOTFOUND`）
+   ⚠️ `try` **只包住 `fetchImpl` 这一个调用**（`magicrewPointsRequest`），否则「坏 JSON」与
+   「网络错误」会塌成同一格 —— 那正是本次要消除的形态。
+2. 两个薄包装：`fetchMagicrewBalance`（保持既有契约：失败返 `undefined`，`magicrewExpiry`
+   据它判 `UNUSABLE`）与新的 `fetchMagicrewBalanceDetailed`（失败 `balance: null + error`，**本身不抛**）。
+   ⚠️ 内部函数原定名 `magicrewPointsOf` 与既有同名函数撞车（`TS2393`）⇒ 改为 `magicrewBalanceOf`。
+3. `src/index.ts`：两站 selector 各注入 `fetchBalanceDetailed`（形参必须叫 `product` 并透传，
+   否则会打到对方 host —— 与「串号」那条既有守卫同因）。
+4. `magicrewLockedError` 的 `unknown` 档文案**顺序反转**：先「按括号里的原因办」并点名
+   403/405 ⇒ **改直连、不用重新登录**；凭据与组织码降级为「原因不明确时」的兜底。
+   ⚠️ 不改错误码（仍是 `QUOTA_EXCEEDED`，理由见 `autoclawLockedError` 那段长注释）。
+
+### 守卫与变异
+
+- `tests/unit/magicrew-credits.spec.ts` 新增 8 条（403 必须含 `403`+`直连`+host、同报文下旧变体仍
+  `undefined`、401 指向重新登录、405 带码、传输层带 `ENOTFOUND`、业务码 `2182` 原样带出、
+  非 JSON、成功时两变体结论一致）⇒ 文件 45 passed。
+- `tests/unit/magicrew-lock-wiring.spec.ts` 新增 3 条 ⇒ 文件 **23 passed**：
+  ① 源码切片：两站 ctor 必须含 `fetchBalanceDetailed: async (credential, product) => await fetchMagicrewBalanceDetailed({`；
+  ② **行为级**：详细变体回 403 时 `select()` 的 `reason.errors` 必须含 `403` 与 `直连`、且 `kind === 'unknown'`；
+  ③ `unknown` 档文案的**顺序判据**（「先按它办」必须排在「检查凭据是否失效」之前）。
+- 变异（三条，全部 `restored: IDENTICAL`）：删掉两处 `fetchBalanceDetailed` ⇒ ① 红 1 条；
+  把 `if (detailed !== undefined)` 短路成 `if (false && …)` ⇒ ② 红 1 条；文案回退旧版 ⇒ ③ 红 1 条。
+  ⚠️ 每条守卫只被**自己**的变异打红 ⇒ 互不替代；射程如实标注（①③ 是源码级，② 是行为级）。
+- 影响面回归：`grep -lE 'magicrew|buddy-balance|lockedError|locked-error-text|foldReasonErrors'`
+  ⇒ **63 spec / 1913 passed**。
+
+### 教训（可推广）
+
+1. **「余额查询失败（凭据失效或响应异常）」这句话本身就是缺陷**，不只是文案问题：
+   它把「网络层被拒」与「凭据坏了」合并成一句，用户按它排查必然白做。
+   凡「多种成因塌成一格、而用户动作不同」的失败，都必须分档（与 `src/astudio-credits.ts` 顶部
+   那条「三条失败路径的用户动作完全不同，故必须用 `fetchBalanceDetailed`」是同一条规则）。
+2. **不带凭据的探针结果是关键证据，不是噪声**：本次正是靠「匿名请求也 403 / 对照站点 200」
+   把拦截点定在 WAF 层。反过来，**未登录态的探针结论不可外推**（同日 AutoClaw 那次
+   「未登录时 `redirect_uri` 不校验 ⇒ 307」害我误判过一轮端口）。
+3. `--resolve` 直连真实 IP 是区分「DNS 污染」与「来源地区拦截」的**唯一**便宜手段。
+4. 用户侧的真正修法是**把两个服务域名设为直连**（不走代理）；插件侧能做的是**把 403 说清楚**，
+   不是绕过它 —— 绕过 WAF 不在插件职责内，也不应尝试。
