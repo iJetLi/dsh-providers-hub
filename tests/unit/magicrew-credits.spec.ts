@@ -765,9 +765,10 @@ describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原�
     expect(out.error).toContain('重新登录')
   })
 
-  it('★ 其它非 2xx（如 405，国际站真机那一格）⇒ 原因带状态码', async () => {
-    const out = await detailedOf(vi.fn(async () => new Response('<html>405</html>', { status: 405 })))
-    expect(out.error).toContain('405')
+  it('★ 其它非 2xx（502 那种）⇒ 只带状态码，**不得**建议改代理（否则把服务端故障引向网络）', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('<html>502</html>', { status: 502 })))
+    expect(out.error).toContain('502')
+    expect(out.error).not.toContain('直连')
   })
 
   it('★ 传输层失败 ⇒ 原因含「网络异常」与原 message（不吞根因）', async () => {
@@ -863,7 +864,7 @@ describe('★★ ProviderCredits 两站必须用详细变体（卡片那句也�
     expect(out.error).toContain('letsmagic.cn')
   })
 
-  it('★★ 国际站 405 ⇒ error 必须含状态码（国际站真机形态）', async () => {
+  it('★★★ 国际站 405 ⇒ 必须与 403 同档（含状态码 + host +「直连」出路）', async () => {
     const out = await withFakeFetch(
       async () => new Response('<html>405</html>', { status: 405 }),
       async (table) => await table.magicrewintl!.fetchBalanceDetailed!(
@@ -873,6 +874,12 @@ describe('★★ ProviderCredits 两站必须用详细变体（卡片那句也�
     expect(out.balance).toBeNull()
     expect(out.error).toContain('405')
     expect(out.error).toContain('magicrew.ai')
+    /**
+     * ⚠️ 上一稿只给 403 配了出路 ⇒ 国际站（真机就是 **405**）的用户仍只拿到
+     * 一串状态码。这条断言是那一格的承重件：把 405 移出 `REJECTED_STATUSES`
+     * 它必须变红。
+     */
+    expect(out.error).toContain('直连')
   })
 
   it('★ 缺 jwt ⇒ 原因说「重新登录」，且**一个请求都不发**（不浪费一次 401）', async () => {

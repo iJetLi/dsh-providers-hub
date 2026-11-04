@@ -113,6 +113,15 @@ export function magicrewParseExpiresAt(text: string): number | undefined {
   return utcMs - BEIJING_OFFSET_MS
 }
 
+/**
+ * 被上游/WAF **按来源拒绝**时两站可能回的码 —— 必须走同一档文案。
+ *
+ * ⚠️ 实测（2026-11-04，本机境外出口）：国内站（火山引擎）**403**、国际站
+ * （阿里）**405**。只按 403 分档会让国际站用户拿不到「设直连」的出路。
+ * ⚠️ 刻意**不含** 429 / 5xx：那两个分别是限流与服务端故障，方向完全不同。
+ */
+const REJECTED_STATUSES: ReadonlySet<number> = new Set<number>([403, 405])
+
 /** `fetchMagicrewBalance*` 两兄弟的入参（**唯一**一份定义）。 */
 export interface MagicrewBalanceParams {
   jwt: string
@@ -191,11 +200,19 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
         error: `积分查询失败（HTTP 401，登录已失效）：请删除该账号后重新登录 ${product.displayName}`,
       }
     }
-    if (status === 403) {
+    /**
+     * ⚠️⚠️ **403 与 405 必须同一档**（2026-11-04 二稿，上一稿只写了 403）。
+     *
+     * 两站被 WAF 拒时回的**不是同一个码**：国内站（火山引擎）`403`，
+     * 国际站（阿里）`405`。上一稿只给 403 配了「设直连」的出路 ⇒
+     * **国际站用户拿到的仍是纯状态码 + 主机名**，等于没修到他那一半。
+     * ⇒ 判据按「同一形态的拒绝」写（`REJECTED_STATUSES`），文案按状态码回显。
+     */
+    if (REJECTED_STATUSES.has(status)) {
       return {
         ok: false,
-        error: `积分查询失败（HTTP 403，上游拒绝）：若你在用代理 / VPN，`
-          + `请把 ${product.host} 设为**直连**（本家接口对境外出口返回 403）；`
+        error: `积分查询失败（HTTP ${status}，上游拒绝）：若你在用代理 / VPN，`
+          + `请把 ${product.host} 设为**直连**（本家接口对境外出口返回 ${status}）；`
           + '否则可能是账号被风控或该接口暂时不可用',
       }
     }
