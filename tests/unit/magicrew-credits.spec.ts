@@ -746,6 +746,12 @@ describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原�
     // 出路必须可操作：真机上这一格的确切成因是代理出口在境外。
     expect(out.error).toContain('直连')
     expect(out.error).toContain('letsmagic.cn')
+    /**
+     * ⚠️ 必须是**域名**而不是完整 URL：用户要去代理里加一条直连规则，而代理规则
+     * 匹配的是域名 —— 写成 `https://…` 会被原样抄成一条匹配不上的规则，而这段
+     * 文案是他唯一的线索（2026-11-04 二稿修的）。
+     */
+    expect(out.error).not.toContain('https://')
   })
 
   it('★★ 同一份 403 报文下 fetchMagicrewBalance 仍返回 undefined（两变体契约不同）', async () => {

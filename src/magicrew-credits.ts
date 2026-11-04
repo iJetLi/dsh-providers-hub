@@ -122,6 +122,17 @@ export function magicrewParseExpiresAt(text: string): number | undefined {
  */
 const REJECTED_STATUSES: ReadonlySet<number> = new Set<number>([403, 405])
 
+/**
+ * 把 `product.host`（形如 `https://i-magic-service.letsmagic.cn`）渲染成**域名**。
+ *
+ * ⚠️ 报错文案里必须给**域名**而不是完整 URL：用户要做的是「在代理里把这条域名设为
+ * 直连」，代理规则（Clash / 系统 PAC）匹配的是域名；写成 `https://…` 会被照抄成
+ * 一条匹配不上的规则，而这个文案是他唯一的线索。
+ */
+function hostLabelOf(host: string): string {
+  return host.replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+}
+
 /** `fetchMagicrewBalance*` 两兄弟的入参（**唯一**一份定义）。 */
 export interface MagicrewBalanceParams {
   jwt: string
@@ -212,7 +223,7 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
       return {
         ok: false,
         error: `积分查询失败（HTTP ${status}，上游拒绝）：若你在用代理 / VPN，`
-          + `请把 ${product.host} 设为**直连**（本家接口对境外出口返回 ${status}）；`
+          + `请把 ${hostLabelOf(product.host)} 设为**直连**（本家接口对境外出口返回 ${status}）；`
           + '否则可能是账号被风控或该接口暂时不可用',
       }
     }
@@ -222,7 +233,7 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
      * 打不通（真机上海外出口下国内回 403、国际回 **405**，两个数字完全不同）。
      * `product.host` 是唯一能把码与站点对应起来的线索。
      */
-    return { ok: false, error: `积分查询失败（HTTP ${status}）：${product.host}` }
+    return { ok: false, error: `积分查询失败（HTTP ${status}）：${hostLabelOf(product.host)}` }
   }
   const text = await response.text()
   let parsed: unknown
