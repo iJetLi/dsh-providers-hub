@@ -33,6 +33,9 @@ export async function fetchMagicrewCatalogModels(params: {
     accept: 'application/json',
     'user-agent': USER_AGENT,
     origin: product.webOrigin,
+    // ⚠️ 本端点不带 referer 也 200，但与其余 magicrew 请求统一（同一 Go 服务的
+    //    另两个端点缺了它就是 403 空 body，见 `magicrew-auth.ts` 的实测记录）。
+    referer: `${product.webOrigin}/`,
   }
   // ⚠️ 只在非空时带：国内站不强制，国际站强制（缺了回 HTTP 500 + 裸文本）。
   if (params.organizationCode.length > 0) headers['organization-code'] = params.organizationCode

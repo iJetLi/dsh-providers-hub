@@ -281,6 +281,15 @@ async function magicrewCall(params: {
  *
  * ⚠️ `origin` **必须**带（网关会看它，缺了偶发 403）；`organization-code` 只在
  * 有值时带（国内站不强制，国际站缺了回 HTTP 500）。
+ *
+ * ⚠️⚠️ `referer` 也是**硬要求**（2026-11-04 真机二分实测，此前全仓零处下发）：
+ * 同一套头（origin / authorization / organization-code / user-agent 全在）下，
+ * 只差一条 `referer: <webOrigin>/` 就是 **403 空 body ⇄ 200** 的差别：
+ * - `GET /api/v1/contact/accounts/me/users`：无 referer **403**，有 referer **200**
+ * - `POST /api/v1/model-gateway/tokens`：无 referer **403**，有 referer **200**
+ * - `GET /api/v1/quota/points/total` 与 `GET /api/v1/flows/models`：两种都 200
+ *   ⇒ 只补 `origin` 不够，WAF 认的是 referer。漏了它的症状是「登录成功但昵称恒
+ *   回落 displayName、gateway key 恒签发失败」两条 warn，而不是明确的鉴权错误。
  */
 function magicrewHeaders(params: {
   token?: string
@@ -295,6 +304,8 @@ function magicrewHeaders(params: {
     'user-agent': params.userAgent ?? MAGICREW_USER_AGENT,
     // 网关会看 Origin，缺了偶发 403（magpie 侧记录）。
     origin: params.webOrigin,
+    // ⚠️ 尾斜杠是照浏览器真实请求抄的；WAF 按 referer 判来源，缺了直接 403 空 body。
+    referer: `${params.webOrigin}/`,
   }
   if (params.token !== undefined && params.token.length > 0) {
     headers.authorization = `Bearer ${params.token}`
