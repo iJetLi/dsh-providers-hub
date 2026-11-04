@@ -695,6 +695,25 @@ officeace / astudio / autoclaw / autoclawintl / magicrew / magicrewintl）。这
    403/405 ⇒ **改直连、不用重新登录**；凭据与组织码降级为「原因不明确时」的兜底。
    ⚠️ 不改错误码（仍是 `QUOTA_EXCEEDED`，理由见 `autoclawLockedError` 那段长注释）。
 
+### ⚠️⚠️⚠️ 补充取证：**整站**都被拦，不只是积分端点（2026-11-04 15:2x 只读复测）
+
+同一台机器、同一凭据（`MAGICREW_ACCOUNT_52D8D2D8` / `MAGICREWINTL_ACCOUNT_F2EB0823`）连打三个端点：
+
+| 端点 | 国内站 | 国际站 |
+| --- | --- | --- |
+| `/api/v1/flows/models`（**模型目录**） | **403** + 空 body | **405** + WAF 页 2569 字节 |
+| `/api/v1/quota/points/total`（积分） | **403** | **405** |
+| `/v1/chat/completions`（**推理**，故意不带 key 只为看状态码） | **403** | **405** |
+
+⇒ 三条腿全拦，因为 `src/magicrew-product.ts:52` 写明「业务 API 与模型网关**共用同一个 host**」。
+**结论：这不是「面板显示坏了」，而是该 provider 在当前网络出口下整站不可用**（推理也发不出去）。
+插件侧唯一能做的就是把 403/405 说成「改出口」，**不可能**绕过 WAF。
+
+⚠️ 复测方法：`node %TEMP%/probe-magicrew-models.cjs`（从 `~/.dsh/.credentials.yaml` 读
+`MAGICREW_ACCOUNT_*` / `MAGICREWINTL_ACCOUNT_*`，只发 GET；推理那发故意不带 key）。
+⚠️ 用户的凭据 `exp` 是 **2026-11-26 ~ 12-01**，`expired=false` —— 所以「403 就是凭据坏了」这条
+直觉在这里**恒错**，而它正是旧文案引导的方向。
+
 ### 守卫与变异
 
 - `tests/unit/magicrew-credits.spec.ts` 新增 12 条：① 8 条详细变体分档（403 含 `403`+`直连`+host、
