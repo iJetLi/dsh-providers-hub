@@ -9160,6 +9160,39 @@ function registerJetHubEndpoints(
             ctx.logger.info(
               `[jet-hub] ${req.provider} 的全部 ${catalog.ids.length} 个模型本就已关闭，无变更`,
             )
+          } else if (!catalog.complete && req.closeProvider === false
+            && catalog.notReady === undefined) {
+            /**
+             * ⚠️⚠️ **模型列表屏的「全关」在「供应商没有账号」时不能拒绝**（2026-11-04 真机报障）。
+             *
+             * 症状（用户原话「部分供应商全关按钮异常」）：模型列表屏上 Codeoly (Unity)
+             * 明明显示「5 个 · 已关闭 0」、五个开关全蓝，点「全关」却报
+             * 「该供应商没有可关闭的模型，未做任何变更」——**界面与报错自相矛盾**。
+             *
+             * 成因：该供应商**没有登录账号** ⇒ `llm.listModels()` 被目录门控成 `[]`
+             * ⇒ `complete = remoteIds.length > 0 = false` ⇒ 落到「目录不完整 ⇒ 拒绝」。
+             * 而界面上那 5 个模型来自适配器**兜底表**（`adapterIds`），`catalog.ids`
+             * 本来就是这 5 个 —— 用户要关的正是它们。
+             *
+             * 为什么这一格**可以**放行（与 IKJW33 不矛盾）：
+             * - IKJW33 的缺陷形态是「写完整黑名单 + 落**关闭意图**」⇒ `provider.status`
+             *   此后报「已关闭」，而上游其实还有几百个模型可选。本分支落的是
+             *   `closeProvider === false`（模型列表屏**从不**写意图，见下面 else 分支
+             *   的注释）⇒ `provider.status` 仍按同一份兜底表算「5 个 · 已关闭 5」，
+             *   **状态与事实一致**。
+             * - 用户看不到的模型不会被误报成已关闭；将来登录后新增的模型仍是打开的，
+             *   用户可以再点一次「全关」。
+             *
+             * ⚠️ **`notReady` 一格必须排除**：那是「远端读到了、但目录还没推导完」
+             * （聚合冷启动），此时「可见项」本身是残的，写黑名单会把状态搞错。
+             * ⚠️ `remoteError`（分支 1 已拦）不放行：那是真的读失败，重试可能就好，
+             * 不该写下一份可能残缺的黑名单。
+             */
+            await pool.writeModelsWithProviderClosed(req.provider, pending, false)
+            ctx.logger.info(
+              `[jet-hub] 关闭 ${req.provider} 的 ${pending.length} 个模型`
+              + '（目录不完整：该供应商未登录或远端无可读目录，只关当前可见项、不落供应商关闭意图）',
+            )
           } else if (!catalog.complete) {
             // 4. **有新增项但目录不完整** ⇒ 拒绝且不落盘。
             //    ⚠️ 必须排在幂等短路**之后**：先判它会让第 3 条那个正常形态
@@ -9197,11 +9230,10 @@ function registerJetHubEndpoints(
             //   供应商**也关掉（`provider.status` 报 closed、选择器里一个模型都没有）
             //   ；再打开**任意一个**模型，供应商又被顺带打开（`setModelDisabled` 的
             //   打开方向会清意图）⇒ 两头都与用户意图相反，且**零提示**。
-            const closeProvider = req.closeProvider !== false
-            await pool.writeModelsWithProviderClosed(req.provider, pending, closeProvider)
+            await pool.writeModelsWithProviderClosed(req.provider, pending, req.closeProvider !== false)
             ctx.logger.info(
               `[jet-hub] 关闭 ${req.provider} 的 ${pending.length} 个模型`
-              + (closeProvider ? '' : '（不落供应商关闭意图）'),
+              + (req.closeProvider !== false ? '' : '（不落供应商关闭意图）'),
             )
           }
         } else {

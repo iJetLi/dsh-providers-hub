@@ -1985,6 +1985,69 @@ describe('model.list / model.setDisabled 端点', () => {
     })
 
     /**
+     * ⚠️⚠️ 2026-11-04 真机报障「**部分供应商全关按钮异常**」。
+     *
+     * 症状：模型列表屏上 `Codeoly (Unity)` 显示「5 个 · 已关闭 0」、五个开关全蓝，
+     * 点「全关」却报「该供应商没有可关闭的模型，未做任何变更」—— 界面与报错矛盾。
+     *
+     * 成因：该供应商**没有登录账号** ⇒ `llm.listModels()` 被目录门控成 `[]`
+     * ⇒ `complete = false` ⇒ 落到「目录不完整 ⇒ 拒绝」。而界面上那 5 个模型
+     * 来自适配器兜底表，`catalog.ids` 本就是它们 ⇒ 用户要关的正是它们。
+     *
+     * 模型列表屏（`closeProvider: false`）**从不写「关闭供应商意图」**，
+     * 故 `provider.status` 仍按同一份兜底表算「5 个 · 已关闭 5」⇒ 状态与事实一致，
+     * 与 ISSUE IKJW33 的「写意图 ⇒ 显示已关闭而模型仍可选」不同。
+     */
+    it('★★ 模型列表屏（closeProvider:false）+ 远端为空（无账号）+ 兜底表非空 ⇒ 关掉可见项并成功', async () => {
+      const fallback = [
+        { id: 'unity-a', name: 'Unity A' },
+        { id: 'unity-b', name: 'Unity B' },
+      ]
+      const { call, storedValue } = registerEndpoints({
+        models: [],
+        modelAdapters: { buddy: { listAllModels: () => fallback } },
+      })
+
+      const result = await call('model.setAllDisabled', {
+        provider: 'buddy',
+        disabled: true,
+        closeProvider: false,
+      })
+
+      expect(result.ok, '模型列表屏在「无账号」时必须能关掉可见模型').toBe(true)
+      expect(storedValue().disabledModels).toEqual({
+        buddy: { 'unity-a': true, 'unity-b': true },
+      })
+      // ⚠️ 反向：**不得**借机落「关闭供应商」意图（否则 status 会报「已关闭」，
+      //    而上游还有我们看不到的模型 —— 正是 IKJW33 的形态）。
+      //    真实持久化键名是 `providerClosed`（内存字段叫 `providerClosedCache`，
+      //    `AccountPool.closedProviders` 是 getter）—— 第一版写成 `closedProviders`
+      //    ⇒ `?? {}` 恒真、变异全绿，已改；`providerClosed` 键**任何保存都会带上**
+      //    （值是 `{}`），所以判据只能是「值为空」。变异 M2（closed=true）实测 RED 1。
+      expect(storedValue().providerClosed ?? {}, '不得落供应商关闭意图').toEqual({})
+    })
+
+    /**
+     * ⚠️ 反向对照：**「关闭供应商」入口**在同样的残缺目录下**仍必须拒绝**。
+     *
+     * 那条路径会落「关闭意图」⇒ 允许它在只看得到兜底子集时就写意图，正是
+     * ISSUE IKJW33 的原始缺陷（供应商显示已关闭、而远端几百个模型仍可选）。
+     */
+    it('★★ 但「关闭供应商」入口（不传 closeProvider）在同样的残缺目录下仍必须拒绝', async () => {
+      const fallback = [{ id: 'unity-a', name: 'Unity A' }]
+      const { call, storedValue } = registerEndpoints({
+        models: [],
+        modelAdapters: { buddy: { listAllModels: () => fallback } },
+      })
+
+      const result = await call('model.setAllDisabled', { provider: 'buddy', disabled: true })
+
+      expect(result.ok).toBe(false)
+      expect(result.error?.message ?? '').toContain('没有可关闭的模型')
+      expect(storedValue().disabledModels ?? {}, '拒绝时一个字节都不许写').toEqual({})
+    })
+
+    /**
      * ⚠️⚠️ **「关闭全部」必须以两个目录来源的并集为准**（真实缺陷，独立审计发现）。
      *
      * `fullCatalogIds` 原先**优先**用 `modelAdapters[provider].listAllModels()`，
