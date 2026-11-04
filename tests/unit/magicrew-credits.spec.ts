@@ -752,6 +752,12 @@ describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原�
      * 文案是他唯一的线索（2026-11-04 二稿修的）。
      */
     expect(out.error).not.toContain('https://')
+    /**
+     * ⚠️ 还必须说明「**在哪**加这条规则」（2026-11-04 四审建议 ③(2)）：本插件**没有**
+     * 魔法麦吉的代理入口（`onOpenProxy` 只对 opencode / gemini / qoder / minimaxintl），
+     * 光说「设为直连」会让用户先在 Jet Hub 面板里找开关，找不到就以为修不了。
+     */
+    expect(out.error, '必须指明是在**代理软件**里加规则（插件内没有该入口）').toContain('代理软件')
   })
 
   it('★★ 同一份 403 报文下 fetchMagicrewBalance 仍返回 undefined（两变体契约不同）', async () => {
@@ -769,6 +775,13 @@ describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原�
     expect(out.balance).toBeNull()
     expect(out.error).toContain('401')
     expect(out.error).toContain('重新登录')
+    /**
+     * ⚠️ 必须点明「锁定不会因删号丢失」（2026-11-04 四审建议 ③(3)）：删号重登是唯一
+     * 路径，而「永久积分锁定」按**渠道**落盘（`src/account-pool.ts` 的
+     * `permanentLocked(provider)`；`removeAccount` 只 unset 凭据 + filter），
+     * 锁本不会丢 —— 但不写这句，用户会因为怕丢锁而不敢重登，卡在 401 上。
+     */
+    expect(out.error, '必须说明永久积分锁定不会因删号丢失').toContain('永久积分锁定')
   })
 
   it('★ 其它非 2xx（502 那种）⇒ 只带状态码，**不得**建议改代理（否则把服务端故障引向网络）', async () => {
@@ -789,9 +802,34 @@ describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原�
     expect(out.error).toContain('2182')
   })
 
-  it('★ 200 但不是 JSON ⇒ 原因说「不是 JSON」而不是笼统的「响应异常」', async () => {
+  it('★★ 200 但返回 HTML（WAF 拦截页）⇒ 必须点出「HTML」并给「直连」出路', async () => {
+    /**
+     * ⚠️⚠️ **「非 JSON」不是一格**（2026-11-04 四审）。取证：阿里 WAF 拦截时回
+     * **HTTP 200 + HTML 拦截页**（`src/accio-adapter.ts:1828-1865` 记了完整特征：
+     * `content-type: text/html` + `rgv587_flag:sm` + `bixi-intl.alicdn.com/punish/`）。
+     * 国际站与 accio 同族 ⇒ 这一格**真实可达**，而旧文案只有「响应不是 JSON」，
+     * 与「上游改版」「空响应」同形，用户拿它**没有任何动作可做** —— 正是本轮
+     * 要消灭的那种塌陷（旧用例用的就是 `<html>oops</html>`，却只断言了「不是 JSON」）。
+     */
     const out = await detailedOf(vi.fn(async () => new Response('<html>oops</html>', { status: 200 })))
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('HTML')
+    expect(out.error).toContain('直连')
+    expect(out.error, '必须点名站点：面板上两站共用同一套文案').toContain('letsmagic.cn')
+  })
+
+  it('★ 200 但不是 JSON 也不是 HTML（上游改版 / 纯文本）⇒ 带 host，且**不得**劝人改代理', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('maintenance', { status: 200 })))
     expect(out.error).toContain('不是 JSON')
+    expect(out.error).toContain('letsmagic.cn')
+    // 反向判据：纯文本不能也引去改代理 —— 那是反向指路（与 502 那格同一个理由）。
+    expect(out.error).not.toContain('直连')
+  })
+
+  it('★ 200 + `null` 信封 ⇒「不是对象」也必须点名站点', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('null', { status: 200 })))
+    expect(out.error).toContain('不是对象')
+    expect(out.error).toContain('letsmagic.cn')
   })
 
   it('★ 成功时 balance 有值且不带 error（两变体对同一报文结论一致）', async () => {
@@ -852,6 +890,14 @@ describe('★★ ProviderCredits 两站必须用详细变体（卡片那句也�
       expect(credits?.fetchBalanceDetailed, `${id} 必须实现详细变体`).toBeTypeOf('function')
       // 反向判据：两条腿都在时 `fetchBalanceDetailed` 优先，但留着 `fetchBalance`
       // 意味着同一份语义两处实现 —— 后人只改一处就会静默分叉。
+      /**
+       * ⚠️ 这条 `toBeUndefined()` 是**风格约束，不是正确性约束**（2026-11-04 四审登记）：
+       * 四个消费点（`src/jet-hub-rpc.ts:1439` / `:8469`、`src/index.ts:5829`、
+       * `src/buddy-balance-selector.ts:436`）都是 detailed 优先、`fetchBalance` 只在
+       * **没实现 detailed** 时才被调用 ⇒ 两条腿并存**不会产生错误行为**。
+       * 它防的是「一份语义两处实现，后人只改一处」。所以将来若确实需要兼容旧调用点
+       * 而补回 `fetchBalance`，删掉这条断言是**允许**的 —— 但必须同时删掉这段说明。
+       */
       expect(credits?.fetchBalance, `${id} 不得再留 fetchBalance（一份语义两处实现）`)
         .toBeUndefined()
     }

@@ -208,7 +208,12 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
     if (status === 401) {
       return {
         ok: false,
-        error: `积分查询失败（HTTP 401，登录已失效）：请删除该账号后重新登录 ${product.displayName}`,
+        error: `积分查询失败（HTTP 401，登录已失效）：请删除该账号后重新登录 ${product.displayName}`
+          // ⚠️ 补一句「锁定不受影响」（2026-11-04 四审建议 ③(3)）：删号重登是唯一路径，
+          //    而「永久积分锁定」是按**渠道**落盘的（`src/account-pool.ts` 的
+          //    `permanentLocked(provider)`），`removeAccount` 只 unset 凭据 + 从账号表
+          //    filter ⇒ 锁**不会**丢。不写这句，用户会因为怕丢锁而不敢重登。
+          + '（永久积分锁定按渠道保存，删号重登不会丢）',
       }
     }
     /**
@@ -223,7 +228,12 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
       return {
         ok: false,
         error: `积分查询失败（HTTP ${status}，上游拒绝）：若你在用代理 / VPN，`
-          + `请把 ${hostLabelOf(product.host)} 设为**直连**（本家接口对境外出口返回 ${status}）；`
+          // ⚠️ 「在代理软件里按域名加规则」这半句是必须的（2026-11-04 四审建议 ③(2)）：
+          //    本插件**没有**魔法麦吉的代理设置入口（`onOpenProxy` 只对
+          //    opencode / gemini / qoder / minimaxintl，见 `plugin-src/client/jet-hub.js`），
+          //    光说「设为直连」会让用户在 Jet Hub 里找开关。
+          + `请把 ${hostLabelOf(product.host)} 设为**直连**`
+          + `（在代理软件里按域名加规则；本家接口对境外出口返回 ${status}）；`
           + '否则可能是账号被风控或该接口暂时不可用',
       }
     }
@@ -240,14 +250,38 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
   try {
     parsed = JSON.parse(text)
   } catch {
-    return { ok: false, error: '积分查询失败（响应不是 JSON）' }
+    /**
+     * ⚠️ **「非 JSON」不是一格，而且这一格必须能指路**（2026-11-04 四审）。
+     *
+     * 取证：阿里 WAF（国际站与 accio 同族）拦截时回 **HTTP 200 + HTML 拦截页**
+     * （`src/accio-adapter.ts:1828-1865` 记了完整特征：`content-type: text/html`、
+     * `rgv587_flag:sm`、`bixi-intl.alicdn.com/punish/`）—— 这一格落进来时
+     * 旧文案只写「响应不是 JSON」，**既没有 host 也没有任何动作可做**，与
+     * 「上游改版」「空响应」同形（正是本轮要消灭的那种塌陷）。
+     *
+     * 判据用**响应体形状**（以 `<` 开头）而不是 `content-type`：这样不必改动
+     * 已经拿到的 `Response`，也覆盖 WAF 用 `text/plain` 回拦截页的变体。
+     * ⚠️ 不把「HTML ⇒ 一定是 WAF」写成断言：也可能是网关错误页/登录跳转页，
+     *    所以文案是「多为…」并同时给出第二可能。
+     */
+    const host = hostLabelOf(product.host)
+    if (/^\s*</.test(text)) {
+      return {
+        ok: false,
+        error: `积分查询失败（上游返回 HTML 而不是 JSON，多为代理 / 出口地区被风控拦截）：`
+          + `若你在用代理 / VPN，请把 ${host} 设为**直连**；否则可能是该接口暂时不可用`,
+      }
+    }
+    return { ok: false, error: `积分查询失败（响应不是 JSON）：${host}` }
   }
   // ⚠️ `JSON.parse('null') === null` ⇒ **信封本身**可能是 `null`，直接读 `.code`
   //    会抛 `TypeError: Cannot read properties of null`（2026-10-29 实测）。
   //    契约是「取数失败 ⇒ `undefined`」（调用方 `magicrewExpiry` 据它判 `UNUSABLE`），
   //    抛出去会变成「折算整轮 reject」，与「取数失败」不同形。
   //    同型守卫见 `src/credits.ts:526-529`。
-  if (typeof parsed !== 'object' || parsed === null) return { ok: false, error: '积分查询失败（响应不是对象）' }
+  if (typeof parsed !== 'object' || parsed === null) {
+    return { ok: false, error: `积分查询失败（响应不是对象）：${hostLabelOf(product.host)}` }
+  }
   const envelope = parsed as { code?: unknown, data?: Record<string, unknown> }
   if (typeof envelope.code === 'number' && envelope.code !== 1000) {
     // ⚠️ 业务码原样带出：`2182`（用户所在组织不存在）是**唯一**能把用户引向

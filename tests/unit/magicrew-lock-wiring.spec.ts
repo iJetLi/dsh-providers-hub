@@ -126,7 +126,14 @@ function ctorBlock(name: string): string {
     .toHaveLength(1)
   expect(block.match(/\bfetchBalance\s*:/g) ?? [], `${name} 的构造区间吞进了别家的 fetchBalance`)
     .toHaveLength(1)
-  expect(block.split('\n').length, `${name} 的构造区间异常（实测 8 行）`).toBeLessThanOrEqual(14)
+  /**
+   * ⚠️ 阈值是**防膨胀的上界，不是精确行数**（2026-11-04 四审）：两个块实测都**恰好 14 行**，
+   * 而 `codeOnly` 剥空后的注释行**仍占一行** ⇒ 阈值卡在 14 时，将来加**一行注释**就假红，
+   * 后人的第一反应会是「把注释删掉」而不是「判据是不是写错了」。
+   * 切片的正确性由上面两条 **计数**断言保证（那是真判据），行数只用来挡
+   * 「吞掉十几行别的代码」那种膨胀（二审实测曾从 6 行膨胀到 21 行）。
+   */
+  expect(block.split('\n').length, `${name} 的构造区间异常（实测 14 行）`).toBeLessThanOrEqual(18)
   expect(block.length, `${name} 的构造区间切成了空`).toBeGreaterThan(80)
   return block
 }
@@ -282,6 +289,11 @@ describe('★ Magicrew：`index.ts` 的接线（源码级，按站切片）', ()
     //   而症状是「锁定时永远报『无法确认』」，与 `provider-expiry.ts` 那次
     //   漏传 `product` 完全同型）。
     const cases = [
+      /**
+       * ⚠️ 国际站那条的 `other` 写 `'MAGICREW,'` **带逗号是有意的，别「统一成 MAGICREW」**：
+       * `MAGICREW` 是 `MAGICREW_INTL` 的子串 ⇒ 不带逗号时国际站块**恒红**（它自己就含 `MAGICREW_INTL`）。
+       * 带逗号 = 只在「真的写了 `product: MAGICREW,` 这个实参」时才命中。
+       */
       ['magicrewBalanceSelector', 'MAGICREW_INTL'],
       ['magicrewIntlBalanceSelector', 'MAGICREW,'],
     ] as const
@@ -327,6 +339,20 @@ describe('★ Magicrew：`index.ts` 的接线（源码级，按站切片）', ()
         ctor,
         `${name} 的 fetchBalanceDetailed 必须透传 product 形参`,
       ).toMatch(/fetchBalanceDetailed: async \(credential, product\) => await fetchMagicrewBalanceDetailed\(\{/)
+      /**
+       * ⚠️⚠️ **上面两条都抓不到「漏传 product,」**（2026-11-04 四审实测）：
+       * 正则只吃到 `({` 为止，把 `product,` 从国际站那一腿删掉后
+       * `toContain('fetchBalanceDetailed:')` 与那条正则**仍然全绿** —— 于是
+       * 「详细变体成了更精确但打错站的假进步」这条风险没有任何守卫。
+       *
+       * 判据改成**逐腿计数**：一个选号器有且只有两条取数腿（`fetchBalance` 与
+       * `fetchBalanceDetailed`），各传一次 `product,` ⇒ 恰好 2 次。
+       * 用 `\bproduct,` 而不是 `product:`：前者是**实参**，后者是对象键（那格另有计数）。
+       */
+      expect(
+        (ctor.match(/\bproduct,/g) ?? []).length,
+        `${name} 的两条取数腿都必须透传 product 实参（少一次就有一腿打到默认站点）`,
+      ).toBe(2)
     }
   })
 
@@ -409,6 +435,19 @@ describe('★ Magicrew：`index.ts` 的接线（源码级，按站切片）', ()
     expect(block, '必须给出 403/405 的正确动作（直连）').toContain('直连')
     // ③ 必须明确劝阻重登 —— 真机上凭据全是好的，重登是纯白做。
     expect(block, '必须明确写「不用重新登录」').toContain('不用重新登录')
+    /**
+     * ⚠️ **两个码都要点**（2026-11-04 四审建议 ③(1)）：本档是**两站共用**的
+     * （`magicrewLockedError('超级麦吉')` 与 `…('MagiCrew (国际版)')`），而真机上
+     * 海外出口下**国内站回 403、国际站回 405**。只写 403 时，国际站用户在锁定态
+     * 看到的码与卡片上「HTTP 405」不符 ⇒ 以为是两件事，反而不信这条文案。
+     *
+     * ⚠️⚠️ 锚点必须是 `返回 403 / 405` 这**后半句**，不能只写 `403 / 405`：
+     * 同一档的前一句「若写的是 HTTP 403 / 405 或网络异常」里也有这两个码，
+     * 只写码的话**前一句就把它喂饱了** ⇒ 断言恒真（2026-11-04 实测：变异
+     * `返回 403 / 405` → `返回 403` 时 74 条**全绿**，就是这个原因）。
+     */
+    expect(block, '锁定态文案必须点明「境外出口返回 403 / 405」这一整句（两站共用这一档）')
+      .toContain('返回 403 / 405')
     // ④ **顺序判据**（本条的承重件）：凭据建议必须排在「按原因办」之后，
     //    否则用户仍然先看到「检查凭据是否失效」，等于没改。
     const first = block.indexOf('先按它办')
