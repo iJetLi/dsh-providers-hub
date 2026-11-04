@@ -673,8 +673,12 @@ officeace / astudio / autoclaw / autoclawintl / magicrew / magicrewintl）。这
 1. `src/magicrew-credits.ts`：把唯一的取数实现抽成 `magicrewBalanceOf(params)`（返回
    `{ ok: true, balance } | { ok: false, error }`），失败**分档**：
    - 401 ⇒ 「登录已失效，请删除该账号后重新登录 …」
-   - **403 ⇒ 「若你在用代理 / VPN，请把 `<host>` 设为**直连**（本家接口对境外出口返回 403）」**
-   - 其它非 2xx ⇒ 带**状态码**（405 这一格就是国际站的真机形态）
+   - **`REJECTED_STATUSES = {403, 405}` 同档 ⇒「若你在用代理 / VPN，请把 `<host>` 设为**直连**
+     （本家接口对境外出口返回 `<实际状态码>`）」** —— ⚠️ **两站被拒时回的不是同一个码**
+     （国内火山引擎 403、国际阿里 **405**），文案回显实际值。⚠️ 初版只给 403 配了出路
+     （405 落到「其它非 2xx」只带码与 host）⇒ **国际站用户仍拿不到出路**，二稿才合并；
+     ⚠️ 刻意**不**含 429 / 5xx（限流与服务端故障，把用户引去改代理是反向指路，有用例锁住）
+   - 其它非 2xx ⇒ 带**状态码 + `host>`**（面板上两站是两张卡片，只说「HTTP 502」看不出哪站）
    - 业务码 ⇒ 带**码值**（`2182` 是唯一指向「登录时没选组织」的线索，不得吞）
    - 解析失败分档：「不是 JSON」/「不是对象」/「缺少可解析的 total_points」；
      网络异常单独一档（带原 `message`，如 `ENOTFOUND`）
@@ -691,15 +695,21 @@ officeace / astudio / autoclaw / autoclawintl / magicrew / magicrewintl）。这
 
 ### 守卫与变异
 
-- `tests/unit/magicrew-credits.spec.ts` 新增 8 条（403 必须含 `403`+`直连`+host、同报文下旧变体仍
-  `undefined`、401 指向重新登录、405 带码、传输层带 `ENOTFOUND`、业务码 `2182` 原样带出、
-  非 JSON、成功时两变体结论一致）⇒ 文件 45 passed。
+- `tests/unit/magicrew-credits.spec.ts` 新增 12 条：① 8 条详细变体分档（403 含 `403`+`直连`+host、
+  同报文下旧变体仍 `undefined`、401 指向重新登录、**405 必须含「直连」**、传输层带 `ENOTFOUND`、
+  业务码 `2182` 原样带出、非 JSON、成功时两变体结论一致）；② 4 条 `ProviderCredits` 两站条目
+  （两站都注册 `fetchBalanceDetailed` 且**不得**再留 `fetchBalance`、国内 403、**国际 405 含「直连」**、
+  缺 jwt 说重新登录且 `calls === 0`）。
+  ⚠️ 「502 不得含『直连』」那一条是**反向判据**：把 429/5xx 并进 `REJECTED_STATUSES` 会红。
+  ⇒ 文件 49 passed。
 - `tests/unit/magicrew-lock-wiring.spec.ts` 新增 3 条 ⇒ 文件 **23 passed**：
   ① 源码切片：两站 ctor 必须含 `fetchBalanceDetailed: async (credential, product) => await fetchMagicrewBalanceDetailed({`；
   ② **行为级**：详细变体回 403 时 `select()` 的 `reason.errors` 必须含 `403` 与 `直连`、且 `kind === 'unknown'`；
   ③ `unknown` 档文案的**顺序判据**（「先按它办」必须排在「检查凭据是否失效」之前）。
-- 变异（三条，全部 `restored: IDENTICAL`）：删掉两处 `fetchBalanceDetailed` ⇒ ① 红 1 条；
-  把 `if (detailed !== undefined)` 短路成 `if (false && …)` ⇒ ② 红 1 条；文案回退旧版 ⇒ ③ 红 1 条。
+- 变异（六条，全部 `restored: IDENTICAL`）：删掉两处 `fetchBalanceDetailed` ⇒ ① 红 1 条；
+  把 `if (detailed !== undefined)` 短路成 `if (false && …)` ⇒ ② 红 1 条；文案回退旧版 ⇒ ③ 红 1 条；
+  缺 jwt 分支退回 `{ balance: null }` ⇒ 红 1 条；403 退回概括文案 ⇒ 红 3 条；默认档不点名 host ⇒ 红 1 条；
+  **405 移出 `REJECTED_STATUSES`（回到只修一半的上一稿）⇒ 红 1 条**；**502 并入集合 ⇒ 红 1 条**。
   ⚠️ 每条守卫只被**自己**的变异打红 ⇒ 互不替代；射程如实标注（①③ 是源码级，② 是行为级）。
 - 影响面回归：`grep -lE 'magicrew|buddy-balance|lockedError|locked-error-text|foldReasonErrors'`
   ⇒ **63 spec / 1913 passed**。
