@@ -45,8 +45,10 @@ import {
   codeartsVisionModel,
 } from '../../src/llm-adapter.js'
 import {
+  codeartsIsVisionModel,
   resetCodeartsImageModels,
   setCodeartsImageModels,
+  shouldOfferAnalyzeImage,
 } from '../../src/codearts-vision.js'
 import { fetchCodeArtsRemoteModels, SNAP_AGENT_CENTER_DETAIL_URL, SNAP_AGENT_CENTER_USERAGENTS_URL, SNAP_MODEL_BUILTIN_URL } from '../../src/models.js'
 import type { CodeArtsCredential } from '../../src/types.js'
@@ -182,6 +184,9 @@ describe('CodeArts 图片输入：能力判定与 wire 形态', () => {
     expect(codeartsAcceptsImage('GLM-5.2')).toBe(false)
     expect(codeartsAcceptsImage('deepseek-v4.1-flash')).toBe(false)
     expect(codeartsAcceptsImage('kimi-k2.6')).toBe(false)
+    // 目录标志过期、但 chat 实测能收图的主模型。不带日期的旧 id 仍不能收。
+    expect(codeartsAcceptsImage('deepseek-v4.1-flash-1017')).toBe(true)
+    expect(codeartsAcceptsImage('DeepSeek-V4.1-Flash-1017')).toBe(true)
   })
 
   /**
@@ -413,5 +418,22 @@ describe('CodeArts 图片输入：跟随远端目录新增的多模态模型', (
     //    `kimi-k3` 不在静态表 ⇒ false（证明目录集合确实没塞进它）。
     expect(codeartsAcceptsImage('kimi-k2.6-vl'), '静态表兜底仍生效').toBe(true)
     expect(codeartsAcceptsImage('kimi-k3'), '静态表没有 kimi-k3 ⇒ false').toBe(false)
+  })
+
+  /**
+   * 守卫 ⑯：`deepseek-v4.1-flash-1017` 的目录标志是 false，动态集合灌不进来，
+   * 但 chat 实测能收图。放行必须走静态覆盖，且**不能**把它算成专职 VL
+   * （否则 `analyzeImage` 会被摘掉，主模型只剩直发）。
+   *
+   * ⚠️ 有牙：删掉 `CODEARTS_IMAGE_CAPABLE_OVERRIDES` ⇒ 第一条变红；
+   * 把它塞进 `CODEARTS_VL_MODELS` ⇒ 最后一条变红。
+   */
+  it('⑯ 1017 目录标志为 false 仍能收图，且不是专职 VL', () => {
+    expect(codeartsAcceptsImage('deepseek-v4.1-flash-1017')).toBe(true)
+    setCodeartsImageModels(['kimi-k3'])
+    expect(codeartsAcceptsImage('deepseek-v4.1-flash-1017'), '目录没标它也要保留').toBe(true)
+    expect(codeartsAcceptsImage('deepseek-v4.1-flash'), '不带日期的旧 id 不放行').toBe(false)
+    expect(codeartsIsVisionModel('deepseek-v4.1-flash-1017')).toBe(false)
+    expect(shouldOfferAnalyzeImage('codearts', 'deepseek-v4.1-flash-1017')).toBe(true)
   })
 })

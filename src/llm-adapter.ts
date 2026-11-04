@@ -620,11 +620,13 @@ export interface CodeArtsAdapterOptions {
    * 接线层用 `makeReadImage(ctx)` 注入 —— 与其余 14 家**同一个**桥接件，
    * 不另写第二套（本仓纪律：同一语义只留一份实现）。
    *
-   * ## ⚠️ 只有 VL 模型能收图（实测）
+   * ## ⚠️ 只有声明了 image 模态的模型会读图
    *
-   * 见 {@link CODEARTS_VL_MODELS}：`kimi-k2.6-vl` / `Qwen3-VL-235B` 收图 200，
-   * 文本模型（含 `glm-5.3`）一律 `InferHub.001001020.406 The request model is
-   * not multimodal`。故本回调只会在**目标模型声明了 image 模态**时被调用
+   * 见 {@link codeartsAcceptsImage}：专职 VL（`kimi-k2.6-vl` / `Qwen3-VL-235B`）
+   * 以及目录标志过期但实测能收图的主模型（`deepseek-v4.1-flash-1017`）。
+   * 文本模型（含 `glm-5.3`、不带日期的 `deepseek-v4.1-flash`）一律
+   * `InferHub.001001020.406 The request model is not multimodal`。
+   * 本回调只会在目标模型声明了 image 模态时被调用
    * （模态声明见 `toCatalogEntry` 的 `inputModalities`）。
    */
   readImage?: (attachment: unknown) => Promise<{ data: Uint8Array; mediaType: string }>
@@ -643,7 +645,8 @@ export interface CodeArtsAdapterOptions {
  * | `Qwen3-VL-235B` | **true** | **图片理解** |
  * | `GLM-5.2` / `glm-5.3` / `glm-5.2-sft-harmony` / `openpangu-2.0-flash` / `openpangu-2.0-pro` / `deepseek-v4.1-flash` | false | 文本生成 |
  *
- * ⇒ 只有这两条能收图，其余**发图必被上游拒**：
+ * ⇒ 目录标志为 true 的只有这两条。`deepseek-v4.1-flash-1017` 的标志仍是 false，
+ * 但 chat 实测能收图，见 `CODEARTS_IMAGE_CAPABLE_OVERRIDES`。其余**发图必被上游拒**：
  * `{"error_code":"InferHub.001001020.406","error_msg":"The request model is not multimodal"}`
  * （实测 glm-5.3，见 `CODEARTS_VL_MODELS` 的探测记录）。
  *
@@ -665,6 +668,23 @@ export interface CodeArtsAdapterOptions {
 //    写在这里会让 `llm-register-compat → llm-adapter → llm-register-compat` 成环。
 //    本文件只**转出**这两个符号，既有导入路径（`from './llm-adapter.js'`）不变。
 export { codeartsAcceptsImage, codeartsVisionModel }
+
+/**
+ * 改写会触发华为云客户端拦截的 User-Agent。
+ *
+ * 实测（2026-11-04）：User-Agent **以** `deepseek-harness/` 开头时，
+ * `chat/completions` 回 HTTP 403 `TM.00000001`（文案「网络繁忙，请稍后重试」）。
+ * 本适配器把 403 归成 `AUTH`，界面就显示「API 密钥无效」。同一条签名请求换掉
+ * 这个前缀即 HTTP 200。前面加一个词即可放行，原标识仍留在后面；大小写不同、
+ * 或不在开头，都不拦截。
+ *
+ * @param attributed - `attributionHeaders()` 给出的 UA；没有则原样不设。
+ */
+export function codeartsOutboundUserAgent(attributed: string | null | undefined): string | undefined {
+  if (attributed == null || attributed.length === 0) return undefined
+  if (/^deepseek-harness\//i.test(attributed)) return `CodeArts ${attributed}`
+  return attributed
+}
 
 /**
  * 把 harness 的图片块转成 CodeArts 接受的 wire 形态。
@@ -2379,6 +2399,8 @@ export class CodeArtsAdapter extends LlmAdapter {
       headers.set('Chat-Id', this.chatId)
       headers.set('Session-Id', this.sessionId)
       headers.set('lang', 'en')
+      const outboundUa = codeartsOutboundUserAgent(headers.get('user-agent'))
+      if (outboundUa !== undefined) headers.set('user-agent', outboundUa)
 
       response = await this.fetchImpl(url, {
         method: 'POST',

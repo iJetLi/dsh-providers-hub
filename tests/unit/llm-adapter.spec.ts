@@ -5,6 +5,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   CHAT_API_BASE,
   CodeArtsAdapter,
+  codeartsOutboundUserAgent,
   codeartsQuotaExhaustedMessage,
   errorDetail,
   errorDetailForClassify,
@@ -37,6 +38,18 @@ const streamOptions = {
   messages: [],
   signal: new AbortController().signal,
 } as never
+
+describe('codeartsOutboundUserAgent', () => {
+  it('给以 deepseek-harness/ 开头的 UA 加前缀，其余原样', () => {
+    const original = 'deepseek-harness/0.1.7-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)'
+    expect(codeartsOutboundUserAgent(original)).toBe(`CodeArts ${original}`)
+    expect(codeartsOutboundUserAgent('DeepSeek-Harness/1.0')).toBe('CodeArts DeepSeek-Harness/1.0')
+    expect(codeartsOutboundUserAgent('CodeArtsAgent/1.0')).toBe('CodeArtsAgent/1.0')
+    expect(codeartsOutboundUserAgent('app deepseek-harness/1.0')).toBe('app deepseek-harness/1.0')
+    expect(codeartsOutboundUserAgent(null)).toBeUndefined()
+    expect(codeartsOutboundUserAgent('')).toBeUndefined()
+  })
+})
 
 function makeAdapter(overrides: {
   credential?: CodeArtsCredential | undefined
@@ -668,6 +681,7 @@ describe('CodeArtsAdapter', () => {
       expect(headers.get('Authorization')).toMatch(/^SDK-HMAC-SHA256 Access=AK/)
       expect(headers.get('x-security-token')).toBe('ST')
       expect(headers.get('Chat-Id')).toBeTruthy()
+      expect(headers.get('user-agent') ?? '').not.toMatch(/^deepseek-harness\//i)
       expect(refreshed).toBe(true)
       return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', { status: 200 })
     })

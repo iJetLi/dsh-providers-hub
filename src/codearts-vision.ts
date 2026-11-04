@@ -118,9 +118,10 @@ export const ANALYZE_IMAGE_TOOL = 'analyzeImage'
  * | 模型 | `supports_images` | `model_category` |
  * |---|---|---|
  * | `kimi-k2.6-vl` / `Qwen3-VL-235B` | **true** | 图片理解 |
+ * | `deepseek-v4.1-flash-1017` | false（目录过期，见 {@link CODEARTS_IMAGE_CAPABLE_OVERRIDES}） | 文本生成 |
  * | `glm-5.3` / `GLM-5.2` / `openpangu-*` / `deepseek-v4.1-flash` | false | 文本生成 |
  *
- * 其余模型发图必被上游拒：
+ * 未列入的模型发图仍会被上游拒：
  * `{"error_code":"InferHub.001001020.406","error_msg":"The request model is not multimodal"}`。
  *
  * ## ⚠️ 本表已降级为**兜底**，权威来源是远端目录（2026-10-26 修）
@@ -134,6 +135,17 @@ export const ANALYZE_IMAGE_TOOL = 'analyzeImage'
  * id 灌进来，判据取**并集**（目录 ∪ 本表）。
  */
 export const CODEARTS_VL_MODELS: readonly string[] = ['kimi-k2.6-vl', 'Qwen3-VL-235B']
+
+/**
+ * 目录 `supports_images` 仍是 false、但 chat 实测能收图的主模型。
+ *
+ * `deepseek-v4.1-flash-1017`：`/v1/model/builtin` 标 `supports_images: false`、
+ * 类别「文本生成」，但 `chat/completions` 用 `image_url` 实测 HTTP 200，且能认出
+ * 像素颜色（2026-11-04）。不放进 {@link CODEARTS_VL_MODELS}：那张表同时被
+ * {@link codeartsIsVisionModel} 当成专职 VL，放进去会把这个主模型的
+ * `analyzeImage` 摘掉。远端动态集合也灌不进来——它只收 `supports_images === true`。
+ */
+export const CODEARTS_IMAGE_CAPABLE_OVERRIDES: readonly string[] = ['deepseek-v4.1-flash-1017']
 
 /**
  * 远端 `/v1/model/builtin` 里 `supports_images` 为 true 的模型 id（小写归一）。
@@ -206,7 +218,9 @@ export const CODEARTS_VISION_MODEL = 'kimi-k2.6-vl'
  *
  * 1. 先查 {@link setCodeartsImageModels} 灌进来的目录集合 ⇒ 上游新上的多模态
  *    模型（如 `kimi-k3`）**自动跟随**，无需改代码；
- * 2. 再查 {@link CODEARTS_VL_MODELS} ⇒ 目录未加载成功过时的兜底。
+ * 2. 再查 {@link CODEARTS_IMAGE_CAPABLE_OVERRIDES} ⇒ 目录标志过期、但实测能收图
+ *    的主模型（不进专职 VL 表）；
+ * 3. 再查 {@link CODEARTS_VL_MODELS} ⇒ 目录未加载成功过时的兜底。
  *
  * ## ⚠️ 为什么取**并集**而不是「目录加载后以目录为准」
  *
@@ -221,6 +235,7 @@ export const CODEARTS_VISION_MODEL = 'kimi-k2.6-vl'
 export function codeartsAcceptsImage(modelId: string): boolean {
   const key = modelId.trim().toLowerCase()
   if (catalogImageModels !== undefined && catalogImageModels.has(key)) return true
+  if (CODEARTS_IMAGE_CAPABLE_OVERRIDES.some((id) => id.toLowerCase() === key)) return true
   return CODEARTS_VL_MODELS.some((id) => id.toLowerCase() === key)
 }
 
