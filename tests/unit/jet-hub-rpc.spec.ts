@@ -2028,6 +2028,78 @@ describe('model.list / model.setDisabled 端点', () => {
     })
 
     /**
+     * ⚠️⚠️⚠️ 2026-11-04 真机报障：「**为什么更新插件后供应商状态会发生变化，
+     * 比如停用的供应商会被启用**」。
+     *
+     * 现场：`state.json` 的 `providerClosed` 只剩 `{accio:true}` —— 用户靠
+     * 「关闭供应商」关过的好几家全都不见了。而「关闭供应商」写意图是**稳的**
+     * （与目录快照无关），所以只可能是**被后来的操作删掉**。
+     *
+     * 元凶就是本屏这条路径：它传 `closeProvider: false`，语义本应是「**不碰**
+     * 供应商开关」，但 `writeModelsWithProviderClosed` 的第三参当时是
+     * `boolean`，`false` 被实现成 **`delete providerClosed[provider]`**：
+     *
+     * ```
+     * ① 点「关闭供应商」 ⇒ providerClosed={X:true} + 全量黑名单   ← 稳定
+     * ② 模型列表屏对 X 点一次「全关」 ⇒ 传 false ⇒ 意图被删
+     * ③ 插件更新 / 目录变长 ⇒ 派生判据 disabled!==total ⇒ 翻回「启用」
+     * ```
+     *
+     * ⇒ 修法是让第三参支持 `'keep'`（**不动**该键），本屏与它的「目录不完整」
+     * 兄弟分支都改传 `'keep'`。
+     */
+    it('★★★ 已关闭的供应商再点一次「全关」⇒ 关闭意图必须保留（否则更新后静默变回启用）', async () => {
+      const catalog = [
+        { id: 'unity-a', name: 'Unity A' },
+        { id: 'unity-b', name: 'Unity B' },
+      ]
+      const { call, pool, storedValue } = registerEndpoints({
+        models: catalog,
+        modelAdapters: { buddy: { listAllModels: () => catalog } },
+      })
+      // 模拟用户点「关闭供应商」（写意图）。
+      await pool.setProviderClosed('buddy', true)
+      expect(storedValue().providerClosed).toEqual({ buddy: true })
+
+      // 之后在模型列表屏对同一家点「全关」。
+      const result = await call('model.setAllDisabled', {
+        provider: 'buddy',
+        disabled: true,
+        closeProvider: false,
+      })
+
+      expect(result.ok).toBe(true)
+      // ⚠️ 判据是「意图仍在」。若实现里 `'keep'` 退化成 `false` ⇒ 意图被删 ⇒ 红。
+      expect(storedValue().providerClosed, '模型级全关不得删除供应商关闭意图')
+        .toEqual({ buddy: true })
+    })
+
+    /**
+     * 兄弟分支：「目录不完整」（供应商未登录）时的那条全关路径同样必须 `'keep'`。
+     *
+     * 两条分支**各写各的**（不是提取成一处），故必须各有一条守卫 —— 只守一条
+     * 时另一条回退成 `false` 仍会全绿。
+     */
+    it('★★★ 目录不完整时的「全关」同样不得删除供应商关闭意图', async () => {
+      const fallback = [{ id: 'unity-a', name: 'Unity A' }]
+      const { call, pool, storedValue } = registerEndpoints({
+        models: [],
+        modelAdapters: { buddy: { listAllModels: () => fallback } },
+      })
+      await pool.setProviderClosed('buddy', true)
+
+      const result = await call('model.setAllDisabled', {
+        provider: 'buddy',
+        disabled: true,
+        closeProvider: false,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(storedValue().providerClosed, '目录不完整分支同样不得删意图')
+        .toEqual({ buddy: true })
+    })
+
+    /**
      * ⚠️ 反向对照：**「关闭供应商」入口**在同样的残缺目录下**仍必须拒绝**。
      *
      * 那条路径会落「关闭意图」⇒ 允许它在只看得到兜底子集时就写意图，正是

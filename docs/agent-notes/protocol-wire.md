@@ -2829,3 +2829,84 @@ e2e：`tests/e2e/image-burst-cross-provider.e2e.spec.ts`（跨家探测 + 腾讯
 ⚠️ 上面两条**已逐条登记进白名单**（`CREDENTIAL_CONSTRUCTOR_SAMPLES`）——
 白名单是**逐条列出**的（不用「含 test 字样就放过」这类启发式）⇒ 将来任何
 **新的**真实凭据都会当场变红。
+
+<h3>⚠️⚠️⚠️ 「关闭供应商」被后来的「全关模型」静默删除 —— 三态参数缺失（2026-11-04 真机报障）</h3>
+
+**用户原话**：「为什么更新插件后供应商状态会发生变化，比如停用的供应商会被启用，模型也是」
+**后续澄清**：「我要的是关闭供应商后他不会随更新等情况改变状态」
+
+#### 现场取证（决定性）
+
+`~/.dsh/jet-hub/state.json`（22:58 写入）里 **65 个账号、818 个模型仍在黑名单，而
+`providerClosed` 只剩 `{"accio":true}`** —— 数据没丢，但用户靠「关闭供应商」关过的
+**其它家全都不见了**。
+
+#### 根因：`writeModelsWithProviderClosed` 的第三参是 `boolean`，`false` 被实现成「删除」
+
+`AccountPool.writeModelsWithProviderClosed(provider, modelIds, closed)` 原语义：
+
+| `closed` | 实现 |
+| --- | --- |
+| `true` | `providerClosed[provider] = true`（写意图） |
+| `false` | **`delete providerClosed[provider]`（删意图）** |
+
+而两个调用点的**本意**都是「**不碰**供应商开关」：
+
+- `src/jet-hub-rpc.ts` 的 `model.setAllDisabled` 正常分支：
+  `req.closeProvider !== false ? true : false`；
+- 同文件「目录不完整」分支（2026-11-04 上午为 IKJW33 新加）：
+  写死 `false`。
+
+⇒ **「不落意图」被实现成「主动删除用户已经设好的意图」**。完整链条：
+
+```
+① 点「关闭供应商」        ⇒ providerClosed={X:true} + 全量黑名单   ← 与目录无关，本来稳定
+② 之后在模型列表屏对 X 点「全关」 ⇒ 传 false ⇒ 意图被删
+③ 插件更新 / 目录变长     ⇒ 派生判据 disabled !== total ⇒ 翻回「启用」
+```
+
+**为什么「更新插件」是触发器**：`provider.status.closed` 是**每次现算**的
+`(目录条数 > 0) && (黑名单命中数 === 目录条数)`（`src/jet-hub-rpc.ts:9352`）。
+目录一变（重载后缓存清空重新拉、上游新增模型、兜底表随 `lib/` 更新）等式就不成立。
+**「关闭意图」是唯一与目录快照无关的判据**（`closedByIntent` 腿），所以它一被删，
+状态就必然随更新漂移。
+
+#### 修法：第三参改三态 `boolean | 'keep'`
+
+| 传值 | 语义 | 使用方 |
+| --- | --- | --- |
+| `true` | 写入意图 | `provider.setEnabled(false)`（关闭供应商） |
+| `false` | **删除**意图 | 打开方向（`clearModelsWithProviderClosed` / `provider.setEnabled(true)`） |
+| `'keep'` | **不动**该键 | **模型级批量关闭**（`model.setAllDisabled` 两条分支） |
+
+`'keep'` 分支连 `providerClosedCache` 的浅拷贝都不做（让「不动」可验证，而不是
+「拷一份再写回同一个值」那种看起来没变的实现）。
+
+#### 守卫与变异（`tests/unit/jet-hub-rpc.spec.ts` 259 → **261**；`ikp8of-provider-closed.spec.ts` 18 → **20**）
+
+| 守卫 | 位置 | 变异 | 结果 |
+| --- | --- | --- | --- |
+| 已关闭的供应商再点「全关」⇒ 意图必须保留 | `model.setAllDisabled` describe | 正常分支 `'keep'` → `false` | **RED 1** |
+| 目录不完整分支同样不得删意图 | 同上 | 该分支 `'keep'` → `false` | **RED 1** |
+| `keep` 不得改动意图 | `ikp8of-provider-closed.spec.ts` | `if (closed !== 'keep')` → `... \|\| true` | **RED 1** |
+| `false` 仍必须删除意图（反向对照） | 同上 | `if (closed)` → `if (closed === true)` | **无牙（等价变异，如实登记）** |
+
+⚠️ **无牙那一格的成因**：外层 `if (closed !== 'keep')` 已经把 `'keep'` 挡在门外，
+内层改写只在 `true` / `false` 时生效，而这两值在两种写法下**动作完全相同**
+⇒ **它与修复态逐字节等价的必然结果**，不是漏写用例（**绝不为它编恒真用例**）。
+
+⚠️⚠️ **`keep` 那条守卫第一版无牙**：只在「已有意图」的 provider 上断言
+`providerClosedFor === true`，于是「`keep` 恒写 true」也全绿。补一格
+「本来没有意图的 provider 传 `keep` ⇒ 仍为 false」才把「**不动**」与
+「写 true」分开。
+
+#### 可推广的教训
+
+1. **`boolean` 参数一旦承载「保持」语义就是陷阱** —— `false` 永远会被读成
+   「设成 false」，而调用方想要的是「别管」。凡「写入 / 删除 / 不动」三种意图
+   必须三态（或独立方法），**不能靠调用约定**。
+2. **「关闭」类状态的稳定性只能靠「意图」，不能靠派生判据**。派生判据依赖目录
+   快照，而目录**必然**变化（上游新增、缓存重建、兜底表随版本更新）⇒ 它天生
+   会漂移。
+3. **两条入口各写各的分支必须各有一条守卫**：`model.setAllDisabled` 的两条
+   全关分支是分开写的，只守一条时另一条回退成 `false` 仍全绿。

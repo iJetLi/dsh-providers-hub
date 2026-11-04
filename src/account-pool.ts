@@ -1527,12 +1527,36 @@ export class AccountPool {
    *
    * @param provider - provider id
    * @param modelIds - 要**追加**进黑名单的 id（已有的关闭项不受影响）
-   * @param closed - 目标关闭意图（`true` 写入 / `false` 删除该键）
+   * @param closed - 目标关闭意图：`true` 写入 / `false` 删除该键 / `'keep'` **不动该键**
+   *
+   * ## ⚠️⚠️ 为什么必须有 `'keep'` 这一态（2026-11-04 真机报障）
+   *
+   * 用户报障：「为什么更新插件后供应商状态会发生变化，比如停用的供应商会被启用」。
+   *
+   * 本方法的第三参原本只有 `true` / `false`，而 `false` 被实现成
+   * **`delete providerClosed[provider]`**（删掉关闭意图）。于是「模型列表屏点一次
+   * 全关」（`model.setAllDisabled` 的 `closeProvider: false` 分支，本意是
+   * 「只关这家的模型、**不碰**供应商开关」）会**把用户先前用「关闭供应商」设下的
+   * 意图一起删掉**：
+   *
+   * ```
+   * ① 用户点「关闭供应商」 ⇒ providerClosed={accio:true} + 全量黑名单   ← 稳定
+   * ② 之后在模型列表屏对同一家点「全关」 ⇒ 删意图 ⇒ providerClosed={}
+   * ③ 插件更新 / 目录变长 ⇒ 派生判据 disabled!==total ⇒ 翻回「启用」
+   * ```
+   *
+   * 实测现场：用户的 `providerClosed` 只剩 `{accio:true}`，其余靠「关闭供应商」
+   * 关过的全都不见了 —— 它们在后续的「全关」里被静默删除。
+   *
+   * ⇒ `false` 只该由「打开供应商」路径使用（`provider.setEnabled(true)` 走
+   * `clearModelsWithProviderClosed`，语义确实是「清掉意图」）；**模型级的批量
+   * 关闭**必须传 `'keep'`：它既不该写意图（那会把整家关掉），也**不该删意图**
+   * （那会让用户先前设下的关闭状态失效）。
    */
   async writeModelsWithProviderClosed(
     provider: string,
     modelIds: readonly string[],
-    closed: boolean,
+    closed: boolean | 'keep',
   ): Promise<void> {
     this.ensureLoaded()
     const next: ModelDisableMap = { ...this.modelCache }
@@ -1542,10 +1566,14 @@ export class AccountPool {
       next[provider] = perProvider
     }
     this.modelCache = next
-    const nextClosed: ProviderClosedMap = { ...this.providerClosedCache }
-    if (closed) nextClosed[provider] = true
-    else delete nextClosed[provider]
-    this.providerClosedCache = nextClosed
+    // ⚠️ `'keep'` ⇒ 连 `providerClosedCache` 的浅拷贝都不做，让「不动」可验证
+    //（不是「拷一份再写回同一个值」那种看起来没变的实现）。
+    if (closed !== 'keep') {
+      const nextClosed: ProviderClosedMap = { ...this.providerClosedCache }
+      if (closed) nextClosed[provider] = true
+      else delete nextClosed[provider]
+      this.providerClosedCache = nextClosed
+    }
     this.loaded = true
     if (this.store.kind === 'memory') {
       this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，模型黑名单与关闭状态变更未落盘')

@@ -9188,10 +9188,14 @@ function registerJetHubEndpoints(
              * ⚠️ `remoteError`（分支 1 已拦）不放行：那是真的读失败，重试可能就好，
              * 不该写下一份可能残缺的黑名单。
              */
-            await pool.writeModelsWithProviderClosed(req.provider, pending, false)
+            // ⚠️ 第三参是 `'keep'` **不是** `false`（2026-11-04 修）：
+            //    `false` 的语义是「删掉该供应商已有的关闭意图」，而本屏从不设置
+            //    意图 ⇒ 传 `false` 会**删除用户在别处设好的关闭状态**
+            //    （用户报障「关闭供应商后随更新变回启用」就是这个）。
+            await pool.writeModelsWithProviderClosed(req.provider, pending, 'keep')
             ctx.logger.info(
               `[jet-hub] 关闭 ${req.provider} 的 ${pending.length} 个模型`
-              + '（目录不完整：该供应商未登录或远端无可读目录，只关当前可见项、不落供应商关闭意图）',
+              + '（目录不完整：该供应商未登录或远端无可读目录，只关当前可见项、不动供应商关闭意图）',
             )
           } else if (!catalog.complete) {
             // 4. **有新增项但目录不完整** ⇒ 拒绝且不落盘。
@@ -9230,10 +9234,28 @@ function registerJetHubEndpoints(
             //   供应商**也关掉（`provider.status` 报 closed、选择器里一个模型都没有）
             //   ；再打开**任意一个**模型，供应商又被顺带打开（`setModelDisabled` 的
             //   打开方向会清意图）⇒ 两头都与用户意图相反，且**零提示**。
-            await pool.writeModelsWithProviderClosed(req.provider, pending, req.closeProvider !== false)
+            // ⚠️⚠️ 第三参 **`'keep'` 而不是 `false`**（2026-11-04 真机报障修复）。
+            //
+            // 上一行的注释说的是「**不落**意图」，而 `false` 的实现是
+            // **`delete providerClosed[provider]`** —— 两回事：
+            // - 「不落」= 不设置；
+            // - `false` = **主动删除**用户已经设好的意图。
+            //
+            // 用户报障的完整链条（实测现场：`providerClosed` 只剩 `{accio:true}`）：
+            // ```
+            // ① 点「关闭供应商」 ⇒ providerClosed={X:true} + 全量黑名单  ← 本来稳定
+            // ② 之后在模型列表屏对 X 点一次「全关」 ⇒ 本行传 false ⇒ 意图被删
+            // ③ 插件更新 / 目录变长 ⇒ 派生判据 disabled!==total ⇒ 翻回「启用」
+            // ```
+            // ⇒ 用户看到「关闭过的供应商自己变回启用」，且无任何提示。
+            await pool.writeModelsWithProviderClosed(
+              req.provider,
+              pending,
+              req.closeProvider !== false ? true : 'keep',
+            )
             ctx.logger.info(
               `[jet-hub] 关闭 ${req.provider} 的 ${pending.length} 个模型`
-              + (req.closeProvider !== false ? '' : '（不落供应商关闭意图）'),
+              + (req.closeProvider !== false ? '' : '（不动供应商关闭意图）'),
             )
           }
         } else {
