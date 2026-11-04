@@ -726,3 +726,12 @@ officeace / astudio / autoclaw / autoclawintl / magicrew / magicrewintl）。这
 3. `--resolve` 直连真实 IP 是区分「DNS 污染」与「来源地区拦截」的**唯一**便宜手段。
 4. 用户侧的真正修法是**把两个服务域名设为直连**（不走代理）；插件侧能做的是**把 403 说清楚**，
    不是绕过它 —— 绕过 WAF 不在插件职责内，也不应尝试。
+5. ⚠️ **锁定与「能不能出模型」是同一件事**（写文案时容易忽略）：`select()` 无论锁没锁都会
+   并发查余额，**只有锁定时**（`allowPermanent === false`，`buddy-balance-selector.ts:520`）
+   才在「tier 不可用」时早退；未锁定时 `rankBuddyAccountsByBalance` 只**排序不过滤**
+   （`src/buddy-balance-rank.ts:404-412`）⇒ 查不到余额也照样 `ok: true`。
+   ⇒ 用户真机那句「读不到积分**和模型**」里，「模型」那一半是**锁定**造成的：
+   临时关掉「永久积分」锁定就能先拿到模型（代价：可能消耗临期积分），
+   而积分那一半只能靠改网络出口。回复用户时必须把这两半分开讲，否则他会以为是一个 bug。
+6. **面板卡片与弹窗是两条独立取数腿**（`credits.balances` 的 `ProviderCredits` vs 选号器的
+   `BalanceQueryDetail`）—— 只改一条 = 只修一半，且症状会「一个地方好了一个地方没变」。
