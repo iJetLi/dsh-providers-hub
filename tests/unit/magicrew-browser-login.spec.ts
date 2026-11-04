@@ -693,6 +693,40 @@ describe('readCredentialViaCdp（**实时**读，磁盘不落盘的真解）', (
     expect(cdp.calls[2]?.params.returnByValue, 'evaluate 必须 returnByValue').toBe(true)
   })
 
+  it('★★ 取键表达式必须**两套键名都读**（裸键 + `MAGIC:user:` 前缀）', async () => {
+    /**
+     * ⚠️⚠️ 真机取证 2026-11-04：letsmagic 网页写进 localStorage 的真实键名带
+     * `MAGIC:user:` 前缀（把本机 Edge 的 `Local Storage/leveldb/071584.ldb`
+     * 按 SSTable 解出来，31 条 letsmagic 记录里凭据键是
+     * `MAGIC:user:authorization` / `MAGIC:user:organizationCode` /
+     * `MAGIC:user:teamshareOrganizationCode`）。
+     *
+     * 只读裸键时，用插件自己开的窗口登录 ⇒ 页面写的也是带前缀的键 ⇒
+     * **CDP 腿恒读不到**，只剩磁盘兜底硬撑；而磁盘那条腿当时又因为不解
+     * Snappy 压缩块一起失效 ⇒ 两腿全瞎、加账号 4 分钟白转。
+     *
+     * 本用例钉住「两套都在场」，且回退语义是 `||`（空串也要让位）。
+     */
+    const cdp = fakeCdp(({ method }) => {
+      if (method === 'Target.getTargets') return targetsWith(LOGIN_PAGE)
+      if (method === 'Target.attachToTarget') return { sessionId: 'SESSION-1' }
+      if (method === 'Runtime.evaluate') return loggedInEvaluate()
+      return {}
+    })
+    await readCredentialViaCdp(cdp.session, ['www.letsmagic.cn'])
+    const expression = String(cdp.calls[2]?.params.expression)
+
+    for (const key of ['authorization', 'organizationCode', 'teamshareOrganizationCode']) {
+      expect(expression, `缺少裸键 ${key}`).toContain(`localStorage.getItem('${key}')`)
+      expect(expression, `缺少带前缀的 ${key}`).toContain(
+        `localStorage.getItem('MAGIC:user:${key}')`,
+      )
+    }
+    // 回退必须是 `||` 而不是 `??`：`getItem` 缺失回 null，但**空串**同样不可用，
+    // 用 `??` 会让空串把后面的前缀键挡住（真机上登出后残留空串就踩这个）。
+    expect(expression).not.toMatch(/getItem\([^)]*\)\s*\?\?/)
+  })
+
   it('★★ URL 用 **hostname** 匹配：登录后的真实形态必须命中', async () => {
     /**
      * ⚠️⚠️ 这是本任务最容易写错的一格：登录后地址**不是** `/login` 了，而是

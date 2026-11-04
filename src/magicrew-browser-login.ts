@@ -186,11 +186,28 @@ function hostnameOf(url: string): string {
  * HTTP 200 + `code:403`（见 `magicrew-local-browser.ts` 头部的配对纪律）。
  *
  * `n` 是 `localStorage.length`：**空 = 还没登完**（见下面的判据）。
+ *
+ * ## ⚠️⚠️ 键名有两套，**必须都试**（真机取证 2026-11-04）
+ *
+ * letsmagic 网页写进 localStorage 的真实键名带 `MAGIC:user:` 前缀 ——
+ * 把本机 Edge 的 `Local Storage/leveldb/071584.ldb` 按 SSTable 解出来后，
+ * 31 条 letsmagic 记录里凭据键是：
+ *
+ *     MAGIC:user:authorization / MAGIC:user:organizationCode /
+ *     MAGIC:user:teamshareOrganizationCode
+ *
+ * 而本文件原来只读**裸键**（`authorization` 等）⇒ 用插件自己开的那个窗口登录时，
+ * 页面写的同样是带前缀的键 ⇒ CDP 腿**恒读不到**，只有「磁盘兜底」在硬撑
+ * （而磁盘那条腿当时又因为不解 Snappy 压缩块一起失效 ⇒ 两条腿全瞎）。
+ *
+ * ⇒ 现在两套都读：**裸键优先**（老版本前端 / 其它站点可能仍是裸键），
+ *   裸键为空再取带前缀的。用 `||` 而不是 `??`：`getItem` 缺失时返回 `null`，
+ *   但空串 `''` 同样不可用，两种都要让位给下面的回退。
  */
 const CDP_CREDENTIAL_EXPRESSION = `JSON.stringify({
-  a: localStorage.getItem('authorization'),
-  o: localStorage.getItem('organizationCode'),
-  t: localStorage.getItem('teamshareOrganizationCode'),
+  a: localStorage.getItem('authorization') || localStorage.getItem('MAGIC:user:authorization'),
+  o: localStorage.getItem('organizationCode') || localStorage.getItem('MAGIC:user:organizationCode'),
+  t: localStorage.getItem('teamshareOrganizationCode') || localStorage.getItem('MAGIC:user:teamshareOrganizationCode'),
   n: localStorage.length,
 })`
 

@@ -46,6 +46,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { registeredBrowserUserDataRoots } from './chromium-session.js'
+import { leveldbRecordsText, readSstableRecords } from './leveldb-sstable.js'
 
 /**
  * 窗口宽度。
@@ -151,10 +152,49 @@ export function magicrewProfilesOf(root: string): string[] {
 }
 
 /**
- * 一个 profile 的 leveldb 文本（按 **latin1** 拼）。
+ * 单个 leveldb 文件的文本。
+ *
+ * ## ⚠️⚠️ `.ldb` 必须走 SSTable 解码，**不能**直接 `toString('latin1')`
+ *
+ * 真机报障 2026-11-04 的根因就在这里：Chromium 把 localStorage 落成若干 `.ldb`
+ * （SSTable），里面每条记录都经过 **前缀压缩**、且 data block 整体被 **Snappy 压缩**。
+ * 直接按字节读文本 ⇒ `"key":"authorization"` 在原始字节里出现 **0 次**
+ * （本机 Edge `071584.ldb` 实测 `indexOf` = -1）⇒ 本机浏览器导入**永远**报
+ * 「未找到登录态」，而测试全绿（fixture 是裸文本 `.log`，从没覆盖压缩块）。
+ *
+ * `.log`（WAL，尚未压实成 SSTable 的尾部写入）是**未压缩**的，仍按 latin1 读 ——
+ * 它里面也可能有刚写进去的凭据（用户刚登录完、Edge 还没压实）。
  *
  * ⚠️ latin1 而不是 utf8：leveldb 文件是二进制，utf8 解码会把非法字节换成 U+FFFD、
  * 长度也会变 —— 而窗口是按字节位置算的。latin1 是**逐字节**映射，位置不变。
+ *
+ * ⚠️ 任何文件解不出来都**只跳过该文件**（被浏览器独占 / 格式不认识），不抛错：
+ * 调用方要的是「能不能读到凭据」，不是「这个目录完不完整」。
+ */
+function leveldbTextForFile(path: string, name: string): string {
+  let buffer: Buffer
+  try {
+    buffer = readFileSync(path)
+  } catch {
+    // 被浏览器独占 / 权限 / 刚被删（Edge 会滚动删文件）⇒ 跳过。
+    return ''
+  }
+  if (name.endsWith('.ldb')) {
+    try {
+      return leveldbRecordsText(readSstableRecords(buffer))
+    } catch {
+      // 不是合法 SSTable（半截写入 / 未知格式）⇒ 当作这个文件没有可用记录。
+      return ''
+    }
+  }
+  return buffer.toString('latin1')
+}
+
+/**
+ * 一个 profile 的 leveldb 文本。
+ *
+ * ⚠️ 文件之间用 `\n` 隔开：不隔开时前一个文件的尾部与后一个的头部会拼成一条
+ * **不存在的**记录（可能凭空造出一对 jwt × org）。
  */
 function leveldbTextForProfile(root: string, profile: string): string {
   const dir = join(root, profile, 'Local Storage', 'leveldb')
@@ -164,15 +204,10 @@ function leveldbTextForProfile(root: string, profile: string): string {
   } catch {
     return ''
   }
-  let text = ''
-  for (const file of files) {
-    try {
-      text += readFileSync(join(dir, file)).toString('latin1')
-    } catch {
-      // 单个文件读不到（被浏览器独占 / 权限）⇒ 跳过，不影响其余文件。
-    }
-  }
-  return text
+  return files
+    .map((file) => leveldbTextForFile(join(dir, file), file))
+    .filter((text) => text.length > 0)
+    .join('\n')
 }
 
 /**
