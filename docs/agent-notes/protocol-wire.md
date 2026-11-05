@@ -2829,3 +2829,260 @@ e2e：`tests/e2e/image-burst-cross-provider.e2e.spec.ts`（跨家探测 + 腾讯
 ⚠️ 上面两条**已逐条登记进白名单**（`CREDENTIAL_CONSTRUCTOR_SAMPLES`）——
 白名单是**逐条列出**的（不用「含 test 字样就放过」这类启发式）⇒ 将来任何
 **新的**真实凭据都会当场变红。
+
+<h3>⚠️⚠️⚠️ 「关闭供应商」被后来的「全关模型」静默删除 —— 三态参数缺失（2026-11-04 真机报障）</h3>
+
+**用户原话**：「为什么更新插件后供应商状态会发生变化，比如停用的供应商会被启用，模型也是」
+**后续澄清**：「我要的是关闭供应商后他不会随更新等情况改变状态」
+
+#### 现场取证（决定性）
+
+`~/.dsh/jet-hub/state.json`（22:58 写入）里 **65 个账号、818 个模型仍在黑名单，而
+`providerClosed` 只剩 `{"accio":true}`** —— 数据没丢，但用户靠「关闭供应商」关过的
+**其它家全都不见了**。
+
+#### 根因：`writeModelsWithProviderClosed` 的第三参是 `boolean`，`false` 被实现成「删除」
+
+`AccountPool.writeModelsWithProviderClosed(provider, modelIds, closed)` 原语义：
+
+| `closed` | 实现 |
+| --- | --- |
+| `true` | `providerClosed[provider] = true`（写意图） |
+| `false` | **`delete providerClosed[provider]`（删意图）** |
+
+而两个调用点的**本意**都是「**不碰**供应商开关」：
+
+- `src/jet-hub-rpc.ts` 的 `model.setAllDisabled` 正常分支：
+  `req.closeProvider !== false ? true : false`；
+- 同文件「目录不完整」分支（2026-11-04 上午为 IKJW33 新加）：
+  写死 `false`。
+
+⇒ **「不落意图」被实现成「主动删除用户已经设好的意图」**。完整链条：
+
+```
+① 点「关闭供应商」        ⇒ providerClosed={X:true} + 全量黑名单   ← 与目录无关，本来稳定
+② 之后在模型列表屏对 X 点「全关」 ⇒ 传 false ⇒ 意图被删
+③ 插件更新 / 目录变长     ⇒ 派生判据 disabled !== total ⇒ 翻回「启用」
+```
+
+**为什么「更新插件」是触发器**：`provider.status.closed` 是**每次现算**的
+`(目录条数 > 0) && (黑名单命中数 === 目录条数)`（`src/jet-hub-rpc.ts:9379`）。
+目录一变（重载后缓存清空重新拉、上游新增模型、兜底表随 `lib/` 更新）等式就不成立。
+**「关闭意图」是唯一与目录快照无关的判据**（`closedByIntent` 腿），所以它一被删，
+状态就必然随更新漂移。
+
+#### 修法：第三参改三态 `boolean | 'keep'`
+
+| 传值 | 语义 | 使用方 |
+| --- | --- | --- |
+| `true` | 写入意图 | `provider.setEnabled(false)`（关闭供应商） |
+| `false` | **删除**意图 | **无生产调用方**（打开方向走的是独立方法 `clearModelsWithProviderClosed`，它一次落盘清黑名单 + 清意图；本方法的 `false` 态当前只有类型层与测试可达 —— 保留它是为了让三态语义完整，别据此以为「打开供应商」走这里） |
+| `'keep'` | **不动**该键 | **模型级批量关闭**（`model.setAllDisabled` 两条分支） |
+
+`'keep'` 分支连 `providerClosedCache` 的浅拷贝都不做（让「不动」可验证，而不是
+「拷一份再写回同一个值」那种看起来没变的实现）。
+
+#### 守卫与变异（`tests/unit/jet-hub-rpc.spec.ts` 259 → **261**；`ikp8of-provider-closed.spec.ts` 18 → **20**）
+
+| 守卫 | 位置 | 变异 | 结果 |
+| --- | --- | --- | --- |
+| 已关闭的供应商再点「全关」⇒ 意图必须保留 | `model.setAllDisabled` describe | 正常分支 `'keep'` → `false` | **RED 1** |
+| 目录不完整分支同样不得删意图 | 同上 | 该分支 `'keep'` → `false` | **RED 1** |
+| `keep` 不得改动意图 | `ikp8of-provider-closed.spec.ts` | `if (closed !== 'keep')` → `... \|\| true` | **RED 1** |
+| `false` 仍必须删除意图（反向对照） | 同上 | `if (closed)` → `if (closed === true)` | **无牙（等价变异，如实登记）** |
+
+⚠️ 那条反向对照用例的括注原写「打开供应商依赖」，**是错的**：「打开供应商」走
+`pool.clearModelsWithProviderClosed`，**不调**本方法；生产代码当前**零调用** `false`
+（只有类型层与测试可达）。留着它是因为三态语义要完整 —— 将来真有调用方传 `false`
+时它才承重。
+
+⚠️ **无牙那一格的成因**：外层 `if (closed !== 'keep')` 已经把 `'keep'` 挡在门外，
+内层改写只在 `true` / `false` 时生效，而这两值在两种写法下**动作完全相同**
+⇒ **它与修复态逐字节等价的必然结果**，不是漏写用例（**绝不为它编恒真用例**）。
+
+⚠️⚠️ **`keep` 那条守卫第一版无牙**：只在「已有意图」的 provider 上断言
+`providerClosedFor === true`，于是「`keep` 恒写 true」也全绿。补一格
+「本来没有意图的 provider 传 `keep` ⇒ 仍为 false」才把「**不动**」与
+「写 true」分开。
+
+#### 可推广的教训
+
+1. **`boolean` 参数一旦承载「保持」语义就是陷阱** —— `false` 永远会被读成
+   「设成 false」，而调用方想要的是「别管」。凡「写入 / 删除 / 不动」三种意图
+   必须三态（或独立方法），**不能靠调用约定**。
+2. **「关闭」类状态的稳定性只能靠「意图」，不能靠派生判据**。派生判据依赖目录
+   快照，而目录**必然**变化（上游新增、缓存重建、兜底表随版本更新）⇒ 它天生
+   会漂移。
+3. **两条入口各写各的分支必须各有一条守卫**：`model.setAllDisabled` 的两条
+   全关分支是分开写的，只守一条时另一条回退成 `false` 仍全绿。
+
+<h3>⚠️⚠️⚠️ 三审（2026-11-05）：5 条真缺陷 —— 数据丢失级、56 秒串行、开关自己变</h3>
+
+用户报障「全开或全关供应商状态就异常，有时候好几个一起启用/关闭，有时候全部开启/关闭」后，派了**三个只读审查员**（并发与时序 / 端到端链路 / 回归面与兼容性）做第三轮对抗性审查。全量 **12337 用例 / 512 文件 / 0 失败**，但挖出 5 条真缺陷 —— **全部落在「守卫打不到」的位置**。
+
+#### 三份报告的结论分布
+
+| 审查员 | P0 | P1 | P2 | 备注 |
+| --- | --- | --- | --- | --- |
+| 并发与时序（`c82e50e2`） | 2 | 3 | 2 | 两条 P0 都是**数据丢失级** |
+| 端到端链路（`be9fdb76`） | 0 | 2 | 1 | 56 秒串行是实测，非推断 |
+| 回归面与兼容性（`ad7f8fb9`） | 0 | 1 | 2 | 全量 12337 用例 0 失败 |
+
+#### P0-1｜`ensureLoaded()` 把「读盘失败」当成「全新安装」
+
+```ts
+// 改前（src/account-pool.ts）
+private ensureLoaded(): void {
+  if (this.loaded) return
+  this.loaded = true          // ← 在读盘**之前**就置位
+  const state = this.store.load()
+  ...
+}
+```
+
+配套的 `FileStore.load()` 在 `catch` 里 **`return undefined`**（只 warn 一句）⇒「读不出来」与「没有文件」**同形**（注意：文件不存在时走 `bootstrapFromCredentialRefs()`，不是 `undefined` ⇒ `undefined` **只**表示读失败）。
+
+后果链：读盘失败 ⇒ 缓存是空的 ⇒ **下一次** `writeModels` / `writeAccounts` 走 `queueStoreSave()` 把**空缓存整体落盘** ⇒ 全部账号、黑名单、关闭意图、网关开关**永久丢失**，且本进程**永不**再读盘。**全程零报错。**
+
+修法（`27aac55`）：`loaded = true` 移到 `store.load()` **之后**；`FileStore.load()` 的 `catch` 改为抛错（`throw error instanceof Error ? error : new Error(String(error))`）；「不是 JSON 对象」也抛错（`${this.path} 不是 JSON 对象（文档已损坏）`）。`SettingsStore.load()` **刻意不加** try/catch —— 让异常自然穿透，`loaded` 不会误置位。
+
+#### P0-2｜`setModelDisabled` 缺 `ensureLoaded()`（六个写入方法里唯一漏网）
+
+对照：`setModelsDisabled` / `clearDisabledModels` / `setAccountsEnabled` / `writeModelsWithProviderClosed` / `clearModelsWithProviderClosed` / `setProviderClosed` **都调了**。实测：磁盘 `disabledModels:{x:{keepme:true}, y:{other:true}}` + 首个操作 `setModelDisabled('x','m1',true)` ⇒ 变成 `{x:{m1:true}}`（**y 整份 + x 的 keepme 全没**）、`providerClosedFor('x') === false`。
+
+可达性如实标注：UI 路径不可达（必须先 `list` ⇒ `ensureLoaded`），但 `model.setDisabled` 是 RPC 直入口，本仓库自己在 `src/jet-hub-rpc.ts` 的注释里明写「脚本/AI 助手直接调 `on`、从未先跑 `list`」是真实冷缓存路径。
+
+#### P1-1｜`provider.status` 的核实腿**串行 56194ms**（实测）
+
+前端挂载即 `void loadProviderStatuses()`，一次性把**全部 30 家**塞进一个请求；服务端 `for (const provider of req.providers)` 逐家 `await fullCatalogIds(...)`（`CATALOG_READ_TIMEOUT_MS = 2000`）：
+
+```
+3 家  ⇒  6053ms
+28 家 ⇒ 56194ms     （上界 25 家有账号 × 2s ≈ 50 秒）
+```
+
+症状：插件更新/重启后**首次**打开设置页，所有开关灰显（`reason: '状态尚未读取'`）最长 50 秒，期间分组不生效、之后突然重排，**全程零提示**。
+
+修法（`c507ad5`）：**三阶段**（`computePlan` 判据只写一份，循环与预取共用 —— 避免「一文件两套同义判据」）：
+
+1. 同步算出「谁需要核实」（原循环里无 `await` 的那部分，逐字搬进闭包）；
+2. `Promise.all` 并发核实（`fullCatalogIds` 是**纯读**：只读目录与黑名单，不写盘、不广播 ⇒ 并发安全；每家 2s 预算不变，总时长 `≤ 2s`）；
+3. 应用核实结果并生成状态。
+
+顺带收敛并发 P1-3：`disabled` 计数改用阶段 1 的 `plan.disabledMap`（与 `total` 同一时刻快照；原实现跨 `await` 用旧快照，而同一文件的方法头已把完全相同的写法判为真实缺陷）。
+
+#### P1-2｜`closed: false` 与 `disabled === total` 互相矛盾，且用户拿不到原因
+
+```
+实测 provider.status = {"models":{"total":2,"disabled":2},"closed":false}
+```
+
+三者对不上：① 界面「已关闭 2」（来自 `model.list` 的 `section.summary`）；② 开关「已打开」（来自 `closed`）；③ 点开关 ⇒ `provider.setEnabled(false)` 拒绝「没有可关闭的模型：<远端原因>」—— **原因只在第 ③ 格里，用户看不到**。
+
+`closed = false` 本身是**对的**（目录不完整时不敢报「已关闭」，否则会出现 IKJW33 那种「界面说关了、模型却仍可选」），所以**不改这个方向**；改的是把原因透出来（`9b2f93a`）：
+
+- `ProviderStatus` 新增可选 `verifyFailed?: string`：**字段缺席 = 核实成功或未需要核实**；只有「派生判据说已关闭、但核实腿没能证明」时才出现；
+- 两条失败分支（`notReady` 冷帧 / `remoteError` 远端读失败）各写一次。**两条腿的用户动作不同**（冷帧要等重试、远端失败要查网络）⇒ 不合并文案。
+
+#### P1-2（前端）｜`loadProviderStatuses` 无 in-flight 序号 ⇒ 开关「跳回去」
+
+每次 `toggleProvider` 成功后都会再读一次全量状态，而服务端每个已关闭的供应商都要 `await fullCatalogIds(...)`（2s 预算、**循环内串行**）⇒ 单次请求耗时随已关闭家数线性增长 ⇒ **两次请求重叠是常态**，先发的可能后到 ⇒ 旧快照覆盖新快照。
+
+修法（`f51b3ef`）：`providerStatusSeqRef`（**最后写者胜**）—— 每次进入先 `++` 占号，响应回来时 `seq !== current` ⇒ **静默丢弃**（连失败提示也不弹：那是上一次请求的事，用户已经操作过了）。
+
+#### P2-1｜`setProviderAll` 只刷模型列表、不刷供应商状态
+
+同一行显示「15 个 · 已关闭 0（该供应商已关闭）」—— `providerStatuses` 只由 `loadProviderStatuses` 写（全仓两个写入点），而 `loadProvider` 刷的是**模型列表**（另一个 state）。
+
+修法（`f51b3ef`）：就地更新这一家的 `models.disabled` 与 `closed`（与 `provider.status` 同一条判据 `total > 0 && disabled === total`）。⚠️ **不**改调 `loadProviderStatuses()`：那会为刷新一家而重发全量请求，把「点一次全开」变成几十秒等待（正是 P1-1 修掉的那个 56 秒）。
+
+#### P2-1（聚合）｜补写黑名单是 fire-and-forget
+
+`void writeDisabled(...).catch(...)` ⇒「读黑名单 → 算 `missing` → 写黑名单」三步与用户操作**交错**：用户在看到补写完成前打开某个聚合模型，会被这次补写**重新关掉**（窗口秒级，无提示）。
+
+修法（`a77ad76`）：方法签名 `void` → `Promise<void>`，`void ...catch()` → `await` + try/catch（失败仍只记 warn）。代价是目录返回晚一次写盘；**正确性优先 —— 用户报障的正是「开关状态自己变」**。
+
+#### 变异验证（全部 `restored IDENTICAL`）
+
+| 变异 | 结果 |
+| --- | --- |
+| `definitive` 恒 false（只烧永久积分那条） | RED 1（混合形态） |
+| `definitive` 恒 true | RED 7（含反向对照） |
+| 核实腿并发 → 串行 `for...of` | RED 1 |
+| 删 `verifyFailed = full.remoteError` | RED 1 |
+| 去掉 `Promise.all` 的 `filter` | **等价变异**（只多核实几家、结果相同）⇒ 如实登记，不编恒真用例 |
+
+#### 五条可推广的教训
+
+1. **⚠️⚠️ 变异脚本的 `restore` 绝不能用「重新读文件」当原文** —— 我写的第一版 `const original = readFileSync(FILE)` 在 `restore` 分支又执行了一次，于是「还原」= 把**变异态**写回 ⇒ 文件被永久留在变异态，而 `readFileSync(FILE) === original` 是**恒真**的，还打印了 `restored: IDENTICAL`。**正确做法：`apply` 时把原文备份到独立文件，`restore` 从备份读。**
+2. **「无牙」有两种，必须分开登记**：① 守卫太弱（补断言）；② **变异本身就等价**（改法与修复态逐字节等价，如 `Promise.all` 的 `filter`）—— 后者**绝不为它编恒真用例**。
+3. **判据不能依赖「超时」**：用「永不 resolve」的桩测并发，会依赖 `CATALOG_READ_TIMEOUT_MS` 的 2s 定时器，全量并行跑时时序不稳（实测 20s 超时）；改「每家延迟 100ms 后**成功**返回」后，并发 100ms / 串行 2800ms 差 28 倍，**只测「远端调用是否并发」，不掺超时逻辑**，判别力更强。
+4. **`boolean` 承载「保持」语义是陷阱**（二审的三态 `'keep'` 已记）；本轮再补一条：**「关闭」类状态只能靠意图，不能靠派生判据** —— 派生判据（`disabled === total`）随目录快照漂移，目录一变就翻。
+5. **「56 秒」这类性能缺陷必须用墙钟时间测**，且**上界要按生产规模算**（25 家 × 2s = 50s），不能按测试里的 3 家算（6053ms 看起来「还行」）。
+
+#### 未修已登记
+
+- **「模型列表屏全关」不落关闭意图**：这是**刻意设计**（`closeProvider: false` 是模型列表屏专用，写意图会把「关模型」变成「关供应商」，与 `src/jet-hub-rpc.ts` 的长注释冲突）。用户报的「全部开启」由上面两条前端缺陷解释（P1-2 乱序 + P2-1 陈旧），已修。
+- **`setAllDisabled` 只关在售模型（dead 被 `withDeadModelPruning()` 挡住）未被测试锁定**：语义已由「以 `listAllModels` 全量目录为准」覆盖。
+- **端到端 P1-1 的真实耗时无法离线判定**（需知道多少家的黑名单覆盖当前 `listAllModels()` 全量）；`aggregate` 的 `catalogReadyForBulkWrite()` 在真实冷启动下返回什么亦未确认。
+
+<h2>⚠️⚠️⚠️ 四审（2026-11-05）：28 家整片翻转的真凶 —— 拿「不知道」当「没关闭」</h2>
+
+用户报障原话（第三次）：「全开或全关供应商状态就异常了，有时候好几个一起启用/关闭。有时候全部开启/关闭」
+
+### 现场：一个动作 28 家一起翻
+
+`probe-uipayload.mjs` 按**真实 UI 载荷**（`model.setAllDisabled({ provider, disabled: true, closeProvider: false })`）关掉 28 家，然后**只让目录读失败**（磁盘状态一个字节都没改）：
+
+| 目录状态 | `closed === true` 的家数 | 前端分组 |
+| --- | --- | --- |
+| 健康 | 28 / 28 | 28 已关闭 |
+| 429（2ms 返回） | **0 / 28** | **28 已打开** |
+| 502 / 超时 2100ms | **0 / 28** | **28 已打开** |
+| 对照：`closeProvider: true`（写意图） | 28 / 28 | 28 已关闭（跳过核实，0ms） |
+
+### 根因：派生判据 + 「读不到」被渲染成「没关闭」
+
+`provider.status` 的 `closed` 是**派生**出来的：`total > 0 && disabled === total`。而 `total` 来自目录快照 —— 目录读**成功**才有值。
+
+```ts
+// 三审的写法（错）
+} else {
+  closed = false            // ← 目录读失败 ⇒ 断言「没关闭」
+  verifyFailed = full.remoteError
+}
+```
+
+⚠️⚠️ **「读不到」不是「没关闭」** —— 它是**不知道**。本地证据（目录快照 + 黑名单）一个字节都没变，变的只是远端连不上。把它断言成 `false`，`groupProviders()` 就会把 28 家整片搬进「已打开」组。
+
+**为什么偏偏是 28 家一起**：模型列表屏点「全关」传的是 `closeProvider: false` ⇒ **从不写关闭意图** ⇒ 每次读状态都要**重新核实目录** ⇒ 上游一抖，所有「靠派生判据」的家**同时**失去依据。这是「有时候全部」而不是「有时候一个」的机制。
+
+### 修法：两格刻意不同
+
+| 分支 | `closed` | 理由 |
+| --- | --- | --- |
+| `notReady`（适配器确定性地说「我这份目录不全」） | **保持 `false`** | 此时「全关」不构成证据；该判断**不随上游抖动翻转** |
+| `remoteError`（远端读失败） | **保持派生值** | 本地证据没变，变的只是可达性；报 `false` 会让 28 家整片翻 |
+
+`verifyFailed` 仍然透出（上一轮已加），前端据此渲染「目录核实失败，无法确认是否已全部关闭」并**禁用开关**（`provider-toggle.js` 的 `providerSwitchState`）。
+
+⚠️ 两格必须**各有守卫**：`M2`（remoteError 加回 `closed = false`）与 `M3`（notReady 去掉 `closed = false`）**都红** ⇒ 证明不是同一个断言。
+
+### 同批修掉的其它 9 条（记「为什么」）
+
+1. **P0 未声明变量**：`f51b3ef` 把 `setProviderStatuses` 写进了 `ModelCenterPanel`（`JetHubPage` 的**孙辈**）⇒ 点「全部打开/全部关闭」必 `ReferenceError` ⇒ 整页清空。修法是回调 prop 逐层透传。**真守卫**是 `credits-capabilities.spec.ts` 的 `tsc -p tsconfig.client-check.json`（TS2304/TS2552）。
+2. **`disabled` 与 `total` 跨 await**：三阶段重构后窗口从「该家一次核实」**放大**成「阶段 1 剩余 + 全部核实」。修法是在阶段 3 的 `remoteError === undefined` 分支里**重读黑名单**，让两次调用之间零 `await`。
+3. **single-flight**：`withTimeout` 只 reject 外层、**不取消**底层（`listModels` 不接受 signal）⇒ 每次 `provider.status` 都发一轮。实测峰值并发 56 / 总调用 56 次。修法是 `registerJetHubEndpoints` 作用域内的在飞 Map（**不要模块级** —— 测试会建多个实例）。
+4. **`fullCatalogIds` 形状校验**：桩返回字符串数组时黑名单会落成 `{"undefined": true}`。
+5. **`FileStore.load()` 包路径**：原来只 `logger.warn` 后原样抛 `SyntaxError`，用户看到 `Expected property name or '}' in JSON at position 2`，**不含路径**、也没有出路。
+6. **RPC 边界保留 `code`**：`(error as NodeJS.ErrnoException)?.code ?? 'jet-hub/handler-failed'`。
+7. **`verifyMap.get(provider)!`** → 显式 `undefined` 检查（将来阶段 1 加 `continue` 会变 `TypeError`）。
+
+### 可推广的教训
+
+1. **「读不到」不是「没有」** —— 这条已经在「删除不可逆」那节写过一次，这次是它的**渲染版**：把未知断言成 `false` 会让整片 UI 撒谎，而且**错的方向是「看起来一切正常」**（用户以为供应商被打开了）。
+2. **`closed` 这类「状态」不能只靠派生判据** —— 派生腿依赖目录快照，而快照会因上游抖动 / 缓存重建 / 兜底表更新而变。有「意图」记录的家不受影响，没有的就会漂。**修法不是让派生更准，而是让「不知道」可表达**（`verifyFailed`）。
+3. **三阶段重构会把「跨 await 窗口」放大** —— 原来每家各等各的，重构后所有家等同一批。任何「先快照、后使用」的变量都要重新审一遍。
+4. **`!` 非空断言是给「不可能」留的口子，不是给「现在不可能」** —— 阶段 1 与阶段 3 的判据写了两份，任何人加一个 `continue` 就断。
+5. **模块级单例在测试里会被多个实例共享**（single-flight 的 Map 必须在 `registerJetHubEndpoints` 内）。
+6. **源码文本断言只能证明「接线」，证明不了「作用域」** —— `setProviderStatuses` 那行文本在，但它在**错误的作用域**里。真正的守卫是编译器（TS2304）。

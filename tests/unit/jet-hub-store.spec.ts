@@ -617,11 +617,88 @@ describe('文件后端（FileStore）', () => {
     expect(createJetHubStore(makeCtx(undefined)).load()?.loomyPermanentLocked).toBe(false)
   })
 
-  it('文档损坏时不抛错，按空状态启动', () => {
+  it('★★ 文档损坏时必须抛错，不得按空状态启动（2026-11-05 三审 P0-1）', () => {
     mkdirSync(join(dir, 'jet-hub'), { recursive: true })
     writeFileSync(join(dir, 'jet-hub', 'state.json'), '{ not json', 'utf-8')
     const store = createJetHubStore(makeCtx(undefined))
-    expect(store.load()).toBeUndefined()
+    // ⚠️⚠️ 这里**必须**抛：返回 `undefined` 与「全新安装」同形，而
+    // `AccountPool.ensureLoaded()` 会把空缓存当成已载入 ⇒ 下一次写入用空状态
+    // 整体覆盖磁盘文档（账号 / 黑名单 / 关闭意图全丢，且全程零报错）。
+    // 本用例原先断言的正是那个错误语义（「按空状态启动」），已随之反转。
+    expect(() => store.load()).toThrow()
+  })
+
+  /**
+   * ⚠️⚠️ **「合法 JSON 但不是对象」也必须抛**（2026-11-05 四审测试判别力）。
+   *
+   * 上一条只覆盖了 `JSON.parse` 自己会抛的输入（`'{ not json'`）；而
+   * `null` / `123` / `'"str"'` 都能**解析成功**，走的是另一条分支：
+   * `if (typeof parsed !== 'object' || parsed === null) throw …`。
+   * 那条分支原先也 `return undefined`，与「全新安装」同形 —— 同一条 P0 的
+   * 另一半，但**没有任何用例打得到它**（变异回 `return undefined` 时 78 全绿）。
+   *
+   * ⚠️ `'[]'` **刻意不在**这组里：数组是 object，会当空配置继续往下走
+   * （与 `{"accounts":[]}` 同义），不是「文档损坏」。
+   */
+  it.each(['null', '123', '"str"', 'true'])('★★ 合法 JSON 但不是对象（%s）也必须抛错', (raw) => {
+    mkdirSync(join(dir, 'jet-hub'), { recursive: true })
+    writeFileSync(join(dir, 'jet-hub', 'state.json'), raw, 'utf-8')
+    const store = createJetHubStore(makeCtx(undefined))
+    expect(() => store.load()).toThrow(/不是 JSON 对象/)
+  })
+
+  /**
+   * ⚠️⚠️ **报错文案必须自带两条出路**（2026-11-05 合规审计：代码对、零守卫）。
+   *
+   * `FileStore.load()` 抛错时，`AccountPool.ensureLoaded()` 会被**全部**读方法
+   * 调用 ⇒ 每次 RPC 都重新读盘并抛错；19 个 `writeAccounts` 调用点写之前也要先读
+   * ⇒ **写也全失败** ⇒ 面板能打开、能点「重试」，但重试**必然**失败，且用户
+   * 无法添加账号、改设置、开关供应商、改黑名单。
+   *
+   * ⇒ 抛出的消息必须点名**路径** + 给出**两条实测可用的出路**：
+   * ① 「备份恢复」里导入一份备份（选**替换**模式；`src/backup.ts` 只在 `merge`
+   *    分支调 `getStateSnapshot` ⇒ `replace` 不读当前状态，故可用）；
+   * ② 手动删除该文件（丢本地索引，凭据本体在 `.credentials.yaml` 里）。
+   *
+   * ⚠️ 原文案只含 `JSON.parse` 的英文 `SyntaxError.message`（不含路径、不含出路）
+   * ⇒ 用户看到的是一条**无法操作的英文解析错误**。
+   */
+  it('★★ 读盘失败的消息必须点名路径 + 给出「备份恢复」与「删除该文件」两条出路', () => {
+    const path = join(dir, 'jet-hub', 'state.json')
+    mkdirSync(join(dir, 'jet-hub'), { recursive: true })
+    writeFileSync(path, '{ not json', 'utf-8')
+    const store = createJetHubStore(makeCtx(undefined))
+    let message = ''
+    try {
+      store.load()
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message, '必须点名是哪个文件坏了').toContain(path)
+    expect(message, '必须给出「备份恢复」这条出路').toContain('备份恢复')
+    expect(message, '必须给出「删除该文件」这条出路').toContain('删除该文件')
+  })
+
+  /**
+   * ⚠️ **本条只证明 `FileStore.load()` 可重试**（它每次都真读盘、没有 `loaded` 缓存）。
+   *
+   * 四审测试判别力实测：把 `AccountPool.ensureLoaded()` 里 `loaded = true`
+   * 移回 `this.store.load()` **之前**，本文件 78 条**全绿** ⇒ 这条**打不到**
+   * 三审 P0-1 的核心（「一次瞬时故障就让本进程永不再读盘」）。
+   * 真守卫在 `tests/unit/account-pool.spec.ts` 的
+   * 「★★ 读盘失败后 `ensureLoaded()` 必须可重试」。
+   */
+  it('★ 读盘失败后必须能重试（`FileStore.load()` 每次都真读盘）', () => {
+    // 这条锁的是 `AccountPool.ensureLoaded()` 里 `loaded = true` 的位置：
+    // 先置位再读 ⇒ 一次瞬时故障就让本进程**永不**再读盘。
+    const path = join(dir, 'jet-hub', 'state.json')
+    mkdirSync(join(dir, 'jet-hub'), { recursive: true })
+    writeFileSync(path, '{ not json', 'utf-8')
+    const store = createJetHubStore(makeCtx(undefined))
+    expect(() => store.load()).toThrow()
+    // 修好文档后重新读，必须拿到真实内容（而不是被缓存的空状态吃掉）。
+    writeFileSync(path, JSON.stringify({ accounts: [], disabledModels: { buddy: { 'm1': true } } }), 'utf-8')
+    expect(store.load()?.disabledModels).toEqual({ buddy: { 'm1': true } })
   })
 
   it('首次启动可从 .credentials.yaml 的 refs 恢复账号（0.1.7 迁移路径）', () => {

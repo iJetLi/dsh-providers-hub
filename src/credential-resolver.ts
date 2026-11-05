@@ -315,6 +315,17 @@ export interface BuddyBalancePlan {
    * 一次行为变更。
    */
   readonly reportPickedAccount?: boolean
+  /**
+   * 锁定态下「余额查不到」时是否降级放行（默认 `false` = 保持既有语义）。
+   *
+   * ⚠️ 只有**确认余额接口会被上游网关整片拒绝**的渠道才开（超级麦吉两站，
+   * 2026-11-04 真机：国内站 HTTP 403 / 国际站 405，九个账号无一幸免）。
+   * 不开时行为逐字不变：锁定 + 查不到 ⇒ `lockedError('unknown')` ⇒ 整个
+   * provider 的模型列表被清空（用户报障「模型都选不了了」）。
+   * 开了以后：查不到余额时放宽一次（允许消耗永久积分），只在余额**查得到**
+   * 且真的没有可用档时才报锁定错误 —— 锁定语义在可判定时不变。
+   */
+  readonly degradeLockedWhenUnknown?: boolean
 }
 
 /**
@@ -496,6 +507,7 @@ export function createCredentialResolver<TCredential>(
       const picked = await pickBuddyAccount<TCredential>(plan.selector, candidates, {
         allowPermanent,
         resolveCredential: config.readCredential,
+        degradeOnUnknown: plan.degradeLockedWhenUnknown === true,
       })
       if (picked.kind === 'account') {
         if (plan.reportPickedAccount !== false) report(picked.account.id)

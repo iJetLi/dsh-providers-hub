@@ -281,3 +281,100 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
     expect(gap.replace(/\s/g, '').length, 'panelHead 与按钮组之间只应差一个右括号').toBeLessThanOrEqual(2)
   })
 })
+
+/**
+ * ⚠️⚠️ **客户端的「请求序号」闸门必须真实存在**（2026-11-05 合规审计：代码对、
+ * 零守卫 —— 删掉闸门 242 条全绿）。
+ *
+ * `providerStatusSeqRef` 是「最后写者胜」的**唯一**实现：
+ * - `loadProviderStatuses` 每次进入占一个新序号，只有序号等于**当前**序号的
+ *   响应才允许写 state（过期响应静默丢弃）；
+ * - `patchProviderStatus`（用户点「全开/全关」后就地改状态）**必须推进序号**，
+ *   否则一次**在途**的 `provider.status` 响应会拿旧快照把刚写的局部补丁**覆盖**
+ *   ⇒ 开关跳回去（用户报障「开关状态自己变」）。
+ *
+ * ## ⚠️ 为什么用 AST 而不是源码文本
+ *
+ * 本仓的已知教训：「源码文本断言的共同弱点是 `if (false)` 短路禁用」——
+ * 一行字面量在死分支里照样存在 ⇒ 文本断言恒绿。⇒ 这里走 AST：
+ * ① 找**更新点**（`providerStatusSeqRef.current` 作为 `++` / `+=` 的左操作数）；
+ * ② 找**比较点**（`providerStatusSeqRef.current` 作为 `!==` 的一侧）。
+ *
+ * 计数判据（而非「包含」）：
+ * - 更新点必须**恰好 2 处**（`loadProviderStatuses` 的 `++` + `patchProviderStatus`
+ *   的 `+= 1`）⇒ 少一处（删掉推进）就红；
+ * - 比较点必须**恰好 2 处**（成功分支 + 失败分支各一个）⇒ 删掉闸门就红。
+ */
+describe('★★ 客户端 provider 状态序号闸门（AST 级）', () => {
+  /** 找 `providerStatusSeqRef.current` 出现的位置（属性访问的父节点）。 */
+  function seqRefUses(): { updates: number, comparisons: number, updateLines: number[] } {
+    let updates = 0
+    let comparisons = 0
+    const updateLines: number[] = []
+    const walk = (node) => {
+      // ① 更新点：`x.current++`（PrefixUnary）或 `x.current += 1`（Binary with +=）。
+      if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.PlusPlusToken) {
+        if (isSeqRef(node.operand)) {
+          updates += 1
+          updateLines.push(lineOf(node.getStart(sf)))
+        }
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) {
+        if (isSeqRef(node.left)) {
+          updates += 1
+          updateLines.push(lineOf(node.getStart(sf)))
+        }
+      }
+      // ② 比较点：`x.current !== y`。
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+        if (isSeqRef(node.left) || isSeqRef(node.right)) comparisons += 1
+      }
+      ts.forEachChild(node, walk)
+    }
+    walk(sf)
+    return { updates, comparisons, updateLines }
+  }
+
+  /** 该表达式是否就是 `providerStatusSeqRef.current`。 */
+  function isSeqRef(node) {
+    return ts.isPropertyAccessExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === 'providerStatusSeqRef'
+      && node.name.text === 'current'
+  }
+
+  it('★★ 更新点必须恰好 2 处（loadProviderStatuses 的 ++ 与 patchProviderStatus 的 += 1）', () => {
+    const { updates, updateLines } = seqRefUses()
+    expect(updates, `providerStatusSeqRef.current 的更新点应恰好 2 处（实测行 ${updateLines.join(',')}）`)
+      .toBe(2)
+  })
+
+  it('★★ 比较点必须恰好 2 处（成功分支 + 失败分支各一个「过期响应丢弃」闸门）', () => {
+    const { comparisons } = seqRefUses()
+    expect(comparisons, 'providerStatusSeqRef.current 的比较点应恰好 2 处').toBe(2)
+  })
+
+  it('★★ patchProviderStatus 必须推进序号（否则在途响应会覆盖用户刚点的补丁）', () => {
+    /**
+     * ⚠️ 用 **AST** 定位 `patchProviderStatus` 的 `useCallback` 回调体，
+     * 而不是文本切片（文本切片会被同名注释骗过）。
+     */
+    const at = source.indexOf('const patchProviderStatus = React.useCallback')
+    expect(at, '找不到 patchProviderStatus').toBeGreaterThan(-1)
+    const slice = source.slice(at, at + 4000)
+    const sliceSf = ts.createSourceFile('patch.ts', slice, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    let hasIncrement = false
+    const walk = (node) => {
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) {
+        if (ts.isPropertyAccessExpression(node.left)
+          && ts.isIdentifier(node.left.expression)
+          && node.left.expression.text === 'providerStatusSeqRef'
+          && node.left.name.text === 'current') hasIncrement = true
+      }
+      ts.forEachChild(node, walk)
+    }
+    walk(sliceSf)
+    expect(hasIncrement, '★★ patchProviderStatus 必须推进 providerStatusSeqRef.current（否则旧快照覆盖用户刚点的补丁）')
+      .toBe(true)
+  })
+})

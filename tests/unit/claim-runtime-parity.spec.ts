@@ -181,7 +181,20 @@ function applyOnce(): Context {
     registerAdapter: () => ({ replace() {} }),
     listModels: async () => [],
   } as never)
-  ctx.provide('settings', { register(): void {}, describe: () => [] } as never)
+  // ⚠️⚠️ `register` 必须返回**带 `get`/`replace` 的 scope 对象**（2026-11-05 四审测试判别力）：
+  // 原写法 `register(): void {}` 让 `createJetHubStore` 拿到 `undefined` ⇒
+  // `SettingsStore.load()` 里 `this.scope.get()` 抛 `TypeError: Cannot read
+  // properties of undefined (reading 'get')`。**该异常发生在 `apply()` 内部，
+  // 被 provider 的 try/catch 吞掉** ⇒ 本文件自己看起来是绿的，但**留下半初始化的
+  // 全局单例**，污染后续用例：
+  //   `★ 豁免者 qoder/qodercn 的领取打到自己的 product 上` ⇒ 凭据解析阶段就抛
+  //   同一个 TypeError ⇒ outcome 变 `failed` ⇒ 零 fetch 调用。
+  // ⚠️ 症状极具误导性：**单条跑绿、整文件跑红**（`-t` 只跑那一组时 `applyOnce`
+  // 的用例被 skip ⇒ 无污染），很容易被当成 flaky 放过去。
+  ctx.provide('settings', {
+    register: () => ({ get: () => undefined, replace: () => {} }),
+    describe: () => [],
+  } as never)
   apply(ctx)
   return ctx
 }
