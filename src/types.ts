@@ -364,7 +364,19 @@ export interface RpcCreateAccountRequest {
    * ⚠️ 来自客户端自报的 RPC 载荷（无 schema 校验）⇒ 读取侧按字面量白名单判，
    * 未登记的值一律当作缺省路径（**不报错、不静默改变语义**）。
    */
-  mode?: 'local-browser' | 'browser'
+  mode?: 'local-browser' | 'browser' | 'paste'
+  /**
+   * **粘贴上来的登录态原文**（`mode: 'paste'` 时必填）。
+   *
+   * ⚠️ 只有 `chatglm`（智谱清言网页端）用这条：它的 token 是 `chatglm.cn` 域的
+   * cookie，**宿主读不到用户本地浏览器里的那一份**（部署在服务器时两机不同），
+   * 而上游没有给我们注册过的 `redirect_uri` ⇒ 没有 CodeArts 那种 loopback 回调
+   * 可收。服务器部署下这是**唯一**可行的登录路径。
+   *
+   * ⚠️ 取值形态由 `chatglmCredentialFromInput` 归一（整条 cookie 或裸 token 都吃），
+   * **不在这里做形状校验** —— 校验只有那一份，两处各写必然漂移。
+   */
+  pasteText?: string
   /**
    * 手机号（**仅 Loomy 需要**）。
    *

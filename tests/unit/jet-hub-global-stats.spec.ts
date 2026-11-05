@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
+import { supportsCreditBalance } from '../../plugin-src/client/credits-capabilities.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLIENT = resolve(HERE, '../../plugin-src/client')
@@ -99,6 +100,71 @@ describe('jet-hub 全局统计带', () => {
     //    各自仍成立、用例全绿。要求「失败分支同时记 partial 并 continue」才有分辨力。
     expect(fn).toMatch(/if\s*\(!balance\)\s*\{\s*partial\s*=\s*true;\s*continue\s*\}/)
     expect(fn).toContain('creditsPartial')
+  })
+
+  /**
+   * ★★★ **`credits.balances` 必须按能力过滤**（2026-11-04 真实报障）。
+   *
+   * ## 报障现场
+   *
+   * 控制台每打开一次 Jet Hub 就刷一串红色：
+   * ```
+   * [jet-hub] global stats: credits.balances failed for qiniu:
+   *   Error: unsupported provider: qiniu
+   * ```
+   *
+   * 根因：本段原先对**全部** provider 一律发 `credits.balances`，而宿主侧
+   * `creditsOf(credits, provider)` 对**没登记积分表**的渠道回 `bad-request`。
+   * `qiniu` / `opencode` / `qoder` / `qodercn` / `officeace` 都在那批里
+   * —— 它们的 `credits.balance: false` 是**实测能力结论**（七牛云官方无余额端点），
+   * 不是漏接线。于是每个 `balance:false` 的渠道贡献一条报错。
+   *
+   * ## ⚠️ 判据为什么必须复用 `supportsCreditBalance`
+   *
+   * 与账号面板的 `canLoadCredits`（`supportsCreditBalance(provider)`）**同源**。
+   * 若在这里另写一份黑名单（`p.id !== 'qiniu'`），就是本仓库「一语义两套判据」
+   * 的复发形态 —— 新增 `balance:false` 的渠道时必然漏改一处。
+   *
+   * ## ⚠️ 这条守卫**有牙**（变异验证）
+   *
+   * 把 `targets.filter(p => supportsCreditBalance(p.id))` 改回 `targets`
+   * ⇒ 本用例变红。⚠️ 但要注意：本文件其它用例是**源码文本**判据（`bodyOf`），
+   * 所以这里的判据也必须是「文本里真的有那次 filter」，
+   * 而不是「代码逻辑看起来对」—— 文本判据不会因运行时短路而假绿。
+   */
+  it('★★★ `credits.balances` 只对**声明了余额能力**的渠道发（否则 qiniu 等刷屏报错）', () => {
+    const fn = bodyOf('loadGlobalStats')
+    // ① 必须真的存在一次按能力的 filter（写成 `targets` 直传 = 报障原状）
+    expect(
+      fn,
+      '★★★ 第二段积分必须过滤掉 `balance:false` 的渠道 —— 否则每打开一次面板'
+      + '就往控制台刷每条「unsupported provider」报错（qiniu / opencode / qoder /'
+      + 'qodercn / officeace 各一条）',
+    ).toMatch(/filter\(\s*\(?p\)?\s*=>\s*supportsCreditBalance\(\s*p\.id\s*\)\s*\)/)
+    // ② 过滤结果必须**真的用在** `credits.balances` 那一轮（不能 filter 完又退回原数组）
+    //
+    // ⚠️ 判据取「最后一次出现 `credits.balances` 的那段」而不是 offsets 窗口：
+    //    本文件其它注释里也提到 `credits.balances`，按 index 取窗口会取到注释里的那个
+    //    （实测第一版就是这么假红的）。
+    // ⚠️ 判据必须锚定 `rpcCall('credits.balances'` 那一处，**不能**用
+    //    `lastIndexOf('credits.balances')` —— 失败日志的文案里也有这个字面量，
+    //    而它是**最后一个**出现的位置（实测第一版就取到了日志、窗口里全是 catch 分支）。
+    const filteredName = fn.match(/const\s+(\w+)\s*=\s*targets\.filter\(\s*\(?p\)?\s*=>\s*supportsCreditBalance/)![1]
+    const callAt = fn.indexOf("rpcCall('credits.balances'")
+    expect(callAt, '必须真的调用 credits.balances').toBeGreaterThan(-1)
+    const balancesBlock = fn.slice(Math.max(0, callAt - 200), callAt + 40)
+    expect(
+      balancesBlock,
+      `本轮必须遍历 \`${filteredName}\`（过滤后的数组），不能又退回 \`targets\``,
+    ).toContain(`${filteredName}.map`)
+    // ③ 反向：`targets` 的**原数组**不得直接喂给 `credits.balances` 那一轮的 map
+    expect(
+      balancesBlock,
+      '★ 不得写成 `targets.map(... rpcCall(\'credits.balances\') ...)`（那正是报障原状）',
+    ).not.toMatch(/targets\.map\(/)
+    // ③ 对照组：必须至少有一家 `balance:false` 的渠道存在，否则这条判据可能空跑
+    expect(supportsCreditBalance('qiniu'), 'qiniu 的 balance:false 是实测结论，判据靠它区分').toBe(false)
+    expect(supportsCreditBalance('chatglm')).toBe(true)
   })
 
   it('⑥ 两段 await 之后都判 mounted（卸载后 setState 会告警并可能污染已卸载组件）', () => {

@@ -171,6 +171,15 @@ import { maskMonkeycodeKey, type MonkeycodeCredential } from './monkeycode.js'
 import { parseMonkeycodeCredential } from './monkeycode-auth.js'
 import { CODELY_PROVIDER_ID, startCodelyDeviceLogin, decodeCodelyJwtExpMs } from './codely-auth.js'
 import type { CodelyAuth } from './codely-auth-service.js'
+import type { ChatglmAuth } from './chatglm-auth-service.js'
+// ⚠️ 有效期判据唯一一份：JWT 的 exp（见 chatglmExpiresAtPatch）。
+import {
+  chatglmCredentialFromInput,
+  chatglmTokenExpiresAtMs,
+  parseChatglmCredential,
+} from './chatglm.js'
+import { fetchChatglmBalanceDetailed } from './chatglm-credits.js'
+import { CHATGLM_BROWSER_LOGIN_URL, chatglmTokenFingerprint } from './chatglm-login.js'
 import { CODERLY } from './codely-product.js'
 import { LOBSTERAI } from './lobsterai-product.js'
 import { PROVIDER_REGISTRY, descriptorOf } from './provider-registry.js'
@@ -454,6 +463,26 @@ function shortId(): string {
   const buf = new Uint8Array(4)
   crypto.getRandomValues(buf)
   return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * 豆包凭据的**账号指纹**：cookie 头里 `sessionid` 的值（同一账号恒定、
+ * 不同账号不同）。
+ *
+ * ⚠️ 取不到（cookie 缺失 / 畸形）返回 `undefined` —— 判重据此跳过，
+ * **不**把「读不出指纹」的账号错判成互不相同。
+ */
+function doubaoSessionIdOf(credential: unknown): string | undefined {
+  const cookie = (credential as { cookie?: unknown } | null | undefined)?.cookie
+  if (typeof cookie !== 'string' || cookie.length === 0) return undefined
+  for (const pair of cookie.split(';')) {
+    const eq = pair.indexOf('=')
+    if (eq <= 0) continue
+    if (pair.slice(0, eq).trim() !== 'sessionid') continue
+    const value = pair.slice(eq + 1).trim()
+    return value.length > 0 ? value : undefined
+  }
+  return undefined
 }
 
 /**
@@ -1704,6 +1733,17 @@ export interface JetHubAuths {
    * `['magicrewintl', magicrewIntlAuth]` 的**同一个对象**（同 `magicrew` 那条）。
    */
   readonly magicrewintl: MagicrewAuth
+  /**
+   * **智谱清言（chatglm.cn 网页端）**（2026-11-04）。
+   *
+   * ⚠️ 本家有**真实的续期端点** `POST /chatglm/user-api/user/refresh`
+   * （Bearer 用 refresh token）⇒ 它**不是** loomy / zcode 那类「设计上没有
+   * refresh 端点」的豁免家 ⇒ 两处**必须同时**登记：
+   * ① 本字段（`index.ts` 传值）；② `SELF_HEAL_REFRESHABLE_PROVIDERS` 的 `'chatglm'`。
+   * 缺任一处 ⇒ 睡眠/挂起恢复后积分行报「未登录」而上游只需一次 refresh，
+   * 且**日志零字**（issue IKKHL5 形态，本仓库已复发多次）。
+   */
+  readonly chatglm: ChatglmAuth
   readonly autoclaw: AutoclawAuth
   /**
    * **AutoClaw 国际版**（`autoclawintl`）。
@@ -1784,10 +1824,43 @@ export function authOf(auths: JetHubAuths, provider: string): JetHubAuthLike | u
  * 池条目上留下一个「值为 undefined 的键」—— 与「从来没有过这个键」在展示上等价，
  * 却让「读不到就**不写**」这条纪律在数据里看不出区别。空对象最诚实。
  */
+/**
+ * 智谱清言账号卡片的 `expiresAt` 补丁（**唯一一份判据**）。
+ *
+ * ⚠️⚠️ 判据是 **JWT 的 `exp`**，不是凭据里的任何「推算值」——
+ * 实测 `exp − iat = 86400s`（**24 小时**），而 cookie `chatglm_token` 的
+ * `expires: 30`（天）**比 token 活得久**，两者不是一回事
+ * （拿 cookie TTL 当 token 寿命会让有效期偏大 29 天 ⇒ `refreshAll` 的
+ * lead-time 永不触发 ⇒ 过期前不自愈、过期后也不自愈，`autoclaw` 的 P0 形态）。
+ *
+ * ⚠️ 读不到时刻时返回**空对象**（不是 `{ expiresAt: undefined }`）：后者会在内存
+ * 池条目上留下一个「值为 undefined 的键」，与「从来没有过这个键」在展示上等价，
+ * 却让「读不到就**不写**」这条纪律在数据里看不出区别。空对象最诚实。
+ *
+ * ⚠️ 为什么必须在**登录那一刻**就写进池（2026-11-04 真机报障「有效期 未知」）：
+ *    `account.list` 的 `expiresAt` 只来自**池条目**（`ProviderAccountEntry.expiresAt`），
+ *    **不读凭据文件**。登录只 `credentials.set` 而不 `pool.updateAccount({ expiresAt })`
+ *    ⇒ 卡片读到 `undefined` ⇒ 恒显示「未知」，且**永远不会自己补上**
+ *    （OfficeAce / Codely / Magicrew 三条都踩过同一个坑，这是第 4 次）。
+ */
 function magicrewExpiresAtPatch(credential: MagicrewCredential): { expiresAt?: number } {
   const expiresAt = magicrewExpiresAtMs(credential)
   return expiresAt === undefined ? {} : { expiresAt }
 }
+export function chatglmExpiresAtPatch(credential: import('./chatglm.js').ChatglmCredential): { expiresAt?: number } {
+  // ⚠️ `expires_at` 优先（续期时按「now + 2 小时」写），缺了才解 JWT `exp`
+  //    —— 与 `autoclaw` 的「JWT 优先、声明值兜底」**方向相反**，理由是：
+  //    本家的 `expires_at` 是**续期那一刻**由服务端口径算出来的新值，
+  //    比旧 token 里冻结的 `exp` 更贴近「这份凭据还能用多久」。
+  const declared = typeof credential.expires_at === 'number' && Number.isFinite(credential.expires_at)
+    && credential.expires_at > 0
+    ? credential.expires_at
+    : undefined
+  if (declared !== undefined) return { expiresAt: declared }
+  const fromToken = chatglmTokenExpiresAtMs(credential.chatglm_token)
+  return fromToken === undefined ? {} : { expiresAt: fromToken }
+}
+
 
 /**
  * 在账号池里找「**同一个超级麦吉账号**」的既有条目 —— **唯一一份判重实现**。
@@ -2787,6 +2860,19 @@ function registerJetHubEndpoints(
     //    ⚠️ 显式豁免登记在 `credits-balance-self-heal.spec.ts` 的 `SELF_HEAL_EXEMPT`
     //    —— 那张表是**反向守卫**（JetHubAuths 每个键都必须在自愈表或豁免表里），
     //    漏登记会红。
+    // ⚠️ **智谱清言（chatglm，2026-11-04）必须在表里**：与 loomy / zcode 相反 ——
+    //    它有**真实**的续期端点 `POST /chatglm/user-api/user/refresh`
+    //    （Bearer 用 refresh token），且 token 确实会过期（cookie TTL 30 天、
+    //    官方本地有效期 = now + 2 小时）⇒ 自愈链对它**有事可做**。
+    //    漏登记的后果与 issue IKKHL5 逐字相同：积分行报「未登录」而上游只需
+    //    一次 refresh，且**日志零字**。
+    'chatglm',
+    // ⚠️ **豆包（doubao）不进本表的理由**（2026-11-04 由守卫点名后核实）：
+    //    它的凭据是**浏览器 cookie 串**（`sessionid` 等），上游**没有** refresh
+    //    端点，续期的唯一方式是人工重扫码 ⇒ 自愈链对它无事可做。
+    //    与 loomy / zcode / modelscope / qiniu 同属「设计上没有 refresh 端点」，
+    //    故显式豁免登记在 `credits-balance-self-heal.spec.ts` 的
+    //    `NO_REFRESH_ENDPOINT`（那里是**反向守卫**，漏登记会红）。
   ])
 
   /**
@@ -3488,6 +3574,28 @@ function registerJetHubEndpoints(
    * ⚠️ 只对**成功**也记：成功后再进这里也没有意义（`credential.nickname` 已存在）。
    */
   const magicrewProfileTried = new Set<string>()
+
+  /**
+   * ⚠️⚠️ **豆包（Doubao）扫码登录的在途任务**（与 `magicrewBrowserLoginInFlight`
+   * 同型，2026-11-03 接入）：`account.create`（`mode: 'browser'`）起一轮
+   * 「开可见浏览器 → 等用户扫码 → `Storage.getCookies` 读 cookie+设备身份 → 落库」，
+   * `login.poll` 单飞 `await` 它（客户端 1 秒一拍、无闸门，两拍重叠会开两个窗口）。
+   */
+  const doubaoLoginInFlight = new Map<
+    string,
+    Promise<{ done: boolean, success?: boolean, error?: string }>
+  >()
+
+  /**
+   * ⚠️⚠️ **智谱清言没有在途登录任务表**（2026-11-04 用户要求后移除）。
+   *
+   * 旧实现（`mode: 'browser'` 在宿主起 `ChatglmLoginSession`）需要这张表做单飞。
+   * 现在 `mode: 'browser'` **不在宿主侧起任何浏览器**（用户报障「服务器开浏览器特别卡、
+   * 根本识别不到滑动块」）⇒ 没有后台任务可 await ⇒ 表已删除。
+   * ⚠️ 保留本条注释是为了让后来者知道**这里曾经有过**、以及为什么它不该回来：
+   * 一旦本家重新在宿主侧开窗，就必须同时恢复「单飞表 + `login.poll` 分支」，
+   * 否则并发点两次会开两个窗口。
+   */
 
   /**
    * 网页版登录占位条目的**最短保留时长**（收口阈值）。
@@ -4740,10 +4848,14 @@ function registerJetHubEndpoints(
         if (req.provider === OFFICEACE.id && accounts.some((a) => a.expiresAt === undefined)) {
           for (const account of accounts) {
             if (account.expiresAt !== undefined) continue
-            // ⚠️ 逐账号 resolve：该账号自己的 `credentialRef`（**不是** ref 名）。
-            const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
-              .catch(() => null)
-            if (!resolved) continue
+            // ⚠️ 逐账号 resolve：该账号自己的 credentialRef（**不是** ref 名）。
+            // ⚠️⚠️ credentialRef() 对非法形态**同步抛错**，.catch() 接不住
+            //    ⇒ 必须包 try（否则一条脏 ref 会让整个 ccount.list 抛 500）。
+            let resolved: { value?: string } | undefined
+            try {
+              resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+            } catch { resolved = undefined }
+            if (resolved?.value === undefined) continue
             let expiresAt = Number.NaN
             try {
               // ⚠️ `expiresAt` 是 STS 的 ISO 8601 字符串（不是数值时间戳 ——
@@ -4829,7 +4941,45 @@ function registerJetHubEndpoints(
          * ⚠️ 回填**只写 `nickname`**，不写 `phone`：上游给的 phone 是 **10 位本地号**，
          * 与 `magicrewDisplayNickname` 的 11 位脱敏判据**不同形**，写进去会得到错位掩码。
          */
-        if (req.provider === 'magicrew' || req.provider === 'magicrewintl') {
+
+        /**
+         * ⚠️⚠️ **智谱清言的 `expiresAt` 自愈回填**（2026-11-04 真机报障：卡片「有效期 未知」）。
+         *
+         * 与上面 OfficeAce / Codely / Magicrew 三条**同因同形**：登录时漏写
+         * `pool.updateAccount({ expiresAt })` ⇒ 池条目没有这个字段 ⇒ 卡片**恒**显示
+         * 「未知」且不会自己补上。列表时发现缺失就从**凭据**算出真实时刻并写回池
+         * （一次性自愈，之后走正常的登录 / 续期回填）。
+         *
+         * ⚠️ 判据是 {@link chatglmExpiresAtPatch}（**唯一一份**）：`expires_at` 优先、
+         * 否则解 JWT 的 `exp`（实测 24 小时）、都拿不到就**跳过**
+         * —— 绝不写 0/NaN（那会让卡片显示成「已过期」）。
+         *
+         * ⚠️ **逐账号按它自己的 ref resolve**（多账号广播 = 拿 A 的有效期写给 B，
+         * 本仓库已复发 7 次的那类错位）。
+         * ⚠️ 纯本地解码、**零网络**，故可以每轮都跑（不像 magicrew 的昵称那条要闸门）。
+         */
+        if (req.provider === 'chatglm' && accounts.some((a) => a.expiresAt === undefined)) {
+          for (const account of accounts) {
+            if (account.expiresAt !== undefined) continue
+            // ⚠️⚠️ credentialRef() 对非法形态**同步抛错**（`/^[A-Za-z_][A-Za-z0-9_]*$/`），
+            //    而 .catch() 只接 Promise 拒绝、接不住同步 throw ⇒ 必须包 try
+            //    （否则一条脏 credentialRef 会让整个 ccount.list 抛 500）。
+            let resolved: { value?: string } | undefined
+            try {
+              resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+            } catch { resolved = undefined }
+            if (resolved?.value === undefined) continue
+            let credential: import('./chatglm.js').ChatglmCredential | undefined
+            try {
+              credential = parseChatglmCredential(resolved.value)
+            } catch { /* 凭据不是合法 JSON ⇒ 跳过该账号 */ }
+            if (credential === undefined) continue
+            const patch = chatglmExpiresAtPatch(credential)
+            if (patch.expiresAt === undefined) continue
+            account.expiresAt = patch.expiresAt
+            void pool.updateAccount(account.id, patch).catch(() => undefined)
+          }
+        }        if (req.provider === 'magicrew' || req.provider === 'magicrewintl') {
           for (const account of accounts) {
             const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
               .catch(() => undefined)
@@ -5444,6 +5594,246 @@ function registerJetHubEndpoints(
             error: {
               code: 'bad-request',
               message: `${magicrewSiteName}请用「从本机浏览器导入」或「网页登录」，不支持手机号密码登录`,
+            },
+          }
+        }
+
+        /**
+         * ⚠️⚠️⚠️ **智谱清言（chatglm.cn 网页端）：本机浏览器登录**（`mode: 'browser'`）。
+         *
+         * ## ⚠️⚠️⚠️ 本分支**绝不在宿主侧起浏览器**（2026-11-04 用户明确要求）
+         *
+         * 用户原话：「现在在服务器打开浏览器特别卡，根本就识别不到滑动块，还是要在
+         * 本地电脑打开浏览器才可以，不然很难登录账号」。
+         *
+         * 这句话点的是**两个各自独立的缺陷**，而且第二个是硬的：
+         * 1. **服务器上开浏览器极慢**（无 GPU / 无头 → 无 Xvfb 时根本起不来；
+         *    智谱的滑块验证码在那种环境里**渲染不出来**，用户「根本识别不到滑动块」）；
+         * 2. 就算窗口真在服务器上开了，**用户也看不见**（部署在远端时那台机器的屏
+         *    不属于用户）。
+         *
+         * ⇒ 本分支**只做一件事**：返回 `loginUrl`，让**客户端**在你**本地**浏览器
+         * `window.open`。**不建占位账号、不起浏览器进程、不设 `login.poll` 在途任务。**
+         *
+         * ## 为什么连占位账号也不建
+         *
+         * 旧实现（`mode: 'browser'` 起 `ChatglmLoginSession`）建了占位条目并挂
+         * `chatglmLoginInFlight`。现在没有浏览器可等 ⇒ 占位条目会变成**幽灵卡**
+         * （用户看得见、却没有凭据、也没有任何东西会来填它）。
+         * ⇒ 账号一律由 `mode: 'paste'` 在**真正拿到 token 那一刻**创建。
+         *
+         * ## 两步的完整链路
+         *
+         * ```
+         * ① mode:'browser' → {accountId:'', loginUrl}
+         *      客户端本地 window.open(loginUrl) + 弹「粘贴登录态」
+         * ② 用户在自己浏览器登录完 → 粘 token
+         *      mode:'paste' → 验上游 → 判重 → 建号 + 写有效期
+         * ```
+         *
+         * ⚠️ **没有 `login.poll`**：本分支不建账号，客户端也不该起轮询
+         * （见 `plugin-src/client/jet-hub.js` 的 chatglm 分支 —— 它在
+         * `accountId` 为空时**不调** `startLoginPoll`）。
+         *
+         * ## ⚠️ 与 CodeArts 的**本质差异**（别在后来的注释里写成「已等同」）
+         *
+         * CodeArts 的 `loginUrl` 是标准 OAuth 授权页 + **本地回调服务器**
+         * （`startOAuthFlow` 起 loopback 端口收 code）⇒ 用户授权完**自动**回来。
+         * 智谱清言网页端**没有**那条回调链路：`chatglm_token` 是 `chatglm.cn` 域的
+         * cookie，宿主读不到你本地那一份；上游也没给我们注册过的 `redirect_uri`
+         * （`WeChatLoginTransit` 是它自己的中转页）。
+         * ⇒ 本地登录完**必须**手动把 token 粘回来（`mode: 'paste'`）。
+         */
+        if (provider === 'chatglm' && req.mode === 'browser') {
+          return {
+            ok: true,
+            // ⚠️ `accountId` 刻意返回**空串**：不建占位条目（没有东西会来填它）。
+            // ⚠️ `loginUrl` 必须**非空** —— 空串会让客户端整段跳过开窗
+            //    （`if (!loginUrl) { …; return }`），于是窗口根本不出来。
+            value: { accountId: '', loginUrl: CHATGLM_BROWSER_LOGIN_URL },
+          }
+        }
+        /**
+         * ⚠️⚠️ **智谱清言：粘贴登录态**（`mode: 'paste'`，2026-11-04）。
+         *
+         * ## 为什么必须有这条路（服务器部署的唯一可用路径）
+         *
+         * 网页登录的 token 是 `chatglm.cn` 域的 cookie，**宿主读不到你本地浏览器里的
+         * 那一份**（部署在服务器 ⇒ 两机不同；即使同机，也只有浏览器进程能读自己的
+         * cookie jar）。上游也没有给我们注册过的 `redirect_uri` ⇒ **没有 loopback
+         * 回调可收**，CodeArts 那种全自动收口在本渠道**不存在**。
+         *
+         * ⇒ 用户动作：在自己浏览器登录 `chatglm.cn` → 从 DevTools 复制 `chatglm_token`
+         * （或整条 cookie）→ 粘进面板。归一与形状校验在 `chatglmCredentialFromInput`
+         * 里（**纯函数，可单测**）。
+         *
+         * ⚠️ **先验一次上游**再落库：粘贴的东西是不是真有效，不让用户以为自己成功了。
+         *    失败分类与余额查询同口径（40102 = token 无效）。
+         * ⚠️ 判重与网页登录那条腿**同源**（token 指纹）：命中既有条目只刷新它，不造第二张卡。
+         * ⚠️ 凭据明文**只经 RPC 上行一次**，下行永不带明文（卡片只显示有效期与积分）。
+         */
+        if (provider === 'chatglm' && req.mode === 'paste') {
+          const raw = typeof req.pasteText === 'string' ? req.pasteText : ''
+          const credential = chatglmCredentialFromInput(raw)
+          if (credential === undefined) {
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: '没能从这段文本里认出智谱清言登录态：请粘贴整条 cookie'
+                  + '（含 chatglm_token=…）或 chatglm_token 的值本身（长度 20 以上、无空格）',
+              },
+            }
+          }
+          // ⚠️ 先验上游（`fetchChatglmBalanceDetailed` 是纯读、幂等、零副作用）。
+          const probe = await fetchChatglmBalanceDetailed(credential)
+          if (probe.balance === null) {
+            return {
+              ok: false,
+              error: { code: 'bad-request', message: probe.error ?? '该登录态无法通过上游校验' },
+            }
+          }
+          const fingerprint = chatglmTokenFingerprint(credential)
+          if (fingerprint !== undefined) {
+            for (const existing of pool.listAccountsByProvider('chatglm')) {
+              let existingFingerprint: string | undefined
+              try {
+                const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
+                existingFingerprint = resolved === undefined
+                  ? undefined
+                  : chatglmTokenFingerprint(parseChatglmCredential(resolved.value))
+              } catch { existingFingerprint = undefined }
+              if (existingFingerprint !== fingerprint) continue
+              await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+              await pool.updateAccount(existing.id, {
+                nickname: '智谱清言账号',
+                ...chatglmExpiresAtPatch(credential),
+              })
+              return { ok: true, value: { accountId: existing.id, loginUrl: '' } }
+            }
+          }
+          await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
+          await pool.addAccount({
+            id,
+            provider: 'chatglm',
+            nickname: '智谱清言账号',
+            enabled: true,
+            credentialRef: refName,
+            refreshable: true,
+            createdAt: Date.now(),
+            ...chatglmExpiresAtPatch(credential),
+          })
+          return { ok: true, value: { accountId: id, loginUrl: '' } }
+        }
+
+        /**
+         * 智谱清言只有网页登录（`mode: 'browser'`）一条路 —— 不带 mode 落到这里
+         * ⇒ 明确报错，不静默降级（与 doubao / magicrew 同款文案纪律）。
+         */
+        if (provider === 'chatglm') {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: '智谱清言请用「网页登录」（会打开浏览器窗口，在窗口里完成登录后自动读取登录态）',
+            },
+          }
+        }
+
+        /**
+         * ⚠️⚠️ **豆包（Doubao）扫码登录**（`mode: 'browser'`，2026-11-03 接入）。
+         *
+         * 与 magicrew 的 `mode: 'browser'` 同型三段式：
+         * ① 占位条目（先登记再开窗，`login.poll` 靠它知道「id 存在」）；
+         * ② 后台任务：`DoubaoLoginSession.open()`（可见窗口 + 一次性 profile）→
+         *    `waitForCredential()`（轮询 `sessionid`，最长 4 分钟）→ 落库 → 回填；
+         * ③ 立刻返回 `{ accountId, loginUrl: '' }`。
+         *
+         * ⚠️ **账号隔离**：每次登录一个全新临时 profile ⇒ 该账号的 cookie 与
+         *    device_id/web_id 都是**本账号自己的**（一次性 profile 天然产出独立
+         *    设备身份，实测见 `doubao-login.ts` 的端到端验证）。
+         *
+         * ⚠️ **判重**：cookie 里的 `sessionid` 值即账号指纹 —— 同一账号重复登录
+         *    只刷新既有条目，不造第二张卡。
+         *
+         * ⚠️ 失败收尾走 `failLogin`（不自己 `removeAccount`）。
+         */
+        if (provider === 'doubao' && req.mode === 'browser') {
+          await pool.addAccount({
+            id,
+            provider: 'doubao',
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+          const task = (async (): Promise<{ done: boolean, success?: boolean, error?: string }> => {
+            const { DoubaoLoginSession } = await import('./doubao-login.js')
+            const session = await DoubaoLoginSession.open({
+              log: (message) => { ctx.logger?.info?.(`[jet-hub] ${message}`) },
+            })
+            let credential: import('./doubao.js').DoubaoCredential | undefined
+            try {
+              credential = await session.waitForCredential(240_000)
+            } catch (error) {
+              const message = await failLogin(id, error)
+              return message === undefined
+                ? { done: true, success: true }
+                : { done: true, success: false, error: message }
+            } finally {
+              // 无论成败都收窗（杀进程 + 删一次性 profile）。
+              session.close()
+            }
+            if (credential === undefined) {
+              const message = await failLogin(id, new Error('扫码登录未完成（超时或窗口已关闭）'))
+              return message === undefined
+                ? { done: true, success: true }
+                : { done: true, success: false, error: message }
+            }
+            // 判重：sessionid 指纹命中既有条目 ⇒ 只刷新它，删掉占位条目。
+            const fingerprint = doubaoSessionIdOf(credential)
+            if (fingerprint !== undefined) {
+              for (const existing of pool.listAccountsByProvider('doubao')) {
+                if (existing.id === id) continue
+                let existingFingerprint: string | undefined
+                try {
+                  const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
+                  existingFingerprint = resolved === undefined
+                    ? undefined
+                    : doubaoSessionIdOf(JSON.parse(resolved.value))
+                } catch { existingFingerprint = undefined }
+                if (existingFingerprint !== fingerprint) continue
+                await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+                await pool.updateAccount(existing.id, { nickname: '豆包账号' })
+                await ctx.credentials.unset(credentialRef(refName)).catch(() => undefined)
+                await pool.removeAccount(id).catch(() => undefined)
+                return { done: true, success: true }
+              }
+            }
+            // 新账号：凭据写到自己的 ref。
+            await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
+            await pool.updateAccount(id, { nickname: '豆包账号' })
+            return { done: true, success: true }
+          })()
+          doubaoLoginInFlight.set(id, task)
+          void (async () => {
+            try { await task } catch { /* 上面已把异常收成返回值 */ }
+            doubaoLoginInFlight.delete(id)
+          })()
+          return { ok: true, value: { accountId: id, loginUrl: '' } }
+        }
+
+        /**
+         * 豆包只有扫码登录（`mode: 'browser'`）一条路 —— 不带 mode 落到这里
+         * ⇒ 明确报错，不静默降级。
+         */
+        if (provider === 'doubao') {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: '豆包请用「扫码登录」（会打开浏览器窗口，用手机豆包 App 扫码）',
             },
           }
         }
@@ -7334,6 +7724,29 @@ function registerJetHubEndpoints(
              */
             return { ok: true, value: { done: false } }
           }
+          /**
+           * ⚠️ 豆包扫码登录（2026-11-03）：与 magicrew 同型 —— `await` 在途任务
+           * （单飞），表里没有就回 `{done:false}` 交给客户端 5 分钟表收口。
+           * 豆包占位条目**没有** TTL 收口器：任务结束（成功/失败）时 `failLogin`
+           * 或判重路径会处理它；宿主重启后表空了 ⇒ 浏览器窗口也没了
+           * （进程随宿主树退出）⇒ 用户重新点登录即可，占位条目由用户手删。
+           */
+          if (entry.provider === 'doubao') {
+            const shared = doubaoLoginInFlight.get(req.accountId)
+            if (shared !== undefined) return { ok: true, value: await shared }
+            return { ok: true, value: { done: false } }
+          }
+          /**
+           * ⚠️ **智谱清言刻意没有本分支**（2026-11-04 用户要求）。
+           *
+           * `mode: 'browser'` 已改为**不在宿主侧起浏览器**（服务器上开窗极慢、
+           * 滑块验证码渲染不出来 ⇒ 用户「根本识别不到滑动块」），它只返回
+           * `loginUrl` 让客户端在**用户本地**浏览器开窗，**不建占位条目**
+           * ⇒ 没有在途任务可 await、客户端也**不调** `startLoginPoll`。
+           * 落到这里（有人给一个 chatglm 账号 id 发 `login.poll`）⇒ 如实回
+           * `{done:false}`：不猜成功、不猜失败。账号一律由 `mode: 'paste'`
+           * 在**真正拿到 token 那一刻**创建。
+           */
           return { ok: true, value: { done: false } }
         }
         if (entry.provider === ZCODE.id) {

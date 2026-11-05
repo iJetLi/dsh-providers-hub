@@ -85,6 +85,12 @@ import { claimCodelyDailyCheckIn, fetchCodelyBalanceDetailed } from './codely-cr
 import type { CodelyCredential } from './codely-auth.js'
 import { fetchAccioBalanceDetailed } from './accio-credits.js'
 import { fetchAstudioBalanceDetailed, claimDaily } from './astudio-credits.js'
+// ⚠️ **本 fork 独有**（豆包，2026-10-29）：签到/余额原语（端点待实测，如实 inactive）。
+import { claimDoubaoDailyCheckin, fetchDoubaoBalanceDetailed } from './doubao-credits.js'
+import type { DoubaoCredential } from './doubao.js'
+// ⚠️ **本 fork 独有**（智谱清言网页端，2026-11-04）：签到/余额/续期原语（**真机逆向实测**）。
+import { claimChatglmDailyCheckin, fetchChatglmBalanceDetailed } from './chatglm-credits.js'
+import type { ChatglmCredential } from './chatglm.js'
 import { fetchAutoclawBalanceDetailed, claimAutoclawDailyQuota } from './autoclaw-credits.js'
 import { AUTOCLAW_INTL } from './autoclaw-product.js'
 import { fetchTraeCreditBalance, claimTraeDailyCheckin, fetchTraeCheckinStatus } from './trae-credits.js'
@@ -707,6 +713,51 @@ export function createProviderCredits(
     accio: {
       fetchBalanceDetailed: async (credential) =>
         await fetchAccioBalanceDetailed(credential as AccioCredential),
+    },
+
+    /**
+     * 智谱清言（chatglm.cn **网页端**，2026-11-04）：**真机逆向实测**，非「结构先行」。
+     *
+     * ⚠️ 两个原语都用「精确形态」：
+     * - `fetchBalanceDetailed`：`40102`（token 无效）与「上游改版」的用户动作不同
+     *   （前者去续期/重登、后者只能等）⇒ 必须分开报，故不能用笼统的 `fetchBalance`；
+     * - `claim` 不带 `fetchStatus`：本家**没有**独立的「今天是否已签」端点
+     *   （`score_activity_*` 是消费抽券、`summer_day_claim_status` 是暑期赠分，
+     *   都不是每日登录积分）⇒ `precheckStatus: false` 避免发一次打错端点的真实请求
+     *   （与 codely / loomy / doubao 同因）。
+     *
+     * ⚠️ 判据是 **`result.score`**（`>0` 领到 / `0` 今天已领），**不是 `status`**
+     * —— 实测成功与已领都回 `status:0`。详见 `chatglm-credits.ts` 模块头。
+     */
+    chatglm: {
+      fetchBalanceDetailed: async (credential, call) =>
+        await fetchChatglmBalanceDetailed(credential as ChatglmCredential, {
+          accountKey: call.accountId,
+        }),
+      claim: async (credential, _entry, call) =>
+        await claimChatglmDailyCheckin(credential as ChatglmCredential, {
+          accountKey: call.accountId,
+        }),
+      precheckStatus: false,
+    },
+
+    /**
+     * 豆包（Doubao，字节跳动）：签到/余额结构已接通，**上游端点待实测**。
+     *
+     * ⚠️ 用 `fetchBalanceDetailed` + 显式 `claim`：两个原语（`doubao-credits.ts`）
+     *    在凭据缺失时给出可读原因，在端点未实测时如实回 `null` / `inactive`
+     *   （不落 0、不发假请求）。将来拿到真实端点后，只需把这两个原语换成
+     *    实测实现，本表项**不用动**（签名已对齐骨架）。
+     */
+    doubao: {
+      fetchBalanceDetailed: async (credential) =>
+        await fetchDoubaoBalanceDetailed(credential as DoubaoCredential),
+      claim: async (credential) =>
+        await claimDoubaoDailyCheckin(credential as DoubaoCredential),
+      // ⚠️ `precheckStatus: false`：本家没有独立的签到状态端点（claim 内部
+      //    直接回 inactive），骨架默认会用 buddy 式 `fetchCheckinStatus` 去打它
+      //    —— 那是一次发错端点的真实请求。与 codely / loomy 同因。
+      precheckStatus: false,
     },
 
     /**

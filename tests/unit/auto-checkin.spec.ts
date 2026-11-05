@@ -695,12 +695,13 @@ describe('自动签到：排除「签到有代价」的渠道', () => {
       .filter((d) => d.autoCheckinExcluded === true)
       .map((d) => d.id)
       .sort()
+    // ⚠️ 2026-11-03 加 doubao（签到要带 a_bogus 签名，需起浏览器 ⇒ 与 zcode 同型排除）。
     expect(
       excluded,
       '排除表与 registry 漂移：多出 = 有家被误排除（用户会失去自动签到），'
       + '少出 = 有家「签到有代价」却没被排除（每次启动都会拉起 headful 浏览器）',
-    ).toEqual(['zcode'])
-    // ⚠️ 写死 `['zcode']` 是**有意**的：新增同样要产 captcha 的家时，
+    ).toEqual(['doubao', 'zcode'])
+    // ⚠️ 写死 `['doubao', 'zcode']` 是**有意**的：新增同样要起浏览器/产 captcha 的家时，
     //    这条会先红，逼作者复核「它是不是也该进排除表」（而不是静默漏掉）。
   })
 })

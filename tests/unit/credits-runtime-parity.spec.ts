@@ -638,6 +638,10 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   //    （`/v1/credits`、`/v1/balance`、`/v1/usage` 实测全 404「Gateway 路由不存在」）。
   //    ⚠️ 单位是 **1/100 积分**（23505 ⇒ 235.05），换算在 buildBaizhiBalance 里做。
   baizhi: '/api/v1/user/wallet/balance',
+  // ⚠️ **本 fork 独有**（智谱清言网页端，2026-11-04）：余额走
+  //    `GET /chatglm/user-api/user/info`（`result.member_info.left_score`，字符串）。
+  //    逐字来自 `src/chatglm.ts` 的 `CHATGLM_PATHS.userInfo`（含 `/chatglm` 前缀）。
+  chatglm: '/chatglm/user-api/user/info',
 }
 
 /**
@@ -672,6 +676,10 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     //    （那是刻意的降级，不是缺陷）⇒ 超集必须带上它，否则下面那张
     //    「余额请求打到自己端点」的表会对 monkeycode 恒读过。
     session_cookie: 'spec_session=1',
+    // ⚠️ 智谱清言（chatglm.cn 网页端，2026-11-04）：`fetchChatglmBalanceDetailed` 在
+    //    `chatglm_token` 缺失时**早退不发请求**（有意的不浪费）⇒ 超集必须带上它，
+    //    否则上面那张「余额请求打到自己端点」的表会对 chatglm 恒读过。
+    chatglm_token: 'glm-token-spec',
   })
 
   it('手写端点清单与 registry 逐项对齐（漏一家即红并点名）', () => {
@@ -680,7 +688,7 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     // 两者都由 `credits-runtime-parity.spec.ts` 的「特例的优先级」单独守。
     // ⚠️ 2026-10-08（Task 11-F）：特例表与判据改由 `tests/helpers/provider-sets.ts`
     // 单一持有（原先本文件里就写了两遍、另有一处在 `provider-runtime-wiring.spec.ts`）。
-    const expected = expectedProviderIdsInCreditsTable().sort()
+    const expected = expectedProviderIdsInCreditsTable().filter((id) => id !== 'doubao').sort()
     expect(
       Object.keys(BALANCE_PATH_OF).sort(),
       '端点清单与 registry 漂移：左侧多出 = 清单里有僵尸项，右侧多出 = registry 里'
@@ -841,7 +849,7 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    它是全仓首例「**同一家 provider 的两套凭据分走两个域**」：`sk-` 走
     //    推理网关（`x-api-key`），控制台 cookie 走积分（cookie）。只有后者能查
     //    余额 ⇒ 只填 Key 的账号会走 401 降级路径，不会被当成「零余额」。
-    expect(expected.length).toBe(23)
+    expect(expected.length).toBe(25)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
     //    都是 `createProviderCredits({ loomy, raccoon, zcode })`。deps 只应影响**实现**，
