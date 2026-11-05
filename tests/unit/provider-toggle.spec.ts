@@ -207,6 +207,53 @@ describe('providerSwitchState（开关三形态）', () => {
     expect(providerSwitchState({ accounts: { total: 1 } }).disabled).toBe(true)
   })
 
+  /**
+   * ★★★ **「全关了 + 核实失败」必须渲染成禁用 + 原因**（2026-11-05 三审端到端 P1-2）。
+   *
+   * ## 缺陷形态（真实可达）
+   *
+   * 服务端在「派生判据说全关了、但目录核实失败」时**故意**报 `closed: false`
+   * （保守方向），同时把原因写进 `verifyFailed`。若前端只读 `closed`：
+   * ```
+   * 界面：「2 个 · 已关闭 2」      开关：「已打开」
+   * 点开关 ⇒ 服务端拒绝「没有可关闭的模型：<远端原因>」
+   * ```
+   * 三者矛盾，且**原因只在报错里** —— 用户拿不到，只会以为「开关坏了」。
+   *
+   * ## 为什么判据必须同时要三个条件
+   *
+   * - `verifyFailed` 是非空字符串：**字段缺席 = 核实成功或未需要核实**；
+   * - `total > 0`：没有模型时走下面那条「没有可关闭的模型」，文案更准确；
+   * - `disabled === total`：只有「全关了」才与 `closed: false` 矛盾。
+   *   若只关了一部分，`closed: false` 本来就是**对的**（服务端不会报 `verifyFailed`）。
+   */
+  it('★★★ 全关了但核实失败 → 禁用 + 把原因透给用户（不得渲染成「可点的已打开」）', () => {
+    const s = providerSwitchState({
+      models: { total: 2, disabled: 2 },
+      closed: false,
+      verifyFailed: '读取模型列表失败：请求超时',
+    })
+    expect(s.disabled, '核实失败却让用户点 ⇒ 点下去必然失败').toBe(true)
+    expect(s.checked).toBe(true)
+    expect(s.reason).toContain('核实失败')
+    expect(s.reason, '原因必须原样透出，否则用户只知道「点不动」').toContain('请求超时')
+  })
+
+  it('★ 反向对照：核实成功（无 verifyFailed）时不得禁用（否则正常态被锁死）', () => {
+    const s = providerSwitchState({ models: { total: 2, disabled: 0 }, closed: false })
+    expect(s.disabled).toBe(false)
+    expect(s.reason).toBeNull()
+  })
+
+  it('★ 反向对照：只关了一部分 + 有 verifyFailed 也不得禁用（此时 closed:false 本就是对）', () => {
+    const s = providerSwitchState({
+      models: { total: 5, disabled: 2 },
+      closed: false,
+      verifyFailed: '目录尚未就绪',
+    })
+    expect(s.disabled, '只关了一部分 ⇒ 关闭动作仍合法，不该禁用').toBe(false)
+  })
+
   it('total 为负数等非法值 → 禁用（不给用户一个无效的操作入口）', () => {
     expect(providerSwitchState({ models: { total: -5 } }).disabled).toBe(true)
   })

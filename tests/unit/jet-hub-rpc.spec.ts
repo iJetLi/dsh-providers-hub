@@ -1285,6 +1285,15 @@ describe('model.list / model.setDisabled 端点', () => {
        * 其余 14 家不声明 ⇒ `model.list` 放弃「已下架」判据、照旧补回黑名单条目。
        */
       catalogConfirmedRemote?(): boolean
+      /**
+       * 适配器自报「这份目录还不是全的」（聚合冷启动专用）。
+       *
+       * ⚠️ 2026-11-05 审查补：`model.setAllDisabled` 的放行分支里有一条
+       * `catalog.notReady === undefined`（冷帧必须继续拒绝），此前**全仓没有
+       * 一条用例打在 `model.setAllDisabled` 上** ⇒ 删掉那半条判据也没人红。
+       * 挂上这个钩子才能测。
+       */
+      catalogReadyForBulkWrite?(): { ready: boolean; reason?: string }
     }>
     /** 让 `ctx.emit` 抛错，验证「广播失败不反噬已落盘的开关」。 */
     emitThrows?: boolean
@@ -1958,7 +1967,14 @@ describe('model.list / model.setDisabled 端点', () => {
       // 落盘后 model.list 应显示全部关闭
       const list = await call('model.list', { provider: 'buddy' })
       const models = (list.value as { models: Array<{ disabled: boolean }> }).models
-      expect(models.every((m) => m.disabled)).toBe(true)
+      // ⚠️ 2026-11-05 红队：`every((m) => m.disabled)` 是**非空真但不判别**的断言 ——
+      //    本用例不传 `closeProvider` ⇒ 分支 4 会写 `providerClosed = true`，
+      //    而 `model.list` 的 `disabled` 是「意图 **或** 黑名单」双腿取或
+      //    ⇒ 砍掉黑名单腿（G1-M15）后这里仍绿。真正判别的是上面那条 `toEqual`
+      //    （逐 id 比对），这里改成**条数**断言，把「一个都没少」这件事补上。
+      // ⚠️ 二审 M1：条数必须从 `MODELS` 派生，**不能写死 3** —— `MODELS` 是测试
+      //    数据常量，将来增删一条（很常见的维护动作）会假红，红因与产品缺陷无关。
+      expect(models).toHaveLength(MODELS.length)
     })
 
     /**
@@ -1982,6 +1998,197 @@ describe('model.list / model.setDisabled 端点', () => {
       await call('model.setAllDisabled', { provider: 'buddy', disabled: true })
 
       expect(storedValue().disabledModels).toEqual({ buddy: { 'glm-5.2': true, hy3: true } })
+    })
+
+    /**
+     * ⚠️⚠️ 2026-11-04 真机报障「**部分供应商全关按钮异常**」。
+     *
+     * 症状：模型列表屏上 `Codeoly (Unity)` 显示「5 个 · 已关闭 0」、五个开关全蓝，
+     * 点「全关」却报「该供应商没有可关闭的模型，未做任何变更」—— 界面与报错矛盾。
+     *
+     * 成因：该供应商**没有登录账号** ⇒ `llm.listModels()` 被目录门控成 `[]`
+     * ⇒ `complete = false` ⇒ 落到「目录不完整 ⇒ 拒绝」。而界面上那 5 个模型
+     * 来自适配器兜底表，`catalog.ids` 本就是它们 ⇒ 用户要关的正是它们。
+     *
+     * 模型列表屏（`closeProvider: false`）**从不写「关闭供应商意图」**，
+     * 故 `provider.status` 仍按同一份兜底表算「5 个 · 已关闭 5」⇒ 状态与事实一致，
+     * 与 ISSUE IKJW33 的「写意图 ⇒ 显示已关闭而模型仍可选」不同。
+     */
+    it('★★ 模型列表屏（closeProvider:false）+ 远端为空（无账号）+ 兜底表非空 ⇒ 关掉可见项并成功', async () => {
+      const fallback = [
+        { id: 'unity-a', name: 'Unity A' },
+        { id: 'unity-b', name: 'Unity B' },
+      ]
+      const { call, storedValue } = registerEndpoints({
+        models: [],
+        modelAdapters: { buddy: { listAllModels: () => fallback } },
+      })
+
+      const result = await call('model.setAllDisabled', {
+        provider: 'buddy',
+        disabled: true,
+        closeProvider: false,
+      })
+
+      expect(result.ok, '模型列表屏在「无账号」时必须能关掉可见模型').toBe(true)
+      expect(storedValue().disabledModels).toEqual({
+        buddy: { 'unity-a': true, 'unity-b': true },
+      })
+      // ⚠️ 反向：**不得**借机落「关闭供应商」意图（否则 status 会报「已关闭」，
+      //    而上游还有我们看不到的模型 —— 正是 IKJW33 的形态）。
+      //    真实持久化键名是 `providerClosed`（内存字段叫 `providerClosedCache`，
+      //    `AccountPool.closedProviders` 是 getter）—— 第一版写成 `closedProviders`
+      //    ⇒ `?? {}` 恒真、变异全绿，已改；`providerClosed` 键**任何保存都会带上**
+      //    （值是 `{}`），所以判据只能是「值为空」。变异 M2（closed=true）实测 RED 1。
+      expect(storedValue().providerClosed ?? {}, '不得落供应商关闭意图').toEqual({})
+    })
+
+    /**
+     * ⚠️⚠️⚠️ 2026-11-04 真机报障：「**为什么更新插件后供应商状态会发生变化，
+     * 比如停用的供应商会被启用**」。
+     *
+     * 现场：`state.json` 的 `providerClosed` 只剩 `{accio:true}` —— 用户靠
+     * 「关闭供应商」关过的好几家全都不见了。而「关闭供应商」写意图是**稳的**
+     * （与目录快照无关），所以只可能是**被后来的操作删掉**。
+     *
+     * 元凶就是本屏这条路径：它传 `closeProvider: false`，语义本应是「**不碰**
+     * 供应商开关」，但 `writeModelsWithProviderClosed` 的第三参当时是
+     * `boolean`，`false` 被实现成 **`delete providerClosed[provider]`**：
+     *
+     * ```
+     * ① 点「关闭供应商」 ⇒ providerClosed={X:true} + 全量黑名单   ← 稳定
+     * ② 模型列表屏对 X 点一次「全关」 ⇒ 传 false ⇒ 意图被删
+     * ③ 插件更新 / 目录变长 ⇒ 派生判据 disabled!==total ⇒ 翻回「启用」
+     * ```
+     *
+     * ⇒ 修法是让第三参支持 `'keep'`（**不动**该键），本屏与它的「目录不完整」
+     * 兄弟分支都改传 `'keep'`。
+     */
+    it('★★★ 已关闭的供应商再点一次「全关」⇒ 关闭意图必须保留（否则更新后静默变回启用）', async () => {
+      const catalog = [
+        { id: 'unity-a', name: 'Unity A' },
+        { id: 'unity-b', name: 'Unity B' },
+      ]
+      const { call, pool, storedValue } = registerEndpoints({
+        models: catalog,
+        modelAdapters: { buddy: { listAllModels: () => catalog } },
+      })
+      // 模拟用户点「关闭供应商」（写意图）。
+      await pool.setProviderClosed('buddy', true)
+      expect(storedValue().providerClosed).toEqual({ buddy: true })
+
+      // 之后在模型列表屏对同一家点「全关」。
+      const result = await call('model.setAllDisabled', {
+        provider: 'buddy',
+        disabled: true,
+        closeProvider: false,
+      })
+
+      expect(result.ok).toBe(true)
+      // ⚠️ 判据是「意图仍在」。若实现里 `'keep'` 退化成 `false` ⇒ 意图被删 ⇒ 红。
+      expect(storedValue().providerClosed, '模型级全关不得删除供应商关闭意图')
+        .toEqual({ buddy: true })
+    })
+
+    /**
+     * 兄弟分支：「目录不完整」（供应商未登录）时的那条全关路径同样必须 `'keep'`。
+     *
+     * 两条分支**各写各的**（不是提取成一处），故必须各有一条守卫 —— 只守一条
+     * 时另一条回退成 `false` 仍会全绿。
+     */
+    it('★★★ 目录不完整时的「全关」同样不得删除供应商关闭意图', async () => {
+      const fallback = [{ id: 'unity-a', name: 'Unity A' }]
+      const { call, pool, storedValue } = registerEndpoints({
+        models: [],
+        modelAdapters: { buddy: { listAllModels: () => fallback } },
+      })
+      await pool.setProviderClosed('buddy', true)
+
+      const result = await call('model.setAllDisabled', {
+        provider: 'buddy',
+        disabled: true,
+        closeProvider: false,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(storedValue().providerClosed, '目录不完整分支同样不得删意图')
+        .toEqual({ buddy: true })
+      // ⚠️ 二审 M4：用例名承诺的是「**全关**」，而黑名单写入此前**完全没有断言** ——
+      //    若实现「放行 `ok:true` 但一个字没写」，上面那条仍绿（`providerClosed`
+      //    的值来自前一行 `pool.setProviderClosed`，与黑名单写入无关）。
+      //    同组另一条用例（模型列表屏那格）有这条，本格漏了。
+      expect(storedValue().disabledModels, '「全关」必须真的把可见模型写进黑名单')
+        .toEqual({ buddy: { 'unity-a': true } })
+    })
+
+    /**
+     * ⚠️ 反向对照：**「关闭供应商」入口**在同样的残缺目录下**仍必须拒绝**。
+     *
+     * 那条路径会落「关闭意图」⇒ 允许它在只看得到兜底子集时就写意图，正是
+     * ISSUE IKJW33 的原始缺陷（供应商显示已关闭、而远端几百个模型仍可选）。
+     */
+    it('★★ 但「关闭供应商」入口（不传 closeProvider）在同样的残缺目录下仍必须拒绝', async () => {
+      const fallback = [{ id: 'unity-a', name: 'Unity A' }]
+      const { call, storedValue } = registerEndpoints({
+        models: [],
+        modelAdapters: { buddy: { listAllModels: () => fallback } },
+      })
+
+      const result = await call('model.setAllDisabled', { provider: 'buddy', disabled: true })
+
+      expect(result.ok).toBe(false)
+      expect(result.error?.message ?? '').toContain('没有可关闭的模型')
+      expect(storedValue().disabledModels ?? {}, '拒绝时一个字节都不许写').toEqual({})
+    })
+
+    /**
+     * ⚠️⚠️ 冷帧（聚合目录只读到 `auto` 一条）**不是**「无账号门控」。
+     *
+     * 上一格放行的依据是「远端读到但为空 = 该供应商没有账号 ⇒ 兜底表就是全部」。
+     * 而冷帧是**另一个形态**：远端读到了、却只有 `auto` 一条，其余虚拟模型还在
+     * 后台推导 ⇒ 此时写黑名单会「只关掉 auto」，另外两个**仍可选**，而端点返回
+     * 成功 —— 正是 IKJW33 明令禁止的形态。
+     *
+     * ⇒ 放行条件里的 `catalog.notReady === undefined` 是**承重**的。
+     * ⚠️ 2026-11-05 审查发现这条**此前零用例**（删掉那半条判据没有任何测试变红）。
+     */
+    it('★★ 冷帧（notReady）+ 模型列表屏（closeProvider:false）⇒ 仍必须拒绝，不得只关 auto', async () => {
+      const fallback = [{ id: 'auto', name: 'Auto' }]
+      const { call, storedValue } = registerEndpoints({
+        models: [],
+        modelAdapters: {
+          buddy: {
+            listAllModels: () => fallback,
+            // ⚠️ `reason` 用**独特**字符串：若写成文案里已有的「聚合目录尚未读取完成」，
+            //    那条 `toContain` 会被**写死的前半句**喂饱 ⇒ 删掉 `${catalog.notReady}`
+            //    插值也不会红（假绿）。用独特值才能证明 reason 真被带出来。
+            catalogReadyForBulkWrite: () => ({ ready: false, reason: '通道路由推导中' }),
+          },
+        },
+      })
+
+      const result = await call('model.setAllDisabled', {
+        provider: 'buddy',
+        disabled: true,
+        closeProvider: false,
+      })
+
+      expect(result.ok, '冷帧放行 ⇒ 只关掉 auto、其余虚拟模型仍可选').toBe(false)
+      // ⚠️⚠️ 报文必须**点出冷帧**（二审 P2-1）：`notReady` 有值 = 聚合目录还在后台
+      //    推导，用户动作是「等一下再点」；而「没账号」的动作是「去登录」。
+      //    `provider.setEnabled` 早就分开说了，本端点此前写死通用文案
+      //    「该供应商没有可关闭的模型」—— 冷帧下界面明明列着模型，自相矛盾。
+      //
+      // ⚠️⚠️ **只断言 reason 原文，不断言固定文案**（二审 M2）：写死
+      //    `toContain('尚未读取完成')` 会与产品措辞**绑死** —— 产品再改一次词
+      //    （哪怕改得更准）这条就假红。而「reason 被带出来」是**语义**，改词不该动摇它。
+      //    ⇒ 独特字符串「通道路由推导中」只有从 `${catalog.notReady}` 插值而来，
+      //      删掉插值必然变红；产品改前后缀则不受影响。
+      expect(result.error?.message ?? '', '冷帧必须把 reason 原文带给用户').toContain('通道路由推导中')
+      // ⚠️ 用 `toEqual({})` 而不是 `not.toHaveProperty('buddy')`（二审建议 1）：
+      //    后者只证明「buddy 这个键没被写」，若实现写成了**别的 provider** 仍绿；
+      //    整表比对才能锁住「一个字节都不许落盘」。
+      expect(storedValue().disabledModels ?? {}, '冷帧一个字节都不许落盘').toEqual({})
     })
 
     /**
@@ -3707,6 +3914,15 @@ describe('provider.status / provider.setEnabled 端点', () => {
      * 用例需要把适配器挂到 `aggregate` 键下才能命中 `aggregate` 的那套判据。
      */
     providerId?: string
+    /**
+     * 把**同一个**适配器替身挂到多个 provider 键下（默认只挂 `providerId`）。
+     *
+     * ⚠️ 只为一件事存在：验证 `provider.status` 的**核实腿是并发还是串行**
+     *（2026-11-05 三审端到端 P1-1）。串行时总耗时随家数线性增长
+     *（28 家 × 2s = 56194ms 实测），并发时 `≤ 2s`。
+     * 不传 ⇒ 行为与改动前逐字节相同（既有 262 条用例不受影响）。
+     */
+    adapterProviders?: readonly string[]
   } = {}) {
     let stored: Record<string, unknown> = {
       // ⚠️ 账号条目必须补齐 `credentialRef`（非空）与 `createdAt`/`refreshable`：
@@ -3819,7 +4035,14 @@ describe('provider.status / provider.setEnabled 端点', () => {
       // 再也挤不掉它 —— 这正是本次改签名要消除的缺陷。
       ctx as never, pool,
       authsStub(),
-      (adapter !== undefined ? { [options.providerId ?? 'buddy']: adapter } : undefined) as never,
+      (adapter !== undefined
+        ? Object.fromEntries(
+            // 默认只挂一个键（既有 262 条用例的行为逐字节不变）；`adapterProviders`
+        // 让同一个替身挂到多家，用于测「核实腿是并发还是串行」。
+            (options.adapterProviders ?? [options.providerId ?? 'buddy'])
+              .map((provider) => [provider, adapter]),
+          )
+        : undefined) as never,
     )
     if (handler === undefined) throw new Error('endpoint handler was not registered')
 
@@ -4032,6 +4255,54 @@ describe('provider.status / provider.setEnabled 端点', () => {
     })
 
     /**
+     * ★★ ★★ **核实腿必须并发**（2026-11-05 三审端到端 P1-1）。
+     *
+     * 现场：插件更新 / 重启后首次打开 Jet Hub 设置页，前端一次性把**全部 30 家**
+     * 塞进一个 `provider.status` 请求；而每家「派生判据说已关闭」的供应商都要
+     * `await fullCatalogIds(...)`（`CATALOG_READ_TIMEOUT_MS = 2000`）。
+     *
+     * 串行实现（改动前）实测：
+     * ```
+     * 3 家  ⇒ 6053ms
+     * 28 家 ⇒ 56194ms     ← 上界 25 家有账号 × 2s ≈ 50s
+     * ```
+     * 症状：设置页所有开关灰显（`reason: '状态尚未读取'`）最长 50 秒，期间
+     * 分组不生效、之后突然重排，**全程零提示**。
+     *
+     * ⚠️ 判据必须是**墙钟时间**，不能断言「`listModels` 被调了 28 次」——
+     * 串行与并发都会调 28 次（那是恒真）。
+     *
+     * ⚠️ 桩用「每家延迟 100ms 后**成功**返回」，而不是「永不 resolve」：
+     *    后者会让用例依赖 `CATALOG_READ_TIMEOUT_MS` 的 2s 定时器，全量并行
+     *    跑时时序不稳（实测 20s 超时）。改成功桩后：并发 = 100ms，
+     *    串行 = 28 × 100ms = 2800ms，两者差 28 倍，判据稳且判别力更强
+     *    （它直接测「远端调用是否并发」，不掺超时逻辑）。
+     */
+    it('★★ ★★ 28 家同时「已关闭」时核实必须并发（串行 ⇒ 56 秒）', async () => {
+      const providers = Array.from({ length: 28 }, (_, index) => `p${index}`)
+      const { call } = setup({
+        catalog: CATALOG,
+        // 每家都「目录里每一条都在黑名单里」⇒ 派生判据说已关闭 ⇒ 触发核实。
+        disabledModels: Object.fromEntries(
+          providers.map((provider) => [provider, { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true }]),
+        ),
+        adapterProviders: providers,
+        // 每家延迟 100ms 后成功 ⇒ 并发 100ms / 串行 2800ms。
+        onListModels: () => new Promise<void>((resolve) => setTimeout(resolve, 100)),
+      })
+
+      const startedAt = Date.now()
+      const result = await call('provider.status', { providers })
+      const elapsed = Date.now() - startedAt
+
+      // 28 家都要出现在结果里（并发不得丢键）。
+      const statuses = (result.value as { statuses: Record<string, unknown> }).statuses
+      expect(Object.keys(statuses)).toHaveLength(28)
+      // 并发 = 100ms + 调度开销；串行 = 2800ms。取 1000ms 作界。
+      expect(elapsed, '28 家串行核实 ⇒ 每家 100ms ⇒ 2800ms（三审端到端 P1-1）').toBeLessThan(1000)
+    })
+
+    /**
      * ⚠️ 反向：**真的全关**时仍须报已关闭。
      *
      * ⚠️ 这条尤其重要：全部关闭时 `listModels()` 会被黑名单**过滤成空数组**
@@ -4053,10 +4324,39 @@ describe('provider.status / provider.setEnabled 端点', () => {
     })
 
     /**
-     * ⚠️ **远端读失败时保守报未关闭**（安全方向：报 false 用户可点开关、
-     * 点了会得到明确错误；报 true 则会把可用模型说成已关闭）。
+     * ⚠️⚠️ **远端读失败时保留派生判据的结论**（2026-11-05 四审端到端 P1-1 改判）。
+     *
+     * ## 三审的结论（已推翻）
+     * 三审（`9b2f93a`）这里报 `closed: false`，理由是「报 false 是安全方向：
+     * 用户可点开关、点了会得到明确错误；报 true 则把可用模型说成已关闭」。
+     *
+     * ## 为什么被推翻（真实链路实测）
+     * 真实 UI 载荷是 `model.setAllDisabled({ closeProvider: false })`
+     *（`plugin-src/client/jet-hub.js` 的 `setProviderAll`）⇒ **永不写关闭意图**
+     * ⇒ 每次读状态都走核实腿。于是**任何一次上游瞬态故障**（429 / 502 /
+     * 超时 > 2s）都会把「派生判据说已关闭」的**全部**供应商一起翻成
+     * `closed: false`：
+     * ```
+     * 健康目录：        closed === true  = 28/28
+     * 目录 429（2ms）： closed === false = 28/28   ← 界面「全部开启」
+     * 502 / 超时 2100ms：同上
+     * ```
+     * 而 `groupProviders`（`plugin-src/client/provider-toggle.js`）只读
+     * `closed === true` ⇒ 28 家整片从「已关闭」组跳到「已打开」组 =
+     * 用户报障的「有时候全部开启 / 全部关闭」。
+     *
+     * ## 新语义
+     * **「核实不了」只意味着「我无法证明它已关闭」，不意味着「它没关闭」。**
+     * 此时保留派生判据（`closed`/`disabled`/`total` 三者来自同一个本地快照，
+     * 自洽），只用 `verifyFailed` 附注「本次未能核实」—— 前端据此把开关渲染成
+     * 禁用并给出原因。目录真的变长时，那一次**成功**的核实会给出
+     * `closed: false`（见「真的全关时仍报已关闭」的相邻分支）。
+     *
+     * ⚠️ 与 `notReady` 那一格刻意不同：`notReady` 是适配器**确定性**地说
+     * 「我这份目录不全」⇒ 此时「全关」不构成证据 ⇒ 仍报 `false`
+     *（见「冷帧下必须报未关闭」那条）。
      */
-    it('⚠️ 核实不了（远端读失败）时保守报未关闭（安全方向）', async () => {
+    it('⚠️ 核实不了（远端读失败）时保留派生判据（不再翻成未关闭）', async () => {
       const { call } = setup({
         catalog: CATALOG,
         listModelsError: '令牌已过期',
@@ -4065,9 +4365,32 @@ describe('provider.status / provider.setEnabled 端点', () => {
       })
 
       const result = await call('provider.status', { providers: ['buddy'] })
-      const s = (result.value as { statuses: Record<string, { closed: boolean }> }).statuses.buddy
+      const s = (result.value as { statuses: Record<string, { closed: boolean; verifyFailed?: string }> }).statuses.buddy
 
-      expect(s.closed, '读不到目录时必须报未关闭（安全方向）').toBe(false)
+      // ⚠️ 保留派生判据：本地快照里 `hy3` 是唯一条目且已关 ⇒ 仍报已关闭。
+      //    报 `false` 会让 28 家随上游抖动整片翻转（见上方用例注释的实测）。
+      expect(s.closed, '远端读失败不得把「无法证明」当成「没关闭」').toBe(true)
+      // ⚠️⚠️ 但**必须透出原因**（2026-11-05 三审端到端 P1-2）：否则用户看到的是
+      // 「已关闭 1」+ 开关「点不动」而**拿不到任何线索**。
+      expect(s.verifyFailed, '核实失败必须透出原因，否则用户只看到「开关点不动」')
+        .toContain('令牌已过期')
+    })
+
+    /**
+     * ⚠️ 反向对照：核实**成功**时不得出现 `verifyFailed`（否则前端会把
+     * 「一切正常」渲染成告警）。
+     */
+    it('★ 核实成功时不得出现 verifyFailed（否则正常态被渲染成告警）', async () => {
+      const { call } = setup({
+        catalog: CATALOG,
+        disabledModels: { buddy: { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true } },
+      })
+
+      const result = await call('provider.status', { providers: ['buddy'] })
+      const s = (result.value as { statuses: Record<string, { closed: boolean; verifyFailed?: string }> }).statuses.buddy
+
+      expect(s.closed).toBe(true)
+      expect(s.verifyFailed).toBeUndefined()
     })
 
     /**
@@ -4090,6 +4413,57 @@ describe('provider.status / provider.setEnabled 端点', () => {
 
       expect(s.closed).toBe(false)
       expect(listModelsCalls, '未关闭的供应商不该读远端目录').toBe(0)
+    })
+
+    /**
+     * ⚠️⚠️ **同一 provider 的在飞核实必须去重**（2026-11-05 四审端到端 P2-1）。
+     *
+     * `withTimeout` 只 reject 外层 Promise、**不取消**底层请求（`listModels`
+     * 不接受 signal）⇒ 每次 `provider.status` 都对「已关闭」的家发一轮核实。
+     * 而该端点在挂载、每次 `toggleProvider` 后、用户点「重试」时都会被调用 ⇒
+     * 上游 5s 才返回时实测**峰值并发 56 / 总调用 56 次**（28 家 × 2 轮）。
+     * 后果是正反馈：请求越多越容易 429，429 又产出 `remoteError`。
+     */
+    it('★★ ★★ 并发两次 provider.status ⇒ 同一 provider 只核实一次（single-flight）', async () => {
+      let listModelsCalls = 0
+      const { call } = setup({
+        catalog: CATALOG,
+        disabledModels: { buddy: { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true } },
+        onListModels: async () => {
+          listModelsCalls += 1
+          // 制造「在飞」窗口：不延迟的话第一次早已完成、第二次自然重发。
+          await new Promise<void>((resolve) => setTimeout(resolve, 50))
+        },
+      })
+
+      const [a, b] = await Promise.all([
+        call('provider.status', { providers: ['buddy'] }),
+        call('provider.status', { providers: ['buddy'] }),
+      ])
+
+      expect(a.ok, '第一次必须成功').toBe(true)
+      expect(b.ok, '第二次必须成功').toBe(true)
+      expect(listModelsCalls, '同一 provider 的在飞核实必须只发一次请求').toBe(1)
+    })
+
+    /**
+     * ⚠️ 反向对照：**「在飞」不是「缓存」**。
+     *
+     * 若把 `catalogVerifyInFlight` 实现成模块级永久缓存（完成后不清除），
+     * 用户切换开关后目录就永远是旧的。这条用例把它与「去重」分开。
+     */
+    it('★ 反向对照：串行两次 ⇒ 各核实一次（在飞去重不是缓存）', async () => {
+      let listModelsCalls = 0
+      const { call } = setup({
+        catalog: CATALOG,
+        disabledModels: { buddy: { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true } },
+        onListModels: async () => { listModelsCalls += 1 },
+      })
+
+      await call('provider.status', { providers: ['buddy'] })
+      await call('provider.status', { providers: ['buddy'] })
+
+      expect(listModelsCalls, '完成后必须清除在飞条目（否则目录会过期）').toBe(2)
     })
 
     it('providers 非字符串数组 → bad-request', async () => {

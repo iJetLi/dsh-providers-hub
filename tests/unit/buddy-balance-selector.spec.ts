@@ -707,6 +707,98 @@ describe('BuddyBalanceSelector：fetchBalanceDetailed（锁定时必须说出「
   })
 })
 
+/**
+ * ⚠️⚠️ 2026-11-04 真机报障「**模型都选不了了**」的直接成因：
+ * 面板上「永久积分」锁定开着 + 余额接口被上游网关整片拒绝（真机国内站 403、
+ * 国际站 405，九个账号无一幸免）⇒ 每个账号都 `unknown` ⇒ 调用方抛 `lockedError`
+ * ⇒ **整个 provider 的模型列表被清空**，模型选择器里只剩一大段错误文案。
+ *
+ * 判据必须**两向**：开了开关时「查不到」要放行；但「查得到且只剩永久桶」
+ * **仍必须报 locked** —— 否则这个开关就成了绕过锁定的后门。
+ */
+describe('★★ 锁定 + 余额查不到：degradeOnUnknown 开关', () => {
+  // ⚠️ 名字刻意的：本 describe 里另有「按 accountId 路由余额」的外层 `makeSelector`
+  //    （文件顶部），两者签名不同 —— 同名遮蔽会让新用例静默拿到错误的造数器
+  //    （实测：`const { selector } = makeSelector(...)` 解构成 `undefined`）。
+  const makeSingleAccountSelector = (fetchBalance: () => Promise<CreditBalance | null>) =>
+    new BuddyBalanceSelector({
+      product: CODEBUDDY,
+      now: () => NOW,
+      resolveCredential: async () => ({ access_token: 'tok' }) as BuddyCredential,
+      fetchBalance,
+    })
+
+  const pick = async (
+    fetchBalance: () => Promise<CreditBalance | null>,
+    degradeOnUnknown: boolean,
+  ) => await pickBuddyAccount(makeSingleAccountSelector(fetchBalance), [account('a1')], {
+    allowPermanent: false,
+    resolveCredential: async () => ({ access_token: 'tok' }) as BuddyCredential,
+    degradeOnUnknown,
+  })
+
+  // ⚠️ 2026-11-05 红队：原名写「默认（不传开关）」，但实参是 `false`（`degradeOnUnknown`
+  //    的类型是 `boolean`，**传不了 `undefined`**）⇒ 名不符实。「不传」的语义由
+  //    `fetchBalanceDetailed` 那组的分支 4 覆盖（G3-M3 打红 4 条），这里改名说清。
+  it('显式传 false：锁定 + 查不到 ⇒ locked —— 既有语义逐字不变', async () => {
+    const result = await pick(async () => null, false)
+    expect(result.kind).toBe('locked')
+  })
+
+  it('★★ 开关打开：锁定 + 查不到 ⇒ 放宽一次、返回账号（渠道不再整条不可用）', async () => {
+    const result = await pick(async () => null, true)
+    expect(result.kind).toBe('account')
+    expect(result.kind === 'account' ? result.account.id : undefined).toBe('a1')
+  })
+
+  it('★★ ★★ 余额**查得到**且只剩永久桶 ⇒ 即使开了开关也必须 locked（降级不得绕过锁定）', async () => {
+    const permanentOnly = async () =>
+      balance(pkg({ remaining: 800, deductionEndTime: '2099-01-01T00:00:00.000Z' }))
+    const result = await pick(permanentOnly, true)
+    expect(result.kind).toBe('locked')
+  })
+
+  /**
+   * ⚠️⚠️ **混合形态：降级不得把「明确只剩永久积分」的账号一起放行**
+   *（2026-11-05 三审回归面 P1-1，`631f1c8` 引入的回归）。
+   *
+   * `noAccountReason` 是**池级**判据（任一账号查不到即 `unknown`），而降级分支
+   * 会把 `allowPermanent` **全局**置真 ⇒ 重排时 `buddyBalanceTier` 对
+   * 「`expiring = 0` 且 `permanent > 0`」的账号返回 `permanent`（可用）
+   * ⇒ 该账号被选中 ⇒ **用户明明关掉了「消耗永久积分」却被烧**。
+   *
+   * 实测（真实 `lib/` 链路）：`degrade=false` 得 `locked`，`degrade=true` 得
+   * `account a2 (tier=permanent)`。上面三条单账号用例**全部抓不到**这一格。
+   *
+   * ⇒ 修法是 `select()` 在进入降级分支前先判 `definitive`（存在「余额查得到且
+   * 只剩永久」的账号 ⇒ 报 `exhausted`，不降级）。
+   */
+  it('★★ ★★ 混合形态：一个查不到 + 一个明确只剩永久 ⇒ 必须 locked（不得烧永久积分）', async () => {
+    const { selector } = makeSelector({
+      a1: null,
+      a2: balance(pkg({ remaining: 800, deductionEndTime: '2099-01-01T00:00:00.000Z' })),
+    })
+    const result = await pickBuddyAccount(selector, [account('a1'), account('a2')], {
+      allowPermanent: false,
+      resolveCredential: async (ref) => ({ access_token: `token-of-${ref}` }) as BuddyCredential,
+      degradeOnUnknown: true,
+    })
+    expect(result.kind).toBe('locked')
+  })
+
+  it('★ 混合形态的反向对照：查不到的账号仍可被降级放行（不得因上一格而拒绝全部）', async () => {
+    // ⚠️ 没有这条，把 `definitive` 写成恒真（`return true`）也全绿 ——
+    // 那会让「纯查不到」的池也永远报 locked，降级开关彻底失效。
+    const { selector } = makeSelector({ a1: null, a2: null })
+    const result = await pickBuddyAccount(selector, [account('a1'), account('a2')], {
+      allowPermanent: false,
+      resolveCredential: async (ref) => ({ access_token: `token-of-${ref}` }) as BuddyCredential,
+      degradeOnUnknown: true,
+    })
+    expect(result.kind).toBe('account')
+  })
+})
+
 /** 只注入 `fetchBalanceDetailed` 的选号器（`balanceImpl` 为 `Error` 时抛错）。 */
 function makeDetailedSelector(
   balanceImpl: { balance: CreditBalance | null; error?: string } | Error,

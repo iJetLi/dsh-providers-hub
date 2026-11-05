@@ -93,6 +93,31 @@ export function providerSwitchState(status) {
   // 已关闭时用户要做的恰恰是**打开**，那个方向永远合法（`provider.setEnabled(true)`
   // 不读目录、纯本地清黑名单 + 清意图）。
   if (status.closed === true) return { checked: false, disabled: false, reason: null };
+  // ⚠️⚠️ **核实腿没能证明「已关闭」时的自相矛盾态**（2026-11-05 三审端到端 P1-2）：
+  //
+  // 服务端在「派生判据说全关了、但目录核实失败」时**故意**报 `closed: false`
+  // （保守方向：不敢断言已关闭，否则会出现 IKJW33 那种「界面说关了、模型却仍可选」），
+  // 同时把原因写进 `verifyFailed`。但前端若只读 `closed`，用户看到的是：
+  // ```
+  // 界面：「2 个 · 已关闭 2」      开关：「已打开」
+  // 点开关 ⇒ 服务端拒绝「没有可关闭的模型：<远端原因>」
+  // ```
+  // —— **三者矛盾，且原因只在报错里**，用户拿不到。
+  //
+  // ⇒ 这里把「全关了 + 核实失败」渲染成**禁用 + 原因**（`reason` 是行 `title`，
+  //    用户悬停即见）。不禁用会更糟：点下去必失败，而失败文案与界面显示的「已打开」
+  //    对不上（用户会以为开关坏了）。
+  //
+  // ⚠️ 自愈：下次 `provider.status` 核实成功时 `verifyFailed` 消失，开关自动恢复。
+  // ⚠️ 判据必须同时要 `verifyFailed` 是非空字符串：字段缺席 = 核实成功或未需要核实。
+  if (typeof status.verifyFailed === 'string' && status.verifyFailed.length > 0
+    && total > 0 && status.models?.disabled === total) {
+    return {
+      checked: true,
+      disabled: true,
+      reason: `目录核实失败，无法确认是否已全部关闭：${status.verifyFailed}`,
+    };
+  }
   if (total <= 0) {
     return {
       checked: true,

@@ -86,11 +86,20 @@ class FakeLlm {
  * `registerProviderSettings` 会注册 provider 配置 namespace 并回读 `describe()`
  * 自检，因此替身必须同时实现 `register` 与 `describe`，否则自检日志会走
  * “describe 失败”分支，无法反映真实的 namespace 注册结果。
+ *
+ * ⚠️⚠️ **`register` 必须返回带 `get`/`replace` 的 scope 对象**（2026-11-05 四审
+ * 测试判别力）：真实宿主契约是「`register(ns, schema)` 返回该 namespace 的
+ * scope」，而原写法 `register(ns, _schema): void` 让 `createJetHubStore` 拿到
+ * `undefined` ⇒ `SettingsStore.load()` 里 `this.scope.get()` 抛
+ * `TypeError: Cannot read properties of undefined (reading 'get')`。
+ * **该异常被 `apply()` 内部的 try/catch 吞掉** ⇒ 本文件大部分用例仍是绿的，
+ * 只有真去读 store 的两条（zcode / minimax 的目录接线）会红。
  */
 class FakeSettings {
   readonly registeredNamespaces: string[] = []
-  register(ns: string, _schema: unknown): void {
+  register(ns: string, _schema: unknown): { get: () => unknown; replace: (value: unknown) => void } {
     if (!this.registeredNamespaces.includes(ns)) this.registeredNamespaces.push(ns)
+    return { get: () => undefined, replace: () => {} }
   }
   describe(): Array<{ ns: string }> {
     return this.registeredNamespaces.map((ns) => ({ ns }))

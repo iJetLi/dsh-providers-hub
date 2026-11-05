@@ -526,8 +526,20 @@ export class AccountPool {
   /** 首次访问时从后端载入账号列表、黑名单与锁定表。 */
   private ensureLoaded(): void {
     if (this.loaded) return
-    this.loaded = true
+    // ⚠️⚠️ **`loaded` 必须在 `load()` 成功之后才置位**（2026-11-05 三审 P0-1）。
+    //
+    // `load()` 在读盘失败时会**抛错**（`FileStore` 与 `SettingsStore` 均如此），
+    // 目的正是让「读不出来」与「没有文件」可区分。若先置位再读，一次瞬时
+    // 故障（文件被占用 / 磁盘错误 / settings 作用域抛错）就会让 `loaded`
+    // 永久为真而缓存保持空表，接着任何一次 `writeModels` / `writeAccounts`
+    // 的 `queueStoreSave()` 都会把这份**空缓存整体落盘**
+    // ⇒ 账号列表、模型黑名单、关闭意图、网关开关**永久丢失**，且本进程
+    // **永不**再读盘，全程零报错。
+    //
+    // 现在的语义：读失败 ⇒ 抛给调用方（RPC 层转成用户可见错误）⇒
+    // `loaded` 仍为假 ⇒ 下一次访问会重试读盘。
     const state = this.store.load()
+    this.loaded = true
     if (state !== undefined) {
       // ⚠️ 这里的 `state.accounts` **已经过去重**：两种后端（SettingsStore /
       // FileStore）的 `load()` 都经 `sanitizeAccounts`，而它按 id 去重。
@@ -831,9 +843,16 @@ export class AccountPool {
    * ⇒ 语义定为：**「打开任意一个模型」= 用户想让这个供应商可用** ⇒ 清除意图，
    * 之后由派生判据（黑名单是否覆盖全目录）如实反映「还剩几个关着」。
    *
-   * ⚠️ 三个打开入口（`setModelDisabled(false)` / `clearModelsDisabled` /
+   * ⚠️ **三个**打开入口（`setModelDisabled(false)` / `clearModelsDisabled` /
    * `clearDisabledModels`）都在**本类内部**调用它 —— 调用方（RPC 层）不需要
    * 记得清，这正是「收口到一个实现」的目的。
+   *
+   * ⚠️ **第四个入口刻意不走这里**：`clearModelsWithProviderClosed`（见下）必须
+   * 「清黑名单 + 清意图」**一次落盘**（Gitee issue IKP8OF —— 分两次会在两次
+   * `replace` 之间留下「黑名单空 + 意图真」，重启后该供应商的模型选择器恒空）。
+   * 所以它**内联** `delete providerClosedCache[provider]`，而不是调本方法
+   *（本方法走 `setProviderClosed` ⇒ 独立落盘）。**这不是漏收口，是刻意的**：
+   * 谁要在这条路径上「顺手统一」成分两步的写法，就会把 IKP8OF 原样挖回来。
    */
   private async clearProviderClosed(provider: string): Promise<void> {
     if (this.providerClosedCache[provider] !== true) return
@@ -1317,6 +1336,11 @@ export class AccountPool {
    * "键存在且为 true 即隐藏"，配置文件也不会随开关操作无限膨胀。
    */
   async setModelDisabled(provider: string, modelId: string, disabled: boolean): Promise<void> {
+    // ⚠️ 六个写入方法里**只有这一处**曾漏掉 `ensureLoaded()`（2026-11-05 三审
+    // P0-2）：`model.setDisabled` 是 RPC 直入口（`src/jet-hub-rpc.ts:8948`），
+    // 脚本 / AI 助手可能直接调用而从未先跑 `list`。冷缓存下拿空表改一处再
+    // `writeModels` ⇒ 其它供应商的黑名单与关闭意图被整份抹掉。
+    this.ensureLoaded()
     const next: ModelDisableMap = { ...this.modelCache }
     const perProvider = { ...(next[provider] ?? {}) }
     if (disabled) perProvider[modelId] = true
@@ -1527,12 +1551,36 @@ export class AccountPool {
    *
    * @param provider - provider id
    * @param modelIds - 要**追加**进黑名单的 id（已有的关闭项不受影响）
-   * @param closed - 目标关闭意图（`true` 写入 / `false` 删除该键）
+   * @param closed - 目标关闭意图：`true` 写入 / `false` 删除该键 / `'keep'` **不动该键**
+   *
+   * ## ⚠️⚠️ 为什么必须有 `'keep'` 这一态（2026-11-04 真机报障）
+   *
+   * 用户报障：「为什么更新插件后供应商状态会发生变化，比如停用的供应商会被启用」。
+   *
+   * 本方法的第三参原本只有 `true` / `false`，而 `false` 被实现成
+   * **`delete providerClosed[provider]`**（删掉关闭意图）。于是「模型列表屏点一次
+   * 全关」（`model.setAllDisabled` 的 `closeProvider: false` 分支，本意是
+   * 「只关这家的模型、**不碰**供应商开关」）会**把用户先前用「关闭供应商」设下的
+   * 意图一起删掉**：
+   *
+   * ```
+   * ① 用户点「关闭供应商」 ⇒ providerClosed={accio:true} + 全量黑名单   ← 稳定
+   * ② 之后在模型列表屏对同一家点「全关」 ⇒ 删意图 ⇒ providerClosed={}
+   * ③ 插件更新 / 目录变长 ⇒ 派生判据 disabled!==total ⇒ 翻回「启用」
+   * ```
+   *
+   * 实测现场：用户的 `providerClosed` 只剩 `{accio:true}`，其余靠「关闭供应商」
+   * 关过的全都不见了 —— 它们在后续的「全关」里被静默删除。
+   *
+   * ⇒ `false` 只该由「打开供应商」路径使用（`provider.setEnabled(true)` 走
+   * `clearModelsWithProviderClosed`，语义确实是「清掉意图」）；**模型级的批量
+   * 关闭**必须传 `'keep'`：它既不该写意图（那会把整家关掉），也**不该删意图**
+   * （那会让用户先前设下的关闭状态失效）。
    */
   async writeModelsWithProviderClosed(
     provider: string,
     modelIds: readonly string[],
-    closed: boolean,
+    closed: boolean | 'keep',
   ): Promise<void> {
     this.ensureLoaded()
     const next: ModelDisableMap = { ...this.modelCache }
@@ -1542,10 +1590,14 @@ export class AccountPool {
       next[provider] = perProvider
     }
     this.modelCache = next
-    const nextClosed: ProviderClosedMap = { ...this.providerClosedCache }
-    if (closed) nextClosed[provider] = true
-    else delete nextClosed[provider]
-    this.providerClosedCache = nextClosed
+    // ⚠️ `'keep'` ⇒ 连 `providerClosedCache` 的浅拷贝都不做，让「不动」可验证
+    //（不是「拷一份再写回同一个值」那种看起来没变的实现）。
+    if (closed !== 'keep') {
+      const nextClosed: ProviderClosedMap = { ...this.providerClosedCache }
+      if (closed) nextClosed[provider] = true
+      else delete nextClosed[provider]
+      this.providerClosedCache = nextClosed
+    }
     this.loaded = true
     if (this.store.kind === 'memory') {
       this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，模型黑名单与关闭状态变更未落盘')

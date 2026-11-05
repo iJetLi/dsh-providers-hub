@@ -616,6 +616,64 @@ describe('★★ IKP8OF：手写 listModels 的四家必须响应「供应商整
     })
 
     /**
+     * ⚠️⚠️⚠️ 2026-11-04 真机报障：「**更新插件后停用的供应商会被启用**」。
+     *
+     * 上面的用例只覆盖 `true`（写意图）。而同一个方法的第三参传 `false` 时
+     * 实现是 **`delete providerClosed[provider]`** —— 于是「模型列表屏全关」
+     * （本意「不碰供应商开关」）会**删掉**用户先前用「关闭供应商」设好的意图：
+     *
+     * ```
+     * ① 关闭供应商 ⇒ providerClosed={X:true}   ← 与目录无关，本来稳定
+     * ② 模型列表屏点「全关」 ⇒ 传 false ⇒ 意图被删
+     * ③ 更新 / 目录变长 ⇒ 派生判据失配 ⇒ 翻回「启用」
+     * ```
+     *
+     * ⇒ 必须提供 `'keep'` 态：**既不加也不删**。
+     */
+    it('★★★ 第三参传 keep 时不得改动关闭意图（模型级全关专用）', async () => {
+      const stored: Record<string, unknown> = { accounts: [] }
+      const pool = makePool(stored)
+      // 先进入「关闭供应商」态。
+      await pool.writeModelsWithProviderClosed('cline', ['m0'], true)
+      expect(pool.providerClosedFor('cline')).toBe(true)
+
+      // 模型级全关：追加黑名单，但**不动**意图。
+      await pool.writeModelsWithProviderClosed('cline', ['m1'], 'keep')
+
+      expect(
+        pool.providerClosedFor('cline'),
+        '★★★ keep 把关闭意图删了 ⇒ 用户点过「关闭供应商」的会随更新静默变回启用',
+      ).toBe(true)
+      expect((stored as { providerClosed?: unknown }).providerClosed).toEqual({ cline: true })
+      // 黑名单确实追加（`keep` 只影响意图，不影响黑名单）。
+      expect(pool.listDisabledModels('cline')).toEqual({ m0: true, m1: true })
+
+      // ⚠️⚠️ **必须另测「本来没有意图」的 provider**：只在「已有意图」上断言
+      // `=== true` 时，把实现改成「`keep` 恒写 true」也全绿（实测 M3 无牙）。
+      // 这一格才让 `keep` 的「**不动**」与「写 true」分开。
+      await pool.writeModelsWithProviderClosed('cline-unused', ['m9'], 'keep')
+      expect(
+        pool.providerClosedFor('cline-unused'),
+        '★★★ keep 不得凭空写入关闭意图（否则等于把整家关掉）',
+      ).toBe(false)
+    })
+
+    /**
+     * 反向对照：`false` 仍是「**删除**意图」（既有语义，`provider.setEnabled(true)`
+     * 依赖它）。没有这条，把 `false` 与 `'keep'` 合并成一个分支也能全绿。
+     */
+    it('★★ 第三参传 false 仍必须删除关闭意图（无生产调用方；保留三态语义完整性）', async () => {
+      const stored: Record<string, unknown> = { accounts: [] }
+      const pool = makePool(stored)
+      await pool.writeModelsWithProviderClosed('cline', ['m0'], true)
+
+      await pool.writeModelsWithProviderClosed('cline', [], false)
+
+      expect(pool.providerClosedFor('cline')).toBe(false)
+      expect((stored as { providerClosed?: unknown }).providerClosed).toEqual({})
+    })
+
+    /**
      * ★★ **「打开供应商」必须一次落盘**（对抗审计打穿：打开方向漏了合并）。
      *
      * 原先走两步（`clearDisabledModels` save #1 → `setProviderClosed(false)` save #2），
