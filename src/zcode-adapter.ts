@@ -77,6 +77,7 @@ import {
   shouldFallbackToOtherChannel,
   type ZcodeChannel,
 } from './zcode-transport.js'
+import { zcodeInferenceAppVersion } from './zcode-upstream.js'
 import {
   buildZcodeSystemBlocks,
   withCallerSystem,
@@ -1432,6 +1433,14 @@ export class ZcodeAdapter extends LlmAdapter {
             sentAt: upstreamStartedAt,
             status: response.status,
             shape: describeZcodeRequestShape(body.system, body.messages),
+            /**
+             * ★ 实际发出的客户端版本（Issue #45）。
+             *
+             * 3012 的判据是「版本号与身份块**同代**」⇒ 只报身份块字符数不够，
+             * 必须把版本一并打出来。取值与真实请求头**同源**
+             * （{@link zcodeInferenceAppVersion}），不另写门控。
+             */
+            appVersion: zcodeInferenceAppVersion(credential),
             /**
              * ★ `logid` —— 上游侧排障的**唯一凭据**（2026-10-12 新增）。
              *

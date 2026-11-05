@@ -323,6 +323,9 @@ export class MagicrewAdapter extends LlmAdapter {
       accept: 'text/event-stream',
       'user-agent': USER_AGENT,
       origin: this.product.webOrigin,
+      // ⚠️ 聊天网关本身不校验 referer（实测 200），但与其余 magicrew 请求统一：
+      //    同一上游的 profile / gateway-token 两个端点缺了它就是 403 空 body。
+      referer: `${this.product.webOrigin}/`,
     }
     // ⚠️ 国际站**强制**要它（缺了是 HTTP 500 裸文本）；国内站不强制但带上无害。
     if (credential.organizationCode.length > 0) {
