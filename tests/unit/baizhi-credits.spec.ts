@@ -191,6 +191,25 @@ describe('fetchBaizhiWallet（控制台钱包 ⇒ 单位 /100）', () => {
     }
   })
 
+  it('★★ 授信账户：读取 billing_mode / credit_limit_cents（1000 积分窗口的分母）', async () => {
+    const { fetchImpl } = makeFetch({
+      body: walletBody({
+        billing_mode: 'postpaid',
+        credit_limit_cents: 100000,
+        available_credit_cents: 90800,
+        temporary_credit_cents: 0,
+        permanent_credit_cents: 0,
+      }),
+    })
+    const res = await fetchBaizhiWallet({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.wallet.billingMode).toBe('postpaid')
+      expect(res.wallet.creditLimit).toBe(1000)
+      expect(res.wallet.available).toBe(908)
+    }
+  })
+
   it('缺 available_credit_cents ⇒ 明确报「未下发」，不静默当 0', async () => {
     const { fetchImpl } = makeFetch({ body: JSON.stringify({ code: 0, data: { balance: 1 } }) })
     const res = await fetchBaizhiWallet({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
@@ -250,14 +269,40 @@ describe('buildBaizhiBalance（控制台钱包页三行数字 ⇒ 面板包）',
     dailyClaimed: true,
   }
 
-  it('主行 = 可用积分；每日/充值各一个有效包', () => {
+  it('主行 = 可用积分；每日包分母固定 100，充值包不假装知道总额', () => {
     const balance = buildBaizhiBalance(wallet, undefined)
     expect(balance.total).toBe(235.05)
     expect(balance.packages.map((p) => p.name)).toEqual(['每日积分', '充值积分'])
     expect(balance.packages.every((p) => p.active)).toBe(true)
+    // 每日包上游按 +100/天发放：remaining 98.21 时必须是 98.21 / 100，
+    // 而不是旧实现的 98.21 / 98.21（用户 2026-11-05 报障）。
+    expect(balance.packages[0]).toMatchObject({ remaining: 98.21, total: 100, used: 1.79 })
+    // 充值余额上游只给当前值，没有初始总额 ⇒ 面板不得显示假分母。
+    expect(balance.packages[1].totalKnown).toBe(false)
     // ⚠️ 上游只说「零点过期」不给时刻 ⇒ 不得编一个时间（面板会显示假倒计时）。
     expect(balance.packages[0].cycleEndTime).toBe('')
     expect(balance.packages[1].expiredTime).toBe('')
+  })
+
+  it('★★ 授信账户：1000 授信额度消耗后显示 908 / 1000（不是孤零零的 908）', () => {
+    const balance = buildBaizhiBalance({
+      available: 908,
+      temporary: 0,
+      permanent: 0,
+      frozen: 0,
+      dailyClaimed: true,
+      billingMode: 'postpaid',
+      creditLimit: 1000,
+    }, undefined)
+    expect(balance.total).toBe(908)
+    expect(balance.packages).toHaveLength(1)
+    expect(balance.packages[0]).toMatchObject({
+      name: '授信额度',
+      remaining: 908,
+      total: 1000,
+      used: 92,
+      totalKnown: true,
+    })
   })
 
   it('冻结积分 > 0 ⇒ 追加一个 active:false 的包（不可用额度）', () => {
@@ -281,8 +326,14 @@ describe('buildBaizhiBalance（控制台钱包页三行数字 ⇒ 面板包）',
       monthCalls: 31,
     })
     expect(balance.usage).toEqual({ label: '本月消耗', amount: 364.95, unit: 'credit' })
-    // ▶ 关键：用量**不能**混进额度包列表。
-    expect(balance.packages.map((p) => p.name)).toEqual(['每日积分', '充值积分'])
+    // 本月消耗存在时，充值包用「当前余额 + 本月充值消耗」反推期初（136.84 + 364.95 - 1.79 = 500）。
+    expect(balance.packages[1]).toMatchObject({
+      name: '充值积分',
+      remaining: 136.84,
+      total: 500,
+      used: 363.16,
+      totalKnown: true,
+    })
     // 且不影响主行总额（用量不是余额）。
     expect(balance.total).toBe(235.05)
   })

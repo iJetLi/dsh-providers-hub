@@ -843,6 +843,24 @@ describe('★ 积分区节标题：单位标签必须按数据走，不写死「
     expect(creditSectionLabel(groups)).toBe('积分')
   })
 
+  it('同一账号多量纲（MonkeyCode 积分 + 每日额度 token）⇒ 各自成组、不相加', () => {
+    const groups = creditGroupsOf([{
+      accountId: 'a',
+      nickname: 'a',
+      balance: {
+        total: 235,
+        packages: [
+          pkg('积分余额', 235, 'credit'),
+          pkg('每日额度', 9_240_000, 'token'),
+        ],
+        expiredTotal: 0,
+      },
+    }]).groups
+    expect(groups.map((g) => g.unit)).toEqual(['credit', 'token'])
+    expect(groups.find((g) => g.unit === 'credit')?.total).toBe(235)
+    expect(groups.find((g) => g.unit === 'token')?.total).toBe(9_240_000)
+  })
+
   it('脏数据（缺 unit / 非对象项）不抛错', () => {
     expect(creditSectionLabel([null, undefined, {}, { unit: 123 }])).toBe('积分')
   })

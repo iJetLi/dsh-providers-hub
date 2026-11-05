@@ -288,6 +288,32 @@ export function creditGroupsOf(accounts) {
     const group = byUnit.get(unit) ?? { unit, label: unitLabel(unit), total: 0, accountCount: 0 };
     group.total += balance.total;
     group.accountCount += 1;
+    /**
+     * 同一账号的**其他量纲**也要单独成组。
+     *
+     * MonkeyCode 的 `每日额度` 是 `token`，主积分是 `credit`；旧实现只取第一个
+     * 包的单位（credit）并把 `balance.total` 加进 credit 组，于是每日额度在
+     * 徽标/折叠态**完全看不到**（用户 2026-11-05 要求「猴子云要区分好积分余额」）。
+     * 这里把非主单位的有效包按**剩余量**另开一组；不同量纲不相加。
+     */
+    for (const pkg of Array.isArray(balance.packages) ? balance.packages : []) {
+      if (!pkg || pkg.active === false) continue
+      const pkgRawUnit = typeof pkg.unit === 'string' ? pkg.unit : ''
+      if (pkgRawUnit === '') continue
+      const pkgUnit = pkgRawUnit === QUOTA_UNIT ? QUOTA_UNIT : normalizeUnit(pkgRawUnit)
+      if (pkgUnit === unit) continue
+      const remaining = Number(pkg.remaining);
+      if (!Number.isFinite(remaining)) continue
+      const extraGroup = byUnit.get(pkgUnit) ?? {
+        unit: pkgUnit,
+        label: unitLabel(pkgUnit),
+        total: 0,
+        accountCount: 0,
+      };
+      extraGroup.total += remaining;
+      extraGroup.accountCount += 1;
+      byUnit.set(pkgUnit, extraGroup);
+    }
     if (unit === QUOTA_UNIT) {
       const line = formatQuotaLine(balance.packages, unit);
       group.quotaLines = group.quotaLines ?? [];
@@ -347,11 +373,13 @@ export function planGroupsOf(rows) {
       label: unitLabel(unit),
       remaining: 0,
       total: 0,
+      totalKnown: true,
       accountCount: 0,
       deductionEndTime: undefined,
     };
     group.remaining += Number(plan.remaining) || 0;
     group.total += Number(plan.total) || 0;
+    if (plan.totalKnown === false) group.totalKnown = false;
     group.accountCount += 1;
     // 取**最早**的到期时刻：多个账号同一套餐时，最该被注意的是最先作废的那份。
     const end = typeof plan.deductionEndTime === 'number' && Number.isFinite(plan.deductionEndTime)
@@ -564,7 +592,9 @@ function readingOf({ mode, windows, planGroups, groups, accounts, failedCount })
   }
   if (mode === 'plan') {
     const best = planGroups[0];
-    const range = `${formatUnits(best.remaining, best.unit) ?? '?'} / ${formatUnits(best.total, best.unit) ?? '?'}`;
+    const range = best.totalKnown === false
+      ? `${formatUnits(best.remaining, best.unit) ?? '?'}`
+      : `${formatUnits(best.remaining, best.unit) ?? '?'} / ${formatUnits(best.total, best.unit) ?? '?'}`;
     // ⚠️ 包名进 detail、`剩余 / 总量 + 单位` 进 reading：包名（多为
     // `Free Plan Subscription` 这类样板字）比数字长得多且信息量低。
     return { detail: best.name, reading: `${range}${best.label}` };

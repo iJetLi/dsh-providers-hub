@@ -158,6 +158,32 @@ describe('buildMonkeycodeMessagesPayload · 思考预算夹逼', () => {
   })
 })
 
+describe('buildMonkeycodeMessagesPayload · system 来源', () => {
+  const MESSAGES_WITH_SYSTEM = [
+    { role: 'system' as const, content: [{ type: 'text' as const, text: '来自 OpenAI 网关的 system' }] },
+    ...MESSAGES,
+  ]
+
+  it('★ 没有 options.system 时从 messages 的 system 消息兜底（OpenAI 网关路径）', () => {
+    const payload = buildMonkeycodeMessagesPayload({
+      model: 'deepseek-flash',
+      messages: MESSAGES_WITH_SYSTEM as never,
+    })
+    expect(payload.system).toBe('来自 OpenAI 网关的 system')
+    // 序列化后的 messages 不重复携带 system（Anthropic 顶层字段才是权威）
+    expect((payload.messages as Array<{ role: string }>).some((message) => message.role === 'system')).toBe(false)
+  })
+
+  it('options.system 存在时优先于 messages 里的 system', () => {
+    const payload = buildMonkeycodeMessagesPayload({
+      model: 'deepseek-flash',
+      messages: MESSAGES_WITH_SYSTEM as never,
+      system: 'DSH 原生链路 system',
+    })
+    expect(payload.system).toBe('DSH 原生链路 system')
+  })
+})
+
 describe('monkeycodeThinkingFor · 档位映射', () => {
   it('档位到预算是弱→强的单调序列', () => {
     const low = monkeycodeThinkingFor('low')

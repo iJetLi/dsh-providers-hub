@@ -449,7 +449,8 @@ function summarizeTest(res) {
 function formatPackageLine(pkg, windowDays, now) {
   const remaining = formatUnits(pkg.remaining, pkg.unit) ?? '?';
   const total = formatUnits(pkg.total, pkg.unit) ?? '?';
-  const parts = [`${pkg.active ? '' : '[已失效] '}${pkg.name || '未命名'}: ${remaining} / ${total}`];
+  const amount = pkg.totalKnown === false ? remaining : `${remaining} / ${total}`;
+  const parts = [`${pkg.active ? '' : '[已失效] '}${pkg.name || '未命名'}: ${amount}`];
   const daysLeft = daysUntilExpiry(pkg, now);
   if (!pkg.active && pkg.expiredTime) parts.push(`失效于 ${pkg.expiredTime}`);
   else if (daysLeft !== null) {
@@ -462,6 +463,7 @@ function formatPackageLine(pkg, windowDays, now) {
      */
     parts.push(formatExpiryHint(pkg, windowDays, now));
   } else if (pkg.cycleEndTime) parts.push(`本周期至 ${pkg.cycleEndTime}`);
+  else if (typeof pkg.expiryNote === 'string' && pkg.expiryNote !== '') parts.push(pkg.expiryNote);
   return parts.join(' · ');
 }
 
@@ -531,6 +533,19 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    */
   const quotaText = formatQuotaLine(all, unit);
   /**
+   * 授信/充值账户的**主行窗口**：`授信额度` 或 `充值积分` 包同时有
+   * `remaining/total`（授信来自 `billing_mode:'postpaid'` + `credit_limit_cents`；
+   * 充值来自本月消耗反推的期初），主行直接显示 `908 / 1000`，不要只显示
+   * 孤零零的 908。只在包名精确匹配时启用，不能把其它 provider 的单包
+   * `remaining / total` 一并搬上来（那会改变现有账号的总余额口径）。
+   */
+  const creditWindow = all.find((pkg) => pkg && (pkg.name === '授信额度' || pkg.name === '充值积分')
+    && pkg.totalKnown !== false && Number(pkg.total) > 0
+    && Number(pkg.total) >= Number(pkg.remaining));
+  const mainText = creditWindow
+    ? `${formatUnits(creditWindow.remaining, unit) ?? '0'} / ${formatUnits(creditWindow.total, unit) ?? '0'}`
+    : quotaText ?? total;
+  /**
    * 跨量纲附注（MonkeyCode：积分 + 每日额度）。
    *
    * ⚠️ 用户 2026-11-02 报障：「每日额度应该在账号积分处单独显示出来」。
@@ -555,7 +570,8 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
           ? pkg.name
           : unitLabel(pkg.unit);
         const remainingText = formatUnits(remaining, pkg.unit) ?? String(remaining);
-        const hasRange = Number.isFinite(poolTotal) && poolTotal > 0 && poolTotal !== remaining;
+        const hasRange = pkg.totalKnown !== false
+          && Number.isFinite(poolTotal) && poolTotal > 0 && poolTotal !== remaining;
         return hasRange
           ? `${poolName} ${remainingText} / ${formatUnits(poolTotal, pkg.unit) ?? String(poolTotal)}`
           : `${poolName} ${remainingText}`;
@@ -703,7 +719,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    *       之后是名词解释，最后才是资源包逐项明细。
    */
   const lineText = [
-    quotaText ?? total,
+    mainText,
     crossUnitText,
     poolSplitText,
     namedPoolText,
@@ -780,7 +796,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
     },
     // ⚠️ 配额窗口显示**逐窗口百分比**而不是均值：均值（94.5）既不是上游给的数，
     // 在「额度」这个标签下更会被读成 94.5 个积分。见 quotaText 的注释。
-    React.createElement('strong', { className: 'dim-jh-creditTotal' }, quotaText ?? total),
+    React.createElement('strong', { className: 'dim-jh-creditTotal' }, mainText),
     // 跨量纲附注（MonkeyCode 的每日额度）：与 loomy 的 `每日 5000` 同位置、同样式，
     // 只是**不参与**上面的合计 —— 单位不同，不能相加（用户 2026-11-02 定调）。
     crossUnitText === null
