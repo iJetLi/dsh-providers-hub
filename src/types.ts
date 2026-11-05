@@ -1728,6 +1728,27 @@ export interface ProviderStatus {
    */
   closed: boolean
   /**
+   * 目录核实**失败**的原因（**可选** —— 只有「派生判据说已关闭、但核实腿
+   * 没能证明它」时才出现）。
+   *
+   * ⚠️⚠️ 这个字段是为了让 `closed: false` 不再与 `models.disabled === models.total`
+   * **自相矛盾**（2026-11-05 三审端到端 P1-2）。现场：
+   * ```
+   * provider.status = {"models":{"total":2,"disabled":2},"closed":false}
+   * ```
+   * 界面显示「已关闭 2」，开关却是「已打开」；用户点开关 ⇒ `provider.setEnabled(false)`
+   * 返回「没有可关闭的模型：<远端原因>」⇒ **三者矛盾且用户拿不到原因**。
+   *
+   * 两条腿的语义：
+   * - `closed: false` 是**保守**的（目录不完整时不敢报「已关闭」，否则会出现
+   *   IKJW33 那种「界面说关了、模型却仍可选」）；
+   * - `verifyFailed` 说明**为什么没能证明** —— 冷帧（`notReady`）与远端读失败
+   *   （`remoteError`）两种形态用户动作不同（前者等重试、后者查网络）。
+   *
+   * ⚠️ 字段缺席 = 核实成功或未需要核实。
+   */
+  verifyFailed?: string
+  /**
    * 目录健康快照（**可选** —— 只有目录来自**多个外部来源**的适配器实现它）。
    *
    * 存在的意义（issue IKKZUG 第 5 点）：`cline` 的目录来自**三个来源**，

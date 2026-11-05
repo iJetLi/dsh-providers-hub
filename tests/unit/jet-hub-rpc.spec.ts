@@ -4232,9 +4232,31 @@ describe('provider.status / provider.setEnabled 端点', () => {
       })
 
       const result = await call('provider.status', { providers: ['buddy'] })
-      const s = (result.value as { statuses: Record<string, { closed: boolean }> }).statuses.buddy
+      const s = (result.value as { statuses: Record<string, { closed: boolean; verifyFailed?: string }> }).statuses.buddy
 
       expect(s.closed, '读不到目录时必须报未关闭（安全方向）').toBe(false)
+      // ⚠️⚠️ 但**必须透出原因**（2026-11-05 三审端到端 P1-2）：否则用户看到的是
+      // 「已关闭 1」+ 开关「已打开」+ 点开关被拒「没有可关闭的模型」三者矛盾，
+      // 而**拿不到任何线索**。
+      expect(s.verifyFailed, '核实失败必须透出原因，否则用户只看到「开关点不动」')
+        .toContain('令牌已过期')
+    })
+
+    /**
+     * ⚠️ 反向对照：核实**成功**时不得出现 `verifyFailed`（否则前端会把
+     * 「一切正常」渲染成告警）。
+     */
+    it('★ 核实成功时不得出现 verifyFailed（否则正常态被渲染成告警）', async () => {
+      const { call } = setup({
+        catalog: CATALOG,
+        disabledModels: { buddy: { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true } },
+      })
+
+      const result = await call('provider.status', { providers: ['buddy'] })
+      const s = (result.value as { statuses: Record<string, { closed: boolean; verifyFailed?: string }> }).statuses.buddy
+
+      expect(s.closed).toBe(true)
+      expect(s.verifyFailed).toBeUndefined()
     })
 
     /**

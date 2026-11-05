@@ -9462,6 +9462,8 @@ function registerJetHubEndpoints(
           const plan = planMap.get(provider)
           if (plan === undefined) continue
           let { total, disabled, closed } = plan
+          /** 核实腿没能证明「已关闭」时的原因（见 `ProviderStatus.verifyFailed`）。 */
+          let verifyFailed: string | undefined
           // ⚠️⚠️ 只有「即将报已关闭」才核实（危险方向，见方法头）。
           // ⚠️ 意图为真时**跳过核实**：核实是为了「证明目录里每一条都关着」，
           //    而意图已经把整家关掉了 ⇒ 核实既无必要，还会因一次远端抖动
@@ -9498,6 +9500,14 @@ function registerJetHubEndpoints(
               // ⇒ 这里把 `notReady` 与「核实不了（远端读失败）」**并列**处理：
               // 两者都说明「我这份合并目录不足以证明已关闭」，都报 `closed:false`。
               // 报 false 是安全的（用户可再点一次开关，点了会得到上面那条明确拒绝）。
+              //
+              // ⚠️⚠️ 但只报 `closed:false` 会与 `disabled === total` 互相矛盾
+              //（2026-11-05 三审端到端 P1-2 现场：
+              //  `{"models":{"total":2,"disabled":2},"closed":false}` ⇒
+              //  界面「已关闭 2」+ 开关「已打开」+ 点开关被拒「没有可关闭的模型」，
+              //  **且用户拿不到原因**）。故透出 `verifyFailed` 说明「为什么没能证明」：
+              // 冷帧与远端读失败的用户动作不同（那个要等/重试，这个要查网络）。
+              verifyFailed = full.notReady
               closed = false
             } else if (full.remoteError === undefined) {
               total = full.ids.length
@@ -9507,7 +9517,9 @@ function registerJetHubEndpoints(
               disabled = full.ids.filter((id) => plan.disabledMap[id] === true).length
               closed = total > 0 && disabled === total
             } else {
-              // 核实不了（远端读失败）⇒ 保守报未关闭（安全方向）。
+              // 核实不了（远端读失败）⇒ 保守报未关闭（安全方向），
+              // 但必须透出原因（否则用户只看到「开关点不动」）。
+              verifyFailed = full.remoteError
               closed = false
             }
           }
@@ -9534,6 +9546,9 @@ function registerJetHubEndpoints(
             },
             closed,
             ...catalogHealth === undefined ? {} : { catalog: catalogHealth },
+            // ⚠️ 字段**缺席**表示「核实成功或未需要核实」；只有「派生判据说已关闭、
+            //    但核实腿没能证明」时才出现（见 `ProviderStatus.verifyFailed`）。
+            ...verifyFailed === undefined ? {} : { verifyFailed },
           }
         }
         const value: RpcProviderStatusResponse = { statuses }
