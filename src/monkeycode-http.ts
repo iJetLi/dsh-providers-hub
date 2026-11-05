@@ -37,15 +37,15 @@
 import { Readable } from 'node:stream'
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib'
 
-import { ProxyAgent, request as undiciRequest } from 'undici'
+import { request as undiciRequest, type Dispatcher } from 'undici'
+
+import { normalizeProxy } from './opencode.js'
+import { buildProxyDispatcher } from './opencode-proxy.js'
 
 /** 上游响应头超时（与 undici `fetch` 的默认值对齐）。 */
 const HEADERS_TIMEOUT_MS = 300_000
 /** 上游响应体空闲超时（同理）。 */
 const BODY_TIMEOUT_MS = 300_000
-
-/** 代理 dispatcher 缓存（按代理 URL 复用连接池，避免每请求新建）。 */
-const dispatchers = new Map<string, ProxyAgent>()
 
 /** 把 `RequestInit['body']` 收敛成 Buffer；不支持的形态**显式抛错**（不静默丢）。 */
 function bodyBufferOf(body: RequestInit['body']): Buffer | undefined {
@@ -57,18 +57,50 @@ function bodyBufferOf(body: RequestInit['body']): Buffer | undefined {
   throw new TypeError('monkeycodeDirectFetch: 仅支持 string / Uint8Array / ArrayBuffer / URLSearchParams 请求体')
 }
 
-/** `NO_PROXY` 是否命中（`*` / 后缀 / `host:port`）。 */
+/**
+ * 拆一条 `NO_PROXY` 条目为 `{ host, port? }`。
+ *
+ * ⚠️ 2026-11-05 审计返工：**不能**用 `entry.split(':')` ——
+ * - IPv6 带方括号（`[::1]`、`[::1]:8080`）会被拆成 `[` / `` / `1]`；
+ * - 裸 IPv6（`::1`）的多冒号会被当成 `host:port`；
+ * - `*.example.com` 的通配前缀会留在 host 里，永远匹配不上。
+ * ⇒ 方括号按 `]` 切、只有**恰好一个**冒号时才当端口。
+ */
+function noProxyEntry(raw: string): { host: string, port?: string } {
+  const entry = raw.trim().toLowerCase()
+  if (entry.startsWith('[')) {
+    const end = entry.indexOf(']')
+    if (end > 0) {
+      const host = entry.slice(1, end)
+      const rest = entry.slice(end + 1)
+      return { host, ...rest.startsWith(':') ? { port: rest.slice(1) } : {} }
+    }
+  }
+  const firstColon = entry.indexOf(':')
+  if (firstColon >= 0 && firstColon === entry.lastIndexOf(':')) {
+    return { host: entry.slice(0, firstColon), port: entry.slice(firstColon + 1) }
+  }
+  return { host: entry }
+}
+
+/** `NO_PROXY` 是否命中（`*` / 后缀 / `host:port` / IPv4 / IPv6 / 通配前缀）。 */
 function bypassesProxy(url: URL, noProxy: string | undefined): boolean {
   if (noProxy === undefined || noProxy.trim() === '') return false
-  const host = url.hostname.toLowerCase()
+  // `URL.hostname` 对 IPv6 带方括号（`[::1]`）；比较前剥掉，并去掉尾点。
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
   const port = url.port === '' ? (url.protocol === 'https:' ? '443' : '80') : url.port
   for (const raw of noProxy.split(',')) {
     const entry = raw.trim().toLowerCase()
     if (entry === '') continue
     if (entry === '*') return true
-    const [entryHost, entryPort] = entry.split(':')
+    const { host: entryHost, port: entryPort } = noProxyEntry(entry)
     if (entryPort !== undefined && entryPort !== '' && entryPort !== port) continue
-    const suffix = entryHost.replace(/^\./, '')
+    // 通配前缀 `*.example.com` / `.example.com` / 尾点 `example.com.` 一律归一成裸域。
+    const suffix = entryHost
+      .replace(/^\./, '')
+      .replace(/^\*\.?/, '')
+      .replace(/\.$/, '')
+    if (suffix === '') continue
     if (host === suffix || host.endsWith(`.${suffix}`)) return true
   }
   return false
@@ -84,16 +116,43 @@ function envProxyFor(url: URL): string | undefined {
   return proxy === undefined || proxy === '' ? undefined : proxy
 }
 
-/** 取（或建）代理 dispatcher。 */
-function dispatcherFor(proxy: string): ProxyAgent {
-  const existing = dispatchers.get(proxy)
-  if (existing !== undefined) return existing
-  const created = new ProxyAgent(proxy)
-  dispatchers.set(proxy, created)
-  return created
+/**
+ * 补默认端口（`normalizeProxy` 要求显式端口；环境变量里常省略）。
+ *
+ * ⚠️ 只用 URL 解析补端口，**不改协议**；解析失败原样返回，让 `normalizeProxy`
+ * 给出可读的 reason。
+ */
+function withDefaultPort(raw: string): string {
+  try {
+    const url = new URL(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw) ? raw : `http://${raw}`)
+    if (url.port === '') {
+      url.port = url.protocol === 'https:' ? '443' : url.protocol === 'socks5:' ? '1080' : '80'
+    }
+    return url.toString()
+  } catch {
+    return raw
+  }
 }
 
-/** `content-encoding` → 解压流（不认识的编码**不猜**，交给调用方看到原始字节会失败）。 */
+/**
+ * 取（或建）代理 dispatcher —— **复用** `opencode-proxy.ts` 的加固实现。
+ *
+ * ⚠️ 不要在这里 `new ProxyAgent(...)`（2026-11-05 审计 P1）：仓库那份实现带
+ * `clientFactory + pipelining: 0`，用来避免 Clash 类代理静默关闭空闲 CONNECT
+ * 隧道导致的请求挂死（实测 2/10 → 10/10，见 `opencode-proxy.ts` 模块头）；
+ * 同时它自带 LRU（上限 16）与 `closeAllProxyDispatchers()`（`index.ts` 的
+ * `ctx.effect` 已在插件卸载时调用）⇒ 不会留下孤儿连接池。
+ */
+function dispatcherFor(proxy: string): Dispatcher {
+  const normalized = normalizeProxy(withDefaultPort(proxy))
+  if (!normalized.ok) {
+    // ⚠️ 必须给**可区分**的文案：否则与上游网络故障同形（用户不知道是代理填错）。
+    throw new Error(`monkeycode: 出口代理配置非法（${normalized.reason}）`)
+  }
+  return buildProxyDispatcher(normalized.proxy)
+}
+
+/** 单层 `content-encoding` → 解压流（不认识的编码返回 `undefined`）。 */
 function decompressorFor(encoding: string): NodeJS.ReadWriteStream | undefined {
   switch (encoding.trim().toLowerCase()) {
     case 'gzip': case 'x-gzip': return createGunzip()
@@ -101,6 +160,30 @@ function decompressorFor(encoding: string): NodeJS.ReadWriteStream | undefined {
     case 'br': return createBrotliDecompress()
     default: return undefined
   }
+}
+
+/**
+ * 按 `content-encoding` 逐层解压（多值按 RFC 9110 **逆序**）。
+ *
+ * ⚠️ 不认识的编码**显式抛错**：静默把压缩字节交给调用方只会得到「未返回任何
+ * 内容块」，比报错难查得多（2026-11-05 审计 P2-2）。
+ */
+function decompressBody(
+  body: Readable,
+  encoding: string | undefined,
+): Readable {
+  if (encoding === undefined || encoding.trim() === '') return body
+  const layers = encoding.split(',').map((layer) => layer.trim().toLowerCase()).filter((layer) => layer !== '')
+  let stream: Readable = body
+  for (const layer of layers.reverse()) {
+    if (layer === 'identity') continue
+    const decoder = decompressorFor(layer)
+    if (decoder === undefined) {
+      throw new Error(`monkeycode: 不支持的上游 content-encoding「${layer}」`)
+    }
+    stream = stream.pipe(decoder) as never
+  }
+  return stream
 }
 
 /**
@@ -165,8 +248,7 @@ export async function monkeycodeDirectFetch(
       return new Response(null, { status, statusText: '', headers: responseHeaders })
     }
     const encoding = response.headers['content-encoding']
-    const decoder = typeof encoding === 'string' ? decompressorFor(encoding) : undefined
-    const stream = decoder === undefined ? response.body : response.body.pipe(decoder)
+    const stream = decompressBody(response.body, typeof encoding === 'string' ? encoding : undefined)
     return new Response(Readable.toWeb(stream as never) as unknown as ReadableStream<Uint8Array>, {
       status,
       statusText: '',

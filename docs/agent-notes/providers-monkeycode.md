@@ -39,15 +39,19 @@ configuration can make this link work (passthrough settings do not ..."}}
    version 0.1.212）没有 `ohmyagent` / `monkeycode` 相关 issue 或 PR；本仓库 Gitee
    上游也没有对应的 MonkeyCode/bili 修复 PR。
 
-## 修法：`monkeycodeDirectFetch`（node:https 直连）
+## 修法：`monkeycodeDirectFetch`（`undici.request` 模块直连）
 
-`src/monkeycode-http.ts` 的 `monkeycodeDirectFetch` 用 `node:http` / `node:https`
-的 `request` 发请求，并用 `Readable.toWeb(response)` 桥接成原生 `Response`。
+`src/monkeycode-http.ts` 的 `monkeycodeDirectFetch` 用 **`undici.request`**（模块导入，
+不是 `globalThis.fetch`）发请求，响应体用 `Readable.toWeb(...)` 桥接成原生 `Response`。
 `src/monkeycode-adapter.ts` 的 `send()` 默认使用它（`this.options.fetchImpl ?? monkeycodeDirectFetch`），
 `fetchImpl` 只保留给单测注入。
 
-- `node:https` 是进程内置模块，bili 只替换 `globalThis.fetch`，无法替换它。
+- `undici.request` 是**模块导入**，bili 只替换 `globalThis.fetch`，无法替换它。
 - 请求体逐字节签好后直接离开进程，签名不被改写。
+- ⚠️ **不要改成 `node:https`**（2026-11-05 审计打穿三条）：它不读
+  `HTTP(S)_PROXY`/宿主 dispatcher（需代理的用户整条渠道消失）、没有超时
+  （`fetch` 300s vs `node:http` 0）、且 `new Response(body,{status:205})` 会在
+  异步回调里抛未捕获异常**带走宿主进程**（205 是 null-body status）。
 - 代价：**MonkeyCode 链路不经过 bili 的上下文压缩**。bili 本来就拒绝压缩签名请求，
   这是「能用」与「用不了」之间唯一可行的取舍，不是可配置项。
 - 同一模式已由 `dsh-our-free-model` v1.4.5 的 EAC 车道采用（`src/eac.js` 的
@@ -91,10 +95,12 @@ configuration can make this link work (passthrough settings do not ..."}}
   `credit_limit_cents` 才是分母。旧实现只读 available，面板只显示孤零零的
   `908`。现在 `fetchBaizhiWallet` 解析这两个字段，`buildBaizhiBalance` 生成
   「授信额度」包，账号卡主行与资源包明细显示 `908 / 1000`。
-  ⚠️ 这是**授信额度**口径；普通充值账户上游仍只给当前余额，没有初始总额。
-  普通充值账户若同时拿到本月用量，则用「当前充值余额 + 本月充值消耗（总消耗 −
-  每日已消耗）」反推本月期初并在 `expiryNote` 标注为反推值；没有用量时仍不显示
-  假分母。百智每日积分先于充值积分消耗，故反推公式先扣除 `100 - temporary`。
+  ⚠️ 这是**授信额度**口径（`credit_limit_cents` 是上游权威分母）。普通充值账户
+  上游只给当前余额、**没有初始总额** ⇒ `totalKnown:false`，面板只显示余额。
+  ⚠️ **不要反推期初**（2026-11-05 审计 P0-1/P0-2）：`app-credit-usage?period=month`
+  是**整月总消耗**（每日积分也含在内），而「每日桶今天花了多少」只有今天的数
+  ⇒ `monthCredit - dailySpent` 会把其余 29 天的每日消耗算进充值桶，分母高估
+  最多 `100×(天数-1)`，且「本月充值消耗为 0」时会退化成 `136.84 / 136.84`。
 - **国际站**：`MONKEYCODE_INTL` 与国内站共用 `MonkeycodeAdapter` 与
   `monkeycodeDirectFetch`，bili 的 403 拒发修复对 `.net` 同样生效。2026-11-05
   无鉴权实测 `proxy.monkeycode-ai.net/v1/messages` GET ⇒ 405、

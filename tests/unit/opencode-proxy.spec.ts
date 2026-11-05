@@ -291,12 +291,30 @@ describe('⚠️ 同源不变式（dispatcher 与 fetch 必须来自同一份 un
      * ⚠️ 新增第三处前先确认：**import 源必须是同一个 'undici'**，否则请复用
      * `proxyFetch`。
      */
-    const legalDispatcherFiles = ['opencode-proxy.ts', 'monkeycode-http.ts']
+    /**
+     * ⚠️ 用**精确相对路径**而不是 `endsWith`（2026-11-05 对抗审计 G2）：
+     * `endsWith('monkeycode-http.ts')` 会让 `src/zzz-monkeycode-http.ts` 这类
+     * 新文件静默继承豁免（实测闸门全绿），与「新增文件也必须被覆盖」相悖。
+     */
+    const legalDispatcherFiles = new Set(['src/opencode-proxy.ts', 'src/monkeycode-http.ts'])
+    const root = join(here, '../..')
+    const relative = (file: string): string => file.slice(root.length + 1).replaceAll('\\', '/')
     const offenders = listSrcFiles()
-      .filter((file) => !legalDispatcherFiles.some((legal) => file.endsWith(legal)))
-      .filter((file) => DISPATCHER_MENTION.test(stripComments(readFileSync(file, 'utf8'))))
-      .map((file) => file.slice(join(here, '../..').length + 1))
+      .map(relative)
+      .filter((file) => !legalDispatcherFiles.has(file))
+      .filter((file) => DISPATCHER_MENTION.test(stripComments(readFileSync(join(root, file), 'utf8'))))
     expect(offenders).toEqual([])
+    /**
+     * 第二个合法落点必须**自证同源**：`ProxyAgent` / `request` 都来自
+     * `'undici'`，且不得借用 `opencode-proxy` 的 dispatcher（那会绕过本不变式）。
+     */
+    const monkeycodeSource = stripComments(readFileSync(join(root, 'src/monkeycode-http.ts'), 'utf8'))
+    expect(monkeycodeSource).toMatch(/import\s*\{[^}]*\brequest\b[^}]*\}\s*from\s*'undici'/)
+    expect(monkeycodeSource).toMatch(/from\s*'undici'/)
+    // 必须**复用** opencode-proxy 的加固 builder（`pipelining: 0` + LRU + dispose），
+    // 且不得自己 `new ProxyAgent(...)`（审计 P1：直接构造会丢掉那层加固）。
+    expect(monkeycodeSource).toMatch(/import\s*\{[^}]*\bbuildProxyDispatcher\b[^}]*\}\s*from\s*'\.\/opencode-proxy\.js'/)
+    expect(monkeycodeSource).not.toMatch(/new\s+ProxyAgent/)
   })
 
   it('⚠️ live 用例本身也走 proxyFetch（否则它又把这个缺陷构造了一遍）', () => {

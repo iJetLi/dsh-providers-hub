@@ -1,5 +1,5 @@
 /**
- * MonkeyCode 专用传输：`node:https` 直连（不经全局 `fetch`）。
+ * MonkeyCode 专用传输：`undici.request` 模块直连（不经全局 `fetch`）。
  *
  * 守卫的核心不变量：bili（billion-context）会替换 `globalThis.fetch` 并按
  * `X-OhmyAgent-Signature` 形状拒发签名请求；本传输必须在**全局 fetch 被替换**
@@ -7,7 +7,7 @@
  */
 import { createHmac } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
-import { gzipSync } from 'node:zlib'
+import { brotliCompressSync, gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -47,16 +47,19 @@ let servers: TestServer[] = []
 
 async function listen(
   handler: (req: IncomingMessage, res: ServerResponse) => void,
+  host = '127.0.0.1',
 ): Promise<TestServer> {
   const server = createServer(handler)
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => resolve())
+    server.listen(0, host, () => resolve())
   })
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('测试服务器没有端口')
+  // IPv6 的 URL 主机段必须带方括号。
+  const hostname = host.includes(':') ? `[${host}]` : host
   const entry: TestServer = {
-    url: `http://127.0.0.1:${address.port}`,
+    url: `http://${hostname}:${address.port}`,
     close: async () => {
       server.closeAllConnections()
       await new Promise<void>((resolve, reject) => server.close((error) => {
@@ -334,6 +337,9 @@ describe('monkeycodeDirectFetch：代理（审计返工 P1-5）', () => {
   it('★ 反向对照：NO_PROXY 命中 ⇒ 直连（代理零命中）', async () => {
     const server = await listen((_req, res) => { res.writeHead(200); res.end('ok') })
     const proxy = await startProxy()
+    // ⚠️ 必须 save/restore：开发机本来导出 `HTTP_PROXY` 时，无条件 `delete`
+    //    会永久抹掉它、污染同 worker 的后续用例（2026-11-05 审计 P3）。
+    const previous = { HTTP_PROXY: process.env.HTTP_PROXY, NO_PROXY: process.env.NO_PROXY }
     process.env.HTTP_PROXY = proxy.url
     process.env.NO_PROXY = '127.0.0.1'
     try {
@@ -341,8 +347,92 @@ describe('monkeycodeDirectFetch：代理（审计返工 P1-5）', () => {
       expect(await response.text()).toBe('ok')
       expect(proxy.hits).toEqual([])
     } finally {
-      delete process.env.HTTP_PROXY
-      delete process.env.NO_PROXY
+      if (previous.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY
+      else process.env.HTTP_PROXY = previous.HTTP_PROXY
+      if (previous.NO_PROXY === undefined) delete process.env.NO_PROXY
+      else process.env.NO_PROXY = previous.NO_PROXY
+      await proxy.close()
+    }
+  })
+
+  it('★ 多值 content-encoding「gzip, br」按逆序逐层解压', async () => {
+    const payload = 'data: {"ok":true}\n\n'
+    const body = brotliCompressSync(gzipSync(Buffer.from(payload, 'utf8')))
+    const server = await listen((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'content-encoding': 'gzip, br' })
+      res.end(body)
+    })
+    const response = await monkeycodeDirectFetch(server.url)
+    expect(await response.text()).toBe(payload)
+  })
+
+  it('★ 不认识的 content-encoding ⇒ 显式抛错（不得把二进制交给调用方）', async () => {
+    const server = await listen((_req, res) => {
+      res.writeHead(200, { 'content-encoding': 'zstd' })
+      res.end(Buffer.from([1, 2, 3]))
+    })
+    // 未知编码在**构造 Response 之前**就抛（fail-loud），不是把二进制塞进 body。
+    await expect(monkeycodeDirectFetch(server.url)).rejects.toThrow(/不支持的上游 content-encoding/)
+  })
+
+  it('★ 204 / 304 / HEAD ⇒ body 为 null（不构造非法 Response）', async () => {
+    const s204 = await listen((_req, res) => { res.writeHead(204); res.end() })
+    const s304 = await listen((_req, res) => { res.writeHead(304); res.end() })
+    const shead = await listen((_req, res) => { res.writeHead(200); res.end('ignored') })
+    for (const [response, status] of [
+      [await monkeycodeDirectFetch(s204.url), 204],
+      [await monkeycodeDirectFetch(s304.url), 304],
+      [await monkeycodeDirectFetch(shead.url, { method: 'HEAD' }), 200],
+    ] as const) {
+      expect(response.status).toBe(status)
+      expect(response.body).toBeNull()
+    }
+  })
+
+  it('★ Request 入参 ⇒ 显式 TypeError（不得静默丢 body）', async () => {
+    await expect(monkeycodeDirectFetch(new Request('http://127.0.0.1:1/x'))).rejects.toThrow(/不支持 Request 入参/)
+  })
+
+  it('★ NO_PROXY 通配前缀 `*.0.0.1` ⇒ 直连（代理零命中）', async () => {
+    const server = await listen((_req, res) => { res.writeHead(200); res.end('ok') })
+    const proxy = await startProxy()
+    const previous = { HTTP_PROXY: process.env.HTTP_PROXY, NO_PROXY: process.env.NO_PROXY }
+    process.env.HTTP_PROXY = proxy.url
+    process.env.NO_PROXY = '*.0.0.1'
+    try {
+      const response = await monkeycodeDirectFetch(server.url)
+      expect(await response.text()).toBe('ok')
+      expect(proxy.hits).toEqual([])
+    } finally {
+      if (previous.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY
+      else process.env.HTTP_PROXY = previous.HTTP_PROXY
+      if (previous.NO_PROXY === undefined) delete process.env.NO_PROXY
+      else process.env.NO_PROXY = previous.NO_PROXY
+      await proxy.close()
+    }
+  })
+
+  it('★ NO_PROXY 方括号 IPv6 `[::1]` ⇒ 直连（若本机支持 IPv6）', async () => {
+    let server: { url: string, close: () => Promise<void> }
+    try {
+      server = await listen((_req, res) => { res.writeHead(200); res.end('ok') }, '::1')
+    } catch {
+      // 无 IPv6 的环境（CI 容器常见）跳过；本机 Windows 实测可用。
+      return
+    }
+    const proxy = await startProxy()
+    const previous = { HTTP_PROXY: process.env.HTTP_PROXY, NO_PROXY: process.env.NO_PROXY }
+    process.env.HTTP_PROXY = proxy.url
+    process.env.NO_PROXY = '[::1]'
+    try {
+      const response = await monkeycodeDirectFetch(server.url)
+      expect(await response.text()).toBe('ok')
+      expect(proxy.hits).toEqual([])
+    } finally {
+      if (previous.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY
+      else process.env.HTTP_PROXY = previous.HTTP_PROXY
+      if (previous.NO_PROXY === undefined) delete process.env.NO_PROXY
+      else process.env.NO_PROXY = previous.NO_PROXY
       await proxy.close()
     }
   })

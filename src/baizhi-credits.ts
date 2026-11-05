@@ -366,7 +366,22 @@ export function buildBaizhiBalance(wallet: BaizhiWallet, usage: BaizhiUsage | un
    */
   const dailyTotal = Math.max(BAIZHI_DAILY_CREDIT_TOTAL, wallet.temporary)
   const dailyUsed = Math.round((dailyTotal - wallet.temporary) * 100) / 100
-  const dailyPending = !wallet.dailyClaimed && wallet.temporary === 0
+  /**
+   * 「今天还没领」只认**显式 false**（2026-11-05 对抗审计 P3-4）：旧实现
+   * `!wallet.dailyClaimed` 把「字段缺失（undefined）」也当成未领取，会误报
+   * 「今日尚未领取」。
+   */
+  const dailyPending = wallet.dailyClaimed === false && wallet.temporary === 0
+  /**
+   * 「领取标记缺失 + 余额为 0」时**不能猜**（既可能是没领，也可能是领了花光）
+   * ⇒ 不显示分母，也不写「已用光」（2026-11-05 对抗审计 P3-4）。
+   */
+  const dailyUnknown = wallet.dailyClaimed === undefined && wallet.temporary === 0
+  /**
+   * 上游某天给超过 100（补发/累计）时**总额不可知** ⇒ 不显示分母
+   * （2026-11-05 对抗审计 P3-2：否则会出现 `150 / 150` 的新假分母）。
+   */
+  const dailyExcess = wallet.temporary > BAIZHI_DAILY_CREDIT_TOTAL
   const creditLimit = wallet.creditLimit ?? 0
   /**
    * 授信账户（控制台 `billing_mode === 'postpaid'`）：
@@ -376,8 +391,15 @@ export function buildBaizhiBalance(wallet: BaizhiWallet, usage: BaizhiUsage | un
    * ⚠️ `available > creditLimit`（超授信 / 退款未出账）时强行显示
    * `1200 / 1200` 又是假分母 ⇒ 退回 `totalKnown:false`（只显示剩余）。
    */
-  const postpaid = wallet.billingMode === 'postpaid' && creditLimit > 0
-  const overLimit = postpaid && wallet.available > creditLimit
+  /**
+   * ⚠️ 授信分支只看 `billing_mode`（2026-11-05 对抗审计 P2-3）：旧判据还要求
+   * `creditLimit > 0`，于是「授信账户但 `credit_limit_cents` 未下发/为 0」会
+   * 掉进「每日积分 + 充值积分」两个**对授信账户无意义**的包，主行口径自相矛盾。
+   * 分母是否可知由 `totalKnown` 单独表达。
+   */
+  const postpaid = wallet.billingMode === 'postpaid'
+  const hasCreditLimit = creditLimit > 0
+  const overLimit = postpaid && hasCreditLimit && wallet.available > creditLimit
   /**
    * ⚠️⚠️ **充值积分不做「反推期初」**（2026-11-05 审计 P0-1/P0-2）：
    * 上游只给当前 `permanent_credit_cents`，`app-credit-usage?period=month` 是
@@ -392,9 +414,14 @@ export function buildBaizhiBalance(wallet: BaizhiWallet, usage: BaizhiUsage | un
       name: '授信额度',
       unit: 'credit',
       remaining: wallet.available,
-      total: Math.max(creditLimit, wallet.available),
-      totalKnown: !overLimit,
-      used: Math.max(0, Math.round((creditLimit - wallet.available) * 100) / 100),
+      // 没有 credit_limit_cents 时 `total` 只能冗余填 remaining，且**不显示分母**。
+      total: hasCreditLimit ? Math.max(creditLimit, wallet.available) : wallet.available,
+      totalKnown: hasCreditLimit && !overLimit && wallet.available >= 0,
+      // `used` 必须落在 [0, creditLimit]：`available < 0`（欠费）时旧算法会得到
+      // `used > total`（对抗审计 P3-3）。
+      used: hasCreditLimit
+        ? Math.min(creditLimit, Math.max(0, Math.round((creditLimit - wallet.available) * 100) / 100))
+        : 0,
       active: true,
       cycleStartTime: '',
       cycleEndTime: '',
@@ -408,13 +435,20 @@ export function buildBaizhiBalance(wallet: BaizhiWallet, usage: BaizhiUsage | un
       remaining: wallet.temporary,
       // 每日包有固定发放额（+100/天）：分母必须固定，只有 remaining 随消耗降。
       total: dailyTotal,
-      ...(dailyPending ? { totalKnown: false } : { totalKnown: true }),
-      used: dailyPending ? 0 : dailyUsed,
+      // 未领取 / 超出固定发放额 / 领取标记缺失时总额不可知 ⇒ 不显示分母。
+      totalKnown: !dailyPending && !dailyExcess && !dailyUnknown,
+      used: dailyPending || dailyExcess || dailyUnknown ? 0 : dailyUsed,
       active: true,
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: '',
-      expiryNote: dailyPending ? '今日尚未领取（每日 +100）' : '每日 00:00（UTC+8）过期',
+      expiryNote: dailyPending
+        ? '今日尚未领取（每日 +100）'
+        : dailyExcess
+          ? '今日发放额超过固定值（上游补发/累计，总额不可知）'
+          : dailyUnknown
+            ? '今日领取状态未知（平台未下发标记）'
+            : '每日 00:00（UTC+8）过期',
     })
     packages.push({
       name: '充值积分',

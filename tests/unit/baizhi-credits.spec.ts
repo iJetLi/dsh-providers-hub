@@ -684,3 +684,44 @@ describe('claimBaizhiDailyCheckin（challenge → PoW → redeem → daily-tempo
     expect(outcome.kind === 'failed' ? outcome.message : '').not.toContain('未发放')
   })
 })
+
+/**
+ * 2026-11-05 对抗审计的四个边界（P2-3 / P3-2 / P3-3 / P3-4）。
+ */
+describe('buildBaizhiBalance：授信/每日的边界', () => {
+  const base = {
+    available: 235.05, temporary: 98.21, permanent: 136.84, frozen: 0, dailyClaimed: true,
+  }
+
+  it('★ postpaid 但 credit_limit 缺失 ⇒ 仍走授信分支（不得掉进每日/充值桶），且不显示分母', () => {
+    const balance = buildBaizhiBalance({ ...base, billingMode: 'postpaid' }, undefined)
+    expect(balance.packages).toHaveLength(1)
+    expect(balance.packages[0]).toMatchObject({
+      name: '授信额度', remaining: 235.05, total: 235.05, totalKnown: false,
+    })
+  })
+
+  it('★ temporary > 100（补发/累计）⇒ totalKnown:false（不得出现 150 / 150 假分母）', () => {
+    const balance = buildBaizhiBalance({ ...base, temporary: 150 }, undefined)
+    const daily = balance.packages[0]
+    expect(daily).toMatchObject({ name: '每日积分', remaining: 150, total: 150, used: 0, totalKnown: false })
+    expect(daily.expiryNote).toContain('超过固定值')
+  })
+
+  it('★ available < 0（欠费）⇒ used 落在 [0, creditLimit]，且不显示分母', () => {
+    const balance = buildBaizhiBalance(
+      { ...base, available: -50, billingMode: 'postpaid', creditLimit: 1000 },
+      undefined,
+    )
+    const credit = balance.packages[0]
+    expect(credit).toMatchObject({ name: '授信额度', remaining: -50, used: 1000, totalKnown: false })
+    expect(Number(credit.used)).toBeLessThanOrEqual(1000)
+  })
+
+  it('★ dailyClaimed 缺失 + temporary=0 ⇒ 既不猜「未领取」也不猜「已用光」', () => {
+    const balance = buildBaizhiBalance({ ...base, temporary: 0, dailyClaimed: undefined }, undefined)
+    const daily = balance.packages[0]
+    expect(daily).toMatchObject({ name: '每日积分', remaining: 0, total: 100, used: 0, totalKnown: false })
+    expect(daily.expiryNote).toContain('领取状态未知')
+  })
+})

@@ -108,10 +108,10 @@ export interface MonkeycodeAdapterOptions {
   /**
    * 请求传输；**仅单测**注入替身。
    *
-   * ⚠️ 生产默认是 {@link monkeycodeDirectFetch}（`node:https` 直连），**不是**
-   * 全局 `fetch`：bili（billion-context）会把 `X-OhmyAgent-Signature` 判成正文
-   * 签名并 403 拒发（它没有该 scheme 的重签器）。`node:https` 不会被别的插件
-   * 替换，签名请求才能逐字节到达网关。原因详见 `monkeycode-http.ts`。
+   * ⚠️ 生产默认是 {@link monkeycodeDirectFetch}（`undici.request` **模块导入**），
+   * **不是**全局 `fetch`：bili（billion-context）会把 `X-OhmyAgent-Signature`
+   * 判成正文签名并 403 拒发（它没有该 scheme 的重签器）。`undici.request` 不会
+   * 被别的插件替换，签名请求才能逐字节到达网关。原因详见 `monkeycode-http.ts`。
    */
   readonly fetchImpl?: typeof fetch
 }
@@ -441,8 +441,8 @@ export class MonkeycodeAdapter extends LlmAdapter {
     }
     const url = monkeycodeMessagesUrl(this.product)
     const headers = monkeycodeHeaders(slot.credential, { body, product: this.product })
-    // ⚠️ 默认必须走 node:https 直连（见 {@link monkeycodeDirectFetch}）：bili 的
-    // global fetch 拦截会把带 `X-OhmyAgent-Signature` 的请求判成正文签名并 403。
+    // ⚠️ 默认必须走 `undici.request` 模块直连（见 {@link monkeycodeDirectFetch}）：
+    // bili 的 global fetch 拦截会把带 `X-OhmyAgent-Signature` 的请求判成正文签名并 403。
     const fetcher = this.options.fetchImpl ?? monkeycodeDirectFetch
     return fetcher(url, {
       method: 'POST',
