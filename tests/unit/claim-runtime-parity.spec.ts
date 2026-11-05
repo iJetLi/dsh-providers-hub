@@ -30,6 +30,9 @@ import { PROVIDER_REGISTRY, descriptorOf } from '../../src/provider-registry.js'
 import { clearProviderRuntimes, registerProviderRuntime, runtimeOf } from '../../src/provider-runtime.js'
 import type { ProviderCredits } from '../../src/provider-runtime.js'
 import type { ClaimOutcome } from '../../src/credits.js'
+// ⚠️ 2026-11-01：Magicrew 两站的**完整 URL** 断言要用到两个 product 常量
+//   （只断路径片段的话两站路径逐字符相同 ⇒ 原理上无法区分）。
+import { MAGICREW, MAGICREW_INTL } from '../../src/magicrew-product.js'
 
 /**
  * 端点级哨兵表的注入点（`vi.hoisted` 让它在 `vi.mock` 的**提升**工厂里可见）。
@@ -240,7 +243,18 @@ describe('签到能力：registry 声明与 runtime 实现必须一致', () => {
     //    `typeof createProviderCredits()['codely'].claim === 'function'`），
     //    此前**因为 `runtimeOf('codely') === undefined` 被上面那句 `continue` 静默跳过**，
     //    所以这条守卫此前对 codely 零覆盖。10 → 11。
-    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(11)
+    // ⚠️ 2026-11-01：magicrew + magicrewintl 补上 `dailyCheckin` 并接了 `claim`
+    //    （`POST /api/v1/login-gift`）⇒ 11 → 13。
+    // ⚠️ 2026-11-02 加 monkeycode（MonkeyCode，声明可签到）：`claim` 在
+    //    `provider-credits.ts` 的 monkeycode 条目里（challenge → 本地 PoW →
+    //    redeem → checkin）⇒ 13 → 14。
+    // ⚠️ 2026-11-02 拆站：monkeycodeintl 与 monkeycode **逐字同构**（同一套代码的
+    //    另一部署），`claim` 同样在 `provider-credits.ts` 的 monkeycodeintl 条目里
+    //    ⇒ 14 → 15。
+    // ⚠️ 2026-11-03 加 baizhi（百智云，Cap 验证码补全后声明可签到）：`claim` 在
+    //    `provider-credits.ts` 的 baizhi 条目里（challenge → 本地 PoW → redeem →
+    //    daily-temporary-credit）⇒ 15 → 16。
+    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(16)
   })
 
   /**
@@ -400,6 +414,73 @@ describe('签到能力：registry 声明与 runtime 实现必须一致', () => {
   })
 })
 
+/**
+ * ★★ **Magicrew 两站的签到必须打到各自的 host**（国际站串号守卫，2026-11-01 补）。
+ *
+ * ## 为什么必须有这条（测试有效性审查的**阻断项**）
+ *
+ * 原有用例（上面那批）只断**路径片段**，而两站的 `login-gift` 路径
+ * **逐字符相同**（`/api/v1/login-gift`）⇒ 原理上无法区分两站。
+ * 实测：把 `src/provider-credits.ts` 里 `magicrewintl` 两处的
+ * `product: MAGICREW_INTL` 复制粘贴成 `product: MAGICREW`（余额 + 签到），
+ * 再连同另外三个同型缺陷一起注入，**25 个 spec / 859 条用例全绿**。
+ *
+ * 生产症状：国际站账号的 JWT 打到 `i-magic-service.letsmagic.cn` ⇒
+ * 签到恒失败（业务码错/401），而 UI 上只看到「签到失败」，零线索指向配置。
+ *
+ * ⇒ 本用例断**完整 URL**（host + path），两站各跑一次；且**断言两个 host 不同**
+ *（否则 fixture 写错时会静默变成「两站都打国内」也过）。
+ */
+describe('★★ Magicrew 两站的签到打到各自的 host（国际站串号守卫）', () => {
+  it.each([
+    { provider: 'magicrew', product: MAGICREW },
+    { provider: 'magicrewintl', product: MAGICREW_INTL },
+  ])('$provider 的 claim 打到 $product.host', async ({ provider, product }) => {
+    const ref = `${provider.toUpperCase()}_ACCOUNT_SPEC`
+    const { call, pool, credentials } = makeRpc(undefined, { ...emptyAuths(), [provider]: {} } as never)
+    await seed(pool, provider, `${provider}-1`, ref)
+    // ⚠️ 必须同时给 `jwt` 与 `organizationCode`：国际站缺 org 时原语会**本地前置拦截**
+    //    （`magicrew-checkin.ts` 的 `needsOrgOnGateway` 判断），那样根本不会发请求，
+    //    本用例就变成空转（审查里 `:87` 那条就是这么废掉的）。
+    await credentials.set(ref, JSON.stringify({ jwt: 'JWT-SPEC', organizationCode: 'org-spec' }))
+
+    const seen: string[] = []
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      seen.push(String(input))
+      return new Response(
+        JSON.stringify({ code: 1000, message: 'ok', data: { granted: true, point_amount: 7 } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    })
+
+    const result = await call('credits.claimAll', { provider })
+    expect(result.ok, `${provider} 应被接受，实际 error=${result.error?.message}`).toBe(true)
+    expect(seen.length, `${provider} 的领取没有发请求（claim 没接上？）`).toBeGreaterThan(0)
+
+    const expectedUrl = `${product.host}/api/v1/login-gift`
+    expect(seen[0], `${provider} 的签到没有打到自己的 host（国际站打到国内 host 会恒失败）`)
+      .toBe(expectedUrl)
+  })
+
+  it('两站的 host 互不相同（fixture 自检：相同则上面那条恒真）', () => {
+    expect(MAGICREW.host).not.toBe(MAGICREW_INTL.host)
+  })
+})
+
+/**
+ * ⚠️ **`precheckStatus: true` 但不需要 `fetchStatus`** 的渠道（2026-11-01）。
+ *
+ * 它们把「今天领没领」的判据**内建在自己的 claim 里**，不暴露成共享状态端点：
+ *
+ * | 渠道 | 为什么豁免 |
+ * |---|---|
+ * | `trae` | claim 本身幂等且与真领取**无法区分**，只能靠 status 判定 —— 而它的状态查询在 `claimTraeDailyCheckin` 内部（走账号池的设备指纹） |
+ * | `zcode` | claim 走 auth 实例的 `claimDailyFor`（每个 plan 现产 captcha），预检在内部完成 |
+ *
+ * ⚠️ 本集合**必须有自检**（见下面那条用例），否则后人遇到红就往里加 id 来消除失败。
+ */
+const PRECHECK_WITHOUT_FETCH_STATUS: ReadonlySet<string> = new Set(['trae', 'zcode'])
+
 describe('precheckStatus：TRAE 必须 true，自带预检的渠道必须 false', () => {
   it('TRAE 为 true（它的 claim 幂等且与真领取无法区分，只能靠 status 判定）', () => {
     applyOnce()
@@ -426,6 +507,58 @@ describe('precheckStatus：TRAE 必须 true，自带预检的渠道必须 false'
     expect(runtimeOf('loomy')?.credits?.precheckStatus, 'loomy 不传 false 会发必然失败的上游请求').toBe(false)
     // 反向：确认 loomy **确实没有** fetchStatus —— 否则上面那条就是多余的。
     expect(runtimeOf('loomy')?.credits?.fetchStatus, 'loomy 不该有同构状态端点').toBeUndefined()
+  })
+
+  /**
+   * ★★ **派生判据**：`precheckStatus` 只有在**真的实现了 `fetchStatus`** 时才允许为 `true`。
+   *
+   * ## 为什么必须有这条（2026-11-01 二审的**阻断项**）
+   *
+   * 上面那条只钉死了 `loomy` 一家。实测把 `src/provider-credits.ts` 里
+   * `magicrewintl` 的 `precheckStatus: false` 改成 `true`，
+   * **全量 11693 条一条都不红** —— 而生产后果是：
+   *
+   * 运行时在签到前先调 `fetchStatus`，而本家根本没有同构端点 ⇒ 发出
+   * `undefined/v2/billing/meter/checkin-activity-status` 这类畸形 URL
+   * （Node 抛 `Failed to parse URL from undefined/...`）⇒ 被 try/catch 收成
+   * `{kind:'failed'}` ⇒ **国际站一键签到每天必失败**，文案还是 URL 解析错误。
+   *
+   * ⇒ 判据从「手写名单」改成**从能力表派生**：凡是 `true` 的，必须自证有 `fetchStatus`。
+   *    这样新接入的渠道漏写 `precheckStatus: false` 时**自动**被点名。
+   */
+  it('★★ 派生：precheckStatus 为 true 的渠道必须真有 fetchStatus（否则签到恒失败）', () => {
+    applyOnce()
+    const offenders: string[] = []
+    let checked = 0
+    for (const descriptor of PROVIDER_REGISTRY) {
+      if (descriptor.credits.dailyCheckin !== true) continue
+      const credits = runtimeOf(descriptor.id)?.credits
+      if (credits === undefined) continue
+      checked += 1
+      if (PRECHECK_WITHOUT_FETCH_STATUS.has(descriptor.id)) continue
+      // `precheckStatus` 缺省是 true（见 `ProviderCredits` 的类型注释）⇒
+      // 只判显式 true 会漏掉「根本没写」的情况，故这里判「不是 false」。
+      const precheck = credits.precheckStatus !== false
+      if (precheck && credits.fetchStatus === undefined) offenders.push(descriptor.id)
+    }
+    expect(
+      offenders,
+      '★ 这些渠道没实现 fetchStatus，却没把 precheckStatus 置 false '
+      + '⇒ 签到前会发一个必然失败的畸形状态查询（用户看到「签到失败」，零线索）',
+    ).toEqual([])
+    // ⚠️ 反向自检：必须真的遍历到若干家，否则上面是空转。
+    expect(checked, '一个渠道都没检查到 = 本用例什么都没守').toBeGreaterThanOrEqual(10)
+  })
+
+  it('★ 豁免集自检：恰好是 {trae, zcode}，且它们确实声明了可签到', () => {
+    // ⚠️ 有了这条，「遇到红就加 id」这条路走不通：加进来的 id 必须真的在 registry 里
+    //    声明 `dailyCheckin: true`，且集合大小被钉死（加一家必须改这条用例并说明理由）。
+    expect([...PRECHECK_WITHOUT_FETCH_STATUS].sort()).toEqual(['trae', 'zcode'])
+    for (const id of PRECHECK_WITHOUT_FETCH_STATUS) {
+      const descriptor = PROVIDER_REGISTRY.find((d) => d.id === id)
+      expect(descriptor, `${id} 不在 registry 里`).toBeDefined()
+      expect(descriptor?.credits.dailyCheckin, `${id} 没有声明可签到，不该在豁免集里`).toBe(true)
+    }
   })
 })
 
@@ -773,6 +906,45 @@ describe('★ 不支持签到的渠道：文案必须指明「该产品无此能
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('★ onboarding.* 真的查表（注入哨兵）', () => {
+  /**
+   * ★★ **Magicrew 两站的新人奖励必须打到各自的 host**（2026-11-01 二审的**阻断项**）。
+   *
+   * 实测：把 `src/provider-onboarding.ts` 里
+   * `magicrewintl: magicrewOnboardingOf(MAGICREW_INTL)` 改成 `(MAGICREW)`，
+   * **全量 11693 条一条都不红** —— 而生产后果是国际站的新人奖励
+   * 拿国际 JWT 去打国内 host（`code 2182` / 401），错误文案还写「超级麦吉」，
+   * 用户完全看不出是配置问题。
+   *
+   * ⚠️ 判据必须是**完整 URL**（两站的 `onboarding/tasks` 路径逐字符相同，
+   *    只断路径片段区分不了）；且必须断言 `fetch` 真被调用过（否则
+   *    「原语提前返回」也会让 URL 断言在空数组上恒真）。
+   */
+  it.each([
+    { provider: 'magicrew', product: MAGICREW },
+    { provider: 'magicrewintl', product: MAGICREW_INTL },
+  ])('★★ $provider 的新人奖励打到 $product.host', async ({ provider, product }) => {
+    const ref = `${provider.toUpperCase()}_ACCOUNT_SPEC`
+    const { call, pool, credentials } = makeRpc(undefined, emptyAuths())
+    await seed(pool, provider, `${provider}-1`, ref)
+    await credentials.set(ref, JSON.stringify({ jwt: 'JWT-SPEC', organizationCode: 'org-spec' }))
+
+    const seen: string[] = []
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      seen.push(String(input))
+      // 回一个空任务表：本用例只关心**请求打到哪**，不关心解析结果。
+      return new Response(
+        JSON.stringify({ code: 1000, data: { participant_type: null, tasks: [] } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    })
+
+    const result = await call('onboarding.status', { provider, accountId: `${provider}-1` })
+    expect(result.ok, `${provider} 应被接受，实际 error=${result.error?.message}`).toBe(true)
+    expect(seen.length, `${provider} 的新人奖励一个请求都没发（表里没登记？）`).toBeGreaterThan(0)
+    expect(seen[0], `${provider} 的新人奖励打到了别的站（国际站打国内 host 会 401/2182）`)
+      .toBe(`${product.host}/api/v1/onboarding/tasks`)
+  })
+
   it('onboarding.status 走注入的表：哨兵读数出现在响应里', async () => {
     const { call, pool, credentials } = makeRpc(undefined, {
       ...emptyAuths(),
@@ -894,7 +1066,7 @@ describe('★ loomy 的 claim 返回 coversToday 语义与旧循环一致', () =
    *
    * ⚠️ 若将来 loomy 加了一个 `coversToday: false` 的分支（例如「活动尚未开始」
    * 与「今天已领」须区分），本用例会红，提醒把它接进 `summary.coversToday` 口径
-   *（见 `auto-checkin.ts` 的 `shouldMarkToday`：**不是** claimed+alreadyClaimed，
+   *（见 `auto-checkin.ts` 的逐渠道水位线判据：**不是** claimed+alreadyClaimed，
    *  而是各渠道用 `coversToday` 声明出来的 summary.coversToday）。
    */
   it('claimed 与 already-claimed 两条分支都不带 coversToday:false', async () => {

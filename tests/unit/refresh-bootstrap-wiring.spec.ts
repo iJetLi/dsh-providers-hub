@@ -93,6 +93,10 @@ describe('续期调度器：启动必须先跑一轮', () => {
       /if\s*\(\s*accounts\.length\s*===\s*0\s*\)/,
     )
     expect(gate, 'isPoolEmpty 必须仍然接上（空池要有可观测日志）').toContain('isPoolEmpty')
+    // issue #20：生产必须把首轮延后 15s（否则冷启动与宿主初始化抢网络/存储）。
+    // 这一行是接线的一部分，删掉后调度器会退回「立即全量续期」而没有任何测试会红。
+    expect(gate, '生产未设置 initialDelayMs（首轮会与宿主启动抢资源）')
+      .toContain('initialDelayMs: 15_000')
   })
 
   it('账号入库时补武装（issue IKJOZB 点名缺失的那条路径）', () => {
@@ -149,7 +153,11 @@ describe('续期调度器：启动必须先跑一轮', () => {
     //    2026-10-20 加 autoclawintl（AutoClaw 国际版）：19 → 20。
     // ⚠️ 2026-10-22（A6）：codely 翻 `channel: true`：20 → 21。
     // 2026-10-29 fork: qiniu + magicrew (channel:true) added -> 21 -> 22 -> 23.
-    expect(expected, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(23)
+    // 2026-11-01 fork: magicrewintl (channel:true) added -> 23 -> 24.
+    // 2026-11-02 fork: monkeycode (channel:true) added -> 24 -> 25.
+    // 2026-11-02 fork: monkeycodeintl (channel:true, 拆站) added -> 25 -> 26.
+    // 2026-11-02: baizhi 接入后 26 -> 27。
+    expect(expected, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(27)
     // ⚠️ 反方向：期望集里的每一个都必须**确实**在 registry 里有声明（防手抄漂移）。
     for (const id of expected) {
       expect(PROVIDER_REGISTRY.some((d) => d.id === id), `registry 缺少声明：${id}`).toBe(true)

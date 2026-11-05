@@ -158,7 +158,10 @@ describe('★ 类型与前端契约（源码级，反向验证必需）', () => 
   it('★ 前端按 unit 渲染（不再写死「积分」）', () => {
     // 逐账号那行
     expect(panelSrc).toMatch(/领取成功 `/)
-    expect(panelSrc).toMatch(/formatUnits\(outcome\.credit, unit\)/)
+    // ⚠️ 2026-11-03 PR #171 合并后变量名从 `outcome.credit` 改成 `claimedCredit`
+    //    （先归一到数字再判 0，避免把 `undefined` 渲染成 NaN）—— 判据要跟着
+    //    真实调用点走，否则这条会变成「实现没坏、用例红」。
+    expect(panelSrc).toMatch(/formatUnits\(claimedCredit, unit\)/)
     // 旧写法必须消失
     expect(panelSrc).not.toMatch(/领取成功 \+\$\{outcome\.credit\} 积分/)
   })

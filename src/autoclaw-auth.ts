@@ -6,6 +6,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   AUTOCLAW,
+  AUTOCLAW_INTL,
   type AutoclawProduct,
 } from './autoclaw-product.js'
 import {
@@ -735,12 +736,31 @@ export class AutoclawAuth extends Service {
   }
 
   /**
-   * 启动 AutoClaw 登录授权流程（本地服务器承载独立登录页，支持短信验证码与一键本地导入）。
+   * 启动 AutoClaw 登录授权流程（本地服务器承载独立登录页：国内=短信+一键导入，国际=Z.ai 授权）。
+   *
+   * ⚠️⚠️ **等待窗口必须按站点给，不能沿用 180s 默认值**（2026-11-02 审查打穿）：
+   *
+   * | 渠道 | 同类浏览器授权流程的超时 |
+   * |---|---|
+   * | buddy | `LOGIN_TIMEOUT_MS = 5 * 60 * 1000` |
+   * | accio | `ACCIO_LOGIN_TIMEOUT_MS = 600_000` |
+   * | astudio | 载体页 `300_000` |
+   * | **autoclaw（改前）** | **`180_000`** ← 断头默认值 |
+   *
+   * 后果链（实测复现）：超时 ⇒ `settleErr` ⇒ flow 关闭本地服务器 ⇒
+   * ① 用户正在填写的 Z.ai 授权页回跳时得到**浏览器级 `ECONNREFUSED`**（不是「登录超时」）；
+   * ② RPC 侧 `failLogin` 会把占位账号**删掉** ⇒ 这一轮不可恢复；
+   * ③ 前端轮询读到 `success:false` ⇒ 还会 **`loginWindow.close()`** 把用户正在操作的窗口关掉。
+   *
+   * Z.ai 那一步是「邮箱 + 密码（+ 可能的邮箱验证码）」的多步授权，3 分钟偏紧 ⇒
+   * 国际版对齐 accio 的 **600 秒**；国内短信仍是 180 秒（输个验证码够用）。
    */
-  async startLogin(_options?: { refName?: string }): Promise<StartedAutoclawSmsLoginFlow> {
+  async startLogin(options?: { refName?: string; timeoutMs?: number }): Promise<StartedAutoclawSmsLoginFlow> {
     return startAutoclawSmsLoginFlow({
       product: this.product,
       fetchImpl: this.fetchImpl,
+      timeoutMs: options?.timeoutMs
+        ?? (this.product.id === AUTOCLAW_INTL.id ? 600_000 : undefined),
     })
   }
 
@@ -763,13 +783,18 @@ export class AutoclawAuth extends Service {
    *    服务端回 `631001 User login error`（= 进了登录逻辑、code 无效），
    *    **不是**「state 无效」⇒ 服务端不硬校验 `state` 内容。
    *
-   * ⇒ 本方法**只拼 `client_id` / `redirect_uri` / `response_type`**，
-   *   `state` 留给授权页填，回调时原样透传给 {@link loginWithZaiCode}。
+   * ⇒ 本方法**只拼 `client_id` / `redirect_uri` / `response_type` / `state`**。
    *
-   * @param redirectUri - 回调地址（`http://localhost:<port>/auth/callback-zai`）。
+   * ⚠️⚠️ `state` **不再是「留给授权页填」**（2026-11-02 真机推翻，见
+   *    `buildAutoclawZaiAuthUrl` 上方那张服务端探针表）：`/api/oauth/authorize`
+   *    **缺 state 直接 422**，把它留空会让整条流程在用户登录完成后静默落回首页。
+   *    调用方若没有既有 state，就传 `autoclawZaiState()` 现生成一个。
+   *
+   * @param redirectUri - 回调地址（`http://127.0.0.1:<port>/auth/callback-zai`）。
+   * @param state - OAuth `state`（**必填**，回调时原样带回）。
    */
-  buildZaiAuthUrl(redirectUri: string): string {
-    return buildAutoclawZaiAuthUrl(redirectUri)
+  buildZaiAuthUrl(redirectUri: string, state: string): string {
+    return buildAutoclawZaiAuthUrl(redirectUri, state)
   }
 
   /**

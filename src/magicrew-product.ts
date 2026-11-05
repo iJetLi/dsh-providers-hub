@@ -54,10 +54,13 @@ export interface MagicrewProduct {
   /** 网页 origin（`Origin` 头必带，缺了偶发 403）。 */
   readonly webOrigin: string
   /**
-   * 网关是否**强制**要求 `organization-code`。
+   * 该站是否**强制**要求 `organization-code`。
    *
-   * 实测：国内站不强制（缺了仍 200）；国际站缺了回 **HTTP 500 + 22 字节裸文本**
-   * （不是 JSON，极易被误判成「网关挂了」）。
+   * 实测：国内站不强制（缺了仍 200）；国际站缺了会被上游拒 —— 但**形态分两种**
+   *（二审更正，原注释把两者混成一句）：
+   * - 业务 API `/api/v1/*`：`{"code":2182,"message":"用户所在组织不存在"}`
+   * - 聊天网关 `/v1/*`：⚠️ **形态未定**。参考实现记的是「HTTP 500 + 22 字节裸文本」，
+   *   但 2026-11-01 用真实 apiKey 实测缺 org 时仍是 HTTP 200 + 正常 SSE ⇒ **不写死**
    */
   readonly needsOrgOnGateway: boolean
   readonly defaultCredentialRef: string
@@ -83,6 +86,42 @@ export const MAGICREW_MODELS_PATH = '/api/v1/flows/models'
 export const MAGICREW_MODEL_POINTS_PATH = '/api/v1/products/model-points'
 export const MAGICREW_POINTS_PATH = '/api/v1/quota/points/total'
 export const MAGICREW_CHAT_PATH = '/v1/chat/completions'
+
+/**
+ * 每日登录积分（= 真正的「每日签到」）。
+ *
+ * `POST <host>/api/v1/login-gift`，**请求体存在且为空串 `''`**（不是省略 body
+ * —— 照这句注释删掉 `body: ''` 就是协议回归），幂等，每天一次。
+ * - 国内站（超级麦吉）：**+200 / 天**
+ * - 国际站（MagiCrew）：**+50 / 天**
+ * - 当天已领 → HTTP 仍 200，但 body 里 `granted: false` +「今日已领取登录积分」
+ *
+ * ⚠️ 两站**逐字符同构**（同一个 Go 服务），故路径是共享常量而非产品字段。
+ * 来源：magpie 插件 `magpie-magicrew-auth/src/tasks.mjs:1-21` 的实测注释
+ * （2026-10-27 用真实网页登录抓包得到 `magicrew.ai` 的 `/login-gift`）。
+ */
+export const MAGICREW_LOGIN_GIFT_PATH = '/api/v1/login-gift'
+
+/**
+ * 新手引导任务（=「新人奖励」）。
+ *
+ * - 查询：`GET <host>/api/v1/onboarding/tasks`
+ * - 完成：`PUT <host>/api/v1/onboarding/tasks/<code>/completion`（body 为 `{}`）
+ *
+ * 国内站 8 项，其中 7 项 PUT 即完成；第 8 项 `first_ai_work`
+ * 服务端回 **`9303`「该新人引导任务不支持手动完成」**，必须真发一条消息才置位。
+ * **每个账号一辈子一次**。
+ *
+ * ⚠️ 「8 项合计 500 积分」这个数字**在参考实现里查不到依据**（`api.mjs` 与
+ * `tasks.mjs` 只说了 8 项 / 7 项可 PUT，没给总分）⇒ 本仓不写死它，一切以
+ * 上游 `tasks[].points` 为准（`fetchMagicrewOnboardingStatus` 现场累加）。
+ *
+ * ⚠️⚠️ **国际站这个接口恒返回 `{participant_type: null, tasks: []}`** ——
+ * 那是「该账号没被登记进引导计划」，**不是**「已经领完了」。别把 0 项当成功
+ * 上报「新手福利 0 项已全部完成」（magpie 0.3.7 犯过这个错）。
+ * ⇒ 本插件照做（代码在，能领就领），但国际站预期就是「拿不到」。
+ */
+export const MAGICREW_ONBOARDING_TASKS_PATH = '/api/v1/onboarding/tasks'
 
 /** 账号池凭据 ref 前缀（`jet-hub-store.ts` 的前缀表必须同步）。 */
 export const MAGICREW_ACCOUNT_PREFIX = 'MAGICREW_ACCOUNT_'
@@ -199,6 +238,73 @@ export const MAGICREW: MagicrewProduct = Object.freeze({
   catalogRetryMs: 60_000,
   // ⚠️ 必须够长：推理模型可能长时间只吐 reasoning、两次字节之间静默 >45s。
   chunkTimeoutMs: 300_000,
+  fallbackModels: MAGICREW_FALLBACK_MODELS,
+})
+
+/**
+ * **Magicrew 国际站**（MagiCrew，`www.magicrew.ai`）。
+ *
+ * ## 为什么是独立 provider 而不是 `MAGICREW` 的站点参数
+ *
+ * 判据与 `minimaxintl` / `autoclawintl` 同款（见 `src/minimax-product.ts` 文件头）：
+ *
+ * | 判据 | 国内（超级麦吉） | 国际（MagiCrew） |
+ * |---|---|---|
+ * | 展示名 | 超级麦吉 | MagiCrew |
+ * | 网页 | `www.letsmagic.cn` | `www.magicrew.ai` |
+ * | API host | `i-magic-service.letsmagic.cn` | **`magic-service.magicrew.ai`** |
+ * | 登录体系 | 手机号 / 短信验证码 | 邮箱 / OAuth |
+ * | 每日签到 | +200 / 天 | **+50 / 天** |
+ * | 强制 org | 否（缺了仍 200） | **是**（缺了业务 API 回 `code 2182`「用户所在组织不存在」；
+ *   聊天网关 `/v1/*` 的形态**未定**，实测 apiKey 形态下仍 200） |
+ *
+ * 账号体系物理隔离（同一个 Go 服务，但数据面分开）⇒ 必须是独立 provider，
+ * 否则一个 provider 下会混进两套 host 的账号，选号器与余额全错位。
+ *
+ * ## ⚠️ `api.magicrew.ai` 不是这套 API
+ *
+ * 它是 teamshare 网关（`MAGIC_GATEWAY_ADDRESS`），对 `/v1/models`、`/api/v1/*`
+ * 一律回 `not match rule path`。真实业务 API 是 **`magic-service.magicrew.ai`**
+ * —— 来源：`GET https://www.magicrew.ai/workspace` 的 HTML 里内嵌的运行时配置
+ * `"MAGIC_SERVICE_BASE_URL":"https://magic-service.magicrew.ai"`
+ * （`MAGIC_APP_ENV: "international-prod"`）。
+ *
+ * ## ⚠️ 实现零复制
+ *
+ * `MagicrewAuth` / `MagicrewService` / `MagicrewAdapter` / 目录 / 积分 / 资料
+ * 全部复用国内版那一套，**只有本常量不同**（与 `autoclawintl` 同纪律：
+ * 复制会让同类缺陷修两遍）。
+ */
+export const MAGICREW_INTL: MagicrewProduct = Object.freeze({
+  id: 'magicrewintl',
+  site: 'intl',
+  // ⚠️ 与客户端 `PROVIDER_REGISTRY` 的 label 语义一致（rail 宽度算式依赖长度）。
+  displayName: 'MagiCrew',
+  host: 'https://magic-service.magicrew.ai',
+  webOrigin: 'https://www.magicrew.ai',
+  /**
+   * ⚠️ **必须 `true`**：国际站缺 `organization-code` 时上游会拒。
+   *
+   * ⚠️ 二审更正：**两种端点两种形态** ——
+   * - 业务 API `/api/v1/*`（签到 / 目录 / 余额 / 计费）：`{"code":2182,"message":"用户所在组织不存在"}`
+   * - 聊天网关 `/v1/chat/completions`：⚠️ **形态未定** —— 参考实现记的是「HTTP 500 +
+   *   22 字节裸文本」，但 2026-11-01 真实 apiKey 实测缺 org 时仍 HTTP 200 + 正常出流
+   *
+   * 国内站缺了仍 200，故两家取值不同。
+   */
+  needsOrgOnGateway: true,
+  defaultCredentialRef: 'MAGICREWINTL_ACCESS_TOKEN',
+  requestTimeoutMs: 30_000,
+  chatHeaderTimeoutMs: 60_000,
+  catalogRetryMs: 60_000,
+  chunkTimeoutMs: 300_000,
+  /**
+   * ⚠️ 兜底模型表**与国内站共用**：两站是同一个 Go 服务的两个数据面，
+   * 目录端点 `/api/v1/flows/models` 逐字符同构，模型 id 集合理论上一致
+   * （实测国际站目录是同一批 id 的子集）。共表比复制一份更安全 ——
+   * 复制会让「新模型只补了一边」变成静默的能力差异。
+   * ⚠️ 本表的 ctx 值**必然腐坏**（见上方的双时间点对照），只作兜底。
+   */
   fallbackModels: MAGICREW_FALLBACK_MODELS,
 })
 

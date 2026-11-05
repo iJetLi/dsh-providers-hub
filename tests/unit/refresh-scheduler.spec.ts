@@ -222,3 +222,101 @@ describe('MultiAccountRefreshScheduler：武装判据不依赖池内布尔（iss
     scheduler.stop()
   })
 })
+
+/**
+ * issue #20：首轮延迟（生产 15s）。
+ *
+ * 宿主启动时立即对全量账号续期会和启动路径抢网络/存储；延迟只作用于首轮，
+ * 周期定时器仍须立刻武装，且延迟期间 `stop()` 必须能取消。
+ */
+describe('MultiAccountRefreshScheduler：首轮延迟（issue #20）', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('★★ initialDelayMs 之前不跑首轮，之后跑一轮，周期照常', async () => {
+    vi.useFakeTimers()
+    const log = makeRefreshLog()
+    const scheduler = new MultiAccountRefreshScheduler({
+      refresh: log.refresh,
+      intervalMs: 1000,
+      isPoolEmpty: async () => false,
+      initialDelayMs: 500,
+    })
+    await scheduler.start()
+    expect(scheduler.isArmed()).toBe(true)
+    await vi.advanceTimersByTimeAsync(499)
+    expect(log.calls).toBe(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(log.calls).toBe(1)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(log.calls).toBe(2)
+    scheduler.stop()
+    vi.useRealTimers()
+  })
+
+  it('★★ 延迟期间 stop() 取消首轮（不留幽灵定时器）', async () => {
+    vi.useFakeTimers()
+    const log = makeRefreshLog()
+    const scheduler = new MultiAccountRefreshScheduler({
+      refresh: log.refresh,
+      intervalMs: 1000,
+      isPoolEmpty: async () => false,
+      initialDelayMs: 500,
+    })
+    await scheduler.start()
+    scheduler.stop()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(log.calls).toBe(0)
+    expect(scheduler.isArmed()).toBe(false)
+    vi.useRealTimers()
+  })
+
+  it('默认（不传 initialDelayMs）仍是立即跑首轮——既有 IKIRTT 契约不变', async () => {
+    vi.useFakeTimers()
+    const log = makeRefreshLog()
+    const scheduler = new MultiAccountRefreshScheduler({
+      refresh: log.refresh,
+      intervalMs: 1000,
+      isPoolEmpty: async () => false,
+    })
+    await scheduler.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(log.calls).toBe(1)
+    scheduler.stop()
+    vi.useRealTimers()
+  })
+  it('★★ 延迟期间重复 start() 仍只跑一次首轮（幂等）', async () => {
+    vi.useFakeTimers()
+    const log = makeRefreshLog()
+    const scheduler = new MultiAccountRefreshScheduler({
+      refresh: log.refresh,
+      intervalMs: 1000,
+      isPoolEmpty: async () => false,
+      initialDelayMs: 500,
+    })
+    await scheduler.start()
+    await scheduler.start()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(log.calls).toBe(1)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(log.calls).toBe(2)
+    scheduler.stop()
+  })
+})
+
+describe('空池留痕（issue IKJOZB 的另一半）', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('★★ 空池也要记一条 info（否则调度坏了用户完全没有线索）', async () => {
+    vi.useFakeTimers()
+    const infos: string[] = []
+    const scheduler = new MultiAccountRefreshScheduler({
+      refresh: async () => {},
+      intervalMs: 1000,
+      isPoolEmpty: async () => true,
+      info: (message) => infos.push(message),
+    })
+    await scheduler.start()
+    expect(infos.some((m) => m.includes('账号池为空'))).toBe(true)
+    scheduler.stop()
+  })
+})

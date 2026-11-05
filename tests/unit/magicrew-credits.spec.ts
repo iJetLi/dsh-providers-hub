@@ -61,10 +61,18 @@ describe('magicrew 积分', () => {
     })
     expect(balance?.total).toBe(1093)
     /**
-     * ⚠️ **两条包**（I3，2026-10-29）：上游只下发**临期**批次（93），
-     * 而 `total_points` 是全部（1093）⇒ 长期那 1000 分必须**合成**一条包，
+     * ⚠️ **两条包**（I3，2026-10-29；**2026-11-01 修正了归因**）：
+     * `expiring_quota_details` 是「**所有**会过期的批次」，不是「只有临期的」——
+     * 真实账号实测里它同时含**今天到期**（200 / 47）与**一年后到期**
+     * （2027-11-03 的 1000 / 200）。而 `total_points` 是全部（1093）⇒
+     * 两者之差是上游**根本不下发到期时间**的那部分 ⇒ 必须**合成一条包**，
      * 否则账号卡 hover 会「只列 93、合计 1093」让用户以为丢了积分。
      * ⇒ 断言 `sum(remaining) === total`（守恒），而不是「恰好 1 条」。
+     *
+     * ⚠️ 这条合成包的名字是「**永久积分**」，不是「长期积分」：它**没有**
+     * `deductionEndTime`，前端 `splitCreditsByExpiry` 会把它落进 `permanent` 桶
+     * （绿）；真正的「长期」是**有到期时间但超出窗口**的批次（上面那条 2027 年的）。
+     * 旧名字让它看起来像「长期」，而实际渲染成「永久」——两处语义打架。
      */
     expect(balance?.packages).toHaveLength(2)
     expect(balance?.packages.reduce((s, p) => s + p.remaining, 0)).toBe(1093)
@@ -76,7 +84,7 @@ describe('magicrew 积分', () => {
     // 长期包：**没有** `deductionEndTime`（⇒ `magicrewExpiry` 会跳过它，仍得 NEVER）
     const longLived = balance?.packages.find((p) => p.deductionEndTime === undefined)
     expect(longLived?.remaining).toBe(1000)
-    expect(longLived?.name).toBe('长期积分')
+    expect(longLived?.name).toBe('永久积分')
   })
 
   it('★ 倍率：input_points / 2000（逐个核对过）', () => {
@@ -100,6 +108,46 @@ describe('magicrew 积分', () => {
     expect(magicrewRateOf({ input_points: '  ' })).toBeUndefined()
     expect(magicrewRateOf({ input_points: 'abc' })).toBeUndefined()
     expect(magicrewRateOf({ input_points: Number.NaN })).toBeUndefined()
+  })
+
+  /**
+   * ★★ **`Number()` 的进制陷阱**（2026-11-01 三审）。
+   *
+   * 本文件此前自带一份「只放行 number 与非空字符串」的实现，**没有**限定十进制
+   * ⇒ `"0x10"` 被 `Number()` 解析成 **16**、`"1e3"` 成 **1000**，
+   * 而签到侧的同名字段被解析成 0 ⇒ 同一个上游字段在两个模块解释不同。
+   *
+   * 现在两处共用 `magicrew-number.ts` 的 `magicrewDecimalOf`（只认十进制），
+   * 本用例钉住积分侧这一半（签到侧见 `magicrew-checkin.spec.ts` 的 points 边界组）。
+   */
+  it('★★ 倍率：十六进制 / 科学计数 / 千分位 ⇒ undefined（只认十进制字面量）', () => {
+    expect(magicrewRateOf({ input_points: '0x10' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '0b11' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '1e3' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '1,234' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '1,234 积分' })).toBeUndefined()
+    // 反向：**真正的十进制字符串必须放行**（收得太紧会让所有正常响应读不到）。
+    expect(magicrewRateOf({ input_points: '200' })).toBeCloseTo(0.1)
+    expect(magicrewRateOf({ input_points: ' 200 ' })).toBeCloseTo(0.1)
+    expect(magicrewRateOf({ input_points: '200.0' })).toBeCloseTo(0.1)
+  })
+
+  /**
+   * ★★ **负单价一律读不到**（2026-11-01 三审：原先 `'-5'` 会得到 **-0.0025 负倍率**）。
+   *
+   * 负倍率会直接显示在模型列表的「倍率」列上，用户看到「-0.0025×」只会困惑；
+   * 而这个值还会参与排序/比较逻辑。单价不可能为负 ⇒ 读不到（`undefined`）。
+   *
+   * ⚠️ 与**余额**的区别：`total_points` 可以是负数（欠费，上游实测 `-31`），
+   * 但它走 `fetchMagicrewBalance` 的直接读取，**不经这里** ⇒ 不会误伤。
+   */
+  it('★★ 倍率：负单价 ⇒ undefined（不许算出负倍率）', () => {
+    expect(magicrewRateOf({ input_points: '-5' })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: -5 })).toBeUndefined()
+    expect(magicrewRateOf({ input_points: '-0.5' })).toBeUndefined()
+    // 反向：0 与正数照常（0 = 免费是合法值）。
+    expect(magicrewRateOf({ input_points: 0 })).toBe(0)
+    expect(magicrewRateOf({ input_points: '0' })).toBe(0)
   })
 
   it('★ 倍率：**数字字符串**仍照旧可算（收紧不得连合法输入一起废掉）', () => {
@@ -330,14 +378,17 @@ describe('magicrew 临期折算', () => {
     })
     expect(mixed).toBe(EXPIRES_AT)
 
-    // 全是过期批次 ⇒ 没有有效到期批次 ⇒ NEVER（余额本身仍在，不是 UNUSABLE）。
+    // ⚠️ **2026-11-02 改（PR #168 对抗审计 B1）**：原先断言 NEVER（「有余额但无临期」）。
+    //    但全是过期批次 ⇒ 那 100 分**一分也扣不到** ⇒ 必须判 UNUSABLE（渠道退出轮换），
+    //    与 `sharedPackageExpiry` / `splitBuddyCreditsByExpiry` / 前端 `expired` 桶同判；
+    //    否则锁定态下这个零可用额度的号仍会被选中、请求必失败。
     const onlyPast = await magicrewExpiry({
       jwt: 'j.w.t',
       organizationCode: 'org1',
       now: NOW,
       cachedBalance: async () => balance([packageOf({ deductionEndTime: past })]),
     })
-    expect(onlyPast).toBe(NEVER)
+    expect(onlyPast).toBe(UNUSABLE)
   })
 })
 
@@ -501,5 +552,163 @@ describe('magicrew 余额取数：四条失败出口', () => {
     const balance = await balanceOf(fetchImpl)
     expect(balance?.packages).toHaveLength(1)
     expect(balance?.packages[0]?.remaining).toBe(93)
+  })
+})
+
+/**
+ * 2026-11-01 二审（行为红队）挖出的四个**降级质量**真缺陷 —— 都不是「上游不发」，
+ * 而是「上游发了一个我们没预料到的**类型/形状**，我们把它静默吃掉了」。
+ *
+ * 共同特征：**不报错、不打日志、与「凭据失效」或「余额为零」同形**，
+ * 用户只看到积分变 0 或账号突然不可用。这四条的判别力全在「别家正常的输入不受影响」上，
+ * 所以**多数**条目带一个「对照格」（同一次取数里放一条**正常**批次/正常 total）——
+ * 不是每条都有：纯「越界日期」那两条的对照在断言里，不在 fixture 里。
+ */
+describe('magicrew 余额取数：类型漂移与越界日期（真缺陷回归）', () => {
+  const balanceOf = (fetchImpl: unknown) => fetchMagicrewBalance({
+    jwt: 'j.w.t',
+    organizationCode: 'org1',
+    fetchImpl: fetchImpl as typeof fetch,
+  })
+
+  it('★★ `total_points` 是**数字字符串** ⇒ 照常解析（旧判据 `typeof === \'number\'` 会让整条余额消失）', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      code: 1000,
+      data: {
+        total_points: '2661',
+        expiring_quota_details: [
+          { quota_id: 1, expires_at: '2026-11-27 13:47:42', remaining_points: 1661 },
+        ],
+      },
+    }))
+    const balance = await balanceOf(fetchImpl)
+    // 整条余额仍在（这是最要紧的一格：旧实现这里返回 undefined）
+    expect(balance).toBeDefined()
+    expect(balance?.total).toBe(2661)
+    // 残差合成同样按数字算 ⇒ 永久 1000
+    expect(balance?.packages.reduce((s, p) => s + p.remaining, 0)).toBe(2661)
+  })
+
+  it('★★ `total_points` 是**负数**（欠费）⇒ 照常解析，不许判成「读不出」（余额口径允许负数）', async () => {
+    // ⚠️ 这一格是「容错」必须用**允许负数**那个解析器的理由：模型单价/任务积分
+    //    为负是错的，但**账户余额**为负是上游真实状态（实测出现过 -31）。
+    //    若复用拒绝负数的 `magicrewDecimalOf`，这条会退化成「查询失败」。
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      code: 1000,
+      data: { total_points: -31, expiring_quota_details: [] },
+    }))
+    const balance = await balanceOf(fetchImpl)
+    expect(balance).toBeDefined()
+    expect(balance?.total).toBe(-31)
+    // 负余额不该合成出「永久积分」包（残差为负 ⇒ 不合成），否则表面积大于 total
+    expect(balance?.packages).toHaveLength(0)
+  })
+
+  it('★★ `remaining_points` 是**数字字符串** ⇒ 该批次保留（旧判据会丢弃它并把金额并进「永久」）', async () => {
+    // 旧行为：batch 被丢 ⇒ Σ批次 = 0 ⇒ 残差 = total = 150 ⇒ **临期 50 被标成永久 150**。
+    // 后果不是「少显示」，而是**锁定永久积分时这个账号被误拒**（方向正好反了）。
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      code: 1000,
+      data: {
+        total_points: 150,
+        expiring_quota_details: [
+          { quota_id: 1, expires_at: '2026-11-05 00:00:00', remaining_points: '50' },
+          { quota_id: 2, expires_at: '2027-11-03 23:02:08', remaining_points: 100 },
+        ],
+      },
+    }))
+    const balance = await balanceOf(fetchImpl)
+    expect(balance?.packages).toHaveLength(2)
+    expect(balance?.packages.map((p) => p.remaining).sort((a, b) => a - b)).toEqual([50, 100])
+    // 守恒：合成包 = total − Σ批次 = 0 ⇒ 不该冒出「永久积分」包
+    expect(balance?.packages.some((p) => p.name === '永久积分')).toBe(false)
+  })
+
+  it('★★ 越界 `expires_at`（`2026-13-45 25:99:99`）⇒ 不编造到期时刻（`Date.UTC` 会把它静默归一化成 2027-02-15）', async () => {
+    // 旧行为：归一化成 1802630439000（2027-02-15）⇒ 前端落「长期」、后端落「永久」，
+    // 而真实值根本不可知 —— 本家契约是「解析不出来就 undefined，绝不编造」。
+    // 落桶方向：无 `deductionEndTime` ⇒ 永久桶（保守：锁定永久积分时宁可拦住，也不误烧）。
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      code: 1000,
+      data: {
+        total_points: 100,
+        expiring_quota_details: [
+          { quota_id: 1, expires_at: '2026-13-45 25:99:99', remaining_points: 100 },
+        ],
+      },
+    }))
+    const balance = await balanceOf(fetchImpl)
+    expect(balance?.packages).toHaveLength(1)
+    expect(balance?.packages[0]?.deductionEndTime).toBeUndefined()
+  })
+
+  it('★★ 批次合计**大于** `total_points`（上游自相矛盾）⇒ 守恒裁剪，且**临期优先保留**', async () => {
+    // 行为红队实测形状：total 100，批次 200（远期）+ 50（临期）= 250。
+    // 不裁的后果：三档合计 350 > 账户实际 100，用户没法判断哪个是真的。
+    // 裁的顺序必须**先到期先保留**（否则被裁掉的是临期，方向反了）。
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      code: 1000,
+      data: {
+        total_points: 100,
+        expiring_quota_details: [
+          { quota_id: 1, expires_at: '2027-11-03 23:02:08', remaining_points: 200 },
+          { quota_id: 2, expires_at: '2026-11-05 00:00:00', remaining_points: 50 },
+        ],
+      },
+    }))
+    const balance = await balanceOf(fetchImpl)
+    // ① 守恒：合计恰好等于 total（不多不少）
+    expect(balance?.packages.reduce((s, p) => s + p.remaining, 0)).toBe(100)
+    // ② 临期那笔**整条保留**（50），远期那笔被裁到 50（不是丢掉临期）
+    const expiring = balance?.packages.find((p) => p.deductionEndTime === Date.parse('2026-11-04T16:00:00.000Z'))
+    expect(expiring?.remaining).toBe(50)
+    const longTerm = balance?.packages.find((p) => p.deductionEndTime !== undefined && p.deductionEndTime !== expiring?.deductionEndTime)
+    expect(longTerm?.remaining).toBe(50)
+    // ③ 没有「永久积分」包（残差 0）
+    expect(balance?.packages.some((p) => p.name === '永久积分')).toBe(false)
+  })
+
+  it('★★ 批次合计大于 total 但 total 为 0 ⇒ 全部裁掉（余额为 0 时不许还显示能用的积分）', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      code: 1000,
+      data: {
+        total_points: 0,
+        expiring_quota_details: [
+          { quota_id: 1, expires_at: '2026-11-27 13:47:42', remaining_points: 100 },
+        ],
+      },
+    }))
+    const balance = await balanceOf(fetchImpl)
+    expect(balance?.total).toBe(0)
+    expect(balance?.packages).toHaveLength(0)
+  })
+})
+
+describe('欠费（total < 0）与批次并存时不得丢弃明细（对抗审计 B5）', () => {
+  const balanceWith = async (totalPoints: number) => await fetchMagicrewBalance({
+    jwt: 'j.w.t',
+    organizationCode: 'org1',
+    fetchImpl: (async () => jsonResponse({
+      code: 1000,
+      data: {
+        total_points: totalPoints,
+        expiring_quota_details: [
+          { quota_id: 1, expires_at: '2027-01-01 00:00:00', remaining_points: 100 },
+        ],
+      },
+    })) as unknown as typeof fetch,
+  })
+
+  it('★ total=-31 且上游给了正批次 ⇒ 批次仍保留（不再整条丢弃）', async () => {
+    const out = await balanceWith(-31)
+    expect(out?.total).toBe(-31)
+    // ⚠️ 旧实现 `budget = total = -31` ⇒ 首轮 break ⇒ packages=[] ⇒ 面板只剩「积分 -31」。
+    expect(out?.packages.length, '批次明细必须保留').toBe(1)
+    expect(out?.packages[0]?.remaining).toBe(100)
+  })
+
+  it('★ total=0 且批次和 > 0 ⇒ 仍然全部裁掉（与既有语义一致）', async () => {
+    const out = await balanceWith(0)
+    expect(out?.packages).toHaveLength(0)
   })
 })

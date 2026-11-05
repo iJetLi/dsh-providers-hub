@@ -952,6 +952,20 @@ export function sanitizeAccounts(raw: unknown): ProviderAccountEntry[] {
       // 无有效项时写 `undefined`：`JSON.stringify` 会整个丢弃该键，
       // 故落盘/传输形态与「从未有过标记」完全一致（不留 `{}` 噪音）。
       modelRateLimits: limits,
+      /**
+       * 封号标记（issue IKS2MV）：时刻走与 `modelRateLimits` **同一个**谓词
+       * （有限、正、Date 范围内 —— 它会进 `new Date()`，脏值抛 `RangeError`），
+       * 报文只保留非空字符串并截断到 200 字符。
+       *
+       * ⚠️ 同样**显式写键名并置于 `...candidate` 之后**：备份文件是用户可编辑输入，
+       * 原样透传会让脏的 `policyBlockedAtMs` 直达选号判据 —— 而封号是**账号级**，
+       * 一条脏值就会让整个账号永久不可选（比逐模型的限流脏值更狠）。
+       */
+      policyBlockedAtMs: isValidResetAtMs(candidate.policyBlockedAtMs) ? candidate.policyBlockedAtMs : undefined,
+      policyBlockedMessage: typeof candidate.policyBlockedMessage === 'string'
+        && candidate.policyBlockedMessage.trim().length > 0
+        ? candidate.policyBlockedMessage.slice(0, 200)
+        : undefined,
       // ⚠️ 四个代理字段统一过闸（2026-10-25 审计 B2-1，见 `PROXY_FIELDS` 的注释）。
       // 与 `modelRateLimits` 同款：**显式写键名并置于展开之后**，否则
       // `candidate` 里的脏值会把清理结果整个覆盖回去（本文件第一版正是如此）。
@@ -1320,6 +1334,24 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   //    `${provider.toUpperCase()}_ACCOUNT_${suffix}`（见 `qiniu-rpc.ts` 的
   //    `qiniuSlotNamesOf`），两者必须对上，否则本表认不出它。
   ['QINIU', 'qiniu'],
+  // ⚠️ **本 fork 独有**的 provider（monkeycode，2026-11-02）—— 同款坑又一次。
+  // 漏加 = `MONKEYCODE_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
+  //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新粘贴 Key）。
+  //
+  // ⚠️ 前缀取 `MONKEYCODE`：`monkeycode-rpc.ts` 的 `monkeycodeSlotNamesOf`
+  //    生成的 ref 恒为 `MONKEYCODE_ACCOUNT_${suffix}`，两者必须对上。
+  ['MONKEYCODE', 'monkeycode'],
+  // ⚠️ 国际站（2026-11-02，2026-11-02 接入）—— script 同款坑第 **八** 次。
+  //    与 `MONKEYCODE` 是**超串关系**（`MONKEYCODEINTL` 以 `MONKEYCODE` 开头）——
+  //    顺序由 `ACCOUNT_REF_RE` 内部的**长度降序排序**保证，与本数组书写顺序无关
+  //    （与 `MINIMAX` / `MINIMAXINTL`、`AUTOCLAW` / `AUTOCLAWINTL` 同型）。
+  //    漏加 = 国际站账号在 `state.json` 缺失时**静默消失**（凭据还在
+  //    `.credentials.yaml` 里，只是索引建不出来，用户只能重新登录）。
+  ['MONKEYCODEINTL', 'monkeycodeintl'],
+  // ⚠️ 百智云（`BAIZHI_ACCOUNT_*`，2026-11-02）：与 MONKEYCODE 系列**无前缀关系**，
+  //    但同样必须登记 —— 漏了它，`state.json` 里的账号列表损坏/缺失时，
+  //    从凭据 ref 反推 provider 会失败 ⇒ 账号在重启后**静默消失**。
+  ['BAIZHI', 'baizhi'],
   // ⚠️ 第 14 个 provider（gemini，2026-10-03）—— 同款坑第 **三** 次。
   // 漏加 = `GEMINI_ACCOUNT_*` 的账号在 `state.json` 缺失时静默消失
   //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新授权）。
@@ -1350,6 +1382,13 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   // 漏加 = `MAGICREW_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
   //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新导入）。
   ['MAGICREW', 'magicrew'],
+  // ⚠️ MagiCrew 国际站（`magicrewintl`，2026-11-01）—— 同款坑第 **九** 次。
+  // 漏加 = `MAGICREWINTL_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
+  //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新导入）。
+  // ⚠️ 与 `MAGICREW` 是**超串关系**（`MAGICREWINTL` 以 `MAGICREW` 开头）——
+  //    顺序由 `ACCOUNT_REF_RE` 内部的**长度降序排序**保证，与本数组书写顺序无关
+  //    （与 `MINIMAX` / `MINIMAXINTL`、`AUTOCLAW` / `AUTOCLAWINTL` 同型）。
+  ['MAGICREWINTL', 'magicrewintl'],
   // ⚠️ 第 19 个 provider（autoclawintl，2026-10-20）—— 同款坑第 **七** 次。
   // 漏加 = `AUTOCLAWINTL_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
   //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新导入）。
@@ -1475,7 +1514,21 @@ function accountFromCredentialRef(ref: string): ProviderAccountEntry | undefined
     enabled: true,
     credentialRef: ref,
     createdAt: Date.now(),
-    refreshable: true,
+    /**
+     * ⚠️ 恢复路径**不能一律写 `true`**（2026-11-03 PR #171 合并审计）。
+     *
+     * 这个值是「凭据能不能自动续期」的镜像：静态 Key 渠道（MonkeyCode 两站 /
+     * 百智云）在上游**没有任何 refresh 端点**，正常建号时都写 `false`
+     * （`monkeycode-rpc.ts` / `baizhi-rpc.ts` / `jet-hub-rpc.ts:5179,5339`）。
+     * 从残留凭据恢复时写 `true` ⇒ 卡片会显示「· 自动续期」，与事实相反，
+     * 且会把「凭据已过期」的排查方向带偏。
+     *
+     * 其余 provider 保持 `true`（绝大多数确有 refresh 端点）；将来新增
+     * 「静态材料」渠道时要把 id 一并加进来 —— 这是一张**只增不改**的例外表。
+     */
+    refreshable: provider !== 'monkeycode'
+      && provider !== 'monkeycodeintl'
+      && provider !== 'baizhi',
   }
 }
 

@@ -457,6 +457,45 @@ describe('credits.status 单账号异常隔离', () => {
     expect(results[0]?.status).toBeNull()
     expect(statusCalls).toBe(0)
   })
+
+  /**
+   * ⚠️⚠️ **同一根缺陷的第二处**（2026-11-02 真机报障的连带修复）：
+   * `collectCreditsStatus` 里逐字相同的 `(product as { id?: string }).id === ASTUDIO.id`。
+   * （⚠️ 不是 `collectClaimResults` —— 它体内没有这个写法。）
+   *
+   * 这一处**在用户界面上看不出来** —— 它的 per-account `catch` 把异常吞成
+   * `status = null`，于是「凭据未配置」与「查询失败」同形（都显示成没有签到状态）。
+   * ⇒ 唯一可观测的差异是 `deps.warn` 有没有被调用（异常路径会告警，正常路径不会），
+   * 判据就打在那里。**别改成断言 `status === null`** —— 那样变异后恒绿（两态同形），
+   * 实测过（变异注入后该断言照绿）。
+   *
+   * ⚠️ 既有的 `:450` 那条「凭据解析为 undefined 时状态为 null」**传的是 `WORKBUDDY`（真值）**
+   * ⇒ 走不进 `resolved === undefined && (product as …).id` 这一格，所以它漏网了。
+   * 后来人别「顺手改回 WORKBUDDY」：本用例的全部价值就在 `undefined as never` 这个第二参。
+   *
+   * ⚠️⚠️ **本用例只有 `warnings` 那一条承重**：红队实测 —— 删掉它之后（且代码处于变异态）
+   * 本用例**照绿**，因为 `status === null` 与 `statusCalls === 0` 在「抛 TypeError」与
+   * 「静默跳过」两态下**都成立**（TypeError 在调用 `fetchStatus` **之前**就抛了）。
+   * 同理 `collectCreditBalances` 那条只有 `error === '凭据未配置'` 承重。⇒ 这几条
+   * 「不许发请求」的断言是**表达意图的文档性断言，不是守卫**，别把它们当覆盖证据。
+   */
+  it('★★ product 为 undefined 时，凭据未配置不得抛 TypeError（否则被吞成一条假告警）', async () => {
+    const warnings: string[] = []
+    let statusCalls = 0
+    const results = await collectCreditsStatus(
+      [makeEntry({ id: 'pending' })],
+      undefined as never,
+      makeDeps({
+        resolve: async () => undefined,
+        fetchStatus: async () => { statusCalls++; return makeStatus() },
+        warn: (msg) => warnings.push(msg),
+      }),
+    )
+
+    expect(warnings, '旧码在这里抛 TypeError 并被 catch 成一条告警').toEqual([])
+    expect(results[0]?.status).toBeNull()
+    expect(statusCalls, '凭据未配置时不得发起状态请求').toBe(0)
+  })
 })
 
 describe('credits.claimAll 单账号异常隔离与顺序性', () => {
@@ -714,6 +753,44 @@ describe('credits.balances 逐账号余额收集', () => {
     // 第二个查不到：balance 为 null 且带原因，UI 不能显示成 0
     expect(results[1]!.balance).toBeNull()
     expect(results[1]!.error).toBe('余额查询失败')
+  })
+
+  /**
+   * ⚠️⚠️ **真实报障**（2026-11-02）：面板上一个「登录中…」的 AutoClaw 国际版占位卡片，
+   * 积分行显示 `Cannot read properties of undefined (reading 'id')`。
+   *
+   * 根因：**`src/` 里的生产调用点都传 `undefined`**（`collectCreditBalances(accounts, undefined, …)`，
+   * product 由各 provider 的 impl 闭包住），而旧码写的是
+   * `(product as { id?: string }).id === ASTUDIO.id` —— 「凭据未配置」这一格
+   * （占位条目正是）短路求值到右边就抛 TypeError，被本函数的 per-account `catch`
+   * 转成错误文案直接上屏。影响面 = 所有经本函数取余额的 provider（别写死家数）。
+   *
+   * ⚠️ 既有的 `:764` 那条「凭据未配置时给出原因」**传的是 `WORKBUDDY`（真值）**
+   * ⇒ 走不进 `resolved === undefined && (product as …).id`，所以它漏网了。
+   * 本用例的全部价值就在 `undefined as never` 这个第二参，别「顺手改回 WORKBUDDY」。
+   *
+   * ⚠️⚠️ **本用例只有 `error === '凭据未配置'` 一条承重**：红队实测 —— 删掉它之后
+   * （且代码处于变异态）本用例**照绿**，因为 `balance === null` 与 `touched === 0` 在
+   * 「抛 TypeError」与「静默跳过」两态下**都成立**（TypeError 在调用 `fetchBalance`
+   * 之前就抛）。它们是文档性断言，不是守卫。
+   *
+   * 判据：product 传 `undefined`（**真实调用形态**）+ 凭据读不到 ⇒ 必须是「凭据未配置」。
+   */
+  it('★★ product 为 undefined（真实调用形态）时，凭据未配置不得抛 TypeError', async () => {
+    let touched = 0
+    const deps = makeDeps({
+      resolve: async () => undefined,
+      fetchBalance: async () => { touched++; return BALANCE },
+    })
+    const results = await collectCreditBalances(
+      [makeEntry({ id: 'pending' })],
+      undefined as never,
+      deps,
+    )
+
+    expect(results[0]!.error, '旧码在这里抛 Cannot read properties of undefined').toBe('凭据未配置')
+    expect(results[0]!.balance).toBeNull()
+    expect(touched, '凭据未配置时不得发起余额请求').toBe(0)
   })
 
   it('凭据未配置时给出原因，且不发起余额请求', async () => {
@@ -4907,9 +4984,45 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
     return calls
   }
 
+  /**
+   * 桩一个**成功**的探测（200 + 合法 SSE 帧）。
+   *
+   * ⚠️ 为什么需要它：默认的 `stubFetch` 恒回 429 ⇒ `testAccount` 的 `ok` 恒 false
+   *    ⇒ 「成功即清封禁」那条分支**根本走不到** ⇒ 那条守卫是无牙的
+   *    （2026-11-01 审计 M12 实测：把它改回去，全量仍绿）。
+   *    这正是本仓库记过的那条教训：「判据没抓住变异，先怀疑判据本身」。
+   */
+  function stubFetchOk(): string[] {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      const frame = JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1, totalTokenCount: 4 },
+        },
+      })
+      return new Response(`data: ${frame}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    })
+    return calls
+  }
+
   function setup(options: {
     /** 初始限流标记；省略 = 账号**没有**任何标记（这正是测试按钮要覆盖的场景）。 */
     modelRateLimits?: Record<string, number>
+    /**
+     * 初始的**账号级封禁**标记（Gitee issue IKS2MV）。
+     *
+     * ⚠️ 这一格是本组用例的**承重断言**：`account.test` 探活成功**不得**把它清掉
+     * —— 探活只测**一个**模型（且优先挑最老的限流键），判据强度不足以证明
+     * 「账号没被封」。第一版实现写成「成功即清」，被对抗审计实测打穿
+     * （`pickTestModel` 选中 `glm-5.2` 这个可用模型 ⇒ 整号封禁被洗白
+     *   ⇒ 池立刻选回它 ⇒ 下一发再 403）。
+     */
+    policyBlockedAtMs?: number
     /** 该 provider 的全量目录；省略则模拟「适配器缺失」（退化到 llm.listModels）。 */
     catalog?: Array<{ id: string; name: string }>
     /** 省略 llm 服务，验证「目录读不出来」的降级路径。 */
@@ -4933,6 +5046,7 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
         createdAt: 1,
         refreshable: true,
         ...(options.modelRateLimits === undefined ? {} : { modelRateLimits: options.modelRateLimits }),
+        ...(options.policyBlockedAtMs === undefined ? {} : { policyBlockedAtMs: options.policyBlockedAtMs }),
       }],
     }
     let handler: Handler | undefined
@@ -5009,7 +5123,12 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
     //    否则本文件 40+ 个调用点都要加 `await`。
     registerProbeRuntimesForTests()
 
-    return { call, storedLimits: () => (stored.accounts as Array<{ modelRateLimits?: Record<string, number> }>)[0]?.modelRateLimits }
+    return {
+      call,
+      storedLimits: () => (stored.accounts as Array<{ modelRateLimits?: Record<string, number> }>)[0]?.modelRateLimits,
+      /** 读回账号级封禁标记（Gitee issue IKS2MV）。 */
+      storedPolicyBlockedAtMs: () => (stored.accounts as Array<{ policyBlockedAtMs?: number }>)[0]?.policyBlockedAtMs,
+    }
   }
 
   afterEach(() => {
@@ -5062,6 +5181,28 @@ describe('account.test 端点（**无条件**真发一次请求）', () => {
     // ⚠️ 这是与重测的硬性分野：重测成功会清标记、失败会写回上游新时刻；
     // 测试必须一个字节都不改（它只是「手动探活」，不改变选号状态）。
     expect(storedLimits()).toEqual({ 'gemini-3.8-flash': marker })
+  })
+
+  it('★ 探活成功**不得**清掉账号级封禁标记（issue IKS2MV：单模型探活证明不了整号）', async () => {
+    // ⚠️ 判据强度：`testAccount` 只测**一个**模型，而 `pickTestModel` 取的是
+    //    `Object.keys(modelRateLimits)[0]`（**插入序最老的键**，常是历史 429 的可用模型）
+    //    ⇒ 那次探测成功**与「账号被封」无关**。
+    //    清除权只留给 `account.retest`（要求所有带标记的模型都通过）与 `account.reset`。
+    const blockedAt = 1_700_000_000_000
+    // ⚠️ 必须桩**成功**：默认桩恒回 429 ⇒ `ok` 恒 false ⇒ 变异那条分支走不到
+    //    ⇒ 守卫会是无牙的（M12 实测）。
+    stubFetchOk()
+    const { call, storedPolicyBlockedAtMs } = setup({
+      modelRateLimits: { 'gemini-3.8-flash': Date.now() + 3_600_000 },
+      policyBlockedAtMs: blockedAt,
+      catalog: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }],
+    })
+
+    const result = await call('account.test', { accountId: 'gemini-1' })
+
+    // 前提：这次探活**真的成功了**（否则那条分支走不到，守卫会是无牙的）。
+    expect((result.value as { ok: boolean }).ok, '本用例的前提是探活成功').toBe(true)
+    expect(storedPolicyBlockedAtMs(), '探活一次就把整号封禁洗白 ⇒ 池会选回它 ⇒ 下一发再 403').toBe(blockedAt)
   })
 
   it('有标记时优先测标记里的模型，且**不**去读目录（目录不可用也能测）', async () => {

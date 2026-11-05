@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { collectGatewayEffortViews, collectGatewayModelIds, collectGatewayModels, toGatewayModelIds, toOpenAiModels } from '../../src/openai-gateway/models.js'
+import { applyGatewayContextWindows, collectGatewayEffortViews, collectGatewayModelDetails, collectGatewayModelIds, collectGatewayModels, toGatewayModelIds, toOpenAiModels } from '../../src/openai-gateway/models.js'
 // ⚠️ 用**真实适配器**的声明驱动投影，而不是手写字面量 —— 见
 // 「CodeArts 的两档经真实适配器投影后是升序」用例的注释。
 import { CodeArtsAdapter } from '../../src/llm-adapter.js'
@@ -316,5 +316,42 @@ describe('collectGatewayEffortViews（思考档位视图）', () => {
     const groups = await collectGatewayModels(source)
     const view = (await collectGatewayEffortViews(source, groups)).get('trae/deepseek-v4.1-flash')
     expect(view?.efforts).toEqual([{ id: 'high', name: 'High', canonical: 'high' }])
+  })
+})
+
+/**
+ * issue #36：/v1/models 必须有 context_window。
+ *
+ * ⚠️ 不能只靠适配器在 listModels 里多带字段：宿主 LlmRuntime.listModels 会
+ * 按白名单重建对象（只留 provider/id/name/description/inputModalities）。
+ * 唯一还带窗口的是 resolveModelInfo().context.contextWindow，而网关本来就会
+ * 为档位逐个调用它 ⇒ 同一次调用里把窗口也读出来。
+ */
+describe('context_window（issue #36）', () => {
+  const source = {
+    listProviders: () => [{ id: 'qoder' }],
+    listModels: async () => [{ id: 'qfmodel', name: 'Qwen Flash' }],
+    resolveModelInfo: async (provider: string, id: string) => ({
+      provider,
+      id,
+      context: { contextWindow: 128_000 },
+    }),
+  }
+
+  it('★★ 逐模型解析窗口，合并后 /v1/models 输出 context_window', async () => {
+    const groups = await collectGatewayModels(source)
+    const details = await collectGatewayModelDetails(source, groups)
+    expect(details.contextWindows.get('qoder/qfmodel')).toBe(128_000)
+    const models = toOpenAiModels(applyGatewayContextWindows(groups, details.contextWindows), details.effortViews)
+    expect(models[0]?.context_window).toBe(128_000)
+  })
+
+  it('resolveModelInfo 缺失/失败时不发字段，也不让目录失败', async () => {
+    const noResolve = { listProviders: () => [{ id: 'qoder' }], listModels: async () => [{ id: 'm', name: 'M' }] }
+    const groups = await collectGatewayModels(noResolve)
+    const details = await collectGatewayModelDetails(noResolve, groups)
+    expect(details.contextWindows.size).toBe(0)
+    expect(toOpenAiModels(applyGatewayContextWindows(groups, details.contextWindows))[0]?.context_window)
+      .toBeUndefined()
   })
 })

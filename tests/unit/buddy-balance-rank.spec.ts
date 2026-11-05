@@ -199,9 +199,16 @@ describe('splitBuddyCreditsByExpiry（按到期时间拆分两桶）', () => {
     expect(split).toEqual({ expiring: 0, permanent: 300 })
   })
 
-  it('已经过期（扣费截止在过去）但服务端仍说有效的包 → 临时桶（马上就没）', () => {
+  /**
+   * ⚠️ **2026-11-02 改（PR #168 对抗审计 B1）**：原先断言它进 `expiring`（临时桶）。
+   * 那会让 `buddyBalanceTier` 判「可用」、聚合把它排第一先烧，而那 100 **扣不到**
+   * （请求必失败）。现在单列 `expired`、`expiring` 归零 ⇒ 档位 `none`。
+   */
+  it('已经过期（扣费截止在过去）但服务端仍说有效的包 → **expired 桶，不算可用**', () => {
     const split = splitBuddyCreditsByExpiry(balance(pkg({ deductionEndTime: NOW - DAY })), NOW)
-    expect(split).toEqual({ expiring: 100, permanent: 0 })
+    expect(split).toEqual({ expiring: 0, permanent: 0, expired: 100 })
+    // ⚠️ 档位用常量比，别写字面量：none 的**数值**是 2，写成 'none' 会假红。
+    expect(buddyBalanceTier({ expiringBalance: split.expiring, permanentBalance: split.permanent }, { allowPermanent: false })).toBe(BUDDY_BALANCE_TIER.none)
   })
 
   /**

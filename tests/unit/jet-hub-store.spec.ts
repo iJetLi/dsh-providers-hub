@@ -861,6 +861,30 @@ describe('归一化', () => {
     expect(accounts[0]!.nickname).toBe('a')
   })
 
+  /**
+   * ★ 封禁标记的取值闸（Gitee issue IKS2MV）。
+   *
+   * 备份文件是**用户可编辑**的输入，而封禁是**账号级**、且不自动过期：
+   * 一条脏的 `policyBlockedAtMs`（`'x'` / `1e308`）若被当成真值，
+   * 那个账号会**永久**从选号里消失，用户只能靠手动重置捞回来 ——
+   * 比逐模型的限流脏值更狠（那种最多只挡一个模型）。
+   */
+  it('★ 封禁标记的脏值必须被丢弃（账号级 + 不自动过期，容错窗口为零）', () => {
+    const base = { id: 'a', provider: 'buddy', credentialRef: 'BUDDY_ACCOUNT_A' }
+    for (const bad of ['not-a-number', null, -1, 0, Number.NaN, 1e308, Number.POSITIVE_INFINITY]) {
+      const entry = sanitizeAccounts([{ ...base, policyBlockedAtMs: bad }])[0]!
+      expect(entry.policyBlockedAtMs, String(bad)).toBeUndefined()
+    }
+    const good = sanitizeAccounts([{ ...base, policyBlockedAtMs: 1_700_000_000_000 }])[0]!
+    expect(good.policyBlockedAtMs).toBe(1_700_000_000_000)
+    // 报文只保留非空字符串并截断（展示用；不参与任何判据）
+    expect(sanitizeAccounts([{ ...base, policyBlockedMessage: '  ' }])[0]!.policyBlockedMessage).toBeUndefined()
+    expect(sanitizeAccounts([{ ...base, policyBlockedMessage: 'x'.repeat(500) }])[0]!.policyBlockedMessage)
+      .toHaveLength(200)
+    expect(sanitizeAccounts([{ ...base, policyBlockedMessage: '账号存在异常行为' }])[0]!.policyBlockedMessage)
+      .toBe('账号存在异常行为')
+  })
+
   it('文件文档里非对象内容按空处理', () => {
     writeFileSync(join(dir, 'raw.json'), '[]', 'utf-8')
     expect(sanitizeAccounts(JSON.parse(readFileSync(join(dir, 'raw.json'), 'utf-8')))).toEqual([])

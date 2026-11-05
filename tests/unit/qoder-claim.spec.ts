@@ -480,3 +480,64 @@ describe('Qoder 每日刷新时刻边界（10:00 UTC+8）', () => {
     expect(after).toMatchObject({ todayCheckedIn: true })
   })
 })
+
+/**
+ * issue #17：Qoder 的**物理单设备每日限领锁**。
+ *
+ * 同一台机器上第一个账号领完后，其余账号回
+ * `status:BLOCKED, failureCode:SAME_PERSON_ALREADY_CLAIMED`。这不是凭据失效，
+ * 重登也无法绕过；必须如实告诉用户「设备锁」，而不是报一句笼统的领取失败。
+ */
+describe('Qoder 设备锁（issue #17）', () => {
+  it('★★ SAME_PERSON_ALREADY_CLAIMED ⇒ already-claimed + 设备锁文案', async () => {
+    const body = {
+      status: 'BLOCKED',
+      failureCode: 'SAME_PERSON_ALREADY_CLAIMED',
+      campaignId: 'c1',
+    }
+    const outcome = await claimQoderCampaign(cred, QODER, 'c1', vi.fn(async () => json(body)) as never)
+    expect(outcome.kind).toBe('already-claimed')
+    expect(outcome).toMatchObject({ message: expect.stringContaining('设备') })
+  })
+
+  it('其它 BLOCKED 失败码仍归 failed，并把 failureCode 带进文案', async () => {
+    const body = { status: 'BLOCKED', failureCode: 'CAMPAIGN_NOT_ACTIVE', campaignId: 'c1' }
+    const outcome = await claimQoderCampaign(cred, QODER, 'c1', vi.fn(async () => json(body)) as never)
+    expect(outcome.kind).toBe('failed')
+    expect(outcome).toMatchObject({ message: expect.stringContaining('CAMPAIGN_NOT_ACTIVE') })
+  })
+})
+
+/**
+ * 汇总层必须把「设备锁」原因透传给用户（2026-11-03 审计 P1）。
+ *
+ * `claimQoderDailyCheckin` 只收集 failed 的 message，旧实现会把
+ * already-claimed 一律换成通用「今天已领取」⇒ 一键领取里用户以为
+ * **本账号**领过了，实际是设备被其它账号占用。
+ */
+describe('Qoder 设备锁：汇总层文案（issue #17）', () => {
+  it('★★ 可领活动 + claim 回设备锁 ⇒ 汇总仍是「设备」而不是通用「今天已领取」', async () => {
+    const blocked = {
+      status: 'BLOCKED',
+      failureCode: 'SAME_PERSON_ALREADY_CLAIMED',
+      campaignId: 'daily',
+    }
+    const fetcher = vi.fn(async (url: string | URL | Request) =>
+      String(url).includes('/claim') ? json(blocked) : json(CAMPAIGNS_BODY))
+    const outcome = await claimQoderDailyCheckin(cred, QODER, fetcher as never)
+    expect(outcome.kind).toBe('already-claimed')
+    expect(outcome).toMatchObject({ message: expect.stringContaining('设备') })
+  })
+
+  it('嵌套 data 包裹也能识别（不得落成 claimed + 0）', async () => {
+    const body = { data: { status: 'BLOCKED', failureCode: 'SAME_PERSON_ALREADY_CLAIMED' } }
+    const outcome = await claimQoderCampaign(cred, QODER, 'c1', vi.fn(async () => json(body)) as never)
+    expect(outcome.kind).toBe('already-claimed')
+  })
+
+  it('failureCode 大小写/尾空格归一后仍命中', async () => {
+    const body = { status: 'BLOCKED', failureCode: ' same_person_already_claimed ' }
+    const outcome = await claimQoderCampaign(cred, QODER, 'c1', vi.fn(async () => json(body)) as never)
+    expect(outcome.kind).toBe('already-claimed')
+  })
+})

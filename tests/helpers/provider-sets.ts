@@ -143,6 +143,15 @@ export const CREDITS_TABLE_EXEMPT: ReadonlyMap<string, string> = new Map([
   //    ⇒ 它现在有真实的 `fetchBalanceDetailed`，**必须**进生产积分表。
   //    ⚠️ 留这段墓碑注释是因为：本表曾收录过它，若后人只看 git blame 会以为
   //    「当初就该收进来」，而真实经过是「收进来又移出、现在又收回来」。
+  //
+  // ⚠️ 百智云（2026-11-02，同日二版更正）：**它已不在本表里**。
+  //    一版曾以「上游根本没有余额/积分接口」为由收录它 —— 那个结论是**错的**：
+  //    控制台 `GET /api/v1/user/wallet/balance`（cookie 认证，非 `x-api-key`）
+  //    如实返回 `{balance, temporary_credit_cents, permanent_credit_cents, …}`。
+  //    ⇒ registry 的 `credits.balance` 现在是 `true`，它进了生产积分表
+  //    （`src/provider-credits.ts` 的 `baizhi` 分支），本表不再收录。
+  //    留这段墓碑注释是因为：只看 git blame 会以为「当初就该排除」，
+  //    真实经过是「排除 → 实测到接口 → 收回来」。
 ])
 
 /**
@@ -295,7 +304,24 @@ export const WRITES_RATE_LIMIT_PROVIDERS: readonly string[] = Object.freeze([
   //  UTC+8 次日 0 点、429 → 1h；探测适配器已挂 `probeById.codely`）。
   //  漏登记 = 标记写进去却永远清不掉（minimax / modelscope 同型）。
   'codely',
-])
+  // ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）：接上请求级换号 + 冷却后
+  //    **会写** `modelRateLimits`（`monkeycode-adapter.ts` 的 `markLimited` →
+  //    `updateModelRateLimit`：额度耗尽 → 24h、429 → 1h；`auth` 类刻意不写，
+  //    因为换账号本来就该由用户处理，把凭据问题记成模型限流只会掩盖真因）。
+  //    漏登记 = 标记写进去却在 `probeById` 里查不到 ⇒ 「重测 / 重置」清不掉。
+  'monkeycode',
+  // ⚠️ 国际站（2026-11-02）：与国内站是**同一个适配器类的两个实例** ⇒ 同样会写
+  //    `modelRateLimits`。漏登记 = 国际站的标记写进去却在 `probeById` 里查不到
+  //    ⇒ 用户点「重测 / 重置」报「没有探测适配器」，且冷却永不解除
+  //    （与 `minimaxintl` 同型同因）。
+  'monkeycodeintl',
+  // ⚠️ **本 fork 独有**（百智云，2026-11-02）：`baizhi-adapter.ts` **会写**
+  //    `modelRateLimits`（429 → 冷却、402 额度耗尽 → 对齐 UTC+8 次日零点；
+  //    走注入的 `markLimited`，未注入时回退 `accountPool.updateModelRateLimit`）。
+  //    漏登记 = 标记写进去却在 `probeById` 里查不到 ⇒「重测 / 重置」清不掉
+  //    （与 monkeycode / qiniu 同型同因）。
+  'baizhi',
+  ])
 
 /** **期望**注册进 `probeById` 的 provider id（会写标记 − {@link PROBE_EXEMPT}）。 */
 export function expectedProviderIdsWithProbe(): string[] {

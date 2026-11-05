@@ -405,3 +405,272 @@ describe('负载均衡开关的 zcode 门控（仅 zcode 渲染）', () => {
     ).toEqual([])
   })
 })
+
+/**
+ * 「锁定永久积分」按钮的**端到端接线**（2026-11-01 二审收尾）。
+ *
+ * ## 为什么必须补这一条
+ *
+ * magicrew 两站刚接上这个能力，此前的验证止步于**静态核对**：
+ * 「`jet-hub.js` 里 `rpcCall('credits.permanentLock', { provider })` 的 provider
+ * 来自 props，三处调用点没有字面量」。但静态核对抓不到两类真实回归：
+ * ① 按钮**根本没渲染**（`supportsPermanentLock` 的判据被改坏 ⇒ 用户看不见入口）；
+ * ② 按钮渲染了但 `onClick` 没接（或接成了别的方法 ⇒ 点下去零请求、零提示）。
+ * 这两类在源码文本上都是「字面量还在」，只有**真渲染 + 真调用**才测得动。
+ *
+ * ## 判据打在哪
+ *
+ * 1. 两站各自渲染出**一个** `aria-label` 含「永久积分」的 `button`；
+ * 2. 真调用它的 `onClick` ⇒ `rpcCall` 收到 `credits.permanentLock`，
+ *    且 `provider` 是**当前那站**（不是另一站、不是字面量）、`locked === true`
+ *    （未锁定态点一次 = 上锁）；
+ * 3. 对照：不支持该能力的 provider（`opencode`）**一个按钮都不许渲染**，
+ *    且**零** `credits.permanentLock` 请求（对不支持的 provider 发会拿到
+ *    `bad-request`，控制台留下必然失败的报错）。
+ *
+ * ⚠️ **挂载时的读请求不会干扰计数**：本文件的 `useEffect` 桩是空实现（`useEffect() {}`），
+ * 所以 `credits.permanentLock` 的**读**分支不执行 —— 收到的每一次都是**点击**触发的写。
+ * 若哪天把这个桩改成真执行 effect，本用例的计数会变成 2，届时**要改的是断言而不是实现**。
+ */
+describe('锁定永久积分按钮的接线（magicrew 两站真渲染）', () => {
+  /** 拿本次渲染产物里那个「永久积分」按钮（没有则 `undefined`）。 */
+  function lockButton(): { props: Record<string, unknown> } | undefined {
+    return elements.find((element) => {
+      if (element.type !== 'button') return false
+      const props = element.props as Record<string, unknown> | null | undefined
+      const label = props?.['aria-label']
+      return typeof label === 'string' && label.includes('永久积分')
+    }) as { props: Record<string, unknown> } | undefined
+  }
+
+  /** 渲染一个 provider 的面板，返回它收到的 RPC 调用（按顺序）。 */
+  async function renderAndRecord(provider: string) {
+    const calls: Array<{ method: string; payload?: unknown }> = []
+    const rpcCall = async (method: string, payload?: unknown) => {
+      calls.push({ method, payload })
+      if (method === 'credits.permanentLock') {
+        return { ok: true, provider, locked: true, windowDays: 15 }
+      }
+      return { ok: true, order: [], statuses: {} }
+    }
+    const result = await renderPanel(rpcCall, provider)
+    expect(result.ok, `${provider} 渲染抛错：${result.ok ? '' : String((result as { error: unknown }).error)}`).toBe(true)
+    return calls
+  }
+
+  for (const provider of ['magicrew', 'magicrewintl'] as const) {
+    it(`★★ 真渲染 + 真点击「${provider}」⇒ 发 credits.permanentLock，provider 原样透传且 locked: true`, async () => {
+      const calls = await renderAndRecord(provider)
+      const button = lockButton()
+      expect(button, `${provider} 面板没有渲染锁定按钮（supportsPermanentLock 判据被改坏？）`).toBeDefined()
+      // 未锁定态 ⇒ 按钮表达的动作是「锁定」，且 title 是整句文案（按钮上只有四个字）
+      expect(button?.props['aria-label']).toBe('锁定永久积分')
+      expect(typeof button?.props.title).toBe('string')
+      expect(button?.props.title).not.toBe('')
+
+      const onClick = button?.props.onClick as (() => unknown) | undefined
+      expect(typeof onClick, '按钮没有 onClick（渲染了但点不动）').toBe('function')
+      await onClick?.()
+      // `onClick` 是 `() => void togglePermanentLock()`（fire-and-forget）⇒ 等一拍让它跑完
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      const writes = calls.filter((call) => call.method === 'credits.permanentLock')
+      expect(writes, `点击后应恰好发一次 credits.permanentLock，实际 ${writes.length} 次`).toHaveLength(1)
+      expect(writes[0]?.payload).toEqual({ provider, locked: true })
+    })
+  }
+
+  it('★★ 对照：不支持该能力的 provider 一个按钮都不渲染，且零请求（门控真的在）', async () => {
+    const calls = await renderAndRecord('opencode')
+    expect(lockButton(), 'opencode 不该有锁定按钮（会拿到 bad-request）').toBeUndefined()
+    expect(calls.filter((call) => call.method === 'credits.permanentLock')).toEqual([])
+  })
+})
+
+/**
+ * ★★「+ 新建账号」对**浏览器登录型 provider** 必须开自绘登录弹窗，不得直落
+ * `account.create`（2026-11-03 PR #171 合并审计 P0）。
+ *
+ * ## 为什么必须行为级
+ *
+ * 原实现漏了 monkeycode / monkeycodeintl / baizhi 三条分支 ⇒ 点按钮直接
+ * `account.create`，而 `new-account.js` 的载荷不带 `mode: 'browser'` ⇒ 宿主
+ * 回 `unknown provider`。**0 账号时用户没有任何添加入口**，而
+ * `monkeycode-client-wiring.spec.ts` 那一组 `toContain` 源码断言**全绿**
+ * （红队实测：把分支改成 `...false ?` 仍 45 passed）。
+ *
+ * ## 判据
+ *
+ * 真渲染对应 provider 的面板 → 真点「新建账号」→
+ * ① **零** `account.create`（走弹窗而不是通用创建）；
+ * ② 有一次 state 写入，值是带 `provider` 与 `error` 的弹窗状态对象
+ *    （即 `setCredentialModal({ provider, error: '' })`）。
+ */
+describe('「新建账号」对浏览器登录型 provider 开弹窗（P0 接线）', () => {
+  function createButton(): { props: Record<string, unknown> } | undefined {
+    return elements.find((element) => {
+      if (element.type !== 'button') return false
+      const props = element.props as Record<string, unknown> | null | undefined
+      return props?.['aria-label'] === '新建账号'
+    }) as { props: Record<string, unknown> } | undefined
+  }
+
+  for (const provider of ['monkeycode', 'monkeycodeintl', 'baizhi'] as const) {
+    it(`★★ ${provider}：点「新建账号」⇒ 零 account.create + 写入登录弹窗状态`, async () => {
+      const rpcCalls: string[] = []
+      const r = await renderPanel(async (method: string) => {
+        rpcCalls.push(method)
+        return { ok: true, order: [], statuses: {}, accounts: [] }
+      }, provider)
+      expect(r.ok, r.ok ? '' : `渲染抛错：${String((r as { error: unknown }).error)}`).toBe(true)
+      if (!r.ok) return
+      const button = createButton()
+      expect(button, `${provider} 面板没有「新建账号」按钮`).toBeDefined()
+      const onClick = button?.props.onClick as (() => unknown) | undefined
+      expect(typeof onClick, '按钮没有 onClick').toBe('function')
+      await onClick?.()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(
+        rpcCalls,
+        `${provider} 直接发了 account.create（缺登录弹窗分支 ⇒ 宿主回 unknown provider）`,
+      ).not.toContain('account.create')
+      const modalWrite = r.writes.find((entry) => {
+        const value = entry.value as { provider?: unknown, error?: unknown } | null | undefined
+        return value !== null && typeof value === 'object'
+          && value.provider === provider && typeof value.error === 'string'
+      })
+      expect(modalWrite, `${provider} 没有写入登录弹窗状态（用户看不到任何入口）`).toBeDefined()
+    })
+  }
+})
+
+/**
+ * ★★ 账号卡片上的三家入口（`改 Key` / `补登录态`）—— **行为级**。
+ *
+ * 红队实测（2026-11-03）：`monkeycode-client-wiring.spec.ts` 全是
+ * `clientSource.toContain(...)` 源码文本断言，把下列任一分支改成永假后
+ * **45 / 34 条仍然全绿**：
+ *
+ * - `...MONKEYCODE_PROVIDER_IDS.includes(provider) ? { onEditMonkeycodeKey } : {}`
+ * - `...provider === 'baizhi' ? { onEditBaizhiKey } : {}`
+ * - `...provider === 'baizhi' ? { onReadSession } : {}`
+ * - AccountCard 里 `onEditMonkeycodeKey ? createElement(...) : null`
+ *
+ * 这里真渲染面板（含一张账号卡）→ 真点按钮 → 断言弹窗状态 / RPC 调用。
+ *
+ * ⚠️ 面板的 `useEffect` 在本 harness 里是空实现，账号列表由 `loadAccounts`
+ * 这个 `useCallback` 拉取 ⇒ 先渲染一次、手动跑一次捕获到的回调、再渲染第二次
+ * （hook 槽位复用，state 保留），卡片才会出现。
+ */
+describe('账号卡片的三家入口（MonkeyCode / 百智云，行为级）', () => {
+  const ACCOUNT = {
+    id: 'monkeycode-abcd1234',
+    provider: 'monkeycode',
+    enabled: true,
+    credentialRef: 'MONKEYCODE_ACCOUNT_ABCD1234',
+    nickname: '尼',
+    monkeycodeKeyMask: 'oma_…abcd',
+    monkeycodeHasSession: true,
+  }
+  const BAIZHI_ACCOUNT = {
+    id: 'baizhi-abcd1234',
+    provider: 'baizhi',
+    enabled: true,
+    credentialRef: 'BAIZHI_ACCOUNT_ABCD1234',
+    nickname: '尼',
+    baizhiKeyMask: 'sk-…abcd',
+    baizhiHasSession: true,
+  }
+
+  /** 渲染两次（跑一次 loadAccounts），返回收到的 RPC 调用。 */
+  async function renderWithCards(
+    provider: string,
+    accounts: unknown[],
+  ): Promise<Array<{ method: string, payload?: unknown }>> {
+    const calls: Array<{ method: string, payload?: unknown }> = []
+    const rpcCall = async (method: string, payload?: unknown) => {
+      calls.push({ method, payload })
+      if (method === 'account.list') return { ok: true, accounts, order: [], statuses: {} }
+      if (method === 'credits.balances') return { ok: true, rows: [] }
+      if (method === 'credits.status') return { ok: true, statuses: {} }
+      if (method === 'credits.permanentLock') return { ok: true, locked: false }
+      if (method === 'sessionBalance.getEnabled') return { ok: true, value: { enabled: false } }
+      return { ok: true, order: [], statuses: {}, accounts }
+    }
+    resetRender()
+    const mod = await import('../../plugin-src/client/jet-hub.js')
+    const panel = (mod as unknown as { __providersPanelForTest?: (props: unknown) => unknown })
+      .__providersPanelForTest
+    expect(typeof panel).toBe('function')
+    panel!({ provider, rpcCall })
+    // 跑一次挂载期回调（loadAccounts 等）。无参回调；带参的调用会抛，吞掉即可。
+    for (const cb of [...callbacks]) {
+      try { await (cb as () => unknown)() } catch { /* 其它需要参数的接线 */ }
+    }
+    // 第二次渲染：复用 hook 槽位（state 里有账号了），光标归零。
+    cursor = 0
+    panel!({ provider, rpcCall })
+    // ⚠️ 本 harness 的 createElement 只记录不渲染函数组件 ⇒ 手动执行 AccountCard，
+    //    卡片内部（改 Key / 登录按钮）才会进入 elements。面板传下去的 props 原样
+    //    使用 ⇒ 「props 门控被改坏」的变异仍然打不中。
+    const cards = elements.filter((element) => typeof element.type === 'function'
+      && (element.type as { name?: string }).name === 'AccountCard')
+    for (const card of cards) (card.type as (props: unknown) => unknown)(card.props)
+    return calls
+  }
+
+  function buttonByTitle(fragment: string): { props: Record<string, unknown> } | undefined {
+    return elements.find((element) => {
+      if (element.type !== 'button') return false
+      const props = element.props as Record<string, unknown> | null | undefined
+      const title = props?.title
+      return typeof title === 'string' && title.includes(fragment)
+    }) as { props: Record<string, unknown> } | undefined
+  }
+
+  it('★★ MonkeyCode：卡片渲染「改 Key」且点击写入编辑弹窗状态', async () => {
+    await renderWithCards('monkeycode', [ACCOUNT])
+    const button = buttonByTitle('API Key')
+    expect(button, 'MonkeyCode 卡片没有「改 Key」按钮（props 门控被改坏？）').toBeDefined()
+    const onClick = button?.props.onClick as (() => unknown) | undefined
+    expect(typeof onClick).toBe('function')
+    await onClick?.()
+    const modal = writes.find((entry) => {
+      const v = entry.value as { provider?: unknown, accountId?: unknown } | null | undefined
+      return v !== null && typeof v === 'object'
+        && v.provider === 'monkeycode' && v.accountId === ACCOUNT.id
+    })
+    expect(modal, '点了「改 Key」但没有写入 monkeycode 的编辑弹窗状态').toBeDefined()
+  })
+
+  it('★★ 百智云：卡片渲染「改 Key」且点击写入编辑弹窗状态', async () => {
+    await renderWithCards('baizhi', [BAIZHI_ACCOUNT])
+    const button = buttonByTitle('API Key')
+    expect(button, '百智云卡片没有「改 Key」按钮').toBeDefined()
+    const onClick = button?.props.onClick as (() => unknown) | undefined
+    await onClick?.()
+    const modal = writes.find((entry) => {
+      const v = entry.value as { provider?: unknown, accountId?: unknown } | null | undefined
+      return v !== null && typeof v === 'object'
+        && v.provider === 'baizhi' && v.accountId === BAIZHI_ACCOUNT.id
+    })
+    expect(modal, '点了「改 Key」但没有写入 baizhi 的编辑弹窗状态').toBeDefined()
+  })
+
+  it('★★ 百智云：卡片渲染「重新登录」且点击真的发 baizhi.startSession', async () => {
+    const calls = await renderWithCards('baizhi', [BAIZHI_ACCOUNT])
+    const button = buttonByTitle('已读到网页登录态')
+    expect(button, '百智云卡片没有「重新登录」按钮（onReadSession 没传下来？）').toBeDefined()
+    const onClick = button?.props.onClick as (() => unknown) | undefined
+    await onClick?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const start = calls.filter((c) => c.method === 'baizhi.startSession')
+    expect(start, '点了「重新登录」但没有发 baizhi.startSession').toHaveLength(1)
+    expect(start[0]?.payload).toEqual({ accountId: BAIZHI_ACCOUNT.id })
+  })
+
+  it('★ 对照：MonkeyCode 面板不得出现百智云的「登录」按钮', async () => {
+    await renderWithCards('monkeycode', [ACCOUNT])
+    expect(buttonByTitle('百智云控制台'), 'MonkeyCode 面板渲染了百智云专属按钮').toBeUndefined()
+  })
+})

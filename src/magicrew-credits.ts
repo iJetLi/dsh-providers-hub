@@ -31,6 +31,7 @@ import {
 // ⚠️ 两个哨兵**定义在 `aggregate-core.ts`**（`NEVER = Number.POSITIVE_INFINITY`、
 //    `UNUSABLE = -1`），不在 `provider-expiry.ts` —— 后者只是消费它们。
 import { NEVER, UNUSABLE } from './aggregate-core.js'
+import { magicrewDecimalOf, magicrewSignedDecimalOf } from './magicrew-number.js'
 import type { CreditBalance, CreditPackage } from './credits.js'
 
 const USER_AGENT =
@@ -43,7 +44,25 @@ const MAGICREW_RATE_BASE = 2000
 /** 北京时间相对 UTC 的偏移（毫秒）。 */
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000
 
-function headersOf(params: {
+/**
+ * Magicrew 业务 API 的请求头 —— **全仓唯一一份**。
+ *
+ * ⚠️ 导出（2026-11-01）：签到（`magicrew-checkin.ts`）与积分走同一个 Go 服务、
+ * 同一套网关校验。此前 `magicrew-auth.ts` 与本文各有一份私有实现
+ *（`magicrewHeaders` / `headersOf`），形状已经**几乎**一样但 UA 取值不同 ——
+ * 再复制第三份就是「一份语义三处实现」。签到侧复用本函数。
+ *
+ * ⚠️ `origin` 必带：网关会看 Origin，缺了偶发 403。
+ * ⚠️ `organization-code` 只在非空时附 —— 国际站缺了会被上游拒绝，所以**调用方**
+ * 必须保证 `organizationCode` 真的取到了（不是这里补空串）。
+ *
+ * ⚠️ **形态以实测为准，别抄「HTTP 500 + 裸文本」**（2026-11-01 二审纠错）：那是
+ * **聊天网关**（`/v1/*`）的旧观察且至今未定（见 `magicrew-product.ts` 的
+ * `needsOrgOnGateway` 说明）；**业务 API**（本文件与签到共用的 Go 服务）缺组织码时
+ * 回的是 `{"code":2182,"message":"用户所在组织不存在"}` —— 见
+ * `src/magicrew-checkin.ts` 的实测记录，两处不得写成同一种形态。
+ */
+export function magicrewApiHeaders(params: {
   jwt: string
   organizationCode: string
   product: MagicrewProduct
@@ -73,6 +92,24 @@ export function magicrewParseExpiresAt(text: string): number | undefined {
     Number(hour), Number(minute), Number(second),
   )
   if (!Number.isFinite(utcMs)) return undefined
+  /**
+   * ⚠️⚠️ **必须回读校验**（2026-11-01 二审实测的真缺陷）：`Date.UTC` 对越界分量是
+   * **静默归一化**，不是 `NaN` —— `Date.UTC(2026, 12, 45, 25, 99, 99)` 会被算成 2027-02-15，
+   * 于是 `"2026-13-45 25:99:99"` 这种**明显非法的日期**被当成真实到期时刻：前端落「长期」、
+   * 后端落「永久」，**没有任何告警**。
+   * 本函数契约是「解析不出来返回 `undefined`，绝不编造」，所以把归一化后的六个分量读回来
+   * 逐个比对；任何一个变了就说明输入越界 ⇒ `undefined`。真实上游只给合法值 ⇒ 回读恒等，
+   * 无行为变化。
+   */
+  const back = new Date(utcMs)
+  if (
+    back.getUTCFullYear() !== Number(year)
+    || back.getUTCMonth() !== Number(month) - 1
+    || back.getUTCDate() !== Number(day)
+    || back.getUTCHours() !== Number(hour)
+    || back.getUTCMinutes() !== Number(minute)
+    || back.getUTCSeconds() !== Number(second)
+  ) return undefined
   return utcMs - BEIJING_OFFSET_MS
 }
 
@@ -88,7 +125,7 @@ export async function fetchMagicrewBalance(params: {
     // ⚠️ 超时（2026-10-29 最终审查 I5）：其余每家 `*-credits.ts` 都有；零超时会让积分面板
     //    转圈到 undici 默认 ~300s（本家 `requestTimeoutMs` 是业务 API 口径）。
     signal: AbortSignal.timeout(product.requestTimeoutMs),
-    headers: headersOf({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
+    headers: magicrewApiHeaders({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
   })
   const text = await response.text()
   let parsed: unknown
@@ -106,14 +143,26 @@ export async function fetchMagicrewBalance(params: {
   const envelope = parsed as { code?: unknown, data?: Record<string, unknown> }
   if (typeof envelope.code === 'number' && envelope.code !== 1000) return undefined
   const data = envelope.data ?? {}
-  const total = typeof data.total_points === 'number' ? data.total_points : Number.NaN
-  if (!Number.isFinite(total)) return undefined
+  /**
+   * ⚠️ **`total_points` 必须容错解析，不能要求 `typeof === 'number'`**（2026-11-01 二审）：
+   * 上游把它改成字符串 `"2661"` 时，旧判据直接 `return undefined` ⇒ 面板「查询失败」、
+   * 锁定态选号判 `none` ⇒ **两家 provider 的积分与选号同时全死**，且与「凭据失效」同形。
+   * ⚠️ 用 `magicrewSignedDecimalOf`（**允许负数**）而**不是** `magicrewDecimalOf`：
+   * 上游实测过 `total_points: -31`（欠费），拒绝负数会让整条余额消失。
+   */
+  const total = magicrewSignedDecimalOf(data.total_points)
+  if (total === undefined) return undefined
   const rawBatches = Array.isArray(data.expiring_quota_details) ? data.expiring_quota_details : []
   const packages: CreditPackage[] = []
   for (const raw of rawBatches) {
     if (typeof raw !== 'object' || raw === null) continue
     const batch = raw as Record<string, unknown>
-    const remaining = typeof batch.remaining_points === 'number' ? batch.remaining_points : 0
+    // ⚠️ **必须容错解析**（2026-11-01 二审实测）：上游把 `remaining_points` 写成字符串
+    //    `"50"`（最常见的类型漂移）时，旧的 `typeof === 'number'` 判据会**静默丢弃该批次**，
+    //    差额由 `total − Σ批次` 的残差吸收 ⇒ **临期积分被误标成永久积分** ⇒ 锁定永久积分时
+    //    误拒这个账号（方向恰好反了：它能用的积分被当成不能用的）。
+    //    非负/非法值仍归 0（随后 `<= 0 ⇒ continue`），语义不变。
+    const remaining = magicrewDecimalOf(batch.remaining_points) ?? 0
     if (remaining <= 0) continue
     const expiresAt = typeof batch.expires_at === 'string'
       ? magicrewParseExpiresAt(batch.expires_at)
@@ -134,27 +183,92 @@ export async function fetchMagicrewBalance(params: {
     })
   }
   /**
-   * ⚠️ **合成「长期积分」包**（I3，2026-10-29）。
+   * ⚠️ **合成「永久积分」包**（I3，2026-10-29 引入；2026-11-01 取证后**改名**）。
    *
-   * 上游只下发**临期批次**（`expiring_quota_details`），而 `total_points` 是
-   * **全部积分**（含长期那部分）。实测样例：`total=1093` / 临期批次和 `=93`
-   * ⇒ 长期 1000 分**没有任何条目**。
+   * ## 取证：残差就是「上游不给到期时间」的那部分
    *
-   * 不合成的话：账号卡片的 hover 列包会只列 93，而合计是 1093 ⇒ 用户以为
-   * 丢了 1000 分。合成后 `sum(remaining) === total`，hover 读起来才对得上。
+   * 2026-11-01 对两站真实账号各做一次**只读**探测（`GET /api/v1/quota/points/total`）：
    *
-   * ⚠️ **刻意不给 `deductionEndTime`**：长期积分没有到期时刻 ⇒
-   * `magicrewExpiry` 的 `expiresAt === undefined ⇒ 跳过` 那条腿会跳过它，
-   * 于是「只有长期积分」的账号仍然得 `NEVER`（排最后但不剔除）—— 与 5a 的口径一致。
+   * | 站 | `total_points` | `expiring_quota_details` | 残差 |
+   * |---|---|---|---|
+   * | 国内 | 2661 | 11 条、合计 1661（最远 `2027-11-03 23:02:08`） | **1000** |
+   * | 国际 | 347 | 2 条、合计 247（最远 `2027-11-03 23:45:12`） | **100** |
+   *
+   * 两条结论（**都推翻了旧注释**）：
+   *
+   * 1. 旧注释写「上游只下发**临期**批次」**不准确** —— 批次里含 2027 年的**远期**
+   *    批次 ⇒ `expiring_quota_details` 的真实语义是「**所有带到期时间的批次**」。
+   * 2. 残差`total_points − Σ批次remaining` 在两站都是**正整数**（1000 / 100），
+   *    而它没有任何到期时刻 ⇒ 这才是上游**不下发到期时间**的积分
+   *（注册奖励 / 活动赠送 / 后台充值），也就是用户口径里的**永久积分**。
+   *
+   * ## 为什么原名「长期积分」是**命名错误**（不只是措辞问题）
+   *
+   * 前端的判据（`plugin-src/client/credit-expiry.js` 的 `splitCreditsByExpiry`）是
+   * 「**有没有 `deductionEndTime`**」：没有 ⇒ 落 `permanent`（绿）、超窗口 ⇒
+   * `longTerm`（黄）、窗口内 ⇒ `expiring`（红）。
+   * ⇒ 这个包**没有** `deductionEndTime`，落的是 **permanent** 桶，名字却叫「长期」
+   *（longTerm）—— 名字与落桶自相矛盾，用户会去找一个并不存在的「长期」分组。
+   *
+   * 不合成的话：账号卡片的 hover 列包只列批次、合计对不上 `total_points`
+   * ⇒ 用户以为丢了积分。合成后 `sum(remaining) === total`。
+   *
+   * ⚠️⚠️ **刻意不给 `deductionEndTime`**（两条腿都不能动）：
+   * · 少了它 ⇒ `magicrewExpiry` 的 `expiresAt === undefined ⇒ 跳过` 那条腿跳过，
+   *   「只有永久积分」的号仍得 `NEVER`（排最后但不剔除）；
+   * · **编一个远期值** ⇒ 它会落进 `longTerm`（黄）并让 `splitBuddyCreditsByExpiry`
+   *   把它算进「可烧」的永久桶 —— 而锁定永久积分保护的正是它。
    */
+  /**
+   * ⚠️⚠️ **守恒裁剪**（2026-11-01 二审 P2-2）：上游可能下发「批次合计 > `total_points`」
+   * 的自相矛盾报文（行为红队构造实测：`total 100` + 批次 `200 + 50`）。
+   *
+   * `total_points` 是**权威余额** —— 面板合计、`magicrewExpiry` 的 `total > 0` 判据都以它
+   * 为准；`expiring_quota_details` 只是「其中这部分会过期」的细分。两者冲突时以 total 为准，
+   * 按**到期时间从早到晚**保留、用满 total 为止。
+   *
+   * ⚠️ 顺序**不能反**：必须**临期优先保留**（先到期先消耗）。反过来先保留远期，会让
+   * 被裁掉的那笔变成「少显示的临期积分」—— 用户以为它还能用，而锁定态选号也会据此
+   * 误判（临期没了 ⇒ 判 `exhausted`/`locked`，方向恰好反了）。
+   *
+   * 不裁的后果：三档合计 **大于** 账户实际余额（实测 350 vs 100），用户无法判断哪个是真的。
+   */
+  const rawListed = packages.reduce((sum, item) => sum + item.remaining, 0)
+  /**
+   * ⚠️⚠️ **`total <= 0` 时不做裁剪**（2026-11-02，PR #168 对抗审计 B5 实测）。
+   *
+   * 上游可以回**负数** `total_points`（欠费，实测 −31）。旧写法 `budget = total`
+   * ⇒ 循环首轮就 `budget <= 0` ⇒ **break** ⇒ 它的正批次被**整条丢弃**、
+   * `packages = []` ⇒ 面板只剩「积分 -31」（无包、三档行不渲染），
+   * 而同一份报文里其实给了可用批次。
+   *
+   * 语义上「欠费」与「批次额度」是两件事：`total` 是净额、批次是各项余额。
+   * 报文自相矛盾时**如实两样都显示**（合计 −31 + 批次明细），比把明细删掉
+   * 让用户以为「什么都没有」更可诊断。
+   */
+  const trimBudget = Math.max(0, total)
+  // ⚠️ 只在 total >= 0 时裁剪：total < 0 是「欠费净额」，与批次是两件事（见上）。
+  if (total >= 0 && rawListed > trimBudget) {
+    const byExpiry = [...packages].sort(
+      (a, b) => (a.deductionEndTime ?? Number.POSITIVE_INFINITY) - (b.deductionEndTime ?? Number.POSITIVE_INFINITY),
+    )
+    packages.length = 0
+    let budget = trimBudget
+    for (const item of byExpiry) {
+      if (budget <= 0) break
+      const keep = Math.min(item.remaining, budget)
+      packages.push(keep === item.remaining ? item : { ...item, remaining: keep, total: keep })
+      budget -= keep
+    }
+  }
   const listedRemaining = packages.reduce((sum, item) => sum + item.remaining, 0)
-  const longLived = total - listedRemaining
-  if (longLived > 0) {
+  const permanentRemaining = total - listedRemaining
+  if (permanentRemaining > 0) {
     packages.push({
-      name: '长期积分',
+      name: '永久积分',
       unit: '积分',
-      remaining: longLived,
-      total: longLived,
+      remaining: permanentRemaining,
+      total: permanentRemaining,
       used: 0,
       active: true,
       cycleStartTime: '',
@@ -172,16 +286,15 @@ export async function fetchMagicrewBalance(params: {
  *
  * ⚠️ 入参是 `unknown`，强转有洞：`Number([]) === 0`、`Number(true) === 1`、
  * `Number(null) === 0` ⇒ 原本会把 `[]` 判成「0 积分 = 免费」、把 `true` 判成
- * 0.0005 倍率。故只放行 **`number`** 与 **非空数字字符串**，其余一律「未知」。
+ * 0.0005 倍率。故只放行 **`number`** 与 **十进制数字字符串**，其余一律「未知」。
+ *
+ * ⚠️⚠️ **判据已抽到 `magicrew-number.ts`**（2026-11-01 三审）：本文件此前自带一份
+ * 同名实现、**没有**「只认十进制」的约束，于是 `input_points: "0x10"` 在这里被
+ * 当成 **16**（倍率 0.008），而签到侧的同名字段被当成 **0** —— 同一个上游字段
+ * 在两个模块解释不同。现在统一走 `magicrewDecimalOf`（契约同为 `number | undefined`）。
  */
 function magicrewPointsOf(entry: { input_points?: unknown }): number | undefined {
-  const raw = entry.input_points
-  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined
-  if (typeof raw !== 'string') return undefined
-  const trimmed = raw.trim()
-  if (trimmed === '') return undefined
-  const points = Number(trimmed)
-  return Number.isFinite(points) ? points : undefined
+  return magicrewDecimalOf(entry.input_points)
 }
 
 /** 从计费条目算倍率；缺价格返回 `undefined`（**不猜**）。 */
@@ -231,7 +344,7 @@ export async function fetchMagicrewModelPoints(params: {
     // ⚠️ 超时（I5）：同上一处。
     signal: AbortSignal.timeout(product.requestTimeoutMs),
     method: 'POST',
-    headers: headersOf({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
+    headers: magicrewApiHeaders({ jwt: params.jwt, organizationCode: params.organizationCode, product }),
     body: JSON.stringify({ model_ids: [...params.modelIds] }),
   })
   const text = await response.text()
@@ -296,7 +409,7 @@ export async function fetchMagicrewModelPoints(params: {
  * {@link UNUSABLE}」⇒ 该渠道在聚合候选表里**静默消失**（本仓库复发过三次的形态）。
  *
  * - 有余额 + 有到期批次 ⇒ 最早那个批次的时刻（`rankCandidates` 据此排先后）
- * - 有余额但无到期批次 ⇒ {@link NEVER}（**长期积分**：排最后但**不剔除**）
+ * - 有余额但无到期批次 ⇒ {@link NEVER}（**永久积分**：排最后但**不剔除**）
  * - 余额为 0 / 取数失败（`fetchMagicrewBalance` 返回 `undefined`） ⇒ {@link UNUSABLE}（**剔除**）
  *
  * ⚠️ 「有余额但无到期时间」必须是 `NEVER` 而**不是** `UNUSABLE`：
@@ -331,15 +444,47 @@ export async function magicrewExpiry(params: {
   if (!(balance.total > 0)) return UNUSABLE
   const now = params.now ?? Date.now()
   let earliest = Number.POSITIVE_INFINITY
+  /**
+   * 是否存在**任何可用**批次（含「有额度但无到期时刻」= 永久）。
+   *
+   * ⚠️ 没有它的话，「只剩已作废批次」会走到 `return NEVER`（长期）——
+   * 而那是「有额度」的意思 ⇒ 该渠道被排进候选、每轮先失败一次
+   * （2026-11-02，对抗审计 B1 的同族；buddy 系与 `sharedPackageExpiry` 已修）。
+   */
+  let hasUsable = false
+  /** 是否**存在任何**（`remaining > 0` 的）批次 —— 用于区分「无批次」与「批次全作废」。 */
+  let sawBatch = false
   for (const item of balance.packages) {
     if (item.remaining <= 0) continue
+    sawBatch = true
     const at = item.deductionEndTime
-    const atMs = typeof at === 'number' && Number.isFinite(at) ? at : undefined
+    /**
+     * ⚠️ **判据与其余三处同一份**（`buddy-balance-rank.ts` 的
+     * `splitBuddyCreditsByExpiry` / `aggregate-expiry.ts` 的 `sharedPackageExpiry` /
+     * 前端 `credit-expiry.js`）：接受 **number 或数字字符串**，其余（`true` / `[ms]` /
+     * `{valueOf}`）一律当「未知」。
+     *
+     * 2026-11-02 审计实测：本原语原先只认 `typeof === 'number'` ⇒ 数字字符串在
+     * **聚合侧判「永久」**而在**面板判「临期」** —— 与 PR #168 §三.4 判为
+     * 「同一语义两套判据」的那格同型，只是换到了 magicrew 自己这一家。
+     * 生产主路径不可达（`fetchMagicrewBalance` 恒写 number），可达面是旧缓存 /
+     * 备份导入 / 手改 `state.json`。
+     */
+    const atIsNumeric = typeof at === 'number' || typeof at === 'string'
+    const atMs = atIsNumeric && Number.isFinite(Number(at)) && Number(at) > 0 ? Number(at) : undefined
     // ⚠️ 批次有效性按**时刻**判，不是硬编码 `active: true`：若上游过期后仍回该批次
     //（`deductionEndTime` 是**过去**时刻）而不判，该账号永远被判「最早作废」⇒
     //    聚合里每轮排最前。参考 `src/credits.ts:676-678`。
+    // 已作废 ⇒ 扣不到，既不算可用、也不参与排序。
     if (atMs !== undefined && atMs <= now) continue
+    hasUsable = true
     if (atMs !== undefined && atMs < earliest) earliest = atMs
   }
+  // ⚠️ 两种「不可用」要分开：
+  // ① **一个批次都没给**（`packages: []`）但 `total > 0`：上游只说有余额、不说批次
+  //    ⇒ 如实当「长期」（排最后但不剔除）—— 这是既有语义，别改成 UNUSABLE。
+  // ② **有批次但全作废**：那些额度扣不到 ⇒ `UNUSABLE`（钱已经没了）。
+  if (!sawBatch) return NEVER
+  if (!hasUsable) return UNUSABLE
   return Number.isFinite(earliest) ? earliest : NEVER
 }

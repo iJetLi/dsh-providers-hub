@@ -41,7 +41,7 @@ import {
   type MagicrewBrowserLogin,
 } from '../../src/magicrew-browser-login.js'
 import { MagicrewAuth, type MagicrewCredential } from '../../src/magicrew-auth.js'
-import { MAGICREW, MAGICREW_GATEWAY_TOKENS_PATH, type MagicrewProduct } from '../../src/magicrew-product.js'
+import { MAGICREW, MAGICREW_GATEWAY_TOKENS_PATH, MAGICREW_INTL, type MagicrewProduct } from '../../src/magicrew-product.js'
 import { MAGICREW_PROFILE_PATH, type MagicrewProfile } from '../../src/magicrew-profile.js'
 import { MagicrewService } from '../../src/magicrew.js'
 
@@ -1307,6 +1307,18 @@ async function setupRpc(script: {
   }) => Promise<MagicrewProfile>
   /** 可换的网关信封（缺省 `keyEnvelope()`）—— 用来钉「有效期回落 JWT exp」那条腿。 */
   keyEnvelope?: () => Response
+  /**
+   * 用例驱动的 provider id（缺省 `'magicrew'`）。
+   *
+   * ⚠️ 2026-11-01 测试有效性审查（**阻断项**）：原先三组 `account.create` 全部只
+   * 驱动 `provider: 'magicrew'`，`src/jet-hub-rpc.ts` 的
+   * `magicrewSite` / `magicrewAuthOf` 分流里 **intl 分支零覆盖**。实测把那行
+   * `magicrewIntl ? auths.magicrewintl : auths.magicrew` 改成恒 `auths.magicrew`
+   * 后，332 条相关用例**全绿** —— 而生产上国际站账号会走国内 auth
+   * （读 letsmagic.cn 的 localStorage、写 `MAGICREW_ACCOUNT_*` 前缀）。
+   * ⇒ 参数化它，两站各跑一遍。
+   */
+  provider?: MagicrewProduct['id']
 }) {
   let stored: Record<string, unknown> = { accounts: [], disabledModels: {} }
   const ctxLike = new Context() as never as {
@@ -1334,22 +1346,53 @@ async function setupRpc(script: {
   } as never)
   ctxLike.provide('accountPool', pool)
 
-  const sessions: ReturnType<typeof fakeSession>[] = []
   let releaseGate: () => void = () => {}
   const gate = {
     promise: new Promise<void>((resolve) => { releaseGate = resolve }),
     resolve: () => { releaseGate() },
   }
   const warnings: string[] = []
-  const magicrewAuth = new MagicrewAuth(ctxLike as never, {
+  /**
+   * 按站点分流的假会话记录（`'magicrew'` / `'magicrewintl'`）。
+   *
+   * ⚠️ 必须**分开记**：两站共用同一套 `browserLoginFactory` 注入点，
+   * 若只用一个数组，「国际站账号误用国内 auth」就只剩 `provider` 字段能看出来，
+   * 而那条线索在 `account.create` 里是入参、不是行为。分开记才能断言
+   * 「**这个站**的 auth 真的被调用了」。
+   */
+  const sessionsBySite: Record<string, ReturnType<typeof fakeSession>[]> = {
+    magicrew: [],
+    magicrewintl: [],
+    /**
+     * ⚠️ **`loginOptions.product` 缺席**的调用单独落这个桶（2026-11-01 二审）。
+     *
+     * 原判据是 `loginOptions?.product?.id ?? product.id` —— 那个 `??` 回落把
+     * 「没传 product」与「传对了」混成同一桶 ⇒ **守卫是假牙**：
+     * 实测把 `src/magicrew-auth.ts:987` 的 `{ product: this.product, timeoutMs }`
+     * 改成 `{ timeoutMs }`，全量 11693 条**一条都不红**。
+     *
+     * 而生产后果很重：`startMagicrewBrowserLogin` 取 `options.product ?? MAGICREW`
+     * （`src/magicrew-browser-login.ts:920`）⇒ 国际站用户点「网页登录」打开的是
+     * **www.letsmagic.cn/login**，登完后的**国内 JWT 落进 `MAGICREWINTL_ACCOUNT_*`**
+     * （凭据与站点串号，且卡片上看起来一切正常）。
+     *
+     * ⇒ 缺席一律记到本桶，用例断言它必须为空。
+     */
+    '__no-product__': [],
+  }
+  const makeAuth = (product: MagicrewProduct) => new MagicrewAuth(ctxLike as never, {
+    product,
     store,
     fetchImpl: (async () => (script.keyEnvelope ?? keyEnvelope)()) as unknown as typeof fetch,
-    warn: (message) => warnings.push(message),
+    warn: (message) => warnings.push(`[${product.id}] ${message}`),
     ...script.profileFetcher === undefined ? {} : { profileFetcher: script.profileFetcher },
-    browserLoginFactory: async () => {
+    browserLoginFactory: async (loginOptions) => {
       if (script.throwError !== undefined) throw script.throwError
       const session = fakeSession({ results: script.results })
-      sessions.push(session)
+      // ⚠️ **禁止回落**：记录用的站点只能取自 `loginOptions.product`。
+      //    写成 `?? product.id` 会让「调用方漏传 product」不可见（见桶上方的注释）。
+      const siteOf = loginOptions?.product?.id ?? '__no-product__'
+      ;(sessionsBySite[siteOf] ??= []).push(session)
       if (script.gate === true) {
         // 卡在 `waitForCredential` 里 = 「用户还没登完」。
         const gated: MagicrewBrowserLogin & { closeCalls: number } = {
@@ -1365,6 +1408,10 @@ async function setupRpc(script: {
       return session
     },
   })
+  const magicrewAuth = makeAuth(MAGICREW)
+  // ⚠️ **必须并存两份实例**：`MagicrewAuth` 构造时按 `${product.id}Auth` 自 provide，
+  //    两个实例在同一 ctx 上互不覆盖；`account.create` 靠 `auths.magicrewintl` 分流。
+  const magicrewIntlAuth = makeAuth(MAGICREW_INTL)
 
   let handler: ((req: Request) => Promise<Response>) | undefined
   const rpcCtx = {
@@ -1389,6 +1436,7 @@ async function setupRpc(script: {
   }
   registerJetHubRpc(rpcCtx as never, pool, {
     magicrew: magicrewAuth,
+    magicrewintl: magicrewIntlAuth,
     codearts: {}, buddy: {}, workbuddy: {}, lobsterai: {}, qoder: {}, qodercn: {},
     trae: {}, cline: {}, loomy: {}, raccoon: {}, minimax: {}, zcode: {},
     gemini: {}, officeace: {}, minimaxintl: {}, autoclaw: {}, accio: {},
@@ -1414,14 +1462,17 @@ async function setupRpc(script: {
   return {
     pool,
     store,
-    sessions,
+    /** 当前 provider 那一站的假会话记录（向后兼容旧用例）。 */
+    sessions: sessionsBySite[script.provider ?? 'magicrew'] ?? [],
+    /** 按站点取假会话记录（两站串号守卫用）。 */
+    sessionsBySite,
     /** 收集到的 warn（断言「不许静默」用）。 */
     warnings,
     /** 放开闸门（让后台那一轮落定）。 */
     release: () => { gate.resolve() },
-    callCreate: () => invoke('account.create', { provider: 'magicrew', mode: 'browser' }),
-    callPoll: (accountId: string) => invoke('login.poll', { accountId, provider: 'magicrew' }),
-    callList: () => invoke('account.list', { provider: 'magicrew' }),
+    callCreate: () => invoke('account.create', { provider: script.provider ?? 'magicrew', mode: 'browser' }),
+    callPoll: (accountId: string) => invoke('login.poll', { accountId, provider: script.provider ?? 'magicrew' }),
+    callList: () => invoke('account.list', { provider: script.provider ?? 'magicrew' }),
     /**
      * 等后台任务落定。
      *
@@ -1587,6 +1638,87 @@ describe("★ account.create({ provider: 'magicrew', mode: 'browser' }) 三步�
 // ════════════════════════════════════════════════════════════════════════
 
 // ════════════════════════════════════════════════════════════════════════
+// ⑦c 两站分流守卫：`magicrewintl` 必须走**自己**的 auth 实例（2026-11-01）
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * ★★ **国际站账号必须走 `auths.magicrewintl`，不得串到国内站**。
+ *
+ * ## 为什么必须有这条（测试有效性审查的**阻断项**）
+ *
+ * 上面那组三步式只驱动 `provider: 'magicrew'`，`src/jet-hub-rpc.ts` 里
+ * `magicrewIntl ? auths.magicrewintl : auths.magicrew` 的 intl 分支**零覆盖**。
+ * 实测把该行改成恒 `auths.magicrew` 后，332 条用例**全绿**。
+ *
+ * 生产症状（三连）：国际站账号
+ * ① 起窗时读的是 `www.letsmagic.cn` 的登录态（必然读不到 / 读到别人的）；
+ * ② 写凭据时用国内站的 ref 前缀 `MAGICREW_ACCOUNT_*` ⇒ 与国内账号**共用 ref 命名空间**；
+ * ③ 续期打国内 host ⇒  silently 失败。
+ * 全程零报错，用户只看到「导入失败」或卡片名字不对。
+ *
+ * ⚠️ 判据用**两个独立 auth 实例各自的假会话记录**（`sessionsBySite`），
+ * 而不是看 `account.provider` 字段 —— 后者是入参回显，串号时照样是对的。
+ */
+describe('★★ 国际站 account.create 必须走 magicrewintl 的 auth（两站串号守卫）', () => {
+  const CREDENTIAL: MagicrewCredential = { jwt: JWT_LIVE, organizationCode: 'org-intl' }
+
+  it('provider: magicrewintl 时只调用国际站 auth，国内站 auth 零调用', async () => {
+    const { callCreate, pool, sessionsBySite, release } = await setupRpc({
+      results: [CREDENTIAL],
+      // ⚠️ `gate: true`：让假会话卡在「用户还没登完」，否则后台任务瞬间落定、
+      //    占位条目被删掉，`accountId` 就取不到了。
+      gate: true,
+      provider: 'magicrewintl',
+    })
+
+    const created = await callCreate()
+    expect(created.ok, `应当成功：${created.error?.message ?? ''}`).toBe(true)
+    const value = created.value as { accountId: string }
+
+    // ① 占位条目的 provider 必须是国际站（串号时会写成 magicrew）。
+    expect(pool.findAccount(value.accountId)?.provider, '国际站账号被记成了国内站')
+      .toBe('magicrewintl')
+
+    // ② **行为判据**：只有国际站的 auth 起了窗口。
+    expect(
+      sessionsBySite.magicrew,
+      '国际站账号的窗口是**国内站** auth 起的 —— `magicrewAuthOf` 分流写反/写死',
+    ).toHaveLength(0)
+    expect(sessionsBySite.magicrewintl, '国际站的 auth 没有被调用').toHaveLength(1)
+    /**
+     * ③ **登录腿必须把 product 传下去**（2026-11-01 二审补的阻断级守卫）。
+     *
+     * `MagicrewAuth.loginViaBrowser` 里若写成 `this.browserLoginFactory({ timeoutMs })`
+     * （漏 `product: this.product`），`startMagicrewBrowserLogin` 会回落
+     * `options.product ?? MAGICREW` ⇒ **国际站开的是国内站登录页**，
+     * 而上面两条断言**照样通过**（因为 auth 实例是对的）。
+     * ⇒ 单独断言「没有一次调用漏传 product」。
+     */
+    expect(
+      sessionsBySite['__no-product__'],
+      '登录腿没把 product 传给 browserLoginFactory ⇒ 国际站会打开国内站登录页（凭据串号）',
+    ).toHaveLength(0)
+
+    release()
+  })
+
+  it('provider: magicrew（对照）时只调用国内站 auth —— 证明上面那条不是恒真', async () => {
+    const { callCreate, pool, sessionsBySite, release } = await setupRpc({
+      results: [CREDENTIAL],
+      gate: true,
+      provider: 'magicrew',
+    })
+    const created = await callCreate()
+    expect(created.ok, `应当成功：${created.error?.message ?? ''}`).toBe(true)
+    const value = created.value as { accountId: string }
+    expect(pool.findAccount(value.accountId)?.provider).toBe('magicrew')
+    expect(sessionsBySite.magicrew, '国内站的 auth 没有被调用').toHaveLength(1)
+    expect(sessionsBySite.magicrewintl, '国内站账号误用了国际站 auth').toHaveLength(0)
+    release()
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════
 // ⑦b `account.list` 的**昵称自愈回填**（2026-10-30）
 // ════════════════════════════════════════════════════════════════════════
 
@@ -1690,18 +1822,65 @@ describe('客户端接线：网页登录入口', () => {
   it('★ 弹窗把 `onBrowse` 接上（否则「网页登录」按钮点了没反应）', () => {
     // ⚠️ 判据必须打在**传参**上，不能只搜函数名 —— 函数存在但没接线是本仓库
     //    记过的经典假绿（「接线零守卫：删掉 158 条全绿」）。
-    expect(source).toMatch(/MagicrewImportModal,\s*\{[\s\S]{0,500}?onBrowse:/)
-    expect(source).toMatch(/onBrowse:\s*\(\)\s*=>\s*void submitMagicrewLocalImport\('browser'\)/)
+    // ⚠️ 窗口从 500 放宽到 1200（2026-11-01）：加国际版后传参块前面多了
+    //    `provider:` 与其长注释。**放宽的是字数上限，不是判据**——
+    //    下面三条仍然逐字要求 `onBrowse` / `provider` / `onSubmit` 的真实接线。
+    expect(source).toMatch(/MagicrewImportModal,\s*\{[\s\S]{0,1200}?onBrowse:/)
+    // ⚠️ 2026-11-01 加国际版后 provider 变成**参数**（`credentialModal.provider`）：
+    //    必须要求弹窗把 provider 显式传进去 —— 漏传会让国际站登录**静默变成国内站**
+    //    （`account.create` 收到 undefined ⇒ 宿主报错或落到默认 provider）。
+    expect(source).toMatch(/provider:\s*credentialModal\.provider,/)
+    expect(source).toMatch(/onBrowse:\s*\(\)\s*=>\s*void submitMagicrewLocalImport\(credentialModal\.provider,\s*'browser'\)/)
+    expect(source).toMatch(/function MagicrewImportModal\(\{[^}]*provider/)
     expect(source).toMatch(/function MagicrewImportModal\(\{[^}]*onBrowse/)
     // 另一条腿仍然是 `local-browser`（两条入口都得在）。
-    expect(source).toMatch(/onSubmit:\s*\(\)\s*=>\s*void submitMagicrewLocalImport\('local-browser'\)/)
+    expect(source).toMatch(/onSubmit:\s*\(\)\s*=>\s*void submitMagicrewLocalImport\(credentialModal\.provider,\s*'local-browser'\)/)
+  })
+
+  it('★ 弹窗文案按站点分流（国际站不得被指引去登国内站）', () => {
+    // ⚠️ 2026-11-01 接线审查发现的真缺陷：文案写死 `www.letsmagic.cn`，而组件
+    //    根本没接收 provider ⇒ 国际站用户被指引去登国内站，读取器却找
+    //    `www.magicrew.ai` 的登录态 ⇒ 必然失败；宿主错误文案又反过来让他去登
+    //    magicrew.ai ⇒ **引导自相矛盾的死循环**。
+    expect(source).toMatch(/const isIntl = provider === 'magicrewintl'/)
+    expect(source).toMatch(/www\.magicrew\.ai/)
+    expect(source).toMatch(/www\.letsmagic\.cn/)
+    // 且域名必须是**变量**而不是写死在文案里（写死 = 又回到那个死循环）。
+    expect(source).toMatch(/`「导入」：先用 Edge \/ Chrome 打开 \$\{webHost\}/)
+  })
+
+  it('★★ 新手任务按钮的 tooltip 不得写死金额（二审：用户可见的假数字）', () => {
+    // ⚠️ 2026-11-01 二审发现：该按钮对**所有** `onboardingTasks: true` 的渠道渲染
+    //（loomy / raccoon / magicrew / magicrewintl），而 tooltip 原先写死
+    //    「合计 10000 积分」—— 那是 **Loomy 一家**的总额。
+    //    raccoon 是 3000、magicrew 由上游 `tasks[].points` 现场累加、
+    //    **magicrewintl 恒为 0**（该站不把账号登记进引导计划）。
+    //    ⇒ 国际站用户 hover 看到「合计 10000」、点下去「无任务可领」，
+    //      与 `src/magicrew-checkin.ts` 那条「0 项不得报已全部完成」的纪律正相反。
+    expect(source).not.toMatch(/领取新手任务（合计 \d+ 积分/)
+    expect(source).toMatch(/领取新手任务（一次性奖励，每个账号仅能领取一次/)
+  })
+
+  it('★★ `manualRequired` 必须被前端渲染（否则宿主算出来也没人看）', () => {
+    // ⚠️ 2026-11-01 测试有效性审查（重要项）：`src/types.ts` 的
+    //    `RpcOnboardingClaimResponse.manualRequired` 加了但**零消费者** ——
+    //    `jet-hub.js` 只渲染 `res.skipped`，于是 Magicrew 的 `first_ai_work`
+    //    （服务端固定回 9303、必须真发一条消息才能置位）在用户端**完全不可见**，
+    //    而单元测试只断言「字段存在」⇒ 造成「没做写成做过已修」的错觉。
+    expect(source).toMatch(/const manual = Array\.isArray\(res\.manualRequired\)/)
+    expect(source).toMatch(/个需你手动完成/)
+    // ⚠️ 反向：它**不得**被并进 `skipped`（那个语义是「此前已完成」，
+    //    把「没做」写成「已完成」就是报假账）。
+    expect(source).not.toMatch(/skipped\.push\(.*manualRequired/)
   })
 
   it('★ 客户端发的是 mode browser（与宿主分支的字面量逐字一致）', () => {
-    // ⚠️ 两种 mode 由**同一个函数**按参数分派（`submitMagicrewLocalImport(mode)`）：
+    // ⚠️ 两种 mode 由**同一个函数**按参数分派（`submitMagicrewLocalImport(provider, mode)`）：
     //    写成两个函数就会有两份 `account.create` 调用点，也就有两份失败文案。
-    expect(source).toMatch(/submitMagicrewLocalImport = async \(mode = 'local-browser'\)/)
-    expect(source).toContain("{ provider: 'magicrew', mode }")
+    expect(source).toMatch(/submitMagicrewLocalImport = async \(provider,\s*mode = 'local-browser'\)/)
+    // ⚠️ 2026-11-01：provider 已参数化（原先写死 `'magicrew'`）⇒ 守「把形参原样传下去」。
+    expect(source).toContain('{ provider, mode }')
+    // 国际站也必须走到同一条 mode 分支（不能只为国内站判 browser）。
     expect(source).toContain("if (mode === 'browser')")
   })
 
@@ -1709,9 +1888,11 @@ describe('客户端接线：网页登录入口', () => {
     // ⚠️⚠️ 这是本任务最关键的一条客户端纪律：`login-poll-terminal-failure.spec.ts`
     //    用计数守着「终态判据全文件只出现一次」。第二个 `while`/`setInterval`
     //    轮询就是第二份「先判 done 还是先判 success」的判据 ⇒ 必然漂移回 IKLI7J。
-    const fn = source.slice(source.indexOf("const submitMagicrewLocalImport = async (mode"))
+    const fn = source.slice(source.indexOf('const submitMagicrewLocalImport = async (provider'))
     const body = fn.slice(0, fn.indexOf('const createAccount'))
-    expect(body).toContain('startLoginPoll({ accountId, provider: \'magicrew\' })')
+    // ⚠️ provider 必须**原样透传**给轮询器：写死任一站的 id 会让另一站的
+    //    `login.poll` 查到错误的 provider（表现为轮询永不终态）。
+    expect(body).toContain("startLoginPoll({ accountId, provider })")
     // 文件里只允许**一处** `setInterval`（就是 startLoginPoll 里那个）。
     expect((source.match(/pollRef\.current = setInterval\(/g) ?? []).length).toBe(1)
   })
@@ -1721,14 +1902,109 @@ describe('客户端接线：网页登录入口', () => {
     //    `submitMagicrewBrowserLogin`（自带第二个 `account.create` 调用点、且没有
     //    `accountId` 校验），而接线只指向其中一份 ⇒ 另一份成了**死代码**：
     //    「函数在、但没人调」既不会被既有守卫抓到，改错它也不会变红。
-    //    ⇒ 判据：magicrew 的登录入口在全文件**只能有一个函数**。
+    //    ⇒ 判据：magicrew 的登录入口在全文件**只能有一个函数**（两站共用同一个）。
     expect((source.match(/const submitMagicrew\w* = async/g) ?? [])).toHaveLength(1)
-    expect(source).toContain('const submitMagicrewLocalImport = async (mode')
+    expect(source).toContain('const submitMagicrewLocalImport = async (provider')
     // 同一份语义的调用点也只能有一处（多一处就可能有一处漏校验）。
-    expect((source.match(/rpcCall\('account\.create', \{ provider: 'magicrew'/g) ?? [])).toHaveLength(1)
+    // ⚠️ 2026-11-01：provider 参数化后不再有 `'magicrew'` 字面量 ⇒ 改为守
+    //    「`account.create` 的 magicrew 系调用点恰好一处」这个**更强**的形态：
+    //    写死任一站的字面量都会让这个计数变 0 而红。
+    expect((source.match(/rpcCall\('account\.create', \{ provider, mode \}/g) ?? [])).toHaveLength(1)
   })
 
   it('★ 鼠标入口在弹窗里渲染出来（`网页登录` 这个按钮文案）', () => {
     expect(source).toContain("'网页登录'")
+  })
+})
+
+/**
+ * ★★ **源码层：两站串号的派生判据**（2026-11-01 二审补）。
+ *
+ * 这一组是**最后一道防线**：下面三种写法都不会让任何行为用例变红，
+ * 但都会让国际站静默串到国内站 —— 二审实测把它们逐个注入后
+ * **全量 11693 条一条不红**。
+ *
+ * ⚠️ 为什么用文本判据而不是行为判据：
+ * - `refreshAll` 已改成行为判据（`magicrew-auth-pool.spec.ts` 的「国际站实例只续期自己的账号」）；
+ * - `loginViaBrowser` 已改成行为判据（`sessionsBySite['__no-product__']`）；
+ * - 但 `readLocalBrowserCreds` 走的是**模块级函数** `readMagicrewLocalCreds`
+ *   （直接读真实 leveldb，不可注入）⇒ 只能退到文本判据。
+ *   本组的意义是「改错就红」，不是「证明行为对」。
+ */
+describe('★★ 源码层：两站串号的派生判据（行为用例覆盖不到的三处）', () => {
+  const authSource = readFileSync(
+    new URL('../../src/magicrew-auth.ts', import.meta.url),
+    'utf8',
+  )
+
+  it('★ 本机浏览器导入探测的站点来自 `this.product`（写死 MAGICREW 即红）', () => {
+    // ⚠️ 实测：把 `[this.product.webOrigin, this.product.host]` 改成
+    //    `[MAGICREW.webOrigin, MAGICREW.host]`，152 条相关用例全绿。
+    //    生产后果：国际站实例「从本机浏览器导入」读的是 `www.letsmagic.cn` 的
+    //    localStorage ⇒ 恒读不到（若用户同时登录国内站，还会把**国内凭据**
+    //    导成国际账号）。
+    expect(authSource).toMatch(/for \(const url of \[this\.product\.webOrigin, this\.product\.host\]\)/)
+    // 反向：`localBrowserHostnames` 里不得出现裸的 `MAGICREW.` 前缀。
+    const start = authSource.indexOf('private localBrowserHostnames()')
+    expect(start, '找不到 localBrowserHostnames（改名了要同步改本用例）').toBeGreaterThan(-1)
+    const block = authSource.slice(start, start + 600)
+    expect(block, 'localBrowserHostnames 里出现了写死的 MAGICREW. 前缀').not.toMatch(/(^|[^.\w])MAGICREW\./)
+  })
+
+  it('★ 登录腿把 `product: this.product` 传给 browserLoginFactory（行为用例已另守，这里是第二道）', () => {
+    expect(authSource).toMatch(/this\.browserLoginFactory\(\{ product: this\.product, timeoutMs \}\)/)
+  })
+
+  it('★ 错误文案的站点名两站都来自 product 常量（不得写死）', () => {
+    // ⚠️ 二审实测：把 `magicrewIntl ? MAGICREW_INTL.displayName : MAGICREW.displayName`
+    //    的国内那一支改回写死 `'超级麦吉'`，111 条相关用例全绿。
+    //    今天两者恰好相等，所以看不出问题；但 `displayName` 一改就**静默分叉**
+    //    （错误文案还叫旧名，用户按旧名去找不到站点）。
+    const rpcSource = readFileSync(
+      new URL('../../src/jet-hub-rpc.ts', import.meta.url),
+      'utf8',
+    )
+    expect(rpcSource).toMatch(
+      /const magicrewSiteName = magicrewIntl \? MAGICREW_INTL\.displayName : MAGICREW\.displayName/,
+    )
+  })
+
+  /**
+   * ★★ **四处 provider 判据必须两站都在场**（2026-11-01 二审）。
+   *
+   * 二审把这四处逐个改成「只认 `'magicrew'`」，**合计 521~380 条相关用例全绿**：
+   *
+   * | 位置 | 写死后的症状 |
+   * |---|---|
+   * | `findMagicrewAccountByFingerprint` 的 `listAccountsByProvider(provider)` | 国际站重复导入同一上游账号 ⇒ **造出重复卡片**（或改错国内卡） |
+   * | `sweepAbandonedMagicrewBrowserLogins` 的 `entry.provider !== 'magicrew'` | 国际站「网页登录中途关窗」的占位条目**永久不收口** = 幽灵卡片 |
+   * | `login.poll` 的在途任务判据 | 国际站登录**失败原因永远报不出来**（客户端 5 分钟超时收场） |
+   * | `account.list` 昵称自愈的 `profileAuth` | 国际站自愈拿国内 auth 读国内 host ⇒ 恒 401、昵称永不回填 |
+   *
+   * ⚠️ 为什么是文本判据：这四处都在 `jet-hub-rpc.ts` 的内部分支里，行为级复现需要
+   *    完整的 RPC 环境 + 账号池 + 在途表三者同时就位；而它们**共同的缺陷形态**
+   *    就是「判据写死成一个字面量」—— 文本判据恰好对它最敏感。
+   */
+  it('★★ 判重 / 收口 / 轮询 / 昵称自愈 四处判据都是两站（写死单站即红）', () => {
+    const rpcSource = readFileSync(
+      new URL('../../src/jet-hub-rpc.ts', import.meta.url),
+      'utf8',
+    )
+    // ① 指纹判重：按**传入的** provider 取账号，不得写死字面量。
+    expect(rpcSource, '指纹判重写死了单站 provider').toMatch(
+      /for \(const existing of pool\.listAccountsByProvider\(provider\)\) \{/,
+    )
+    // ② 幽灵条目收口：两站都要扫。
+    expect(rpcSource, 'sweep 只扫了国内站（国际站幽灵卡片永久残留）').toMatch(
+      /entry\.provider !== 'magicrew' && entry\.provider !== 'magicrewintl'/,
+    )
+    // ③ / ④ 两处 `req.provider === 'magicrew' || … === 'magicrewintl'` 的门（poll + 昵称自愈）。
+    const twoSiteGates = rpcSource.match(/req\.provider === 'magicrew' \|\| req\.provider === 'magicrewintl'/g) ?? []
+    expect(
+      twoSiteGates.length,
+      `两站门只找到 ${twoSiteGates.length} 处（应为 ≥2：login.poll 与 account.list 昵称自愈）`,
+    ).toBeGreaterThanOrEqual(2)
+    // ⑤ 昵称自愈的 auth 选择必须按站分流（写死 auths.magicrew 即红）。
+    expect(rpcSource).toMatch(/const profileAuth = req\.provider === 'magicrewintl'/)
   })
 })

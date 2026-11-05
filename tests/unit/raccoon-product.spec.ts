@@ -72,7 +72,12 @@ describe('兜底模型表', () => {
     expect(byId.get('sn-sensenova-6-8-flash')?.contextWindow).toBe(256_000)
     expect(byId.get('sn-sensenova-6-8-flash')?.maxTokens).toBe(63_999)
     expect(byId.get('sn-glm-5-3')?.contextWindow).toBe(1_000_000)
-    expect(byId.get('sn-glm-5-3')?.maxTokens).toBe(100_000)
+    // ⚠️ issue IKS1L5：兜底表声明值必须 ≤ 上游硬校验上限（65_536），
+    //    写 100_000 会让 DSH 每轮回传该值 ⇒ 上游 400 且该 model group 无 fallback。
+    expect(byId.get('sn-glm-5-3')?.maxTokens).toBe(65_536)
+    for (const model of RACCOON.fallbackModels) {
+      expect(model.maxTokens, model.id).toBeLessThanOrEqual(65_536)
+    }
     expect(byId.get('sn-deepseek-v4-1-flash')?.contextWindow).toBe(1_000_000)
   })
 

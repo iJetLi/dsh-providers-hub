@@ -761,6 +761,17 @@ describe('AStudio Provider Credits & Jet Hub RPC 接线验证', () => {
       //    结构化类型，漏一个即 TS2741 —— 本用例只验 astudio 那条链，故给空桩即可。
       qiniu: blank(),
       magicrew: blank(),
+      // ⚠️ **MagiCrew 国际版**（2026-11-01）：与 `magicrew` 是两个实例、两个
+      //    provider id，`JetHubAuths` 因此各占一个键 —— 漏掉同样报 TS2741。
+      magicrewintl: blank(),
+      // ⚠️ 2026-11-02 加 monkeycode（MonkeyCode）：`JetHubAuths` 每加一个
+      //    provider，所有拿它做类型标注的替身都要补同名键，否则
+      //    `pnpm typecheck:tests` 报 TS2741 而 vitest 照绿（类型层守卫的价值）。
+      monkeycode: blank(),
+      // ⚠️ 2026-11-02 拆站：国际站与百智云各自是独立 provider，都要有自己的 auth 键
+      //    （`JetHubAuths` 是全量 Record，漏一个就编译失败 —— 这正是它该起的作用）。
+      monkeycodeintl: blank(),
+      baizhi: blank(),
       astudio: astudioAuth,
     }
 

@@ -1558,3 +1558,31 @@ CN 项目每 3~5 次请求主动换 `machine_id` 以「降低 IDE 端点风控�
 故该能力**默认关闭**，仅在显式设 `DSH_TRAE_ROTATE_MACHINE_ID=1` 时按每 4 次
 请求递增一代（`deriveRotatingMachineId`）。它是出现**集中 401/风控**时的第一个
 可尝试开关。
+
+## ⚠️ 前缀缓存自 2026-10-26 起为 0（issue IKSFT2，**已用原始 SSE 定论**）
+
+**实测结论（2026-11-03 e2e，`tests/e2e/trae-cache-probe.e2e.spec.ts`）**：
+同一段约 3.8 万 token 的固定前缀连发三次，**直接读上游 SSE 原始 `usage`**
+（不经适配器投影），`trae/deepseek-v4.1-flash` 的结果是
+
+| 请求 | `prompt_tokens` | `cache_read_input_tokens` | `cache_creation_input_tokens` |
+|---|---|---|---|
+| A 冷启动 | 38234 | **0** | 0 |
+| B 同前缀第二次 | 38234 | **0** | 0 |
+| C 同前缀 + `prompt_cache_key`（请求体确认已带，`body has key: true`） | 38234 | **0** | 0 |
+
+⇒ 两点定论：
+1. **不是字段被投影丢弃**：上游原始行里 `cache_read_input_tokens` 就是 0；
+2. **`prompt_cache_key` 对 trae 无效**：带上后仍 0，且 `prompt_tokens` 仍是全量
+   38234（没有部分命中）。对照 buddy 第二次 97.6%，客户端/网络侧正常。
+
+插件侧 `traeUsageFromTokenUsage` 在故障前后未改，请求体也没有新增时间戳/随机 id
+（`src/trae-adapter.ts` 最近改动 2026-10-25，早于 10-26）⇒ **判断为上游服务端变更**
+（该时间窗内 trae 模型目录从 12 涨到 35+，疑似集群迁移）；本仓没有可修的客户端缺陷。
+影响：长上下文会话每一步全量重算（用户实测单步 27s~218s、一轮 19 步 27.8 分钟）。
+README 已加「不建议把 trae 当长跑主力」的提示。
+
+⚠️ 仍待上游确认（拿到答复前不要改代码）：
+1. Max 档 / 1M 集群是否不参与前缀缓存（本轮探针未切 Max 档，只验证了默认档）；
+2. 上游是否已彻底关闭 trae 的前缀缓存（若是，本仓无解）；
+3. 若只是换集群/换 key，官方需要给出新的命中条件（`prompt_cache_key` 已被实测排除）。

@@ -94,6 +94,41 @@ export interface ProviderAccountEntry {
    */
   modelRateLimits?: Record<string, number>
   /**
+   * 「账号被上游策略封禁」的**首次观测时刻**（毫秒）；缺省/0 = 未封禁。
+   *
+   * ## 为什么必须与 `modelRateLimits` 分开（Gitee issue IKS2MV）
+   *
+   * 两者的**恢复方式**完全不同，混在一张表里必然出事：
+   *
+   * | | `modelRateLimits` | 本字段 |
+   * |---|---|---|
+   * | 语义 | 限流（**单个模型**） | 封号（**整个账号**） |
+   * | 上游形态 | HTTP 429 + `code 6004` + **明确的重置时刻** | HTTP 403（2026-10-16 起也可能是 400）+ `code 11140` + `账号存在异常行为`，**不给时刻** |
+   * | 能否自愈 | 等时间到 | **只能重新登录 / 人工解封** |
+   *
+   * 旧实现把 11140 也写进 `modelRateLimits`（30 分钟冷却），于是：30 分钟后标记
+   * 自动过期 ⇒ 面板恢复「已就绪」⇒ 用户以为账号好了 ⇒ 下一轮再撞 403 ⇒ 循环。
+   * 用户报障原话：「11 个账号 8 个被封，面板上全部绿色『已就绪』」。
+   *
+   * ## 清除路径（**不自动过期**）
+   *
+   * 1. 该账号**实测成功**：`account.retest`（要求**所有**带标记的模型都通过 ——
+   *    证据强度足够的那一条）；
+   * 2. 用户点「重置」（`account.reset` / `account.resetAll`，清限流标记时一并清它）；
+   * 3. 账号被删除。
+   *
+   * 选号侧也据此**排除整个账号**（封号是账号级）—— 与 `modelRateLimits` 的
+   * 逐模型过滤不同，见 `AccountPool.candidateAccounts`。
+   */
+  policyBlockedAtMs?: number
+  /**
+   * 上游封禁报文的原文（`displayMsg`，如「账号存在异常行为，已被限制使用」）。
+   *
+   * 仅用于**展示**（面板上那行红字），不参与任何判据 —— 判据只看
+   * {@link policyBlockedAtMs}。值域由 `sanitizeAccounts` 截断到 200 字符。
+   */
+  policyBlockedMessage?: string
+  /**
    * TRAE 签到设备轮换代次（仅 `trae` provider 使用）。
    *
    * 业务码 `9074`（签到人数过多）的限流范围是 **device_id 而非账号**：
@@ -250,6 +285,45 @@ export interface ProviderAccountStatus extends ProviderAccountEntry {
    * devtools / 日志 / 崩溃上报里）。与 `modelscopeKeyMask` 同款。
    */
   qiniuKeyMask?: string
+  /**
+   * MonkeyCode API Key 的**打码串**（宿主侧 `maskMonkeycodeKey` 生成，形如
+   * `oma_…wxyz`）。
+   *
+   * ⚠️ 只下发打码串，**绝不下发明文**（同 `qiniuKeyMask` / `modelscopeKeyMask` /
+   * `baizhiKeyMask`）—— 打码由宿主算好，客户端拿不到凭据，两端各写一份判据必然漂移。
+   *
+   * ⚠️ 这里**没有**、也不再有 `channel` 字段：2026-11-02 拆站后 `monkeycode`
+   * 与 `monkeycodeintl` 是两个独立 provider，一个账号只可能属于其中一个，
+   * 「这个账号走哪条通道」不再存在（拆站前那个 `monkeycodeChannel` 已删）。
+   */
+  monkeycodeKeyMask?: string
+  /**
+   * 该账号凭据里是否带了平台会话 cookie（决定额度行渲染「未配置会话」还是读数）。
+   *
+   * ⚠️ 额度/积分/签到需要 web 会话 cookie，没有它时卡片要给出「未配置会话」提示，
+   * 而不是显示一个假的 0。
+   *
+   * ⚠️ 2026-11-02 三审 F🟡-9：本处原有一段讲 `monkeycodeChannel`（`baizhi` 白泽直连 /
+   * `gateway` 网关）的注释 —— 那个字段在 2026-11-02 拆站时**已删**（现在
+   * `monkeycode` 与 `monkeycodeintl` 是两个独立 provider），而注释没同步删。
+   * → 已删除该段，字段本体（`monkeycodeHasSession`）保留。
+   */
+  monkeycodeHasSession?: boolean
+  /**
+   * 百智云账号的**打码** API Key（形如 `sk-a…wxyz`）。
+   *
+   * ⚠️ 只下发打码串，**绝不下发明文**（同 `qiniuKeyMask` / `monkeycodeKeyMask`）。
+   * ⚠️ 打码由宿主 `maskBaizhiKey` 算好：客户端拿不到凭据，两端各写一份判据必然漂移。
+   */
+  baizhiKeyMask?: string
+  /**
+   * 是否存有百智云**控制台**网页登录态（`session_cookie`）。
+   *
+   * 卡片据此决定积分行的显示方式：没有会话时不该报「查询失败」红字，而应
+   * 显示「用浏览器登录后可查看积分」（2026-11-02 用户报障：只填 Key 的账号
+   * 积分行空白且没有任何引导）。
+   */
+  baizhiHasSession?: boolean
 }
 
 /** Jet Hub 在 ctx.settings 中的 schema */
@@ -1246,6 +1320,29 @@ export interface RpcOnboardingClaimResponse {
   /** 领取后本地现算的累计已领。 */
   earned: number
   total: number
+  /**
+   * 本次**尝试了但失败**的任务（`"<key>: <原因>"`）。可选。
+   *
+   * ⚠️ 与 {@link skipped} 语义**不同**，不得混用：
+   * - `skipped` = 「**此前已完成**」（前端渲染成「N 个此前已完成」）
+   * - `errors`  = 「本次做了但没成功」⇒ 用户需要知道并可能重试
+   *
+   * ⚠️ 存在的理由（2026-11-01 协议审查）：magicrew 有 8 项新人任务，
+   * 其中 1 项失败 + 7 项成功时，旧形状**没有任何字段能表达那一项失败**
+   * ⇒ 失败被静默吞掉，用户以为全领到了。部分成功**不上抛**（上抛会让整轮
+   * 报成"失败"，而实际已领到 7 项的分），故用本字段承载。
+   */
+  errors?: string[]
+  /**
+   * 需要用户**手动操作**才能完成的任务 key（服务端拒绝自动完成）。可选。
+   *
+   * ⚠️ 存在的理由（2026-11-01 协议审查）：magicrew 的 `first_ai_work` 固定回
+   * `9303`「该新人引导任务不支持手动完成」—— 必须真发一条消息才置位。
+   * 旧实现把它塞进 {@link skipped}，于是前端显示「1 个此前已完成」，
+   * 而它**既没完成也没领到分** —— 典型的「把没做写成做过」。
+   * ⇒ 单列一个字段，前端据此渲染「需手动完成」而不是「已完成」。
+   */
+  manualRequired?: string[]
 }
 
 /**
@@ -2438,13 +2535,14 @@ export interface RpcUsageTokenLedgerDeleteDayResponse {
 }
 
 /**
- * 「每日首次启动自动签到」的实时状态。
+ * 「每日定时自动签到」的实时状态。
  *
- * 语义要点（用户 2026-10-02 的需求：「每日第一次打开 DSH 可以按照这个状态是否
- * 自动签到，并记录签到状态，不多次重复触发」）：
+ * 语义要点：
  * - 开关是**全局**的（不分渠道），作用范围是**全部有账号的渠道**；
  * - 「今天」按 **UTC+8** 日界算（各渠道的每日额度都按 UTC+8 结算）；
- * - `lastDate` 就是「不多次重复触发」的凭据：等于今天 ⇒ 当天不再自动跑。
+ * - ★ 2026-10-18 起从「每日首次启动跑一次」改成**每天两个固定时刻**；
+ *   `lastSlot` 是「不多次重复触发」的新凭据：水位线之后的时段才需要跑。
+ *   ⚠️ 2026-10-31 重建（上一版随 `git reset --hard` 升级被清空）。
  */
 export interface RpcUsageAutoCheckinState {
   /**
@@ -2454,10 +2552,48 @@ export interface RpcUsageAutoCheckinState {
    * 与实现分家（那正是本 PR 审查发现的一处矛盾）。
    */
   enabled: boolean
+  /**
+   * 每天两个执行时刻（`HH:MM`，UTC+8，升序）。
+   *
+   * 用户 2026-10-18：「每天几点自动启动…一天两次实现无遗漏」—— 用**两个时段**
+   * 替代原先的「每日首次启动跑一次」，否则早上开过 DSH 后，21:00 才刷新额度的
+   * 渠道当天就再也领不到。
+   */
+  times: string[]
+  /**
+   * 随机浮动幅度（分钟）：0 = 精确按时刻执行；>0 = 每轮在 ±N 分钟内随机偏移。
+   *
+   * 用户 2026-10-31：「搞得像真人一样有时间波动」—— 固定到分钟的签到时刻是
+   * 明显的脚本特征。偏移**每轮重新抽**（不是每天固定一个偏移量，后者指纹依然稳定）。
+   */
+  jitterMinutes: number
+  /**
+   * 已完成时段的**水位线**（`YYYY-MM-DD#HH:MM`）；空串 = 从未跑过。
+   *
+   * 含义：key 不大于它的时段都算已处理。故 `lastSlot` 落后于「已到点的最大
+   * 时段」时就该补跑 —— 这也是「DSH 没开时错过的那轮，启动后补跑」的判据。
+   */
+  lastSlot: string
   /** 上次**完成**自动签到的 UTC+8 日期（`YYYY-MM-DD`）；空串 = 从未跑过。 */
   lastDate: string
-  /** 今天是否已经自动签到过（`lastDate` 等于今天）。 */
+  /** 今天是否已经跑过至少一个时段（`lastSlot` 的日期部分是今天）。 */
   ranToday: boolean
+  /**
+   * 下一次自动执行的毫秒时刻；0 = 不会执行（开关关闭）。
+   *
+   * ⚠️ 客户端渲染它时**必须区分三态**（非数字 = 宿主是旧代码 / `<=0` = 开关
+   * 关闭 / `>0` = 正常时刻）。把前两者混成一句「开关已关闭」会造成「开关明明
+   * 勾着却说已关闭」的自相矛盾（2026-10-18 真实报障）。
+   */
+  nextRunAt: number
+  /**
+   * 正在**补领**的时段（`YYYY-MM-DD#HH:MM`）；空串 = 没有待补的渠道。
+   *
+   * ⚠️ 这是「逐渠道水位线」的对外投影：一个时段里只要还有渠道没证明「今天已处理」
+   * （典型：**10:00 才刷新额度**的 Qoder 在 10:00 之前那轮），本字段非空，宿主会
+   * 按退避**只重试那些渠道**，而不是等下一个时段。面板据此显示「N 个渠道待补」。
+   */
+  pendingSlot: string
   /** 正在执行中（刚打开开关会立刻跑一轮，此时为 true）。 */
   running: boolean
   /** 上次结果摘要（中文短句，展示在状态灯提示里）。 */
@@ -2495,6 +2631,18 @@ export interface RpcUsageAutoCheckinState {
  */
 export interface RpcUsageAutoCheckinRequest {
   enabled?: boolean
+  /**
+   * 改写两个执行时刻（`HH:MM`，UTC+8）。
+   *
+   * ⚠️ 必须**恰好两项**、格式合法、互不相同 —— 任一不满足都回 `bad-request`，
+   * 不做静默回落（回落会让「设置没生效」看起来像「保存成功」）。
+   */
+  times?: string[]
+  /**
+   * 随机浮动幅度（分钟，0–120）。省略 = **不改动**（与 `times` 语义独立）。
+   * 给出但非法（负数 / 非数字 / 超上限）⇒ `bad-request`，不静默回落。
+   */
+  jitterMinutes?: number
   dismiss?: boolean
 }
 

@@ -104,6 +104,16 @@ describe('registerJetHubRpc：auths 是命名对象（类型层守卫）', () =>
       //    漏掉会让本行报 TS2345 —— 正是本用例想守的不变式。
       qiniu: stub,
       magicrew: stub,
+      // ⚠️ **MagiCrew 国际版**（2026-11-01）：与 `magicrew` 是两个实例、两个
+      //    provider id ⇒ `JetHubAuths` 各占一个键 —— 漏掉会让本行报 TS2345。
+      magicrewintl: stub,
+      // ⚠️ 2026-11-02 加 monkeycode（MonkeyCode）：与上面两条同因 ——
+      //    `JetHubAuths` 新增键后所有替身都要补齐，否则本行报 TS2345。
+      monkeycode: stub,
+      // ⚠️ 2026-11-02 拆站：国际站与百智云各自是独立 provider，都要有自己的 auth 键
+      //    （`JetHubAuths` 是全量 Record，漏一个就编译失败 —— 这正是它该起的作用）。
+      monkeycodeintl: stub,
+      baizhi: stub,
     })
     // 运行时只要求端点真的注册了（证明桩搭对了，上面那行的类型检查才有意义）。
     expect(registered.length).toBeGreaterThan(0)

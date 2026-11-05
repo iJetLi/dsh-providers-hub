@@ -13,6 +13,8 @@ import {
   checkinProviders,
 } from './credits-capabilities.js';
 import { orderAfterDrop, dropPositionFromPointer } from './account-order.js';
+import { checkinCommitPlan, formatNextRunAt, isInsideCheckinDock, needsHostRestartNotice } from './checkin-panel-logic.js';
+import { accountLimitActionState, policyBlockedHint, policyBlockedInfo } from './account-status.js';
 // ⚠️ 冲突解法（PR !144 × origin/master × 本 fork 的 qoder 代理）：
 //    - HEAD（PR !144）：删掉了旧侧栏入口 store（那个 `sidebar-entry` 前缀的
 //      老 store 模块，上游已整块删除）的四个符号 —— 侧栏入口改由
@@ -39,6 +41,12 @@ import {
 //    面板点「添加账号」无任何反应入口（症状零日志）。
 import { ModelscopeKeyModal, ModelscopeKeyEditModal } from './modelscope-key-modal.js';
 import { QiniuKeyModal, QiniuKeyEditModal } from './qiniu-key-modal.js';
+// ⚠️ **本 fork 独有**（MonkeyCode / 百智云）：两个「改 Key」弹窗。
+// 与 modelscope / qiniu 那两对同型：一个新建、一个编辑（本 fork 合成一个，用 `editing`
+// 参数分流）。未引入这两行时，寄主早已有 `monkeycode.setApiKey` /
+// `baizhi.setApiKey` 但**零客户端调用点** ⇒ 用户填错 Key 只能删卡重建。
+import { BaizhiKeyModal } from './baizhi-key-modal.js';
+import { MonkeycodeKeyModal } from './monkeycode-key-modal.js';
 // ⚠️ 2026-10-22 整页白屏事故的兜底层（见该文件头的事故说明）。
 import { normalizeProbeNotice, safeNoticeDetails } from './notice-shape.js';
 import {
@@ -48,8 +56,8 @@ import {
   formatPackageTooltip,
   splitCreditsByExpiry,
   expirySplitParts,
-  expiryBucketLabel,
   daysUntilExpiry,
+  formatExpiryHint,
   exclusivePoolRemainingOf,
   isExclusivePool,
 } from './credit-expiry.js';
@@ -173,6 +181,7 @@ import {
   formatQuotaLine,
   formatQuotaDetail,
   formatClaimGains,
+  normalizeUnit,
   unitLabel,
 } from './credits-format.js';
 import {
@@ -444,8 +453,14 @@ function formatPackageLine(pkg, windowDays, now) {
   const daysLeft = daysUntilExpiry(pkg, now);
   if (!pkg.active && pkg.expiredTime) parts.push(`失效于 ${pkg.expiredTime}`);
   else if (daysLeft !== null) {
-    const label = expiryBucketLabel(pkg, windowDays, now);
-    parts.push(`距到期 ${Math.ceil(daysLeft)} 天${label ? `（${label}）` : ''}`);
+    /**
+     * ⚠️⚠️ **这里原先自己拼了一遍「距到期 N 天（label）」**，与 `credit-expiry.js` 的
+     * `formatExpiryHint` **逐字重复**（同一语义两套实现）⇒ 2026-11-01 四审实测：
+     * 把 `expiryBucketLabel` 的「已过期」分支修好之后，**本行仍输出「距到期 -3 天（已过期）」**
+     * —— 修了一半。改成复用同一个函数：文案逐字节不变（已核对：`days` 同为
+     * `Math.ceil(left)`、label 为空时同样省略括号），且自动继承那边的修复。
+     */
+    parts.push(formatExpiryHint(pkg, windowDays, now));
   } else if (pkg.cycleEndTime) parts.push(`本周期至 ${pkg.cycleEndTime}`);
   return parts.join(' · ');
 }
@@ -515,6 +530,38 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    * ⚠️ 非配额单位时 `quotaText` 为 `null`，下面全部走老分支，**零影响**。
    */
   const quotaText = formatQuotaLine(all, unit);
+  /**
+   * 跨量纲附注（MonkeyCode：积分 + 每日额度）。
+   *
+   * ⚠️ 用户 2026-11-02 报障：「每日额度应该在账号积分处单独显示出来」。
+   *    根因是上面的 `unit` 只取**第一个包**的单位 —— 另一个量纲的包
+   *    （`每日额度` 是 token，`积分余额` 是 credit）因此从未被任何渲染路径读过。
+   * ⚠️ 形态由用户定调：**不另起一行**，像 loomy 的 `每日 5000` 那样跟在主值后面
+   *    变成 `积分 235.05 · 每日额度 9.24M / 10.00M` 的单行后缀。
+   * ⚠️ 只列**量纲不同**的包（同量纲的已经算进上面的合计）；单位不同**不能相加**，
+   *    所以这里只做并列展示，绝不并入 `total`。
+   * ⚠️ 上限与剩余相同时不写 `/ 上限`：上游只给一个标量时重复两遍同一个数，
+   *    会被读成「总额」。
+   */
+  const crossUnitText = unit === undefined ? null : (() => {
+    const mainUnit = normalizeUnit(unit);
+    const parts = all
+      .filter(pkg => pkg && typeof pkg.unit === 'string' && pkg.unit.length > 0
+        && normalizeUnit(pkg.unit) !== mainUnit)
+      .map(pkg => {
+        const remaining = Number(pkg.remaining);
+        const poolTotal = Number(pkg.total);
+        const poolName = typeof pkg.name === 'string' && pkg.name
+          ? pkg.name
+          : unitLabel(pkg.unit);
+        const remainingText = formatUnits(remaining, pkg.unit) ?? String(remaining);
+        const hasRange = Number.isFinite(poolTotal) && poolTotal > 0 && poolTotal !== remaining;
+        return hasRange
+          ? `${poolName} ${remainingText} / ${formatUnits(poolTotal, pkg.unit) ?? String(poolTotal)}`
+          : `${poolName} ${remainingText}`;
+      });
+    return parts.length === 0 ? null : parts.join(' · ');
+  })();
   /**
    * ⚠️ 分类在**渲染的这一刻**用当前时间现算，绝不存进 state、也不缓存到别处：
    * 「临时 / 永久」等于「距扣费截止是否满 N 天」，而宿主长期开着、时间只向前流 ——
@@ -657,6 +704,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    */
   const lineText = [
     quotaText ?? total,
+    crossUnitText,
     poolSplitText,
     namedPoolText,
     accioResetNote,
@@ -673,6 +721,11 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
       : null,
     balance.expiredTotal > 0
       ? `另有 ${formatUnits(balance.expiredTotal, unit)} 已失效`
+      : null,
+    // 用量（2026-11-02 三审 F🟡-8）：上游真下发用量时才出现 ⇒ 其余 provider 逐字不变。
+    // ⚠️ 原先它是塞进 `packages` 的一个 `active: false` 包，渲染成「[已失效] 本月消耗」。
+    balance.usage
+      ? `${balance.usage.label} ${formatUnits(balance.usage.amount, balance.usage.unit) ?? balance.usage.amount}`
       : null,
   ].filter(Boolean).join(' · ');
   /**
@@ -728,6 +781,11 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
     // ⚠️ 配额窗口显示**逐窗口百分比**而不是均值：均值（94.5）既不是上游给的数，
     // 在「额度」这个标签下更会被读成 94.5 个积分。见 quotaText 的注释。
     React.createElement('strong', { className: 'dim-jh-creditTotal' }, quotaText ?? total),
+    // 跨量纲附注（MonkeyCode 的每日额度）：与 loomy 的 `每日 5000` 同位置、同样式，
+    // 只是**不参与**上面的合计 —— 单位不同，不能相加（用户 2026-11-02 定调）。
+    crossUnitText === null
+      ? null
+      : React.createElement('span', { className: 'dim-jh-creditPools' }, crossUnitText),
     // 当日池分桶（loomy / raccoon）：`formatPoolSplitLine` 已覆盖原先硬编码的
     // loomy 两池判据，且对 Raccoon 的「每日积分」同样成立（用户 2026-09-29 要求）。
     // ⚠ 数字按**包自身的单位**格式化（remote 的单位支持）：池可能来自
@@ -804,13 +862,8 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
       ? React.createElement('span', { className: 'dim-jh-creditPackages' },
           `${activeCount}/${all.length} 个资源包有效`)
       : null,
-    // 失效额度单独提示：它们仍在服务端响应里，但不计入上面的数字
-    // ⚠️ 配额单位下恒不渲染（`expiredTotal` 就是 0），留着分支只为不改变
-    // 其它 provider 的行为。
-    balance.expiredTotal > 0
-      ? React.createElement('span', { className: 'dim-jh-creditExpired' },
-          `另有 ${formatUnits(balance.expiredTotal, unit)} 已失效`)
-      : null,
+    // ⚠️ 上面这段「另有 X 已失效」曾经在这里**又写了一遍**（2026-11-02 审查发现），
+    //    同一个节点里连着挂两个，有失效额度的卡片会原样显示两遍。只保留下面那一处。
     /**
      * 失效额度单独提示：它们仍在服务端响应里，但不计入上面的数字
      * ⚠️ 配额单位下恒不渲染（`expiredTotal` 就是 0），留着分支只为不改变
@@ -819,6 +872,10 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
     balance.expiredTotal > 0
       ? React.createElement('span', { className: 'dim-jh-creditExpired' },
           `另有 ${formatUnits(balance.expiredTotal, unit)} 已失效`)
+      : null,
+    // 用量（2026-11-02 三审 F🟡-8，见上方 hover 那段注释）。未下发用量时不渲染。
+    balance.usage ? React.createElement('span', { className: 'dim-jh-creditUsage' },
+        `${balance.usage.label} ${formatUnits(balance.usage.amount, balance.usage.unit) ?? balance.usage.amount}`)
       : null),
     // 操作按钮（重测 / 重置 / 停用 / 删除）贴在这行最右侧 —— 三列网格的第三列。
     // ⚠️ 必须是 div 的直接子节点（与 dt / dd 同级）：挂进 dd 会被它的
@@ -864,7 +921,10 @@ function proxyModalComponent(provider) {
   // ⚠️ 两站同一组件：组件内 `const isCn = provider === 'qodercn'` 分站。
   if (provider === 'qoder') return QoderProxyModal;
   if (provider === 'qodercn') return QoderProxyModal;
-  return OpencodeProxyModal;
+  // ⚠⚠ **末支必须是白名单**（六审收口）：原写 `return OpencodeProxyModal` 是开放式的
+  // —— 任何新 provider 只要忘了在这里登记，就会默默弹出「OpenCode 代理」弹窗。
+  // 白名单内的忽略行为是 `null`（渲染侧已判空）。
+  return provider === 'opencode' ? OpencodeProxyModal : null;
 }
 
 function AccountCard({ account, index, order, provider, onToggle, onDelete, onRetest, onReset, onTest, onClaimOnboarding, onboardingBusy, busy, credits, creditsLoading, showCredits, showPackageList, windowDays, showRateLimitActions, drag,
@@ -872,14 +932,27 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
   // 前者额外需要 current 代理串，故签名与 onRetest 略有不同。
   // ⚠️ **本 fork 独有**：modelscope 的「令牌」按钮同理（传了才渲染），
   // 第二参是宿主算好的**打码**串。
-  onOpenProxy, onRotateFingerprint, onEditModelscopeKey, onEditQiniuKey }) {
-  const rateLimits = account.modelRateLimits
-    ? Object.entries(account.modelRateLimits).filter(([, v]) => v > Date.now())
-    : [];
+  onOpenProxy, onRotateFingerprint, onEditModelscopeKey, onEditQiniuKey,
+  // ⚠️ **本 fork 独有**（MonkeyCode 两站 / 百智云）：两个「改 Key」+ 一个「登录」。
+  // 同为 props 存在性开关（而非 provider 硬判断），见各自按钮处注释。
+  onEditMonkeycodeKey, onEditBaizhiKey, onReadSession }) {
+  /**
+   * 「这个号还能不能用」的判据全部收在 `account-status.js`（纯函数，有单测）：
+   * 那里区分了**逐模型限流**（会自己好）与**账号级封禁**（只能重新登录），
+   * 两者的字段、展示、能否重测都不同 —— Gitee issue IKS2MV。
+   *
+   * ⚠️ 别把这三行改回「内联判据」：这一片的缺陷形态恰恰是「看起来正常」，
+   * 只有能被单测钉住的纯函数才守得住。
+   */
+  const limitState = accountLimitActionState(account);
+  const rateLimits = limitState.activeRateLimits.map(({ modelId, resetAt }) => [modelId, resetAt]);
+  const policyBlocked = limitState.policyBlocked;
+  const policyBlockedMessage = policyBlockedInfo(account).message;
   const expired = typeof account.expiresAt === 'number' && account.expiresAt > 0 && account.expiresAt <= Date.now();
-  // 只要存在**任何**标记（即使已过期）就允许重测/重置——过期记录正是
-  // 用户最想清理的对象，而 UI 的 rateLimits 只显示未到期的。
-  const hasAnyLimit = Boolean(account.modelRateLimits && Object.keys(account.modelRateLimits).length > 0);
+  /** 「重置」可用：任一标记（含已过期）+ 封禁。 */
+  const hasAnyLimit = limitState.canReset;
+  /** 「重测」可用：只对**逐模型**标记有意义（纯封禁账号上它按了没反应）。 */
+  const hasAnyModelLimit = limitState.canRetest;
   // 拖拽相关的状态与回调由 ProviderPanel 统一管理（它掌握整个列表顺序）。
   const dragProps = drag || {};
 
@@ -917,18 +990,28 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
     ?? (showPackageList && creditsLoading ? '资源包加载中…' : undefined);
 
   const actionsNode = React.createElement('div', { className: 'dim-jh-accountActions' },
-      // 新手任务（仅 Loomy）：一次性 10000 分，每号只能领一次。
+      // 新手任务：全仓库**所有** `credits.onboardingTasks: true` 的渠道共用这一个按钮
+      //（loomy / raccoon / magicrew / magicrewintl），**不是「仅 Loomy」** ——
+      // 旧注释写「仅 Loomy」是接入 raccoon 之前的事。
       // 与「一键领取积分」（每日签到）是**不同**的操作，故独立按钮 ——
-      // 混进「一键签到」会导致每天对已领完的账号发 8 个必然 alreadyCompleted 的请求。
+      // 混进「一键签到」会导致每天对已领完的账号发 N 个必然 alreadyCompleted 的请求。
       //
       // ⚠️ **只显示礼物图标**（用户报障：「领取新手任务」文字太长、按钮溢出行尾）。
       // 该行有 5 个按钮且 `flex-wrap: nowrap`，多一个宽按钮就会被挤出容器。
       // 文案移到 `title`（hover tooltip）与 `aria-label`（无障碍）里。
+      //
+      // ⚠️⚠️ **tooltip 不得写死金额**（2026-11-01 二审发现，用户可见的假数字）：
+      // 原先写「合计 10000 积分」，而那是 **Loomy 一家**的总额 ——
+      // raccoon 是 3000、magicrew 由上游 `tasks[].points` 现场累加、
+      // **magicrewintl 恒为 0**（该站不把账号登记进引导计划）。
+      // 于是国际站用户 hover 看到「合计 10000 积分」、点下去显示「无任务可领」，
+      // 与 `src/magicrew-checkin.ts` 那条「0 项不得报已全部完成」的纪律正相反。
+      // ⇒ 改成不带金额的通用文案。
       onClaimOnboarding
         ? React.createElement('button', {
             className: 'dim-jh-btn dim-jh-iconBtn',
-            // tooltip 说明「是什么 + 一次性 + 多少分」，因为图标本身不自解释
-            title: '领取新手任务（合计 10000 积分，每个账号仅能领取一次）',
+            // tooltip 说明「是什么 + 一次性」，金额由点开后的结果面板给（那里是实测值）
+            title: '领取新手任务（一次性奖励，每个账号仅能领取一次；具体金额以领取结果为准）',
             'aria-label': '领取新手任务',
             disabled: busy || onboardingBusy,
             onClick: () => onClaimOnboarding(account.id),
@@ -977,8 +1060,11 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
       showRateLimitActions
         ? React.createElement('button', {
             className: 'dim-jh-btn',
+            // ⚠️ 「重测」只测**已有模型标记**的模型（`retestAccount` 在零标记时
+            //    一次请求都不发）。封禁标记不算模型标记 ⇒ 纯封禁账号上它按了也没反应，
+            //    故禁用并让用户走「测试」（无条件探活）。判据与实现同源，别只看 hasAnyLimit。
             title: RETEST_HELP,
-            disabled: busy || !hasAnyLimit,
+            disabled: busy || !hasAnyModelLimit,
             onClick: () => onRetest(account.id),
           }, '重测')
         : null,
@@ -1074,6 +1160,50 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
             onClick: () => onEditQiniuKey(account.id, account.qiniuKeyMask || ''),
           }, 'Key')
         : null,
+      // ⚠️ **本 fork 独有**（MonkeyCode 两站共用）：改 API Key / 签名密钥。
+      //    tooltip 给的是宿主算好的打码串（`monkeycodeKeyMask`），客户端不自己打码；
+      //    `hasSession === false` 时提一句——那意味着积分 / 每日额度 / 签到都不可用
+      //    （它们全靠浏览器登录攒下的 HttpOnly `session_cookie`）。
+      onEditMonkeycodeKey ? React.createElement('button', {
+        className: 'dim-jh-btn',
+        title: (account.monkeycodeKeyMask
+          ? 'API Key：' + account.monkeycodeKeyMask + '（点击修改）'
+          : '设置该账号的 API Key 与签名密钥（oma_…）')
+          + (account.monkeycodeHasSession === false
+            ? '｜未读取网页登录态：积分/额度/签到不可用（点「改 Key」补填 session cookie，或删掉用浏览器登录重新添加）'
+            : ''),
+        disabled: busy,
+        onClick: () => onEditMonkeycodeKey(account.id, account.monkeycodeKeyMask || ''),
+      }, '改 Key') : null,
+      // ⚠️ **本 fork 独有**（百智云）：改 `sk-` API Key。走 `baizhi.setApiKey`（读旧凭据再合并），
+      //    不会冲掉控制台登录态 `session_cookie`。
+      onEditBaizhiKey ? React.createElement('button', {
+        className: 'dim-jh-btn',
+        title: account.baizhiKeyMask
+          ? 'API Key：' + account.baizhiKeyMask + '（点击修改）'
+          : '设置该账号的 API Key（sk-…，在大模型商店 console/keys 生成）',
+        disabled: busy,
+        onClick: () => onEditBaizhiKey(account.id, account.baizhiKeyMask || ''),
+      }, '改 Key') : null,
+      // ⚠️ **本 fork 独有**（百智云）：登录控制台以读取积分。
+      //
+      // 为何需要**两个**凭据（业内罕见的双凭据渠道）：
+      //   · `access_token`（`sk-` 67 位）→ 打模型网关 `ai-models.app.baizhi.cloud`，
+      //     **能对话**，但拿它查积分是 401；
+      //   · 控制台 `cookie`（`sl-session` + `baizhi_session`）→ 打
+      //     `baizhi.cloud/api/v1/user/wallet/balance`，**能看积分**，但不能发消息；
+      //   且控制台的「API Keys」页只能发 `bzy_`（15 位，打网关 401），
+      //   ⇒ 两套凭据**没有**任何一条能互相顶替的路径，必须各拿各的。
+      //
+      // 文案用「登录」而不是「读积分」：用户动作确实是去控制台登一次。
+      onReadSession ? React.createElement('button', {
+        className: 'dim-jh-btn',
+        title: account.baizhiHasSession
+          ? '已读到网页登录态（积分可读）。点击可重新登录一次控制台'
+          : '登录百智云控制台（打开浏览器窗口）以读取积分；不会动你已填的 API Key',
+        disabled: busy,
+        onClick: () => onReadSession(account.id),
+      }, account.baizhiHasSession ? '重新登录' : '登录') : null,
       // ⚠️ **只显示垃圾桶图标**（用户 2026-10-26 要求「删除按钮改为图标」）。
       //    ⚠️ 换成图标后有两处**必须**补上，否则是净损失：
       //    ① `title` —— 原按钮文案「删除」自带动作语义，图标不自解释；
@@ -1243,15 +1373,36 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
             actions: actionsNode,
           })
         : null),
+    // ★ 封禁（账号级）必须排在限流（模型级）**前面**、且用红色：它才是「这个号废了」。
+    policyBlocked
+      ? React.createElement('div', { className: 'dim-jh-policyBlocked', role: 'alert' },
+          React.createElement('span', { className: 'dim-jh-policyBlockedLabel' }, '已限制 · 需重新登录'),
+          policyBlockedMessage === ''
+            ? null
+            : React.createElement('span', {
+                className: 'dim-jh-policyBlockedMsg',
+                title: policyBlockedMessage,
+              }, policyBlockedMessage),
+          // ⚠️⚠️ 文案里的入口**必须与真实存在的按钮同源**（对抗审计 E9）：
+          //   「测试」只在登记了能力位的 provider 上渲染（当前只有 gemini），
+          //   而本 issue 的 buddy / workbuddy **没有这个按钮** —— 让用户「点测试」
+          //   等于指一个不存在的入口，比不写更糟。
+          //   `onTest` 就是那个能力位在客户端的落点（`undefined` = 没登记）。
+          React.createElement('span', { className: 'dim-jh-policyBlockedHint' },
+            policyBlockedHint(onTest !== undefined)))
+      : null,
     rateLimits.length > 0
       ? React.createElement('div', { className: 'dim-jh-rateLimits' },
-          React.createElement('span', { className: 'dim-jh-rateLimitsLabel' }, '限额重置'),
+          // ⚠️ 文案要说清「**只影响这个模型**」（issue IKS2MV 问题 2）：上游报文自己
+          //    就写着「您也可以切换其他模型继续使用」。笼统写「限流」会让用户以为
+          //    整个账号废了 —— 实测同一账号同一秒：flash 连续 6 次 429，pro 立刻 200。
+          React.createElement('span', { className: 'dim-jh-rateLimitsLabel' }, '限流（仅该模型）'),
           rateLimits.map(([modelId, resetAt]) =>
             React.createElement('span', {
               key: modelId,
               className: 'dim-jh-ttlBadge',
-              title: `模型 ${modelId}`,
-            }, `${modelId} · ${formatTime(resetAt)}`)))
+              title: `模型 ${modelId} 限流中（仅此模型；换其它模型仍可用）`,
+            }, `${modelId} · 至 ${formatTime(resetAt)}`)))
       : null,
     // 不支持积分余额的 provider 没有积分行可挂按钮 ⇒ 退回原来的独立行。
     // 否则那个账号卡片上就再也没有「重测 / 重置 / 停用 / 删除」入口了。
@@ -3092,7 +3243,11 @@ function ProviderPanel({ provider, rpcCall }) {
    */
   const [accioRegion, setAccioRegion] = React.useState('cn');
   const [astudioLoginMethod, setAstudioLoginMethod] = React.useState('local');
-  const [autoclawMode, setAutoclawMode] = React.useState('local');
+  // ⚠️ 国际版默认选 Z.ai（2026-11-02）：`local` 要求本机装了 AutoClaw 国际版客户端
+  //    并已登录，而 Z.ai 授权**不需要装任何东西** ⇒ 默认值应落在最可能成功的那条路上。
+  const [autoclawMode, setAutoclawMode] = React.useState(
+    provider === 'autoclawintl' ? 'zai' : 'local',
+  );
   /**
    * ★ 弹窗是否开着（`false` = 关着）。
    *
@@ -3167,6 +3322,18 @@ function ProviderPanel({ provider, rpcCall }) {
   // ⚠️ 输入框内容**不放 state**（用 ref + DOM 读值）：API key 是凭据，
   // 进 state 会随每次重渲染经过整棵组件树，也会被 devtools 组件树检查器读到。
   const [keyModal, setKeyModal] = React.useState(null);
+  /**
+   * `keyModal` 的**镜像 ref**（2026-11-02 二次审查）。
+   *
+   * 异步失败回调里读 `keyModal` 这个闭包变量，拿到的是「发起请求那一刻」的值 ——
+   * 用户中途点了取消，闭包仍以为弹窗开着，于是错误被写进一个已经关掉的弹窗；
+   * 反过来，弹窗已关时若 `setKeyModal({ provider, error })` 兜底，又会凭空重开
+   * 一个报错窗（账号其实已经建好，只是随后的 `loadAccounts()` 失败）。
+   *
+   * ⚠️ 渲染期同步赋值：本组件没有 `startTransition`，写入立刻生效，风险可忽略。
+   */
+  const keyModalRef = React.useRef(null);
+  keyModalRef.current = keyModal;
   const keyInputRef = React.useRef(null);
   // ⚠️ **本 fork 独有**（modelscope 编辑令牌）：**独立** ref ——
   // 与添加弹窗共用一个的话，打开编辑弹窗时若添加弹窗还挂着（理论上互斥，
@@ -3199,6 +3366,14 @@ function ProviderPanel({ provider, rpcCall }) {
    * 池里凭空多出一条账号（与 `claimInFlightRef` 同款理由：**用 ref 做同步闸门**）。
    */
   const magicrewInFlightRef = React.useRef(false);
+  /**
+   * 百智云「读网页登录态」的**在途闸门**（2026-11-02 二次审查）。
+   *
+   * ⚠️ 用 `Set` 而不是单个字符串槽位：账号卡片是逐卡渲染的，两张卡可以同时点
+   * 「登录」；单槽位存 `accountId` 时，B 覆盖 A，再点 A 会起第二个轮询。
+   * ⚠️ 同理不能用 `creating`（state）当闸门：同一 tick 内连点两次读到的仍是旧值。
+   */
+  const baizhiSessionRef = React.useRef(new Set());
 
   /**
    * 拖拽排序状态：正在拖的账号 id 与当前悬停的目标账号 id。
@@ -3340,7 +3515,22 @@ function ProviderPanel({ provider, rpcCall }) {
    *    ⚠️ 这与「按钮必须按 provider 分支」同源：同一个弹窗在两家语义不同。
    *    ⚠️ 将来若 Z.ai OAuth 接上 RPC，这里要换成三条路（导入 / OAuth / —）。
    */
+  /**
+   * AutoClaw 的**登录方式按站点分裂**（2026-11-02 接线）：
+   *
+   * | 站点 | 登录方式 | 依据 |
+   * |---|---|---|
+   * | 国内 `autoclaw` | 手机短信验证码 | `agent-send-code` / `agent-login` |
+   * | 国际 `autoclawintl` | **Z.ai OAuth** | 国际账号是邮箱 + OAuth 创建、`phone` 为 null、
+   *   无绑手机端点（`bind-phone` 全 404）⇒ 短信必然失败。实测记录见 `src/autoclaw-oauth.ts` 文件头 |
+   *
+   * ⚠️⚠️ 改前**两个都不渲染**：国际版弹窗只剩「一键导入本机桌面端凭据」，
+   *    而说明文字还承诺「或使用手机短信验证码快速登录」—— 文案与选项自相矛盾，
+   *    且那唯一一条路要求本机装了客户端并登录。用户（2026-11-02 报障）
+   *    两个前提都不满足 ⇒ **完全无法添加国际版账号**。
+   */
   const autoclawSmsAvailable = provider === 'autoclaw';
+  const autoclawZaiAvailable = provider === 'autoclawintl';
   // 支持每日签到积分的 provider 才渲染领取按钮。
   const supportsCredits = supportsDailyCheckin(provider);
   // 有成长中心的 provider 才传 runTasks（见 GROWTH_TASK_PROVIDERS 的注释：
@@ -3711,12 +3901,35 @@ function ProviderPanel({ provider, rpcCall }) {
         parts.push(`本次领取 ${res.claimed.length} 个任务（+${gained} 积分）`);
       }
       if (res.skipped.length > 0) parts.push(`${res.skipped.length} 个此前已完成`);
+      /**
+       * ⚠️ `manualRequired`（2026-11-01）：**需要用户自己去做**的任务。
+       *
+       * 目前只有 Magicrew 的 `first_ai_work` —— 服务端固定回 `9303`
+       * 「该新人引导任务不支持手动完成」，必须真发一条消息才置位。
+       *
+       * ⚠️⚠️ **不能把它并进 `skipped`**：`skipped` 的语义是「此前已完成」
+       *    （见 `src/types.ts` 的 `RpcOnboardingClaimResponse`），把「没做」写成
+       *    「已完成」就是报假账 —— 用户会以为那项的分已经拿到了。
+       *    所以单独一条提示，且**不加**到 `onboarding.skipped` 里（那个 state 驱动
+       *    「已全部领取」的按钮禁用判据）。
+       *
+       * ⚠️ 若这里不渲染，宿主侧算出来的 `manualRequired` 就**没有任何消费者**
+       *    （测试有效性审查点名的「把没做写成做过已修」形态）。
+       */
+      const manual = Array.isArray(res.manualRequired) ? res.manualRequired : [];
+      if (manual.length > 0) parts.push(`${manual.length} 个需你手动完成`);
+      if (Array.isArray(res.errors) && res.errors.length > 0) {
+        parts.push(`${res.errors.length} 个失败`);
+      }
       setOnboardingNotice({
-        tone: 'ok',
+        tone: manual.length > 0 || (Array.isArray(res.errors) && res.errors.length > 0)
+          ? 'warn' : 'ok',
         text: parts.length > 0 ? parts.join('，') : '没有可领取的任务',
         details: [
           `累计已领 ${res.earned} / ${res.total}`,
           ...res.claimed.map((item) => `${item.title} +${item.points}`),
+          ...manual.map((key) => `${key}：需在网页里完成（发一条消息）后才能领`),
+          ...(Array.isArray(res.errors) ? res.errors : []).map((item) => `失败：${item}`),
         ],
       });
       setOnboarding({ earned: res.earned, total: res.total, skipped: res.skipped });
@@ -3814,10 +4027,24 @@ function ProviderPanel({ provider, rpcCall }) {
     //   本行原写作 `+${...} ${unitLabel(unit)}`（**带空格**）—— 后果是**同一次
     //   签到**的逐账号明细显示 `+100.00M Token`、而汇总行显示 `+100.00MToken`，
     //   两行并列却像两种单位（2026-10-05 复审修正）。
-    details.push(
-      `${item.nickname || item.accountId}：领取成功 `
-      + `+${formatUnits(outcome.credit, unit)}${unitLabel(unit)}`,
-    )
+    //
+    // ⚠️⚠️ **`credit === 0` 不能拼成「+0积分」**（2026-11-03 合并审计 P1）：
+    //   上游不返回奖励金额的渠道（MonkeyCode / AutoClaw / Codely）会按契约给
+    //   `credit: 0 + delayedMessage`，而 `formatUnits(0)` 渲染成 `+0积分` ——
+    //   用户读到的是「签到成功，但一分没到账」。有 `delayedMessage` 时必须
+    //   换成**那句说明**（它才是「钱到账了、数量稍后看余额」这一事实）。
+    const claimedCredit = Number(outcome.credit) || 0;
+    const delayedMessage = typeof outcome.delayedMessage === 'string' ? outcome.delayedMessage : '';
+    if (claimedCredit > 0) {
+      details.push(
+        `${item.nickname || item.accountId}：领取成功 `
+        + `+${formatUnits(claimedCredit, unit)}${unitLabel(unit)}`,
+      );
+    } else if (delayedMessage !== '') {
+      details.push(`${item.nickname || item.accountId}：${delayedMessage}`);
+    } else {
+      details.push(`${item.nickname || item.accountId}：领取成功`);
+    }
         } else if (outcome.kind === 'already-claimed') {
           details.push(`${item.nickname || item.accountId}：${outcome.message || '今天已领取'}`);
         } else if (outcome.kind === 'inactive') {
@@ -4066,7 +4293,13 @@ function ProviderPanel({ provider, rpcCall }) {
         });
       }
     } catch (caught) {
-      setKeyModal({ error: caught && caught.message ? caught.message : '未知错误' });
+      // ⚠⚠ **不得造一个没有 provider 的弹窗对象**（二审 D🔴、三审收口）。
+      // 原写法把 error 直接塞进一个新对象、丢了 provider，而渲染侧当时是排除名单
+      // （「不是 modelscope/qiniu/baizhi/monkeycode 就挂 opencode」）⇒ 百智云添加失败却弹「添加
+      // OpenCode 账号」，用户再粘一次百智的 `sk-…` 就**跌进 opencode 池**。
+      // 现在双重保护：① 这里只合并到已存在的弹窗（弹窗已关就不重开）；
+      // ② 渲染侧从排除名单改成**白名单**（只认 `provider === 'opencode'`）。
+      setKeyModal((prev) => (prev ? { ...prev, error: caught && caught.message ? caught.message : '未知错误' } : prev));
     } finally {
       setCreating(false);
     }
@@ -4108,14 +4341,245 @@ function ProviderPanel({ provider, rpcCall }) {
    *
    * @returns {Promise<void>}
    */
-  const submitMagicrewLocalImport = async (mode = 'local-browser') => {
+  /**
+   * @param {string} provider 提供者 id（`magicrew` 国内 / `magicrewintl` 国际）
+   * @param {string} [mode] `local-browser`（读本机浏览器登录态）或 `browser`（开窗让用户登）
+   * @returns {Promise<void>}
+   */
+  /**
+   * MonkeyCode 的两站（国内 / 国际）。两站各有独立账号池，但**共用同一套凭据
+   * 形状与同一套弹窗**，所以只在「按 provider 分派」的地方查这张表。
+   * ⚠️ 顺序无关，但都必须是完整 id（`ACCOUNT_REF_RE` 靠长度降序区分
+   * `MONKEYCODE` 与 `MONKEYCODEINTL` 前缀）。
+   */
+  const submitBaizhiKey = async (rawKey) => {
+    const key = String(rawKey == null ? '' : rawKey).trim();
+    if (key === '') return;
+    const editAccountId = keyModal && keyModal.accountId ? keyModal.accountId : '';
+    if (!editAccountId) {
+      await submitOpencodeEntry('baizhi.addAccount', { apiKey: key });
+      return;
+    }
+    setCreating(true);
+    try {
+      const res = await rpcCall('baizhi.setApiKey', { accountId: editAccountId, apiKey: key });
+      setKeyModal(null);
+      await loadAccounts();
+      setProbeNotice({
+        tone: 'ok',
+        text: res && res.renamed ? '已更新 API Key。该账号的标识随 Key 一并更新（昵称与停用状态已保留）。' : '已更新 API Key（控制台登录态保留）。',
+        details: []
+      });
+    } catch (caught) {
+      const message = caught && caught.message ? caught.message : '未知错误';
+      setKeyModal((prev) => prev ? { ...prev, error: message } : prev);
+      if (keyModalRef.current === null) {
+        setProbeNotice({ tone: 'error', text: message, details: [] });
+      }
+    } finally {
+      setCreating(false);
+    }
+  };
+  const MONKEYCODE_PROVIDER_IDS = ['monkeycode', 'monkeycodeintl'];
+
+  const submitMonkeycodeKey = async (value, provider = 'monkeycode') => {
+    const apiKey = String(value && value.apiKey ? value.apiKey : '').trim();
+    const sessionCookie = String(value && value.sessionCookie ? value.sessionCookie : '').trim();
+    const signingSecret = String(value && value.signingSecret ? value.signingSecret : '').trim();
+    const editAccountId = keyModal && keyModal.accountId ? keyModal.accountId : '';
+    if (apiKey === '') {
+      if (editAccountId !== '' && signingSecret !== '') {
+        setKeyModal((prev) => prev ? { ...prev, error: '改 signing_secret 必须同时重填 API Key（账号 id 由 Key 派生）。只想补网页登录态时，把 API Key 与 signing_secret 都留空、只填 session cookie。' } : prev);
+        return;
+      }
+      if (editAccountId !== '' && sessionCookie !== '') {
+        setCreating(true);
+        try {
+          await rpcCall(`${provider}.setSession`, { accountId: editAccountId, sessionCookie });
+          setKeyModal(null);
+          await loadAccounts();
+          await loadCredits(true);
+          setProbeNotice({ tone: 'ok', text: '已写入会话 cookie，积分与签到可用了。', details: [] });
+        } catch (caught) {
+          const message = caught && caught.message ? caught.message : '未知错误';
+          setKeyModal((prev) => prev ? { ...prev, error: message } : prev);
+          if (keyModalRef.current === null) {
+            setProbeNotice({ tone: 'error', text: message, details: [] });
+          }
+        } finally {
+          setCreating(false);
+        }
+        return;
+      }
+      // ⚠️ 六审 B🟡-7：此前这里是**静默 return**——新建模式只填了 session cookie
+      //    就点确定，界面零反馈（与本轮「失败必须落 probe notice」的宗旨同型）。
+      setKeyModal((prev) => prev ? { ...prev, error: 'API Key 不能为空。若只是给已有账号补网页登录态，请从账号卡片的「改 Key」进入并只填 session cookie。' } : prev);
+      return;
+    }
+    const payload = { apiKey };
+    if (signingSecret !== '') payload.signingSecret = signingSecret;
+    if (sessionCookie !== '') payload.sessionCookie = sessionCookie;
+    if (editAccountId) payload.accountId = editAccountId;
+    setCreating(true);
+    try {
+      const res = await rpcCall(
+        editAccountId ? `${provider}.setApiKey` : `${provider}.addAccount`,
+        payload
+      );
+      setKeyModal(null);
+      await loadAccounts();
+      setProbeNotice({
+        tone: 'ok',
+        text: editAccountId ? res && res.renamed ? '已更新凭据。该账号的标识随 Key 一并更新（昵称与停用状态已保留）。' : '已更新凭据。' : res && res.existed ? '该 key 已存在，已为你定位到原有账号。' : '已添加 MonkeyCode 账号。',
+        details: []
+      });
+    } catch (caught) {
+      const message = caught && caught.message ? caught.message : '未知错误';
+      setKeyModal((prev) => prev ? { ...prev, error: message } : prev);
+      /**
+       * ⚠️ **2026-11-02 五审 I🟡-1：弹窗已被用户关掉时，失败必须落到 probe notice。**
+       * 同函数上方的「只补会话」分支、`submitBaizhiKey`、`submitOpencodeEntry` 都做了
+       * 这件事，只有这条主分支漏了 ⇒ 用户点了取消后，本次失败会**静默丢失**
+       * （账号没建上、凭据没写进去，界面上什么都不显示）。
+       */
+      if (keyModalRef.current === null) {
+        setProbeNotice({ tone: 'error', text: message, details: [] });
+      }
+    } finally {
+      setCreating(false);
+    }
+  };
+  const submitMonkeycodeBrowserLogin = async (provider = 'monkeycode') => {
+    if (magicrewInFlightRef.current) return;
+    magicrewInFlightRef.current = true;
+    setCreating(true);
+    setError(null);
+    try {
+      const created = await rpcCall('account.create', { provider, mode: 'browser' });
+      if (mounted.current) setCredentialModal(null);
+      const accountId = created && created.accountId ? created.accountId : '';
+      if (!accountId) {
+        if (mounted.current) {
+          setCredentialModal((m) => m ? { ...m, error: '宿主未返回账号 id，请重试' } : m);
+        }
+        return;
+      }
+      setProbeNotice({
+        tone: 'ok',
+        text: '浏览器窗口已打开，请在窗口里完成登录（完成后会自动建号并拉取额度）。',
+        details: []
+      });
+      startLoginPoll({ accountId, provider });
+    } catch (caught) {
+      if (mounted.current) {
+        setCredentialModal((m) => m ? { ...m, error: caught && caught.message ? caught.message : '登录失败' } : m);
+      }
+    } finally {
+      magicrewInFlightRef.current = false;
+      if (mounted.current) setCreating(false);
+    }
+  };
+  const submitBaizhiBrowserLogin = async () => {
+    if (magicrewInFlightRef.current) return;
+    magicrewInFlightRef.current = true;
+    setCreating(true);
+    setError(null);
+    try {
+      const created = await rpcCall('account.create', { provider: 'baizhi', mode: 'browser' });
+      if (mounted.current) setCredentialModal(null);
+      const accountId = created && created.accountId ? created.accountId : '';
+      if (!accountId) {
+        if (mounted.current) {
+          setCredentialModal((m) => m ? { ...m, error: '宿主未返回账号 id，请重试' } : m);
+        }
+        return;
+      }
+      setProbeNotice({
+        tone: 'ok',
+        text: '浏览器窗口已打开，请在窗口里登录百智云；登录完成后会自动建号，并同时拿到 API Key 与积分。',
+        details: []
+      });
+      startLoginPoll({ accountId, provider: 'baizhi' });
+    } catch (caught) {
+      if (mounted.current) {
+        setCredentialModal((m) => m ? { ...m, error: caught && caught.message ? caught.message : '登录失败' } : m);
+      }
+    } finally {
+      magicrewInFlightRef.current = false;
+      if (mounted.current) setCreating(false);
+    }
+  };
+  const startBaizhiSession = async (accountId) => {
+    if (!accountId) return;
+    const inFlight = baizhiSessionRef.current;
+    if (inFlight.has(accountId)) return;
+    inFlight.add(accountId);
+    try {
+      await runBaizhiSession(accountId);
+    } finally {
+      inFlight.delete(accountId);
+    }
+  };
+  const runBaizhiSession = async (accountId) => {
+    if (!mounted.current) return;
+    setProbeNotice({
+      tone: 'ok',
+      text: '浏览器窗口已打开，请在窗口里登录百智云控制台（baizhi.cloud）；登录完成后卡片上的积分会自动出现。',
+      details: []
+    });
+    try {
+      const res = await rpcCall('baizhi.startSession', { accountId });
+      if (!mounted.current) return;
+      if (!res || !res.accountId) {
+        setProbeNotice({ tone: 'error', text: '宿主未接受补登录态请求，请重试。', details: [] });
+        return;
+      }
+    } catch (caught) {
+      if (!mounted.current) return;
+      setProbeNotice({
+        tone: 'error',
+        text: caught && caught.message ? caught.message : '补登录态失败',
+        details: []
+      });
+      return;
+    }
+    const deadline = Date.now() + 4 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 3e3);
+      });
+      if (!mounted.current) return;
+      await reloadAccountsQuietly();
+      const snapshot = accountsRef.current || [];
+      const hit = snapshot.find((a) => a && a.id === accountId);
+      if (hit && hit.baizhiHasSession === true) {
+        if (mounted.current) {
+          setProbeNotice({
+            tone: 'ok',
+            text: '已读到百智云登录态，正在拉取积分…',
+            details: []
+          });
+        }
+        await loadCredits(true);
+        return;
+      }
+    }
+    if (mounted.current) {
+      setProbeNotice({
+        tone: 'warn',
+        text: '没读到百智云登录态（4 分钟内未完成登录）。窗口可能已关闭 —— 可点卡片上的「登录」重试。',
+        details: []
+      });
+    }
+  };
+  const submitMagicrewLocalImport = async (provider, mode = 'local-browser') => {
     if (magicrewInFlightRef.current) return;
     magicrewInFlightRef.current = true;
     setCreating(true);
     setError(null);
     try {
       // ⚠️ 响应里只有 accountId —— 不打日志（同「凭据不进 console」口径）。
-      const created = await rpcCall('account.create', { provider: 'magicrew', mode });
+      const created = await rpcCall('account.create', { provider, mode });
       if (mounted.current) setCredentialModal(null);
       /**
        * ⚠️⚠️ **两条腿的等待语义完全不同**（别合并成一次 `loadAccounts`）：
@@ -4143,11 +4607,11 @@ function ProviderPanel({ provider, rpcCall }) {
           text: '浏览器窗口已打开，请在窗口里完成登录（完成后会自动读取登录态）。',
           details: [],
         });
-        startLoginPoll({ accountId, provider: 'magicrew' });
+        startLoginPoll({ accountId, provider });
         return;
       }
       await loadAccounts();
-      setProbeNotice({ tone: 'ok', text: '已从本机浏览器导入超级麦吉账号。', details: [] });
+      setProbeNotice({ tone: 'ok', text: `已从本机浏览器导入${provider === 'magicrewintl' ? 'MagiCrew 国际版' : '超级麦吉'}账号。`, details: [] });
     } catch (caught) {
       // ⚠️ 错误**留在弹窗内**（同 submitOpencodeEntry）：把整个账号列表切成
       //    错误态会让用户刚看的说明与失败原因一起消失，只能刷新重试。
@@ -4204,6 +4668,47 @@ function ProviderPanel({ provider, rpcCall }) {
     //    ⇒ 本弹窗提供两条**无门槛**的路：读本机浏览器登录态（`local-browser`）、
     //    或开一个干净窗口让用户自己登（`browser`，走两步式 + login.poll）。
     if (provider === 'magicrew') {
+      setCredentialModal({ provider, error: '' });
+      return;
+    }
+    // MagiCrew **国际站**（2026-11-01）：与国内站完全同款的两条无门槛路径
+    //（读本机浏览器登录态 / 开窗让用户登），只是打开的网页不同
+    //（`www.magicrew.ai` 而不是 `www.letsmagic.cn`）。
+    // ⚠️ **单独一条 if，不合并成 `provider === 'magicrew' || provider === 'magicrewintl'`**：
+    //    本仓库记录过合并成 `||` 之后「守卫正则只匹配到前一站、第二站从此不设防」
+    //    的事故（见 `proxyModalComponent` 的逐分支注释）。各占一条 = 每条都能被
+    //    逐分支配对的用例单独钉住。
+    if (provider === 'magicrewintl') {
+      setCredentialModal({ provider, error: '' });
+      return;
+    }
+    /**
+     * ⚠️⚠️ **MonkeyCode 两站 + 百智云（2026-11-03 合并审计 P0）**：
+     *
+     * 这三家的凭据**只能由浏览器登录产出**（网页会话 → 换网关 Key / 控制台 Key），
+     * 既没有 OAuth 授权页、也没有可粘贴的现成凭据入口 ⇒ 必须走自绘登录弹窗，
+     * 与 magicrew 同款改道。
+     *
+     * 原实现**漏了这三条分支**：`createAccount()` 直接落到通用 `account.create`，
+     * 而 `new-account.js` 的载荷早退成 `{ provider }`、不带 `mode: 'browser'`
+     * ⇒ 宿主 `jet-hub-rpc.ts` 的两条 browser 分支都不进，最终回
+     * `unknown provider: monkeycode`。症状是**0 账号时没有任何添加入口**，
+     * 而空态文案还在说「点击「+ 新建账号」进行浏览器登录」。
+     *
+     * ⚠️ 两站**各占一条 if**（不合并成 `MONKEYCODE_PROVIDER_IDS.includes`）：
+     *    本仓库记录过合并后「守卫只覆盖前一站、第二站从此不设防」的事故
+     *    （见 `proxyModalComponent` 的逐分支注释）。
+     */
+    if (provider === 'monkeycode') {
+      setCredentialModal({ provider, error: '' });
+      return;
+    }
+    if (provider === 'monkeycodeintl') {
+      setCredentialModal({ provider, error: '' });
+      return;
+    }
+    // 百智云：控制台网页登录一次拿到 `sk-` + 积分 cookie（`baizhi.startSession` 只补会话）。
+    if (provider === 'baizhi') {
       setCredentialModal({ provider, error: '' });
       return;
     }
@@ -4999,7 +5504,8 @@ function ProviderPanel({ provider, rpcCall }) {
               className: 'dim-jh-btn',
               title: supportsGrowthTasks
                 ? `领取全部 ${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号（含已停用）的每日签到积分，**并完成成长中心任务**。`
-                  + '成长一轮单账号实测 90～270s 且全串行，账号多时可能需多点几次；'
+                  + '成长一轮单账号可达数分钟（小程序族任务有 45s/条的反作弊节奏）且全串行，账号多时可能需多点几次；'
+                  + '同时自动领取连登兑换、补签、抽奖、首Buddy 与新手礼包；'
                   + '受客户端动作限制的项（微信、夜猫子窗口、判据推不动）会如实标为「需客户端」。'
                 : `领取全部 ${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号（含已停用）的每日签到积分`,
               disabled: claiming || accounts.length === 0,
@@ -5284,7 +5790,9 @@ function ProviderPanel({ provider, rpcCall }) {
                 astudioDialog
                   ? '支持导入本机桌面端已登录会话，或在浏览器中打开三合一登录页（支持手机短信/账号密码/微信扫码）。'
                   : autoclawDialog
-                    ? '请选择登录方式：可直接读取本机已安装并登录的桌面端凭据，或使用手机短信验证码快速登录。'
+                    ? (autoclawZaiAvailable
+                        ? '请选择登录方式：可直接读取本机已安装并登录的桌面端凭据，或使用 Z.ai 账号在浏览器中授权登录。'
+                        : '请选择登录方式：可直接读取本机已安装并登录的桌面端凭据，或使用手机短信验证码快速登录。')
                     : (accioDialog
                         ? 'Accio 的登录页按区域分域名，且区域由服务端按账号下发 —— 登录前'
                           + '无法自动判断。请选择该账号所属的区域，否则会打开打不开的登录页。'
@@ -5449,6 +5957,12 @@ function ProviderPanel({ provider, rpcCall }) {
                           //    `autoclawSmsAvailable` 的注释）。
                           ...(autoclawSmsAvailable
                             ? [{ value: 'sms', label: '📱 手机验证码快速登录', desc: '免安装桌面端，支持输入任意手机号登录' }]
+                            : []),
+                          // ⚠️ 国际版**只有**这一条能走通（短信对国际账号必然失败）：
+                          //    非 local 的取值会落到 RPC 的「其它情况」分支 ⇒ startLogin
+                          //    ⇒ 返回的登录页对国际版渲染 Z.ai 授权按钮。
+                          ...(autoclawZaiAvailable
+                            ? [{ value: 'zai', label: '🌐 使用 Z.ai 账号登录', desc: '在浏览器里用 Z.ai 账号授权（国际版唯一可用方式）' }]
                             : []),
                         ].map((opt) => {                          const active = autoclawMode === opt.value;
                           return React.createElement('div', {
@@ -5731,6 +6245,33 @@ function ProviderPanel({ provider, rpcCall }) {
                       }),
                     }
                   : {}),
+                // ⚠️ 编辑凭据（MonkeyCode 两站共用同一个弹窗组件，靠 provider 分派站点）。
+                //
+                // 背景（2026-11-02 审查 B🟡）：宿主早就有 `monkeycode.setApiKey`，
+                // 但客户端**零调用点** ⇒ 用户填错 Key 只能删卡重建，而重建会丢掉
+                // 已攒下的 `session_cookie`（积分/额度/签到全靠它）。
+                ...MONKEYCODE_PROVIDER_IDS.includes(provider) ? {
+                  onEditMonkeycodeKey: (id, masked) => setKeyModal({
+                    provider,
+                    accountId: id,
+                    currentMasked: masked,
+                    error: ''
+                  })
+                } : {},
+                // ⚠️ 百智云同理：`baizhi.setApiKey` 走「读旧凭据再合并」，
+                // 不会冲掉控制台登录态（`session_cookie`）。
+                ...provider === 'baizhi' ? {
+                  onEditBaizhiKey: (id, masked) => setKeyModal({
+                    provider,
+                    accountId: id,
+                    currentMasked: masked,
+                    error: ''
+                  })
+                } : {},
+                // ⚠️ **本 fork 独有**（百智云）：补网页登录态（读积分）。
+                // 与上面的「编辑 Key」是**两个方向**的凭据：这里只写
+                // `session_cookie`、绝不覆盖手填的 `sk-`。
+                ...provider === 'baizhi' ? { onReadSession: (id) => void startBaizhiSession(id) } : {},
                 // 新手任务（仅 Loomy）：一次性 10000 分，每号只能领一次。
                 // 与「一键领取积分」（每日签到）是**不同**的操作，故独立按钮。
                 onClaimOnboarding: canClaimOnboarding
@@ -5777,8 +6318,9 @@ function ProviderPanel({ provider, rpcCall }) {
     // 不同，React 抛 #310（"Rendered more hooks than during the previous render"），
     // 整个设置页崩成白屏。仓库其它弹窗（ModelListPanel / BackupPanel /
     // ClineQuotaPanel）都是 `createElement` 形式，正是这个原因。
-    proxyModal
-      ? React.createElement(proxyModalComponent(proxyModal.provider), {
+    // ⚠️ `proxyModalComponent` 对未知 provider 返回 `null`（白名单，2026-11-03 五审），
+    //    这里必须判空再 `createElement`，否则 `createElement(null)` 直接抛。
+    proxyModal && proxyModalComponent(proxyModal.provider) ? React.createElement(proxyModalComponent(proxyModal.provider), {
           // ⚠️ 传最小 ctx 门面而不是整个面板：弹窗只需要 rpc，
           // 这样它在单测/复用时不必拖上整个 ProviderPanel 的依赖。
           ctx: { rpc: (payload) => rpcCall(payload.method, payload.payload) },
@@ -5792,8 +6334,10 @@ function ProviderPanel({ provider, rpcCall }) {
       : null,
     // 「添加 opencode 账号」弹窗：自绘而非 window.prompt ——
     // DSH 客户端沙箱里 prompt() 直接抛 `prompt() is not supported`（真机报障）。
-    keyModal && keyModal.provider !== 'modelscope' && keyModal.provider !== 'qiniu'
-      ? React.createElement(OpencodeKeyModal, {
+    // ⚠️ 白名单（2026-11-02 四审）：原先这里是**排除式**（`!== 'modelscope' && !== 'qiniu'`），
+    //    任何没被点名的新 provider 都会落到本弹窗 ⇒ 用户往里粘的是别家的 Key，
+    //    却按本 provider 打 RPC（跨 provider 落库）。排除名单是开放式，白名单是封闭式。
+    keyModal && keyModal.provider === 'opencode' ? React.createElement(OpencodeKeyModal, {
           error: keyModal.error,
           busy: creating,
           inputRef: keyInputRef,
@@ -5827,11 +6371,43 @@ function ProviderPanel({ provider, rpcCall }) {
           onClose: () => setKeyModal(null),
         })
       : null,
+    keyModal && keyModal.provider === 'baizhi' ? React.createElement(BaizhiKeyModal, {
+      error: keyModal.error,
+      busy: creating,
+      // ⚠️ 编辑模式判据**必须由 `accountId` 派生**（2026-11-02 二审 D🟡-2）：
+      //    宿主对空 mask 是**省略字段**下发（`maskBaizhiKey` 正则不过即 `''`），
+      //    所以「accountId 有值但 mask 为空」是合法状态 —— 若拿 mask 判态，
+      //    弹窗会显示「添加/确定」而提交却按 accountId 走 setApiKey。
+      editing: Boolean(keyModal.accountId),
+      currentMasked: keyModal.currentMasked || '',
+      inputRef: keyInputRef,
+      onSubmit: (value) => void submitBaizhiKey(value),
+      onClose: () => setKeyModal(null),
+      onDismissError: () => setKeyModal((prev) => prev ? { ...prev, error: '' } : prev)
+    }) : null,
+    // ⚠️ **本 fork 独有**（MonkeyCode）：三个字段（API Key / signing_secret / session cookie），
+    //    故独立组件；⚠️ 必须用 React.createElement 而非直接调用（hook #310 事故）。
+    // ⚠️ **必须传 provider**（2026-11-02 审查员 B 复审 🔴）：两站是独立部署，
+    //    弹窗里的站点名与「去哪个域名生 Key」都由它派生。不传会恒按国内站渲染 ⇒
+    //    国际站用户被指去 .com 生 Key，而两站凭据不通用（国际站的 cookie 打国内站
+    //    回 401）⇒ 建出每次 401 的账号。
+    keyModal && MONKEYCODE_PROVIDER_IDS.includes(keyModal.provider) ? React.createElement(MonkeycodeKeyModal, {
+      provider: keyModal.provider,
+      error: keyModal.error,
+      busy: creating,
+      // ⚠️ 同百智：编辑态判据由 `accountId` 派生（mask 可能为空），
+      //    `currentMasked` 只用于显示「当前 Key：…」。
+      editing: Boolean(keyModal.accountId),
+      currentMasked: keyModal.currentMasked || '',
+      inputRef: keyInputRef,
+      onSubmit: (value) => void submitMonkeycodeKey(value, keyModal.provider),
+      onClose: () => setKeyModal(null),
+      onDismissError: () => setKeyModal((prev) => prev ? { ...prev, error: '' } : prev)
+    }) : null,
     // ⚠️ **本 fork 独有**（魔搭）：「编辑访问令牌」弹窗（独立 state + 独立 ref）。
     // ⚠️ 必须用 `React.createElement` 而非直接调用组件函数：直接调用会把组件的
     // hook 算进 ProviderPanel（该文件头记录过 hook #310 事故，整个设置页白屏）。
-    keyEditModal
-      ? React.createElement(ModelscopeKeyEditModal, {
+    keyEditModal && provider === 'modelscope' ? React.createElement(ModelscopeKeyEditModal, {
           error: keyEditModal.error || '',
           busy: creating,
           currentMasked: keyEditModal.currentMasked || '',
@@ -5841,8 +6417,7 @@ function ProviderPanel({ provider, rpcCall }) {
         })
       : null,
     // ⚠️ **本 fork 独有**（七牛云）：「编辑 API Key」弹窗（独立 state + 独立 ref）。
-    qiniuKeyEditModal
-      ? React.createElement(QiniuKeyEditModal, {
+    qiniuKeyEditModal && provider === 'qiniu' ? React.createElement(QiniuKeyEditModal, {
           error: qiniuKeyEditModal.error || '',
           busy: creating,
           currentMasked: qiniuKeyEditModal.currentMasked || '',
@@ -5856,12 +6431,45 @@ function ProviderPanel({ provider, rpcCall }) {
     // 理由见 `credentialModal` 的声明处。
     // ⚠️ 同样必须 `React.createElement` 而非直接调用组件函数：直接调用会把
     // 组件的 hook 算进 ProviderPanel（该文件头记录过 hook #310 事故，整页白屏）。
-    credentialModal
-      ? React.createElement(MagicrewImportModal, {
+    credentialModal && credentialModal.provider === 'baizhi' ? React.createElement(BaizhiLoginModal, {
+      error: credentialModal.error || '',
+      busy: creating,
+      onBrowse: () => void submitBaizhiBrowserLogin(),
+      onManual: () => {
+        setCredentialModal(null);
+        setKeyModal({ provider: 'baizhi', error: '' });
+      },
+      onClose: () => setCredentialModal(null)
+    }) : null,
+    // MonkeyCode 走**浏览器登录**（本 fork 独有，2026-11-02）：与 magicrew 共用
+    // `credentialModal` 这个 state，但渲染的是**另一个组件** —— 它没有「导入本机
+    // 登录态」这条腿（cookie 是 HttpOnly，只能由插件自己开的窗口读到）。
+    credentialModal && MONKEYCODE_PROVIDER_IDS.includes(credentialModal.provider) ? React.createElement(MonkeycodeLoginModal, {
+      provider: credentialModal.provider,
+      error: credentialModal.error || '',
+      busy: creating,
+      onBrowse: () => void submitMonkeycodeBrowserLogin(credentialModal.provider),
+      onManual: () => {
+        const manualProvider = credentialModal.provider;
+        setCredentialModal(null);
+        setKeyModal({ provider: manualProvider, error: '' });
+      },
+      onClose: () => setCredentialModal(null)
+    }) : null,
+    // ⚠️ 白名单（2026-11-02 四审 H-1）：原先末支是整条排除式（`credentialModal ?`），
+    //    任何 provider 误用都会落到本弹窗 ⇒ 看到 Magicrew 文案、并按错的 provider 打 RPC。
+    credentialModal && (credentialModal.provider === 'magicrew' || credentialModal.provider === 'magicrewintl') ? React.createElement(MagicrewImportModal, {
+          // ⚠️ **必须传 provider**（2026-11-01 接线审查）：本弹窗同时服务
+          //    `magicrew`（超级麦吉 / www.letsmagic.cn）与 `magicrewintl`
+          //    （MagiCrew 国际版 / www.magicrew.ai）。不传的话标题与引导文案
+          //    恒为国内站 ⇒ 国际站用户被指引去登 letsmagic.cn，而读取器找的是
+          //    magicrew.ai 的登录态 ⇒ 必然失败；宿主错误文案又反过来让他去登
+          //    magicrew.ai ⇒ **引导自相矛盾的死循环**。
+          provider: credentialModal.provider,
           error: credentialModal.error || '',
           busy: creating,
-          onSubmit: () => void submitMagicrewLocalImport('local-browser'),
-          onBrowse: () => void submitMagicrewLocalImport('browser'),
+          onSubmit: () => void submitMagicrewLocalImport(credentialModal.provider, 'local-browser'),
+          onBrowse: () => void submitMagicrewLocalImport(credentialModal.provider, 'browser'),
           onClose: () => setCredentialModal(null),
         })
       : null);
@@ -5896,9 +6504,17 @@ function ProviderPanel({ provider, rpcCall }) {
  * 「没登录」而是「这个入口看不见那份凭据」⇒ 必须有一条能**自己登一次**的路，
  * 那就是「网页登录」。
  *
- * @param props `{ error, busy, onSubmit(), onBrowse(), onClose() }`
+ * @param props `{ provider, error, busy, onSubmit(), onBrowse(), onClose() }`
+ *   ⚠️ `provider` 必传：本弹窗服务 `magicrew` 与 `magicrewintl` 两个站，
+ *      标题与「去哪个域名登录」的引导必须跟着走（见调用点的长注释）。
  */
-function MagicrewImportModal({ error, busy, onSubmit, onBrowse, onClose }) {
+function MagicrewImportModal({ provider, error, busy, onSubmit, onBrowse, onClose }) {
+  // ⚠️ 两站的展示名与登录域名。与 `src/magicrew-product.ts` 的
+  //    `displayName` / `webOrigin` 必须一致（客户端无法直接 import TS 常量，
+  //    故这里是**唯一**的复制点，两处改其一都要同步）。
+  const isIntl = provider === 'magicrewintl'
+  const siteName = isIntl ? 'MagiCrew (国际版)' : '超级麦吉'
+  const webHost = isIntl ? 'www.magicrew.ai' : 'www.letsmagic.cn'
   return React.createElement('div', {
     className: 'dim-jh-modalOverlay',
     onClick: (e) => { if (e.target === e.currentTarget && !busy && onClose) onClose(); },
@@ -5907,16 +6523,16 @@ function MagicrewImportModal({ error, busy, onSubmit, onBrowse, onClose }) {
       className: 'dim-jh-modal',
       role: 'dialog',
       'aria-modal': 'true',
-      'aria-label': '导入超级麦吉',
+      'aria-label': `导入${siteName}`,
       style: { maxWidth: '460px' },
     },
       React.createElement('div', { className: 'dim-jh-modalHead' },
-        React.createElement('div', { className: 'dim-jh-modalTitle' }, '导入超级麦吉'),
+        React.createElement('div', { className: 'dim-jh-modalTitle' }, `导入${siteName}`),
       ),
       React.createElement('div', { className: 'dim-jh-modalBody' },
         React.createElement('p', { className: 'dim-jh-modalHint' },
           // ⚠️ 纯文本（不走 markdown 渲染），不要写 `**强调**`。
-          '「导入」：先用 Edge / Chrome 打开 www.letsmagic.cn 登录，然后回到这里点「导入」。'
+          `「导入」：先用 Edge / Chrome 打开 ${webHost} 登录，然后回到这里点「导入」。`
           + '插件会直接读取该浏览器的登录态，不需要再输一次密码。'),
         React.createElement('p', { className: 'dim-jh-modalHint' },
           '「网页登录」：插件会另开一个干净的浏览器窗口，你在里面完成登录即可'
@@ -5960,6 +6576,121 @@ function MagicrewImportModal({ error, busy, onSubmit, onBrowse, onClose }) {
  *
  * 弹窗被拦截 / 口令错误等失败只提示、不清空已选文件，用户可以修正后重试。
  */
+function BaizhiLoginModal({ error, busy, onBrowse, onManual, onClose }) {
+  return React.createElement('div', {
+      className: 'dim-jh-modalOverlay',
+      onClick: (e) => {
+        if (e.target === e.currentTarget && !busy && onClose) onClose();
+      }
+    },
+    React.createElement('div', {
+        className: 'dim-jh-modal',
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': '登录百智云',
+        style: { maxWidth: '460px' }
+      },
+      React.createElement('div', { className: 'dim-jh-modalHead' },
+        React.createElement('div', { className: 'dim-jh-modalTitle' }, '登录百智云')
+      ),
+      React.createElement('div', { className: 'dim-jh-modalBody' },
+        React.createElement('p', { className: 'dim-jh-modalHint' },
+          // ⚠️ 纯文本（不走 markdown 渲染），不要写 `**强调**`。
+          '点「打开浏览器登录」后，插件会新开一个浏览器窗口，你在里面登录百智云（手机号 / 密码 / 第三方都行）。登录完成后会自动建号：同时取回大模型商店的 sk- API Key（用于对话）与控制台登录态（用于读积分），不需要你复制任何东西。'
+        ),
+        React.createElement('p', { className: 'dim-jh-modalHint' },
+          '如果你已经有一把 sk- 开头的 Key（大模型商店 console/keys 页可以创建），也可以点「手动填写 API Key」直接填入；这样能对话，但卡片上看不到积分。'
+        ),
+        error ? React.createElement('p', { className: 'dim-jh-error', role: 'alert' }, error) : null
+      ),
+      React.createElement('div', { className: 'dim-jh-modalActions' },
+        React.createElement('button', {
+          type: 'button',
+          className: 'dim-jh-btn dim-jh-btnPrimary',
+          disabled: !!busy,
+          onClick: () => {
+            if (onBrowse) onBrowse();
+          }
+        }, busy ? '等待登录…' : '打开浏览器登录'),
+        React.createElement('button', {
+          type: 'button',
+          className: 'dim-jh-btn',
+          disabled: !!busy,
+          onClick: () => {
+            if (onManual) onManual();
+          }
+        }, '手动填写 API Key'),
+        React.createElement('button', {
+          type: 'button',
+          className: 'dim-jh-btn',
+          disabled: !!busy,
+          onClick: () => {
+            if (onClose) onClose();
+          }
+        }, '取消')
+      )
+    )
+  );
+}
+function MonkeycodeLoginModal({ provider, error, busy, onBrowse, onManual, onClose }) {
+  const siteName = provider === 'monkeycodeintl' ? 'MonkeyCode 国际站' : 'MonkeyCode';
+  return React.createElement('div', {
+      className: 'dim-jh-modalOverlay',
+      onClick: (e) => {
+        if (e.target === e.currentTarget && !busy && onClose) onClose();
+      }
+    },
+    React.createElement('div', {
+        className: 'dim-jh-modal',
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': `登录 ${siteName}`,
+        style: { maxWidth: '460px' }
+      },
+      React.createElement('div', { className: 'dim-jh-modalHead' },
+        React.createElement('div', { className: 'dim-jh-modalTitle' }, `登录 ${siteName}`)
+      ),
+      React.createElement('div', { className: 'dim-jh-modalBody' },
+        React.createElement('p', { className: 'dim-jh-modalHint' },
+          // ⚠️ 纯文本（不走 markdown 渲染），不要写 `**强调**`。
+          `点「打开浏览器登录」后，插件会新开一个浏览器窗口。你在里面用手机号 / 密码 / 第三方账号登录 ${siteName}，登录完成后插件自动读取登录态并建号 —— 不需要复制任何东西。`
+        ),
+        React.createElement('p', { className: 'dim-jh-modalHint' },
+          '如果你已经有 OhMyAgent 的 API Key（oma_ 开头，可在站内「OhMyAgent」页面生成），可以点「手动填写 API Key」。'
+        ),
+        error ? React.createElement('p', { className: 'dim-jh-error', role: 'alert' }, error) : null
+      ),
+      React.createElement('div', { className: 'dim-jh-modalActions' },
+        React.createElement('button', {
+          type: 'button',
+          className: 'dim-jh-btn dim-jh-btnPrimary',
+          disabled: !!busy,
+          onClick: () => {
+            if (onBrowse) onBrowse();
+          }
+        }, busy ? '等待登录…' : '打开浏览器登录'),
+        React.createElement('button', {
+          type: 'button',
+          className: 'dim-jh-btn',
+          // ⚠️ 与「打开浏览器登录」共用 `busy`：两条路都会建账号，同时跑会让池里
+          //    多出两个账号指向同一个上游号。
+          disabled: !!busy,
+          onClick: () => {
+            if (onManual) onManual();
+          }
+        }, '手动填写 API Key'),
+        React.createElement('button', {
+          type: 'button',
+          className: 'dim-jh-btn',
+          disabled: !!busy,
+          onClick: () => {
+            if (onClose) onClose();
+          }
+        }, '取消')
+      )
+    )
+  );
+}
 function BackupPanel({ rpcCall, onImported }) {
   // 当前打开的弹窗：null | 'export' | 'import'
   const [dialog, setDialog] = React.useState(null);
@@ -7879,12 +8610,17 @@ function GatewayPanel({ status, busy, notice, onToggle, onToggleAllowLan, onRelo
  * 说明写在这里而不是数组内部：下面那条守卫按 `split(',')` 解析数组体，
  * 数组内的注释只要含半角逗号就会被当成名单项（我第一版就这么写红过）。
  */
+// ⚠️ 2026-11-02：MonkeyCode 两站 + 百智云（三家都有跨账号的到期余额探测端点，
+//    见 `src/aggregate-expiry.ts` 的同名表）。漏记会让空态文案少报三家 ——
+//    而「决定候选表可见性的是后端那张表」，两边必须集合相等（有 spec 守着）。
+//    ⚠️ 数组字面量里**不要写注释**：那条守卫用 `split(',')` 抽 id，注释会被当成一项。
 const AGG_WIRED_CHANNEL_IDS = [
   'buddy', 'workbuddy', 'loomy', 'codearts', 'zcode', 'lobsterai', 'trae',
   'accio', 'officeace', 'modelscope', 'autoclaw', 'autoclawintl',
   'qoder', 'qodercn',
   'astudio', 'minimax', 'minimaxintl',
-  'magicrew',
+  'magicrew', 'magicrewintl',
+  'monkeycode', 'monkeycodeintl', 'baizhi',
 ];
 
 /**
@@ -8701,6 +9437,75 @@ export function JetHubPage({ rpcCall }) {
   const [checkinBusy, setCheckinBusy] = React.useState(false);
   const [checkinNotice, setCheckinNotice] = React.useState(null);
   /**
+   * 「一键签到 ▾」展开的**定时签到配置面板**（用户 2026-10-18 需求）。
+   *
+   * 语义：原先只有「每日首次启动跑一次」，用户要的是**每天固定两个时刻**自动跑，
+   * 且配置入口放在原一键签到按钮上。面板里管：开关、两个时刻、下次执行、上次结果。
+   *
+   * ⚠️ `autoCheckin` 是**宿主实时状态**（含 `nextRunAt` / `times`），不落缓存 ——
+   * 每次打开面板都重新读一次，否则改完时刻后显示的「下次执行」会停在旧值上。
+   */
+  const [showCheckinPanel, setShowCheckinPanel] = React.useState(false);
+  /**
+   * 下拉面板与触发按钮的引用 —— 「点击外部关闭」需要它。
+   *
+   * ⚠️ 必须把**触发按钮**也包在「内部」的范围里：只判面板本身的话，点那个 ▾
+   * 会先被 document 上的监听判成「外部」而关闭，紧接着按钮自己的 onClick 又把它
+   * 打开 ⇒ 表现为**点一次闪一下、关不掉**（典型的下拉陷阱）。
+   */
+  const checkinWrapRef = React.useRef(null);
+  const [autoCheckin, setAutoCheckin] = React.useState(null);
+  const [autoCheckinError, setAutoCheckinError] = React.useState('');
+  const [autoCheckinBusy, setAutoCheckinBusy] = React.useState(false);
+  /** 面板里正在编辑的两个时刻（提交前不写宿主）。 */
+  const [timeDraft, setTimeDraft] = React.useState(['09:00', '21:00']);
+  /**
+   * 随机浮动开关与幅度（分钟）。
+   *
+   * 用户 2026-10-31：「加入随机签到（定时就灰色了）或者在我选择的时间搞一个上下
+   * 浮动一些时间。搞得像真人一样有时间波动。」
+   * 语义：勾上后每个时段在 [时刻 - N, 时刻 + N] 内**随机**偏移一次（每轮重新抽），
+   * 关掉则精确按时刻执行。**刻意不做成百分比**：用户能直观理解「±10 分钟」。
+   */
+  const [jitterOn, setJitterOn] = React.useState(false);
+  const [jitterMinutes, setJitterMinutes] = React.useState(10);
+  /**
+   * 上面三者「最新值」的同步副本。
+   *
+   * ⚠️ 存在的唯一理由：`closeCheckinPanel` 可能被**早期注册的监听**调用
+   *（document 上的 mousedown 捕获监听），那个闭包捕获的是注册时的旧 state。
+   * 直接读 state 会拿到上一次渲染的值 ⇒ 关闭时保存的是**旧草稿**（真实缺陷，
+   * 2026-11-01 实测：改完时刻点外部关闭，改动静默丢失）。
+   */
+  const timeDraftRef = React.useRef(timeDraft);
+  const jitterOnRef = React.useRef(jitterOn);
+  const jitterMinutesRef = React.useRef(jitterMinutes);
+  React.useEffect(() => { timeDraftRef.current = timeDraft }, [timeDraft]);
+  React.useEffect(() => { jitterOnRef.current = jitterOn }, [jitterOn]);
+  React.useEffect(() => { jitterMinutesRef.current = jitterMinutes }, [jitterMinutes]);
+  /**
+   * 宿主状态的「最新值」同步副本。
+   *
+   * ⚠️⚠️ **这条是 2026-11-01 审计打穿的那个真缺陷的修法**：上面三个 ref 只解决了
+   * 「草稿」的陈旧闭包，而提交判据还要读**宿主基线**（`autoCheckin.times`）。
+   * `document` 上的监听注册在 `useEffect(..., [showCheckinPanel])` 里，它的闭包里
+   * `autoCheckin` 永远是**打开那一刻**的值 —— 首次打开时它是 `null`
+   * ⇒ `checkinCommitPlan` 走「读不到宿主就不提交」⇒ 改完时刻点外部关闭、**静默丢失**。
+   * （实测：首次打开 + 点外部关闭 = 0 次写请求；同一份草稿用 ▾ 关闭却能存。）
+   */
+  const autoCheckinRef = React.useRef(autoCheckin);
+  React.useEffect(() => { autoCheckinRef.current = autoCheckin }, [autoCheckin]);
+  /** 正在保存（单飞闸门）：防止「连点关闭」发出两条相同的写请求。 */
+  const checkinSavingRef = React.useRef(false);
+  /**
+   * 上一次保存**失败过**（面板已把错误显示出来）。
+   *
+   * ⚠️ 存在的理由（2026-11-01 第二轮审计 P2-3）：修好「失败保住面板」之后，面板
+   * 会变成**关不掉** —— 每次关闭手势都重试保存、都失败。这里的闸门让「失败过一次」
+   * 之后的关闭手势直接关掉面板（错误已提示过），用户仍有唯一的逃生出口。
+   */
+  const checkinSaveFailedRef = React.useRef(false);
+  /**
    * 供应商级状态（provider id → ProviderStatus），driving 左侧分组与页头弹窗里的开关。
    *
    * `null` = 尚未读取成功（分组退化为不分组平铺，弹窗里的开关全部禁用）——
@@ -9216,6 +10021,202 @@ export function JetHubPage({ rpcCall }) {
    * 单渠道失败只计入 failed，**不中断后续渠道**（与后端「单账号失败不中断
    * 整体」同型）。但后端对**无账号**的渠道本就是零请求，故不额外预查账号。
    */
+  /**
+   * 下拉面板的「点击外部 / ESC 关闭」。
+   *
+   * 为什么不像其它弹窗那样「点击遮罩关闭」：那些是 `position: fixed` 的全屏遮罩，
+   * 有一个明确的表层可点；本面板是**锚定在按钮下方的下拉卡**（`position: absolute`），
+   * 没有遮罩层 —— 若也做成遮罩，会把整个设置页压暗、且与其它弹窗互斥逻辑打架。
+   * 故改用 document 级监听 + 命中测试。
+   *
+   * ⚠️ 用 `mousedown` 而不是 `click`：`click` 要等 mouseup 才触发，用户点空白处后
+   * 若手指稍有位移就不触发；`mousedown` 更接近「点到了别处」的直觉，也与浏览器
+   * 原生下拉的行为一致。
+   * ⚠️ 命中测试必须用 `contains()`（DOM 层级），**不能**用坐标判断：面板会被
+   * 窗口尺寸、滚动、缩放影响，坐标判据必然漂移。
+   * ⚠️ `checkinWrapRef` 覆盖**按钮 + 面板**两者：只判面板会让「点 ▾」自我关闭再重开。
+   */
+  React.useEffect(() => {
+    if (!showCheckinPanel) return undefined;
+    const onPointerDown = (event) => {
+      const wrap = checkinWrapRef.current;
+      // 点在容器（含按钮与面板）之内 ⇒ 不关。判据在 checkin-panel-logic.js
+      //（抽成纯函数是为了能测；这里只负责把 DOM 能力传进去）。
+      const inside = isInsideCheckinDock({
+        contains: (node) => wrap !== null && wrap.contains(node),
+        target: event.target,
+        isNode: typeof Node !== 'undefined' && event.target instanceof Node,
+      });
+      if (inside) return;
+      // ⚠️⚠️ **不能直接 `setShowCheckinPanel(false)`**（真实缺陷，2026-11-01 实测）：
+      //    那样会绕开 `toggleCheckinPanel` 里的「关闭即保存」分支，用户改了时刻/
+      //    浮动后点外部关闭 ⇒ 改动**静默丢失**，界面看着一切正常。
+      //    必须走同一个关闭入口，让保存只有一条腿。
+      closeCheckinPanel();
+    };
+    // 捕获阶段监听：避免被内部某个 stopPropagation 截断。
+    //
+    // ⚠️ **刻意不绑 ESC**（用户 2026-10-31 明确要求「按 ESC 关闭这个没必要」）：
+    //    本面板是按钮的附属下拉，不是模态框 —— 它不抢焦点、不遮页面、不改输入流。
+    //    用户在这里通常正拿着鼠标点时刻/开关，按 ESC 多半是想取消上游某个操作
+    //    （例如输入框的撤销），顺手把面板也关掉反而是干扰。
+    //    「移除」而非「保留但无害」：留着监听会让 ESC 同时做两件事，行为难预期。
+    document.addEventListener('mousedown', onPointerDown, true);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown, true);
+    };
+  }, [showCheckinPanel]);
+
+  /**
+   * 读取宿主侧的**定时签到**状态（开关 / 两个时刻 / 下次执行 / 上次结果）。
+   *
+   * ⚠️ 每次打开面板都读，不复用缓存：`nextRunAt` 是宿主按当前时刻算出来的，
+   * 缓存会让「改完时刻」后的显示停在旧值上（用户会以为没保存成功）。
+   */
+  const loadAutoCheckin = React.useCallback(async () => {
+    try {
+      const res = await rpcCall('usage.autoCheckin', {});
+      const next = res?.autoCheckin || null;
+      setAutoCheckin(next);
+      if (Array.isArray(next?.times) && next.times.length === 2) setTimeDraft([...next.times]);
+      if (typeof next?.jitterMinutes === 'number') {
+        setJitterOn(next.jitterMinutes > 0);
+        if (next.jitterMinutes > 0) setJitterMinutes(next.jitterMinutes);
+      }
+      setAutoCheckinError('');
+    } catch (error) {
+      // 读取失败**不清空**已有状态：抖动一次就把面板变空会让人以为配置丢了。
+      setAutoCheckinError(error?.message || '定时签到状态读取失败');
+    }
+  }, [rpcCall]);
+
+  /**
+   * 展开/收起配置面板。
+   *
+   * ⚠️⚠️ **打开时不要清空 `autoCheckin`、也不要在无数据时渲染「状态读取中…」**
+   *（用户 2026-10-31 报障：「我点击一按钮这个小弹窗文字会闪一下好难受」）。
+   * 根因是上一版每次打开都把状态当成空，于是面板先渲染「状态读取中…」、
+   * 几百毫秒后再换成真实文案 —— 这一下**文字替换**就是「闪」。修法两条腿：
+   * 1. 打开时**保留**上一次读到的状态（它只是稍旧，不是错的）；
+   * 2. 状态区在「还没读到」时渲染**固定高度的骨架占位**（无文字），而不是
+   *    一句会消失的文案。
+   * ⚠️ 后台仍然照常刷新一次（`loadAutoCheckin`），数据会悄悄更新 ——
+   *    只要形状不变，用户就看不到跳动。
+   */
+  /**
+   * **唯一**的关闭入口 —— 任何关闭路径都必须走这里，保证「关闭即保存」。
+   *
+   * ⚠️⚠️ 这不是洁癖（真实缺陷，2026-11-01 实测）：上一版有两处关闭 —— 滚轮按钮走
+   * `toggleCheckinPanel`（会保存），点外部走裸的 `setShowCheckinPanel(false)`（不保存）
+   * ⇒ 用户改完设置点外面关闭时，改动**静默丢失**，而界面看不出任何异常。
+   * 同义语义只留一条实现，是本仓库反复记录的一条纪律。
+   */
+  const closeCheckinPanel = () => {
+    // ★ 关闭即保存（用户 2026-10-31：「退出这个小弹窗自动保存就行」）。
+    //
+    // ⚠️⚠️ **一律读 ref，不读闭包里的 state**（真实缺陷，2026-11-01 两轮审计各自
+    //    实测打穿）：本函数可能被**早于最后一次 setState 注册的监听**调用
+    //    （document 的 mousedown 捕获监听注册在 `useEffect(..., [showCheckinPanel])`，
+    //    闭包停在打开那一刻）⇒ 读到的是旧值。**草稿三个 ref + 宿主状态一个 ref
+    //    缺一不可**：只修前者时，首次打开（autoCheckin 还是 null）点外部关闭会走
+    //    `checkinCommitPlan` 的「读不到宿主」分支 ⇒ 改动**静默丢失**，而用 ▾ 关闭
+    //    却能存（同一份草稿两条路径相反）。
+    const plan = checkinCommitPlan({
+      hostTimes: autoCheckinRef.current?.times,
+      hostJitter: autoCheckinRef.current?.jitterMinutes,
+      draftTimes: timeDraftRef.current,
+      draftJitterOn: jitterOnRef.current,
+      draftJitterMinutes: jitterMinutesRef.current,
+    });
+    if (plan === null) {
+      // 没改动（或宿主状态还没读回来）⇒ 直接关。
+      // ⚠️ 宿主状态读不到时**不提交**：那时草稿只是本地默认值，写进去会把用户的
+      //   真实设置覆盖成默认两个时刻。
+      setShowCheckinPanel(false);
+      return;
+    }
+    // ★ 单飞：上一次保存还没回来时，忽略重复的关闭手势（audit2 P2-3）。
+    //   否则「点外部关闭 + 再点一次」会发出**两条相同 payload** 的写请求。
+    if (checkinSavingRef.current) return;
+    // ★ 上一次保存**已经失败过**且用户没再改 ⇒ 这次直接关：错误已经显示过，
+    //   不能把面板变成关不掉的死锁（audit2 P2-3）。用户的改动仍是「未保存」，
+    //   重开面板时草稿会被宿主值覆盖 —— 这是「已经提示过失败」的代价，比卡死好。
+    if (checkinSaveFailedRef.current) {
+      setShowCheckinPanel(false);
+      return;
+    }
+    // 有改动 ⇒ 提交；**成功才关**，失败则把面板留在打开状态（否则错误文案渲染在
+    // 一个已经关闭的面板里，用户永远看不到 —— 2026-11-01 审计 P2-4）。
+    checkinSavingRef.current = true;
+    void saveCheckinTimesWith(plan.times, plan.jitterMinutes > 0, plan.jitterMinutes)
+      .then((okSaved) => {
+        checkinSavingRef.current = false;
+        if (okSaved) setShowCheckinPanel(false);
+        else checkinSaveFailedRef.current = true;
+      });
+  };
+
+  const toggleCheckinPanel = () => {
+    if (showCheckinPanel) { closeCheckinPanel(); return }
+    setAutoCheckinError('');
+    // 重新打开 = 重新给一次机会：清掉「上次保存失败」的闸门（否则用户改完再关会
+    // 走「直接关」分支，改动又一次静默丢弃）。
+    checkinSaveFailedRef.current = false;
+    setShowCheckinPanel(true);
+    // 与其它页头浮层互斥：它们都是 position:fixed，同时开会叠在一起。
+    setShowProviderSwitches(false);
+    setShowGateway(false);
+    setShowTokenLedger(false);
+    // ⚠️ 不清空 autoCheckin：保留旧值，避免 null → 真值 的文字替换。
+    void loadAutoCheckin();
+  };
+
+  /** 开关自动签到。宿主在「打开」时会立刻尝试一轮（有时段没跑则补）。 */
+  const toggleAutoCheckin = async (enabled) => {
+    setAutoCheckinBusy(true);
+    setAutoCheckinError('');
+    try {
+      const res = await rpcCall('usage.autoCheckin', { enabled });
+      const next = res?.autoCheckin || null;
+      setAutoCheckin(next);
+      if (Array.isArray(next?.times) && next.times.length === 2) setTimeDraft([...next.times]);
+    } catch (error) {
+      setAutoCheckinError(error?.message || '定时签到开关保存失败');
+    } finally {
+      setAutoCheckinBusy(false);
+    }
+  };
+
+  /**
+   * 保存两个时刻（用户在面板里改过才写）。
+   *
+   * ⚠️ 非法值由**宿主**拒绝并回 `bad-request`，这里只负责把那条文案显示出来 ——
+   * 客户端**不重复实现**校验（两处判据必然漂移，本仓库已有该类真实缺陷）。
+   *
+   * ★ 用户 2026-10-31：「这个二按钮没必要存在，退出这个小弹窗自动保存就行」
+   *   ⇒ 面板不再有「保存时刻」按钮，改为**关闭时自动提交**。
+   *   ⚠️ 必须**只在真的改过时**才发请求（见 `commitTimesIfDirty`）：关闭面板是
+   *   高频动作，每次都写盘会让宿主反复保存、也让「时刻」被无谓地重置。
+   */
+  const saveCheckinTimesWith = async (draft, jOn, jMin) => {
+    setAutoCheckinBusy(true);
+    setAutoCheckinError('');
+    try {
+      const res = await rpcCall('usage.autoCheckin', { times: [...draft], jitterMinutes: jOn ? jMin : 0 });
+      const next = res?.autoCheckin || null;
+      setAutoCheckin(next);
+      if (Array.isArray(next?.times) && next.times.length === 2) setTimeDraft([...next.times]);
+      return true;
+    } catch (error) {
+      // 错误文案由面板渲染（`renderCheckinPanel` 的 role="alert" 那一行）——
+      // 调用方负责在失败时**把面板留着**，否则这句看不见。
+      setAutoCheckinError(error?.message || '时刻保存失败');
+      return false;
+    } finally {
+      setAutoCheckinBusy(false);
+    }
+  };
+
   const checkinAll = async () => {
     setCheckinBusy(true);
     setCheckinNotice(null);
@@ -9265,6 +10266,14 @@ export function JetHubPage({ rpcCall }) {
           //   回归由 `tests/unit/claim-unit-callsites.spec.ts` 的源码级断言锁死。
           const amount = formatClaimGains(byUnit);
           if (amount !== null) bits.push(amount);
+          else {
+            // ⚠️⚠️ **「签到了但收益读数为 0」不等于「没有账号」**（2026-11-03
+            //   合并审计 P1）：`formatClaimGains` 在全零时返回 `null`，原实现
+            //   直接跳过 ⇒ 本渠道 `bits` 为空 ⇒ 下行拼出「MonkeyCode 无账号」，
+            //   而用户刚刚**确实签到成功**。上游不回奖励金额的渠道
+            //   （MonkeyCode / AutoClaw / Codely）常态走到这里。
+            bits.push(`${s.claimed} 个签到成功`);
+          }
         }
         if (s.alreadyClaimed > 0) bits.push(`${s.alreadyClaimed} 个今日已领`);
         if (s.inactive > 0) bits.push(`${s.inactive} 个暂无活动`);
@@ -9467,6 +10476,142 @@ export function JetHubPage({ rpcCall }) {
   //    「一份状态两套判据」，而且页头那个开关只能表达两态、无法承载互斥语义。
   //    卡片实现见 `plugin-src/client/settings-card.js`。
 
+  /**
+   * 定时签到配置面板（下拉卡）。
+   *
+   * ⚠️ 内容必须是**受控**的：`timeDraft` 与宿主状态分开存 —— 直接绑定宿主值会让
+   * 用户每次按键都触发一次写盘（且中途状态非法）。
+   * ⚠️ **没有「保存」按钮**（用户 2026-10-31：「这个二按钮没必要存在，退出这个小
+   *   弹窗自动保存就行」）⇒ 提交发生在面板**关闭**时（`commitTimesIfDirty`）。
+   */
+  function renderCheckinPanel() {
+    const a = autoCheckin;
+    const busy = autoCheckinBusy;
+    return React.createElement('div', {
+      className: 'dim-jh-checkinPanel',
+      role: 'dialog',
+      'aria-label': '定时签到设置',
+      // ⚠️ 阻止冒泡：外层页头没有点击关闭逻辑，但将来若给它加，这里不该被连带触发。
+      onClick: (event) => event.stopPropagation(),
+    },
+      React.createElement('div', { className: 'dim-jh-checkinPanelTitle' }, '定时签到'),
+      // ⚠️⚠️ **不能让 `<label>` 包住整行**（用户 2026-10-31：「按钮范围有点大啊」）：
+      //    `label` 的语义是「点它任意位置都切换那个 input」⇒ 整行 300px 全成了
+      //    命中区，用户点行尾空白也会把开关切走。
+      //    修法：容器改 `div`，只有**开关 + 紧邻文字**包在 label 里。
+      //    ⚠️ 也不能干脆不要 label：那样键盘 Tab 到 checkbox 时没有可读的关联文字。
+      React.createElement('div', { className: 'dim-jh-checkinRow' },
+        React.createElement('label', { className: 'dim-jh-checkinToggle' },
+          React.createElement('input', {
+            type: 'checkbox',
+            className: 'dim-jh-switch',
+            checked: a?.enabled === true,
+            // ⚠️ 只在 `autoCheckinBusy` 时禁用，**不再**因 `a === null` 禁用：
+            //   那会让面板刚打开的一瞬间开关是灰的，用户点了没反应（也是「闪」的一种）。
+            disabled: busy,
+            onChange: (event) => void toggleAutoCheckin(event.target.checked),
+          }),
+          React.createElement('span', null, '每天自动签到（两次）'))),
+      React.createElement('div', { className: 'dim-jh-checkinRow' },
+        React.createElement('label', null, '执行时刻'),
+        timeDraft.map((value, index) => React.createElement('input', {
+          key: `t-${index}`,
+          type: 'time',
+          className: 'dim-jh-checkinTime',
+          value,
+          disabled: busy,
+          'aria-label': `第 ${index + 1} 个执行时刻`,
+          onChange: (event) => {
+            const next = [...timeDraft];
+            next[index] = event.target.value;
+            // 用户又改了 ⇒ 允许下一次关闭再试一次保存（清掉失败闸门）。
+            checkinSaveFailedRef.current = false;
+            setTimeDraft(next);
+          },
+        }))),
+      // ★ 随机浮动（用户 2026-10-31：「搞得像真人一样有时间波动」）。
+      //   勾上 = 每个时段在 ±jitter 分钟内随机偏移；关掉 = 精确按时刻跑。
+      //
+      // ⚠️ 同「每天自动签到」那行：`label` **只**包开关 + 紧邻文字，
+      //    数字框与「分钟」在 label 外面 —— 否则点数字框附近也会切换开关
+      //    （用户 2026-10-31：「按钮范围有点大啊」）。
+      React.createElement('div', { className: 'dim-jh-checkinRow' },
+        React.createElement('label', { className: 'dim-jh-checkinToggle' },
+          React.createElement('input', {
+            type: 'checkbox',
+            className: 'dim-jh-switch',
+            checked: jitterOn,
+            disabled: busy,
+            onChange: (event) => {
+              checkinSaveFailedRef.current = false;
+              setJitterOn(event.target.checked);
+            },
+          }),
+          React.createElement('span', null, '随机浮动')),
+        React.createElement('input', {
+          type: 'number',
+          className: 'dim-jh-checkinJitter',
+          min: 0,
+          max: 120,
+          step: 5,
+          value: jitterMinutes,
+          disabled: busy || !jitterOn,
+          'aria-label': '随机浮动分钟数',
+          onChange: (event) => {
+            checkinSaveFailedRef.current = false;
+            setJitterMinutes(Number(event.target.value));
+          },
+        }),
+        React.createElement('span', null, '分钟')),
+      React.createElement('div', { className: 'dim-jh-checkinHint' },
+        jitterOn
+          ? '每个时刻会在 ±' + String(jitterMinutes) + ' 分钟内随机偏移（两个时刻挨得近时，幅度会被夹到间隔的一半），'
+            + '避免固定时刻被识别为脚本；改完关闭面板自动保存。'
+          : '固定时刻执行；改完关闭面板自动保存。'),
+      renderCheckinStatus(a),
+      autoCheckinError === ''
+        ? null
+        : React.createElement('div', { className: 'dim-jh-checkinHint', role: 'alert', style: { color: '#d93025' } }, autoCheckinError),
+    );
+  }
+
+  /**
+   * 状态区：下次执行 + 待补渠道 + 上次结果。
+   *
+   * ⚠️ **旧宿主**（插件已更新、进程还在跑旧代码）必须显式说出来：那时响应里
+   * 没有 `times`/`nextRunAt`，若把「字段缺失」当成「开关已关闭」，面板就会同时
+   * 显示「开关勾着」与「不会执行（开关已关闭）」—— 用户 2026-10-18 报障的
+   * 正是这一格。判据与文案都在 `checkin-panel-logic.js`（那里有回归用例）。
+   *
+   * ⚠️ **还没读回来时渲染固定高度的骨架，不渲染文字**（2026-11-01 审计 P3-1）：
+   * 用户报障「点开小弹窗文字会闪一下」的成因就是「状态读取中…」→ 真值这一次
+   * 文字替换。留空白骨架 ⇒ 形状不变，不会跳。
+   */
+  function renderCheckinStatus(a) {
+    if (a === null) {
+      return React.createElement('div', {
+        className: 'dim-jh-checkinStatus dim-jh-checkinStatusLoading',
+        'aria-hidden': 'true',
+      });
+    }
+    if (needsHostRestartNotice(a)) {
+      return React.createElement('div', { className: 'dim-jh-checkinStatus', role: 'alert' },
+        '⚠️ 宿主仍在运行旧代码（没有定时签到接口）。请完全退出并重新打开 DSH，'
+        + '之后这里才会显示「下次执行」时间。');
+    }
+    return React.createElement('div', { className: 'dim-jh-checkinStatus' },
+      React.createElement('div', null, `下次执行：${formatNextRunAt(a.nextRunAt, Date.now())}`),
+      // ★ 逐渠道水位线：这个时段还有渠道没领到（典型：10:00 才刷新额度的渠道）。
+      //   宿主会按退避重试它们，界面必须说出来 —— 否则用户只看到「下次执行 21:00」
+      //   却不知道 10:00 那批还要再过一会儿才会领到。
+      typeof a.pendingSlot === 'string' && a.pendingSlot !== ''
+        ? React.createElement('div', null, `有渠道待补（${a.pendingSlot.slice(11, 16)} 那一轮），正在自动重试`)
+        : null,
+      a.lastResult === ''
+        ? null
+        : React.createElement('div', null, `上次：${a.lastResult}`));
+  }
+
   return React.createElement('section', { className: 'dim-jh-page', 'aria-label': 'Jet Hub Provider 设置' },
     // ⚠️ 页头左侧的「Jet Hub」标题块已**整块删除**（用户 2026-10-07 要求：
     // 标题只占宽度、不带任何操作，空间全给按钮行）。这里先后删过两样东西，
@@ -9498,14 +10643,31 @@ export function JetHubPage({ rpcCall }) {
             setShowProviderSwitches(true);
           },
         }, '供应商'),
-        // 一键签到在备份/恢复**左侧**（需求指定位置）
-        React.createElement('button', {
-          className: 'dim-jh-btn',
-          title: '依次签到全部支持签到的渠道（CodeBuddy / LobsterAI / CodeArts / Qoder / TRAE）。'
-            + '串行执行以避免触发风控。',
-          disabled: checkinBusy,
-          onClick: () => void checkinAll(),
-        }, checkinBusy ? '签到中…' : '一键签到'),
+        // 一键签到在备份/恢复**左侧**（需求指定位置）。
+        //
+        // ★ 2026-10-18：按钮改成「[一键签到][▾]」两段式 —— 主按钮仍是**立刻签到**
+        //   （高频动作，不该多点一次），右侧小箭头展开**定时签到配置面板**。
+        //   用户原话：「在原来的一键签到那里加一个展开页面里面进行配置」。
+        //   ⚠️ 不做成「点主按钮即展开」：那会让「立刻签到」多一步，且与用户
+        //   「不是手动点击、要自动」的诉求相反 —— 手动入口必须保留且零成本。
+        React.createElement('span', { className: 'dim-jh-checkinWrap', ref: checkinWrapRef },
+          React.createElement('button', {
+            className: 'dim-jh-btn dim-jh-checkinMain',
+            title: '依次签到全部支持签到的渠道（CodeBuddy / LobsterAI / CodeArts / Qoder / TRAE）。'
+              + '串行执行以避免触发风控。',
+            disabled: checkinBusy,
+            onClick: () => void checkinAll(),
+          }, checkinBusy ? '签到中…' : '一键签到'),
+          React.createElement('button', {
+            className: 'dim-jh-btn dim-jh-checkinCaret',
+            title: '定时签到：设置每天两个自动执行的时刻',
+            'aria-haspopup': 'dialog',
+            'aria-expanded': showCheckinPanel ? 'true' : 'false',
+            'aria-label': '定时签到设置',
+            onClick: toggleCheckinPanel,
+          }, '▾'),
+          showCheckinPanel ? renderCheckinPanel() : null,
+        ),
         React.createElement(BackupPanel, {
           rpcCall,
           // 导入成功会整体替换账号，ProviderPanel 只在挂载时拉列表；

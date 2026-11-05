@@ -7,6 +7,7 @@ import {
   applyModelsDevCatalog,
   makeClineModelsDevLoader,
   parseClineModelsDev,
+  stripClineSnapshotSuffix,
 } from '../../src/cline-models-dev.js'
 import { clearModelsDevCache, setModelsDevForTest } from '../../src/models-dev-cache.js'
 
@@ -299,5 +300,71 @@ describe('makeClineModelsDevLoader', () => {
   it('ETag 条件请求与 Brotli 在**共享缓存**里（唯一直读点）', () => {
     const src = readFileSync(join(here, '../../src/models-dev-cache.ts'), 'utf8')
     expect(src).toMatch(/Accept-Encoding/i)
+  })
+})
+
+/**
+ * issue #18：带日期/快照后缀的模型必须继承基底能力。
+ *
+ * 上游常发 `qwen2.5-coder-7b-instruct-1017`，而 models.dev 只登记基底 id。
+ * 精确匹配失败会让 `supportsImage` 变成「未知」（宿主据此**放行图片**），
+ * `contextWindow` 也会一起丢。
+ */
+describe('快照后缀继承（issue #18）', () => {
+  it('★★ -1017 后缀继承基底的图片能力 / 窗口 / 名字', () => {
+    const dev = new Map([
+      ['cline-pass/qwen2.5-coder-7b-instruct', {
+        id: 'cline-pass/qwen2.5-coder-7b-instruct',
+        name: 'Qwen2.5 Coder 7B',
+        supportsImage: true,
+        contextWindow: 131_072,
+      }],
+    ])
+    const merged = applyModelsDevCatalog(
+      [{ id: 'cline-pass/qwen2.5-coder-7b-instruct-1017', name: 'cline-pass/qwen2.5-coder-7b-instruct-1017', isFree: false }],
+      dev,
+    )
+    const model = merged.find((m) => m.id === 'cline-pass/qwen2.5-coder-7b-instruct-1017')!
+    expect(model.supportsImage, '图片能力必须从基底继承（否则宿主会放行图片）').toBe(true)
+    expect(model.contextWindow).toBe(131_072)
+    expect(model.name).toBe('Qwen2.5 Coder 7B (1017)')
+  })
+
+  it('精确匹配优先：同 id 的显式能力不被基底覆盖', () => {
+    const dev = new Map([
+      ['cline-pass/m', { id: 'cline-pass/m', supportsImage: false }],
+      ['cline-pass/m-1017', { id: 'cline-pass/m-1017', supportsImage: true, contextWindow: 1 }],
+    ])
+    const merged = applyModelsDevCatalog(
+      [{ id: 'cline-pass/m-1017', name: 'id', isFree: false }],
+      dev,
+    )
+    expect(merged.find((m) => m.id === 'cline-pass/m-1017')?.supportsImage).toBe(true)
+  })
+
+  it('没有基底时保持原样（不猜）', () => {
+    const merged = applyModelsDevCatalog(
+      [{ id: 'cline-pass/unknown-1017', name: 'unknown', isFree: false }],
+      new Map([['cline-pass/other', { id: 'cline-pass/other', supportsImage: true }]]),
+    )
+    expect(merged.find((m) => m.id === 'cline-pass/unknown-1017')?.supportsImage).toBeUndefined()
+  })
+})
+
+/**
+ * 快照后缀的**边界**（对抗审计：原正则把末尾任意 4/8 位数字都当日期，
+ * 于是 -4096 这类上下文长度也被剥掉、误继承基底能力）。
+ */
+describe('stripClineSnapshotSuffix 的边界', () => {
+  it('只剥 MMDD / YYYYMMDD', () => {
+    expect(stripClineSnapshotSuffix('foo-1017')).toBe('foo')
+    expect(stripClineSnapshotSuffix('foo-20241022')).toBe('foo')
+    // 非日期数字不剥：-4096 / -2024 更像尺寸/年份，剥了会误继承基底能力。
+    expect(stripClineSnapshotSuffix('foo-4096')).toBe('foo-4096')
+    expect(stripClineSnapshotSuffix('foo-2024')).toBe('foo-2024')
+    expect(stripClineSnapshotSuffix('foo-123')).toBe('foo-123')
+    expect(stripClineSnapshotSuffix('foo-v2')).toBe('foo-v2')
+    expect(stripClineSnapshotSuffix('foo-1017-suffix')).toBe('foo-1017-suffix')
+    expect(stripClineSnapshotSuffix('foo')).toBe('foo')
   })
 })

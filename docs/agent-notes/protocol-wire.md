@@ -496,6 +496,50 @@ provider 后端不带该字段**，不挡住就会在它们的卡片上凭空渲
 ⚠️ tooltip 的到期天数取 `deductionEndTime`，**不是 `cycleEndTime`**：套餐的计量
 周期是月度的（月底清零），拿它显示会让用户以为"永久积分只剩 2 天"。
 
+#### ⚠️⚠️ 前端这一侧曾有四处分叉（2026-11-01 三审实测，**全部已修**）
+
+这一层是 15 家渠道共用的，且**后端与前端各自有一套判据** —— 缺陷只在两侧不一致时才暴露，
+任何单侧用例都发现不了（正是本节开头那句话）。
+
+| 缺陷 | 形态 | 修法 |
+|---|---|---|
+| ① 前端裸 `Number()` | 后端 `src/buddy-balance-rank.ts` 已把 `deductionEndTime` 收窄成 `number\|string`，前端没有 ⇒ `deductionEndTime: true` / `[ms]` / `{valueOf}` 三格**前后端落不同桶**（前端「临期 100」、后端「永久 100」） | 前端 `packageExpiryMs` 同样收窄成 `typeof raw === 'number' \|\| typeof raw === 'string'` |
+| ② 同一文件两套判据 | 分桶走 `packageExpiryMs`、**标签**走 `daysUntilExpiry` 里的 `typeof === 'number'` ⇒ 数字字符串或靠 `expiredTime` 兜底的包「分到临期桶、日期列正常、标签却写『到期时间未知』」 | `daysUntilExpiry` 改为先 `packageExpiryMs(pkg)`，三出口同判 |
+| ③ `formatPackageExpiry` 用 `toISOString()` | 那是 **UTC 日期**：东八区用户看到早一天（北京 `2026-10-04 00:00` 显示 `2026-10-03`），且 `07:59:59` 与 `08:00:00` 会显示成两个不同日期 | 改按**本地分量**拼 `YYYY-MM-DD`。⚠️ 不要写死 +8（共用层要给 UTC-8 用户也对）；连带约束：**断言的期望值必须按本地分量算** |
+| ④ 已过期但 `active:true` 的包 | 输出**负数天**（`-3 天内到期`；`-0.5 天` 因 `Math.ceil` 变成「0 天内到期」）。可达：`jet-hub.js` 的 `all = balance?.packages \|\| []` **不过滤** | `expiryBucketLabel` 加 `if (left <= 0) return '已过期';`（顺序：未知 → 已过期 → `days === null` → 分档） |
+| ⑤ **半修**（四审抓的）| ④ 修好后，`formatExpiryHint` 仍拼 **「距到期 -3 天（已过期）」** —— 同一个字符串里一半修好一半没修；`Math.ceil(-0.5) = -0` 还会变成「距到期 0 天」。**该函数此前一条用例都没有**，所以这半修无人发现 | `formatExpiryHint` 加 `if (left <= 0) return '已过期';`，并补 3 条用例（`-3 天` / `-0.5 天` / `0` 三格 + 未过期对照 + 无到期回空串）|
+| ⑥ **同一语义两处实现** | `jet-hub.js` 的 `formatPackageLine` 自己又拼了一遍 `距到期 ${Math.ceil(daysLeft)} 天（${label}）`，与 `formatExpiryHint` **逐字重复** ⇒ 修 ⑤ 时只修一处，那段仍然错 | `formatPackageLine` 改为复用 `formatExpiryHint`（文案逐字节核对一致：`days` 同为 `Math.ceil(left)`、label 为空时同样省略括号），顺带去掉不再使用的 `expiryBucketLabel` 导入 |
+
+判别力缺口（同批补上）：`tests/unit/credit-expiry.spec.ts` 的对账 fixture 原有的 14 格
+**没有一格**是 `true` / 数组 / 对象；那条日期用例用的 `NOW+8天` 恰好落在 UTC 与北京**同一天**
+⇒ 对缺陷 ③ 零判别力。现补 4 条对账格（`true` / 单元素数组 / `{valueOf}` / 数字字符串，
+前三格用 `as unknown as CreditPackage` 绕类型）+ 3 条标签用例（数字字符串标签同判、
+只有 `expiredTime` 的包、已过期含 `-0.5 天`/窗口 null/恰好 `NOW` 三格），
+再加**跨日两格**（`UTC 18:00` 与 `UTC 06:00`，分别让东八区 / UTC-8 跨日）+ 3 条 `formatExpiryHint`
+用例，文件 106 → **117 条**。
+⚠️ 反向验证：`packageExpiryMs` 退回裸 `Number()` ⇒ 3 红；`daysUntilExpiry` 退回只认 number ⇒ 2 红；
+删「已过期」分支（`expiryBucketLabel`）⇒ 1 红；④ 的日期改回 `toISOString()` ⇒ 2 红（**改前是 0 红**：
+`NOW+8天` 在三个时区都同日，这就是「守卫存在但不承重」的取样）；删 `formatExpiryHint` 的已过期截断 ⇒ 1 红。
+
+⚠️ **日期那两格在 `TZ=UTC` 机器上会退化成恒真**（`utc === local`，第二句主动跳过）—— 这是刻意接受的
+局限不是遗漏：在 UTC 下 `toISOString()` 与本地分量**本来就等价**，没有任何断言能区分。三时区实测：
+`TZ=UTC` / `Asia/Shanghai` / `America/Los_Angeles` 下本文件均 117 passed，其中后两者跨日格**有牙**。
+
+### ⚠️ 登记不改：**已过期的包仍被算进「临期」桶**（2026-11-01 四审实测）
+
+实测（`splitCreditsByExpiry([已过期 3 天, 5 天后到期], 15, now)`）⇒ `expiring = 200`：
+**已作废的那 100 也被算成「临期 100」**，而同一个包的标签现在如实写「已过期」⇒ 卡片上
+「临期 200」与 tooltip 里「已过期」并列，自相矛盾。
+
+前后端**都是**这样（`src/buddy-balance-rank.ts` 的 `if (endMs - now < windowMs) expiring += remaining`
+没有下界判断）⇒ 这**不是**前后端分叉，是共用的语义选择。
+
+**为什么不修**：① 生产可达性未取证 —— 已实测的批次里没有「`active: true` 且 `deductionEndTime` 已过」
+的样本（`minimax-credits.ts` 恒 `active: true` 但实测 20 条全部未过期；`lobsterai-credits.ts` 用日期
+自己判 `active`）；② 修它要同时动 15 家共用的**展示分桶**与**选号判据**（后端 `expiring > 0` 决定
+「这个号还有临期积分可用」），收益是数字更准、风险是选号面全体位移。
+**后果方向**：选到一个「只剩已作废批次」的号 ⇒ 请求报额度不足，而不是「没有账号」——**不烧永久积分**。
+
 ### RPC：一条实现 + 一个历史别名
 
 `credits.permanentLock { provider, locked? }`（`locked` 省略 = 只读）。
@@ -534,6 +578,27 @@ provider 后端不带该字段**，不挡住就会在它们的卡片上凭空渲
 使锁定形同虚设 —— loomy 当初就是这条，单测里也专门钉住「编排函数体内不出现
 `getAvailableAccount`」。未锁定时的 `exhausted`（凭据都坏了）才允许兜底，
 且必须把 `tried` 传给 `getAvailableAccount` 的排除集合，否则会原地打转。
+
+### ⚠️⚠️ 锁定表的**状态层**四个缺陷（2026-11-01 三审实测；两个已修、两个已登记）
+
+这一节是**共用层**的（15 家渠道共用同一张表与同一个端点），所以记在这里而不是某一家的笔记。
+
+| # | 缺陷 | 实测形态 | 处置 |
+|---|---|---|---|
+| D1 | **多进程丢锁** | `setPermanentLocked` 是「读内存 → 改 → 整份写」。同机两个 profile（desktop + web 共用一个 `$DSH_HOME`，正是本表拆成独立文档的既定场景）各自载入后，后写者用自己那份陈旧内存整份覆盖：A 锁 `magicrew`、B 锁 `magicrewintl` ⇒ 文件**只剩后者**，另一站的锁定静默消失 ⇒ 继续烧永久积分 | ✅ 已修：写前重读权威文档并按 provider 合并（`AccountPool.reloadLocksFromDisk()`），冲突以本次操作的 provider 为准。⚠️ 合并的**方向**在四审被推翻过一次：初版 `{ ...disk, ...memory }` 会让「磁盘上刚被另一个进程删掉的键」**复活**（内存里还留着 `true`）⇒ 改成**磁盘优先**：磁盘存在就以磁盘为准（能反映别人的解锁），磁盘不存在才退回内存（保守，不静默解锁） |
+| D2 | **锁表损坏 ⇒ fail-open 静默解锁** | 半截 JSON（并发写 / 断电 / 手工编辑）⇒ 旧实现 catch 后返回空表 ⇒ 所有 provider 按**未锁定**，只 warn ⇒ 继续烧永久积分 | ✅ 已修：`load()` 主文件读不出来时**回落 `.bak`**，两者都不可读才退空表（**不再 fail-open**）。
+⚠️ `.bak` 的写入时机在四审被推翻过一次：初版「覆盖**前**备份」= 备份永远落后一版 ⇒ ① 最后一版新增的锁在恢复时丢失；② 用户**刚解锁**后主文件损坏，备份会把锁**拉回来**（= 解不掉的开关）；③ 回落后再写一次会把坏主文件复制成 `.bak`（恢复只剩一次机会）。改为「`renameSync` **之后**再复制」⇒ `.bak` = **最近一次成功发布的完整内容** |
+| D3 | **选号器 60s 私有缓存与面板共享读数分叉** | `BuddyBalanceSelector` 自带 60s 缓存、自己发 HTTP，与 `balance-cache`（面板用）是**两份互不相通**的缓存；`.invalidate(` 在全仓 `src/` **零调用**（selector 注释里声明的责任方不存在）。后果：面板刚刷新到「有临期 500」时选号器仍按旧读数报「没有可用账号」；反方向会让锁定在 ≤60s 内**失效**、继续烧永久 | ⚠️ **未修，已登记**：修法是在积分写操作（`credits.claimAll` / `credits.balances` 的 force 刷新 / `account.create`）之后调 `selector.invalidate(accountId)`，需把两站 selector 实例接进 RPC 层。⚠️ **与既有 15 家同形**（buddy / qoder / autoclaw / minimax 等的 selector 也都是自己发请求、不读 `balance-cache`）⇒ 这是**全仓既有架构取舍**，不是 magicrew 引入的新缺陷；修它要动共用选号骨架、影响所有锁定渠道，超出本任务范围 |
+| D4 | **聚合候选不读锁定** | `aggregate-adapter.ts` 的候选过滤只问 `getAvailableAccount`、不读 `permanentLocked` ⇒ 「只剩永久」的号排在前面时每轮先白撞一次 | ⚠️ **未修，已登记**：**不烧积分**（真正派发仍经目标 provider 的 resolver 拦截），代价是一次必败尝试 |
+
+**跨进程只写不读**（D1 的另一半，仍是已知边界）：`permanentLocked()` 只读进程内缓存，
+另一个进程改了锁不会在本进程生效。刻意**不**加周期重读 —— 让热路径去 stat/读文件，
+会在落盘失败时把「内存里刚改的新值」用磁盘旧值覆盖回去（方向又反了）。
+真要跨进程即时可见，应做成文件/事件监听，而不是轮询。
+
+⚠️ 一条测试教训：`tests/unit/account-pool.spec.ts` 的 `beforeEach` 原本只删主文件，
+D2 落地后 **`.bak` 会让上一个用例的锁定复活**（实测 13 条假红）⇒ 清理必须同时删
+`` `${LOCK_DOC()}.bak` ``。同理，任何「主文件存在性」驱动的用例都要记得备份文件。
 
 ### 回归用例
 
@@ -688,6 +753,43 @@ const claim = deps.claim ?? (claimDailyCheckin as unknown as NonNullable<…>)
 - 累加后 `roundCredits` 规整两位小数（多包浮点噪声会放大成 655.67000031）
 - 失败时 `balance` 为 `null` + `error`，卡片显示原因而非 0
 - RPC：`credits.balances`；前端 `AccountCard` 的 `CreditBalanceRow`，面板有「刷新积分」按钮
+
+### ⚠️⚠️ `product` 形参是 `undefined`：读它必须可选链（2026-11-02 真机报障）
+
+`collectCreditBalances` / `collectCreditsStatus` 的**第 2 个形参 `product`**：**`src/` 里的生产调用点全部传 `undefined`**（product 由各 provider 的 impl 闭包住）。而函数体里有两处按它判 ASTUDIO 的特殊兜底：
+
+```ts
+// 旧码（变异验证时还原成这个）
+if (resolved === undefined && (product as { id?: string }).id === ASTUDIO.id) { … }
+```
+
+`resolved === undefined` 恰恰是**「凭据未配置」**那一格 —— 最典型的来源是**新建账号时的占位条目**（面板显示「登录中…」，条目已在池里、凭据还没落盘）。短路求值到右边就抛 `TypeError: Cannot read properties of undefined (reading 'id')`。
+
+用户 2026-11-02 的截图就是它：AutoClaw（国际版）「登录中…」卡片，**积分行直接显示这串英文**（不是「凭据未配置」）。**与本轮任何接线无关**，是既有缺陷被占位卡片暴露；任何「占位 / 凭据丢失」的账号都会这样。
+
+⚠️ 三处措辞必须精确，写错了会误导后人：
+1. **范围是「`src/` 里的生产调用点」**，不是「所有调用点」——`tests/unit/jet-hub-rpc.spec.ts` 里有一批老用例传的是 `WORKBUDDY`（真值），**正因为如此这个缺陷逃过了既有用例**（走不进那一格）。后来人做这条的变异时也别把用例的第二参改回真值，否则判据立刻失效。
+2. **第二处是 `collectCreditsStatus`（签到状态），不是 `collectClaimResults`** —— 后者函数体内没有这个写法。
+3. **别写死家数**：写「N 家」必然随 `PROVIDER_REGISTRY` 腐坏（家数随 registry 变动，且 `qoder` / `qodercn` 并不走这个收集器）。写「所有经该收集器取数的 provider」即可。
+
+两处的**吞法不同，判据必须分开写**：
+
+| 位置 | 症状 | 判据写在哪 |
+|---|---|---|
+| `collectCreditBalances` | `error = caught.message` 直接上屏 ⇒ 用户看到 TypeError | 断言 `error === '凭据未配置'` |
+| `collectCreditsStatus` | `catch` 吞成 `status = null` + 一条 `deps.warn` ⇒ **界面两态同形** | **只能断言 `warn` 未被调用**；断言 `status === null` 变异后恒绿（实测） |
+
+⚠️ `product` 形参**不是**可以随手删的「历史包袱」：它仍被转发给 `fetchStatus` / `claim` / `fetchBalance`（以及 `src/buddy-balance-selector.ts` 里读 `deps.product.id` 的那条腿）。删形参要连调用点与 impl 签名一起改，别只改一处。
+
+⚠️⚠️ **那个 ASTUDIO 兜底分支本身恒不可达**（2026-11-02 审查用 git 证实）：调用点在 `ea5e64d`（2026-10-10）就改成传 `undefined`，而兜底是 `96f2001`（2026-10-17）才引入 ⇒ **自引入起就永远进不去**，被触及只会抛。所以 `?.` 的净效果是「把抛中止」而**不是**「让兜底生效」。要不要恢复兜底是另一个决定（得让调用点把 product 传进来；通用分派路径上它不可得）；刻意保留死分支，否则将来恢复没有落点。
+
+⚠️ **两条用例各有 1 条承重断言，其余是「两态同形」**（红队实测）：`error === '凭据未配置'` 与 `warn` 未被调用是唯一有牙的两条；`balance === null` / `status === null` / `touched === 0` / `statusCalls === 0` 在「抛 TypeError」与「静默跳过」两态下**都成立**（TypeError 在调用 fetch 之前就抛）。别把后者当覆盖证据，也别为它们再编用例（没有可观测差异）。
+
+⇒ 修法是 `(product as { id?: string } | undefined)?.id === ASTUDIO.id`（两处同修）。守卫：`tests/unit/jet-hub-rpc.spec.ts` 两条「★★ product 为 undefined …」；变异回 `.id` ⇒ 恰好这 2 条红。
+
+⚠️ 教训可推广：**`as` 断言不改变运行时的 `undefined`**。凡是「调用点传 `undefined` 但类型上写着必有」的形参，`as { x }` 只是骗过编译器 —— 这类位置在**错误分支**里最危险（正常路径不执行，只有异常场景才炸，而异常场景本来就是用户最需要看文案的时候）。
+
+⚠️ 教训可推广：**`as` 断言不改变运行时的 `undefined`**。凡是「调用点传 `undefined` 但类型上写着必有」的形参，`as { x }` 只是骗过编译器 —— 这类位置在**错误分支**里最危险（正常路径不执行，只有异常场景才炸，而异常场景本来就是用户最需要看文案的时候）。
 
 ## 积分能力必须在请求前判定（`credits-capabilities.js`）
 

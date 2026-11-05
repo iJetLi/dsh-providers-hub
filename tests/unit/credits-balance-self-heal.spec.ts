@@ -707,11 +707,34 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     //    两层独立理由都指向「无事可做」。⚠️ 必须显式登记：本表是**反向守卫**
     //    （`JetHubAuths` 每个键都必须在自愈表或本表里），漏登记即红。
     ['qiniu', '无 refresh 端点 + 无余额端点：凭据是长期有效的静态 API Key（sk- 开头、默认不过期）⇒ 没有「快过期」；credits.balance: false ⇒ 积分端点也不会为它触发自愈链'],
+    // ⚠️ **MonkeyCode**（`monkeycode`，2026-11-02）：理由与 modelscope **同型**
+    //    （余额能读 ≠ 能续期，两件事）：
+    //    ① 凭据是长期有效的静态 API Key（白泽 `sk-…` / 网关 `oma_…`），
+    //       官方**没有 refresh 端点、也没有过期时刻**（`expires_at` 字段通常缺失，
+    //       缺失时 `isMonkeycodeExpired` 恒 false）⇒ 没有「快过期」这回事；
+    //    ② 即便 `credits.balance: true`（平台有 `GET /api/v1/users/wallet`），
+    //       自愈链的终点 `refreshAccountCredential` 也只是本地有效期对账
+    //       （`syncAccountExpiry`，零网络）⇒ 调它等于白发一次本地读。
+    //    ⚠️ 必须显式登记：本表是**反向守卫**（`JetHubAuths` 每个键都必须在
+    //    自愈表或本表里），漏登记即红。
+    ['monkeycode', '无 refresh 端点：凭据是长期有效的静态 API Key（oma_ + signing_secret，expires_at 通常缺失）⇒ 没有「快过期」，自愈链无事可做（余额能读不等于能续期，两件事）'],
+    // ⚠️ **国际站（`monkeycodeintl`，2026-11-02）**：与国内站**完全同源**
+    //    （同一个 `MonkeycodeAuth` 类、同一套凭据形状，只差 `product`）
+    //    ⇒ 豁免理由逐字相同。两站必须各登记一行：本表是**反向守卫**
+    //    （`JetHubAuths` 每个键都必须在自愈表或本表里），漏一行即红。
+    ['monkeycodeintl', '无 refresh 端点：与国内站同源（静态 oma_ + signing_secret，expires_at 通常缺失）⇒ 没有「快过期」，自愈链无事可做'],
+    // ⚠️ 百智云（2026-11-02）：凭据是用户手工粘贴的 `sk-…` 静态材料，`BaizhiAuth`
+    //    没有 `refresh` 端点（`isBaizhiRefreshable()` 恒 false）⇒ 不存在「快过期」，
+    //    自愈链无事可做。可核对：`src/baizhi-auth.ts` 全文无 `fetch(` 续期调用，
+    //    只有 `refreshAccountCredential` 的有效期对账（与 qiniu / loomy 同型）。
+    ['baizhi', '静态 sk- API Key，无 refresh 端点（只有有效期对账，没有续期请求）⇒ 自愈链无事可做'],
   ])
 
   it('★ Set 里的字面量恰好是 codearts / buddy / workbuddy（多一个少一个都红）', () => {
     const { literals } = selfHealSetParts()
-    expect(literals.slice().sort()).toEqual(['buddy', 'codearts', 'magicrew', 'workbuddy'])
+    // ⚠️ 2026-11-01 加 `magicrewintl`（MagiCrew 国际版）：与 `magicrew` 同形 ——
+    //    两站共用同一个 `mgw_` key（**2 小时**寿命）与同一个 refresh 端点。
+    expect(literals.slice().sort()).toEqual(['buddy', 'codearts', 'magicrew', 'magicrewintl', 'workbuddy'])
   })
 
   it('★ Set 里的 `.id` 常量恰好是登记的那些家（逐家点名，不写魔数阈值）', () => {
@@ -732,8 +755,8 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     const inSet = new Set([...literals, ...constants.map((c) => ID_OF[c] ?? c)])
     expect([...inSet].sort()).toEqual([
       'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'cline', 'codearts', 'codely',
-      'gemini', 'lobsterai', 'magicrew', 'minimax', 'minimaxintl', 'officeace', 'qoder',
-      'qodercn', 'raccoon', 'trae', 'workbuddy',
+      'gemini', 'lobsterai', 'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace',
+      'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy',
     ])
     // 反向：两家没有 refresh 端点，必须**静默跳过**而非尝试续期。
     expect(inSet.has('loomy')).toBe(false)
@@ -775,6 +798,19 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
       //    `/openapi/v1/magicubes/balance` 带 API Key 返 200）与**凭据能续**是两件
       //    独立的事；前者为真不推出后者。自愈链对它无事可做 ⇒ 必须豁免。
       ['modelscope', '静态 API Key 凭据、无 refresh 端点（余额能读 ≠ 凭据能续）'],
+      // ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）。与 modelscope **同型**：
+      //    凭据是长期有效的静态 API Key（白泽 `sk-…` / 网关 `oma_…`），官方
+      //    没有 refresh 端点、也没有过期时刻（`expires_at` 通常缺失）⇒ 没有
+      //    「快过期」。它的 `credits.balance === true`（平台有 wallet 端点）
+      //    只说明**余额能读**，而自愈链要的是**凭据能续** —— 两件独立的事。
+      ['monkeycode', '静态 API Key 凭据（oma_ + signing_secret）、无 refresh 端点（余额能读 ≠ 凭据能续）'],
+      ['monkeycodeintl', '与国内站同源：静态 oma_ + signing_secret、无 refresh 端点（余额能读 ≠ 凭据能续）'],
+      // ⚠️ 百智云（`baizhi`，2026-11-02）：`credits.balance === true`（控制台
+      //    `GET /api/v1/user/wallet/balance` 带 cookie 返 200），但凭据是
+      //    长期有效的静态材料（`sk-…` + 控制台 cookie），`BaizhiAuth` 没有
+      //    refresh 端点（`isBaizhiRefreshable()` 恒 false）⇒ 没有「快过期」。
+      //    ⚠️ 与 modelscope 同型：**余额能读 ≠ 凭据能续**，前者为真不推出后者。
+      ['baizhi', '按量计费静态凭据（sk- 推理 + 控制台 cookie 读积分）、无 refresh 端点（余额能读 ≠ 凭据能续）'],
     ])
     const { literals, constants } = selfHealSetParts()
     const inSet = new Set([...literals, ...constants.map((c) => ID_OF[c] ?? c)])

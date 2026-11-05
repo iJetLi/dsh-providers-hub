@@ -9,6 +9,7 @@ import http from 'node:http'
 import { execFileSync } from 'node:child_process'
 import {
   AUTOCLAW,
+  AUTOCLAW_INTL,
   AUTOCLAW_SOURCE_ID,
   AUTOCLAW_CLIENT_VERSION,
   type AutoclawProduct,
@@ -54,16 +55,55 @@ export const AUTOCLAW_LOGIN_PATH = '/userapi/v1/agent-login'
 // **`631001 User login error`** —— 这是「进入登录逻辑后 code 无效」，
 // **不是**「state 无效」。⇒ 服务端不硬校验 `state` 的内容。
 //
-// ⇒ 实现采取**最可靠**的形态：`state` **由官方授权页生成并随回调带回**，
-//   插件只做**透传**（不自己拼 `aosi.*`）。这样 `nh` 到底是什么都不影响。
+// ## ⚠️⚠️ 「`state` 交给授权页生成」这条路线**已被真机推翻**（2026-11-02，用户报障）
+//
+// 当时的推理是：`state` 留空、由官方授权页填、回调时透传 ⇒ 不必逆向 `nh`。
+// 真机结果是**整条流程走不下去**：用户从登录页点「使用 Z.ai 账号继续」，
+// 浏览器登录 Z.ai 成功后**停在 `chat.z.ai` 首页**，我们本地的
+// `/auth/callback-zai` 一个请求都没收到（面板一直等，最后超时）。
+//
+// 服务端探针给出决定性证据（全部**匿名** GET，无凭据）：
+//
+// | 请求 | 响应 |
+// |---|---|
+// | `GET /api/oauth/authorize?client_id=…&response_type=code&redirect_uri=…`（**无 state**） | **422 Unprocessable Entity** |
+// | 同上 **+ `state=aosi.probe-…`** | **307** → `/auth?response_type=code&client_id=…&redirect_uri=…&state=aosi.probe-…` |
+// | `GET /api/oauth/authorize?client_id=…（错的值）&state=…` | 307（**不校验 client_id**） |
+// | 同上但 `redirect_uri` 换成 `https://evil.example.com/cb` | 307（**不校验 redirect_uri**） |
+//
+// ⇒ **`state` 是服务端必需参数**（缺了直接 422）。而 `/auth` 只是它的
+// **前端登录页路由**，不是授权端点 —— 直接打开 `/auth` 时页面只拿
+// `redirect_uri` 判断「我在 OAuth 流程里」（客户端 bundle 的
+// `Hht = () => !!t.get("redirect_uri") || gJ() || !!t.get("sso_redirect")`），
+// 真正的回跳目标走的是 `redirect` 参数 / sessionStorage，**不是**顶层 `redirect_uri`
+// ⇒ 登录完没有可回的目标，落回首页。
+//
+// ⇒ 正确形态是走 **`/api/oauth/authorize`** 并**自己生成 `state`**：
+//   未登录 ⇒ 它 307 到 `/auth?…&state=…`（把它原样带到登录页）；
+//   登录后 ⇒ 它 302 回 `redirect_uri?code=…&state=…`。
+//
+// `aosi.` 前缀 + 任意内容是可行的：`nh` 仍未知，但服务端**不硬校验 `state` 内容**
+// （实测把瞎编的 `aosi.fake-state-probe` 打到 `zai-oauth-login`，回的是
+// `631001 User login error` = **进了登录逻辑、code 无效**，而不是「state 无效」）。
 
-/** Z.ai 授权页（国际版）。 */
-export const AUTOCLAW_ZAI_AUTH_URL = 'https://chat.z.ai/auth'
+/** Z.ai **授权端点**（国际版）。⚠️ 不是 `https://chat.z.ai/auth` —— 那是登录页前端路由，见上方实测。 */
+export const AUTOCLAW_ZAI_AUTH_URL = 'https://chat.z.ai/api/oauth/authorize'
 /**
- * Z.ai OAuth 的固定 `client_id`。
+ * Z.ai OAuth 的 `client_id` —— **只用于降级路径**，正常路径由服务端下发。
  *
- * ⚠️ 实测依据：两次独立授权 URL 的 `client_id` 逐字节相同 ⇒ 它是**构建期常量**，
- * 不是服务端下发（`oauth-url` 端点需要登录态，首次登录拿不到）。
+ * ## ⚠️⚠️ 只用这个值自己拼**不成立**（2026-11-02 第三轮真机证伪）
+ *
+ * 它来自一次真实授权 URL（两次采样逐字节相同）。但真机复现时，用同一个 `client_id`
+ * + 已注册端口 + 自造 `state` 打 `/api/oauth/authorize`，服务端回
+ * `{"detail":"Redirect URI not registered for this client"}` —— 端口与路径都已经被
+ * 上一轮修对了，仍被拒。
+ *
+ * 客户端实现里**没有**这个常量：它走 `POST /userapi/overseasv1/zai-oauth-url`
+ * 拿 `{oauth_url, state}`。⇒ 真正成立的是「服务端按 `navigate_uri` 现注册一组」，
+ * 而不是「某个固定的 (client_id, redirect_uri) 组合」。
+ *
+ * ⇒ 生产路径见 `fetchAutoclawZaiAuthUrl`；这里保留常量只为「服务端不可达时仍能渲染出
+ * 可点的链接」这一降级分支，且页面会显式告知用户可能失败。
  */
 export const AUTOCLAW_ZAI_CLIENT_ID = 'client_EnD0QI8bLRFT8cciLp389Q'
 /** OAuth 换 token 端点（`overseasv1` 命名空间，仅国际站有）。 */
@@ -77,19 +117,199 @@ export const AUTOCLAW_OAUTH_CALLBACK_PATH = '/auth/callback-zai'
 export const AUTOCLAW_OAUTH_CALLBACK_PORTS: readonly number[] = [18432, 19654, 19723, 53699]
 
 /**
+ * 生成 Z.ai OAuth 的 `state`。
+ *
+ * 形态对齐官方：`aosi.<base64url(JSON)>`。官方那个 JWT 里 `dh = SHA256(deviceId)`
+ * **已破解**、`nh` **未解**，但服务端不硬校验内容（见上方实测表）⇒ 我们只放
+ * 一个能自证「这是本轮流程」的随机串，不做任何防伪。
+ *
+ * ⚠️ **它必须非空**：`/api/oauth/authorize` 缺 `state` 直接回 **422**（实测），
+ * 这正是 2026-11-02 那次「点完按钮、登录成功、回调永不发生」的根因。
+ */
+export function autoclawZaiState(now: number = Date.now()): string {
+  const payload = JSON.stringify({ n: Math.random().toString(36).slice(2), t: now })
+  return `aosi.${Buffer.from(payload, 'utf8').toString('base64url')}`
+}
+
+/**
+ * 按顺序尝试监听**注册过的回调端口**（{@link AUTOCLAW_OAUTH_CALLBACK_PORTS}）。
+ *
+ * ## ⚠️⚠️ 为什么不能 `listen(0)` 随机端口（2026-11-02 真机，第二处报障）
+ *
+ * Z.ai 的 `/api/oauth/authorize` 对**已登录**用户会校验 `redirect_uri` 白名单，
+ * 未注册的端口直接回一段 JSON：
+ *
+ * ```
+ * {"detail":"Redirect URI not registered for this client"}
+ * ```
+ *
+ * 实测端点是随机端口 `60768`。而 `AUTOCLAW_OAUTH_CALLBACK_PORTS` 正是官方客户端
+ * 注册的那几个 —— 它在本次接线之前是**零消费**常量（审查员登记过「与 `listen(0)`
+ * 冲突，若服务端做端口白名单会直接死在授权页」，现在被真机证实）。
+ *
+ * ⚠️ 未登录时**看不出**这个问题：那时 `/api/oauth/authorize` 一律 307 到登录页，
+ * 不做白名单校验 ⇒ 「curl 探针 307」**不能**当成「端口没问题」的证据。
+ *
+ * ## 回退策略
+ *
+ * 4 个端口全被占用 ⇒ 回退 `listen(0)`。此时 OAuth 一定登不上（未注册），但本地页
+ * 仍能打开 —— 用户至少能看到授权页并拿到一条可诊断的失败，而不是「窗口都起不来」。
+ * 回调里对这种情况已经会返回「授权失败」的可见文案。
+ *
+ * @param server - 只需 `listen` / `once` / `removeListener`（单测因此可以注入替身）。
+ * @param candidates - 候选端口，按顺序尝试。
+ */
+export async function listenOnCallbackPorts(
+  server: AutoclawCallbackListenable,
+  candidates: readonly number[] = AUTOCLAW_OAUTH_CALLBACK_PORTS,
+): Promise<void> {
+  for (const candidate of candidates) {
+    const ok = await tryListen(server, candidate)
+    if (ok) return
+  }
+  await tryListen(server, 0)
+}
+
+/** `listenOnCallbackPorts` 需要的最小 server 面（结构类型，便于单测注入替身）。 */
+export interface AutoclawCallbackListenable {
+  listen: (port: number, host: string) => unknown
+  once: (event: 'listening' | 'error', listener: () => void) => unknown
+  removeListener: (event: 'listening' | 'error', listener: () => void) => unknown
+}
+
+/** 尝试监听一个端口；`EADDRINUSE` 等错误返回 `false`（不抛）。 */
+function tryListen(server: AutoclawCallbackListenable, port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const onError = (): void => {
+      server.removeListener('listening', onListening)
+      resolve(false)
+    }
+    const onListening = (): void => {
+      server.removeListener('error', onError)
+      resolve(true)
+    }
+    server.once('error', onError)
+    server.once('listening', onListening)
+    server.listen(port, '127.0.0.1')
+  })
+}
+
+/**
  * 构造 Z.ai 授权 URL。
  *
- * ⚠️ `state` **不由本函数生成** —— 它留空，由官方授权页在跳转时填充，
- *    回调时原样带回（见上方「关于 state.nh」）。这避免了逆向 `nh`。
- *
- * @param redirectUri - 回调地址（`http://localhost:<port>/auth/callback-zai`）。
+ * @param redirectUri - 回调地址（`http://127.0.0.1:<port>/auth/callback-zai`）。
+ * @param state - **必填**（见 {@link autoclawZaiState}）。回调时原样带回，用于认领本轮流程。
  */
-export function buildAutoclawZaiAuthUrl(redirectUri: string): string {
+export function buildAutoclawZaiAuthUrl(redirectUri: string, state: string): string {
   const url = new URL(AUTOCLAW_ZAI_AUTH_URL)
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('client_id', AUTOCLAW_ZAI_CLIENT_ID)
   url.searchParams.set('redirect_uri', redirectUri)
+  url.searchParams.set('state', state)
   return url.toString()
+}
+
+/**
+ * 由**服务端签发**授权 URL 的端点（`overseasv1`，仅国际站）。
+ *
+ * ## 为什么必须走它，而不是自己拼（2026-11-02 第三轮真机报障）
+ *
+ * 自己拼的 URL 在真机上被 Z.ai 拒绝：
+ * `{"detail":"Redirect URI not registered for this client"}`。
+ * 客户端实现（`dist/main.cjs`）里根本没有 `client_id` 常量 —— 它的顺序是：
+ *
+ * ```js
+ * // 1) 起 loopback，拿到 navigate_uri
+ * // 2) 向服务端要授权地址
+ * const t = await this.post('/userapi/overseasv1/zai-oauth-url', { navigate_uri });
+ * const oauthUrl = a.data.oauth_url, state = a.data.state;   // ← 服务端签发
+ * // 3) 打开 oauthUrl；回调拿 code+state；4) POST zai-oauth-login
+ * ```
+ *
+ * ⇒ **`(client_id, redirect_uri, state)` 是服务端按 `navigate_uri` 现注册的一组**。
+ * 我们照抄过一次真实 URL 里的 `client_id`，但那一组的 `state` 已随上一轮流程失效
+ * ⇒ 服务端找不到「这个 redirect_uri 属于哪个 state」，于是报成「redirect_uri 未注册」。
+ * 这个报错文案极具误导性 —— 它让人以为是端口/路径问题（实际都改对了）。
+ *
+ * @param navigateUri - 回调地址，必须与 `zai-oauth-login` 的 `navigate_uri` 逐字节相同。
+ */
+export const AUTOCLAW_ZAI_AUTH_URL_PATH = '/userapi/overseasv1/zai-oauth-url'
+
+/** HTML 转义（登录页与回调页共用同一份，避免两份实现在特殊字符上分叉）。 */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+/** 服务端签发的授权参数。 */
+export interface AutoclawZaiAuthorization {
+  /** 直接可以打开的授权页地址（已含 `client_id` / `redirect_uri` / `state`）。 */
+  authUrl: string
+  /** 服务端签发的 `state`，回调时原样带回，比对用。 */
+  state: string
+}
+
+/**
+ * 向服务端申请一次授权：返回**授权页地址**与配套的 `state`。
+ *
+ * 失败时**不抛**（返回 `{ ok: false, error }`）—— 调用方（登录页）要把原因显示出来。
+ */
+export async function fetchAutoclawZaiAuthUrl(
+  navigateUri: string,
+  options?: LoginAutoclawWithCodeOptions,
+): Promise<{ ok: true; value: AutoclawZaiAuthorization } | { ok: false; error: string }> {
+  const product = options?.product ?? AUTOCLAW
+  const fetcher = options?.fetchImpl ?? fetch
+  const deviceId = resolveDeviceId(product, options?.deviceId)
+  const ts = Math.floor(Date.now() / 1000).toString()
+  const sign = calculateAutoclawSign(product.appId, ts, product.appKey)
+
+  try {
+    const resp = await fetcher(`${product.apiBase}${AUTOCLAW_ZAI_AUTH_URL_PATH}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // 与 `exchangeAutoclawZaiCode` 完全同一组管理头（缺一个都进不了登录逻辑）。
+        'X-Version': AUTOCLAW_CLIENT_VERSION,
+        'X-Tm': 'win',
+        'X-Product': product.product,
+        'X-Auth-Appid': product.appId,
+        'X-Auth-TimeStamp': ts,
+        'X-Auth-Sign': sign,
+        'X-Lang': 'en-US',
+        'X-Channel': 'official',
+        'User-Agent': `AutoClaw/${AUTOCLAW_CLIENT_VERSION} (win)`,
+      },
+      body: JSON.stringify({
+        navigate_uri: navigateUri,
+        source_id: AUTOCLAW_SOURCE_ID,
+        device_id: deviceId,
+      }),
+      signal: AbortSignal.timeout(AUTOCLAW_REQUEST_TIMEOUT_MS),
+    })
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '')
+      return { ok: false, error: `申请授权地址失败(${resp.status})：${text.slice(0, 200)}` }
+    }
+
+    const json = (await resp.json()) as {
+      code?: number
+      msg?: string
+      data?: { oauth_url?: string; state?: string }
+    }
+    const authUrl = typeof json.data?.oauth_url === 'string' ? json.data.oauth_url.trim() : ''
+    const state = typeof json.data?.state === 'string' ? json.data.state.trim() : ''
+    if (json.code !== 0 || authUrl === '' || state === '') {
+      // ⚠️ 服务端回 `code !== 0` 时 `msg` 才是用户能看懂的那句，别吞。
+      const detail = json.msg !== undefined && json.msg !== '' ? `：${json.msg}` : ''
+      return { ok: false, error: `服务端未返回授权地址（code=${json.code}）${detail}` }
+    }
+    return { ok: true, value: { authUrl, state } }
+  } catch (err) {
+    return { ok: false, error: `申请授权地址失败：${err instanceof Error ? err.message : String(err)}` }
+  }
 }
 
 /**
@@ -182,11 +402,28 @@ export async function exchangeAutoclawZaiCode(
 
     const cleanAccess = cleanBearerToken(rawAccess)
     const cleanRefresh = data.refresh_token === undefined ? '' : cleanBearerToken(data.refresh_token)
-    const expiresAt = typeof data.expires_at === 'number'
-      ? autoclawExpiresAtMs(data.expires_at)
-      : typeof data.expires_in === 'number'
-        ? Date.now() + data.expires_in * 1000
-        : Date.now() + 7 * 86400_000
+    /**
+     * ⚠️⚠️ **沿用 IKOYEG 的修法：JWT 优先、声明值兜底、都读不到就 `undefined`**
+     * （2026-11-02 由 doc-wiring 审查打穿 —— 本轮之前这一行还是「编造 7 天」）。
+     *
+     * 旧实现写的是 `Date.now() + 7 * 86400_000`，与 `src/autoclaw.ts:227-246` 记录的
+     * 那次 P0 **逐字同型**：一个编造的有效期同时是「续期 lead-time」与「积分按需自愈」
+     * 的唯一判据 ⇒ 过期前不自愈、过期后也不自愈、**日志零字**。
+     *
+     * 它此前一直**不可达**（只有零调用的 `loginWithZaiCode` 会走到），所以历次审计都没
+     * 抓到；2026-11-02 把 Z.ai OAuth 接成生产路径后，这个 P0 立刻复活。
+     *
+     * ⚠️ 新测试的假上游固定回 `expires_in: 3600`，恰好把 7 天分支绕开 ⇒ 用例**恒绿**。
+     *    「被兜底分支掩盖的缺陷」要单独一格用例（`expires_at`/`expires_in` 都不给）。
+     */
+    const expiresAt = autoclawAccessTokenExpiresAtMs(
+      cleanAccess,
+      typeof data.expires_at === 'number'
+        ? autoclawExpiresAtMs(data.expires_at)
+        : typeof data.expires_in === 'number'
+          ? Date.now() + data.expires_in * 1000
+          : undefined,
+    )
 
     // ⚠️ 身份字段：优先服务端 `user_id`，其次 JWT 的 `user_id`（numericUserId）。
     //    与国内版同口径（见 `autoclawIdentityOf` 的注释：UUID 与 numericUserId
@@ -902,15 +1139,71 @@ export async function startAutoclawSmsLoginFlow(
   let settleOk!: (val: { credential: AutoclawCredential; phone: string }) => void
   let settleErr!: (err: unknown) => void
 
+  /**
+   * 本轮流**最近一次**渲染登录页时生成的 `state`。
+   *
+   * 定义在这里（而不是 GET 处理器内）是因为回调处理器要读它比对：
+   * 两个处理器是同一 `createServer` 的回调，闭包共享这份变量。
+   *
+   * ⚠️ 用户刷新登录页会让它被覆盖 —— 所以回调**只 warn 不拒绝**（旧标签页的回调
+   * 仍应被认领；`state` 的价值是诊断「回调来自哪一轮」，不是防伪）。
+   */
+  let pendingZaiState = ''
+
   const result = new Promise<{ credential: AutoclawCredential; phone: string }>((resolve, reject) => {
     settleOk = resolve
     settleErr = reject
   })
 
   const server = http.createServer((req, res) => {
+    void handleRequest(req, res)
+  })
+
+  /** 真正的处理器（异步：登录页要等服务端签发授权地址）。 */
+  async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${(req.socket as any).localPort ?? 0}`)
 
     if (req.method === 'GET' && (url.pathname === '/autoclaw/login' || url.pathname === '/')) {
+      /**
+       * ⚠️⚠️ **登录方式按站点分裂**（2026-11-02 接线，此前这里写死国内形态）。
+       *
+       * | 站点 | 登录方式 | 依据 |
+       * |---|---|---|
+       * | 国内 `autoclaw` | 手机短信验证码 | `agent-send-code` / `agent-login` |
+       * | 国际 `autoclawintl` | **Z.ai OAuth** | 国际账号是邮箱 + OAuth 创建、`phone` 为 null、无绑手机端点 ⇒ 短信必然失败 |
+       *
+       * 依据见 `src/autoclaw-product.ts` 那张「为什么是两个 provider」的表，
+       * 以及 `autoclaw-oauth.ts` 文件头的实测记录。
+       *
+       * ## 为什么这里必须算 `redirectUri`
+       *
+       * OAuth 要求「授权时的 `redirect_uri`」与「换 token 时的 `navigate_uri`」**逐字节相同**
+       * （`exchangeAutoclawZaiCode` 的入参）。两处都从 `req.socket.localPort` 取 ——
+       * 端口由 {@link listenOnCallbackPorts} 按**注册过的回调端口**选定（不是 `listen(0)`
+       * 随机端口，那种端口会被 Z.ai 以「Redirect URI not registered」拒绝），
+       * 但处理器拿到的是 `req`，闭包里没有 port 变量，所以仍从 socket 现算。
+       */
+      const smsLogin = product.id === AUTOCLAW.id
+      const localPort = (req.socket as { localPort?: number }).localPort ?? 0
+      const redirectUri = `http://127.0.0.1:${localPort}${AUTOCLAW_OAUTH_CALLBACK_PATH}`
+      // ⚠️⚠️ **授权地址必须由服务端签发**（2026-11-02 第三轮真机报障）。
+      //     客户端里没有 `client_id` 常量：它先起 loopback，再 POST `zai-oauth-url`
+      //     拿 `{oauth_url, state}`，最后打开 —— 也就是说 `(client_id, redirect_uri, state)`
+      //     是服务端按 `navigate_uri` **现注册的一组**。我们照抄过一次真实 URL 的
+      //     `client_id` 自己拼，真机被拒（`Redirect URI not registered for this client`，
+      //     报错文案误导，实际端口与路径都对）。
+      //     自拼只作**降级**（服务端不可达时至少还能看到页面与原因）。
+      const issued = smsLogin
+        ? { ok: false as const, error: '' }
+        : await fetchAutoclawZaiAuthUrl(redirectUri, { product, fetchImpl: options?.fetchImpl })
+      const zaiAuthUrl = issued.ok
+        ? ((pendingZaiState = issued.value.state), issued.value.authUrl)
+        : buildAutoclawZaiAuthUrl(redirectUri, (pendingZaiState = autoclawZaiState()))
+      const zaiIssue = issued.ok ? '' : issued.error
+      const pageTitle = smsLogin ? 'AutoClaw 账号登录' : `${product.displayName ?? 'AutoClaw'} 账号登录`
+      const pageDesc = smsLogin
+        ? '支持一键读取本机桌面端凭据，或通过手机验证码快速登录。'
+        : '支持一键读取本机桌面端凭据，或使用 Z.ai 账号授权登录。'
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
       res.end(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -947,10 +1240,11 @@ export async function startAutoclawSmsLoginFlow(
 </head>
 <body>
   <div class="card">
-    <h2>AutoClaw 账号登录</h2>
-    <p class="desc">支持一键读取本机桌面端凭据，或通过手机验证码快速登录。</p>
-    <button type="button" class="btn-secondary" id="btnLocal">⚡ 一键读取本机 AutoClaw 桌面端凭据</button>
-    <div class="divider">或者使用手机验证码登录</div>
+    <h2>${pageTitle}</h2>
+    <p class="desc">${pageDesc}</p>
+    <button type="button" class="btn-secondary" id="btnLocal">⚡ 一键读取本机桌面端凭据</button>
+${smsLogin
+      ? `    <div class="divider">或者使用手机验证码登录</div>
     <div class="input-group">
       <label for="phone">手机号</label>
       <input type="tel" id="phone" placeholder="请输入 11 位手机号" maxlength="11" />
@@ -962,7 +1256,11 @@ export async function startAutoclawSmsLoginFlow(
         <button type="button" class="btn-code" id="btnSend">获取验证码</button>
       </div>
     </div>
-    <button type="button" class="btn-primary" id="btnLogin">登录并绑定账号</button>
+    <button type="button" class="btn-primary" id="btnLogin">登录并绑定账号</button>`
+      : `    <div class="divider">或者使用 Z.ai 账号登录</div>
+    <a class="btn-primary" id="btnZai" href="${zaiAuthUrl}"
+       style="display:block;text-align:center;text-decoration:none;box-sizing:border-box;">🌐 使用 Z.ai 账号继续</a>
+    ${zaiIssue === '' ? '' : `<div class="msg error" style="display:block">⚠️ 未能从 AutoClaw 服务端申请授权地址（正在使用降级链接，可能被 Z.ai 拒绝）：${escapeHtml(zaiIssue)}</div>`}`}
     <div class="msg" id="msgBox"></div>
   </div>
   <script>
@@ -983,7 +1281,7 @@ export async function startAutoclawSmsLoginFlow(
           showMsg('success', '✅ 成功读取本机已登录凭据（' + (data.phone || 'AutoClaw账号') + '）！已自动绑定，请关闭本窗口返回 IDE。');
           btnLocal.style.display = 'none';
         } else {
-          showMsg('error', data.error || '未检测到本地 AutoClaw 桌面端有效登录凭据，请使用下方手机验证码登录。');
+          showMsg('error', data.error || '${smsLogin ? '未检测到本地 AutoClaw 桌面端有效登录凭据，请使用下方手机验证码登录。' : '未检测到本地 AutoClaw 桌面端有效登录凭据，请改用下方的 Z.ai 账号登录。'}');
           btnLocal.disabled = false;
           btnLocal.textContent = '⚡ 一键读取本机 AutoClaw 桌面端凭据';
         }
@@ -993,6 +1291,7 @@ export async function startAutoclawSmsLoginFlow(
         btnLocal.textContent = '⚡ 一键读取本机 AutoClaw 桌面端凭据';
       }
     });
+    if (btnSend && btnLogin) {
     let countdown = 0;
     btnSend.addEventListener('click', async () => {
       const phone = phoneInput.value.trim();
@@ -1046,9 +1345,117 @@ export async function startAutoclawSmsLoginFlow(
         btnLogin.textContent = '登录并绑定账号';
       }
     });
+    }
   </script>
 </body>
 </html>`)
+      return
+    }
+
+    /**
+     * ⚠️⚠️ **Z.ai OAuth 回调**（2026-11-02 接线；此前是纯死代码）。
+     *
+     * 接之前的事实：`buildZaiAuthUrl` / `loginWithZaiCode` /
+     * `AUTOCLAW_OAUTH_CALLBACK_PATH` 三样都在，但**零调用方** ——
+     * 本地服务的路由只有 `/autoclaw/login`、`send-code`、`submit-code`、
+     * `import-local` 四条，登录页也只有短信 + 一键读本机。
+     * 后果：国际版**没有任何可用的登录入口**（短信对国际账号必然失败、
+     * Z.ai 按钮不存在），只剩「一键导入本机桌面端凭据」。
+     *
+     * ## 两个必须对齐的点
+     *
+     * 1. `redirect_uri`（授权时）与 `navigate_uri`（换 token 时）**必须逐字节相同**，
+     *    两处都从 `req.socket.localPort` 现算 —— 端口由 `listenOnCallbackPorts`
+     *    按**注册过的回调端口**选定（`AUTOCLAW_OAUTH_CALLBACK_PORTS`）。
+     * 2. **失败不要 `settleErr`**：那会立刻结束整个 flow（`result` 变成 reject），
+     *    用户连重试都不行。这里只回一个错误页，flow 继续等用户再点一次。
+     */
+    if (req.method === 'GET' && url.pathname === AUTOCLAW_OAUTH_CALLBACK_PATH) {
+      /**
+       * ⚠️⚠️ **只有国际版注册这条腿**（2026-11-02 审查打穿）。
+       *
+       * 实测缺陷：不门控时，以 `product: AUTOCLAW`（国内）起的 flow 上，
+       * 直接 GET 本端点会**真的**走一遍换 token 并把凭据 settle 进**国内**占位账号，
+       * 页面还写着「已绑定 AutoClaw（国际版）账号」—— 与「登录页按站点分裂」自相矛盾，
+       * 且给「任意本机进程往 loopback 投递 code」开了一条无入口但可达的路。
+       *
+       * 同源问题：`/autoclaw/send-code` 与 `/autoclaw/submit-code` 对国际版也仍可达。
+       * 那两条**保留**（国际站后端确实接受短信，只是账号没绑手机；UI 已不渲染入口），
+       * 因为它们不会把凭据写进错误站点的槽位 —— 而这条会。
+       */
+      if (product.id !== AUTOCLAW_INTL.id) {
+        res.writeHead(404).end('Not Found')
+        return
+      }
+      const renderCallbackPage = (ok: boolean, text: string): string => `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><title>Z.ai 授权</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 32px; width: 100%; max-width: 420px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5); }
+  h2 { margin: 0 0 12px 0; font-size: 19px; color: ${ok ? '#4ade80' : '#f87171'}; }
+  p { color: #cbd5e1; font-size: 13px; line-height: 1.6; margin: 0; word-break: break-all; }
+</style></head><body><div class="card"><h2>${ok ? '✅ 授权已完成' : '❌ 授权失败'}</h2><p>${escapeHtml(text)}</p></div></body></html>`
+
+      const localPort = (req.socket as { localPort?: number }).localPort ?? 0
+      const redirectUri = `http://127.0.0.1:${localPort}${AUTOCLAW_OAUTH_CALLBACK_PATH}`
+      const code = url.searchParams.get('code') ?? ''
+      const state = url.searchParams.get('state') ?? ''
+      // 只 warn 不拒绝：用户可能刷新过登录页（`pendingZaiState` 被覆盖），旧标签页的回调
+      // 仍应被认领；`state` 在这里的价值是「能不能看出回调来自哪一轮」，不是防伪。
+      if (pendingZaiState !== '' && state !== pendingZaiState) {
+        // 这里没有 logger 钩子（`AutoclawSmsLoginFlowOptions` 不带告警出口），按仓库惯例
+        // 用带守卫的 `console.warn` 兜底 —— 静默丢掉的代价是「回调来自哪一轮」再也查不到。
+        if (typeof console !== 'undefined') {
+          console.warn(`[autoclaw] Z.ai 回调的 state 与本次流程不一致（收到 ${state === '' ? '空' : state.slice(0, 16) + '…'}）—— 可能是刷新过登录页，继续认领`)
+        }
+      }
+      if (code === '') {
+        // ⚠️ 用户点「拒绝授权」时，授权页回的是 `?error=access_denied&error_description=…`
+        //    （实测形态）。原文案会把整串 query 甩给用户，等于让人自己读协议。
+        const providerError = url.searchParams.get('error') ?? ''
+        const providerErrorDesc = url.searchParams.get('error_description') ?? ''
+        const hint = providerError === ''
+          ? `回调没带授权码。请回到登录页重新点击「使用 Z.ai 账号继续」。（${url.search}）`
+          : providerError === 'access_denied'
+            ? '你拒绝了授权。请回到登录页重新点击「使用 Z.ai 账号继续」并允许访问。'
+            : `授权页返回了错误：${providerError}${providerErrorDesc === '' ? '' : `（${providerErrorDesc}）`}。请回到登录页重试。`
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end(renderCallbackPage(false, hint))
+        return
+      }
+      void (async () => {
+        try {
+          const exchanged = await exchangeAutoclawZaiCode(code, state, redirectUri, {
+            product,
+            fetchImpl: options?.fetchImpl,
+            deviceId: options?.deviceId,
+          })
+          if (!exchanged.ok || exchanged.credential === undefined) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+            res.end(renderCallbackPage(false, `${exchanged.error ?? 'Z.ai 授权失败（未返回凭据）'}。请回到登录页重试。`))
+            return
+          }
+          settleOk({ credential: exchanged.credential, phone: exchanged.credential.user_phone ?? '' })
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          /**
+           * ⚠️⚠️ **文案必须中性，不能写「已绑定」**（2026-11-02 审查）。
+           *
+           * 此刻 `settleOk` 只是 resolve 了 Promise；真正的「这凭据能不能用」发生在
+           * RPC 侧的 `verifyCredentialSite()`（它要打一次余额端点），失败就 `failLogin`
+           * 并**删账号**。原文案会在浏览器上显示「✅ 已绑定」、IDE 里同时显示
+           * 「导入的凭据无法通过校验」然后卡片消失 —— 两句互相打脸。
+           *
+           * 而且 `Z.ai OAuth 换出的 token 是否等价于 AutoClaw access_token`
+           * 至今**零验证**（见 `docs/agent-notes/providers-autoclaw.md` 的「未验证」），
+           * 所以这不是理论瑕疵。
+           */
+          res.end(renderCallbackPage(true, '授权已完成，正在绑定账号 —— 请返回 IDE 查看结果。本窗口可以关闭。'))
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          res.end(renderCallbackPage(false, `授权过程出错：${reason}`))
+        }
+      })()
       return
     }
 
@@ -1128,11 +1535,11 @@ export async function startAutoclawSmsLoginFlow(
     }
 
     res.writeHead(404).end('Not Found')
-  })
+  }
 
-  await new Promise<void>((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve())
-  })
+  // ⚠️ 必须优先用**注册过的回调端口**（`listen(0)` 的随机端口会被 Z.ai 以
+  //    `{"detail":"Redirect URI not registered for this client"}` 拒绝，2026-11-02 真机）。
+  await listenOnCallbackPorts(server)
 
   const addr = server.address()
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0

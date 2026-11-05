@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { descriptorOf } from '../../src/provider-registry.js'
 import { PROVIDER_ICONS } from '../../plugin-src/client/provider-icons.js'
+import { stripComments } from '../helpers/strip-comments.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const hub = readFileSync(join(here, '../../plugin-src/client/jet-hub.js'), 'utf8')
@@ -63,7 +64,7 @@ describe('账号行按钮', () => {
     expect(sig).toContain('onRotateFingerprint')
   })
   it('只有 opencode 面板注入这两个回调', () => {
-    expect(hub).toMatch(/\.\.\.\(provider === 'opencode'/)
+    expect(hub).toMatch(/\.\.\.\(?provider === 'opencode'/)
   })
   it('代理按钮的 tooltip 说明「不设置会怎样」', () => {
     expect(hub).toMatch(/共享本机出口 IP/)
@@ -133,7 +134,15 @@ describe('面板文案', () => {
     const at = hub.indexOf('const submitOpencodeKey = async')
     expect(at).toBeGreaterThan(-1)
     const body = hub.slice(at, hub.indexOf('const createAccount = async', at))
-    expect(body).toMatch(/setKeyModal\(\{ error:/)
+    /**
+     * ⚠️ 形态在 2026-11-02 变过一次（二审 D🔴-1）：原来写 `setKeyModal({ error })`，
+     * 那会造出**只有 error、没有 provider** 的对象 ⇒ 渲染侧对所有 provider 的排除
+     * 条件都为真 ⇒ 挂上 OpenCode 弹窗，别的渠道（如百智云）失败时会在「添加 OpenCode
+     * 账号」里重试，key 就被落进 opencode 池了。现在必须是「保留 prev 全部字段」。
+     */
+    expect(body, '错误仍然要留在弹窗内（不能 setPhase）').toMatch(/setKeyModal\(/)
+    expect(body, '必须保留 prev 的 provider，否则弹窗会退化成 OpenCode').toMatch(/setKeyModal\(\(prev\)/)
+    expect(body, '不能再出现「裸对象只带 error」的写法').not.toMatch(/setKeyModal\(\{ error:/)
     expect(body).not.toMatch(/setPhase\('error'\)/)
   })
   it('⚠️ API key 不进 React state（用 ref + DOM 读值）', () => {
@@ -225,7 +234,10 @@ describe('弹窗必须是 React 组件（hooks 规则，真实事故 2026-10-02�
      * 本用例的正则只能匹配到前一站，第二站从此**不设防**（把 `qodercn`
      * 那个分支改成返回别家，用例仍绿）—— 那正是上面 ② 号变异的老毛病。
      */
-    const selector = hub.match(/function proxyModalComponent\([\s\S]*?\n\}/)?.[0]
+    // ⚠️ 先剥注释再匹配：本轮新增的注释里就含有 `return OpencodeProxyModal`
+    //    这个字面量（六审 B 实测：原断言命中偏移 327、状态机判 inComment=true），
+    //    不剥注释 = 把真正的 opencode 分支删掉也照样绿。
+    const selector = stripComments(hub).match(/function proxyModalComponent\([\s\S]*?\n\}/)?.[0]
     expect(selector, '找不到 proxyModalComponent 函数体').toBeDefined()
     // 逐分支抽取 `provider === 'X'` → `return Y` 的配对。
     const pairs = [...selector!.matchAll(
@@ -240,8 +252,20 @@ describe('弹窗必须是 React 组件（hooks 规则，真实事故 2026-10-02�
       ['qoder', 'QoderProxyModal'],
       ['qodercn', 'QoderProxyModal'],
     ])
-    // 缺省回落 OpencodeProxyModal（未知 provider 的既有行为不可变更）。
-    expect(selector!).toContain('return OpencodeProxyModal')
+    // 缺省必须是**封闭白名单**：只认 opencode，其余一律 `null`。
+    //
+    // ⚠️⚠️ 原来是 `expect(selector!).toContain('return OpencodeProxyModal')` ——
+    //    而该字面量只存在于函数上方的**注释**里（六审 B 探针：偏移 327、
+    //    判 inComment=true）⇒ 两个变异全绿：① 改成 `? GeminiProxyModal : null`；
+    //    ② 整条三元删成 `return null;`。同变异下
+    //    `credits-usage-and-redirect-guards.spec.ts` 的正向断言会变红，
+    //    说明只有这条没牙。⇒ 改成**解构三元**（正向）+ 禁止 fail-open 兜底（反向）。
+    expect(selector, '缺省分支必须显式点名 opencode（白名单，不是 fail-open）').toMatch(
+      /return provider === 'opencode' \? OpencodeProxyModal : null;/,
+    )
+    expect(selector, '不许再出现「其余一律回落 opencode」的 fail-open 写法').not.toMatch(
+      /\n\s{2}return OpencodeProxyModal;/,
+    )
   })
 
   it('⚠️ Gemini 弹窗的宿主 facade 也由 props 传入（不得退回位置参数）', () => {

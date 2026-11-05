@@ -20,6 +20,7 @@ import {
   expiryCountdown,
   expirySplitParts,
   findDailyPool,
+  formatExpiryHint,
   formatExpirySplitLine,
   formatNamedPoolLine,
   formatPackageExpiry,
@@ -74,8 +75,14 @@ function backendSplit(packages: CreditPackage[], windowDays = WINDOW_DAYS, now =
  * `permanent + longTerm` 恰好等于后端的 `permanent`（同一个集合的两种切法）。
  * 故对账时按此归约 —— 这样「前端多算/少算临时积分」这类真实漂移仍会被抓住。
  */
-function reduceFrontendToBackend(frontend: { expiring: number; longTerm: number; permanent: number }) {
-  return { expiring: frontend.expiring, permanent: frontend.permanent + frontend.longTerm }
+function reduceFrontendToBackend(frontend: { expiring: number; longTerm: number; permanent: number; expired?: number }) {
+  // ⚠️ `expired` 也要带过去（2026-11-02）：两边都把它从 `expiring` 摘出来了，
+  //    对账时不带上就会「前端 0 / 后端 0 但键多一个」地假红。
+  return {
+    expiring: frontend.expiring,
+    permanent: frontend.permanent + frontend.longTerm,
+    ...frontend.expired === undefined ? {} : { expired: frontend.expired },
+  }
 }
 
 describe('splitCreditsByExpiry（前端三档分桶）', () => {
@@ -363,7 +370,9 @@ describe('splitCreditsByExpiry（前端三档分桶）', () => {
       pkg({ remaining: 100, deductionEndTime: NOW - 5 * DAY }), // 已过期但 active 仍为 true
       pkg({ remaining: 50, deductionEndTime: NOW + 3 * DAY }),
     ], WINDOW_DAYS, NOW)
-    expect(split?.expiring, '两笔都计入临期桶（它确实会作废）').toBe(150)
+    // ⚠️ **2026-11-02 改**：已过期那笔**不再**计入 `expiring`（扣不到），单独进 `expired`。
+    expect(split?.expiring, '只有未过期那笔还算「临期可用」').toBe(50)
+    expect(split?.expired, '已过期那笔单列').toBe(100)
     // ⚠️ 关键：取未过期那笔，而不是那个 5 天前的。
     expect(split?.earliestExpiringAt, '已过期包会让倒计时恒空，必须被排除').toBe(NOW + 3 * DAY)
   })
@@ -457,6 +466,31 @@ describe('与后端 splitBuddyCreditsByExpiry 对账', () => {
       pkg({ name: '会员积分', remaining: 0, deductionEndTime: NOW + 200 * DAY }),
       pkg({ name: '星火积分（独立池，不参与主池合计）', remaining: 25000, deductionEndTime: NOW + 3 * DAY }),
     ]],
+    /**
+     * ★★ **`deductionEndTime` 的四格「非数字」**（2026-11-01 三审实测的分叉）。
+     *
+     * 前端旧判据是裸 `Number(pkg.deductionEndTime)`，后端 `src/buddy-balance-rank.ts`
+     * 早已收窄成 `number | string` ⇒ 前三格**同一条数据前后端落不同桶**：
+     * 前端「临期 100」、后端「永久 100」。用户看到的档位（能烧临期）与选号实际用的
+     * 档位（算永久、锁定期间不可用）不一致，且**没有一条既有 fixture 覆盖这三格**。
+     *
+     * 第四格是**反方向**的守卫：收窄不能连「数字字符串」一起废掉
+     * （上游确实发字符串毫秒，见 `src/magicrew-credits.ts` 的类型漂移取证）。
+     * ⚠️ `[NOW+3*DAY]` 与 `{valueOf}` 是刻意的「逼真旁路」：这类值在 JS 里
+     * 都能被 `Number()` 成功强转，却**不是**服务端给的到期时刻。
+     */
+    ['deductionEndTime 是 true（Number(true)===1 陷阱）', [
+      { ...pkg({ remaining: 100 }), deductionEndTime: true } as unknown as CreditPackage,
+    ]],
+    ['deductionEndTime 是单元素数组', [
+      { ...pkg({ remaining: 100 }), deductionEndTime: [NOW + 3 * DAY] } as unknown as CreditPackage,
+    ]],
+    ['deductionEndTime 是带 valueOf 的对象', [
+      { ...pkg({ remaining: 100 }), deductionEndTime: { valueOf: () => NOW + 3 * DAY } } as unknown as CreditPackage,
+    ]],
+    ['deductionEndTime 是数字字符串（收窄不得连合法的也废掉）', [
+      { ...pkg({ remaining: 100 }), deductionEndTime: String(NOW + 3 * DAY) } as unknown as CreditPackage,
+    ]],
   ]
 
   for (const [label, packages, windowDays] of fixtures) {
@@ -548,6 +582,93 @@ describe('daysUntilExpiry / expiryBucketLabel', () => {
     expect(expiryBucketLabel(pkg({ deductionEndTime: NOW + 9 * DAY }), undefined, NOW)).toBeNull()
     // 但到期时间未知仍给确定文案（它不依赖窗口）
     expect(expiryBucketLabel(pkg({ deductionEndTime: undefined }), null, NOW)).toBe('到期时间未知')
+  })
+
+  /**
+   * ★★ 三个出口必须**同判**（2026-11-01 三审实测的分叉）。
+   *
+   * 同一个包在「分桶 / 日期列 / 标签」三处曾给出三种结论：
+   * `deductionEndTime: "1791072000000"`（数字字符串）⇒ 分桶**临期**、日期列正常，
+   * 标签却说**「到期时间未知」**。`expiredTime` 兜底的包同理。
+   */
+  it('★★ 标签与分桶同判：数字字符串的到期时刻不得报「到期时间未知」', () => {
+    const asString = { ...pkg({ remaining: 100 }), deductionEndTime: String(NOW + 9 * DAY) }
+    expect(daysUntilExpiry(asString, NOW)).toBeCloseTo(9, 6)
+    expect(expiryBucketLabel(asString, WINDOW_DAYS, NOW)).toBe('9 天内到期')
+  })
+
+  it('★★ 标签与分桶同判：只有 `expiredTime`（无 `deductionEndTime`）的包也要给出天数', () => {
+    // `packageExpiryMs` 第二段回落就是为这种包写的；标签此前只认 `deductionEndTime`
+    // ⇒ 与分桶分叉。（本节初稿写的「有效包 expiredTime 恒空串」已被四审证伪，
+    // 见 `plugin-src/client/credit-expiry.js` 的 `daysUntilExpiry` 文档。）
+    const onlyExpired = pkg({ deductionEndTime: undefined, expiredTime: '2026-10-10 00:00:00' })
+    /**
+     * ⚠️ 这一格**只**证明「回落真的被取用」：期望值与实现是同一个表达式
+     * （`replace(' ', 'T')` 后 `Date.parse`），钉不住解析口径 —— 改成
+     * `new Date(exp).getTime()` 在 V8 下同值、仍然绿。它**不是**同义反复：
+     * 删掉回落分支后 `packageExpiryMs` 返回 `null`，这一格立刻变红。
+     */
+    expect(packageExpiryMs(onlyExpired)).toBe(Date.parse('2026-10-10T00:00:00'))
+    // 标签必须跟着兜底走（此前这里会写「到期时间未知」）
+    expect(expiryBucketLabel(onlyExpired, WINDOW_DAYS, NOW)).not.toBe('到期时间未知')
+    /**
+     * ★★ **优先级**这一格才有方向性：两个字段**都给**时必须取 `deductionEndTime`。
+     * 把回落顺序写反（先看 `expiredTime`）这条会红，且与上面那条互补 ——
+     * 上面守「别忘了兜底」，这条守「别让兜底抢了主判据」。
+     */
+    const both = pkg({ deductionEndTime: NOW + 3 * DAY, expiredTime: '2027-01-01 00:00:00' })
+    expect(packageExpiryMs(both)).toBe(NOW + 3 * DAY)
+  })
+
+  /**
+   * ★★ 已过期但 `active: true` 的包不得输出负数天（2026-11-01 三审实测）。
+   *
+   * `plugin-src/client/jet-hub.js` 的 `all = balance?.packages || []` **不过滤**，
+   * 所以这类包真的会进账号卡片的 title ⇒ 旧实现渲染出 **「-3 天内到期」**，
+   * 而 `-0.5 天` 因 `Math.ceil` 变成「0 天内到期」（看起来像即将到期，其实已过期）。
+   *
+   * ⚠️ 与 `formatPackageExpiry` 的「（已过期）」口径对齐 —— 同一件事不应有两种说法。
+   */
+  it('★★ 已过期的包 ⇒ 「已过期」，不出负数天（含 -0.5 天那一格）', () => {
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW - 3 * DAY }), WINDOW_DAYS, NOW)).toBe('已过期')
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW - 0.5 * DAY }), WINDOW_DAYS, NOW)).toBe('已过期')
+    // 窗口为 null 时也要说「已过期」（不能因为拿不到窗口就把已过期的包藏起来）
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW - 3 * DAY }), null, NOW)).toBe('已过期')
+    // 恰好到期的那一毫秒算「已过期」（`left <= 0`），与 `formatPackageExpiry` 的 `days <= 0` 同口径
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW }), WINDOW_DAYS, NOW)).toBe('已过期')
+    // 对照：还有 1 毫秒就是「1 天内到期」，不是「已过期」
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW + 1 }), WINDOW_DAYS, NOW)).toBe('1 天内到期')
+  })
+})
+
+describe('formatExpiryHint（tooltip 那一行的到期提示）', () => {
+  /**
+   * ⚠️⚠️ **2026-11-01 四审：本函数此前一条用例都没有** ⇒ 把 `expiryBucketLabel` 的
+   * 「已过期」分支修好之后，它仍然拼出 **「距到期 -3 天（已过期）」** 这个半修结果，
+   * 而**没有任何守卫能发现**（同期 `jet-hub.js` 的 `formatPackageLine` 也自己拼了
+   * 一遍同样的字符串，四处重复）。
+   *
+   * ⚠️ `Math.ceil(-0.5)` 的结果是 **`-0`** ⇒ 旧行为会显示「距到期 0 天」，
+   * 比负数更容易被当成「还有 0 天」的真话，所以这一格必须测。
+   */
+  it('★★ 已过期的包只回「已过期」，不拼负数天', () => {
+    for (const left of [-3 * DAY, -0.5 * DAY, 0]) {
+      // `toBe('已过期')` 已经钉住「没有负数 / 没有 `-0`」——不再另加 `not.toMatch(/-/)`
+      // 那种被完全覆盖的恒真断言（2026-11-01 四审判据审计）。
+      expect(formatExpiryHint(pkg({ deductionEndTime: NOW + left }), WINDOW_DAYS, NOW), `left=${left / DAY} 天`)
+        .toBe('已过期')
+    }
+  })
+
+  it('未过期：距到期 N 天 + 分档标签', () => {
+    expect(formatExpiryHint(pkg({ deductionEndTime: NOW + 3 * DAY }), WINDOW_DAYS, NOW))
+      .toBe('距到期 3 天（3 天内到期）')
+    expect(formatExpiryHint(pkg({ deductionEndTime: NOW + 30 * DAY }), WINDOW_DAYS, NOW))
+      .toBe('距到期 30 天（还有 30 天）')
+  })
+
+  it('无到期时间 ⇒ 空串（调用方按「未知」处理，不显示「距到期」）', () => {
+    expect(formatExpiryHint(pkg({ deductionEndTime: undefined }), WINDOW_DAYS, NOW)).toBe('')
   })
 })
 
@@ -936,6 +1057,40 @@ describe('formatPackageExpiry（单个包的到期列）', () => {
   it('有到期时间：绝对日期 + 相对天数', () => {
     expect(formatPackageExpiry(pkg({ deductionEndTime: NOW + 8 * DAY }), NOW))
       .toBe('2026-10-09（8 天后）')
+  })
+
+  /**
+   * ⚠️⚠️ **上面那条对「UTC 日期 vs 本地日期」零判别力**（2026-11-01 四审实测：
+   * 把实现改回 `toISOString()` 后本文件 113 条**全绿**）—— 因为 `NOW + 8 天`
+   * 在 UTC、东八区、UTC-8 下**恰好是同一天**。这是本仓库第 N 次「守卫存在但不承重」。
+   *
+   * 本用例专门取**跨日**的两个时刻，让「用了 UTC 日期」在**任何非 UTC 时区**都暴露：
+   * - `UTC 18:00` ⇒ 东八区已跨到次日（+8 机器上有牙）；
+   * - `UTC 06:00` ⇒ UTC-8 仍在**前一**日（-8 机器上有牙）。
+   *
+   * ⚠️ **在 UTC 时区（`TZ=UTC`）下本用例自动退化为恒真**（`utc === local`，第二句跳过）——
+   * 这是刻意接受的局限，不是遗漏：`toISOString()` 与本地分量在 UTC 下**本来就等价**，
+   * 没有任何断言能在那台机器上区分它们。CI 若跑 UTC，请另用 `TZ=Asia/Shanghai` 跑一遍。
+   */
+  it('★★ 日期列用**本地**日期，不用 UTC 日期（取跨日两格）', () => {
+    const localDateOf = (ms: number) => {
+      const d = new Date(ms)
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    }
+    const cases = [
+      { end: Date.UTC(2026, 9, 8, 18, 0, 0), why: 'UTC 18:00（东八区已跨到次日）' },
+      { end: Date.UTC(2026, 9, 8, 6, 0, 0), why: 'UTC 06:00（UTC-8 仍是前一日）' },
+    ]
+    for (const { end, why } of cases) {
+      const out = formatPackageExpiry(pkg({ deductionEndTime: end }), end - 8 * DAY)
+      const local = localDateOf(end)
+      const utc = new Date(end).toISOString().slice(0, 10)
+      expect(out.startsWith(local), `${why}：期望本地日期 ${local}（UTC 日期 ${utc}），实际 ${out}`).toBe(true)
+      // 只在时区偏移真的跨日时，这一句才检查「有没有误用 UTC 日期」
+      if (utc !== local) {
+        expect(out.startsWith(utc), `${why}：用了 UTC 日期 ${utc}（本地应为 ${local}）`).toBe(false)
+      }
+    }
   })
 
   /** ⚠️ 用户明确要求的降级：拿不到到期时间显示「长期」。 */
@@ -1359,5 +1514,35 @@ describe('exclusivePoolRemainingOf（独立池剩余量的唯一判据）', () =
 
   it('主池不计入', () => {
     expect(exclusivePoolRemainingOf([pkg({ name: '赠送积分', remaining: 1900 })])).toBe(0)
+  })
+})
+
+/**
+ * ⚠️ 四审补：`packageExpiryMs` 只保证「有限且 > 0」，而 `new Date(1e16)` 是
+ * **Invalid Date** ⇒ 本地分量全给 `NaN`，拼出「NaN-NaN-NaN（115720014 天后）」。
+ *
+ * 触发面：外部写入（`state.json` / 备份导入）里出现荒谬的毫秒值（单位写错成
+ * 微秒/纳秒就能到 1e16 量级）。旧实现用 `toISOString()` 时是 **RangeError 直接抛**
+ * （整块面板渲染炸掉），四审改成「失效即按长期处理」并加 `NaN` 守卫。
+ *
+ * 判别力：删掉 `Number.isNaN(local.getTime())` 那条早退 ⇒ 本条**必红**
+ * （输出里出现 `NaN`）。注意这**不是**「已过期」那条的分支 —— 它走的是
+ * `end === null` 之前，两者互不可替代。
+ */
+describe('★★ formatPackageExpiry：超出 Date 范围的到期值不得拼出 NaN', () => {
+  it('★★ `deductionEndTime = 1e16` ⇒ 按长期显示，不出现 NaN', () => {
+    const out = formatPackageExpiry({ deductionEndTime: 1e16 }, NOW)
+    expect(out, `输入超出 Date 表示范围，输出却是 ${JSON.stringify(out)}`).not.toContain('NaN')
+    expect(out).toBe('长期')
+  })
+
+  it('★ 对照：同样荒谬但仍在 Date 范围内的值照常给日期（不误伤）', () => {
+    // ⚠️ 期望值必须按**本地分量**算：日期列给的是用户本地日期（见 formatPackageExpiry 注释）
+    const end = Date.UTC(2100, 0, 1)
+    const local = new Date(end)
+    const expected = [local.getFullYear(), String(local.getMonth() + 1).padStart(2, '0'), String(local.getDate()).padStart(2, '0')].join('-')
+    const out = formatPackageExpiry({ deductionEndTime: end }, NOW)
+    expect(out).toContain(expected)
+    expect(out).not.toContain('NaN')
   })
 })

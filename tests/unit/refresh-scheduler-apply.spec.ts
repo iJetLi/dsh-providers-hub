@@ -133,15 +133,23 @@ describe('★ issue IKJOZB 真 apply() 端到端', () => {
   it('① 冷启动空池时调度器仍然武装（旧实现在此直接 return）', async () => {
     const { ctx, infos } = makeCtxWithLogs()
     apply(ctx)
-    await settle()
+    // issue #20：首轮延后 15s（生产接线）。apply() 的启动链需要若干轮微任务
+    // 才真正调用 start()，故交错推进：start 一旦排下 15s 定时器，下一轮触发。
+    for (let i = 0; i < 6; i += 1) {
+      await settle(5)
+      await vi.advanceTimersByTimeAsync(15_000)
+    }
 
     expect(
       infos.some((s) => s.includes('多账号续期调度器已武装')),
       '空池时调度器未武装 —— 正是 issue IKJOZB 的根因',
     ).toBe(true)
+    // issue #20：生产接线把首轮延后 15s，必须留下可观测的说明（否则用户会以为
+    // 「重启后一直没续期」）。空池留痕本身由 refresh-scheduler.spec.ts 的
+    // 「空池仍要记一条 info」用例守（那里没有 apply 的异步启动链噪声）。
     expect(
-      infos.some((s) => s.includes('账号池为空')),
-      '空池必须留痕（issue 的另一半伤害是「日志无痕」）',
+      infos.some((s) => s.includes('首轮续期延后 15000ms')),
+      '首轮延迟必须留痕（issue #20）',
     ).toBe(true)
     // 启动首轮必须跑过（issue !IKIRTT 的既有约定）
     expect(ticks.length, '启动首轮没跑').toBeGreaterThanOrEqual(1)
@@ -151,6 +159,8 @@ describe('★ issue IKJOZB 真 apply() 端到端', () => {
     const { ctx, infos } = makeCtxWithLogs()
     apply(ctx)
     await settle()
+    // issue #20：先让延后的首轮真正跑一次，再看「登录入库」是否被追加。
+    await vi.advanceTimersByTimeAsync(15_000)
     const afterStartup = ticks.length
 
     // 用户登录：走**真实** AccountPool → 真实 onAccountAdded 钩子（不打网络）

@@ -63,6 +63,14 @@ import { AUTOCLAW } from './autoclaw-product.js'
 import type { AutoclawCredential } from './autoclaw.js'
 import type { AccioCredential } from './accio.js'
 import { fetchAccioBalanceDetailed } from './accio-credits.js'
+// ⚠️ MonkeyCode / 百智云（本 fork 独有，2026-11-02 审查 B🟡-9 补齐）：
+//    余额读数要**会话 cookie**（推理只要主凭据）⇒ 折算原语里要判会话是否存在。
+import { fetchMonkeycodeBalanceDetailed } from './monkeycode-credits.js'
+import { MONKEYCODE, type MonkeycodeProduct } from './monkeycode-product.js'
+import type { MonkeycodeCredential } from './monkeycode.js'
+import { fetchBaizhiBalanceDetailed } from './baizhi-credits.js'
+import { BAIZHI, type BaizhiProduct } from './baizhi-product.js'
+import type { BaizhiCredential } from './baizhi.js'
 // ⚠️ AStudio（讯飞 AstronStudio）：三池各带 `*NextExpireTime` ⇒ 可精确折算
 //    （2026-10-20 新增）。判据链与 autoclaw 同形，只是时间字段确实存在。
 import { fetchAstudioBalanceDetailed } from './astudio-credits.js'
@@ -237,6 +245,20 @@ export const WIRED_EXPIRY_PROVIDERS: readonly string[] = Object.freeze([
   //    （⚠️ 那里必须传 `AUTOCLAW_INTL`，否则会用国内基址查国际账号余额）
   //    + 折算原语（`autoclawExpiry` 本身产品无关，无需改）。
   'autoclawintl',
+  // ⚠️ **MonkeyCode 国内站 / 国际站 / 百智云**（本 fork 独有，2026-11-02 审查
+  //    B🟡-9 补齐）：经「审查员 B 说豁免理由被证伪」核实后确认 —— 三家都**有**
+  //    真实的余额读数接口，折算原语见 `monkeycodeExpiry` / `baizhiExpiry`。
+  //
+  //    ⚠️ 三处必须同改（本表 + `provider-expiry.ts` 的 `createProviderExpiry()`
+  //    + 折算原语）—— 本仓库这个陷阱已复发 5 次（cline → accio → officeace →
+  //    autoclaw → autoclawintl），症状恒定**静默**：模型层归并发生了、看起来
+  //    接好了，但候选层被这道闸门剔掉，用户在聚合轮换列表里永远看不到该渠道。
+  //
+  //    ⚠️ `monkeycodeintl` 必须传 `MONKEYCODE_INTL`（两站账号池不互通、域名不同：
+  //    国际站 cookie 打国内站回 401）—— 传错会让国际账号折算恒 `UNUSABLE`。
+  'monkeycode',
+  'monkeycodeintl',
+  'baizhi',
   // ⚠️ **Qoder**（中国版 / 国际版，2026-10-20，用户要求补齐三档分档 + 永久锁）。
   //    折算原语见 `qoderExpiry`（两站共用，只换 product）。
   //
@@ -293,6 +315,12 @@ export const WIRED_EXPIRY_PROVIDERS: readonly string[] = Object.freeze([
   //    只加 `AGGREGATE_CHANNELS` 而不加这里 ⇒ 折算恒 UNUSABLE（静默少一个候选）。
   //    折算原语：`provider-expiry.ts` 的 `magicrew` 条目 → `magicrew-credits.ts` 的 `magicrewExpiry`。
   'magicrew',
+  // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：**决定聚合候选表可见性
+  //    的就是本表**。只加 `AGGREGATE_CHANNELS` 而不加这里 ⇒ 折算恒 UNUSABLE
+  //    ⇒ 国际站候选从轮换表里静默消失（与 minimaxintl / autoclawintl 同款）。
+  //    折算原语：`provider-expiry.ts` 的 `magicrewintl` 条目 → 同一个 `magicrewExpiry`，
+  //    但**必须传 `MAGICREW_INTL`**（传国内版会拿国内基址查国际账号余额）。
+  'magicrewintl',
 ])
 
 /**
@@ -1289,9 +1317,39 @@ async function sharedPackageExpiry(
      * `isExclusiveCreditPool`）⇒ 两侧口径一致。
      */
     if (isExclusiveCreditPool(pkg)) continue
+    const end: unknown = pkg.deductionEndTime
+    /**
+     * ⚠️⚠️ **判据必须与 `src/buddy-balance-rank.ts` 的 `splitBuddyCreditsByExpiry` 同一份**
+     * （2026-11-01 四审）：那边已把 `deductionEndTime` 收窄成「**number 或数字字符串**」，
+     * 而这里曾只认 `typeof === 'number'`。
+     *
+     * 后果（结构可达、生产零实测 —— 目前所有生产者都写 number）：外部写入
+     * （`state.json` / 备份导入 / 旧缓存里的 `"1791072000000"`）会让**面板判「临期」**
+     * 而**聚合轮换把它当「未知」= 长期、排到最后** ⇒ 用户看到的「马上到期」与
+     * 自动选择顺序相反。这正是本仓红线「同一语义不得两套判据」。
+     */
+    const endIsNumeric = typeof end === 'number' || typeof end === 'string'
+    const endMs = endIsNumeric ? Number(end) : Number.NaN
+    /**
+     * ⚠️⚠️ **已作废的额度不参与「可用额度」与排序**（2026-11-02，对抗审计 B1）。
+     *
+     * TRAE / Qoder 的 `active` 是**硬编码 true**，所以「`deductionEndTime` 已过、
+     * `remaining > 0`」的包一定会出现。旧行为把它的**过去时刻**当 `earliest`
+     * ⇒ 聚合按「越早到期越优先」把它排**第一** ⇒ 请求必失败，而同池里真正
+     * 3 天后到期的渠道被排在后面。
+     *
+     * ⇒ 与 `buddy-balance-rank.ts` 的 `splitBuddyCreditsByExpiry`（`endMs <= now`
+     *   单列 `expired`、不计入 `expiring`）保持**同一判据**。
+     *   只剩作废额度 ⇒ `hasAnyCredit` 保持 false ⇒ 本渠道判 `UNUSABLE`（钱已经没了）。
+     */
+    if (Number.isFinite(endMs) && endMs > 0) {
+      if (endMs <= Date.now()) continue
+      hasAnyCredit = true
+      if (endMs < earliest) earliest = endMs
+      continue
+    }
+    // 到期时间未知（无字段 / 脏值）⇒ 算「有余额但不知道什么时候过期」= 长期。
     hasAnyCredit = true
-    const end = pkg.deductionEndTime
-    if (typeof end === 'number' && Number.isFinite(end) && end > 0 && end < earliest) earliest = end
   }
   // 有余额但都没给到期时间 ⇒ 长期（排最后，不剔除）。
   if (hasAnyCredit) return earliest
@@ -1429,6 +1487,102 @@ export async function autoclawExpiry(
       const result = await fetchAutoclawBalanceDetailed(credential, { product })
       // ⚠️ 同上：`fetchBalanceDetailed` 的失败形态是 `balance: null + error`，
       //    `sharedPackageExpiry` 认「`null` ⇒ UNUSABLE」⇒ 只取 `balance`。
+      return result.balance
+    },
+  ))
+}
+
+/**
+ * MonkeyCode（国内站 `monkeycode` / 国际站 `monkeycodeintl`，**共用**本原语，
+ * 只换 product）—— 2026-11-02 审查 B🟡-9 补齐。
+ *
+ * ## 判据（如实判「现在还有没有可烧的额度」，不编造任何时刻）
+ *
+ * `GET <platformBaseUrl>/api/v1/users/wallet` + `/api/v1/users/subscription`
+ * （**cookie 认证**）⇒ `buildMonkeycodeBalance` 给两个包：
+ *
+ * - 「积分余额」（unit `credit`，`remaining = balance / 1000`）—— 可以是**负数**；
+ * - 「每日额度」（unit `token`，`remaining = daily_token_balance`）。
+ *
+ * 两个包的 `remaining` 都实测会如实归零/为负（额度用尽那次：`daily 0`、
+ * `balance -8191` 千分之一积分）⇒ 直接复用 `sharedPackageExpiry` 的
+ * 「有 `active && remaining > 0` 的包 ⇒ `NEVER`；一个都没有 ⇒ `UNUSABLE`」。
+ *
+ * ## ⚠️ 与 `aggregate-expiry.ts` 里其它家最不同的一点：**缺会话直接放行**
+ *
+ * 余额接口只认网页登录态，而推理只要 `oma_` + `signing_secret` ⇒ 手填 Key 的
+ * 账号**读不到余额但能发消息**。缺会话时若折算成 `UNUSABLE`，这些账号会被
+ * **静默踢出聚合轮换**（把「不知道」当「不可用」）⇒ 这里按 `NEVER` 保守放行。
+ * 代价与 modelscope / autoclaw **同型**：额度烧光后仍会被选中并失败一次。
+ *
+ * ## ⚠️ 为什么必须走 `cachedBalance`
+ *
+ * 聚合每轮折算会对同一账号反复提问；没有共享读数就会白发大量重复请求
+ * （与 buddy / trae / modelscope / autoclaw 同款理由）。
+ */
+export async function monkeycodeExpiry(
+  credential: MonkeycodeCredential,
+  product: MonkeycodeProduct = MONKEYCODE,
+  /** 共享读数入口（见 {@link buddyExpiry} 的同名参数）。 */
+  cached?: () => Promise<CreditBalance | null | undefined>,
+): Promise<number> {
+  if (typeof credential.session_cookie !== 'string' || credential.session_cookie.trim() === '') {
+    // 没做过浏览器登录 ⇒ 读不到额度，但 `oma_` Key 照常能推理（见上方长注释）。
+    return NEVER
+  }
+  return sharedPackageExpiry(() => fetchBalanceWithCache(
+    cached,
+    async () => {
+      const result = await fetchMonkeycodeBalanceDetailed(credential, product)
+      // ⚠️ `fetchBalanceDetailed` 的失败形态是 `balance: null + error`，
+      //    `sharedPackageExpiry` 认「`null` ⇒ UNUSABLE」⇒ 只取 `balance`。
+      return result.balance
+    },
+  ))
+}
+
+/**
+ * 百智云（`baizhi`）—— 2026-11-02 审查 B🟡-9 补齐。
+ *
+ * ## 判据
+ *
+ * `GET https://baizhi.cloud/api/v1/user/wallet/balance`（**cookie 认证**）⇒
+ * `buildBaizhiBalance` 给三个**额度**包：每日积分 / 充值积分（`remaining =
+ * *_cents / 100`）+ 冻结积分（`active: false`）。
+ *
+ * ⚠️ 2026-11-02 三审 F🟡-8：此处原写「四个包」，把「本月消耗」也算成了包。
+ * 用量不是额度，已改走 `CreditBalance.usage`（不参与折算）。
+ *
+ * 实测（2026-11-02，真实账号）：`可用 235.05`、`每日 98.21`、`充值 136.84`
+ * ⇒ 有 `remaining > 0` 的包 ⇒ `NEVER`（长期，排最后、不剔除）；
+ * 全部烧光 ⇒ 一个可烧的包都没有 ⇒ `UNUSABLE`（剔除）。
+ *
+ * ## ⚠️ 缺会话直接放行
+ *
+ * 与 {@link monkeycodeExpiry} 同理：余额接口只认控制台 cookie，而推理只要
+ * `sk-`（`x-api-key`）⇒ 手填 Key 的账号读不到积分但照常能发消息。
+ * ⇒ 缺 `session_cookie` 时返回 `NEVER`，绝不判 `UNUSABLE`。
+ *
+ * ## ⚠️ 已知且刻意接受的代价
+ *
+ * 积分烧光时**不会被提前剔出轮换** —— 报文里没有任何「额度何时重置」字段
+ * （`daily_temporary_credit_claimed` 只是个布尔）⇒ 耗尽后仍会被选中并失败一次。
+ * 与 modelscope / autoclaw **同型**，且**不许**用「猜一个 UTC+8 零点」消除它。
+ */
+export async function baizhiExpiry(
+  credential: BaizhiCredential,
+  product: BaizhiProduct = BAIZHI,
+  /** 共享读数入口（见 {@link buddyExpiry} 的同名参数）。 */
+  cached?: () => Promise<CreditBalance | null | undefined>,
+): Promise<number> {
+  if (typeof credential.session_cookie !== 'string' || credential.session_cookie.trim() === '') {
+    // 只填了 `sk-` 的账号读不到积分（控制台接口要 cookie），但推理可用。
+    return NEVER
+  }
+  return sharedPackageExpiry(() => fetchBalanceWithCache(
+    cached,
+    async () => {
+      const result = await fetchBaizhiBalanceDetailed(credential, product)
       return result.balance
     },
   ))

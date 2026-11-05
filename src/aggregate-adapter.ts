@@ -1336,6 +1336,33 @@ export class AggregateAdapter extends LlmAdapter {
     //    `expiry-runtime-parity.spec.ts` 的 `NOT_EXPIRY_WIRED` 豁免表里，
     //    由「豁免理由被验证」那条用例钉住。
     'qiniu',
+    // ⚠️ monkeycode（MonkeyCode，2026-11-02）：`channel: true` ⇒ 必须进本清单，
+    //    否则它的模型**永不进聚合目录、静默不可见**。
+    //
+    // ⚠️⚠️ **本数组只是第一道门**（模型层归并）。决定「在不在候选表里」的是
+    //    `aggregate-expiry.ts` 的 `WIRED_EXPIRY_PROVIDERS`。
+    //
+    //    📌 **2026-11-02 三审 F🟡-1 更正**：这段注释原写「monkeycode **刻意不
+    //    进**那张表」，**已过期** —— 三家（`monkeycode` / `monkeycodeintl` /
+    //    `baizhi`）早已补进 `WIRED_EXPIRY_PROVIDERS`（`aggregate-expiry.ts:259-261`）
+    //    与 `provider-expiry.ts` 的 `createProviderExpiry()`（折算原语
+    //    `monkeycodeExpiry`）。当时的理由「wallet 报文只有标量、没有到期时刻」只对
+    //    一半：真正接入的是**每日额度的重置时刻**（次 UTC+8 零点，`nextUtc8DayStartMs`），
+    //    不是积分包的到期时间 ⇒ 属「有余额但不下发到期时间」那一类：有额度即
+    //    `NEVER`、烧光即 `UNUSABLE`。
+    //    ⚠️ 该陷阱（只改本数组、忘了那张表 ⇒ 候选层被静默剔掉）在本仓库已复发 5 次。
+    'monkeycode',
+    // ⚠️ monkeycodeintl（MonkeyCode 国际站，2026-11-02 拆站）：与 `monkeycode`
+    //    **逐字同构** —— 同一套代码的另一部署（`proxy.monkeycode-ai.net` 实测
+    //    与 .com 一样对 `GET /v1/models` 回 405），`channel: true` ⇒ 必须进本清单。
+    //    ⚠️ **已进** `WIRED_EXPIRY_PROVIDERS`（同上，2026-11-02 三审 F🟡-1 更正），
+    //    折算原语与国内站共用（`monkeycodeExpiry`），但必须传 `MONKEYCODE_INTL`
+    //    —— 两站账号池不互通、域名不同（国际站 cookie 打国内站回 401）。
+    'monkeycodeintl',
+    // 百智云（2026-11-02）：`channel: true` ⇒ 必须进本清单，否则它在聚合目录里
+    // 永远不可见（**静默**）。它是 `x-api-key: sk-…` 的按量付费网关，
+    // 与 MonkeyCode 两站的 oma_ 凭据/每日额度完全无关，只是同源上游。
+    'baizhi',
     // officeace（2026-10-12）：华为 MaaS 云端直连渠道，`channel: true`
     // ⇒ 必须进聚合目录，否则它的模型**永不进聚合、静默不可见**。
     // ⚠️ 本数组**只是第一道门**（模型层归并）。真正决定「在不在候选表里」的是
@@ -1408,6 +1435,14 @@ export class AggregateAdapter extends LlmAdapter {
     //    **只加本数组不够** —— 决定候选表可见性的是 `aggregate-expiry.ts` 的
     //    `WIRED_EXPIRY_PROVIDERS`，漏了它 ⇒ 折算恒 UNUSABLE ⇒ 该渠道静默消失。
     'magicrew',
+    // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：与 `magicrew` 是
+    //    **两个 provider**（host 不同、账号体系物理隔离）⇒ 必须各自登记，
+    //    否则国际站的模型**永不进聚合目录、静默不可见**
+    //    （同款陷阱已复发五次：cline → accio → officeace → autoclaw → magicrew）。
+    //    ⚠️ 与 `magicrew` 一样**不只加本数组**：还要进 `aggregate-expiry.ts` 的
+    //    `WIRED_EXPIRY_PROVIDERS` 与 `provider-expiry.ts` 的条目，
+    //    且后者必须传 `MAGICREW_INTL`（传国内版会拿国内基址查国际账号余额）。
+    'magicrewintl',
   ])
 
   /**
@@ -1476,7 +1511,21 @@ export class AggregateAdapter extends LlmAdapter {
       if (disabled.has(model.key)) continue
       // ⚠️ 见方法头那张表：**只有**「所有候选都 default-rejected」才跳过。
       if (this.isAllDefaultsUnopened(model)) continue
-      entries.push({ provider, id: model.key, name: this.pickerNameOf(model), inputModalities: ['text', 'image'] })
+      /**
+       * issue #36：把**已经算出来**的窗口带上（供 OpenAI 网关 `/v1/models`
+       * 使用）。这里**刻意不触发新的解析** —— `contextWindowFor()` 可能要打
+       * 全部候选的上游，放在目录列表里会拖慢每一次 `listModels`；只读缓存，
+       * 未命中就不声明（与「未知」同义，不猜）。
+       */
+      const contextWindow = this.cachedContextWindowOf(model.key)
+      const entry: LlmModelInfo & { contextWindow?: number } = {
+        provider,
+        id: model.key,
+        name: this.pickerNameOf(model),
+        inputModalities: ['text', 'image'],
+        ...contextWindow === undefined ? {} : { contextWindow },
+      }
+      entries.push(entry)
     }
     return entries
   }
@@ -2638,6 +2687,26 @@ export class AggregateAdapter extends LlmAdapter {
    * @param modelKey - 虚拟模型 id（含 `auto`），仅用于记忆化。
    * @param candidates - 该虚拟模型的候选表（`auto` 传全池候选）。
    */
+  /**
+   * 只读缓存里的窗口判决；未命中或已过期返回 `undefined`（不触发解析）。
+   *
+   * 供 `listModels` 带出 `contextWindow` 用（issue #36）：目录列表要快，
+   * 不能为了窗口去逐候选打上游。
+   */
+  private cachedContextWindowOf(modelKey: string): number | undefined {
+    const remembered = this.contextWindowCache.get(modelKey)
+    if (remembered === undefined) return undefined
+    const now = this.options.now?.() ?? Date.now()
+    const ttl = remembered.degraded
+      ? this.options.contextWindowDegradedTtlMs ?? AGGREGATE_CONTEXT_WINDOW_DEGRADED_TTL_MS
+      : this.options.catalogTtlMs ?? AGGREGATE_CATALOG_TTL_MS
+    if (now - remembered.at >= ttl) {
+      this.contextWindowCache.delete(modelKey)
+      return undefined
+    }
+    return remembered.window
+  }
+
   private async contextWindowFor(
     modelKey: string,
     candidates: readonly { provider: string; realId: string }[],

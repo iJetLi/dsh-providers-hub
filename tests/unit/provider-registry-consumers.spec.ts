@@ -35,7 +35,7 @@ describe('autoCheckinExcluded：宿主消费取决于 registry', () => {
 })
 
 describe('usesExpiryWindow：永久积分锁定的 windowDays 取决于 registry', () => {
-  it('恰好是 registry 里 usesExpiryWindow === true 的 12 家（officeace 2026-10-12、autoclaw 2026-10-17、qoder/qodercn/astudio/minimax/minimaxintl/codearts 2026-10-20 加入）', () => {
+  it('恰好是 registry 里 usesExpiryWindow === true 的 14 家（officeace 2026-10-12、autoclaw 2026-10-17、qoder/qodercn/astudio/minimax/minimaxintl/codearts 2026-10-20、magicrew/magicrewintl 2026-11-01 加入）', () => {
     const withWindow = PROVIDER_REGISTRY
       .filter((d) => d.usesExpiryWindow === true)
       .map((d) => d.id).sort()
@@ -46,10 +46,14 @@ describe('usesExpiryWindow：永久积分锁定的 windowDays 取决于 registry
     // ⚠️ codearts 2026-10-20 加入（PR !123）：只有**基础积分包**能分档（随套餐
     //    `end_date` 到期），赠送/按需包走 `expiringTotal`。它**不**开
     //    `permanentLock` —— 下面那条「支持锁定的渠道」断言因此不受影响。
+    // ⚠️ magicrew / magicrewintl 2026-11-01 加入：`expiring_quota_details[].expires_at`
+    //    是**无时区**的本地时间串（`magicrewParseExpiresAt` 按 UTC+8 解析），而合成包
+    //    「永久积分」（= `total_points` 减批次和的残差）**不带** `deductionEndTime`
+    //    ⇒ 三档判据的两种输入同时存在。⚠️ 两站各占一项（账号物理隔离）。
     expect(withWindow).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
-      'minimax', 'minimaxintl', 'officeace', 'qoder', 'qodercn', 'trae',
-      'workbuddy',
+      'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
+      'qodercn', 'trae', 'workbuddy',
     ])
   })
 
@@ -68,9 +72,12 @@ describe('usesExpiryWindow：永久积分锁定的 windowDays 取决于 registry
     // ⚠️ autoclaw / autoclawintl 2026-10-21 加入（用户要求「补锁定开关」）：
     //    两站**同日同时**登记两个字段（本家早有 `usesExpiryWindow`，本次补
     //    `permanentLock` + `balance` 接线）。⚠️ 两站各占一项。
+    // ⚠️ magicrew / magicrewintl 2026-11-01 加入：两站**同日同时**登记两个字段
+    //    （半残形态正是这里防的：锁定按钮在、分档行却不渲染）。两站各占一项。
     expect(viaWindow).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'lobsterai',
-      'minimax', 'minimaxintl', 'officeace', 'qoder', 'qodercn', 'trae', 'workbuddy',
+      'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
+      'qodercn', 'trae', 'workbuddy',
     ])
     expect(locked).toEqual([...viaWindow, 'loomy'].sort())
   })

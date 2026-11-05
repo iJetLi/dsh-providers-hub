@@ -75,6 +75,10 @@ import type { ModelscopeCredential } from './modelscope.js'
 import { MODELSCOPE } from './modelscope-product.js'
 // ⚠️ **本 fork 独有**（超级麦吉 Magicrew，2026-10-29）：积分余额原语。
 import { fetchMagicrewBalance } from './magicrew-credits.js'
+// ⚠️ **本 fork 独有**（Magicrew 每日签到，2026-11-01 用户要求接入）：
+//    `POST /login-gift`，国内 +200/天、国际 +50/天，两站逐字符同构。
+import { claimMagicrewLoginGift } from './magicrew-checkin.js'
+import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 // ⚠️ **本 fork 独有**（Codely/Unity，2026-10-19）：积分余额原语。
 // 2026-10-20 起接每日签到（`/api/points/check-in`，实测 200）。
 import { claimCodelyDailyCheckIn, fetchCodelyBalanceDetailed } from './codely-credits.js'
@@ -109,6 +113,22 @@ import type { RaccoonCredential } from './raccoon.js'
 import type { TraeCredential } from './trae.js'
 import { participateTraeLottery } from './trae-lottery.js'
 import type { ZcodeCredential } from './zcode.js'
+// ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）：平台侧读数（积分余额 / 每日额度 /
+//    订阅档位 / 每日签到）。⚠️ 它的读数走**网页 Cookie**（`session_cookie`），
+//    与推理用的 `sk-` / `oma_` API Key 是两套凭据 —— 没配会话时一律降级成
+//    一句可行动的说明，**绝不抛错**（见 `monkeycode-credits.ts` 模块头）。
+import {
+  claimMonkeycodeDailyCheckin,
+  fetchMonkeycodeBalanceDetailed,
+} from './monkeycode-credits.js'
+// 百智云（2026-11-02）：积分在**主站控制台**（`baizhi.cloud`），不在模型网关。
+//   钱包接口只认网页登录态 cookie；`x-api-key` 打过去一律 401。
+//   两套凭据的分工与实测报文见 `baizhi-credits.ts` 模块头。
+import { claimBaizhiDailyCheckin, fetchBaizhiBalanceDetailed } from './baizhi-credits.js'
+import type { BaizhiCredential } from './baizhi.js'
+import { BAIZHI } from './baizhi-product.js'
+import type { MonkeycodeCredential } from './monkeycode.js'
+import { MONKEYCODE, MONKEYCODE_INTL } from './monkeycode-product.js'
 
 /**
  * 三家「余额查询挂在 auth 实例上」的渠道所需的最小接口。
@@ -966,7 +986,18 @@ export function createProviderCredits(
      * （见 {@link ProviderCredits.fetchBalanceDetailed} 的注释）。
      * ⚠️ `?? null`：原语用 `undefined` 表达「读不到」，而本接口契约是 `null`
      * —— 两者**同义**，但 `undefined` 会被上层当成「没实现」。
-     * ⚠️ 没有 `claim`：本家**有**签到端点，但刻意不接（会消耗真实积分，用户未要求）。
+     * ## ✅ `claim`（2026-11-01 用户要求接入）
+     *
+     * `POST /api/v1/login-gift`，**请求体存在且为空串**（`body: ''` ——
+     * ⚠️ **不是省略 body**：参考实现也显式发空串，删掉它就是协议回归），
+     * 幂等（当天已领回 `granted:false`，HTTP 仍 200）。
+     * 国内站 **+200/天**、国际站 **+50/天**，两站逐字符同构 ⇒
+     * 两家共用 `claimMagicrewLoginGift`，只差传进来的 `product`。
+     *
+     * ⚠️ **不会重复扣/领**：端点本身幂等，且 `granted:false` 被映射成
+     * `already-claimed`（**不是** `claimed`）—— 后者会让用户以为每天真的加了积分。
+     * ⚠️ 原先这里写「刻意不接（会消耗真实积分）」是**误判**：`login-gift` 是
+     * **发放**登录积分，不消耗任何东西。用户 2026-11-01 明确要求接上。
      */
     magicrew: {
       fetchBalance: async (credential) => {
@@ -975,10 +1006,180 @@ export function createProviderCredits(
         return await fetchMagicrewBalance({
           jwt: parsed.jwt,
           organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+          // ⚠️ **显式传**（2026-11-01 三审）：原靠 `?? MAGICREW` 缺省，而国际站
+          //    条目显式传 ⇒ 两条腿不对称，后人照抄国内条目到新站就会静默打错 host。
+          product: MAGICREW,
         }) ?? null
       },
+      claim: async (credential) => {
+        const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
+        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) {
+          return { kind: 'failed', code: -1, message: '账号未登录（缺少 JWT），请重新登录' }
+        }
+        return await claimMagicrewLoginGift({
+          jwt: parsed.jwt,
+          organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+          product: MAGICREW,
+        })
+      },
+      /**
+       * ⚠️ `precheckStatus: false` —— 本家**没有**与 `CheckinStatus` 同构的
+       * 状态端点（`login-gift` 的响应只在调用时才知道今天领没领）。
+       * 置 `true` 会让运行时先去调 `fetchStatus` 拿幂等判据，而它不存在
+       * ⇒ 每次签到都先报一条「未实现状态查询」的错（见 `claim-runtime-parity.spec.ts`）。
+       */
       precheckStatus: false,
-      claimUnavailableReason: '超级麦吉暂不支持每日签到（本插件未接该端点）',
+    },
+
+    /**
+     * **MagiCrew 国际站**（`magicrewintl`，2026-11-01 接入）。
+     *
+     * 与国内版**共用全部实现**，只有 `product` 常量不同（判据与理由见
+     * `src/magicrew-product.ts` 的 `MAGICREW_INTL` 注释）。
+     *
+     * ⚠️ 两站必须**各自登记一项**：`creditsOf` 按 provider id 取值，
+     * 漏了 `magicrewintl` 的症状是「只登国际站的用户没有一键签到按钮」。
+     * ⚠️ 国际站签到的金额是 **+50/天**（国内 +200），但这个差异由**服务端**
+     * 决定，本层不做任何金额假设 —— 只如实回传上游的 `point_amount`。
+     */
+    magicrewintl: {
+      fetchBalance: async (credential) => {
+        const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
+        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) return null
+        return await fetchMagicrewBalance({
+          jwt: parsed.jwt,
+          organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+          product: MAGICREW_INTL,
+        }) ?? null
+      },
+      claim: async (credential) => {
+        const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
+        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) {
+          return { kind: 'failed', code: -1, message: '账号未登录（缺少 JWT），请重新登录' }
+        }
+        return await claimMagicrewLoginGift({
+          jwt: parsed.jwt,
+          organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
+          product: MAGICREW_INTL,
+        })
+      },
+      precheckStatus: false,
+    },
+
+    /**
+     * MonkeyCode：**本 fork 独有**（2026-11-02 用户要求接入）。
+     *
+     * ## 为什么用 `fetchBalanceDetailed` 而不是 `fetchBalance`
+     *
+     * 它有三种**用户动作完全不同**的失败：
+     * 1. **没配会话**（`session_cookie` 为空）⇒ 用户要用「浏览器登录」重新添加，
+     *    或点卡片上的「改 Key」只补 session cookie；
+     *    （⚠️ 2026-11-02 四审自查：原写「去粘贴 Cookie」——那枚 cookie
+     *    是 **HttpOnly**，`document.cookie` 读不到。）
+     * 2. **会话过期**（401/403）⇒ 用户要重新登录网页再更新 Cookie；
+     * 3. 平台改版 / 网络故障 ⇒ 什么都不用做，等修复。
+     *
+     * `fetchBalance` 的 `null` 会被共享骨架统一补一句「余额查询失败」——
+     * 前两种最关键的分流就没了（这正是 minimax 2026-10-17 那次审计的同款缺陷）。
+     *
+     * ## ⚠️ 为什么 `dailyCheckin: true` 却仍要 `precheckStatus: false`
+     *
+     * `claimMonkeycodeDailyCheckin` **内部第一步就是** `GET /wallet/checkin`
+     * 判 `checked_in`（幂等 + 省一次 50 题的 PoW）。骨架的默认预检会拿
+     * `fetchStatus` **再打一遍同一个端点** ⇒ 多一次请求、多一次会话失效的
+     * 失败面，换不到任何信息。⇒ 显式关掉，预检职责由 claim 自己承担。
+     *
+     * ## ⚠️⚠️ 为什么**刻意不登记 `fetchStatus`**
+     *
+     * 那个端点只回一个布尔 `{ checked_in }` —— 没有连续天数、没有每日奖励、
+     * 没有活动期（详见 `monkeycode-credits.ts` 的
+     * `fetchMonkeycodeCheckinStatus` 注释）。而 `CheckinStatus` 契约要求
+     * `streakDays` / `dailyCredit` / `checkinDates` 等字段存在 ⇒ 只能填 0 / 空串，
+     * 面板于是显示「连续 0 天」「每日 +0」这种**看起来像真实读数**的假数据。
+     *
+     * 这正是本表那条守卫（`credits-runtime-parity.spec.ts` 的
+     * 「fetchStatus 只登记在真有同构状态端点的渠道上」）要防的形态
+     * ⇒ 与 codearts / lobsterai / trae 同型：`credits.status` 如实回 `null`，
+     * 面板不显示签到状态行，「一键签到」按钮照常工作（幂等由 claim 自己判）。
+     */
+    monkeycode: {
+      fetchBalanceDetailed: async (credential, call) =>
+        fetchMonkeycodeBalanceDetailed(
+          credential as MonkeycodeCredential,
+          MONKEYCODE,
+          { warn: call.warn },
+        ),
+      claim: (credential, _entry, call) =>
+        claimMonkeycodeDailyCheckin(
+          credential as MonkeycodeCredential,
+          MONKEYCODE,
+          { warn: call.warn },
+        ),
+      precheckStatus: false,
+    },
+    /**
+     * MonkeyCode 国际站（2026-11-02）—— 与国内站**同一个实现**，只换 product。
+     *
+     * ⚠️ 这不是「复制一份判据」：`fetchMonkeycodeBalanceDetailed` /
+     *    `claimMonkeycodeDailyCheckin` 的第二个参数就是站点，两站共用同一套
+     *    wallet / checkin / PoW 代码（`MONKEYCODE_PRODUCTS` 是唯一真相源）。
+     * ⚠️ `precheckStatus: false` 的理由与国内站相同：上游 `wallet/checkin`
+     *    只回一个布尔，凑不出「连续 N 天」的读数字段。
+     */
+    monkeycodeintl: {
+      fetchBalanceDetailed: async (credential, call) =>
+        fetchMonkeycodeBalanceDetailed(
+          credential as MonkeycodeCredential,
+          MONKEYCODE_INTL,
+          { warn: call.warn },
+        ),
+      claim: (credential, _entry, call) =>
+        claimMonkeycodeDailyCheckin(
+          credential as MonkeycodeCredential,
+          MONKEYCODE_INTL,
+          { warn: call.warn },
+        ),
+      precheckStatus: false,
+    },
+    /**
+     * 百智云（2026-11-02 二版）—— **有积分，但要网页登录态**。
+     *
+     * 第一版把它登记成「无积分渠道」（`credits: { balance: false, … }` + 进
+     * `CREDITS_TABLE_EXEMPT`），理由是模型网关 `ai-models.app.baizhi.cloud`
+     * 除了 `/v1/models` / `/v1/messages` 全 404。那个实测没错，但结论错了：
+     * 积分在**主站** `baizhi.cloud`：
+     *
+     * - `GET /api/v1/user/wallet/balance` →
+     *   `{available_credit_cents:23505, temporary_credit_cents:9821,
+     *     permanent_credit_cents:13684, frozen_credit_cents:0,
+     *     daily_temporary_credit_claimed:true}`（单位 1/100 积分）
+     * - `GET /api/v1/user/wallet/app-credit-usage?period=month` →
+     *   `{items:[{period:'2026-11-02', app_id:22, call_count:31, credit:364.95}]}`
+     *
+     * 与用户控制台截图逐位吻合（235.05 / 98.21 / 136.84 / 364.95 / 31 次）。
+     *
+     * ⚠️ `claim` 登记（2026-11-03 真机取证）：每日临时积分领取
+     *    `POST /api/v1/user/wallet/daily-temporary-credit` 要先过 Cap 验证码，
+     *    但那是**纯本地 PoW**（`challenge → 解 50 题 → redeem`），不是图形码。
+     *    `claimBaizhiDailyCheckin` 复用 `src/cap-pow.ts`（与 MonkeyCode 同协议），
+     *    实测完整跑通并到账 100 积分，故不再以「400 captcha binding mismatch」拒绝。
+     * ⚠️ `precheckStatus: false`：预检已在 `claimBaizhiDailyCheckin` 内部用
+     *    钱包的 `daily_temporary_credit_claimed` 完成（与 monkeycode 同型）。
+     */
+    baizhi: {
+      fetchBalanceDetailed: async (credential, call) =>
+        fetchBaizhiBalanceDetailed(
+          credential as BaizhiCredential,
+          BAIZHI,
+          { warn: call.warn },
+        ),
+      claim: (credential, _entry, call) =>
+        claimBaizhiDailyCheckin(
+          credential as BaizhiCredential,
+          BAIZHI,
+          { warn: call.warn },
+        ),
+      precheckStatus: false,
     },
   }
 }

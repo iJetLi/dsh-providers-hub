@@ -408,11 +408,16 @@ export const AUTOCLAW: AutoclawProduct = {
  *    用它们给 `autoglm-api.autoglm.ai` 签名后，`oauth-captcha-config` 返回
  *    `code=0 SUCCESS`（与国内站同码），说明签名中间件认同一对凭据。
  *
- * ⚠️ **登录方式尚未接入**：国内走短信（`AutoclawAuth.loginWithCode`），
+ * ⚠️ **登录方式**：国内走短信（`AutoclawAuth.loginWithCode`），
  *    国际走 **Z.ai OAuth**（浏览器授权 + `POST /userapi/overseasv1/zai-oauth-login`）。
- *    OAuth 的 `client_id`（`client_EnD0QI8bLRFT8cciLp389Q`）与
- *    `state.dh = SHA256(deviceId)` 已逆向确认，`state.nh` 来源未知 ——
- *    在打通之前，本 provider **只能通过手工注入 token 使用**。
+
+ *    ✅ **已于 2026-11-02 接入**（接入前这里写的是「尚未接入、只能手工注入 token」）。
+ *    实现形态：登录页按 `product.id` 分裂 —— 国际版渲染一条
+ *    `<a href="{buildAutoclawZaiAuthUrl(redirectUri)}">` 授权链接，回调由本地服务的
+ *    `GET /auth/callback-zai` 接（`src/autoclaw-oauth.ts`）；**没有** `login.startOAuth` 分支。
+ *
+ *    `state.nh` 仍未解 —— 实现改为「**不生成 state、只透传**」：授权页生成并随回调带回，
+ *    我们原样转给换 token 端点（实测服务端不硬校验 state 内容，见 `autoclaw-oauth.ts` 文件头）。
  */
 export const AUTOCLAW_INTL: AutoclawProduct = {
   id: 'autoclawintl',

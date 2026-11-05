@@ -66,6 +66,13 @@ const STYLES = `
 .dim-jh-providerIcon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; box-shadow: 0 1px 3px rgb(31 35 41 / 7%); overflow: hidden; }
 .dim-jh-providerIcon img { display: block; width: 20px; height: 20px; border-radius: 2px; }
 .dim-jh-providerIcon.codearts { background: white; }
+/* MonkeyCode（国内站 / 国际站）：官方 logo 是透明底 + 黑绿猴子头像 ⇒ 白底容器。
+   ⚠️ 两个站点共用同一个 logoClass 之外的图标素材，但 logoClass 各自是
+      monkeycode / monkeycode —— 国际站的 logoClass 也是 monkeycode（见 registry），
+      故这里一条规则覆盖两行。 */
+.dim-jh-providerIcon.monkeycode { background: white; }
+/* 百智云：官方 favicon 是透明底 + 深灰单色图形（已去掉 dark-mode 变白）⇒ 白底容器。 */
+.dim-jh-providerIcon.baizhi { background: white; }
 .dim-jh-providerIcon.buddy { background: white; }
 .dim-jh-providerIcon.workbuddy { background: white; }
 .dim-jh-providerIcon.lobsterai { background: white; }
@@ -267,6 +274,8 @@ const STYLES = `
 .dim-jh-creditPoolSep { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 已失效额度：弱化的橙色提示，与主数值的蓝色明确区分 */
 .dim-jh-creditExpired { font-size: 11px; color: #b45309; }
+/* 用量（本月消耗）—— 三审 F🟡-8：与「已失效额度」同级但中性色，不得混成橙色警告 */
+.dim-jh-creditUsage { font-size: 11px; color: #6b7280; }
 /* 独立池（AStudio 星火积分等）：与上方三档分桶并列的事实标注。
    用中性灰而**不是** warn 橙 —— 它不是「快过期」的告警，而是「这笔钱不能混用」
    的说明；用橙色会与临期档抢注意力。 */
@@ -275,6 +284,16 @@ const STYLES = `
 /* 限额重置徽章行 */
 .dim-jh-rateLimits { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .dim-jh-rateLimitsLabel { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); }
+
+/* 账号级封禁横幅（Gitee issue IKS2MV，2026-11-01）。
+   ⚠️ 必须与「限流」视觉上**明显不同**：限流是黄字徽章（.dim-jh-ttlBadge，会自己好），
+   封禁是**整块红色**底纹（整个账号不可用、只能重新登录）—— 用户报障的核心就是
+   「8 个被封的号在面板上和好号长得一样」。
+   ⚠️ 危险色用设计变量而不是硬编码红，深色模式下才不刺眼。 */
+.dim-jh-policyBlocked { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-top: 8px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-danger, #f3b1ad); background: var(--dsw-alias-bg-danger, #fdecea); }
+.dim-jh-policyBlockedLabel { font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-danger, #b3261e); }
+.dim-jh-policyBlockedMsg { font-size: 11px; line-height: 18px; color: var(--dsw-alias-label-danger, #b3261e); opacity: 0.85; }
+.dim-jh-policyBlockedHint { flex-basis: 100%; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 
 /* 操作按钮：横向一行，右对齐。
    ⚠️ flex-wrap: nowrap 是**有意**的（2026-10-26 之前就是），理由是账号卡片
@@ -359,6 +378,32 @@ const STYLES = `
 .dim-jh-btn[data-kind="danger"] { color: #d93025; border-color: color-mix(in srgb, #d93025 35%, var(--dsw-alias-border-l2, #dfe1e5)); }
 .dim-jh-btn[data-kind="danger"]:hover:not(:disabled) { color: #b3261e; border-color: #d93025; background: rgb(217 48 37 / 6%); }
 .dim-jh-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* 「一键签到 ▾」的展开配置面板（用户 2026-10-18 要求：每天两次定时签到，
+   配置入口就放在原一键签到按钮上）。
+   ⚠️ 用**绝对定位的下拉卡**而不是居中模态框：它是按钮的附属配置，不是独立任务，
+   模态框会把用户的注意力与页面滚动静止，而这里改完还要顺手点旁边的「一键签到」。
+   ⚠️ 必须 position: relative 挂在容器上（.dim-jh-checkinWrap），否则下拉会以
+   最近的非 static 祖先定位 —— 实测会跑到页头外面去。 */
+.dim-jh-checkinWrap { position: relative; display: inline-flex; align-items: center; }
+.dim-jh-checkinMain { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.dim-jh-checkinCaret { padding: 4px 7px; border-left: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
+.dim-jh-checkinPanel { position: absolute; top: calc(100% + 6px); left: 0; z-index: 40; width: 300px; padding: 12px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 10px; background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: 0 8px 24px rgb(15 23 42 / 12%); display: flex; flex-direction: column; gap: 10px; }
+.dim-jh-checkinPanelTitle { font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); }
+.dim-jh-checkinRow { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #4e5969); }
+.dim-jh-checkinRow > label { flex: none; }
+/* 开关 + 紧邻文字的可点区（用户 2026-10-31：「按钮范围有点大啊」）。
+   ⚠️ 只包开关和文字、**不包整行**：label 的语义是「点任意位置都切换 input」，
+   包整行会让行尾空白也变成命中区。inline-flex 让可点区贴合内容。 */
+.dim-jh-checkinToggle { flex: none; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.dim-jh-checkinTime { width: 92px; padding: 4px 8px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: var(--dsw-alias-label-primary, #1f2329); font: inherit; font-size: 12px; }
+.dim-jh-checkinTime:focus { outline: none; border-color: #1677ff; box-shadow: 0 0 0 2px color-mix(in srgb, #1677ff 20%, transparent); }
+.dim-jh-checkinHint { font-size: 11px; line-height: 1.6; color: var(--dsw-alias-label-tertiary, #8f959e); }
+.dim-jh-checkinStatus { margin-top: 2px; padding: 6px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); font-size: 11px; line-height: 1.6; color: var(--dsw-alias-label-secondary, #4e5969); }
+/* 「还没读回来」的骨架：**固定高度、无文字**（2026-11-01 审计 P3-1）。
+   旧实现渲染一句「状态读取中…」，RPC 回来后替换成真值 ⇒ 用户看到文字闪一下
+   （原始报障）。骨架保持同样高度，替换时不产生跳动。 */
+.dim-jh-checkinStatusLoading { min-height: 34px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); opacity: 0.6; }
 
 
 /* 纯图标按钮（如「领取新手任务」的礼物图标）。

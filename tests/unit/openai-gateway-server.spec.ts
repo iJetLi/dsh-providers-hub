@@ -527,6 +527,8 @@ describe('OpenAI gateway 思考档位（翻译层与对照表）', () => {
       provider: 'trae',
       id: 'deepseek-v4.1-flash',
       name: 'Flash',
+      // issue #36：窗口只出现在 resolveModelInfo 的 context 里（listModels 被宿主重建）。
+      context: { contextWindow: 1_048_576 },
       reasoning: {
         efforts: [
           { id: 'light', name: 'Light' },
@@ -594,6 +596,7 @@ describe('OpenAI gateway 思考档位（翻译层与对照表）', () => {
     await gateway.start()
     try {
       const models = JSON.parse((await call(port, '/v1/models', { key: 'test-key' })).body)
+      expect(models.data[0].context_window).toBe(1_048_576)
       expect(models.data[0].reasoning).toEqual({
         efforts: [
           { id: 'light', name: 'Light', canonical: 'low' },

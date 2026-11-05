@@ -661,3 +661,120 @@ billing 文案**恒走 `(110/model_error)` 即 HTTP 200 + SSE 通道**；
 （不是纵深防御），M8（auth 也写冷却）只红一条纯函数用例、**零行为守卫**。
 **留给按 F-01 修法一并实现的人**（AUTH 走类别表 ⇒ 换号 + 不冷却，并加
 「第二发 `body.token`」的行为用例）。
+
+## ⚠️⚠️ 传输级失败必须换号（issue IKR5ZD，2026-10-31 修复）
+
+用户报障（2026-10-28）：「`qoder: transport error: fetch failed`；到 `api2.qoder.sh`
+的 TCP 连接 10s 超时，**重试不换 IP**，错误丢失 cause」。本地逐条取证：
+
+| 指控 | 结论 |
+|---|---|
+| 10s 连接超时 | **不是插件设的** —— undici 默认 `connectTimeout`。用保证不可达的 `192.0.2.1` 实测 `10,713ms`，错误形态 `TypeError: fetch failed` → `cause.code=UND_ERR_CONNECT_TIMEOUT`、`cause.message` 含 `attempted address: …:443, timeout: 10000ms` |
+| 重试不换 IP | **成立且更硬**：该域名有 **2 个 A 记录**（`47.57.188.188` / `8.223.13.163`），但 `dns.lookup` 默认**只回第一个**，连打 **8 次建连全部落在 `47.57.188.188`**；而适配器对 transport 错误**零换号**（`fetch` 只 1 发、池 `getAvailableAccount` 0 次），宿主又把 `TRANSPORT` 当可重试码（`DEFAULT_RETRYABLE_CODES`，`maxRetries=5`、退避 500ms→10s）⇒ **6 发全打同一条出口**，对「路由被阻断」等于零重试 |
+| 错误丢失 cause | 对象层面**不成立**（`{ cause }` 从首版就有，issue 那个版本 `e8d14c6:src/qoder-adapter.ts:1703-1704` 也带着）；但 **message 只有 `fetch failed`**，可操作信息在两级 `cause` 之下 ⇒ 用户视角成立 |
+
+### 修法（三条，`src/qoder-adapter.ts`）
+
+1. **transport 错误换号**：`sendEncrypted` 外包一层 `try/catch`，命中 `code==='TRANSPORT'`
+   就调 `switchAccountOnQuota(..., 'transport')` —— **换号 = 换出口**（每账号可配独立
+   代理，见 `618a090`「国际版 SNI 阻断下唯一出路」）。修前这条调用**一次都执行不到**。
+2. **预算 2 次**（`QODER_TRANSPORT_MAX_RETRIES`）：**只换号、不同号空转** —— 同号重连对
+   阻断路由无效，而「瞬时抖动」宿主已经用退避重试 5 次兜了；再叠一层只会把「完全离线」
+   从 10s 放大到 30s/轮。换不到号就**立即抛**。
+3. **message 带 cause 链**（`transportErrorDetail`）：沿 `cause` 取最多 4 层、去重、
+   自引用不发散，输出形如
+   `qoder: transport error: fetch failed ← UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error (attempted address: 1.2.3.4:443, timeout: 10000ms)`。
+   ⚠️ 结果过 `maskProxyPassword` 脱敏 —— 顺手把该函数从**锚定 `^`** 改成全局非锚定
+   （原来对「地址夹在句子中间」静默漏脱敏，而那正是错误文案最常见的形态）。
+
+### 三条边界（与 `minimaxFetchWithRetry` 同款）
+
+只处理传输错误（4xx/5xx 是服务端明确答复，重试只会掩盖真因）／**abort 绝不重试**／
+耗尽后抛**原错误**并保住 `cause`。
+
+⚠️ abort 的判据**只留一处**（`sendEncrypted` 的早退）：在重试循环里再判一遍是
+**不可观测的等价变异**（实测删掉它全绿 —— 因为 abort 时 `sendEncrypted` 抛的是原始
+错误、非 `TRANSPORT`，循环里上一行的码判据先 rethrow 了）。行为由「abort ⇒ 只发一发」
+的服务级用例守住。
+
+### 仍未修（如实登记）
+
+`dns.lookup` 的**单地址**行为没动：真要「换 IP」得对 `api2.qoder.sh` 取 `all:true`
+再逐地址尝试，那属于出口层改造，风险比换号大，单独一轮再定。
+`fetchFor` 的代理侧同理 —— 该域名若在某条链路上被 SNI 阻断，**给账号配代理**仍是当前
+唯一出路。
+
+### 复审修正（同日：一名审计 + 一名红队跑本分支，抓出的东西）
+
+- **P1 安全回退已修**：给 `maskProxyPassword` 去掉锚定时，第一版顺手把字符类收窄成
+  `[^:@/\s]` / `[^@/\s]`，于是 `http://a b:s3cr3t@h:1` 这种**带空白的脏值**从
+  「已脱敏」退回「明文输出」。`account-pool.ts` 的 `proxyLogText` 明写它接收
+  「备份文件原样透传的脏值」⇒ 这条影响面是真实日志。**字符类必须保持宽口径**
+  （`[^:@/]` / `[^@/]`）：**宁可多遮，不可漏遮**。
+- **P1 假绿已删**：原「换号重发」用例拿「两发 `Authorization` 不同」当判据 ——
+  COSY 载荷每次带新 `requestId`，**同一账号连发两次也必然不同** ⇒ 断言恒真，
+  连「换回同一个号」的变异都能过。改为「池返回**缺 uid** 的凭据 ⇒ 必然抛
+  `MISSING_CREDENTIAL`」——这条能真正证明用的是**池返回的那份凭据**。
+- **P2 无牙用例已换**：原「HTTP 500 不被传输级重试吞掉」没有判别力（500 被归
+  `other`，且它的 `LlmError` 在新 `try` **之外**抛，新 catch 根本看不到）。
+  改成「`fetch` 抛**非传输**错误时不得被包装成 TRANSPORT、一发即止」。
+- **P2 强化**：`transportErrorDetail` 补 `String(code)` 兜底（`code` 是 Symbol 时
+  原来会**自己抛错顶替原始错误**）与 **512 字符截断**（实测 10 万字符 cause 会原样
+  进日志/UI）；用例补上 cause 为字符串/普通对象/深链/相邻重复/2 跳自引用/超长。
+- **P2 注释说反已改**：正文里「换不到号才同号退避重试」与实际（**立即抛**）不一致。
+- **已登记的边界**：① 只覆盖**建连腿**，SSE 中途的 `sse transport error` 被
+  `classifyQoderFailure` 归 `other` ⇒ **不换号**（正文可能已吐一半，换号会重复内容，
+  刻意如此）；② transport 换号会把上一个号塞进本次请求的 `tried`，后续额度换号
+  少一个候选（非永久损失，transport 不写冷却）；③ `classifyQoderFailure` **永不**
+  返回 `'transport'`，该成员只作内部入参；④ `transportErrorDetail` 是仓内**第 7 份**
+  「沿 cause 链取信息」的实现（另有 `opencode-rpc.ts` 的 `describeFetchError`、
+  `minimax.ts`、`network-hint.ts`、`refresh*.ts`），口径重叠、有漂移风险，暂不合并。
+
+### 第二轮（红队）补记：无牙与不可观测，逐条登记
+
+| 腿 | 变异 | 现在 | 处置 |
+|---|---|---|---|
+| 限深 4 层 / 相邻去重 | 4→1 / 去掉去重 | **有牙**（已补深链、重复、2 跳自引用、Symbol code、10 万字符截断用例） | 已补 |
+| 换号后 `ensureUid` | 删掉 | **有牙**（缺 uid ⇒ `MISSING_CREDENTIAL` 用例） | 已补 |
+| 换号 = 换出口 | 把 `fetcherForCurrentAccount()` 提到循环外 | **有牙**（新增 `fetchFor` 观测用例：出口序列必须是 `['acct-A','acct-B']`） | 已补 |
+| 换后不采纳新凭据（`credential = switched.credential`） | 删该行 | **无牙、且无法观测** | **如实登记**：两份凭据的差异只在 WASM 的 `COSY` 签名内部；`machine_id: ''` 与「缺 uid」两条替代判据实测都不可区分（后者抛点在 `ensureUid`、在 switch 内部）。保留该行 + 代码评审，**不编恒真用例** |
+| `authRefreshed = false` | 删掉 | **无牙** | 只有「401→transport→401」的顺序能观测；该场景代价 > 收益，**登记**为未覆盖 |
+| `shouldRotateQoderAccount('transport')` | 改 false | **无牙（死代码）** | `classifyQoderFailure` 永不返回 `'transport'`，transport 换号是**直接调**；已把注释改成「别当承重件」 |
+| 删 `transportRetries += 1` | — | **挂死**（不是变红） | 循环全是已 resolve 的微任务 ⇒ 事件循环闹钟饿死、vitest 的 `testTimeout` **不触发**，只能靠 CI job 超时。**登记**：这行若被误删，CI 表现为「挂到超时」 |
+
+另外两条**行为**结论（都已改掉）：
+- `activeAccountId` 为 `''`/`undefined` 时（探测适配器 `currentAccountId: () => entry?.id ?? ''`），
+  换号拿不到排除通道、池可能把同一个号还回来 ⇒ 白等一个 10s。现在**直接抛**。
+- 换号期间池自己抛错（如 `pool read failed`）会顶掉原始 `TRANSPORT`、`cause` 也没了 ——
+  与「保住 cause」主旨相反。现在**只吞非 `LlmError`**（`LlmError` 是刻意的判断，如
+  `MISSING_CREDENTIAL`，必须如实报出）。
+
+## ⚠️ 多账号同机的「物理设备锁」（issue #17，2026-11-03 核对）
+
+Qoder 服务端按**设备指纹**（`Cosy-MachineToken` + `Cosy-MachineType`）限制每日领取：
+同一台机器上第一个账号领完后，其余账号的 claim 会回
+
+```json
+{ "status": "BLOCKED", "failureCode": "SAME_PERSON_ALREADY_CLAIMED" }
+```
+
+**这不是登录失效，也不是本插件的缺陷**：设备身份由 Qoder 桌面端的 UMID 生成，
+同一台机器天然只有一套；重新登录、删卡重加、换账号都**无法绕过**（服务端就是
+按设备计数）。⚠️ 仓库的 `QODER_MACHINE_TOKEN_PATH` 可以把身份指向另一份 token 文件，
+但它只用于**单测隔离/排查**（生产不会自动切换设备身份），不要用它来规避设备锁。插件现在把该 failureCode 翻成「同一设备今日已由其它 Qoder 账号领取
+（上游设备锁），换设备或明日再试」，避免用户误以为是登录坏了。
+
+⚠️ **不要**为了「让多账号都能领」而给每个账号伪造不同的 `Cosy-MachineToken` ——
+那是规避上游反滥用设备锁，既不稳定也可能违反服务条款；多账号需求应分设备。
+
+### 与 issue 里另外两条的关系（均已核对）
+
+- **`/claim` 请求体**：本仓 `claimQoderCampaign` 一直是 `body: ''`（`content-length: 0`），
+  issue 说的「必须发空串」**已经是现状**，无需改。
+- **Linux 路径**：`findRuntimeInfoExecutable` 走 `<home>/.qoder{,-cn}/.bin/umid-*/runtime-info`
+  （非 Windows 用无 `.exe` 的名字），磁盘退路是
+  `~/.config/Qoder{," CN"}/SharedClientCache/cache/machine_token.json`。issue 提到的
+  `~/.local/opt/qoder` / `~/.config/com.qoder.app.stable` 不在现有候选里；但它们是否是
+  Linux 上 UMID 的真实数据目录**尚未在 Linux 实测**，不能断言「不需要追加」——
+  若 Linux 用户拿不到身份，应先用 `QODER_RUNTIME_INFO` 指向真实可执行文件验证。若 Linux 用户仍拿不到身份，
+  应先用 `QODER_RUNTIME_INFO` 指向真实的 `runtime-info` 验证，再谈路径扩展。

@@ -57,11 +57,19 @@ describe('★ ModelScope 登录入口（2026-10-17 审计 P0）', () => {
 
   it('★ 两个 key 弹窗必须按 provider 互斥渲染（否则会同时弹出两个）', () => {
     const client = read('plugin-src/client/jet-hub.js')
-    // ⚠️ 方向性：opencode 分支要**排除** modelscope、modelscope 分支要**只认**
-    //    modelscope。两者共用一个 keyModal 状态位，漏任一侧就会同时渲染。
+    // ⚠️ 方向性：两个分支都要**只认自己那一家**。两者共用一个 keyModal 状态位，
+    //    任何一侧写成「排除别人」都会在边界情况（provider 为 undefined / 新增一家
+    //    忘了加排除）同时渲染两层遮罩。
+    //
+    //    ⚠️⚠️ 2026-11-02 三审 E🔴-2 之后 opencode 分支改成了**白名单**
+    //    （`keyModal.provider === 'opencode'`）—— 原来的「排除名单」写法让任何缺
+    //    provider 的对象都落进 opencode（百智添加失败会弹出「添加 OpenCode 账号」，
+    //    用户重填的 Key 就落错池）。所以这里断言的是**白名单**，不是排除。
     const opencodeBlock = client.slice(client.indexOf('React.createElement(OpencodeKeyModal') - 200, client.indexOf('React.createElement(OpencodeKeyModal'))
-    expect(opencodeBlock, 'opencode 弹窗分支未排除 modelscope ⇒ 两个弹窗会同时渲染')
-      .toMatch(/keyModal\s*&&\s*keyModal\.provider\s*!==\s*'modelscope'/)
+    expect(opencodeBlock, 'opencode 弹窗分支必须是白名单（只认自己的 provider）⇒ 否则缺 provider 的对象会落进来')
+      .toMatch(/keyModal\s*&&\s*keyModal\.provider\s*===\s*'opencode'/)
+    expect(opencodeBlock, 'opencode 分支不得回到「排除名单」写法')
+      .not.toMatch(/keyModal\.provider\s*!==\s*'modelscope'/)
     const msBlock = client.slice(
       client.indexOf('React.createElement(ModelscopeKeyModal') - 200,
       client.indexOf('React.createElement(ModelscopeKeyModal'),

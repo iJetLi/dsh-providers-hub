@@ -67,7 +67,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  */
 
 /** 上游到期时刻（用它证明「折算真的采信了某个值」）。 */
-const UPSTREAM_END = 1_700_000_000_009
+const UPSTREAM_END = Date.now() + 3 * 86_400_000 + 9
 
 /**
  * ⚠️ mock 必须**提到模块顶层**（`vi.mock` 是提升的）⇒ 折算链拿到的

@@ -107,6 +107,24 @@ export const REFRESH_PROVIDERS = [
   //    （`PUT /api/v1/model-gateway/tokens`，`refreshMagicrewKey` 是 refresh_token 的唯一出口），
   //    `refreshAccountCredential` 续期并回写池内 `expiresAt` ⇒ 不属 loomy / zcode 那类豁免。
   'magicrew',
+  // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：与 `magicrew` 共用同一个
+  //    `MagicrewAuth` 类与同一条续期通路（`PUT /api/v1/model-gateway/tokens`），
+  //    只是 host 不同 ⇒ 必须各占一项，漏了它国际站账号的 `account.refresh`
+  //    行为覆盖为零（与 minimaxintl 同型）。
+  'magicrewintl',
+  // ⚠️ **MonkeyCode**（`monkeycode`，2026-11-02）：与 qiniu / modelscope 同型 ——
+  //    **没有 refresh 端点**（凭据是长期静态 API Key：白泽 `sk-…` / 网关 `oma_…`，
+  //    `expires_at` 通常缺失），但 `MonkeycodeAuth.refreshAccountCredential` 仍按
+  //    统一接口做有效期对账并回写池内 `expiresAt` ⇒ **留在本表里**，
+  //    漏了它这一家的 `account.refresh` 行为覆盖就降为零。
+  'monkeycode',
+  // 百智云（2026-11-02）：`channel: true`、`rateLimit` 缺省 true。它的
+  // `refreshAccountCredential` 是**有效期对账**（静态 sk- 无续期端点），
+  // 与 qiniu / loomy 同型 —— 必须登记，否则 account.refresh 行为覆盖为零。
+  'baizhi',
+  // ⚠️ 2026-11-02 拆站：国际站是**独立部署**（独立账号池 / cookie / 网关），
+  //    `channel: true` ⇒ 必须进批量续期表，否则它的 `account.refresh` 覆盖为零。
+  'monkeycodeintl',
 ] as const
 
 /**

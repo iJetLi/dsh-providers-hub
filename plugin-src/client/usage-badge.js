@@ -12,8 +12,9 @@
  *
  * 1. 目录快照里必须有当前模型（`current.provider`）；没有就整体不渲染；
  * 2. 该 provider 必须在**能力表**里具备余额能力（`supportsCreditBalance`，
- *    12 个渠道全为真）—— 判定来自能力表而不是 `PROVIDERS.includes()`，
- *    与设置页同一真相源；
+ *    **由 `PROVIDER_REGISTRY` 派生的家数**，本注释不再写死数字 —— 2026-11-01
+ *    二审实测该处原写「12 个」而实际已是 24 个，硬编码的家数必然腐坏）——
+ *    判定来自能力表而不是 `PROVIDERS.includes()`，与设置页同一真相源；
  * 3. 其余（有没有账号、账号是否启用）由宿主返回后决定显示成「未配置启用账号」，
  *    此时宿主**不会**产生任何上游请求（账号列表为空 ⇒ 余额分支空转）。
  *
@@ -889,14 +890,20 @@ function UsageBadgeActive(props) {
    */
   const autoTitle = (() => {
     const what = '自动签到开关';
+    // ★ 2026-11-01：语义已从「每天首次启动跑一次」改成「每天两个固定时刻」
+    //   （默认 10:05 / 21:00，用户可改）。文案必须跟着改 —— 旧文案会让人以为
+    //   「今天启动过一次就够了」，而实际上 21:00 那轮还没跑。
+    const slots = Array.isArray(auto?.times) && auto.times.length === 2
+      ? auto.times.join(' / ')
+      : '设定时刻';
     if (auto === undefined) return `${what}：状态读取中…`;
     if (auto.enabled !== true) {
-      return `${what}（当前：关闭）—— 点击开启后，每天首次启动 DSH 时会自动为全部渠道签到一次`;
+      return `${what}（当前：关闭）—— 点击开启后，每天 ${slots} 会自动为全部渠道签到`;
     }
     if (auto.running === true) return `${what}（当前：开启，正在执行）—— 串行遍历有账号的渠道，请稍候`;
     const last = auto.lastResult === '' ? '' : `；上次：${auto.lastResult}`;
-    if (auto.ranToday === true) return `${what}（当前：开启，今天已完成）${last} —— 点击关闭`;
-    return `${what}（当前：开启，今天尚未执行）—— 每天首次启动 DSH 时自动签到${last}；点击关闭`;
+    if (auto.ranToday === true) return `${what}（当前：开启，今天已跑过；每天 ${slots}）${last} —— 点击关闭`;
+    return `${what}（当前：开启，今天尚未执行）—— 每天 ${slots} 自动签到${last}；点击关闭`;
   })();
   const autoState = auto === undefined || auto.enabled !== true
     ? 'off'
@@ -1035,6 +1042,12 @@ function UsageBadgeActive(props) {
             //   与 `jet-hub.js` 同因（2026-10-05 复审实测），详见该处注释。
             const amount = formatClaimGains(byUnit);
             if (amount !== null) bits.push(amount);
+            else {
+              // ⚠️ 与 `jet-hub.js` 同因（2026-11-03 合并审计 P1）：全零时
+              //    `formatClaimGains` 返回 `null`，跳过会让本渠道 `bits` 为空 ⇒
+              //    拼出「无账号」，而用户刚签到成功（MonkeyCode 不回奖励金额）。
+              bits.push(`${summary.claimed} 个签到成功`);
+            }
           }
           if (summary.alreadyClaimed > 0) bits.push(`${summary.alreadyClaimed} 个今日已领`);
           if (summary.inactive > 0) bits.push(`${summary.inactive} 个暂无活动`);
@@ -1574,11 +1587,14 @@ function UsageBadgeActive(props) {
           type: 'button',
           className: 'dim-jh-badgeAction',
           disabled: claiming !== null,
-          // ⚠️ 渠道数是**从能力表数出来的快照**（`registry.credits.dailyCheckin === true`
-          // 的家数）—— 加一个支持签到的渠道就必须改这里。
-          // 2026-10-16 合并审计发现：加 `minimaxintl` 后能力表已 9 → **10**，
-          // 而此处仍写 9（**零守卫**：全仓没有断言这个数字的用例）。
-          title: `串行签到全部支持签到的渠道（10 个；WorkBuddy 国际版 / Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天首次启动 DSH 时会自动执行一次' : ''}`,
+          // ⚠️ 渠道数**必须从能力表派生**（`registry.credits.dailyCheckin === true` 的家数）。
+          // 2026-10-16 合并审计发现「加 `minimaxintl` 后能力表已 9 → 10，此处仍写 9」
+          // 且**零守卫**（全仓没有断言这个数字的用例）。
+          // 2026-11-01 二审：该数字**又漂了 6 家**（实测已是 16 家，这里仍写 10）
+          // —— 硬编码必然腐坏，改成 `checkinProviders().length` 现算（该函数本文件已 import）。
+          // 2026-11-01 三审（本分支）：自动签到的语义已从「每天首次启动」改成「每天两个时段」，
+          // 文案必须跟着改，否则与面板「下次执行：21:00」自相矛盾。
+          title: `串行签到全部支持签到的渠道（${checkinProviders().length} 个；WorkBuddy 国际版 / Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻自动执行' : ''}`,
           onClick: () => { void onClaimAll(); },
         }, allBusy
           ? (claimProgress === null ? '签到中…' : `签到中 ${claimProgress.done}/${claimProgress.total}…`)

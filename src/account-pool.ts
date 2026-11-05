@@ -5,7 +5,7 @@ import type { BuddyProduct } from './product.js'
 import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizeProviderClosed, withAllowed, withoutAllowed } from './jet-hub-store.js'
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, ProviderClosedMap } from './jet-hub-store.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
-import type { PermanentLockStore } from './permanent-lock-store.js'
+import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
 import { maskProxyPassword } from './proxy-mask.js'
 // ⚠️ `model-queue.ts` **零 import**（纯函数模块，见其模块头）⇒ 不引入环。
@@ -288,6 +288,23 @@ export function proxyLogText(value: unknown): string {
   const raw = asProxyText(value).trim()
   if (raw.length === 0) return '直连'
   return maskProxyPassword(raw)
+}
+
+/**
+ * 该账号是否**被上游策略封禁**（账号级，Gitee issue IKS2MV）。
+ *
+ * ⚠️ 判据与 `modelRateLimits` **刻意不同**：
+ * - 限流是**逐模型**的（`candidateAccounts` 按目标模型比对 `modelRateLimits[modelId]`）；
+ * - 封禁是**整个账号**的（11140 的实测语义：同一账号在 2 个模型上 200、在 4 个模型上
+ *   403/11140 —— 拦截按账号生效）。故这里**不看任何模型**，只要标记存在就排除。
+ *
+ * ⚠️ 值域走 `isValidResetAtMs`：备份文件可编辑，脏值（`'x'` / `1e308`）若被当成
+ * 真值会让账号**永久不可选**（比逐模型脏值更狠）。
+ */
+export function isPolicyBlockedAccount(
+  entry: Pick<ProviderAccountEntry, 'policyBlockedAtMs'>,
+): boolean {
+  return isValidResetAtMs(entry.policyBlockedAtMs)
 }
 
 export class AccountPool {
@@ -1635,11 +1652,77 @@ export class AccountPool {
   async setPermanentLocked(provider: string, locked: boolean): Promise<void> {
     if (provider.length === 0) return
     this.ensureLoaded()
-    const next: PermanentLockMap = { ...this.permanentLockCache }
+    /**
+     * ⚠️⚠️ **写前重读磁盘并按 provider 合并**（2026-11-01 三审实测的 D1）：
+     * 同机多 profile（desktop + web 共用一个 `$DSH_HOME`，正是本文件拆出独立
+     * 文档的既定场景）各自载入后，直接「读内存 → 改 → 整份写」会让**后写者
+     * 用自己那份陈旧内存覆盖先写者**。
+     *
+     * 实测（两个真实 node 进程）：A 锁 `magicrew`、B 锁 `magicrewintl`，后写的
+     * 一方把文件写成只剩自己那一个键 ⇒ **另一站的锁定静默消失**。而锁定消失
+     * 的后果不是显示问题，是**继续消耗永久积分，且烧掉不可撤回**。
+     *
+     * 故基线 = 磁盘现值 ∪ 本进程内存（本进程刚改的键可能还没被别的进程看到），
+     * 冲突时以**本次操作的那个 provider** 为准。
+     *
+     * ⚠️ 刻意**只解决写**、不加周期重读：让 `permanentLocked` 去 stat/读文件会
+     * 把「内存里刚改的新值」在落盘失败后被磁盘旧值覆盖（方向又反了）。
+     * 跨进程**读**的可见性仍是已知边界，见 `docs/agent-notes/protocol-wire.md`。
+     *
+     * ⚠️⚠️ **方向在四审改过一次，别改回去**（2026-11-01）：早先写的是
+     * `{ ...disk, ...memory }` —— 锁定值时域只有字面 `true`（`sanitizePermanentLocks`
+     * 只留 `true`、解锁是删键），所以那样合并恒等于**并集**：钱的方向安全
+     *（磁盘上的锁永不丢），但会**复活别的进程刚删掉的键** —— 实测：
+     * A 进程刚把 `buddy` 解锁 ⇒ 磁盘 `{}`；B 进程再锁别的 provider 时按自己那份
+     * 陈旧内存合并 ⇒ 磁盘又变回 `{ buddy: true }` ⇒ **用户解不开**。
+     *
+     * 现在的规则：**磁盘存在就以磁盘为准**（它是最新事实，能反映别的进程的解锁），
+     * 本进程内存只在「文档不存在」时兜底 —— 那时无法判断是「真的没锁」还是
+     * 「文档被删」，按「钱不可逆」的方向保留内存里的锁，绝不静默解锁。
+     */
+    const disk = this.reloadLocksFromDisk()
+    /**
+     * ⚠️⚠️ **`degraded` 时以内存为基线**（2026-11-02，PR #168 对抗审计 B3 实测）：
+     * 主文件与 `.bak` 都读不出来时，那份空表**不是事实**。旧实现只看 `disk.exists`
+     * ⇒ 用户再锁任意一家，其余几家的锁定就被这份空表覆盖，**并连同 `.bak` 一起**
+     * 写死 ⇒ 重启后 fail-open 被持久化、不可恢复（症状：永久积分照烧、无提示）。
+     */
+    const useDisk = disk.exists && disk.degraded !== true
+    const next: PermanentLockMap = useDisk ? { ...disk.locks } : { ...this.permanentLockCache }
     if (locked) next[provider] = true
     else delete next[provider]
+    /**
+     * ⚠️⚠️ **落盘失败必须回滚内存**（2026-11-02，对抗审计 B4 实测）：
+     * 旧实现先改内存再 `await persistLocks()`，一次并发写失败（`EPERM`/`ENOENT`，
+     * 两进程共用 `$DSH_HOME` 时真实存在）会让内存**领先磁盘**；用户随后再动
+     * 任意一家的锁，那条「内存有、磁盘没有」的记录就被「磁盘优先」删掉
+     * ⇒ 锁定静默失效（实测：`magicrew` 从 `true` 变 `false`）。
+     * 回滚后磁盘与内存始终一致，失败的锁定对用户是**可见的报错**而不是隐身状态。
+     */
+    const previous = this.permanentLockCache
     this.permanentLockCache = next
-    await this.persistLocks()
+    try {
+      await this.persistLocks()
+    } catch (error) {
+      this.permanentLockCache = previous
+      throw error
+    }
+  }
+
+  /**
+   * 直接读一次权威文档（不触碰内存表、不做迁移）。
+   *
+   * 存在的唯一理由是 `setPermanentLocked` 的写前合并；读失败返回空表 ——
+   * 合并语义下「读不到 = 没有别人的键可保留」，比抛错让按钮失败更合适
+   * （真正的落盘保护在 `FileLockStore`：损坏时回落 `.bak`）。
+   */
+  private reloadLocksFromDisk(): PermanentLockRead {
+    try {
+      return this.lockStore.load()
+    } catch (error) {
+      this.ctx.logger?.warn?.(`[jet-hub] 锁定表重读失败（按本进程内存处理）: ${String(error)}`)
+      return { exists: false, locks: {} }
+    }
   }
 
   /**
@@ -1704,10 +1787,11 @@ export class AccountPool {
       }
       results.push(status)
     }
-    // 稳定视图排序：可用在前、限流中沉底（Array.prototype.sort 在现代引擎是稳定的）。
+    // 稳定视图排序：可用在前、限流中与**被封禁**沉底（Array.prototype.sort 在现代引擎是稳定的）。
     const now = Date.now()
     const isLimited = (a: ProviderAccountStatus) =>
-      Object.values(a.modelRateLimits ?? {}).some(resetAtMs => resetAtMs > now)
+      isPolicyBlockedAccount(a)
+      || Object.values(a.modelRateLimits ?? {}).some(resetAtMs => resetAtMs > now)
     return results.sort((a, b) => Number(isLimited(a)) - Number(isLimited(b)))
   }
 
@@ -2179,16 +2263,23 @@ export class AccountPool {
    * @param provider - provider id（如 `zcode`）。
    * @param field - 凭据里用作身份判据的字段名（如 `user_id`）。
    * @param identity - 要比对的值（空串直接返回 `''`，调用方据空串放弃去重）。
+   * @param excludeAccountId - 可选：跳过这个账号 id。
+   *   ⚠️ **登录后判重的调用点必须传本次新建的占位 id**：新条目的凭据在查重
+   *   **之前**就已写入，不排除它会「自己匹配自己」，而本方法只返回**第一个**
+   *   匹配 ⇒ 判重是否成立取决于条目顺序（一次拖动排序就静默失效，2026-11-03
+   *   对抗审计实测：新条目被重排到前面后两条同账号卡片都保持启用）。
    * @returns 匹配到的账号 id；无匹配返回空串。
    */
   async findAccountIdByIdentityField(
     provider: string,
     field: string,
     identity: string,
+    excludeAccountId?: string,
   ): Promise<string> {
     if (identity.length === 0) return ''
     for (const entry of this.readAccounts()) {
       if (entry.provider !== provider) continue
+      if (excludeAccountId !== undefined && entry.id === excludeAccountId) continue
       const resolved = await this.resolveCredentialByRef(entry.credentialRef)
       if (resolved === undefined) continue
       const value = resolved[field]
@@ -2297,6 +2388,78 @@ export class AccountPool {
       `[jet-hub] 已清除限流标记: 账号 ${accountId} 模型 ${targets.join(', ')}（共 ${removed} 条）`,
     )
     return removed
+  }
+
+  /**
+   * 记账：该账号**被上游策略封禁**（Gitee issue IKS2MV）。
+   *
+   * 与 {@link updateModelRateLimit} 的**分工**（别合并）：
+   * - 限流 = 单个模型、会自己好、有明确重置时刻 ⇒ 写 `modelRateLimits` 那本账；
+   * - 封禁 = 整个账号、只能重新登录 / 人工解封、上游**不给时刻** ⇒ 写本方法。
+   *
+   * 调用点在 `buddy-adapter.ts` 的 `markPolicyBlockedAccount`（6 处 11140 命中）。
+   * 那里**同时**保留 30 分钟逐模型冷却 —— 那个解决「本轮别反复重撞」，
+   * 与「状态展示 / 账号级排除」是两件事（issue 作者明确要求不要动冷却）。
+   *
+   * ⚠️ `policyBlockedAtMs` 取**首次**观测时刻（幂等）：用户排查时最需要知道
+   * 「什么时候开始被封的」，反复写入会把那一刻冲掉。
+   */
+  async markAccountPolicyBlocked(accountId: string, message?: string): Promise<void> {
+    const accounts = this.readAccounts()
+    const idx = accounts.findIndex(a => a.id === accountId)
+    if (idx === -1) return
+    const current = accounts[idx]!
+    const wasBlocked = isValidResetAtMs(current.policyBlockedAtMs)
+    const trimmed = typeof message === 'string' && message.trim().length > 0 ? message.trim().slice(0, 200) : undefined
+    /**
+     * 已标记且报文未变 ⇒ **直接返回，不写盘**。
+     *
+     * ⚠️ 这是响应写放大的（对抗审计 E4 实测：同一账号连撞 3 次 11140 = **6 次落盘**，
+     * 每次事件两笔账各写一次，且第 2 次起状态根本没变）。封禁账号虽已被选号侧排除，
+     * 但「手动探活 / 多实例并发」仍可能重复命中同一条报文 —— 每次都是全量
+     * accounts 的读-改-写，没必要为「同一个事实」重复付。
+     */
+    if (wasBlocked && (trimmed === undefined || trimmed === current.policyBlockedMessage)) return
+    const atMs = wasBlocked ? current.policyBlockedAtMs : Date.now()
+    const next = [...accounts]
+    next[idx] = {
+      ...current,
+      policyBlockedAtMs: atMs,
+      ...trimmed === undefined ? {} : { policyBlockedMessage: trimmed },
+    }
+    await this.writeAccounts(next)
+    this.ctx.logger?.warn?.(
+      `[jet-hub] 账号 ${accountId} 被上游策略封禁（${message ?? '上游未给原因'}）`
+      + ' —— 已标记为「需重新登录」，面板会显示红色徽标；实测通过或手动重置后自动清除。',
+    )
+  }
+
+  /**
+   * 清除封号标记。
+   *
+   * 三个调用点（与 `ProviderAccountEntry.policyBlockedAtMs` 的注释一一对应）：
+   * 实测成功（`account.retest` 的「全部标记模型都通过」判据）、
+   * 用户手动重置（`account.reset` / `account.resetAll`）、账号删除（随条目一起没了）。
+   *
+   * ⚠️ **不含 `account.test`**：它只测一个模型（且优先挑最老的那个限流键），
+   * 判据强度不足以证明「账号没被封」（2026-11-01 对抗审计实测会洗白）。
+   *
+   * @returns 是否真的清掉了一条标记（没有标记时 `false`，调用方可据此决定要不要写日志）。
+   */
+  async clearAccountPolicyBlocked(accountId: string): Promise<boolean> {
+    const accounts = this.readAccounts()
+    const idx = accounts.findIndex(a => a.id === accountId)
+    if (idx === -1) return false
+    const current = accounts[idx]!
+    if (!isPolicyBlockedAccount(current)) return false
+    const next = [...accounts]
+    const updated = { ...current }
+    delete updated.policyBlockedAtMs
+    delete updated.policyBlockedMessage
+    next[idx] = updated
+    await this.writeAccounts(next)
+    this.ctx.logger?.info?.(`[jet-hub] 已清除账号 ${accountId} 的封禁标记（实测通过 / 手动重置）`)
+    return true
   }
 
   /**
@@ -2455,6 +2618,13 @@ export class AccountPool {
     return this.readAccounts()
       .filter(a => a.provider === provider && a.enabled)
       .filter(a => excludeAccountIds === undefined || !excludeAccountIds.has(a.id))
+      // 封禁是**账号级**：11140 判的是账号（issue IKS2MV 的实测表：11 个账号里
+      // 8 个被 11140 限制、1 个 429、2 个正常；报文语义是「账号存在异常行为」）。
+      // 故这里**不看模型**，只要标记存在就排除整个账号。
+      // ⚠️ 该判据有**两份**实现：本方法与 `credential-resolver.ts` 的 `candidatesOf`
+      //    （主请求路径走后者），改动必须同步（对抗审计 E8 实测过只改一份的后果）。
+      // 清除路径见 `clearAccountPolicyBlocked`（实测通过 / 手动重置）。
+      .filter(a => !isPolicyBlockedAccount(a))
       .filter(a => {
         // 空 modelId（未知目标模型）：无可比对的键，保持候选不变。
         if (modelId.length === 0) return true

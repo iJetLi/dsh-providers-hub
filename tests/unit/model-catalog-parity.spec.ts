@@ -61,6 +61,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { createModelCatalog, type CatalogEntry } from '../../src/model-catalog.js'
+import { toOpenAiModels } from '../../src/openai-gateway/models.js'
 import { BuddyAdapter } from '../../src/buddy-adapter.js'
 import { AccioAdapter } from '../../src/accio-adapter.js'
 import { AutoclawAdapter } from '../../src/autoclaw-adapter.js'
@@ -68,8 +69,13 @@ import { AutoclawAdapter } from '../../src/autoclaw-adapter.js'
 import { AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
 // ⚠️ **本 fork 独有**（modelscope，2026-10-16）。
 import { MagicrewAdapter } from '../../src/magicrew-adapter.js'
-import { MAGICREW_FALLBACK_CONTEXT_WINDOW } from '../../src/magicrew-product.js'
+import { MAGICREW_FALLBACK_CONTEXT_WINDOW, MAGICREW_INTL } from '../../src/magicrew-product.js'
 import { ModelscopeAdapter } from '../../src/modelscope-adapter.js'
+// ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）。
+import { MonkeycodeAdapter } from '../../src/monkeycode-adapter.js'
+import { MONKEYCODE_INTL } from '../../src/monkeycode-product.js'
+import { BaizhiAdapter } from '../../src/baizhi-adapter.js'
+import { BAIZHI } from '../../src/baizhi-product.js'
 // ⚠️ **本 fork 独有**（qiniu/七牛云，2026-10-29）。
 import { QiniuAdapter } from '../../src/qiniu-adapter.js'
 import { CodelyAdapter } from '../../src/codely-adapter.js'
@@ -185,9 +191,24 @@ describe('createModelCatalog 对拍：① 枚举字段在 listModels 上逐项�
     expect(info.id).toBe('MiniMax-M3')
     expect(info.provider).toBe('demo')
     expect(info.inputModalities).toEqual(['text', 'image'])
-    // ⚠️ `LlmModelInfo` 只有这四个字段 —— `bareName` / `contextWindow` /
-    //    `reasoning` **不得**出现在 `listModels` 的输出里（它们属于 resolveModel）。
-    expect(Object.keys(info).sort()).toEqual(['id', 'inputModalities', 'name', 'provider'])
+    // ⚠️ `bareName` / `reasoning` 仍**不得**出现在 `listModels` 的输出里
+    //（它们属于 resolveModel）；但 `contextWindow` 自 issue #36 起**必须**带出
+    //（网关 `/v1/models` 的 `context_window` 唯一来源）。
+    expect(Object.keys(info).sort()).toEqual(['contextWindow', 'id', 'inputModalities', 'name', 'provider'])
+    expect((info as { contextWindow?: number }).contextWindow).toBe(1_048_576)
+  })
+
+  it('★★ 条目没有窗口时不得凭空造一个（`contextWindow` 字段必须缺席）', async () => {
+    const catalog = makeCatalog([BUDDY_UNKNOWN_MODALITY])
+    const listed = await catalog.listModels('demo')
+    expect('contextWindow' in listed[0]!).toBe(false)
+  })
+
+  it('★★ 带窗口的目录经网关投影后 `/v1/models` 有 context_window（issue #36 全链路）', async () => {
+    const catalog = makeCatalog([LOOMY_ENTRY])
+    const listed = await catalog.listModels('demo')
+    const models = toOpenAiModels([{ provider: 'demo', models: listed as never }])
+    expect(models[0]?.context_window).toBe(1_048_576)
   })
 
   it('⚠️ 倍率名绝不能被当成裸名下发（` · x4.0` 必须留在 name 里）', async () => {
@@ -678,6 +699,19 @@ id: 'autoclaw',
         resolveCredential: async () => ({ jwt: 'J', organizationCode: 'org1' } as never),
       } as never),
     },
+    // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：`channel: true` ⇒ 必须进本表，
+    //    否则它不过本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
+    //    ⚠️ 必须显式传 `product: MAGICREW_INTL` —— 用默认值会拿国内站的
+    //    `fallbackModels` 与 host 去构造一个「看起来对、实际是另一站」的适配器
+    //    （本段只对拍跨家契约，但 product 传错会让档位/窗口的判据失去意义）。
+    {
+      id: 'magicrewintl',
+      make: () => new MagicrewAdapter({
+        ...NO_CRED,
+        product: MAGICREW_INTL,
+        resolveCredential: async () => ({ jwt: 'J', organizationCode: 'org1' } as never),
+      } as never),
+    },
     // ⚠️ Codely（Unity，2026-10-22 A6）：`channel` 已翻 true ⇒ 必须进本表，
     //    否则它不过本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
     {
@@ -714,6 +748,64 @@ id: 'autoclaw',
         //    与上面的 accio 同款是零网络的。
       } as never),
     },
+    {
+      // ⚠️ **MonkeyCode**（`monkeycode`，2026-11-02）：`channel: true` ⇒ 必须进本表，
+      //    否则它不过本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
+      // ⚠️ **不注入 `fetchRemoteModels`**：注入了就会真发网络（白泽目录端点）。
+      //    不注入时 `loadCatalogEntries` 直接回退 `MONKEYCODE_MODELS`（白泽 4 条 +
+      //    网关 9 条的合并去重表），本段因此是零网络的。
+      // ⚠️ `slots` 必须返回**至少一个**条目：`listModels` 的门控是
+      //    「`slots.length === 0` ⇒ 返回 `[]`」（空槽与「无账号」同形）。
+      //    ⚠️ 这里不得用 `sk-` 开头的字面量：`tests/unit/repo-pii-guard.spec.ts`
+      //    会把入库的 sk- 风格串判成泄漏密钥（qiniu 那条注释记过同一个坑）。
+      //    ⚠️ 也**不要**用高熵的假 key（`mc_spec_key_000000` 这类 18 位随机串
+      //    会被同一条守卫按「凭据字段名 + 高熵字面量」拦下）—— `spec-token`
+      //    这种低熵串才是这个仓库存测试夹具的惯用形态。
+      //    ⚠️ 2026-11-02 三审 F🟡-10：本处原写「凭据形状用白泽通道
+      //    （`channel: 'baizhi'`）」—— 那个字段在拆站时**已删**，留着它只能靠
+      //    外层 `as never` 掩盖（关键字法检查也就彻底发现不了真正的凭据形状漂移）。
+      //    现在只留**真实字段**。
+      id: 'monkeycode',
+      make: () => new MonkeycodeAdapter({
+        ...NO_CRED,
+        slots: async () => [{
+          accountId: 'monkeycode',
+          credential: { access_token: 'spec-token' },
+        }],
+      } as never),
+    },
+    {
+      // ⚠️ MonkeyCode 国际站（`monkeycodeintl`，2026-11-02 拆站）：与 `monkeycode`
+      //    **逐字同构** —— 同一套代码的另一部署（`proxy.monkeycode-ai.net` 对
+      //    `GET /v1/models` 同样回 405），目录同样是那 9 条内置清单。
+      //    ⚠️ 两站的模型清单**刻意各自内置一份**：镜像关系可能会漂（国际站先上/
+      //    后撤模型是运营动作），共用一份会让漂移以「另一边多了个不存在的模型」
+      //    的形式静默出现。
+      id: 'monkeycodeintl',
+      make: () => new MonkeycodeAdapter({
+        ...NO_CRED,
+        // ⚠️ 必须显式传 `product: MONKEYCODE_INTL`：适配器回填 `provider` 时读的是
+        //    `this.product.id`，漏传会默认 `MONKEYCODE` ⇒ 目录里每个模型都标成
+        //    国内站（本段「跨家目录契约」正是靠这条判据点名的）。
+        product: MONKEYCODE_INTL,
+        slots: async () => [{
+          accountId: 'monkeycodeintl',
+          credential: { access_token: 'spec-token-intl' },
+        }],
+      } as never),
+    },
+    {
+      // 百智云（`baizhi`，2026-11-02）：静态 `sk-…` 凭据、`x-api-key` 头、
+      // Anthropic Messages 协议。**不注入 `fetchRemoteModels`** ⇒ 零网络，
+      // 目录回退内置兜底表（15 条）。
+      // ⚠️ 槽形状与 MonkeyCode 不同：`{ id, apiKey }`（不是 accountId/credential）。
+      id: 'baizhi',
+      make: () => new BaizhiAdapter({
+        ...NO_CRED,
+        product: BAIZHI,
+        slots: async () => [{ id: BAIZHI.id, apiKey: 'spec-token-baizhi' }],
+      } as never),
+    },
   ]
 
   /**
@@ -741,7 +833,15 @@ id: 'autoclaw',
    * 它确实存在「未知态」（能力来源会在进程运行中拿不到），而有些家的目录是
    * 编译期表恒可用、根本不存在未知态 —— 那些**不**该加进来。
    */
-  const OMIT_UNKNOWN_MODALITIES: ReadonlySet<string> = new Set(['buddy', 'workbuddy', 'cline'])
+  const OMIT_UNKNOWN_MODALITIES: ReadonlySet<string> = new Set([
+    'buddy', 'workbuddy', 'cline',
+    // 百智云（2026-11-02）：`baizhi-messages.ts` / `baizhi-adapter.ts` 对**未知**
+    // 模型 id 刻意不声明 `unknownModelInputModalities` —— 宁可把图片当
+    // `UNSUPPORTED_CONTENT` 拒掉（真收到图时判模型在前、读字节在后），也不要
+    // 先报一个服务端可能不认的模态、让请求打到上游才 400。
+    // ⚠️ 与 buddy 系同型：这是**保守侧**的省略，不是漏配。
+    'baizhi',
+  ])
 
   /**
    * ⚠️ **只有 `cline` 与 `codearts` 对未知 id 仍声明 `reasoning`**：它们的档位
@@ -764,7 +864,7 @@ id: 'autoclaw',
    *（比「臆造档位」更实际的损失），而本家只两档、且上行前按
    * `MAGICREW_REASONING_EFFORTS` 过滤（非法值本就不会发出）。
    */
-  const DECLARE_UNKNOWN_REASONING: ReadonlySet<string> = new Set(['cline', 'codearts', 'magicrew'])
+  const DECLARE_UNKNOWN_REASONING: ReadonlySet<string> = new Set(['cline', 'codearts', 'magicrew', 'magicrewintl'])
 
   it('⚠️ 表的家数 == 全部对外注册的 LLM provider（漏一家 ⇒ 它不过本段任何断言）', async () => {
     // ⚠️ 判据来自 **PROVIDER_REGISTRY**（唯一的 provider 真源），不手抄。
@@ -782,7 +882,12 @@ id: 'autoclaw',
     expect(CASES.map(c => c.id).sort()).toEqual(channels)
     // ⚠️ 2026-10-22（A6）：codely 翻 `channel: true` ⇒ 进本表：21 → 22。
     // ⚠️ 2026-10-29 **本 fork** 并入 qiniu（七牛云）+ master 并入 magicrew：22 → 23 → 24。
-    expect(CASES).toHaveLength(24)
+    // ⚠️ 2026-11-01 加 magicrewintl（MagiCrew 国际版）：24 → 25。
+    // ⚠️ 2026-11-02 加 monkeycode（MonkeyCode）：25 → 26。
+    // ⚠️ 2026-11-02 **拆站**：monkeycodeintl（MonkeyCode 国际站）是独立部署，
+    //    `channel: true` ⇒ 26 → 27。
+    // ⚠️ 2026-11-02 并入 baizhi（百智云，`channel: true`）⇒ 27 → 28。
+    expect(CASES).toHaveLength(28)
   })
 
   it('★★ `catalog` 具备 `refresh` 的家，适配器上必须**存在** `refresh` 成员（转发接线）', () => {
@@ -837,10 +942,11 @@ id: 'autoclaw',
     //       **共用适配器类**，因此同样继承了 config 回调与转发（实测由本断言自己找出）。
     expect(
       forwarding.sort(),
-      '这 15 家必须都接入后台刷新（改这条名单前请先读 be42b25 与本轮修正的注释）',
+      '这 19 家必须都接入后台刷新（改这条名单前请先读 be42b25 与本轮修正的注释）',
     ).toEqual([
-      'accio', 'astudio', 'buddy', 'codearts', 'lobsterai', 'loomy', 'magicrew',
-      'minimax', 'minimaxintl', 'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy', 'zcode',
+      'accio', 'astudio', 'baizhi', 'buddy', 'codearts', 'lobsterai', 'loomy',
+      'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'monkeycode',
+      'monkeycodeintl', 'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy', 'zcode',
     ])
   })
 
@@ -952,7 +1058,7 @@ id: 'autoclaw',
         unknown.context,
         `${id} 对未知 id 必须给具名兜底窗口（否则手填模型永远没有上下文占用条）`,
       ).toEqual({ contextWindow: CODEARTS_FALLBACK_CONTEXT_WINDOW })
-    } else if (id === 'magicrew') {
+    } else if (id === 'magicrew' || id === 'magicrewintl') {
       // ⚠️ 超级麦吉（Magicrew，2026-10-29）与 codearts **同因**：两个目录端点都
       //    **不下发** ctx ⇒ 手填/新上的模型若不给兜底窗口，上下文占用条会**整条不渲染**
       //   （`ContextMeter` 在 `contextWindow === undefined` 时 `return null`）。

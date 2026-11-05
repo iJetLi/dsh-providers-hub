@@ -325,7 +325,7 @@ export interface AutoclawLedgerEntry {
  *
  * 对照 `src/trae-credits.ts` 的同款「条目级到期」问题：那边服务端给的是
  * `quota.credits_limit`（上限）**与** `usage.credits_amount`（已用），
- * 折算 `remaining = creditsLimit - used`（`:378`）—— **两腿都在**才算得出剩余。
+ * 折算 `remaining = creditsLimit - used`（见 `trae-credits.ts` 里同一处算式）—— **两腿都在**才算得出剩余。
  * 本渠道**只有发放那一腿**，按同款写法直接取 `amount` 就是拿上限当剩余。
  *
  * ⇒ **用户一旦消耗过积分，批次和就 ≠ `total_balance`**，下方的守恒校验恒不成立
