@@ -2428,14 +2428,20 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * @param pool - 读黑名单（**在 await 之后**，理由见上）。
  * @param modelAdapters - 设置页目录来源（并集的一半）。
  * @param provider - 目标 provider。
- * @returns 可核对的目录 id 集合；`undefined` = **放弃核对**（三种情况见上）。
+ * @returns `known` = 可核对的目录 id 集合；`undefined` = **放弃核对**（三种情况见上）。
+ *          `catalog` = {@link fullCatalogIds} 的**原始并集结果**（不并黑名单）。
+ *          ⚠️ 两者**不可混用**：`known` 是 `catalog.ids` **并回黑名单**后的派生值，
+ *          拿它判「本次写入是否覆盖该家全量目录」**恒真**（等于「关一个模型就关掉
+ *          整个供应商」）—— 那个判据只能用 `catalog.ids`，见 `model.setDisabledMany`。
+ *          ⚠️ 顺带返回 `catalog` 是为了让关闭方向**不必再取一次目录**
+ *          （`fullCatalogIds` 冷缓存下真的会发远端拉取，多调一次就多一条网络依赖）。
  */
 async function readableCatalogIds(
   ctx: Context,
   pool: AccountPool,
   modelAdapters: Readonly<Record<string, ModelCatalogSource>> | undefined,
   provider: string,
-): Promise<ReadonlySet<string> | undefined> {
+): Promise<{ known: ReadonlySet<string> | undefined; catalog: FullCatalogResult }> {
   const catalog = await fullCatalogIds(ctx, modelAdapters, provider)
   // ⚠️⚠️ **目录不可用 ⇒ 整体放弃核对**（判 `complete`，它同时覆盖
   // 「远端读失败」「远端读到但为空」「**适配器自报未就绪**（`notReady`）」三种形态
@@ -2444,7 +2450,7 @@ async function readableCatalogIds(
   // 「该模型可能已被上游下架」。
   // 不得退化成「只用 listAllModels 兜底表」：那会退回第一版的大面积误报。
   // 提示层错了不如不说。
-  if (!catalog.complete) return undefined
+  if (!catalog.complete) return { known: undefined, catalog }
   const known = new Set(catalog.ids)
   // ⚠️ 并回「被关着」的 id —— **必须在 await 之后读**（理由见函数头）。
   // ⚠️ `fullCatalogIds` 的并集**已含**适配器目录里那些被关闭的 id，
@@ -2453,7 +2459,7 @@ async function readableCatalogIds(
   for (const [id, disabled] of Object.entries(pool.listDisabledModels(provider))) {
     if (disabled === true) known.add(id)
   }
-  return known
+  return { known, catalog }
 }
 
 /**
@@ -8939,7 +8945,7 @@ function registerJetHubEndpoints(
         // `listModels()` 过滤掉，写完再读就把它误判成「不在目录」。
         // ⚠️ 黑名单**不在这里取** —— `readableCatalogIds` 会在 `await` 之后
         //    自己读（理由见其注释：提前取会与写入时刻错开、导致误报「没有变更」）。
-        const known = await readableCatalogIds(ctx, pool, modelAdapters, req.provider)
+        const { known } = await readableCatalogIds(ctx, pool, modelAdapters, req.provider)
         await pool.setModelDisabled(req.provider, req.modelId, req.disabled === true)
         ctx.logger.info(
           `[jet-hub] ${req.disabled === true ? '关闭' : '打开'}模型 ${req.provider}/${req.modelId}`,
@@ -9045,9 +9051,71 @@ function registerJetHubEndpoints(
         }
         // 同单条端点：目录必须在写入**之前**读（关闭方向会让 `listModels()`
         // 过滤掉这些 id）；黑名单由 `readableCatalogIds` 在 `await` 之后自取。
-        const known = await readableCatalogIds(ctx, pool, modelAdapters, req.provider)
-        if (req.disabled) await pool.setModelsDisabled(req.provider, ids)
-        else await pool.clearModelsDisabled(req.provider, ids)
+        const { known, catalog } = await readableCatalogIds(ctx, pool, modelAdapters, req.provider)
+        if (req.disabled) {
+          /**
+           * ⚠️⚠️ **关闭方向必须补设「供应商关闭」意图**（本仓补丁，2026-11-05）。
+           *
+           * ## 缺陷形态（与 `model.setAllDisabled` 的 IKP8OF 同一个症状的**第三个入口**）
+           *
+           * 宿主的「供应商开关」与 `provider.status` 是**两套持久语义**：
+           *
+           * - 开关写的是「黑名单 + 关闭意图」两份状态；
+           * - `provider.status` 的 `closed` 判据是 `total > 0 && disabled === total`
+           *   （`total` 取自 `listAllModels()`，**含被过滤掉的 id**）。
+           *
+           * 本端点原实现只写黑名单、**从不落意图**。于是：
+           *
+           * 1. 模型列表弹窗把该家**全部**模型按「未勾选」全传进来 ⇒ 黑名单写满全量；
+           * 2. 此刻 `provider.status` 报 `closed: true`（`disabled === total`），
+           *    但 `providerClosed[provider]` 仍是 `false`；
+           * 3. 用户看到「全部已关闭」，点「打开供应商」—— 走
+           *    `clearModelsWithProviderClosed`，它按**意图**决定清哪家 ⇒ 清不到；
+           * 4. 弹窗重新打开，34 个模型仍全显示「已在 Jet Hub 关闭」、勾选数 0；
+           * 5. 再点保存 ⇒ 又全传一次。**死循环，用户没有任何出口。**
+           *
+           * 实测（2026-11-05，本机）：黑名单 29 家 / 1005 条全 `true`，而
+           * `providerClosed` 只有 2 家（那两家恰好是账号全停用、走
+           * `provider.setEnabled(false)` 关闭的）。历史备份从 830 → 920 → 1005
+           * 一路上涨，说明每保存一次就把当时目录里的全部模型加进黑名单。
+           *
+           * ## 判据：黑名单**覆盖该家全量目录** ⇒ 语义上等价于「关闭供应商」
+           *
+           * ⚠️ **必须用 `catalog.ids`（`fullCatalogIds` 的纯净并集）**，
+           *    不能用 `known` —— 后者已经把黑名单里的 id 并回去了（为了清理历史
+           *    死键），拿它判「全量覆盖」**恒真**，等于「关一个模型就关掉整个
+           *    供应商」。两者不可混用，见 `readableCatalogIds` 的 `@returns`。
+           *
+           * ⚠️ **目录不完整（`complete === false`）时不猜** —— 宁可少设一次
+           *    意图，也不能拿残缺目录把供应商误关掉（与 `setAllDisabled` 的同名
+           *    守卫同源）。`catalog.ids.length > 0` 同理防「空目录 ⇒ every 恒真」。
+           *
+           * ⚠️ **未覆盖全量时走原路径，一个字节都不变** —— 用户只是关掉了某几个
+           *    分组，那与「关闭供应商」是两件事（`setAllDisabled` 的
+           *    `closeProvider` 注释也这么写：模型级批量关闭不得顺带关供应商）。
+           *
+           * ⚠️ **黑名单与意图必须同一次落盘** —— `writeModelsWithProviderClosed`
+           *    内部合并好两份状态后只 `queueStoreSave()` 一次；分两次写会留下
+           *    「黑名单满了、意图没写」的半套状态，重启后静默复发。
+           */
+          const disabledBefore = pool.listDisabledModels(req.provider)
+          const after: Record<string, boolean> = { ...disabledBefore }
+          for (const id of ids) after[id] = true
+          const coversAll = catalog.complete
+            && catalog.ids.length > 0
+            && catalog.ids.every((id) => after[id] === true)
+          if (coversAll) {
+            await pool.writeModelsWithProviderClosed(req.provider, ids, true)
+            ctx.logger.info(
+              `[jet-hub] ${req.provider} 的黑名单已覆盖全量目录（${catalog.ids.length} 个），`
+              + '同时落「供应商关闭」意图',
+            )
+          } else {
+            await pool.setModelsDisabled(req.provider, ids)
+          }
+        } else {
+          await pool.clearModelsDisabled(req.provider, ids)
+        }
         ctx.logger.info(
           `[jet-hub] ${req.disabled ? '关闭' : '打开'} ${req.provider} 的 ${ids.length} 个模型（按分组）`,
         )
