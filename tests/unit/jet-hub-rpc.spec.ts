@@ -2476,6 +2476,110 @@ describe('model.list / model.setDisabled 端点', () => {
       expect((await call('model.setDisabledMany', { provider: '', modelIds: ['hy3'], disabled: true })).ok).toBe(false)
       expect(emitted).toEqual([])
     })
+
+    /**
+     * ⚠️⚠️ **关闭方向：黑名单覆盖该家全量目录 ⇒ 必须补设「供应商关闭」意图**。
+     *
+     * ## 缺陷形态（`model.setAllDisabled` 的 IKP8OF 是**第二个入口**，这里是第三个）
+     *
+     * 模型列表弹窗把该家**全部**模型按「未勾选」全传进来时，原实现只写黑名单、
+     * **不落意图**。而 `provider.status` 的 `closed` 判据是
+     * `total > 0 && disabled === total`（`total` 取自 `listAllModels()`，
+     * **含被过滤掉的 id**）⇒ 报 `closed: true`，但
+     * `providerClosed[provider]` 仍是 `false`。
+     *
+     * 于是「打开供应商」走 `clearModelsWithProviderClosed`，它按**意图**决定
+     * 清哪家 ⇒ 清不到 ⇒ 弹窗重新打开仍显示「全部已关闭」、勾选数 0 ⇒
+     * 再点保存又全传一次。**死循环，用户没有任何出口。**
+     *
+     * 实测（2026-11-05，本机）：黑名单 29 家 / 1005 条全 `true`，而
+     * `providerClosed` 只有 2 家（那两家恰好是账号全停用、走
+     * `provider.setEnabled(false)` 关闭的）。历史备份从 830 → 920 → 1005
+     * 一路上涨，说明每保存一次就把当时目录里的全部模型加进黑名单。
+     */
+    it('关闭方向：黑名单覆盖全量目录 ⇒ 补设「供应商关闭」意图', async () => {
+      const { call, storedValue } = registerEndpoints({
+        models: MODELS,
+        modelAdapters: { buddy: { listAllModels: () => MODELS } },
+      })
+
+      const result = await call('model.setDisabledMany', {
+        provider: 'buddy',
+        modelIds: MODELS.map((m) => m.id),
+        disabled: true,
+      })
+
+      expect(result.ok).toBe(true)
+      // 黑名单照旧写满（原有行为不变）
+      expect(storedValue().disabledModels).toEqual({
+        buddy: Object.fromEntries(MODELS.map((m) => [m.id, true])),
+      })
+      // ⚠️ 关键：意图必须一起落，否则「打开供应商」清不到
+      expect(storedValue().providerClosed).toEqual({ buddy: true })
+    })
+
+    /**
+     * ⚠️ **回归锚点：只关部分模型时**不得**落意图。**
+     *
+     * 用户只是关掉了某几个分组，那与「关闭供应商」是两件事 ——
+     * `model.setAllDisabled` 的 `closeProvider` 注释也这么立约
+     *（模型级批量关闭不得顺带关供应商，否则点一次「本组全关」会把整家关掉，
+     * 且再打开**任意一个**模型又会把供应商顺带打开，两头都与用户意图相反）。
+     */
+    it('关闭方向：只关部分模型 ⇒ **不**设意图（与「关闭供应商」是两件事）', async () => {
+      const { call, storedValue } = registerEndpoints({
+        models: MODELS,
+        modelAdapters: { buddy: { listAllModels: () => MODELS } },
+      })
+
+      await call('model.setDisabledMany', { provider: 'buddy', modelIds: ['hy3'], disabled: true })
+
+      expect(storedValue().disabledModels).toEqual({ buddy: { hy3: true } })
+      // ⚠️ 不能因为「关了一个」就把整家关掉
+      // ⚠️ 断言「没有 buddy 这一条」而不是「整个字段不存在」：
+      // `providerClosedCache` 初始是 `{}`，`queueStoreSave()` 会把整份状态写回
+      // `stored` ⇒ 空对象会落盘成 `{}`。写「不为 undefined」会把实现细节写进断言。
+      expect(storedValue().providerClosed).not.toHaveProperty('buddy')
+    })
+
+    /**
+     * ⚠️ **目录不完整（`complete === false`）时不猜** —— 与
+     * `setAllDisabled` 的同名守卫同源：宁可少设一次意图，也不能拿残缺目录
+     * 把供应商误关掉。
+     *
+     * 构造：「该家全部模型都已关闭」时 `listModels()` 会被黑名单过滤成 `[]`
+     * ⇒ `complete === false`（`complete` 的定义是「远端读到且**非空**」）。
+     * 此时适配器兜底表里仍有那几个 id，拿它判「全覆盖」会**恒真**
+     * —— 那等于「整个供应商被关掉」，而用户可能只是关了几个分组。
+     *
+     * ⚠️ 这条同时也是**幂等**的回归锚点：已经全关再点一次保存，黑名单不变、
+     * 意图也不该被「重新推断」成 true（原实现此时什么都不写）。
+     */
+    it('关闭方向：目录不完整（complete=false）⇒ 不猜，不设意图', async () => {
+      const { call, storedValue } = registerEndpoints({
+        models: MODELS,
+        // 预置：该家全部模型都已关闭
+        disabledModels: { buddy: Object.fromEntries(MODELS.map((m) => [m.id, true])) },
+        modelAdapters: { buddy: { listAllModels: () => MODELS } },
+      })
+
+      const result = await call('model.setDisabledMany', {
+        provider: 'buddy',
+        modelIds: MODELS.map((m) => m.id),
+        disabled: true,
+      })
+
+      expect(result.ok).toBe(true)
+      // 黑名单保持原样
+      expect(storedValue().disabledModels).toEqual({
+        buddy: Object.fromEntries(MODELS.map((m) => [m.id, true])),
+      })
+      // ⚠️ 目录不完整 ⇒ 不拿兜底表推断意图
+      // ⚠️ 断言「没有 buddy 这一条」而不是「整个字段不存在」：
+      // `providerClosedCache` 初始是 `{}`，`queueStoreSave()` 会把整份状态写回
+      // `stored` ⇒ 空对象会落盘成 `{}`。写「不为 undefined」会把实现细节写进断言。
+      expect(storedValue().providerClosed).not.toHaveProperty('buddy')
+    })
   })
 
   /**
