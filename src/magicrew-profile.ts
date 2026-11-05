@@ -100,6 +100,9 @@ export async function fetchMagicrewProfile(params: {
     accept: 'application/json',
     'user-agent': USER_AGENT,
     origin: product.webOrigin,
+    // ⚠️⚠️ `referer` 缺了**恒 403 空 body**（2026-11-04 真机二分实测：同一套头只差
+    //    这一条，本端点 403 ⇄ 200）。这正是「昵称恒回落 displayName」的真因。
+    referer: `${product.webOrigin}/`,
   }
   // ⚠️ 两个头**都要**：`organization-code` 有值时必须带（实测缺了读不到本账号资料）。
   if (params.organizationCode.length > 0) headers['organization-code'] = params.organizationCode

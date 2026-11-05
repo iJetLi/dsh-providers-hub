@@ -633,3 +633,99 @@ officeace / astudio / autoclaw / autoclawintl / magicrew / magicrewintl）。这
 
 ⚠️ **教训**：文档里的**绝对行号**在多人/多 agent 并发编辑时必然腐坏，且腐坏后**没有任何守卫能发现**
 （`check-refs.cjs` 只验路径存在、不验行号）。本批之后 magicrew 相关章节一律用**符号锚 + 函数名**。
+
+## ⚠️⚠️ 「加不上账号」的三条腿与 2026-11-05 审计返工
+
+报障现象：点「新建账号」→ 一条都落不了库；即使加进去，昵称恒回落 `displayName`、
+gateway key 恒签发失败。三条**互相独立**的腿同时断（这才是它难查的原因）：
+
+### ① 磁盘腿：`.ldb` 是 **SSTable + Snappy 压缩块**，不能按 latin1 直读
+
+Chromium 把 localStorage 落成 `Local Storage/leveldb/*.ldb`：记录先做**前缀压缩**，
+data block 再整体 **Snappy** 压缩。旧实现 `readFileSync().toString('latin1')` 直接扫文本
+⇒ 原始字节里 `"key":"authorization"` **0 命中**（本机 Edge 5 个 `.ldb` 实测），
+而单测 fixture 是裸文本 `.log` ⇒ **测试全绿、真机全废**。
+
+- 读取器：`src/leveldb-sstable.ts`（footer 48B / magic `57 fb 80 8b 24 75 47 db` /
+  index block / restart 数组 / 5B trailer 的压缩位；Snappy 的 literal + copy1/2/4 +
+  **重叠 copy 逐字节前向复制**；value 的 `0x00`=UTF-16LE / `0x01`=Latin-1 头）。
+- 接线：`src/magicrew-local-browser.ts` 的 `leveldbTextForFile` —— `.ldb` **与 `.sst`**
+  走解码，其余（`.log` WAL 未压缩）仍按 latin1 读。
+- ⚠️ **`Buffer.alloc(expected)` 必须先判上限**（`MAX_DECOMPRESSED_BLOCK_BYTES = 8 MiB`）：
+  Snappy 头的 varint 是**攻击者/损坏文件可控**的，5 个字节就能声明 `2^31`
+  ⇒ 旧实现先分配 **2 GiB** 再抛「产出与声明不符」（内存已经付出）。损坏的 `.ldb`
+  是真实会发生的（浏览器崩溃 / 断电 / 并发压实）。上限取 8 MiB 的依据：本机 5 个
+  真实 Edge `.ldb` 的**最大块 39 846 B**（p50 5 172 B）⇒ 8 MiB 已是最大真实块的
+  ~200 倍；再宽只会放大「合法但恶意」块的堆占用（100k 条 ≈ 34 MiB heap，358 B/条）。
+- ⚠️ **块内记录不得用 `out.push(...records)` 展开**：记录数到 ~12.8 万时 V8 抛
+  `RangeError: Maximum call stack size exceeded`，被 `catch` 吞成「整份 `.ldb`
+  跳过」⇒ 逐条 `push`。
+- ⚠️ **解析失败必须 warn 一次**（每个文件一次，文案带文件名与原因、**不含内容**）：
+  ⚠️ 去重**按日志出口（函数身份）分桶**，不是全局路径表 —— `magicrew` 与
+  `magicrewintl` 两个实例扫**同一批**浏览器路径，全局去重会让第二个实例永远收不到
+  （2026-11-05 审计 P2-①）。
+  ⚠️ 并且 `MagicrewAuth` 必须把出口接到 **`this.warn()`**（带 `ctx.logger?.warn?.`
+  兜底）而**不是** `this.warnImpl`（只有单测注入时才有值）—— 后者在生产里恒
+  `undefined` ⇒ 只剩 `console.warn`、宿主结构化日志收不到（**假修**，2026-11-05
+  对抗审计 P1-1）。出口引用必须**稳定**（类字段建一次），否则去重按身份失效、每
+  500ms 刷一条。
+  整条修复压在 `catch { return '' }` 上，没有日志时「解析器坏了」与「用户没登录」
+  完全同形（审计 P1-3）。**U1（单文件静默跳过）由此关闭一半**：仍然跳过，但不再是零痕迹。
+- 不校验 block CRC（有意取舍）：LevelDB 用 crc32c 挡局部损坏，我们没实现 ⇒
+  坏块可能解出**错误但形状合法**的值。若将来「读到但配错」变多，先怀疑这里。
+
+### ② CDP 腿：键名带 `MAGIC:user:` 前缀，且回退必须**逐对**
+
+真实 localStorage 键是 `MAGIC:user:authorization` / `…organizationCode` /
+`…teamshareOrganizationCode`；裸键（`authorization` 等）只在老前端/别站出现。
+
+⚠️⚠️ **回退粒度是「整套键名」而不是「单键」**：在表达式里对 `a`/`o` 各自 `||`
+会拼出 `{jwt_裸, org_前缀}` 这种**从未同时写入过**的组合 ⇒ 上游 HTTP 200 +
+`code:403`（比「读不到」难查得多）。现在表达式**只取原始值**，配对逻辑在
+`parseEvaluatedCredential`（导出、纯函数、行为级单测）：
+先试裸键那套、整套不完整再试前缀那套，两套都不完整 ⇒ `undefined`。
+`n === 0`（localStorage 为空）⇒ `undefined`（还没登完，不抛）。
+
+### ③ referer：**5 处构造点**（覆盖 8 个出站请求）**缺一不可**
+
+同一套头只差一条 `referer` 就是 403 空 body ⇄ 200 的分水岭：
+
+| 端点 | 无 referer | 有 referer |
+|---|---|---|
+| `GET /api/v1/contact/accounts/me/users` | **403 空 body** | 200 |
+| `POST /api/v1/model-gateway/tokens` | **403 空 body** | 200 |
+| `GET /api/v1/quota/points/total` / `GET /api/v1/flows/models` | 200 | 200 |
+
+值恒为 `${webOrigin}/`（尾斜杠照浏览器真实请求；**与 `origin` 同源**，API host
+`i-magic-service.*` 不是它）。覆盖点：`magicrew-auth.ts`（`magicrewHeaders`，
+`magicrewCall` 唯一出口）、`magicrew-profile.ts`、`magicrew-credits.ts`
+（`magicrewApiHeaders` → 积分/倍率/签到）、`magicrew-catalog.ts`、
+`magicrew-adapter.ts`（聊天网关，实测不校验，但同上游统一）。
+⚠️ **聊天适配器那处曾零守卫**（删掉后 6 条 referer 用例全绿）⇒ 现在
+`magicrew-referer.spec.ts` 真跑 `stream()` 断言首个请求头。
+
+### 已知边界（未修，登记）
+
+1. **跨文件窗口配对**：`\n` 只挡「正则跨文件拼接」，`credsNear` 的 2000 字节窗口
+   仍可能把文件 A 的 jwt 与文件 B 的 org 配成一对（本机 profile 未观察到真实发生）。
+2. **tombstone / 多版本：已用 sequence 去重修复（2026-11-05 返工）**
+   `removeItem` 只写 tombstone（`type=0`、无 value），旧值还在 `.ldb`；同一条
+   localStorage key 的多次写入会横跨 `.ldb`（旧）与 `.log` WAL（新）。
+   ⇒ 现在**先收集记录、再按 user key 取最大 sequence、`type===0` 即丢弃该 key**，
+   最后才渲染文本（`leveldbVisibleRecords`）：
+   - `.ldb` / `.sst`：`readSstableRecords` 拆 internal key 尾部 8 字节
+     （`seq<<8 | type`），未知 `type` 抛错（不猜）；
+   - `.log`：`readWalRecords` 解 WriteBatch（`seq(8) + count(4) + entries`，
+     `kind 1` = put / `kind 0` = delete）；**不是**合法 WAL（`LOG` / `MANIFEST-*` /
+     测试直接写的明文）时退回 latin1 原文，行为与旧版一致；
+   - 去重是**跨文件**的（两者共用同一 sequence 空间）⇒ 「先登出再登录」不再漏读、
+     「登出」不再复活旧 org。
+   ⚠️ 剩余边界：WAL 只接**整条** `FULL` 记录（分片 `FIRST/MIDDLE/LAST` 退化为
+   原文扫描，理论上会复活 tombstone）；块 CRC 仍未校验；`.log` 与 `.ldb` 的
+   sequence 若是不同 DB（理论上不会）会互相覆盖。
+3. **奇数长度 UTF-16 value** 会被 `toString('utf16le')` 静默丢最后一字节（只影响
+   `userInfo` 这类展示值，不影响凭据）。
+4. **`.ldb` data block 存的是 internal key**（user key + 8 字节 trailer）。当前正则
+   容忍它；将来若改精确 key 比较，**必须先剥这 8 字节**。
+5. **性能**：本机 114 KiB / 707 条 ⇒ `leveldbTextFor` ~4 ms、`readMagicrewLocalCreds`
+   7–15 ms；按 928 KiB 外推 ~60–120 ms/次 × 每 root × 每 hostname。未做 mtime 缓存。
