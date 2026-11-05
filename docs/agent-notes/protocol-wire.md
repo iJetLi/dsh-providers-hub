@@ -2866,7 +2866,7 @@ e2e：`tests/e2e/image-burst-cross-provider.e2e.spec.ts`（跨家探测 + 腾讯
 ```
 
 **为什么「更新插件」是触发器**：`provider.status.closed` 是**每次现算**的
-`(目录条数 > 0) && (黑名单命中数 === 目录条数)`（`src/jet-hub-rpc.ts:9352`）。
+`(目录条数 > 0) && (黑名单命中数 === 目录条数)`（`src/jet-hub-rpc.ts:9379`）。
 目录一变（重载后缓存清空重新拉、上游新增模型、兜底表随 `lib/` 更新）等式就不成立。
 **「关闭意图」是唯一与目录快照无关的判据**（`closedByIntent` 腿），所以它一被删，
 状态就必然随更新漂移。
@@ -2876,7 +2876,7 @@ e2e：`tests/e2e/image-burst-cross-provider.e2e.spec.ts`（跨家探测 + 腾讯
 | 传值 | 语义 | 使用方 |
 | --- | --- | --- |
 | `true` | 写入意图 | `provider.setEnabled(false)`（关闭供应商） |
-| `false` | **删除**意图 | 打开方向（`clearModelsWithProviderClosed` / `provider.setEnabled(true)`） |
+| `false` | **删除**意图 | **无生产调用方**（打开方向走的是独立方法 `clearModelsWithProviderClosed`，它一次落盘清黑名单 + 清意图；本方法的 `false` 态当前只有类型层与测试可达 —— 保留它是为了让三态语义完整，别据此以为「打开供应商」走这里） |
 | `'keep'` | **不动**该键 | **模型级批量关闭**（`model.setAllDisabled` 两条分支） |
 
 `'keep'` 分支连 `providerClosedCache` 的浅拷贝都不做（让「不动」可验证，而不是
@@ -2890,6 +2890,11 @@ e2e：`tests/e2e/image-burst-cross-provider.e2e.spec.ts`（跨家探测 + 腾讯
 | 目录不完整分支同样不得删意图 | 同上 | 该分支 `'keep'` → `false` | **RED 1** |
 | `keep` 不得改动意图 | `ikp8of-provider-closed.spec.ts` | `if (closed !== 'keep')` → `... \|\| true` | **RED 1** |
 | `false` 仍必须删除意图（反向对照） | 同上 | `if (closed)` → `if (closed === true)` | **无牙（等价变异，如实登记）** |
+
+⚠️ 那条反向对照用例的括注原写「打开供应商依赖」，**是错的**：「打开供应商」走
+`pool.clearModelsWithProviderClosed`，**不调**本方法；生产代码当前**零调用** `false`
+（只有类型层与测试可达）。留着它是因为三态语义要完整 —— 将来真有调用方传 `false`
+时它才承重。
 
 ⚠️ **无牙那一格的成因**：外层 `if (closed !== 'keep')` 已经把 `'keep'` 挡在门外，
 内层改写只在 `true` / `false` 时生效，而这两值在两种写法下**动作完全相同**

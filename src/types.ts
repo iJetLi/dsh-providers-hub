@@ -1656,8 +1656,19 @@ export interface RpcModelSetAllDisabledRequest {
    *
    * - `true`（默认）：维持既有语义 —— 「关闭全部模型」**等价于**「关闭该供应商」
    *   （既有供应商级开关 `provider.setEnabled(false)` 走的是同一条路径）。
-   * - `false`：**只**改模型黑名单，**不**落意图 ⇒ 供应商仍「已打开」、账号仍可用、
-   *   只是这些模型从选择器里消失。
+   * - `false`：**只**改模型黑名单，**不动**供应商的关闭意图。
+   *
+   * ⚠️⚠️ **`false` 的语义是「不动」，不是「清除」**（2026-11-04 修正）：
+   * 早先的实现把 `false` 落成 `delete providerClosed[provider]`，于是「模型列表屏
+   * 点一次全关」会**静默删掉**用户此前用「关闭供应商」设下的意图 —— 等目录变长
+   * （插件更新 / 上游新增模型）派生判据失配，那家供应商就**自己变回「启用」**。
+   * 真机现场：`state.json` 里 `providerClosed` 只剩 `{accio:true}`，818 条黑名单
+   * 却对应 29 家 —— 靠「关闭供应商」关过的其它家全都不见了。
+   *
+   * ⇒ 现在传 `false` 时内部走三态的 `'keep'`（**连 `providerClosedCache` 的浅拷贝
+   * 都不做**），已有关闭意图**原样保留** ⇒ 供应商仍「已关闭」、账号仍不可用。
+   * 「清除意图」是**打开供应商**的职责，走 `clearModelsWithProviderClosed`
+   *（`provider.setEnabled(true)`），**不**由本开关承担。
    *
    * ⚠️ **缺省即 `true`**：既有调用方（`provider.setEnabled(false)` 与既有的
    * 「模型列表」屏的「关闭全部」）的语义**逐字不变**。

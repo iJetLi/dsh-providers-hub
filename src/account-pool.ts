@@ -831,9 +831,16 @@ export class AccountPool {
    * ⇒ 语义定为：**「打开任意一个模型」= 用户想让这个供应商可用** ⇒ 清除意图，
    * 之后由派生判据（黑名单是否覆盖全目录）如实反映「还剩几个关着」。
    *
-   * ⚠️ 三个打开入口（`setModelDisabled(false)` / `clearModelsDisabled` /
+   * ⚠️ **三个**打开入口（`setModelDisabled(false)` / `clearModelsDisabled` /
    * `clearDisabledModels`）都在**本类内部**调用它 —— 调用方（RPC 层）不需要
    * 记得清，这正是「收口到一个实现」的目的。
+   *
+   * ⚠️ **第四个入口刻意不走这里**：`clearModelsWithProviderClosed`（见下）必须
+   * 「清黑名单 + 清意图」**一次落盘**（Gitee issue IKP8OF —— 分两次会在两次
+   * `replace` 之间留下「黑名单空 + 意图真」，重启后该供应商的模型选择器恒空）。
+   * 所以它**内联** `delete providerClosedCache[provider]`，而不是调本方法
+   *（本方法走 `setProviderClosed` ⇒ 独立落盘）。**这不是漏收口，是刻意的**：
+   * 谁要在这条路径上「顺手统一」成分两步的写法，就会把 IKP8OF 原样挖回来。
    */
   private async clearProviderClosed(provider: string): Promise<void> {
     if (this.providerClosedCache[provider] !== true) return

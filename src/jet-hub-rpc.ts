@@ -2112,7 +2112,7 @@ export interface ModelCatalogSource {
  *
  * | 调用点 | 需求 | 对「远端那一半缺失」的动作 |
  * |---|---|---|
- * | `model.setAllDisabled` | **必须完整**（要写黑名单） | 判 `complete`：**拒绝且不落盘** |
+ * | `model.setAllDisabled` | **有新增项时必须完整**（要写黑名单） | 判 `complete`：**拒绝且不落盘**；⚠️ 例外：`closeProvider === false`（模型列表屏）且 `notReady === undefined` 时**放行**（只关可见项、传 `'keep'` 不动意图） |
  * | `provider.setEnabled` | **远端读成功即可**（要写黑名单） | 判 `remoteError`：读失败**拒绝**；读到但为空**照常关闭**；**适配器自报未就绪（`notReady`）拒绝** |
  * | `provider.status` | 只要「能否证明已关闭」 | `remoteError` 或 `notReady` ⇒ **保守报未关闭**（安全方向） |
  * | `account.test` | **尽力而为**（只要一个 id 就能测） | 用拿到的那些照常测 |
@@ -2121,7 +2121,12 @@ export interface ModelCatalogSource {
  * 前者是**供应商级**开关，「远端读到但为空」（无账号门控）时并集只剩适配器
  * 兜底表，而该供应商本来就没有账号 ⇒ 模型选择器里一条都选不到，用兜底表写黑名单
  * 不会造成「显示已关闭而模型仍可选」；若按 `complete` 拒绝，**无账号的供应商
- * 将永远无法关闭**。后者是模型级批量操作，语义上要求目录完整，维持原判据。
+ * 将永远无法关闭**。后者是模型级批量操作，语义上要求目录完整 —— **唯一例外是
+ * 「模型列表屏」**（`closeProvider: false`）：那一屏用户的意图就是「关掉这家看得见
+ * 的模型」，而屏幕上那几条恰恰来自适配器兜底表（正是并集本身），拒绝它等于
+ * 「界面列着 5 个、点全关却说没有可关闭的模型」（2026-11-04 真机报障）。
+ * ⚠️ 该例外**必须排除** `notReady`（聚合冷启动，目录只有 `auto` 一条）：那是不确定
+ * 状态，放行会写出残缺黑名单。
  * ⚠️ 两者共用 {@link fullCatalogIds}（目录来源只此一处），差异只在失败时的动作。
  */
 interface FullCatalogResult {
@@ -9111,7 +9116,7 @@ function registerJetHubEndpoints(
           : undefined
         if (req.disabled && catalog !== undefined) {
           // 关闭全部：先取全量目录，再一次性写入黑名单。
-          // ⚠️⚠️ **判据顺序是语义的一部分**，四条分支按「能否在目录不完整时
+          // ⚠️⚠️ **判据顺序是语义的一部分**，五条分支按「能否在目录不完整时
           // 安全作答」从强到弱排列（下面逐条给理由，别重排）：
           //
           // 1. **远端读失败**（超时/抛错/无 llm 服务）⇒ 拒绝且不落盘。
@@ -9660,7 +9665,7 @@ function registerJetHubEndpoints(
         broadcastCatalogChanged(ctx)
         ctx.logger.info(
           `[jet-hub] ${req.enabled ? '打开' : '关闭'}供应商 ${req.provider}：`
-          + `${req.enabled ? '清空' : '写入'} ${modelCount} 个模型、`
+          + `${req.enabled ? '清空' : '变更'} ${modelCount} 个模型、`
           + `${req.enabled ? '启用' : '停用'} ${accountCount} 个账号`,
         )
         const value: RpcProviderSetEnabledResponse = {

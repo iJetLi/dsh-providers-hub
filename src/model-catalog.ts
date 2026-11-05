@@ -614,12 +614,15 @@ export function createModelCatalog(
       // 意图判据（`providerClosedFor`）与目录快照无关，故它是唯一能覆盖
       // 「关闭之后才出现的模型」的判据。
       //
-      // ⚠️ **放在这里覆盖的是「经本骨架 `listModels` 的 13 家」**（实测：`src/` 里
-      //    有 14 个文件 `import` 本函数，但 `aggregate-adapter.ts` 只在注释里提到它、
-      //    自己实现了 `listModels`）。另 5 家**手写** `listModels`、必须各自接线：
-      //    `autoclaw`（国内+国际两实例）/ `modelscope` / `officeace` / `opencode` /
-      //    `aggregate`。⚠️ 别在这里写死家数（本仓库的家数注释已腐坏过多次）——
-      //    权威守卫是 `ikp8of-provider-closed.spec.ts` 的**逐家点名**用例。
+      // ⚠️ **放在这里覆盖的是「经本骨架 `listModels` 的渠道」—— 别在这里写死家数**
+      //    （本仓库的家数注释已腐坏过多次，2026-11-04 就又错了一轮）。有两类必须
+      //    各自接线：① 手写 `listModels` 的（`autoclaw` 国内+国际两实例 /
+      //    `modelscope` / `officeace` / `opencode` / `aggregate`）；② 其余直接
+      //    `import` 本骨架的渠道。
+      //    权威守卫是 `ikp8of-provider-closed.spec.ts` 的**派生式普查**：扫全部
+      //    `*-adapter.ts` 的 `createModelCatalog(` 调用点、要求每个都传 `accountPool`
+      //    （该用例明写「**取代**了原来那张逐家点名的硬编码表」—— 硬编码表漏一家
+      //    就静默失效，派生式普查不会）。
       //
       // ⚠️ 返回值必须是 `[]` 而不是「过滤掉已知 id」：意图为真时目录里**每一条**
       //    都该消失，而其中可能包含我们**从未见过**的 id（黑名单里没有它们）。
