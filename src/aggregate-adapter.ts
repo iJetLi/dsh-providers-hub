@@ -1148,8 +1148,14 @@ export class AggregateAdapter extends LlmAdapter {
     // ⚠️ **不得无条件补写**：
     //   - 用户从未关闭过（黑名单为空）⇒ 凭空补写会**静默关闭整个 provider**（灾难且难察觉）；
     //   - 用户只是**逐个**关了某几个模型（黑名单没覆盖上快照）⇒ 不该被升级成整 provider 关闭。
-    // ⚠️ 补写是**异步落盘**，不阻塞本次目录返回；失败只记 warn（下次推导会再试）。
-    this.maintainProviderClosedState(previousIds)
+    //
+    // ⚠️⚠️ **必须 `await`**（2026-11-05 三审并发 P2-1）。原实现是
+    // fire-and-forget（`void writeDisabled(...).catch(...)`），于是「读黑名单
+    // → 算 missing → 写黑名单」这三步与用户操作**交错**：用户在看到补写完成前
+    // 打开某个聚合模型，会被这次补写**重新关掉**（窗口秒级，且无任何提示）。
+    // 代价是目录返回晚一次写盘（`setModelsDisabled` 走池的串行队列）；
+    // 正确性优先 —— 用户报障的正是「开关状态自己变」。
+    await this.maintainProviderClosedState(previousIds)
     // ⚠️⚠️ **目录落地后必须广播**（与其余 12 家适配器的 `onCatalogLoaded` 同一口径）。
     //
     // 不广播的后果（本条修的就是它）：客户端 `ModelCatalogDirectory` 在
@@ -1213,7 +1219,7 @@ export class AggregateAdapter extends LlmAdapter {
    * @param previousIds - **上一次**推导出的全量目录（含 `auto`）——
    *   用它判断「用户关的是整个 provider」而不是逐个关了某几个模型。
    */
-  private maintainProviderClosedState(previousIds: readonly string[]): void {
+  private async maintainProviderClosedState(previousIds: readonly string[]): Promise<void> {
     // ⚠️ **防御性取值**：`listDisabledModels` 是 `AccountPool` 的方法，而单测的池桩
     //    往往只实现被测到的那几个（`disabledModelsFor` / `getAvailableAccount`…）。
     //    这里缺方法时**直接跳过**（而不是抛）—— 否则本方法会把 67 条既有用例全打红
@@ -1243,12 +1249,16 @@ export class AggregateAdapter extends LlmAdapter {
       setModelsDisabled?: (provider: string, ids: readonly string[]) => Promise<void>
     }).setModelsDisabled
     if (typeof writeDisabled !== 'function') return
-    void writeDisabled.call(this.options.accountPool, AGGREGATE_PROVIDER, missing)
-      .catch((error: unknown) => {
-        this.ctx.logger?.warn?.(
-          `[aggregate] 补写「整个 provider 已关闭」的黑名单失败（下次目录推导会再试）：${String(error)}`,
-        )
-      })
+    // ⚠️ 失败只记 warn（下次目录推导会再试），但**必须 `await`**：
+    // 不 await 时「读黑名单 → 算 missing → 写黑名单」会与用户操作交错，
+    // 把用户刚打开的模型重新关掉（2026-11-05 三审并发 P2-1）。
+    try {
+      await writeDisabled.call(this.options.accountPool, AGGREGATE_PROVIDER, missing)
+    } catch (error: unknown) {
+      this.ctx.logger?.warn?.(
+        `[aggregate] 补写「整个 provider 已关闭」的黑名单失败（下次目录推导会再试）：${String(error)}`,
+      )
+    }
   }
 
   /**
