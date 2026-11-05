@@ -27,7 +27,11 @@ import {
   startMagicrewBrowserLogin,
   type MagicrewBrowserLogin,
 } from './magicrew-browser-login.js'
-import { jwtTimes, readMagicrewLocalCreds } from './magicrew-local-browser.js'
+import {
+  jwtTimes,
+  readMagicrewLocalCreds,
+  type MagicrewLocalBrowserOptions,
+} from './magicrew-local-browser.js'
 import { fetchMagicrewProfile, type MagicrewProfile } from './magicrew-profile.js'
 import { SerialQueue } from './serial-queue.js'
 import {
@@ -281,6 +285,15 @@ async function magicrewCall(params: {
  *
  * ⚠️ `origin` **必须**带（网关会看它，缺了偶发 403）；`organization-code` 只在
  * 有值时带（国内站不强制，国际站缺了回 HTTP 500）。
+ *
+ * ⚠️⚠️ `referer` 也是**硬要求**（2026-11-04 真机二分实测，此前全仓零处下发）：
+ * 同一套头（origin / authorization / organization-code / user-agent 全在）下，
+ * 只差一条 `referer: <webOrigin>/` 就是 **403 空 body ⇄ 200** 的差别：
+ * - `GET /api/v1/contact/accounts/me/users`：无 referer **403**，有 referer **200**
+ * - `POST /api/v1/model-gateway/tokens`：无 referer **403**，有 referer **200**
+ * - `GET /api/v1/quota/points/total` 与 `GET /api/v1/flows/models`：两种都 200
+ *   ⇒ 只补 `origin` 不够，WAF 认的是 referer。漏了它的症状是「登录成功但昵称恒
+ *   回落 displayName、gateway key 恒签发失败」两条 warn，而不是明确的鉴权错误。
  */
 function magicrewHeaders(params: {
   token?: string
@@ -295,6 +308,8 @@ function magicrewHeaders(params: {
     'user-agent': params.userAgent ?? MAGICREW_USER_AGENT,
     // 网关会看 Origin，缺了偶发 403（magpie 侧记录）。
     origin: params.webOrigin,
+    // ⚠️ 尾斜杠是照浏览器真实请求抄的；WAF 按 referer 判来源，缺了直接 403 空 body。
+    referer: `${params.webOrigin}/`,
   }
   if (params.token !== undefined && params.token.length > 0) {
     headers.authorization = `Bearer ${params.token}`
@@ -648,6 +663,20 @@ export class MagicrewAuth extends Service {
   private readonly refreshOnce: ReturnType<typeof createMagicrewRefreshOnce>
   /** 每账号一份在途状态（含最新 refresh_token）。 */
   private readonly states = new Map<string, MagicrewRefreshState>()
+  /**
+   * 本机浏览器腿的日志出口（**稳定引用**，见 `readLocalBrowserCreds`）。
+   *
+   * ⚠️ 必须走 `this.warn()`（它带 `ctx.logger?.warn?.` 兜底）而**不是**
+   * `this.warnImpl`（只有单测注入时才有值）—— 用 `warnImpl` 的版本在生产里
+   * 恒 `undefined`，`log` 不注入 ⇒ 只剩 `console.warn`，宿主结构化日志收不到
+   *（2026-11-05 对抗审计 P1-1）。
+   *
+   * ⚠️ 引用必须**稳定**（类字段只建一次）：`leveldbTextForFile` 的「每文件一次」
+   * 去重按日志出口身份分桶，每次 new 一个箭头函数会让去重失效（每次轮询都报）。
+   */
+  private readonly localBrowserLog = (message: string): void => {
+    this.warn(message)
+  }
   /**
    * 登录态是否活跃。`stop()` / `logout()` 置 false，**阻止在途续期回写**。
    *
@@ -1062,7 +1091,16 @@ export class MagicrewAuth extends Service {
    * 两个都试，谁命中用谁。
    */
   private readLocalBrowserCreds(): ReturnType<typeof readMagicrewLocalCreds> {
-    const options = this.browserRoots === undefined ? {} : { roots: this.browserRoots }
+    /**
+     * ⚠️ `log` 必须**透传**（2026-11-05 返工自查）：`leveldbTextForFile` 的
+     * 「解析失败 warn 一次」若只走它自己的默认 `console.warn`，宿主注入的
+     * `warn`（`ctx.logger.warn`）就永远收不到 ⇒ 生产里是「有日志但进不了宿主
+     * 日志系统」，单测也断言不到 —— 那就是**假修**。
+     */
+    const options: MagicrewLocalBrowserOptions = {
+      ...this.browserRoots === undefined ? {} : { roots: this.browserRoots },
+      log: this.localBrowserLog,
+    }
     for (const hostname of this.localBrowserHostnames()) {
       const found = readMagicrewLocalCreds(hostname, options)
       if (found !== undefined) return found

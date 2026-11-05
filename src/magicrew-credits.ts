@@ -56,6 +56,11 @@ const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000
  * ⚠️ `organization-code` 只在非空时附 —— 国际站缺了会被上游拒绝，所以**调用方**
  * 必须保证 `organizationCode` 真的取到了（不是这里补空串）。
  *
+ * ⚠️ **`referer` 一并带上**（2026-11-04 真机二分实测）：本文件覆盖的积分/签到端点
+ * 单看并不校验它（不带也 200），但同一套 Go 服务里的
+ * `/api/v1/contact/accounts/me/users` 与 `/api/v1/model-gateway/tokens`
+ * **不带 referer 就是 403 空 body** ⇒ 头集中在一处派生，才不会漏第二回。
+ *
  * ⚠️ **形态以实测为准，别抄「HTTP 500 + 裸文本」**（2026-11-01 二审纠错）：那是
  * **聊天网关**（`/v1/*`）的旧观察且至今未定（见 `magicrew-product.ts` 的
  * `needsOrgOnGateway` 说明）；**业务 API**（本文件与签到共用的 Go 服务）缺组织码时
@@ -73,6 +78,9 @@ export function magicrewApiHeaders(params: {
     accept: 'application/json',
     'user-agent': USER_AGENT,
     origin: params.product.webOrigin,
+    // ⚠️ 与 `magicrewHeaders` / `fetchMagicrewProfile` 保持一致（漏了它，同服务的
+    //    另两个端点是 403 空 body）。
+    referer: `${params.product.webOrigin}/`,
   }
   if (params.organizationCode.length > 0) headers['organization-code'] = params.organizationCode
   return headers

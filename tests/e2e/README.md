@@ -105,6 +105,8 @@
 | `lobsterai-claim-probe.e2e.spec.ts` | `DSH_LOBSTERAI_E2E=1` + `DSH_LOBSTERAI_CLAIM_E2E_CONFIRM=yes` | 真实签到（会改动当日签到状态；**不消耗模型积分**，且重复运行幂等） |
 | `codearts-credits-probe.e2e.spec.ts` | `DSH_CODEARTS_E2E=1` | **只读**：凭据结构、**账户类型检测**（`is_credit_package`）、积分余额、活动列表。**绝不领取** |
 | `codearts-claim-probe.e2e.spec.ts` | `DSH_CODEARTS_E2E=1` + `DSH_CODEARTS_CLAIM_E2E_CONFIRM=yes` | 真实领取积分（会改动当日领取状态；**不消耗模型积分**，重复运行幂等） |
+| `zcode-identity-probe.e2e.spec.ts` | `DSH_ZCODE_E2E=1` | **ZCode 3012 的「版本 × 身份块同代」真机准入**（Issue #45）：用**生产配置**（`buildZcodeHeaders` 的门槛版本 + `buildZcodeSystemBlocks` 的 3 块 + 首轮日期块）发 1 发，断言**不是** `405 + 3012`。⚠️ 判据是「不是 3012」而不是「HTTP 200」—— 免费额度耗尽回 `200 + 1005`，那说明**准入已过**（用 `=== 200` 会把「额度用完」误报成「身份块过时」）。单测锁不住「这一对过不过上游」 |
+| `codearts-ua-probe.e2e.spec.ts` | `DSH_CODEARTS_E2E=1` | **华为 WAF 的 UA 前缀查验**（2026-11-05）：断言 chat 请求的 `user-agent` 逐字等于官方 IDE 的 `codearts/1.0.0-1147257973136832`，且上游真出流。⚠️ WAF 拒发 `deepseek-harness/` 前缀（403 `TM.00000001`）⇒ 客户端把 `AUTH` 换成「API 密钥无效」。单测锁不住「那个 UA 过不过 WAF」（上游策略），只能靠本文件。消耗 1 次极小额度 |
 | `qoder-probe.e2e.spec.ts` | `DSH_QODER_E2E=1` | **只读**：凭据结构（含 `machine_id`）、令牌对 `/api/v1/userinfo` 的有效性、静态兜底模型表。**不发模型请求、不续期** |
 | `qoder-credits-probe.e2e.spec.ts` | `DSH_QODER_E2E=1` | **只读**：**逐账号**签到状态（`dailyCredit` / `todayCheckedIn` / 活动 key），并校验**设备身份（`Cosy-MachineToken` + `Cosy-MachineType`）确实生效**。**绝不领取**。⚠️ 覆盖「多账号下第二个账号看不到可领活动」这一缺陷 —— 单测配置刻意禁用了 `runtime-info.exe`（见下「Qoder 设备身份为何只能在 e2e 里验证」），故它唯一的自动化回归就在这里 |
 | `trae-probe.e2e.spec.ts` | `DSH_TRAE_E2E=1` | **只读**：凭据结构（含 machine_id / device_id）、积分余额、签到状态、远端模型列表。**不签到、不发模型请求** |

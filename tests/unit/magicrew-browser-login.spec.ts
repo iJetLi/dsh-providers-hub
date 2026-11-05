@@ -35,6 +35,8 @@ import {
   ensureMagicrewLoginPage,
   createProfileCredentialReader,
   isBlankPageUrl,
+  CDP_CREDENTIAL_EXPRESSION,
+  parseEvaluatedCredential,
   readCredentialViaCdp,
   readCredentialViaCdpDetailed,
   startMagicrewBrowserLogin,
@@ -691,6 +693,142 @@ describe('readCredentialViaCdp（**实时**读，磁盘不落盘的真解）', (
     expect(expression).toContain("localStorage.getItem('teamshareOrganizationCode')")
     expect(expression).toContain('localStorage.length')
     expect(cdp.calls[2]?.params.returnByValue, 'evaluate 必须 returnByValue').toBe(true)
+  })
+
+  /**
+   * ⚠️⚠️ 真机取证 2026-11-04：letsmagic 网页写进 localStorage 的真实键名带
+   * `MAGIC:user:` 前缀（把本机 Edge 的 `Local Storage/leveldb/071584.ldb`
+   * 按 SSTable 解出来后，31 条 letsmagic 记录里凭据键是
+   * `MAGIC:user:authorization` / `MAGIC:user:organizationCode` /
+   * `MAGIC:user:teamshareOrganizationCode`）。
+   *
+   * 只读裸键时，用插件自己开的窗口登录 ⇒ 页面写的也是带前缀的键 ⇒
+   * **CDP 腿恒读不到**，只剩磁盘兜底硬撑；而磁盘那条腿当时又因为不解
+   * Snappy 压缩块一起失效 ⇒ 两腿全瞎、加账号 4 分钟白转。
+   *
+   * ## ⚠️⚠️ 2026-11-05 审计返工：守卫必须是**行为级**
+   *
+   * 旧用例只断言「表达式文本里出现过这几个字符串」——对抗审计实测
+   * 把表达式改成 `(false && 前缀) || 裸键`（语义完全失效）仍然**全绿**。
+   * ⇒ 现在把回退逻辑搬进 `parseEvaluatedCredential`（TS 纯函数），
+   * 直接喂 `Runtime.evaluate` 会回传的那几种 JSON 形状做真求值。
+   *
+   * 另外，回退粒度从「逐键」改成「**逐对**」：各键分别 `||` 会拼出
+   * 「裸 jwt × 前缀 org」这种从未同时写入过的组合（上游 = 200 + code:403）。
+   */
+  it('★★ 两套键名都读：裸键整套 / 前缀整套各自可用', async () => {
+    // ① 结构级（接线）：表达式必须把两套键名都取回，否则下面的行为用例测不到真路径。
+    const cdp = fakeCdp(({ method }) => {
+      if (method === 'Target.getTargets') return targetsWith(LOGIN_PAGE)
+      if (method === 'Target.attachToTarget') return { sessionId: 'SESSION-1' }
+      if (method === 'Runtime.evaluate') return loggedInEvaluate()
+      return {}
+    })
+    await readCredentialViaCdp(cdp.session, ['www.letsmagic.cn'])
+    const expression = String(cdp.calls[2]?.params.expression)
+    for (const key of ['authorization', 'organizationCode', 'teamshareOrganizationCode']) {
+      expect(expression, `缺少裸键 ${key}`).toContain(`localStorage.getItem('${key}')`)
+      expect(expression, `缺少带前缀的 ${key}`).toContain(
+        `localStorage.getItem('MAGIC:user:${key}')`,
+      )
+    }
+    expect(expression).toContain('localStorage.length')
+  })
+
+  /**
+   * ★★ 表达式本身必须**真求值**（2026-11-05 合规审计返工：P1-2 只关闭了一半）。
+   *
+   * 上一版只用 `toContain` 断言源码文本 —— 对抗审计实测把表达式改成
+   * `(false && getItem('MAGIC:user:…')) || null`（语义完全失效）仍然 **94/94 全绿**。
+   * ⇒ 这里用假 `localStorage` 把 `CDP_CREDENTIAL_EXPRESSION` 真跑一遍，
+   * 再喂给 `parseEvaluatedCredential`，钉住「表达式 → 载荷 → 凭据」整条链。
+   *
+   * ⚠️ 纯内存求值（`new Function`），**不启动任何浏览器**。
+   */
+  function evaluateExpression(storage: Record<string, string | null>): string {
+    const fake = {
+      getItem: (key: string) => (key in storage ? storage[key] : null),
+      get length() { return Object.keys(storage).length },
+    }
+    // eslint-disable-next-line no-new-func
+    return new Function('localStorage', `return ${CDP_CREDENTIAL_EXPRESSION}`)(fake) as string
+  }
+
+  it('★★ 页面表达式真求值：裸键 / 前缀 / 空串 / 混搭', () => {
+    // ① 只有裸键
+    expect(parseEvaluatedCredential(evaluateExpression({
+      authorization: JWT_LIVE, organizationCode: 'ORG-BARE',
+    }))).toEqual({ jwt: JWT_LIVE, organizationCode: 'ORG-BARE' })
+
+    // ② 只有前缀键（当前前端）
+    expect(parseEvaluatedCredential(evaluateExpression({
+      'MAGIC:user:authorization': JWT_LIVE,
+      'MAGIC:user:organizationCode': 'ORG-PREFIX',
+    }))).toEqual({ jwt: JWT_LIVE, organizationCode: 'ORG-PREFIX' })
+
+    // ③ 两套都在 ⇒ **裸键优先**（老前端兼容；交换优先级必须变红）
+    expect(parseEvaluatedCredential(evaluateExpression({
+      authorization: JWT_LIVE, organizationCode: 'ORG-BARE',
+      'MAGIC:user:authorization': JWT_LIVE, 'MAGIC:user:organizationCode': 'ORG-PREFIX',
+    }))).toEqual({ jwt: JWT_LIVE, organizationCode: 'ORG-BARE' })
+
+    // ④ 裸键残留空串 ⇒ 让位给前缀整套
+    expect(parseEvaluatedCredential(evaluateExpression({
+      authorization: '', organizationCode: '',
+      'MAGIC:user:authorization': JWT_LIVE, 'MAGIC:user:organizationCode': 'ORG-PREFIX',
+    }))).toEqual({ jwt: JWT_LIVE, organizationCode: 'ORG-PREFIX' })
+
+    // ⑤ 混搭（裸 jwt + 前缀 org，两套都不完整）⇒ undefined（不得拼出从未共存的一对）
+    expect(parseEvaluatedCredential(evaluateExpression({
+      authorization: JWT_LIVE, 'MAGIC:user:organizationCode': 'ORG-PREFIX',
+    }))).toBeUndefined()
+  })
+
+  it('★ 非对象载荷（null / 数组 / 数字 / 布尔）⇒ undefined，不得抛 TypeError', () => {
+    for (const payload of ['null', '[]', '123', 'true', '"str"']) {
+      expect(parseEvaluatedCredential(payload), payload).toBeUndefined()
+    }
+  })
+
+  it('★ 裸键整套完整 ⇒ 用裸键（老前端兼容）', () => {
+    expect(parseEvaluatedCredential(JSON.stringify({
+      a: JWT_LIVE, o: 'ORG-BARE', t: null, n: 3,
+      ao: null, oo: null, to: null,
+    }))).toEqual({ jwt: JWT_LIVE, organizationCode: 'ORG-BARE' })
+  })
+
+  it('★ 前缀整套完整（裸键全空）⇒ 用前缀', () => {
+    expect(parseEvaluatedCredential(JSON.stringify({
+      a: null, o: null, t: null, n: 3,
+      ao: JWT_LIVE, oo: 'ORG-PREFIX', to: null,
+    }))).toEqual({ jwt: JWT_LIVE, organizationCode: 'ORG-PREFIX' })
+  })
+
+  it('★ 空串等同缺失（登出残留 `""` 要让位给前缀那套）', () => {
+    expect(parseEvaluatedCredential(JSON.stringify({
+      a: '', o: '', t: '', n: 3,
+      ao: JWT_LIVE, oo: 'ORG-PREFIX', to: null,
+    }))).toEqual({ jwt: JWT_LIVE, organizationCode: 'ORG-PREFIX' })
+  })
+
+  it('★★ 不得跨套混搭：裸 jwt + 前缀 org 且没有完整套 ⇒ undefined', () => {
+    expect(parseEvaluatedCredential(JSON.stringify({
+      a: JWT_LIVE, o: null, t: null, n: 2,
+      ao: null, oo: 'ORG-PREFIX', to: null,
+    }))).toBeUndefined()
+  })
+
+  it('★ `n === 0` ⇒ 还没登完 ⇒ undefined（不抛）', () => {
+    expect(parseEvaluatedCredential(JSON.stringify({ a: null, o: null, t: null, n: 0 })))
+      .toBeUndefined()
+  })
+
+  it('★ 缺 org / jwt 形状不对 ⇒ undefined（不造假）', () => {
+    expect(parseEvaluatedCredential(JSON.stringify({ a: JWT_LIVE, o: null, t: null, n: 2 })))
+      .toBeUndefined()
+    expect(parseEvaluatedCredential(JSON.stringify({ a: 'not-a-jwt', o: 'ORG', t: null, n: 2 })))
+      .toBeUndefined()
+    expect(parseEvaluatedCredential('not json')).toBeUndefined()
   })
 
   it('★★ URL 用 **hostname** 匹配：登录后的真实形态必须命中', async () => {

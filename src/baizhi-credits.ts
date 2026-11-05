@@ -668,8 +668,30 @@ export async function claimBaizhiDailyCheckin(
       : undefined
     const claimed = readBool(record, 'claimed')
     if (claimed === false) {
-      // 预检与领取之间被别人领掉（或预检失败）⇒ 今天已经领过，不是错误。
-      return { kind: 'already-claimed', message: '今天已经领取过每日积分' }
+      /**
+       * ⚠️ `claimed:false` 的语义**不能靠猜**（2026-11-03 审计 P1）：它可能是
+       * 「今天已领过」，也可能是「上游没发放」（预检失败时会走到这里）。
+       * 唯一可靠的判据是**再读一次钱包**的 `daily_temporary_credit_claimed`：
+       * 真 ⇒ already-claimed；假 ⇒ failed（让用户看到真实失败，而不是静默
+       * 报「今天已领取」却零积分）。
+       */
+      const after = await fetchBaizhiWallet(credential, product, deps)
+      if (after.ok && after.wallet.dailyClaimed) {
+        return { kind: 'already-claimed', message: '今天已经领取过每日积分' }
+      }
+      if (!after.ok) {
+        // 复核本身失败 ⇒ 不能断言「未发放」；把不确定如实说出来，让用户刷新核对。
+        return {
+          kind: 'failed',
+          code: -1,
+          message: `领取结果无法确认（复核钱包失败：${after.error}）—— 请刷新余额核对是否到账`,
+        }
+      }
+      return {
+        kind: 'failed',
+        code: -1,
+        message: '领取接口返回 claimed=false，但钱包仍显示未领取 —— 上游未发放，请稍后重试',
+      }
     }
     if (claimed === undefined) {
       return { kind: 'failed', code: -1, message: '每日积分领取响应里没有 claimed 字段（上游形态可能已变）' }

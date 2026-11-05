@@ -2309,8 +2309,27 @@ for (const account of accounts) {              ← jet-hub-rpc.ts 的逐账号�
 无证据地整体抬版本会把这些结论一起作废。
 落地形态：`buildZcodeHeaders` 新增可选的 `appVersion` 覆盖，**只有营销请求**传它。
 
-⚠ **下限未二分**：只测了 `3.14.3` 空 / `3.16.3` 有，中间档没测。
-取值即「与用户官方客户端同版本」，**不声称 3.16.3 是最低下限**。
+⚠⚠ **下限是「逐期」的，不是固定值**（2026-11-03 用户报障「怎么领不到了」时实测）：
+
+| `X-ZCode-App-Version` | `marketing/touch` 的 `data.deliveries` |
+|---|---|
+| `3.14.3` / `3.15.0` / `3.16.0` / **`3.16.3`** / `3.17.0` | **`[]`（空）** |
+| **`3.17.1`** | `[{… plan_id:"zcode-v3-start-plan-1103", name:"ZCODE GLOBAL BUILD", grant_units:300000000 …}]` ★ |
+
+⇒ 上一期（1024）在 `3.16.3` 能拿到；1103 这期把门槛抬到了 `3.17.1`。
+**服务端按活动下发门控**，所以这个常量会随期次腐坏 ——
+下期若再抬，重新二分一次（同一账号、只改一个头、间隔 3 秒避 429）。
+症状恒定是「一键领取只回『今日暂无可领额度』，而官方客户端里有得领」。
+
+✅ **2026-11-04 真机 claim 验收（3.17.1）**：生产路径 `claimDailyFor` →
+`{kind:'claimed', credit:300000000, unit:'token'}`；当天第二次运行返回
+`already-claimed`（「今日暂无可领额度」）。探针：`tests/e2e/zcode-claim-probe.e2e.spec.ts`
+（双闸门 `DSH_ZCODE_E2E=1` + `DSH_ZCODE_E2E_CONFIRM=yes`，会真实领取）。
+⚠️ 1024 期已结束，**不再考虑它的向上兼容性**。
+
+⚠️ **推理路径不跟门控一起抬**：`buildZcodeHeaders` 的默认值走
+`ZCODE_INFERENCE_MIN_APP_VERSION`（3.16.3），营销/领取显式传 3.17.1。
+
 
 #### 3.1 ⚠️⚠️ **领取端点（claim）也受同一个门控** —— 只抬投放的版本会「看得到、领不到」
 
@@ -2861,3 +2880,85 @@ Flash 首帧通常 <1s ⇒ 单请求耗时短 ⇒ 同样间隔下单位时间内
 ⚠️ 该 spec 现在**已列进 `tsconfig.tests.json` 的 `include`**：初版不在，于是
 `typecheck:tests` 对它恒为「0 错」，而它正是「把日聚合表当账号负载表传」这种
 **形状错误**的唯一现场（纳入后立刻暴露 3 处 `TS2345`，那两条用例当时是假绿）。
+
+## ⚠️⚠️ 3012 的**版本 × 身份块同代**不变式（Issue #45，2026-11-05 真机 2×2）
+
+### 报障
+
+用户原话：官方客户端 **11-02 自动升级到 3.17.2** 后，插件（0.2.1-rc.2，11-02 11:56 安装）
+**每次请求必现** `405 + {"code":3012,"msg":"request has been blocked due to unusual activity."}`，
+诊断行显示「system 3 块 · 身份块 2632 字符(42+2590) · 日期块 有」（即**旧**身份块）。
+报障者的推断是「身份块过时」，并附了「在 `app.asar` 里 grep `You are ZCode` ⇒ 0 命中」的证据。
+
+### 结论：**版本号与身份块必须同代**，跨代即 3012
+
+真机 2×2（同 URL、同 18 个头、同 body 形状，只改 `X-ZCode-App-Version` 与身份块文本，8 发）：
+
+| `X-ZCode-App-Version` | 身份块 | 结果 |
+|---|---|---|
+| `3.16.3` | 3.16 文本（改前内置） | **200**（×3） |
+| `3.17.2` | 3.16 文本 | **405 + 3012**（×2） |
+| `3.16.3` | 3.17 文本（改后内置） | **405 + 3012**（×3） |
+| `3.17.1` / `3.17.2` | 3.17 文本 | **200**（×2） |
+
+⚠️ **交叉验证排除了「账号级风控」这条错误假设**（第一轮差点就这么收工）：
+**同一账号**换组合即可通过 ——
+`acct 0`：3.17.2 + 3.17 文本 **200** → 3.16.3 + 3.17 文本 **405**；
+`acct 2`：3.16.3 + 3.17 文本 **405** → 3.17.1 + 3.17 文本 **200**。
+⇒ 判据是**组合**，不是账号，也不是频率（连续两发间隔 1 秒同为 200）。
+
+### 为什么是「升级后必现」而不是「所有人都挂」
+
+插件发的是 `max(凭据里的 app_version, 门槛)`。**门槛**在改前是 `3.16.3`：
+
+- 存量凭据（3.14.3 登录的）⇒ 发 3.16.3 + 3.16 身份块 ⇒ **同代，200**；
+- 官方客户端升级后重新登录过的凭据（`app_version` 变 3.17.2）⇒ 发 3.17.2 +
+  3.16 身份块 ⇒ **跨代，3012**（「从未成功过一次」就是这个形态）。
+
+⇒ 报障者「身份块过时」的**方向对了一半**：文本确实变了，但**只改身份块会全员挂**
+（3.16.3 + 3.17 文本 = 405）。两处必须**同改**。
+
+### 报障者那两条证据的更正
+
+1. **`app.asar` 里 grep 不到 ≠ 官方删了身份块**：身份块在
+   `resources/glm/zcode.cjs`（V8 编译前的 JS bundle），不在 `app.asar`。
+2. 「身份块结构变了」**成立**，但 3.17.x 的变化是「小改」而不是重写：
+   - `cliPrefix`：`You are ZCode, an interactive coding agent`（42）
+     → `You are ZCode, an interactive agent`（35）；
+   - identity 首句：`You are an interactive ZCode agent that helps users with
+     software engineering tasks.` → `You are an agent working with the user
+     toward their goals, using your own judgment along the way.`；
+   - `# Harness` 每条项目符号**多一个前导空格**（`- ` → ` - `）；
+   - desktop 段（`# ZCode Desktop Context …`）**逐字未变**（1377）；
+   - 合计 `cliPrefix + stable`：**2632 → 2643**。
+
+### 修法（两处同改，缺一即全量 3012）
+
+- `src/zcode-identity.ts`：重新提取 `OFFICIAL_CLI_PREFIX`（35）与
+  `OFFICIAL_STABLE_SECTIONS[0]`（1229），`OFFICIAL_IDENTITY_CHARS = 2643`；
+- `src/zcode-upstream.ts`：`ZCODE_INFERENCE_MIN_APP_VERSION` `3.16.3` → **`3.17.1`**
+  （本机官方客户端版本，实测 200；与身份块同代）。
+
+### 守卫
+
+- 单测：`zcode.spec.ts`（cliPrefix 35 / 头版本 3.17.1）、
+  `zcode-diagnostics.spec.ts`（2643 = 35+2608）、`zcode-wire-invariants.spec.ts`
+  （真实 wire 的 `system[0].length === 35`、`system[1].length === 2608`、
+  **3012 报文里必须带「版本 3.17.1」**）。
+  变异验证：把版本常量退回 3.16.3 ⇒ **4 红**；把 cliPrefix 退回 42 字符 ⇒ **7 红**；
+  把诊断行的 `appVersion` 摘掉 ⇒ **1 红**。
+- e2e：`tests/e2e/zcode-identity-probe.e2e.spec.ts`（`pnpm test:e2e:zcode-identity`）——
+  **真机一发**，断言「不是 3012」。单测锁不住「这一对过不过上游」，只能靠它。
+  2026-11-05 通过：`HTTP 200 · 版本 3.17.1 · 身份块 2643 字符(35+2608)`。
+- 自检脚本：`scripts/verify-zcode-identity.mjs` —— 从本机官方 bundle 现提身份块，
+  与插件内置文本逐字对比并打印**第一处差异**。报障者可自证「我的客户端是不是比插件新」，
+  不必再等作者（Issue #45 的第 3 点）。
+
+### ⚠ 为什么「3012 熔断」没有做成「按账号冷却」
+
+Issue #45 第 2 点建议「连续 N 次 3012 后熔断该账号」。**不做**，因为本轮实测证明
+3012 的成因是**版本/身份块组合**（确定性、可修），把它记到账号头上会在
+「插件自己配置错」时**冤枉整个账号池**（与 qoder 那次的教训同型：
+同码多因，按最坏假设惩罚账号）。
+真正的保护是：① 把成因修对；② **把版本号打进诊断行**（本轮新增），
+下次跨代时一行就能看出。

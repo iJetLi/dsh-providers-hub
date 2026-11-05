@@ -570,3 +570,123 @@ IDE 的 32000 是**客户端默认预算**（AgentCenter 给该模型的上限�
    system 提示（为规避 APIG 60s 空闲断连）。IDE 对 `-1017` 用标准 tools 路径，
    而插件对 `-1017` **也是**标准路径（正则不匹配它）⇒ 该模型与 IDE 一致。
 4. **`user_prompt` 之外的 `thought_signature` 一类字段**：IDE 未下发，不臆造。
+
+## ⚠️⚠️ 华为 WAF 按 `User-Agent` 前缀拒发：「API 密钥无效」的真因不是凭据（2026-11-05 真机）
+
+### 报障原话
+
+> 有人反应 codearts 模型用不了，需要改 user-agent：jethub 插件 codearts 出现提示
+> **api 密钥无效**，可以把请求的 UA 改成 vscode 的就能用。
+
+### 实测结论：**UA 是唯一变量**
+
+同账号、同签名（`signRequestHuawei` 的入参逐字节相同）、同 body，只改 `User-Agent`：
+
+| `User-Agent` | 结果 |
+|---|---|
+| `deepseek-harness/0.2.1-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)`（宿主 `attributionHeaders()` 默认值） | **403 `{"error_code":"TM.00000001","error_msg":"网络繁忙，请稍后重试"}`** |
+| `deepseek-harness/0.2.1`（去掉 url 段） | **403 同一码** |
+| `deepseek-harness/0.2` / `deepseek-harness/1.0.0` / `deepseek-harness/1.2.3` | **403** |
+| `deepseek-harness`（**无** `/版本`）、`deepseek-harness-x/1.0`、`DEEPSEEK-HARNESS/1.0` | 200 |
+| `foo/1.0 deepseek-harness/2.0`（不在行首） | 200 |
+| `VSCode/1.95.3` / `Mozilla/5.0 …` / `curl/8.4.0` | 200 |
+| `claude-code/1.0.0` / `opencode/1.0.0` / `cline/3.0.0` | 200（**不是**「拦所有 AI 客户端」） |
+
+⇒ 判据是**大小写敏感的行首前缀 `deepseek-harness/`**。4 个账号全部一致，
+交替顺序 3 轮可复现（排除瞬时抖动/账号差异）。
+
+### 拒发方是 **WAF**，不是 APIG 验签
+
+403 响应头：`server: CW`、`set-cookie: HWWAFSESID=…` / `HWWAFSESTIME=…`、
+`lubanops-*`、`x-request-id: …`，body 是 WAF 的 `TM.00000001 网络繁忙`
+（**不是** APIG 的 `APIG.0301`）。
+
+⚠️ **UA 不参与 SDK-HMAC-SHA256 签名**（`signRequestHuawei` 只签
+`host` / `x-sdk-date` / `x-sdk-content-sha256` / `x-security-token` /
+`content-type` / 显式 `extraHeaders`）⇒ 覆盖它**不会**打破验签（实测改后 200）。
+
+### 症状链（为什么「API 密钥无效」极具误导性）
+
+1. WAF 403 ⇒ `httpErrorCode()` 的 `if (status === 401 || status === 403) return 'AUTH'`；
+2. 客户端把 `AUTH` 的 message **整条替换**成「API 密钥无效」
+   （`dsh-client-ui-chat/lib/client.js` 的 `"message.failure.auth": "API 密钥无效"`）
+   ⇒ 用户看到的是**假原因**，真实报文（`TM.00000001 网络繁忙`）被吞掉；
+3. 且 `isAuthError` 对 403 恒真 ⇒ 每次失败**白跑一次凭据续期**
+   （实测 `stream()` 内 `refresh()` 1 次、`fetch` 6 次）；
+   而 CodeArts 的 `refresh_token` 是**一次性轮换**的（见
+   `tests/e2e/codearts-credential.ts` 注释）⇒ 这不是无害副作用。
+
+### 修法（`src/llm-adapter.ts`）
+
+`CODEARTS_USER_AGENT = 'codearts/1.0.0-1147257973136832'`，在 chat 请求构造处
+**覆盖**宿主的 `user-agent`。取值逐字取自本机 CodeArts Agent 内核的启动参数
+（`~/.codeartsdoer/codearts-data/log/kernel_error_*.log`：
+`Args: "…AgentKernel_Vscode_….exe" "--user-agent=codearts/1.0.0-1147257973136832"`）
+⇒ 与真实客户端同形（WAF 只拒 `deepseek-harness/`，版本尾段只影响指纹相似度）。
+
+⚠️ **只改推理路径**：目录（`fetchSignedGet`）/ 积分 / 签到三条腿**不显式设置 UA**
+—— 实测 Node 的 `fetch` 会补 `user-agent: node`（本机 `http.createServer` 抓头验证），
+而 WAF 只拒 `deepseek-harness/` 前缀 ⇒ 本来就过 WAF，无需改动。这也正是「模型列表正常、一发消息就『API 密钥无效』」这一报障形态的由来。
+
+### 守卫
+
+- 单测 `tests/unit/codearts-user-agent.spec.ts`：① chat 请求 UA **逐字等于**
+  `codearts/1.0.0-1147257973136832`（**字面量**，写常量会成同义反复）；
+  ② **任何**出站请求都不得带 `deepseek-harness/` 前缀（逐请求点名）；
+  ③ 反向对照：排队状态 GET 不带 UA 也算过（判据只拦前缀）。
+  变异验证：删覆盖行 / 把常量换回宿主默认值 ⇒ 各 **2 条精确变红**。
+- e2e `tests/e2e/codearts-ua-probe.e2e.spec.ts`（`pnpm test:e2e:codearts`）：
+  真机断言「头 = 官方 IDE UA」+「上游真出流」，2026-11-05 通过。
+  ⚠️ 单测锁不住「那个 UA 过不过 WAF」（上游策略），这条只能靠 e2e。
+
+## ⚠️⚠️ 三个「非凭据问题」业务码：`TM.00000001` / `TM.00001041` / `TM.000010051`（2026-11-05）
+
+### 为什么单列（Gitee PR #175 评审 + 本仓库 UA 修复的兜底）
+
+`httpErrorCode()` 对 **401/403 恒归 `AUTH`**（铁律：先按状态码判），而客户端会把
+`AUTH` 的 message **整条替换**成「API 密钥无效」（`dsh-client-ui-chat` 的
+`message.failure.auth`）⇒ 三个**与凭据无关**的上游业务码全被说成「密钥无效」，
+用户去重登/换 token，方向全错。且 `isAuthError(403)` 恒真 ⇒ 每次失败**白跑一次**
+一次性轮换的 STS 续期。
+
+| 业务码 | 成因 | 重试有效？ | 宿主码 | 出路 |
+|---|---|---|---|---|
+| `TM.00000001` | 华为 WAF 按 UA 首 product token 拒发（**不是真的繁忙**） | **否**（同 UA 恒 403） | `PERMISSION`（不可重试） | 升级插件（UA 已覆盖官方 IDE 身份，`378ffd7`） |
+| `TM.00001041` | 账号级并发上限（实测每账号同时最多 3 个请求） | **是**（等 1~2 分钟即好；换账号立即解除） | `RATE_LIMIT`（可重试） | 等 / 换号 |
+| `TM.000010051` | 模型未在本租户开通 | **否** | `PERMISSION` | 换模型 / 换账号 |
+
+⚠️ **三条的码必须不同**：把 `TM.00000001` 也归 `RATE_LIMIT` 是错的 ——
+宿主 `DEFAULT_RETRYABLE_CODES` 含 `RATE_LIMIT`（`maxRetries 5`）⇒ 确定性失败
+白退避重试 5 次，每次打上游一次 403（与 qoder 那条「网关 5xx 白重试」同型，
+只是方向相反）。
+
+### 判据：**精确业务码 + 数字边界**（`hasBusinessCode`）
+
+业务码是**纯数字后缀** ⇒ `body.includes('TM.00000001')` 会命中 `TM.000000011`。
+本仓库已踩过同型坑（`isSseQueueErrorCode` 的 `429` 命中 `InferHub.4291.200`）⇒
+现用 `new RegExp(`${code}(?![0-9])`)` 断开，且**大小写敏感**（上游恒为大写 `TM.`）。
+
+### 边界：400 形态的排队自愈**逐字节未动**
+
+`TM.00001041` 在 **400** 形态下仍走 `isQueueError` 的排队重试（10s × 180 次）；
+新分支全部位于 `if (!isQueueError(...))` **之内** ⇒ 只作用于 **403** 出口。
+⚠️ 本仓库既有 4 条用例锁着「撞上限后自动重试即成功」这条自愈能力
+（`llm-adapter.spec.ts` 的 `retries the chat request after a queue error even when
+the queue status is working`）—— 故本节的单测**刻意不重复**那一条
+（重复只会让全量测试白慢 10 秒，守卫强度不变）。
+
+### ⚠️ SSE 流内**不动**（PR #175 的那条改动是回归）
+
+PR #175 把「SSE 流内 `TM.00001041`」从「进入 10s 重试自愈」改成「立即抛错」，
+与它自己宣称的边界（不动自愈）矛盾：流内命中时槽位同样会在 1~2 分钟内释放，
+重试是**有效**的，改成立即失败只是把自愈换成手动重发。⇒ 本仓库**不采纳**该改动。
+
+### 守卫
+
+- 单测 `tests/unit/codearts-gateway-classification.spec.ts`（10 条）：三条码的
+  「专用文案 + 专用码 + refresh 0 次 + 不重发」；反向对照（`APIG.0602` 真凭据失效
+  **仍**归 `AUTH` 且**续期一次**）；边界（`TM.000000011` 不命中 ⇒ 落回 `AUTH`）；
+  互不串味；空串/非字符串不抛错。
+- 变异验证（**6/6 有牙**）：删 gatewayBusy 分支 ⇒ 1 红；码改 `RATE_LIMIT` ⇒ 1 红；
+  删 concurrency 分支 ⇒ 1 红；删 tenant 分支 ⇒ 1 红；删 `isAuthError` 排除 ⇒ **3 红**；
+  去掉数字边界 ⇒ **2 红**。

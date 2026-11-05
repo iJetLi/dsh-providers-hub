@@ -177,9 +177,9 @@ describe('ZCode captcha param 校验', () => {
 // ───────────────────────────── 身份块 ─────────────────────────────
 
 describe('ZCode 官方身份块（3012 准入）', () => {
-  it('cliPrefix 是官方那 42 字符', () => {
-    expect(OFFICIAL_CLI_PREFIX).toBe('You are ZCode, an interactive coding agent')
-    expect(OFFICIAL_CLI_PREFIX.length).toBe(42)
+  it('cliPrefix 是官方那 35 字符（3.17.x）', () => {
+    expect(OFFICIAL_CLI_PREFIX).toBe('You are ZCode, an interactive agent')
+    expect(OFFICIAL_CLI_PREFIX.length).toBe(35)
   })
 
   it('★ 身份块总长度与实测通过的量级一致（2355 级别）', () => {
@@ -495,23 +495,25 @@ describe('ZCode 请求头与错误映射', () => {
   })
 
   it('★ 版本号必须抬到门槛 —— 报旧版本会被上游判成异常客户端', () => {
-    // 依据（2026-10-25 真机取证）：官方客户端 2026-10-23 升级到 3.16.3 之后，
-    // 插件的**推理**请求开始稳定 `405 + request has been blocked due to
-    // unusual activity`（跨账号、跨会话；官方客户端同账号同网络正常）。
-    // 当时身份块已逐字对齐、官方 11 个头（`Suc` 全量）也全部对齐，
-    // **版本号是唯一与官方不一致的请求特征**。
+    // 依据（2026-11-05 真机 2×2，Issue #45）：上游把**版本号**与**身份块文本**
+    // 当同一代校验，跨代即 `405 + request has been blocked due to unusual
+    // activity`。本条锁的是「版本号必须被抬到与身份块同代的门槛」：
+    // 凭据写 3.14.3（旧客户端登录的存量凭据）时，头里必须是 3.17.1 而不是 3.14.3。
+    //
+    // ⚠ 改这个期望值**必须同改** `src/zcode-identity.ts` 的身份块文本代次 ——
+    // 两处不同代就是「全量用户 3012」（见 `zcode-upstream.ts` 的对照表）。
     //
     // 反面：改回 `credential.app_version ?? ZCODE_APP_VERSION_FALLBACK`
     // 会让本用例变红（凭据写的是 3.14.3）。
     const headers = buildZcodeHeaders({ ...credential, app_version: '3.14.3' })
-    expect(headers['X-ZCode-App-Version']).toBe(ZCODE_VERSION_GATED_MIN_APP_VERSION)
-    expect(headers['User-Agent']).toBe(`ZCode/${ZCODE_VERSION_GATED_MIN_APP_VERSION}`)
+    expect(headers['X-ZCode-App-Version']).toBe('3.17.1')
+    expect(headers['User-Agent']).toBe('ZCode/3.17.1')
   })
 
   it('凭据版本比门槛高时用凭据自己的（向前兼容，不把用户降级）', () => {
-    const headers = buildZcodeHeaders({ ...credential, app_version: '3.17.0' })
-    expect(headers['X-ZCode-App-Version']).toBe('3.17.0')
-    expect(headers['User-Agent']).toBe('ZCode/3.17.0')
+    const headers = buildZcodeHeaders({ ...credential, app_version: '3.17.2' })
+    expect(headers['X-ZCode-App-Version']).toBe('3.17.2')
+    expect(headers['User-Agent']).toBe('ZCode/3.17.2')
   })
 
   it('显式 appVersion 覆盖优先于凭据与门槛两者', () => {
