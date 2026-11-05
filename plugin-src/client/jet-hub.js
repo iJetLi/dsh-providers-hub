@@ -7762,6 +7762,32 @@ function ModelCenterPanel({ providers, rpcCall, statuses }) {
       if (mounted.current) setToggleWarnings(Array.isArray(result?.warnings) ? result.warnings : []);
       // 批量动作会改动整张黑名单，逐项翻不可靠 ⇒ 重载这一家。
       await loadProvider(providerId);
+      // ⚠️⚠️ 但**供应商级状态**也必须同步（2026-11-05 三审端到端 P2-1）：
+      // `providerStatuses` 只由 `loadProviderStatuses` 写（全仓两个写入点），
+      // 而 `loadProvider` 刷的是**模型列表**，两者是不同的 state ⇒ 不同步就会
+      // 出现「15 个 · 已关闭 0（该供应商已关闭）」这种自相矛盾的一行 ——
+      // 界面、开关、报错三者对不上。
+      //
+      // ⚠️ **不要**改调 `loadProviderStatuses()`：那会为刷新一家而重发全量请求
+      //（服务端对每个已关闭的供应商都要 `await fullCatalogIds`，2s 预算），
+      // 把「点一次全开」变成几十秒的等待。就地改这一家即可。
+      if (mounted.current) {
+        setProviderStatuses(prev => {
+          const current = prev?.[providerId];
+          if (current === undefined) return prev;
+          const total = current.models?.total ?? 0;
+          const nextDisabled = disabled ? total : 0;
+          return {
+            ...prev,
+            [providerId]: {
+              ...current,
+              models: { total, disabled: nextDisabled },
+              // 与 `provider.status` 同一条判据（`total > 0 && disabled === total`）。
+              closed: total > 0 && nextDisabled === total,
+            },
+          };
+        });
+      }
     } catch (error) {
       if (mounted.current) setToggleError(`批量切换「${label}」失败：${error?.message || String(error)}`);
     } finally {
@@ -9521,6 +9547,19 @@ export function JetHubPage({ rpcCall }) {
    */
   const [providerStatusFailed, setProviderStatusFailed] = React.useState(false);
   /**
+   * `loadProviderStatuses` 的**请求序号**（最后写者胜）。
+   *
+   * ⚠️⚠️ 没有它就会「开关跳回去」（2026-11-05 三审并发 P1-2）：每次
+   * `toggleProvider` 成功后都会再读一次全量状态，而服务端对每个已关闭的
+   * 供应商都要 `await fullCatalogIds(...)`（预算 2s，**循环内串行**）⇒
+   * 单次请求的耗时随已关闭家数线性增长 ⇒ **两次请求重叠是常态**，
+   * 先发的可能后到 ⇒ 旧快照覆盖新快照 ⇒ 用户刚打开的开关又变回「已关闭」。
+   *
+   * 判据：只有序号等于**当前**序号的响应才允许写 state；过期响应**静默丢弃**
+   *（连失败提示也不弹 —— 那是上一次请求的事，用户已经操作过了）。
+   */
+  const providerStatusSeqRef = React.useRef(0);
+  /**
    * 「供应商开关」弹窗的展开状态。
    *
    * 与「模型列表」同款取舍：**关闭时不挂载**，避免每次进入设置页都为它做一次
@@ -9662,14 +9701,18 @@ export function JetHubPage({ rpcCall }) {
    * 若在这里抛错，整个设置页会白屏 —— 那是「左侧装饰性功能拖垮主功能」的糟糕取舍。
    */
   const loadProviderStatuses = React.useCallback(async () => {
+    // ⚠️ 每次进入都占一个新序号；只有**最后**发起的请求允许写 state
+    //（见 `providerStatusSeqRef` 的注释：重叠是常态，先发的可能后到）。
+    const seq = ++providerStatusSeqRef.current;
     try {
       const res = await rpcCall('provider.status', { providers: PROVIDERS.map(p => p.id) });
-      if (!mounted.current) return;
+      if (!mounted.current || seq !== providerStatusSeqRef.current) return;
       setProviderStatuses(res?.statuses || {});
       setProviderStatusFailed(false);
     } catch (caught) {
       console.error('[jet-hub] load provider statuses failed:', caught);
-      if (!mounted.current) return;
+      // 过期响应的失败同样丢弃：用户已经做过更新的操作，这条错误不再有意义。
+      if (!mounted.current || seq !== providerStatusSeqRef.current) return;
       setProviderStatuses(null);
       setProviderStatusFailed(true);
       setProviderNotice({
