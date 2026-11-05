@@ -186,7 +186,8 @@ buddy: no usable credential; log in from the Jet Hub panel first
   走那条兜底等于把「策略拦截」冒充成「服务端限流」。也别与 cline / lobsterai / trae 的
   `*_RATE_LIMIT_FALLBACK_MS` 合并成一个常量（语义不同，调一个不该动另一个）。
   ⚠️ 标记**只随时间到期失效**：`sweepExpiredRateLimits` 在生产代码里**没有任何调用方**，
-  别指望它来清过期项（判据是 `account-pool.ts:578` 的 `Date.now() >= resetAt`）。
+  别指望它来清过期项（过期标记靠**取号时的过滤器**忽略：`getAvailableAccount` / `listAvailableCredentials` 里的 `Date.now() >= resetAt`。
+  ⚠️ 这里**刻意不写行号** —— 2026-11-05 二审实测它已漂到 `578`（真实位置 2668 / 2751），行号在两次提交内就会腐坏。
   ⚠️ **只标该模型**（同 qoder 额度那条口径）：跨模型无实测依据，标全部模型会误伤本可用的组合。
   ⚠️ 写标记失败**只记日志、不上抛**（与 `src/expiry-sync.ts` 惯例一致）：本次的准确错误才是主线。
 - ⚠️ **流内（HTTP 200 + SSE 帧）那条通道原先整帧被静默丢掉**：buddy 的帧类型里**没有**
@@ -1301,6 +1302,15 @@ fallback**（宁可取不到值时背景异常、能一眼看出，也不要一�
 ⚠️ `notReady`（聚合冷启动，目录只有 `auto` 一条）必须排除 —— 那是不确定状态，
 放行会写出残缺黑名单）；⑤ 有新增项但 `!complete`（且 `closeProvider !== false` 或 `notReady !== undefined`）⇒ 拒绝。
 
+⚠️ **第 ⑤ 段内部还要再分一次文案**（2026-11-05 二审 P2-1，行为级探针 S4b 实测）：
+`notReady` 有值 = 聚合目录**还在后台推导**，用户动作是「等一下再点」；无值 = 「没账号」，
+动作是「去登录」——**两条文案不能合并**（`provider.setEnabled` 早就分开了，本端点此前
+写死通用文案「该供应商没有可关闭的模型」，冷帧下界面明明列着 5 个模型、自相矛盾）。
+冷帧文案必须**带 `reason` 原文**：`聚合目录尚未读取完成（<reason>），为避免只关闭
+一部分模型，本次未做任何变更。请稍后重试。`
+⚠️ 守卫的 `reason` 要用**独特**字符串：写成文案里已有的「聚合目录尚未读取完成」，
+`toContain` 会被写死的前半句喂饱 ⇒ 删掉 `${catalog.notReady}` 插值也不会红（假绿）。
+
 ⚠️ **`complete` 不是「凡 false 即拒绝」的开关**（2026-08 修订）：它只回答
 「远端那一半是否可用」，**不回答**「本次有没有东西要写」。调用方必须自己判
 「有没有新增项」——两者混同就是上面那个「已全关却报错」的缺陷。
@@ -2155,7 +2165,8 @@ buddy: no usable credential; log in from the Jet Hub panel first
   走那条兜底等于把「策略拦截」冒充成「服务端限流」。也别与 cline / lobsterai / trae 的
   `*_RATE_LIMIT_FALLBACK_MS` 合并成一个常量（语义不同，调一个不该动另一个）。
   ⚠️ 标记**只随时间到期失效**：`sweepExpiredRateLimits` 在生产代码里**没有任何调用方**，
-  别指望它来清过期项（判据是 `account-pool.ts:578` 的 `Date.now() >= resetAt`）。
+  别指望它来清过期项（过期标记靠**取号时的过滤器**忽略：`getAvailableAccount` / `listAvailableCredentials` 里的 `Date.now() >= resetAt`。
+  ⚠️ 这里**刻意不写行号** —— 2026-11-05 二审实测它已漂到 `578`（真实位置 2668 / 2751），行号在两次提交内就会腐坏。
   ⚠️ **只标该模型**（同 qoder 额度那条口径）：跨模型无实测依据，标全部模型会误伤本可用的组合。
   ⚠️ 写标记失败**只记日志、不上抛**（与 `src/expiry-sync.ts` 惯例一致）：本次的准确错误才是主线。
 - ⚠️ **流内（HTTP 200 + SSE 帧）那条通道原先整帧被静默丢掉**：buddy 的帧类型里**没有**

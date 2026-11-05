@@ -42,7 +42,7 @@ import { foldReasonErrors } from './locked-error-text.js'
 import { MultiAccountRefreshScheduler } from './refresh-scheduler.js'
 import { hasLegacyNamespaceRegistration, settingsOf, suppressAutoSettingsPage } from './settings-compat.js'
 import { DEFAULT_BODY_LIMITED_IMAGE_MAX_BYTES, type ImageRequestTarget } from './image-budget.js'
-import { buildRaccoonNickname, registerJetHubRpc, type JetHubAuthLike } from './jet-hub-rpc.js'
+import { buildRaccoonNickname, registerJetHubRpc, type JetHubAuthLike, type ModelCatalogSource } from './jet-hub-rpc.js'
 import { ALL_PRODUCTS, CODEBUDDY, WORKBUDDY } from './product.js'
 import { mountOpenAiGateway } from './openai-gateway/index.js'
 import { installLoopResume } from './loop-recovery.js'
@@ -6009,7 +6009,15 @@ async function fetchBalanceReading(
       return adapter
     }
   }
-  const modelAdapters: Record<string, { listAllModels(): readonly { id: string; name: string }[] }> = {
+  // ⚠️⚠️ 类型必须是 **`ModelCatalogSource`**，不能写成 `{ listAllModels() }`（二审 P3-1）。
+  //
+  //    写成「只带 `listAllModels` 的结构类型」是**合法赋值**（`catalogReadyForBulkWrite`
+  //    是可选成员），所以 TypeScript **不会**报错 —— 但那意味着：任何人把这个方法
+  //    改名（例如聚合适配器重构），编译期零错误、测试桩零影响（桩自己造钩子）、
+  //    而生产里 `fullCatalogIds` 的 `notReady` 判据**恒为 undefined** ⇒ 静默失效。
+  //    本仓库「缺一处就静默失效」的形态已经复发过多次（`SELF_HEAL_REFRESHABLE_PROVIDERS`、
+  //    `WIRED_EXPIRY_PROVIDERS` 等），凡是「靠可选成员挂钩」的表都必须用**接口本身**标注。
+  const modelAdapters: Record<string, ModelCatalogSource> = {
     // `codearts` 是 registerCodeArtsLlm 返回的**适配器实例**（与 CodeArtsAuth
     // 服务实例 `service` 不同名，故这里可以简写）。
     codearts: pruned(CODEARTS_PROVIDER, codearts),

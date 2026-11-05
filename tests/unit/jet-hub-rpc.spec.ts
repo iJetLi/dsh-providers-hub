@@ -2151,7 +2151,10 @@ describe('model.list / model.setDisabled 端点', () => {
         modelAdapters: {
           buddy: {
             listAllModels: () => fallback,
-            catalogReadyForBulkWrite: () => ({ ready: false, reason: '聚合目录尚未读取完成' }),
+            // ⚠️ `reason` 用**独特**字符串：若写成文案里已有的「聚合目录尚未读取完成」，
+            //    那条 `toContain` 会被**写死的前半句**喂饱 ⇒ 删掉 `${catalog.notReady}`
+            //    插值也不会红（假绿）。用独特值才能证明 reason 真被带出来。
+            catalogReadyForBulkWrite: () => ({ ready: false, reason: '通道路由推导中' }),
           },
         },
       })
@@ -2163,10 +2166,13 @@ describe('model.list / model.setDisabled 端点', () => {
       })
 
       expect(result.ok, '冷帧放行 ⇒ 只关掉 auto、其余虚拟模型仍可选').toBe(false)
-      // ⚠️ 报文是**分支 4** 的通用文案（`!catalog.complete` 拒绝），不含「尚未读取完成」
-      //    —— 那是 `notReady` 只体现在**放行条件**上、不体现在文案上的结果。
-      //    这条断言第一版写成 `/尚未读取完成|目录/` ⇒ 红（行为其实是对的）。
-      expect(result.error?.message ?? '').toContain('没有可关闭的模型')
+      // ⚠️⚠️ 报文必须**点出冷帧**（二审 P2-1）：`notReady` 有值 = 聚合目录还在后台
+      //    推导，用户动作是「等一下再点」；而「没账号」的动作是「去登录」。
+      //    `provider.setEnabled` 早就分开说了，本端点此前写死通用文案
+      //    「该供应商没有可关闭的模型」—— 冷帧下界面明明列着模型，自相矛盾。
+      //    ⇒ 两条断言：① 说清是冷帧；② 必须带上 `reason` 原文（否则用户不知道在等什么）。
+      expect(result.error?.message ?? '').toContain('尚未读取完成')
+      expect(result.error?.message ?? '').toContain('通道路由推导中')
       expect(storedValue().disabledModels ?? {}, '冷帧一个字节都不许落盘').not.toHaveProperty('buddy')
     })
 

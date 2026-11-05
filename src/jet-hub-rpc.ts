@@ -9210,6 +9210,22 @@ function registerJetHubEndpoints(
             //    而它只是**子集**，据此写黑名单正是本 issue 的原始缺陷。
             //    ⚠️ 文案与 `provider.setEnabled` **逐字同构**：`remoteError` 有值
             //    = 「**读不到**」（已在第 1 条拦下）；无值 = 「**没账号**」（去登录）。
+            // ⚠️⚠️ **冷帧必须与「无账号」分开说**（二审 P2-1，行为级探针 S4b 实测）：
+            //    `notReady` 有值 = 聚合目录**还在后台推导**，用户动作是「等一下再点」；
+            //    而「没账号」的动作是「去登录」。两者动作不同 ⇒ 文案不能合并，
+            //    否则冷帧下界面明明列着 5 个模型、报错却说「没有可关闭的模型」。
+            //    `provider.setEnabled` 早就分开说了（见它自己的 `notReady` 分支），
+            //    本端点此前漏了 —— 同一份数据、两个端点、两套文案。
+            if (catalog.notReady !== undefined) {
+              return {
+                ok: false,
+                error: {
+                  code: 'bad-request',
+                  message: `聚合目录尚未读取完成（${catalog.notReady}），`
+                    + '为避免只关闭一部分模型，本次未做任何变更。请稍后重试。',
+                },
+              }
+            }
             return {
               ok: false,
               error: {
