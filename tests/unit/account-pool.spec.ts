@@ -1289,6 +1289,32 @@ describe('AccountPool', () => {
   })
 
   /**
+   * ⚠️⚠️ **`setModelDisabled` 必须先 `ensureLoaded()`**（2026-11-05 合规审计：
+   * 代码对、零守卫 —— 删掉那行 479 条全绿）。
+   *
+   * 六个写入方法里**只有这一处**曾漏掉 `ensureLoaded()`（三审 P0-2）：
+   * `model.setDisabled` 是 RPC 直入口（`src/jet-hub-rpc.ts` 的
+   * `case 'model.setDisabled'`），脚本 / AI 助手可能**直接调用**而从未先跑 `list`。
+   * 冷缓存下拿**空表**改一处再 `writeModels` ⇒ **其它供应商的黑名单与关闭意图
+   * 被整份抹掉**（账号 / 黑名单 / 关闭意图 / 网关开关永久丢失，全程零报错）。
+   *
+   * ⇒ 判据必须走**真实写路径**：池替身让 `get()` 抛错（模拟读盘失败），再调
+   * `setModelDisabled` ⇒ 必须**抛错**（而不是拿空缓存落盘）。
+   */
+  it('★★ `setModelDisabled` 读盘失败时必须抛错（不得拿空缓存整体覆盖磁盘文档）', async () => {
+    const ctx = createMockContext(
+      [makeMockAccount({ id: 'disk-account', credentialRef: 'REF_DISK' })],
+      { failGetOf: (call) => call === 0 },
+    )
+    const flakyPool = new AccountPool(ctx as never)
+    await expect(
+      flakyPool.setModelDisabled('buddy', 'glm-5.2', true),
+    ).rejects.toThrow('EACCES')
+    // 读盘失败时**不得**写盘（写了就等于把空缓存落盘 ⇒ 抹掉磁盘上的账号）。
+    expect(ctx.replaceCalls.length, '读盘失败时不得落盘').toBe(0)
+  })
+
+  /**
    * ★ 一次落盘失败不得让后续写全部拒绝（写队列的"断链"回归）。
    *
    * 若把队列直接串在会 reject 的 Promise 上，第一次失败后链上所有后续写都会

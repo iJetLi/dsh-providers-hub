@@ -9692,9 +9692,16 @@ function registerJetHubEndpoints(
               //（见上面 `total = full.ids.length` 那一支）。即：只有「读到了
               //    新目录」才允许改判 —— 与 `notReady` 那一格刻意不同。
               //
-              // ⚠️ 用户仍能从 `verifyFailed` 知道「本次没核实成」，前端据此把
-              //    开关渲染成禁用 + 给出原因（`provider-toggle.js` 的
-              //    `providerSwitchState`）。
+              // ⚠️⚠️ **前端在这一格**拿不到**原因**（2026-11-05 对抗审计 P2-3）：
+              //    `providerSwitchState` 的第一条 `if (status.closed === true)`
+              //    **先短路** ⇒ 本格 `closed:true` + `verifyFailed` ⇒ 前端渲染成
+              //    「已关闭、可点开」，**`reason` 为 null** ⇒ 悬停看不到「本次没核实成」。
+              //    （`notReady` 那一格不同：它报 `closed:false` ⇒ 走下面那条
+              //    「核实失败 ⇒ 禁用 + 原因」分支 ⇒ 原因可见。）
+              //    ⇒ 这里**刻意**保留 `closed:true`（界面与分组自洽，见上方注释），
+              //      `verifyFailed` 只作**排障线索**（服务端日志 / 客户端 console），
+              //      **不得**在注释里承诺「前端会渲染成禁用 + 原因」——
+              //      那会是一个不存在的渲染。
               verifyFailed = full.remoteError
             }
           }

@@ -804,12 +804,22 @@ describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原�
      * 锁本不会丢 —— 但不写这句，用户会因为怕丢锁而不敢重登，卡在 401 上。
      */
     expect(out.error, '必须说明永久积分锁定不会因删号丢失').toContain('永久积分锁定')
+    /**
+     * ⚠️ **必须点名 host**（2026-11-05 合规审计）：面板上国内 / 国际是**两张独立
+     * 卡片**，而这条文案是逐账号的 —— 只说「HTTP 401」时用户不知道是哪一站登录失效。
+     */
+    expect(out.error, '必须点名站点（两站共用同一套文案）').toContain('letsmagic.cn')
   })
 
   it('★ 其它非 2xx（502 那种）⇒ 只带状态码，**不得**建议改代理（否则把服务端故障引向网络）', async () => {
     const out = await detailedOf(vi.fn(async () => new Response('<html>502</html>', { status: 502 })))
     expect(out.error).toContain('502')
     expect(out.error).not.toContain('直连')
+    /**
+     * ⚠️ **其余状态码也必须点名 host**（2026-11-05 合规审计）：真机国内回 403、
+     * 国际回 405（两个数字完全不同）⇒ 只说状态码时用户不知道是哪一站打不通。
+     */
+    expect(out.error, '必须点名站点').toContain('letsmagic.cn')
   })
 
   it('★ 传输层失败 ⇒ 原因含「网络异常」与原 message（不吞根因）', async () => {
@@ -822,6 +832,15 @@ describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原�
   it('★ 上游业务码 2182（组织不存在）必须原样带出（唯一指向「没选组织」的线索）', async () => {
     const out = await detailedOf(vi.fn(async () => jsonResponse({ code: 2182, message: '用户所在组织不存在' })))
     expect(out.error).toContain('2182')
+    /**
+     * ⚠️⚠️ **必须点名 host + 给出路**（2026-11-05 合规审计）：`2182` 的官方文案
+     * 「用户所在组织不存在」极易被读成「我的组织被删了」⇒ 必须说清是「登录时没选
+     * 组织」，并指明去网页端选一个组织后重新登录（`src/magicrew-checkin.ts` 的
+     * 本地前置校验用的是同一句出路 —— 两处必须同口径）。
+     */
+    expect(out.error, '必须点名站点').toContain('letsmagic.cn')
+    expect(out.error, '必须说明是「登录时没选组织」而非组织被删').toContain('登录时没选组织')
+    expect(out.error, '必须给出可操作出路').toContain('重新登录')
   })
 
   it('★★ 200 但返回 HTML（WAF 拦截页）⇒ 必须点出「HTML」并给「直连」出路', async () => {

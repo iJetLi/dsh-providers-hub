@@ -1319,6 +1319,11 @@ describe('model.list / model.setDisabled 端点', () => {
       accounts: [],
       ...options.disabledModels !== undefined ? { disabledModels: options.disabledModels } : {},
     }
+    /**
+     * ⚠️ **落盘次数**（2026-11-05 合规审计补）：「黑名单与关闭意图必须**同一次**
+     * 落盘」——分两次写会留下「黑名单满了、意图没写」的半套状态，重启后静默复发。
+     */
+    let writeCount = 0
     let handler: Handler | undefined
     /** 端点通过 `ctx.emit` 广播过的事件名（按顺序）。 */
     const emitted: string[] = []
@@ -1328,7 +1333,10 @@ describe('model.list / model.setDisabled 端点', () => {
         ? {
             register: () => ({
               get: () => stored,
-              replace: async (value: Record<string, unknown>) => { stored = value },
+              replace: async (value: Record<string, unknown>) => {
+                writeCount += 1
+                stored = value
+              },
             }),
           }
         : undefined,
@@ -1439,7 +1447,7 @@ describe('model.list / model.setDisabled 端点', () => {
       return body.result
     }
 
-    return { call, pool, storedValue: () => stored, emitted }
+    return { call, pool, storedValue: () => stored, emitted, writeCount: () => writeCount }
   }
 
   const MODELS = [
@@ -2608,6 +2616,37 @@ describe('model.list / model.setDisabled 端点', () => {
         workbuddy: { 'gpt-5.4': true },
         buddy: { hy3: true },
       })
+    })
+
+    /**
+     * ⚠️⚠️ **「覆盖全量 ⇒ 补设关闭意图」必须与黑名单**同一次落盘**
+     *（2026-11-05 合规审计：实现正确、端点级无守卫）。
+     *
+     * `writeModelsWithProviderClosed` 内部合并好两份状态后只 `queueStoreSave()`
+     * 一次；分两次写（先写黑名单、再写意图）会留下半套状态：磁盘上「黑名单满了、
+     * 意图没写」⇒ 重启后 `provider.status` 仍报「已打开」⇒ 用户点「打开供应商」
+     * 按**意图**决定清哪家 ⇒ 清不到 ⇒ 死循环复发。
+     *
+     * ⚠️ 判据是**落盘次数**（不是「有没有调过 write」）——后者两条路径都会调。
+     */
+    it('★★ 覆盖全量时黑名单与关闭意图必须同一次落盘（不得分两次写）', async () => {
+      const { call, storedValue, writeCount } = registerEndpoints({
+        models: MODELS,
+      })
+
+      // 传入**全部**模型 id ⇒ 黑名单覆盖全量目录 ⇒ 触发补设意图那条分支。
+      const result = await call('model.setDisabledMany', {
+        provider: 'buddy',
+        modelIds: MODELS.map((m) => m.id),
+        disabled: true,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(storedValue().disabledModels).toEqual({
+        buddy: { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true },
+      })
+      expect(storedValue().providerClosed, '必须补设「供应商关闭」意图').toEqual({ buddy: true })
+      expect(writeCount(), '★ 黑名单与关闭意图必须同一次落盘（分两次写会留下半套状态）').toBe(1)
     })
 
     /** 批量**只广播一次**：分组里可能有 460 条，逐条调用会打 460 次目录刷新。 */
@@ -3850,6 +3889,101 @@ describe('account.reorder 端点', () => {
  * 3. 两个方向都必须广播 `llm/adapters-updated`（否则对话框选择器要重启才更新）；
  * 4. `enabled` 非布尔一律拒绝（不猜默认值）。
  */
+/**
+ * ⚠️⚠️ **RPC 兜底 catch 必须保留底层错误码**（2026-11-05 合规审计：代码对、零守卫
+ * —— 写死 `'jet-hub/handler-failed'` 后 561 条全绿）。
+ *
+ * `EACCES`（改权限）/ `ENOENT`（文件不在）/ `EISDIR`（路径是目录）/
+ * `SyntaxError`（文档损坏）的用户动作**完全不同**，全塌成 `handler-failed`
+ * 会让客户端无法分支处理，也只能给出「未知故障」。
+ *
+ * ⚠️ 客户端目前对 `error.code` **零分支** ⇒ 这是纯增量，不会破坏既有契约；
+ * 但正因为没有消费者，将来有人「顺手简化」成常量就会静默丢掉这份信息。
+ *
+ * ⇒ 判据必须**行为级**：让某条端点抛一个**带 `code` 的错误**（Node 的 errno
+ * 形态），断言 RPC 回包里 `error.code` 就是那个码（而不是 `handler-failed`）。
+ */
+describe('★★ RPC 兜底 catch 保留底层错误码', () => {
+  it('★★ errno 形态（EACCES）⇒ error.code 必须逐字是 EACCES', async () => {
+    /**
+     * ⚠️ 必须让**端点内部**抛一个带 `code` 的错误。
+     *
+     * `registerEndpoints` 的 `listModelsError` 只带字符串 ⇒ 那条路抛的是
+     * 普通 `Error`（**没有** `code` 属性）⇒ 断言 `EACCES` 会恒红。
+     * ⇒ 这里直接用**真实的 settings 替身**：`replace` 抛一个带 `code` 的错误
+     * （模拟「改权限被拒」），而 `model.setDisabled` 走 `writeModels` ⇒
+     * `queueStoreSave()` ⇒ `store.save()` ⇒ `replace` ⇒ 端点内部抛出。
+     */
+    const handler = await (async () => {
+      let registered: ((request: Request) => Promise<Response>) | undefined
+      let stored: Record<string, unknown> = { accounts: [] }
+      const ctx = {
+        get: (key: string) => {
+          if (key === 'connection') {
+            return {
+              fetch: {
+                register: (config: { path: string, fetch: (request: Request) => Promise<Response> }) => {
+                  if (config.path === JET_HUB_API_PATH) registered = config.fetch
+                },
+              },
+            }
+          }
+          if (key === 'llm') {
+            return {
+              listModels: async (provider: string) => [
+                { id: 'glm-5.2', name: 'GLM-5.2', provider },
+              ],
+            }
+          }
+          if (key === 'settings') {
+            return {
+              register: () => ({
+                get: () => stored,
+                // ⚠️ 模拟「改权限被拒」：Node 的 errno 形态（带 `code`）。
+                replace: async () => {
+                  const error = new Error('EACCES: permission denied, open state.json') as Error & { code?: string }
+                  error.code = 'EACCES'
+                  throw error
+                },
+              }),
+            }
+          }
+          return undefined
+        },
+        inject: (_deps: string[], callback: (ctx: unknown) => void) => { callback(ctx) },
+        logger: { warn: () => {}, info: () => {} },
+        emit: () => {},
+        credentials: {
+          describe: async () => ({ configured: false, writable: true }),
+          resolve: async () => undefined,
+          set: async () => {},
+          unset: async () => {},
+        },
+      }
+      const pool = new AccountPool(ctx as never)
+      registerJetHubRpc(ctx as never, pool, authsStub())
+      if (registered === undefined) throw new Error('endpoint handler was not registered')
+      return registered
+    })()
+
+    const response = await handler(new Request('http://localhost/api/jet-hub', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request', rpcId: 'rpc-1', method: 'jet-hub',
+        payload: { method: 'model.setDisabled', payload: { provider: 'buddy', modelId: 'glm-5.2', disabled: true } },
+      }),
+    }))
+    const body = await response.json() as {
+      result: { ok: boolean, error?: { code?: string, message?: string } }
+    }
+    expect(body.result.ok).toBe(false)
+    expect(body.result.error?.code, '★ errno 码必须逐字透出（不得塌成 handler-failed）')
+      .toBe('EACCES')
+    expect(body.result.error?.message).toContain('EACCES')
+  })
+})
+
 describe('provider.status / provider.setEnabled 端点', () => {
   type Handler = (request: Request) => Promise<Response>
 

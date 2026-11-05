@@ -257,6 +257,88 @@ describe('AggregateAdapter：目录播报', () => {
     expect(adapter.providerInfo(AGGREGATE_PROVIDER).id).toBe(AGGREGATE_PROVIDER)
   })
 
+  /**
+   * ⚠️⚠️ **`refreshCatalog` 的补写黑名单必须 `await`**（2026-11-05 合规审计：
+   * 代码对、零守卫 —— 退回 `void` 后 489 条全绿）。
+   *
+   * 「读黑名单 → 算 missing → 写黑名单」这三步若**不 await**，就与用户操作
+   * **交错**：用户在补写落地前打开某个聚合模型，会被这次补写**重新关掉**
+   * （窗口秒级，且无任何提示）。用户报障的正是「开关状态自己变」。
+   *
+   * ⇒ 判据必须是**行为级**：让写方法**挂起**，断言 `refreshCatalog()` 在补写
+   * 落地**之前**不得返回；释放闸门后它才返回。
+   *
+   * - 不 await（fire-and-forget）：`refreshCatalog` **立刻返回**（补写还在挂起）
+   *   ⇒ 用户在这段时间里的操作会与补写**交错**；
+   * - await（正确）：`refreshCatalog` **等补写完成**才返回 ⇒ 用户拿到的目录状态
+   *   已经包含补写结果。
+   *
+   * ⚠️ 判据落在「**返回时机**」而不是「有没有调过 write」——后者两条路径都调用
+   * 了它；也不是「最终黑名单状态」——那条要构造「用户恰好在窗口里打开某个
+   * 模型」的场景，而写方法只**新增**黑名单项、不会覆盖用户的打开动作 ⇒
+   * 那条判据在两条路径下都绿（**恒真**）。
+   */
+  it('★★ ★★ 补写黑名单必须 await（否则会把用户刚打开的模型重新关掉）', async () => {
+    /**
+     * 黑名单状态（可被用户操作改写）。
+     *
+     * ⚠️ `auto` 与 `deepseek-v4-1-flash` 是**上一轮**全量目录的两条 ⇒ 判据
+     * 「上一次全量目录是否全被标记为关闭」成立 ⇒ 第二轮新增的 `glm-5.3` 触发补写。
+     */
+    let disabled: Record<string, boolean> = {}
+    /** 渠道目录（第二轮会长出一条新模型 ⇒ 触发补写）。 */
+    const catalogs: Record<string, Array<{ id: string, name?: string }>> = {
+      buddy: [{ id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash' }],
+    }
+    /** 写方法的调用计数与「挂起闸门」。 */
+    let writeCalls = 0
+    let releaseWrite: (() => void) | undefined
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve })
+
+    const adapter = new AggregateAdapter(makeCtx(catalogs), {
+      accountPool: {
+        disabledModelsFor: () => new Set(Object.keys(disabled).filter((k) => disabled[k] === true)),
+        listDisabledModels: () => ({ ...disabled }),
+        getAvailableAccount: async () => ({ entry: { id: 'a1' }, credential: {} }),
+        setModelsDisabled: async (_provider: string, ids: readonly string[]) => {
+          writeCalls += 1
+          // ⚠️ 第一次写挂起，模拟「补写与用户操作交错」的窗口。
+          if (writeCalls === 1) await writeGate
+          for (const id of ids) disabled[id] = true
+        },
+      } as never,
+    })
+
+    // ⚠️ 第 0 轮：把目录跑热（此刻黑名单为空 ⇒ 不触发补写）。
+    await adapter.refreshCatalog(true)
+    // ⇒ 用户关掉整个聚合供应商：黑名单覆盖**上一轮**的全量目录。
+    disabled = { auto: true, 'deepseek-v4-1-flash': true }
+    // ⇒ 目录长出一条新模型（`glm-5.3`）⇒ 第二轮触发补写。
+    catalogs.buddy = [
+      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash' },
+      { id: 'glm-5.3', name: 'GLM-5.3' },
+    ]
+
+    // 第二轮：目录变长 ⇒ 补写「整个 provider 已关闭」的黑名单。
+    const first = adapter.refreshCatalog(true)
+    // ⚠️ 让出微任务队列，确保补写已经开始（挂起在 writeGate 上）。
+    for (let i = 0; i < 5; i += 1) await Promise.resolve()
+    expect(writeCalls, '前提失败：补写根本没发生').toBeGreaterThan(0)
+    // ⚠️ **核心判据**：补写还挂着 ⇒ `refreshCatalog()` **不得**已经返回。
+    let settled = false
+    void first.then(() => { settled = true })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+    expect(
+      settled,
+      '★ refreshCatalog 在补写黑名单落地之前就返回了（await 被退回成 fire-and-forget）'
+      + ' ⇒ 用户在这段时间里的操作会与补写交错',
+    ).toBe(false)
+    // 释放写闸门，让补写落地；此后 refreshCatalog 才可返回。
+    releaseWrite?.()
+    await first
+    expect(settled, '前提失败：补写完成后 refreshCatalog 仍未返回').toBe(true)
+  })
+
   it('listModels 播报虚拟模型（含 auto），每条 provider 都是 aggregate', async () => {
     const adapter = new AggregateAdapter(makeCtx({
       buddy: [{ id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash' }],

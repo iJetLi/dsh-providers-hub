@@ -101,8 +101,14 @@ export interface BuddyCandidateAccount {
 export type BuddyNoAccountReason =
   /** 所有候选都查到了余额，且可用那类积分确实都是 0。 */
   | { kind: 'exhausted' }
-  /** 至少一个候选**查询失败**，无法判定它是否真的没额度。 */
-  | { kind: 'unknown'; errors: string[] }
+  /**
+   * 至少一个候选**查询失败**，无法判定它是否真的没额度。
+   *
+   * ⚠️ `degraded: true` = 至少一个候选的余额是**降级读数**（总额读到、逐包明细
+   * 丢了）⇒ **不能**按「纯查不到」放宽永久积分锁定（2026-11-05 对抗审计 P2-1）：
+   * 明细丢失时「有临期积分」会被误判成「只剩永久积分」，而放宽就会真烧掉永久积分。
+   */
+  | { kind: 'unknown'; errors: string[]; degraded?: boolean }
   /**
    * **一个候选都没有** ⇒ 压根没走到余额查询，也就无从断言「积分用尽」。
    *
@@ -567,7 +573,10 @@ export class BuddyBalanceSelector<
  */
 function noAccountReason(balances: readonly BuddyAccountBalanceEntry[]): BuddyNoAccountReason {
   const errors = balances.filter(b => !b.ok).map(b => b.error ?? '未知原因')
-  if (errors.length > 0) return { kind: 'unknown', errors }
+  // ⚠️ `degraded` 标记**先算**：只要池里有一个「降级读数」，本档就**不是**「纯查不到」
+  // （2026-11-05 对抗审计 P2-1）⇒ 调用方不得据此放宽永久积分锁定。
+  const hasDegraded = balances.some((b) => b.ok && b.degraded === true)
+  if (errors.length > 0) return { kind: 'unknown', errors, ...(hasDegraded ? { degraded: true } : {}) }
   /**
    * ⚠️⚠️ **「明细不可达」也不能断言 `exhausted`**（2026-10-21 二轮审计 P1）。
    *
@@ -590,6 +599,7 @@ function noAccountReason(balances: readonly BuddyAccountBalanceEntry[]): BuddyNo
   if (degraded.length > 0) {
     return {
       kind: 'unknown',
+      degraded: true,
       errors: [`${degraded.length} 个账号的**逐包明细**不可用（总额已读到，但没有到期时刻）`],
     }
   }
@@ -730,13 +740,22 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
        * 是池级判据（任一账号查不到即 `unknown`），若池里同时有「查不到」与
        * 「明确只剩永久」，全局置 `allowPermanent` 会把后者放行 ⇒ 烧永久积分。
        * 故 `select` 在进入本分支前已先判 `definitive`（存在明确只剩永久的账号
-       * ⇒ 报 `exhausted`），本分支只可能因「纯查不到」被触发。
+       * ⇒ 报 `exhausted`）。
+       *
+       * ⚠️⚠️ **「降级读数」也不能被这样放行**（2026-11-05 对抗审计 P2-1）：
+       * `noAccountReason` 把「纯查不到」与「总额读到、明细丢了（`degraded`）」都归
+       * `unknown`，而 `definitive` 守卫刻意 `&& entry.degraded !== true` 把降级账号
+       * **排除在** `definitive` **之外** ⇒ 降级读数恰好落进本分支 ⇒ 放宽后按
+       * 「永久积分」烧。而明细丢失时「有临期积分」本就可能被误判成「只剩永久积分」
+       * ⇒ 这正是 `noAccountReason` 那段注释要防的事。
+       * ⇒ 本分支必须再加一条腿：`reason.degraded !== true`。
        *
        * ⚠️ 不会死循环：`allowPermanent` 置真后 `!allowPermanent` 恒假，本分支只进一次。
        * ⚠️ 放开后若仍失败，`kind` 由 `allowPermanent` 决定 ⇒ 变 `exhausted`
        *    （走池兜底），不再是「锁定拒绝」—— 与「真的没有可用账号」如实对应。
        */
       if (!allowPermanent && picked.reason.kind === 'unknown'
+        && picked.reason.degraded !== true
         && options.degradeOnUnknown === true) {
         allowPermanent = true
         continue

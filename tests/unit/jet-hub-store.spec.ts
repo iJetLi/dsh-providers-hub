@@ -648,6 +648,38 @@ describe('文件后端（FileStore）', () => {
   })
 
   /**
+   * ⚠️⚠️ **报错文案必须自带两条出路**（2026-11-05 合规审计：代码对、零守卫）。
+   *
+   * `FileStore.load()` 抛错时，`AccountPool.ensureLoaded()` 会被**全部**读方法
+   * 调用 ⇒ 每次 RPC 都重新读盘并抛错；19 个 `writeAccounts` 调用点写之前也要先读
+   * ⇒ **写也全失败** ⇒ 面板能打开、能点「重试」，但重试**必然**失败，且用户
+   * 无法添加账号、改设置、开关供应商、改黑名单。
+   *
+   * ⇒ 抛出的消息必须点名**路径** + 给出**两条实测可用的出路**：
+   * ① 「备份恢复」里导入一份备份（选**替换**模式；`src/backup.ts` 只在 `merge`
+   *    分支调 `getStateSnapshot` ⇒ `replace` 不读当前状态，故可用）；
+   * ② 手动删除该文件（丢本地索引，凭据本体在 `.credentials.yaml` 里）。
+   *
+   * ⚠️ 原文案只含 `JSON.parse` 的英文 `SyntaxError.message`（不含路径、不含出路）
+   * ⇒ 用户看到的是一条**无法操作的英文解析错误**。
+   */
+  it('★★ 读盘失败的消息必须点名路径 + 给出「备份恢复」与「删除该文件」两条出路', () => {
+    const path = join(dir, 'jet-hub', 'state.json')
+    mkdirSync(join(dir, 'jet-hub'), { recursive: true })
+    writeFileSync(path, '{ not json', 'utf-8')
+    const store = createJetHubStore(makeCtx(undefined))
+    let message = ''
+    try {
+      store.load()
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message, '必须点名是哪个文件坏了').toContain(path)
+    expect(message, '必须给出「备份恢复」这条出路').toContain('备份恢复')
+    expect(message, '必须给出「删除该文件」这条出路').toContain('删除该文件')
+  })
+
+  /**
    * ⚠️ **本条只证明 `FileStore.load()` 可重试**（它每次都真读盘、没有 `loaded` 缓存）。
    *
    * 四审测试判别力实测：把 `AccountPool.ensureLoaded()` 里 `loaded = true`

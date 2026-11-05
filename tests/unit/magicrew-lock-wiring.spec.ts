@@ -356,6 +356,35 @@ describe('★ Magicrew：`index.ts` 的接线（源码级，按站切片）', ()
     }
   })
 
+  /**
+   * ⚠️⚠️ **两站都必须开 `degradeLockedWhenUnknown`**（2026-11-05 合规审计：
+   * 代码对、零守卫 —— 两条都删掉 110 条全绿）。
+   *
+   * 这是 PR #46 的**核心**修复：上游 WAF 按 `Host` 拒本机出口（国内 403 /
+   * 国际 405）⇒ 九个账号全部 `ok:false` ⇒ `noAccountReason` 给出 `unknown` ⇒
+   * 调用方 `lockedError('unknown')` 抛错 ⇒ **整个 provider 的模型列表被清空**，
+   * 模型选择器里只剩一大段错误文案，用户一个模型都选不了（用户原话）。
+   *
+   * 不开这个开关 ⇒ 正是那个症状；开了以后「查不到余额时放宽一次」⇒ 渠道可用。
+   *
+   * ⚠️ **两站是两条独立腿**（共用实现不等于共用一个 id）⇒ 少一条就有一站仍然
+   * 整条不可用，且症状与「凭据坏了」同形。
+   */
+  it('★★ 两站都必须开 `degradeLockedWhenUnknown`（否则「模型都选不了」）', () => {
+    for (const name of ['magicrewBalanceSelector', 'magicrewIntlBalanceSelector']) {
+      expect(
+        selectorBlock(name),
+        `${name} 必须开 degradeLockedWhenUnknown（否则 WAF 拒发时整条渠道不可用）`,
+      ).toContain('degradeLockedWhenUnknown: true')
+    }
+    // ⚠️ **计数判据**：不能只靠上面的 `toContain`（若两站共用同一段文本，
+    //    一站的缺失可能被另一站掩盖）⇒ 全仓必须恰好 2 处。
+    expect(
+      (indexCode.match(/degradeLockedWhenUnknown:\s*true/g) ?? []).length,
+      'degradeLockedWhenUnknown: true 必须恰好两处（国内站 + 国际站）',
+    ).toBe(2)
+  })
+
   it('★★ 行为级：详细变体返回 403 时，选号器必须把 403 带进 reason（而不是那句概括文案）', async () => {
     const makeSelector = () => new BuddyBalanceSelector<
       MagicrewProduct,

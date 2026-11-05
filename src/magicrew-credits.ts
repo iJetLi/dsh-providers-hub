@@ -223,7 +223,10 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
     if (status === 401) {
       return {
         ok: false,
+        // ⚠️ **必须点名 host**（2026-11-05 合规审计）：面板上国内 / 国际是两张
+        //    独立卡片，只说「HTTP 401」时用户不知道是哪一站登录失效了。
         error: `积分查询失败（HTTP 401，登录已失效）：请删除该账号后重新登录 ${product.displayName}`
+          + `（${hostLabelOf(product.host)}）`
           // ⚠️ 补一句「锁定不受影响」（2026-11-04 四审建议 ③(3)）：删号重登是唯一路径，
           //    而「永久积分锁定」是按**渠道**落盘的（`src/account-pool.ts` 的
           //    `permanentLocked(provider)`），`removeAccount` 只 unset 凭据 + 从账号表
@@ -324,7 +327,21 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
   if (typeof envelope.code === 'number' && envelope.code !== 1000) {
     // ⚠️ 业务码原样带出：`2182`（用户所在组织不存在）是**唯一**能把用户引向
     //    「登录时没选组织」的线索，吞掉它等于让这一档永远不可诊断。
-    return { ok: false, error: `积分查询失败（上游业务码 ${envelope.code}）` }
+    // ⚠️ **必须点名 host + 给出路**（2026-11-05 合规审计）：`2182` 的官方文案
+    //    「用户所在组织不存在」极易被读成「我的组织被删了」⇒ 必须说清是
+    //    「登录时没选组织」，并指明去网页端选一个组织后重新登录
+    //    （`src/magicrew-checkin.ts` 的本地前置校验用的是同一句出路）。
+    if (envelope.code === 2182) {
+      return {
+        ok: false,
+        error: `积分查询失败（上游业务码 2182：用户所在组织不存在）：${hostLabelOf(product.host)}`
+          + ' —— 这是**登录时没选组织**，不是组织被删了；请在网页端选中一个组织后重新登录',
+      }
+    }
+    return {
+      ok: false,
+      error: `积分查询失败（上游业务码 ${envelope.code}）：${hostLabelOf(product.host)}`,
+    }
   }
   const data = envelope.data ?? {}
   /**

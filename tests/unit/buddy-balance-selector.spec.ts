@@ -786,6 +786,37 @@ describe('★★ 锁定 + 余额查不到：degradeOnUnknown 开关', () => {
     expect(result.kind).toBe('locked')
   })
 
+  /**
+   * ⚠️⚠️ **「降级读数」也不得被降级放行**（2026-11-05 对抗审计 P2-1）。
+   *
+   * `noAccountReason` 把两种语义都归 `unknown`：
+   * - `!ok` ⇒ 真的查不到；
+   * - `ok && degraded === true` ⇒ **总额读到了、逐包明细丢了**（分类不可信）。
+   *
+   * 而 `definitive` 守卫刻意 `&& entry.degraded !== true` 把降级账号**排除在**
+   * `definitive` **之外** ⇒ 降级读数恰好落进「unknown」⇒ 降级分支放行 ⇒ 按
+   * 「永久积分」烧。而明细丢失时「有临期积分」本就可能被误判成「只剩永久积分」
+   * ⇒ 这正是 `noAccountReason` 那段注释要防的事。
+   *
+   * ⚠️ 当前生产不可达（`degraded: true` 只由 `autoclaw-credits.ts` 产出，而
+   * `degradeLockedWhenUnknown` 只在 magicrew 两站开）⇒ 仍要钉住，否则将来
+   * 接上 autocalw 那条腿时静默烧永久积分。
+   */
+  it('★★ ★★ 降级读数（总额读到、明细丢失）⇒ 不得被降级放行（不得烧永久积分）', async () => {
+    const { selector } = makeSelector({
+      a1: null,
+      // ⚠️ `degraded: true` = 总额可信、逐包到期信息不可用 ⇒ 拆分出的「永久桶」
+      //    可能其实是「明明有临期、但我们看不到」。
+      a2: { ...balance(pkg({ remaining: 800 })), degraded: true },
+    })
+    const result = await pickBuddyAccount(selector, [account('a1'), account('a2')], {
+      allowPermanent: false,
+      resolveCredential: async (ref) => ({ access_token: `token-of-${ref}` }) as BuddyCredential,
+      degradeOnUnknown: true,
+    })
+    expect(result.kind).toBe('locked')
+  })
+
   it('★ 混合形态的反向对照：查不到的账号仍可被降级放行（不得因上一格而拒绝全部）', async () => {
     // ⚠️ 没有这条，把 `definitive` 写成恒真（`return true`）也全绿 ——
     // 那会让「纯查不到」的池也永远报 locked，降级开关彻底失效。
