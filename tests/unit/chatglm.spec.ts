@@ -452,13 +452,18 @@ describe('★ registry 接线（能力矩阵如实登记）', () => {
     expect(descriptor?.rateLimit).toBe(false)
   })
 
-  it('★ 声明序在 magicrew 之前（magicrew 仍紧邻 aggregate = 倒数第二）', () => {
+  it('★ 声明序在 magicrew 之前（magicrew 系仍在 aggregate 之前 = 尾部两席）', () => {
     const ids = PROVIDER_REGISTRY.map((d) => d.id)
     const ic = ids.indexOf('chatglm')
     const im = ids.indexOf('magicrew')
+    const imi = ids.indexOf('magicrewintl')
     const ia = ids.indexOf('aggregate')
     expect(ic).toBeGreaterThan(-1)
-    expect(ic, 'chatglm 必须排在 magicrew 之前，否则 magicrew 就不再是倒数第二').toBeLessThan(im)
-    expect(ia - im).toBe(1)
+    // 上游 PR #177 后新增了 magicrewintl（国际站），它紧随 magicrew 之后；
+    // 原断言「aggregate 紧邻 magicrew（差 1）」随魔法rewintl 的加入失效 ——
+    // 真实不变式是「chatglm < magicrew < magicrewintl < aggregate（aggregate 恒最后）」。
+    expect(ic, 'chatglm 必须排在 magicrew 之前').toBeLessThan(im)
+    expect(im, 'magicrew 必须排在 magicrewintl 之前（国内站在前）').toBeLessThan(imi)
+    expect(imi, 'magicrewintl 必须是 aggregate 的前一个（倒数第二）').toBe(ia - 1)
   })
 })
