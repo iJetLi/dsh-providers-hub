@@ -23,7 +23,9 @@ import { describe, expect, it } from 'vitest'
 
 import {
   leveldbRecordsText,
+  leveldbVisibleRecords,
   parseBlockEntries,
+  readWalRecords,
   readSstableRecords,
   readVarint,
   snappyDecompress,
@@ -123,18 +125,34 @@ function snappyCompress(input: Buffer): Buffer {
   return Buffer.concat(parts)
 }
 
+/**
+ * 造一条 **internal key**：`user_key || (seq << 8 | type)`（8 字节小端）。
+ *
+ * ⚠️ 2026-11-05 返工后 `readSstableRecords` 会剥掉尾部 8 字节，fixture 必须
+ * 真的带上它 —— 否则拆出来的 user key 会短 8 字节（这正是「fixture 不是真格式」
+ * 那类假绿的来源）。
+ */
+function internalKey(userKey: Buffer, sequence = 1, type: 0 | 1 | 2 = 1): Buffer {
+  const trailer = Buffer.alloc(8)
+  trailer.writeBigUInt64LE((BigInt(sequence) << 8n) | BigInt(type))
+  return Buffer.concat([userKey, trailer])
+}
+
 /** 一个 block：entry 区 + restart 数组 + restart 数量（restart 间隔取 1 ⇒ shared 恒 0）。 */
-function buildBlock(entries: readonly { key: Buffer, value: Buffer }[]): Buffer {
+function buildBlock(
+  entries: readonly { key: Buffer, value: Buffer, sequence?: number, type?: 0 | 1 | 2 }[],
+): Buffer {
   const chunks: Buffer[] = []
   const restarts: number[] = []
   let offset = 0
   for (const entry of entries) {
     restarts.push(offset)
+    const key = internalKey(entry.key, entry.sequence ?? 1, entry.type ?? 1)
     const encoded = Buffer.concat([
       varint(0),
-      varint(entry.key.length),
+      varint(key.length),
       varint(entry.value.length),
-      entry.key,
+      key,
       entry.value,
     ])
     chunks.push(encoded)
@@ -157,7 +175,12 @@ const FOOTER_MAGIC = Buffer.from([0x57, 0xfb, 0x80, 0x8b, 0x24, 0x75, 0x47, 0xdb
  *
  * @param blocks 每个 data block 的记录，以及它是否被压缩
  */
-function buildSstable(blocks: readonly { entries: { key: Buffer, value: Buffer }[], compressed: boolean }[]): Buffer {
+function buildSstable(
+  blocks: readonly {
+    entries: { key: Buffer, value: Buffer, sequence?: number, type?: 0 | 1 | 2 }[]
+    compressed: boolean
+  }[],
+): Buffer {
   const parts: Buffer[] = []
   const handles: { offset: number, size: number }[] = []
   let offset = 0
@@ -507,5 +530,175 @@ describe('★ 端到端：.ldb 文件 → readMagicrewLocalCreds', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════
+// 2026-11-05 审计返工：病态声明长度必须**先拒绝、后分配**
+// ════════════════════════════════════════════════════════════════════════
+
+describe('★★ Snappy 声明长度上限（审计 P1-1）', () => {
+  /** `8 MiB + 1` 的 varint（自证：先解一遍，确认 fixture 不是拍脑袋）。 */
+  const OVER_LIMIT = Buffer.from([0x81, 0x80, 0x80, 0x04])
+  const MAX_BLOCK_BYTES = 8 * 1024 * 1024
+
+  it('fixture 自证：这 4 个字节确实是 8 MiB + 1', () => {
+    expect(readVarint(OVER_LIMIT, 0).value).toBe(MAX_BLOCK_BYTES + 1)
+  })
+
+  it('★ 超过上限 ⇒ 直接抛错（先校验、后分配）', () => {
+    const before = process.memoryUsage().arrayBuffers
+    expect(() => snappyDecompress(OVER_LIMIT)).toThrow(/超过上限/)
+    const delta = process.memoryUsage().arrayBuffers - before
+    // ⚠️ 若把上限判断挪到 `Buffer.alloc` 之后，这里会先分配 8 MiB+1 ⇒ 红。
+    //    取 2 MiB 余量：V8/GC 噪声远小于这个量级，而 8 MiB 分配远大于它。
+    expect(delta).toBeLessThan(2 * 1024 * 1024)
+  })
+
+  it('★ 5 字节块头声明 2^31（真机上可让进程先吃 2 GiB 的那一例）必须同样被上限拦住', () => {
+    const twoGiB = Buffer.from([0x80, 0x80, 0x80, 0x80, 0x08])
+    expect(readVarint(twoGiB, 0).value).toBe(2 ** 31)
+    expect(() => snappyDecompress(twoGiB)).toThrow(/超过上限/)
+  })
+
+  /**
+   * ★ 边界：声明**正好** `8 MiB` 必须**放行**（不得被上限拒绝）。
+   *
+   * 判据是错误**类型**而不是「不抛」：放行后会因为「没有 tag」抛「实际产出与
+   * 声明长度不符」；若把 `>` 写成 `>=`，这里会先抛「超过上限」⇒ 红。
+   * ⚠️ 会真分配 8 MiB（可接受，单次）。
+   */
+  it('★ 边界：正好 8 MiB 不得被上限拒绝', () => {
+    const exact = Buffer.from([0x80, 0x80, 0x80, 0x04])
+    expect(readVarint(exact, 0).value).toBe(MAX_BLOCK_BYTES)
+    expect(() => snappyDecompress(exact)).toThrow(/实际产出与声明长度不符/)
+    expect(() => snappyDecompress(exact)).not.toThrow(/超过上限/)
+  })
+
+  it('★ 正常规模（1 KiB）不受影响', () => {
+    const payload = Buffer.from('x'.repeat(1024), 'latin1')
+    expect(snappyDecompress(snappyLiteralOnly(payload)).equals(payload)).toBe(true)
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════
+// 2026-11-05 返工：sequence 去重 / tombstone / WAL 解析
+// ════════════════════════════════════════════════════════════════════════
+
+/** 造一条 leveldb WAL record（`crc32 | length | type | WriteBatch`；crc 恒 0，本读取器不校验）。 */
+function walRecord(
+  sequence: number,
+  entries: readonly { key: string, value?: string }[],
+): Buffer {
+  const parts: Buffer[] = []
+  const seq = Buffer.alloc(8)
+  seq.writeBigUInt64LE(BigInt(sequence))
+  const count = Buffer.alloc(4)
+  count.writeUInt32LE(entries.length)
+  parts.push(seq, count)
+  for (const entry of entries) {
+    const key = Buffer.from(entry.key, 'latin1')
+    if (entry.value === undefined) {
+      // 删除标记：kind 0 + key（没有 value 段）。
+      parts.push(Buffer.from([0]), varint(key.length), key)
+    } else {
+      const value = Buffer.from(entry.value, 'latin1')
+      parts.push(Buffer.from([1]), varint(key.length), key, varint(value.length), value)
+    }
+  }
+  const payload = Buffer.concat(parts)
+  const header = Buffer.alloc(7)
+  header.writeUInt16LE(payload.length, 4)
+  header[6] = 1 // FULL
+  return Buffer.concat([header, payload])
+}
+
+describe('readWalRecords（.log WriteBatch）', () => {
+  it('put 记录：seq 按批次递增、key/value 逐字节取回', () => {
+    const records = readWalRecords(Buffer.concat([
+      walRecord(100, [{ key: 'authorization', value: 'eyJ' }, { key: 'organizationCode', value: 'ORG' }]),
+    ]))
+    expect(records).toHaveLength(2)
+    expect(records?.map((record) => ({
+      key: record.key.toString(), value: record.value.toString(), sequence: record.sequence, deleted: record.deleted,
+    }))).toEqual([
+      { key: 'authorization', value: 'eyJ', sequence: 100, deleted: false },
+      { key: 'organizationCode', value: 'ORG', sequence: 101, deleted: false },
+    ])
+  })
+
+  it('★ 删除标记（kind 0）⇒ deleted=true 且 value 为空', () => {
+    const records = readWalRecords(walRecord(200, [{ key: 'organizationCode' }]))
+    expect(records).toEqual([{
+      key: Buffer.from('organizationCode'), value: Buffer.alloc(0), sequence: 200, deleted: true,
+    }])
+  })
+
+  it('★ 不是 WAL（明文 / 分片记录 / 空）⇒ undefined（调用方退回原文扫描）', () => {
+    expect(readWalRecords(Buffer.from('not a wal at all, just text'))).toBeUndefined()
+    expect(readWalRecords(Buffer.alloc(0))).toBeUndefined()
+    const fragmented = Buffer.concat([walRecord(1, [{ key: 'a', value: 'b' }])])
+    fragmented[6] = 2 // FIRST（分片）
+    expect(readWalRecords(fragmented)).toBeUndefined()
+  })
+
+  it('★ 截断的 payload ⇒ undefined（不产出半截记录）', () => {
+    const record = walRecord(1, [{ key: 'authorization', value: 'eyJ' }])
+    expect(readWalRecords(record.subarray(0, record.length - 2))).toBeUndefined()
+  })
+})
+
+describe('leveldbVisibleRecords（按 sequence 取最新 + 丢 tombstone）', () => {
+  const record = (key: string, value: string, sequence: number, deleted = false) => ({
+    key: Buffer.from(key), value: Buffer.from(value), sequence, deleted,
+  })
+
+  it('★ 同一 key 多版本 ⇒ 取 sequence 最大', () => {
+    expect(leveldbVisibleRecords([
+      record('organizationCode', 'OLD', 100),
+      record('organizationCode', 'NEW', 200),
+      record('authorization', 'JWT', 150),
+    ]).map((item) => `${item.key.toString()}=${item.value.toString()}`)).toEqual([
+      'organizationCode=NEW',
+      'authorization=JWT',
+    ])
+  })
+
+  it('★★ 最新版本是 tombstone ⇒ 该 key 整条消失（不复活旧值）', () => {
+    expect(leveldbVisibleRecords([
+      record('organizationCode', 'OLD', 100),
+      record('organizationCode', '', 200, true),
+    ])).toEqual([])
+  })
+
+  it('★ 没有 sequence 的人造记录原样保留（单测直接构造文本的路径）', () => {
+    const raw = { key: Buffer.from('x'), value: Buffer.from('y') }
+    expect(leveldbVisibleRecords([raw])).toEqual([raw])
+  })
+})
+
+describe('readSstableRecords：internal key 拆分', () => {
+  it('★ 剥掉尾部 8 字节，并暴露 sequence / deleted', () => {
+    const file = buildSstable([{
+      entries: [
+        { key: Buffer.from('organizationCode'), value: ldbValue('{"k":1}'), sequence: 42 },
+        { key: Buffer.from('organizationCode'), value: Buffer.alloc(0), sequence: 43, type: 0 },
+      ],
+      compressed: false,
+    }])
+    expect(readSstableRecords(file).map((record) => ({
+      key: record.key.toString(), sequence: record.sequence, deleted: record.deleted,
+    }))).toEqual([
+      { key: 'organizationCode', sequence: 42, deleted: false },
+      { key: 'organizationCode', sequence: 43, deleted: true },
+    ])
+  })
+
+  it('★ 未知 internal key 类型 ⇒ 抛错（不猜）', () => {
+    const file = buildSstable([{
+      entries: [{ key: Buffer.from('x'), value: Buffer.from('y'), type: 2 }],
+      compressed: false,
+    }])
+    expect(() => readSstableRecords(file)).toThrow(/未知 internal key 类型 2/)
   })
 })

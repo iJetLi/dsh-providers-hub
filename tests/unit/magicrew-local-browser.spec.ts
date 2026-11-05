@@ -886,3 +886,325 @@ describe("★ account.create({ provider: 'magicrew', mode: 'local-browser' })", 
     expect(pool.listAccountsByProvider('magicrew')).toHaveLength(2)
   })
 })
+
+// ════════════════════════════════════════════════════════════════════════
+// 2026-11-05 返工：sequence 去重 + tombstone（P2-2 / P2-3 的正确修法）
+// ════════════════════════════════════════════════════════════════════════
+
+/** 造一条 leveldb WAL record（`crc32 | length | type | WriteBatch`；crc 恒 0）。 */
+function walRecord(
+  sequence: number,
+  entries: readonly { key: string, value?: string }[],
+): Buffer {
+  const parts: Buffer[] = []
+  const seq = Buffer.alloc(8)
+  seq.writeBigUInt64LE(BigInt(sequence))
+  const count = Buffer.alloc(4)
+  count.writeUInt32LE(entries.length)
+  parts.push(seq, count)
+  for (const entry of entries) {
+    const key = Buffer.from(entry.key, 'latin1')
+    if (entry.value === undefined) {
+      parts.push(Buffer.from([0]), Buffer.from(varintBytes(key.length)), key)
+      continue
+    }
+    const value = Buffer.from(entry.value, 'latin1')
+    parts.push(
+      Buffer.from([1]),
+      Buffer.from(varintBytes(key.length)), key,
+      Buffer.from(varintBytes(value.length)), value,
+    )
+  }
+  const payload = Buffer.concat(parts)
+  const header = Buffer.alloc(7)
+  header.writeUInt16LE(payload.length, 4)
+  header[6] = 1
+  return Buffer.concat([header, payload])
+}
+
+/** 最小的 varint 编码（fixture 专用；只处理非负小整数）。 */
+function varintBytes(value: number): number[] {
+  const bytes: number[] = []
+  let rest = value
+  while (rest >= 0x80) {
+    bytes.push((rest & 0x7f) | 0x80)
+    rest = Math.floor(rest / 128)
+  }
+  bytes.push(rest)
+  return bytes
+}
+
+/** Chromium 给 localStorage value 加的编码头 `0x01`（Latin-1）+ JSON。 */
+function walValue(name: string, value: string): string {
+  return String.fromCharCode(1) + JSON.stringify({ key: name, value })
+}
+
+/** 真实 localStorage 的 WAL key：`_<origin>\x00\x01<带前缀的 name>`。 */
+function walKey(name: string): string {
+  return `_${ORIGIN_CN}\u0000\u0001MAGIC:user:${name}`
+}
+
+/** 把若干 WAL record 写进临时 User Data 根目录的指定文件。 */
+function writeWalFiles(files: Record<string, Buffer>): string {
+  const root = mkdtempSync(join(tmpdir(), 'magicrew-wal-'))
+  const dir = join(root, 'Default', 'Local Storage', 'leveldb')
+  mkdirSync(dir, { recursive: true })
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content)
+  return root
+}
+
+describe('★★ sequence 去重与 tombstone（P2-2 / P2-3 的正确修法）', () => {
+  it('★ 同一 .log 内：新值覆盖旧值（取 sequence 最大）', () => {
+    const root = writeWalFiles({
+      '000005.log': Buffer.concat([
+        walRecord(100, [{ key: walKey('authorization'), value: walValue('authorization', JWT_EXPIRED) }]),
+        walRecord(200, [{ key: walKey('authorization'), value: walValue('authorization', JWT_LIVE) }]),
+        walRecord(200, [{ key: walKey('organizationCode'), value: walValue('organizationCode', 'ORG-LIVE') }]),
+      ]),
+    })
+    expect(readMagicrewLocalCreds('www.letsmagic.cn', { roots: [root], now: NOW })).toEqual({
+      jwt: JWT_LIVE, organizationCode: 'ORG-LIVE', expiresAt: (Math.floor(NOW / 1000) + 3600) * 1000,
+    })
+  })
+
+  it('★★ tombstone 较新（登出）⇒ 该 key 消失，不得复活旧 org', () => {
+    const root = writeWalFiles({
+      '000005.log': walRecord(100, [
+        { key: walKey('authorization'), value: walValue('authorization', JWT_LIVE) },
+        { key: walKey('organizationCode'), value: walValue('organizationCode', 'ORG-OLD') },
+      ]),
+      '000006.log': walRecord(200, [{ key: walKey('organizationCode') }]),
+    })
+    expect(credsNear(leveldbTextFor(root), 'www.letsmagic.cn')).toEqual([])
+    expect(readMagicrewLocalCreds('www.letsmagic.cn', { roots: [root], now: NOW })).toBeUndefined()
+  })
+
+  it('★★ 空值较旧、新值较新（先登出再登录）⇒ 必须读到新 org，不得漏读', () => {
+    const root = writeWalFiles({
+      '000005.log': walRecord(100, [
+        { key: walKey('authorization'), value: walValue('authorization', JWT_LIVE) },
+        { key: walKey('organizationCode') },
+      ]),
+      '000006.log': walRecord(200, [
+        { key: walKey('organizationCode'), value: walValue('organizationCode', 'ORG-LIVE') },
+      ]),
+    })
+    expect(credsNear(leveldbTextFor(root), 'www.letsmagic.cn')).toEqual([
+      { jwt: JWT_LIVE, organizationCode: 'ORG-LIVE' },
+    ])
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════
+// 2026-11-05 审计返工：四条守卫（每条都对应一个「全绿但真机失效」的缝）
+// ════════════════════════════════════════════════════════════════════════
+
+describe('★★ leveldb 读取的四个返工点（审计 2026-11-05）', () => {
+  /**
+   * ① 文件之间**必须**用 `\n` 隔开。
+   *
+   * 判据打在行为上：把一条 JSON 从中间劈开、分放两个文件 ——
+   * - 有分隔符 ⇒ `"key":"authoriz\nation"` 不匹配 ⇒ **读不到**（正确）；
+   * - 无分隔符 ⇒ 拼成 `"key":"authorization"` ⇒ 凭空读出一对凭据（错误）。
+   *
+   * ⚠️ 这里**不能**只断言 `text.includes('\n')`：那是源码文本断言，
+   * 把 join 换成 `join('\n\n')` 之类的等价写法会假红，而真正的
+   * 「跨文件拼接」缺陷反而可能漏掉。
+   */
+  it('★ 文件边界的半个 key 不得被拼成完整凭据（join 分隔符）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'magicrew-split-'))
+    const dir = join(root, 'Default', 'Local Storage', 'leveldb')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, '000001.log'),
+      Buffer.from(`_${ORIGIN_CN}\u0000\u0001x{"key":"authoriz`, 'latin1'),
+    )
+    writeFileSync(
+      join(dir, '000002.log'),
+      Buffer.from(`ation","value":"${JWT_LIVE}"}{"key":"organizationCode","value":"ORG-SPLIT"}`, 'latin1'),
+    )
+    const text = leveldbTextFor(root)
+    expect(credsNear(text, 'www.letsmagic.cn')).toEqual([])
+    // 反向对照：同一个文件里完整写一遍 ⇒ 必须读得到（否则本用例恒真）。
+    const root2 = makeUserData(storageEntry(ORIGIN_CN, 'x', credentialPair(JWT_LIVE, 'ORG-ONE-FILE')))
+    expect(credsNear(leveldbTextFor(root2), 'www.letsmagic.cn')).toEqual([
+      { jwt: JWT_LIVE, organizationCode: 'ORG-ONE-FILE' },
+    ])
+  })
+
+  /**
+   * ② 空 `organizationCode`：**保守放弃**这把 jwt（2026-11-05 审计复核后的结论）。
+   *
+   * 初版审计报「空值遮蔽有效 org ⇒ 凭据整条丢失（P2-6）」，但复核发现
+   * LevelDB 的 internal key 是「user key 升序、同 key 内 **sequence 降序**」
+   * ⇒ 同一 key 的**最新写入排在最前**，所以「空值在前」= 空值**较新**
+   * （登出/切组织的 tombstone），后面那个有效值是**已删除的陈旧值**。
+   * 去够它 = 复活一个已登出的组织（`jwt_stale × org_new` 在上游是
+   * HTTP 200 + `code:403`，还会把已删的账号加回池里）。
+   *
+   * ⇒ 判据是「**放弃**」，不是「继续找」；跨 `.log`/跨文件的旧在前形态
+   * 无法只靠文本区分（需要 8 字节 trailer 的 sequence，见文档「已知边界」）。
+   */
+  it('★ 空 org（tombstone）在前 ⇒ 放弃这把 jwt；有效值在前 ⇒ 正常配对', () => {
+    const tombstoneFirst = storageEntry(ORIGIN_CN, 'x', credentialPair(JWT_LIVE, ''))
+      + storageEntry(ORIGIN_CN, 'y', `{"key":"organizationCode","value":"STALE-ORG"}`)
+    expect(credsNear(tombstoneFirst, 'www.letsmagic.cn')).toEqual([])
+
+    // 反向对照：写的是「有效 org 在前、空值在后」（有效值较新）⇒ 必须配对成功。
+    const liveFirst = storageEntry(ORIGIN_CN, 'x', credentialPair(JWT_LIVE, 'ORG-LIVE'))
+      + storageEntry(ORIGIN_CN, 'y', `{"key":"organizationCode","value":""}`)
+    expect(credsNear(liveFirst, 'www.letsmagic.cn')).toEqual([
+      { jwt: JWT_LIVE, organizationCode: 'ORG-LIVE' },
+    ])
+  })
+
+  /**
+   * ③ `.sst` 与 `.ldb` 同格式，必须一起解 —— 否则它会退回「原文扫描」那条
+   * 坏路（= 修复前的行为），而 `.sst` 里的压缩块同样读不出东西。
+   *
+   * 判据：把一个**不是合法 SSTable** 的 `.sst` 写进去（内容恰好是明文凭据）。
+   * - 走解码 ⇒ 解析失败 ⇒ 跳过 ⇒ 读不到（正确）；
+   * - 退回 latin1 ⇒ 明文命中 ⇒ 读得到（错误）。
+   */
+  it('★ .sst 必须走 SSTable 解码，不得回落成原文扫描', () => {
+    const root = mkdtempSync(join(tmpdir(), 'magicrew-sst-'))
+    const dir = join(root, 'Default', 'Local Storage', 'leveldb')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, '000004.sst'),
+      Buffer.from(storageEntry(ORIGIN_CN, 'x', credentialPair(JWT_LIVE, 'ORG-SST')), 'latin1'),
+    )
+    expect(readMagicrewLocalCreds('www.letsmagic.cn', { roots: [root], now: NOW })).toBeUndefined()
+  })
+
+  /**
+   * ④b 两个 provider（`magicrew` / `magicrewintl`）扫**同一批**浏览器路径 ⇒
+   * 去重键不能是「全局路径」，否则先跑的那个把路径吃掉、另一个的 logger 永远收不到。
+   * 判据：两个不同 `log` 出口各得一条；同一个出口仍只有一条。
+   */
+  it('★ 不同 log 出口各自去重（两个 provider 都要看得见）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'magicrew-warn-perlog-'))
+    const dir = join(root, 'Default', 'Local Storage', 'leveldb')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '000007.ldb'), Buffer.from('broken-bytes', 'latin1'))
+    const first: string[] = []
+    const second: string[] = []
+    // ⚠️ 出口必须是**稳定引用**（每次 new 一个箭头函数会让去重按身份分桶失效）。
+    const sinkA = (message: string): void => { first.push(message) }
+    const sinkB = (message: string): void => { second.push(message) }
+    readMagicrewLocalCreds('www.letsmagic.cn', { roots: [root], now: NOW, log: sinkA })
+    readMagicrewLocalCreds('www.letsmagic.cn', { roots: [root], now: NOW, log: sinkB })
+    expect(first).toHaveLength(1)
+    expect(second).toHaveLength(1)
+    // 同一个出口再跑一次仍只有一条（轮询去重）。
+    readMagicrewLocalCreds('www.letsmagic.cn', { roots: [root], now: NOW, log: sinkA })
+    expect(first).toHaveLength(1)
+  })
+
+  /**
+   * ⑤ warn 必须**透传**到宿主注入的 `warn`（2026-11-05 返工自查）。
+   *
+   * `leveldbTextForFile` 的默认出口是 `console.warn`；若 `MagicrewAuth` 不把
+   * `options.warn` 转成 `log`，宿主日志系统收不到 ⇒ 生产里「有日志」但人看不见，
+   * 单测也断言不到 —— 那就是**假修**。
+   */
+  it('★★ 解析失败的 warn 必须透传到宿主 logger（不是只打到 console）', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'magicrew-auth-warn-'))
+    const dir = join(root, 'Default', 'Local Storage', 'leveldb')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '000006.ldb'), Buffer.from('not-a-sstable', 'latin1'))
+    const store = new FakeStore()
+    const warnings: string[] = []
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const auth = new MagicrewAuth(makeContext(store), {
+        store,
+        browserRoots: [root],
+        warn: (message: string) => warnings.push(message),
+        fetchImpl: (async () => {
+          throw new Error('坏文件不得触发网络请求')
+        }) as unknown as typeof fetch,
+      })
+      expect(await auth.importFromLocalBrowser()).toBeUndefined()
+      expect(warnings.filter((line) => line.includes('000006.ldb'))).toHaveLength(1)
+      // ⚠️ 反向对照：注入 warn 时**不得**再打 console（单出口不变式，
+      //    2026-11-05 合规/对抗审计 P2-1 的假绿面）。
+      expect(consoleSpy).not.toHaveBeenCalled()
+    } finally {
+      consoleSpy.mockRestore()
+    }
+  })
+
+  /**
+   * ★★ ⑤b **生产形态**：`index.ts` 两处 `new MagicrewAuth(ctx)` 都**不注入**
+   * `warn`。若 `log` 只取 `warnImpl`（单测专用），生产里就恒 `undefined` ⇒
+   * 只剩 `console.warn`、宿主结构化日志收不到（2026-11-05 对抗审计 P1-1）。
+   * 判据：不传 `warn`，`ctx.logger.warn` 必须收到。
+   */
+  it('★★ 生产形态（不注入 warn）也必须打到 ctx.logger', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'magicrew-auth-ctxlog-'))
+    const dir = join(root, 'Default', 'Local Storage', 'leveldb')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '000008.ldb'), Buffer.from('broken', 'latin1'))
+    const store = new FakeStore()
+    const logged: string[] = []
+    const ctx = makeContext(store)
+    // ⚠️ `ctx.logger` 在 cordis 里是**可变属性**，直接替换（`provide('logger')` 不生效）。
+    ;(ctx as unknown as { logger: { warn: (message: string) => void } }).logger = {
+      warn: (message: string) => logged.push(message),
+    }
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const auth = new MagicrewAuth(ctx, {
+        store,
+        browserRoots: [root],
+        fetchImpl: (async () => {
+          throw new Error('坏文件不得触发网络请求')
+        }) as unknown as typeof fetch,
+      })
+      expect(await auth.importFromLocalBrowser()).toBeUndefined()
+      expect(logged.some((line) => line.includes('000008.ldb'))).toBe(true)
+      expect(consoleSpy).not.toHaveBeenCalled()
+    } finally {
+      consoleSpy.mockRestore()
+    }
+  })
+
+  /**
+   * ⑥ 大小写不敏感后缀（2026-11-05 对抗审计 P3-3）：`.LDB` / `.SST` 必须与
+   * 小写同路径（解码失败即跳过），**不得**退回「原文扫描」从原始字节编造凭据。
+   */
+  it('★ .LDB / .SST 大写后缀也必须走解码（不得回落原文扫描）', () => {
+    for (const name of ['000009.LDB', '000010.SST']) {
+      const root = mkdtempSync(join(tmpdir(), 'magicrew-upper-'))
+      const dir = join(root, 'Default', 'Local Storage', 'leveldb')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, name), Buffer.from(
+        storageEntry(ORIGIN_CN, 'x', credentialPair(JWT_LIVE, 'ORG-UPPER')), 'latin1',
+      ))
+      expect(
+        readMagicrewLocalCreds('www.letsmagic.cn', { roots: [root], now: NOW, log: () => {} }),
+        name,
+      ).toBeUndefined()
+    }
+  })
+
+  /**
+   * ④ 解析失败必须**留一条日志**（每个文件一次），否则「解析器坏了」与
+   * 「用户没登录」完全同形（审计 P1-3）。
+   */
+  it('★ 坏 .ldb 解析失败要 warn（含文件名），且同一文件不刷屏', () => {
+    const root = mkdtempSync(join(tmpdir(), 'magicrew-warn-'))
+    const dir = join(root, 'Default', 'Local Storage', 'leveldb')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '000005.ldb'), Buffer.from('not-a-sstable-at-all', 'latin1'))
+    const lines: string[] = []
+    const options = { roots: [root], now: NOW, log: (message: string) => lines.push(message) }
+    expect(readMagicrewLocalCreds('www.letsmagic.cn', options)).toBeUndefined()
+    expect(readMagicrewLocalCreds('www.letsmagic.cn', options)).toBeUndefined()
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('000005.ldb')
+    // 日志**不得**带文件内容（可能含别的站点 token）。
+    expect(lines[0]).not.toContain('not-a-sstable')
+  })
+})

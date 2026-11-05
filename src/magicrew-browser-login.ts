@@ -201,13 +201,20 @@ function hostnameOf(url: string): string {
  * （而磁盘那条腿当时又因为不解 Snappy 压缩块一起失效 ⇒ 两条腿全瞎）。
  *
  * ⇒ 现在两套都读：**裸键优先**（老版本前端 / 其它站点可能仍是裸键），
- *   裸键为空再取带前缀的。用 `||` 而不是 `??`：`getItem` 缺失时返回 `null`，
- *   但空串 `''` 同样不可用，两种都要让位给下面的回退。
+ *   整套裸键不完整再取带前缀的整套。
+ *
+ * ⚠️⚠️ 表达式**只取原始值**，回退配对放在 {@link parseEvaluatedCredential} 里
+ * （逐**对**回退，不逐键）：`getItem` 缺失回 `null`、登出后残留空串，两种都要
+ * 让位；而在表达式里对各键分别 `||` 会拼出「裸 jwt × 前缀 org」这种从未同时
+ * 写入过的组合（2026-11-05 审计 P2-2）。
  */
-const CDP_CREDENTIAL_EXPRESSION = `JSON.stringify({
-  a: localStorage.getItem('authorization') || localStorage.getItem('MAGIC:user:authorization'),
-  o: localStorage.getItem('organizationCode') || localStorage.getItem('MAGIC:user:organizationCode'),
-  t: localStorage.getItem('teamshareOrganizationCode') || localStorage.getItem('MAGIC:user:teamshareOrganizationCode'),
+export const CDP_CREDENTIAL_EXPRESSION = `JSON.stringify({
+  a: localStorage.getItem('authorization'),
+  ao: localStorage.getItem('MAGIC:user:authorization'),
+  o: localStorage.getItem('organizationCode'),
+  oo: localStorage.getItem('MAGIC:user:organizationCode'),
+  t: localStorage.getItem('teamshareOrganizationCode'),
+  to: localStorage.getItem('MAGIC:user:teamshareOrganizationCode'),
   n: localStorage.length,
 })`
 
@@ -302,27 +309,77 @@ function pickPageTarget(
 }
 
 /** 解析 `Runtime.evaluate` 的返回值（`{ result: { value } }`）⇒ 读到的凭据。 */
-function parseEvaluatedCredential(value: unknown): MagicrewCredential | undefined {
+/** 页面表达式回传的原始载荷（两套键名各三个，见 {@link CDP_CREDENTIAL_EXPRESSION}）。 */
+interface EvaluatedCredentialPayload {
+  a?: unknown
+  ao?: unknown
+  o?: unknown
+  oo?: unknown
+  t?: unknown
+  to?: unknown
+  n?: unknown
+}
+
+/**
+ * 从**同一套键名**里取出一对凭据；任一缺失就返回 `undefined`。
+ *
+ * ⚠️ `organizationCode` 与 `teamshareOrganizationCode` 是**同层的两个候选**：
+ * 前者优先，为空才退后者（真机两种组织码都存在过）。
+ */
+function credentialOfPair(
+  jwt: unknown,
+  organization: unknown,
+  teamshare: unknown,
+): MagicrewCredential | undefined {
+  const token = typeof jwt === 'string' ? jwt : ''
+  if (!isJwtShaped(token)) return undefined
+  const org = typeof organization === 'string' && organization.length > 0
+    ? organization
+    : typeof teamshare === 'string' && teamshare.length > 0 ? teamshare : ''
+  // ⚠️ 缺组织码 ⇒ `undefined`（**不造假**）：空 org 配 jwt 在上游是 HTTP 200 + code:403。
+  if (org.length === 0) return undefined
+  return { jwt: token, organizationCode: org }
+}
+
+/**
+ * 把 `Runtime.evaluate` 回传的 JSON 串解析成凭据（**纯函数**，可直接单测）。
+ *
+ * ## ⚠️⚠️ 回退必须**逐对**，不能逐键（2026-11-05 审计 P2-2）
+ *
+ * 旧写法在表达式里对 `a` / `o` **各自**做 `||` 回退 ⇒ 当「老裸键残留 + 新前缀键
+ * 并存」时会拼出 `{jwt_裸, org_前缀}` 这种**从未同时写入过**的组合（上游症状：
+ * HTTP 200 + `code:403`，与「没读到」相比难查得多）。
+ *
+ * ⇒ 现在表达式只取**原始值**，回退在这里按**整套键名**配对：
+ * 先试裸键那一套（老版本前端），整套不完整再试 `MAGIC:user:` 那一套（当前前端）。
+ * 两套都不完整 ⇒ `undefined`（宁可读不到，也绝不混搭）。
+ *
+ * ⚠️ 逐对回退的**另一条收益**：逻辑落在 TS 里，可以真求值单测 —— 而不是像
+ * 旧守卫那样只断言「表达式文本里有这几个字符串」（`if (false)` 即可旁路）。
+ *
+ * ⚠️⚠️ **`localStorage` 为空要当「还没登完」返回 `undefined`，不要抛**：
+ * 用户刚点开窗口那一刻必然是空的，而这条路径每 500ms 走一次。
+ */
+export function parseEvaluatedCredential(value: unknown): MagicrewCredential | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined
-  let parsed: { a?: unknown, o?: unknown, t?: unknown, n?: unknown }
+  let parsed: EvaluatedCredentialPayload
   try {
-    parsed = JSON.parse(value) as typeof parsed
+    parsed = JSON.parse(value) as EvaluatedCredentialPayload
   } catch {
     return undefined
   }
   /**
-   * ⚠️⚠️ **`localStorage` 为空要当「还没登完」返回 `undefined`，不要抛**：
-   * 用户刚点开窗口那一刻必然是空的，而这条路径每 500ms 走一次。
+   * ⚠️ 必须挡**非对象载荷**：`JSON.parse('null')` 合法返回 `null`，随后
+   * `parsed.n` 会抛 `TypeError`（2026-11-05 审计实测）。当前表达式恒产出对象
+   * 字符串 ⇒ 生产不可达，但本函数已**导出**（公共 API + 行为级单测主体），
+   * 不该让调用方拿到一个会炸的纯函数。
+   * ⚠️ `'[]'` / `'123'` / `'true'` 逐属性读是 `undefined`（不炸），但同样不是
+   * 我们的载荷形状 ⇒ 一并早退。
    */
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   if (parsed.n === 0) return undefined
-  const authorization = typeof parsed.a === 'string' ? parsed.a : ''
-  if (!isJwtShaped(authorization)) return undefined
-  const organization = typeof parsed.o === 'string' && parsed.o.length > 0
-    ? parsed.o
-    : typeof parsed.t === 'string' && parsed.t.length > 0 ? parsed.t : ''
-  // ⚠️ 缺组织码 ⇒ `undefined`（**不造假**）：空 org 配 jwt 在上游是 HTTP 200 + code:403。
-  if (organization.length === 0) return undefined
-  return { jwt: authorization, organizationCode: organization }
+  return credentialOfPair(parsed.a, parsed.o, parsed.t)
+    ?? credentialOfPair(parsed.ao, parsed.oo, parsed.to)
 }
 
 /**

@@ -4,6 +4,8 @@ import { MAGICREW } from '../../src/magicrew-product.js'
 import { fetchMagicrewProfile } from '../../src/magicrew-profile.js'
 import { fetchMagicrewCatalogModels } from '../../src/magicrew-catalog.js'
 import { fetchMagicrewBalance, magicrewApiHeaders } from '../../src/magicrew-credits.js'
+import { MagicrewAdapter } from '../../src/magicrew-adapter.js'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 /**
  * ★★ 2026-11-04 真机二分实测的**唯一**修复判据：`referer` 必须下发。
@@ -119,5 +121,50 @@ describe('magicrew 请求头必须带 referer（缺了 = 403 空 body）', () =>
     })
     expect(headers.referer).toBe(`${MAGICREW.webOrigin}/`)
     expect(headers.referer.endsWith('/')).toBe(true)
+  })
+})
+
+/**
+ * ★★ 2026-11-05 审计返工：**聊天适配器**那一处 referer 原先零守卫。
+ *
+ * 对抗审计实测：删掉 `magicrew-adapter.ts` 的 `referer`，本文件其余 6 条用例
+ * 全绿（它们只覆盖 auth / profile / credits / catalog 四条生产者）⇒
+ * PR 声称的「五处生产者一并钉住」不成立。
+ *
+ * 判据打在行为上：真跑 `stream()`，检查**实际发出的第一个请求头**。
+ * ⚠️ 聊天网关实测**不校验** referer（200），但这行存在的理由是「同一上游的
+ * 其余端点缺了就 403」⇒ 它属于「统一形态」，必须与那几处同生共死。
+ */
+describe('★★ 聊天适配器的出站请求也带 referer（审计 P2-3 零守卫）', () => {
+  const STREAM_OPTIONS = {
+    provider: 'magicrew',
+    model: 'deepseek-v4.1-flash',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  } as unknown as GenerateOptions
+
+  it('★ `MagicrewAdapter.stream()` 的首个请求头必须带 referer', async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
+    ))
+    const adapter = new MagicrewAdapter({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      resolveCredential: async () => ({
+        jwt: 'jwt-abc',
+        organizationCode: 'org-1',
+        apiKey: 'mgw_key',
+      }),
+    })
+    const texts: string[] = []
+    for await (const chunk of adapter.stream(STREAM_OPTIONS)) {
+      if (chunk.type === 'text-delta') texts.push(chunk.text)
+    }
+    // ⚠️ 反向对照：必须真的产出内容 —— 否则「fetch 被调用但 stream 提前返回」
+    //    这种变异也能绿（2026-11-05 审计 M12）。
+    expect(texts.join('')).toBe('ok')
+    const call = fetchImpl.mock.calls[0] as [string, { headers: Record<string, string> }]
+    expect(call[1].headers.referer).toBe(EXPECTED_REFERER)
+    // 反向对照：同一处必须仍带 origin（别为了加 referer 把 origin 挤掉）。
+    expect(call[1].headers.origin).toBe(MAGICREW.webOrigin)
   })
 })
