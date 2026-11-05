@@ -115,12 +115,13 @@ export const ANALYZE_IMAGE_TOOL = 'analyzeImage'
 /**
  * 能**原生收图**的 codearts 模型（`/v1/model/builtin` 的 `supports_images` 实测）。
  *
- * | 模型 | `supports_images` | `model_category` |
- * |---|---|---|
- * | `kimi-k2.6-vl` / `Qwen3-VL-235B` | **true** | 图片理解 |
- * | `glm-5.3` / `GLM-5.2` / `openpangu-*` / `deepseek-v4.1-flash` | false | 文本生成 |
+ * | 模型 | `supports_images` | `model_category` | 实际能收图？ |
+ * |---|---|---|---|
+ * | `kimi-k2.6-vl` / `Qwen3-VL-235B` | **true** | 图片理解 | ✅ |
+ * | `deepseek-v4.1-flash-1017` / `deepseek-v4.1-flash` | false（**目录过期**） | 文本生成 | ✅（wire 实测，见 {@link CODEARTS_IMAGE_CAPABLE_OVERRIDES}） |
+ * | `glm-5.3` / `GLM-5.2` / `openpangu-*` | false | 文本生成 | ❌ 406 |
  *
- * 其余模型发图必被上游拒：
+ * 目录未标 `supports_images` 的模型发图会被上游拒：
  * `{"error_code":"InferHub.001001020.406","error_msg":"The request model is not multimodal"}`。
  *
  * ## ⚠️ 本表已降级为**兜底**，权威来源是远端目录（2026-10-26 修）
@@ -131,9 +132,35 @@ export const ANALYZE_IMAGE_TOOL = 'analyzeImage'
  * 发不到上游。真实报障：`kimi-k3` 官方支持图片，但本表里没有它。
  *
  * ⇒ 现由 {@link setCodeartsImageModels} 把远端目录里 `supports_images: true` 的
- * id 灌进来，判据取**并集**（目录 ∪ 本表）。
+ * id 灌进来，判据取**并集**（目录 ∪ 本表 ∪ 覆盖表）。
  */
 export const CODEARTS_VL_MODELS: readonly string[] = ['kimi-k2.6-vl', 'Qwen3-VL-235B']
+
+/**
+ * 目录 `supports_images` 仍是 false、但 **wire 实测能收图**的主模型。
+ *
+ * ## 2026-11-05 真机实测（`image_url` 直发 `chat/completions`，4×4 纯色 PNG）
+ *
+ * | 模型 | 图片 | 结果 |
+ * |---|---|---|
+ * | `deepseek-v4.1-flash-1017` | 红 | **200**，正文「红色」 |
+ * | `deepseek-v4.1-flash` | 蓝 | **200**，正文「蓝色」 |
+ * | `glm-5.3`（对照） | — | **406** `The request model is not multimodal` |
+ *
+ * ⇒ 目录的 `supports_images: false` 对这两条**是过期数据**；而 DSH 的图片准入
+ * 只看 `inputModalities`，声明成 `['text']` 会让图**在入库阶段**被换成占位文字
+ * （插件侧根本没机会发出去）。
+ *
+ * ## ⚠️ 为什么不放进 {@link CODEARTS_VL_MODELS}
+ *
+ * 那张表同时被 {@link codeartsIsVisionModel} 当「专职 VL」判据 —— 放进去会把
+ * 这两个**主模型**的 `analyzeImage` 摘掉（它们主业是主模型，不是专职识图）。
+ * 所以这里另起一张表，只影响「能不能收图」，不影响「要不要挂识图工具」。
+ */
+export const CODEARTS_IMAGE_CAPABLE_OVERRIDES: readonly string[] = [
+  'deepseek-v4.1-flash-1017',
+  'deepseek-v4.1-flash',
+]
 
 /**
  * 远端 `/v1/model/builtin` 里 `supports_images` 为 true 的模型 id（小写归一）。
@@ -221,6 +248,8 @@ export const CODEARTS_VISION_MODEL = 'kimi-k2.6-vl'
 export function codeartsAcceptsImage(modelId: string): boolean {
   const key = modelId.trim().toLowerCase()
   if (catalogImageModels !== undefined && catalogImageModels.has(key)) return true
+  // 目录 `supports_images` 过期、但 wire 实测能收图的主模型（2026-11-05）。
+  if (CODEARTS_IMAGE_CAPABLE_OVERRIDES.some((id) => id.toLowerCase() === key)) return true
   return CODEARTS_VL_MODELS.some((id) => id.toLowerCase() === key)
 }
 

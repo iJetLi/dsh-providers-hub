@@ -1408,7 +1408,7 @@ function UsageBadgeActive(props) {
               //   `94.54MToken` 在同一弹窗里并列，像两种单位
               //   （2026-10-05 复审补修；这是该批次最后一处空格漏网，见
               //    `tests/unit/claim-unit-callsites.spec.ts` 的穷举断言）。
-              `${formatUnits(group.remaining, group.unit) ?? '?'} / ${formatUnits(group.total, group.unit) ?? '?'}${group.label}`),
+              `${formatUnits(group.remaining, group.unit) ?? '?'}${group.totalKnown === false ? '' : ` / ${formatUnits(group.total, group.unit) ?? '?'}`}${group.label}`),
           ]),
           React.createElement('div', { key: 'note', className: 'dim-jh-badgeRowNote' },
             [

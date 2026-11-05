@@ -63,6 +63,19 @@ export const BAIZHI_SESSION_COOKIE_NAME = 'baizhi_session'
 export const BAIZHI_SL_SESSION_COOKIE_NAME = 'sl-session'
 
 /**
+ * 每日临时积分的**发放总额**（积分）。
+ *
+ * 上游 `POST /api/v1/user/wallet/daily-temporary-credit` 实测
+ * `amount_credit_cents: 10000` ⇒ 100 积分，控制台「每日领积分 +100」也是同一口径。
+ * 这是每日包的**固定分母**：`remaining` 随消耗下降，`total` 必须保持 100，
+ * 否则会显示成 `98.21 / 98.21`（用户 2026-11-05 报障）。
+ *
+ * ⚠️ 只用于「每日积分」包；`permanent`（充值积分）上游不给初始总额，
+ * 不能套用这个数。
+ */
+export const BAIZHI_DAILY_CREDIT_TOTAL = 100
+
+/**
  * 控制台请求的可注入依赖。
  *
  * ⚠️ `fetchImpl` 只给单测用：本仓红线是「单测不许发真网络」。
@@ -77,7 +90,7 @@ export interface BaizhiCreditsDeps {
 export interface BaizhiWallet {
   /** 控制台用户 id（数字）。 */
   readonly userId?: number
-  /** 当前可用积分（temporary + permanent - frozen）。 */
+  /** 当前可用积分（temporary + permanent - frozen；授信账户则为授信剩余）。 */
   readonly available: number
   /** 每日积分（**零点过期**）。 */
   readonly temporary: number
@@ -87,7 +100,16 @@ export interface BaizhiWallet {
   readonly frozen: number
   /** 今天是否已领取每日积分。 */
   readonly dailyClaimed: boolean
+  /**
+   * 计费模式。控制台钱包对**授信账户**返回 `'postpaid'`，此时
+   * `available` 是「授信总额 - 预占 - 未出账 - 已出账未结清」的剩余，
+   * `creditLimit` 才是真正的分母（控制台 JS 的 `billing_mode` 分支）。
+   */
+  readonly billingMode?: string
+  /** 授信总额（仅 `billingMode==='postpaid'` 时有意义）。 */
+  readonly creditLimit?: number
 }
+
 
 /** 用量明细里的一天 / 一个周期。 */
 export interface BaizhiUsageItem {
@@ -258,6 +280,8 @@ export async function fetchBaizhiWallet(
   }
   // 单位是 1/100 积分 ⇒ 除 100 才是面板上的「235.05」。
   const toCredit = (cents: number | undefined): number => (cents === undefined ? 0 : cents / 100)
+  const billingMode = typeof record?.billing_mode === 'string' ? record.billing_mode : undefined
+  const creditLimit = readNumber(record, 'credit_limit_cents')
   return {
     ok: true,
     wallet: {
@@ -267,6 +291,8 @@ export async function fetchBaizhiWallet(
       permanent: toCredit(readNumber(record, 'permanent_credit_cents')),
       frozen: toCredit(readNumber(record, 'frozen_credit_cents')),
       dailyClaimed: readBool(record, 'daily_temporary_credit_claimed') === true,
+      ...(billingMode === undefined ? {} : { billingMode }),
+      ...(creditLimit === undefined ? {} : { creditLimit: toCredit(creditLimit) }),
     },
   }
 }
@@ -329,30 +355,116 @@ export async function fetchBaizhiUsage(
  * - 「充值积分」= permanent（长期有效 ⇒ 无到期字段）。
  */
 export function buildBaizhiBalance(wallet: BaizhiWallet, usage: BaizhiUsage | undefined): CreditBalance {
-  const packages: CreditPackage[] = [
-    {
+  /**
+   * 每日包的固定分母（上游实测 `amount_credit_cents: 10000` ⇒ 100 积分）。
+   *
+   * ⚠️ 两个边界（2026-11-05 审计返工）：
+   * - 上游某天给超过 100（累计/补发）时以实际余额为上限，避免倒挂；
+   * - **今天还没领**（`dailyClaimed=false` 且 `temporary=0`）时**不能**显示
+   *   `0 / 100` —— 那会被读成「已经用光」。此时 `totalKnown:false`（只显示 0）
+   *   并给出诚实文案「今日尚未领取（每日 +100）」。
+   */
+  const dailyTotal = Math.max(BAIZHI_DAILY_CREDIT_TOTAL, wallet.temporary)
+  const dailyUsed = Math.round((dailyTotal - wallet.temporary) * 100) / 100
+  /**
+   * 「今天还没领」只认**显式 false**（2026-11-05 对抗审计 P3-4）：旧实现
+   * `!wallet.dailyClaimed` 把「字段缺失（undefined）」也当成未领取，会误报
+   * 「今日尚未领取」。
+   */
+  const dailyPending = wallet.dailyClaimed === false && wallet.temporary === 0
+  /**
+   * 「领取标记缺失 + 余额为 0」时**不能猜**（既可能是没领，也可能是领了花光）
+   * ⇒ 不显示分母，也不写「已用光」（2026-11-05 对抗审计 P3-4）。
+   */
+  const dailyUnknown = wallet.dailyClaimed === undefined && wallet.temporary === 0
+  /**
+   * 上游某天给超过 100（补发/累计）时**总额不可知** ⇒ 不显示分母
+   * （2026-11-05 对抗审计 P3-2：否则会出现 `150 / 150` 的新假分母）。
+   */
+  const dailyExcess = wallet.temporary > BAIZHI_DAILY_CREDIT_TOTAL
+  const creditLimit = wallet.creditLimit ?? 0
+  /**
+   * 授信账户（控制台 `billing_mode === 'postpaid'`）：
+   * `available` 是「授信总额 - 预占 - 未出账 - 已出账未结清」的剩余，
+   * `credit_limit_cents` 才是**上游权威**的分母 ⇒ 可以显示 `908 / 1000`。
+   *
+   * ⚠️ `available > creditLimit`（超授信 / 退款未出账）时强行显示
+   * `1200 / 1200` 又是假分母 ⇒ 退回 `totalKnown:false`（只显示剩余）。
+   */
+  /**
+   * ⚠️ 授信分支只看 `billing_mode`（2026-11-05 对抗审计 P2-3）：旧判据还要求
+   * `creditLimit > 0`，于是「授信账户但 `credit_limit_cents` 未下发/为 0」会
+   * 掉进「每日积分 + 充值积分」两个**对授信账户无意义**的包，主行口径自相矛盾。
+   * 分母是否可知由 `totalKnown` 单独表达。
+   */
+  const postpaid = wallet.billingMode === 'postpaid'
+  const hasCreditLimit = creditLimit > 0
+  const overLimit = postpaid && hasCreditLimit && wallet.available > creditLimit
+  /**
+   * ⚠️⚠️ **充值积分不做「反推期初」**（2026-11-05 审计 P0-1/P0-2）：
+   * 上游只给当前 `permanent_credit_cents`，`app-credit-usage?period=month` 是
+   * **整月总消耗**（每日积分也含在内），而「每日桶今天花了多少」只有今天的数
+   * ⇒ 任何 `monthCredit - dailySpent` 都会把其余 29 天的每日消耗算进充值桶，
+   * 分母高估最多 `100×(天数-1)`，且「本月充值消耗为 0」时会退化成
+   * `136.84 / 136.84` 的假窗口。宁可只显示余额，也不编造分母。
+   */
+  const packages: CreditPackage[] = []
+  if (postpaid) {
+    packages.push({
+      name: '授信额度',
+      unit: 'credit',
+      remaining: wallet.available,
+      // 没有 credit_limit_cents 时 `total` 只能冗余填 remaining，且**不显示分母**。
+      total: hasCreditLimit ? Math.max(creditLimit, wallet.available) : wallet.available,
+      totalKnown: hasCreditLimit && !overLimit && wallet.available >= 0,
+      // `used` 必须落在 [0, creditLimit]：`available < 0`（欠费）时旧算法会得到
+      // `used > total`（对抗审计 P3-3）。
+      used: hasCreditLimit
+        ? Math.min(creditLimit, Math.max(0, Math.round((creditLimit - wallet.available) * 100) / 100))
+        : 0,
+      active: true,
+      cycleStartTime: '',
+      cycleEndTime: '',
+      expiredTime: '',
+      expiryNote: '授信额度（平台未提供到期日）',
+    })
+  } else {
+    packages.push({
       name: '每日积分',
       unit: 'credit',
       remaining: wallet.temporary,
-      total: wallet.temporary,
-      used: 0,
+      // 每日包有固定发放额（+100/天）：分母必须固定，只有 remaining 随消耗降。
+      total: dailyTotal,
+      // 未领取 / 超出固定发放额 / 领取标记缺失时总额不可知 ⇒ 不显示分母。
+      totalKnown: !dailyPending && !dailyExcess && !dailyUnknown,
+      used: dailyPending || dailyExcess || dailyUnknown ? 0 : dailyUsed,
       active: true,
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: '',
-    },
-    {
+      expiryNote: dailyPending
+        ? '今日尚未领取（每日 +100）'
+        : dailyExcess
+          ? '今日发放额超过固定值（上游补发/累计，总额不可知）'
+          : dailyUnknown
+            ? '今日领取状态未知（平台未下发标记）'
+            : '每日 00:00（UTC+8）过期',
+    })
+    packages.push({
       name: '充值积分',
       unit: 'credit',
       remaining: wallet.permanent,
+      // 上游不给初始总额 ⇒ 只显示余额（见上方「不做反推期初」）。
       total: wallet.permanent,
+      totalKnown: false,
       used: 0,
       active: true,
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: '',
-    },
-  ]
+      expiryNote: '长期有效（平台未提供到期日）',
+    })
+  }
   if (wallet.frozen > 0) {
     packages.push({
       name: '冻结积分',

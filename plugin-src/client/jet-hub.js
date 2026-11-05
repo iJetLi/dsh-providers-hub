@@ -449,7 +449,8 @@ function summarizeTest(res) {
 function formatPackageLine(pkg, windowDays, now) {
   const remaining = formatUnits(pkg.remaining, pkg.unit) ?? '?';
   const total = formatUnits(pkg.total, pkg.unit) ?? '?';
-  const parts = [`${pkg.active ? '' : '[已失效] '}${pkg.name || '未命名'}: ${remaining} / ${total}`];
+  const amount = pkg.totalKnown === false ? remaining : `${remaining} / ${total}`;
+  const parts = [`${pkg.active ? '' : '[已失效] '}${pkg.name || '未命名'}: ${amount}`];
   const daysLeft = daysUntilExpiry(pkg, now);
   if (!pkg.active && pkg.expiredTime) parts.push(`失效于 ${pkg.expiredTime}`);
   else if (daysLeft !== null) {
@@ -462,6 +463,7 @@ function formatPackageLine(pkg, windowDays, now) {
      */
     parts.push(formatExpiryHint(pkg, windowDays, now));
   } else if (pkg.cycleEndTime) parts.push(`本周期至 ${pkg.cycleEndTime}`);
+  else if (typeof pkg.expiryNote === 'string' && pkg.expiryNote !== '') parts.push(pkg.expiryNote);
   return parts.join(' · ');
 }
 
@@ -531,6 +533,28 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    */
   const quotaText = formatQuotaLine(all, unit);
   /**
+   * 授信/充值账户的**主行窗口**：`授信额度` 或 `充值积分` 包同时有
+   * `remaining/total`（授信来自 `billing_mode:'postpaid'` + `credit_limit_cents`；
+   * 充值来自本月消耗反推的期初），主行直接显示 `908 / 1000`，不要只显示
+   * 孤零零的 908。只在包名精确匹配时启用，不能把其它 provider 的单包
+   * `remaining / total` 一并搬上来（那会改变现有账号的总余额口径）。
+   */
+  /**
+   * ⚠️⚠️ 必须**同时**限定 provider（2026-11-05 审计 P0-3）：
+   * `raccoon` 也下发同名「充值积分」包（`src/raccoon-credits.ts` 的
+   * `makePackage('充值积分', …)`，且没有 `totalKnown` 字段）⇒ 只按包名匹配会把
+   * Raccoon 的主行从「总余额 500」劫持成「充值桶 200 / 200」（多出一个假分母）。
+   * 这两行只服务 baizhi 的授信/充值窗口，别的 provider 一律不碰。
+   */
+  const creditWindow = provider === 'baizhi'
+    ? all.find((pkg) => pkg && (pkg.name === '授信额度' || pkg.name === '充值积分')
+      && pkg.totalKnown !== false && Number(pkg.total) > 0
+      && Number(pkg.total) >= Number(pkg.remaining))
+    : undefined;
+  const mainText = creditWindow
+    ? `${formatUnits(creditWindow.remaining, unit) ?? '0'} / ${formatUnits(creditWindow.total, unit) ?? '0'}`
+    : quotaText ?? total;
+  /**
    * 跨量纲附注（MonkeyCode：积分 + 每日额度）。
    *
    * ⚠️ 用户 2026-11-02 报障：「每日额度应该在账号积分处单独显示出来」。
@@ -555,7 +579,8 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
           ? pkg.name
           : unitLabel(pkg.unit);
         const remainingText = formatUnits(remaining, pkg.unit) ?? String(remaining);
-        const hasRange = Number.isFinite(poolTotal) && poolTotal > 0 && poolTotal !== remaining;
+        const hasRange = pkg.totalKnown !== false
+          && Number.isFinite(poolTotal) && poolTotal > 0 && poolTotal !== remaining;
         return hasRange
           ? `${poolName} ${remainingText} / ${formatUnits(poolTotal, pkg.unit) ?? String(poolTotal)}`
           : `${poolName} ${remainingText}`;
@@ -703,7 +728,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    *       之后是名词解释，最后才是资源包逐项明细。
    */
   const lineText = [
-    quotaText ?? total,
+    mainText,
     crossUnitText,
     poolSplitText,
     namedPoolText,
@@ -780,7 +805,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
     },
     // ⚠️ 配额窗口显示**逐窗口百分比**而不是均值：均值（94.5）既不是上游给的数，
     // 在「额度」这个标签下更会被读成 94.5 个积分。见 quotaText 的注释。
-    React.createElement('strong', { className: 'dim-jh-creditTotal' }, quotaText ?? total),
+    React.createElement('strong', { className: 'dim-jh-creditTotal' }, mainText),
     // 跨量纲附注（MonkeyCode 的每日额度）：与 loomy 的 `每日 5000` 同位置、同样式，
     // 只是**不参与**上面的合计 —— 单位不同，不能相加（用户 2026-11-02 定调）。
     crossUnitText === null
@@ -7557,7 +7582,7 @@ function providerRowSummary(row) {
  * 传入；拖拽的视觉状态（正在拖哪行 / 落点在哪）是本组件的局部 UI 状态，drop 时
  * 通过 `onCommitOrder` 把新顺序交给页面层持久化。
  */
-function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onToggle, onReload, onClose, order, onCommitOrder, reordering, notice, rpcCall }) {
+function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onToggle, onReload, onClose, order, onCommitOrder, reordering, notice, rpcCall, onProviderStatusPatched }) {
   // ESC 关闭：挂在 document 上而不是弹窗上 —— 焦点可能落在任意一个开关上，
   // 只监听弹窗自身的 keydown 会漏掉这些按键（与 ModelListPanel 同因）。
   React.useEffect(() => {
@@ -7729,7 +7754,7 @@ function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onTog
     : null,
   React.createElement('div', { className: 'dim-jh-modalBody' },
     view === 'models'
-      ? React.createElement(ModelCenterPanel, { providers, rpcCall, statuses })
+      ? React.createElement(ModelCenterPanel, { providers, rpcCall, statuses, onProviderStatusPatched })
       : React.createElement('div', { className: 'dim-jh-modelList' },
       rows.map(row => {
         const busy = busyIds.has(row.id);
@@ -7812,7 +7837,7 @@ function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onTog
  * 本组件也刻意**不用 `createPortal`**（见 `ModelListPanel` 的注释：客户端模块表
  * 由宿主注入，`react-dom` 可能不在其中，require 会抛「missed the module table」白屏）。
  */
-function ModelCenterPanel({ providers, rpcCall, statuses }) {
+function ModelCenterPanel({ providers, rpcCall, statuses, onProviderStatusPatched }) {
   // providerId -> { phase: 'idle'|'loading'|'ready'|'error', models, error }
   const [states, setStates] = React.useState({});
   const [query, setQuery] = React.useState('');
@@ -8004,6 +8029,23 @@ function ModelCenterPanel({ providers, rpcCall, statuses }) {
       if (mounted.current) setToggleWarnings(Array.isArray(result?.warnings) ? result.warnings : []);
       // 批量动作会改动整张黑名单，逐项翻不可靠 ⇒ 重载这一家。
       await loadProvider(providerId);
+      // ⚠️⚠️ 但**供应商级状态**也必须同步（2026-11-05 三审端到端 P2-1）：
+      // `providerStatuses` 只由 `loadProviderStatuses` 写（全仓两个写入点），
+      // 而 `loadProvider` 刷的是**模型列表**，两者是不同的 state ⇒ 不同步就会
+      // 出现「15 个 · 已关闭 0（该供应商已关闭）」这种自相矛盾的一行 ——
+      // 界面、开关、报错三者对不上。
+      //
+      // ⚠️ **不要**改调 `loadProviderStatuses()`：那会为刷新一家而重发全量请求
+      //（服务端对每个已关闭的供应商都要 `await fullCatalogIds`，2s 预算），
+      // 把「点一次全开」变成几十秒的等待。就地改这一家即可。
+      //
+      // ⚠️⚠️⚠️ **`setProviderStatuses` 不在本组件作用域里**（2026-11-05 四审
+      // 测试判别力 P0）—— 它由 `JetHubPage` 的 `React.useState` 声明，
+      // 而本组件是它的**孙辈**。`f51b3ef` 直接写了这个标识符 ⇒ `TS2304`、
+      // 点「全部打开/全部关闭」时 `ReferenceError` ⇒ 宿主 `SlotErrorBoundary`
+      // 捕获 ⇒ **整个设置页清空**，而这段「就地更新」的全部价值从未生效过。
+      // 修法：由 `JetHubPage` 经 `ProviderSwitchPanel` 逐层传入回调。
+      if (mounted.current) onProviderStatusPatched?.(providerId, disabled);
     } catch (error) {
       if (mounted.current) setToggleError(`批量切换「${label}」失败：${error?.message || String(error)}`);
     } finally {
@@ -9763,6 +9805,19 @@ export function JetHubPage({ rpcCall }) {
    */
   const [providerStatusFailed, setProviderStatusFailed] = React.useState(false);
   /**
+   * `loadProviderStatuses` 的**请求序号**（最后写者胜）。
+   *
+   * ⚠️⚠️ 没有它就会「开关跳回去」（2026-11-05 三审并发 P1-2）：每次
+   * `toggleProvider` 成功后都会再读一次全量状态，而服务端对每个已关闭的
+   * 供应商都要 `await fullCatalogIds(...)`（预算 2s，**循环内串行**）⇒
+   * 单次请求的耗时随已关闭家数线性增长 ⇒ **两次请求重叠是常态**，
+   * 先发的可能后到 ⇒ 旧快照覆盖新快照 ⇒ 用户刚打开的开关又变回「已关闭」。
+   *
+   * 判据：只有序号等于**当前**序号的响应才允许写 state；过期响应**静默丢弃**
+   *（连失败提示也不弹 —— 那是上一次请求的事，用户已经操作过了）。
+   */
+  const providerStatusSeqRef = React.useRef(0);
+  /**
    * 「供应商开关」弹窗的展开状态。
    *
    * 与「模型列表」同款取舍：**关闭时不挂载**，避免每次进入设置页都为它做一次
@@ -10073,14 +10128,18 @@ export function JetHubPage({ rpcCall }) {
    * 若在这里抛错，整个设置页会白屏 —— 那是「左侧装饰性功能拖垮主功能」的糟糕取舍。
    */
   const loadProviderStatuses = React.useCallback(async () => {
+    // ⚠️ 每次进入都占一个新序号；只有**最后**发起的请求允许写 state
+    //（见 `providerStatusSeqRef` 的注释：重叠是常态，先发的可能后到）。
+    const seq = ++providerStatusSeqRef.current;
     try {
       const res = await rpcCall('provider.status', { providers: PROVIDERS.map(p => p.id) });
-      if (!mounted.current) return;
+      if (!mounted.current || seq !== providerStatusSeqRef.current) return;
       setProviderStatuses(res?.statuses || {});
       setProviderStatusFailed(false);
     } catch (caught) {
       console.error('[jet-hub] load provider statuses failed:', caught);
-      if (!mounted.current) return;
+      // 过期响应的失败同样丢弃：用户已经做过更新的操作，这条错误不再有意义。
+      if (!mounted.current || seq !== providerStatusSeqRef.current) return;
       setProviderStatuses(null);
       setProviderStatusFailed(true);
       setProviderNotice({
@@ -10089,6 +10148,43 @@ export function JetHubPage({ rpcCall }) {
       });
     }
   }, [rpcCall]);
+
+  /**
+   * 就地把**一家**供应商的状态补成「全关 / 全开」。
+   *
+   * ⚠️⚠️ 为什么不直接调 `loadProviderStatuses()`（2026-11-05 三审端到端 P2-1）：
+   * 那会为刷新一家而重发全量请求，而服务端对每个「派生判据说已关闭」的供应商
+   * 都要 `await fullCatalogIds`（2s 预算）⇒ 把「点一次全开」变成几十秒等待。
+   *
+   * ⚠️⚠️ **必须推进序号**（2026-11-05 四审端到端 P1-3）：
+   * `loadProviderStatuses` 是唯一 `++providerStatusSeqRef.current` 的地方。
+   * 若这里不推进，某次 `provider.status` 可能在用户点「全关」**之前**发出、
+   * **之后**才返回 ⇒ 它拿到的 `seq` 仍相等 ⇒ 通过闸门 ⇒ 把刚写的局部补丁
+   * **覆盖成旧快照** ⇒ 开关跳回去。序号闸门的语义是「写入使在飞请求失效」，
+   * 不是「谁后发谁赢」。
+   */
+  const patchProviderStatus = React.useCallback((providerId, disabled) => {
+    providerStatusSeqRef.current += 1;
+    setProviderStatuses(prev => {
+      const current = prev?.[providerId];
+      if (current === undefined) return prev;
+      const total = current.models?.total ?? 0;
+      const nextDisabled = disabled ? total : 0;
+      return {
+        ...prev,
+        [providerId]: {
+          ...current,
+          models: { total, disabled: nextDisabled },
+          // 与 `provider.status` 同一条判据（`total > 0 && disabled === total`）。
+          closed: total > 0 && nextDisabled === total,
+          // ⚠️ 「本次核实失败」的附注已经过时 —— 我们刚刚**知道**这一家的开关
+          // 结果（`model.setAllDisabled` 成功返回）。不清掉的话
+          // `providerSwitchState` 会继续按「核实失败」把它渲染成禁用。
+          verifyFailed: undefined,
+        },
+      };
+    });
+  }, []);
 
   React.useEffect(() => {
     mounted.current = true;
@@ -11052,6 +11148,11 @@ export function JetHubPage({ rpcCall }) {
           notice: providerNotice,
           // 弹窗的「模型列表」视图要逐家调 `model.list`（服务端只有单 provider 端点）。
           rpcCall,
+          // ⚠️⚠️ 模型列表屏点「全部打开/全部关闭」后就地补一家状态（2026-11-05
+          // 四审测试判别力 P0：`f51b3ef` 让 `ModelCenterPanel` 直接写
+          // `setProviderStatuses`，而那是本组件（`JetHubPage`）的 state ⇒
+          // 该标识符在孙辈作用域里不存在 ⇒ 一点按钮就 `ReferenceError`）。
+          onProviderStatusPatched: patchProviderStatus,
         })
       : null,
     // 同款做法：网关开关也是覆盖层，且与「供应商开关」互斥 —— 两者都是

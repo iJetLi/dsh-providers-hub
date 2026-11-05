@@ -1130,6 +1130,24 @@ describe('formatPackageTooltip（包列表）', () => {
     expect(text).toBe('拉新权益包  100 / 100  长期')
   })
 
+  it('totalKnown=false ⇒ 只显示剩余，不显示「98 / 98」假分母', () => {
+    const text = formatPackageTooltip(
+      [pkg({ name: '积分余额', remaining: 98, total: 98, totalKnown: false, deductionEndTime: undefined })],
+      { format: v => String(v), now: NOW },
+    )
+    expect(text).toBe('积分余额  98  长期')
+    expect(text).not.toContain('98 / 98')
+  })
+
+  it('无时间戳但有 expiryNote ⇒ 显示平台口径而不是笼统「长期」', () => {
+    const text = formatPackageTooltip(
+      [pkg({ name: '每日积分', remaining: 98.21, total: 100, deductionEndTime: undefined, expiryNote: '每日 00:00（UTC+8）过期' })],
+      { format: v => String(v), now: NOW },
+    )
+    expect(text).toContain('每日 00:00（UTC+8）过期')
+    expect(text).not.toContain('长期')
+  })
+
   /**
    * ⚠️ **只列还能用的包**（用户 2026-09-29 要求）：
    * 「已经消耗为0的过滤掉，已经过期的过滤掉」。

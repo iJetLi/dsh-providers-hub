@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createProviderCredits } from '../../src/provider-credits.js'
 import {
   fetchMagicrewBalance,
+  fetchMagicrewBalanceDetailed,
   fetchMagicrewModelPoints,
   magicrewExpiry,
   magicrewIsFree,
@@ -710,5 +712,286 @@ describe('欠费（total < 0）与批次并存时不得丢弃明细（对抗审�
   it('★ total=0 且批次和 > 0 ⇒ 仍然全部裁掉（与既有语义一致）', async () => {
     const out = await balanceWith(0)
     expect(out?.packages).toHaveLength(0)
+  })
+})
+
+/**
+ * `fetchMagicrewBalanceDetailed` —— **带原因**的余额变体（2026-11-04 新增）。
+ *
+ * ## 为什么必须有它（真机报障，不是理论问题）
+ *
+ * 用户报「超级麦吉两个供应商读不到积分和模型」。真机取证：火山引擎 WAF 对国内站回
+ * **HTTP 403 + 空 body**（国际站被阿里 WAF 回 **405 + 拦截页**），九个账号全中。
+ * 而选号器当时只接了 `fetchBalance` ⇒ `null` ⇒ 锁定态那句报错说成
+ * 「余额查询失败（凭据失效或响应异常）」⇒ 用户去重登、去查组织码，
+ * **而凭据一个都没坏**。这正是 `src/index.ts:76` 记录的 Qoder `!136` 同型缺陷。
+ *
+ * ⚠️⚠️ **成因归因已改口**（2026-11-04 七审）：初版写「本机代理把流量送到境外出口
+ * ⇒ 被拒」，但完整出口矩阵（10 组，含 Clash 全退出的**真境内家宽**）实测两站对
+ * **所有**出口都回同一形态，而第三方境外代理能 200 ⇒ 「地区封锁」已被证伪。
+ * ⇒ 断言**不得**再依赖「境外出口」这个说法，只锁「状态码 + host + 可执行出路」。
+ *
+ * ⚠️ 断言一律打在**具体原因**上（状态码 / 业务码 / 原文），不要只断言
+ * 「有 error」—— 那是恒真的（任何失败都非空），等于没有判据。
+ */
+describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原因（2026-11-04 真机）', () => {
+  const detailedOf = (fetchImpl: unknown) => fetchMagicrewBalanceDetailed({
+    jwt: 'j.w.t',
+    organizationCode: 'org1',
+    fetchImpl: fetchImpl as typeof fetch,
+  })
+
+  it('★★★ HTTP 403 ⇒ 原因含 403 且必须指向「代理/直连」（真机那一格）', async () => {
+    const fetchImpl = vi.fn(async () => new Response('', { status: 403 }))
+    const out = await detailedOf(fetchImpl)
+    expect(out.balance).toBeNull()
+    // 状态码是唯一能让人想到「网络层被拒」的线索，缺了就是又一句「响应异常」。
+    expect(out.error).toContain('403')
+    // 出路必须可操作：真机上这一格的确切成因是代理出口在境外。
+    expect(out.error).toContain('直连')
+    expect(out.error).toContain('letsmagic.cn')
+    /**
+     * ⚠️ 必须是**域名**而不是完整 URL：用户要去代理里加一条直连规则，而代理规则
+     * 匹配的是域名 —— 写成 `https://…` 会被原样抄成一条匹配不上的规则，而这段
+     * 文案是他唯一的线索（2026-11-04 二稿修的）。
+     */
+    expect(out.error).not.toContain('https://')
+    /**
+     * ⚠️ 还必须说明「**在哪**加这条规则」（2026-11-04 四审建议 ③(2)）：本插件**没有**
+     * 魔法麦吉的代理入口（`onOpenProxy` 只对 opencode / gemini / qoder / minimaxintl），
+     * 光说「设为直连」会让用户先在 Jet Hub 面板里找开关，找不到就以为修不了。
+     */
+    expect(out.error, '必须指明是在**代理软件**里加规则（插件内没有该入口）').toContain('代理软件')
+    /**
+     * ⚠️⚠️ **不得把成因断言成「境外出口」**（2026-11-04 七审）：完整出口矩阵实测
+     * （10 组，含 Clash 全退出的真境内家宽 `120.229.253.224`）两站对所有出口都回
+     * 403/405，而第三方境外代理能 200 ⇒ 「地区封锁」已被证伪。文案若继续这么写，
+     * 用户换出口后仍然失败，却以为是自己没配对。
+     */
+    expect(out.error, '不得断言成因是「境外出口 / 出口地区」（已被出口矩阵证伪）')
+      .not.toContain('境外出口')
+    expect(out.error, '不得断言成因是「出口地区」').not.toContain('出口地区')
+    // 但它**必须**说清这是网关层拒绝、且与凭据无关 —— 那才是让用户停手的唯一理由。
+    expect(out.error, '必须点明是网关 / WAF 层拒绝').toContain('网关')
+    expect(out.error, '必须点明与凭据无关').toContain('不是凭据问题')
+    /**
+     * ⚠️ **不得给「设直连即可」式的承诺**：真机实测直连同样 403，用户照做一次
+     * 白做一次。文案只能写成「先试一次」，并把下一档动作（换网络环境）写出来。
+     */
+    expect(out.error, '必须给出直连之外的下一档动作（换网络环境）').toContain('换一个网络环境')
+    expect(out.error, '不得承诺「设为直连即可」').not.toContain('即可')
+  })
+
+  it('★★ 同一份 403 报文下 fetchMagicrewBalance 仍返回 undefined（两变体契约不同）', async () => {
+    const fetchImpl = vi.fn(async () => new Response('', { status: 403 }))
+    // ⚠️ 这条是对照：`magicrewExpiry` 依赖 `undefined` 判 `UNUSABLE`，
+    //    若有人把旧变体也改成抛异常/返回对象，折算会整轮 reject。
+    expect(await fetchMagicrewBalance({
+      jwt: 'j.w.t', organizationCode: 'org1', fetchImpl: fetchImpl as typeof fetch,
+    })).toBeUndefined()
+    expect((await detailedOf(fetchImpl)).error).toContain('403')
+  })
+
+  it('★ HTTP 401 ⇒ 原因含 401 且指向重新登录', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('', { status: 401 })))
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('401')
+    expect(out.error).toContain('重新登录')
+    /**
+     * ⚠️ 必须点明「锁定不会因删号丢失」（2026-11-04 四审建议 ③(3)）：删号重登是唯一
+     * 路径，而「永久积分锁定」按**渠道**落盘（`src/account-pool.ts` 的
+     * `permanentLocked(provider)`；`removeAccount` 只 unset 凭据 + filter），
+     * 锁本不会丢 —— 但不写这句，用户会因为怕丢锁而不敢重登，卡在 401 上。
+     */
+    expect(out.error, '必须说明永久积分锁定不会因删号丢失').toContain('永久积分锁定')
+    /**
+     * ⚠️ **必须点名 host**（2026-11-05 合规审计）：面板上国内 / 国际是**两张独立
+     * 卡片**，而这条文案是逐账号的 —— 只说「HTTP 401」时用户不知道是哪一站登录失效。
+     */
+    expect(out.error, '必须点名站点（两站共用同一套文案）').toContain('letsmagic.cn')
+  })
+
+  it('★ 其它非 2xx（502 那种）⇒ 只带状态码，**不得**建议改代理（否则把服务端故障引向网络）', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('<html>502</html>', { status: 502 })))
+    expect(out.error).toContain('502')
+    expect(out.error).not.toContain('直连')
+    /**
+     * ⚠️ **其余状态码也必须点名 host**（2026-11-05 合规审计）：真机国内回 403、
+     * 国际回 405（两个数字完全不同）⇒ 只说状态码时用户不知道是哪一站打不通。
+     */
+    expect(out.error, '必须点名站点').toContain('letsmagic.cn')
+  })
+
+  it('★ 传输层失败 ⇒ 原因含「网络异常」与原 message（不吞根因）', async () => {
+    const out = await detailedOf(vi.fn(async () => { throw new Error('getaddrinfo ENOTFOUND') }))
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('网络异常')
+    expect(out.error).toContain('ENOTFOUND')
+  })
+
+  it('★ 上游业务码 2182（组织不存在）必须原样带出（唯一指向「没选组织」的线索）', async () => {
+    const out = await detailedOf(vi.fn(async () => jsonResponse({ code: 2182, message: '用户所在组织不存在' })))
+    expect(out.error).toContain('2182')
+    /**
+     * ⚠️⚠️ **必须点名 host + 给出路**（2026-11-05 合规审计）：`2182` 的官方文案
+     * 「用户所在组织不存在」极易被读成「我的组织被删了」⇒ 必须说清是「登录时没选
+     * 组织」，并指明去网页端选一个组织后重新登录（`src/magicrew-checkin.ts` 的
+     * 本地前置校验用的是同一句出路 —— 两处必须同口径）。
+     */
+    expect(out.error, '必须点名站点').toContain('letsmagic.cn')
+    expect(out.error, '必须说明是「登录时没选组织」而非组织被删').toContain('登录时没选组织')
+    expect(out.error, '必须给出可操作出路').toContain('重新登录')
+  })
+
+  it('★★ 200 但返回 HTML（WAF 拦截页）⇒ 必须点出「HTML」并给「直连」出路', async () => {
+    /**
+     * ⚠️⚠️ **「非 JSON」不是一格**（2026-11-04 四审）。取证：阿里 WAF 拦截时回
+     * **HTTP 200 + HTML 拦截页**（`src/accio-adapter.ts:1828-1865` 记了完整特征：
+     * `content-type: text/html` + `rgv587_flag:sm` + `bixi-intl.alicdn.com/punish/`）。
+     * 国际站与 accio 同族 ⇒ 这一格**真实可达**，而旧文案只有「响应不是 JSON」，
+     * 与「上游改版」「空响应」同形，用户拿它**没有任何动作可做** —— 正是本轮
+     * 要消灭的那种塌陷（旧用例用的就是 `<html>oops</html>`，却只断言了「不是 JSON」）。
+     */
+    const out = await detailedOf(vi.fn(async () => new Response('<html>oops</html>', { status: 200 })))
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('HTML')
+    expect(out.error).toContain('直连')
+    expect(out.error, '必须点名站点：面板上两站共用同一套文案').toContain('letsmagic.cn')
+    /**
+     * ⚠️ 与 403/405 档同一个口径（2026-11-04 七审）：**不得**把成因断言成
+     * 「出口地区被拦截」，也不得承诺「设直连就好」—— 出口矩阵已把该归因证伪。
+     */
+    expect(out.error, '不得断言成因是「出口地区」').not.toContain('出口地区')
+    expect(out.error, '必须给出下一档动作（换网络环境）').toContain('换一个网络环境')
+  })
+
+  it('★ 200 但不是 JSON 也不是 HTML（上游改版 / 纯文本）⇒ 带 host，且**不得**劝人改代理', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('maintenance', { status: 200 })))
+    expect(out.error).toContain('不是 JSON')
+    expect(out.error).toContain('letsmagic.cn')
+    // 反向判据：纯文本不能也引去改代理 —— 那是反向指路（与 502 那格同一个理由）。
+    expect(out.error).not.toContain('直连')
+  })
+
+  it('★ 200 + `null` 信封 ⇒「不是对象」也必须点名站点', async () => {
+    const out = await detailedOf(vi.fn(async () => new Response('null', { status: 200 })))
+    expect(out.error).toContain('不是对象')
+    expect(out.error).toContain('letsmagic.cn')
+  })
+
+  it('★ 成功时 balance 有值且不带 error（两变体对同一报文结论一致）', async () => {
+    const body = {
+      code: 1000,
+      data: { total_points: 1093, expiring_quota_details: [] },
+    }
+    const out = await fetchMagicrewBalanceDetailed({
+      jwt: 'j.w.t', organizationCode: 'org1',
+      fetchImpl: vi.fn(async () => jsonResponse(body)) as unknown as typeof fetch,
+    })
+    expect(out.balance?.total).toBe(1093)
+    expect(out.error).toBeUndefined()
+    const plain = await fetchMagicrewBalance({
+      jwt: 'j.w.t', organizationCode: 'org1',
+      fetchImpl: vi.fn(async () => jsonResponse(body)) as unknown as typeof fetch,
+    })
+    // ⚠️ 口径一致性：两条腿对**同一份报文**必须给出同样的余额（防「一份语义两处实现」）。
+    expect(plain?.total).toBe(out.balance?.total)
+  })
+})
+
+/**
+ * `createProviderCredits()` 里两站的积分条目：**必须用详细变体**。
+ *
+ * ## 为什么这条必须行为级（不能只断言源码里有 `fetchBalanceDetailed`）
+ *
+ * 账号卡片上的「余额查询失败」来自 `credits.balances` ⇒ 它读的是
+ * `ProviderCredits.fetchBalance` / `fetchBalanceDetailed`（后者优先），
+ * **不是**选号器那条腿。若只改选号器，弹窗里的文案会变好、卡片上仍然是那句
+ * 会把人引向凭据的概括文案 —— 2026-11-04 真机报障的表面症状正是卡片。
+ *
+ * ⚠️ 上游一律用 `vi.stubGlobal('fetch', …)` 替身：`magicrewBalanceOf` 在**调用时**
+ * 读全局 `fetch`（`params.fetchImpl ?? fetch`），故替身生效、且本文件**不发任何
+ * 真实网络请求**（本仓库铁律：单测不得依赖真实上游，否则用例变成随机真值）。
+ */
+describe('★★ ProviderCredits 两站必须用详细变体（卡片那句也要能指路）', () => {
+  const callCtx = { accountId: 'a1' } as never
+
+  const withFakeFetch = async <T>(
+    fetchImpl: () => Promise<Response>,
+    run: (table: ReturnType<typeof createProviderCredits>) => Promise<T>,
+  ): Promise<T> => {
+    const spy = vi.fn(fetchImpl)
+    vi.stubGlobal('fetch', spy)
+    try {
+      return await run(createProviderCredits())
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }
+
+  it('★★★ 两站都必须注册 `fetchBalanceDetailed`，且**不得**再留 `fetchBalance`（后者塌成概括文案）', () => {
+    const table = createProviderCredits()
+    for (const id of ['magicrew', 'magicrewintl']) {
+      const credits = table[id]
+      expect(credits, `${id} 必须在积分表里`).toBeDefined()
+      expect(credits?.fetchBalanceDetailed, `${id} 必须实现详细变体`).toBeTypeOf('function')
+      // 反向判据：两条腿都在时 `fetchBalanceDetailed` 优先，但留着 `fetchBalance`
+      // 意味着同一份语义两处实现 —— 后人只改一处就会静默分叉。
+      /**
+       * ⚠️ 这条 `toBeUndefined()` 是**风格约束，不是正确性约束**（2026-11-04 四审登记）：
+       * 四个消费点（`src/jet-hub-rpc.ts:1439` / `:8469`、`src/index.ts:5829`、
+       * `src/buddy-balance-selector.ts:436`）都是 detailed 优先、`fetchBalance` 只在
+       * **没实现 detailed** 时才被调用 ⇒ 两条腿并存**不会产生错误行为**。
+       * 它防的是「一份语义两处实现，后人只改一处」。所以将来若确实需要兼容旧调用点
+       * 而补回 `fetchBalance`，删掉这条断言是**允许**的 —— 但必须同时删掉这段说明。
+       */
+      expect(credits?.fetchBalance, `${id} 不得再留 fetchBalance（一份语义两处实现）`)
+        .toBeUndefined()
+    }
+  })
+
+  it('★★★ 国内站 403 ⇒ error 必须含 403 与「直连」（真机那一格）', async () => {
+    const out = await withFakeFetch(
+      async () => new Response('', { status: 403 }),
+      async (table) => await table.magicrew!.fetchBalanceDetailed!(
+        { jwt: 'j.w.t', organizationCode: 'org1' }, callCtx,
+      ),
+    )
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('403')
+    expect(out.error).toContain('直连')
+    expect(out.error).toContain('letsmagic.cn')
+  })
+
+  it('★★★ 国际站 405 ⇒ 必须与 403 同档（含状态码 + host +「直连」出路）', async () => {
+    const out = await withFakeFetch(
+      async () => new Response('<html>405</html>', { status: 405 }),
+      async (table) => await table.magicrewintl!.fetchBalanceDetailed!(
+        { jwt: 'j.w.t', organizationCode: 'org-j' }, callCtx,
+      ),
+    )
+    expect(out.balance).toBeNull()
+    expect(out.error).toContain('405')
+    expect(out.error).toContain('magicrew.ai')
+    /**
+     * ⚠️ 上一稿只给 403 配了出路 ⇒ 国际站（真机就是 **405**）的用户仍只拿到
+     * 一串状态码。这条断言是那一格的承重件：把 405 移出 `REJECTED_STATUSES`
+     * 它必须变红。
+     */
+    expect(out.error).toContain('直连')
+  })
+
+  it('★ 缺 jwt ⇒ 原因说「重新登录」，且**一个请求都不发**（不浪费一次 401）', async () => {
+    let calls = 0
+    await withFakeFetch(
+      async () => { calls += 1; return new Response('', { status: 200 }) },
+      async (table) => {
+        const out = await table.magicrew!.fetchBalanceDetailed!({ organizationCode: 'org1' }, callCtx)
+        expect(out.balance).toBeNull()
+        // 原实现这一格是 `return null` ⇒ 卡片只显示「余额查询失败」，用户看不出是「没登录」。
+        expect(out.error).toContain('重新登录')
+      },
+    )
+    expect(calls, '缺凭据时不得发出请求').toBe(0)
   })
 })

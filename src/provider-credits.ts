@@ -74,7 +74,7 @@ import { fetchModelscopeBalanceDetailed } from './modelscope-credits.js'
 import type { ModelscopeCredential } from './modelscope.js'
 import { MODELSCOPE } from './modelscope-product.js'
 // ⚠️ **本 fork 独有**（超级麦吉 Magicrew，2026-10-29）：积分余额原语。
-import { fetchMagicrewBalance } from './magicrew-credits.js'
+import { fetchMagicrewBalanceDetailed } from './magicrew-credits.js'
 // ⚠️ **本 fork 独有**（Magicrew 每日签到，2026-11-01 用户要求接入）：
 //    `POST /login-gift`，国内 +200/天、国际 +50/天，两站逐字符同构。
 import { claimMagicrewLoginGift } from './magicrew-checkin.js'
@@ -1050,17 +1050,37 @@ export function createProviderCredits(
      * ⚠️ 原先这里写「刻意不接（会消耗真实积分）」是**误判**：`login-gift` 是
      * **发放**登录积分，不消耗任何东西。用户 2026-11-01 明确要求接上。
      */
+    /**
+     * 超级麦吉（Magicrew，2026-10-29）。
+     *
+     * ## ⚠️⚠️ 必须用 `fetchBalanceDetailed`（2026-11-04 真机更正）
+     *
+     * 原注释写「本家的失败面只有『读不到』一种（网络 / 业务码非 1000 / 缺
+     * `total_points`），没有需要让用户做**不同动作**的子原因」—— **那句被真机
+     * 报障证伪**：同一天两站九个账号全部返回 **HTTP 403**（本机代理出口在境外，
+     * 上游火山 WAF 按来源地区拒绝），而卡片只有一句「余额查询失败」，用户被引去
+     * 重登、去查组织码，白做一整轮 —— 凭据其实一个都没坏。
+     *
+     * 三类成因的用户动作**完全不同**：403 ⇒ 改代理 / 直连；401 ⇒ 重新登录；
+     * 业务码 `2182` ⇒ 登录时没选组织。这正是 {@link ProviderCredits.fetchBalanceDetailed}
+     * 的存在理由（与上面 `codearts` 那条「非积分账户」同因）。
+     *
+     * ⚠️ `?? null` 那套不再需要：详细变体自带 `balance: null + error` 契约；
+     * 凭据缺 `jwt` 时直接给一句**能指认**的原因，而不是回落到「余额查询失败」。
+     * ⚠️ `product` 必须**显式传**（2026-11-01 三审）：原靠 `?? MAGICREW` 缺省，
+     * 而国际站条目显式传 ⇒ 两条腿不对称，后人照抄国内条目到新站就会静默打错 host。
+     */
     magicrew: {
-      fetchBalance: async (credential) => {
+      fetchBalanceDetailed: async (credential) => {
         const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
-        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) return null
-        return await fetchMagicrewBalance({
+        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) {
+          return fail('账号未登录（缺少 JWT），请重新登录')
+        }
+        return await fetchMagicrewBalanceDetailed({
           jwt: parsed.jwt,
           organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
-          // ⚠️ **显式传**（2026-11-01 三审）：原靠 `?? MAGICREW` 缺省，而国际站
-          //    条目显式传 ⇒ 两条腿不对称，后人照抄国内条目到新站就会静默打错 host。
           product: MAGICREW,
-        }) ?? null
+        })
       },
       claim: async (credential) => {
         const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
@@ -1094,14 +1114,20 @@ export function createProviderCredits(
      * 决定，本层不做任何金额假设 —— 只如实回传上游的 `point_amount`。
      */
     magicrewintl: {
-      fetchBalance: async (credential) => {
+      /**
+       * ⚠️ 与国内站**逐字同构**，只差 `product`（2026-11-04 真机更正：原先是
+       * `fetchBalance`，会让国际站的 405 / WAF 拦截塌成「余额查询失败」）。
+       */
+      fetchBalanceDetailed: async (credential) => {
         const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined
-        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) return null
-        return await fetchMagicrewBalance({
+        if (typeof parsed?.jwt !== 'string' || parsed.jwt.length === 0) {
+          return fail('账号未登录（缺少 JWT），请重新登录')
+        }
+        return await fetchMagicrewBalanceDetailed({
           jwt: parsed.jwt,
           organizationCode: typeof parsed.organizationCode === 'string' ? parsed.organizationCode : '',
           product: MAGICREW_INTL,
-        }) ?? null
+        })
       },
       claim: async (credential) => {
         const parsed = credential as { jwt?: unknown, organizationCode?: unknown } | null | undefined

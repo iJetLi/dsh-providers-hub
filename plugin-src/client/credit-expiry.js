@@ -719,7 +719,11 @@ export function packageExpiryMs(pkg) {
  */
 export function formatPackageExpiry(pkg, now) {
   const end = packageExpiryMs(pkg);
-  if (end === null) return '长期';
+  if (end === null) {
+    // 平台没有可解析的到期时间，但可能给了明确的产品口径（如「每日 00:00 过期」）。
+    // 只在生产方确认过上游语义时填 `expiryNote`，绝不在这里猜。
+    return pkg && typeof pkg.expiryNote === 'string' && pkg.expiryNote !== '' ? pkg.expiryNote : '长期';
+  }
   const at = Number.isFinite(now) ? now : Date.now();
   /**
    * ⚠️⚠️ **日期按本地时区取，不能用 `toISOString()`**（2026-11-01 三审实测）：
@@ -834,9 +838,11 @@ export function formatPackageTooltip(packages, options = {}) {
     const name = (pkg && pkg.name) || '未命名';
     const remaining = format ? format(Number(pkg && pkg.remaining) || 0) : String(pkg && pkg.remaining);
     const total = format ? format(Number(pkg && pkg.total) || 0) : String(pkg && pkg.total);
+    // 上游只给当前余额时 `totalKnown === false`：不显示假分母（会变成 98/98）。
+    const amount = pkg && pkg.totalKnown === false ? remaining : `${remaining} / ${total}`;
     // 走到这里必然 active !== false 且未过期，故不再需要 [已失效] 标记 ——
     // 那种包已被过滤掉。保留 formatPackageExpiry 的日期与天数展示。
-    return `${name}  ${remaining} / ${total}  ${formatPackageExpiry(pkg, at)}`;
+    return `${name}  ${amount}  ${formatPackageExpiry(pkg, at)}`;
   });
 
   const rest = sorted.slice(maxRows);

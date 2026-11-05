@@ -189,7 +189,7 @@ describe('fetchMonkeycodeBalanceDetailed（平台 wallet 读数）', () => {
     expect(result.balance?.total).not.toBe(12.5 * 1000)
 
     const [credit, quota] = result.balance!.packages
-    expect(credit).toMatchObject({ name: '积分余额', unit: 'credit', remaining: 12.5, total: 12.5, used: 0, active: true })
+    expect(credit).toMatchObject({ name: '积分余额', unit: 'credit', remaining: 12.5, total: 12.5, totalKnown: false, used: 0, active: true })
     expect(quota).toMatchObject({
       // ⚠️ 包名**不含档位**（2026-11-02 改）：档位已经由 `extra.accountTier`
       // 渲染成卡片上的「账号规格」一行（见下一条断言），包名再带一遍只会把

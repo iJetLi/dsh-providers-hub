@@ -45,6 +45,7 @@ import {
   codeartsVisionModel,
 } from '../../src/llm-adapter.js'
 import {
+  codeartsIsVisionModel,
   resetCodeartsImageModels,
   setCodeartsImageModels,
 } from '../../src/codearts-vision.js'
@@ -95,21 +96,51 @@ describe('CodeArts 图片输入：模态声明', () => {
   })
 
   /**
+   * 守卫 ①b：目录 `supports_images: false`、但 **wire 实测能收图**的主模型。
+   *
+   * 2026-11-05 真机（`image_url` 直发，4×4 纯色 PNG）：
+   * - `deepseek-v4.1-flash-1017` + 红 → 200，「红色」；
+   * - `deepseek-v4.1-flash` + 蓝 → 200，「蓝色」；
+   * - `glm-5.3` 对照 → 406 not multimodal。
+   *
+   * ⚠️ 这些模型**不是**专职 VL：必须继续拿得到 `analyzeImage`（`codeartsIsVisionModel`
+   * 为 false），否则「能收图」和「该挂识图工具」会被混为一谈。
+   */
+  it('①b 目录标 false 但实测能收图的主模型（deepseek-v4.1-flash / -1017）', async () => {
+    const adapter = makeAdapter({
+      remote: [
+        { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash' },
+        { id: 'deepseek-v4.1-flash-1017', name: 'DeepSeek-V4.1-Flash-1017' },
+        { id: 'glm-5.3', name: 'GLM-5.3' },
+      ],
+    })
+    for (const id of ['deepseek-v4.1-flash', 'deepseek-v4.1-flash-1017']) {
+      const resolved = await adapter.resolveModel('codearts', id)
+      expect({ id, modalities: resolved.inputModalities }).toEqual({ id, modalities: ['text', 'image'] })
+      expect(codeartsIsVisionModel(id), `${id} 不该被当成专职 VL`).toBe(false)
+    }
+    // 有条目但目录没标、又不在覆盖表里的模型仍是纯文本。
+    expect(codeartsAcceptsImage('glm-5.3')).toBe(false)
+  })
+
+  /**
    * 守卫 ②：**文本模型不得声明 `image`**（反向对照）。
    *
    * ⚠️ 这一条与 ① 同等重要：若「所有模型都给 image」，用户就能选 `glm-5.3` 发图，
    * 而实测上游会回 `InferHub.001001020.406 The request model is not multimodal`
    * ⇒ **每一轮带图对话都失败**，且错误信息看不出是「这个模型不收图」。
+   *
+   * ⚠️ `deepseek-v4.1-flash` 已**不在**本组：2026-11-05 wire 实测它能收图
+   *（见 ①b），旧断言基于 2026-10-26 的目录数据，已过期。
    */
   it('② 文本模型不声明 image（上游实测会 406 拒绝）', async () => {
     const adapter = makeAdapter({
       remote: [
         { id: 'glm-5.3', name: 'GLM-5.3' },
         { id: 'GLM-5.2', name: 'GLM-5.2' },
-        { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash' },
       ],
     })
-    for (const id of ['glm-5.3', 'GLM-5.2', 'deepseek-v4.1-flash']) {
+    for (const id of ['glm-5.3', 'GLM-5.2']) {
       const resolved = await adapter.resolveModel('codearts', id)
       expect({ id, modalities: resolved.inputModalities }).toEqual({ id, modalities: ['text'] })
     }
@@ -180,7 +211,9 @@ describe('CodeArts 图片输入：能力判定与 wire 形态', () => {
     // 反向：文本模型与「长得像但不是」的 id 都不能放行。
     expect(codeartsAcceptsImage('glm-5.3')).toBe(false)
     expect(codeartsAcceptsImage('GLM-5.2')).toBe(false)
-    expect(codeartsAcceptsImage('deepseek-v4.1-flash')).toBe(false)
+    // 覆盖表：大小写不敏感（目录/手填都可能大小写漂移）。
+    expect(codeartsAcceptsImage('deepseek-v4.1-flash')).toBe(true)
+    expect(codeartsAcceptsImage('DeepSeek-V4.1-Flash-1017')).toBe(true)
     expect(codeartsAcceptsImage('kimi-k2.6')).toBe(false)
   })
 
@@ -250,7 +283,9 @@ describe('CodeArts 图片输入：跟随远端目录新增的多模态模型', (
   it('⑨ 目录未标 true 的模型仍不能收图（不误放行）', () => {
     setCodeartsImageModels(['kimi-k3'])
     expect(codeartsAcceptsImage('glm-5.3')).toBe(false)
-    expect(codeartsAcceptsImage('deepseek-v4.1-flash')).toBe(false)
+    expect(codeartsAcceptsImage('GLM-5.2')).toBe(false)
+    // ⚠️ `deepseek-v4.1-flash` 不在这组：它在覆盖表里（wire 实测能收图）。
+    expect(codeartsAcceptsImage('deepseek-v4.1-flash')).toBe(true)
   })
 
   /**

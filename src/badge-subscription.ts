@@ -130,6 +130,9 @@ export function badgePlanFor(provider: string, balance: CreditBalance | null): R
       name: BALANCE_PLAN_LABEL,
       remaining: balance.total,
       total: capacity > 0 ? capacity : balance.total,
+      // 任一有效包的总额不可知 ⇒ 整个套餐读数也不得显示分母（否则假分母会从
+      // 积分区漏到套餐区）。
+      ...active.some((pkg) => pkg.totalKnown === false) ? { totalKnown: false } : {},
       unit: unitOf(balance.packages),
     }
   }
@@ -145,6 +148,8 @@ export function badgePlanFor(provider: string, balance: CreditBalance | null): R
     name: best.name,
     remaining: best.remaining,
     total: best.total,
+    // `totalKnown:false` 必须透传，否则套餐区仍会显示假分母。
+    ...best.totalKnown === false ? { totalKnown: false } : {},
     // ⚠️ 下发前归一：包上的 `unit` 是服务端原值（实测同账号内 `credit` 与
     // `credits` 并存），原样下发会让客户端把同一份套餐拆成两组。见 `unitOf`。
     unit: normalizeCreditUnit(best.unit),

@@ -44,7 +44,7 @@ import { foldReasonErrors } from './locked-error-text.js'
 import { MultiAccountRefreshScheduler } from './refresh-scheduler.js'
 import { hasLegacyNamespaceRegistration, settingsOf, suppressAutoSettingsPage } from './settings-compat.js'
 import { DEFAULT_BODY_LIMITED_IMAGE_MAX_BYTES, type ImageRequestTarget } from './image-budget.js'
-import { buildRaccoonNickname, registerJetHubRpc, type JetHubAuthLike } from './jet-hub-rpc.js'
+import { buildRaccoonNickname, registerJetHubRpc, type JetHubAuthLike, type ModelCatalogSource } from './jet-hub-rpc.js'
 import { ALL_PRODUCTS, CODEBUDDY, WORKBUDDY } from './product.js'
 import { mountOpenAiGateway } from './openai-gateway/index.js'
 import { installLoopResume } from './loop-recovery.js'
@@ -101,7 +101,7 @@ import { fetchQoderBalanceDetailed, fetchQoderCreditBalance } from './qoder-cred
 //    `CreditBalance | null`）。两个变体**都接**（见上方长注释），选号器优先用 Detailed。
 import { MagicrewAuth } from './magicrew-auth.js'
 import type { MagicrewCredential } from './magicrew-auth.js'
-import { fetchMagicrewBalance } from './magicrew-credits.js'
+import { fetchMagicrewBalance, fetchMagicrewBalanceDetailed } from './magicrew-credits.js'
 import { MagicrewService } from './magicrew.js'
 import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 import type { MagicrewProduct } from './magicrew-product.js'
@@ -2155,7 +2155,35 @@ export function apply(ctx: Context): void {
           `${displayName}：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能全部完成`
           + `（${foldReasonErrors(reason.errors)}）。这些账号**可能仍有**「${days} 天内到期」`
           + '的积分 —— 请重试。'
-          + `⚠️ 若持续失败，请在 Jet Hub 的 ${displayName} 面板检查凭据是否失效`
+          /**
+           * ⚠️⚠️ **「先按括号里的原因办」，不要把用户第一时间引向凭据**（2026-11-04 真机）。
+           *
+           * 原句只有「若持续失败…检查凭据是否失效」，而真机上九个账号全部是
+           * **HTTP 403**（网关层拒绝，火山 WAF）—— 凭据一个都没坏。
+           * 用户照着那句去重登，做完仍然报错，**且看不出自己白做了一轮**。
+           *
+           * 本档的 `errors` 现在来自详细变体（`fetchMagicrewBalanceDetailed`），
+           * 含状态码 / 「网络异常」/ 上游业务码 ⇒ 括号里**已经**是原因。
+           * 于是把凭据与组织码两条**降级为「原因不明确时」的兜底**，并点明
+           * 403/405 这一格的正确动作（不要重登）。
+           *
+           * ⚠️⚠️⚠️ **别再断言「境外出口」**（2026-11-04 七审更正）：完整出口矩阵
+           * （10 组，含 Clash 全退出的真境内家宽）实测国内站对**所有**出口回 403、
+           * 国际站回 405，而第三方境外代理能 200 ⇒ 「地区封锁」已被证伪，真因是
+           * 「本机这条出口被上游网关按 IP 段 / 网络环境拒掉」，插件无法辨别、
+           * 也不能绕过。⇒ 文案只说已实测的事：网关层拒绝、不是凭据问题、
+           * 直连与多个代理出口都无效，再往上只能换网络环境或等服务方放行。
+           */
+          + '⚠️ 处理顺序：括号里的原因**来自余额接口本身**，请先按它办 —— '
+          + '若写的是 HTTP 403 / 405 或网络异常，那是**上游网关（WAF）拒绝了本机请求**，'
+          // ⚠️ 点 `403 / 405` 两个码而**不是**只点 403（2026-11-04 四审建议 ③(1)）：
+          //    真机上海外出口下**国内站回 403、国际站回 405**（2026-11-04 取证），
+          //    本档是两站共用的（`magicrewLockedError('超级麦吉')` / `…('MagiCrew (国际版)')`），
+          //    只写 403 会让国际站用户在锁定态看到与卡片上不符的码、以为说的是另一件事。
+          + `不是凭据问题、也不是积分用尽（真机实测直连与多个代理出口都回 403 / 405，`
+          + '可先在代理软件里给该站点加一条直连规则再试一次，仍不行就换一个网络环境'
+          + '（如手机热点）重试；持续如此只能等服务方放行），**不用重新登录**。'
+          + `原因不明确时，再在 Jet Hub 的 ${displayName} 面板检查凭据是否失效`
           + '（本家的推理凭据是定期轮换的 `mgw_` key，JWT 过期后需要重新登录）；'
           // ⚠️ 点名 `organizationCode` 是可诊断性的唯一出路：`fetchMagicrewBalance`
           //    没有「缺组织码」前置守卫（签到侧有，用的是 `product.needsOrgOnGateway`）
@@ -4162,6 +4190,23 @@ export function apply(ctx: Context): void {
       organizationCode: credential.organizationCode,
       product,
     }) ?? null,
+    /**
+     * ⚠️⚠️ **详细变体必接**（2026-11-04 真机报障）：只接 `fetchBalance` 时，
+     * 锁定永久积分的那句报错拿到的是 `null` ⇒ 说成「余额查询失败（凭据失效或
+     * 响应异常）」，把用户引去重登一个本来没问题的号。真机取证：本机代理全局
+     * 模式把流量送出国境，上游火山 WAF 回 **HTTP 403**（国际站 405），九个账号
+     * 全中 —— 与凭据、组织码都无关。
+     * ⇒ 详细变体把「HTTP 403 / 网络异常 / 上游业务码」原样带进报错。
+     * 同款教训见 `src/index.ts:76` 那段长注释（Qoder `!136` 的回归）。
+     *
+     * ⚠️ 接口注释里「两个变体必须同时收 `ctx`」那条规则对本家不适用：
+     *    这两站都不按出口 IP 分流，故两参写法与上面的 `fetchBalance` 一致。
+     */
+    fetchBalanceDetailed: async (credential, product) => await fetchMagicrewBalanceDetailed({
+      jwt: credential.jwt,
+      organizationCode: credential.organizationCode,
+      product,
+    }),
   })
   const magicrewResolver = createCredentialResolver<MagicrewCredential>(
     { pool: pool as never },
@@ -4205,6 +4250,24 @@ export function apply(ctx: Context): void {
         selector: magicrewBalanceSelector,
         lockedError: magicrewLockedError('超级麦吉'),
         isFreeModel: NO_FREE_MODEL,
+        /**
+         * ⚠️⚠️ **本家是本开关唯一的开启者**（2026-11-04 真机报障「模型都选不了了」）。
+         *
+         * 本家的余额接口会被上游网关**整片拒绝**（真机国内站 HTTP 403 空 body、
+         * 国际站 405 + WAF 页，九个账号无一幸免，官方 magpie 同时刻也 403/405）。
+         * 此时锁定态下每个账号都落到 `unknown` ⇒ 抛 `lockedError` ⇒ **整个 provider
+         * 的模型列表被清空**，模型选择器里只剩一大段错误文案，用户一个模型都选不了。
+         *
+         * 开这个开关的含义：**查不到余额时放宽一次**（允许消耗永久积分），
+         * 余额查得到时锁定语义逐字不变。取舍是「可能消耗**永久**积分」换「渠道可用」——
+         * 不降级的代价是「完全用不了」，明显更坏。
+         *
+         * ⚠️⚠️ 风险是「永久」不是「临期」（2026-11-05 三审回归面 P2-1）：`expiring > 0`
+         * 的账号在锁定态本就可用、永远进不了降级分支；能进分支的只有 `expiring = 0`
+         * 的账号。故 `BuddyBalanceSelector.select` 额外加了 `definitive` 守卫 ——
+         * 池里存在「余额查得到且只剩永久」的账号时报 `exhausted`，不再降级。
+         */
+        degradeLockedWhenUnknown: true,
       },
     },
   )
@@ -4281,6 +4344,17 @@ export function apply(ctx: Context): void {
       organizationCode: credential.organizationCode,
       product,
     }) ?? null,
+    /**
+     * ⚠️⚠️ **两站必须各接一份**（同国内站，2026-11-04 真机报障）：
+     * 国际站在同一台机器上回的是 **HTTP 405 + WAF 错误页**（国内站是 403 空 body），
+     * 只接 `fetchBalance` 时用户同样只看到「凭据失效或响应异常」而无从下手。
+     * ⚠️ 漏接不会有任何用例变红（锁定时只是文案退化）⇒ 与国内站成对存在。
+     */
+    fetchBalanceDetailed: async (credential, product) => await fetchMagicrewBalanceDetailed({
+      jwt: credential.jwt,
+      organizationCode: credential.organizationCode,
+      product,
+    }),
   })
   const magicrewIntlResolver = createCredentialResolver<MagicrewCredential>(
     { pool: pool as never },
@@ -4303,6 +4377,8 @@ export function apply(ctx: Context): void {
         selector: magicrewIntlBalanceSelector,
         lockedError: magicrewLockedError('MagiCrew (国际版)'),
         isFreeModel: NO_FREE_MODEL,
+        /** ⚠️ 与国内站成对存在，理由见上方国内站那段注释（国际站 405）。 */
+        degradeLockedWhenUnknown: true,
       },
     },
   )
@@ -5956,7 +6032,23 @@ async function fetchBalanceReading(
       return adapter
     }
   }
-  const modelAdapters: Record<string, { listAllModels(): readonly { id: string; name: string }[] }> = {
+  // ⚠️⚠️ 类型必须是 **`ModelCatalogSource`**，不能写成 `{ listAllModels() }`（二审 P3-1）。
+  //
+  //    写成「只带 `listAllModels` 的结构类型」是**合法赋值**（`catalogReadyForBulkWrite`
+  //    是可选成员），所以 TypeScript **不会**报错。
+  //
+  // ⚠️ **但类型收敛只保护「必需」成员**（2026-11-05 三审回归面 P2-2 订正）：
+  //    `catalogReadyForBulkWrite` 至今仍是**可选**成员（`src/jet-hub-rpc.ts` 的
+  //    `ModelCatalogSource` 里带 `?`）⇒ 把它**改名或删除仍然是合法赋值、仍然零
+  //    编译错误**。类型收敛的真实收益只有「必需成员 `listAllModels` 的签名不兼容
+  //    会报错」这一条，**不要**据此以为「有类型保护了，不用加运行时守卫」。
+  //    真正锁住接线的是行为级用例（`tests/unit/jet-hub-rpc.spec.ts` 里对
+  //    `aggregate` 冷帧 `notReady` 的那组），**不是**这个类型别名。
+  //
+  //    本仓库「缺一处就静默失效」的形态已经复发过多次（`SELF_HEAL_REFRESHABLE_PROVIDERS`、
+  //    `WIRED_EXPIRY_PROVIDERS` 等）⇒ 凡是「靠可选成员挂钩」的表，**判据必须打在
+  //    行为上**，源码/类型级断言只能当辅助。
+  const modelAdapters: Record<string, ModelCatalogSource> = {
     // `codearts` 是 registerCodeArtsLlm 返回的**适配器实例**（与 CodeArtsAuth
     // 服务实例 `service` 不同名，故这里可以简写）。
     codearts: pruned(CODEARTS_PROVIDER, codearts),

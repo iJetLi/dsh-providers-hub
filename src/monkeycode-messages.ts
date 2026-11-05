@@ -150,6 +150,40 @@ export function monkeycodeMaxTokensFor(maxTokens: number | undefined): number {
   return Math.min(raw, MONKEYCODE_MAX_OUTPUT_TOKENS)
 }
 
+/**
+ * 从 `messages` 里提取 `role:'system'` 的文本。
+ *
+ * ⚠️ **OpenAI 兼容网关的真实路径**：`toGenerateOptions()` 把客户端传来的
+ * `role:'system'` 消息原样放进 `GenerateOptions.messages`，不会写
+ * `GenerateOptions.system`（DSH 原生链路才写后者）。而
+ * `serializeMinimaxMessages` 会显式跳过 system 角色 ⇒ 若这里不兜住，
+ * payload 没有 `system`，`monkeycodeSigningPrompt()` 对空串签名，网关必回
+ * `403 invalid ohmyagent request`。这不是凭据问题，重登/换号都不会好。
+ *
+ * 只取第一条非空 system；`options.system` 存在时永远优先（DSH 原生链路）。
+ */
+function systemMessageText(messages: readonly RequestMessage[]): string | undefined {
+  for (const message of messages) {
+    if (message.role !== 'system') continue
+    const content = message.content as unknown
+    if (typeof content === 'string') {
+      if (content !== '') return content
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    const text = content
+      .map((block) => {
+        if (typeof block === 'string') return block
+        if (typeof block !== 'object' || block === null) return ''
+        const candidate = block as { text?: unknown }
+        return typeof candidate.text === 'string' ? candidate.text : ''
+      })
+      .join('')
+    if (text !== '') return text
+  }
+  return undefined
+}
+
 export function buildMonkeycodeMessagesPayload(
   options: BuildMonkeycodeMessagesPayloadOptions,
 ): Record<string, unknown> {
@@ -162,7 +196,10 @@ export function buildMonkeycodeMessagesPayload(
     stream: true,
     messages: serializeMonkeycodeMessages(options.messages, options.images),
   }
-  if (options.system !== undefined && options.system !== '') payload.system = options.system
+  const system = options.system !== undefined && options.system !== ''
+    ? options.system
+    : systemMessageText(options.messages)
+  if (system !== undefined && system !== '') payload.system = system
   if (options.temperature !== undefined) payload.temperature = options.temperature
   if (options.stop !== undefined && options.stop.length > 0) payload.stop_sequences = [...options.stop]
   if (options.tools !== undefined && options.tools.length > 0) {

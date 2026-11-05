@@ -109,7 +109,7 @@ describe('★ 积分行：单行 + 省略号（窄容器）', () => {
     expect(start).toBeGreaterThan(-1)
     const body = hub.slice(start, hub.indexOf('const hoverTitle = ', start))
     // 行内那几段全部要在场：主数值、池分桶、三档分桶、独立池、资源包计数。
-    for (const token of ['quotaText', 'total', 'poolSplitText', 'expiryParts', 'exclusiveRemaining', 'activeCount']) {
+    for (const token of ['mainText', 'poolSplitText', 'expiryParts', 'exclusiveRemaining', 'activeCount']) {
       expect(body, `hoverTitle 少了行内那一段：${token}`).toContain(token)
     }
     // ⚠️ 判据收窄到**主数值**：`formatUnits(exclusiveRemaining, ...)` 与

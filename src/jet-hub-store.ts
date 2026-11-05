@@ -362,7 +362,14 @@ export type JetHubStoreKind = 'settings' | 'file' | 'memory'
 /** Jet Hub 状态存取接口（同步读、异步写）。 */
 export interface JetHubStore {
   readonly kind: JetHubStoreKind
-  /** 同步载入；文档不存在时返回 `undefined`（等价于"空"）。 */
+  /**
+   * 同步载入；文档不存在（全新安装且没有可迁移的凭据）时返回 `undefined`（等价于"空"）。
+   *
+   * ⚠️⚠️ **「读不出来」必须抛错，不得返回 `undefined`**（2026-11-05 三审 P0-1）。
+   * 两种状态同形会让 `AccountPool.ensureLoaded()` 把空缓存当成已载入，接着
+   * 任何一次写入都会用空状态**整体覆盖**磁盘文档（账号 / 模型黑名单 / 关闭
+   * 意图 / 网关开关全部永久丢失，且全程零报错）。调用方负责决定降级方式。
+   */
   load(): JetHubState | undefined
   /** 整体写入（账号与黑名单必须同时携带，见 AccountPool 的说明）。 */
   save(state: JetHubState): Promise<void>
@@ -1564,7 +1571,12 @@ class FileStore implements JetHubStore {
     try {
       if (!existsSync(this.path)) return this.bootstrapFromCredentialRefs()
       const parsed = JSON.parse(readFileSync(this.path, 'utf-8')) as unknown
-      if (typeof parsed !== 'object' || parsed === null) return undefined
+      // ⚠️⚠️ **文档形状坏掉也必须抛，不能返回 `undefined`**（2026-11-05 三审 P0-1）：
+      // `undefined` 与「全新安装」同形，而 `AccountPool.ensureLoaded()` 会把
+      // 空缓存当成已载入 ⇒ 下一次写入整体覆盖磁盘文档。
+      if (typeof parsed !== 'object' || parsed === null) {
+        throw new Error(`${this.path} 不是 JSON 对象（文档已损坏）`)
+      }
       const value = parsed as {
         accounts?: unknown
         disabledModels?: unknown
@@ -1613,8 +1625,35 @@ class FileStore implements JetHubStore {
         providerClosed: sanitizeProviderClosed(value.providerClosed),
       }
     } catch (error) {
-      this.logger?.warn(`[jet-hub] 读取 ${this.path} 失败，本次以空列表启动: ${String(error)}`)
-      return undefined
+      // ⚠️⚠️ **不能吞成 `undefined`**（2026-11-05 三审 P0-1）：`undefined` 与
+      // 「全新安装」同形，而 `AccountPool.ensureLoaded()` 会把空缓存当成已载入
+      // ⇒ 下一次写入用空状态**整体覆盖**磁盘文档（账号 / 黑名单 / 关闭意图全丢）。
+      // 抛出去交给调用方：`ensureLoaded` 不置 `loaded`，RPC 层转成用户可见错误，
+      // 下一次访问会重试读盘。
+      this.logger?.warn(`[jet-hub] 读取 ${this.path} 失败：${String(error)}`)
+      // ⚠️⚠️ **必须把路径与出路包进面向用户的消息**（2026-11-05 四审契约 P1-1）。
+      //
+      // 原始 `JSON.parse` 的 `SyntaxError.message` 形如
+      // `Expected property name or '}' in JSON at position 2 (line 1 column 3)`
+      // —— **不含路径**，而它会被 RPC 层原样透给用户
+      //（`{ code: 'jet-hub/handler-failed', message }`）。用户看到的就是一条
+      // **无法操作的英文解析错误**：既不知道坏的是哪个文件，也不知道该怎么办。
+      // 而 `AccountPool.ensureLoaded()` 被**全部**读方法调用 ⇒ 每次 RPC 都重新
+      // 读盘并抛错；19 个 `writeAccounts` 调用点写之前都要先读 ⇒ **写也全失败**
+      // ⇒ 面板能打开、能点「重试」，但重试**必然**失败，且用户无法添加账号、
+      // 改设置、开关供应商、改黑名单。
+      //
+      // ⚠️ 自查出路只有两条，文案里必须点名（两条都实测可用）：
+      // ① `backup.import` 的 **`replace`** 模式（`src/backup.ts` 只在 `merge`
+      //    分支调 `getStateSnapshot` ⇒ `replace` 不读当前状态，故可用）；
+      // ② 手动删除该文件（丢本地索引，但凭据本体在 `.credentials.yaml` 里）。
+      throw new Error(
+        `读取账号状态文件失败（${this.path}）：`
+        + `${error instanceof Error ? error.message : String(error)}。`
+        + '可在「备份恢复」里导入一份备份（选择「替换」模式），'
+        + '或删除该文件后重新添加账号。',
+        { cause: error },
+      )
     }
   }
 

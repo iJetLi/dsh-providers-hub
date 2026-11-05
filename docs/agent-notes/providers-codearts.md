@@ -224,7 +224,7 @@ id 时的分母取 AgentCenter 的权威值**（动态窗口表与目录可见�
 **不是** `if (id !== 'codearts')` 跳过断言 —— 后者会让 codearts 这条完全无牙。
 ⚠️ 该不变式此前对 **15 家全部有牙**（文件头注有反向验证记录），改它时要保住这一点。
 
-## ⚠️⚠️ 图片输入：只有 VL 模型能收图，且 DSH 会按模态把图**投影成文字**
+## ⚠️⚠️ 图片输入：能收图的不只 VL 模型（目录会过期），且 DSH 会按模态把图**投影成文字**
 
 ### 报障与结论（2026-10-21）
 
@@ -247,10 +247,27 @@ or base64 data and extract information such as OCR text, objects, layout, colors
 
 ### 谁能收图（`/v1/model/builtin` 的 `supports_images`，8 条逐条实测）
 
-| 模型 | `supports_images` | `model_category` |
+| 模型 | `supports_images`（目录） | 实际能收图？ | 说明 |
+|---|---|---|---|
+| `kimi-k2.6-vl` / `Qwen3-VL-235B` | **true** | ✅ | 专职 VL（`analyzeImage` 借它识图） |
+| `deepseek-v4.1-flash-1017` / `deepseek-v4.1-flash` | false | ✅ | **目录过期**；2026-11-05 wire 实测 200 + 答对颜色（见下） |
+| `glm-5.3` / `GLM-5.2` / `glm-5.2-sft-harmony` / `openpangu-2.0-flash` / `-pro` | false | ❌ 406 | — |
+
+### ⚠️⚠️ 2026-11-05 更正：`deepseek-v4.1-flash`（含 `-1017`）也能收图
+
+真机 wire（`image_url` 直发 `chat/completions`，4×4 纯色 PNG）：
+
+| 模型 | 图片 | 结果 |
 |---|---|---|
-| `kimi-k2.6-vl` / `Qwen3-VL-235B` | **true** | **图片理解** |
-| `glm-5.3` / `GLM-5.2` / `glm-5.2-sft-harmony` / `openpangu-2.0-flash` / `-pro` / `deepseek-v4.1-flash` | false | 文本生成 |
+| `deepseek-v4.1-flash-1017` | 红 | **200**，正文「红色」 |
+| `deepseek-v4.1-flash` | 蓝 | **200**，正文「蓝色」 |
+| `glm-5.3`（对照） | — | **406** `The request model is not multimodal` |
+
+⇒ 目录的 `supports_images: false` 对这两条是**过期数据**；而 DSH 的图片准入只看
+`inputModalities`，声明成 `['text']` 会让图**在入库阶段**就被换成占位文字。
+修法是 `CODEARTS_IMAGE_CAPABLE_OVERRIDES`（**只影响「能不能收图」**）：
+⚠️ **不要**把它们放进 `CODEARTS_VL_MODELS` —— 那张表同时被 `codeartsIsVisionModel`
+当「专职 VL」判据，放进去会把这两个**主模型**的 `analyzeImage` 摘掉。
 
 ### ⚠️⚠️ wire 形态**四选一**，只有一种被接受（实测）
 
@@ -287,7 +304,8 @@ if (modelInfo.inputModalities !== void 0
 
 ### 三条接线（本次改动）
 
-1. `CODEARTS_VL_MODELS` + `codeartsAcceptsImage()`：**逐模型**判能力（大小写不敏感）；
+1. `CODEARTS_VL_MODELS` + `CODEARTS_IMAGE_CAPABLE_OVERRIDES` + `codeartsAcceptsImage()`：
+   **逐模型**判能力（大小写不敏感）；后者是「目录标 false 但 wire 实测能收图」的主模型；
 2. `toCatalogEntry` 与 **`unknownModelInputModalities(modelId)`** 都要按 id 判 ——
    ⚠️⚠️ VL 模型**刻意不在对话目录里**（上下文小、不支持工具调用），所以
    `resolveModel('kimi-k2.6-vl')` 走的是**「目录外」分支**，只有后者生效。
