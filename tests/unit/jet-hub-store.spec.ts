@@ -617,11 +617,28 @@ describe('文件后端（FileStore）', () => {
     expect(createJetHubStore(makeCtx(undefined)).load()?.loomyPermanentLocked).toBe(false)
   })
 
-  it('文档损坏时不抛错，按空状态启动', () => {
+  it('★★ 文档损坏时必须抛错，不得按空状态启动（2026-11-05 三审 P0-1）', () => {
     mkdirSync(join(dir, 'jet-hub'), { recursive: true })
     writeFileSync(join(dir, 'jet-hub', 'state.json'), '{ not json', 'utf-8')
     const store = createJetHubStore(makeCtx(undefined))
-    expect(store.load()).toBeUndefined()
+    // ⚠️⚠️ 这里**必须**抛：返回 `undefined` 与「全新安装」同形，而
+    // `AccountPool.ensureLoaded()` 会把空缓存当成已载入 ⇒ 下一次写入用空状态
+    // 整体覆盖磁盘文档（账号 / 黑名单 / 关闭意图全丢，且全程零报错）。
+    // 本用例原先断言的正是那个错误语义（「按空状态启动」），已随之反转。
+    expect(() => store.load()).toThrow()
+  })
+
+  it('★ 读盘失败后必须能重试（`loaded` 不得提前置位）', () => {
+    // 这条锁的是 `AccountPool.ensureLoaded()` 里 `loaded = true` 的位置：
+    // 先置位再读 ⇒ 一次瞬时故障就让本进程**永不**再读盘。
+    const path = join(dir, 'jet-hub', 'state.json')
+    mkdirSync(join(dir, 'jet-hub'), { recursive: true })
+    writeFileSync(path, '{ not json', 'utf-8')
+    const store = createJetHubStore(makeCtx(undefined))
+    expect(() => store.load()).toThrow()
+    // 修好文档后重新读，必须拿到真实内容（而不是被缓存的空状态吃掉）。
+    writeFileSync(path, JSON.stringify({ accounts: [], disabledModels: { buddy: { 'm1': true } } }), 'utf-8')
+    expect(store.load()?.disabledModels).toEqual({ buddy: { 'm1': true } })
   })
 
   it('首次启动可从 .credentials.yaml 的 refs 恢复账号（0.1.7 迁移路径）', () => {

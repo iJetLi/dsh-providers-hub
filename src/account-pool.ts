@@ -526,8 +526,20 @@ export class AccountPool {
   /** 首次访问时从后端载入账号列表、黑名单与锁定表。 */
   private ensureLoaded(): void {
     if (this.loaded) return
-    this.loaded = true
+    // ⚠️⚠️ **`loaded` 必须在 `load()` 成功之后才置位**（2026-11-05 三审 P0-1）。
+    //
+    // `load()` 在读盘失败时会**抛错**（`FileStore` 与 `SettingsStore` 均如此），
+    // 目的正是让「读不出来」与「没有文件」可区分。若先置位再读，一次瞬时
+    // 故障（文件被占用 / 磁盘错误 / settings 作用域抛错）就会让 `loaded`
+    // 永久为真而缓存保持空表，接着任何一次 `writeModels` / `writeAccounts`
+    // 的 `queueStoreSave()` 都会把这份**空缓存整体落盘**
+    // ⇒ 账号列表、模型黑名单、关闭意图、网关开关**永久丢失**，且本进程
+    // **永不**再读盘，全程零报错。
+    //
+    // 现在的语义：读失败 ⇒ 抛给调用方（RPC 层转成用户可见错误）⇒
+    // `loaded` 仍为假 ⇒ 下一次访问会重试读盘。
     const state = this.store.load()
+    this.loaded = true
     if (state !== undefined) {
       // ⚠️ 这里的 `state.accounts` **已经过去重**：两种后端（SettingsStore /
       // FileStore）的 `load()` 都经 `sanitizeAccounts`，而它按 id 去重。
@@ -1324,6 +1336,11 @@ export class AccountPool {
    * "键存在且为 true 即隐藏"，配置文件也不会随开关操作无限膨胀。
    */
   async setModelDisabled(provider: string, modelId: string, disabled: boolean): Promise<void> {
+    // ⚠️ 六个写入方法里**只有这一处**曾漏掉 `ensureLoaded()`（2026-11-05 三审
+    // P0-2）：`model.setDisabled` 是 RPC 直入口（`src/jet-hub-rpc.ts:8948`），
+    // 脚本 / AI 助手可能直接调用而从未先跑 `list`。冷缓存下拿空表改一处再
+    // `writeModels` ⇒ 其它供应商的黑名单与关闭意图被整份抹掉。
+    this.ensureLoaded()
     const next: ModelDisableMap = { ...this.modelCache }
     const perProvider = { ...(next[provider] ?? {}) }
     if (disabled) perProvider[modelId] = true

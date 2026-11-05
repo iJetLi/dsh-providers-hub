@@ -362,7 +362,14 @@ export type JetHubStoreKind = 'settings' | 'file' | 'memory'
 /** Jet Hub 状态存取接口（同步读、异步写）。 */
 export interface JetHubStore {
   readonly kind: JetHubStoreKind
-  /** 同步载入；文档不存在时返回 `undefined`（等价于"空"）。 */
+  /**
+   * 同步载入；文档不存在（全新安装且没有可迁移的凭据）时返回 `undefined`（等价于"空"）。
+   *
+   * ⚠️⚠️ **「读不出来」必须抛错，不得返回 `undefined`**（2026-11-05 三审 P0-1）。
+   * 两种状态同形会让 `AccountPool.ensureLoaded()` 把空缓存当成已载入，接着
+   * 任何一次写入都会用空状态**整体覆盖**磁盘文档（账号 / 模型黑名单 / 关闭
+   * 意图 / 网关开关全部永久丢失，且全程零报错）。调用方负责决定降级方式。
+   */
   load(): JetHubState | undefined
   /** 整体写入（账号与黑名单必须同时携带，见 AccountPool 的说明）。 */
   save(state: JetHubState): Promise<void>
@@ -1548,7 +1555,12 @@ class FileStore implements JetHubStore {
     try {
       if (!existsSync(this.path)) return this.bootstrapFromCredentialRefs()
       const parsed = JSON.parse(readFileSync(this.path, 'utf-8')) as unknown
-      if (typeof parsed !== 'object' || parsed === null) return undefined
+      // ⚠️⚠️ **文档形状坏掉也必须抛，不能返回 `undefined`**（2026-11-05 三审 P0-1）：
+      // `undefined` 与「全新安装」同形，而 `AccountPool.ensureLoaded()` 会把
+      // 空缓存当成已载入 ⇒ 下一次写入整体覆盖磁盘文档。
+      if (typeof parsed !== 'object' || parsed === null) {
+        throw new Error(`${this.path} 不是 JSON 对象（文档已损坏）`)
+      }
       const value = parsed as {
         accounts?: unknown
         disabledModels?: unknown
@@ -1597,8 +1609,13 @@ class FileStore implements JetHubStore {
         providerClosed: sanitizeProviderClosed(value.providerClosed),
       }
     } catch (error) {
-      this.logger?.warn(`[jet-hub] 读取 ${this.path} 失败，本次以空列表启动: ${String(error)}`)
-      return undefined
+      // ⚠️⚠️ **不能吞成 `undefined`**（2026-11-05 三审 P0-1）：`undefined` 与
+      // 「全新安装」同形，而 `AccountPool.ensureLoaded()` 会把空缓存当成已载入
+      // ⇒ 下一次写入用空状态**整体覆盖**磁盘文档（账号 / 黑名单 / 关闭意图全丢）。
+      // 抛出去交给调用方：`ensureLoaded` 不置 `loaded`，RPC 层转成用户可见错误，
+      // 下一次访问会重试读盘。
+      this.logger?.warn(`[jet-hub] 读取 ${this.path} 失败：${String(error)}`)
+      throw error instanceof Error ? error : new Error(String(error))
     }
   }
 

@@ -4241,8 +4241,13 @@ export function apply(ctx: Context): void {
          * 的模型列表被清空**，模型选择器里只剩一大段错误文案，用户一个模型都选不了。
          *
          * 开这个开关的含义：**查不到余额时放宽一次**（允许消耗永久积分），
-         * 余额查得到时锁定语义逐字不变。取舍是「可能消耗临期积分」换「渠道可用」——
+         * 余额查得到时锁定语义逐字不变。取舍是「可能消耗**永久**积分」换「渠道可用」——
          * 不降级的代价是「完全用不了」，明显更坏。
+         *
+         * ⚠️⚠️ 风险是「永久」不是「临期」（2026-11-05 三审回归面 P2-1）：`expiring > 0`
+         * 的账号在锁定态本就可用、永远进不了降级分支；能进分支的只有 `expiring = 0`
+         * 的账号。故 `BuddyBalanceSelector.select` 额外加了 `definitive` 守卫 ——
+         * 池里存在「余额查得到且只剩永久」的账号时报 `exhausted`，不再降级。
          */
         degradeLockedWhenUnknown: true,
       },
@@ -6012,11 +6017,19 @@ async function fetchBalanceReading(
   // ⚠️⚠️ 类型必须是 **`ModelCatalogSource`**，不能写成 `{ listAllModels() }`（二审 P3-1）。
   //
   //    写成「只带 `listAllModels` 的结构类型」是**合法赋值**（`catalogReadyForBulkWrite`
-  //    是可选成员），所以 TypeScript **不会**报错 —— 但那意味着：任何人把这个方法
-  //    改名（例如聚合适配器重构），编译期零错误、测试桩零影响（桩自己造钩子）、
-  //    而生产里 `fullCatalogIds` 的 `notReady` 判据**恒为 undefined** ⇒ 静默失效。
+  //    是可选成员），所以 TypeScript **不会**报错。
+  //
+  // ⚠️ **但类型收敛只保护「必需」成员**（2026-11-05 三审回归面 P2-2 订正）：
+  //    `catalogReadyForBulkWrite` 至今仍是**可选**成员（`src/jet-hub-rpc.ts` 的
+  //    `ModelCatalogSource` 里带 `?`）⇒ 把它**改名或删除仍然是合法赋值、仍然零
+  //    编译错误**。类型收敛的真实收益只有「必需成员 `listAllModels` 的签名不兼容
+  //    会报错」这一条，**不要**据此以为「有类型保护了，不用加运行时守卫」。
+  //    真正锁住接线的是行为级用例（`tests/unit/jet-hub-rpc.spec.ts` 里对
+  //    `aggregate` 冷帧 `notReady` 的那组），**不是**这个类型别名。
+  //
   //    本仓库「缺一处就静默失效」的形态已经复发过多次（`SELF_HEAL_REFRESHABLE_PROVIDERS`、
-  //    `WIRED_EXPIRY_PROVIDERS` 等），凡是「靠可选成员挂钩」的表都必须用**接口本身**标注。
+  //    `WIRED_EXPIRY_PROVIDERS` 等）⇒ 凡是「靠可选成员挂钩」的表，**判据必须打在
+  //    行为上**，源码/类型级断言只能当辅助。
   const modelAdapters: Record<string, ModelCatalogSource> = {
     // `codearts` 是 registerCodeArtsLlm 返回的**适配器实例**（与 CodeArtsAuth
     // 服务实例 `service` 不同名，故这里可以简写）。
