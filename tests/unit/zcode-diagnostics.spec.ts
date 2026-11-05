@@ -58,11 +58,11 @@ describe('ZCode 3012 可观测诊断（issue IKJI0Y）', () => {
   describe('请求形态实测', () => {
     it('★ 身份块字符数读的是**实际构造出来的 system**，不是常量', () => {
       const shape = realShape()
-      // 2632 = cliPrefix(42) + stable(2590)，官方 2026-10-23 版实测。
+      // 2643 = cliPrefix(35) + stable(2608)，官方 3.17.x 版实测（2026-11-05）。
       // ⚠ 官方再改身份块结构时这里要跟着动（见 src/zcode-identity.ts 的提取记录）。
-      expect(shape.identityChars).toBe(2632)
-      expect(shape.identityBlockChars).toEqual([42, 2590])
-      expect(shape.cliPrefixChars).toBe(42)
+      expect(shape.identityChars).toBe(2643)
+      expect(shape.identityBlockChars).toEqual([35, 2608])
+      expect(shape.cliPrefixChars).toBe(35)
       expect(shape.systemBlocks).toBeGreaterThanOrEqual(3)
     })
 
@@ -79,13 +79,49 @@ describe('ZCode 3012 可观测诊断（issue IKJI0Y）', () => {
       expect(line).toContain('本进程 成功')
       expect(line).toContain('最近成功')
       expect(line).toContain('距上条')
-      expect(line).toContain('身份块 2632 字符(42+2590)')
+      expect(line).toContain('身份块 2643 字符(35+2608)')
       expect(line).toContain('日期块 有')
       expect(line).toContain('HTTP 405')
     })
 
     /**
-     * ★ 反向验证：常量说 2632，但如果真出现「身份块没进请求体」，
+     * ★★ 版本号必须出现在诊断行（Issue #45）。
+     *
+     * 3012 的判据是「**版本号与身份块同代**」，而改前诊断行只有身份块字符数 ⇒
+     * 报障者（与维护者）都看不出「版本 3.17.2 + 3.16 身份块」这种跨代组合，
+     * 于是只能去怀疑账号/频率（方向全错）。
+     *
+     * ⚠ 判据刻意写成**字面量 3.17.1**：它必须与 `zcode-upstream.ts` 的推理版本
+     * 门槛同代，改一处漏一处就是「全量用户 3012」。
+     */
+    it('★★ 诊断行渲染实际发出的客户端版本（与身份块相邻，便于一眼看同代）', () => {
+      const shape = realShape()
+      const line = formatZcodeDiagnostic({
+        accountId: 'zcode-1a2b3c4d',
+        sentAt: 1_000_000,
+        status: 405,
+        shape,
+        appVersion: '3.17.1',
+        now: 1_000_000,
+      })
+      expect(line).toContain('版本 3.17.1')
+      // 相邻：身份块 → 版本 → 日期块（顺序即「一眼看同代」）
+      expect(line).toMatch(/身份块 2643 字符\(35\+2608\) · 版本 3\.17\.1 · 日期块/)
+    })
+
+    it('★ 未提供版本时整项省略（不编造、也不留空壳）', () => {
+      const line = formatZcodeDiagnostic({
+        accountId: 'zcode-1a2b3c4d',
+        sentAt: 1_000_000,
+        status: 405,
+        shape: realShape(),
+        now: 1_000_000,
+      })
+      expect(line).not.toContain('版本 ')
+    })
+
+    /**
+     * ★ 反向验证：常量说 2643，但如果真出现「身份块没进请求体」，
      * 诊断必须**如实显示 0** —— 读实际值才做得到这一点。
      */
     it('★ 身份块缺失时如实报 0 字符（读实际值，不是读常量）', () => {
@@ -96,7 +132,7 @@ describe('ZCode 3012 可观测诊断（issue IKJI0Y）', () => {
         accountId: 'a', sentAt: 1, status: 405, shape, now: 1,
       })
       expect(line).toContain('身份块 0 字符(无)')
-      expect(line).not.toContain('2632')
+      expect(line).not.toContain('2643')
     })
 
     it('日期块有无被如实识别（去掉日期块即报「无」）', () => {
@@ -368,7 +404,7 @@ describe('ZCode 3012 可观测诊断（issue IKJI0Y）', () => {
       const text = describeUpstreamError(405, '{"code":3012,"msg":"blocked"}', diag)
       expect(text).toContain('本机诊断：')
       expect(text).toContain('账号#1')
-      expect(text).toContain('身份块 2632 字符')
+      expect(text).toContain('身份块 2643 字符')
     })
 
     it('★ 不给诊断时行为与原来**逐字一致**（旧调用点不受影响）', () => {
@@ -390,7 +426,7 @@ describe('ZCode 3012 可观测诊断（issue IKJI0Y）', () => {
     it('非 3012 的错误**不附**诊断（那些文案本身已说明原因）', () => {
       // 适配器只在 `text.includes('3012')` 时传诊断；这里验证纯函数侧：
       // 即使误传，3007/1005 的固定文案仍以自己的说明开头。
-      const diag = '账号#1 · 身份块 2632 字符'
+      const diag = '账号#1 · 身份块 2643 字符'
       expect(describeUpstreamError(400, '{"code":3007}', diag)).toContain('阿里云 captcha 校验失败')
       expect(describeUpstreamError(429, '{"code":1005}', diag)).toContain('额度用尽')
     })

@@ -719,6 +719,17 @@ export interface ZcodeDiagnosticInput {
    */
   shape?: ZcodeRequestShape
   /**
+   * ★ 本次请求**实际发出**的客户端版本（`User-Agent` / `X-ZCode-App-Version`）。
+   *
+   * ⚠ 2026-11-05 新增（Issue #45）：3012 的判据是「**版本号与身份块同代**」，
+   * 跨代即 405 —— 而此前的诊断行只渲染身份块字符数，**版本号完全不可见** ⇒
+   * 报障者（与维护者）都无法发现「版本 3.17.2 + 3.16 身份块」这种组合。
+   * 取值必须来自 {@link zcodeInferenceAppVersion}（与真实请求头同源），
+   * **不得**在这里另写一份门控。
+   * ⚠ 缺省时整项省略（领取路径没有推理版本号）。
+   */
+  appVersion?: string
+  /**
    * 上游的 `logid`（排障凭据，见 {@link extractZcodeLogId}）。
    *
    * ⚠ **可选**：取不到时整项**省略**（不留 `logid ` 空壳）。
@@ -768,6 +779,13 @@ export function formatZcodeDiagnostic(input: ZcodeDiagnosticInput): string {
           ? input.shape.identityBlockChars.join('+')
           : '无'
       })`,
+      /**
+       * ⚠ 版本号紧跟在身份块之后：两者**必须同代**（Issue #45 的唯一判据），
+       * 放在相邻位置才能一眼看出「版本 3.17.2 + 2608 字符身份块」这类跨代组合。
+       */
+      ...input.appVersion === undefined || input.appVersion.length === 0
+        ? []
+        : [`版本 ${input.appVersion}`],
       `日期块 ${input.shape.hasDateBlock ? '有' : '无'}`,
     ]
   return [

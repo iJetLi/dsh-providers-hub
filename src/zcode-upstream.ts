@@ -160,11 +160,32 @@ export const ZCODE_VERSION_GATED_MIN_APP_VERSION = '3.17.1'
  *
  * ⚠️ 为什么不能共用：`buildZcodeHeaders` 的默认值同时服务推理请求
  * （`zcode-transport.ts` 的 `buildChannelRequest`），而推理路径的 405
- * `unusual activity` 结论是在 **3.16.3** 上验收的（2026-10-25 真机）。
+ * `unusual activity` 结论是**按客户端代次**验收的（见下）。
  * 营销/领取的门控逐期漂移（1103 期已到 3.17.1），无证据地把推理头一起抬
  * 会把那条验收作废。
+ *
+ * ## ⚠⚠⚠ 2026-11-05：本常量与 `zcode-identity.ts` 的身份块**必须同代**
+ *
+ * 上游把「版本号」与「身份块文本」当**同一代**校验，**跨代即 405 + 3012**
+ * （与账号 / IP / 频率 / 头都无关）。真机 2×2（同 URL、同头、同 body，
+ * 只改这两个变量，8 发）：
+ *
+ * | `X-ZCode-App-Version` | 身份块 | 结果 |
+ * |---|---|---|
+ * | `3.16.3` | 3.16 文本 | **200** |
+ * | `3.17.2` | 3.16 文本 | **405 + 3012** |
+ * | `3.16.3` | 3.17 文本 | **405 + 3012** |
+ * | `3.17.1` / `3.17.2` | 3.17 文本 | **200** |
+ *
+ * ⇒ 本次随身份块一起抬到 **`3.17.1`**（本机官方客户端版本，实测 200）。
+ * 交叉验证排除了「账号级风控」这条错误假设：同一账号换组合即可通过
+ * （Issue #45 的 3012 就是这么来的 —— 用户 11-02 升级官方客户端后，
+ * 凭据里的 `app_version` 变新 ⇒ 发 3.17.2 + 旧身份块 ⇒ **从未成功过一次**）。
+ *
+ * ⚠ 改本常量**必须同改** `zcode-identity.ts` 的 `OFFICIAL_CLI_PREFIX` /
+ * `OFFICIAL_STABLE_SECTIONS`，反之亦然 —— 改一处漏一处就是**全量用户 3012**。
  */
-export const ZCODE_INFERENCE_MIN_APP_VERSION = '3.16.3'
+export const ZCODE_INFERENCE_MIN_APP_VERSION = '3.17.1'
 
 /**
  * 合法的客户端版本号形态（`major.minor.patch`，纯数字、**无前导零**）。
@@ -307,7 +328,7 @@ export function buildZcodeHeaders(
     platform?: { platform: string; osCategory: string; osVersion: string }
   } = {},
 ): Record<string, string> {
-  const appVersion = options.appVersion ?? zcodeVersionGatedAppVersion(credential, ZCODE_INFERENCE_MIN_APP_VERSION)
+  const appVersion = options.appVersion ?? zcodeInferenceAppVersion(credential)
   const platform = options.platform ?? zcodeClientPlatform()
   const headers: Record<string, string> = {
     'User-Agent': `ZCode/${appVersion}`,
@@ -923,6 +944,21 @@ export function zcodeVersionGatedAppVersion(
   return compareZcodeAppVersion(stored, minAppVersion) < 0
     ? minAppVersion
     : stored
+}
+
+/**
+ * **推理**路径实际发出的客户端版本（`User-Agent` / `X-ZCode-App-Version` 同源）。
+ *
+ * ⚠ 存在的唯一理由：**诊断行要能看见它**（Issue #45）。3012 的判据是
+ * 「版本号与身份块同代」，而此前诊断行只渲染身份块字符数 ⇒ 报障者与维护者
+ * 都无法发现「版本 3.17.2 + 3.16 身份块」这种跨代组合。
+ * 让 `buildZcodeHeaders` 与 `formatZcodeDiagnostic` **共用**这一个函数，
+ * 两边就不可能漂移成两个版本。
+ */
+export function zcodeInferenceAppVersion(
+  credential: Pick<ZcodeCredential, 'app_version'>,
+): string {
+  return zcodeVersionGatedAppVersion(credential, ZCODE_INFERENCE_MIN_APP_VERSION)
 }
 
 /**

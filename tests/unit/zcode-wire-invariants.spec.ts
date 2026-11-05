@@ -42,9 +42,11 @@ import {
   zcodeClientPlatform,
   zcodeCredentialAppVersion,
   zcodeVersionGatedAppVersion,
+  zcodeInferenceAppVersion,
   compareZcodeAppVersion,
   fetchZcodeModels,
 } from '../../src/zcode-upstream.js'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import { withCallerSystem } from '../../src/zcode-identity.js'
 
 /* ────────────────────────── 桩 ────────────────────────── */
@@ -114,9 +116,9 @@ describe('★★ system 恒为官方 3 块，调用方 system 走 messages（405
     const system = sent.system ?? []
     // ① 块数 —— 这是 405 的判据（4 块恒 405，与第 4 块长度无关）。
     expect(system).toHaveLength(3)
-    // ② 前三块的身份段自检（42 + 2590 + environment），别只数块数。
-    expect(system[0]?.text).toHaveLength(42)
-    expect(system[1]?.text).toHaveLength(2590)
+    // ② 前三块的身份段自检（35 + 2608 + environment），别只数块数。
+    expect(system[0]?.text).toHaveLength(35)
+    expect(system[1]?.text).toHaveLength(2608)
     expect(system[2]?.text?.startsWith('# Environment')).toBe(true)
     // ③ caller 绝不能出现在 system 里（放回去 = 405）
     expect(JSON.stringify(system), '调用方 system 又回到 system 数组里了 ⇒ 必然 405+3012')
@@ -233,7 +235,7 @@ describe('★★ 版本号：门控口径与凭据口径各司其职，且脏值
   it('★★ 头里的版本可以被显式覆盖成与 query 一致（同一请求只有一个版本号）', () => {
     const credential = { device_mid: 'mid-A', app_version: '3.14.3' }
     // 默认：门控口径（405 的修法）
-    expect(buildZcodeHeaders(credential)['X-ZCode-App-Version']).toBe('3.16.3')
+    expect(buildZcodeHeaders(credential)['X-ZCode-App-Version']).toBe('3.17.1')
     // 带 query app_version 的站点必须显式传同一个值，否则同请求两个版本号
     const pinned = buildZcodeHeaders(credential, { appVersion: zcodeCredentialAppVersion(credential) })
     expect(pinned['X-ZCode-App-Version']).toBe('3.14.3')
@@ -280,7 +282,7 @@ describe('★★ 诊断行必须渲染 system 块数（下次 405 报障的唯�
     const shape3 = describeZcodeRequestShape(
       [
         { type: 'text', text: 'a'.repeat(42) },
-        { type: 'text', text: 'b'.repeat(2590) },
+        { type: 'text', text: 'b'.repeat(2608) },
         { type: 'text', text: '# Environment' },
       ],
       messages as never,
@@ -304,6 +306,56 @@ describe('★★ 诊断行必须渲染 system 块数（下次 405 报障的唯�
     expect(line4).toContain('system 4 块')
     expect(line3, '3 块与 4 块（405 判据）的诊断行逐字相同 ⇒ 排查时看不出差异')
       .not.toBe(line4)
+  })
+
+  /**
+   * ★★ Issue #45 的直接守卫：3012 的判据是「版本号与身份块**同代**」，
+   * 只报身份块字符数不够 —— 报障者看不出「版本 3.17.2 + 3.16 身份块」。
+   *
+   * 判据打在**适配器真的抛出来的那句报文**上（不是 helper 的返回值）：
+   * 接线把 `appVersion` 丢了，本用例必红。
+   */
+  it('★★ 3012 报文里必须带**实际发出的**版本号（与身份块相邻）', async () => {
+    const adapter = new ZcodeAdapter({
+      credentialRef: 'R' as never,
+      resolveCredential: async () => ({ zcode_jwt: 'jwt-A', device_mid: 'mid-A', app_version: '3.14.3' }),
+      refresh: async () => {},
+      mintCaptcha: async () => 'param',
+      fetchImpl: (async () => new Response(
+        '{"code":3012,"msg":"request has been blocked due to unusual activity."}',
+        { status: 405, headers: { 'content-type': 'application/json' } },
+      )) as never,
+      gate: new ModelGate({ sleep: async () => {} }),
+      sleep: async () => {},
+      product: ZCODE,
+    })
+
+    let error: unknown
+    try {
+      for await (const _chunk of adapter.stream({
+        provider: 'zcode',
+        model: 'GLM-5.3-Flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      } as never)) { /* 读完即可 */ }
+    } catch (caught) {
+      error = caught
+    }
+
+    expect(error).toBeInstanceOf(LlmError)
+    // 3012 必须仍是「别重试」的 PERMISSION（有冷却惩罚，降级成 SERVER 会白退避重试）
+    expect((error as LlmError).code).toBe('PERMISSION')
+    const message = String((error as LlmError).message)
+    // 凭据写 3.14.3 ⇒ 实际发出的是门槛版 3.17.1（与身份块同代）
+    expect(message).toContain('版本 3.17.1')
+    expect(message).toContain('身份块 2643 字符(35+2608)')
+    expect(message).toMatch(/身份块 2643 字符\(35\+2608\) · 版本 3\.17\.1 · 日期块/)
+  })
+
+  it('★ 诊断行的版本与请求头同源（zcodeInferenceAppVersion 是唯一出口）', () => {
+    const credential = { device_mid: 'mid-A', app_version: '3.14.3' }
+    expect(zcodeInferenceAppVersion(credential)).toBe('3.17.1')
+    expect(zcodeInferenceAppVersion(credential))
+      .toBe(buildZcodeHeaders(credential)['X-ZCode-App-Version'])
   })
 })
 
