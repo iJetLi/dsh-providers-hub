@@ -662,7 +662,7 @@ describe('★★ IKP8OF：手写 listModels 的四家必须响应「供应商整
      * 反向对照：`false` 仍是「**删除**意图」（既有语义，`provider.setEnabled(true)`
      * 依赖它）。没有这条，把 `false` 与 `'keep'` 合并成一个分支也能全绿。
      */
-    it('★★ 第三参传 false 仍必须删除关闭意图（打开供应商依赖）', async () => {
+    it('★★ 第三参传 false 仍必须删除关闭意图（无生产调用方；保留三态语义完整性）', async () => {
       const stored: Record<string, unknown> = { accounts: [] }
       const pool = makePool(stored)
       await pool.writeModelsWithProviderClosed('cline', ['m0'], true)

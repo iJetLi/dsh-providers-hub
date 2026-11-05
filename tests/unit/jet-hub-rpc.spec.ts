@@ -1972,7 +1972,9 @@ describe('model.list / model.setDisabled 端点', () => {
       //    而 `model.list` 的 `disabled` 是「意图 **或** 黑名单」双腿取或
       //    ⇒ 砍掉黑名单腿（G1-M15）后这里仍绿。真正判别的是上面那条 `toEqual`
       //    （逐 id 比对），这里改成**条数**断言，把「一个都没少」这件事补上。
-      expect(models).toHaveLength(3)
+      // ⚠️ 二审 M1：条数必须从 `MODELS` 派生，**不能写死 3** —— `MODELS` 是测试
+      //    数据常量，将来增删一条（很常见的维护动作）会假红，红因与产品缺陷无关。
+      expect(models).toHaveLength(MODELS.length)
     })
 
     /**
@@ -2111,6 +2113,12 @@ describe('model.list / model.setDisabled 端点', () => {
       expect(result.ok).toBe(true)
       expect(storedValue().providerClosed, '目录不完整分支同样不得删意图')
         .toEqual({ buddy: true })
+      // ⚠️ 二审 M4：用例名承诺的是「**全关**」，而黑名单写入此前**完全没有断言** ——
+      //    若实现「放行 `ok:true` 但一个字没写」，上面那条仍绿（`providerClosed`
+      //    的值来自前一行 `pool.setProviderClosed`，与黑名单写入无关）。
+      //    同组另一条用例（模型列表屏那格）有这条，本格漏了。
+      expect(storedValue().disabledModels, '「全关」必须真的把可见模型写进黑名单')
+        .toEqual({ buddy: { 'unity-a': true } })
     })
 
     /**
@@ -2170,10 +2178,17 @@ describe('model.list / model.setDisabled 端点', () => {
       //    推导，用户动作是「等一下再点」；而「没账号」的动作是「去登录」。
       //    `provider.setEnabled` 早就分开说了，本端点此前写死通用文案
       //    「该供应商没有可关闭的模型」—— 冷帧下界面明明列着模型，自相矛盾。
-      //    ⇒ 两条断言：① 说清是冷帧；② 必须带上 `reason` 原文（否则用户不知道在等什么）。
-      expect(result.error?.message ?? '').toContain('尚未读取完成')
-      expect(result.error?.message ?? '').toContain('通道路由推导中')
-      expect(storedValue().disabledModels ?? {}, '冷帧一个字节都不许落盘').not.toHaveProperty('buddy')
+      //
+      // ⚠️⚠️ **只断言 reason 原文，不断言固定文案**（二审 M2）：写死
+      //    `toContain('尚未读取完成')` 会与产品措辞**绑死** —— 产品再改一次词
+      //    （哪怕改得更准）这条就假红。而「reason 被带出来」是**语义**，改词不该动摇它。
+      //    ⇒ 独特字符串「通道路由推导中」只有从 `${catalog.notReady}` 插值而来，
+      //      删掉插值必然变红；产品改前后缀则不受影响。
+      expect(result.error?.message ?? '', '冷帧必须把 reason 原文带给用户').toContain('通道路由推导中')
+      // ⚠️ 用 `toEqual({})` 而不是 `not.toHaveProperty('buddy')`（二审建议 1）：
+      //    后者只证明「buddy 这个键没被写」，若实现写成了**别的 provider** 仍绿；
+      //    整表比对才能锁住「一个字节都不许落盘」。
+      expect(storedValue().disabledModels ?? {}, '冷帧一个字节都不许落盘').toEqual({})
     })
 
     /**
