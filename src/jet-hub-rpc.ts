@@ -9377,10 +9377,19 @@ function registerJetHubEndpoints(
           return { ok: false, error: { code: 'bad-request', message: 'providers 必须是字符串数组' } }
         }
         const statuses: Record<string, ProviderStatus> = {}
-        for (const provider of req.providers) {
-          // 空 id 不进结果：它不可能对应任何 provider，留着只会让前端多一个
-          // 无意义的键（前端按 PROVIDERS 取，多出来的键会被忽略，但脏数据不该产生）。
-          if (provider.length === 0) continue
+        // ⚠️⚠️ **三阶段：先同步算出「谁需要核实」，再并发核实，最后生成状态**
+        //（2026-11-05 三审端到端 P1-1）。原先是一个 `for` 里逐家
+        // `await fullCatalogIds(...)`，而该调用最长 2000ms
+        //（`CATALOG_READ_TIMEOUT_MS`）⇒ 28 家全关时**串行 56194ms**（实测）。
+        // 症状：插件更新/重启后首次打开设置页，供应商开关整片灰显
+        //（`reason: '状态尚未读取'`）最长 50 秒，期间分组不生效、之后突然重排，
+        // **全程零提示**。
+        //
+        // ⚠️ `fullCatalogIds` 是**纯读**（只读目录与黑名单，不写盘、不广播），
+        //    故并发安全。每家的 2s 预算不变，总时长从 `N × 2s` 降到 `≤ 2s`。
+        // ⚠️ 判据只写一份（`computePlan`）：循环与预取共用它，避免两处漂移
+        //    （本仓库「一文件两套同义判据」是红线）。
+        const computePlan = (provider: string) => {
           const catalog = modelAdapters?.[provider]?.listAllModels()
           let total = catalog?.length ?? 0
           // ⚠️ `listAllModels()` **不带 disabled 字段**，故必须另取黑名单再按 id 计数。
@@ -9428,12 +9437,38 @@ function registerJetHubEndpoints(
             closed = true
             disabled = total
           }
+          return { total, disabled, closed, closedByIntent, disabledMap }
+        }
+
+        // 阶段 2：**并发**核实（只对「派生判据为已关闭且无意图」的家发请求）。
+        // ⚠️ 「空 id 不进结果」：它不可能对应任何 provider，留着只会让前端多一个
+        //    无意义的键（前端按 PROVIDERS 取，多出来的键会被忽略，但脏数据不该产生）。
+        const planMap = new Map<string, ReturnType<typeof computePlan>>()
+        for (const provider of req.providers) {
+          if (provider.length === 0) continue
+          planMap.set(provider, computePlan(provider))
+        }
+        const verifyMap = new Map<string, Awaited<ReturnType<typeof fullCatalogIds>>>()
+        await Promise.all(
+          [...planMap]
+            .filter(([, plan]) => plan.closed && !plan.closedByIntent)
+            .map(async ([provider]) => {
+              verifyMap.set(provider, await fullCatalogIds(ctx, modelAdapters, provider))
+            }),
+        )
+
+        // 阶段 3：应用核实结果并生成状态。
+        for (const provider of req.providers) {
+          const plan = planMap.get(provider)
+          if (plan === undefined) continue
+          let { total, disabled, closed } = plan
           // ⚠️⚠️ 只有「即将报已关闭」才核实（危险方向，见方法头）。
           // ⚠️ 意图为真时**跳过核实**：核实是为了「证明目录里每一条都关着」，
           //    而意图已经把整家关掉了 ⇒ 核实既无必要，还会因一次远端抖动
           //    把 `closed` 翻回 false（正是本 issue 的形态）。
-          if (closed && !closedByIntent) {
-            const full = await fullCatalogIds(ctx, modelAdapters, provider)
+          if (closed && !plan.closedByIntent) {
+            // ⚠️ 阶段 2 已按同一判据预取 ⇒ 这里必然命中（`!` 只是类型收敛）。
+            const full = verifyMap.get(provider)!
             // ⚠️⚠️ **判据是「远端读成功」，不是 `complete`**：`complete` 额外要求
             // 远端**非空**，而这里恰好有一个**正常**的空形态 ——
             // 「全部模型都已关闭」时 `listModels()` 被黑名单过滤成 `[]`
@@ -9466,7 +9501,10 @@ function registerJetHubEndpoints(
               closed = false
             } else if (full.remoteError === undefined) {
               total = full.ids.length
-              disabled = full.ids.filter((id) => disabledMap[id] === true).length
+              // ⚠️ 用 `plan.disabledMap`（阶段 1 同一时刻的快照）：黑名单与目录
+              //    必须来自**同一时刻**，否则 `disabled` 与 `total` 会互相矛盾
+              //（2026-11-05 三审并发 P1-3）。
+              disabled = full.ids.filter((id) => plan.disabledMap[id] === true).length
               closed = total > 0 && disabled === total
             } else {
               // 核实不了（远端读失败）⇒ 保守报未关闭（安全方向）。

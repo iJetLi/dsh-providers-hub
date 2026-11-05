@@ -3810,6 +3810,15 @@ describe('provider.status / provider.setEnabled 端点', () => {
      * 用例需要把适配器挂到 `aggregate` 键下才能命中 `aggregate` 的那套判据。
      */
     providerId?: string
+    /**
+     * 把**同一个**适配器替身挂到多个 provider 键下（默认只挂 `providerId`）。
+     *
+     * ⚠️ 只为一件事存在：验证 `provider.status` 的**核实腿是并发还是串行**
+     *（2026-11-05 三审端到端 P1-1）。串行时总耗时随家数线性增长
+     *（28 家 × 2s = 56194ms 实测），并发时 `≤ 2s`。
+     * 不传 ⇒ 行为与改动前逐字节相同（既有 262 条用例不受影响）。
+     */
+    adapterProviders?: readonly string[]
   } = {}) {
     let stored: Record<string, unknown> = {
       // ⚠️ 账号条目必须补齐 `credentialRef`（非空）与 `createdAt`/`refreshable`：
@@ -3922,7 +3931,14 @@ describe('provider.status / provider.setEnabled 端点', () => {
       // 再也挤不掉它 —— 这正是本次改签名要消除的缺陷。
       ctx as never, pool,
       authsStub(),
-      (adapter !== undefined ? { [options.providerId ?? 'buddy']: adapter } : undefined) as never,
+      (adapter !== undefined
+        ? Object.fromEntries(
+            // 默认只挂一个键（既有 262 条用例的行为逐字节不变）；`adapterProviders`
+        // 让同一个替身挂到多家，用于测「核实腿是并发还是串行」。
+            (options.adapterProviders ?? [options.providerId ?? 'buddy'])
+              .map((provider) => [provider, adapter]),
+          )
+        : undefined) as never,
     )
     if (handler === undefined) throw new Error('endpoint handler was not registered')
 
@@ -4132,6 +4148,54 @@ describe('provider.status / provider.setEnabled 端点', () => {
       // 核实后 `total` 用并集（3 条），只关了 1 条 ⇒ 未关闭。
       expect(s.models).toEqual({ total: 3, disabled: 1 })
       expect(s.closed, '子集判据误报已关闭：界面说关了，远端模型却仍可选').toBe(false)
+    })
+
+    /**
+     * ★★ ★★ **核实腿必须并发**（2026-11-05 三审端到端 P1-1）。
+     *
+     * 现场：插件更新 / 重启后首次打开 Jet Hub 设置页，前端一次性把**全部 30 家**
+     * 塞进一个 `provider.status` 请求；而每家「派生判据说已关闭」的供应商都要
+     * `await fullCatalogIds(...)`（`CATALOG_READ_TIMEOUT_MS = 2000`）。
+     *
+     * 串行实现（改动前）实测：
+     * ```
+     * 3 家  ⇒ 6053ms
+     * 28 家 ⇒ 56194ms     ← 上界 25 家有账号 × 2s ≈ 50s
+     * ```
+     * 症状：设置页所有开关灰显（`reason: '状态尚未读取'`）最长 50 秒，期间
+     * 分组不生效、之后突然重排，**全程零提示**。
+     *
+     * ⚠️ 判据必须是**墙钟时间**，不能断言「`listModels` 被调了 28 次」——
+     * 串行与并发都会调 28 次（那是恒真）。
+     *
+     * ⚠️ 桩用「每家延迟 100ms 后**成功**返回」，而不是「永不 resolve」：
+     *    后者会让用例依赖 `CATALOG_READ_TIMEOUT_MS` 的 2s 定时器，全量并行
+     *    跑时时序不稳（实测 20s 超时）。改成功桩后：并发 = 100ms，
+     *    串行 = 28 × 100ms = 2800ms，两者差 28 倍，判据稳且判别力更强
+     *    （它直接测「远端调用是否并发」，不掺超时逻辑）。
+     */
+    it('★★ ★★ 28 家同时「已关闭」时核实必须并发（串行 ⇒ 56 秒）', async () => {
+      const providers = Array.from({ length: 28 }, (_, index) => `p${index}`)
+      const { call } = setup({
+        catalog: CATALOG,
+        // 每家都「目录里每一条都在黑名单里」⇒ 派生判据说已关闭 ⇒ 触发核实。
+        disabledModels: Object.fromEntries(
+          providers.map((provider) => [provider, { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true }]),
+        ),
+        adapterProviders: providers,
+        // 每家延迟 100ms 后成功 ⇒ 并发 100ms / 串行 2800ms。
+        onListModels: () => new Promise<void>((resolve) => setTimeout(resolve, 100)),
+      })
+
+      const startedAt = Date.now()
+      const result = await call('provider.status', { providers })
+      const elapsed = Date.now() - startedAt
+
+      // 28 家都要出现在结果里（并发不得丢键）。
+      const statuses = (result.value as { statuses: Record<string, unknown> }).statuses
+      expect(Object.keys(statuses)).toHaveLength(28)
+      // 并发 = 100ms + 调度开销；串行 = 2800ms。取 1000ms 作界。
+      expect(elapsed, '28 家串行核实 ⇒ 每家 100ms ⇒ 2800ms（三审端到端 P1-1）').toBeLessThan(1000)
     })
 
     /**
