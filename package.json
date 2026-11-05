@@ -44,7 +44,7 @@
     "test:e2e:buddy-conv": "cross-env DSH_BUDDY_CONV_E2E=1 DSH_BUDDY_CONV_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/buddy-conversation-headers.e2e.spec.ts",
     "test:e2e:buddy-ratelimit": "cross-env DSH_BUDDY_RATELIMIT_E2E=1 DSH_BUDDY_RATELIMIT_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/buddy-ratelimit-probe.e2e.spec.ts",
     "test:e2e:buddy-fingerprint": "cross-env DSH_BUDDY_FINGERPRINT_E2E=1 DSH_BUDDY_FINGERPRINT_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/buddy-fingerprint-roles.e2e.spec.ts",
-    "test:e2e:codearts": "cross-env DSH_CODEARTS_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/v4-models.e2e.spec.ts tests/e2e/v4-large-write.e2e.spec.ts",
+    "test:e2e:codearts": "cross-env DSH_CODEARTS_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/v4-models.e2e.spec.ts tests/e2e/v4-large-write.e2e.spec.ts tests/e2e/codearts-ua-probe.e2e.spec.ts",
     "test:e2e:codearts-credits": "cross-env DSH_CODEARTS_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/codearts-credits-probe.e2e.spec.ts",
     "test:e2e:codearts-claim": "cross-env DSH_CODEARTS_E2E=1 DSH_CODEARTS_CLAIM_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/codearts-claim-probe.e2e.spec.ts",
     "test:e2e:workbuddy-claim": "cross-env DSH_WORKBUDDY_CLAIM_E2E=1 DSH_WORKBUDDY_CLAIM_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/workbuddy-claim-probe.e2e.spec.ts",

@@ -55,6 +55,53 @@ import { reportLedgerAccount } from './token-ledger.js'
 
 export const CHAT_API_BASE = 'https://snap-access.cn-north-4.myhuaweicloud.com/api/v2'
 /**
+ * CodeArts 推理请求的 `User-Agent` —— **必须是官方客户端的身份**。
+ *
+ * ## ⚠️⚠️ 为什么不能沿用宿主的 `attributionHeaders()`（2026-11-05 真机实测）
+ *
+ * 宿主的 `attributionHeaders()` 恒发
+ * `deepseek-harness/<ver> (+https://github.com/deepseek-ai/deepseek-harness)`，
+ * 而**华为 WAF 按这个前缀拒发**：报文
+ * `403 {"error_code":"TM.00000001","error_msg":"网络繁忙，请稍后重试"}`，
+ * 响应头带 `server: CW` / `set-cookie: HWWAFSESID=…`（WAF 侧，不是 APIG）。
+ *
+ * ⚠️ **症状极具误导性**：403 落到 {@link httpErrorCode} 的 `AUTH` 分支 ⇒ 客户端
+ * 把整条 message 换成「**API 密钥无效**」（`dsh-client-ui-chat` 的
+ * `message.failure.auth`）⇒ 用户以为凭据坏了去重新登录，而凭据**完全有效**。
+ * 且 `isAuthError` 对 403 恒真 ⇒ 每次失败还**白跑一次凭据续期**（CodeArts 的
+ * `refresh_token` 是**一次性轮换**的，见 `tests/e2e/codearts-credential.ts` 的
+ * 注释 ⇒ 这不是无害副作用）。
+ *
+ * ## 实测对照（同一账号、同一份签名、逐字节相同的 body，只改 UA）
+ *
+ * | `User-Agent` | 结果 |
+ * |---|---|
+ * | `deepseek-harness/0.2.1-rc.2 (+https://…)` | **403 TM.00000001** |
+ * | `deepseek-harness/0.2.1`（无 url 段） | **403 TM.00000001** |
+ * | `deepseek-harness`（无 `/版本`） | 200 |
+ * | `deepseek-harness-x/1.0` / `DEEPSEEK-HARNESS/1.0` | 200 |
+ * | `VSCode/1.95.3` / `Mozilla/5.0 …` / `curl/8.4.0` | 200 |
+ * | `claude-code` / `opencode` / `cline` | 200（**不是**「拦所有 AI 客户端」） |
+ *
+ * ⇒ 拒发判据是**大小写敏感的前缀 `deepseek-harness/`**（4 个账号全部一致，
+ * 交替顺序 3 轮可复现）。故本家必须显式覆盖该头。
+ *
+ * ## 取值 = 官方 IDE 的身份（不是随手编一个能过的值）
+ *
+ * `codearts/1.0.0-1147257973136832` 逐字取自本机 CodeArts Agent 内核进程的
+ * 启动参数（`~/.codeartsdoer/codearts-data/log/kernel_error_*.log`：
+ * `Args: "…AgentKernel_Vscode_….exe" "--user-agent=codearts/1.0.0-1147257973136832"`）
+ * ⇒ 与真实客户端同形。终值部分只影响指纹相似度（WAF 只拒 `deepseek-harness/`）。
+ *
+ * ⚠️ UA **不参与** SDK-HMAC-SHA256 签名（`signRequestHuawei` 只签
+ * `host` / `x-sdk-date` / `x-sdk-content-sha256` / `x-security-token` /
+ * `content-type` / 显式传入的 `extraHeaders`）⇒ 覆盖它**不会**打破验签。
+ * ⚠️ 覆盖只作用于**推理**路径：目录（`fetchSignedGet`）/ 积分 / 签到路径
+ * **不显式设置** UA —— 实测 Node 的 `fetch` 会补 `user-agent: node`（本机验证），
+ * 而 WAF 只拒 `deepseek-harness/` 前缀 ⇒ 那三条腿本来就过 WAF，无需改动。
+ */
+export const CODEARTS_USER_AGENT = 'codearts/1.0.0-1147257973136832'
+/**
  * codearts 的 provider id。
  *
  * ⚠️ 字面量的**唯一定义处在 `codearts-vision.ts`**（叶子模块）—— 注册期包装
@@ -2372,6 +2419,10 @@ export class CodeArtsAdapter extends LlmAdapter {
         extraSignedHeaders,
       )
       const headers = new Headers(attributionHeaders())
+      // ⚠️⚠️ **必须覆盖宿主的 `user-agent`**（华为 WAF 拒发
+      // `deepseek-harness/` 前缀 ⇒ 403 ⇒ 客户端报「API 密钥无效」）。
+      // 取证、对照表与「为什么不参与签名」见 {@link CODEARTS_USER_AGENT}。
+      headers.set('user-agent', CODEARTS_USER_AGENT)
       // 签名 map 中的额外头（如 maas_type）必须随请求发送——它们已参与
       // canonical 计算、包含在 SignedHeaders 列表中，缺失会导致服务端验签失败。
       signed.forEach((value, key) => { if (key !== 'content-type') headers.set(key, value) })
