@@ -48,6 +48,14 @@ function createMockContext(
      * 写队列**不被一次失败打断**（见对应用例）。
      */
     failReplaceOf?: (call: number) => boolean
+    /**
+     * 让某次 `get()` 抛错（模拟**读盘失败**）。判据是**调用序号**（0 基）。
+     *
+     * ⚠️ 这是三审 P0-1 的复现手段：`ensureLoaded()` 若在 `store.load()` **之前**
+     * 就置 `loaded = true`，一次瞬时读盘失败会让本进程**永不**再读盘 ⇒ 下一次
+     * 写入用空缓存整体覆盖磁盘文档（账号 / 黑名单 / 关闭意图全丢，全程零报错）。
+     */
+    failGetOf?: (call: number) => boolean
   } = {},
 ) {
   let stored: {
@@ -75,9 +83,15 @@ function createMockContext(
    * 「进程重启后会读到什么」，也就是竞态的可观测结果。
    */
   let onDisk: typeof stored = stored
+  let getCount = 0
   const mockSettings = {
     register: (_ns: string, _schema: unknown) => ({
-      get: () => (options.staleReads ? visible : stored),
+      get: () => {
+        const call = getCount
+        getCount += 1
+        if (options.failGetOf?.(call) === true) throw new Error('EACCES: permission denied, open state.json')
+        return options.staleReads ? visible : stored
+      },
       replace: async (value: {
         accounts?: ProviderAccountEntry[]
         disabledModels?: Record<string, Record<string, boolean>>
@@ -1243,6 +1257,35 @@ describe('AccountPool', () => {
     const disk = racingCtx.diskAccounts().map(a => a.id).sort()
     expect(disk).toEqual(memory)
     expect(disk).toEqual(['keep'])
+  })
+
+  /**
+   * ⚠️⚠️ **读盘失败后 `ensureLoaded()` 必须可重试**（三审 P0-1 的核心）。
+   *
+   * 四审测试判别力实测：把 `ensureLoaded()` 里 `loaded = true` 移回
+   * `this.store.load()` **之前**，`tests/unit/jet-hub-store.spec.ts` 78 条
+   * **全绿**（那些用例只调 `FileStore.load()`，而 `FileStore` 根本没有
+   * `loaded` 字段）⇒ 原来那条「读盘失败后必须能重试」是**假绿**，打不到
+   * 本处。真守卫必须是**实例化 `AccountPool` 并走它的 `ensureLoaded()`**。
+   */
+  it('★★ 读盘失败后 `ensureLoaded()` 必须可重试（`loaded` 不得提前置位）', async () => {
+    // 磁盘上**本来就有**一个账号：这样「重试成功」与「缓存空表」才有区分度。
+    // 第 0 次 get() 抛错（模拟瞬时 EACCES / 文件被占用），之后正常。
+    const ctx = createMockContext(
+      [makeMockAccount({ id: 'disk-account', credentialRef: 'REF_DISK' })],
+      { failGetOf: (call) => call === 0 },
+    )
+    const flakyPool = new AccountPool(ctx as never)
+
+    // 第一次读：错误必须抛给调用方（不得静默当成「全新安装」）。
+    await expect(flakyPool.listAllAccounts()).rejects.toThrow('EACCES')
+
+    // ★ 第二次：必须**真的重试**并读到磁盘上的 `disk-account`。
+    // 若 `loaded` 提前置位 ⇒ 缓存停在空表 ⇒ 这里返回 `[]`（判据变红），
+    // 而本进程**永不**再读盘 ⇒ 下一次写入用空缓存整体覆盖磁盘文档
+    // （账号 / 黑名单 / 关闭意图全丢，全程零报错）。
+    const ids = (await flakyPool.listAllAccounts()).map((a) => a.id)
+    expect(ids).toEqual(['disk-account'])
   })
 
   /**

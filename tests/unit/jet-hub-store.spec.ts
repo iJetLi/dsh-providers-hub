@@ -628,7 +628,35 @@ describe('文件后端（FileStore）', () => {
     expect(() => store.load()).toThrow()
   })
 
-  it('★ 读盘失败后必须能重试（`loaded` 不得提前置位）', () => {
+  /**
+   * ⚠️⚠️ **「合法 JSON 但不是对象」也必须抛**（2026-11-05 四审测试判别力）。
+   *
+   * 上一条只覆盖了 `JSON.parse` 自己会抛的输入（`'{ not json'`）；而
+   * `null` / `123` / `'"str"'` 都能**解析成功**，走的是另一条分支：
+   * `if (typeof parsed !== 'object' || parsed === null) throw …`。
+   * 那条分支原先也 `return undefined`，与「全新安装」同形 —— 同一条 P0 的
+   * 另一半，但**没有任何用例打得到它**（变异回 `return undefined` 时 78 全绿）。
+   *
+   * ⚠️ `'[]'` **刻意不在**这组里：数组是 object，会当空配置继续往下走
+   * （与 `{"accounts":[]}` 同义），不是「文档损坏」。
+   */
+  it.each(['null', '123', '"str"', 'true'])('★★ 合法 JSON 但不是对象（%s）也必须抛错', (raw) => {
+    mkdirSync(join(dir, 'jet-hub'), { recursive: true })
+    writeFileSync(join(dir, 'jet-hub', 'state.json'), raw, 'utf-8')
+    const store = createJetHubStore(makeCtx(undefined))
+    expect(() => store.load()).toThrow(/不是 JSON 对象/)
+  })
+
+  /**
+   * ⚠️ **本条只证明 `FileStore.load()` 可重试**（它每次都真读盘、没有 `loaded` 缓存）。
+   *
+   * 四审测试判别力实测：把 `AccountPool.ensureLoaded()` 里 `loaded = true`
+   * 移回 `this.store.load()` **之前**，本文件 78 条**全绿** ⇒ 这条**打不到**
+   * 三审 P0-1 的核心（「一次瞬时故障就让本进程永不再读盘」）。
+   * 真守卫在 `tests/unit/account-pool.spec.ts` 的
+   * 「★★ 读盘失败后 `ensureLoaded()` 必须可重试」。
+   */
+  it('★ 读盘失败后必须能重试（`FileStore.load()` 每次都真读盘）', () => {
     // 这条锁的是 `AccountPool.ensureLoaded()` 里 `loaded = true` 的位置：
     // 先置位再读 ⇒ 一次瞬时故障就让本进程**永不**再读盘。
     const path = join(dir, 'jet-hub', 'state.json')
