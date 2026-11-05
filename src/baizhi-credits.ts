@@ -355,41 +355,46 @@ export async function fetchBaizhiUsage(
  * - 「充值积分」= permanent（长期有效 ⇒ 无到期字段）。
  */
 export function buildBaizhiBalance(wallet: BaizhiWallet, usage: BaizhiUsage | undefined): CreditBalance {
-  /** 每日包的固定分母；上游某天给超过 100（累计/补发）时以实际余额为上限，避免倒挂。 */
+  /**
+   * 每日包的固定分母（上游实测 `amount_credit_cents: 10000` ⇒ 100 积分）。
+   *
+   * ⚠️ 两个边界（2026-11-05 审计返工）：
+   * - 上游某天给超过 100（累计/补发）时以实际余额为上限，避免倒挂；
+   * - **今天还没领**（`dailyClaimed=false` 且 `temporary=0`）时**不能**显示
+   *   `0 / 100` —— 那会被读成「已经用光」。此时 `totalKnown:false`（只显示 0）
+   *   并给出诚实文案「今日尚未领取（每日 +100）」。
+   */
   const dailyTotal = Math.max(BAIZHI_DAILY_CREDIT_TOTAL, wallet.temporary)
   const dailyUsed = Math.round((dailyTotal - wallet.temporary) * 100) / 100
-  /**
-   * 充值包的**本期期初**只能反推：上游钱包只给当前 `permanent_credit_cents`，
-   * 不记“充值总额”。但 `app-credit-usage?period=month` 有本月消耗；
-   * 每日积分先于充值积分消耗，故本月充值消耗 = 本月总消耗 - 每日已消耗。
-   * 用「当前充值余额 + 本月充值消耗」作为窗口分母，并在 `expiryNote`
-   * 明说是反推值 —— 不把它伪装成上游精确字段。
-   */
-  const dailySpent = Math.max(0, BAIZHI_DAILY_CREDIT_TOTAL - wallet.temporary)
-  const permanentSpent = Math.max(
-    0,
-    Math.round(((usage?.monthCredit ?? 0) - dailySpent) * 100) / 100,
-  )
-  const permanentTotal = wallet.permanent + permanentSpent
-  const hasPermanentWindow = usage !== undefined && permanentTotal > 0
+  const dailyPending = !wallet.dailyClaimed && wallet.temporary === 0
   const creditLimit = wallet.creditLimit ?? 0
   /**
    * 授信账户（控制台 `billing_mode === 'postpaid'`）：
    * `available` 是「授信总额 - 预占 - 未出账 - 已出账未结清」的剩余，
-   * `credit_limit_cents` 才是分母。旧实现只读 available，面板只能显示一个
-   * 孤零零的「908」，没有窗口；这里把它还原成「908 / 1000」。
+   * `credit_limit_cents` 才是**上游权威**的分母 ⇒ 可以显示 `908 / 1000`。
+   *
+   * ⚠️ `available > creditLimit`（超授信 / 退款未出账）时强行显示
+   * `1200 / 1200` 又是假分母 ⇒ 退回 `totalKnown:false`（只显示剩余）。
    */
   const postpaid = wallet.billingMode === 'postpaid' && creditLimit > 0
-  const postpaidTotal = Math.max(creditLimit, wallet.available)
+  const overLimit = postpaid && wallet.available > creditLimit
+  /**
+   * ⚠️⚠️ **充值积分不做「反推期初」**（2026-11-05 审计 P0-1/P0-2）：
+   * 上游只给当前 `permanent_credit_cents`，`app-credit-usage?period=month` 是
+   * **整月总消耗**（每日积分也含在内），而「每日桶今天花了多少」只有今天的数
+   * ⇒ 任何 `monthCredit - dailySpent` 都会把其余 29 天的每日消耗算进充值桶，
+   * 分母高估最多 `100×(天数-1)`，且「本月充值消耗为 0」时会退化成
+   * `136.84 / 136.84` 的假窗口。宁可只显示余额，也不编造分母。
+   */
   const packages: CreditPackage[] = []
   if (postpaid) {
     packages.push({
       name: '授信额度',
       unit: 'credit',
       remaining: wallet.available,
-      total: postpaidTotal,
-      totalKnown: true,
-      used: Math.round((postpaidTotal - wallet.available) * 100) / 100,
+      total: Math.max(creditLimit, wallet.available),
+      totalKnown: !overLimit,
+      used: Math.max(0, Math.round((creditLimit - wallet.available) * 100) / 100),
       active: true,
       cycleStartTime: '',
       cycleEndTime: '',
@@ -403,29 +408,27 @@ export function buildBaizhiBalance(wallet: BaizhiWallet, usage: BaizhiUsage | un
       remaining: wallet.temporary,
       // 每日包有固定发放额（+100/天）：分母必须固定，只有 remaining 随消耗降。
       total: dailyTotal,
-      used: dailyUsed,
+      ...(dailyPending ? { totalKnown: false } : { totalKnown: true }),
+      used: dailyPending ? 0 : dailyUsed,
       active: true,
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: '',
-      expiryNote: '每日 00:00（UTC+8）过期',
+      expiryNote: dailyPending ? '今日尚未领取（每日 +100）' : '每日 00:00（UTC+8）过期',
     })
     packages.push({
       name: '充值积分',
       unit: 'credit',
       remaining: wallet.permanent,
-      // 有本月用量时用「当前余额 + 本月充值消耗」反推期初；没有用量则维持
-      // `totalKnown:false`，宁可不显示窗口也不编一个假分母。
-      total: hasPermanentWindow ? permanentTotal : wallet.permanent,
-      ...(hasPermanentWindow ? { totalKnown: true } : { totalKnown: false }),
-      used: hasPermanentWindow ? permanentSpent : 0,
+      // 上游不给初始总额 ⇒ 只显示余额（见上方「不做反推期初」）。
+      total: wallet.permanent,
+      totalKnown: false,
+      used: 0,
       active: true,
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: '',
-      expiryNote: hasPermanentWindow
-        ? '本月期初（按当前余额 + 本月消耗反推）'
-        : '长期有效（平台未提供到期日）',
+      expiryNote: '长期有效（平台未提供到期日）',
     })
   }
   if (wallet.frozen > 0) {

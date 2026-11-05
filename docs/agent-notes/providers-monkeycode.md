@@ -110,3 +110,18 @@ configuration can make this link work (passthrough settings do not ..."}}
   不是凭据问题，不要刷新或换号；先确认该 provider 是否走了 bili 的 global fetch。
 - 看到 `invalid ohmyagent request`：这是网关签名校验失败，通常是没有 system prompt
   或 signing_secret 不匹配；检查 `options.system` 和账号凭据。
+
+## ⚠️⚠️ 2026-11-05 审计返工：`undici.request` 直连（不是 `node:http`）
+
+上一版用 `node:https.request` 绕开 bili 的 `globalThis.fetch` 替换，审计打穿三条：
+
+| 问题 | 后果 | 修法 |
+|---|---|---|
+| **代理被绕过** | `node:https` 不读宿主 `setGlobalDispatcher`、也不读 `HTTP(S)_PROXY` ⇒ 需要代理才能到网关的用户整条渠道消失 | 改用 `undici.request` + 按 `HTTPS_PROXY`/`NO_PROXY` 建 `ProxyAgent` |
+| **没有超时** | `fetch` 有 undici 默认 300s，`node:http` 默认 0 ⇒ 上游吊死即永久挂起 | `headersTimeout` / `bodyTimeout` = 300s |
+| **205/≥600 崩溃** | `new Response(body,{status:205})` 抛 `TypeError`（205 是 null-body status）、`≥600` 抛 `RangeError`，且在**异步回调**里 ⇒ **未捕获异常带走宿主进程** | 状态码先校验；205/204/304/HEAD 传 `null` body 并排空底层流 |
+
+⚠️ `undici.request` 是**模块导入**，bili 只替换 `globalThis.fetch`，拦不到（核心不变量不变）。
+⚠️ 响应 `content-encoding: gzip/deflate/br` 现在会解压（代理无视 `identity` 时不再读到二进制垃圾）；
+⚠️ 3xx **不跟随**（与 `fetch` 不同）—— 上游若做 http→https 跳转会失败，已登记。
+⚠️ `Request` 入参**显式抛错**（上一版会静默丢 body）；适配器只传 URL 字符串，不可达。

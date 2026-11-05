@@ -6,7 +6,8 @@
  * 的情况下仍能逐字节发出请求并流式读回 SSE。
  */
 import { createHmac } from 'node:crypto'
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
+import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -225,5 +226,124 @@ describe('monkeycodeDirectFetch', () => {
     // 签名不是空 prompt 的固定值，防止兜底再次静默失效。
     const emptyPromptSignature = `v1=${createHmac('sha256', 'secret-1').update('', 'utf8').digest('hex')}`
     expect(receivedSignature).not.toBe(emptyPromptSignature)
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════
+// 2026-11-05 审计返工：传输层三条高危（205 崩溃 / 无超时 / 代理被绕过）
+// ════════════════════════════════════════════════════════════════════════
+
+describe('monkeycodeDirectFetch：状态码与编码（审计返工）', () => {
+  it('★★ 205（null-body status）⇒ 正常回 Response（body=null），**不得**抛 uncaught TypeError', async () => {
+    const server = await listen((_req, res) => {
+      res.writeHead(205, 'Reset')
+      res.end('x')
+    })
+    // 205 是合法状态码；旧实现用 `new Response(body,{status:205})` 在异步回调里
+    // 抛 TypeError（未捕获 ⇒ 进程退出）。现在必须正常返回、且 body 为 null。
+    const response = await monkeycodeDirectFetch(server.url)
+    expect(response.status).toBe(205)
+    expect(response.body).toBeNull()
+  })
+
+  it('★★ 600（Response 构造器 RangeError）⇒ reject，不逃逸', async () => {
+    const server = await listen((_req, res) => {
+      // Node 允许写 6xx 状态码（非法 HTTP，但服务端可以发）。
+      res.writeHead(600)
+      res.end('x')
+    })
+    await expect(monkeycodeDirectFetch(server.url)).rejects.toThrow(/非法状态码 600/)
+  })
+
+  it('★ gzip 响应自动解压（代理无视 identity 时不得读到二进制垃圾）', async () => {
+    const payload = 'data: {"ok":true}\n\n'
+    const server = await listen((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'content-encoding': 'gzip' })
+      res.end(gzipSync(Buffer.from(payload, 'utf8')))
+    })
+    const response = await monkeycodeDirectFetch(server.url)
+    expect(await response.text()).toBe(payload)
+  })
+
+  it('★ 请求带 `accept-encoding: identity`（SSE 不应被压缩）', async () => {
+    let acceptEncoding = ''
+    const server = await listen((req, res) => {
+      acceptEncoding = String(req.headers['accept-encoding'] ?? '')
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('ok')
+    })
+    await monkeycodeDirectFetch(server.url)
+    expect(acceptEncoding).toBe('identity')
+  })
+})
+
+describe('monkeycodeDirectFetch：代理（审计返工 P1-5）', () => {
+  /** 极简 HTTP 转发代理：记录请求行并把目标响应回传。 */
+  async function startProxy(): Promise<{ url: string, hits: string[], close: () => Promise<void> }> {
+    const hits: string[] = []
+    const proxy = createServer((req, res) => {
+      hits.push(`${req.method} ${req.url}`)
+      const target = new URL(String(req.url))
+      const upstream = httpRequest({
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search}`,
+        method: req.method,
+        headers: req.headers,
+      }, (upstreamResponse) => {
+        res.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers)
+        upstreamResponse.pipe(res)
+      })
+      upstream.on('error', () => { res.writeHead(502); res.end() })
+      req.pipe(upstream)
+    })
+    await new Promise<void>((resolve) => { proxy.listen(0, '127.0.0.1', resolve) })
+    const address = proxy.address()
+    if (address === null || typeof address === 'string') throw new Error('代理端口不可用')
+    return {
+      url: `http://127.0.0.1:${address.port}`,
+      hits,
+      close: async () => {
+        proxy.closeAllConnections()
+        await new Promise<void>((resolve, reject) => proxy.close((error) => (
+          error === undefined ? resolve() : reject(error)
+        )))
+      },
+    }
+  }
+
+  it('★★ 设置了 HTTP_PROXY ⇒ 请求走代理', async () => {
+    const server = await listen((_req, res) => { res.writeHead(200); res.end('ok') })
+    const proxy = await startProxy()
+    const previous = { HTTP_PROXY: process.env.HTTP_PROXY, NO_PROXY: process.env.NO_PROXY }
+    process.env.HTTP_PROXY = proxy.url
+    delete process.env.NO_PROXY
+    try {
+      const response = await monkeycodeDirectFetch(server.url)
+      expect(await response.text()).toBe('ok')
+      expect(proxy.hits.length).toBe(1)
+    } finally {
+      if (previous.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY
+      else process.env.HTTP_PROXY = previous.HTTP_PROXY
+      if (previous.NO_PROXY === undefined) delete process.env.NO_PROXY
+      else process.env.NO_PROXY = previous.NO_PROXY
+      await proxy.close()
+    }
+  })
+
+  it('★ 反向对照：NO_PROXY 命中 ⇒ 直连（代理零命中）', async () => {
+    const server = await listen((_req, res) => { res.writeHead(200); res.end('ok') })
+    const proxy = await startProxy()
+    process.env.HTTP_PROXY = proxy.url
+    process.env.NO_PROXY = '127.0.0.1'
+    try {
+      const response = await monkeycodeDirectFetch(server.url)
+      expect(await response.text()).toBe('ok')
+      expect(proxy.hits).toEqual([])
+    } finally {
+      delete process.env.HTTP_PROXY
+      delete process.env.NO_PROXY
+      await proxy.close()
+    }
   })
 })

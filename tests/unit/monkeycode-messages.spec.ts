@@ -170,8 +170,13 @@ describe('buildMonkeycodeMessagesPayload · system 来源', () => {
       messages: MESSAGES_WITH_SYSTEM as never,
     })
     expect(payload.system).toBe('来自 OpenAI 网关的 system')
-    // 序列化后的 messages 不重复携带 system（Anthropic 顶层字段才是权威）
-    expect((payload.messages as Array<{ role: string }>).some((message) => message.role === 'system')).toBe(false)
+    // 序列化后的 messages 不重复携带 system（Anthropic 顶层字段才是权威）。
+    // ⚠️ 2026-11-05 审计：只断言 `some(role === 'system') === false` 是**同义反复**
+    //    —— 把 serializer 的 `continue` 删掉后，system 会被改写成 `role:'user'`
+    //    重复注入，该断言仍恒真。必须断言**文本**不出现。
+    const serialized = JSON.stringify(payload.messages)
+    expect(serialized).not.toContain('来自 OpenAI 网关的 system')
+    expect((payload.messages as Array<{ role: string }>).length).toBe(1)
   })
 
   it('options.system 存在时优先于 messages 里的 system', () => {

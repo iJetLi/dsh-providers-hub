@@ -274,15 +274,26 @@ describe('⚠️ 同源不变式（dispatcher 与 fetch 必须来自同一份 un
     expect(rpcSrc).not.toMatch(/const\s+message\s*=\s*error\s+instanceof\s+Error/)
   })
 
-  it('⚠️ 全仓库 src/ 不得**提及** dispatcher（唯一合法落点是 opencode-proxy.ts）', () => {
+  it('⚠️ 全仓库 src/ 不得**提及** dispatcher（合法落点只有 opencode-proxy.ts 与 monkeycode-http.ts）', () => {
     // 这是不变式的**总闸**：任何人把 dispatcher 塞进请求选项都要变红，
     // 逼后来者改用 proxyFetch（或明确论证为何例外）。
     // ⚠️ 扫真目录而非写死清单 —— 新增文件也必须被覆盖（实测 src/ 下 169 个 .ts）。
     // ⚠️ proxyFetch 自身是唯一合法落点，故整体豁免该文件。
     // ⚠️ 用最严的 MENTION（连 ['dispatcher'] 方括号键、[k] 模板键都拦住）；
     //    测试文件不能用它（那里有正当措辞），见上面的分层说明。
+    /**
+     * ⚠️ 2026-11-05 审计返工：`monkeycode-http.ts` 是**第二个**合法落点。
+     *
+     * 它同时 `import { ProxyAgent, request } from 'undici'` —— 两者来自**同一份**
+     * undici 模块实例，正是本不变式要求的口径（缺陷 IKK4BY 的成因是「dispatcher
+     * 与 fetch 来自不同副本」）。且它必须直连（bili 会替换 `globalThis.fetch`），
+     * 只有 `undici.request` 能同时满足「绕开全局 fetch」与「尊重代理/超时」。
+     * ⚠️ 新增第三处前先确认：**import 源必须是同一个 'undici'**，否则请复用
+     * `proxyFetch`。
+     */
+    const legalDispatcherFiles = ['opencode-proxy.ts', 'monkeycode-http.ts']
     const offenders = listSrcFiles()
-      .filter((file) => !file.endsWith('opencode-proxy.ts'))
+      .filter((file) => !legalDispatcherFiles.some((legal) => file.endsWith(legal)))
       .filter((file) => DISPATCHER_MENTION.test(stripComments(readFileSync(file, 'utf8'))))
       .map((file) => file.slice(join(here, '../..').length + 1))
     expect(offenders).toEqual([])

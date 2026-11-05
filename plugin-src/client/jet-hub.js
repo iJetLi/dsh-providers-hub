@@ -539,9 +539,18 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    * 孤零零的 908。只在包名精确匹配时启用，不能把其它 provider 的单包
    * `remaining / total` 一并搬上来（那会改变现有账号的总余额口径）。
    */
-  const creditWindow = all.find((pkg) => pkg && (pkg.name === '授信额度' || pkg.name === '充值积分')
-    && pkg.totalKnown !== false && Number(pkg.total) > 0
-    && Number(pkg.total) >= Number(pkg.remaining));
+  /**
+   * ⚠️⚠️ 必须**同时**限定 provider（2026-11-05 审计 P0-3）：
+   * `raccoon` 也下发同名「充值积分」包（`src/raccoon-credits.ts` 的
+   * `makePackage('充值积分', …)`，且没有 `totalKnown` 字段）⇒ 只按包名匹配会把
+   * Raccoon 的主行从「总余额 500」劫持成「充值桶 200 / 200」（多出一个假分母）。
+   * 这两行只服务 baizhi 的授信/充值窗口，别的 provider 一律不碰。
+   */
+  const creditWindow = provider === 'baizhi'
+    ? all.find((pkg) => pkg && (pkg.name === '授信额度' || pkg.name === '充值积分')
+      && pkg.totalKnown !== false && Number(pkg.total) > 0
+      && Number(pkg.total) >= Number(pkg.remaining))
+    : undefined;
   const mainText = creditWindow
     ? `${formatUnits(creditWindow.remaining, unit) ?? '0'} / ${formatUnits(creditWindow.total, unit) ?? '0'}`
     : quotaText ?? total;
