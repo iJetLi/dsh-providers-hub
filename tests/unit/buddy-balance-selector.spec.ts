@@ -734,7 +734,10 @@ describe('★★ 锁定 + 余额查不到：degradeOnUnknown 开关', () => {
     degradeOnUnknown,
   })
 
-  it('默认（不传开关）：锁定 + 查不到 ⇒ locked —— 既有语义逐字不变', async () => {
+  // ⚠️ 2026-11-05 红队：原名写「默认（不传开关）」，但实参是 `false`（`degradeOnUnknown`
+  //    的类型是 `boolean`，**传不了 `undefined`**）⇒ 名不符实。「不传」的语义由
+  //    `fetchBalanceDetailed` 那组的分支 4 覆盖（G3-M3 打红 4 条），这里改名说清。
+  it('显式传 false：锁定 + 查不到 ⇒ locked —— 既有语义逐字不变', async () => {
     const result = await pick(async () => null, false)
     expect(result.kind).toBe('locked')
   })

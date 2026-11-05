@@ -1285,6 +1285,15 @@ describe('model.list / model.setDisabled 端点', () => {
        * 其余 14 家不声明 ⇒ `model.list` 放弃「已下架」判据、照旧补回黑名单条目。
        */
       catalogConfirmedRemote?(): boolean
+      /**
+       * 适配器自报「这份目录还不是全的」（聚合冷启动专用）。
+       *
+       * ⚠️ 2026-11-05 审查补：`model.setAllDisabled` 的放行分支里有一条
+       * `catalog.notReady === undefined`（冷帧必须继续拒绝），此前**全仓没有
+       * 一条用例打在 `model.setAllDisabled` 上** ⇒ 删掉那半条判据也没人红。
+       * 挂上这个钩子才能测。
+       */
+      catalogReadyForBulkWrite?(): { ready: boolean; reason?: string }
     }>
     /** 让 `ctx.emit` 抛错，验证「广播失败不反噬已落盘的开关」。 */
     emitThrows?: boolean
@@ -1958,7 +1967,12 @@ describe('model.list / model.setDisabled 端点', () => {
       // 落盘后 model.list 应显示全部关闭
       const list = await call('model.list', { provider: 'buddy' })
       const models = (list.value as { models: Array<{ disabled: boolean }> }).models
-      expect(models.every((m) => m.disabled)).toBe(true)
+      // ⚠️ 2026-11-05 红队：`every((m) => m.disabled)` 是**非空真但不判别**的断言 ——
+      //    本用例不传 `closeProvider` ⇒ 分支 4 会写 `providerClosed = true`，
+      //    而 `model.list` 的 `disabled` 是「意图 **或** 黑名单」双腿取或
+      //    ⇒ 砍掉黑名单腿（G1-M15）后这里仍绿。真正判别的是上面那条 `toEqual`
+      //    （逐 id 比对），这里改成**条数**断言，把「一个都没少」这件事补上。
+      expect(models).toHaveLength(3)
     })
 
     /**
@@ -2117,6 +2131,43 @@ describe('model.list / model.setDisabled 端点', () => {
       expect(result.ok).toBe(false)
       expect(result.error?.message ?? '').toContain('没有可关闭的模型')
       expect(storedValue().disabledModels ?? {}, '拒绝时一个字节都不许写').toEqual({})
+    })
+
+    /**
+     * ⚠️⚠️ 冷帧（聚合目录只读到 `auto` 一条）**不是**「无账号门控」。
+     *
+     * 上一格放行的依据是「远端读到但为空 = 该供应商没有账号 ⇒ 兜底表就是全部」。
+     * 而冷帧是**另一个形态**：远端读到了、却只有 `auto` 一条，其余虚拟模型还在
+     * 后台推导 ⇒ 此时写黑名单会「只关掉 auto」，另外两个**仍可选**，而端点返回
+     * 成功 —— 正是 IKJW33 明令禁止的形态。
+     *
+     * ⇒ 放行条件里的 `catalog.notReady === undefined` 是**承重**的。
+     * ⚠️ 2026-11-05 审查发现这条**此前零用例**（删掉那半条判据没有任何测试变红）。
+     */
+    it('★★ 冷帧（notReady）+ 模型列表屏（closeProvider:false）⇒ 仍必须拒绝，不得只关 auto', async () => {
+      const fallback = [{ id: 'auto', name: 'Auto' }]
+      const { call, storedValue } = registerEndpoints({
+        models: [],
+        modelAdapters: {
+          buddy: {
+            listAllModels: () => fallback,
+            catalogReadyForBulkWrite: () => ({ ready: false, reason: '聚合目录尚未读取完成' }),
+          },
+        },
+      })
+
+      const result = await call('model.setAllDisabled', {
+        provider: 'buddy',
+        disabled: true,
+        closeProvider: false,
+      })
+
+      expect(result.ok, '冷帧放行 ⇒ 只关掉 auto、其余虚拟模型仍可选').toBe(false)
+      // ⚠️ 报文是**分支 4** 的通用文案（`!catalog.complete` 拒绝），不含「尚未读取完成」
+      //    —— 那是 `notReady` 只体现在**放行条件**上、不体现在文案上的结果。
+      //    这条断言第一版写成 `/尚未读取完成|目录/` ⇒ 红（行为其实是对的）。
+      expect(result.error?.message ?? '').toContain('没有可关闭的模型')
+      expect(storedValue().disabledModels ?? {}, '冷帧一个字节都不许落盘').not.toHaveProperty('buddy')
     })
 
     /**
