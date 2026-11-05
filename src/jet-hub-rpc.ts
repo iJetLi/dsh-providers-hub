@@ -2247,7 +2247,15 @@ async function fullCatalogIds(
   // ⚠️ 它抛错**不独自决定成败**：远端那一半仍可能成功，故单独吞掉。
   const adapterIds: string[] = []
   try {
-    for (const model of modelAdapters?.[provider]?.listAllModels() ?? []) adapterIds.push(model.id)
+    // ⚠️ **必须校验形状**（2026-11-05 四审端到端 P2-2）：适配器的类型契约是
+    // `LlmModelInfo[]`，但那是**编译期**保证。运行期若某个第三方/桩实现返回
+    // 字符串数组，`.id` 会取到 `undefined` ⇒ 黑名单被写成 `{"undefined":true}`
+    //（静默落盘、且 `total` 随之虚高）。实测：桩返回 `['a','b']` ⇒ 黑名单
+    // `{"a":true,"b":true,"undefined":true}`、状态 `{total:3,disabled:3}`。
+    // 过滤是**零成本**的（正常实现每条都过），故不必区分「该不该防」。
+    for (const model of modelAdapters?.[provider]?.listAllModels() ?? []) {
+      if (typeof model?.id === 'string' && model.id.length > 0) adapterIds.push(model.id)
+    }
   } catch {
     /* 适配器异常不该让整个读取失败：远端目录仍可用 */
   }
@@ -2260,8 +2268,11 @@ async function fullCatalogIds(
   }
   let remoteIds: string[]
   try {
+    // ⚠️ 同样校验形状（理由见上面 `adapterIds` 处；远端那份更值得防 —— 它是
+    // **网络来的**数据，上游一次改契约就会让 `undefined` 混进黑名单）。
     remoteIds = (await withTimeout(llm.listModels(provider), CATALOG_READ_TIMEOUT_MS))
-      .map((model) => model.id)
+      .map((model) => model?.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     return { ids: adapterIds, complete: false, remoteError: `读取模型列表失败：${reason}` }
@@ -2520,6 +2531,43 @@ function registerJetHubEndpoints(
     // ⚠️ AutoClaw 国际版（`autoclawintl`）—— 与 `autoclaw` 是**两个实例**。
     autoclawintl,
   } = auths
+  /**
+   * 在飞的目录核实（single-flight 去重，键 = provider id）。
+   *
+   * ⚠️⚠️ **为什么需要**（2026-11-05 四审端到端 P2-1）：`withTimeout` 只
+   * reject 外层 Promise、**不取消**底层请求（`listModels` 不接受 signal，
+   * 见 `withTimeout` 的注释）。而 `provider.status` 会被反复调用
+   *（挂载即发 + 每次 `toggleProvider` 后 + 用户点「重试」），每次都对
+   * 「派生判据说已关闭」的家发一轮核实 ⇒ 上游 5s 才返回时，连发两次就有
+   * **56 个在飞请求**（28 家 × 2 轮，实测：`峰值并发 = 56`、
+   * `listModels 总调用 = 56 次`）。
+   *
+   * 后果是正反馈：请求越多越容易 429，而 429 又会产出 `remoteError`。
+   *
+   * ⇒ 对同一 provider 的在飞核实去重：后来者 `await` 同一个 Promise。
+   * 语义等价（同一时刻的同一份目录），只是不再重复发请求。
+   *
+   * ⚠️ **必须完成后立即清除**（成功与失败都清）：目录是**可变**的，
+   * 缓存超过一次「在飞窗口」就会让用户看到过期目录。
+   * ⚠️ 作用域在 `registerJetHubEndpoints` 内（**不是模块级**）：测试会创建
+   * 多个实例，模块级 Map 会让它们互相复用对方的 Promise（假绿/假红）。
+   */
+  const catalogVerifyInFlight = new Map<string, Promise<FullCatalogResult>>()
+  /**
+   * 对同一 provider 的目录核实做 single-flight（见 `catalogVerifyInFlight`）。
+   *
+   * ⚠️ 只在**同一时刻**去重，不跨请求复用结果 —— 这正是「在飞」而非「缓存」
+   * 的含义。要缓存请另做（本仓库的目录缓存另有其事，见
+   * `src/model-catalog.ts` 的 `invalidateCatalogCache`）。
+   */
+  const verifyCatalogOnce = (provider: string): Promise<FullCatalogResult> => {
+    const existing = catalogVerifyInFlight.get(provider)
+    if (existing !== undefined) return existing
+    const pending = fullCatalogIds(ctx, modelAdapters, provider)
+      .finally(() => { catalogVerifyInFlight.delete(provider) })
+    catalogVerifyInFlight.set(provider, pending)
+    return pending
+  }
   /**
    * 积分能力表。
    *
@@ -4289,7 +4337,16 @@ function registerJetHubEndpoints(
         ctx.logger.warn(`[jet-hub] ${String(call.method)} failed: ${message}`)
         return reply(rpcId, {
           ok: false,
-          error: { code: 'jet-hub/handler-failed', message },
+          error: {
+            // ⚠️ **保留底层错误码**（2026-11-05 四审契约 P2-2）：
+            // `EACCES`（改权限）/ `ENOENT`（文件不在）/ `EISDIR` /
+            // `SyntaxError`（文档损坏）的用户动作**完全不同**，全塌成
+            // `handler-failed` 会让客户端无法分支处理，也只能给出「未知故障」。
+            // ⚠️ 客户端目前对 `handler-failed` **零分支**（`grep` 只命中本仓
+            // src 的注释）⇒ 这是纯增量，不会破坏既有契约。
+            code: (error as NodeJS.ErrnoException)?.code ?? 'jet-hub/handler-failed',
+            message,
+          },
         })
       }
     },
@@ -9367,9 +9424,8 @@ function registerJetHubEndpoints(
        * ⚠️ 这样**常见路径零网络**：绝大多数供应商是「未关闭」，子集判据
        * 直接给 false、不触发核实（冷缓存下也不触发）。只有**真的可能已关闭**
        * 的供应商才付一次目录读取；缓存已热时那次读是纯内存的。
-       * ⚠️ 代价：多个「已关闭」供应商会**串行**各读一次（每次上限
-       * {@link CATALOG_READ_TIMEOUT_MS}）—— 首屏最多因此多花「已关闭家数 × 2 秒」
-       * 的最坏值，而实际情况是缓存已热（用户会先看到列表才会去关）。
+       * ⚠️ 代价：**只有真的可能已关闭**的供应商才付一次目录读取；缓存已热时
+       * 那次读是纯内存的。并发后总时长与家数**无关**（见阶段 2 的注释）。
        */
       case 'provider.status': {
         const req = payload as RpcProviderStatusRequest
@@ -9385,8 +9441,13 @@ function registerJetHubEndpoints(
         //（`reason: '状态尚未读取'`）最长 50 秒，期间分组不生效、之后突然重排，
         // **全程零提示**。
         //
-        // ⚠️ `fullCatalogIds` 是**纯读**（只读目录与黑名单，不写盘、不广播），
-        //    故并发安全。每家的 2s 预算不变，总时长从 `N × 2s` 降到 `≤ 2s`。
+        // ⚠️ `fullCatalogIds` 是**幂等**的读（只读目录与黑名单，不写本仓库的
+        //    状态、不广播），故并发安全。⚠️ 它**不是**「纯读」——冷缓存下会写
+        //    models.dev 的**磁盘缓存**（`src/models-dev-cache.ts` 的
+        //    `writeFile` + `rename`）并发网络请求；那份缓存的并发由模块级在途槽
+        //    + `RemoteCatalogGate` 去重保证（2026-11-05 四审并发 P1-2 更正：
+        //    原注释自称「纯读」，与实现不符）。
+        //    每家的 2s 预算不变，总时长从 `N × 2s` 降到 `≤ 2s`。
         // ⚠️ 判据只写一份（`computePlan`）：循环与预取共用它，避免两处漂移
         //    （本仓库「一文件两套同义判据」是红线）。
         const computePlan = (provider: string) => {
@@ -9437,7 +9498,7 @@ function registerJetHubEndpoints(
             closed = true
             disabled = total
           }
-          return { total, disabled, closed, closedByIntent, disabledMap }
+          return { total, disabled, closed, closedByIntent }
         }
 
         // 阶段 2：**并发**核实（只对「派生判据为已关闭且无意图」的家发请求）。
@@ -9453,7 +9514,9 @@ function registerJetHubEndpoints(
           [...planMap]
             .filter(([, plan]) => plan.closed && !plan.closedByIntent)
             .map(async ([provider]) => {
-              verifyMap.set(provider, await fullCatalogIds(ctx, modelAdapters, provider))
+              // ⚠️ 走 single-flight：同一 provider 的在飞核实只发一次请求
+              //（2026-11-05 四审端到端 P2-1，见 `verifyCatalogOnce`）。
+              verifyMap.set(provider, await verifyCatalogOnce(provider))
             }),
         )
 
@@ -9469,8 +9532,13 @@ function registerJetHubEndpoints(
           //    而意图已经把整家关掉了 ⇒ 核实既无必要，还会因一次远端抖动
           //    把 `closed` 翻回 false（正是本 issue 的形态）。
           if (closed && !plan.closedByIntent) {
-            // ⚠️ 阶段 2 已按同一判据预取 ⇒ 这里必然命中（`!` 只是类型收敛）。
-            const full = verifyMap.get(provider)!
+            // ⚠️ 阶段 2 已按同一判据预取，但**判据写了两份**（那边的 `filter`
+            //    与这里的 `if`）⇒ 将来任何人在阶段 1 加一个 `continue` 就会
+            //    「该核实却没预取」⇒ 这里必须显式处理 `undefined`
+            //（2026-11-05 四审并发 P2-3；改用 `!` 会在下面 `full.notReady`
+            //  处抛 `TypeError`，把一次读状态变成 500）。
+            const full = verifyMap.get(provider)
+            if (full === undefined) continue
             // ⚠️⚠️ **判据是「远端读成功」，不是 `complete`**：`complete` 额外要求
             // 远端**非空**，而这里恰好有一个**正常**的空形态 ——
             // 「全部模型都已关闭」时 `listModels()` 被黑名单过滤成 `[]`
@@ -9493,34 +9561,73 @@ function registerJetHubEndpoints(
               // provider.status = {"total":1,"disabled":1,"closed":true,"verified":"ok（远端 0 条）"}
               // 改前形态        = {"total":1,"disabled":1,"closed":false,"verified":"remoteError：超时"}
               // ```
-              // 改前该路径必然 2000ms 超时 ⇒ `remoteError` ⇒ `closed=false`（**安全方向**）；
               // 改后核实「成功」但只见到 `auto` ⇒ `closed=true`（**危险方向**），
               // 而另外两个虚拟模型仍可选 —— 界面与事实相反。
               //
-              // ⇒ 这里把 `notReady` 与「核实不了（远端读失败）」**并列**处理：
-              // 两者都说明「我这份合并目录不足以证明已关闭」，都报 `closed:false`。
-              // 报 false 是安全的（用户可再点一次开关，点了会得到上面那条明确拒绝）。
-              //
-              // ⚠️⚠️ 但只报 `closed:false` 会与 `disabled === total` 互相矛盾
-              //（2026-11-05 三审端到端 P1-2 现场：
-              //  `{"models":{"total":2,"disabled":2},"closed":false}` ⇒
-              //  界面「已关闭 2」+ 开关「已打开」+ 点开关被拒「没有可关闭的模型」，
-              //  **且用户拿不到原因**）。故透出 `verifyFailed` 说明「为什么没能证明」：
-              // 冷帧与远端读失败的用户动作不同（那个要等/重试，这个要查网络）。
+              // ⚠️⚠️ 这一格与下面的 `remoteError` **必须分开**（2026-11-05 四审
+              // 端到端 P1-1 与三审 P1-2 的裁决）：
+              // - `notReady` 是**适配器确定性地**说「我这份目录不全」⇒ 此时
+              //   「派生判据说全关」**不构成证据**（它只见到一个子集）⇒ 必须报
+              //   `closed:false`。这个判断**不随上游抖动翻转**（它是适配器自己
+              //   的就绪状态），故没有「28 家一起翻」的问题。
+              // - `remoteError` 是**瞬态网络故障**（429 / 502 / 超时）⇒ 本地
+              //   证据（目录快照 + 黑名单）**一个字都没变**，变的只是「远端
+              //   读不到」⇒ 保留派生判据（见下面 else 分支的长注释）。
               verifyFailed = full.notReady
               closed = false
             } else if (full.remoteError === undefined) {
               total = full.ids.length
-              // ⚠️ 用 `plan.disabledMap`（阶段 1 同一时刻的快照）：黑名单与目录
-              //    必须来自**同一时刻**，否则 `disabled` 与 `total` 会互相矛盾
-              //（2026-11-05 三审并发 P1-3）。
-              disabled = full.ids.filter((id) => plan.disabledMap[id] === true).length
+              // ⚠️⚠️ 黑名单必须在**这一刻**重读（2026-11-05 四审并发 P1-1）。
+              //
+              // 原实现用阶段 1 的快照（`plan.disabledMap`），理由是「黑名单与
+              // 目录必须来自同一时刻」。方向对，但**取错了那一时刻**：
+              // 阶段 1 在**所有**核实之前跑完，而 `total` 来自**全部**核实
+              // 之后 ⇒ 窗口从「该家一次读取（≤2s）」**放大**成「阶段 1 剩余
+              // + 全部核实」。可复现（两供应商，p1 核实期间把 m3 移出黑名单）：
+              // ```
+              // 改前 p2 = {"total":3,"disabled":2,"closed":false}  ✅ 安全
+              // 改后 p2 = {"total":3,"disabled":3,"closed":true}   ❌ 报已关闭而
+              //                                                      m3 已可选
+              // ```
+              // 现在两者紧挨着取 ⇒ 窗口 = 两次同步调用之间的**零 await**。
+              const disabledMap = pool.listDisabledModels(provider)
+              disabled = full.ids.filter((id) => disabledMap[id] === true).length
               closed = total > 0 && disabled === total
             } else {
-              // 核实不了（远端读失败）⇒ 保守报未关闭（安全方向），
-              // 但必须透出原因（否则用户只看到「开关点不动」）。
+              // ⚠️⚠️⚠️ **瞬态远端故障时绝不改写 `closed`**（2026-11-05 四审端到端 P1-1）。
+              //
+              // 三审（`9b2f93a`）这里原本是 `closed = false`，理由是「保守报
+              // 未关闭是安全方向」。**该结论已被真实链路实测推翻**：
+              //
+              // 真实 UI 载荷是 `model.setAllDisabled({closeProvider:false})`
+              //（`plugin-src/client/jet-hub.js:7757-7761`）⇒ **永不写关闭意图**
+              // ⇒ 每次读状态都走核实腿。于是**任何一次上游瞬态故障**
+              //（429 / 502 / 超时 > 2s）都会把「派生判据说已关闭」的**全部**
+              // 供应商一起翻成 `closed:false`。实测 28 家同时关闭：
+              // ```
+              // 健康目录：        closed===true  = 28/28
+              // 目录 429（2ms）： closed===false = 28/28   ← 界面「全部开启」
+              // 502 / 超时 2100ms：同上
+              // ```
+              // 而 `groupProviders`（`plugin-src/client/provider-toggle.js:42-55`）
+              // 只读 `closed === true` ⇒ 28 家整片从「已关闭」组跳到「已打开」组
+              // = 用户报障的「有时候全部开启 / 全部关闭」。
+              //
+              // ⇒ 正确语义：**「核实不了」只意味着「我无法证明它已关闭」，
+              //    不意味着「它没关闭」**。此时保留派生判据的结论（`closed` 与
+              //    `disabled`/`total` 都来自**同一个**本地快照，三者自洽），
+              //    只用 `verifyFailed` 附注「本次未能核实」。
+              //
+              // ⚠️ 保留 `closed:true` 会不会「危险」（界面说已关闭而模型可选）？
+              //    本格的触发条件是**远端读失败**，而目录快照与黑名单一个字都没变
+              //    ⇒ 若目录真的变长了，那一次**成功**的核实会给出 `closed:false`
+              //（见上面 `total = full.ids.length` 那一支）。即：只有「读到了
+              //    新目录」才允许改判 —— 与 `notReady` 那一格刻意不同。
+              //
+              // ⚠️ 用户仍能从 `verifyFailed` 知道「本次没核实成」，前端据此把
+              //    开关渲染成禁用 + 给出原因（`provider-toggle.js` 的
+              //    `providerSwitchState`）。
               verifyFailed = full.remoteError
-              closed = false
             }
           }
           const entries = pool.listAccountsByProvider(provider)

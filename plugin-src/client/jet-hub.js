@@ -7315,7 +7315,7 @@ function providerRowSummary(row) {
  * 传入；拖拽的视觉状态（正在拖哪行 / 落点在哪）是本组件的局部 UI 状态，drop 时
  * 通过 `onCommitOrder` 把新顺序交给页面层持久化。
  */
-function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onToggle, onReload, onClose, order, onCommitOrder, reordering, notice, rpcCall }) {
+function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onToggle, onReload, onClose, order, onCommitOrder, reordering, notice, rpcCall, onProviderStatusPatched }) {
   // ESC 关闭：挂在 document 上而不是弹窗上 —— 焦点可能落在任意一个开关上，
   // 只监听弹窗自身的 keydown 会漏掉这些按键（与 ModelListPanel 同因）。
   React.useEffect(() => {
@@ -7487,7 +7487,7 @@ function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onTog
     : null,
   React.createElement('div', { className: 'dim-jh-modalBody' },
     view === 'models'
-      ? React.createElement(ModelCenterPanel, { providers, rpcCall, statuses })
+      ? React.createElement(ModelCenterPanel, { providers, rpcCall, statuses, onProviderStatusPatched })
       : React.createElement('div', { className: 'dim-jh-modelList' },
       rows.map(row => {
         const busy = busyIds.has(row.id);
@@ -7570,7 +7570,7 @@ function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onTog
  * 本组件也刻意**不用 `createPortal`**（见 `ModelListPanel` 的注释：客户端模块表
  * 由宿主注入，`react-dom` 可能不在其中，require 会抛「missed the module table」白屏）。
  */
-function ModelCenterPanel({ providers, rpcCall, statuses }) {
+function ModelCenterPanel({ providers, rpcCall, statuses, onProviderStatusPatched }) {
   // providerId -> { phase: 'idle'|'loading'|'ready'|'error', models, error }
   const [states, setStates] = React.useState({});
   const [query, setQuery] = React.useState('');
@@ -7771,23 +7771,14 @@ function ModelCenterPanel({ providers, rpcCall, statuses }) {
       // ⚠️ **不要**改调 `loadProviderStatuses()`：那会为刷新一家而重发全量请求
       //（服务端对每个已关闭的供应商都要 `await fullCatalogIds`，2s 预算），
       // 把「点一次全开」变成几十秒的等待。就地改这一家即可。
-      if (mounted.current) {
-        setProviderStatuses(prev => {
-          const current = prev?.[providerId];
-          if (current === undefined) return prev;
-          const total = current.models?.total ?? 0;
-          const nextDisabled = disabled ? total : 0;
-          return {
-            ...prev,
-            [providerId]: {
-              ...current,
-              models: { total, disabled: nextDisabled },
-              // 与 `provider.status` 同一条判据（`total > 0 && disabled === total`）。
-              closed: total > 0 && nextDisabled === total,
-            },
-          };
-        });
-      }
+      //
+      // ⚠️⚠️⚠️ **`setProviderStatuses` 不在本组件作用域里**（2026-11-05 四审
+      // 测试判别力 P0）—— 它由 `JetHubPage` 的 `React.useState` 声明，
+      // 而本组件是它的**孙辈**。`f51b3ef` 直接写了这个标识符 ⇒ `TS2304`、
+      // 点「全部打开/全部关闭」时 `ReferenceError` ⇒ 宿主 `SlotErrorBoundary`
+      // 捕获 ⇒ **整个设置页清空**，而这段「就地更新」的全部价值从未生效过。
+      // 修法：由 `JetHubPage` 经 `ProviderSwitchPanel` 逐层传入回调。
+      if (mounted.current) onProviderStatusPatched?.(providerId, disabled);
     } catch (error) {
       if (mounted.current) setToggleError(`批量切换「${label}」失败：${error?.message || String(error)}`);
     } finally {
@@ -9722,6 +9713,43 @@ export function JetHubPage({ rpcCall }) {
     }
   }, [rpcCall]);
 
+  /**
+   * 就地把**一家**供应商的状态补成「全关 / 全开」。
+   *
+   * ⚠️⚠️ 为什么不直接调 `loadProviderStatuses()`（2026-11-05 三审端到端 P2-1）：
+   * 那会为刷新一家而重发全量请求，而服务端对每个「派生判据说已关闭」的供应商
+   * 都要 `await fullCatalogIds`（2s 预算）⇒ 把「点一次全开」变成几十秒等待。
+   *
+   * ⚠️⚠️ **必须推进序号**（2026-11-05 四审端到端 P1-3）：
+   * `loadProviderStatuses` 是唯一 `++providerStatusSeqRef.current` 的地方。
+   * 若这里不推进，某次 `provider.status` 可能在用户点「全关」**之前**发出、
+   * **之后**才返回 ⇒ 它拿到的 `seq` 仍相等 ⇒ 通过闸门 ⇒ 把刚写的局部补丁
+   * **覆盖成旧快照** ⇒ 开关跳回去。序号闸门的语义是「写入使在飞请求失效」，
+   * 不是「谁后发谁赢」。
+   */
+  const patchProviderStatus = React.useCallback((providerId, disabled) => {
+    providerStatusSeqRef.current += 1;
+    setProviderStatuses(prev => {
+      const current = prev?.[providerId];
+      if (current === undefined) return prev;
+      const total = current.models?.total ?? 0;
+      const nextDisabled = disabled ? total : 0;
+      return {
+        ...prev,
+        [providerId]: {
+          ...current,
+          models: { total, disabled: nextDisabled },
+          // 与 `provider.status` 同一条判据（`total > 0 && disabled === total`）。
+          closed: total > 0 && nextDisabled === total,
+          // ⚠️ 「本次核实失败」的附注已经过时 —— 我们刚刚**知道**这一家的开关
+          // 结果（`model.setAllDisabled` 成功返回）。不清掉的话
+          // `providerSwitchState` 会继续按「核实失败」把它渲染成禁用。
+          verifyFailed: undefined,
+        },
+      };
+    });
+  }, []);
+
   React.useEffect(() => {
     mounted.current = true;
     void loadProviderStatuses();
@@ -10680,6 +10708,11 @@ export function JetHubPage({ rpcCall }) {
           notice: providerNotice,
           // 弹窗的「模型列表」视图要逐家调 `model.list`（服务端只有单 provider 端点）。
           rpcCall,
+          // ⚠️⚠️ 模型列表屏点「全部打开/全部关闭」后就地补一家状态（2026-11-05
+          // 四审测试判别力 P0：`f51b3ef` 让 `ModelCenterPanel` 直接写
+          // `setProviderStatuses`，而那是本组件（`JetHubPage`）的 state ⇒
+          // 该标识符在孙辈作用域里不存在 ⇒ 一点按钮就 `ReferenceError`）。
+          onProviderStatusPatched: patchProviderStatus,
         })
       : null,
     // 同款做法：网关开关也是覆盖层，且与「供应商开关」互斥 —— 两者都是

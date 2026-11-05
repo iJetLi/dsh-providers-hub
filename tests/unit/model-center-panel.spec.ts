@@ -48,10 +48,23 @@ describe('入口接线：从「供应商」弹窗切到模型列表屏', () => {
     expect(switchPanel).toContain('setView(value)')
   })
 
-  it('模型屏由 ProviderSwitchPanel 挂载，并把 rpcCall 传下去', () => {
+  it('模型屏由 ProviderSwitchPanel 挂载，并把 rpcCall 与状态补丁回调传下去', () => {
     // ⚠️ 必须用 `createElement` 而不是直接调用函数：直接调用会让 hook 数量随
     // 父组件的状态变化而变化，触发 React #310（2026-10-02 事故）。
-    expect(switchPanel).toContain('React.createElement(ModelCenterPanel, { providers, rpcCall, statuses })')
+    //
+    // ⚠️⚠️ **`onProviderStatusPatched` 也必须透传**（2026-11-05 四审测试判别力 P0）：
+    // 模型列表屏点「全部打开/全部关闭」后要就地补这一家的状态，而
+    // `setProviderStatuses` 是 `JetHubPage` 的 state —— `ModelCenterPanel` 是它的
+    // **孙辈**，作用域里根本没有那个标识符。`f51b3ef` 曾直接写它 ⇒ 一点按钮就
+    // `ReferenceError` ⇒ 宿主 `SlotErrorBoundary` 捕获 ⇒ 整个设置页清空。
+    //
+    // ⚠️ 本条只是**接线**判据。「未声明变量」的**真守卫**在
+    // `credits-capabilities.spec.ts` 里跑 `tsc -p tsconfig.client-check.json` 的
+    // TS2304/TS2552 检查（已做红→绿反向验证）。单测环境没有 react（见文件头），
+    // 做不了行为级渲染 —— 不要为它编源码文本断言来假装有守卫。
+    expect(switchPanel).toContain(
+      'React.createElement(ModelCenterPanel, { providers, rpcCall, statuses, onProviderStatusPatched })',
+    )
   })
 
   it('页面层把 rpcCall 传进 ProviderSwitchPanel（否则模型屏调不了任何端点）', () => {

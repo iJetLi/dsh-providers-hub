@@ -3025,3 +3025,64 @@ private ensureLoaded(): void {
 - **「模型列表屏全关」不落关闭意图**：这是**刻意设计**（`closeProvider: false` 是模型列表屏专用，写意图会把「关模型」变成「关供应商」，与 `src/jet-hub-rpc.ts` 的长注释冲突）。用户报的「全部开启」由上面两条前端缺陷解释（P1-2 乱序 + P2-1 陈旧），已修。
 - **`setAllDisabled` 只关在售模型（dead 被 `withDeadModelPruning()` 挡住）未被测试锁定**：语义已由「以 `listAllModels` 全量目录为准」覆盖。
 - **端到端 P1-1 的真实耗时无法离线判定**（需知道多少家的黑名单覆盖当前 `listAllModels()` 全量）；`aggregate` 的 `catalogReadyForBulkWrite()` 在真实冷启动下返回什么亦未确认。
+
+<h2>⚠️⚠️⚠️ 四审（2026-11-05）：28 家整片翻转的真凶 —— 拿「不知道」当「没关闭」</h2>
+
+用户报障原话（第三次）：「全开或全关供应商状态就异常了，有时候好几个一起启用/关闭。有时候全部开启/关闭」
+
+### 现场：一个动作 28 家一起翻
+
+`probe-uipayload.mjs` 按**真实 UI 载荷**（`model.setAllDisabled({ provider, disabled: true, closeProvider: false })`）关掉 28 家，然后**只让目录读失败**（磁盘状态一个字节都没改）：
+
+| 目录状态 | `closed === true` 的家数 | 前端分组 |
+| --- | --- | --- |
+| 健康 | 28 / 28 | 28 已关闭 |
+| 429（2ms 返回） | **0 / 28** | **28 已打开** |
+| 502 / 超时 2100ms | **0 / 28** | **28 已打开** |
+| 对照：`closeProvider: true`（写意图） | 28 / 28 | 28 已关闭（跳过核实，0ms） |
+
+### 根因：派生判据 + 「读不到」被渲染成「没关闭」
+
+`provider.status` 的 `closed` 是**派生**出来的：`total > 0 && disabled === total`。而 `total` 来自目录快照 —— 目录读**成功**才有值。
+
+```ts
+// 三审的写法（错）
+} else {
+  closed = false            // ← 目录读失败 ⇒ 断言「没关闭」
+  verifyFailed = full.remoteError
+}
+```
+
+⚠️⚠️ **「读不到」不是「没关闭」** —— 它是**不知道**。本地证据（目录快照 + 黑名单）一个字节都没变，变的只是远端连不上。把它断言成 `false`，`groupProviders()` 就会把 28 家整片搬进「已打开」组。
+
+**为什么偏偏是 28 家一起**：模型列表屏点「全关」传的是 `closeProvider: false` ⇒ **从不写关闭意图** ⇒ 每次读状态都要**重新核实目录** ⇒ 上游一抖，所有「靠派生判据」的家**同时**失去依据。这是「有时候全部」而不是「有时候一个」的机制。
+
+### 修法：两格刻意不同
+
+| 分支 | `closed` | 理由 |
+| --- | --- | --- |
+| `notReady`（适配器确定性地说「我这份目录不全」） | **保持 `false`** | 此时「全关」不构成证据；该判断**不随上游抖动翻转** |
+| `remoteError`（远端读失败） | **保持派生值** | 本地证据没变，变的只是可达性；报 `false` 会让 28 家整片翻 |
+
+`verifyFailed` 仍然透出（上一轮已加），前端据此渲染「目录核实失败，无法确认是否已全部关闭」并**禁用开关**（`provider-toggle.js` 的 `providerSwitchState`）。
+
+⚠️ 两格必须**各有守卫**：`M2`（remoteError 加回 `closed = false`）与 `M3`（notReady 去掉 `closed = false`）**都红** ⇒ 证明不是同一个断言。
+
+### 同批修掉的其它 9 条（记「为什么」）
+
+1. **P0 未声明变量**：`f51b3ef` 把 `setProviderStatuses` 写进了 `ModelCenterPanel`（`JetHubPage` 的**孙辈**）⇒ 点「全部打开/全部关闭」必 `ReferenceError` ⇒ 整页清空。修法是回调 prop 逐层透传。**真守卫**是 `credits-capabilities.spec.ts` 的 `tsc -p tsconfig.client-check.json`（TS2304/TS2552）。
+2. **`disabled` 与 `total` 跨 await**：三阶段重构后窗口从「该家一次核实」**放大**成「阶段 1 剩余 + 全部核实」。修法是在阶段 3 的 `remoteError === undefined` 分支里**重读黑名单**，让两次调用之间零 `await`。
+3. **single-flight**：`withTimeout` 只 reject 外层、**不取消**底层（`listModels` 不接受 signal）⇒ 每次 `provider.status` 都发一轮。实测峰值并发 56 / 总调用 56 次。修法是 `registerJetHubEndpoints` 作用域内的在飞 Map（**不要模块级** —— 测试会建多个实例）。
+4. **`fullCatalogIds` 形状校验**：桩返回字符串数组时黑名单会落成 `{"undefined": true}`。
+5. **`FileStore.load()` 包路径**：原来只 `logger.warn` 后原样抛 `SyntaxError`，用户看到 `Expected property name or '}' in JSON at position 2`，**不含路径**、也没有出路。
+6. **RPC 边界保留 `code`**：`(error as NodeJS.ErrnoException)?.code ?? 'jet-hub/handler-failed'`。
+7. **`verifyMap.get(provider)!`** → 显式 `undefined` 检查（将来阶段 1 加 `continue` 会变 `TypeError`）。
+
+### 可推广的教训
+
+1. **「读不到」不是「没有」** —— 这条已经在「删除不可逆」那节写过一次，这次是它的**渲染版**：把未知断言成 `false` 会让整片 UI 撒谎，而且**错的方向是「看起来一切正常」**（用户以为供应商被打开了）。
+2. **`closed` 这类「状态」不能只靠派生判据** —— 派生腿依赖目录快照，而快照会因上游抖动 / 缓存重建 / 兜底表更新而变。有「意图」记录的家不受影响，没有的就会漂。**修法不是让派生更准，而是让「不知道」可表达**（`verifyFailed`）。
+3. **三阶段重构会把「跨 await 窗口」放大** —— 原来每家各等各的，重构后所有家等同一批。任何「先快照、后使用」的变量都要重新审一遍。
+4. **`!` 非空断言是给「不可能」留的口子，不是给「现在不可能」** —— 阶段 1 与阶段 3 的判据写了两份，任何人加一个 `continue` 就断。
+5. **模块级单例在测试里会被多个实例共享**（single-flight 的 Map 必须在 `registerJetHubEndpoints` 内）。
+6. **源码文本断言只能证明「接线」，证明不了「作用域」** —— `setProviderStatuses` 那行文本在，但它在**错误的作用域**里。真正的守卫是编译器（TS2304）。

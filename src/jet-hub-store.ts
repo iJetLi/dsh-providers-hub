@@ -1615,7 +1615,29 @@ class FileStore implements JetHubStore {
       // 抛出去交给调用方：`ensureLoaded` 不置 `loaded`，RPC 层转成用户可见错误，
       // 下一次访问会重试读盘。
       this.logger?.warn(`[jet-hub] 读取 ${this.path} 失败：${String(error)}`)
-      throw error instanceof Error ? error : new Error(String(error))
+      // ⚠️⚠️ **必须把路径与出路包进面向用户的消息**（2026-11-05 四审契约 P1-1）。
+      //
+      // 原始 `JSON.parse` 的 `SyntaxError.message` 形如
+      // `Expected property name or '}' in JSON at position 2 (line 1 column 3)`
+      // —— **不含路径**，而它会被 RPC 层原样透给用户
+      //（`{ code: 'jet-hub/handler-failed', message }`）。用户看到的就是一条
+      // **无法操作的英文解析错误**：既不知道坏的是哪个文件，也不知道该怎么办。
+      // 而 `AccountPool.ensureLoaded()` 被**全部**读方法调用 ⇒ 每次 RPC 都重新
+      // 读盘并抛错；19 个 `writeAccounts` 调用点写之前都要先读 ⇒ **写也全失败**
+      // ⇒ 面板能打开、能点「重试」，但重试**必然**失败，且用户无法添加账号、
+      // 改设置、开关供应商、改黑名单。
+      //
+      // ⚠️ 自查出路只有两条，文案里必须点名（两条都实测可用）：
+      // ① `backup.import` 的 **`replace`** 模式（`src/backup.ts` 只在 `merge`
+      //    分支调 `getStateSnapshot` ⇒ `replace` 不读当前状态，故可用）；
+      // ② 手动删除该文件（丢本地索引，但凭据本体在 `.credentials.yaml` 里）。
+      throw new Error(
+        `读取账号状态文件失败（${this.path}）：`
+        + `${error instanceof Error ? error.message : String(error)}。`
+        + '可在「备份恢复」里导入一份备份（选择「替换」模式），'
+        + '或删除该文件后重新添加账号。',
+        { cause: error },
+      )
     }
   }
 

@@ -4220,10 +4220,39 @@ describe('provider.status / provider.setEnabled 端点', () => {
     })
 
     /**
-     * ⚠️ **远端读失败时保守报未关闭**（安全方向：报 false 用户可点开关、
-     * 点了会得到明确错误；报 true 则会把可用模型说成已关闭）。
+     * ⚠️⚠️ **远端读失败时保留派生判据的结论**（2026-11-05 四审端到端 P1-1 改判）。
+     *
+     * ## 三审的结论（已推翻）
+     * 三审（`9b2f93a`）这里报 `closed: false`，理由是「报 false 是安全方向：
+     * 用户可点开关、点了会得到明确错误；报 true 则把可用模型说成已关闭」。
+     *
+     * ## 为什么被推翻（真实链路实测）
+     * 真实 UI 载荷是 `model.setAllDisabled({ closeProvider: false })`
+     *（`plugin-src/client/jet-hub.js` 的 `setProviderAll`）⇒ **永不写关闭意图**
+     * ⇒ 每次读状态都走核实腿。于是**任何一次上游瞬态故障**（429 / 502 /
+     * 超时 > 2s）都会把「派生判据说已关闭」的**全部**供应商一起翻成
+     * `closed: false`：
+     * ```
+     * 健康目录：        closed === true  = 28/28
+     * 目录 429（2ms）： closed === false = 28/28   ← 界面「全部开启」
+     * 502 / 超时 2100ms：同上
+     * ```
+     * 而 `groupProviders`（`plugin-src/client/provider-toggle.js`）只读
+     * `closed === true` ⇒ 28 家整片从「已关闭」组跳到「已打开」组 =
+     * 用户报障的「有时候全部开启 / 全部关闭」。
+     *
+     * ## 新语义
+     * **「核实不了」只意味着「我无法证明它已关闭」，不意味着「它没关闭」。**
+     * 此时保留派生判据（`closed`/`disabled`/`total` 三者来自同一个本地快照，
+     * 自洽），只用 `verifyFailed` 附注「本次未能核实」—— 前端据此把开关渲染成
+     * 禁用并给出原因。目录真的变长时，那一次**成功**的核实会给出
+     * `closed: false`（见「真的全关时仍报已关闭」的相邻分支）。
+     *
+     * ⚠️ 与 `notReady` 那一格刻意不同：`notReady` 是适配器**确定性**地说
+     * 「我这份目录不全」⇒ 此时「全关」不构成证据 ⇒ 仍报 `false`
+     *（见「冷帧下必须报未关闭」那条）。
      */
-    it('⚠️ 核实不了（远端读失败）时保守报未关闭（安全方向）', async () => {
+    it('⚠️ 核实不了（远端读失败）时保留派生判据（不再翻成未关闭）', async () => {
       const { call } = setup({
         catalog: CATALOG,
         listModelsError: '令牌已过期',
@@ -4234,10 +4263,11 @@ describe('provider.status / provider.setEnabled 端点', () => {
       const result = await call('provider.status', { providers: ['buddy'] })
       const s = (result.value as { statuses: Record<string, { closed: boolean; verifyFailed?: string }> }).statuses.buddy
 
-      expect(s.closed, '读不到目录时必须报未关闭（安全方向）').toBe(false)
+      // ⚠️ 保留派生判据：本地快照里 `hy3` 是唯一条目且已关 ⇒ 仍报已关闭。
+      //    报 `false` 会让 28 家随上游抖动整片翻转（见上方用例注释的实测）。
+      expect(s.closed, '远端读失败不得把「无法证明」当成「没关闭」').toBe(true)
       // ⚠️⚠️ 但**必须透出原因**（2026-11-05 三审端到端 P1-2）：否则用户看到的是
-      // 「已关闭 1」+ 开关「已打开」+ 点开关被拒「没有可关闭的模型」三者矛盾，
-      // 而**拿不到任何线索**。
+      // 「已关闭 1」+ 开关「点不动」而**拿不到任何线索**。
       expect(s.verifyFailed, '核实失败必须透出原因，否则用户只看到「开关点不动」')
         .toContain('令牌已过期')
     })
@@ -4279,6 +4309,57 @@ describe('provider.status / provider.setEnabled 端点', () => {
 
       expect(s.closed).toBe(false)
       expect(listModelsCalls, '未关闭的供应商不该读远端目录').toBe(0)
+    })
+
+    /**
+     * ⚠️⚠️ **同一 provider 的在飞核实必须去重**（2026-11-05 四审端到端 P2-1）。
+     *
+     * `withTimeout` 只 reject 外层 Promise、**不取消**底层请求（`listModels`
+     * 不接受 signal）⇒ 每次 `provider.status` 都对「已关闭」的家发一轮核实。
+     * 而该端点在挂载、每次 `toggleProvider` 后、用户点「重试」时都会被调用 ⇒
+     * 上游 5s 才返回时实测**峰值并发 56 / 总调用 56 次**（28 家 × 2 轮）。
+     * 后果是正反馈：请求越多越容易 429，429 又产出 `remoteError`。
+     */
+    it('★★ ★★ 并发两次 provider.status ⇒ 同一 provider 只核实一次（single-flight）', async () => {
+      let listModelsCalls = 0
+      const { call } = setup({
+        catalog: CATALOG,
+        disabledModels: { buddy: { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true } },
+        onListModels: async () => {
+          listModelsCalls += 1
+          // 制造「在飞」窗口：不延迟的话第一次早已完成、第二次自然重发。
+          await new Promise<void>((resolve) => setTimeout(resolve, 50))
+        },
+      })
+
+      const [a, b] = await Promise.all([
+        call('provider.status', { providers: ['buddy'] }),
+        call('provider.status', { providers: ['buddy'] }),
+      ])
+
+      expect(a.ok, '第一次必须成功').toBe(true)
+      expect(b.ok, '第二次必须成功').toBe(true)
+      expect(listModelsCalls, '同一 provider 的在飞核实必须只发一次请求').toBe(1)
+    })
+
+    /**
+     * ⚠️ 反向对照：**「在飞」不是「缓存」**。
+     *
+     * 若把 `catalogVerifyInFlight` 实现成模块级永久缓存（完成后不清除），
+     * 用户切换开关后目录就永远是旧的。这条用例把它与「去重」分开。
+     */
+    it('★ 反向对照：串行两次 ⇒ 各核实一次（在飞去重不是缓存）', async () => {
+      let listModelsCalls = 0
+      const { call } = setup({
+        catalog: CATALOG,
+        disabledModels: { buddy: { 'glm-5.2': true, 'deepseek-v4-flash': true, hy3: true } },
+        onListModels: async () => { listModelsCalls += 1 },
+      })
+
+      await call('provider.status', { providers: ['buddy'] })
+      await call('provider.status', { providers: ['buddy'] })
+
+      expect(listModelsCalls, '完成后必须清除在飞条目（否则目录会过期）').toBe(2)
     })
 
     it('providers 非字符串数组 → bad-request', async () => {
