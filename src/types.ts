@@ -2386,6 +2386,13 @@ export interface RpcUsageBadgePlanReading {
   name: string
   remaining: number
   total: number
+  /**
+   * `total` 是否是上游真实下发的周期总额（同 {@link CreditPackage.totalKnown}）。
+   *
+   * `false` = 上游只给当前余额 ⇒ 客户端**不得**把两者并列显示
+   * （否则 `100/100 → 98/98` 的假分母会从积分区漏到套餐区）。
+   */
+  totalKnown?: boolean
   /** 额度单位（`credits` / `token`），渲染标签与数字格式化都按它走。 */
   unit: string
   /** 扣费截止（毫秒）；缺省 = 服务端未下发（**不是**已过期）。 */

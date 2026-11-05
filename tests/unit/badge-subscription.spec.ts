@@ -177,3 +177,30 @@ describe('badgePlanFor', () => {
     expect(badgePlanFor('zcode', balance([pkg('桶', 5, 10, { unit: 'token' })], 5))?.unit).toBe('token')
   })
 })
+
+/**
+ * `totalKnown` 透传（2026-11-05 审计 P3-16）。
+ *
+ * 套餐区（`planGroupsOf` → `readingOf`）早已按 `totalKnown === false` 隐藏分母，
+ * 但 `badgePlanFor` 从不下发该字段 ⇒ 那条分支是**死代码**（变异全绿）。
+ * 本组用例钉住「两种形态都必须透传，且缺省时**不得**凭空多出这个键」。
+ */
+describe('badgePlanFor：totalKnown 透传', () => {
+  it('★ package 形态（buddy）：包 totalKnown:false ⇒ 读数 totalKnown:false', () => {
+    const plan = badgePlanFor('buddy', balance([
+      pkg('Free Plan Subscription', 100, 100, { totalKnown: false }),
+    ], 100))
+    expect(plan).toMatchObject({ totalKnown: false, remaining: 100 })
+  })
+
+  it('★ balance 形态（zcode）：任一有效包 totalKnown:false ⇒ 读数 totalKnown:false', () => {
+    const plan = badgePlanFor('zcode', balance([pkg('桶', 100, 100, { totalKnown: false })], 100))
+    expect(plan).toMatchObject({ totalKnown: false })
+  })
+
+  it('★ 对照：缺省 ⇒ 不下发该字段（面板仍显示 x / y）', () => {
+    const plan = badgePlanFor('buddy', balance([pkg('Free Plan Subscription', 100)], 100))
+    expect(plan).not.toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(plan, 'totalKnown')).toBe(false)
+  })
+})

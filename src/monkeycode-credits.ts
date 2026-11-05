@@ -526,10 +526,11 @@ export function buildMonkeycodeBalance(
       name: '积分余额',
       unit: 'credit',
       remaining: wallet.balance,
-      // 上游只给「当前余额」这一个数，不给「总额 / 已用」⇒ 如实让 total 等于
-      // remaining、used 为 0。编一个「总额」会让面板显示「12.5 / 100」这种
-      // 用户根本无法核对的数字。
+      // 上游只给「当前余额」这一个数，不给「总额 / 已用」⇒ `total` 只能冗余填
+      // remaining，并明确标记 `totalKnown: false`：面板据此**不显示**
+      // `remaining / total`，否则每次消耗后分母跟着余额跑（100/100 → 98/98）。
       total: wallet.balance,
+      totalKnown: false,
       used: 0,
       // 余额为 0 不等于「包失效」—— `active` 是「这部分额度还算不算数」，
       // 余额用光时它仍然是用户的账户额度（下一天/充值后继续可用）。
@@ -537,6 +538,7 @@ export function buildMonkeycodeBalance(
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: '',
+      expiryNote: '长期有效（平台未提供到期日）',
     },
   ]
   const limit = wallet.dailyTokenLimit
@@ -559,6 +561,7 @@ export function buildMonkeycodeBalance(
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: '',
+      expiryNote: '每日刷新（平台未提供具体时刻）',
     })
   }
   return {

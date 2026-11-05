@@ -199,6 +199,16 @@ export interface CreditPackage {
   remaining: number
   /** 本计费周期总额度（精确值） */
   total: number
+  /**
+   * `total` 是否是**上游真实下发的周期总额**。
+   *
+   * 缺失/`true` = 总额已知，面板可以显示 `remaining / total`；
+   * `false` = 上游只给当前余额，**没有**初始总额。此时 `total` 只能冗余填
+   * `remaining`（类型要求 number），面板**不得**把两者并列显示 ——
+   * 否则每次消耗后都会出现 `100/100 → 98/98` 这种「分母跟着余额跑」的假读数
+   * （用户 2026-11-05 报障）。
+   */
+  totalKnown?: boolean
   /** 本计费周期已用额度（精确值） */
   used: number
   /**
@@ -215,6 +225,13 @@ export interface CreditPackage {
   cycleEndTime: string
   /** 该包自身的失效时间（可能为空 = 无固定失效时间） */
   expiredTime: string
+  /**
+   * 无法归一成时间戳、但平台确实给出的到期说明（如「每日 00:00（UTC+8）过期」）。
+   *
+   * 仅用于展示；`deductionEndTime` / `expiredTime` 都没有时，用它替代「长期」。
+   * ⚠️ 不要把猜测的零点写进来 —— 只有平台文档/响应明确给出时才填。
+   */
+  expiryNote?: string
   /**
    * 该包的**扣费截止时间**（毫秒时间戳；实测缺失或 0 = 服务端未下发）。
    *

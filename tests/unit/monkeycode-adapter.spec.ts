@@ -35,7 +35,7 @@ import {
   type MonkeycodeSlot,
 } from '../../src/monkeycode-adapter.js'
 import type { MonkeycodeCredential } from '../../src/monkeycode.js'
-import { MONKEYCODE } from '../../src/monkeycode-product.js'
+import { MONKEYCODE, MONKEYCODE_INTL } from '../../src/monkeycode-product.js'
 
 const KEY1 = `oma_${'a'.repeat(32)}`
 const KEY2 = `oma_${'b'.repeat(32)}`
@@ -196,6 +196,19 @@ describe('凭据与请求形状', () => {
     expect(body.model).toBe('deepseek-flash')
     expect(body.stream).toBe(true)
     expect(body.max_tokens).toBe(4096)
+  })
+
+  it('国际站实例必须打 .net 网关（不能落回国内站）', async () => {
+    const fetchImpl = vi.fn(async () => sseResponse(SSE_OK))
+    const adapter = makeAdapter({
+      product: MONKEYCODE_INTL,
+      credentialRef: 'MONKEYCODEINTL_ACCESS_TOKEN' as never,
+      fetchImpl: fetchImpl as never,
+    })
+    await drain(adapter.stream(request({ provider: MONKEYCODE_INTL.id })))
+    expect(String(fetchCalls(fetchImpl)[0]?.[0])).toBe(
+      'https://proxy.monkeycode-ai.net/v1/messages',
+    )
   })
 
   it('正常流：文本拼接 + finish 块', async () => {

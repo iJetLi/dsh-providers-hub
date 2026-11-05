@@ -207,6 +207,31 @@ describe('套餐的归组', () => {
    * 同一份套餐在不同账号上被服务端拼成 `credit` / `credits` 时，若用原值当键，
    * 弹窗里的「2 个账号合计」会退化成两行、每行各一个账号。
    */
+  /**
+   * ★★ 2026-11-05 审计返工：`totalKnown:false`（上游只给余额）时**不得**显示
+   * `remaining / total` —— 否则又是 `136.84 / 136.84` 的假分母。
+   */
+  it('★★ totalKnown:false ⇒ 折叠态只显示余额（无分母）；对照：true 才显示 x / y', () => {
+    const withPlan = (totalKnown) => badgeView({
+      providerLabel: '百智云',
+      // ⚠️ `auto` 的候选顺序是 credits 优先（有账号就会走积分区）⇒ 要测套餐区
+      //    必须显式选 `subscription`。
+      preference: 'subscription',
+      subscription: {
+        kind: 'plan',
+        accounts: [{
+          accountId: 'a',
+          plan: { name: 'Free Plan', remaining: 136.84, total: 136.84, unit: 'credits', ...totalKnown === undefined ? {} : { totalKnown } },
+        }],
+      },
+      accounts: [row('a', [pkg('Free Plan', 136.84)])],
+    })
+    expect(withPlan(false).text).toContain('136.84')
+    expect(withPlan(false).text).not.toContain(' / ')
+    // 反向对照：分母已知时必须显示（否则本用例恒真）。
+    expect(withPlan(true).text).toContain('136.84 / 136.84')
+  })
+
   it('同一份套餐的单位拼法不同（credit / credits）必须合并成一条', () => {
     const groups = planGroupsOf([
       { accountId: 'a', plan: { name: 'Free Plan Subscription', remaining: 100, total: 500, unit: 'credits' } },
@@ -841,6 +866,24 @@ describe('★ 积分区节标题：单位标签必须按数据走，不写死「
     ]).groups
     expect(groups.map((g) => g.unit)).toEqual(['credit', 'token'])
     expect(creditSectionLabel(groups)).toBe('积分')
+  })
+
+  it('同一账号多量纲（MonkeyCode 积分 + 每日额度 token）⇒ 各自成组、不相加', () => {
+    const groups = creditGroupsOf([{
+      accountId: 'a',
+      nickname: 'a',
+      balance: {
+        total: 235,
+        packages: [
+          pkg('积分余额', 235, 'credit'),
+          pkg('每日额度', 9_240_000, 'token'),
+        ],
+        expiredTotal: 0,
+      },
+    }]).groups
+    expect(groups.map((g) => g.unit)).toEqual(['credit', 'token'])
+    expect(groups.find((g) => g.unit === 'credit')?.total).toBe(235)
+    expect(groups.find((g) => g.unit === 'token')?.total).toBe(9_240_000)
   })
 
   it('脏数据（缺 unit / 非对象项）不抛错', () => {
