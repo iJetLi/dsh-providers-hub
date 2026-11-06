@@ -32,14 +32,16 @@ describe('Loomy 产品配置', () => {
     expect(LOOMY.defaultCredentialRef).toBe('LOOMY_ACCESS_TOKEN')
   })
 
-  it('兜底模型表覆盖 8 个 chat 模型、id 唯一', () => {
+  it('兜底模型表覆盖 9 个 chat 模型、id 唯一', () => {
     const ids = LOOMY.fallbackModels.map((m) => m.id)
-    expect(ids).toHaveLength(8)
-    expect(new Set(ids).size).toBe(8)
-    // 与实测远端 chat 集合逐一对齐
+    // ⚠️ 2026-11-06 由 8 → 9：远端新上架 `DeepSeek-V4.1-Flash`，兜底表必须跟上
+    //（否则远端抓取失败时它落「目录外」分支 ⇒ 档位/窗口双双缺失 ⇒ 整轮失败）。
+    expect(ids).toHaveLength(9)
+    expect(new Set(ids).size).toBe(9)
+    // 与实测远端 chat 集合逐一对齐（含 2026-09-26 那批 + 2026-11-06 新增）
     expect([...ids].sort()).toEqual([
-      'GLM-5.3-Flash', 'Kimi-k2.6', 'MiniMax-M3', 'deepseek-v4-flash-0731',
-      'mimo-v2.5', 'qwen-3.8-max', 'qwen3.8-flash', 'spark-x',
+      'DeepSeek-V4.1-Flash', 'GLM-5.3-Flash', 'Kimi-k2.6', 'MiniMax-M3',
+      'deepseek-v4-flash-0731', 'mimo-v2.5', 'qwen-3.8-max', 'qwen3.8-flash', 'spark-x',
     ].sort())
   })
 

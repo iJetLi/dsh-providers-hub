@@ -863,8 +863,22 @@ id: 'autoclaw',
    * 不声明 ⇒ 用户手填模型 id 时**没有档位选择器** ⇒ 永远关不掉思考
    *（比「臆造档位」更实际的损失），而本家只两档、且上行前按
    * `MAGICREW_REASONING_EFFORTS` 过滤（非法值本就不会发出）。
+   *
+   * ⚠️⚠️ **Loomy（2026-11-06）在此，理由是「不声明会整轮失败」**（真报障）：
+   * 本家的档位是**产品级**事实 —— 全部 chat 模型（含 2026-11-06 新上架的
+   * `DeepSeek-V4.1-Flash`）下发的 `reasoning_efforts` **逐字相同**
+   * `['none','low','medium','high','xhigh']`。而远端 `GET /models` 抓取失败时
+   * 会退回兜底表，兜底表跟不上的新 id 就落「目录外」⇒ 不声明档位 ⇒
+   * 用户在该模型上持久化过 `xhigh` 时，`dsh-llm` 的 `resolveCallWithInfo`
+   * **硬抛** `UNSUPPORTED_REASONING_EFFORT`（不 clamp、不 alias）⇒
+   * **整轮失败、一个 token 都没发出去**，用户侧表现为「切个模型就整轮挂」。
+   * 实测损失比「臆造档位」重一个量级（臆造最多是上游回一个参数错）。
+   * 另附证据：3 次 `agent.failed` + 1 条 `no context capacity` 压缩 warn，
+   * 会话档 `model/selection` 与 `request/header` 双向对得上。
    */
-  const DECLARE_UNKNOWN_REASONING: ReadonlySet<string> = new Set(['cline', 'codearts', 'magicrew', 'magicrewintl'])
+  const DECLARE_UNKNOWN_REASONING: ReadonlySet<string> = new Set([
+    'cline', 'codearts', 'magicrew', 'magicrewintl', 'loomy',
+  ])
 
   it('⚠️ 表的家数 == 全部对外注册的 LLM provider（漏一家 ⇒ 它不过本段任何断言）', async () => {
     // ⚠️ 判据来自 **PROVIDER_REGISTRY**（唯一的 provider 真源），不手抄。

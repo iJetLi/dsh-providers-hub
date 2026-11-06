@@ -119,8 +119,15 @@ export interface LoomyProduct {
  * 逐条重复只会让将来上游变更时漏改其中几条。
  * ⚠️ 远端可用时**优先用远端的 `reasoning_efforts`**，本常量只在远端整体失败时
  * 顶替（与 `contextWindow` 同策略）。
+ *
+ * ⚠️⚠️ **导出供「目录外 id」复用**（2026-11-06）：本家的档位是**产品级**事实
+ * （实测全部 chat 模型逐字相同，包括 2026-11-06 新上架的 `DeepSeek-V4.1-Flash`），
+ * 与具体模型无关 ⇒ `loomy-adapter` 的 `unknownModelReasoning` 直接返回这一份，
+ * 让**将来又一个**新上架模型在远端抓取失败时也不会退化成「无档位」。
+ * 判据与同型先例（cline / codearts 的未知 id 仍声明档位）见
+ * `src/model-catalog.ts` 的 `unknownModelReasoning` 表格。
  */
-const LOOMY_EFFORTS: readonly string[] = ['none', 'low', 'medium', 'high', 'xhigh']
+export const LOOMY_EFFORTS: readonly string[] = ['none', 'low', 'medium', 'high', 'xhigh']
 
 /**
  * 本插件选用的默认档位（**用户要求 `high`**）。
@@ -320,6 +327,14 @@ export function loomySupportsImage(modelId: string, declared: boolean): boolean 
 
 const LOOMY_FALLBACK_MODELS: readonly LoomyFallbackModel[] = [
   { id: 'deepseek-v4-flash-0731', name: 'DeepSeek V4 Flash 0731 · x3.0', contextWindow: 1_048_576, efforts: [...LOOMY_EFFORTS], defaultEffort: LOOMY_DEFAULT_EFFORT },
+  // ⚠️ 2026-11-06 新增：远端目录已上架该模型，而兜底表此前**没有**它 ⇒ 远端抓取失败时
+  // 它会走「目录外 id」分支，**既不声明 reasoning 也不声明 context** ⇒ 用户持久化的
+  // `xhigh` 被 `dsh-llm` 硬抛 `UNSUPPORTED_REASONING_EFFORT`（整轮失败，不发一个 token），
+  // 同时自动压缩静默失效（`no context capacity`）。详见
+  // `docs/agent-notes/providers-loomy-raccoon-minimax.md` 的「兜底表漂移」一节。
+  // 值取自 2026-11-06 生产端点实测：`context_length: 1048576`、倍率 `x2.0`、
+  // 档位与其余 chat 模型**完全一致**（`['none','low','medium','high','xhigh']`）。
+  { id: 'DeepSeek-V4.1-Flash', name: 'DeepSeek V4.1 Flash · x2.0', contextWindow: 1_048_576, efforts: [...LOOMY_EFFORTS], defaultEffort: LOOMY_DEFAULT_EFFORT },
   { id: 'MiniMax-M3', name: 'MiniMax M3 · x4.0', contextWindow: 1_048_576, efforts: [...LOOMY_EFFORTS], defaultEffort: LOOMY_DEFAULT_EFFORT },
   { id: 'Kimi-k2.6', name: 'Kimi k2.6 · x6.5', contextWindow: 262_144, efforts: [...LOOMY_EFFORTS], defaultEffort: LOOMY_DEFAULT_EFFORT },
   { id: 'qwen-3.8-max', name: 'Qwen 3.8 Max · x12.0', contextWindow: 1_000_000, efforts: [...LOOMY_EFFORTS], defaultEffort: LOOMY_DEFAULT_EFFORT },

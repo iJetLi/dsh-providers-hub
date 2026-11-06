@@ -36,7 +36,14 @@ import {
   splitLoomyRate,
   type LoomyCredential,
 } from './loomy.js'
-import { LOOMY, loomyContextWindow, loomySupportsImage, type LoomyFallbackModel, type LoomyProduct } from './loomy-product.js'
+import {
+  LOOMY,
+  LOOMY_EFFORTS,
+  loomyContextWindow,
+  loomySupportsImage,
+  type LoomyFallbackModel,
+  type LoomyProduct,
+} from './loomy-product.js'
 import {
   registerAdapterIdempotent,
 } from './llm-register-compat.js'
@@ -49,6 +56,44 @@ import {
   serializeMessages,
 } from './openai-compat.js'
 import { planSessionTitleThinking } from './session-title.js'
+
+/**
+ * 档位 id 数组 → `LlmResolvedModelInfo['reasoning']`（**唯一**实现）。
+ *
+ * ⚠️ 抽成模块级纯函数是因为它现在有**两个**消费者：目录内条目走
+ * `LoomyAdapter.reasoningFor`，目录外 id 走 `unknownModelReasoning`。
+ * 两份实现会漂移成「目录内下发 high、目录外不发」这类静默缺陷 ——
+ * 与本仓库红线「同一 provider 内不得有两套同义判据」同型。
+ *
+ * 三条口径：
+ * 1. `efforts` **原样取远端顺序**（服务端下发的就是展示顺序，DSH 当作展示序）；
+ * 2. `defaultEffort` **必须落在 `efforts` 内** —— DSH 会拿它直接发请求，
+ *    给一个不存在的档位会抛 `UNSUPPORTED_REASONING_EFFORT`，比不给更糟；
+ * 3. 档位为空时不声明 `reasoning`（UI 显示「当前模型未提供推理等级」）。
+ *
+ * @param efforts - 档位 id 列表（远端 `reasoning_efforts` 或兜底表同名字段）。
+ * @returns 可直接进 `resolveModel()` 的 `reasoning`，或 `undefined` 表示不声明。
+ */
+export function reasoningFromEfforts(
+  efforts: readonly string[] | undefined,
+): LlmResolvedModelInfo['reasoning'] {
+  if (efforts === undefined || efforts.length === 0) return undefined
+  // ⚠️ **默认档用本插件自己的「高」，不采信远端的 `default_reasoning_effort`**（用户要求）。
+  // 依据：远端声明的是 `low`，而 DSH 的 `effectiveEffort` 直接取 `defaultEffort`
+  // （`dsh-client-ui-model-selection`：`state.current?.reasoningEffort ?? reasoning?.defaultEffort`），
+  // 即「用户没选时发哪个档」完全由这里决定 —— 沿用 low 会让默认思考偏浅。
+  const defaultEffort = LOOMY_PREFERRED_DEFAULT_EFFORT
+  const hasDefault = efforts.includes(defaultEffort)
+  return {
+    efforts: efforts.map((id) => ({
+      id: ReasoningEffortId(id),
+      // 未登记的中文名回退到 id 本身（新档位上线时不至于空白）。
+      name: LOOMY_EFFORT_NAMES[id] ?? id,
+    })),
+    ...hasDefault ? { defaultEffort: ReasoningEffortId(defaultEffort) } : {},
+  }
+}
+
 
 /** 本适配器注册的 provider 路由名（等价于 `LOOMY.id`）。 */
 export const PROVIDER = 'loomy'
@@ -550,6 +595,28 @@ export class LoomyAdapter extends LlmAdapter {
         loadCatalog: () => this.loadCatalogEntries(),
         // ⚠️ 未知 id 保守报 ['text']（宁可少报能力，也不报服务端可能不认的模态）。
         unknownModelInputModalities: () => ['text'] as const,
+        /**
+         * ★ **目录外 id 仍声明档位**（2026-11-06 真实报障）。
+         *
+         * 缺陷形态：远端 `GET /models` 抓取失败 ⇒ `loadModels()` 退回兜底表 ⇒
+         * 兜底表里**没有**刚上架的模型（如 `DeepSeek-V4.1-Flash`）⇒ 该 id 走
+         * `model-catalog.ts` 的「目录外」分支 ⇒ **不声明 `reasoning`** ⇒ 用户在它上面
+         * 持久化过的 `xhigh` 被 `dsh-llm` 的 `resolveCallWithInfo` **硬抛**
+         * `UNSUPPORTED_REASONING_EFFORT`（`no clamping or aliasing is performed`）⇒
+         * **整轮失败，一个 token 都没发出去**，且没有任何降级路径。
+         *
+         * 为什么本家可以给：Loomy 的档位是**产品级**事实 —— 实测全部 chat 模型
+         * （含 2026-11-06 新上架的 `DeepSeek-V4.1-Flash`）下发的
+         * `reasoning_efforts` **逐字相同** `['none','low','medium','high','xhigh']`，
+         * 与具体模型无关。同理先例：`cline` 的档位来自产品配置、`codearts` 的思考
+         * 控制是顶层 `thinking.type`，两者都对本家「目录外 id」照样声明
+         * （见 `src/model-catalog.ts` 的 `unknownModelReasoning` 表格）。
+         *
+         * ⚠️ **刻意不提供 `unknownModelContextWindow`**：窗口是**该模型**的事实，
+         * 目录外 id 无从得知 ⇒ 编一个就是假窗口（分母错会让占用比与压缩阈值一起错，
+         * 比「不显示」更难发现）。这与上面档位的取舍**不同源**，不要一并改。
+         */
+        unknownModelReasoning: () => reasoningFromEfforts([...LOOMY_EFFORTS]),
         syncCatalog: () => this.syncCatalogEntries(),
         /**
          * ★ **强制重拉**（供后台 20 分钟刷新器与「用户改设置」）。
@@ -722,21 +789,7 @@ export class LoomyAdapter extends LlmAdapter {
   ): LlmResolvedModelInfo['reasoning'] {
     // 远端优先；远端整体失败时用兜底表（两者字段同名同形）。
     const efforts = entry?.efforts ?? fallback?.efforts
-    if (efforts === undefined || efforts.length === 0) return undefined
-    // ⚠️ **默认档用本插件自己的「高」，不采信远端的 `default_reasoning_effort`**（用户要求）。
-    // 依据：远端声明的是 `low`，而 DSH 的 `effectiveEffort` 直接取 `defaultEffort`
-    // （`dsh-client-ui-model-selection`：`state.current?.reasoningEffort ?? reasoning?.defaultEffort`），
-    // 即「用户没选时发哪个档」完全由这里决定 —— 沿用 low 会让默认思考偏浅。
-    const defaultEffort = LOOMY_PREFERRED_DEFAULT_EFFORT
-    const hasDefault = efforts.includes(defaultEffort)
-    return {
-      efforts: efforts.map((id) => ({
-        id: ReasoningEffortId(id),
-        // 未登记的中文名回退到 id 本身（新档位上线时不至于空白）。
-        name: LOOMY_EFFORT_NAMES[id] ?? id,
-      })),
-      ...hasDefault ? { defaultEffort: ReasoningEffortId(defaultEffort) } : {},
-    }
+    return reasoningFromEfforts(efforts)
   }
 
   /**
