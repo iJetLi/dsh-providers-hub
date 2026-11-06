@@ -88,9 +88,6 @@ import { fetchAstudioBalanceDetailed, claimDaily } from './astudio-credits.js'
 // ⚠️ **本 fork 独有**（豆包，2026-10-29）：签到/余额原语（端点待实测，如实 inactive）。
 import { claimDoubaoDailyCheckin, fetchDoubaoBalanceDetailed } from './doubao-credits.js'
 import type { DoubaoCredential } from './doubao.js'
-// ⚠️ **本 fork 独有**（智谱清言网页端，2026-11-04）：签到/余额/续期原语（**真机逆向实测**）。
-import { claimChatglmDailyCheckin, fetchChatglmBalanceDetailed } from './chatglm-credits.js'
-import type { ChatglmCredential } from './chatglm.js'
 import { fetchAutoclawBalanceDetailed, claimAutoclawDailyQuota } from './autoclaw-credits.js'
 import { AUTOCLAW_INTL } from './autoclaw-product.js'
 import { fetchTraeCreditBalance, claimTraeDailyCheckin, fetchTraeCheckinStatus } from './trae-credits.js'
@@ -713,32 +710,6 @@ export function createProviderCredits(
     accio: {
       fetchBalanceDetailed: async (credential) =>
         await fetchAccioBalanceDetailed(credential as AccioCredential),
-    },
-
-    /**
-     * 智谱清言（chatglm.cn **网页端**，2026-11-04）：**真机逆向实测**，非「结构先行」。
-     *
-     * ⚠️ 两个原语都用「精确形态」：
-     * - `fetchBalanceDetailed`：`40102`（token 无效）与「上游改版」的用户动作不同
-     *   （前者去续期/重登、后者只能等）⇒ 必须分开报，故不能用笼统的 `fetchBalance`；
-     * - `claim` 不带 `fetchStatus`：本家**没有**独立的「今天是否已签」端点
-     *   （`score_activity_*` 是消费抽券、`summer_day_claim_status` 是暑期赠分，
-     *   都不是每日登录积分）⇒ `precheckStatus: false` 避免发一次打错端点的真实请求
-     *   （与 codely / loomy / doubao 同因）。
-     *
-     * ⚠️ 判据是 **`result.score`**（`>0` 领到 / `0` 今天已领），**不是 `status`**
-     * —— 实测成功与已领都回 `status:0`。详见 `chatglm-credits.ts` 模块头。
-     */
-    chatglm: {
-      fetchBalanceDetailed: async (credential, call) =>
-        await fetchChatglmBalanceDetailed(credential as ChatglmCredential, {
-          accountKey: call.accountId,
-        }),
-      claim: async (credential, _entry, call) =>
-        await claimChatglmDailyCheckin(credential as ChatglmCredential, {
-          accountKey: call.accountId,
-        }),
-      precheckStatus: false,
     },
 
     /**

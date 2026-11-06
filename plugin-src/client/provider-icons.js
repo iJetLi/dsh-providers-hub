@@ -261,14 +261,6 @@ const GEMINI_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53M
 const AGGREGATE_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PGNpcmNsZSBjeD0iNSIgY3k9IjUiIHI9IjIuNiIgZmlsbD0iIzRGOERGNyIvPjxjaXJjbGUgY3g9IjUiIGN5PSIxOSIgcj0iMi42IiBmaWxsPSIjOUI3MkNCIi8+PGNpcmNsZSBjeD0iMTkiIGN5PSIxMiIgcj0iMi42IiBmaWxsPSIjNEY4REY3Ii8+PHBhdGggZD0iTTcgNi4yIDE2LjQgMTFNNyAxNy44IDE2LjQgMTMiIHN0cm9rZT0iIzlCNzJDQiIgc3Ryb2tlLXdpZHRoPSIxLjciIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgZmlsbD0ibm9uZSIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEuNSIgZmlsbD0iIzlCNzJDQiIvPjwvc3ZnPg==';
 
 /**
- * 智谱清言（chatglm.cn 网页端）面板图标：蓝底「GLM」字样（手绘占位）。
- *
- * ⚠️ **占位图标**：暂无官方小尺寸 SVG，先用「蓝底 + GLM」占位（与 DOUBAO_ICON /
- *   QINIU_ICON 同款做法）—— 拿到官方图标后替换本常量即可，键名 chatglm 不动。
- */
-const CHATGLM_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNCIgZmlsbD0iIzFmNmZlYiIvPjxwYXRoIGQ9Ik02IDZoM3YxMkg2ek0xMSA2aDd2M2gtNHYyaDR2M2gtNHYyaDR2MmgtN3oiIGZpbGw9IiNmZmYiLz48L3N2Zz4='
-
-/**
  * 豆包（Doubao）面板图标（内联 SVG data URL，手绘占位）。
  *
  * ⚠️ **占位图标**：暂无豆包官方小尺寸 SVG，先用「蓝色圆角方块 + 笑脸」占位
@@ -372,9 +364,6 @@ export const PROVIDER_ICONS = {
   //    （`provider-registry.spec.ts` 有行为断言）。
   autoclawintl: AUTOCLAW_ICON,
   modelscope: MODELSCOPE_ICON,
-  // ⚠️ 与 registry 的声明序一致：chatglm 排在 magicrew / doubao 之前
-  //    （magicrew 仍紧邻 aggregate，`ia - im === 1` 那条守卫才不破）。
-  chatglm: CHATGLM_ICON,
   // ⚠️ 与 registry 的声明序一致：doubao 排在 magicrew 之前（magicrew 仍紧邻 aggregate）。
   doubao: DOUBAO_ICON,
   // ⚠️ 与 registry 的声明序一致：magicrew 紧邻 aggregate 之前（倒数第二）。

@@ -112,8 +112,6 @@ const STYLES = `
    故容器保持透明（与 zcode / officeace / codely 同因：图标自己不透明，再叠白底多余）。
    ⚠️ 本文件的样式整体是一个模板字符串 —— 注释里不能出现反引号（会提前终止）。 */
 .dim-jh-providerIcon.magicrew { background: transparent; }
-/* 智谱清言（chatglm.cn 网页端）：内联 SVG 自带蓝底，容器透明以免双底。 */
-.dim-jh-providerIcon.chatglm { background: transparent; }
 .dim-jh-providerIcon.doubao { background: transparent; }
 /* 聚合 provider：内联 SVG（三渠道汇聚），白底容器中显示清晰。
    ⚠️ 加这一条是必要的 —— 上面每家的 logoClass 都各自声明了背景，

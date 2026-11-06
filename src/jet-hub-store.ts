@@ -1410,15 +1410,6 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   //    **静默消失**（凭据还在 `.credentials.yaml` 里，只是索引建不出来）。
   //    这正是那张表存在的理由，也是「守卫比人眼可靠」的又一例。
   ['DOUBAO', 'doubao'],
-  // ⚠️ **本 fork 独有**（智谱清言网页端，2026-11-04）—— 同款坑第 **十一** 次。
-  // 漏加 = `CHATGLM_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
-  //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新登录）。
-  // ⚠️ 前缀取 `CHATGLM`：`account.create` 生成的账号 ref 恒为
-  //    `${provider.toUpperCase()}_ACCOUNT_${suffix}`，两者必须对上。
-  // ⚠️ 与 `AUTOCLAW` / `ZCODE` 都**不是**超串关系（三者在智谱但前缀互不重叠），
-  //    故不存在长度降序的隐藏依赖 —— 但登记它仍然必须，
-  //    因为恢复表按 `PROVIDER_REGISTRY` 全量派生（只豁免 aggregate）。
-  ['CHATGLM', 'chatglm'],
 ]
 
 /**

@@ -419,7 +419,8 @@ describe('ZCode 客户端接入（缺口 3 / 4 / 5）', () => {
     // 2026-10-29 fork: qiniu + magicrew added -> 24 -> 25.
     // 2026-11-01 fork: magicrewintl（MagiCrew 国际版）added -> 25 -> 26.
     // 2026-11-02 fork: monkeycode -> 27；monkeycodeintl + baizhi -> 29.
-    expect(ids).toHaveLength(31)
+    // 2026-11-05 fork: chatglm 等并入 -> 31；2026-11-06 移除 chatglm -> 30.
+    expect(ids).toHaveLength(30)
   })
 
   it('展示名与产品配置一致（避免两处漂移）', () => {
@@ -666,7 +667,8 @@ describe('ZCode RPC 分派（缺口 2：接线）', () => {
     // 2026-10-29 fork: qiniu + magicrew added -> 24 -> 25.
     // 2026-11-01 fork: magicrewintl（MagiCrew 国际版）added -> 25 -> 26.
     // 2026-11-02 fork: monkeycode -> 27；monkeycodeintl + baizhi -> 29.
-    expect(clientIds.length).toBe(31)
+    // 2026-11-06 fork: 移除 chatglm -> 31 → 30.
+    expect(clientIds.length).toBe(30)
     // ⚠️ **21 个 auth 键**（23 个客户端 id − opencode − aggregate）。
     //    ⚠️ 2026-10-22（A6）：codely **已接续期**（`CodelyAuth` 签名修正为单参
     //    `refreshAll(pool)`，并接入 `index.ts` 的 `auths`）⇒ 它不再是豁免项。
@@ -674,7 +676,8 @@ describe('ZCode RPC 分派（缺口 2：接线）', () => {
     // 2026-11-01 fork: magicrewintl（与国内站共用 `MagicrewAuth`）：23 -> 24.
     // 2026-11-02 fork: monkeycode（`MonkeycodeAuth`）：24 -> 25.
     // 2026-11-02: monkeycodeintl + baizhi 接入后 25 -> 27。
-    expect(keys).toHaveLength(28)
+    // 2026-11-06 fork: 移除 chatglm（它占一个 auth 键）-> 28 → 27。
+    expect(keys).toHaveLength(27)
     const withoutKey = clientIds.filter((id) => !keys.includes(id))
     expect([...withoutKey].sort()).toEqual(['aggregate', 'doubao', 'opencode'])
   })

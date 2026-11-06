@@ -4,8 +4,6 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
 // Codely 的续期服务对象（2026-10-20：推理已走 HTTP 自签，这里只负责续期）
 import { CodelyAuth } from './codely-auth-service.js'
-// 智谱清言网页端（2026-11-04）：只看续期（签到/余额是纯函数，无需服务实例）
-import { ChatglmAuth } from './chatglm-auth-service.js'
 import { createHash } from 'node:crypto'
 import { codeartsImagePart, codeartsVisionModel, registerCodeArtsLlm, PROVIDER as CODEARTS_PROVIDER } from './llm-adapter.js'
 // ⚠️ `analyzeImage`：让纯文本模型也能看图（2026-10-21）。模块头有完整判据链。
@@ -4098,22 +4096,6 @@ export function apply(ctx: Context): void {
   const astudio = new AstudioAuth(ctx)
   // 超级麦吉（Magicrew 国内站，2026-10-29）。MagicrewAuth 构造时自 provide（服务名 magicrewAuth）。
   const magicrewAuth = new MagicrewAuth(ctx)
-  // 智谱清言（chatglm.cn 网页端，2026-11-04）。ChatglmAuth 构造时自 provide（服务名 chatglmAuth）。
-  // ⚠️ 只做续期：签到 / 余额都是纯函数（`chatglm-credits.ts`），不走服务实例。
-  // ⚠️ 本渠道没有模型目录 / 适配器（`channel: false`），故**不需要**
-  //    `registerChatglmLlm` 之类的东西 —— 它不存在，不是漏接。
-  const chatglmAuth = new ChatglmAuth(ctx, {
-    credentials: ctx.credentials as never,
-    // ⚠️ 回写池里的有效期：续期成功后按官方口径（now + 2 小时）更新。
-    //    不回写会让界面有效期停在旧值（officeace / codely 记过同款缺陷）。
-    writebackExpiry: async (accountId, expiresAtMs) => {
-      await pool.updateAccount(accountId, {
-        // ⚠️ `ProviderAccountEntry.expiresAt` 是**毫秒数值**（`number`），
-        //    写成 `toISOString()` 会直接编译失败。
-        ...expiresAtMs === undefined ? {} : { expiresAt: expiresAtMs },
-      })
-    },
-  })
   /**
    * **MagiCrew 国际站**（`magicrewintl`，2026-11-01 用户要求）。
    *
@@ -6719,11 +6701,6 @@ async function fetchBalanceReading(
     // ⚠️ MagiCrew 国际站（2026-11-01）：必须与上面 `['magicrewintl', magicrewIntlAuth]`
     //    是**同一个实例**，否则 spec 布在该实例上的 spy 收不到调用。
     magicrewintl: magicrewIntlAuth,
-    // ⚠️ **本 fork 独有**（智谱清言网页端，2026-11-04）：它有**真实续期端点**
-    //    （`/chatglm/user-api/user/refresh`）⇒ 必须同时进
-    //    `SELF_HEAL_REFRESHABLE_PROVIDERS`（`jet-hub-rpc.ts`），两处缺一不可。
-    //    漏挂 ⇒ 睡眠恢复后积分行报「未登录」且日志零字（issue IKKHL5 形态）。
-    chatglm: chatglmAuth,
   }, modelAdapters)
 
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已

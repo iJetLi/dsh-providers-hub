@@ -164,7 +164,7 @@ describe('jet-hub 全局统计带', () => {
     ).not.toMatch(/targets\.map\(/)
     // ③ 对照组：必须至少有一家 `balance:false` 的渠道存在，否则这条判据可能空跑
     expect(supportsCreditBalance('qiniu'), 'qiniu 的 balance:false 是实测结论，判据靠它区分').toBe(false)
-    expect(supportsCreditBalance('chatglm')).toBe(true)
+    expect(supportsCreditBalance('doubao'), '纯签到渠道（channel:false）但有余额端点，对照它').toBe(true)
   })
 
   it('⑥ 两段 await 之后都判 mounted（卸载后 setState 会告警并可能污染已卸载组件）', () => {

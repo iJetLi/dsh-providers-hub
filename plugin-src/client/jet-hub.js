@@ -3383,28 +3383,6 @@ function ProviderPanel({ provider, rpcCall }) {
   // 故没有 `keyModal` 那种「凭据不进 state」的问题。
   const [credentialModal, setCredentialModal] = React.useState(null);
   /**
-   * 智谱清言「粘贴登录态」弹窗（**本 fork 独有**，2026-11-04）。
-   *
-   * ## ⚠️⚠️ 为什么必须有它（服务器部署的唯一可用路径）
-   *
-   * 网页登录的 token 是 `chatglm.cn` 域的 cookie，**宿主读不到用户本地浏览器里的
-   * 那一份**（部署在服务器 ⇒ 两机不同；即使同机，也只有浏览器进程能读自己的
-   * cookie jar），而上游没有给我们注册过的 `redirect_uri` ⇒ **没有 CodeArts
-   * 那种 loopback 回调可收**。⇒ 用户在自己浏览器登录完后，须把 token 粘回来。
-   *
-   * ⚠️ 与 `credentialModal`（超级麦吉）**刻意分成两个 state**：那家的语义是
-   * 「从本机浏览器读 / 开窗登」（不收输入），本弹窗是「收一段粘贴文本」——
-   * 两套语义挤进同一个槽就是本仓库记过的「语义不同的状态共用一槽，开一个把
-   * 另一个顶掉」（`proxyModal` × `loginUrlForManual` 等两次教训）。
-   *
-   * ⚠️ **粘贴的明文不进这个 state**：`{ provider, error }` 只放状态，
-   * 输入值走 ref（与 `keyModal` / `qiniuKeyEditModal` 同款约定 ——
-   * 凭据不进 React state，避免被 devtools / 序列化带出去）。
-   */
-  const [chatglmPasteModal, setChatglmPasteModal] = React.useState(null);
-  /** 粘贴框的 ref（明文只在这里，不进 state）。 */
-  const chatglmPasteInputRef = React.useRef(null);
-  /**
    * 超级麦吉登录的**在途闸门**（防双击建出两个账号）。
    *
    * ⚠️ 不能用 `creating`（useState）当守卫：`setCreating(true)` 是异步的，
@@ -4320,44 +4298,6 @@ function ProviderPanel({ provider, rpcCall }) {
     }
   };
 
-  /**
-   * 提交「粘贴登录态」（智谱清言，2026-11-04）。
-   *
-   * ⚠️ 走 `account.create` 的 `mode: 'paste'`：宿主侧做三件事 ——
-   * ① 归一（`chatglmCredentialFromInput`，整条 cookie 或裸 token 都吃）；
-   * ② **先验一次上游**（防止用户以为粘成功了但 token 无效）；
-   * ③ 按 token 指纹判重（命中既有账号就只刷新它，不造第二张卡）。
-   *
-   * ⚠️ 失败把 `message` 原样显示在弹窗里（宿主的文案已经分类过：
-   * 「认不出这段文本」/「登录态无效」/「上游形状改版」，三类用户动作不同）——
-   * **不要**在这里换成一句笼统的「导入失败」。
-   */
-  const submitChatglmPaste = async () => {
-    const raw = chatglmPasteInputRef.current ? String(chatglmPasteInputRef.current.value || '') : '';
-    const text = raw.trim();
-    if (text === '') {
-      setChatglmPasteModal((prev) => (prev ? { ...prev, error: '请先粘贴 chatglm_token 或整条 cookie' } : prev));
-      return;
-    }
-    setCreating(true);
-    try {
-      const res = await rpcCall('account.create', { provider: 'chatglm', mode: 'paste', pasteText: text });
-      setChatglmPasteModal(null);
-      await loadAccounts();
-      setProbeNotice({
-        tone: 'ok',
-        text: '已导入智谱清言登录态。',
-        details: [],
-      });
-      void res;
-    } catch (caught) {
-      const message = caught && caught.message ? caught.message : '未知错误';
-      setChatglmPasteModal((prev) => (prev ? { ...prev, error: message } : prev));
-    } finally {
-      if (mounted.current) setCreating(false);
-    }
-  };
-
   /** 两个添加入口的公共收尾（成功关弹窗并刷新；失败把错误留在弹窗里）。 */
   const submitOpencodeEntry = async (method, payload) => {
     setCreating(true);
@@ -4795,58 +4735,6 @@ function ProviderPanel({ provider, rpcCall }) {
     // 百智云：控制台网页登录一次拿到 `sk-` + 积分 cookie（`baizhi.startSession` 只补会话）。
     if (provider === 'baizhi') {
       setCredentialModal({ provider, error: '' });
-      return;
-    }
-    // ⚠️⚠️ 智谱清言（chatglm.cn 网页端，2026-11-04）：**绝不在宿主侧开浏览器**。
-    //
-    // 用户原话：「现在在服务器打开浏览器特别卡，根本就识别不到滑动块，还是要在本地
-    // 电脑打开浏览器才可以，不然很难登录账号」。⇒ 宿主不再 `spawn` 浏览器，
-    // `mode:'browser'` 只返回 `loginUrl` 让**这里**在你本地浏览器 `window.open`。
-    //
-    // 完整两步（**没有 `login.poll`** —— 宿主不建占位账号，没有东西会来填它）：
-    //   ① 本地开窗 → 你在自己电脑登录 chatglm.cn（滑块能正常拖动）
-    //   ② 登录完 → 「粘贴登录态」把 chatglm_token 交回来（`mode:'paste'` 建号）
-    //
-    // ⚠️ 为什么不能像 CodeArts 那样自动收口：它靠**标准 OAuth + 本地回调服务器**
-    //    （`startOAuthFlow` 起 loopback 端口收 code）。本渠道的 `chatglm_token` 是
-    //    `chatglm.cn` 域的 cookie，宿主读不到你本地那份；上游也没给我们注册过的
-    //    `redirect_uri` ⇒ 只能手动粘。
-    if (provider === 'chatglm') {
-      setCreating(true);
-      try {
-        // ⚠️ 仍然调一次 `account.create`：`loginUrl` 是**宿主编排的**（它知道该开哪个
-        //    页面），客户端不自己拼 URL —— 拼错了用户会打开一个空白页而毫无提示。
-        const created = await rpcCall('account.create', { provider: 'chatglm', mode: 'browser' });
-        const loginUrl = created && typeof created.loginUrl === 'string' ? created.loginUrl : '';
-        const accountId = created && created.accountId ? created.accountId : '';
-        if (loginUrl !== '') {
-          // ⚠️ 紧跟用户点击 ⇒ 仍在 transient activation 窗口内，弹窗不会被拦。
-          try { window.open(loginUrl, '_blank', 'width=1000,height=800'); }
-          catch { /* 弹窗被拦：下面 `setLoginUrlForManual` 给出可点链接 */ }
-          setLoginUrlForManual(loginUrl);
-        }
-        // 粘贴弹窗**总是**弹出来：它是这条流程的第二步，不是可选补救。
-        setChatglmPasteModal({ provider, error: '' });
-        setProbeNotice({
-          tone: loginUrl !== '' ? 'ok' : 'warn',
-          text: loginUrl !== ''
-            ? '已在本机浏览器打开智谱清言登录页。登录完成后，在弹窗里粘贴 chatglm_token（插件读不到你本地浏览器的 cookie）。'
-            : '宿主没有返回登录地址。请自行打开 chatglm.cn 登录后，用弹窗里的「粘贴登录态」导入。',
-          details: [],
-        });
-        // ⚠️ **只在有账号 id 时才轮询**：本次修复后宿主不再建占位账号
-        //    （`accountId` 恒为空串），起轮询只会空转 5 分钟然后报「登录超时」——
-        //    那个超时是**假的**（用户此时正在粘贴弹窗里操作）。
-        if (accountId !== '') startLoginPoll({ accountId, provider: 'chatglm' });
-      } catch (caught) {
-        setProbeNotice({
-          tone: 'err',
-          text: caught && caught.message ? caught.message : '智谱清言登录启动失败',
-          details: [],
-        });
-      } finally {
-        if (mounted.current) setCreating(false);
-      }
       return;
     }
     // ⚠️ 豆包（Doubao，2026-11-03）：**扫码登录**——宿主起一个可见浏览器窗口，
@@ -6641,18 +6529,6 @@ function ProviderPanel({ provider, rpcCall }) {
           onBrowse: () => void submitMagicrewLocalImport(credentialModal.provider, 'browser'),
           onClose: () => setCredentialModal(null),
         })
-      : null,
-    // 「粘贴智谱清言登录态」弹窗（**本 fork 独有**，2026-11-04）：服务器部署时
-    // 宿主开的窗口在服务器上（用户看不到）⇒ 必须有一条把 token 交回来的路径。
-    // ⚠️ 独立 state（不蹭 `credentialModal`），理由见 `chatglmPasteModal` 声明处。
-    chatglmPasteModal
-      ? React.createElement(ChatglmPasteModal, {
-          error: chatglmPasteModal.error || '',
-          busy: creating,
-          inputRef: chatglmPasteInputRef,
-          onSubmit: () => void submitChatglmPaste(),
-          onClose: () => setChatglmPasteModal(null),
-        })
       : null);
 }
 
@@ -6743,92 +6619,6 @@ function MagicrewImportModal({ provider, error, busy, onSubmit, onBrowse, onClos
           disabled: !!busy,
           onClick: () => { if (onClose) onClose(); },
         }, '取消'),
-      ),
-    ),
-  );
-}
-/**
- * 「粘贴智谱清言登录态」弹窗（**本 fork 独有**，2026-11-04）。
- *
- * ## ⚠️⚠️ 为什么需要「粘贴」这一步（服务器部署的唯一可用路径）
- *
- * 网页登录的 token 是 `chatglm.cn` 域的 cookie，**宿主读不到你本地浏览器里的那一份**
- * （部署在服务器时两机不同；即使同机，也只有浏览器进程能读自己的 cookie jar）。
- * 上游也没有给我们注册过的 `redirect_uri`（`WeChatLoginTransit` 是它自己的中转页）
- * ⇒ **没有 loopback 回调可收**，CodeArts 那种「授权完自动回来」在本渠道不存在。
- *
- * ⇒ 用户动作：在自己浏览器登录 `chatglm.cn` → 从 DevTools 复制 `chatglm_token`
- * （或整条 cookie）→ 粘进来。归一与形状校验只有一份
- * （`src/chatglm.ts` 的 `chatglmCredentialFromInput`），**本组件不做校验**。
- *
- * ## ⚠️ 明文输入走 ref，不进 props/state
- *
- * `value` 由 `inputRef` 承载（与 `keyModal` / `qiniuKeyEditModal` 同款约定）——
- * 凭据进 React state 就会被 devtools / 组件树序列化带出去。
- *
- * ## ⚠️ 必须是组件、用 `React.createElement` 渲染
- *
- * 直接调用组件函数会把它的 hook 算进 `ProviderPanel`（该文件头记录过 hook 事故，
- * 整页白屏）。
- */
-function ChatglmPasteModal({ error, busy, inputRef, onSubmit, onClose }) {
-  return React.createElement('div', {
-    className: 'dim-jh-modalOverlay',
-    onClick: (e) => { if (e.target === e.currentTarget && !busy && onClose) onClose(); },
-  },
-    React.createElement('div', {
-      className: 'dim-jh-modal',
-      role: 'dialog',
-      'aria-modal': 'true',
-      'aria-label': '粘贴智谱清言登录态',
-      style: { maxWidth: '520px' },
-    },
-      React.createElement('div', { className: 'dim-jh-modalHead' },
-        React.createElement('div', { className: 'dim-jh-modalTitle' }, '粘贴智谱清言登录态'),
-      ),
-      React.createElement('div', { className: 'dim-jh-modalBody' },
-        // ⚠️ 纯文本（不走 markdown 渲染），不要写 `**强调**`。
-        React.createElement('p', { className: 'dim-jh-modalHint' },
-          '步骤：① 在你自己电脑的浏览器里打开 chatglm.cn 并登录；'
-          + '② 按 F12 打开开发者工具 → Console，粘贴运行下面这行，'
-          + '把输出的那一长串复制回来填在下面。'),
-        React.createElement('p', {
-          className: 'dim-jh-modalHint',
-          style: { fontFamily: 'monospace', userSelect: 'all', wordBreak: 'break-all' },
-        },
-          // ⚠️ 只取 chatglm_token：它才是鉴权用的那个 cookie（实测 40102 判据）。
-          'document.cookie.match(/chatglm_token=([^;]+)/)?.[1]'),
-        React.createElement('p', { className: 'dim-jh-modalHint' },
-          '也可以直接粘贴整条 cookie（含 chatglm_token=… 与 chatglm_refresh_token=…），'
-          + '刷新令牌一并带上后续就能自动续期。'),
-        React.createElement('input', {
-          ref: inputRef,
-          type: 'password',
-          className: 'dim-jh-input',
-          placeholder: 'chatglm_token 的值，或整条 cookie',
-          autoComplete: 'off',
-          spellCheck: 'false',
-          disabled: busy,
-          // Enter = 提交（单输入框表单的常规预期）。
-          onKeyDown: (e) => { if (e.key === 'Enter' && !busy) { e.preventDefault(); onSubmit(); } },
-        }),
-        error
-          ? React.createElement('p', { className: 'dim-jh-error', role: 'alert' }, error)
-          : null,
-      ),
-      React.createElement('div', { className: 'dim-jh-modalActions' },
-        React.createElement('button', {
-          type: 'button',
-          className: 'dim-jh-btn',
-          disabled: busy,
-          onClick: onClose,
-        }, '取消'),
-        React.createElement('button', {
-          type: 'button',
-          className: 'dim-jh-btn dim-jh-btnPrimary',
-          disabled: busy,
-          onClick: onSubmit,
-        }, busy ? '导入中…' : '导入'),
       ),
     ),
   );

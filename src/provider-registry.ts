@@ -1153,46 +1153,6 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     channel: false,
   },
   {
-    // 智谱清言（chatglm.cn **网页端**，2026-11-04 接入）。
-    //
-    // ⚠️⚠️ **与 `zcode` / `autoclaw` 是三个不同的产品面**（端点、鉴权、签到协议全不同，
-    //    凭据不互通）：本家是 `chatglm.cn` 的 **cookie/Bearer `chatglm_token`**，
-    //    签到走 `POST /chatglm/member-api/member/daily_login_score`。
-    //    详见 `src/chatglm.ts` 模块头的能力矩阵。
-    //
-    // ⚠️ 位置要求：排在 magicrew **之前** —— magicrew 有「倒数第二」的显式守卫
-    //    （`provider-registry.spec.ts` 的 `ia - im === 1`），新渠道插在它前面才不破那条断言。
-    id: 'chatglm',
-    label: '智谱清言 (网页)',
-    displayName: '智谱清言 (网页)',
-    logoClass: 'chatglm',
-    /**
-     * ✅ **真机逆向实测接通**（2026-11-04，非「结构先行」）：
-     * - 签到端点 `POST /chatglm/member-api/member/daily_login_score`；
-     * - 判据是 **`result.score`**（`>0` = 本次领到、`0` = 今天已领），**不是 `status`**
-     *   —— 实测「成功」与「今天已领」都回 `status:0`，只判 status 会给错文案；
-     * - 余额 `GET /chatglm/user-api/user/info` 的 `result.member_info.left_score`（**字符串**）；
-     * - 续期 `POST /chatglm/user-api/user/refresh`（Bearer 用 **refresh token**）。
-     *
-     * ⚠️ **闸门诚实登记**：37 格消融矩阵实测「删掉 `X-Sign` / `X-Nonce` / `X-Timestamp` /
-     *    `X-Device-Id` / `App-Name` / `X-App-*` / `X-Exp-Groups` / `Content-Type`
-     *    **全部仍过闸**」（判据 40102=过闸仅 token 无效 vs 40003=被前置拒绝）。
-     *    本渠道仍按官方算法发**真签名**，理由是「上游随时可收紧而无前置征兆」，
-     *    不是「签名必需」——别把这条读成「必须签名才能用」。
-     */
-    credits: { balance: true, dailyCheckin: true },
-    // ⚠️ **`rateLimit: false` 必须显式写**（与 doubao / magicrew 同因）：本渠道当前
-    //    没有适配器、零 `updateModelRateLimit` 写点、也不在 `probeById` 里
-    //    ⇒「重测 / 重置」两个按钮点下去是**零请求、零清除**（`account.retest`
-    //    走 `adapterForProbe` 会抛「chatglm 没有探测适配器」）。接推理链路时翻正。
-    // ⚠️ **`channel: false`**：签到 / 余额 / 续期已接通，但本渠道**没有模型目录 /
-    //    适配器 / auth 服务**（纯签到渠道，与 doubao 同型）。`channel: true` 会点燃
-    //    `refresh-targets-derived.spec.ts` 的「channel ⇒ 必须有 modelAdapters 目录」守卫。
-    //    `credits.balance: true` 的判据独立于 `channel`（见 `tests/helpers/provider-sets.ts`）。
-    rateLimit: false,
-    channel: false,
-  },
-  {
     // Magicrew（超级麦吉国内站，2026-10-29 接入）。
     // ⚠️ 位置要求（用户明确）：**排在 aggregate 之前 = 倒数第二**。
     //    守因为未自定义 `providerOrder` 时，左栏完全按本表的**声明序**渲染

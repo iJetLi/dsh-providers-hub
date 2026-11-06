@@ -734,7 +734,7 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     const { literals } = selfHealSetParts()
     // ⚠️ 2026-11-01 加 `magicrewintl`（MagiCrew 国际版）：与 `magicrew` 同形 ——
     //    两站共用同一个 `mgw_` key（**2 小时**寿命）与同一个 refresh 端点。
-    expect(literals.slice().sort()).toEqual(['buddy', 'chatglm', 'codearts', 'magicrew', 'magicrewintl', 'workbuddy'])
+    expect(literals.slice().sort()).toEqual(['buddy', 'codearts', 'magicrew', 'magicrewintl', 'workbuddy'])
   })
 
   it('★ Set 里的 `.id` 常量恰好是登记的那些家（逐家点名，不写魔数阈值）', () => {
@@ -754,7 +754,7 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     const { literals, constants } = selfHealSetParts()
     const inSet = new Set([...literals, ...constants.map((c) => ID_OF[c] ?? c)])
     expect([...inSet].sort()).toEqual([
-      'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'chatglm', 'cline', 'codearts', 'codely',
+      'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'cline', 'codearts', 'codely',
       'gemini', 'lobsterai', 'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace',
       'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy',
     ])
