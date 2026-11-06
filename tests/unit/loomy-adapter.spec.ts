@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   LoomyAdapter, classifyLoomyFailure, loomyCooldownResetAtMs, parseLoomyRemoteModels,
-  recordsLoomyRateLimit,
+  reasoningFromEfforts, recordsLoomyRateLimit,
 } from '../../src/loomy-adapter.js'
 import { classifyRaccoonFailure } from '../../src/raccoon-adapter.js'
 import { LOOMY, loomyContextWindow } from '../../src/loomy-product.js'
@@ -112,10 +112,10 @@ describe('LoomyAdapter.listModels', () => {
     expect(models[0]!.name).toBe('MiniMax M3 · x4.0')
   })
 
-  it('远端失败时回退兜底表（8 个，兜底表名已含倍率）', async () => {
+  it('远端失败时回退兜底表（9 个，兜底表名已含倍率）', async () => {
     const adapter = makeAdapter({ fetchRemoteModels: async () => { throw new Error('boom') } })
     const models = await adapter.listModels('loomy')
-    expect(models).toHaveLength(8)
+    expect(models).toHaveLength(9)
     expect(models.map((m) => m.id)).toContain('qwen3.8-flash')
   })
 
@@ -133,7 +133,7 @@ describe('LoomyAdapter.listModels', () => {
    */
   it('★ 远端失败后**不**把兜底表写进 remoteModels', async () => {
     const adapter = makeAdapter({ fetchRemoteModels: async () => { throw new Error('boom') } })
-    expect(await adapter.listModels('loomy')).toHaveLength(8)
+    expect(await adapter.listModels('loomy')).toHaveLength(9)
     const cache = (adapter as unknown as { remoteModels: unknown }).remoteModels
     expect(cache, '兜底表不得进缓存 —— 否则远端恢复后也永远看不到真实目录').toBeUndefined()
   })
@@ -143,10 +143,10 @@ describe('LoomyAdapter.listModels', () => {
     const adapter = makeAdapter({
       fetchRemoteModels: async () => { calls += 1; return [] },
     })
-    expect(await adapter.listModels('loomy')).toHaveLength(8)
+    expect(await adapter.listModels('loomy')).toHaveLength(9)
     // ⚠ 只应拉一次：`buildModelCatalog` 会为每个模型各调一次 resolveModel，
     // 不去重/不冷却的话这里会变成 N 次串行请求。
-    expect(await adapter.listModels('loomy')).toHaveLength(8)
+    expect(await adapter.listModels('loomy')).toHaveLength(9)
     expect(await adapter.resolveModel('loomy', 'qwen3.8-flash')).toBeDefined()
     expect(calls).toBe(1)
     expect((adapter as unknown as { remoteModels: unknown }).remoteModels).toBeUndefined()
@@ -187,7 +187,8 @@ describe('LoomyAdapter.listModels', () => {
     })
     const ids = (await adapter.listModels('loomy')).map((m) => m.id)
     expect(ids).not.toContain('spark-x')
-    expect(ids.length).toBe(7)
+    // 9 条兜底里关掉 1 条 ⇒ 剩 8 条
+    expect(ids.length).toBe(8)
   })
 })
 
@@ -203,6 +204,94 @@ describe('LoomyAdapter.listAllModels', () => {
     // 被关闭的 spark-x 也必须出现（否则用户无法重新打开）
     expect(all.map((m) => m.id)).toContain('spark-x')
     expect(all.find((m) => m.id === 'spark-x')!.name).toBe('Spark X2.5 · x0.1')
+  })
+})
+
+/**
+ * ★★ 兜底表漂移 ⇒ 整轮失败（2026-11-06 真实报障）。
+ *
+ * ## 缺陷
+ *
+ * 远端 `GET /models` 已上架 `DeepSeek-V4.1-Flash`（2026-11-06 实测 6 个 chat 模型
+ * 之一），而 `LOOMY_FALLBACK_MODELS` 仍只有 2026-09-26 那批 ⇒ 远端抓取失败
+ * （冷启动 / 断网 / 网关抖动）时该 id 落在「目录外」分支 ⇒ **既不声明
+ * `reasoning` 也不声明 `context`** ⇒
+ *
+ * 1. 用户在该模型上持久化过 `reasoningEffort: 'xhigh'` ⇒ `dsh-llm` 的
+ *    `resolveCallWithInfo` **硬抛** `UNSUPPORTED_REASONING_EFFORT`
+ *    （源码明文 `Unsupported explicit efforts reject before provider I/O;
+ *    no clamping or aliasing is performed`）⇒ **整轮失败，一个 token 都没发出去**；
+ * 2. 同一份缺失的 `context` 让 `dsh-compaction-basic` 抛
+ *    `no context capacity for loomy/DeepSeek-V4.1-Flash`，被 agent/pre-step
+ *    吞成一条 warn ⇒ 该模型的**自动压缩永久静默失效**。
+ *
+ * 实测证据（2026-11-06 本机）：3 次 `agent.failed` + 1 条压缩 warn，
+ * 会话档 `model/selection` 写着 xhigh、`request/header` 带着 xhigh 发出去。
+ *
+ * ## 为什么这一组必须分**两层**测
+ *
+ * 只补兜底表 = **治标**：下一次上游再上架一个模型，同样的失败原样复现。
+ * 只加 `unknownModelReasoning` = **把兜底表留一个洞**：该模型在离线时
+ * 仍不显示窗口、也不会出现在兜底列表里。
+ * 两条都锁，任何一条退化都会立刻变红。
+ */
+describe('Loomy 兜底表漂移（2026-11-06 整轮失败）', () => {
+  it('★ 兜底表已含 DeepSeek-V4.1-Flash（远端 2026-11-06 实测值）', () => {
+    const entry = LOOMY.fallbackModels.find((m) => m.id === 'DeepSeek-V4.1-Flash')
+    expect(entry, '兜底表缺该模型 ⇒ 远端失败时它落「目录外」分支').toBeDefined()
+    expect(entry!.contextWindow).toBe(1_048_576)
+    expect(entry!.efforts).toEqual(['none', 'low', 'medium', 'high', 'xhigh'])
+    expect(entry!.name).toBe('DeepSeek V4.1 Flash · x2.0')
+  })
+
+  it('★ 兜底表条目数下界 ≥9（远端新增时必须同步，不钉死数字）', () => {
+    // 2026-11-06 生产端点实测：9 条里 type==='chat' 的 6 条；兜底表保留 2026-09-26
+    // 那批中仍可见的、并补上新增的 ⇒ 现为 9 条（多出的是已下架但保留的兜底项）。
+    // ⚠️ 这条断言**故意写成下界 + 必须含新模型**，而不是钉死数字：
+    // 钉死数字会让每次上游增减都要改测试（本仓库明确反对「改文档就要改测试」）。
+    expect(LOOMY.fallbackModels.length).toBeGreaterThanOrEqual(9)
+  })
+
+  it('★ 远端抓取失败时 resolveModel 仍声明 reasoning 与该模型窗口', async () => {
+    const adapter = makeAdapter({ fetchRemoteModels: async () => { throw new Error('boom') } })
+    const resolved = await adapter.resolveModel('loomy', 'DeepSeek-V4.1-Flash')
+    expect(resolved.reasoning?.efforts.map((e) => e.id))
+      .toEqual(['none', 'low', 'medium', 'high', 'xhigh'])
+    expect(resolved.context?.contextWindow).toBe(1_048_576)
+  })
+
+  it('★★ 目录外 id 仍声明档位（兜底表也没覆盖的新模型不再整轮失败）', async () => {
+    // 场景：上游又上架了一个兜底表**还没跟上**的模型，且远端此刻抓不到。
+    // 修复前：reasoning === undefined ⇒ 用户持久化的档位被 dsh-llm 硬抛。
+    const adapter = makeAdapter({ fetchRemoteModels: async () => { throw new Error('boom') } })
+    const resolved = await adapter.resolveModel('loomy', 'Some-Future-Model')
+    expect(resolved.reasoning, '目录外 id 必须仍声明档位，否则整轮失败').toBeDefined()
+    expect(resolved.reasoning!.efforts.map((e) => e.id))
+      .toEqual(['none', 'low', 'medium', 'high', 'xhigh'])
+    // ⚠️ 默认档必须落在 efforts 内（DSH 会拿它直接发请求）。
+    expect(resolved.reasoning!.defaultEffort).toBe('high')
+  })
+
+  it('⚠️ 目录外 id **不**编造上下文窗口（窗口是该模型的事实）', async () => {
+    const adapter = makeAdapter({ fetchRemoteModels: async () => { throw new Error('boom') } })
+    const resolved = await adapter.resolveModel('loomy', 'Some-Future-Model')
+    expect(resolved.context, '编一个假窗口会让占用比与压缩阈值一起错').toBeUndefined()
+  })
+
+  it('⚠️ 档位与目录内条目走**同一份**实现（不得两套同义判据）', async () => {
+    // 审计 C #3：旧版拿 `reasoningFromEfforts` 同参互比 = **恒真**（换任何手写
+    // 实现都照样绿，锁不住接线漂移）。行为级判据改为：目录外 id 的声明必须与
+    // **目录内条目**的声明 deep-equal —— 两条路径分别走
+    // `unknownModelReasoning`（目录外）与 `reasoningFor`（目录内），任何一侧
+    // 换掉实现、漂移口径，这里都会变红（含 name 字段，不是只比 id 集合）。
+    const adapter = makeAdapter({ fetchRemoteModels: async () => { throw new Error('boom') } })
+    const inside = await adapter.resolveModel('loomy', 'DeepSeek-V4.1-Flash')
+    const outside = await adapter.resolveModel('loomy', 'Some-Future-Model')
+    expect(outside.reasoning, '目录外声明与目录内不同源 ⇒ 档位蒸发（审计 #9 同型）')
+      .toEqual(inside.reasoning)
+    // 空档位 ⇒ 不声明（不是空数组）
+    expect(reasoningFromEfforts(undefined)).toBeUndefined()
+    expect(reasoningFromEfforts([])).toBeUndefined()
   })
 })
 
@@ -448,10 +537,10 @@ describe('LoomyAdapter 请求体里的 reasoning_effort', () => {
     }) as unknown as typeof fetch
   }
 
-  async function drain(adapter: LoomyAdapter, effort?: string) {
+  async function drain(adapter: LoomyAdapter, effort?: string, model = 'MiniMax-M3') {
     for await (const _chunk of adapter.stream({
       provider: 'loomy',
-      model: 'MiniMax-M3',
+      model,
       messages: [{ role: 'user', content: 'hi' }],
       ...effort !== undefined ? { reasoningEffort: effort as never } : {},
     })) {
@@ -509,6 +598,56 @@ describe('LoomyAdapter 请求体里的 reasoning_effort', () => {
     })
     await drain(adapter, 'xhigh')
     expect(captured.body?.reasoning_effort).toBe('xhigh')
+  })
+
+  /**
+   * ★★ 2026-11-06 审计 #9 的行为级守卫（wire 白名单与声明面同源）。
+   *
+   * 修复前：目录外 id 的**声明**有五档（`unknownModelReasoning`），但 wire 白名单
+   * 只查「目录 + 兜底表」⇒ `reasoning_effort` 静默不上行 —— 同一请求「声明有档、
+   * 上行不发」，用户选的档位蒸发成服务端默认档，且 UI 与 wire 同条件不同结果
+   * （表内 id 能上行、目录外 id 不能）。
+   */
+  it('★★ 目录外 id 的 wire 白名单与声明同源（选了档位就下发，2026-11-06 审计 #9）', async () => {
+    const captured: { body?: Record<string, unknown> } = {}
+    const adapter = makeAdapter({
+      fetchImpl: makeFetch(captured),
+      fetchRemoteModels: async () => { throw new Error('network down') },
+    })
+    await drain(adapter, 'xhigh', 'Some-Future-Model')
+    expect(captured.body?.reasoning_effort, '目录外 id 声明了五档 ⇒ 选中的档位必须上行').toBe('xhigh')
+  })
+
+  it('⚠️ 目录外 id 的白名单仍生效（档位不在产品级五档内 → 静默不下发）', async () => {
+    // 同源 ≠ 恒上行：白名单继续挡非法值，收敛后语义与表内条目一致。
+    const captured: { body?: Record<string, unknown> } = {}
+    const adapter = makeAdapter({
+      fetchImpl: makeFetch(captured),
+      fetchRemoteModels: async () => { throw new Error('network down') },
+    })
+    await drain(adapter, 'ultra', 'Some-Future-Model')
+    expect(captured.body).not.toHaveProperty('reasoning_effort')
+  })
+
+  /**
+   * ⚠️ 审计 #6 的行为级登记（刻意不修的已知残余）：目录内条目远端**未下发**
+   * 档位（`reasoning_efforts: []` 被解析层省略键）⇒ 声明与 wire 一致地「不声明
+   * 也不发」。刻意的两侧一致：声明面回退产品级五档反而会让「UI 出档位选择器、
+   * 上行也发」变成**编造**（远端可能刻意不下发）。见 `reasoningFor` 的注释。
+   */
+  it('⚠️ 目录内无档位条目：声明与 wire 一致地不给（审计 #6 已知残余）', async () => {
+    const captured: { body?: Record<string, unknown> } = {}
+    const adapter = makeAdapter({
+      fetchImpl: makeFetch(captured),
+      fetchRemoteModels: async () => parseLoomyRemoteModels({
+        data: [remoteEntry({ id: 'Future-NoEffort', reasoning_efforts: [] })],
+      }),
+    })
+    const resolved = await adapter.resolveModel('loomy', 'Future-NoEffort')
+    expect(resolved.reasoning, '目录内条目未下发档位 ⇒ 声明面不臆造（见 reasoningFor 注释）')
+      .toBeUndefined()
+    await drain(adapter, 'high', 'Future-NoEffort')
+    expect(captured.body, 'wire 与声明同源 ⇒ 同样不发').not.toHaveProperty('reasoning_effort')
   })
 })
 

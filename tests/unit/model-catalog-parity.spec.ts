@@ -844,15 +844,17 @@ id: 'autoclaw',
   ])
 
   /**
-   * ⚠️ **只有 `cline` 与 `codearts` 对未知 id 仍声明 `reasoning`**：它们的档位
-   * 来自**产品配置 / 网关协议**（与具体模型无关），故未知模型同样给。
-   * 其余家的档位来自**该模型的**远端配置，未知模型无从得知 ⇒ **不声明**。
+   * ⚠️ **对未知 id 仍声明 `reasoning` 的家见下方集合**（当前 5 家）：
+   * `cline` / `codearts`（档位来自**产品配置 / 网关协议**，与具体模型无关）、
+   * `magicrew` / `magicrewintl`、`loomy` —— 各家理由**不同**，逐家说明在集合
+   * 上方的注释块里。其余家的档位来自**该模型的**远端配置，未知模型无从得知
+   * ⇒ **不声明**。
    *
    * ⚠️ 与 `OMIT_UNKNOWN_MODALITIES` 同为「默认 + 显式例外」：将来新增一家若想
    * 对未知 id 声明档位，必须**显式**加进本集合，否则下面 (i) 变红并点名它。
-   * ⚠️ 实测为 2 家（跑真实适配器）；`model-catalog.spec.ts` ⑯ 的标题
-   * 「cline/codearts 恒声明」与此一致，但那里的判据是**自造 config**、
-   * 不逐家核对 —— 逐家核对由本段的 (i) 承担。
+   * ⚠️ 逐家行为核对由本段的 (i) 承担（跑真实适配器）；`model-catalog.spec.ts`
+   * ⑯ 的判据是**自造 config**、只演示两种形态的骨架语义，不逐家核对 ——
+   * 两份测试各管一层，别把 (i) 的逐家职责误记到那边。
    */
   /**
    * 未知 id 也声明 `reasoning` 的家。
@@ -863,8 +865,22 @@ id: 'autoclaw',
    * 不声明 ⇒ 用户手填模型 id 时**没有档位选择器** ⇒ 永远关不掉思考
    *（比「臆造档位」更实际的损失），而本家只两档、且上行前按
    * `MAGICREW_REASONING_EFFORTS` 过滤（非法值本就不会发出）。
+   *
+   * ⚠️⚠️ **Loomy（2026-11-06）在此，理由是「不声明会整轮失败」**（真报障）：
+   * 本家的档位是**产品级**事实 —— 全部 chat 模型（含 2026-11-06 新上架的
+   * `DeepSeek-V4.1-Flash`）下发的 `reasoning_efforts` **逐字相同**
+   * `['none','low','medium','high','xhigh']`。而远端 `GET /models` 抓取失败时
+   * 会退回兜底表，兜底表跟不上的新 id 就落「目录外」⇒ 不声明档位 ⇒
+   * 用户在该模型上持久化过 `xhigh` 时，`dsh-llm` 的 `resolveCallWithInfo`
+   * **硬抛** `UNSUPPORTED_REASONING_EFFORT`（不 clamp、不 alias）⇒
+   * **整轮失败、一个 token 都没发出去**，用户侧表现为「切个模型就整轮挂」。
+   * 实测损失比「臆造档位」重一个量级（臆造最多是上游回一个参数错）。
+   * 另附证据：3 次 `agent.failed` + 1 条 `no context capacity` 压缩 warn，
+   * 会话档 `model/selection` 与 `request/header` 双向对得上。
    */
-  const DECLARE_UNKNOWN_REASONING: ReadonlySet<string> = new Set(['cline', 'codearts', 'magicrew', 'magicrewintl'])
+  const DECLARE_UNKNOWN_REASONING: ReadonlySet<string> = new Set([
+    'cline', 'codearts', 'magicrew', 'magicrewintl', 'loomy',
+  ])
 
   it('⚠️ 表的家数 == 全部对外注册的 LLM provider（漏一家 ⇒ 它不过本段任何断言）', async () => {
     // ⚠️ 判据来自 **PROVIDER_REGISTRY**（唯一的 provider 真源），不手抄。
