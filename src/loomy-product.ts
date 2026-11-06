@@ -37,8 +37,9 @@ export interface LoomyFallbackModel {
    * 可选思考档位（远端 `reasoning_efforts` 的实测值）。
    *
    * ⚠️ 与远端**同名字段、同一口径**：远端可用时优先用它，兜底表只在远端整体
-   * 失败时顶替。实测 8 个 chat 模型全部是
-   * `['none','low','medium','high','xhigh']`、默认 `low`。
+   * 失败时顶替。2026-09-28 实测 8 个 chat 模型全部是
+   * `['none','low','medium','high','xhigh']`、默认 `low`；2026-11-06 新上架的
+   * `DeepSeek-V4.1-Flash` 下发同款档位，合计 9 个。
    */
   efforts?: string[]
   /** 远端声明的默认档位（`default_reasoning_effort`）。 */
@@ -65,7 +66,7 @@ export interface LoomyProduct {
   appId: string
   /** 默认凭据 ref（无账号池时的单凭据回退）。 */
   defaultCredentialRef: string
-  /** 远端模型列表不可用时的兜底模型目录（8 个 chat 模型）。 */
+  /** 远端模型列表不可用时的兜底模型目录（9 个 chat 模型）。 */
   fallbackModels: readonly LoomyFallbackModel[]
   /**
    * 单张请求图片的像素预算。**当前刻意不赋值** —— 见下。
@@ -103,9 +104,10 @@ export interface LoomyProduct {
 }
 
 /**
- * 兜底模型目录（8 个 chat 模型）。
+ * 兜底模型目录（9 个 chat 模型）。
  *
- * 来源：2026-09-26 实测 `GET /api/v1/models`，取 `type === 'chat'` 的条目。
+ * 来源：2026-09-26 实测 `GET /api/v1/models`，取 `type === 'chat'` 的条目
+ * （2026-11-06 补 `DeepSeek-V4.1-Flash`，见下方表内注释）。
  * 顺序**照抄远端返回顺序**，不重排 —— 重排会让「与远端对比」这类排查失去可比性。
  *
  * ⚠️ `name` 已按 `loomyDisplayName` 规范化（远端原值是三种括号风格混用）。
@@ -113,9 +115,10 @@ export interface LoomyProduct {
  * {@link LOOMY_CONTEXT_WINDOW_OVERRIDES}（`spark-x` 远端虚高）。
  */
 /**
- * 实测的思考档位（8 个 chat 模型**完全一致**，2026-09-28 用真实凭据采集）。
+ * 实测的思考档位（2026-09-28 用真实凭据采集 8 个 chat 模型**完全一致**；
+ * 2026-11-06 新上架的 `DeepSeek-V4.1-Flash` 下发同款，合计 9 个）。
  *
- * ⚠️ 抽成常量而不是逐条写 8 遍：远端对全部 chat 模型下发同一份档位，
+ * ⚠️ 抽成常量而不是逐条写 9 遍：远端对全部 chat 模型下发同一份档位，
  * 逐条重复只会让将来上游变更时漏改其中几条。
  * ⚠️ 远端可用时**优先用远端的 `reasoning_efforts`**，本常量只在远端整体失败时
  * 顶替（与 `contextWindow` 同策略）。
@@ -225,7 +228,15 @@ export const LOOMY_CONTEXT_WINDOW_OVERRIDES: Readonly<Record<string, number>> = 
  * @param modelId 待查的模型 id（远端原值或兜底表值）。
  * @returns 小写、去首尾空白的查表键。
  */
-function loomyCatalogKey(modelId: string): string {
+/**
+ * 取一个模型 id 的查表键（小写、去首尾空白）。
+ *
+ * ⚠️ 2026-11-06 起**导出**：`loomy-product.spec.ts` 的「覆盖表条目必须存在于
+ * 兜底表」守卫需要用**同一个**归一化对齐两侧 —— 兜底表 id 保留上游大小写
+ * （如 `DeepSeek-V4.1-Flash`），覆盖表条目必须小写，直接 `Set.has` 会在
+ * 大小写混用的 id 上恒 false（守卫假红）。归一化逻辑不得在测试里再写一份。
+ */
+export function loomyCatalogKey(modelId: string): string {
   return modelId.trim().toLowerCase()
 }
 
@@ -300,9 +311,21 @@ export function loomyContextWindow(modelId: string, declared: number): number {
  * 纯文本模型时恒 true 会把图放行，让上游回一个更难懂的 400（错误更晚、更难查）。
  *
  * ⚠️ 表内条目必须**小写**：查表经 `loomyCatalogKey()` 归一，混入大写条目会恒不命中。
+ *
+ * ⚠️ **2026-11-06 审计补登 4 条**：上表实测读图 ✅ 的 `DeepSeek-V4.1-Flash` /
+ * `Kimi-k2.6` / `qwen3.8-flash` / `mimo-v2.5` 此前也不在表里 —— 远端可用时
+ * 无影响（远端声明已含 image），但远端失败走兜底表时起算值恒 `false` ⇒
+ * **同一批模型离线不能读图**，能力随远端可用性漂移。四条都实测 ✅ 且都在
+ * 兜底表（`fallbackToRemote` 走同一覆盖表，登记后离线即闭合）。
+ * `GLM-5.3-Flash`（⚠️ 答错过颜色名）与 `MiniMax-M3`（❌ 疑似假声明）刻意不入表。
  */
 export const LOOMY_IMAGE_CAPABILITY_OVERRIDES: ReadonlySet<string> = new Set([
   'qwen-3.8-max',
+  // 2026-11-06 补登：实测读图 ✅（见上方对照表），兜底表 id 同名。
+  'deepseek-v4.1-flash',
+  'kimi-k2.6',
+  'qwen3.8-flash',
+  'mimo-v2.5',
 ])
 
 /**

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ALL_LOOMY_PRODUCTS, LOOMY, LOOMY_CONTEXT_WINDOW_OVERRIDES, LOOMY_IMAGE_CAPABILITY_OVERRIDES,
-  loomyContextWindow, loomyProductById, loomySupportsImage,
+  loomyCatalogKey, loomyContextWindow, loomyProductById, loomySupportsImage,
 } from '../../src/loomy-product.js'
 
 describe('Loomy 产品配置', () => {
@@ -104,7 +104,16 @@ describe('Loomy 产品配置', () => {
    * 只放有实测证据的条目。
    */
   it('★ 覆盖表让 qwen-3.8-max 在远端漏报（声明 text）时仍判定支持图片', () => {
-    expect(Array.from(LOOMY_IMAGE_CAPABILITY_OVERRIDES)).toEqual(['qwen-3.8-max'])
+    // 2026-11-06 审计补登 4 条（同批实测读图 ✅ 的 DeepSeek-V4.1-Flash / Kimi-k2.6 /
+    // qwen3.8-flash / mimo-v2.5）：远端可用时无影响，但远端失败走兜底表时起算值
+    // 恒 false ⇒ 同一批模型离线不能读图，能力随远端可用性漂移。
+    expect(Array.from(LOOMY_IMAGE_CAPABILITY_OVERRIDES)).toEqual([
+      'qwen-3.8-max',
+      'deepseek-v4.1-flash',
+      'kimi-k2.6',
+      'qwen3.8-flash',
+      'mimo-v2.5',
+    ])
     expect(loomySupportsImage('qwen-3.8-max', false)).toBe(true)
     // 声明为 image 时当然还是 true（覆盖表只做「补报」，不做「降级」）
     expect(loomySupportsImage('qwen-3.8-max', true)).toBe(true)
@@ -114,13 +123,20 @@ describe('Loomy 产品配置', () => {
     // 两个方向都要传对：声明 text 的仍是 text，声明 image 的仍是 image。
     // 恒 true 会把图放给纯文本模型，让上游回一个更晚、更难懂的 400。
     expect(loomySupportsImage('spark-x', false)).toBe(false)
-    expect(loomySupportsImage('Kimi-k2.6', false)).toBe(false)
+    // Kimi-k2.6 已入表（2026-11-06 补登，实测 ✅）⇒ 离线也能读图
+    expect(loomySupportsImage('Kimi-k2.6', false)).toBe(true)
     expect(loomySupportsImage('Kimi-k2.6', true)).toBe(true)
     expect(loomySupportsImage('qwen3.8-flash', true)).toBe(true)
+    // ⚠️ 仍未登记的 GLM-5.3-Flash（实测 ⚠️ 答错过颜色名）照传声明值
+    expect(loomySupportsImage('GLM-5.3-Flash', false)).toBe(false)
+    expect(loomySupportsImage('GLM-5.3-Flash', true)).toBe(true)
   })
 
   it('⚠️ 覆盖表只放**实测确认能读图**的模型，且必须存在于兜底表', () => {
-    const ids = new Set(LOOMY.fallbackModels.map((m) => m.id))
+    // ⚠️ 用**同一个归一化**（loomyCatalogKey）对齐两侧：兜底表 id 保留上游
+    // 大小写（如 DeepSeek-V4.1-Flash），覆盖表条目必须小写 —— 直接 Set.has
+    // 会在大小写混用的 id 上恒 false（2026-11-06 补登 4 条时实测抓到）。
+    const ids = new Set(LOOMY.fallbackModels.map((m) => loomyCatalogKey(m.id)))
     for (const id of Array.from(LOOMY_IMAGE_CAPABILITY_OVERRIDES)) {
       expect(ids.has(id), `${id} 不在兜底表里`).toBe(true)
     }
@@ -129,6 +145,8 @@ describe('Loomy 产品配置', () => {
     expect(LOOMY_IMAGE_CAPABILITY_OVERRIDES.has('deepseek-v4-flash-0731')).toBe(false)
     // 实测疑似「声明 image 但读不出」的 MiniMax-M3 本次刻意不降级（见源码注释）
     expect(LOOMY_IMAGE_CAPABILITY_OVERRIDES.has('MiniMax-M3')).toBe(false)
+    // 实测 ⚠️（答错过颜色名）的 GLM-5.3-Flash 也不入表（证据不足不判死也不补报）
+    expect(LOOMY_IMAGE_CAPABILITY_OVERRIDES.has('glm-5.3-flash')).toBe(false)
   })
 
   /**

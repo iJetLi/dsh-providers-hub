@@ -5,7 +5,7 @@ import {
   reasoningFromEfforts, recordsLoomyRateLimit,
 } from '../../src/loomy-adapter.js'
 import { classifyRaccoonFailure } from '../../src/raccoon-adapter.js'
-import { LOOMY, LOOMY_EFFORTS, loomyContextWindow } from '../../src/loomy-product.js'
+import { LOOMY, loomyContextWindow } from '../../src/loomy-product.js'
 import { allAccountsRateLimitedForModel } from '../../src/account-pool.js'
 import { isLoomyAuthBusinessCode, LOOMY_PROBE_BACKOFF_MS } from '../../src/loomy-adapter.js'
 import { nextUtc8DayStartMs } from '../../src/model-queue.js'
@@ -244,7 +244,7 @@ describe('Loomy 兜底表漂移（2026-11-06 整轮失败）', () => {
     expect(entry!.name).toBe('DeepSeek V4.1 Flash · x2.0')
   })
 
-  it('★ 兜底表条目数与远端 chat 集合一致（远端新增时必须同步）', () => {
+  it('★ 兜底表条目数下界 ≥9（远端新增时必须同步，不钉死数字）', () => {
     // 2026-11-06 生产端点实测：9 条里 type==='chat' 的 6 条；兜底表保留 2026-09-26
     // 那批中仍可见的、并补上新增的 ⇒ 现为 9 条（多出的是已下架但保留的兜底项）。
     // ⚠️ 这条断言**故意写成下界 + 必须含新模型**，而不是钉死数字：
@@ -278,11 +278,17 @@ describe('Loomy 兜底表漂移（2026-11-06 整轮失败）', () => {
     expect(resolved.context, '编一个假窗口会让占用比与压缩阈值一起错').toBeUndefined()
   })
 
-  it('⚠️ 档位与目录内条目走**同一份**实现（不得两套同义判据）', () => {
-    // `reasoningFromEfforts` 是唯一实现：两个消费者必须拿到逐字相同的结构。
-    const inside = reasoningFromEfforts([...LOOMY_EFFORTS])
-    const outside = reasoningFromEfforts([...LOOMY_EFFORTS])
-    expect(outside).toEqual(inside)
+  it('⚠️ 档位与目录内条目走**同一份**实现（不得两套同义判据）', async () => {
+    // 审计 C #3：旧版拿 `reasoningFromEfforts` 同参互比 = **恒真**（换任何手写
+    // 实现都照样绿，锁不住接线漂移）。行为级判据改为：目录外 id 的声明必须与
+    // **目录内条目**的声明 deep-equal —— 两条路径分别走
+    // `unknownModelReasoning`（目录外）与 `reasoningFor`（目录内），任何一侧
+    // 换掉实现、漂移口径，这里都会变红（含 name 字段，不是只比 id 集合）。
+    const adapter = makeAdapter({ fetchRemoteModels: async () => { throw new Error('boom') } })
+    const inside = await adapter.resolveModel('loomy', 'DeepSeek-V4.1-Flash')
+    const outside = await adapter.resolveModel('loomy', 'Some-Future-Model')
+    expect(outside.reasoning, '目录外声明与目录内不同源 ⇒ 档位蒸发（审计 #9 同型）')
+      .toEqual(inside.reasoning)
     // 空档位 ⇒ 不声明（不是空数组）
     expect(reasoningFromEfforts(undefined)).toBeUndefined()
     expect(reasoningFromEfforts([])).toBeUndefined()
@@ -531,10 +537,10 @@ describe('LoomyAdapter 请求体里的 reasoning_effort', () => {
     }) as unknown as typeof fetch
   }
 
-  async function drain(adapter: LoomyAdapter, effort?: string) {
+  async function drain(adapter: LoomyAdapter, effort?: string, model = 'MiniMax-M3') {
     for await (const _chunk of adapter.stream({
       provider: 'loomy',
-      model: 'MiniMax-M3',
+      model,
       messages: [{ role: 'user', content: 'hi' }],
       ...effort !== undefined ? { reasoningEffort: effort as never } : {},
     })) {
@@ -592,6 +598,56 @@ describe('LoomyAdapter 请求体里的 reasoning_effort', () => {
     })
     await drain(adapter, 'xhigh')
     expect(captured.body?.reasoning_effort).toBe('xhigh')
+  })
+
+  /**
+   * ★★ 2026-11-06 审计 #9 的行为级守卫（wire 白名单与声明面同源）。
+   *
+   * 修复前：目录外 id 的**声明**有五档（`unknownModelReasoning`），但 wire 白名单
+   * 只查「目录 + 兜底表」⇒ `reasoning_effort` 静默不上行 —— 同一请求「声明有档、
+   * 上行不发」，用户选的档位蒸发成服务端默认档，且 UI 与 wire 同条件不同结果
+   * （表内 id 能上行、目录外 id 不能）。
+   */
+  it('★★ 目录外 id 的 wire 白名单与声明同源（选了档位就下发，2026-11-06 审计 #9）', async () => {
+    const captured: { body?: Record<string, unknown> } = {}
+    const adapter = makeAdapter({
+      fetchImpl: makeFetch(captured),
+      fetchRemoteModels: async () => { throw new Error('network down') },
+    })
+    await drain(adapter, 'xhigh', 'Some-Future-Model')
+    expect(captured.body?.reasoning_effort, '目录外 id 声明了五档 ⇒ 选中的档位必须上行').toBe('xhigh')
+  })
+
+  it('⚠️ 目录外 id 的白名单仍生效（档位不在产品级五档内 → 静默不下发）', async () => {
+    // 同源 ≠ 恒上行：白名单继续挡非法值，收敛后语义与表内条目一致。
+    const captured: { body?: Record<string, unknown> } = {}
+    const adapter = makeAdapter({
+      fetchImpl: makeFetch(captured),
+      fetchRemoteModels: async () => { throw new Error('network down') },
+    })
+    await drain(adapter, 'ultra', 'Some-Future-Model')
+    expect(captured.body).not.toHaveProperty('reasoning_effort')
+  })
+
+  /**
+   * ⚠️ 审计 #6 的行为级登记（刻意不修的已知残余）：目录内条目远端**未下发**
+   * 档位（`reasoning_efforts: []` 被解析层省略键）⇒ 声明与 wire 一致地「不声明
+   * 也不发」。刻意的两侧一致：声明面回退产品级五档反而会让「UI 出档位选择器、
+   * 上行也发」变成**编造**（远端可能刻意不下发）。见 `reasoningFor` 的注释。
+   */
+  it('⚠️ 目录内无档位条目：声明与 wire 一致地不给（审计 #6 已知残余）', async () => {
+    const captured: { body?: Record<string, unknown> } = {}
+    const adapter = makeAdapter({
+      fetchImpl: makeFetch(captured),
+      fetchRemoteModels: async () => parseLoomyRemoteModels({
+        data: [remoteEntry({ id: 'Future-NoEffort', reasoning_efforts: [] })],
+      }),
+    })
+    const resolved = await adapter.resolveModel('loomy', 'Future-NoEffort')
+    expect(resolved.reasoning, '目录内条目未下发档位 ⇒ 声明面不臆造（见 reasoningFor 注释）')
+      .toBeUndefined()
+    await drain(adapter, 'high', 'Future-NoEffort')
+    expect(captured.body, 'wire 与声明同源 ⇒ 同样不发').not.toHaveProperty('reasoning_effort')
   })
 })
 

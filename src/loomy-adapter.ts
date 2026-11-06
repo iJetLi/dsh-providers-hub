@@ -60,9 +60,11 @@ import { planSessionTitleThinking } from './session-title.js'
 /**
  * 档位 id 数组 → `LlmResolvedModelInfo['reasoning']`（**唯一**实现）。
  *
- * ⚠️ 抽成模块级纯函数是因为它现在有**两个**消费者：目录内条目走
- * `LoomyAdapter.reasoningFor`，目录外 id 走 `unknownModelReasoning`。
- * 两份实现会漂移成「目录内下发 high、目录外不发」这类静默缺陷 ——
+ * ⚠️ 抽成模块级纯函数是因为它现在有**三个**消费者：目录内条目走
+ * `LoomyAdapter.reasoningFor`，目录外 id 的**声明**走 `unknownModelReasoning`，
+ * 目录外 id 的 **wire 白名单**走 `stream()`（2026-11-06 审计 #9：声明与上行
+ * 不同源会让用户选的档位静默蒸发成服务端默认档，且零提示）。
+ * 两套实现会漂移成「目录内下发 high、目录外不发」这类静默缺陷 ——
  * 与本仓库红线「同一 provider 内不得有两套同义判据」同型。
  *
  * 三条口径：
@@ -94,6 +96,27 @@ export function reasoningFromEfforts(
   }
 }
 
+/**
+ * 目录外 id（目录与兜底表都没有）的档位声明 —— **唯一接线**（2026-11-06 审计 #9 修复）。
+ *
+ * ⚠️⚠️ 修复前 `stream()` 的 wire 白名单只查「目录 + 兜底表」，目录外 id 在
+ * **声明面**有五档（`unknownModelReasoning`）、在 **wire 面**却拿不到
+ * `reasoning_effort` —— 同一请求「声明有档、上行不发」，用户选的档位静默
+ * 蒸发成服务端默认档。收敛规则与骨架（`model-catalog.ts` 的
+ * `entry !== undefined ? entry.reasoning : config.unknownModelReasoning?.()`）
+ * 逐分支一致：
+ * - 目录内 → `LoomyAdapter.reasoningFor`（远端优先、兜底表补位）；
+ * - 目录外 → 这里（产品级五档：全部 chat 模型 `reasoning_efforts` 逐字相同）。
+ *
+ * 档位是**产品级**事实而非模型级事实，这正是对未知 id 也敢给的理由；
+ * 对照：`unknownModelContextWindow` 刻意不提供（窗口是模型级事实，编造 = 假窗口）。
+ *
+ * 两个消费者：目录外 id 的声明（`unknownModelReasoning`）与 wire 白名单（`stream()`），
+ * 必须引用**同一个**函数 —— 换任何一份手写实现都会在这两者之间重新裂开。
+ */
+function offCatalogReasoning(): LlmResolvedModelInfo['reasoning'] {
+  return reasoningFromEfforts([...LOOMY_EFFORTS])
+}
 
 /** 本适配器注册的 provider 路由名（等价于 `LOOMY.id`）。 */
 export const PROVIDER = 'loomy'
@@ -616,7 +639,11 @@ export class LoomyAdapter extends LlmAdapter {
          * 目录外 id 无从得知 ⇒ 编一个就是假窗口（分母错会让占用比与压缩阈值一起错，
          * 比「不显示」更难发现）。这与上面档位的取舍**不同源**，不要一并改。
          */
-        unknownModelReasoning: () => reasoningFromEfforts([...LOOMY_EFFORTS]),
+        // 目录外 id 仍声明档位（2026-11-06 真报障：远端新上架模型未同步兜底表 ⇒
+        // 切模型即整轮失败）。⚠️ 与 stream() 的 wire 白名单引用**同一个**
+        // `offCatalogReasoning` —— 两个消费者换任何一份手写实现都会重新裂开
+        // （审计 #9：修复前白名单只查「目录 + 兜底表」，声明有档而 wire 不发）。
+        unknownModelReasoning: offCatalogReasoning,
         syncCatalog: () => this.syncCatalogEntries(),
         /**
          * ★ **强制重拉**（供后台 20 分钟刷新器与「用户改设置」）。
@@ -782,6 +809,14 @@ export class LoomyAdapter extends LlmAdapter {
    * 2. `defaultEffort` **必须落在 `efforts` 内** —— DSH 会拿它直接发请求，
    *    给一个不存在的档位会抛 `UNSUPPORTED_REASONING_EFFORT`，比不给更糟；
    * 3. 远端未下发档位时不声明 `reasoning`（UI 显示「当前模型未提供推理等级」）。
+   *
+   * ⚠️ **已知残余（2026-11-06 审计 #6，登记不修）**：目录内条目远端**未下发**
+   * 档位（`reasoning_efforts: []` 会被 `parseLoomyRemoteModels` 省略键）⇒ 不声明
+   * ⇒ 用户持久化过的档位仍会被 dsh-llm 硬抛（与本 PR 报障同型但**入口不同**：
+   * 报障是目录外 id，这里是目录内无档位条目 —— 且仅当该 id 也不在兜底表时）。
+   * 刻意**不**在这里回退产品级五档：远端对目录内条目的逐模型声明是优先事实，
+   * 空档位可能是服务端刻意的（「全部 chat 模型逐字相同」只是快照，2026-11-06）。
+   * wire 侧白名单已与声明同源（`stream()`），故该形态下两侧一致地「不声明也不发」。
    */
   private reasoningFor(
     entry: LoomyRemoteModel | undefined,
@@ -1066,8 +1101,31 @@ export class LoomyAdapter extends LlmAdapter {
      * —— 服务端对未知字段静默忽略（与「无效模型名回退默认模型」同一模式）。
      * 故这里的字段名依据是**远端自己的命名**，而非「试出来能通」。
      */
-    const effortsForModel = (await this.loadModels()).find((m) => m.id === options.model)?.efforts
-      ?? this.fallbackIndex.get(options.model)?.efforts
+    /**
+     * ⚠️⚠️ wire 白名单与 `resolveModel` 的声明**同源**（2026-11-06 审计 #9 修复）。
+     *
+     * 修复前白名单只查「目录 + 兜底表」（`entry?.efforts ?? fallback?.efforts`），
+     * 目录外 id ⇒ `undefined` ⇒ `reasoning_effort` **静默不上行**，而声明面
+     * （`unknownModelReasoning`）恰恰给了目录外 id 五档 —— 同一请求「声明有档、
+     * wire 不发」，用户选的档位蒸发成服务端默认档，零提示（远端失败时表内 id
+     * 能上行、目录外 id 不能，同条件不同结果）。收敛规则与骨架
+     * （`model-catalog.ts` 的 `entry !== undefined ? entry.reasoning : config.unknownModelReasoning?.()`）
+     * 逐分支一致：
+     * - 目录内 → `reasoningFor`（远端优先、兜底表补位，与修复前值不变）；
+     * - 目录外 → `offCatalogReasoning`（产品级五档，与声明面同一函数）。
+     * 目录内条目两侧都**不**回退产品级五档 —— 目录内条目未下发档位时声明与
+     * wire 一致地「不声明也不发」（见 `reasoningFor` 的已知残余登记）。
+     *
+     * ⚠️ `entry` 复用本函数开头图片闸门（`supportsImage`）那一次 `loadModels()`
+     * 的查找结果 —— 同一请求、同一个模型，目录只查一次。
+     */
+    const declaredReasoning = entry !== undefined
+      ? this.reasoningFor(entry, this.fallbackIndex.get(options.model))
+      : offCatalogReasoning()
+    // `String(e.id)`：reasoning.efforts[].id 是 branded `ReasoningEffortId`，
+    // 摊平回 plain string —— 下游 `includes(titlePlan.effort: string)` 与
+    // 修复前的 `string[]` 白名单语义逐字节等价。
+    const effortsForModel = declaredReasoning?.efforts.map((e) => String(e.id))
     /**
      * 会话自动命名（`purpose: 'session-title'`）的思考与预算决策（issue IKKVDH）。
      *
