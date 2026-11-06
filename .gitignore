@@ -163,3 +163,16 @@ docs/audit/
 
 # Codegraph 本地索引（94 MB，纯本地生成物，不入库）
 .codegraph/
+
+# REA 网页端逆向取证目录（约 50 MB，纯本地研究材料，不入库）
+#
+# 含：从网页端下载的打包产物（`main.*.js` 6.3 MB / `6748.*.js` 2.7 MB /
+# `libs.*.js`）、`index.html` 入口，以及抽取与消融用的 Python 探针
+# （`probe.py` / `ablate*.py` / `ck_list.py`）。`raw/` 存未改动的原始副本。
+#
+# ⚠️ 这是**取证工作区**而非运行时依赖：`src/` 不引用它，构建链路也不读它。
+#    体积近 50 MB 且是第三方打包产物，入库会让仓库永久膨胀
+#    （与 `dist/`、`tests/fixtures/test.png` 同型考虑）。
+.rea-web/
+
+

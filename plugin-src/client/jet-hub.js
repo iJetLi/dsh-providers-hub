@@ -4737,6 +4737,37 @@ function ProviderPanel({ provider, rpcCall }) {
       setCredentialModal({ provider, error: '' });
       return;
     }
+    // ⚠️ 豆包（Doubao，2026-11-03）：**扫码登录**——宿主起一个可见浏览器窗口，
+    //    用户用手机豆包 App 扫码；插件轮询 `sessionid` 落库后走 `login.poll`。
+    //    没有 OAuth 授权页、没有手机号密码 ⇒ 与 magicrew 的 `browser` 模式同型，
+    //    但只有一条路，直接发起（不再弹中间选择窗）。
+    if (provider === 'doubao') {
+      setCreating(true);
+      try {
+        const created = await rpcCall('account.create', { provider: 'doubao', mode: 'browser' });
+        const accountId = created && created.accountId ? created.accountId : '';
+        if (!accountId) {
+          setProbeNotice({ tone: 'err', text: '宿主未返回账号 id，请重试。', details: [] });
+          return;
+        }
+        setProbeNotice({
+          tone: 'ok',
+          text: '浏览器窗口已打开，请用手机豆包 App 扫码登录（完成后自动读取登录态）。',
+          details: [],
+        });
+        startLoginPoll({ accountId, provider: 'doubao' });
+      } catch (caught) {
+        setProbeNotice({
+          tone: 'err',
+          text: caught && caught.message ? caught.message : '豆包登录启动失败',
+          details: [],
+        });
+      } finally {
+        // ⚠️ 闸门无条件释放（`creating` 在登录轮询期间就该恢复 —— 等待由 login.poll 承担）。
+        if (mounted.current) setCreating(false);
+      }
+      return;
+    }
 
     setCreating(true);
     let accountId = '';
@@ -6491,6 +6522,7 @@ function ProviderPanel({ provider, rpcCall }) {
           //    magicrew.ai 的登录态 ⇒ 必然失败；宿主错误文案又反过来让他去登
           //    magicrew.ai ⇒ **引导自相矛盾的死循环**。
           provider: credentialModal.provider,
+
           error: credentialModal.error || '',
           busy: creating,
           onSubmit: () => void submitMagicrewLocalImport(credentialModal.provider, 'local-browser'),
@@ -9636,6 +9668,175 @@ export function JetHubPage({ rpcCall }) {
   React.useEffect(() => () => { mounted.current = false; }, []);
 
   /**
+   * 全局统计带（页头下方、tab 按钮组与「已打开 / 已关闭」列表之间）。
+   *
+   * 只放三格：**总积分 / 剩余积分 / 账号数量**（用户 2026-10-22 明确要求，其余项已移除）。
+   *
+   * ## 两个积分口径
+   *
+   * | 格 | 取数 |
+   * |---|---|
+   * | 总积分 | 各账号**有效包**（`active !== false`）的 `packages[].total` 之和 —— 本计费周期的**总额度** |
+   * | 剩余积分 | 各账号 `balance.total` 之和 —— 与 IDE 顶部 "Credits Balance" 同口径（周期剩余） |
+   *
+   * ⚠️ 刻意**不用** `packages[].remaining` 自己求和去凑"剩余"：`CreditBalance.total`
+   *    才是宿主已经算好的权威周期口径（`credits.ts` 里明确了它对齐 IDE、且刻意避开
+   *    服务端 `TotalDosage` 的终身口径）。两处各算一遍必然对不上。
+   *
+   * ⚠️ **跨 provider 求和是用户明确要求的聚合**。各家"积分"的单位与价值不同
+   *    （CodeArts 的积分 ≠ CodeBuddy 的积分），所以这两个数是「总量参考」，不是可折算的
+   *    等价额度。原先的按单位分列红线依然适用于**一键签到**的提示文案，这里不冲突。
+   *
+   * ## 数据源与时机
+   *
+   * - 账号数走 `account.list`（读账号池**内存副本**，不发上游请求）→ 首帧就能出。
+   * - 积分走 `credits.balances`（**上游实时读数**，吃 120 秒共享缓存）→ 慢，故两段式：
+   *   先渲染账号数、积分显示 `—`，读数到达后再补。任一 provider 失败只让它记 0 并标记
+   *   `creditsPartial`，不让整条消失（部分数据比没有更有用）。
+   * - `force` 不传（吃缓存）：每次打开 Jet Hub 都强刷会打爆上游，也可能触发风控。
+   *
+   * ⚠️ 本状态与 `loadGlobalStats` 必须声明在 `providerStatuses` **之后** ——
+   *    deps 数组在进入调用前就急切求值，放到前面会因 TDZ 抛
+   *    `Cannot access 'providerStatuses' before initialization`，整个 Jet Hub 白屏。
+   */
+  const [globalStats, setGlobalStats] = React.useState(null);
+
+  const loadGlobalStats = React.useCallback(async () => {
+    // 聚合是组合视图，没有自己的账号与积分，不计入统计。
+    const targets = PROVIDERS.filter(p => p.id !== 'aggregate');
+
+    // ---- 第一段：账号数（快，内存副本）----
+    const lists = await Promise.all(targets.map(async (p) => {
+      try {
+        const res = await rpcCall('account.list', { provider: p.id });
+        return Array.isArray(res?.accounts) ? res.accounts : [];
+      } catch (caught) {
+        console.error('[jet-hub] global stats: account.list failed for ' + p.id + ':', caught);
+        return [];
+      }
+    }));
+    if (!mounted.current) return;
+    const accounts = lists.flat().length;
+    setGlobalStats({ accounts, totalCredits: null, remainingCredits: null, creditsLoading: true, creditsPartial: false });
+
+    // ---- 第二段：积分（慢，上游读数；宿主持 120s 共享缓存）----
+    //
+    // ⚠⚠ **必须先按 `supportsCreditBalance` 过滤**（2026-11-04 真实报障：
+    //   控制台刷 `credits.balances failed for qiniu: unsupported provider: qiniu`）。
+    //
+    //    本段原先对**全部** provider 一律发 `credits.balances`，而宿主侧
+    //    `creditsOf(credits, provider)` 对**没有登记积分表的渠道**回
+    //    `bad-request` —— `qiniu` / `opencode` / `qoder` / `qodercn` / `officeace`
+    //    都在那批里（它们 `credits.balance: false`，是**实测能力结论**，
+    //    不是漏接线）。于是每打开一次 Jet Hub 就往控制台刷 5 条红色报错。
+    //
+    //    ⚠️ 判据**必须复用 `supportsCreditBalance`**（与账号面板 `canLoadCredits`
+    //       同源），不要在这里另写一份 `p.id !== 'qiniu'` 之类的黑名单 ——
+    //       那正是本仓库「一语义两套判据」的复发形态：新增渠道时必然漏改一处。
+    //    ⚠️ `balance:false` 的渠道**不是失败**：它们不该进 `partial`
+    //       （`partial` 的语义是「本次读数不完整」，而那些渠道本来就没有读数）。
+    const creditTargets = targets.filter(p => supportsCreditBalance(p.id));
+    const balances = await Promise.all(creditTargets.map(async (p) => {
+      try {
+        const res = await rpcCall('credits.balances', { provider: p.id });
+        return Array.isArray(res?.accounts) ? res.accounts : [];
+      } catch (caught) {
+        console.error('[jet-hub] global stats: credits.balances failed for ' + p.id + ':', caught);
+        return null;
+      }
+    }));
+    if (!mounted.current) return;
+
+    let totalCredits = 0;
+    let remainingCredits = 0;
+    let partial = false;
+    for (const list of balances) {
+      if (list === null) { partial = true; continue }
+      for (const entry of list) {
+        const balance = entry?.balance;
+        // `balance === null` 表示该账号读取失败（与"余额为 0"严格区分），计入 partial 但不加 0。
+        if (!balance) { partial = true; continue }
+        remainingCredits += Number(balance.total) || 0;
+        for (const pkg of (balance.packages ?? [])) {
+          if (pkg?.active === false) continue;
+          totalCredits += Number(pkg?.total) || 0;
+        }
+      }
+    }
+    setGlobalStats({
+      accounts,
+      totalCredits,
+      remainingCredits,
+      creditsLoading: false,
+      creditsPartial: partial,
+    });
+  }, [rpcCall]);
+
+  React.useEffect(() => { void loadGlobalStats(); }, [loadGlobalStats]);
+
+  /**
+   * 统计带渲染：总积分 / 剩余积分 / 账号数量（三格）。
+   *
+   * `globalStats === null`（第一段还没回来）时整条不渲染 —— 用骨架占位会让页头下方
+   * 闪一次布局跳动。积分未到时不显示 `0`（那会被读成"真的一分都没有"），而是 `—`。
+   *
+   * 数值格式：带小数时保留 2 位并加千分位；整数就只加千分位。`Number.toLocaleString`
+   * 的 `undefined` options 在整数下不会补 `.00`，正是想要的效果。
+   */
+  const renderGlobalStats = () => {
+    if (globalStats === null) return null;
+    const fmt = (value) => {
+      if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+      return Number.isInteger(value)
+        ? value.toLocaleString('zh-CN')
+        : value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+    const creditsPending = globalStats.creditsLoading || globalStats.totalCredits === null;
+    const cells = [
+      {
+        key: 'total',
+        label: '总积分',
+        value: fmt(globalStats.totalCredits),
+        unit: creditsPending ? '' : '积分',
+        tone: 'info',
+        title: '全部账号本计费周期的额度总量（各 provider 单位不同，仅供总量参考）',
+      },
+      {
+        key: 'remaining',
+        label: '剩余积分',
+        value: fmt(globalStats.remainingCredits),
+        unit: creditsPending ? '' : '积分',
+        tone: 'ok',
+        title: '全部账号当前可用余额（与 IDE 顶部的 Credits Balance 同口径）',
+      },
+      {
+        key: 'accounts',
+        label: '账号数量',
+        value: fmt(globalStats.accounts),
+        unit: '个',
+        tone: 'muted',
+        title: '全部 provider 已保存的账号总数',
+      },
+    ];
+    return React.createElement('div', {
+      className: 'dim-jh-globalStats',
+      role: 'group',
+      'aria-label': '全局积分与账号统计',
+    }, cells.map(cell => React.createElement('div', {
+      key: cell.key,
+      className: 'dim-jh-globalStat',
+      'data-tone': cell.tone,
+      title: cell.title,
+    },
+    React.createElement('span', { className: 'dim-jh-globalStatLabel' }, cell.label),
+    React.createElement('span', { className: 'dim-jh-globalStatValue' },
+      cell.value,
+      cell.unit === ''
+        ? null
+        : React.createElement('span', { className: 'dim-jh-globalStatUnit' }, cell.unit)))));
+  };
+
+  /**
    * 读取网关状态。
    *
    * 失败**不抛**、也不把 `gatewayStatus` 置成任何「像是有值」的状态：保持
@@ -10697,6 +10898,10 @@ export function JetHubPage({ rpcCall }) {
           style: { flex: 'none', margin: '12px 24px 0' },
         }, React.createElement('div', null, providerNotice.text))
       : null,
+    // 全局统计带：与上面两条提示同位置（页头之后、layout 之前），
+    // 所以左右边距、`flex: none` 防压扁的写法也一致。读数是异步的，
+    // 首帧不渲染（见 renderGlobalStats 的 `null` 判断），避免布局先跳一次。
+    renderGlobalStats(),
     React.createElement('div', { className: 'dim-jh-layout' },
       React.createElement('nav', { className: 'dim-jh-rail', role: 'tablist', 'aria-label': 'Provider 导航' },
         renderRail()),

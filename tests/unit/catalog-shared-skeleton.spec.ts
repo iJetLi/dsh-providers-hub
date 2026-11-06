@@ -49,6 +49,13 @@ const VIRTUAL_PROVIDERS = new Map<string, string>([
   ['auto', '只有一个合成模型 auto，目标由选型决定，没有自己的上游目录'],
   ['jet-hub-auto', '与 auto 同一实例（AUTO_PROVIDER 常量）'],
   ['aggregate', '播的是跨渠道合成的虚拟模型，目录由 ctx.llm.listModels 逐渠道推导'],
+  // ⚠️ **纯签到渠道**：`doubao` **没有模型目录 / 适配器 / 推理链路**，只做签到 +
+  //    余额，registry 里登记 `channel: false` ⇒ 它根本不会出现在 `adapterSources()`
+  //    的结果里。
+  //    ⚠️ 但本判据是按 `PROVIDER_REGISTRY` **全量**派生的（只豁免本表），
+  //    所以必须显式登记理由 —— 否则「纯签到渠道」与「漏接适配器」在本判据眼里
+  //    完全同形，而后者正是 Gitee IKP8OF 的成因。那才是本表存在的意义。
+  ['doubao', '纯签到渠道（channel:false）：无模型目录/适配器/推理链路，只做签到+余额'],
 ])
 
 /** 剥掉注释（判据用；防「注释里写了一句就算接线了」的诱饵）。 */
@@ -187,9 +194,12 @@ describe('★★ 实体 provider 必须走共享骨架（虚拟的两家显式�
  * ⚠️ 每条都带**对照组**（未关闭时必须非空），否则空数组断言恒真。
  */
 describe('★★ IKP8OF 迁移规格：关掉的模型必须消失、关掉的供应商必须整体消失', () => {
-  it('★ 判据自检：VIRTUAL_PROVIDERS 恰好是 auto / jet-hub-auto / aggregate', () => {
+  it('★ 判据自检：VIRTUAL_PROVIDERS 恰好是 auto / jet-hub-auto / aggregate 与纯签到渠道', () => {
     // ⚠️ 这条防「把实体 provider 塞进豁免表绕过判据」。
-    expect([...VIRTUAL_PROVIDERS.keys()].sort()).toEqual(['aggregate', 'auto', 'jet-hub-auto'])
+    //    `doubao` 是 `channel: false` 的纯签到渠道（无适配器），与虚拟渠道
+    //    **理由不同**但**豁免形态相同**。
+    expect([...VIRTUAL_PROVIDERS.keys()].sort())
+      .toEqual(['aggregate', 'auto', 'doubao', 'jet-hub-auto'])
   })
 })
 
