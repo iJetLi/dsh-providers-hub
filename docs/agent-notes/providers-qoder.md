@@ -261,28 +261,77 @@ let u = JSON.parse(E)                           // { 场景: [模型…] }
 3. **`Encode=1` 不保证响应加密** —— 两站实测都回**明文 JSON**
    （`decrypt_server_response` 失败即明文，与官方 `rb()` 逐字同形）。
 4. **响应是 `{场景: [模型]}`**：`chat / developer / assistant / inline / quest /
-   qwork / experts / qwake / app / byok_teams / byok_enterprise`；本插件取 `chat`。
+   qwork / experts / qwake / app / byok_teams / byok_enterprise`；本插件取
+   **`chat` ∪ `app`**（`QODER_CATALOG_SCENES`，见下节「QoDuck」）。
 
-### ⚠️⚠️ 版本闸门：`fast` 拿不到是**设计如此**，不是缺陷
+### ⚠️⚠️ `QoDuck`（`lmodel`）只发布在 `app` 场景 —— 只读 `chat` 会**结构性**漏掉它
+
+2026-11-07 用户报障「qoder 国际版有个模型 QoDuck，我们的列表里没加载出来」。
+实测（真实凭据，声明版本 `1.1.49` / `1.1.69` / `1.1.70` 三档各拉一遍；
+`scripts/probe-qoder-duck.mts`）：
+
+| 声明版本 | `chat` | `app` | `app` 相对 `chat` 多出 |
+|---|---|---|---|
+| 1.1.49 | 14 | 15 | **`lmodel`（QoDuck）** |
+| 1.1.69 | 14 | 15 | **`lmodel`** |
+| 1.1.70 | 15（+`fast`） | 16（+`fast`） | **`lmodel`** |
+
+两条**决定性**判据：
+
+- **`app` ≡ `chat` + `lmodel`，逐版本成立**；反向差集（`chat` 有而 `app` 没有的）
+  **一条都没有** ⇒ 并场景**只多这一个模型**，不会带进别的东西。
+- **`QoDuck` 条目里根本没有 `minimal_version` 字段** ⇒ 它**不受版本闸门管辖**，
+  抬版本一分都拿不到它（抬到 1.1.70 多出的是 `fast`）。故「我们声明的版本太低
+  所以服务端不发」这个假设**已被证伪** —— 真因是**读错了场景**。
+
+条目原文（`app` 场景，`key` 即模型 id）：`{"key":"lmodel","display_name":"QoDuck",
+"is_vl":true,"is_reasoning":true,"price_factor":0,"original_price_factor":0.5,
+"max_input_tokens":180000,"tags":["free"],"is_free":true,"is_lite_plan":true,
+"is_sensitive":true,"context_config":{"1M":{…},"200K":{…,"is_default":true},"400K":{…}},
+"thinking_config":{"disabled":{},"enabled":{"efforts":{"xhigh":{},"high":{"is_default":true},
+"low":{}},"is_default":true}}}`。
+
+**可用性已实测**（不是「进了列表但调不动」）：`QoderAdapter.stream({ model:'lmodel' })`
+在 **1.1.79** 身份下回 HTTP 200 + 正文 `"OK"`（`scripts/probe-qoder-duck-call.mts`）。
+⚠️ 首包 **91.4 s**，而 `dfmodel` 只要 **3.7 s** —— 上游模型特性，接进列表后
+表现为「这个模型很慢」，不是插件重试/超时问题。
+
+并场景后自动走同一条展示/能力链路（`scripts/probe-qoder-duck-meta.mts` 实解）：
+`name: "QoDuck · 免费"`、`contextWindow: 1000000`（`parseContextWindow` 取
+`context_config` 最大档，**刻意不认** `max_input_tokens: 180000`）、
+`inputModalities: ["text","image"]`、`efforts: xhigh/high/low + none`（默认 `high`）。
+
+### ⚠️⚠️ 版本闸门：`minimal_version` 与 `COSY_VERSION = 1.1.79`
 
 条目可带 `minimal_version: {app, cli, qoder_wake, vsc}`，服务端按**请求方自称的
 客户端类型**选命名空间比较。同一账号、只改身份与版本的实测：
 
 | 身份 + 声明版本 | `chat` 条数 | `fast` |
 |---|---|---|
-| `client_type=5`（cli，本插件）+ `1.1.49`（= `COSY_VERSION`） | 14 | ✗ |
+| `client_type=5`（cli）+ `1.1.49`（2026-10 的旧值） | 14 | ✗ |
 | `client_type=5` + `1.1.69` | 14 | ✗ |
 | `client_type=5` + `1.1.70` | 15 | ✓ |
+| `client_type=5` + `1.1.79` / `1.1.80` / `1.2.0` / `9.9.9` | 15 | ✓ |
 | `client_type=10`（app，IDE 用它）+ `0.4.8` | 14 | ✗ |
 | `client_type=10` + `1.1.66` | 15 | ✓ |
 | `client_type=10` + `1.1.69`（= IDE 的 SDK 版本常量 `NH`） | 15 | ✓ |
 
-⇒ 闸门是 `{app: 1.1.66, cli: 1.1.70}`，IDE 是 **app 身份 + 1.1.69** 才刚好过。
-本插件用 **cli 身份 + 1.1.49** ⇒ 需要 1.1.70 才够，故**天然拿不到 `fast`**
-（用户 2026-10-20 明确「不需要这种 IDE 融合档位」）⇒ **刻意不动 `COSY_VERSION`**：
-它同时被**推理**签名使用，为一个融合档位抬高声明版本属未经实测的改动。
-**其余 14 个模型不受影响**（1.1.49 下 `dfmodel` 的 `price_factor/is_free/
-original_price_factor` 与 `mmodel` 的改名都已是最新值）。
+⇒ 闸门是 `{app: 1.1.66, cli: 1.1.70}`，**且目录在 1.1.70 处封顶**
+（1.1.79 / 1.1.80 / 1.2.0 / 9.9.9 与 1.1.70 逐条相同）。
+
+⚠️ **2026-11-07 起 `COSY_VERSION` 由 `1.1.49` 抬到 `1.1.79`**（用户要求）。
+依据是**本机官方自称版本**，不是猜：两个产品都装到 IDE **0.5.6**
+（`%LOCALAPPDATA%\Programs\Qoder` 与 `Programs\Qoder CN` 的 `.qoder-versions\0.5.6`），
+其 `~/.qoder/logs/runs/<run>/manifest.json` 与 `~/.qoder-cn/logs/runs/<run>/manifest.json`
+的 `cli_version` 恒为 **`1.1.79-hotfix.18`**（各取最新一条 run，逐字一致）。
+取 `1.1.79` 而**不带** `-hotfix.18`：预发布版本按 semver **低于**同位正式版，
+若上游把闸门抬到 `1.1.79` 本身，带后缀会静默判不过。
+
+⚠️ `COSY_VERSION` 同时进**推理签名**（`QoderContext` 的 `Cosy-Version` 与签名载荷）
+⇒ 抬版本必须实测推理仍 200：`scripts/probe-qoder-duck-verify.mts` 在 1.1.79 下
+对 `lmodel` / `dfmodel` 各发一次，均 200 + 正文正常（2026-11-07）。
+**其余 14 个模型不受影响**（`dfmodel` 的 `price_factor/is_free/original_price_factor`
+与 `mmodel` 的改名都已是最新值）。
 
 ### ⚠️⚠️ `is_reasoning=false` 不是「不支持思考」—— 两条信号相互独立（2026-10-20 用户追问）
 

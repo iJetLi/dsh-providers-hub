@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   QODER_CATALOG_SCENE,
+  QODER_CATALOG_SCENES,
   QODER_MODEL_LIST_PATH,
   fetchQoderRemoteModels,
   parseQoderRemoteModels,
+  parseQoderRemoteModelsForScenes,
   qoderRemoteModelToFallback,
 } from '../../src/qoder-catalog.js'
 import { QODER, QODER_CN } from '../../src/qoder-product.js'
@@ -55,6 +57,46 @@ const REMOTE_MMODEL = {
   is_reasoning: false,
   price_factor: 0.1,
   context_config: { '200K': { token_count: 200000, is_default: true } },
+}
+
+/**
+ * `QoDuck`（`lmodel`）—— 字段**逐项照抄 2026-11-07 真机响应**的 `app` 场景。
+ *
+ * ⚠️ 它**只出现在 `app` 场景**（`chat` 里没有），且**不带 `minimal_version`**
+ * —— 这正是「只读 `chat` 就看不见它」的成因，见 `qoder-catalog.ts` 模块头。
+ */
+const REMOTE_LMODEL = {
+  key: 'lmodel',
+  status: 'idle',
+  format: 'openai',
+  source: 'system',
+  enable: true,
+  icon: 'QoderQoduckFill',
+  display_name: 'QoDuck',
+  is_vl: true,
+  is_reasoning: true,
+  is_default: false,
+  is_new: true,
+  price_factor: 0,
+  original_price_factor: 0.5,
+  max_input_tokens: 180000,
+  is_sensitive: true,
+  tags: ['free'],
+  is_free: true,
+  is_lite_plan: true,
+  is_editable: true,
+  context_config: {
+    '1M': { token_count: 1000000 },
+    '200K': { token_count: 200000, is_default: true },
+    '400K': { token_count: 400000 },
+  },
+  thinking_config: {
+    disabled: {},
+    enabled: {
+      efforts: { xhigh: {}, high: { is_default: true }, low: {} },
+      is_default: true,
+    },
+  },
 }
 
 describe('parseQoderRemoteModels', () => {
@@ -160,6 +202,64 @@ describe('parseQoderRemoteModels', () => {
   it('⚠️ 没有档位表也没有 available_context_windows ⇒ 窗口报 0（= 不声明，不编造）', () => {
     const model = qoderRemoteModelToFallback({ key: 'k', display_name: 'K', max_input_tokens: 180000 })
     expect(model?.contextWindow).toBe(0)
+  })
+})
+
+/**
+ * `chat ∪ app` 场景合并（2026-11-07）。
+ *
+ * 每一条都对应一处**真实成因**：`QoDuck` 只发布在 `app` 场景、且**不带**
+ * `minimal_version` ⇒ 只读 `chat` 的实现结构性地看不见它（不是版本问题）。
+ */
+describe('parseQoderRemoteModelsForScenes（chat ∪ app）', () => {
+  it('默认场景与优先级：chat → app', () => {
+    expect(QODER_CATALOG_SCENES).toEqual(['chat', 'app'])
+  })
+
+  it('app 独有的 QoDuck 会被并进来，且排在 chat 的模型之后', () => {
+    const models = parseQoderRemoteModelsForScenes({
+      chat: [REMOTE_DFMODEL],
+      app: [REMOTE_DFMODEL, REMOTE_LMODEL],
+    })
+    expect(models?.map((m) => m.id)).toEqual(['dfmodel', 'lmodel'])
+    const duck = models![1]!
+    expect(duck.name).toBe('QoDuck')
+    // 窗口取档位表**最大**档，而不是 `max_input_tokens: 180000`（见 parseContextWindow）。
+    expect(duck.contextWindow).toBe(1_000_000)
+    expect(duck.supportsImage).toBe(true)
+    expect(duck.supportsThinking).toBe(true)
+    expect(duck.efforts).toEqual(['xhigh', 'high', 'low'])
+    expect(duck.defaultEffort).toBe('high')
+    expect(duck.isFree).toBe(true)
+  })
+
+  it('⚠️ 同 id 两边都有 ⇒ 取 chat 那条（顺序即优先级），且不产生重复 id', () => {
+    // 重复 id 会让 DSH 的 `listModels` 抛 INVALID_CATALOG（整个 provider 消失），
+    // 比少一个模型更糟 ⇒ 去重必须与合并同时做。
+    const models = parseQoderRemoteModelsForScenes({
+      chat: [{ ...REMOTE_MMODEL, display_name: '来自 chat' }],
+      app: [{ ...REMOTE_MMODEL, display_name: '来自 app' }],
+    })
+    expect(models?.map((m) => m.id)).toEqual(['mmodel'])
+    expect(models![0]!.name).toBe('来自 chat')
+  })
+
+  it('⚠️ chat 为空但 app 有模型 ⇒ 照常返回（不能被「空 chat」判成协议非法）', () => {
+    expect(parseQoderRemoteModelsForScenes({ chat: [], app: [REMOTE_LMODEL] })?.map((m) => m.id))
+      .toEqual(['lmodel'])
+  })
+
+  it('app 缺失或形状非法时退回 chat（旧响应向后兼容）', () => {
+    expect(parseQoderRemoteModelsForScenes({ chat: [REMOTE_MMODEL] })?.map((m) => m.id))
+      .toEqual(['mmodel'])
+    expect(parseQoderRemoteModelsForScenes({ chat: [REMOTE_MMODEL], app: 'nope' })?.map((m) => m.id))
+      .toEqual(['mmodel'])
+  })
+
+  it('一个场景都不是数组 ⇒ undefined（协议变了，与空列表严格区分）', () => {
+    expect(parseQoderRemoteModelsForScenes(null)).toBeUndefined()
+    expect(parseQoderRemoteModelsForScenes([])).toBeUndefined()
+    expect(parseQoderRemoteModelsForScenes({ developer: [] })).toBeUndefined()
   })
 })
 

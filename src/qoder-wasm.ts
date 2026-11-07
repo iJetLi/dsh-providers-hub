@@ -100,8 +100,25 @@ declare const WebAssembly: {
   Module: new (bytes: Uint8Array) => WasmModule
 }
 
-/** 客户端版本与产品标识（与 `QODER` 产品配置保持一致）。 */
-const COSY_VERSION = '1.1.49'
+/**
+ * 客户端版本与产品标识（与 `QODER` 产品配置保持一致）。
+ *
+ * ⚠️ **2026-11-07 由 `1.1.49` 抬到 `1.1.79`**（用户要求「更新版本」）。依据是
+ * **本机实测的官方自称版本**，不是猜的：两个产品都装到 IDE **0.5.6**
+ * （`%LOCALAPPDATA%\Programs\Qoder` / `Programs\Qoder CN` 的 `.qoder-versions\0.5.6`），
+ * 其 `~/.qoder/logs/runs/<run>/manifest.json` 与 `~/.qoder-cn/logs/runs/<run>/manifest.json`
+ * 的 `cli_version` 恒为 **`1.1.79-hotfix.18`**（各取最新一条 run，逐字一致）。
+ *
+ * 取 `1.1.79` 而**不带** `-hotfix.18` 后缀：预发布版本按 semver **低于**同位
+ * 正式版，若上游把闸门抬到 `1.1.79` 本身，带后缀会静默判不过。
+ *
+ * ⚠️ **该值同时进推理签名**（`QoderContext` 的 `Cosy-Version` 与签名载荷），
+ * 抬版本后必须实测推理仍 200：`scripts/probe-qoder-duck-call.mts` 在 1.1.79 下
+ * 对 `lmodel` / `dfmodel` 各发一次，均 HTTP 200 + 正文正常（2026-11-07）。
+ * 目录侧的版本闸门（`minimal_version`）在 1.1.70 处**封顶**，1.1.79 与
+ * 1.1.80 / 1.2.0 / 9.9.9 逐条相同（见 `qoder-catalog.ts` 模块头）。
+ */
+const COSY_VERSION = '1.1.79'
 
 /**
  * wasm-bindgen 生成的 import 对象名。WASM 里 embed 了这个模块路径，

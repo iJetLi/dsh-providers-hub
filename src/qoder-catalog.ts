@@ -42,32 +42,58 @@
  *    故解密那一步**不能**当成必成功。
  * 4. **响应是 `{场景: [模型]}`**，顶层实际键：
  *    `chat / developer / assistant / inline / quest / qwork / experts / qwake / app /
- *    byok_teams / byok_enterprise`。本插件取 {@link QODER_CATALOG_SCENE}（`chat`）
- *    —— 与兜底表的采集口径一致，也是加密推理端点实际走的那一类会话。
+ *    byok_teams / byok_enterprise`。本插件取 {@link QODER_CATALOG_SCENES}
+ *    （`chat` ∪ `app`）—— **只取 `chat` 会漏掉 `QoDuck`**，见下一节。
  *
- * ## ⚠️ 版本闸门：`fast` 为什么我们拿不到（而 IDE 拿得到）
+ * ## ⚠️ 为什么必须并 `app` 场景：`QoDuck`（`lmodel`）只发布在 `app` 里
+ *
+ * 2026-11-07 实测（真实凭据；声明版本 `1.1.49` / `1.1.69` / `1.1.70` 三档各拉
+ * 一遍，`scripts/probe-qoder-duck.mts`）：
+ *
+ * `app` 场景 ≡ `chat` 场景 **+ `lmodel`（`QoDuck`）**，**逐版本成立**；
+ * 反向差集（`chat` 有而 `app` 没有的）**一条都没有**。
+ *
+ * 而 `QoDuck` 条目里**根本没有 `minimal_version` 字段** ⇒ 它不受版本闸门管辖，
+ * 抬版本一分都拿不到它（抬到 1.1.70 多出的是另一个模型 `fast`）。只读 `chat`
+ * 的旧实现因此**结构性地**看不见它 —— 这不是「声明版本太低」，是**读错了场景**。
+ *
+ * 可用性已实测：`QoderAdapter.stream({ model: 'lmodel' })` 回 200 + 正文正常
+ * （`scripts/probe-qoder-duck-call.mts`）。⚠️ 首包 **91.4s**，而 `dfmodel` 只要
+ * **3.7s** —— 上游模型特性，不是插件问题；接进列表后会体现为「这个模型很慢」。
+ *
+ * 并场景后它自动走同一条展示/能力链路：窗口 **1M**（`parseContextWindow` 取
+ * `context_config` 最大值，**刻意不认** `max_input_tokens: 180000`，理由见该函数
+ * 注释）、`supportsImage: true`（`is_vl`）、三档思考 `low/high/xhigh`（默认
+ * `high`）、`isFree: true`（`price_factor: 0`，原价 `0.5×`）。
+ *
+ * ## ⚠️ 版本闸门（`minimal_version`）
  *
  * 模型条目可带 `minimal_version: {app, cli, qoder_wake, vsc}`，服务端按
  * **请求方自称的客户端类型**选对应的命名空间比较：
  *
  * | 实测用例（同一账号、只改身份与版本） | `chat` 条数 | `fast` |
  * |---|---|---|
- * | `client_type=5`（cli） + `1.1.49`（本插件现值） | 14 | ✗ |
+ * | `client_type=5`（cli） + `1.1.49`（2026-10 的旧值） | 14 | ✗ |
  * | `client_type=5` + `1.1.69` | 14 | ✗ |
  * | `client_type=5` + `1.1.70` | 15 | ✓ |
+ * | `client_type=5` + `1.1.79` / `1.1.80` / `1.2.0` / `9.9.9` | 15 | ✓ |
  * | `client_type=10`（app，IDE 用它） + `0.4.8` | 14 | ✗ |
  * | `client_type=10` + `1.1.66` | 15 | ✓ |
  * | `client_type=10` + `1.1.69`（= IDE 的 SDK 版本常量） | 15 | ✓ |
  *
- * 即 `fast` 的闸门是 `{app: 1.1.66, cli: 1.1.70}`，而 IDE 是 **app 身份 + 1.1.69**
- * ⇒ 只差 `app` 那一档。本插件用 **cli 身份 + `COSY_VERSION = 1.1.49`**
- * ⇒ 需要 1.1.70 才够，故**天然拿不到 `fast`**。
+ * 即 `fast` 的闸门是 `{app: 1.1.66, cli: 1.1.70}`，**且目录在 1.1.70 处封顶**
+ * （1.1.79 / 1.1.80 / 1.2.0 / 9.9.9 与 1.1.70 逐条相同）。
  *
- * 这是**刻意保留**的：`fast` 是 IDE 的融合档位（用户 2026-10-20 明确「不需要」），
- * 而抬高声明版本会连带改变**推理**请求的签名身份（同一条 `QoderContext` 常量），
- * 属未经实测的改动 ⇒ 不动。**其余 14 个模型不受影响**（实测 1.1.49 下
- * `dfmodel` 的 `price_factor/is_free/original_price_factor` 与 `mmodel` 的改名
- * 都已是最新值）。
+ * ⚠️ **2026-11-07 起 `COSY_VERSION` 抬到 `1.1.79`**（用户要求）。依据：本机两个
+ * 产品都装到 IDE **0.5.6**，其 `logs/runs/<run>/manifest.json` 的 `cli_version` 恒为
+ * **`1.1.79-hotfix.18`**（`~/.qoder` 与 `~/.qoder-cn` 各取最新一条 run 实测一致）
+ * ⇒ 官方客户端自称的就是 1.1.79 这一档。取 `1.1.79`（**不带** `-hotfix.18`
+ * 预发布后缀）以保持 semver 单调 —— 预发布版本按 semver **低于**同位正式版，
+ * 若上游哪天把闸门抬到 `1.1.79` 本身，带后缀会静默判不过。
+ *
+ * ⚠️ 该常量**同时进推理签名**（`QoderContext` 的 `Cosy-Version` 与签名载荷），
+ * 故抬版本必须**实测推理仍 200**：`scripts/probe-qoder-duck-call.mts` 在 1.1.79
+ * 下对 `lmodel` / `dfmodel` 各发一次，均 HTTP 200 + 正文正常（2026-11-07）。
  *
  * ## ⚠️ 与「本地 catalog-v6」的区别（不要混用）
  *
@@ -92,6 +118,18 @@ export const QODER_MODEL_LIST_PATH = '/api/v2/model/list?Encode=1'
 
 /** 目录响应的**场景键**（见模块头第 4 条）。 */
 export const QODER_CATALOG_SCENE = 'chat'
+
+/**
+ * 参与合并的**场景键**，**按优先级降序**（前面的赢）。
+ *
+ * ⚠️ 必须并 `app`：`QoDuck`（`lmodel`）只发布在 `app` 场景，且**不带**
+ * `minimal_version`（完整论证见模块头「为什么必须并 `app` 场景」）。
+ * 实测 `app` ≡ `chat` + `lmodel`，逐版本成立，故并进来**只多这一个模型**。
+ *
+ * 顺序即优先级：`chat` 是加密推理端点实际走的那一类会话，同一 id 在两边都
+ * 出现时取 `chat` 那条（与旧实现的取值逐字节一致 ⇒ 并场景不改变既有模型）。
+ */
+export const QODER_CATALOG_SCENES: readonly string[] = ['chat', 'app']
 
 /**
  * 单次目录请求预算（毫秒）。
@@ -460,6 +498,43 @@ export function parseQoderRemoteModels(
   return models
 }
 
+/**
+ * 解析**多个场景**并合并（按 `scenes` 顺序去重，靠前的赢）。
+ *
+ * 为什么不直接「逐个场景各调一次 {@link parseQoderRemoteModels} 再拼」：那样
+ * **跨场景**会留下重复 id，而 DSH 的 `listModels` 对重复 id 抛 `INVALID_CATALOG`
+ * —— 整个 provider 从选择器里消失（比少一个模型更糟）。去重必须与合并同时做。
+ *
+ * @param body - 已解密的 JSON。
+ * @param scenes - 参与合并的场景键，**按优先级降序**；缺省
+ *   {@link QODER_CATALOG_SCENES}。
+ * @returns 合并后的模型列表；**一个场景都不是数组**时返回 `undefined`
+ *   （协议变了）。⚠️ 与「空列表」严格区分：`chat` 空但 `app` 有模型时
+ *   **照常返回** `app` 的那些（不能被「空 `chat`」判成协议变更）。
+ */
+export function parseQoderRemoteModelsForScenes(
+  body: unknown,
+  scenes: readonly string[] = QODER_CATALOG_SCENES,
+): QoderFallbackModel[] | undefined {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined
+  const record = body as Record<string, unknown>
+  const models: QoderFallbackModel[] = []
+  const seen = new Set<string>()
+  let found = false
+  for (const scene of scenes) {
+    const list = record[scene]
+    if (!Array.isArray(list)) continue
+    found = true
+    for (const raw of list) {
+      const model = qoderRemoteModelToFallback(raw)
+      if (model === undefined || seen.has(model.id)) continue
+      seen.add(model.id)
+      models.push(model)
+    }
+  }
+  return found ? models : undefined
+}
+
 /** {@link fetchQoderRemoteModels} 的可注入依赖（测试用）。 */
 export interface QoderRemoteCatalogOptions {
   /** 注入的 fetch；缺省用全局。 */
@@ -522,8 +597,12 @@ export async function fetchQoderRemoteModels(
     // ⚠️ 「解密失败即明文」是**协议的一部分**（官方 `rb()` 就是这么写的），
     //    故不能把解密失败当错误 —— 实测两个产品都回明文。
     const plain = await decryptServerResponseOrRaw(await response.text())
-    const models = parseQoderRemoteModels(JSON.parse(plain) as unknown)
-    if (models === undefined) throw new Error('模型目录响应形状非法（无 chat 场景数组）')
+    const models = parseQoderRemoteModelsForScenes(JSON.parse(plain) as unknown)
+    if (models === undefined) {
+      throw new Error(
+        `模型目录响应形状非法（无 ${QODER_CATALOG_SCENES.join(' / ')} 场景数组）`,
+      )
+    }
     if (models.length === 0) throw new Error('模型目录响应为空')
     return models
   } catch (error) {
