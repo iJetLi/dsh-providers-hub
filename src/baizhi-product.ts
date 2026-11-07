@@ -109,8 +109,20 @@ export const BAIZHI: BaizhiProduct = {
  */
 export const BAIZHI_MAX_CONTEXT = 1_048_576
 
-/** 单次输出上限（`max_tokens=100000` 实测可成功）。 */
+/**
+ * 单次输出上限的服务级默认值（`max_tokens=100000` 实测可成功）。
+ *
+ * ⚠️ 不是所有模型都吃这个值：qwen 系列有更低的上游硬限
+ * （100,000 时 400 原文 `Range of max_tokens should be [1, 65536]` / `[1, 32768]`）。
+ * 逐模型上限见 `BAIZHI_KNOWN_CAPABILITIES` 的 `maxTokens`，夹取用 `baizhiMaxOutputTokensFor`。
+ */
 export const BAIZHI_MAX_OUTPUT_TOKENS = 100_000
+
+/** qwen3.6-plus / qwen3.5-plus / qwen3.5-flash 的上游硬限（实测 65,536 可成功，100,000 被 400）。 */
+export const BAIZHI_QWEN_MAX_OUTPUT_TOKENS = 65_536
+
+/** qwen-flash 的上游硬限（实测 32,768 可成功，100,000 被 400）。 */
+export const BAIZHI_QWEN_FLASH_MAX_OUTPUT_TOKENS = 32_768
 
 /** 兜底/能力表中的一条模型。形状对齐 `model-catalog.ts` 的 `CatalogEntry` 子集。 */
 export interface BaizhiModelEntry {
@@ -120,12 +132,16 @@ export interface BaizhiModelEntry {
   readonly contextWindow?: number
   /** 省略 = **未知**（不等于「明确不支持」）。只对明确知道的写 true。 */
   readonly supportsImage?: boolean
+  /** 实测网关接受的单次输出上限（`max_tokens`）；省略 = **未知**，回落服务级默认。 */
+  readonly maxTokens?: number
 }
 
 /** 模型的已知能力；未列出的字段一律表示「不知道」。 */
 export interface BaizhiCapability {
   readonly contextWindow?: number
   readonly supportsImage?: boolean
+  /** 实测网关接受的单次输出上限（`max_tokens`）；省略 = **未知**。 */
+  readonly maxTokens?: number
 }
 
 /**
@@ -144,25 +160,40 @@ export interface BaizhiCapability {
  * `supportsImage` 同样保守：只有明确知道能看图的才写 true，
  * 其余省略 —— 适配器对「省略」的模型收到图片时会抛 `UNSUPPORTED_CONTENT`，
  * 不会静默丢图。
+ *
+ * `maxTokens` 的来源是 2026-11-07 对 `POST /v1/messages` 的**真机探测**
+ * （账号 `BAIZHI_ACCOUNT_6E40BB58`，body 带 `stream:true` + 短消息，看到
+ * `message_start` 即断开）：100,000 对 deepseek/minimax/glm/kimi 全部 200；
+ * qwen 三兄弟 100,000 被 400（`[1, 65536]`）、65,536 通过；qwen-flash 上限 32,768。
+ * 参数探测只证明「网关接受该值」；另对 deepseek-v4-flash 做了长文实测
+ * （`max_tokens=20000` + 数数提示词）⇒ 实际 `output_tokens=20000`、
+ * `stop_reason=max_tokens`，没有被静默夹到 8k/16k。没探测过的 id 一律省略。
  */
 const BAIZHI_KNOWN_CAPABILITIES: readonly (BaizhiCapability & { readonly id: string })[] = [
   // deepseek 系列（4 条，窗口与 monkeycode-product.ts 保持一致）
-  { id: 'deepseek-v4-pro', contextWindow: BAIZHI_MAX_CONTEXT },
-  { id: 'deepseek-v4-flash', contextWindow: BAIZHI_MAX_CONTEXT },
-  { id: 'deepseek-v4-flash-vision-exp', contextWindow: BAIZHI_MAX_CONTEXT, supportsImage: true },
-  { id: 'deepseek-flash', contextWindow: BAIZHI_MAX_CONTEXT },
+  { id: 'deepseek-v4-pro', contextWindow: BAIZHI_MAX_CONTEXT, maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  { id: 'deepseek-v4-flash', contextWindow: BAIZHI_MAX_CONTEXT, maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  {
+    id: 'deepseek-v4-flash-vision-exp',
+    contextWindow: BAIZHI_MAX_CONTEXT,
+    supportsImage: true,
+    maxTokens: BAIZHI_MAX_OUTPUT_TOKENS,
+  },
+  { id: 'deepseek-flash', contextWindow: BAIZHI_MAX_CONTEXT, maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
   // 其余已知 id：窗口未知、是否支持图片未逐一实测 ⇒ 只列 id
-  { id: 'minimax-m2.7', supportsImage: true },
-  { id: 'minimax-m2.5' },
-  { id: 'glm-5.1', supportsImage: true },
-  { id: 'glm-5' },
-  { id: 'glm-4.7' },
-  { id: 'kimi-k2.6', supportsImage: true },
-  { id: 'kimi-k2.5' },
-  { id: 'qwen3.6-plus' },
-  { id: 'qwen3.5-plus', supportsImage: true },
-  { id: 'qwen3.5-flash' },
-  { id: 'qwen-flash' },
+  { id: 'minimax-m2.7', supportsImage: true, maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  { id: 'minimax-m2.5', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  // 远端目录独有（不在 45 条快照里，但会话实测在用）；补进能力表才能下发 maxTokens。
+  { id: 'minimax-m3.1-flash', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  { id: 'glm-5.1', supportsImage: true, maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  { id: 'glm-5', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  { id: 'glm-4.7', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  { id: 'kimi-k2.6', supportsImage: true, maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  { id: 'kimi-k2.5', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
+  { id: 'qwen3.6-plus', maxTokens: BAIZHI_QWEN_MAX_OUTPUT_TOKENS },
+  { id: 'qwen3.5-plus', supportsImage: true, maxTokens: BAIZHI_QWEN_MAX_OUTPUT_TOKENS },
+  { id: 'qwen3.5-flash', maxTokens: BAIZHI_QWEN_MAX_OUTPUT_TOKENS },
+  { id: 'qwen-flash', maxTokens: BAIZHI_QWEN_FLASH_MAX_OUTPUT_TOKENS },
 ]
 
 /**
@@ -177,6 +208,7 @@ export const BAIZHI_FALLBACK_MODELS: readonly BaizhiModelEntry[] = BAIZHI_KNOWN_
     name: capability.id,
     ...capability.contextWindow === undefined ? {} : { contextWindow: capability.contextWindow },
     ...capability.supportsImage === undefined ? {} : { supportsImage: capability.supportsImage },
+    ...capability.maxTokens === undefined ? {} : { maxTokens: capability.maxTokens },
   }),
 )
 
@@ -191,7 +223,19 @@ export function baizhiCapabilityOf(modelId: string): BaizhiCapability | undefine
   return {
     ...found.contextWindow === undefined ? {} : { contextWindow: found.contextWindow },
     ...found.supportsImage === undefined ? {} : { supportsImage: found.supportsImage },
+    ...found.maxTokens === undefined ? {} : { maxTokens: found.maxTokens },
   }
+}
+
+/**
+ * 某个模型的单次输出上限（`max_tokens` 能用多大）。
+ *
+ * 已知模型走 `maxTokens`（实测值）；未知模型回落 `BAIZHI_MAX_OUTPUT_TOKENS`。
+ * ⚠️ 必须按**模型**夹取，不能一律夹到 100,000 —— qwen 系列会被上游 400。
+ */
+export function baizhiMaxOutputTokensFor(modelId: string | undefined): number {
+  if (modelId === undefined) return BAIZHI_MAX_OUTPUT_TOKENS
+  return baizhiCapabilityOf(modelId)?.maxTokens ?? BAIZHI_MAX_OUTPUT_TOKENS
 }
 
 /** 是否在已知清单里。 */

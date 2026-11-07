@@ -175,12 +175,43 @@ export const MONKEYCODE_PRODUCTS: readonly MonkeycodeProduct[] = [MONKEYCODE, MO
  */
 export const MONKEYCODE_MAX_CONTEXT = 1_048_576
 
+/**
+ * **deepseek 系**的单次输出上限（tokens）。
+ *
+ * 证据（2026-11-07 真机探测，账号 `MONKEYCODE_ACCOUNT_6BFC73BB`，
+ * 模型 `monkeycode-basic/deepseek-flash`）：网关对 `max_tokens` = 131,072 与
+ * 262,144 均回 HTTP 200 并正常开流 ⇒ 真实上限**不小于** 131,072。
+ *
+ * ⚠️ 取 128,000 而不是探测到的更大值：它是各渠道对同代 deepseek 最常见的
+ * 声明值（workbuddy / codearts 都是 128,000），且**低于**已被接受的 131,072，
+ * 留出安全余量。
+ *
+ * ⚠️ 探测只能证明「参数被接受」，**不能**证明「模型真的能产出 128k 正文」；
+ * 要证明后者得跑一次长生成（贵，且与本字段用途无关 —— DSH 只拿它当默认
+ * 输出预算，见 `model-catalog.ts` 的 `defaultMaxTokens`）。
+ *
+ * ⚠️⚠️ 不声明它的后果是**真实事故**（2026-11-07 取证）：宿主不 materialize
+ * `maxTokens`，请求头中途丢掉该字段后，适配器兜底 `max_tokens: 4096`
+ * （`MONKEYCODE_DEFAULT_MAX_TOKENS`）⇒ 思考把 4096 全烧掉、正文 0 字、
+ * `turn/end: max-tokens`。声明后宿主带 `adapterDefaults.maxTokens = true`，
+ * **每一步重新 materialize**，中途丢值也能自愈。
+ */
+export const MONKEYCODE_MAX_OUTPUT_TOKENS = 128_000
+
 /** 目录条目（内部中间结构，与 `model-catalog.ts` 的 `CatalogEntry` 同形但更窄）。 */
 export interface MonkeycodeModelEntry {
   readonly id: string
   readonly name: string
   /** 上下文窗口；省略 = **不声明**（不编造假窗口）。 */
   readonly contextWindow?: number
+  /**
+   * 单次输出上限；省略 = **不声明**。
+   *
+   * ⚠️ 与 `contextWindow` 同一条纪律：没有证据就不写。未知时宿主不会
+   * materialize 输出预算，适配器只能用 4096 兜底（见
+   * {@link MONKEYCODE_MAX_OUTPUT_TOKENS} 的事故记录）。
+   */
+  readonly maxTokens?: number
   /**
    * 是否支持图片输入。
    *
@@ -205,17 +236,22 @@ export interface MonkeycodeModelEntry {
  * 所以 `glm-5` 那几条没有占用条（2026-11-02 审查 A🟡-9 提出的「整条消失」）。
  * 反过来给没证据的模型标 1M，会让溢出压缩推迟到根本到不了的 token 数，
  * 而压缩阈值正是由这个字段算的 —— 谎报的代价比少一条进度条大得多。
+ *
+ * ⚠️ 输出上限（`maxTokens`）的声明策略与窗口**同源**：只在探测过推理通道的
+ * deepseek 系上声明 {@link MONKEYCODE_MAX_OUTPUT_TOKENS}；`glm-5` 仍然省略。
+ * 这里**不能**沿用「省略最安全」——省略的代价是宿主拿不到默认输出预算，
+ * 适配器退回 4096（见该常量的注释），比少一个进度条严重得多。
  */
 export const MONKEYCODE_GATEWAY_MODELS: readonly MonkeycodeModelEntry[] = [
-  { id: 'monkeycode-basic/deepseek-flash', name: 'DeepSeek Flash（basic 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT },
-  { id: 'monkeycode-basic/deepseek-v4-flash', name: 'DeepSeek V4 Flash（basic 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT },
-  { id: 'monkeycode-pro/deepseek-flash', name: 'DeepSeek Flash（pro 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT },
-  { id: 'monkeycode-pro/deepseek-v4-pro', name: 'DeepSeek V4 Pro（pro 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT },
-  { id: 'monkeycode-ultra/deepseek-v4-pro', name: 'DeepSeek V4 Pro（ultra 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT },
+  { id: 'monkeycode-basic/deepseek-flash', name: 'DeepSeek Flash（basic 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT, maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS },
+  { id: 'monkeycode-basic/deepseek-v4-flash', name: 'DeepSeek V4 Flash（basic 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT, maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS },
+  { id: 'monkeycode-pro/deepseek-flash', name: 'DeepSeek Flash（pro 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT, maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS },
+  { id: 'monkeycode-pro/deepseek-v4-pro', name: 'DeepSeek V4 Pro（pro 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT, maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS },
+  { id: 'monkeycode-ultra/deepseek-v4-pro', name: 'DeepSeek V4 Pro（ultra 额度）', contextWindow: MONKEYCODE_MAX_CONTEXT, maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS },
   // 不带前缀的 = 直接扣积分（不走每日额度），与订阅档位无关。
-  { id: 'deepseek-flash', name: 'DeepSeek Flash（按积分计费）', contextWindow: MONKEYCODE_MAX_CONTEXT },
-  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash（按积分计费）', contextWindow: MONKEYCODE_MAX_CONTEXT },
-  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro（按积分计费）', contextWindow: MONKEYCODE_MAX_CONTEXT },
+  { id: 'deepseek-flash', name: 'DeepSeek Flash（按积分计费）', contextWindow: MONKEYCODE_MAX_CONTEXT, maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS },
+  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash（按积分计费）', contextWindow: MONKEYCODE_MAX_CONTEXT, maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro（按积分计费）', contextWindow: MONKEYCODE_MAX_CONTEXT, maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS },
   // ⚠️ `glm-5` **刻意不声明** `contextWindow`：它不是 deepseek，窗口与
   //    {@link MONKEYCODE_MAX_CONTEXT} 毫无关系，照抄就是谎报（且会把 DSH 的
   //    溢出压缩推迟到不可能达到的 token 数）。未知就省略。

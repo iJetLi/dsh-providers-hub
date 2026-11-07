@@ -116,6 +116,10 @@ configuration can make this link work (passthrough settings do not ..."}}
   不是凭据问题，不要刷新或换号；先确认该 provider 是否走了 bili 的 global fetch。
 - 看到 `invalid ohmyagent request`：这是网关签名校验失败，通常是没有 system prompt
   或 signing_secret 不匹配；检查 `options.system` 和账号凭据。
+- 看到「回答一直在输出上限处断掉、有时正文一个字都没有、`turn/end` 是
+  `{"kind":"max-tokens"}`」：先看 `assistant/message.usage.outputTokens` 是否
+  **恰好 4096**。是 ⇒ 走了 `MONKEYCODE_DEFAULT_MAX_TOKENS` 兜底，根因是
+  目录没声明 `maxTokens`（见下一节），不是上游限流、不是账号问题。
 
 ## ⚠️⚠️ 2026-11-05 审计返工：`undici.request` 直连（不是 `node:http`）
 
@@ -131,3 +135,113 @@ configuration can make this link work (passthrough settings do not ..."}}
 ⚠️ 响应 `content-encoding: gzip/deflate/br` 现在会解压（代理无视 `identity` 时不再读到二进制垃圾）；
 ⚠️ 3xx **不跟随**（与 `fetch` 不同）—— 上游若做 http→https 跳转会失败，已登记。
 ⚠️ `Request` 入参**显式抛错**（上一版会静默丢 body）；适配器只传 URL 字符串，不可达。
+
+## 输出上限缺失：4096 兜底截断（2026-11-07 取证并修复）
+
+### 症状（真实会话 `session-3b0f49c4-ef32-445f-be70-3fa7aa1650ab`）
+
+- 第 2 轮 27 步里前 26 步 `finish: tool-calls`（单步 output 56~3201）全部正常，
+  第 27 步突然 `finish: max-tokens`、`outputTokens: 4096`（**正好等于兜底值**），
+  内容 `[reasoning: 14497 字符, text: 0]` —— 推理吃光预算，正文零字。
+- 第 3 轮第 1 步同型复现：`outputTokens: 4096`、`[reasoning: 13579, text: 0]`。
+- 两轮 `turn/end` 都是 `{"kind":"max-tokens"}`。用户观感即「一直输出上限制」。
+
+### 请求头取证（会话内三条 `request/header`）
+
+| 时刻 | reason | config |
+|---|---|---|
+| 02:48:13 第 1 轮 | `initial` | `astudio/xopdsv4flash0731in`, effort=high, **maxTokens=8192** |
+| 02:49:03 第 2 轮第 1 步 | `change` | `monkeycode/monkeycode-basic/deepseek-flash`, **maxTokens=8192** |
+| 02:49:34 第 2 轮第 2 步 | `change` | 同路由，**maxTokens 被删**，此后（含第 3 轮）再未出现 |
+
+- 会话**初始上限 8192**，来自宿主播种，不是渠道声明（三条记录 `adapterDefaults`
+  均为 `undefined`）。
+- 第 1 轮 astudio 首发 `HTTP 404 API endpoint not found` 后切到 monkeycode；
+  切换当步 maxTokens 还在，**下一步就丢了**，此后 max_tokens 恒为插件的 4096。
+
+### 根因链
+
+1. `src/monkeycode-product.ts:210-218` 的 9 条目录条目只声明 `contextWindow`，
+   **没有 `maxTokens`**（上游 `ijetli/master` 同样没有）。
+2. `src/model-catalog.ts:744-746` 只在条目有 `maxTokens` 时才设
+   `resolved.defaultMaxTokens` ⇒ 本家恒 `undefined` ⇒ 宿主
+   `@deepseek-ai/dsh-tmux-context/lib/index.js:1863 resolveCallWithInfo`
+   的 `config.maxTokens === undefined && info.defaultMaxTokens !== undefined`
+   分支永不成立，不会替它补上限。
+3. 因为上限不是「适配器派生的」，请求头不带 `adapterDefaults.maxTokens = true`。
+   宿主的 `@deepseek-ai/dsh-agent-loop/lib/index.js:717-722 requestProposal`
+   只在 `adapterDefaults.maxTokens === true` 时删值再重算；反向也成立 ——
+   **没有这个标志，值只能靠持久化，一旦被改写就永久丢失**，宿主不会重建。
+4. `src/monkeycode-messages.ts:69` `MONKEYCODE_DEFAULT_MAX_TOKENS = 4096`，
+   Anthropic Messages 协议 `max_tokens` 必填，于是每次请求都发
+   `max_tokens: 4096`（`monkeycodeMaxTokensFor(undefined)` → 4096）。
+5. `monkeycodeThinkingFor`（同文件 `:96-100`）`high → budgetTokens 8192`，
+   构造 payload 时夹到 `maxTokens - 1`；本例切号后 `reasoningEffort` 随切换消失
+   ⇒ 不发 `thinking` 字段 ⇒ 服务端默认开思考且预算不受控，14k 字符推理直接把
+   4096 烧完，正文拿 0。
+
+### 对照：声明了上限的渠道不会丢
+
+同工作区会话普查（`~/.dsh/sessions/--F-project-pojie--/*`）显示，声明了
+`maxTokens` 的渠道请求头一律带 `adapterDefaults={"maxTokens":true}`，且
+`resume` / `change` 全程稳定：workbuddy 128000、astudio 384000、cline 131072、
+gemini 64000、raccoon 100000、minimax 128000。monkeycode / baizhi / codearts /
+accio / loomy 等未声明的则 `adapterDefaults=undefined`，多数整条 `maxTokens`
+都没有。
+
+### 上游核对（2026-11-07）
+
+- `git log HEAD..ijetli/master` 的 12 个提交无一处涉及输出上限；
+  `git diff HEAD..ijetli/master -- src/monkeycode*` 只删了 `monkeycode-http.ts`
+  与 `systemMessageText` 兜底；`git show ijetli/master:src/monkeycode-product.ts
+  | grep -n "maxTokens\|maxOutput"` **零命中**。
+- 同型先例（可照抄修法）：`611a57a fix(cline): 补 minimax-m3.1-flash 的
+  maxTokens 声明 —— 请求不带 max_tokens ⇒ 退回网关默认 4096 ⇒ 长回答被静默截断`。
+
+### 修法（2026-11-07 已实施：`maxTokens: 128_000`）
+
+在 `MONKEYCODE_GATEWAY_MODELS` 的 8 条 deepseek 条目上补
+`maxTokens: MONKEYCODE_MAX_OUTPUT_TOKENS`（= `128_000`），`glm-5` 仍按
+「未知就省略」不声明；适配器 `toCatalogEntry` 透传到 `CatalogEntry.maxTokens`
+⇒ `model-catalog.ts` 映射成 `defaultMaxTokens` ⇒ 宿主带
+`adapterDefaults.maxTokens = true`、**每一步重新 materialize**，中途丢值自愈。
+
+**取值依据（真机探测，2026-11-07）**：用 `.credentials.yaml` 里
+`MONKEYCODE_ACCOUNT_6BFC73BB` 的凭据直连 `proxy.monkeycode-ai.com/v1/messages`
+（复刻适配器的 `X-OhMyAgent-Signature: v1=HMAC-SHA256(signing_secret, system)`
+与 `x-api-key`），对 `monkeycode-basic/deepseek-flash` 依次探 `max_tokens`：
+
+| max_tokens | 结果 |
+|---|---|
+| 131,072 | HTTP 200，`event: message_start` 正常开流 |
+| 262,144 | HTTP 200，正常开流 |
+| 393,216 / 524,288 / 786,432 / 1,048,575 | 未测完（探测被中断） |
+
+⇒ 真实上限**不小于** 131,072。最终取 **128,000**：各渠道对同代 deepseek 最
+常见的声明值（workbuddy / codearts 都是 128,000），且低于已被接受的 131,072。
+
+⚠️ **这个方法只能证明「参数被接受」**，不能证明「模型真能产出 128k 正文」——
+要证明后者得跑一次长生成。本字段的用途是「默认输出预算」（DSH 用它 seed
+`max_tokens`），被接受即可达成本次修复目标。
+
+⚠️ 未采取的修法：只把兜底常量 `MONKEYCODE_DEFAULT_MAX_TOKENS` 提到 8192/128k
+是治标 —— 请求头仍会丢 `maxTokens`、仍没有 `adapterDefaults` 每步重算的保护。
+
+### 同型对照：其他渠道对 deepseek 的声明值
+
+| 渠道 | 模型 | 声明值 |
+|---|---|---|
+| astudio | `xopdsv4flash0731in` / `xopdeepseekv4pro0813` | 384,000 |
+| officeace | `deepseek-v4.1-flash` / `deepseek-v4-flash` | 393,216 |
+| workbuddy | `deepseek-v4.1-flash` | 128,000（另一端点 131,072） |
+| codearts | `deepseek-v4.1-flash` / `deepseek-v4-pro` | 128,000 |
+| codearts | `deepseek-v4-flash` | 50,000 |
+| raccoon | `sn-deepseek-v4-1-flash` | 65,536（远上报 100,000，网关硬校验 `1..65536`） |
+| baizhi | 4 条 deepseek | **同一提交已补声明**（100,000），且 qwen 系列按上游硬限 65,536/32,768 单独声明 |
+
+### 复现/取证方法
+
+`session.v4.jsonl.zstd` 是逐帧 zstd（magic `28 B5 2F FD`），用
+`zlib.zstdDecompressSync` 逐帧解压后按行 `JSON.parse`；关键记录
+`request/header`（每次上限变化）、`assistant/message.usage.outputTokens`、
+`turn/end.reason`。

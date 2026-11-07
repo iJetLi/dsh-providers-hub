@@ -13,13 +13,20 @@
  * ⑧ 未知图片能力 ⇒ `UNSUPPORTED_CONTENT`，且**不读字节**、不静默丢图；
  * ⑨ `thinking.budget_tokens` 严格小于 `max_tokens`（写成 ≥ 直接被上游 400）；
  * ⑩ `listAllModels()` 必须**同步**返回（远端挂了回退内置表，面板不能空）。
+ * ⑪ 目录声明 `maxTokens`（不声明 ⇒ 请求不带 max_tokens ⇒ 退回 4096 截断），
+ *    且 `max_tokens` 按**模型**夹取（qwen 系列吃不下 100,000）。
  */
 
 import { describe, expect, it, vi } from 'vitest'
 
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
-import { BAIZHI_MAX_CONTEXT, type BaizhiModelEntry } from '../../src/baizhi-product.js'
+import {
+  BAIZHI_MAX_CONTEXT,
+  BAIZHI_MAX_OUTPUT_TOKENS,
+  BAIZHI_QWEN_MAX_OUTPUT_TOKENS,
+  type BaizhiModelEntry,
+} from '../../src/baizhi-product.js'
 import {
   BAIZHI_MAX_ROTATE,
   BaizhiAdapter,
@@ -175,6 +182,18 @@ describe('无凭据 / 请求形状', () => {
     expect(body.model).toBe('deepseek-v4-pro')
     expect(body.stream).toBe(true)
     expect(body.max_tokens).toBe(4096)
+  })
+
+  it('★ 宿主下发的 100,000 按模型夹：deepseek 原样发、qwen 夹到 65,536（否则上游 400）', async () => {
+    const deepseekFetch = vi.fn(async () => sseResponse(SSE_OK))
+    const deepseekAdapter = makeAdapter({ fetchImpl: deepseekFetch as never })
+    await drain(deepseekAdapter.stream(request({ maxTokens: BAIZHI_MAX_OUTPUT_TOKENS })))
+    expect(bodyOf(deepseekFetch).max_tokens).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
+
+    const qwenFetch = vi.fn(async () => sseResponse(SSE_OK))
+    const qwenAdapter = makeAdapter({ fetchImpl: qwenFetch as never })
+    await drain(qwenAdapter.stream(request({ model: 'qwen3.6-plus', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS })))
+    expect(bodyOf(qwenFetch).max_tokens).toBe(BAIZHI_QWEN_MAX_OUTPUT_TOKENS)
   })
 
   it('正常流：文本拼接 + finish 块', async () => {
@@ -449,6 +468,20 @@ describe('模型目录', () => {
     expect(resolved.provider).toBe('baizhi')
     expect(resolved.name).toBe('DeepSeek V4 Pro')
     expect(resolved.context?.contextWindow).toBe(BAIZHI_MAX_CONTEXT)
+  })
+
+  it('★ 目录声明 maxTokens ⇒ 宿主 defaultMaxTokens 有值（否则请求不带 max_tokens、退回 4096）', async () => {
+    // 走兜底表（远端失败）：能力表是 maxTokens 的唯一来源。
+    const adapter = makeAdapter({
+      fetchRemoteModels: async () => { throw new Error('boom') },
+    })
+    const deepseek = await adapter.resolveModel('baizhi', 'deepseek-v4-pro')
+    expect(deepseek.defaultMaxTokens).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
+    const qwen = await adapter.resolveModel('baizhi', 'qwen3.6-plus')
+    expect(qwen.defaultMaxTokens).toBe(BAIZHI_QWEN_MAX_OUTPUT_TOKENS)
+    // 反向自检：`context` 的键集合必须只有 `contextWindow` —— 多写的键会被
+    // 宿主 `normalizeModelInfo` 白名单重建时静默丢掉。
+    expect(Object.keys(deepseek.context ?? {}).sort()).toEqual(['contextWindow'])
   })
 
   it('providerInfo 用产品展示名', () => {

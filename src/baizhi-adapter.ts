@@ -284,7 +284,8 @@ export class BaizhiAdapter extends LlmAdapter {
     const entry = (await this.loadModels()).find((model) => model.id === options.model)
     const images = await this.inlineImages(options, entry)
 
-    const maxTokens = baizhiMaxTokensFor(options.maxTokens)
+    // ⚠️ 按**模型**夹上限：qwen 系列吃不下 100,000（会 400），不能一律用服务级上限。
+    const maxTokens = baizhiMaxTokensFor(options.maxTokens, options.model)
     /**
      * 思考配置。
      *
@@ -527,6 +528,12 @@ export class BaizhiAdapter extends LlmAdapter {
       ...model.supportsImage === true ? { inputModalities: ['text', 'image'] as const } : {},
       ...model.contextWindow !== undefined && model.contextWindow > 0
         ? { contextWindow: model.contextWindow }
+        : {},
+      // ⚠️ 必须走 `CatalogEntry.maxTokens`：宿主只从这里 materialize
+      // `defaultMaxTokens`（`src/model-catalog.ts`），写进 `context` 会被白名单重建丢弃。
+      // 不声明 ⇒ 请求不带 max_tokens ⇒ 退回插件兜底 4096、长篇被静默截断。
+      ...model.maxTokens !== undefined && model.maxTokens > 0
+        ? { maxTokens: model.maxTokens }
         : {},
     }
   }

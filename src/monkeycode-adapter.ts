@@ -532,6 +532,12 @@ export class MonkeycodeAdapter extends LlmAdapter {
       ...model.contextWindow !== undefined && model.contextWindow > 0
         ? { contextWindow: model.contextWindow }
         : {},
+      // ⚠️ 输出上限必须走 `CatalogEntry.maxTokens`（宿主映射成 `defaultMaxTokens`）。
+      // 写进 `context` 是无效的：`LlmModelContext` 只认 `contextWindow`，
+      // `normalizeModelInfo` 会白名单重建并静默丢掉多写的键。
+      ...model.maxTokens !== undefined && model.maxTokens > 0
+        ? { maxTokens: model.maxTokens }
+        : {},
     }
   }
 

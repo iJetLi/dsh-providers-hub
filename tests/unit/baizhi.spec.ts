@@ -39,8 +39,11 @@ import {
   BAIZHI_FALLBACK_MODELS,
   BAIZHI_MAX_CONTEXT,
   BAIZHI_MAX_OUTPUT_TOKENS,
+  BAIZHI_QWEN_FLASH_MAX_OUTPUT_TOKENS,
+  BAIZHI_QWEN_MAX_OUTPUT_TOKENS,
   baizhiCapabilityOf,
   baizhiFallbackModels,
+  baizhiMaxOutputTokensFor,
   findBaizhiFallback,
   isKnownBaizhiModel,
 } from '../../src/baizhi-product.js'
@@ -154,6 +157,7 @@ describe('模型目录解析：远端字段 + 本地能力表', () => {
       id: 'deepseek-v4-pro',
       name: 'DeepSeek V4 Pro',
       contextWindow: 1_048_576,
+      maxTokens: BAIZHI_MAX_OUTPUT_TOKENS,
     })
     expect(models[1].supportsImage).toBe(true)
   })
@@ -163,10 +167,11 @@ describe('模型目录解析：远端字段 + 本地能力表', () => {
     expect(model.name).toBe('glm-5')
   })
 
-  it('★ 未知模型：不写 contextWindow、不写 supportsImage（「未知」≠「不支持」）', () => {
+  it('★ 未知模型：不写 contextWindow、不写 supportsImage、不写 maxTokens（「未知」≠「不支持」）', () => {
     const [model] = parseBaizhiModelList({ data: [{ id: 'brand-new-model-9' }] })
     expect(Object.hasOwn(model, 'contextWindow')).toBe(false)
     expect(Object.hasOwn(model, 'supportsImage')).toBe(false)
+    expect(Object.hasOwn(model, 'maxTokens')).toBe(false)
   })
 
   it('★ 已知但窗口未知的模型也不补窗口（glm-5 只知识别，没有窗口证据）', () => {
@@ -219,10 +224,26 @@ describe('兜底模型表：至少覆盖实测过的 12 条 id', () => {
   })
 
   it('能力查询：已知返回能力、未知返回 undefined', () => {
-    expect(baizhiCapabilityOf('deepseek-v4-pro')).toEqual({ contextWindow: BAIZHI_MAX_CONTEXT })
+    expect(baizhiCapabilityOf('deepseek-v4-pro')).toEqual({
+      contextWindow: BAIZHI_MAX_CONTEXT,
+      maxTokens: BAIZHI_MAX_OUTPUT_TOKENS,
+    })
     expect(baizhiCapabilityOf('nope')).toBeUndefined()
     expect(isKnownBaizhiModel('kimi-k2.6')).toBe(true)
     expect(isKnownBaizhiModel('nope')).toBe(false)
+  })
+
+  it('★ 逐模型输出上限：deepseek/glm/kimi/minimax 100k、qwen 65,536、qwen-flash 32,768', () => {
+    for (const id of ['deepseek-v4-pro', 'deepseek-flash', 'glm-5.1', 'kimi-k2.6', 'minimax-m2.7', 'minimax-m3.1-flash']) {
+      expect(baizhiMaxOutputTokensFor(id), `${id} 上限`).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
+    }
+    for (const id of ['qwen3.6-plus', 'qwen3.5-plus', 'qwen3.5-flash']) {
+      expect(baizhiMaxOutputTokensFor(id), `${id} 上限`).toBe(BAIZHI_QWEN_MAX_OUTPUT_TOKENS)
+    }
+    expect(baizhiMaxOutputTokensFor('qwen-flash')).toBe(BAIZHI_QWEN_FLASH_MAX_OUTPUT_TOKENS)
+    // 未知模型 / 未传模型 ⇒ 回落服务级默认（不编 per-model 上限）
+    expect(baizhiMaxOutputTokensFor('brand-new-model-9')).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
+    expect(baizhiMaxOutputTokensFor(undefined)).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
   })
 })
 
@@ -351,12 +372,23 @@ describe('思考预算：必须严格小于 max_tokens', () => {
     expect(baizhiThinkingFor('on', 4096)).toBeUndefined()
   })
 
-  it('max_tokens 归一化：默认 4096、正数取整、封顶 100,000、非法值回默认', () => {
+  it('max_tokens 归一化：默认 4096、正数取整、按模型封顶、非法值回默认', () => {
     expect(baizhiMaxTokensFor(undefined)).toBe(BAIZHI_DEFAULT_MAX_TOKENS)
     expect(baizhiMaxTokensFor(12_345.9)).toBe(12_345)
     expect(baizhiMaxTokensFor(Number.MAX_SAFE_INTEGER)).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
     expect(baizhiMaxTokensFor(0)).toBe(BAIZHI_DEFAULT_MAX_TOKENS)
     expect(baizhiMaxTokensFor(-5)).toBe(BAIZHI_DEFAULT_MAX_TOKENS)
+  })
+
+  it('★ 按模型夹取：同一 100,000 在 deepseek 原样、在 qwen 被夹到各自硬限', () => {
+    expect(baizhiMaxTokensFor(BAIZHI_MAX_OUTPUT_TOKENS, 'deepseek-v4-pro'))
+      .toBe(BAIZHI_MAX_OUTPUT_TOKENS)
+    expect(baizhiMaxTokensFor(BAIZHI_MAX_OUTPUT_TOKENS, 'qwen3.6-plus'))
+      .toBe(BAIZHI_QWEN_MAX_OUTPUT_TOKENS)
+    expect(baizhiMaxTokensFor(BAIZHI_MAX_OUTPUT_TOKENS, 'qwen-flash'))
+      .toBe(BAIZHI_QWEN_FLASH_MAX_OUTPUT_TOKENS)
+    // 小值不受影响
+    expect(baizhiMaxTokensFor(4096, 'qwen-flash')).toBe(4096)
   })
 })
 

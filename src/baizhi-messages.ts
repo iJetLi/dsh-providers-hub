@@ -5,7 +5,8 @@
  *
  * 协议解析**复用** `src/minimax-messages.ts`（本仓唯一的 Anthropic Messages 实现），
  * 只在这里补百智云的两点差异：
- * 1. `max_tokens` 的上限（100,000，实测可用）与默认值（4096）；
+ * 1. `max_tokens` 的上限（逐模型实测：deepseek/minimax/glm/kimi 100,000、
+ *    qwen 65,536 / qwen-flash 32,768）与默认值（4096）；
  * 2. 思考参数：百智云用 `thinking: {type:'enabled', budget_tokens:N}`，
  *    **不支持** Anthropic 的 `output_config.effort`（顶层 `effort` 实测无作用：
  *    low/xhigh 各 2 次思考长度无差异）⇒ 这里**不做 effort 透传**，
@@ -21,7 +22,7 @@
 
 import type { RequestMessage, StreamChunk, ToolSchema } from '@deepseek-ai/dsh-llm'
 
-import { BAIZHI_MAX_OUTPUT_TOKENS } from './baizhi-product.js'
+import { baizhiMaxOutputTokensFor } from './baizhi-product.js'
 import {
   consumeMinimaxSse,
   serializeMinimaxMessages,
@@ -55,14 +56,17 @@ export type BaizhiThinking =
   | { readonly type: 'disabled' }
 
 /**
- * 归一化 `max_tokens`：非正/非有限 ⇒ 默认 4096；超过输出上限 ⇒ 夹到 100,000。
+ * 归一化 `max_tokens`：非正/非有限 ⇒ 默认 4096；超过该模型的输出上限 ⇒ 夹到上限。
+ *
+ * ⚠️ 上限是**逐模型**的（qwen 系列比 deepseek 低，实测 65,536 / 32,768），
+ * 传 `model` 才会按模型夹；不传时按服务级默认 `BAIZHI_MAX_OUTPUT_TOKENS` 夹。
  */
-export function baizhiMaxTokensFor(maxTokens: number | undefined): number {
+export function baizhiMaxTokensFor(maxTokens: number | undefined, model?: string): number {
   const raw =
     typeof maxTokens === 'number' && Number.isFinite(maxTokens) && maxTokens > 0
       ? Math.floor(maxTokens)
       : BAIZHI_DEFAULT_MAX_TOKENS
-  return Math.min(raw, BAIZHI_MAX_OUTPUT_TOKENS)
+  return Math.min(raw, baizhiMaxOutputTokensFor(model))
 }
 
 /**
@@ -114,7 +118,7 @@ export interface BuildBaizhiMessagesPayloadOptions {
 export function buildBaizhiMessagesPayload(
   options: BuildBaizhiMessagesPayloadOptions,
 ): Record<string, unknown> {
-  const maxTokens = baizhiMaxTokensFor(options.maxTokens)
+  const maxTokens = baizhiMaxTokensFor(options.maxTokens, options.model)
   const payload: Record<string, unknown> = {
     model: options.model,
     max_tokens: maxTokens,
