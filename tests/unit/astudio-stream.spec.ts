@@ -6,7 +6,8 @@
  *            （非导出的）`rewriteLine` + `isAllEmptyDelta` / `astudioWrapIncremental`
  *
  * ── 为什么这三个函数值得单独一组用例（事实依据）──────────────────────
- * fact 352/363/380 实测：上游 `POST /model-gateway/v1/chat/completions` 的 stream=true 回的是
+ * fact 352/363/380 实测：上游 `POST {maasBaseUrl}/chat/completions`（2026-11-07 起为
+ * `maas-api.cn-huabei-1.xf-yun.com/v1`）的 stream=true 回的是
  * **标准 OpenAI 增量** chunk + `[DONE]`。但任务方法论的「已知坑」与 fact 349 记录的内置链
  * 是「同一 Id 累积全文」⇒ `astudioWrapIncremental` 是**防御性**包装器。
  * 风险两个方向都存在：

@@ -773,8 +773,8 @@ export class AstudioAuth extends Service {
    * 拉取远端模型目录：`GET {catalogBaseUrl}{catalogPath}`，解
    * `{code:0,data:{models:[…]}}` 信封。
    *
-   * ⚠️ **不能**走 `{maasBaseUrl}/models`：实测恒 **404** `page not found`
-   *（`/model-gateway/v1/models` 与 `/api/v1/model-manager/models` 是两个不同前缀，
+   * ⚠️ **不能**走 `{maasBaseUrl}/models`：实测恒 **404/405**
+   *（推理网关与 `/api/v1/model-manager/models` 是两个不同域/前缀，
    * 见 `astudio-product.ts` 模块头第 1 条）。
    * ⚠️ 返回**未过滤**的解析结果：可见性过滤（剔 `visibility:hide` 的内部别名）
    * 由适配器用 `astudioVisibleModels` 做 —— 一处只干一件事，且

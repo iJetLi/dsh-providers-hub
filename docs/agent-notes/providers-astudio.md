@@ -11,13 +11,31 @@ AStudio 后端采用**推理网关**与**账号控制面**严格分离的双域�
 
 | 域 | 基础地址 | 鉴权方式 | 承载能力 |
 |---|---|---|---|
-| **推理网关** | `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1` | `Authorization: Bearer <modelBearerToken>` + `X-Account-Id` | `/chat/completions`、`/responses` 模型推理对话 |
+| **推理网关** | `https://maas-api.cn-huabei-1.xf-yun.com/v1`（2026-11-07 起；旧 `astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1` 已下线） | `Authorization: Bearer <modelBearerToken>` + `X-Account-Id` | `/chat/completions`、`/responses` 模型推理对话 |
 | **账号控制面** | `https://agent.xfyun.cn/xingchen-studio` | `Cookie: ssoSessionId=<sid>` | 额度查询（`points/balance`、`points/summary`）、每日签到（`client-popups`）、凭据轮换 |
 | **SSO 认证** | `https://sso.xfyun.cn/SSOService/wx/scanlogin` | 随机 Session `fd` 参数 | 微信扫码授权、UID/会话轮询 |
 
 **核心规则**：
 1. **凭据双轨制**：推理端点不消费 Cookie；账号面端点不消费 Bearer Token。
 2. **凭据自愈链**：当推理返回 `401 / no_valid_authorization` 时，使用存活的 `ssoSessionId` 请求控制面 `/bot/models/configs` 即可无感刷新换取最新 `modelBearerToken`。
+
+### 0.1 推理网关迁移（2026-11-07 真机复测）
+
+症状：会话内所有 AStudio 请求立即失败 `HTTP 404 API endpoint not found`（`INVALID_REQUEST`），
+客户端看起来「模型不回复」。**不是** token 过期、**不是**模型下架。
+
+| 探测 | 结果 |
+|---|---|
+| `POST https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1/chat/completions`（真 token） | **404** `{"error":{"message":"API endpoint not found","type":"not_found_error"}}` |
+| 同上但**假 token** | **401** `{"message":"HMAC signature cannot be verified: apikey not found"}` ⇒ 网关先验鉴权，404 发生在路由阶段 |
+| `GET https://astronstudio-api-volces-prod.xf-yun.com/api/v1/model-manager/models`（同一 token） | **200** `code:0`，7 个模型，含 `xopdsv4flash0731in` ⇒ 凭据有效 |
+| `POST https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions`（同一 token） | **200**，普通与 SSE 流均正常出字，`reasoning_effort:high` 也被接受 |
+| `POST https://maas-api.cn-huabei-1.xf-yun.com/v1/models` | **405** `method not allowed` ⇒ 目录仍走旧域的 `/api/v1/model-manager/models` |
+| 新基址 + 不存在的模型 | **400** `{"error":{"code":10404,"message":"no category route found","type":"invalid_request_error"}}` |
+
+结论：推理基址搬到 `https://maas-api.cn-huabei-1.xf-yun.com/v1`，**目录基址未变**。
+该值来自 AStudio 客户端 bundle（与 `AStudio2API` 从客户端提取的 `DefaultUpstreamBase` 一致），
+并经上表真机 200 验证。旧前缀不会恢复 —— 它现在对任何路径都返回同一句 404。
 
 ---
 

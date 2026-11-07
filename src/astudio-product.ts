@@ -1,20 +1,25 @@
 /**
  * AStudio（讯飞 AstronStudio 桌面端）provider 的产品配置 —— **唯一真相源**。
  *
- * ## 协议速览（全部为 2026-10-15 真机实测，详见 `docs/agent-notes/providers-astudio.md`）
+ * ## 协议速览（2026-10-15 首测；推理基址 2026-11-07 迁移后复测，详见 `docs/agent-notes/providers-astudio.md`）
  *
  * | 用途 | 方法 | 地址 | 认证 |
  * |---|---|---|---|
- * | 对话 | POST | `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1/chat/completions` | `Authorization: Bearer <modelBearerToken>` |
+ * | 对话 | POST | `https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions` | `Authorization: Bearer <modelBearerToken>` |
  * | 模型目录 | GET | `https://astronstudio-api-volces-prod.xf-yun.com/api/v1/model-manager/models` | 同上 |
  * | 活体凭据（权威源） | GET | `https://agent.xfyun.cn/xingchen-studio/bot/models/configs` | `Cookie` 四字段串 |
  *
  * 三条与其余 provider 不同的**结构性事实**（都不是从代码推出来的，必须实测才知道）：
  *
- * 1. **两个基址不共用前缀**：推理在 `/model-gateway/v1`，目录在 `/api/v1/model-manager`。
- *    ⚠️ `/model-gateway/v1/models` 实测恒 **404 `page not found`**（带不带
- *    `X-Account-Id`、带不带 `X-Session-Id` 三种组合都试过）—— 按「OpenAI 兼容
- *    网关必有 `/v1/models`」的直觉去拼会一路 404。
+ * 1. **两个基址不同域**：推理在 `maas-api.cn-huabei-1.xf-yun.com/v1`，目录在
+ *    `astronstudio-api-volces-prod.xf-yun.com/api/v1/model-manager`。
+ *    ⚠️ 2026-11-07 起旧的推理前缀 `astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1`
+ *    整段下线：任何路径（含 `/chat/completions`）都回
+ *    **HTTP 404 `{"error":{"message":"API endpoint not found","type":"not_found_error"}}`**；
+ *    同一 token 打目录仍 200（证明不是鉴权失效），打新基址 200 且正常出流。
+ *    网关迁移时不会发公告，故该常量必须能随实测更新（`ASTUDIO_MAAS_BASE_URL`）。
+ *    ⚠️ 目录基址**没有** `/v1/models`（新推理基址的 `/v1/models` 是 405 `method not allowed`）——
+ *    按「OpenAI 兼容网关必有 `/v1/models`」的直觉去拼会一路 404/405。
  * 2. **推理端点的 `model` 只认裸 slug**：本地回环网关（`127.0.0.1:4605/v1/models`）
  *    把每个模型下发**两份**（`builtin/<base64url(裸 slug)>` 为 `visibility:list`、
  *    裸 slug 为 `hide` 别名），那是 acode 内核的**内部路由标识**；而上游推理端点
@@ -126,6 +131,17 @@ export interface AstudioProduct {
 export const ASTUDIO_CHAT_PATH = '/chat/completions'
 export const ASTUDIO_CATALOG_PATH = '/api/v1/model-manager/models'
 export const ASTUDIO_API_KEY_CONFIG_PATH = '/bot/models/configs'
+
+/**
+ * 推理网关基址（OpenAI 兼容）。
+ *
+ * ⚠️ **2026-11-07 真机复测：旧基址已整段下线。**
+ * `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1` 下任何路径
+ * （含 `/chat/completions`）都回 HTTP 404 `API endpoint not found`；同一 token
+ * 打模型目录仍 200，说明不是鉴权失效而是网关搬迁。AStudio 客户端 3.4.4+ 的
+ * 推理基址即本值（与 AStudio2API 从客户端 bundle 提取的默认值一致）。
+ */
+export const ASTUDIO_MAAS_BASE_URL = 'https://maas-api.cn-huabei-1.xf-yun.com/v1'
 
 /** 凭据文件路径的环境变量覆盖（单测/非默认安装位置用）。 */
 export const ASTUDIO_SESSION_FILE_ENV = 'DSH_ASTUDIO_SESSION_FILE'
@@ -253,7 +269,7 @@ export const ASTUDIO: AstudioProduct = {
   id: 'astudio',
   // ⚠️ 与客户端 `PROVIDERS` 里的 label 逐字一致（rail 宽度算式依赖它）。
   displayName: 'AStudio',
-  maasBaseUrl: 'https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1',
+  maasBaseUrl: ASTUDIO_MAAS_BASE_URL,
   chatPath: ASTUDIO_CHAT_PATH,
   catalogBaseUrl: 'https://astronstudio-api-volces-prod.xf-yun.com',
   catalogPath: ASTUDIO_CATALOG_PATH,
