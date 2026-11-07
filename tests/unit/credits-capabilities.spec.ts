@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -978,11 +978,27 @@ describe('客户端源码静态检查（防未声明变量崩页面）', () => {
   it('plugin-src/client 下没有未声明变量（TS2304 / TS2552）', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const root = resolve(here, '../..')
+    const configPath = resolve(root, 'tsconfig.client-check.json')
+    // ⚠️⚠️ **闸门自身必须先能证明它真的跑过**（六审 P1-1，实测打穿）。
+    //
+    // `spawnSync` 的退出码与 `error` 都**不参与**下面的过滤 —— 而 tsc 在
+    // 「找不到 -p 指定的配置文件」时报的是 `error TS5058: The specified path
+    // does not exist`，那个码**不在** `TS(2304|2552)` 白名单里 ⇒
+    // `undeclared` 恒为 `[]` ⇒ 断言通过。
+    //
+    // 实测：把 `tsconfig.client-check.json` 改个名字，**48 条仍然全绿**。
+    // ⇒ 「闸门自己」和「它守护的东西」一样需要被守卫。
+    expect(
+      existsSync(configPath),
+      `客户端 tsc 闸门缺少配置文件 ${configPath} ⇒ 本条会静默变成空跑（fail-open）`,
+    ).toBe(true)
     const result = spawnSync(
       process.execPath,
-      [resolve(root, 'node_modules/typescript/bin/tsc'), '-p', resolve(root, 'tsconfig.client-check.json')],
+      [resolve(root, 'node_modules/typescript/bin/tsc'), '-p', configPath],
       { cwd: root, encoding: 'utf8' },
     )
+    // 启动失败（`ENOENT` 之类）时 `stdout` / `stderr` 可能都是空 ⇒ 同样是 fail-open。
+    expect(result.error, `tsc 未能启动：${String(result.error)}`).toBeUndefined()
     const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
     // 只保留「找不到名称」两类：其余诊断（JSDoc 风格、第三方类型）不是本闸的目标。
     const undeclared = output

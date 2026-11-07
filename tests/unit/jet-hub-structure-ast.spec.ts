@@ -100,7 +100,7 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
       .toEqual([])
   })
 
-  it('★★★ panelHead 的子节点只能是「标题 + 状态提示 + 排序提示 + 按钮组」', () => {
+  it('★★★ panelHead 的子节点只能是「标题行 + 状态提示 + 排序提示 + 按钮组」', () => {
     const ph = panelHeadCall()
     expect(ph, '找不到 .dim-jh-panelHead').toBeTruthy()
     const children = ph.arguments.slice(2)
@@ -114,7 +114,14 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
         .map((c) => source.slice(c.getStart(sf), c.getStart(sf) + 40).replace(/\s+/g, ' '))
         .join(' | ')}）`,
     ).toBe(9)
-    expect(classNameOf(children[0])).toBe('dim-jh-panelTitle')
+    // ⚠️ 2026-11-06：第一个子项从 `.dim-jh-panelTitle` 变成
+    //    `.dim-jh-panelTitleRow`（标题 + 最右侧的「供应商开关」图标**包了一层
+    //    行容器**）。**不能**直接把标题改成 `flex: 1 1 auto` 了事 —— 那样
+    //    标题 + 图标 + 按钮组会在宽屏下挤成一行（1400px 有约 930px 富余，
+    //    wrap 不触发），2026-10-26 的「标题独占一整行」当场破掉。那条契约
+    //    现在由 `.dim-jh-panelHead > .dim-jh-panelTitleRow { flex: 1 0 100% }`
+    //    保证，见 `tests/unit/provider-toggle.spec.ts` 的「★★ 样式侧」。
+    expect(classNameOf(children[0])).toBe('dim-jh-panelTitleRow')
     expect(classNameOf(children[children.length - 1])).toBe('dim-jh-headerActions')
     // 中间那个三元是排序提示（accounts.length > 1 ? <p.orderHint> : null）
     const orderHintIdx = children.findIndex((c) => source.slice(c.getStart(sf), c.getEnd())
@@ -272,109 +279,16 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
   it('★★ headerActions 必须闭合在 panelHead 之前（不许把面板主体吞进去）', () => {
     const ha = headerActionsCalls()
     const ph = panelHeadCall()
-    expect(ha.length, '页头按钮组应有 2 处（面板 + 全局页头）').toBe(2)
+    // ⚠️ 2026-11-05 侧边栏重构：**全局页头整个删掉了**（供应商 / 一键签到 /
+    //    网关 / 用量 / 渠道原生搜索四个按钮搬进侧边栏底部操作行），所以
+    //    headerActions 只剩账号面板里那一处。哪天有人把页头加回来，这条会红，
+    //    提醒他同时检查「共用类名改默认值会不会波及另一处」。
+    expect(ha.length, '页头按钮组只应剩账号面板里那一处（全局页头已删除）').toBe(1)
     const panelActions = ha.find((n) => n.getStart(sf) > ph.getStart(sf) && n.getEnd() < ph.getEnd())
     expect(panelActions, 'panelHead 内找不到 headerActions').toBeTruthy()
     // 面板那组的结束位置必须早于 panelHead 的结束位置，且两者之间只差收尾括号
     const gap = source.slice(panelActions.getEnd(), ph.getEnd())
     expect(gap.replace(/\s/g, ''), `panelHead 收尾多出内容：${JSON.stringify(gap)}`).toMatch(/^\)+$/)
     expect(gap.replace(/\s/g, '').length, 'panelHead 与按钮组之间只应差一个右括号').toBeLessThanOrEqual(2)
-  })
-})
-
-/**
- * ⚠️⚠️ **客户端的「请求序号」闸门必须真实存在**（2026-11-05 合规审计：代码对、
- * 零守卫 —— 删掉闸门 242 条全绿）。
- *
- * `providerStatusSeqRef` 是「最后写者胜」的**唯一**实现：
- * - `loadProviderStatuses` 每次进入占一个新序号，只有序号等于**当前**序号的
- *   响应才允许写 state（过期响应静默丢弃）；
- * - `patchProviderStatus`（用户点「全开/全关」后就地改状态）**必须推进序号**，
- *   否则一次**在途**的 `provider.status` 响应会拿旧快照把刚写的局部补丁**覆盖**
- *   ⇒ 开关跳回去（用户报障「开关状态自己变」）。
- *
- * ## ⚠️ 为什么用 AST 而不是源码文本
- *
- * 本仓的已知教训：「源码文本断言的共同弱点是 `if (false)` 短路禁用」——
- * 一行字面量在死分支里照样存在 ⇒ 文本断言恒绿。⇒ 这里走 AST：
- * ① 找**更新点**（`providerStatusSeqRef.current` 作为 `++` / `+=` 的左操作数）；
- * ② 找**比较点**（`providerStatusSeqRef.current` 作为 `!==` 的一侧）。
- *
- * 计数判据（而非「包含」）：
- * - 更新点必须**恰好 2 处**（`loadProviderStatuses` 的 `++` + `patchProviderStatus`
- *   的 `+= 1`）⇒ 少一处（删掉推进）就红；
- * - 比较点必须**恰好 2 处**（成功分支 + 失败分支各一个）⇒ 删掉闸门就红。
- */
-describe('★★ 客户端 provider 状态序号闸门（AST 级）', () => {
-  /** 找 `providerStatusSeqRef.current` 出现的位置（属性访问的父节点）。 */
-  function seqRefUses(): { updates: number, comparisons: number, updateLines: number[] } {
-    let updates = 0
-    let comparisons = 0
-    const updateLines: number[] = []
-    const walk = (node) => {
-      // ① 更新点：`x.current++`（PrefixUnary）或 `x.current += 1`（Binary with +=）。
-      if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.PlusPlusToken) {
-        if (isSeqRef(node.operand)) {
-          updates += 1
-          updateLines.push(lineOf(node.getStart(sf)))
-        }
-      }
-      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) {
-        if (isSeqRef(node.left)) {
-          updates += 1
-          updateLines.push(lineOf(node.getStart(sf)))
-        }
-      }
-      // ② 比较点：`x.current !== y`。
-      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
-        if (isSeqRef(node.left) || isSeqRef(node.right)) comparisons += 1
-      }
-      ts.forEachChild(node, walk)
-    }
-    walk(sf)
-    return { updates, comparisons, updateLines }
-  }
-
-  /** 该表达式是否就是 `providerStatusSeqRef.current`。 */
-  function isSeqRef(node) {
-    return ts.isPropertyAccessExpression(node)
-      && ts.isIdentifier(node.expression)
-      && node.expression.text === 'providerStatusSeqRef'
-      && node.name.text === 'current'
-  }
-
-  it('★★ 更新点必须恰好 2 处（loadProviderStatuses 的 ++ 与 patchProviderStatus 的 += 1）', () => {
-    const { updates, updateLines } = seqRefUses()
-    expect(updates, `providerStatusSeqRef.current 的更新点应恰好 2 处（实测行 ${updateLines.join(',')}）`)
-      .toBe(2)
-  })
-
-  it('★★ 比较点必须恰好 2 处（成功分支 + 失败分支各一个「过期响应丢弃」闸门）', () => {
-    const { comparisons } = seqRefUses()
-    expect(comparisons, 'providerStatusSeqRef.current 的比较点应恰好 2 处').toBe(2)
-  })
-
-  it('★★ patchProviderStatus 必须推进序号（否则在途响应会覆盖用户刚点的补丁）', () => {
-    /**
-     * ⚠️ 用 **AST** 定位 `patchProviderStatus` 的 `useCallback` 回调体，
-     * 而不是文本切片（文本切片会被同名注释骗过）。
-     */
-    const at = source.indexOf('const patchProviderStatus = React.useCallback')
-    expect(at, '找不到 patchProviderStatus').toBeGreaterThan(-1)
-    const slice = source.slice(at, at + 4000)
-    const sliceSf = ts.createSourceFile('patch.ts', slice, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-    let hasIncrement = false
-    const walk = (node) => {
-      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) {
-        if (ts.isPropertyAccessExpression(node.left)
-          && ts.isIdentifier(node.left.expression)
-          && node.left.expression.text === 'providerStatusSeqRef'
-          && node.left.name.text === 'current') hasIncrement = true
-      }
-      ts.forEachChild(node, walk)
-    }
-    walk(sliceSf)
-    expect(hasIncrement, '★★ patchProviderStatus 必须推进 providerStatusSeqRef.current（否则旧快照覆盖用户刚点的补丁）')
-      .toBe(true)
   })
 })

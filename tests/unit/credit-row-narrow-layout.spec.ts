@@ -43,7 +43,19 @@ const hub = readFileSync(resolve(HERE, '../../plugin-src/client/jet-hub.js'), 'u
  */
 const stylesBare = styles.replace(/\/\*[\s\S]*?\*\//g, '')
 
-/** 取一条 CSS 规则（选择器 + 第一对花括号）。 */
+/**
+ * 取一条 CSS 规则（选择器 + 第一对花括号）。
+ *
+ * ⚠️ **只取第一条匹配**。当同一选择器既有基础规则、又在 `@container` /
+ * `@media` 里有覆盖时，它拿到的永远是**基础**那条。本文件的用例因此分成两类：
+ *
+ * - 断言「**基础**规则没被改坏」（`:107` / `:127` 那几条反向钉子）⇒ 用 `ruleOf`；
+ * - 断言「**容器里**那条覆盖规则」⇒ **必须**先在 `containerBlock()` 里切出范围
+ *   再 `.match(...)`（见 `:149` / `:161` / `:168`），否则会断言到基础规则上。
+ *
+ * （十一审 P3 #4 曾建议把 `ruleOf` 改成「取最后一条」—— 实测会让上面那两条
+ * 反向钉子立刻假红，因为基础规则排在前面。**按范围查**才是正解。）
+ */
 function ruleOf(selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const found = stylesBare.match(new RegExp(`${escaped} \\{[^}]*\\}`))?.[0]
