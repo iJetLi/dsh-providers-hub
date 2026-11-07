@@ -13,8 +13,9 @@ import {
   checkinProviders,
 } from './credits-capabilities.js';
 import { orderAfterDrop, dropPositionFromPointer } from './account-order.js';
-import { checkinCommitPlan, formatNextRunAt, isInsideCheckinDock, needsHostRestartNotice } from './checkin-panel-logic.js';
+import { checkinCommitPlan, formatNextRunAt, needsHostRestartNotice } from './checkin-panel-logic.js';
 import { accountLimitActionState, policyBlockedHint, policyBlockedInfo } from './account-status.js';
+import { providerSwitchState } from './provider-toggle.js';
 // ⚠️ 冲突解法（PR !144 × origin/master × 本 fork 的 qoder 代理）：
 //    - HEAD（PR !144）：删掉了旧侧栏入口 store（那个 `sidebar-entry` 前缀的
 //      老 store 模块，上游已整块删除）的四个符号 —— 侧栏入口改由
@@ -287,6 +288,34 @@ const GROWTH_TASK_PROVIDERS = new Set(['buddy']);
  * 一致性由 `tests/unit/accio-client-panel.spec.ts` 从宿主源码真读该字面量锁死。
  */
 const ACCIO_DAILY_BUCKET = '每日积分';
+
+/**
+ * 「关闭设置弹窗时自动保存定时签到时刻」这条链路的**超时上界**（毫秒）。
+ *
+ * ## 为什么需要它
+ *
+ * `rpcCall` 直通宿主的 `connection.rpc.call`（`plugin-src/client/index.js`
+ * 的 `apply()` 里那个包装），**这一层没有任何超时**。链路卡死（服务端阻塞、
+ * 连接半开）时那个 Promise 永远不 resolve，而 `closeSettings` 用
+ * `checkinSavingRef.current` 做单飞闸门 ⇒ 它会永远是 `true` ⇒
+ * **设置弹窗彻底关不掉**，连「完成」按钮都不响应，用户只能刷新页面。
+ *
+ * ## 为什么是 15 秒
+ *
+ * 一次账号写盘 + 一次宿主往返的**宽松上界**：正常情况是几十毫秒级，
+ * 15 秒意味着「确实出问题了」，不会误杀慢请求。
+ *
+ * ## 超时之后发生什么
+ *
+ * 按「保存失败」处理（`saveCheckinTimesWith` 返回 `false`）⇒ 走
+ * `checkinSaveFailedRef` 那条路，用户**再点一次就能关掉** —— 而「已经
+ * 提示过失败」正是这条兜底要的终态。
+ *
+ * ⚠️ 超时**不取消**底层请求（`Promise.race` 不会），所以它后来若真的成功了，
+ * `setAutoCheckin` 仍会更新界面 —— 服务端确实保存了，这是正确的。代价是
+ * 用户可能看到「失败」提示后状态又自己变对了，但比「面板关不掉」轻得多。
+ */
+const CHECKIN_SAVE_TIMEOUT_MS = 15_000;
 
 /**
  * Accio 每日额度的**诚实说明**（本面板唯一的说明文案来源）。
@@ -3219,7 +3248,40 @@ function accioResetSeconds(packages, now) {
 }
 
 
-function ProviderPanel({ provider, rpcCall }) {
+/**
+ * 单个供应商的账号管理面板。
+ *
+ * 标题行右侧有一个**供应商开关**（`role="switch"`），点击直接
+ * `provider.setEnabled({ provider, enabled })`，不用跳弹窗。
+ *
+ * @param providerStatuses 页面级的 `provider.status` 汇总（`Record<provider, ProviderStatus>`）。
+ *   ⚠️ 开关的三件套（`checked` / `disabled` / `reason`）**必须**走
+ *   `providerSwitchState(status)`，不要在这里重写一份 —— 那份判据同时服务
+ *   「供应商开关」弹窗，两处一旦分叉就会出现「弹窗说能点、这里说不能」。
+ * @param providerBusy 正在切换的供应商 id 集合（页面级）—— 用于在请求在飞时
+ *   禁用开关，避免连点产生两条互相覆盖的意图。
+ * @param onToggleProvider 页面级的切换动作（带 confirm + 重拉状态 + 重挂载面板）。
+ *   ⚠️ 本组件**不做**乐观更新：开关的 `aria-checked` 完全由 `providerStatuses`
+ *   驱动，请求回来后 `loadProviderStatuses()` 会把它刷成服务端真值。
+ *
+ * ⚠️ 历史：2026-11-06 用户两轮需求 —— 先是「在账号管理行最右侧增加供应商开关
+ *    按钮」（做成了「打开供应商开关弹窗」的入口），被否：「我说的是加单独供应商
+ *    开启/关闭的功能，你把整个移过来干嘛」⇒ 改成当前供应商自己的真开关。
+ *    那个 `onOpenProviderSwitches` 回调已删除，不要再加回来。
+ */
+function ProviderPanel({
+  provider,
+  rpcCall,
+  providerStatuses,
+  providerBusy,
+  onToggleProvider,
+}) {
+  // 标题行右侧那个「供应商开关」的三件套判据（checked / disabled / reason）。
+  // ⚠️ 必须是 `providerSwitchState()` 的产物，不能在这里重写一遍判据 ——
+  //    「已关闭优先于没有模型可关」那条顺序是 IKP8OF 死锁的修复。
+  const switchState = providerSwitchState(providerStatuses?.[provider]);
+  const switchBusy = providerBusy?.has?.(provider) === true;
+  const providerLabel = PROVIDERS.find((p) => p.id === provider)?.label || provider;
   const [accounts, setAccounts] = React.useState([]);
   const [phase, setPhase] = React.useState('loading');
   const [error, setError] = React.useState(null);
@@ -5404,8 +5466,56 @@ function ProviderPanel({ provider, rpcCall }) {
     //    ⚠️ 提示为 null（账号 ≤ 1）时按钮组仍靠右：margin-left: auto 与
     //    justify-content: flex-end 两条都留着，任一条都能把它推到右边。
     React.createElement('div', { className: 'dim-jh-panelHead' },
-      React.createElement('h2', { className: 'dim-jh-panelTitle' },
-        `${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号管理`),
+      React.createElement('div', { className: 'dim-jh-panelTitleRow' },
+        React.createElement('h2', { className: 'dim-jh-panelTitle' },
+          `${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号管理`),
+        // ⚠️ **「供应商开关」在标题行的最右侧**（2026-11-06 用户：
+        //    「是上面一行，图标，不是文字」—— 第一版做成了按钮组里的文字按钮，
+        //    用户否掉了）。
+        //
+        //    为什么放在标题行而不是按钮组：
+        //    ① 按钮组已经有 6 个（一键领取积分 / 重测所有 / 重置所有 / 模型 /
+        //       新建账号 / 刷新积分），再加一个文字按钮会把 `flex-wrap` 推到
+        //       第二行，视觉上把「本页操作」和「跨页导航」混成一堆；
+        //    ② 标题行右侧是**空白**，图标放这里零成本，且与「供应商」这个
+        //       全局概念在位置上更匹配（标题 = 页面身份，开关 = 跨页导航）。
+        //
+        //    ⚠️ **为什么必须包一层 `.dim-jh-panelTitleRow`**：2026-10-26 用户
+        //       要求「标题独占一整行、按钮组另起一行」，靠的是
+        //       `.dim-jh-panelTitle { flex: 1 0 100% }`。如果直接把图标作为
+        //       标题的兄弟塞进 panelHead，标题就必须改成 `flex: 1 1 auto`
+        //       才能与图标同行 —— 而那样**标题 + 图标 + 按钮组会挤在同一行**
+        //       （1400px 下有约 930px 富余，wrap 不会触发），2026-10-26 的
+        //       需求当场破掉。包一层 flex 行容器既能保住「独占一行」，
+        //       又能让图标靠右。
+        //    ⚠️ 包容器**只对标题安全** —— 下面的状态提示（`.dim-jh-probeNotice`）
+        //       必须仍是 panelHead 的**直接**子节点（见下方长注释）。
+      // ⚠️ **这是「当前供应商」自己的开关，不是「打开供应商开关弹窗」的入口**
+      //    （2026-11-06 用户澄清：「我说的是加单独供应商开启/关闭的功能，
+      //    你把整个移过来干嘛」—— 第一版做成了弹窗入口，被否）。
+      //
+      //    语义直接对应 `provider.setEnabled`（见 `toggleProvider` 的长注释）：
+      //    关闭 = 停用它的全部账号 + 写「关闭意图」（模型整体不再可选，
+      //    **但黑名单不动**）；打开 = 反过来。
+      //
+      //    ⚠️ 判据一律走 `./provider-toggle.js` 的 `providerSwitchState()` ——
+      //    它同时给出 checked / disabled / reason 三件套，其中「已关闭优先于
+      //    没有模型可关」那条顺序是 IKP8OF 死锁的修复，不能在这里重写一遍。
+      React.createElement('button', {
+        className: 'dim-jh-providerSwitch',
+        type: 'button',
+        role: 'switch',
+        'aria-checked': switchState.checked ? 'true' : 'false',
+        'aria-label': `${providerLabel}：${switchState.checked ? '已启用' : '已关闭'}`,
+        disabled: switchState.disabled === true || switchBusy,
+        title: switchState.reason
+          ?? `点击${switchState.checked ? '关闭' : '打开'}「${providerLabel}」`
+          + '（关闭 = 停用它的全部账号；模型黑名单保持不动）',
+        onClick: () => {
+          void onToggleProvider?.(provider, !switchState.checked)
+        },
+      },
+      React.createElement('span', { className: 'dim-jh-providerSwitchThumb' }))),
       // ⚠️ 2026-10-26 用户要求「信息应该在按钮行上方行，而不是下方行」：
       //    面板级状态提示（探测结果 / 锁定状态 / 领取结果 / 新手任务 / 登录链接 /
       //    补偿卡片）此前是 section 的直接子节点，排在 panelHead **之后** ⇒
@@ -5778,6 +5888,9 @@ function ProviderPanel({ provider, rpcCall }) {
               onClick: () => setShowMinimaxXff(true),
             }, minimaxXff !== '' ? '国际站分流：已绕过' : '国际站分流设置')
           : null,
+        // ⚠️ 「供应商开关」**不在这里** —— 它在标题行（见 panelHead 开头那段
+        //    注释）。2026-11-06 用户明确「是上面一行，图标，不是文字」，
+        //    第一版做在按钮组里被否掉了。别再加回来。
         // ★ 预选对话框（用户 2026-10-03：从按钮旁搬到弹窗里）
         //
         // ⚠ 内容按 provider 分支：zcode 问**登录渠道**，accio 问**登录区域**
@@ -7340,7 +7453,7 @@ function providerRowSummary(row) {
  * 传入；拖拽的视觉状态（正在拖哪行 / 落点在哪）是本组件的局部 UI 状态，drop 时
  * 通过 `onCommitOrder` 把新顺序交给页面层持久化。
  */
-function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onToggle, onReload, onClose, order, onCommitOrder, reordering, notice, rpcCall, onProviderStatusPatched }) {
+function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onToggle, onReload, onClose, order, onCommitOrder, reordering, notice, rpcCall, onStatusReload }) {
   // ESC 关闭：挂在 document 上而不是弹窗上 —— 焦点可能落在任意一个开关上，
   // 只监听弹窗自身的 keydown 会漏掉这些按键（与 ModelListPanel 同因）。
   React.useEffect(() => {
@@ -7512,7 +7625,7 @@ function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onTog
     : null,
   React.createElement('div', { className: 'dim-jh-modalBody' },
     view === 'models'
-      ? React.createElement(ModelCenterPanel, { providers, rpcCall, statuses, onProviderStatusPatched })
+      ? React.createElement(ModelCenterPanel, { providers, rpcCall, statuses, onStatusReload })
       : React.createElement('div', { className: 'dim-jh-modelList' },
       rows.map(row => {
         const busy = busyIds.has(row.id);
@@ -7595,7 +7708,7 @@ function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onTog
  * 本组件也刻意**不用 `createPortal`**（见 `ModelListPanel` 的注释：客户端模块表
  * 由宿主注入，`react-dom` 可能不在其中，require 会抛「missed the module table」白屏）。
  */
-function ModelCenterPanel({ providers, rpcCall, statuses, onProviderStatusPatched }) {
+function ModelCenterPanel({ providers, rpcCall, statuses, onStatusReload }) {
   // providerId -> { phase: 'idle'|'loading'|'ready'|'error', models, error }
   const [states, setStates] = React.useState({});
   const [query, setQuery] = React.useState('');
@@ -7729,6 +7842,14 @@ function ModelCenterPanel({ providers, rpcCall, statuses, onProviderStatusPatche
           },
         };
       });
+      // ⚠️ **汇总状态必须跟着刷新**（2026-11-07 十一审 P3）：`setStates` 只更新
+      // 本屏的模型列表，而「已关闭」的分组与开关读的是 `providerStatuses`
+      //（服务端的派生判据 `disabled === total`）⇒ 不刷新的话，用户逐条关光全部
+      // 模型后开关仍显示「已打开」，左侧分组也不动，**要重挂载面板才看到变化**。
+      //
+      // 不计入 `busyIds`、也不 `await`：这是**装饰性**的旁路刷新，慢一点无妨，
+      // 失败也不能影响模型开关本身（`loadProviderStatuses` 内部已吞掉异常并降级）。
+      void onStatusReload?.();
     } catch (error) {
       if (mounted.current) setToggleError(`「${modelId}」切换失败：${error?.message || String(error)}`);
     } finally {
@@ -7787,23 +7908,9 @@ function ModelCenterPanel({ providers, rpcCall, statuses, onProviderStatusPatche
       if (mounted.current) setToggleWarnings(Array.isArray(result?.warnings) ? result.warnings : []);
       // 批量动作会改动整张黑名单，逐项翻不可靠 ⇒ 重载这一家。
       await loadProvider(providerId);
-      // ⚠️⚠️ 但**供应商级状态**也必须同步（2026-11-05 三审端到端 P2-1）：
-      // `providerStatuses` 只由 `loadProviderStatuses` 写（全仓两个写入点），
-      // 而 `loadProvider` 刷的是**模型列表**，两者是不同的 state ⇒ 不同步就会
-      // 出现「15 个 · 已关闭 0（该供应商已关闭）」这种自相矛盾的一行 ——
-      // 界面、开关、报错三者对不上。
-      //
-      // ⚠️ **不要**改调 `loadProviderStatuses()`：那会为刷新一家而重发全量请求
-      //（服务端对每个已关闭的供应商都要 `await fullCatalogIds`，2s 预算），
-      // 把「点一次全开」变成几十秒的等待。就地改这一家即可。
-      //
-      // ⚠️⚠️⚠️ **`setProviderStatuses` 不在本组件作用域里**（2026-11-05 四审
-      // 测试判别力 P0）—— 它由 `JetHubPage` 的 `React.useState` 声明，
-      // 而本组件是它的**孙辈**。`f51b3ef` 直接写了这个标识符 ⇒ `TS2304`、
-      // 点「全部打开/全部关闭」时 `ReferenceError` ⇒ 宿主 `SlotErrorBoundary`
-      // 捕获 ⇒ **整个设置页清空**，而这段「就地更新」的全部价值从未生效过。
-      // 修法：由 `JetHubPage` 经 `ProviderSwitchPanel` 逐层传入回调。
-      if (mounted.current) onProviderStatusPatched?.(providerId, disabled);
+      // ⚠️ 同 `toggleModel`：整家全关/全开后汇总状态也变了（`closed` 的派生判据
+      // 是 `disabled === total`）⇒ 必须刷新，否则左侧分组与标题行的开关停在旧值。
+      void onStatusReload?.();
     } catch (error) {
       if (mounted.current) setToggleError(`批量切换「${label}」失败：${error?.message || String(error)}`);
     } finally {
@@ -9487,15 +9594,18 @@ export function JetHubPage({ rpcCall }) {
    * ⚠️ `autoCheckin` 是**宿主实时状态**（含 `nextRunAt` / `times`），不落缓存 ——
    * 每次打开面板都重新读一次，否则改完时刻后显示的「下次执行」会停在旧值上。
    */
-  const [showCheckinPanel, setShowCheckinPanel] = React.useState(false);
   /**
-   * 下拉面板与触发按钮的引用 —— 「点击外部关闭」需要它。
+   * 「设置」弹窗是否打开（2026-11-06 起它同时承载**定时签到**配置）。
    *
-   * ⚠️ 必须把**触发按钮**也包在「内部」的范围里：只判面板本身的话，点那个 ▾
-   * 会先被 document 上的监听判成「外部」而关闭，紧接着按钮自己的 onClick 又把它
-   * 打开 ⇒ 表现为**点一次闪一下、关不掉**（典型的下拉陷阱）。
+   * ⚠️⚠️ 状态名从 `showCheckinPanel` 改过来不是纯改名：语义从「按钮下方的
+   *    下拉卡片」变成了「全屏遮罩弹窗」。这个区别是承重的 ——
+   *    下拉卡片靠 `document` 级 mousedown 命中测试判「点外部」，
+   *    而弹窗有自己的遮罩层（点遮罩即关），所以那套监听被整个删掉了。
+   *
+   * ⚠️ 关闭**必须**走 `closeSettings()`（关闭即保存定时签到），
+   *    不能裸写 `setShowSettings(false)` —— 那会把用户改的时刻静默丢弃。
    */
-  const checkinWrapRef = React.useRef(null);
+  const [showSettings, setShowSettings] = React.useState(false);
   const [autoCheckin, setAutoCheckin] = React.useState(null);
   const [autoCheckinError, setAutoCheckinError] = React.useState('');
   const [autoCheckinBusy, setAutoCheckinBusy] = React.useState(false);
@@ -9514,7 +9624,7 @@ export function JetHubPage({ rpcCall }) {
   /**
    * 上面三者「最新值」的同步副本。
    *
-   * ⚠️ 存在的唯一理由：`closeCheckinPanel` 可能被**早期注册的监听**调用
+   * ⚠️ 存在的唯一理由：`closeSettings` 可能被**早期注册的监听**调用
    *（document 上的 mousedown 捕获监听），那个闭包捕获的是注册时的旧 state。
    * 直接读 state 会拿到上一次渲染的值 ⇒ 关闭时保存的是**旧草稿**（真实缺陷，
    * 2026-11-01 实测：改完时刻点外部关闭，改动静默丢失）。
@@ -9530,7 +9640,7 @@ export function JetHubPage({ rpcCall }) {
    *
    * ⚠️⚠️ **这条是 2026-11-01 审计打穿的那个真缺陷的修法**：上面三个 ref 只解决了
    * 「草稿」的陈旧闭包，而提交判据还要读**宿主基线**（`autoCheckin.times`）。
-   * `document` 上的监听注册在 `useEffect(..., [showCheckinPanel])` 里，它的闭包里
+   * `document` 上的监听注册在 `useEffect(..., [showSettings])` 里，它的闭包里
    * `autoCheckin` 永远是**打开那一刻**的值 —— 首次打开时它是 `null`
    * ⇒ `checkinCommitPlan` 走「读不到宿主就不提交」⇒ 改完时刻点外部关闭、**静默丢失**。
    * （实测：首次打开 + 点外部关闭 = 0 次写请求；同一份草稿用 ▾ 关闭却能存。）
@@ -9548,12 +9658,44 @@ export function JetHubPage({ rpcCall }) {
    */
   const checkinSaveFailedRef = React.useRef(false);
   /**
+   * 保存进行中时被「排队」的关闭回调。
+   *
+   * ⚠️⚠️ 存在的理由（2026-11-05 三审 P2-3，**重建时漏掉过，2026-11-06 补回**）：
+   *    `closeSettings()` 有三个「打开别的弹窗」的入口（网关 / 用量 / 供应商开关）
+   *    和一个「完成」按钮。它们都写成 `closeSettings(() => setShowXxx(true))` ——
+   *    **后续动作放进回调**，因为保存失败时面板要留着（用户在错误的弹窗里点不到
+   *    目标弹窗）。
+   *
+   *    但出口②（`checkinSavingRef.current === true`，保存进行中）**早退**，
+   *    不执行回调 ⇒ 用户在保存的几百毫秒里点「网关」会**什么都不发生**，
+   *    而几百毫秒后再点就好了 —— 这种「有时灵有时不灵」的反馈最容易被当成
+   *    「界面卡了」。
+   *
+   *    修法：把这个手势的 `onClosed` **存起来**，保存完成后补执行。
+   *    ⚠️ 只存**一个**：连点两次时后一次覆盖前一次（用户最后一次点的那个目标
+   *    才是他要的）。
+   */
+  const checkinPendingCloseRef = React.useRef(null);
+  /**
    * 供应商级状态（provider id → ProviderStatus），driving 左侧分组与页头弹窗里的开关。
    *
    * `null` = 尚未读取成功（分组退化为不分组平铺，弹窗里的开关全部禁用）——
    * 与「读取到空对象」区分：后者说明服务端确实什么都没返回，也按未读取处理。
    */
   const [providerStatuses, setProviderStatuses] = React.useState(null);
+  /**
+   * `loadProviderStatuses` 的**请求序号**，用来丢弃过期响应（2026-11-07 十一审 P3）。
+   *
+   * 现在有两类触发源：挂载时一次、以及每次 `model.setDisabled` / `setAllDisabled`
+   * 成功之后各一次（见 `onStatusReload`）。**连续操作会同时在飞多个请求**，
+   * 而它们的返回顺序与发起顺序无关 ⇒ 若不加序号，先发的那次可能后到、
+   * 把界面上已经是「已关闭」的开关**改回「已打开」**（用户看到自己刚点的
+   * 操作被撤销，且没有任何报错）。
+   *
+   * ⚠️ 判据是 `seq !== ref.current`（**过期即丢弃**），不是 `seq < ref.current`
+   * —— 两者等价，但前者的意图更直白：只有「最后一次发起的」才允许写状态。
+   */
+  const providerStatusSeqRef = React.useRef(0);
   /**
    * 供应商状态**读取失败**（区别于「还没读回来」）。
    *
@@ -9562,19 +9704,6 @@ export function JetHubPage({ rpcCall }) {
    * 误导（用户会一直等）。失败信息由页头那条 notice 与弹窗计数共同承担。
    */
   const [providerStatusFailed, setProviderStatusFailed] = React.useState(false);
-  /**
-   * `loadProviderStatuses` 的**请求序号**（最后写者胜）。
-   *
-   * ⚠️⚠️ 没有它就会「开关跳回去」（2026-11-05 三审并发 P1-2）：每次
-   * `toggleProvider` 成功后都会再读一次全量状态，而服务端对每个已关闭的
-   * 供应商都要 `await fullCatalogIds(...)`（预算 2s，**循环内串行**）⇒
-   * 单次请求的耗时随已关闭家数线性增长 ⇒ **两次请求重叠是常态**，
-   * 先发的可能后到 ⇒ 旧快照覆盖新快照 ⇒ 用户刚打开的开关又变回「已关闭」。
-   *
-   * 判据：只有序号等于**当前**序号的响应才允许写 state；过期响应**静默丢弃**
-   *（连失败提示也不弹 —— 那是上一次请求的事，用户已经操作过了）。
-   */
-  const providerStatusSeqRef = React.useRef(0);
   /**
    * 「供应商开关」弹窗的展开状态。
    *
@@ -9717,8 +9846,7 @@ export function JetHubPage({ rpcCall }) {
    * 若在这里抛错，整个设置页会白屏 —— 那是「左侧装饰性功能拖垮主功能」的糟糕取舍。
    */
   const loadProviderStatuses = React.useCallback(async () => {
-    // ⚠️ 每次进入都占一个新序号；只有**最后**发起的请求允许写 state
-    //（见 `providerStatusSeqRef` 的注释：重叠是常态，先发的可能后到）。
+    // 每次发起都领一个新序号；回来时若已不是最新的，直接丢弃（见 ref 上的注释）。
     const seq = ++providerStatusSeqRef.current;
     try {
       const res = await rpcCall('provider.status', { providers: PROVIDERS.map(p => p.id) });
@@ -9727,7 +9855,6 @@ export function JetHubPage({ rpcCall }) {
       setProviderStatusFailed(false);
     } catch (caught) {
       console.error('[jet-hub] load provider statuses failed:', caught);
-      // 过期响应的失败同样丢弃：用户已经做过更新的操作，这条错误不再有意义。
       if (!mounted.current || seq !== providerStatusSeqRef.current) return;
       setProviderStatuses(null);
       setProviderStatusFailed(true);
@@ -9737,43 +9864,6 @@ export function JetHubPage({ rpcCall }) {
       });
     }
   }, [rpcCall]);
-
-  /**
-   * 就地把**一家**供应商的状态补成「全关 / 全开」。
-   *
-   * ⚠️⚠️ 为什么不直接调 `loadProviderStatuses()`（2026-11-05 三审端到端 P2-1）：
-   * 那会为刷新一家而重发全量请求，而服务端对每个「派生判据说已关闭」的供应商
-   * 都要 `await fullCatalogIds`（2s 预算）⇒ 把「点一次全开」变成几十秒等待。
-   *
-   * ⚠️⚠️ **必须推进序号**（2026-11-05 四审端到端 P1-3）：
-   * `loadProviderStatuses` 是唯一 `++providerStatusSeqRef.current` 的地方。
-   * 若这里不推进，某次 `provider.status` 可能在用户点「全关」**之前**发出、
-   * **之后**才返回 ⇒ 它拿到的 `seq` 仍相等 ⇒ 通过闸门 ⇒ 把刚写的局部补丁
-   * **覆盖成旧快照** ⇒ 开关跳回去。序号闸门的语义是「写入使在飞请求失效」，
-   * 不是「谁后发谁赢」。
-   */
-  const patchProviderStatus = React.useCallback((providerId, disabled) => {
-    providerStatusSeqRef.current += 1;
-    setProviderStatuses(prev => {
-      const current = prev?.[providerId];
-      if (current === undefined) return prev;
-      const total = current.models?.total ?? 0;
-      const nextDisabled = disabled ? total : 0;
-      return {
-        ...prev,
-        [providerId]: {
-          ...current,
-          models: { total, disabled: nextDisabled },
-          // 与 `provider.status` 同一条判据（`total > 0 && disabled === total`）。
-          closed: total > 0 && nextDisabled === total,
-          // ⚠️ 「本次核实失败」的附注已经过时 —— 我们刚刚**知道**这一家的开关
-          // 结果（`model.setAllDisabled` 成功返回）。不清掉的话
-          // `providerSwitchState` 会继续按「核实失败」把它渲染成禁用。
-          verifyFailed: undefined,
-        },
-      };
-    });
-  }, []);
 
   React.useEffect(() => {
     mounted.current = true;
@@ -9964,51 +10054,6 @@ export function JetHubPage({ rpcCall }) {
    * 单渠道失败只计入 failed，**不中断后续渠道**（与后端「单账号失败不中断
    * 整体」同型）。但后端对**无账号**的渠道本就是零请求，故不额外预查账号。
    */
-  /**
-   * 下拉面板的「点击外部 / ESC 关闭」。
-   *
-   * 为什么不像其它弹窗那样「点击遮罩关闭」：那些是 `position: fixed` 的全屏遮罩，
-   * 有一个明确的表层可点；本面板是**锚定在按钮下方的下拉卡**（`position: absolute`），
-   * 没有遮罩层 —— 若也做成遮罩，会把整个设置页压暗、且与其它弹窗互斥逻辑打架。
-   * 故改用 document 级监听 + 命中测试。
-   *
-   * ⚠️ 用 `mousedown` 而不是 `click`：`click` 要等 mouseup 才触发，用户点空白处后
-   * 若手指稍有位移就不触发；`mousedown` 更接近「点到了别处」的直觉，也与浏览器
-   * 原生下拉的行为一致。
-   * ⚠️ 命中测试必须用 `contains()`（DOM 层级），**不能**用坐标判断：面板会被
-   * 窗口尺寸、滚动、缩放影响，坐标判据必然漂移。
-   * ⚠️ `checkinWrapRef` 覆盖**按钮 + 面板**两者：只判面板会让「点 ▾」自我关闭再重开。
-   */
-  React.useEffect(() => {
-    if (!showCheckinPanel) return undefined;
-    const onPointerDown = (event) => {
-      const wrap = checkinWrapRef.current;
-      // 点在容器（含按钮与面板）之内 ⇒ 不关。判据在 checkin-panel-logic.js
-      //（抽成纯函数是为了能测；这里只负责把 DOM 能力传进去）。
-      const inside = isInsideCheckinDock({
-        contains: (node) => wrap !== null && wrap.contains(node),
-        target: event.target,
-        isNode: typeof Node !== 'undefined' && event.target instanceof Node,
-      });
-      if (inside) return;
-      // ⚠️⚠️ **不能直接 `setShowCheckinPanel(false)`**（真实缺陷，2026-11-01 实测）：
-      //    那样会绕开 `toggleCheckinPanel` 里的「关闭即保存」分支，用户改了时刻/
-      //    浮动后点外部关闭 ⇒ 改动**静默丢失**，界面看着一切正常。
-      //    必须走同一个关闭入口，让保存只有一条腿。
-      closeCheckinPanel();
-    };
-    // 捕获阶段监听：避免被内部某个 stopPropagation 截断。
-    //
-    // ⚠️ **刻意不绑 ESC**（用户 2026-10-31 明确要求「按 ESC 关闭这个没必要」）：
-    //    本面板是按钮的附属下拉，不是模态框 —— 它不抢焦点、不遮页面、不改输入流。
-    //    用户在这里通常正拿着鼠标点时刻/开关，按 ESC 多半是想取消上游某个操作
-    //    （例如输入框的撤销），顺手把面板也关掉反而是干扰。
-    //    「移除」而非「保留但无害」：留着监听会让 ESC 同时做两件事，行为难预期。
-    document.addEventListener('mousedown', onPointerDown, true);
-    return () => {
-      document.removeEventListener('mousedown', onPointerDown, true);
-    };
-  }, [showCheckinPanel]);
 
   /**
    * 读取宿主侧的**定时签到**状态（开关 / 两个时刻 / 下次执行 / 上次结果）。
@@ -10050,16 +10095,25 @@ export function JetHubPage({ rpcCall }) {
    * **唯一**的关闭入口 —— 任何关闭路径都必须走这里，保证「关闭即保存」。
    *
    * ⚠️⚠️ 这不是洁癖（真实缺陷，2026-11-01 实测）：上一版有两处关闭 —— 滚轮按钮走
-   * `toggleCheckinPanel`（会保存），点外部走裸的 `setShowCheckinPanel(false)`（不保存）
+   * `openSettings`（会保存），点外部走裸的 `setShowSettings(false)`（不保存）
    * ⇒ 用户改完设置点外面关闭时，改动**静默丢失**，而界面看不出任何异常。
    * 同义语义只留一条实现，是本仓库反复记录的一条纪律。
    */
-  const closeCheckinPanel = () => {
+  const closeSettings = (onClosed) => {
     // ★ 关闭即保存（用户 2026-10-31：「退出这个小弹窗自动保存就行」）。
+    //
+    // ⚠️⚠️ **`onClosed` 不是可选装饰**（2026-11-06 重建时漏掉过，真回归）：
+    //    四个入口里的三个（网关 / 用量 / 供应商开关）都是
+    //    `closeSettings(() => setShowXxx(true))` —— 它们要「先关设置、再打开
+    //    目标弹窗」。函数签名少写这个参数，调用处的实参就被**静默丢弃**，
+    //    用户点那三个按钮**什么都不发生**，而 127 条测试全绿（它们只断言源码
+    //    里存在 `closeSettings(() =>` 这个字符串）。
+    //    ⇒ 凡「传回调给一个只负责『关闭』的函数」，**必须有一条行为断言**
+    //    证明回调真的被调用了。
     //
     // ⚠️⚠️ **一律读 ref，不读闭包里的 state**（真实缺陷，2026-11-01 两轮审计各自
     //    实测打穿）：本函数可能被**早于最后一次 setState 注册的监听**调用
-    //    （document 的 mousedown 捕获监听注册在 `useEffect(..., [showCheckinPanel])`，
+    //    （document 的 mousedown 捕获监听注册在 `useEffect(..., [showSettings])`，
     //    闭包停在打开那一刻）⇒ 读到的是旧值。**草稿三个 ref + 宿主状态一个 ref
     //    缺一不可**：只修前者时，首次打开（autoCheckin 还是 null）点外部关闭会走
     //    `checkinCommitPlan` 的「读不到宿主」分支 ⇒ 改动**静默丢失**，而用 ▾ 关闭
@@ -10075,17 +10129,31 @@ export function JetHubPage({ rpcCall }) {
       // 没改动（或宿主状态还没读回来）⇒ 直接关。
       // ⚠️ 宿主状态读不到时**不提交**：那时草稿只是本地默认值，写进去会把用户的
       //   真实设置覆盖成默认两个时刻。
-      setShowCheckinPanel(false);
+      setShowSettings(false);
+      onClosed?.();
       return;
     }
     // ★ 单飞：上一次保存还没回来时，忽略重复的关闭手势（audit2 P2-3）。
     //   否则「点外部关闭 + 再点一次」会发出**两条相同 payload** 的写请求。
-    if (checkinSavingRef.current) return;
+    //   ⚠️ 但**不能连「打开目标弹窗」这个后续动作一起丢掉**（三审 P2-3）：
+    //   把它排进 `checkinPendingCloseRef`，保存完成后补执行。
+    if (checkinSavingRef.current) {
+      // ⚠️⚠️ **只在有回调时排队**（2026-11-06 十审，真缺陷）：
+      //    纯关闭手势（「完成」按钮 / 点遮罩 / 再点一次「设置」）传的是
+      //    空（undefined）。若无条件赋值，它会把**之前排队的**那个回调覆盖掉 ⇒
+      //    用户先点「网关」（排队）再点「完成」（覆盖成 undefined）⇒ 保存完成
+      //    后什么都不执行，那次「打开网关」的意图**永久丢失**。
+      //    ⇒ 语义应是「记住最近一次**有后续动作**的关闭意图」，不是「记住最近
+      //    一次关闭」。纯关闭不需要记 —— 它的目的就是关掉面板本身。
+      if (onClosed !== undefined) checkinPendingCloseRef.current = onClosed;
+      return;
+    }
     // ★ 上一次保存**已经失败过**且用户没再改 ⇒ 这次直接关：错误已经显示过，
     //   不能把面板变成关不掉的死锁（audit2 P2-3）。用户的改动仍是「未保存」，
     //   重开面板时草稿会被宿主值覆盖 —— 这是「已经提示过失败」的代价，比卡死好。
     if (checkinSaveFailedRef.current) {
-      setShowCheckinPanel(false);
+      setShowSettings(false);
+      onClosed?.();
       return;
     }
     // 有改动 ⇒ 提交；**成功才关**，失败则把面板留在打开状态（否则错误文案渲染在
@@ -10094,18 +10162,27 @@ export function JetHubPage({ rpcCall }) {
     void saveCheckinTimesWith(plan.times, plan.jitterMinutes > 0, plan.jitterMinutes)
       .then((okSaved) => {
         checkinSavingRef.current = false;
-        if (okSaved) setShowCheckinPanel(false);
-        else checkinSaveFailedRef.current = true;
+        // ⚠️ 排队的那次手势**无论成败都要取走**（它只代表「这一次关闭意图」）：
+        //    失败时面板留着，用户下次点会走出口③ 直接关。
+        const pending = checkinPendingCloseRef.current;
+        checkinPendingCloseRef.current = null;
+        if (okSaved) {
+          setShowSettings(false);
+          onClosed?.();
+          pending?.();
+        } else {
+          checkinSaveFailedRef.current = true;
+        }
       });
   };
 
-  const toggleCheckinPanel = () => {
-    if (showCheckinPanel) { closeCheckinPanel(); return }
+  const openSettings = () => {
+    if (showSettings) { closeSettings(); return }
     setAutoCheckinError('');
     // 重新打开 = 重新给一次机会：清掉「上次保存失败」的闸门（否则用户改完再关会
     // 走「直接关」分支，改动又一次静默丢弃）。
     checkinSaveFailedRef.current = false;
-    setShowCheckinPanel(true);
+    setShowSettings(true);
     // 与其它页头浮层互斥：它们都是 position:fixed，同时开会叠在一起。
     setShowProviderSwitches(false);
     setShowGateway(false);
@@ -10144,18 +10221,47 @@ export function JetHubPage({ rpcCall }) {
   const saveCheckinTimesWith = async (draft, jOn, jMin) => {
     setAutoCheckinBusy(true);
     setAutoCheckinError('');
+    // ⚠️ 超时兜底（2026-11-07 十一审 P3 #3）：`rpcCall` 直通宿主
+    //    `connection.rpc.call`，**这一层没有任何超时**。链路卡死（服务端阻塞、
+    //    连接半开）时这个 Promise 永远不 resolve ⇒ `closeSettings` 里
+    //    `checkinSavingRef.current` 永远是 `true` ⇒ 设置弹窗**彻底关不掉**
+    //    （连「完成」都不响应，只能刷新页面）。
+    //
+    //    15 秒 = 一次账号写盘 + 一次宿主往返的宽松上界。超时按「保存失败」
+    //    处理（返回值 `false`）⇒ 走 `checkinSaveFailedRef` 那条路，用户再点
+    //    一次就能关掉 —— 而「已经提示过失败」正是这条兜底要的终态。
+    //
+    //    ⚠️ 超时**不取消**底层请求（`Promise.race` 不会），所以它后来若真的
+    //    成功了，`setAutoCheckin` 仍会更新界面 —— 服务端确实保存了，这是
+    //    正确的。代价是用户可能看到「失败」提示后状态又自己变对了，但比
+    //    「面板关不掉」轻得多。
+    const timeoutError = new Error(`保存时刻超时（${CHECKIN_SAVE_TIMEOUT_MS / 1000} 秒未响应）`);
+    // ⚠️ 句柄必须提出来并在 `finally` 里 `clearTimeout`（十一审 P3 #3 复核）：
+    //    `Promise.race` 只负责「谁先 settle」，**不会**清另一侧的定时器。
+    //    正常路径（几十毫秒）下那个 `setTimeout` 会一直挂着 15 秒才触发 ——
+    //    期间组件可能已卸载、用户可能已重复操作多次，于是**每点一次就留一个
+    //    15 秒的孤儿定时器**（测试里表现为 `vi.useFakeTimers()` 后遗留的
+    //    pending timer，真实环境里是关不掉的 CPU 唤醒）。
+    let timeoutTimer
+    const timeout = new Promise((_resolve, reject) => {
+      timeoutTimer = setTimeout(() => reject(timeoutError), CHECKIN_SAVE_TIMEOUT_MS);
+    });
     try {
-      const res = await rpcCall('usage.autoCheckin', { times: [...draft], jitterMinutes: jOn ? jMin : 0 });
+      const res = await Promise.race([
+        rpcCall('usage.autoCheckin', { times: [...draft], jitterMinutes: jOn ? jMin : 0 }),
+        timeout,
+      ]);
       const next = res?.autoCheckin || null;
       setAutoCheckin(next);
       if (Array.isArray(next?.times) && next.times.length === 2) setTimeDraft([...next.times]);
       return true;
     } catch (error) {
-      // 错误文案由面板渲染（`renderCheckinPanel` 的 role="alert" 那一行）——
+      // 错误文案由面板渲染（`renderCheckinSection` 的 role="alert" 那一行）——
       // 调用方负责在失败时**把面板留着**，否则这句看不见。
       setAutoCheckinError(error?.message || '时刻保存失败');
       return false;
     } finally {
+      clearTimeout(timeoutTimer);
       setAutoCheckinBusy(false);
     }
   };
@@ -10296,7 +10402,17 @@ export function JetHubPage({ rpcCall }) {
    */
   const renderProviderRow = (p) => {
     const closed = providerStatuses?.[p.id]?.closed === true;
-    return React.createElement('div', { className: 'dim-jh-providerRow', key: p.id, 'data-provider': p.id },
+    // 已关闭的供应商整行置灰（2026-11-06 用户要求「已关闭的供应商置灰」）。
+    // ⚠️ 置灰的是**行容器**的类，但 CSS 只作用在 `.dim-jh-provider`（按钮）
+    //    上，**不动开关** —— 开关在关闭态本来就是灰色的，再叠一层不透明度
+    //    会让用户以为它不可点（实际上它是唯一能把供应商打开的东西）。
+    // ⚠️ 选中态不置灰（见 CSS 里的 `:not([aria-selected='true'])`）：用户
+    //    正在看的那一家必须保持清晰，否则「已关闭」会看起来像「不可用」。
+    return React.createElement('div', {
+      className: closed ? 'dim-jh-providerRow dim-jh-providerRowClosed' : 'dim-jh-providerRow',
+      key: p.id,
+      'data-provider': p.id,
+    },
       React.createElement('button', {
         type: 'button',
         role: 'tab',
@@ -10336,6 +10452,236 @@ export function JetHubPage({ rpcCall }) {
    * `providerOrder === null`（未自定义/读取失败）时 `sortOpenProvidersByOrder`
    * 返回原数组 = 声明序兜底。「已关闭」组恒按声明顺序沉底（与弹窗同口径）。
    */
+  /**
+   * 侧边栏底部操作行的图标（14×14 内联 SVG）。
+   *
+   * ⚠️⚠️ **一律不用 emoji**（2026-11-06）：emoji 在 Windows 上是**彩色位图**，
+   *    跟系统字体走 —— 同一行里粗细、尺寸、基线全都跟旁边的文字对不上，
+   *    而且不同系统渲染出完全不同的样子。内联 SVG 用 `currentColor`
+   *    与 `stroke-linecap` 就能与文字同色同基线。
+   *
+   * 几何数（几何守卫按 kind 分别计数，见 `provider-toggle.spec.ts`）：
+   * 签到 2 / 网关 3 / 用量 4 / 设置 2 = 11。
+   * ⚠️ 改任何一支的图形都必须同步改守卫里的数字，否则「合法新增图标」
+   *    会变成假红、「少画一条」会变成假绿。
+   */
+  function renderRailIcon(kind) {
+    const common = {
+      width: 14,
+      height: 14,
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 2,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      'aria-hidden': 'true',
+      focusable: 'false',
+      style: { flex: 'none' },
+    };
+    if (kind === 'checkin') {
+      // 时钟：表盘 + 指针。
+      return React.createElement('svg', common,
+        React.createElement('circle', { cx: 12, cy: 12, r: 10 }),
+        React.createElement('path', { d: 'M12 7v5l3 2' }));
+    }
+    if (kind === 'gateway') {
+      // 地球：外圆 + 赤道 + 一条经线。
+      return React.createElement('svg', common,
+        React.createElement('circle', { cx: 12, cy: 12, r: 10 }),
+        React.createElement('path', { d: 'M2 12h20' }),
+        React.createElement('path', { d: 'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z' }));
+    }
+    if (kind === 'usage') {
+      // 柱状图：坐标轴 + 三根柱子。
+      return React.createElement('svg', common,
+        React.createElement('path', { d: 'M3 3v18h18' }),
+        React.createElement('path', { d: 'M8 17v-5' }),
+        React.createElement('path', { d: 'M13 17v-9' }),
+        React.createElement('path', { d: 'M18 17v-3' }));
+    }
+    // 设置：**齿轮**（2026-11-05 用户指定「设置应该用这个图标」）。
+    // ⚠️ 路径是 Lucide settings 的标准几何（八齿 + 中心圆），不要自己画简化版：
+    //    齿数、圆角、开口角度任一不同，用户就不认那个形状了。
+    return React.createElement('svg', common,
+      React.createElement('circle', { cx: 12, cy: 12, r: 3 }),
+      React.createElement('path', {
+        d: 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z',
+      }));
+  }
+
+  /**
+   * 侧边栏底部操作行（2026-11-06 从页头搬来）。
+   *
+   * 四个入口全是**高频**动作：签到 / 网关 / 用量 / 设置。低频配置
+   *（备份恢复、渠道原生搜索、定时签到、供应商开关）收进「设置」弹窗。
+   *
+   * ⚠️⚠️ 按钮文字**必须短**（2 个汉字）：228px 宽的栏里一行要放下
+   *    4 个按钮 + 4 个图标 + 3 个 gap，算账见 `.dim-jh-railActions` 的注释。
+   *    完整语义由 `title` 与弹窗标题承担。
+   */
+  function renderRailActions() {
+    return React.createElement('div', { className: 'dim-jh-railActions' },
+      React.createElement('button', {
+        className: 'dim-jh-btn dim-jh-railAction',
+        title: '依次签到全部支持签到的渠道（CodeBuddy / LobsterAI / CodeArts / Qoder / TRAE）。'
+          + '串行执行以避免触发风控。',
+        disabled: checkinBusy,
+        onClick: () => void checkinAll(),
+        // ⚠️ `aria-busy` 与文字分开：文字**恒为**「签到」两个字，否则
+        //    「签到中…」比「签到」宽 1 个字，整行会左右跳（4 个按钮等分宽度）。
+        'aria-busy': checkinBusy ? 'true' : 'false',
+      },
+      renderRailIcon('checkin'),
+      React.createElement('span', null, checkinBusy ? '签到' : '签到')),
+      React.createElement('button', {
+        className: 'dim-jh-btn dim-jh-railAction',
+        title: gatewayButtonTitle(gatewayStatus),
+        'aria-haspopup': 'dialog',
+        'aria-expanded': showGateway ? 'true' : 'false',
+        onClick: () => {
+          // ⚠️⚠️ 与另外三个入口互斥：四个弹窗都是 `position: fixed` 的全屏覆盖层，
+          //    同时打开会叠在一起，而 ESC / 遮罩只会关掉**后挂载**的那个。
+          //    设置弹窗在组件树里最后挂载（见 return 的末尾），所以必须显式关掉
+          //    它，否则从设置里点「网关」会出现「设置还盖在上面」。
+          closeSettings(() => {
+            setShowGateway(true);
+            setGatewayNotice(null);
+            void loadGatewayStatus();
+          });
+        },
+      },
+      renderRailIcon('gateway'),
+      React.createElement('span', null, '网关')),
+      React.createElement('button', {
+        className: 'dim-jh-btn dim-jh-railAction',
+        title: 'Token 用量：按渠道（直连/网关）、供应商与模型统计本机请求的 token 消耗。',
+        'aria-haspopup': 'dialog',
+        'aria-expanded': showTokenLedger ? 'true' : 'false',
+        onClick: () => {
+          closeSettings(() => setShowTokenLedger(true));
+        },
+      },
+      renderRailIcon('usage'),
+      React.createElement('span', null, '用量')),
+      React.createElement('button', {
+        className: 'dim-jh-btn dim-jh-railAction',
+        title: '设置：定时签到、备份与恢复、渠道原生搜索、供应商开关。',
+        'aria-haspopup': 'dialog',
+        'aria-expanded': showSettings ? 'true' : 'false',
+        onClick: openSettings,
+      },
+      renderRailIcon('settings'),
+      React.createElement('span', null, '设置')));
+  }
+
+  /**
+   * 「设置」弹窗（2026-11-06 新增）。
+   *
+   * 承载四类**低频配置**（用户要求「将备份/恢复/渠道原生搜索归到设置里」，
+   * 随后追加「将供应商也放入设置」）：
+   * ① 供应商开关（批量破坏性操作）
+   * ② 定时签到（配置一次就不动）
+   * ③ 备份与恢复
+   * ④ 渠道原生搜索
+   *
+   * ⚠️⚠️ **关闭必须走 `closeSettings()`** —— 它负责「关闭即保存」定时签到。
+   *    裸写 `setShowSettings(false)` 会把用户改的时刻静默丢弃
+   *    （2026-11-01 审计 P1-1 的同一形态）。
+   *
+   * ⚠️ 从设置里切到别的弹窗时，`setShowXxx` 必须放进 `closeSettings` 的
+   *    回调里 —— `closeSettings` 只有「没改动 / 已失败过」两个同步出口，
+   *    有改动时走异步保存、**成功才关**。写成「先关面板再立刻开目标弹窗」
+   *    的话，保存失败后两个覆盖层同时挂载，而设置弹窗**最后挂载**
+   *    ⇒ 完全盖住目标弹窗，`aria-expanded` 却已是 'true' ⇒ 再点毫无反应。
+   */
+  function renderSettingsPanel() {
+    return React.createElement('div', {
+      className: 'dim-jh-modalOverlay',
+      // 点遮罩关闭（与其它弹窗同款：只在 target === currentTarget 时触发，
+      // 否则点弹窗内部会连带关闭）。
+      onClick: (event) => {
+        if (event.target === event.currentTarget) closeSettings();
+      },
+    },
+      React.createElement('div', {
+        className: 'dim-jh-modal',
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': 'Jet Hub 设置',
+      },
+        React.createElement('div', { className: 'dim-jh-modalHead' },
+          React.createElement('div', { className: 'dim-jh-modalTitle' }, '设置'),
+          React.createElement('button', {
+            className: 'dim-jh-btn',
+            // ⚠️⚠️ **必须包一层箭头函数**（2026-11-05 二审 P0）：直接传
+            //    `closeSettings` 的话 React 会以 `(SyntheticEvent)` 调用它，
+            //    于是 `onClosed = event` ⇒ 函数体里 `onClosed?.()` 抛
+            //    `TypeError: onClosed is not a function` —— 点「完成」**必抛**。
+            onClick: () => closeSettings(),
+          }, '完成')),
+        React.createElement('div', { className: 'dim-jh-modalBody' },
+          // ① 供应商
+          React.createElement('div', { className: 'dim-jh-settingsSection' },
+            React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '供应商'),
+            React.createElement('p', { className: 'dim-jh-modalHint' },
+              '逐个打开 / 关闭供应商。关闭一个供应商 = 关闭它的全部模型并停用它的全部账号。'),
+            React.createElement('div', { className: 'dim-jh-settingsSectionActions' },
+              React.createElement('button', {
+                className: 'dim-jh-btn',
+                title: (providerSummary.known
+                  ? '供应商开关：逐个打开/关闭（已打开 ' + String(providerSummary.open)
+                    + '、已关闭 ' + String(providerSummary.closed) + '）。'
+                  : '供应商开关：逐个打开/关闭。')
+                  + '关闭一个供应商 = 关闭它的全部模型并停用它的全部账号。',
+                'aria-haspopup': 'dialog',
+                'aria-expanded': showProviderSwitches ? 'true' : 'false',
+                onClick: () => {
+                  closeSettings(() => {
+                    setShowGateway(false);
+                    setShowTokenLedger(false);
+                    setShowProviderSwitches(true);
+                  });
+                },
+              }, '打开供应商开关'))),
+          // ② 定时签到
+          renderCheckinSection(),
+          // ③ 备份与恢复
+          React.createElement('div', { className: 'dim-jh-settingsSection' },
+            React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '备份与恢复'),
+            React.createElement('p', { className: 'dim-jh-modalHint' },
+              '导出全部账号（含凭据）为备份文件；导入时可选「合并」或「替换」。'),
+            React.createElement('div', { className: 'dim-jh-settingsSectionActions' },
+              React.createElement(BackupPanel, {
+                rpcCall,
+                // 导入成功会整体替换账号，ProviderPanel 只在挂载时拉列表；
+                // 递增版号强制重新挂载，让账号列表与模型目录立即反映新状态。
+                onImported: () => setVersion(v => v + 1),
+              }))),
+          // ④ 渠道原生搜索
+          React.createElement('div', { className: 'dim-jh-settingsSection' },
+            React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '渠道原生搜索'),
+            React.createElement('label', {
+              className: 'dim-jh-nativeSearch',
+              title: (nativeSearchFailed
+                ? '⚠️ 开关状态读取失败，当前显示的是默认值（开启）。点击即可重新提交一次。'
+                : '渠道原生搜索：为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索。'
+                  + '关闭后所有渠道都改用 DeepSeek 官方搜索（需要 DEEPSEEK_API_KEY）。'),
+            },
+              React.createElement('input', {
+                type: 'checkbox',
+                className: 'dim-jh-switch',
+                checked: nativeSearchOn,
+                // ⚠️ **只**因提交中而禁用：读取失败时不禁用 —— 那会让用户在
+                //    唯一一次读取抖动后**彻底失去**自救路径（连切换都点不动），
+                //    与网关面板「任何一个附属字段采集失败都不该把用户挡在关掉它
+                //    这条自救路径之外」同一取向。
+                disabled: nativeSearchBusy,
+                onChange: (event) => void toggleNativeSearch(event.target.checked),
+              }),
+              React.createElement('span', null, '为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索'))))));
+  }
+
   const renderRail = () => {
     if (providerStatuses === null) {
       return PROVIDERS.map(p => renderProviderRow(p));
@@ -10427,17 +10773,18 @@ export function JetHubPage({ rpcCall }) {
    * ⚠️ **没有「保存」按钮**（用户 2026-10-31：「这个二按钮没必要存在，退出这个小
    *   弹窗自动保存就行」）⇒ 提交发生在面板**关闭**时（`commitTimesIfDirty`）。
    */
-  function renderCheckinPanel() {
+  function renderCheckinSection() {
     const a = autoCheckin;
     const busy = autoCheckinBusy;
     return React.createElement('div', {
-      className: 'dim-jh-checkinPanel',
-      role: 'dialog',
-      'aria-label': '定时签到设置',
-      // ⚠️ 阻止冒泡：外层页头没有点击关闭逻辑，但将来若给它加，这里不该被连带触发。
-      onClick: (event) => event.stopPropagation(),
+      className: 'dim-jh-settingsSection',
+      // ⚠️ 2026-11-06 起它是「设置」弹窗里的**一个分区**，不再是独立的下拉卡片
+      //    ⇒ 去掉 `role="dialog"`（弹窗本体才是 dialog，嵌套 dialog 会让读屏
+      //    软件报两次「进入对话框」）与「阻止冒泡」（遮罩层自己处理点击关闭）。
     },
-      React.createElement('div', { className: 'dim-jh-checkinPanelTitle' }, '定时签到'),
+      React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '定时签到'),
+      React.createElement('p', { className: 'dim-jh-modalHint' },
+        '每天自动执行两次签到；改完点「完成」自动保存。'),
       // ⚠️⚠️ **不能让 `<label>` 包住整行**（用户 2026-10-31：「按钮范围有点大啊」）：
       //    `label` 的语义是「点它任意位置都切换那个 input」⇒ 整行 300px 全成了
       //    命中区，用户点行尾空白也会把开关切走。
@@ -10556,121 +10903,31 @@ export function JetHubPage({ rpcCall }) {
   }
 
   return React.createElement('section', { className: 'dim-jh-page', 'aria-label': 'Jet Hub Provider 设置' },
-    // ⚠️ 页头左侧的「Jet Hub」标题块已**整块删除**（用户 2026-10-07 要求：
-    // 标题只占宽度、不带任何操作，空间全给按钮行）。这里先后删过两样东西，
-    // 都**不要**加回来：
+    // ⚠️⚠️ **整个页头已删除**（用户 2026-11-06 要求：「将顶部的按钮功能移动
+    //     侧边栏底部单独一行，增加设置按钮将备份/恢复/渠道原生搜索归到设置里」；
+    //     随后追加「将供应商也放入设置」）。
+    //
+    // 这里先后删过**三样**东西，都**不要**加回来：
     // ① 副标题「提供商凭据与多账号管理」（.dim-jh-brandDesc）—— 2026-10-06，
     //    因为按钮太多，副标题既显示不全又挤占页头高度；
     // ② 标题本体「Jet Hub」（.dim-jh-brand / .dim-jh-brandName）—— 2026-10-07，
     //    页头一排已有 7 个按钮，标题纯属占位。设置页的语义由本节点的
-    //    aria-label 与宿主左侧「Jet Hub」导航项承担，不丢。
-    React.createElement('header', { className: 'dim-jh-header' },
-      React.createElement('div', { className: 'dim-jh-headerActions' },
-        // 「供应商开关」在页头，而不是左侧每个供应商行尾（!25 的原形态）：
-        // 它是破坏性批量操作，与「选择看哪个供应商」这个高频无害动作分开摆放，
-        // 误点的可能性归零，也让左侧窄栏回到纯导航。见 `ProviderSwitchPanel`。
-        // ⚠️ 按钮文字只写「供应商」（不是「供应商开关」）：页头四个按钮要排成
-        // 一排，5 个字会把「关闭」挤到第二行 —— 完整语义由 tooltip 与弹窗标题承担。
-        React.createElement('button', {
-          className: 'dim-jh-btn',
-          title: (providerSummary.known
-            ? '供应商开关：逐个打开/关闭（已打开 ' + providerSummary.open + '、已关闭 ' + providerSummary.closed + '）。'
-            : '供应商开关：逐个打开/关闭。')
-            + '关闭一个供应商 = 关闭它的全部模型并停用它的全部账号。',
-          'aria-haspopup': 'dialog',
-          'aria-expanded': showProviderSwitches ? 'true' : 'false',
-          onClick: () => {
-            // 与网关弹窗互斥：两者都是 position:fixed 的全屏覆盖层，
-            // 同时打开会叠在一起，而 ESC 只关掉后挂载的那个。
-            setShowGateway(false);
-            setShowProviderSwitches(true);
-          },
-        }, '供应商'),
-        // 一键签到在备份/恢复**左侧**（需求指定位置）。
-        //
-        // ★ 2026-10-18：按钮改成「[一键签到][▾]」两段式 —— 主按钮仍是**立刻签到**
-        //   （高频动作，不该多点一次），右侧小箭头展开**定时签到配置面板**。
-        //   用户原话：「在原来的一键签到那里加一个展开页面里面进行配置」。
-        //   ⚠️ 不做成「点主按钮即展开」：那会让「立刻签到」多一步，且与用户
-        //   「不是手动点击、要自动」的诉求相反 —— 手动入口必须保留且零成本。
-        React.createElement('span', { className: 'dim-jh-checkinWrap', ref: checkinWrapRef },
-          React.createElement('button', {
-            className: 'dim-jh-btn dim-jh-checkinMain',
-            title: '依次签到全部支持签到的渠道（CodeBuddy / LobsterAI / CodeArts / Qoder / TRAE）。'
-              + '串行执行以避免触发风控。',
-            disabled: checkinBusy,
-            onClick: () => void checkinAll(),
-          }, checkinBusy ? '签到中…' : '一键签到'),
-          React.createElement('button', {
-            className: 'dim-jh-btn dim-jh-checkinCaret',
-            title: '定时签到：设置每天两个自动执行的时刻',
-            'aria-haspopup': 'dialog',
-            'aria-expanded': showCheckinPanel ? 'true' : 'false',
-            'aria-label': '定时签到设置',
-            onClick: toggleCheckinPanel,
-          }, '▾'),
-          showCheckinPanel ? renderCheckinPanel() : null,
-        ),
-        React.createElement(BackupPanel, {
-          rpcCall,
-          // 导入成功会整体替换账号，ProviderPanel 只在挂载时拉列表；
-          // 递增版号强制重新挂载，让账号列表与模型目录立即反映新状态。
-          onImported: () => setVersion(v => v + 1),
-        }),
-        // 本机网关开关。⚠️ 文字刻意只写「网关」（见「供应商」按钮上方的同款
-        // 注释）：页头按钮排成一行，长文字会把右端「关闭」挤到第二行。
-        React.createElement('button', {
-          className: 'dim-jh-btn',
-          title: gatewayButtonTitle(gatewayStatus),
-          'aria-haspopup': 'dialog',
-          'aria-expanded': showGateway ? 'true' : 'false',
-          onClick: () => {
-            setShowProviderSwitches(false);
-            setShowGateway(true);
-            setGatewayNotice(null);
-            void loadGatewayStatus();
-          },
-        }, gatewayButtonLabel(gatewayStatus)),
-        // 「Token 用量」入口：全 provider 的本地记账（直连/网关分开统计）。
-        React.createElement('button', {
-          className: 'dim-jh-btn',
-          title: 'Token 用量：按渠道（直连/网关）、供应商与模型统计本机请求的 token 消耗。',
-          'aria-haspopup': 'dialog',
-          'aria-expanded': showTokenLedger ? 'true' : 'false',
-          onClick: () => {
-            setShowProviderSwitches(false);
-            setShowGateway(false);
-            setShowTokenLedger(true);
-          },
-        }, 'Token 用量'),
-        // 「渠道原生搜索」总开关。**取代**了原先这里的「关闭」按钮 ——
-        // 关闭设置页仍有右上角 × 与点击空白处两条路径，而那个按钮与外壳的 ×
-        // 语义完全重复（用户 2026-10-14 决定）。
-        //
-        // 语义：开 = 支持原生搜索的渠道（CodeBuddy / WorkBuddy）走自己后端的
-        // 搜索接口；关 = 所有渠道一律回官方 DeepSeek 搜索（需要 API Key）。
-        React.createElement('label', {
-          className: 'dim-jh-nativeSearch',
-          title: (nativeSearchFailed
-            ? '⚠️ 开关状态读取失败，当前显示的是默认值（开启）。点击即可重新提交一次。'
-            : '渠道原生搜索：为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索。'
-              + '关闭后所有渠道都改用 DeepSeek 官方搜索（需要 DEEPSEEK_API_KEY）。'),
-        },
-          React.createElement('input', {
-            type: 'checkbox',
-            className: 'dim-jh-switch',
-            checked: nativeSearchOn,
-            // ⚠️ **只**因提交中而禁用：读取失败时不禁用 —— 那会让用户在
-            //    唯一一次读取抖动后**彻底失去**自救路径（连切换都点不动），
-            //    与网关面板「任何一个附属字段采集失败都不该把用户挡在关掉它
-            //    这条自救路径之外」同一取向。
-            disabled: nativeSearchBusy,
-            onChange: (event) => void toggleNativeSearch(event.target.checked),
-          }),
-          React.createElement('span', null, '渠道原生搜索')))),
-    // 签到结果放在页头下方横跨整宽：页头是 flex 且不换行，塞进去会挤压按钮。
-    // `flex: none` 是必需的 —— `dim-jh-page` 是 column flex 且 `dim-jh-layout`
-    // 带 `flex: 1`，不锁住的话提示条会被压扁（与 modal 内同款做法）。
+    //    aria-label 与宿主左侧「Jet Hub」导航项承担，不丢；
+    // ③ **页头本体 `.dim-jh-header`**（含 `.dim-jh-headerActions` 那一排控件）
+    //    —— 2026-11-06。按钮行搬到**侧边栏底部**（见 `renderRail` 返回结构里的
+    //    `.dim-jh-railActions`），理由三条：
+    //    · **垂直空间**：页头横跨整宽、把内容区往下压一整个 header 高度（约 56px），
+    //      而它承载的全是「全局操作」—— 与左侧导航同属「去哪」这一层，搬过去之后
+    //      内容区从第一行就开始；
+    //    · **低频项收进设置**：备份 / 恢复 / 渠道原生搜索 / 定时签到都是**配置一次
+    //      就不再动**的低频项，占着一排最显眼的位置不合理 ⇒ 收进「设置」弹窗，
+    //      底部行只留 4 个高频入口；
+    //    · **破坏性操作收敛**：「供应商开关」是批量破坏性操作，与「选择看哪个
+    //      供应商」这个高频无害动作分开摆放（!25 的原形态）—— 现在它进设置弹窗，
+    //      距离更远，误点可能性进一步归零。
+    //
+    // ⚠️ `flex: none` 仍是必需的 —— `dim-jh-page` 是 column flex 且
+    //    `dim-jh-layout` 带 `flex: 1`，不锁住的话提示条会被压扁（与 modal 内同款做法）。
     checkinNotice
       ? React.createElement('div', {
           className: 'dim-jh-probeNotice',
@@ -10698,8 +10955,14 @@ export function JetHubPage({ rpcCall }) {
         }, React.createElement('div', null, providerNotice.text))
       : null,
     React.createElement('div', { className: 'dim-jh-layout' },
+      // ⚠️ 侧边栏分成「可滚动的开关列表」+「固定的底部操作行」两段：
+      //    `.dim-jh-rail` 本身是 `display: grid`（每个 tab 一个格子、gap 8px），
+      //    直接塞操作行会让它变成「又一个 tab」。包一层 flex 列之后，列表
+      //    自己滚、操作行永远贴在底部。
       React.createElement('nav', { className: 'dim-jh-rail', role: 'tablist', 'aria-label': 'Provider 导航' },
-        renderRail()),
+        React.createElement('div', { className: 'dim-jh-railScroll' },
+          renderRail()),
+        renderRailActions()),
       React.createElement('main', {
         className: 'dim-jh-panel',
         role: 'tabpanel',
@@ -10714,6 +10977,11 @@ export function JetHubPage({ rpcCall }) {
                 key: p.id + '-' + version,
                 provider: p.id,
                 rpcCall,
+                // 标题行右侧的「供应商开关」：状态从页面级 `providerStatuses` 取，
+                // 点击走页面级 `toggleProvider`（带 confirm + 重拉状态 + 重挂载面板）。
+                providerStatuses,
+                providerBusy,
+                onToggleProvider: toggleProvider,
               }))
         : null))),
     // 「供应商开关」以 modal 渲染：它是覆盖层，放在布局之后只是组件树的书写顺序
@@ -10733,11 +11001,9 @@ export function JetHubPage({ rpcCall }) {
           notice: providerNotice,
           // 弹窗的「模型列表」视图要逐家调 `model.list`（服务端只有单 provider 端点）。
           rpcCall,
-          // ⚠️⚠️ 模型列表屏点「全部打开/全部关闭」后就地补一家状态（2026-11-05
-          // 四审测试判别力 P0：`f51b3ef` 让 `ModelCenterPanel` 直接写
-          // `setProviderStatuses`，而那是本组件（`JetHubPage`）的 state ⇒
-          // 该标识符在孙辈作用域里不存在 ⇒ 一点按钮就 `ReferenceError`）。
-          onProviderStatusPatched: patchProviderStatus,
+          // ⚠️ 逐条 / 整家切换模型后必须重拉汇总状态（2026-11-07 十一审 P3）——
+          // 否则「已关闭」的分组与开关要重挂载面板才更新。
+          onStatusReload: loadProviderStatuses,
         })
       : null,
     // 同款做法：网关开关也是覆盖层，且与「供应商开关」互斥 —— 两者都是
@@ -10760,6 +11026,11 @@ export function JetHubPage({ rpcCall }) {
           rpcCall,
           onClose: () => setShowTokenLedger(false),
         })
-      : null);
+      : null,
+    // 「设置」弹窗：底部操作行里「设置」按钮打开的**全屏遮罩**弹窗。
+    // ⚠️ 它在本函数里**最后**挂载 —— 这正是「底部四个按钮必须走
+    //    `closeSettings()` 而不是裸 `setShowXxx(false)`」的物理原因：
+    //    设置弹窗会盖住它们，先关再开才能让目标弹窗真的可见。
+    showSettings ? renderSettingsPanel() : null);
 }
 

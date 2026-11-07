@@ -51,7 +51,17 @@ const STYLES = `
    RaccoonProduct / QODER_CN 等 displayName 的跨文件一致性断言冲突，故未做。
    ⚠️ 测量本身的三条坑（inline 元素 clientWidth 恒 0 会得到假阴性、不能靠行高判折行、
    滚动条吃掉约 15px）见工作区 jet-hub-provider-toggle-notes.md。 */
-.dim-jh-rail { width: 228px; border-right: 1px solid var(--dsw-alias-border-default, #e5e5e5); padding: 6px; overflow-y: auto; display: grid; align-content: start; gap: 8px; }
+/* 侧边栏：上段是可滚动的开关列表，下段是固定的操作行（签到/网关/用量/设置）。
+   ⚠️ 容器本身**不再滚动**（overflow 交给 .dim-jh-railScroll）—— 否则操作行
+   会跟着列表一起滚走，用户必须滚到底才能看到「设置」。 */
+.dim-jh-rail { width: 228px; border-right: 1px solid var(--dsw-alias-border-default, #e5e5e5); display: flex; flex-direction: column; min-height: 0; }
+.dim-jh-railScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px; display: grid; align-content: start; gap: 8px; }
+/* 底部操作行：四个按钮**等分**一行（228px 窄栏里必须 nowrap）。
+   算账：3 个汉字 × 11px + 左右各 4px padding = 41px，四个 = 164px，
+   加 3 个 4px 间距 = 176px，加左右各 6px padding = 188px < 228px。 */
+.dim-jh-railActions { flex: none; display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; padding: 8px 6px; border-top: 1px solid var(--dsw-alias-border-default, #e5e5e5); }
+.dim-jh-railActions > .dim-jh-btn { flex: 1 1 0; min-width: 0; padding: 6px 4px; font-size: 11px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+.dim-jh-railActions > .dim-jh-btn:disabled { cursor: default; }
 
 /* 每个 provider 按钮：align dsh-im .dim-channel */
 /* padding 与图标间距比 !25 各收窄 2px（12→10、10→8）：这两处是**纯开销**，
@@ -139,6 +149,14 @@ const STYLES = `
    「去掉开关后右边有片空白，要省略让右边的账号池区域显示更宽」。 */
 .dim-jh-providerRow { display: grid; grid-template-columns: minmax(0, 1fr); }
 .dim-jh-providerRow .dim-jh-provider { min-width: 0; }
+/* 已关闭的供应商整行置灰（2026-11-06 用户要求「已关闭的供应商置灰」）。
+   ⚠️ 只降不透明度、**不改布局** —— 行高/宽度必须与打开态逐像素一致，否则
+   「已打开」组与「已关闭」组的分界会随状态变化而跳动。
+   ⚠️ **只灰按钮，不灰开关**：开关在关闭态本来就是灰色的，再叠一层不透明度
+   会让用户以为它不可点 —— 而它恰恰是唯一能把供应商打开的东西。
+   ⚠️ **选中态不置灰**：用户正在看的那一家必须保持清晰。 */
+.dim-jh-providerRowClosed .dim-jh-provider:not([aria-selected='true']) { opacity: .55; }
+.dim-jh-providerRowClosed .dim-jh-provider:not([aria-selected='true']):hover { opacity: .78; }
 
 /* 右侧面板。
    ⚠️ 2026-10-26 用户要求「页头滚动时应该只滚动账号列表」：本容器改为
@@ -379,17 +397,13 @@ const STYLES = `
 .dim-jh-btn[data-kind="danger"]:hover:not(:disabled) { color: #b3261e; border-color: #d93025; background: rgb(217 48 37 / 6%); }
 .dim-jh-btn:disabled { opacity: 0.5; cursor: default; }
 
-/* 「一键签到 ▾」的展开配置面板（用户 2026-10-18 要求：每天两次定时签到，
-   配置入口就放在原一键签到按钮上）。
-   ⚠️ 用**绝对定位的下拉卡**而不是居中模态框：它是按钮的附属配置，不是独立任务，
-   模态框会把用户的注意力与页面滚动静止，而这里改完还要顺手点旁边的「一键签到」。
-   ⚠️ 必须 position: relative 挂在容器上（.dim-jh-checkinWrap），否则下拉会以
-   最近的非 static 祖先定位 —— 实测会跑到页头外面去。 */
-.dim-jh-checkinWrap { position: relative; display: inline-flex; align-items: center; }
-.dim-jh-checkinMain { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.dim-jh-checkinCaret { padding: 4px 7px; border-left: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
-.dim-jh-checkinPanel { position: absolute; top: calc(100% + 6px); left: 0; z-index: 40; width: 300px; padding: 12px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 10px; background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: 0 8px 24px rgb(15 23 42 / 12%); display: flex; flex-direction: column; gap: 10px; }
-.dim-jh-checkinPanelTitle { font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); }
+/* 设置弹窗里的一个分区（供应商 / 定时签到 / 备份与恢复 / 渠道原生搜索）。
+   ⚠️ 2026-11-05 之前它是页头下方的**下拉卡片**（.dim-jh-checkinPanel，
+   配 .dim-jh-checkinWrap 做定位锚点）；页头整个删掉、四个按钮搬进侧边栏
+   底部之后，那五条规则全部失去 DOM 对应，已删除。 */
+.dim-jh-settingsSection { display: flex; flex-direction: column; gap: 8px; }
+.dim-jh-settingsSectionTitle { font-size: 13px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); }
+.dim-jh-settingsSectionActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dim-jh-checkinRow { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #4e5969); }
 .dim-jh-checkinRow > label { flex: none; }
 /* 开关 + 紧邻文字的可点区（用户 2026-10-31：「按钮范围有点大啊」）。
@@ -479,10 +493,33 @@ const STYLES = `
    与相邻项挤在一起。改布局时三处一起看，别只改一处。
    ⚠️ align-items: center 让「提示 + 按钮组」那一行里两种高度的元素垂直居中对齐。 */
 .dim-jh-panelHead { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 16px; }
-/* 标题独占一行（用户 2026-10-26「将按钮行合并到文案行最右侧」的配套）。
-   ⚠️ flex-basis: 100% 是唯一能让标题单独占一行的写法：wrap + basis 100%
-   会把后续兄弟挤到下一行，而**不必**给 panelHead 换 flex-direction。 */
-.dim-jh-panelHead > .dim-jh-panelTitle { flex: 1 0 100%; }
+/* 标题行：标题 + 最右侧的「供应商开关」图标（2026-11-06 用户要求）。
+   ⚠️ **为什么必须包一层 .dim-jh-panelTitleRow**：2026-10-26 用户要求
+   「标题独占一整行、按钮组另起一行」，靠的是 flex: 1 0 100%。如果直接
+   把图标作为 .dim-jh-panelTitle 的兄弟塞进 panelHead，标题就必须改成
+   flex: 1 1 auto 才能与图标同行 —— 而那样**标题行 + 图标 + 按钮组会挤在
+   同一行**（1400px 下有约 930px 富余，wrap 不会触发），2026-10-26 的需求
+   就破了。包一层 flex 行容器既能保住「独占一行」，又能让图标靠右。
+   ⚠️ 包容器**只对标题安全** —— 状态提示（.dim-jh-probeNotice）必须仍是
+   panelHead 的**直接**子节点，别跟着包。
+   ⚠️ min-width: 0 是必需的：flex item 默认 min-width: auto，长 provider
+   名（如「MagiCrew (国际版) 账号管理」）会把图标挤出可视区。
+   ⚠️ 本仓库第 N 次踩同一个坑：**CSS 注释里不能出现反引号** —— 会提前
+   闭合 STYLES 模板字符串，而 node --check / tsc 都发现不了（闭合后仍是
+   合法 JS），只有 esbuild 打包时报 Expected ";" but found "flex"。 */
+.dim-jh-panelHead > .dim-jh-panelTitleRow { flex: 1 0 100%; display: flex; align-items: center; gap: 10px; }
+.dim-jh-panelTitleRow > .dim-jh-panelTitle { flex: 1 1 auto; min-width: 0; }
+/* 标题行右侧的「供应商开关」：36×20 的滑动开关，蓝色 = 已启用。
+   ⚠️ 两态用 aria-checked 而不是 :checked —— 它是 button role=switch，
+   不是 input type=checkbox。这样键盘推进由浏览器原生处理，视觉只跟
+   aria 属性走，不会出现「视觉开着但可访问性上是关的」。
+   ⚠️ 禁用态用 opacity 而不是 display: none —— 用户要能看到「这里有开关，
+   只是现在点不了」（原因在 title 里）。 */
+.dim-jh-providerSwitch { flex: none; position: relative; width: 36px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: #c9cdd4; cursor: pointer; transition: background-color .15s ease; }
+.dim-jh-providerSwitch[aria-checked='true'] { background: #1677ff; }
+.dim-jh-providerSwitch:disabled { opacity: .5; cursor: default; }
+.dim-jh-providerSwitchThumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .15); transition: transform .15s ease; }
+.dim-jh-providerSwitch[aria-checked='true'] .dim-jh-providerSwitchThumb { transform: translateX(16px); }
 /* 面板级状态提示（探测结果 / 锁定状态 / 领取结果 / 新手任务 / 登录链接 / 补偿卡）。
    ⚠️ 2026-10-26 用户要求「信息应该在按钮行上方行，而不是下方行」：这些提示
    已从 section 直接子节点搬进 panelHead、排在按钮组之前，**必须各占一整行**。
@@ -1687,10 +1724,20 @@ const STYLES = `
     width: auto; flex: none;
     display: flex; flex-direction: row; align-items: stretch;
     gap: 8px; padding: 8px 10px;
-    overflow-x: auto; overflow-y: hidden;
+    /* ⚠️ 滚动**只能**在 .dim-jh-railScroll 上：给这里加 overflow-x: auto
+       会让底部操作行（签到/网关/用量/设置）跟着列表一起滚走，用户必须
+       滚到最右才看得到「设置」。 */
+    overflow: hidden;
     border-right: 0;
     border-bottom: 1px solid var(--dsw-alias-border-default, #e5e5e5);
   }
+  /* 窄屏下纵向变横向：这一层从「grid 列」变成「横向可滚动条」。 */
+  .dim-jh-railScroll {
+    display: flex; flex-direction: row; align-items: stretch;
+    gap: 8px; flex: 1 1 auto; min-width: 0;
+    padding: 0; overflow-x: auto; overflow-y: hidden;
+  }
+  .dim-jh-railActions { padding: 0; border-top: 0; }
   /* 分组外壳在横向条里不再需要：display: contents 让 provider 按钮
      直接参与父级 flex，避免每个分组各占一整行。 */
   .dim-jh-railGroup { display: contents; }

@@ -72,7 +72,7 @@ export function groupProviders(providers, statuses) {
  * 有几个模型，让用户点一个状态不明的开关更糟。分组那边则仍把它显示在「已打开」
  * 组（宁多勿少），两处取舍不同是有意的 —— 显示可以保守，操作必须明确。
  *
- * @param {{ models?: { total?: number }, accounts?: { total?: number }, closed?: boolean } | undefined} status
+ * @param {{ models?: { total?: number }, accounts?: { total?: number }, closed?: boolean, verifyFailed?: string } | undefined} status
  * @returns {{ checked: boolean, disabled: boolean, reason: string | null }}
  */
 export function providerSwitchState(status) {
@@ -93,29 +93,27 @@ export function providerSwitchState(status) {
   // 已关闭时用户要做的恰恰是**打开**，那个方向永远合法（`provider.setEnabled(true)`
   // 不读目录、纯本地清黑名单 + 清意图）。
   if (status.closed === true) return { checked: false, disabled: false, reason: null };
-  // ⚠️⚠️ **核实腿没能证明「已关闭」时的自相矛盾态**（2026-11-05 三审端到端 P1-2）：
+  // ⚠️⚠️ **核实失败时不得让用户点**（2026-11-05 三审 P1-2）。
   //
-  // 服务端在「派生判据说全关了、但目录核实失败」时**故意**报 `closed: false`
-  // （保守方向：不敢断言已关闭，否则会出现 IKJW33 那种「界面说关了、模型却仍可选」），
-  // 同时把原因写进 `verifyFailed`。但前端若只读 `closed`，用户看到的是：
-  // ```
-  // 界面：「2 个 · 已关闭 2」      开关：「已打开」
-  // 点开关 ⇒ 服务端拒绝「没有可关闭的模型：<远端原因>」
-  // ```
-  // —— **三者矛盾，且原因只在报错里**，用户拿不到。
+  // 走到这里说明 `closed === false`（派生判据说没关），但**这次核实没成功**
+  // （`provider.status` 的 `verifyFailed` 有值）⇒ 我们其实**不知道**它到底关没关。
+  // 此时让用户点「关闭」，服务端会再核实一次、大概率还是失败，用户只得到一句
+  // 与现场无关的错误。
   //
-  // ⇒ 这里把「全关了 + 核实失败」渲染成**禁用 + 原因**（`reason` 是行 `title`，
-  //    用户悬停即见）。不禁用会更糟：点下去必失败，而失败文案与界面显示的「已打开」
-  //    对不上（用户会以为开关坏了）。
+  // 而这个缺陷的**症状**正是「界面、开关、报错三者互相矛盾」：
+  // - 分组标题说「已关闭」（意图为真，`closedByIntent`）；
+  // - 开关显示「已打开」（`closed: false`）；
+  // - 点一下弹「核实不了」。
   //
-  // ⚠️ 自愈：下次 `provider.status` 核实成功时 `verifyFailed` 消失，开关自动恢复。
-  // ⚠️ 判据必须同时要 `verifyFailed` 是非空字符串：字段缺席 = 核实成功或未需要核实。
-  if (typeof status.verifyFailed === 'string' && status.verifyFailed.length > 0
-    && total > 0 && status.models?.disabled === total) {
+  // ⇒ 把这次失败的原因**直接展示**出来（禁用 + 附注），三者终于自洽。
+  //
+  // ⚠️ 顺序必须在 `closed === true` **之后**：已关闭时用户要做的恰恰是**打开**，
+  //    那个方向永远合法、且不依赖目录（见上一条注释）。
+  if (typeof status.verifyFailed === 'string' && status.verifyFailed.length > 0) {
     return {
       checked: true,
       disabled: true,
-      reason: `目录核实失败，无法确认是否已全部关闭：${status.verifyFailed}`,
+      reason: `暂时无法核实：${status.verifyFailed}`,
     };
   }
   if (total <= 0) {

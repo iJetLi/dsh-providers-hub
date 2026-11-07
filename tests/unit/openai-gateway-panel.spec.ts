@@ -1553,7 +1553,12 @@ describe('网关弹窗的按钮尺寸统一（用户要求与「复制密钥」�
   })
 
   it('★ 通用按钮没被改小（30+ 处调用点：页头、卡片头…）', () => {
-    const generic = /\.dim-jh-btn \{([^}]*)\}/.exec(styles)?.[1] ?? ''
+    // ⚠️ 必须**行首锚定**：`\.dim-jh-btn \{` 也会命中
+    //    `.dim-jh-railActions > .dim-jh-btn {`（2026-11-05 侧边栏底部操作行
+    //    新增的小号变体）—— 那条写在基础规则**之前**，不加锚点就会取到它的
+    //    `padding: 6px 4px`，误报「通用按钮被改小」。
+    const generic = /(?:^|\n)\.dim-jh-btn \{([^}]*)\}/.exec(styles)?.[1] ?? ''
+    expect(generic, '找不到基础 .dim-jh-btn 规则').not.toBe('')
     expect(generic).toContain('padding: 4px 12px')
     expect(generic).toContain('line-height: 18px')
   })
