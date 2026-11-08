@@ -88,6 +88,49 @@ export const MAGICREW_POINTS_PATH = '/api/v1/quota/points/total'
 export const MAGICREW_CHAT_PATH = '/v1/chat/completions'
 
 /**
+ * 上游 `User-Agent` —— **全仓唯一一份**。
+ *
+ * 五个生产者（`magicrew-adapter` 聊天网关 / `magicrew-auth` gateway key /
+ * `magicrew-catalog` 目录 / `magicrew-credits` 积分与签到 / `magicrew-profile`
+ * 账号资料）**必须**引用这一个常量，不得再各留一份字面量：它们打的是同一个
+ * `product.host`，一处被 WAF 拒就是整站不可用，而复制 5 份必然出现
+ * 「改一个忘四个」⇒ 症状是「一个入口好了，别的入口照旧 405」。
+ *
+ * ⚠️⚠️⚠️ **必须是真实存在的 build 号，不许写 `.0.0.0`**（issue IKTPRV，
+ * 2026-11-08 真机四轮取证）。
+ *
+ * 国际站（`magic-service.magicrew.ai`，阿里 WAF）维护了一份**已知脚本客户端
+ * 的 UA 黑名单**，原先那条 `Chrome/141.0.0.0 Safari/537.36` 正在名单上：
+ *
+ * | 请求 | 结果 |
+ * |---|---|
+ * | 该常量（匿名 / 假 Bearer / **真实 JWT + 组织码**） | **405** + 2657 B 拦截页 |
+ * | 换成 `Chrome/140.0.0.0` 或 `Chrome/141.0.7390.55` | **200** |
+ * | 去掉 ` Safari/537.36` 尾 | 200 |
+ * | 小写 `chrome/141.0.0.0 safari/537.36` / 双空格 | **405**（大小写与空白都归一化） |
+ * | `Macintosh…Chrome/141.0.0.0` | 200 |
+ * | `MagicrewDesktop/1.0` / `curl/8.0` | **405** |
+ * | 空 UA / `MyTestAgent/1.0` | 200 |
+ *
+ * ⇒ 判据是**整串精确匹配**（不是「主版本号 ≥ 141」，也不是「非浏览器 UA 一律拒」），
+ * 而**全零 build 的假版本号正是被收录的形态**（`curl` / `MagicrewDesktop` 也在名单上
+ * ⇒ 「换成自家 UA」不是出路，空 UA 虽通但不可靠）。
+ *
+ * ⚠️ 影响面**不止业务 API**：`/v1/chat/completions` 同样 405 ⇒ 国际站账号
+ * 曾经**完全不可用**（不是「积分面板坏了」）。
+ *
+ * ⚠️ 附带推翻了「境外出口 / 地区封锁」的旧归因（`magicrew-credits.ts` 的
+ * 403/405 分支与 `docs/agent-notes/providers-magicrew.md` 七审一节）：那份
+ * 10 组出口矩阵**只变出口、UA 恒为上面那条**，无法把两者分开；同一出口换个
+ * UA 就 200，所以「改出口 / 设直连」对国际站是**反向指路**。
+ * 国内站（火山引擎）是**另一层**（速率 / 瞬时封禁，约 10 分钟恢复），
+ * 同一时刻常量 UA 匿名也能 200 ⇒ **两站不可合并归因**。
+ */
+export const MAGICREW_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/141.0.7390.55 Safari/537.36'
+
+/**
  * 每日登录积分（= 真正的「每日签到」）。
  *
  * `POST <host>/api/v1/login-gift`，**请求体存在且为空串 `''`**（不是省略 body

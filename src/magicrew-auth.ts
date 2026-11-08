@@ -38,6 +38,7 @@ import {
   MAGICREW,
   MAGICREW_GATEWAY_TOKENS_PATH,
   MAGICREW_SESSIONS_PATH,
+  MAGICREW_USER_AGENT,
   type MagicrewProduct,
 } from './magicrew-product.js'
 
@@ -201,10 +202,12 @@ const MAGICREW_OK_CODE = 1000
  */
 export const MAGICREW_PROFILE_TIMEOUT_MS = 6_000
 
-/** 上游 UA（缺了偶发 403；与 magpie 侧逐字一致）。 */
-const MAGICREW_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-  + '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+/**
+ * 上游 UA 来自 {@link MAGICREW_USER_AGENT}（`magicrew-product.ts` 的单一定义处）。
+ *
+ * ⚠️ **不要在这里恢复一份字面量**（issue IKTPRV）：gateway key 与另外四腿打同一个
+ * `product.host`，黑名单命中的就是那条 `.0.0.0` 假版本号 ⇒ 一处漏改就整站不可用。
+ */
 
 /**
  * 发一次请求并剥掉业务信封。

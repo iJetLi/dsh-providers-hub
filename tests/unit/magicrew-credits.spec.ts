@@ -780,6 +780,20 @@ describe('★★ fetchMagicrewBalanceDetailed：失败必须带能指路的原�
      */
     expect(out.error, '必须给出直连之外的下一档动作（换网络环境）').toContain('换一个网络环境')
     expect(out.error, '不得承诺「设为直连即可」').not.toContain('即可')
+    /**
+     * ⚠️⚠️ **第一出手动作必须是「升级插件」**（2026-11-08 IKTPRV）：
+     * 旧版硬编码的 UA 在**上游 WAF 黑名单**上 ⇒ 国际站积分 / 目录 / 聊天三条腿全 405。
+     * 对旧版用户，「代理里设直连」**必然失败**（同一出口、同一时刻只改 UA 就 200）
+     * ⇒ 把它排在第一位等于把用户引向一个白做的动作（与 2026-11-04「引向凭据」同型）。
+     *
+     * ⚠️ 顺序判据是承重件：只断言「出现了升级插件」时，把这句挪到末尾照样绿，
+     * 而用户读到的第一句仍是改代理 ⇒ 等于没改。
+     */
+    const upgrade = out.error.indexOf('升级到最新版')
+    expect(upgrade, '必须把「升级插件」写成第一出手动作').toBeGreaterThan(-1)
+    const directAction = out.error.indexOf('设为**直连**')
+    expect(directAction, '直连这条兜底不得被整段删掉').toBeGreaterThan(-1)
+    expect(upgrade, '「升级插件」必须排在「设为直连」之前').toBeLessThan(directAction)
   })
 
   it('★★ 同一份 403 报文下 fetchMagicrewBalance 仍返回 undefined（两变体契约不同）', async () => {

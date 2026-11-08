@@ -45,7 +45,7 @@
  * 11 位脱敏判据（`/^\d{11}$/`），填进去只会得到一个错位的掩码串。
  */
 
-import { type MagicrewProduct } from './magicrew-product.js'
+import { MAGICREW_USER_AGENT, type MagicrewProduct } from './magicrew-product.js'
 
 /** 账号资料端点（⚠️ **带 `/users`**；不带的那条实测 404）。 */
 export const MAGICREW_PROFILE_PATH = '/api/v1/contact/accounts/me/users'
@@ -63,10 +63,12 @@ export interface MagicrewProfile {
 /** 上游业务码：`1000` = ok，其余都是错误。 */
 const MAGICREW_OK_CODE = 1000
 
-/** 上游 UA（与 `magicrew-auth.ts` / `magicrew-credits.ts` 逐字一致；缺了偶发 403）。 */
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-  + '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+/**
+ * 上游 UA 来自 {@link MAGICREW_USER_AGENT}（单一定义处）。
+ *
+ * ⚠️ **不要在这里恢复一份字面量**（issue IKTPRV）：账号资料 GET 与其余四腿打同一个
+ * `product.host`，漏改的症状是「昵称恒回落 displayName」这类静默降级。
+ */
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -98,7 +100,7 @@ export async function fetchMagicrewProfile(params: {
     authorization: `Bearer ${params.jwt}`,
     'content-type': 'application/json',
     accept: 'application/json',
-    'user-agent': USER_AGENT,
+    'user-agent': MAGICREW_USER_AGENT,
     origin: product.webOrigin,
     // ⚠️⚠️ `referer` 缺了**恒 403 空 body**（2026-11-04 真机二分实测：同一套头只差
     //    这一条，本端点 403 ⇄ 200）。这正是「昵称恒回落 displayName」的真因。

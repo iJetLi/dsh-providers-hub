@@ -26,6 +26,7 @@ import {
   MAGICREW,
   MAGICREW_MODEL_POINTS_PATH,
   MAGICREW_POINTS_PATH,
+  MAGICREW_USER_AGENT,
   type MagicrewProduct,
 } from './magicrew-product.js'
 // ⚠️ 两个哨兵**定义在 `aggregate-core.ts`**（`NEVER = Number.POSITIVE_INFINITY`、
@@ -34,9 +35,12 @@ import { NEVER, UNUSABLE } from './aggregate-core.js'
 import { magicrewDecimalOf, magicrewSignedDecimalOf } from './magicrew-number.js'
 import type { CreditBalance, CreditPackage } from './credits.js'
 
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-  + '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+/**
+ * 上游 UA 来自 {@link MAGICREW_USER_AGENT}（单一定义处）。
+ *
+ * ⚠️ **不要在这里恢复一份字面量**（issue IKTPRV）：积分 / 签到两条腿与其余三条
+ * 打同一个 `product.host`，黑名单命中的是那条 `.0.0.0` 假版本号。
+ */
 
 /** 每「1×」倍率对应多少积分（magpie 侧实测口径）。 */
 const MAGICREW_RATE_BASE = 2000
@@ -80,7 +84,7 @@ export function magicrewApiHeaders(params: {
     authorization: `Bearer ${params.jwt}`,
     'content-type': 'application/json',
     accept: 'application/json',
-    'user-agent': USER_AGENT,
+    'user-agent': MAGICREW_USER_AGENT,
     origin: params.product.webOrigin,
     // ⚠️ 与 `magicrewHeaders` / `fetchMagicrewProfile` 保持一致（漏了它，同服务的
     //    另两个端点是 403 空 body）。
@@ -242,7 +246,8 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
      * **国际站用户拿到的仍是纯状态码 + 主机名**，等于没修到他那一半。
      * ⇒ 判据按「同一形态的拒绝」写（`REJECTED_STATUSES`），文案按状态码回显。
      *
-     * ⚠️⚠️⚠️ **归因已被真机推翻两次，文案不得再断言「境外出口」**（2026-11-04 七审）。
+     * ⚠️⚠️⚠️ **归因已被真机推翻三次，文案不得再断言「境外出口」**（2026-11-04 七审
+     * + 2026-11-08 IKTPRV 三审）。
      *
      * 演进：①初稿写「境外出口被拦」——当时确有一条（美国出口 403）作依据；
      * ②完整出口矩阵（10 组）之后该结论**不再成立**：国内站对本机**所有**出口都回
@@ -250,28 +255,39 @@ async function magicrewBalanceOf(params: MagicrewBalanceParams): Promise<Magicre
      *   `120.229.253.224` / 广东汕头 / 移动）——而同一时刻用 `r.jina.ai` 这类
      *   第三方境外代理去打它却 **200**（`hello, magic-service!`）。国际站同理：
      *   美国 / 香港 / 新加坡 / 日本 / 裸网**全是 405**，第三方代理 **200**。
-     * ⇒ 「地区封锁」被证伪，真因落在「**本机这条出口被上游网关按 IP 段 / 网络环境
-     *   拒掉**」这一层，而插件**无法**辨别它到底是哪一条（也不能绕过 WAF）。
+     *   ⇒ 「地区封锁」被证伪，当时归到「本机这条出口被上游网关按 IP 段 / 网络环境
+     *   拒掉」这一层。
+     * ③⚠️⚠️ **2026-11-08（issue IKTPRV）第 ② 步的矩阵是带混淆变量的** —— 它**只变
+     *   出口、UA 恒为旧常量**（`Chrome/141.0.0.0 Safari/537.36`），因此无法把两者
+     *   分开。同一出口、同一时刻只改 UA 的对照：国际站匿名 / 假 Bearer / **真实 JWT
+     *   + 组织码**三种都是 **405**，换成 `Chrome/141.0.7390.55` 立刻 **200**
+     *   （`/api/v1/quota/points/total`、`/api/v1/flows/models`、
+     *   `/v1/chat/completions` 三条腿全过）。⇒ **国际站的 405 是本插件自己的 UA
+     *   命中阿里 WAF 黑名单**，「改出口 / 设直连」对它是**反向指路**。
+     *   ⚠️ 国内站（火山引擎）是**另一层**：速率 / 瞬时封禁（约 10 分钟恢复），
+     *   同一时刻旧 UA 匿名也能 200 ⇒ **两站不可合并归因**。
+     *   UA 已收敛到 `src/magicrew-product.ts` 的 `MAGICREW_USER_AGENT`（单一定义处）。
      *
-     * 因此文案只允许说三件**已实测**的事：①这是网关层拒绝、**不是凭据问题**
-     *   （JWT 未过期 + 组织码齐全时照样 403/405）；②**直连与多个代理出口都无效**
-     *   （所以「设为直连」只能作为「先试一次」的低成本动作，不得写成承诺）；
-     *   ③再往上就是换网络环境 / 等服务方放行。
-     * ⚠️ 别再写出「设直连即可」这种**已实测无效**的保证 —— 用户照做一次白做一次，
-     *   而这条文案是他唯一的线索（与 `src/index.ts:76` 记的 Qoder `!136` 同型）。
+     * 因此文案的**第一出手动作**是「升级插件」（旧版 UA 在名单上，升级即好），
+     * 直连与换网络降级为「升级后仍如此」的兜底 —— 顺序不能反：反过来用户会先
+     * 白折腾一轮代理，而真因在他手里就能解。
+     * ⚠️ 别再写出「设直连即可」这种**已实测无效**的保证（与 `src/index.ts:76`
+     *   记的 Qoder `!136` 同型）。
      */
     if (REJECTED_STATUSES.has(status)) {
       return {
         ok: false,
         error: `积分查询失败（HTTP ${status}，上游网关拒绝）：网关层（WAF）拒绝了本机请求，`
-          + '**不是凭据问题**（JWT 未过期、组织码齐全也照样如此；'
-          + '真机实测直连与多个代理出口都命中同一档）。'
-          // ⚠️ 「在代理软件里按域名加规则」这半句是必须的（2026-11-04 四审建议 ③(2)）：
+          + '**不是凭据问题**（JWT 未过期、组织码齐全也照样如此）。'
+          // ⚠️ 第一句必须是「升级插件」（2026-11-08 IKTPRV）：旧版硬编码的浏览器 UA
+          //    已被上游列入黑名单 ⇒ 升级即好，而「改代理」对这类用户完全无效。
+          + '请先把本插件升级到最新版（旧版硬编码的浏览器 UA 已被上游列入黑名单，会整站 405）；'
+          // ⚠️ 「在代理软件里按域名加规则」这半句仍必须保留（2026-11-04 四审建议 ③(2)）：
           //    本插件**没有**魔法麦吉的代理设置入口（`onOpenProxy` 只对
           //    opencode / gemini / qoder / minimaxintl，见 `plugin-src/client/jet-hub.js`），
           //    光说「设为直连」会让用户在 Jet Hub 里找开关。
-          + `可先在代理软件里把 ${hostLabelOf(product.host)} 设为**直连**再试一次，`
-          + '仍不行就换一个网络环境（如手机热点）重试；'
+          + `升级后仍如此，再在代理软件里把 ${hostLabelOf(product.host)} 设为**直连**试一次，`
+          + '最后才考虑换一个网络环境（如手机热点）；'
           + '持续如此说明该出口被上游风控挡下，**不用重新登录**，只能等服务方放行',
       }
     }
