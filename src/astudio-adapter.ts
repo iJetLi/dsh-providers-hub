@@ -4,7 +4,7 @@
  * ## 本文件只干三件事（协议判据一律来自 `astudio.ts`，不在此重复）
  *
  * 1. **发请求**：`POST {maasBaseUrl}{chatPath}`
- *    （实测 = `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1/chat/completions`）。
+ *    （实测 = `https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions`）。
  *    请求体**一律**交给 {@link buildAstudioChatRequest}，本文件绝不自己拼 body ——
  *    那函数已把三条实测取舍固化在纯函数层（裸 slug、空值省键、`stream_options.include_usage`），
  *    在这里再拼一遍就是第二处实现，必然漂移。

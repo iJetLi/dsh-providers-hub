@@ -658,8 +658,8 @@ export function astudioBareSlugOf(slug: string): string {
  * 解析模型目录响应。
  *
  * 三条实测驱动的规则：
- * 1. **信封先解**：`{code:0,message,data:{models:[…]}}`（`/model-gateway/v1/models`
- *    是 404，必须走这个端点）。
+ * 1. **信封先解**：`{code:0,message,data:{models:[…]}}`（推理网关 `/v1/models`
+ *    是 404/405，必须走这个目录端点）。
  * 2. **按裸 slug 去重**：本地回环网关把每个模型下发**两份**（`builtin/…` 为
  *    `list`、裸 slug 为 `hide` 别名，能力字段逐字相同，实测 12 条 = 6 模型 × 2）。
  *    上游目前只给裸 slug 一份，但**去重必须现在就写**：否则上游/网关形状一变
@@ -1112,7 +1112,7 @@ export interface AstudioChatRequestInput {
 }
 
 /**
- * 构造 `POST /model-gateway/v1/chat/completions` 的请求体。
+ * 构造 `POST {maasBaseUrl}/chat/completions` 的请求体。
  *
  * 三条实测驱动的取舍：
  * 1. **`model` 用裸 slug**：`builtin/<base64>` 形态会 502 `model_not_found`（fact 380），

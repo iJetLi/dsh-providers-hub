@@ -4,7 +4,7 @@
  * ## 为什么单独一个文件
  *
  * 额度端点在**账号后端**（`agent.xfyun.cn/xingchen-studio`），与推理网关
- *（`astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1`）**不同域、不同鉴权**：
+ *（`maas-api.cn-huabei-1.xf-yun.com/v1`）**不同域、不同鉴权**：
  * 推理用 `Authorization: Bearer <modelBearerToken>`，额度只认 **Cookie 的
  * `ssoSessionId`**。⇒ 凭据里那一份 `access_token` 在这里**用不上**，
  * 本文件读的是 `sso_session_id`（缺失时如实报「未登录」，不发必然 80000 的请求）。

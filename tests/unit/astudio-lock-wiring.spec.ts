@@ -364,7 +364,10 @@ describe('★★ AStudio：分档行为（驱动生产判据，不是复述实�
     //    「非 buddy 系必须注入 `fetchBalance`」（否则会用 product.endpoint 拼出
     //    错误的余额 URL）。本家已注入，故这条只钉住 product 常量本身。
     expect(ASTUDIO.id).toBe('astudio')
-    expect(ASTUDIO.maasBaseUrl).toContain('astronstudio')
+    // ⚠️ 2026-11-07 实测：旧基址 `astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1`
+    //    对任何路径都回 404 `API endpoint not found`（同一 token 打目录仍 200），
+    //    推理已迁到 maas 域。钉死新值，防止有人「按记忆」改回旧域。
+    expect(ASTUDIO.maasBaseUrl).toBe('https://maas-api.cn-huabei-1.xf-yun.com/v1')
   })
 
   /**
