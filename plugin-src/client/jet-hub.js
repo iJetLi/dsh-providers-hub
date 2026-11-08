@@ -3268,17 +3268,16 @@ function accioResetSeconds(packages, now) {
  *    按钮」（做成了「打开供应商开关弹窗」的入口），被否：「我说的是加单独供应商
  *    开启/关闭的功能，你把整个移过来干嘛」⇒ 改成当前供应商自己的真开关。
  *    那个 `onOpenProviderSwitches` 回调已删除，不要再加回来。
- */
-/**
- * 单个供应商的账号面板。
  *
- * ⚠️ 导出只是为了**行为级单测**能直接渲染它（`tests/unit/checkin-panel-wiring.spec.ts`
- * 的「供应商开关的点击接线」段）。本文件里的 react 替身**不会**调用函数组件，
- * 所以从 `JetHubPage` 往下走只能拿到 `<ProviderPanel …>` 这个元素本身、
- * 拿不到它内部的开关 —— 那正是「源码文本断言 + 循环指认」漏掉 M6 的形态。
+ * ⚠️ 行为级单测要直接渲染它，走本文件**既有**的 `__providersPanelForTest`
+ * 别名（文件末尾），不要在这里加 `export function` —— 那会让同一个组件有
+ * 两条导入路径，下一个改测试的人不知道该用哪条。
+ * 为什么要能直接渲染：本文件里的 react 替身**不会**调用函数组件，所以从
+ * `JetHubPage` 往下走只能拿到 `<ProviderPanel …>` 这个元素本身、拿不到它内部
+ * 的开关 —— 那正是「源码文本断言 + 循环指认」漏掉「点开关什么都不发生」的形态。
  * 生产代码里没有第二处引用它。
  */
-export function ProviderPanel({
+function ProviderPanel({
   provider,
   rpcCall,
   providerStatuses,
@@ -5536,7 +5535,12 @@ export function ProviderPanel({
         //    改用 WAI-ARIA 的标准做法：`aria-disabled` + 点击早退。仍然可聚焦、
         //    tooltip 照常显示、屏幕阅读器读出「不可用」，而行为上依然点不动。
         'aria-disabled': switchState.disabled === true || switchBusy ? 'true' : 'false',
-        title: switchState.reason
+        // ⚠️ 2026-11-09 审计（P3-2）：`switchBusy` 时不能再提示「点击关闭「X」」
+        //    —— 那时点下去什么都不发生（早退），文案与行为相反。忙碌与「不可用」
+        //    是两个不同的理由，必须分开说。
+        title: switchBusy
+          ? `正在提交「${providerLabel}」的开关变更…`
+          : switchState.reason
           ?? `点击${switchState.checked ? '关闭' : '打开'}「${providerLabel}」`
           + '（关闭 = 停用它的全部账号，并把当前目录里的模型全部关掉；'
           + '再打开时这些模型会一起恢复，**包括手工关掉的**）',
@@ -9728,6 +9732,16 @@ export function JetHubPage({ rpcCall }) {
    */
   const providerStatusSeqRef = React.useRef(0);
   /**
+   * 是否**成功读到过**供应商汇总状态（只增不减）。
+   *
+   * ⚠️ 2026-11-09 审计（P3-1）：`loadProviderStatuses` 的失败文案要分两种情形 ——
+   * 读到过（「显示的是上一次读到的状态」）与从未读到（「暂时读不到」）。判据不能
+   * 用 `providerStatuses` 这个 state：本回调 deps 只有 `[rpcCall]`，闭包里读到的是
+   * **创建那一拍**的 state（恒为首帧的 `null`）⇒ 用它会让「已读到过」那半句永远
+   * 出不来。用只增不减的 ref 才与渲染时机解耦。
+   */
+  const providerStatusEverLoadedRef = React.useRef(false);
+  /**
    * 供应商状态**读取失败**（区别于「还没读回来」）。
    *
    * `providerStatuses === null` 同时承载「加载中」与「失败」两种情况，界面上
@@ -9744,6 +9758,21 @@ export function JetHubPage({ rpcCall }) {
   const [showProviderSwitches, setShowProviderSwitches] = React.useState(false);
   /** 正在提交的供应商 id 集合：只禁用被点的那一个开关。 */
   const [providerBusy, setProviderBusy] = React.useState(() => new Set());
+  /**
+   * 正在提交中的供应商 id（**同步**判据，不是 state）。
+   *
+   * ⚠️⚠️ 2026-11-09 审计（P2-2）：`providerBusy` 是 state，要等下一次渲染才反映
+   * 到 `switchState`/`switchBusy` 上；同一帧里连点两次（或按住 Enter 的自动重复）
+   * 时两次 `onClick` 读到的都是**旧的** `switchBusy === false` ⇒ 两个 RPC 都发出去。
+   * 而 `toggleProvider` 自身当时**没有任何 busy 判据**，所以：
+   * - 「关闭」方向 ⇒ **弹两次 confirm、发两次写请求**；
+   * - 「打开」方向 ⇒ 直接**发两次写请求**。
+   * `aria-disabled` 只是「告诉」AT，`onClick` 里的早退才是真拦，而那条早退也
+   * 只能拦住「已经渲染过一次」的第二次点击。
+   * ⇒ 用 ref 做**同帧**去重：进函数先占位、`finally` 里释放（与 `providerBusy`
+   * 一快一慢，两者缺一不可 —— 快的防重入，慢的驱动视觉）。
+   */
+  const providerToggleInFlightRef = React.useRef(new Set());
   /**
    * 供应商自定义显示顺序（「供应商开关」弹窗的拖拽排序，宿主持久化）。
    *
@@ -9894,6 +9923,15 @@ export function JetHubPage({ rpcCall }) {
       if (!mounted.current || seq !== providerStatusSeqRef.current) return;
       setProviderStatuses(res?.statuses || {});
       setProviderStatusFailed(false);
+      providerStatusEverLoadedRef.current = true;
+      // ⚠️ 2026-11-09 审计（P3-1）：恢复成功后必须把那条 warn 横幅收掉。
+      //    原先只 `setProviderStatusFailed(false)`，而 `providerNotice` 只有
+      //    `toggleProvider` / `commitProviderOrder` 会清 ⇒ 一次瞬态失败之后，
+      //    即使后面每次读都成功，页头仍永久挂着「显示的是上一次读到的状态」，
+      //    与界面上的实时状态**自相矛盾**。
+      //    ⚠️ 只清**本条**（按 `source` 认领），不能无条件 `setProviderNotice(null)`：
+      //    这个 notice 还承载登录结果 / 领取结果 / 锁定态等其它来源。
+      setProviderNotice(prev => (prev?.source === 'provider-status' ? null : prev));
     } catch (caught) {
       console.error('[jet-hub] load provider statuses failed:', caught);
       if (!mounted.current || seq !== providerStatusSeqRef.current) return;
@@ -9902,8 +9940,18 @@ export function JetHubPage({ rpcCall }) {
       setProviderStatusFailed(true);
       setProviderNotice({
         tone: 'warn',
-        text: `供应商开关状态读取失败（${caught?.message || '未知错误'}），显示的是上一次读到的状态；`
-          + '账号管理不受影响。可在「设置 → 打开供应商开关」里点「刷新」重试。',
+        // ⚠️ `source` 让成功分支能**只**收掉这一条（见上面成功分支的注释）。
+        source: 'provider-status',
+        // ⚠️ 2026-11-09 审计（P3-1）：**首次即失败**时「上一次读到的状态」是假话
+        //    —— 那时根本没有「上一次」，8 个开关全是灰的。两种情形分开说。
+        //    ⚠️ 判据必须是 **ref** 不是 `providerStatuses` 这个 state：本回调的
+        //    deps 只有 `[rpcCall]`，闭包里读到的是**创建那一拍**的 state（恒为
+        //    首帧的 null）⇒ 用它会让「已读到过」的降级文案永远出不来。
+        text: providerStatusEverLoadedRef.current
+          ? `供应商开关状态读取失败（${caught?.message || '未知错误'}），显示的是上一次读到的状态；`
+            + '账号管理不受影响。可在「设置 → 打开供应商开关」里点「刷新」重试。'
+          : `供应商开关状态读取失败（${caught?.message || '未知错误'}），暂时读不到；`
+            + '账号管理不受影响。可在「设置 → 打开供应商开关」里点「刷新」重试。',
       });
     }
   }, [rpcCall]);
@@ -10038,6 +10086,10 @@ export function JetHubPage({ rpcCall }) {
    */
   const toggleProvider = async (providerId, enabled) => {
     const label = PROVIDERS.find(p => p.id === providerId)?.label || providerId;
+    // ⚠️ 同帧去重（见 `providerToggleInFlightRef` 上的注释）：必须在 `confirm` **之前**
+    //    就占位，否则「关闭」方向的双击会弹两次确认框。
+    if (providerToggleInFlightRef.current.has(providerId)) return;
+    providerToggleInFlightRef.current.add(providerId);
     const status = providerStatuses?.[providerId];
     if (!enabled) {
       const models = status?.models?.total ?? 0;
@@ -10048,7 +10100,11 @@ export function JetHubPage({ rpcCall }) {
         + `并停用它的 ${accounts} 个启用账号。\n\n`
         + `取消则不做任何变更。`,
       );
-      if (!ok) return;
+      // ⚠️ 用户取消也要释放占位，否则这个供应商的开关会被永久卡住。
+      if (!ok) {
+        providerToggleInFlightRef.current.delete(providerId);
+        return;
+      }
     }
     setProviderBusy(prev => new Set(prev).add(providerId));
     setProviderNotice(null);
@@ -10071,6 +10127,9 @@ export function JetHubPage({ rpcCall }) {
         text: `${label} 操作失败：${caught?.message || '未知错误'}`,
       });
     } finally {
+      // ⚠️ 无论组件还在不在都要释放占位（`mounted` 为 false 时 state 已经没人消费，
+      //    但 ref 是模块级以外的同一份对象，留着会让重挂载后的第一次点击被吞掉）。
+      providerToggleInFlightRef.current.delete(providerId);
       if (mounted.current) {
         setProviderBusy((prev) => {
           const next = new Set(prev);

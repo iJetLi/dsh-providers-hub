@@ -3354,7 +3354,8 @@ CSS 选择器同步从 `:disabled` 改成 `[aria-disabled='true']`。
 ### ⚠️ `provider.status` 失败**不许**把汇总置 null
 
 原实现失败就 `setProviderStatuses(null)`，于是**一次瞬态失败（429 / 502 / 超时）
-让全部 8 个开关变灰**，而唯一恢复路径是「设置 → 打开供应商开关 → **刷新**」——
+让全部 29 个开关变灰**（`PROVIDER_REGISTRY` 当前 29 条 —— 别写成「8 个」，
+那是本仓早期的 provider 数），而唯一恢复路径是「设置 → 打开供应商开关 → **刷新**」——
 那条路径在提示文案里一个字都没提。⇒ 改成**保留上一次读到的汇总**（它是「稍旧」
 不是「错的」，再点一次服务端会自己纠正），提示文案补上「可在『设置 → 打开供应商
 开关』里点『刷新』重试」。只有从未读到过（仍是初始 null）才退化为不分组平铺。
@@ -3395,7 +3396,12 @@ useRef(initial) { const s = slots[k]; if (!('cur' in s)) s.cur = initial; return
 
 ### 已登记未修（P3）
 - `isInsideCheckinDock`（`plugin-src/client/checkin-panel-logic.js`）**零生产调用方**，
-  却有 6 条用例在守它（`auto-checkin-panel.spec.ts`）⇒ 死代码 + 假信心。
+  却有 3 条用例（6 条断言）在守它（`auto-checkin-panel.spec.ts`）⇒ 死代码 + 假信心。
+- **设置弹窗没有 Escape、没有焦点陷阱**：`renderSettingsPanel`（`plugin-src/client/jet-hub.js`）
+  只有遮罩点击 + 「完成」两个出口，而 `aria-modal="true"` 已声明 —— 键盘用户关不掉。
+  同文件的 `ProviderSwitchPanel` 有 Escape 处理，两处不一致。
+- **另有 23 个零引用 CSS 类**（全仓 321 个 `.dim-*` 逐条扫描，只删了 `.dim-jh-header`
+  一条）⇒ 下次清理时一并删，别只删一个就宣布「死 CSS 清完了」。
 - `openSettings` 里 `if (showSettings) { closeSettings(); return }` 不可达。
 - `saveCheckinTimesWith` 的超时注释称「底层请求若成功 `setAutoCheckin` 仍会更新界面」
   —— `Promise.race` 只结算一次，界面**不会**更新（只有重开面板 `loadAutoCheckin` 才追平）。
@@ -3404,3 +3410,39 @@ useRef(initial) { const s = slots[k]; if (!('cur' in s)) s.cur = initial; return
 - 保存进行中点「设置」⇒ 意图静默丢弃。
 - `switchBusy` 只由 `providerBusy` 提供，模型列表的 `toggleModel` / `setProviderAll`
   不入忙集（两屏互相遮挡 ⇒ 实测不可达，降级登记）。
+- **AST 判据只认三种写法**（`!==` / 前缀 `++` / `+=`）⇒ `!=`、`= x + 1`、后缀 `x++`
+  会**假红**（误报方向安全，但阻碍合法重构）。假红不危险，**但别把它当有牙**。
+- **「状态未知」在 rail 分组上仍与「全部已启用」同形**（`groupProviders` 把非对象
+  `statuses` 当 `{}`）—— 开关本身是禁用态、可区分，但侧边栏的组归属看不出来。
+
+## ⚠️⚠️ 二审（2026-11-09，返工提交 `bfb55eb` 之后）：三条「代码对、守卫可被静默拿掉」
+
+一审的 9 条守卫全部有牙（16/16 期望红），但对抗审计又用 18 条变异找出**三条
+「代码正确、守卫拿掉也不红」**的腿。这不是回归，是**守卫强度**问题 —— 记录在此
+以免下次有人用那三种改法「合法地」把闸门关掉。
+
+### 补的三条行为级用例
+
+| 补的用例（`tests/unit/checkin-panel-wiring.spec.ts`） | 挡的改法 | 红因（逐字） |
+|---|---|---|
+| `★★ 迟到的旧 provider.status 不得覆盖新状态（序号闸门的行为级守卫）` | 成功分支的 `seq !== providerStatusSeqRef.current` 删掉 / 用 `&& false` 短路 | `AssertionError: ★★ 迟到的旧响应必须被丢弃…: expected { models: { total: 9, disabled: 9 } } to deeply equal { models: { total: 2, disabled: +0 } }` |
+| `★★ 同帧连点两次只发一次 provider.setEnabled（防双写）` | `if (providerToggleInFlightRef.current.has(providerId)) return` 删掉 | `AssertionError: ★★ 同帧连点两次必须只发一次 provider.setEnabled…: expected 2 to be 1` |
+| `★ 读失败后恢复成功 ⇒ 那条「显示的是上一次读到的状态」必须收掉` | 成功分支的 `setProviderNotice(prev => …)` 删掉 | `AssertionError: ★ 恢复成功后那条 warn 必须消失…: expected '供应商开关状态读取失败（502 Bad Gateway），暂时读不到；账号…' to be ''` |
+
+### 三条教训
+
+1. **AST 计数判据的射程只有「被整段删掉」，挡不住「留着但失效」** ——
+   `if (false && (…))`、删 `return` 留空 `if` 体、把 `++` 搬到隔壁函数，三种
+   语义已死的改法让 `++`=1、`!==`=2 三个数字**全不变**（34 条全绿）。
+   ⇒ **必须成对**：AST 挡「整段删除」，行为级挡「保留但失效」。
+2. **`slice(at, at + 4000)` 这种「函数体切片」会越界** —— `loadProviderStatuses`
+   的函数体只有 900 余字符，4000 字符窗口直接盖到隔壁的 `commitProviderOrder`，
+   于是「函数体内恰好 2 处」名不副实：把闸门**搬到隔壁函数**也绿。
+   修法 = 用 AST 找 `VariableDeclaration` 取 `initializer` 的**精确**范围。
+3. **变异红在「超时」上不等于红在「被测腿」上** —— 防双写用例第一版只放行
+   「当前那一个」写请求的 resolver，去重腿一删，第二次写永远挂着 ⇒ 用例以
+   30s 超时变红。**红因是超时，不是 `expect(writes.length).toBe(1)`。**
+   修法 = 把所有挂起的 resolver 收进数组、一次放行 ⇒ 红因回到断言本身
+   （`expected 2 to be 1`）。同型先例：本仓 `providers-magicrew` 的
+   「红不自动等于红因是被测变异」。
+

@@ -852,14 +852,17 @@ describe('★★ 供应商开关的点击接线（真实组件 + 真 event handl
    * 从 `JetHubPage` 渲染出来只看得到 `<ProviderPanel …>` 这个**元素本身**、
    * 看不到它内部的开关。这正是「源码文本断言 + 循环指认」漏掉 M6 的形态：
    * 断言「有 onClick」看得见，断言「点了真发请求」看不见。
-   * ⇒ `jet-hub.js` 把 `ProviderPanel` 导出了，**仅供本段使用**。
+   * ⇒ 走 `jet-hub.js` **既有**的 `__providersPanelForTest` 别名
+   *   （`__creditBalanceRowForTest` 同款取舍）。⚠️ 不要为此再加一个
+   *   `export function ProviderPanel` —— 同一个组件两条导入路径，
+   *   下一个人不知道该用哪条。
    */
   async function renderPanel(overrides: Record<string, unknown> = {}): Promise<void> {
     const mod = await import('../../plugin-src/client/jet-hub.js') as unknown as {
-      ProviderPanel: (p: unknown) => unknown
+      __providersPanelForTest?: (p: unknown) => unknown
     }
-    const panel = mod.ProviderPanel
-    expect(typeof panel, 'ProviderPanel 必须被导出（本段的前提，不是被测行为）').toBe('function')
+    const panel = mod.__providersPanelForTest
+    expect(typeof panel, '__providersPanelForTest 必须被导出（本段的前提，不是被测行为）').toBe('function')
     const props: Record<string, unknown> = {
       provider: 'codearts',
       rpcCall: async () => ({}),
@@ -1055,10 +1058,10 @@ describe('provider.status 读失败：开关不得集体变灰（2026-11-09 审�
       //    元素，props 永远滞后一拍（状态更新要下一拍才反映出来）。
       for (let i = 0; i < 6; i += 1) await render({ rpcCall })
 
-      // ⚠️ 本文件的 react 替身**不渲染子组件**（见 `ProviderPanel` 的导出注释），
-      //    所以拿不到真正的 `<button role=switch>`。退一步读**传给 ProviderPanel
-      //    的 props** —— 那正是开关状态与可点性的唯一来源，等价于「渲染出来的
-      //    开关长什么样」，且不依赖 DOM 替身。
+      // ⚠️ 本文件的 react 替身**不渲染子组件**（见 `__providersPanelForTest`
+      //    的注释），所以拿不到真正的 `<button role=switch>`。退一步读**传给
+      //    ProviderPanel 的 props** —— 那正是开关状态与可点性的唯一来源，
+      //    等价于「渲染出来的开关长什么样」，且不依赖 DOM 替身。
       const panelProps = (): Record<string, unknown> | undefined =>
         // ⚠️ 必须同时匹配 `providerStatuses`：`ProviderLogo` 也收 `provider`，
         //    只按 provider 找会命中那个图标组件（实测 props 里没有状态）。
@@ -1082,14 +1085,180 @@ describe('provider.status 读失败：开关不得集体变灰（2026-11-09 审�
 
       const after = panelProps()
       expect(after, '读失败后 ProviderPanel 必须还在（不许整块消失）').toBeDefined()
-      // 判别力：把 catch 里的「刻意不置 null」改回 `setProviderStatuses(null)`
-      // ⇒ 这里拿到 `null` ⇒ 每个开关都退化成「状态尚未读取」+ 禁用 ⇒ 变红。
+      // ⚠️ 2026-11-09 审计（P3-5）：先单独判一次 `providerStatuses` 非 null，
+      //    否则「读失败把它清成 null」这个缺陷会表现为
+      //    `TypeError: Cannot read properties of null (reading 'codearts')`
+      //    —— 报错指向的是**断言自己**，看不出「是哪条语义坏了」。
+      const afterStatuses = after!.providerStatuses as Record<string, unknown> | null
       expect(
-        (after!.providerStatuses as Record<string, unknown>).codearts,
+        afterStatuses,
         '★★ 一次读失败不得把已读到的汇总清成 null（那会让整页供应商管理不可用）',
-      ).toEqual(OPEN)
+      ).not.toBeNull()
+      // 判别力：把 catch 里的「刻意不置 null」改回 `setProviderStatuses(null)`
+      // ⇒ 上一条拿到 `null` ⇒ 变红（且报的是上面那句，不是 TypeError）。
+      expect(afterStatuses?.codearts, '读失败后必须仍是上一次读到的「已启用」').toEqual(OPEN)
     } finally {
       ;(globalThis as Record<string, unknown>).confirm = originalConfirm
     }
+  })
+
+  /**
+   * ⚠️⚠️ 2026-11-09 审计（P2-1 / 变异 M15）：恢复的 AST 闸门**只数语法**，
+   * 一行 `if (false && (…)) return` 就能让「更新点 = 1、比较点 = 2」三个数字
+   * 全不变，而闸门实际已死（34 条全绿）。⇒ 必须再有一条**行为级**用例把
+   * 「迟到的旧响应不得覆盖新状态」钉死在运行时。
+   *
+   * 判别力：把 `if (!mounted.current || seq !== providerStatusSeqRef.current) return`
+   * 里的序号比较删掉 ⇒ 慢的 `OLD` 后到并覆盖 `NEW` ⇒ 变红。
+   */
+  it('★★ 迟到的旧 provider.status 不得覆盖新状态（序号闸门的行为级守卫）', async () => {
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+
+    const NEW = { models: { total: 2, disabled: 0 } }
+    const OLD = { models: { total: 9, disabled: 9 } }
+    let call = 0
+    const rpcCall = async (method: string): Promise<unknown> => {
+      if (method !== 'provider.status') return {}
+      call += 1
+      // 第 1 次：立刻回「新状态」；第 2 次：**慢 40ms** 回「旧状态」。
+      // 两者都按发起顺序编号，但返回顺序相反 —— 正是序号闸门要处理的场景。
+      if (call === 1) return { statuses: { codearts: NEW } }
+      if (call === 2) {
+        await new Promise((resolve) => setTimeout(resolve, 40))
+        return { statuses: { codearts: OLD } }
+      }
+      // 第 3 次起永久挂起：否则最后一次读取渲染会把 OLD 洗成 NEW，判别力归零。
+      return new Promise(() => {})
+    }
+
+    await render({ rpcCall })
+    // 再渲染一拍 ⇒ effect 依赖（stub 里 `useCallback` 每次返回新函数）变化 ⇒
+    // 发出第 2 次 `provider.status`（慢的那个）。
+    await render({ rpcCall })
+    // 等慢响应真的回来并（应当）被丢弃。
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    await flush(6)
+
+    const panel = findAll(
+      (node) => typeof node.type === 'function'
+        && node.props?.provider === 'codearts'
+        && 'providerStatuses' in node.props,
+    )[0]?.props as Record<string, unknown> | undefined
+    expect(panel, '找不到 codearts 的 ProviderPanel ⇒ 本段失效').toBeDefined()
+    const statuses = panel!.providerStatuses as Record<string, unknown> | null
+    expect(statuses, '状态不得为空（本用例的前提）').not.toBeNull()
+    expect(
+      statuses?.codearts,
+      '★★ 迟到的旧响应必须被丢弃（否则界面会回退成用户没做过的状态，且没有任何报错）',
+    ).toEqual(NEW)
+  })
+
+  /**
+   * ⚠️⚠️ 2026-11-09 审计（P2-2 / 变异 M17）：`toggleProvider` 自身当时**没有任何
+   * busy 判据** —— `providerBusy` 是 state，要等下一次渲染才进 `switchBusy`，
+   * 同一帧里连点两次读到的都是旧的 `false` ⇒ **两个写请求都发出去**。
+   * `aria-disabled` 只是「告诉」AT，不是拦截。
+   *
+   * 判别力：删掉 `if (providerToggleInFlightRef.current.has(providerId)) return`
+   * 或 `finally` 里的 `delete` 之外的任何一条腿 ⇒ 这里变 2。
+   */
+  it('★★ 同帧连点两次只发一次 provider.setEnabled（防双写）', async () => {
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+
+    const writes: Array<Record<string, unknown>> = []
+    // ⚠️ 收集**所有**挂起的写，最后一起放行。若只放行「当前那一个」，
+    //    去重腿被删掉时第二次写会永远挂着、用例变成**超时**而不是断言失败
+    //    —— 那样「变红」的红因就不是被测腿了（本仓明写的假红形态）。
+    const releasers: Array<() => void> = []
+    const rpcCall = async (method: string, params?: unknown): Promise<unknown> => {
+      if (method === 'provider.status') return { statuses: { codearts: { models: { total: 3, disabled: 0 } } } }
+      if (method === 'provider.setEnabled') {
+        writes.push(params as Record<string, unknown>)
+        // 挂住写请求，让第二次点击**在它返回之前**发生（模拟真实双击）。
+        await new Promise<void>((resolve) => { releasers.push(resolve) })
+        return {}
+      }
+      // `gateway.getEnabled` / 其它一律给空壳。
+      return {}
+    }
+
+    await render({ rpcCall })
+    const panel = findAll(
+      (node) => typeof node.type === 'function'
+        && node.props?.provider === 'codearts'
+        && 'providerStatuses' in node.props,
+    )[0]?.props as Record<string, unknown> | undefined
+    expect(panel, '找不到 codearts 的 ProviderPanel ⇒ 本段失效').toBeDefined()
+
+    const toggle = panel!.onToggleProvider as (id: string, enabled: boolean) => Promise<void>
+    // ⚠️ 打开方向（enabled=true）不会弹 confirm —— 本用例只验「防双写」这一腿。
+    const first = toggle('codearts', true)
+    const second = toggle('codearts', true)
+    await flush(2)
+    // 全部放行（正常实现下只有一个）。
+    for (const release of releasers) release()
+    await Promise.all([first.catch(() => {}), second.catch(() => {})])
+    await flush(6)
+
+    expect(
+      writes.length,
+      '★★ 同帧连点两次必须只发一次 provider.setEnabled（否则账号/模型状态被写两遍，第二次读到的是第一次的中间态）',
+    ).toBe(1)
+  })
+
+  /**
+   * ⚠️⚠️ 2026-11-09 审计（P3-1）：失败时挂的那条 warn 横幅原先**永远不会消失**
+   * —— 成功分支只 `setProviderStatusFailed(false)`，而 `providerNotice` 只有
+   * `toggleProvider` / `commitProviderOrder` 会清。一次瞬态 502 之后，哪怕后面
+   * 每次读都成功，页头仍永久写着「显示的是上一次读到的状态」，与界面上的实时
+   * 状态**自相矛盾**（用户会以为还在坏着）。
+   *
+   * 判别力：删掉成功分支里的
+   * `setProviderNotice(prev => (prev?.source === 'provider-status' ? null : prev))`
+   * ⇒ 这里仍读到那条 warn ⇒ 变红。
+   */
+  it('★ 读失败后恢复成功 ⇒ 那条「显示的是上一次读到的状态」必须收掉', async () => {
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+
+    const OPEN = { models: { total: 3, disabled: 0 } }
+    let shouldFail = true
+    const rpcCall = async (method: string): Promise<unknown> => {
+      if (method === 'provider.status') {
+        if (shouldFail) throw new Error('502 Bad Gateway')
+        return { statuses: { codearts: OPEN } }
+      }
+      return {}
+    }
+
+    /**
+     * 页面级供应商提示（`providerNotice`）的文字。
+     *
+     * ⚠️ 它不是 `ProviderPanel` 的 prop —— 它由 `JetHubPage` 直接渲染成
+     * `div.dim-jh-probeNotice[data-tone]`（`plugin-src/client/jet-hub.js:11065-11071`），
+     * 所以只能按 DOM 形状找。`style.margin` 是这条独有的（同页还有其它
+     * `dim-jh-probeNotice`，都在各自面板里、margin 不是这个）。
+     */
+    const providerNoticeText = (): string => {
+      const nodes = findAll(
+        (node) => node.props?.className === 'dim-jh-probeNotice'
+          && (node.props?.style as Record<string, unknown> | undefined)?.margin === '12px 24px 0',
+      )
+      return nodes.map((node) => textsIn([node]).join('')).join('\n')
+    }
+
+    // 第一拍：读失败 ⇒ 挂上 warn。
+    for (let i = 0; i < 6; i += 1) await render({ rpcCall })
+    expect(
+      providerNoticeText(),
+      '读失败必须给出提示（否则用户不知道看到的是旧状态）',
+    ).toContain('供应商开关状态读取失败')
+
+    // 第二拍：恢复成功 ⇒ 横幅必须收掉。
+    shouldFail = false
+    for (let i = 0; i < 8; i += 1) await render({ rpcCall })
+    expect(
+      providerNoticeText(),
+      '★ 恢复成功后那条 warn 必须消失（否则界面永久自相矛盾）',
+    ).toBe('')
   })
 })

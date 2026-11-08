@@ -375,17 +375,37 @@ describe('★★ 客户端 provider 状态序号闸门（AST 级）', () => {
 
   it('★★ 失败分支也必须丢弃过期响应（否则旧失败的 catch 会盖掉新成功的 state）', () => {
     /**
-     * ⚠️ 用 **AST** 定位 `loadProviderStatuses` 的 `useCallback` 回调体，
-     * 而不是文本切片（文本切片会被同名注释骗过）。
+     * ⚠️ 用 **AST** 定位 `loadProviderStatuses` 的声明，取其 initializer
+     * （`React.useCallback(<fn>, …)`）的**精确**范围 —— 不是文本切片。
      *
-     * 两条闸门都在同一个函数里 ⇒ 断言「该函数体内 `!==` 比较点恰好 2 处」
-     * 就能同时锁住「成功分支有闸门」与「失败分支有闸门」——
-     * 删掉任一条都会让计数变 1。
+     * ⚠️⚠️ 2026-11-09 二审（P2-1）：原实现是
+     * `source.slice(at, at + 4000)`，而该函数体只有 900 余字符 ⇒ 窗口会**越界**
+     * 到下一个函数（`commitProviderOrder`），于是「函数体内恰好 2 处」这条断言
+     * 名不副实：把闸门从 `loadProviderStatuses` 搬到隔壁函数里照样绿。
+     *
+     * ⚠️ **本条的射程只有「语法计数」**：`if (false && seq !== ref.current)`、
+     * 删 `return` 留空 `if` 体、把 `++` 搬到别的函数 —— 这三种「语义已死」
+     * 的改法它都看不出来。真正的守卫是行为级
+     * `tests/unit/checkin-panel-wiring.spec.ts` 的
+     * 「迟到的旧 provider.status 不得覆盖新状态」（实测：删掉序号比较 ⇒ 变红）。
+     * 两条判据缺一不可：这条挡「被整段删掉」，那条挡「留着但失效」。
      */
-    const at = source.indexOf('const loadProviderStatuses = React.useCallback')
-    expect(at, '找不到 loadProviderStatuses').toBeGreaterThan(-1)
-    const slice = source.slice(at, at + 4000)
-    const sliceSf = ts.createSourceFile('load.ts', slice, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    let decl: ts.Node | undefined
+    const findDecl = (node: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(node)
+        && ts.isIdentifier(node.name)
+        && node.name.text === 'loadProviderStatuses'
+        && node.initializer !== undefined
+      ) {
+        decl = node.initializer
+      }
+      ts.forEachChild(node, findDecl)
+    }
+    findDecl(sf)
+    expect(decl, '找不到 loadProviderStatuses 的声明 ⇒ 本条会静默失明').toBeDefined()
+    const body = decl as unknown as ts.Node
+
     let comparisonsInFn = 0
     const walk = (node: ts.Node): void => {
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
@@ -393,7 +413,7 @@ describe('★★ 客户端 provider 状态序号闸门（AST 级）', () => {
       }
       ts.forEachChild(node, walk)
     }
-    walk(sliceSf)
+    walk(body)
     expect(
       comparisonsInFn,
       'loadProviderStatuses 体内必须有 2 道序号闸门（成功分支 + 失败分支）',
