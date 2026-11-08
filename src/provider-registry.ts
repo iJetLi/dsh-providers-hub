@@ -1311,3 +1311,51 @@ export function creditCapabilitiesOf(): Record<string, CreditsCapability> {
   }
   return out
 }
+
+/**
+ * **会做「余额到期分档」的渠道**（`id` 全集的唯一真源）。
+ *
+ * ## 为什么需要这张表
+ *
+ * 这些渠道的选号器走 `pickBuddyAccount` / `rankBuddyAccountsByBalance`
+ *（或 Loomy 那份同构实现）：**先按积分到期档位排序，档内才看用户拖拽的顺序**。
+ * 其余渠道（codearts / raccoon / cline / gemini …）是纯池内手动序 ——
+ * 拖拽对它们是**绝对**的优先级。
+ *
+ * 这个差别对用户是**不可见**的，而它正是「拖拽时灵时不灵」这条报障的根源：
+ * 面板文案「按顺序选号」在分档渠道上只是一半真话。
+ * ⇒ 面板据此决定要不要渲染「严格手动顺序」开关，以及要不要补一句说明。
+ *
+ * ## ⚠️ 它必须与真实装配一致
+ *
+ * 来源是 `src/index.ts` 里**每一处** `balance: { kind: 'buddy' | 'loomy' }`
+ * 的 `product`（2026-11-09 逐处清点）。加渠道时**必须同步**，
+ * `tests/unit/strict-manual-order-wiring.spec.ts` 会扫描 `src/index.ts`
+ * 的真实装配并对账 —— 漏一家会**变红**，而不是静默少一个开关。
+ *
+ * ⚠️ **`officeace` 刻意不在表里**：它的分档只发生在**锁定永久积分**时
+ *（`officeace-lock.ts` 的 `permanentLocked() === false` 分支直接走
+ * `resolveUnlocked()`，与手动顺序逐字节同路径）。给它渲染开关会承诺一个
+ * 解锁态下不存在的排序语义。
+ */
+export const BALANCE_TIERED_PROVIDERS: readonly string[] = Object.freeze([
+  'buddy',
+  'workbuddy',
+  'lobsterai',
+  'qoder',
+  'qodercn',
+  'trae',
+  'loomy',
+  'minimax',
+  'minimaxintl',
+  'autoclaw',
+  'autoclawintl',
+  'magicrew',
+  'magicrewintl',
+  'astudio',
+])
+
+/** 该渠道的选号是否会先按余额到期档位排序（见 {@link BALANCE_TIERED_PROVIDERS}）。 */
+export function isBalanceTieredProvider(provider: string): boolean {
+  return BALANCE_TIERED_PROVIDERS.includes(provider)
+}

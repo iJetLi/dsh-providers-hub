@@ -404,6 +404,10 @@ import type {
   RpcSessionBalanceGetEnabledResponse,
   RpcSessionBalanceSetEnabledRequest,
   RpcSessionBalanceSetEnabledResponse,
+  RpcStrictManualOrderGetRequest,
+  RpcStrictManualOrderGetResponse,
+  RpcStrictManualOrderSetRequest,
+  RpcStrictManualOrderSetResponse,
   RpcPanelEntryGetResponse,
   RpcPanelEntrySetRequest,
   RpcPanelEntrySetResponse,
@@ -10471,6 +10475,48 @@ function registerJetHubEndpoints(
           + `${req.enabled ? '' : '（ZCode 回到手动顺序优先选号）'}`,
         )
         const value: RpcSessionBalanceSetEnabledResponse = { enabled: pool.sessionBalanceEnabled() }
+        return { ok: true, value }
+      }
+
+      // ── 「严格手动顺序」（账号面板上每张渠道卡片一个开关）──
+      //
+      // 语义：**开** = 拖拽顺序是**唯一**的选号优先级（余额档位退化为「可用 /
+      // 不可用」判据，「锁定永久积分」照旧生效）；**关**（缺键默认）= 升级前行为
+      // （余额分档优先、档内才看手动顺序）。
+      //
+      // 消费方是 `credential-resolver.ts` 的分档编排（每次现读
+      // `pool.strictManualOrder(providerId)`）。没有它时面板文案
+      //「拖动卡片调整排序，按顺序选号」对**走余额分档的渠道**是一句假话 ——
+      // 那正是「拖拽时灵时不灵」这条报障的根。
+      case 'strictManualOrder.getEnabled': {
+        const req = payload as RpcStrictManualOrderGetRequest
+        if (typeof req?.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        const value: RpcStrictManualOrderGetResponse = {
+          enabled: pool.strictManualOrder(req.provider),
+        }
+        return { ok: true, value }
+      }
+
+      case 'strictManualOrder.setEnabled': {
+        const req = payload as RpcStrictManualOrderSetRequest
+        if (typeof req?.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        // ⚠️ 与 `sessionBalance.setEnabled` 同约定：**不做默认值猜测** ——
+        // 默认成 true 会静默打开用户特意关闭的开关（而本开关会改变选号策略，
+        // 静默打开等于用户不知情地开始按拖拽序发请求）。
+        if (typeof req.enabled !== 'boolean') {
+          return { ok: false, error: { code: 'bad-request', message: '非空布尔 enabled 必填' } }
+        }
+        await pool.setStrictManualOrder(req.provider, req.enabled)
+        // 不刷新任何缓存：选号路径**每次现读** `pool.strictManualOrder(provider)`。
+        ctx.logger.info(
+          `[jet-hub] ${req.enabled ? '打开' : '关闭'} ${req.provider} 的严格手动顺序`
+          + `${req.enabled ? '（选号完全按拖拽序，余额档位只判可用性）' : '（回到余额分档优先）'}`,
+        )
+        const value: RpcStrictManualOrderSetResponse = { enabled: pool.strictManualOrder(req.provider) }
         return { ok: true, value }
       }
 

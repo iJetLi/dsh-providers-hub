@@ -114,6 +114,15 @@ export type AggregateOrderMode = 'expiry' | 'manual'
 export type PermanentLockMap = Record<string, boolean>
 
 /**
+ * 各 provider 的「严格手动顺序」开关：provider id → 已开启。
+ *
+ * ⚠️ **只记录已开启的**（缺键 = 走余额分档的升级前行为），与
+ * {@link PermanentLockMap} 同一种稀疏表约定 —— 这样老文档读到空表时的语义
+ * 天然就是「一个都没开」。
+ */
+export type StrictManualOrderMap = Record<string, boolean>
+
+/**
  * Jet Hub 的**唯一**入口位置。
  *
  * 两个取值严格互斥，任一时刻只有一个入口存在（见 {@link JetHubState.panelEntry}）。
@@ -232,6 +241,30 @@ export interface JetHubState {
    * —— 没有任何不可逆后果。缺键语义为**启用**（2026-10-30 用户要求的默认）。
    */
   sessionBalanceEnabled?: boolean
+  /**
+   * 「严格手动顺序」开关表（{@link StrictManualOrderMap}）：
+   * provider id → 是否**完全**按用户拖拽的顺序取号。
+   *
+   * 语义：**开** = 拖拽顺序是**唯一**的优先级判据（余额分档只保留「锁定永久
+   * 积分」这道门 —— 只剩永久积分的号照旧不可用；档位不再重排先后）；
+   * **关**（缺键，= 升级前行为）= 余额分档优先、档内才看手动顺序。
+   *
+   * ## 为什么需要它（真实报障）
+   *
+   * 面板文案与序号徽标一直写「拖动卡片调整排序，按顺序选号」「序号 = 自动选号
+   * 优先级」，而**当过余额分档的渠道**（buddy 系 / TRAE / Qoder / MiniMax /
+   * AutoClaw / Magicrew / AStudio / Loomy）实际执行的是「先按积分到期档位排序，
+   * 档内才看手动顺序」。于是用户把某号拖到首位、只要它不再持有临期积分
+   *（或余额接口抖了一下），请求就会**静默**落到别的号上 —— 用户侧的表现正是
+   *「拖拽时灵时不灵」。
+   *
+   * ⚠️ 与 `sessionBalanceEnabled` 同级、**可以**住在这里：老版本代码整体重写
+   * `state.json` 时会丢掉本键 ⇒ 回到「档位优先」的升级前行为，用户再开一次即可
+   *（可逆、且方向保守：不会静默烧掉任何东西）。
+   *
+   * 缺键语义为**关闭**：老用户升级后行为与升级前**逐字节一致**。
+   */
+  strictManualOrder?: StrictManualOrderMap
   /**
    * 「面板入口」：Jet Hub 的**唯一**入口位置（{@link PanelEntry}）。
    *
@@ -409,6 +442,13 @@ export const jetHubSchema = Schema.object({
   // 「ZCode 会话负载均衡」：默认开启（2026-10-30 用户要求）。关闭 = ZCode
   // 回到「手动顺序首个可用账号」的既有语义。判据在 sanitizeSessionBalanceEnabled。
   sessionBalanceEnabled: Schema.boolean().default(true),
+  // 「严格手动顺序」：**默认关闭**（= 升级前行为：余额分档优先、档内看手动顺序）。
+  // ⚠️ 用 `Schema.dict(Schema.any())` 与 `providerClosed` 同款：schema 只负责类型，
+  // 取值合法性由 `sanitizeStrictManualOrder` 在**读写两侧**统一判（老契约后端不
+  // 经过 schema，只靠那个函数；两处用同一份判据才不会漂移）。
+  // ⚠️ 绝不能写成 `Schema.boolean().default(false)` —— 它是**按 provider 的稀疏表**，
+  //   不是全局布尔；写成布尔会把「只给某一家开」这件事从数据形状上抹掉。
+  strictManualOrder: Schema.dict(Schema.any()).default({}),
   // 缺键 = 「仅侧栏」（升级前的默认就是显示那一行；改掉是显式动作）。
   // ⚠️ 用 `Schema.string()` 而不是 `Schema.union([...])`：schema 只负责类型，
   // 取值合法性由 `sanitizePanelEntry` 在**读写两侧**统一判（老契约后端不经过
@@ -491,6 +531,31 @@ export function sanitizeNativeWebSearchEnabled(raw: unknown): boolean {
  */
 export function sanitizeSessionBalanceEnabled(raw: unknown): boolean {
   return raw !== false
+}
+
+/**
+ * 归一化「严格手动顺序」开关表（{@link JetHubState.strictManualOrder}）。
+ *
+ * 判据与 {@link sanitizeProviderClosed} **逐字同构**：只有**显式 `true`** 才算开启
+ * （`false` / `1` / `'true'` / `null` 都不算）。
+ *
+ * ⚠️ 为什么不能宽松接受 truthy：`'false'` 是**非空字符串**、truthy ⇒ 会被判成
+ * 「用户开启了严格手动顺序」，而这正是个**行为变更**的开关（关掉余额分档）。
+ * 脏数据把它打开，用户就会看到一个自己从没开过的行为变化，且没有任何入口能
+ * 告诉他「这是被脏数据打开的」。
+ *
+ * ⚠️ 反向也**不能**把非 `true` 一律清成「关闭」以外的东西：缺键 / 畸形输入
+ *（含数组 —— `typeof [] === 'object'`）一律退化为空表 = 升级前行为。
+ */
+export function sanitizeStrictManualOrder(raw: unknown): StrictManualOrderMap {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const result: StrictManualOrderMap = {}
+  for (const [provider, flag] of Object.entries(raw as Record<string, unknown>)) {
+    // provider id 必须非空字符串（空串既不是合法 provider，也会让面板渲染出幽灵行）。
+    if (provider.length === 0) continue
+    if (flag === true) result[provider] = true
+  }
+  return result
 }
 
 /**
@@ -1144,6 +1209,7 @@ class SettingsStore implements JetHubStore {
         gatewayAllowLan?: unknown
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
+        strictManualOrder?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
         panelEntry?: unknown
@@ -1172,6 +1238,8 @@ class SettingsStore implements JetHubStore {
       nativeWebSearchEnabled: sanitizeNativeWebSearchEnabled(value.nativeWebSearchEnabled),
       // 老文档没这个键 → 启用（2026-10-30 用户要求的默认方向）。
       sessionBalanceEnabled: sanitizeSessionBalanceEnabled(value.sessionBalanceEnabled),
+      // 老文档没这个键 → 空表（= 全部走余额分档，升级前行为）。
+      strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
       // 老文档没新键 → 按老布尔迁移（只有明确 false 才是「仅设置页」）；两者都没有 → 仅侧栏。
       panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
       // 老文档没这个键 → 空数组（未自定义），展示侧按声明顺序渲染。
@@ -1227,6 +1295,12 @@ class SettingsStore implements JetHubStore {
       //    `replace` 整体替换陷阱）：漏键会让用户明确关闭的「ZCode 会话负载
       //    均衡」在任何一次其它写入时被抹掉，重启后**静默回到开启**。
       sessionBalanceEnabled: state.sessionBalanceEnabled !== false,
+      // ⚠️⚠️ **必须带上本键**（与前几个新键是**同一个** `replace` 整体替换陷阱）：
+      //    漏键 ⇒ 用户开过的「严格手动顺序」在**任何**一次其它写入（改账号 / 改黑名单
+      //    / 改网关 / 拖顺序 / 切面板入口）时被抹掉，重启后**静默回到余额分档优先**。
+      //    症状极难归因：用户只会看到「拖拽又不灵了」，而面板序号还停在 1。
+      //    过一遍 sanitize：入参可能来自任何调用方，脏值不该被写进文档。
+      strictManualOrder: sanitizeStrictManualOrder(state.strictManualOrder),
       // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同因，是同一个
       //    `replace` 整体替换陷阱的第二个受害者）：漏键会让用户改过的
       //    「面板入口」在**任何**一次账号/黑名单/网关/顺序写入时被抹掉，
@@ -1573,6 +1647,7 @@ class FileStore implements JetHubStore {
         gatewayAllowLan?: unknown
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
+        strictManualOrder?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
         panelEntry?: unknown
@@ -1599,6 +1674,8 @@ class FileStore implements JetHubStore {
         nativeWebSearchEnabled: sanitizeNativeWebSearchEnabled(value.nativeWebSearchEnabled),
         // 老文档没这个键 → 启用，与升级前行为一致。
         sessionBalanceEnabled: sanitizeSessionBalanceEnabled(value.sessionBalanceEnabled),
+        // 老文档没这个键 → 空表（= 全部走余额分档，与升级前行为一致）。
+        strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
         // 老文档没新键 → 按老布尔迁移（与 `SettingsStore` 同一判据）；两者都没有 → 仅侧栏。
         panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
         // 老文档没这个键 → 空数组（未自定义），展示侧按声明顺序渲染。
@@ -1701,6 +1778,8 @@ class FileStore implements JetHubStore {
         nativeWebSearchEnabled: true,
         // 同上：恢复出的文档不含会话负载均衡开关信息 → 启用（与全新安装一致）。
         sessionBalanceEnabled: true,
+        // 同上：恢复出的文档不含严格手动顺序信息 → 空表（与全新安装一致）。
+        strictManualOrder: {},
         // 同上：恢复出的文档不含面板入口信息 → 默认「仅侧栏」（与全新安装一致）。
         panelEntry: DEFAULT_PANEL_ENTRY,
         // 凭据文件里也没有顺序信息 → 空数组（未自定义，与全新安装一致）。

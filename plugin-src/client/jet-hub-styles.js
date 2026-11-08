@@ -206,6 +206,13 @@ const STYLES = `
    是「独占一行」时代的遗留，留着会在按钮组下方多出一截空隙。 */
 .dim-jh-orderHint { flex: 0 1 auto; min-width: 0; margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 
+/* 「严格手动顺序」开关行（只在走余额分档的渠道渲染，见 jet-hub.js 的 canStrictOrder）。
+   ⚠️ 与 .dim-jh-orderHint 同在一行：开关在左、说明在右，说明块 flex: 1 1 auto
+   + min-width: 0 让它在窄面板下省略，而不是把开关挤出可视区。
+   ⚠️ 本文件是模板字符串，注释里绝不能出现反引号。 */
+.dim-jh-orderMode { display: flex; flex: 0 1 auto; align-items: center; gap: 8px; min-width: 0; }
+.dim-jh-orderModeHint { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); }
+
 /* 顶部一行：状态点 + 名称 + 状态标签 */
 .dim-jh-accountTop { display: flex; align-items: center; gap: 8px; }
 .dim-jh-accountStatus { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-label-tertiary, #9aa0a6); }

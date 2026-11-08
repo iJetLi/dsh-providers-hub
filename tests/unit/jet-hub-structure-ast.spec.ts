@@ -100,20 +100,24 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
       .toEqual([])
   })
 
-  it('★★★ panelHead 的子节点只能是「标题行 + 状态提示 + 排序提示 + 按钮组」', () => {
+  it('★★★ panelHead 的子节点只能是「标题行 + 状态提示 + 排序提示 + 严格手动顺序行 + 按钮组」', () => {
     const ph = panelHeadCall()
     expect(ph, '找不到 .dim-jh-panelHead').toBeTruthy()
     const children = ph.arguments.slice(2)
     // 2026-10-26 第二次改（用户「信息应该在按钮行上方行，而不是下方行」）：
     // 面板级状态提示从 section 直接子节点搬进 panelHead、排在按钮组**之前**。
-    // 顺序契约：标题 → 6 条状态提示 → 排序提示三元 → 按钮组。
+    // 顺序契约：标题 → 6 条状态提示 → 排序提示三元 → 严格手动顺序行 → 按钮组。
+    // ⚠️ 2026-11-09：新增「严格手动顺序」行（`.dim-jh-orderMode`，见
+    //    `strict-manual-order.spec.ts`）。它**必须**紧跟在排序提示之后、
+    //    按钮组之前 —— 这两句是同一个话题（「顺序是怎么用的」），拆开会让
+    //    用户以为那个开关管的是别的东西。
     expect(
       children.length,
-      `panelHead 应包 1 标题 + 6 条状态提示 + 1 排序提示 + 1 按钮组 = 9 个子项，实际 ${children.length} 个`
-      + `（多出来的是被括号错位圈进来的：第 10 个起是 ${children.slice(9)
+      `panelHead 应包 1 标题 + 6 条状态提示 + 1 排序提示 + 1 严格手动顺序行 + 1 按钮组 = 10 个子项，实际 ${children.length} 个`
+      + `（多出来的是被括号错位圈进来的：第 11 个起是 ${children.slice(10)
         .map((c) => source.slice(c.getStart(sf), c.getStart(sf) + 40).replace(/\s+/g, ' '))
         .join(' | ')}）`,
-    ).toBe(9)
+    ).toBe(10)
     // ⚠️ 2026-11-06：第一个子项从 `.dim-jh-panelTitle` 变成
     //    `.dim-jh-panelTitleRow`（标题 + 最右侧的「供应商开关」图标**包了一层
     //    行容器**）。**不能**直接把标题改成 `flex: 1 1 auto` 了事 —— 那样
@@ -126,7 +130,7 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
     // 中间那个三元是排序提示（accounts.length > 1 ? <p.orderHint> : null）
     const orderHintIdx = children.findIndex((c) => source.slice(c.getStart(sf), c.getEnd())
       .includes("className: 'dim-jh-orderHint'"))
-    expect(orderHintIdx, '排序提示必须在 panelHead 里、且紧挨在按钮组之前').toBe(children.length - 2)
+    expect(orderHintIdx, '排序提示必须在 panelHead 里、且紧挨在严格手动顺序行之前').toBe(children.length - 3)
     // ⚠️ 条件必须**恰好**是 accounts.length > 1：只判「文本里含 orderHint」时，
     //    把条件改成 `accounts.length > 1 && false` 仍然是绿的，而提示从此永不显示
     //    （变异验证实测 NO-TEETH）。故这里用 AST 取 condition 原文比对。
@@ -134,6 +138,22 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
     expect(ts.isConditionalExpression(orderHintNode), '排序提示必须是三元表达式').toBe(true)
     const condText = source.slice(orderHintNode.condition.getStart(sf), orderHintNode.condition.getEnd())
     expect(condText.replace(/\s+/g, ' '), '排序提示的显示条件被改了').toBe('accounts.length > 1')
+    /**
+     * 「严格手动顺序」行：**必须在排序提示与按钮组之间**（2026-11-09）。
+     *
+     * ⚠️ 与排序提示同一条纪律 —— 只判「文本里含 orderMode」时，把条件改成
+     * `canStrictOrder && false` 仍然全绿，而开关从此永不显示（变异实测
+     * NO-TEETH 的同一个形态）。故这里也取 condition 原文比对。
+     */
+    const strictRowIdx = children.findIndex((c) => source.slice(c.getStart(sf), c.getEnd())
+      .includes("className: 'dim-jh-orderMode'"))
+    expect(strictRowIdx, '严格手动顺序行必须在 panelHead 里、紧跟排序提示').toBe(orderHintIdx + 1)
+    const strictRowNode = children[strictRowIdx]!
+    expect(ts.isConditionalExpression(strictRowNode), '严格手动顺序行必须是三元表达式').toBe(true)
+    const strictCond = source.slice(strictRowNode.condition.getStart(sf), strictRowNode.condition.getEnd())
+    // ⚠️ 条件是 `canStrictOrder`（= 只在走余额分档的渠道渲染）。
+    //    改成 `true` 会让不分档的渠道也出现一个「打开后行为不变」的开关。
+    expect(strictCond.replace(/\s+/g, ' '), '严格手动顺序行的渲染条件被改了').toBe('canStrictOrder')
     // 补偿卡片必须在按钮组**之前**（它曾经被挤到按钮组右侧，那次事故的根因）
     const compIdx = children.findIndex((c) => source.slice(c.getStart(sf), c.getEnd()) === 'compensationCard')
     expect(compIdx, '补偿卡片必须在 panelHead 里、且在按钮组之前').toBeGreaterThan(0)

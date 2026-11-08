@@ -27,6 +27,7 @@ import {
   loomyBalanceTier,
   loomyTierUsable,
   rankLoomyAccountsByBalance,
+  rankLoomyAccountsByManualOrder,
   type LoomyAccountBalance,
   type LoomyTierOptions,
 } from './loomy-balance-rank.js'
@@ -259,7 +260,11 @@ export class LoomyBalanceSelector {
     const balances = await Promise.all(candidates.map((c) => this.balanceOf(c)))
     const byId = new Map(candidates.map((c, i) => [c.id, { account: c, balance: balances[i]! }]))
 
-    const ranked = rankLoomyAccountsByBalance(
+    // ⚠️ 严格手动顺序时改用 `rankLoomyAccountsByManualOrder`：先后完全按用户的
+    //    拖拽序，档位退化为「可用 / 不可用」判据（= 与 buddy 那份同一条纪律）。
+    const ranked = (options.strictManualOrder === true
+      ? rankLoomyAccountsByManualOrder
+      : rankLoomyAccountsByBalance)(
       balances.map((b) => ({ ...b, id: b.id })),
       options,
     )

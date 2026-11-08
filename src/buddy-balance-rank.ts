@@ -342,6 +342,16 @@ export interface BuddyTierOptions {
   now?: number
   /** ⚠️ 同上：**当前实现不读它**（保留但无效果，别用它做窗口边界用例）。 */
   windowMs?: number
+  /**
+   * 「严格手动顺序」：**档位只决定可用性，不决定先后**（见
+   * {@link rankBuddyAccountsByManualOrder}）。
+   *
+   * 默认 `false` = 既有语义（先按到期档位、档内看手动顺序）。
+   *
+   * ⚠️ 它**不影响** `buddyBalanceTier` 的返回值，只用在那两个排序函数的
+   * 选择上 —— 故传 `true` 时「锁定永久积分」这道门照旧生效。
+   */
+  strictManualOrder?: boolean
 }
 
 /**
@@ -408,6 +418,52 @@ export function rankBuddyAccountsByBalance<T extends BuddyAccountBalance>(
   return accounts
     .map((account, index) => ({ account, index, tier: buddyBalanceTier(account, options) }))
     .sort((a, b) => (a.tier - b.tier) || (a.index - b.index))
+    .map((entry) => entry.account)
+}
+
+/**
+ * 「严格手动顺序」版的候选排序：**档位只当可用性判据，不当先后判据**。
+ *
+ * ## 它与 {@link rankBuddyAccountsByBalance} 的唯一差别
+ *
+ * | | 默认（`rankBuddyAccountsByBalance`） | 严格手动顺序 |
+ * |---|---|---|
+ * | 先后由谁决定 | 先按档位，**档内**才看手动顺序 | 一律按手动顺序 |
+ * | 档位还剩什么用 | 决定谁先 | **只决定「谁还可用」**（`none` 档沉底） |
+ *
+ * ## 为什么「沉底」这一条不能一起去掉
+ *
+ * `none` 档包含两类账号：**余额查询失败**的，和**锁定永久积分后只剩永久积分**的。
+ * 后者正是「锁定永久积分」要保护的对象 —— 若严格模式把它当普通候选排在最前，
+ * 用户明明锁了永久积分，请求仍会落到那个号上并消耗永久积分（不可撤回）。
+ *
+ * ⇒ 严格模式**保留档位的筛选语义**（`none` 沉底），只**放弃档位的排序语义**：
+ * `expiring` 与 `permanent` 两档在严格模式下**同权**，全都按用户拖的顺序排。
+ *
+ * ⚠️ 这与「锁定永久积分」的既有判据不冲突：`buddyBalanceTier` 在
+ * `allowPermanent: false` 时对「只剩永久积分」的账号直接返回 `none`，
+ * 于是它照样被沉底 —— 锁定语义在两条排序里完全一致。
+ *
+ * ⚠️ 稳定排序：`Array.prototype.sort` 在现代引擎是稳定的，但这里的比较器本身
+ * 就带原始下标兜底，故不依赖引擎实现细节。
+ *
+ * @param accounts - 待排序账号（顺序即手动优先级）。
+ * @param options - 与 {@link rankBuddyAccountsByBalance} 同义（`allowPermanent` 决定
+ *   哪些账号算「不可用」）。
+ * @returns **新数组**（不修改入参）。
+ */
+export function rankBuddyAccountsByManualOrder<T extends BuddyAccountBalance>(
+  accounts: readonly T[],
+  options: BuddyTierOptions = {},
+): T[] {
+  return accounts
+    .map((account, index) => ({
+      account,
+      index,
+      // ⚠️ 关键：只保留「可用 / 不可用」这一层，**不保留三档的先后**。
+      unusable: buddyTierUsable(buddyBalanceTier(account, options)) ? 0 : 1,
+    }))
+    .sort((a, b) => (a.unusable - b.unusable) || (a.index - b.index))
     .map((entry) => entry.account)
 }
 

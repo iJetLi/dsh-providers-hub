@@ -45,6 +45,7 @@ import {
   BUDDY_BALANCE_TIER,
   buddyTierUsable,
   rankBuddyAccountsByBalance,
+  rankBuddyAccountsByManualOrder,
   splitBuddyCreditsByExpiry,
   type BuddyAccountBalance,
   type BuddyBalanceTier,
@@ -492,6 +493,12 @@ export class BuddyBalanceSelector<
    * 排序规则见 `rankBuddyAccountsByBalance`：
    * 有快到期积分 → 只剩永久 → 无余额/查不到。**档内保持传入顺序**（= 手动顺序）。
    *
+   * ⚠️ **`options.strictManualOrder === true` 时改用
+   * `rankBuddyAccountsByManualOrder`**（见 `JetHubState.strictManualOrder`）：
+   * 先后完全按用户的拖拽序，档位退化为「可用 / 不可用」判据。此时
+   * `expiring` 与 `permanent` 两种账号**同权**，不再「临期优先」—— 但
+   * `none`（查不到 / 锁定态下只剩永久）照旧沉底，故「锁定永久积分」语义不变。
+   *
    * ⚠️ **锁定永久积分时（`allowPermanent: false`）**：只剩永久积分的账号落入
    * `none` 档（不可用）。若**全部候选都不可用**，返回 `ok: false` 并带上原因 ——
    * 调用方据此报明确错误，而不是硬着头皮消耗永久积分。
@@ -516,7 +523,10 @@ export class BuddyBalanceSelector<
     const balances = await Promise.all(candidates.map((c) => this.balanceOf(c)))
     const byId = new Map(candidates.map((c, i) => [c.id, { account: c, balance: balances[i]! }]))
 
-    const ranked = rankBuddyAccountsByBalance(balances, options)
+    const ranked = options.strictManualOrder === true
+      // 严格手动顺序：档位只当「可用 / 不可用」判据，先后完全按用户的拖拽序。
+      ? rankBuddyAccountsByManualOrder(balances, options)
+      : rankBuddyAccountsByBalance(balances, options)
     const first = ranked[0]
     if (first === undefined) {
       return { ok: false, reason: noAccountReason(balances) }
@@ -673,6 +683,15 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
      * 否则一次网关抖动会把整条渠道的模型列表清空，用户一个模型都选不了。
      */
     degradeOnUnknown?: boolean
+    /**
+     * 「严格手动顺序」（见 `JetHubState.strictManualOrder`）。
+     *
+     * ⚠️ 与 `tierOptions` **刻意分开**：`tierOptions` 的契约是「测试注入时间用的
+     * 透传口」，而本项是**用户可见的生产配置**，必须由调用方（`credential-resolver`）
+     * 从账号池现读后显式传入。混进 `tierOptions` 会让「生产开关」与「测试注入口」
+     * 共用一条通道 —— 将来谁给 `tierOptions` 换形状都会连带改掉选号策略。
+     */
+    strictManualOrder?: boolean
   },
 ): Promise<
   | {
@@ -710,7 +729,13 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
   for (let remaining = candidates; remaining.length > 0;) {
     const picked = await selector.select(
       remaining,
-      { ...options.tierOptions, allowPermanent },
+      {
+        ...options.tierOptions,
+        allowPermanent,
+        // ⚠️ 每次迭代都带上：降级分支会把 `allowPermanent` 翻真，而本项与它无关，
+        //    不能因为走了降级就把「严格手动顺序」丢掉（那会让用户开了开关却偶发失效）。
+        ...(options.strictManualOrder === true ? { strictManualOrder: true } : {}),
+      },
     )
     if (!picked.ok) {
       /**

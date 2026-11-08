@@ -67,6 +67,7 @@ import {
   PROVIDER_REGISTRY,
   creditCapabilitiesOf,
   descriptorOf,
+  isBalanceTieredProvider,
 } from '../../src/provider-registry.js';
 
 /**
@@ -130,6 +131,17 @@ export const RATE_LIMIT_CAPABILITIES = Object.freeze(
  */
 export function supportsRateLimit(provider) {
   return RATE_LIMIT_CAPABILITIES[provider]?.rateLimit !== false;
+}
+
+/**
+ * 该渠道的选号是否**先按余额到期档位排序**（决定面板渲不渲染「严格手动顺序」）。
+ *
+ * 判据在宿主的 `BALANCE_TIERED_PROVIDERS`（`src/provider-registry.ts`）——
+ * 那里是「哪些渠道走 `pickBuddyAccount`」的唯一真源，有单测扫描 `src/index.ts`
+ * 的真实装配做过账。本函数只是把它暴露给客户端，**不另写一份名单**。
+ */
+export function supportsBalanceTier(provider) {
+  return isBalanceTieredProvider(provider);
 }
 
 /**

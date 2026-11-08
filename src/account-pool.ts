@@ -2,8 +2,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { BuddyCredential } from './buddy.js'
 import type { BuddyProduct } from './product.js'
-import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizeProviderClosed, withAllowed, withoutAllowed } from './jet-hub-store.js'
-import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, ProviderClosedMap } from './jet-hub-store.js'
+import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizeProviderClosed, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
+import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
@@ -423,6 +423,17 @@ export class AccountPool {
    */
   private sessionBalanceCache = true
   /**
+   * 「严格手动顺序」开关表的进程内副本（{@link StrictManualOrderMap}）。
+   *
+   * 缺键语义是**关闭**（= 升级前行为：先按积分到期档位、档内才看手动顺序）。
+   *
+   * ⚠️ 方向取决于「能不能接受静默的行为反转」而不是「哪个更像缺陷」：把默认写成
+   * 开启，等于让所有老用户升级后**在不知情的前提下**改变选号策略（余额分档不再
+   * 生效 ⇒ 永久积分可能被提前消耗、临期积分可能放过期）。默认关闭时最坏结果只是
+   * 「用户仍需要显式开一次开关」，那是可见、可逆的。
+   */
+  private strictManualOrderCache: StrictManualOrderMap = {}
+  /**
    * 「面板入口」的进程内副本：Jet Hub 的唯一入口位置（两个取值互斥）。
    *
    * 缺键语义是 `'sidebar'`「仅侧栏」（与 {@link nativeWebSearchCache} 同一方向）：
@@ -576,6 +587,9 @@ export class AccountPool {
       // 供应商关闭意图同理：老文档没有该键 → 空表（没有任何供应商被关闭，
       // 与升级前行为一致）。**过一遍 sanitize**：老文档里可能有脏值。
       this.providerClosedCache = sanitizeProviderClosed(state.providerClosed)
+      // 严格手动顺序同理：老文档没有该键 → 空表（= 全部走余额分档，与升级前一致）。
+      // 过一遍 sanitize：老契约后端可能绕过 schema 直接给出原始文档。
+      this.strictManualOrderCache = sanitizeStrictManualOrder(state.strictManualOrder)
     }
     this.loadLocks(state)
   }
@@ -675,6 +689,10 @@ export class AccountPool {
         //    漏键会让用户明确关闭的「会话负载均衡」在任何一次其它写入时被抹掉，
         //    重启后静默回到开启。
         sessionBalanceEnabled: this.sessionBalanceCache,
+        // ⚠️ **必须带上本键**（与上面几个新键是同一个 `replace` 整体替换陷阱）：
+        //    漏键 ⇒ 用户开过的「严格手动顺序」在**任何**一次其它写入时被抹掉，
+        //    重启后静默回到余额分档优先（用户只看到「拖拽又不灵了」）。
+        strictManualOrder: this.strictManualOrderCache,
         // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同一个整体替换陷阱）：
         //    漏键会让用户改过的面板入口在**任何**一次账号/黑名单/网关/顺序写入时
         //    被静默清掉，重启后入口又变回默认「仅侧栏」。
@@ -1223,6 +1241,48 @@ export class AccountPool {
     this.loaded = true
     if (this.store.kind === 'memory') {
       this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，会话负载均衡开关仅本次会话有效')
+      return
+    }
+    await this.queueStoreSave()
+  }
+
+  /**
+   * 该 provider 是否开启了「严格手动顺序」。
+   *
+   * **开** = 拖拽顺序是**唯一**的优先级判据：选号器不再按积分到期档位重排先后
+   *（「锁定永久积分」这道门照旧生效 —— 只剩永久积分的账号依然不可用）；
+   * **关**（缺键 / 老文档）= 升级前行为：余额分档优先、档内才看手动顺序。
+   *
+   * ⚠️ 调用方（`credential-resolver.ts` 的分档编排）**必须每次现读**，不能缓存
+   * 返回值：用户在面板上随时可能切换。
+   *
+   * ⚠️ 缺键语义是**关闭**，见 {@link strictManualOrderCache} 的说明。
+   */
+  strictManualOrder(provider: string): boolean {
+    this.ensureLoaded()
+    return this.strictManualOrderCache[provider] === true
+  }
+
+  /**
+   * 打开/关闭某 provider 的「严格手动顺序」并落盘。
+   *
+   * ⚠️ 与 {@link setProviderClosed} 同款：走同一条写队列（`queueStoreSave`），
+   * 不能自己 `store.save(...)` —— 那会与账号/黑名单的写入乱序覆盖。
+   */
+  async setStrictManualOrder(provider: string, enabled: boolean): Promise<void> {
+    this.ensureLoaded()
+    if (provider.length === 0) return
+    const current = this.strictManualOrderCache[provider] === true
+    if (current === enabled) return
+    const next: StrictManualOrderMap = { ...this.strictManualOrderCache }
+    // 稀疏表：关闭时**删键**而不是写 `false`，与 `sanitizeStrictManualOrder`
+    // 「只认显式 true」的读侧判据对称（写 `false` 也能活，但会留下永不消费的噪音键）。
+    if (enabled) next[provider] = true
+    else delete next[provider]
+    this.strictManualOrderCache = next
+    this.loaded = true
+    if (this.store.kind === 'memory') {
+      this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，严格手动顺序开关仅本次会话有效')
       return
     }
     await this.queueStoreSave()
@@ -2812,6 +2872,35 @@ export class AccountPool {
    * 时刻，而过期的标记由 {@link sweepExpiredRateLimits} 清理。
    */
   async updateModelRateLimit(accountId: string, modelId: string, resetAtMs: number): Promise<void> {
+    /**
+     * ⚠️⚠️ **模型 id 必须归一化（trim）后再落库**（真实缺陷，真机 state.json 实测）。
+     *
+     * 现场（本机 `~/.dsh/jet-hub/state.json`，两条 Raccoon 账号逐字如此）：
+     * ```
+     * "modelRateLimits": { "sn-deepseek-v4-1-flash-1017\t": 1793527493342 }
+     *                               ↑ 尾随一个制表符
+     * ```
+     * 而 Adapter 实际请求用的模型 id 是 `sn-deepseek-v4-1-flash-1017`（无 `\t`）。
+     *
+     * ## 两个后果，都不报错
+     *
+     * 1. **标记永不命中**：`candidateAccounts` 按 `a.modelRateLimits[modelId]` 取值，
+     *    键多了个 `\t` ⇒ 恒 `undefined` ⇒ 该账号**永远不会因为限流被过滤**。
+     *    实测形态正是「额度轮不完」：撞了 429 也照样被选中，下次再撞。
+     * 2. **永久垃圾键**：`sweepExpiredRateLimits` 只清**过期**的条目，而这个键的
+     *    值是真值（未过期时不清）⇒ 它会一直躺在文档里，直到账号被删。
+     *
+     * ## 为什么修在**写入侧的一处**、而不是读取侧兜底
+     *
+     * 读取侧有两处（`sanitizeModelRateLimits` 与 `candidateAccounts` 的直读），
+     * 而写入侧只有本方法一个收口点 —— 修一处即可覆盖全部调用方，且**不会**
+     * 让「文档里已有的脏键」继续参与比较（trim 后写入的是干净键）。
+     *
+     * ⚠️ 脏键本身不会被本方法删除（那是 `sanitizeModelRateLimits` 的职责，
+     *    且它必须在**读到**时才清 —— 直接删会让「谁删的」无从追查）。两者
+     *    合起来的效果：新标记干净，老脏键在下次落盘规范化时消失。
+     */
+    const normalizedModelId = modelId.trim()
     const accounts = this.readAccounts()
     const idx = accounts.findIndex(a => a.id === accountId)
     if (idx === -1) {
@@ -2836,12 +2925,12 @@ export class AccountPool {
     // 都恒为 false（该模型被永久限流、sweep 也清不掉）。
     if (!isValidResetAtMs(resetAtMs)) {
       this.ctx.logger?.warn?.(
-        `[jet-hub] updateModelRateLimit: 账号 ${accountId} 模型 ${modelId} 收到无效的解禁时刻 `
+        `[jet-hub] updateModelRateLimit: 账号 ${accountId} 模型 ${normalizedModelId} 收到无效的解禁时刻 `
         + `${String(resetAtMs)}（须为 0 < v ≤ ${MAX_DATE_MS} 的有限毫秒时间戳），已忽略`,
       )
       return
     }
-    const current = accounts[idx]!.modelRateLimits?.[modelId]
+    const current = accounts[idx]!.modelRateLimits?.[normalizedModelId]
     /**
      * ★ **认领该键**（见 {@link expiryMarkedKeys} 的长注释）：适配器为某
      * (账号, 模型) 写过标记 ⇒ 这份证据来自**一次真实失败的请求**，
@@ -2851,7 +2940,7 @@ export class AccountPool {
      * ⚠️ 放在有效性校验**之后**：无效时刻会被上面拒绝（不写盘），
      * 那种情况下不该认领任何东西。
      */
-    this.expiryMarkedKeys.delete(exhaustedKey(accountId, modelId))
+    this.expiryMarkedKeys.delete(exhaustedKey(accountId, normalizedModelId))
     // ⚠️ 判据用 `>=`：相等时无需写盘（省一次 IO），语义上也无差别。
     // ⚠️ 现值也走同一谓词：**池里可能存在历史遗留的坏值**（本次修复前导入的
     //    `1e308` 已经躺在磁盘上）—— 此时 `isValidResetAtMs(current)` 为 false，
@@ -2861,7 +2950,7 @@ export class AccountPool {
     const markerUnchanged = currentValid && current >= resetAtMs
     if (markerUnchanged) {
       this.ctx.logger?.info?.(
-        `[jet-hub] updateModelRateLimit: 账号 ${accountId} 模型 ${modelId} 已有更长的限流标记 `
+        `[jet-hub] updateModelRateLimit: 账号 ${accountId} 模型 ${normalizedModelId} 已有更长的限流标记 `
         + `(${new Date(current).toISOString()} ≥ ${new Date(resetAtMs).toISOString()})，本次不覆盖`,
       )
     }
@@ -2870,7 +2959,7 @@ export class AccountPool {
     let next = [...accounts]
     if (!markerUnchanged) {
       const entry = { ...next[idx]! }
-      entry.modelRateLimits = { ...entry.modelRateLimits, [modelId]: resetAtMs }
+      entry.modelRateLimits = { ...entry.modelRateLimits, [normalizedModelId]: resetAtMs }
       next[idx] = entry
     }
 
