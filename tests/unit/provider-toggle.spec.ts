@@ -198,6 +198,60 @@ describe('providerSwitchState（开关三形态）', () => {
     expect(s.reason).toBeTruthy()
   })
 
+  /**
+   * ⚠️⚠️ 2026-11-05 三审 P1-2：**核实失败时不得让用户点**。
+   *
+   * `provider.status` 的 `closed` 在「目录没读完」与「远端读失败」两种情况下
+   * **不是**从真实目录算的，都保守报 `false`。而前端只看到 `closed: false`
+   * 与「用户确实打开着」**同形** ⇒ 设置页那行渲染成可点的普通状态，
+   * 点下去才得到一句与现场无关的错误。
+   *
+   * 更糟的是**界面、开关、报错三者互相矛盾**：分组标题说「已关闭」
+   *（意图为真）、开关显示「已打开」（`closed: false`）、点一下弹「核实不了」。
+   * 加 `verifyFailed` 后三者终于自洽。
+   */
+  it('★★ 核实失败（verifyFailed 有值）→ 必须禁用并把原因展示出来', () => {
+    const s = providerSwitchState({
+      models: { total: 3, disabled: 1 },
+      closed: false,
+      verifyFailed: '令牌已过期',
+    })
+    expect(s.disabled, '★★ 核实不了却让用户点 ⇒ 服务端再核实一次、大概率还是失败').toBe(true)
+    expect(s.reason, '必须把这次失败的原因展示出来，否则用户不知道为什么点不动').toContain('令牌已过期')
+    expect(s.reason).toContain('暂时无法核实')
+  })
+
+  it('★ 反向对照：核实成功（verifyFailed 缺席）时仍必须可点', () => {
+    const s = providerSwitchState({ models: { total: 3, disabled: 1 }, closed: false })
+    expect(s.disabled, '没有 verifyFailed 就说明核实成功了，不得因此禁用').toBe(false)
+    expect(s.reason).toBeNull()
+  })
+
+  /**
+   * ⚠️ 顺序判据：`closed === true` **必须优先于** `verifyFailed`。
+   *
+   * 已关闭时用户要做的恰恰是**打开**，那个方向永远合法 ——
+   * `provider.setEnabled(true)` 不读目录、纯本地清黑名单 + 清意图。
+   * 若让 `verifyFailed` 抢先，就会出现「已关闭 + 核实失败 ⇒ 点不动的死开关」，
+   * 正是 IKP8OF 那条死锁换了个入口复发。
+   */
+  it('★★ 已关闭 + 核实失败 → 仍必须可点开（打开方向不依赖目录）', () => {
+    const s = providerSwitchState({
+      models: { total: 3, disabled: 3 },
+      closed: true,
+      verifyFailed: '令牌已过期',
+    })
+    expect(s.disabled, '★★ 已关闭 + 核实失败却禁用 ⇒ 用户永远打不开它（IKP8OF 死锁复发）').toBe(false)
+    expect(s.checked).toBe(false)
+    expect(s.reason).toBeNull()
+  })
+
+  it('★ verifyFailed 是空串时视同缺席（不得渲染出空的「暂时无法核实：」）', () => {
+    const s = providerSwitchState({ models: { total: 3, disabled: 1 }, closed: false, verifyFailed: '' })
+    expect(s.disabled).toBe(false)
+    expect(s.reason).toBeNull()
+  })
+
   it('③ 状态非对象（异常输入）→ 禁用而不是抛错', () => {
     expect(providerSwitchState(null).disabled).toBe(true)
     expect(providerSwitchState('bogus').disabled).toBe(true)
@@ -205,53 +259,6 @@ describe('providerSwitchState（开关三形态）', () => {
 
   it('models 字段缺失时视为 0 → 禁用（不误判为可操作）', () => {
     expect(providerSwitchState({ accounts: { total: 1 } }).disabled).toBe(true)
-  })
-
-  /**
-   * ★★★ **「全关了 + 核实失败」必须渲染成禁用 + 原因**（2026-11-05 三审端到端 P1-2）。
-   *
-   * ## 缺陷形态（真实可达）
-   *
-   * 服务端在「派生判据说全关了、但目录核实失败」时**故意**报 `closed: false`
-   * （保守方向），同时把原因写进 `verifyFailed`。若前端只读 `closed`：
-   * ```
-   * 界面：「2 个 · 已关闭 2」      开关：「已打开」
-   * 点开关 ⇒ 服务端拒绝「没有可关闭的模型：<远端原因>」
-   * ```
-   * 三者矛盾，且**原因只在报错里** —— 用户拿不到，只会以为「开关坏了」。
-   *
-   * ## 为什么判据必须同时要三个条件
-   *
-   * - `verifyFailed` 是非空字符串：**字段缺席 = 核实成功或未需要核实**；
-   * - `total > 0`：没有模型时走下面那条「没有可关闭的模型」，文案更准确；
-   * - `disabled === total`：只有「全关了」才与 `closed: false` 矛盾。
-   *   若只关了一部分，`closed: false` 本来就是**对的**（服务端不会报 `verifyFailed`）。
-   */
-  it('★★★ 全关了但核实失败 → 禁用 + 把原因透给用户（不得渲染成「可点的已打开」）', () => {
-    const s = providerSwitchState({
-      models: { total: 2, disabled: 2 },
-      closed: false,
-      verifyFailed: '读取模型列表失败：请求超时',
-    })
-    expect(s.disabled, '核实失败却让用户点 ⇒ 点下去必然失败').toBe(true)
-    expect(s.checked).toBe(true)
-    expect(s.reason).toContain('核实失败')
-    expect(s.reason, '原因必须原样透出，否则用户只知道「点不动」').toContain('请求超时')
-  })
-
-  it('★ 反向对照：核实成功（无 verifyFailed）时不得禁用（否则正常态被锁死）', () => {
-    const s = providerSwitchState({ models: { total: 2, disabled: 0 }, closed: false })
-    expect(s.disabled).toBe(false)
-    expect(s.reason).toBeNull()
-  })
-
-  it('★ 反向对照：只关了一部分 + 有 verifyFailed 也不得禁用（此时 closed:false 本就是对）', () => {
-    const s = providerSwitchState({
-      models: { total: 5, disabled: 2 },
-      closed: false,
-      verifyFailed: '目录尚未就绪',
-    })
-    expect(s.disabled, '只关了一部分 ⇒ 关闭动作仍合法，不该禁用').toBe(false)
   })
 
   it('total 为负数等非法值 → 禁用（不给用户一个无效的操作入口）', () => {
@@ -548,13 +555,23 @@ describe('供应商开关的接线（源码级回归）', () => {
   it('⚠️ 左侧供应商行里不再有开关（只剩一个 tab 按钮）', () => {
     const start = source.indexOf('const renderProviderRow = (p) => {')
     expect(start).toBeGreaterThan(-1)
-    const body = source.slice(start, source.indexOf('const renderRail = () =>'))
+    // ⚠️ 结束锚点必须是**紧接着的**下一个声明（renderRailIcon）：2026-11-05
+    //    设置弹窗（renderSettingsPanel）也插在 renderRail 之前，而它里面有
+    //    渠道原生搜索的 checkbox —— 用 renderRail 当锚点会把那一整段切进来，
+    //    于是「不得有 input」这条恒红（切到别人的控件了）。
+    const body = source.slice(start, source.indexOf('function renderRailIcon(kind)'))
     expect(body).not.toContain("React.createElement('input'")
     expect(body).not.toContain("type: 'checkbox'")
     expect(body).toContain("role: 'tab'")
     // 行容器仍不挂 onClick：点击只属于 tab 按钮。
-    expect(body).toContain("className: 'dim-jh-providerRow'")
-    expect(body).not.toMatch(/dim-jh-providerRow'[^}]*onClick/)
+    // ⚠️ 2026-11-06 起行容器是**三元表达式**（已关闭的供应商多一个
+    //    `dim-jh-providerRowClosed` 类用于置灰），所以锚点不能带
+    //    `className: ` 前缀 —— 但两态都必须落在同一个 `className` 上，
+    //    否则「置灰」会变成给别的元素加类。
+    expect(body).toContain("className: closed ? 'dim-jh-providerRow dim-jh-providerRowClosed' : 'dim-jh-providerRow'")
+    expect(body).not.toMatch(/dim-jh-providerRow[^}]*onClick/)
+    // 置灰必须由 `providerStatuses` 的 closed 驱动，不得自己算一套
+    expect(body).toContain('const closed = providerStatuses?.[p.id]?.closed === true;')
   })
 
   it('开关搬进弹窗：页头按钮点开，关闭即不挂载', () => {
@@ -568,17 +585,31 @@ describe('供应商开关的接线（源码级回归）', () => {
     expect(source).toContain('onClose: () => setShowProviderSwitches(false)')
   })
 
-  it('两个全屏弹窗互斥：点开一个必须先关掉另一个', () => {
-    // 供应商开关与网关都是 position:fixed 的全屏覆盖层，同时打开会叠在一起，
-    // 而 ESC 只关掉后挂载的那个 —— 剩下一个关不掉的弹窗挡住整个设置页。
-    // ⚠️ 取块方向是**向前**：`setShowGateway(false)` 写在
-    // `setShowProviderSwitches(true)` 之前（先关对方、再开自己），从后往前找会漏。
-    const supplierEnd = source.indexOf("}, '供应商')")
-    const gatewayEnd = source.indexOf('}, gatewayButtonLabel(gatewayStatus))')
-    expect(supplierEnd).toBeGreaterThan(-1)
-    expect(gatewayEnd).toBeGreaterThan(-1)
-    expect(source.slice(supplierEnd - 600, supplierEnd)).toContain('setShowGateway(false)')
-    expect(source.slice(gatewayEnd - 600, gatewayEnd)).toContain('setShowProviderSwitches(false)')
+  it('四个全屏弹窗互斥：打开自己之前必须先关掉其它', () => {
+    // 四个都是 position:fixed 的全屏覆盖层，同时打开会叠在一起，
+    // 而 ESC / 遮罩只关掉**后挂载**的那个 —— 剩下关不掉的弹窗挡住整个设置页。
+    //
+    // ⚠️ 2026-11-05 侧边栏重构后承重的互斥点在 `openSettings` 里：设置弹窗在
+    //    组件树里**最后**挂载（见 return 末尾的注释），所以凡是从别处进设置，
+    //    都必须先把另外三个关掉 —— 否则设置弹窗被它自己盖住。
+    const openBody = source.slice(
+      source.indexOf('const openSettings = () => {'),
+      source.indexOf('/** 开关自动签到'),
+    )
+    expect(openBody, '找不到 openSettings 的函数体').not.toBe('')
+    expect(openBody, '打开设置时必须关掉「供应商开关」弹窗').toContain('setShowProviderSwitches(false)')
+    expect(openBody, '打开设置时必须关掉「网关」弹窗').toContain('setShowGateway(false)')
+    expect(openBody, '打开设置时必须关掉「用量」弹窗').toContain('setShowTokenLedger(false)')
+
+    // 设置弹窗内的「供应商」入口是**唯一**能从设置里跳到另一个全屏弹窗的路径
+    // （网关/用量两个按钮在侧边栏，被设置弹窗的遮罩挡着），所以它要关掉剩下两个。
+    const supplierStart = source.indexOf("}, '打开供应商开关')")
+    expect(supplierStart).toBeGreaterThan(-1)
+    const supplierBody = source.slice(source.lastIndexOf('onClick: () => {', supplierStart), supplierStart)
+    expect(supplierBody, '「供应商」入口必须先关掉「网关」').toContain('setShowGateway(false)')
+    expect(supplierBody, '「供应商」入口必须先关掉「用量」').toContain('setShowTokenLedger(false)')
+    expect(supplierBody, '「供应商」入口必须走 closeSettings（关设置即保存定时签到）')
+      .toContain('closeSettings(')
   })
 
   it('弹窗行是 <label> + **恰好一个** checkbox（第二个会让「点行名」激活错控件）', () => {
@@ -621,6 +652,55 @@ describe('供应商开关的接线（源码级回归）', () => {
   it('关闭前必须确认，且文案给出影响面', () => {
     expect(source).toContain('确认关闭「${label}」？')
     expect(source).toContain('取消则不做任何变更')
+  })
+
+  /**
+   * ⚠️⚠️ **切换模型后必须重拉汇总状态**（2026-11-07 十一审 P3）。
+   *
+   * `setStates` 只更新**本屏的模型列表**，而「已关闭」的分组标题与开关读的是
+   * `providerStatuses`（服务端的派生判据 `disabled === total`）⇒ 不重拉的话，
+   * 用户逐条关光全部模型后开关仍显示「已打开」、左侧分组也不动，
+   * **要重挂载面板才看到变化**（没有任何报错，属静默失效）。
+   *
+   * ⚠️ 这两条是**接线判据**（漏一行就失效的那种），行为判据见挂载点那条。
+   */
+  it('★★ toggleModel 成功后必须重拉汇总状态', () => {
+    // ⚠️ 本文件里有两个 `toggleModel`：`ModelListPanel`（账号管理里的模型列表弹窗）
+    // 与 `ModelCenterPanel`（供应商开关弹窗里的模型列表屏）。**只有后者需要**重拉
+    // —— 前者关掉弹窗后会重挂载、挂载时本来就会拉一次；后者是常驻的整屏视图。
+    // ⇒ 锚点必须带 `(providerId, ` 前缀，否则切到第一个（第一版就这么翻了）。
+    const start = source.indexOf('const toggleModel = async (providerId, modelId, disabled) =>')
+    expect(start, '找不到 ModelCenterPanel 的 toggleModel（可能被改名或改签名）').toBeGreaterThan(-1)
+    const end = source.indexOf('const restoreModel = async', start)
+    expect(end, '找不到 restoreModel（用于界定 toggleModel 的结束）').toBeGreaterThan(start)
+    const body = source.slice(start, end)
+    expect(body, 'toggleModel 里必须调 onStatusReload').toContain('void onStatusReload?.()')
+  })
+
+  it('★★ setProviderAll 成功后必须重拉汇总状态', () => {
+    const start = source.indexOf('const setProviderAll = async')
+    expect(start, '找不到 setProviderAll（可能被改名）').toBeGreaterThan(-1)
+    const end = source.indexOf('const loadAll = async', start)
+    expect(end, '找不到 loadAll（用于界定 setProviderAll 的结束）').toBeGreaterThan(start)
+    const body = source.slice(start, end)
+    expect(body, 'setProviderAll 里必须调 onStatusReload').toContain('void onStatusReload?.()')
+  })
+
+  /**
+   * ⚠️ 上一批「未声明变量」事故（四审 P0）的教训：**prop 少传一层就静默失效**，
+   * 而 TypeScript 对 JSX/CreateElement 的 props 不做检查。这里把整条链路
+   * 三层（JetHubPage → ProviderSwitchPanel → ModelCenterPanel）都钉住。
+   */
+  it('★★ onStatusReload 必须三层逐层透传（少一层就静默失效）', () => {
+    // ① 页面层把回调交给 ProviderSwitchPanel
+    expect(source).toContain('onStatusReload: loadProviderStatuses')
+    // ② ProviderSwitchPanel 把它交给 ModelCenterPanel
+    expect(source).toContain(
+      'React.createElement(ModelCenterPanel, { providers, rpcCall, statuses, onStatusReload })',
+    )
+    // ③ 两个组件都解构出了这个 prop
+    expect(source).toContain('function ProviderSwitchPanel({ providers, statuses, statusFailed, busyIds, onToggle, onReload, onClose, order, onCommitOrder, reordering, notice, rpcCall, onStatusReload })')
+    expect(source).toContain('function ModelCenterPanel({ providers, rpcCall, statuses, onStatusReload })')
   })
 })
 
@@ -694,7 +774,12 @@ describe('供应商开关的样式约束（源码级回归）', () => {
     // ⓪ 媒体条件必须真的生效 —— 审计实测的假绿之一：把条件改成
     //    `max-width: 1px`（永不命中）或 `min-width: 720px`（笔误）时原用例全绿。
     expect(block, '窄屏主布局块必须用 max-width 断点').toMatch(/@media \(max-width: 720px\)/)
-    expect(block, '不得出现 min-width（min/max 笔误会让窄屏永远不命中）').not.toMatch(/min-width/)
+    // ⚠️ 只拒绝「带 px 的 min-width」：那才是把断点写反（min-width: 720px
+    //    意思是「宽于 720 才生效」，窄屏反而永远不命中）。而
+    //    `min-width: 0` 是合法的 flex 收缩写法（.dim-jh-railScroll 用它
+    //    防止横向条被内容撑开），2026-11-05 侧边栏重构后新增。
+    expect(block, '断点不得被写成 min-width（那会让「窄屏」变成「宽屏」）')
+      .not.toMatch(/min-width:\s*\d+px/)
 
     // ① 两栏改两段。
     const layout = cssRuleBody(block, '.dim-jh-layout')
@@ -705,9 +790,16 @@ describe('供应商开关的样式约束（源码级回归）', () => {
     //    不能用 [\s\S]*?（那会跨到后面的 .dim-jh-provider 去，见 helper 注释）。
     const rail = cssRuleBody(block, '.dim-jh-rail')
     expect(rail, '窄屏块里必须有 .dim-jh-rail 规则').not.toBeNull()
-    expect(rail, '标签条必须可横向滑动，否则供应商一多就撑破屏幕').toMatch(/overflow-x: auto/)
     expect(rail, '标签条必须是横向 flex（否则退回基础规则的 grid 竖排）').toMatch(/display: flex/)
     expect(rail, '标签条必须显式 flex-direction: row').toMatch(/flex-direction: row/)
+    // ⚠️ 2026-11-05 侧边栏重构：滚动**从外层挪到了内层**。
+    //    外层（.dim-jh-rail）必须 overflow: hidden —— 它同时装着底部操作行，
+    //    给它加 overflow-x: auto 会让操作行跟着开关列表一起滚走，用户必须
+    //    滚到最右才看得到「设置」。
+    expect(rail, '外层不得滚动（否则底部操作行跟着滚走）').toMatch(/overflow: hidden/)
+    const scroll = cssRuleBody(block, '.dim-jh-railScroll')
+    expect(scroll, '窄屏块里必须有 .dim-jh-railScroll 规则').not.toBeNull()
+    expect(scroll, '标签条必须可横向滑动，否则供应商一多就撑破屏幕').toMatch(/overflow-x: auto/)
     // ③ 分组外壳展平。
     const group = cssRuleBody(block, '.dim-jh-railGroup')
     expect(group, '窄屏块里必须有 .dim-jh-railGroup 规则').not.toBeNull()
@@ -842,10 +934,24 @@ describe('供应商开关的样式约束（源码级回归）', () => {
       expect(panelHead, '提示不能再加 >= 1 的口子').not.toContain('accounts.length >= 1')
     })
 
-    it('★★ 样式侧：panelHead 必须换行 + 标题独占整行', () => {
+    it('★★ 样式侧：panelHead 必须换行 + 标题行独占整行', () => {
       expect(styles, 'panelHead 不换行时四项会挤在一行').toMatch(/\.dim-jh-panelHead \{[^}]*flex-wrap: wrap/)
-      expect(styles, '标题不占整行会与提示挤在同一行')
-        .toMatch(/\.dim-jh-panelHead > \.dim-jh-panelTitle \{[^}]*flex: 1 0 100%/)
+      // 2026-11-06：「供应商开关」图标进标题行后，标题 + 图标包了一层
+      //   `.dim-jh-panelTitleRow`（**它**才是 panelHead 的 `flex: 1 0 100%` 子项）。
+      //   ⚠️ 不能直接给标题 `flex: 1 1 auto` —— 那样标题 + 图标 + 按钮组
+      //   会在宽屏下挤成一行（1400px 有约 930px 富余，wrap 不触发），
+      //   2026-10-26 的「标题独占一整行」需求当场破掉。
+      expect(styles, '标题行不占整行会与提示挤在同一行')
+        .toMatch(/\.dim-jh-panelHead > \.dim-jh-panelTitleRow \{[^}]*flex: 1 0 100%/)
+      expect(styles, '标题行必须是 flex 行容器（否则图标掉到标题下面）')
+        .toMatch(/\.dim-jh-panelHead > \.dim-jh-panelTitleRow \{[^}]*display: flex/)
+      // ⚠️ 标题自己必须是 `flex: 1 1 auto` + `min-width: 0`：
+      //   前者把剩余空间吃掉（把图标顶到最右），后者防长 provider 名
+      //   （如「MagiCrew (国际版) 账号管理」）把图标挤出可视区。
+      expect(styles, '标题必须吃满剩余空间并把图标顶到最右')
+        .toMatch(/\.dim-jh-panelTitleRow > \.dim-jh-panelTitle \{[^}]*flex: 1 1 auto/)
+      expect(styles, '标题必须允许收缩（否则长名字把图标挤出可视区）')
+        .toMatch(/\.dim-jh-panelTitleRow > \.dim-jh-panelTitle \{[^}]*min-width: 0/)
       // ⚠️ 账号列表已于 2026-10-26 挪出 panelHead（它现在是 .dim-jh-accountSection
       //    的子项、并且是滚动容器），所以「列表占整行」不再由 flex-basis: 100% 表达，
       //    改由 accountSection 那条规则守（见下面「只滚账号列表」那组用例）。
@@ -873,9 +979,12 @@ describe('供应商开关的样式约束（源码级回归）', () => {
       expect(base, '基础规则必须居中').toMatch(/justify-content: center/)
       expect(base, '基础规则不得带 margin-left: auto（那会把它顶到最右）')
         .not.toMatch(/margin-left: auto/)
-      // 反向钉子：全局页头那一组必须是基础规则直接命中，不能被 panelHead 那条误伤
-      expect(source, '全局页头用的是 .dim-jh-header，不是 panelHead')
-        .toContain("className: 'dim-jh-header'")
+      // 反向钉子：全局页头那一组必须是基础规则直接命中，不能被 panelHead 那条误伤。
+      // ⚠️ 2026-11-05 侧边栏重构后**全局页头整个删掉了**（四个按钮搬进侧边栏
+      //    底部操作行），所以这里改成「不得再有页头」—— 若哪天有人把页头加
+      //    回来，这条会红，提醒他同时检查「共用类名改默认值会波及另一处」。
+      expect(source, '全局页头已删除（按钮搬进侧边栏底部操作行）')
+        .not.toContain("className: 'dim-jh-header'")
     })
 
     it('★ 提示自身必须能收缩（否则长文案把按钮组挤出容器）', () => {
@@ -1500,8 +1609,35 @@ describe('供应商弹窗的自定义排序（2026-10-06 拖拽需求）', () =>
       expect(source).not.toContain('localStorage')
     })
 
-    it('拖拽提交失败时不做乐观更新（回读保持与服务端一致）', () => {
-      expect(source).toContain('await loadProviderOrder();')
+    it('★★ 拖拽提交失败时不做乐观更新（setProviderOrder 必须排在 RPC 成功之后）', () => {
+      // ⚠️⚠️ 六审 P1-6 实测：原来这里只有一句
+      //     `expect(source).toContain('await loadProviderOrder();')`
+      //   —— 它只证明「失败分支里会回读」，**锁不住「不做乐观更新」**。
+      //
+      //   具体能漏掉的回归：把 `setProviderOrder(next)` 从 `try` 里挪到
+      //   `await rpcCall(...)` **之前**（即经典的乐观更新）。此时：
+      //   ① `catch` 里的 `await loadProviderOrder()` 仍在（那条断言照样绿）；
+      //   ② 但保存失败时界面会**先**显示新顺序、再被回读覆盖 ——
+      //      用户看到一次「顺序跳了一下又跳回去」。
+      //
+      //   真判据是**顺序**：`await rpcCall('provider.setOrder'` 必须出现在
+      //   `setProviderOrder(next)` 之前。切片取到 `catch` 之前即可，避免
+      //   把 `finally` 里可能的其他调用算进来。
+      const commit = source.slice(
+        source.indexOf('const commitProviderOrder = React.useCallback('),
+        source.indexOf('const selectProvider = (id) =>'),
+      )
+      expect(commit, '找不到 commitProviderOrder 的完整实现 ⇒ 本条会静默失明').not.toBe('')
+      const rpcAt = commit.indexOf("await rpcCall('provider.setOrder'")
+      const setAt = commit.indexOf('setProviderOrder(next)')
+      expect(rpcAt, '找不到 provider.setOrder 的 RPC 调用').toBeGreaterThan(-1)
+      expect(setAt, '找不到 setProviderOrder(next) 的落状态调用').toBeGreaterThan(-1)
+      expect(
+        rpcAt,
+        'setProviderOrder 必须排在 RPC 之后（否则是乐观更新，保存失败时界面会闪一下新顺序）',
+      ).toBeLessThan(setAt)
+      // 失败分支仍必须回读（服务端才是权威）。
+      expect(commit).toContain('await loadProviderOrder();')
     })
 
     it('行拖拽的视觉状态与账号卡片同款（淡出 + 插入线）', () => {
@@ -1528,6 +1664,146 @@ describe('供应商弹窗的自定义排序（2026-10-06 拖拽需求）', () =>
 
   // ⚠️ 回归（PR #63 复审发现）：初版没有排序提交锁。不做乐观更新 ⇒ RPC 返回前
   // 界面顺序未变，再拖一次会基于旧顺序计算并把上一次的移动静默覆盖。
+  describe('账号管理行标题行右侧的「供应商开关」（2026-11-06 用户两轮需求）', () => {
+    /**
+     * `ProviderPanel` 的源码切片（到下一个 `function` 之前）。
+     *
+     * ⚠️ 不能用整份 `source` —— `ProviderSwitchPanel` 里也有同名常量，
+     *    不限定组件会把两边混起来。
+     */
+    const providerPanelSource = (): string => {
+      const start = source.indexOf('function ProviderPanel(')
+      expect(start, '找不到 ProviderPanel 组件').toBeGreaterThan(-1)
+      const rest = source.slice(start)
+      const offset = rest.slice(1).search(/^(?:export )?function /m)
+      return offset === -1 ? rest : rest.slice(0, offset + 1)
+    }
+
+    // ⚠️ 需求演进：第一版做成「打开供应商开关弹窗」的入口（文字按钮），
+    //    用户否掉：「我说的是加单独供应商开启/关闭的功能，你把整个移过来干嘛」
+    //    ⇒ 现在是**当前供应商自己的开关**，点它直接 provider.setEnabled。
+
+    it('★★ 标题行里必须有 role="switch" 的开关', () => {
+      const body = providerPanelSource()
+      const rowStart = body.indexOf("className: 'dim-jh-panelTitleRow'")
+      expect(rowStart, '找不到标题行容器 ⇒ 本条会静默失明').toBeGreaterThan(-1)
+      const titleRow = body.slice(rowStart)
+      expect(titleRow, '开关的 className 必须是 dim-jh-providerSwitch').toContain("className: 'dim-jh-providerSwitch'")
+      expect(titleRow, '开关必须是 role="switch"（否则屏幕阅读器读成一个普通按钮）')
+        .toContain("role: 'switch'")
+      expect(titleRow, '开关必须用 aria-checked 表达两态').toContain("'aria-checked':")
+      // ⚠️ 光有 aria-checked 这个名字不够 —— 写死 'true' 会让**关闭态也显示成开**，
+      //    而所有存在性断言全绿（变异实测 M1）。
+      expect(
+        titleRow,
+        'aria-checked 必须跟随 switchState.checked（写死 true 会让关闭态也显示成开）',
+      ).toContain("'aria-checked': switchState.checked ? 'true' : 'false',")
+      // 「最右侧」：必须排在标题 <h2> 之后（用户明确要求「标题行最右侧」）。
+      const switchAt = titleRow.indexOf("className: 'dim-jh-providerSwitch'")
+      const titleAt = titleRow.indexOf("'dim-jh-panelTitle'")
+      expect(titleAt, '找不到标题的 className 锚点').toBeGreaterThan(-1)
+      expect(switchAt, '开关必须排在标题之后（用户要求在最右侧）').toBeGreaterThan(titleAt)
+    })
+
+    it('★★ 三件套判据必须走 providerSwitchState（不得自己重写）', () => {
+      // ⚠️ 「已关闭优先于没有模型可关」那条顺序是 IKP8OF 死锁的修复，
+      //    在面板里重写一遍必然漂移。
+      expect(providerPanelSource()).toContain(
+        'const switchState = providerSwitchState(providerStatuses?.[provider]);',
+      )
+    })
+
+    it('★★ 点击必须走 onToggleProvider(provider, !checked)', () => {
+      // ⚠️ 只断言「有 aria-label + 顺序」抓不到「没接线」—— 变异实测：
+      //    把 onClick 整行删掉，所有存在性断言全绿，而开关点了没反应。
+      const body = providerPanelSource()
+      const at = body.indexOf("className: 'dim-jh-providerSwitch'")
+      expect(at, '找不到开关 ⇒ 本条会静默失明').toBeGreaterThan(-1)
+      const end = body.indexOf('},', at)
+      expect(body.slice(at, end), '开关必须接上 onToggleProvider（否则点了没反应）')
+        .toContain('onToggleProvider?.(provider, !switchState.checked)')
+    })
+
+    it('★★ 忙碌/禁用时不得可点（aria-disabled 必须吃进两个来源）', () => {
+      // ⚠️⚠️ 2026-11-09 审计（F1）：这里原本断言 `disabled: …`。改成
+      //    `aria-disabled` 是因为 Chromium 不为 disabled 的表单控件显示原生
+      //    tooltip，而「为什么点不动」（`switchState.reason`）只挂在 title 上
+      //    ⇒ 用户与屏幕阅读器都读不到原因。
+      //    ⚠️ 但**属性本身不是拦截**：真正拦住点击的是 onClick 里的早退，
+      //    那一腿由 `checkin-panel-wiring.spec.ts` 的「禁用态的开关点下去
+      //    必须一次都不调」用**行为级**用例守（本文件只有源码文本断言）。
+      expect(providerPanelSource()).toContain(
+        "'aria-disabled': switchState.disabled === true || switchBusy ? 'true' : 'false',",
+      )
+    })
+
+    it('★ 反向对照：ProviderPanel 的签名必须解构出三个新 prop', () => {
+      const sig = providerPanelSource()
+      for (const prop of ['providerStatuses', 'providerBusy', 'onToggleProvider']) {
+        expect(sig, `签名里必须解构出 ${prop}`).toContain(prop)
+      }
+      // 反向：旧的「弹窗入口」prop 必须删干净（用户明确否掉了那个做法）。
+      expect(sig, '旧的 onOpenProviderSwitches 必须已删除').not.toContain('onOpenProviderSwitches')
+    })
+
+    it('★★ 挂载点必须把状态与回调都传下去', () => {
+      const at = source.indexOf('createElement(ProviderPanel, {')
+      expect(at, '找不到 ProviderPanel 的挂载点 ⇒ 本条会静默失明').toBeGreaterThan(-1)
+      const mounting = source.slice(at, at + 600)
+      expect(mounting, '必须传 providerStatuses（否则开关读不到状态）').toContain('providerStatuses,')
+      expect(mounting, '必须传 providerBusy（否则切换期间可以连点）').toContain('providerBusy,')
+      expect(mounting, '必须传 onToggleProvider（否则点了没反应）').toContain('onToggleProvider: toggleProvider,')
+    })
+
+    it('★★ CSS 两态必须都在（开=蓝色，关=灰色，滑块位移）', () => {
+      expect(styles, '开关本体').toContain('.dim-jh-providerSwitch {')
+      expect(styles, '打开态必须是蓝色').toMatch(/\.dim-jh-providerSwitch\[aria-checked='true'\] \{ background: #1677ff/)
+      expect(styles, '滑块必须位移到右侧').toContain(
+        '.dim-jh-providerSwitch[aria-checked=\'true\'] .dim-jh-providerSwitchThumb { transform: translateX(16px); }',
+      )
+      // ⚠️ 2026-11-09 审计（F1）：选择器从 `:disabled` 改成 `[aria-disabled='true']`
+      //    —— 开关本体已改用 `aria-disabled` + 点击早退（理由见上一条用例）。
+      //    改回 `:disabled` 会让「点不动」变成「看不出点不动、也看不出为什么」。
+      expect(styles, '禁用态必须降低不透明度').toContain(
+        ".dim-jh-providerSwitch[aria-disabled='true'] { opacity: .5;",
+      )
+      // ⚠️⚠️ 2026-11-06 十一审（审查员 e4e74842 报的 P1-3）。
+      //
+      // 上面四条只断言「规则**名**存在」。而「两个白圆」那个真机 bug 的**直接
+      // 可见属性**是「胶囊底色」与「滑块底色」—— 这两条删掉都不红：
+      // - `.dim-jh-providerSwitch` 的 `background: #c9cdd4`（关态灰底）
+      //   ⇒ 删掉后胶囊透明，白滑块看起来像悬空的；
+      // - `.dim-jh-providerSwitchThumb` 的 `background: #fff`（滑块白底）
+      //   ⇒ 删掉后滑块消失，只剩一个灰胶囊。
+      //
+      // 而它们恰好是「两个圆」那个 bug 的**受害者属性**：class 名一撞，
+      // `::after` 的白圆与本体的白滑块同时出现。**属性级判据是唯一能抓到
+      // 「样式被删但类名还在」的守卫。**
+      expect(styles, '关态底色必须是灰色（否则白滑块看起来是悬空的）')
+        .toMatch(/\.dim-jh-providerSwitch \{[^}]*background: #c9cdd4/)
+      expect(styles, '滑块底色必须是白色（否则滑块消失，只剩灰胶囊）')
+        .toMatch(/\.dim-jh-providerSwitchThumb \{[^}]*background: #fff/)
+    })
+
+    it('★★ 已关闭的供应商整行置灰（2026-11-06 用户要求）', () => {
+      // 置灰必须作用在 `.dim-jh-provider`（按钮）上，且**排除选中态** ——
+      // 用户正在看的那一家必须保持清晰，否则「已关闭」会看起来像「不可用」。
+      expect(styles, '已关闭行必须降不透明度').toMatch(
+        /\.dim-jh-providerRowClosed \.dim-jh-provider:not\(\[aria-selected='true'\]\) \{ opacity: \.55; \}/,
+      )
+      // ⚠️ **不能灰开关**：开关在关闭态本来就是灰色的，再叠一层不透明度会让
+      //    用户以为它不可点 —— 而它恰恰是唯一能把供应商打开的东西。
+      expect(styles, '置灰规则不得命中开关').not.toMatch(
+        /\.dim-jh-providerRowClosed[^{]*(?:Switch|switchThumb)[^{]*\{[^}]*opacity/,
+      )
+      // ⚠️ 只能是 opacity —— 改行高/宽度会让「已打开」组与「已关闭」组的分界
+      //    随状态变化而跳动。
+      expect(styles, '置灰不得改布局').not.toMatch(
+        /\.dim-jh-providerRowClosed \.dim-jh-provider:not\(\[aria-selected='true'\]\) \{[^}]*(?:padding|margin|height|width|grid-template)[^}]*\}/,
+      )
+    })
+  })
+
   describe('排序提交的互斥（防止连续拖拽互相覆盖）', () => {
     it('提交期间整体冻结拖拽（reordering 并入 dragEnabled）', () => {
       const body = panelBody()

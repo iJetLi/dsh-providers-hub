@@ -3264,3 +3264,185 @@ probeNotice.details.length > 0 ? … : null
 ⚠️ 但真实缺陷仍在（P2 级）：**恢复路径不可发现**。fallback 只写「已拦住，其余页面
 仍可正常使用」，没告诉用户「关掉这一节再打开就恢复」。⇒ 若要改，改的是**可发现性**
 （加一句「关掉再打开这一节即可恢复」或加重试按钮），**不是**「文案在撒谎」。
+
+## ⚠️⚠️ 页头按钮搬进侧边栏 + 「设置」弹窗 + 供应商开关（GitHub PR #52，2026-11-09 审计）
+
+三域（需求实现 / 正确性与回归 / 对抗性变异）+ 我本人独立复核，基线
+`build:all` exit 0、8 个相关 spec 372 passed、全量 **519 files / 12526 passed / 0 failed**。
+三条用户需求 **11 个实现项全部满足**，旧页头 7 个控件逐个确认去向、无遗失无第二入口。
+以下是这次审计挖出来、且**不能凭直觉改**的点。
+
+### ⚠️⚠️ 「只写关闭意图、黑名单不动」是**假的**（P1，必读）
+
+PR 描述写着：「启用/关闭供应商**不再**替用户决定模型黑名单；只写关闭意图，
+黑名单**逐字不动**；关→开两跳之后，手工关掉的模型仍然是关的」。
+
+**`src/` 一行未改**（10 个文件全在 `plugin-src/client` + 测试），服务端仍双向改黑名单：
+
+- 关闭 → `src/jet-hub-rpc.ts` 的 `provider.setEnabled` 调
+  `pool.writeModelsWithProviderClosed(provider, catalog.ids, true)`
+  → `src/account-pool.ts` 里 `for (const id of modelIds) perProvider[id] = true`
+  ⇒ **把当前目录的每一条模型都灌进黑名单**；
+- 打开 → `pool.clearModelsWithProviderClosed(provider)` → `delete next[provider]`
+  ⇒ **整家黑名单清空**（不是「只清意图写进去的那些」）。
+
+一次性探针（真实 `AccountPool` + 真实 settings 后端）实测：
+手工关掉 `glm-5.3` → 关供应商 → 再开供应商 ⇒ `listDisabledModels` 由
+`{'glm-5.3': true}` 变成 `{}`，失败输出逐字
+`AssertionError: expected {} to deeply equal { 'glm-5.3': true }`。
+
+⚠️ **真正的「只写意图、不动黑名单」在服务端是另一个端点**
+（`model.setAllDisabled` 的 `'keep'` 分支），供应商开关**不走**那条路。
+⇒ 要么改文案（已改，见下），要么动 `src/`（那是另一个 PR 的量）。
+⚠️ 另一个入口同样覆盖细粒度状态：两方向都会 `pool.setAccountsEnabled(provider, enabled)`
+⇒ 用户手工停用过的**个别账号**也被整体开关抹掉。
+
+### ⚠️⚠️ 文案三处自相矛盾（已修）
+
+同一个交互里两句相反的话：
+
+- 开关的 `title`：「（关闭 = 停用它的全部账号；**模型黑名单保持不动**）」← 假；
+- confirm 弹窗：「将关闭它的 **N 个模型（从对话框的模型选择里移除）**」← 真；
+- `ProviderPanel` 的 doc 注释：「**但黑名单不动**」← 假。
+
+⇒ 现统一为「关闭 = 停用它的全部账号，并把当前目录里的模型全部关掉；
+再打开时这些模型会一起恢复，**包括手工关掉的**」，且注释里记了探针与行号。
+
+### ⚠️⚠️ 删「第二个更新点」时**不要连守卫一起删**
+
+`providerStatusSeqRef` 是「最后写者胜」的唯一实现。本 PR 删掉了
+`patchProviderStatus`（第二个占号点），于是把 `tests/unit/jet-hub-structure-ast.spec.ts`
+里那条 `describe('★★ 客户端 provider 状态序号闸门（AST 级）')` **整段删掉**。
+
+但机制一行没少（仍是 1 个 `++` + 2 个 `!==`），删掉的只是**守卫**。
+域C 变异实测：把 `++` 改成不递增、或删掉 catch 里的比较，**12526 条全绿**。
+
+⇒ 正确做法是**把计数从 2 改成 1**（已恢复：`updates === 1`、`comparisons === 2`，
+另加一条「`loadProviderStatuses` 体内两道闸门恰好 2 处」）。同一类教训见
+`docs/agent-notes/providers-officeace.md`：「登记了一处例外 ≠ 这处例外有守卫」。
+
+### ⚠️⚠️ `disabled` 会把**原生 tooltip 一起关掉**（`title` 白写）
+
+开关禁用时原因只挂在 `title: switchState.reason` 上，而同一元素
+`disabled: switchState.disabled === true || switchBusy`。**Chromium 不为 disabled
+的表单控件显示原生 tooltip** ⇒ 用户悬停什么都没有；`aria-label` 里也只有
+「已启用/已关闭」⇒ 屏幕阅读器同样拿不到原因。测试全绿，因为它断言的是
+`providerSwitchState()` 的**返回值字符串**，不是 DOM。
+
+⇒ 改用 WAI-ARIA 的标准做法：**`aria-disabled` + onClick 早退**
+（仍可聚焦、tooltip 照常显示、AT 读出「不可用」，行为上依然点不动），
+CSS 选择器同步从 `:disabled` 改成 `[aria-disabled='true']`。
+⚠️ **属性本身不是拦截** —— 真正拦住点击的是早退，必须用**行为级**用例守。
+
+### ⚠️⚠️ 「循环指认」：两条 spec 各自指着对方，实际零守卫
+
+`provider-toggle.spec.ts` 那 130 条几乎全是**源码字符串 / 切片断言**（除
+`providerSwitchState` 纯函数）；而 `model-center-panel.spec.ts` 写着
+「行为守卫在 `provider-toggle.spec.ts`」。
+
+域C 变异 M6 把开关的 `onClick` 体整个包进 `if (false)` ⇒ **148 条全绿**。
+⇒ 讽刺的是 PR 自己在描述里写着「点『网关』/『用量』/『供应商开关』什么都不发生，
+而 **127 条测试全绿**」—— 同一个 PR 里又造了一个同型的。
+
+修法（已落）：`jet-hub.js` 导出 `ProviderPanel`（**只为单测**，生产无第二处引用），
+`tests/unit/checkin-panel-wiring.spec.ts` 新增一段**真渲染 + 真 handler**：
+点「已启用」⇒ `onToggleProvider('codearts', false)`；点「已关闭」⇒ `(…, true)`；
+点「禁用」⇒ **一次都不调**。
+⚠️ 为什么必须直接渲染 `ProviderPanel`：本仓的 react 替身**不调用函数组件**，
+从 `JetHubPage` 往下走只能拿到 `<ProviderPanel …>` 这个**元素**，看不到内部开关。
+
+### ⚠️ `provider.status` 失败**不许**把汇总置 null
+
+原实现失败就 `setProviderStatuses(null)`，于是**一次瞬态失败（429 / 502 / 超时）
+让全部 29 个开关变灰**（`PROVIDER_REGISTRY` 当前 29 条 —— 别写成「8 个」，
+那是本仓早期的 provider 数），而唯一恢复路径是「设置 → 打开供应商开关 → **刷新**」——
+那条路径在提示文案里一个字都没提。⇒ 改成**保留上一次读到的汇总**（它是「稍旧」
+不是「错的」，再点一次服务端会自己纠正），提示文案补上「可在『设置 → 打开供应商
+开关』里点『刷新』重试」。只有从未读到过（仍是初始 null）才退化为不分组平铺。
+
+### ⚠️ 死 import 让「运行态圆点」静默消失
+
+`gatewayButtonLabel(status)`（返回 `'网关 ●'` / `'网关'`）在 `jet-hub.js` 里
+**引入了却零使用** —— 底部操作行的网关按钮硬编码 `'网关'`。
+`openai-gateway-panel.spec.ts` 仍在测那个纯函数 ⇒ **测试不会红**，
+但旧页头的「网关 ●」运行态圆点丢了，运行/停止的差别只剩 `title`。
+⇒ 已改回 `gatewayButtonLabel(gatewayStatus)`。
+**判据：引入一个纯函数却不用它，比不引入更危险 —— 因为测试会替你证明它「在工作」。**
+
+### ⚠️⚠️ react 替身的 `useRef` 少写一个字段 ⇒ 所有「按序号丢弃过期响应」的闸门在单测里恒为「全丢弃」
+
+`tests/unit/checkin-panel-wiring.spec.ts` 里的 react 替身原先这样实现 `useRef`：
+
+```js
+useRef(initial) { const s = slots[k]; if (!('cur' in s)) s.cur = initial; return s }
+```
+
+属性名是 **`cur`**，而真实 React 的 ref 上叫 **`current`**。于是 `React.useRef(0)`
+之后 `providerStatusSeqRef.current` 是 `undefined`，`++undefined` = **`NaN`**，
+而 `NaN !== NaN` **恒真** ⇒ 每个响应都被判成「过期的」，`setProviderStatuses`
+一次都不会执行。
+
+⚠️ 症状极具误导性：不是报错，是 **`providerStatuses` 恒为 `null`**，
+看起来像「服务端没回」或「组件没渲染」。
+
+⚠️⚠️ **这正是那条序号闸门十几年没人用行为级测它的根因** —— 在那个替身下
+任何依赖 `useRef(数字)` 的闸门都不可观测，只能退回源码/AST 断言。
+⇒ 已改为初始化时**同时**写 `cur` 与 `current`（`cur` 保留只为不破坏既有写法）。
+
+**可推广的判据**：写 hooks 替身时，属性名必须与真实 API 逐个对齐
+（`current` 不是 `cur`）；**替身少一个字段 ⇒ 被测代码的整条分支静默失效**，
+而它表现为「状态不更新」而不是「测试失败」。本仓已有同型教训：
+`providers-accio` 的「替身缺一条真实实现里有的腿 ⇒ 对应变异全体无牙」。
+
+### 已登记未修（P3）
+- `isInsideCheckinDock`（`plugin-src/client/checkin-panel-logic.js`）**零生产调用方**，
+  却有 3 条用例（6 条断言）在守它（`auto-checkin-panel.spec.ts`）⇒ 死代码 + 假信心。
+- **设置弹窗没有 Escape、没有焦点陷阱**：`renderSettingsPanel`（`plugin-src/client/jet-hub.js`）
+  只有遮罩点击 + 「完成」两个出口，而 `aria-modal="true"` 已声明 —— 键盘用户关不掉。
+  同文件的 `ProviderSwitchPanel` 有 Escape 处理，两处不一致。
+- **另有 23 个零引用 CSS 类**（全仓 321 个 `.dim-*` 逐条扫描，只删了 `.dim-jh-header`
+  一条）⇒ 下次清理时一并删，别只删一个就宣布「死 CSS 清完了」。
+- `openSettings` 里 `if (showSettings) { closeSettings(); return }` 不可达。
+- `saveCheckinTimesWith` 的超时注释称「底层请求若成功 `setAutoCheckin` 仍会更新界面」
+  —— `Promise.race` 只结算一次，界面**不会**更新（只有重开面板 `loadAutoCheckin` 才追平）。
+- 三条 `★★★` 用例证明的是**被遮罩挡住**的交互：设置弹窗盖着（`z-index:3000`）时
+  点底部操作行。真正可达的只有弹窗内的「打开供应商开关」。
+- 保存进行中点「设置」⇒ 意图静默丢弃。
+- `switchBusy` 只由 `providerBusy` 提供，模型列表的 `toggleModel` / `setProviderAll`
+  不入忙集（两屏互相遮挡 ⇒ 实测不可达，降级登记）。
+- **AST 判据只认三种写法**（`!==` / 前缀 `++` / `+=`）⇒ `!=`、`= x + 1`、后缀 `x++`
+  会**假红**（误报方向安全，但阻碍合法重构）。假红不危险，**但别把它当有牙**。
+- **「状态未知」在 rail 分组上仍与「全部已启用」同形**（`groupProviders` 把非对象
+  `statuses` 当 `{}`）—— 开关本身是禁用态、可区分，但侧边栏的组归属看不出来。
+
+## ⚠️⚠️ 二审（2026-11-09，返工提交 `bfb55eb` 之后）：三条「代码对、守卫可被静默拿掉」
+
+一审的 9 条守卫全部有牙（16/16 期望红），但对抗审计又用 18 条变异找出**三条
+「代码正确、守卫拿掉也不红」**的腿。这不是回归，是**守卫强度**问题 —— 记录在此
+以免下次有人用那三种改法「合法地」把闸门关掉。
+
+### 补的三条行为级用例
+
+| 补的用例（`tests/unit/checkin-panel-wiring.spec.ts`） | 挡的改法 | 红因（逐字） |
+|---|---|---|
+| `★★ 迟到的旧 provider.status 不得覆盖新状态（序号闸门的行为级守卫）` | 成功分支的 `seq !== providerStatusSeqRef.current` 删掉 / 用 `&& false` 短路 | `AssertionError: ★★ 迟到的旧响应必须被丢弃…: expected { models: { total: 9, disabled: 9 } } to deeply equal { models: { total: 2, disabled: +0 } }` |
+| `★★ 同帧连点两次只发一次 provider.setEnabled（防双写）` | `if (providerToggleInFlightRef.current.has(providerId)) return` 删掉 | `AssertionError: ★★ 同帧连点两次必须只发一次 provider.setEnabled…: expected 2 to be 1` |
+| `★ 读失败后恢复成功 ⇒ 那条「显示的是上一次读到的状态」必须收掉` | 成功分支的 `setProviderNotice(prev => …)` 删掉 | `AssertionError: ★ 恢复成功后那条 warn 必须消失…: expected '供应商开关状态读取失败（502 Bad Gateway），暂时读不到；账号…' to be ''` |
+
+### 三条教训
+
+1. **AST 计数判据的射程只有「被整段删掉」，挡不住「留着但失效」** ——
+   `if (false && (…))`、删 `return` 留空 `if` 体、把 `++` 搬到隔壁函数，三种
+   语义已死的改法让 `++`=1、`!==`=2 三个数字**全不变**（34 条全绿）。
+   ⇒ **必须成对**：AST 挡「整段删除」，行为级挡「保留但失效」。
+2. **`slice(at, at + 4000)` 这种「函数体切片」会越界** —— `loadProviderStatuses`
+   的函数体只有 900 余字符，4000 字符窗口直接盖到隔壁的 `commitProviderOrder`，
+   于是「函数体内恰好 2 处」名不副实：把闸门**搬到隔壁函数**也绿。
+   修法 = 用 AST 找 `VariableDeclaration` 取 `initializer` 的**精确**范围。
+3. **变异红在「超时」上不等于红在「被测腿」上** —— 防双写用例第一版只放行
+   「当前那一个」写请求的 resolver，去重腿一删，第二次写永远挂着 ⇒ 用例以
+   30s 超时变红。**红因是超时，不是 `expect(writes.length).toBe(1)`。**
+   修法 = 把所有挂起的 resolver 收进数组、一次放行 ⇒ 红因回到断言本身
+   （`expected 2 to be 1`）。同型先例：本仓 `providers-magicrew` 的
+   「红不自动等于红因是被测变异」。
+
