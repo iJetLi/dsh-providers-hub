@@ -13,13 +13,18 @@
  * ⑧ 未知图片能力 ⇒ `UNSUPPORTED_CONTENT`，且**不读字节**、不静默丢图；
  * ⑨ `thinking.budget_tokens` 严格小于 `max_tokens`（写成 ≥ 直接被上游 400）；
  * ⑩ `listAllModels()` 必须**同步**返回（远端挂了回退内置表，面板不能空）。
+ * ⑪ 目录声明 `maxTokens`（不声明 ⇒ 请求不带 max_tokens ⇒ 退回 4096 截断），
+ *    且 `max_tokens` 按**模型**夹取（qwen 系列吃不下 100,000）。
  */
 
 import { describe, expect, it, vi } from 'vitest'
 
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
-import { BAIZHI_MAX_CONTEXT, type BaizhiModelEntry } from '../../src/baizhi-product.js'
+import {
+  BAIZHI_MAX_CONTEXT,
+  type BaizhiModelEntry,
+} from '../../src/baizhi-product.js'
 import {
   BAIZHI_MAX_ROTATE,
   BaizhiAdapter,
@@ -175,6 +180,44 @@ describe('无凭据 / 请求形状', () => {
     expect(body.model).toBe('deepseek-v4-pro')
     expect(body.stream).toBe(true)
     expect(body.max_tokens).toBe(4096)
+  })
+
+  it('★ 宿主下发的 100,000 按模型夹：deepseek 原样发、qwen 夹到 65,536（否则上游 400）', async () => {
+    // ⚠️ 期望值写字面量。写 `BAIZHI_QWEN_MAX_OUTPUT_TOKENS` 的话，把常量改成
+    //    100,000（**正是上游回 400 的那个值**）这条用例仍然全绿（2026-11-08 审计实测）。
+    const deepseekFetch = vi.fn(async () => sseResponse(SSE_OK))
+    const deepseekAdapter = makeAdapter({ fetchImpl: deepseekFetch as never })
+    await drain(deepseekAdapter.stream(request({ maxTokens: 100_000 })))
+    expect(bodyOf(deepseekFetch).max_tokens).toBe(100_000)
+
+    const qwenFetch = vi.fn(async () => sseResponse(SSE_OK))
+    const qwenAdapter = makeAdapter({ fetchImpl: qwenFetch as never })
+    await drain(qwenAdapter.stream(request({ model: 'qwen3.6-plus', maxTokens: 100_000 })))
+    expect(bodyOf(qwenFetch).max_tokens).toBe(65_536)
+  })
+
+  it('★ 目录未声明 maxTokens ⇒ 告警**一次**（否则「静默截断」与「上游就这德行」同形）', async () => {
+    // 症状：`finish_reason=max_tokens` 而正文 0 字，且**零日志** ⇒ 无法诊断。
+    // 这里**不编**上限（编了就是拿假设换真故障），只把「你正在踩这个坑」说清楚。
+    const warn = vi.fn()
+    const adapter = makeAdapter({
+      warn,
+      fetchImpl: vi.fn(async () => sseResponse(SSE_OK)) as never,
+    })
+    await drain(adapter.stream(request({ model: 'warn-probe-model' })))
+    await drain(adapter.stream(request({ model: 'warn-probe-model' })))
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][0]).toContain('warn-probe-model')
+    expect(warn.mock.calls[0][0]).toContain('4096')
+
+    // 反向对照：宿主下发了 maxTokens 时**不该**告警（否则真缺陷会被噪音埋掉）
+    const quiet = vi.fn()
+    const quietAdapter = makeAdapter({
+      warn: quiet,
+      fetchImpl: vi.fn(async () => sseResponse(SSE_OK)) as never,
+    })
+    await drain(quietAdapter.stream(request({ model: 'quiet-probe-model', maxTokens: 4096 })))
+    expect(quiet).not.toHaveBeenCalled()
   })
 
   it('正常流：文本拼接 + finish 块', async () => {
@@ -449,6 +492,21 @@ describe('模型目录', () => {
     expect(resolved.provider).toBe('baizhi')
     expect(resolved.name).toBe('DeepSeek V4 Pro')
     expect(resolved.context?.contextWindow).toBe(BAIZHI_MAX_CONTEXT)
+  })
+
+  it('★ 目录声明 maxTokens ⇒ 宿主 defaultMaxTokens 有值（否则请求不带 max_tokens、退回 4096）', async () => {
+    // 走兜底表（远端失败）：能力表是 maxTokens 的唯一来源。
+    const adapter = makeAdapter({
+      fetchRemoteModels: async () => { throw new Error('boom') },
+    })
+    const deepseek = await adapter.resolveModel('baizhi', 'deepseek-v4-pro')
+    // ⚠️ 字面量：这里的期望值就是「宿主会拿到什么」，写常量名等于同义反复。
+    expect(deepseek.defaultMaxTokens).toBe(100_000)
+    const qwen = await adapter.resolveModel('baizhi', 'qwen3.6-plus')
+    expect(qwen.defaultMaxTokens).toBe(65_536)
+    // 反向自检：`context` 的键集合必须只有 `contextWindow` —— 多写的键会被
+    // 宿主 `normalizeModelInfo` 白名单重建时静默丢掉。
+    expect(Object.keys(deepseek.context ?? {}).sort()).toEqual(['contextWindow'])
   })
 
   it('providerInfo 用产品展示名', () => {

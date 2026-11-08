@@ -25,8 +25,17 @@
  * MonkeyCode 没有下发「每个模型支持哪些思考档位」的元数据。凭空编一张表
  * 就是假能力（Qoder 的教训：UI 给了选项、请求却被丢弃）。
  * - 目录条目**不带** `reasoning` ⇒ UI 不出现档位选择器；
- * - 但如果 harness 自己传了 `reasoningEffort`（例如用户在别处设过），
- *   仍会映射成 `thinking.budget_tokens` —— 见 `monkeycodeThinkingFor`。
+ * - ⚠️ 2026-11-08 审计**订正**：本注释原写「但 harness 自己传了
+ *   `reasoningEffort`（例如用户在别处设过）时仍会映射成
+ *   `thinking.budget_tokens`」—— **不成立**。宿主 `dsh-llm` 的
+ *   `resolveCallWithInfo`（`lib/index.js:2186-2196`）在
+ *   `reasoning === void 0 && requested !== void 0` 时**直接抛**
+ *   `UNSUPPORTED_REASONING_EFFORT`，请求根本到不了适配器。
+ *   故 `monkeycodeThinkingFor` 的档位阶梯（low 2048 / medium 4096 /
+ *   high 8192）当前是**死代码**；真正会生效的只有 `purpose ===
+ *   'session-title'` 的强制 `disabled` 与「不发该字段」两条。
+ *   保留阶梯是为了上游将来下发档位表时不必重写，**不是当前可达的行为**
+ *   （不要再拿它当「思考预算会影响输出」的依据）。
  *
  * ## 错误码纪律（与 minimax 同口径）
  *
@@ -75,6 +84,7 @@ import {
   type MonkeycodeFailureClass,
 } from './monkeycode.js'
 import {
+  MONKEYCODE_DEFAULT_MAX_TOKENS,
   buildMonkeycodeMessagesPayload,
   consumeMonkeycodeSse,
   monkeycodeThinkingFor,
@@ -118,6 +128,13 @@ export interface MonkeycodeAdapterOptions {
 
 /** 单次请求允许最多换几个账号（防止池里 20 个坏 key 时打满上游）。 */
 const MONKEYCODE_MAX_ROTATE = 4
+
+/**
+ * 已经为「目录未声明 maxTokens 的模型」告警过的 id。
+ *
+ * 只告警一次：这类模型每一轮都会走到兜底值，每轮刷一条没有信息量。
+ */
+const warnedMissingMaxTokens = new Set<string>()
 
 /** 限流冷却：1 小时。 */
 const MONKEYCODE_RATE_LIMIT_COOLDOWN_MS = 3_600_000
@@ -267,6 +284,20 @@ export class MonkeycodeAdapter extends LlmAdapter {
     const thinking = options.purpose === 'session-title'
       ? { type: 'disabled' as const }
       : monkeycodeThinkingFor(options.reasoningEffort)
+
+    // ⚠️ 目录**没有**声明 `defaultMaxTokens` 时宿主不下发 `maxTokens`，出站只能
+    // 回落到 4096 ⇒ 长回答被静默截断（`finish_reason=max_tokens` 而正文 0 字，
+    // 正是本 PR 要修的那个症状）。`glm-5` 就是这种：它既无 `maxTokens` 也无
+    // `contextWindow`。这里**不编**上限（编了就是拿假设换真故障），只把
+    // 「你正在踩这个坑」说清楚 —— 否则症状与「上游就这德行」同形，无法诊断。
+    if (options.maxTokens === undefined && !warnedMissingMaxTokens.has(options.model)) {
+      warnedMissingMaxTokens.add(options.model)
+      this.warn(
+        `[monkeycode] 模型 ${options.model} 未在目录里声明 maxTokens ⇒ 出站回落 `
+        + `${MONKEYCODE_DEFAULT_MAX_TOKENS}，长回答可能被截断。`
+        + '请在 src/monkeycode-product.ts 的网关模型表里补上实测值。',
+      )
+    }
 
     const payload = buildMonkeycodeMessagesPayload({
       model: options.model,
@@ -531,6 +562,12 @@ export class MonkeycodeAdapter extends LlmAdapter {
       ...model.supportsImage === true ? { inputModalities: ['text', 'image'] as const } : {},
       ...model.contextWindow !== undefined && model.contextWindow > 0
         ? { contextWindow: model.contextWindow }
+        : {},
+      // ⚠️ 输出上限必须走 `CatalogEntry.maxTokens`（宿主映射成 `defaultMaxTokens`）。
+      // 写进 `context` 是无效的：`LlmModelContext` 只认 `contextWindow`，
+      // `normalizeModelInfo` 会白名单重建并静默丢掉多写的键。
+      ...model.maxTokens !== undefined && model.maxTokens > 0
+        ? { maxTokens: model.maxTokens }
         : {},
     }
   }

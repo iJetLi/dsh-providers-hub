@@ -35,7 +35,7 @@ import {
   type MonkeycodeSlot,
 } from '../../src/monkeycode-adapter.js'
 import type { MonkeycodeCredential } from '../../src/monkeycode.js'
-import { MONKEYCODE, MONKEYCODE_INTL } from '../../src/monkeycode-product.js'
+import { MONKEYCODE, MONKEYCODE_INTL, MONKEYCODE_MAX_OUTPUT_TOKENS } from '../../src/monkeycode-product.js'
 
 const KEY1 = `oma_${'a'.repeat(32)}`
 const KEY2 = `oma_${'b'.repeat(32)}`
@@ -419,5 +419,66 @@ describe('目录', () => {
     const models = adapter.listAllModels()
     expect(models.length).toBeGreaterThan(0)
     expect(models.map((entry) => entry.id)).toContain('deepseek-flash')
+  })
+
+  /**
+   * ★★ 输出上限必须真的流到 `defaultMaxTokens`。
+   *
+   * 没有这条守卫时：目录条目漏写 `maxTokens` ⇒ 宿主不 materialize 输出预算
+   * ⇒ 请求头一旦丢掉 `maxTokens`，适配器兜底 4096（`MONKEYCODE_DEFAULT_MAX_TOKENS`）
+   * ⇒ 思考把预算烧光、正文 0 字、`turn/end: max-tokens`
+   * （2026-11-07 真机会话 `session-3b0f49c4` 取证）。
+   */
+  it('★★ deepseek 系下发 defaultMaxTokens = 128000，且不写进 context（宿主会丢）', async () => {
+    const adapter = makeAdapter()
+    for (const id of [
+      'monkeycode-basic/deepseek-flash',
+      'monkeycode-basic/deepseek-v4-flash',
+      'monkeycode-pro/deepseek-flash',
+      'monkeycode-pro/deepseek-v4-pro',
+      'monkeycode-ultra/deepseek-v4-pro',
+      'deepseek-flash',
+      'deepseek-v4-flash',
+      'deepseek-v4-pro',
+    ]) {
+      const resolved = await adapter.resolveModel(MONKEYCODE.id, id)
+      expect(resolved.defaultMaxTokens, `${id} 未下发输出上限`).toBe(MONKEYCODE_MAX_OUTPUT_TOKENS)
+      expect(MONKEYCODE_MAX_OUTPUT_TOKENS).toBe(128_000)
+      // ⚠️ 反向自检：`context` 的键集合必须**只有** `contextWindow` ——
+      // 多写的键会被宿主 `normalizeModelInfo` 白名单重建时静默丢掉。
+      expect(Object.keys(resolved.context ?? {}).sort()).toEqual(['contextWindow'])
+    }
+  })
+
+  it('★ glm-5 不声明输出上限（没有探测证据就不编造）', async () => {
+    const adapter = makeAdapter()
+    const resolved = await adapter.resolveModel(MONKEYCODE.id, 'glm-5')
+    expect(resolved.defaultMaxTokens).toBeUndefined()
+    expect(resolved.context).toBeUndefined()
+  })
+
+  it('★ 目录未声明 maxTokens ⇒ 告警**一次**（否则「静默截断」与「上游就这德行」同形）', async () => {
+    // 症状：`finish_reason=max_tokens` 而正文 0 字，且**零日志** ⇒ 无法诊断。
+    // 这里**不编**上限（编了就是拿假设换真故障），只把「你正在踩这个坑」说清楚。
+    const warn = vi.fn()
+    const adapter = makeAdapter({
+      warn,
+      fetchImpl: vi.fn(async () => sseResponse(SSE_OK)) as never,
+    })
+    await drain(adapter.stream(request({ model: 'glm-5' })))
+    await drain(adapter.stream(request({ model: 'glm-5' })))
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [message] = warn.mock.calls[0] as [string]
+    expect(message).toContain('glm-5')
+    expect(message).toContain('4096')
+
+    // 反向对照：宿主下发了 maxTokens 时**不该**告警（否则真缺陷会被噪音埋掉）
+    const quiet = vi.fn()
+    const quietAdapter = makeAdapter({
+      warn: quiet,
+      fetchImpl: vi.fn(async () => sseResponse(SSE_OK)) as never,
+    })
+    await drain(quietAdapter.stream(request({ model: 'deepseek-flash', maxTokens: 4096 })))
+    expect(quiet).not.toHaveBeenCalled()
   })
 })
