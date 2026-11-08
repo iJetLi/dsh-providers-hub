@@ -136,6 +136,14 @@ export const MONKEYCODE_MAX_OUTPUT_TOKENS = 1_048_576
  *    直接透传，上游传 `0` 或负数时会原样写进 `max_tokens` ⇒ 服务端 400，
  *    而 400 落在「其它失败」档 ⇒ 适配器把它当账号级失败、挨个换号，
  *    最终整条渠道被判死。**一个参数错误不该杀掉整个 provider。**
+ *
+ * ⚠️ 与 baizhi 的口径**刻意不同**（2026-11-08 审计提出，**有意保留**）：
+ *    本函数只有**下限**（挡 `0`/负数/NaN）和「荒谬值」上限 1,048_576，
+ *    **没有按模型夹** —— 手填 500,000 会原样上行。baizhi 的
+ *    `baizhiMaxTokensFor` 则按模型夹到 100,000 / 65,536 / 32,768。
+ *    差异是证据驱动的（baizhi 的 qwen 硬限实测 400；monkeycode 只观测到
+ *    「1,000,000 也接受」，没有可夹的真实边界）。**不要为了统一合并两者**
+ *    —— 那会静默削掉用户明确要的预算。详见 `src/baizhi-messages.ts` 的同名注释。
  */
 export function monkeycodeMaxTokensFor(maxTokens: number | undefined): number {
   /**

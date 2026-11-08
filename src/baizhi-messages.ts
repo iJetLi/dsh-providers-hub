@@ -60,6 +60,42 @@ export type BaizhiThinking =
  *
  * ⚠️ 上限是**逐模型**的（qwen 系列比 deepseek 低，实测 65,536 / 32,768），
  * 传 `model` 才会按模型夹；不传时按服务级默认 `BAIZHI_MAX_OUTPUT_TOKENS` 夹。
+ *
+ * ⚠️ 这是本仓**唯一**一条「按模型夹出站上限」的实现（全仓另一个 clamp 点是
+ *    `monkeycodeMaxTokensFor`，它**没有**按模型夹 —— 两家策略刻意不同，见下）。
+ *
+ * ## 与 `monkeycode` 的口径差异（2026-11-08 审计提出，**有意保留**）
+ *
+ * | | baizhi（本文件） | monkeycode（`monkeycode-messages.ts`） |
+ * | --- | --- | --- |
+ * | 语义 | 逐模型**硬限**（超了上游 400） | 只挡**荒谬值**（1_048_576） |
+ * | 手填 500,000 | 夹到 100,000 | 原样上行 |
+ * | 依据 | qwen 三兄弟 100,000 实测 400 | 该模型 100,000 / 1,000,000 实测都能回 |
+ *
+ * 差异是**证据驱动**的，不是漏写：baizhi 的上限是「上游会拒绝」的硬边界，
+ * 不夹就是把 400 发给用户；monkeycode 只观测到「能接受」，没有可夹的真实边界，
+ * 夹了反而会静默削掉用户明确要的预算。**不要为了「统一」把两者合并。**
+ *
+ * ## ⚠️ 与「刻意不声明 maxTokens」定案的区别（别当成回归）
+ *
+ * 本仓有两处**明确决定不声明** `maxTokens` 的定案：
+ * `src/models.ts:105-124`（2026-10-30 第二轮审计 D-4，AgentCenter）与
+ * `src/llm-adapter.ts:2004-2029`（同批四路审计 P1-1，codearts）。理由是
+ * **声明会改变宿主的自动压缩触发点**（`dsh-compaction-basic` 的
+ * `reservedCompletionTokens` 直接读 `maxTokens`）：窗口 131,072 的模型若声明
+ * 100,000，`pressureBudgetTokens` 会算成负、抛 `TargetPressureConfigError`，
+ * 而它被 `agent/pre-step` 吞成一条 warn ⇒ **自动压缩静默关闭**。
+ *
+ * 这两条定案**不适用于本文件**：codearts 的出站预算已由
+ * `CODEARTS_MAX_OUTPUT_TOKENS = 65_536` 单点决定，不声明也不改 wire 值；
+ * 而 baizhi / monkeycode 的兜底是 `*_DEFAULT_MAX_TOKENS = 4096`，
+ * **不声明就真的发 4096** ⇒ 长回答被静默截断。两边的「不声明」后果相反。
+ *
+ * 算术核对（本文件的声明值不会踩到压缩坑）：baizhi 的窗口 1,048,576 +
+ * 输出 100,000 ⇒ `pressureBudgetTokens = 1,048,576 - 100,000 - 65,536 = 883,040`
+ * > `thresholdTokens = 838,860` ⇒ **触发点完全不变**；monkeycode 同型
+ * （余量 16,180）。只有当 `maxTokens > 144,180` 时阈值才开始下降，
+ * 只有 `contextWindow <= maxTokens + 65,536` 才会抛错。
  */
 export function baizhiMaxTokensFor(maxTokens: number | undefined, model?: string): number {
   const raw =

@@ -161,10 +161,13 @@ configuration can make this link work (passthrough settings do not ..."}}
 
 ### 根因链
 
-1. `src/monkeycode-product.ts:210-218` 的 9 条目录条目只声明 `contextWindow`，
-   **没有 `maxTokens`**（上游 `ijetli/master` 同样没有）。
-2. `src/model-catalog.ts:744-746` 只在条目有 `maxTokens` 时才设
-   `resolved.defaultMaxTokens` ⇒ 本家恒 `undefined` ⇒ 宿主
+1. `src/monkeycode-product.ts:246-254` 的 **8 条** deepseek 目录条目只声明
+   `contextWindow`，**没有 `maxTokens`**；`glm-5`（`:258`）两者都不声明。
+   （⚠️ 2026-11-08 审计订正：原文写「`:210-218` 的 9 条」—— 那是 **base** 的
+   行号，且 `glm-5` 连 `contextWindow` 都没声明，不是「只声明 contextWindow」。）
+2. `src/model-catalog.ts:749-752` 只在条目有 `maxTokens` 时才设
+   `resolved.defaultMaxTokens`（`:744-746` 是 `contextWindow` 的兜底分支，
+   别对着找）。⇒ 本家恒 `undefined` ⇒ 宿主
    `@deepseek-ai/dsh-tmux-context/lib/index.js:1863 resolveCallWithInfo`
    的 `config.maxTokens === undefined && info.defaultMaxTokens !== undefined`
    分支永不成立，不会替它补上限。
@@ -175,10 +178,35 @@ configuration can make this link work (passthrough settings do not ..."}}
 4. `src/monkeycode-messages.ts:69` `MONKEYCODE_DEFAULT_MAX_TOKENS = 4096`，
    Anthropic Messages 协议 `max_tokens` 必填，于是每次请求都发
    `max_tokens: 4096`（`monkeycodeMaxTokensFor(undefined)` → 4096）。
-5. `monkeycodeThinkingFor`（同文件 `:96-100`）`high → budgetTokens 8192`，
+5. `monkeycodeThinkingFor`（同文件 `:96-102`）`high → budgetTokens 8192`，
    构造 payload 时夹到 `maxTokens - 1`；本例切号后 `reasoningEffort` 随切换消失
    ⇒ 不发 `thinking` 字段 ⇒ 服务端默认开思考且预算不受控，14k 字符推理直接把
    4096 烧完，正文拿 0。
+
+### ⚠️ 根因链第 3 环的订正（2026-11-08 审计，三域独立复现）
+
+上面第 3 环**作为「值为什么会丢」的机制不成立**，别照它推演：
+
+- `dsh-llm/lib/index.js:2236-2244` 的 `adapterDefaults` 在
+  `proposed.maxTokens === undefined` 且 `resolvedConfig.maxTokens !== undefined`
+  时才置 `maxTokens: true`。若 8192 是**显式** `agent options.maxTokens`，
+  则 `proposed.maxTokens !== undefined` ⇒ `adapterDefaults` 为空对象 `{}`。
+- 而 `dsh-session/lib/index.js:604-612` 的 `canonicalHeader`
+  （`...adapterDefaults?.reasoningEffort === true || adapterDefaults?.maxTokens === true
+  ? { adapterDefaults } : {}`）**会把空对象整个丢掉**，`dsh-api-session-controller`
+  同样要求 `must omit empty adapterDefaults`。
+- 于是 `requestProposal` 首行 `if (header.adapterDefaults === void 0) return header.config`
+  直接返回原配置 —— **同实例内根本不会删值**。
+
+真机制在**另一条路径**：`prepareRequest`（`dsh-agent-loop/lib/index.js:1185`）
+只读 `this.options.maxTokens`，不读 `persistedConfig.maxTokens`。所以
+「丢值」出现在 **`resume` / 重建 agent** 时（新实例的 `options` 里没有该值），
+不是「下一步」被主动删除。
+
+**结论：叙事错、修法对。** 8 条 deepseek 声明 `maxTokens` 之后，
+`defaultMaxTokens` 非 `undefined` ⇒ 每次 `prepareCall` 都会重新补齐
+⇒ resume 也能自愈。**修法在错误叙事下仍然有效**，但按第 3 环去复现会得到
+相反结论（用显式 `options.maxTokens` 试，值删不掉）。
 
 ### 对照：声明了上限的渠道不会丢
 
@@ -189,12 +217,19 @@ gemini 64000、raccoon 100000、minimax 128000。monkeycode / baizhi / codearts 
 accio / loomy 等未声明的则 `adapterDefaults=undefined`，多数整条 `maxTokens`
 都没有。
 
-### 上游核对（2026-11-07）
+### 上游核对（2026-11-07，2026-11-08 审计**订正**）
 
-- `git log HEAD..ijetli/master` 的 12 个提交无一处涉及输出上限；
-  `git diff HEAD..ijetli/master -- src/monkeycode*` 只删了 `monkeycode-http.ts`
-  与 `systemMessageText` 兜底；`git show ijetli/master:src/monkeycode-product.ts
-  | grep -n "maxTokens\|maxOutput"` **零命中**。
+⚠️ 本节原写「`git log HEAD..ijetli/master` 的 12 个提交…」，但**本仓库没有
+`ijetli` remote**（只有 `origin` = Gitee 的 `iJetLi/deepseek-harness-codearts`、
+`github` = `iJetLi/dsh-providers-hub`）⇒ 那条命令当场 `fatal: Needed a single
+revision`，12 个提交与「删了 `monkeycode-http.ts`」都**无法复现**。
+可复现的只有：
+
+- `git show github/master:src/monkeycode-product.ts | grep -n "maxTokens\|maxOutput"`
+  **零命中**（rc=1）⇒「上游没有声明输出上限」这个结论**成立**；
+- 但 `git log HEAD..github/master` 只有 **1** 个提交、diff 也只含本 PR
+  ⇒ 原记的「12 个提交」在 `github/master` 上同样不成立（可能是别的 fork 的
+  时点，已无从考证）。引用前先确认是哪个 remote。
 - 同型先例（可照抄修法）：`611a57a fix(cline): 补 minimax-m3.1-flash 的
   maxTokens 声明 —— 请求不带 max_tokens ⇒ 退回网关默认 4096 ⇒ 长回答被静默截断`。
 

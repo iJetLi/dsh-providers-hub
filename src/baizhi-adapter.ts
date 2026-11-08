@@ -79,7 +79,7 @@ import {
   type BaizhiFailureKind,
 } from './baizhi.js'
 import {
-  baizhiMaxTokensFor,
+  BAIZHI_DEFAULT_MAX_TOKENS,
   baizhiThinkingFor,
   buildBaizhiMessagesPayload,
   consumeBaizhiSse,
@@ -125,6 +125,13 @@ export interface BaizhiAdapterOptions {
 
 /** 单次请求允许最多换几个账号（防止池里 20 个坏 Key 时打满上游）。 */
 export const BAIZHI_MAX_ROTATE = 4
+
+/**
+ * 已经为「目录未声明 maxTokens 的模型」告警过的 id。
+ *
+ * 只告警一次：这类模型每一轮都会走到兜底值，每轮刷一条没有信息量。
+ */
+const warnedMissingMaxTokens = new Set<string>()
 
 /**
  * 百智云适配器。
@@ -284,8 +291,33 @@ export class BaizhiAdapter extends LlmAdapter {
     const entry = (await this.loadModels()).find((model) => model.id === options.model)
     const images = await this.inlineImages(options, entry)
 
-    // ⚠️ 按**模型**夹上限：qwen 系列吃不下 100,000（会 400），不能一律用服务级上限。
-    const maxTokens = baizhiMaxTokensFor(options.maxTokens, options.model)
+    /**
+     * 出站 `max_tokens` 的**按模型**夹取只有一份实现：`buildBaizhiMessagesPayload`
+     * 内部调 `baizhiMaxTokensFor(options.maxTokens, options.model)`（qwen 系列吃不下
+     * 100,000，会 400）。
+     *
+     * ⚠️ 这里**不要**再夹一次（2026-11-08 审计实测）：两处各夹一次时删掉任一处，
+     *    全量 12,532 条用例都全绿（互为掩码）—— 等于「按模型上限」这条腿
+     *    **没有任何守卫**（同 officeace 的「只留一份实现」教训）。
+     *
+     * 传给 `baizhiThinkingFor` 的是**未夹**的值，行为与夹过完全一致：那边只做
+     * `Math.min(ladder, maxTokens - 1024)`，而 `ladder ≤ 8192`、所有按模型上限
+     * 都 `≥ 32768` ⇒ 只要 `maxTokens ≥ 9216` 就恒等于 `ladder`；`maxTokens < 9216`
+     * 时夹取根本不会生效。落盘的 `budget_tokens` 另由 payload 对**夹后**的
+     * `max_tokens` 再收一次口（`maxTokens - 1`）。
+     */
+    const maxTokens = options.maxTokens ?? BAIZHI_DEFAULT_MAX_TOKENS
+    // ⚠️ 目录**没有**声明 `defaultMaxTokens` 时宿主不下发 `maxTokens`，出站只能
+    // 回落到 4096 ⇒ 长回答被静默截断（`finish_reason=max_tokens` 而正文 0 字，
+    // 正是本 PR 要修的那个症状）。这里**不编**上限（编了就是拿假设换真故障），
+    // 只把「你正在踩这个坑」说清楚 —— 否则症状与「上游就这德行」同形，无法诊断。
+    if (options.maxTokens === undefined && !warnedMissingMaxTokens.has(options.model)) {
+      warnedMissingMaxTokens.add(options.model)
+      this.warn(
+        `[baizhi] 模型 ${options.model} 未在目录里声明 maxTokens ⇒ 出站回落 ${BAIZHI_DEFAULT_MAX_TOKENS}`
+        + '，长回答可能被截断。请在 src/baizhi-product.ts 的 BAIZHI_KNOWN_CAPABILITIES 补上实测值。',
+      )
+    }
     /**
      * 思考配置。
      *

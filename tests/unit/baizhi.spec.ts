@@ -39,8 +39,6 @@ import {
   BAIZHI_FALLBACK_MODELS,
   BAIZHI_MAX_CONTEXT,
   BAIZHI_MAX_OUTPUT_TOKENS,
-  BAIZHI_QWEN_FLASH_MAX_OUTPUT_TOKENS,
-  BAIZHI_QWEN_MAX_OUTPUT_TOKENS,
   baizhiCapabilityOf,
   baizhiFallbackModels,
   baizhiMaxOutputTokensFor,
@@ -234,16 +232,73 @@ describe('兜底模型表：至少覆盖实测过的 12 条 id', () => {
   })
 
   it('★ 逐模型输出上限：deepseek/glm/kimi/minimax 100k、qwen 65,536、qwen-flash 32,768', () => {
-    for (const id of ['deepseek-v4-pro', 'deepseek-flash', 'glm-5.1', 'kimi-k2.6', 'minimax-m2.7', 'minimax-m3.1-flash']) {
-      expect(baizhiMaxOutputTokensFor(id), `${id} 上限`).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
+    /**
+     * ⚠️ 两条判据缺一不可，理由都是 2026-11-08 审计**实测**出来的：
+     *
+     * ① **值必须写字面量**。兜底值 `BAIZHI_MAX_OUTPUT_TOKENS` 恰好也是 100,000
+     *    ⇒ 用常量名断言等于同义反复。实测：把 `BAIZHI_QWEN_MAX_OUTPUT_TOKENS`
+     *    从 65,536 改成 100,000（**正是上游回 400 的那个值**），
+     *    4 个 spec 共 113 条用例**全部通过**。
+     * ② **必须断言键存在**。`baizhiMaxOutputTokensFor` 对未知 id 的兜底与声明值
+     *    同值 ⇒ 删掉某条条目的 `maxTokens` 后，取值断言仍然是 100,000。
+     *    实测：抽 7 条删除，全部全绿。
+     *
+     * 这两条腿合起来才是「能力表逐条声明了实测上限」的真守卫。
+     */
+    const hundredK = [
+      'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-flash',
+      'minimax-m2.7', 'minimax-m2.5', 'minimax-m3.1-flash',
+      'glm-5.1', 'glm-5', 'glm-4.7', 'kimi-k2.6', 'kimi-k2.5',
+    ]
+    for (const id of hundredK) {
+      expect(baizhiCapabilityOf(id), `${id} 不在能力表`).toBeDefined()
+      expect(Object.hasOwn(baizhiCapabilityOf(id) as object, 'maxTokens'), `${id} 未声明 maxTokens`).toBe(true)
+      expect(baizhiMaxOutputTokensFor(id), `${id} 上限`).toBe(100_000)
     }
     for (const id of ['qwen3.6-plus', 'qwen3.5-plus', 'qwen3.5-flash']) {
-      expect(baizhiMaxOutputTokensFor(id), `${id} 上限`).toBe(BAIZHI_QWEN_MAX_OUTPUT_TOKENS)
+      expect(Object.hasOwn(baizhiCapabilityOf(id) as object, 'maxTokens'), `${id} 未声明 maxTokens`).toBe(true)
+      expect(baizhiMaxOutputTokensFor(id), `${id} 上限`).toBe(65_536)
     }
-    expect(baizhiMaxOutputTokensFor('qwen-flash')).toBe(BAIZHI_QWEN_FLASH_MAX_OUTPUT_TOKENS)
+    expect(Object.hasOwn(baizhiCapabilityOf('qwen-flash') as object, 'maxTokens')).toBe(true)
+    expect(baizhiMaxOutputTokensFor('qwen-flash')).toBe(32_768)
     // 未知模型 / 未传模型 ⇒ 回落服务级默认（不编 per-model 上限）
-    expect(baizhiMaxOutputTokensFor('brand-new-model-9')).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
-    expect(baizhiMaxOutputTokensFor(undefined)).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
+    expect(baizhiMaxOutputTokensFor('brand-new-model-9')).toBe(100_000)
+    expect(baizhiMaxOutputTokensFor(undefined)).toBe(100_000)
+  })
+
+  it('★ 未声明 contextWindow 的条目 = 会静默关闭自动压缩的已知债务（新增条目须自觉）', () => {
+    /**
+     * 宿主 `dsh-compaction-basic` 在 `info.context === void 0` 时抛
+     * `TargetPressureConfigError`（`lib/index.js:939`），而它被
+     * `agent/pre-step` 的 catch 吞成一条 `step compaction failed: …; continuing
+     * the turn` 的 warn（同文件 `:840-852`）—— 后果不是崩，是**自动压缩被静默
+     * 关闭**（上下文只涨不压）。
+     *
+     * 而 `src/model-catalog.ts:725-746` 只在 `entry === undefined` 时才走
+     * `unknownModelContextWindow` 兜底 ⇒ **「条目存在但不声明 contextWindow」
+     * 是唯一会踩到它的形状**。
+     *
+     * ⚠️ 这**不是**「忘了写」：没有实测证据就编窗口，会让 90 万 token 才触发压缩
+     *    （比静默关闭更糟）。所以这份清单是**已登记债务**，不是待办勾选表；
+     *    新增条目时若没有窗口证据，就必须在这里显式加一行。
+     */
+    const withoutContextWindow = BAIZHI_FALLBACK_MODELS
+      .filter((model) => model.contextWindow === undefined)
+      .map((model) => model.id)
+    expect(withoutContextWindow).toEqual([
+      'minimax-m2.7',
+      'minimax-m2.5',
+      'minimax-m3.1-flash',
+      'glm-5.1',
+      'glm-5',
+      'glm-4.7',
+      'kimi-k2.6',
+      'kimi-k2.5',
+      'qwen3.6-plus',
+      'qwen3.5-plus',
+      'qwen3.5-flash',
+      'qwen-flash',
+    ])
   })
 })
 
@@ -375,20 +430,34 @@ describe('思考预算：必须严格小于 max_tokens', () => {
   it('max_tokens 归一化：默认 4096、正数取整、按模型封顶、非法值回默认', () => {
     expect(baizhiMaxTokensFor(undefined)).toBe(BAIZHI_DEFAULT_MAX_TOKENS)
     expect(baizhiMaxTokensFor(12_345.9)).toBe(12_345)
-    expect(baizhiMaxTokensFor(Number.MAX_SAFE_INTEGER)).toBe(BAIZHI_MAX_OUTPUT_TOKENS)
+    // ⚠️ 字面量：写常量名的话「服务级默认」改错也测不出来（同义反复）。
+    expect(baizhiMaxTokensFor(Number.MAX_SAFE_INTEGER)).toBe(100_000)
     expect(baizhiMaxTokensFor(0)).toBe(BAIZHI_DEFAULT_MAX_TOKENS)
     expect(baizhiMaxTokensFor(-5)).toBe(BAIZHI_DEFAULT_MAX_TOKENS)
   })
 
   it('★ 按模型夹取：同一 100,000 在 deepseek 原样、在 qwen 被夹到各自硬限', () => {
-    expect(baizhiMaxTokensFor(BAIZHI_MAX_OUTPUT_TOKENS, 'deepseek-v4-pro'))
-      .toBe(BAIZHI_MAX_OUTPUT_TOKENS)
-    expect(baizhiMaxTokensFor(BAIZHI_MAX_OUTPUT_TOKENS, 'qwen3.6-plus'))
-      .toBe(BAIZHI_QWEN_MAX_OUTPUT_TOKENS)
-    expect(baizhiMaxTokensFor(BAIZHI_MAX_OUTPUT_TOKENS, 'qwen-flash'))
-      .toBe(BAIZHI_QWEN_FLASH_MAX_OUTPUT_TOKENS)
+    // ⚠️ 期望值写字面量（65,536 / 32,768）：写常量名的话，把常量改成 100,000
+    //    （**正是上游回 400 的那个值**）这条用例仍然全绿（2026-11-08 审计实测）。
+    expect(baizhiMaxTokensFor(100_000, 'deepseek-v4-pro')).toBe(100_000)
+    expect(baizhiMaxTokensFor(100_000, 'qwen3.6-plus')).toBe(65_536)
+    expect(baizhiMaxTokensFor(100_000, 'qwen-flash')).toBe(32_768)
     // 小值不受影响
     expect(baizhiMaxTokensFor(4096, 'qwen-flash')).toBe(4096)
+  })
+
+  it('★ 大小写不敏感：上游改 id 大小写时仍能查到逐模型上限（否则静默回落 100,000 ⇒ 400）', () => {
+    // 2026-11-08 审计实测：精确匹配时 `baizhiMaxOutputTokensFor('Qwen3.6-Plus')`
+    // 静默回落到 100,000，而 qwen 的上游硬限是 65,536 ⇒ 用户手填大预算就 400。
+    expect(baizhiMaxOutputTokensFor('Qwen3.6-Plus')).toBe(65_536)
+    expect(baizhiMaxOutputTokensFor('QWEN-FLASH')).toBe(32_768)
+    expect(baizhiMaxOutputTokensFor('DeepSeek-V4-Pro')).toBe(100_000)
+    expect(baizhiCapabilityOf('Kimi-K2.6')).toEqual(baizhiCapabilityOf('kimi-k2.6'))
+    // 仍保留 trim
+    expect(baizhiMaxOutputTokensFor('  qwen3.6-plus  ')).toBe(65_536)
+    // 空串 / 纯空白仍然是「未知」
+    expect(baizhiCapabilityOf('')).toBeUndefined()
+    expect(baizhiCapabilityOf('   ')).toBeUndefined()
   })
 })
 

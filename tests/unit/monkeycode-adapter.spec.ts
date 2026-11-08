@@ -456,4 +456,29 @@ describe('目录', () => {
     expect(resolved.defaultMaxTokens).toBeUndefined()
     expect(resolved.context).toBeUndefined()
   })
+
+  it('★ 目录未声明 maxTokens ⇒ 告警**一次**（否则「静默截断」与「上游就这德行」同形）', async () => {
+    // 症状：`finish_reason=max_tokens` 而正文 0 字，且**零日志** ⇒ 无法诊断。
+    // 这里**不编**上限（编了就是拿假设换真故障），只把「你正在踩这个坑」说清楚。
+    const warn = vi.fn()
+    const adapter = makeAdapter({
+      warn,
+      fetchImpl: vi.fn(async () => sseResponse(SSE_OK)) as never,
+    })
+    await drain(adapter.stream(request({ model: 'glm-5' })))
+    await drain(adapter.stream(request({ model: 'glm-5' })))
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [message] = warn.mock.calls[0] as [string]
+    expect(message).toContain('glm-5')
+    expect(message).toContain('4096')
+
+    // 反向对照：宿主下发了 maxTokens 时**不该**告警（否则真缺陷会被噪音埋掉）
+    const quiet = vi.fn()
+    const quietAdapter = makeAdapter({
+      warn: quiet,
+      fetchImpl: vi.fn(async () => sseResponse(SSE_OK)) as never,
+    })
+    await drain(quietAdapter.stream(request({ model: 'deepseek-flash', maxTokens: 4096 })))
+    expect(quiet).not.toHaveBeenCalled()
+  })
 })

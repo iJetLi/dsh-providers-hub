@@ -184,6 +184,12 @@ const BAIZHI_KNOWN_CAPABILITIES: readonly (BaizhiCapability & { readonly id: str
   { id: 'minimax-m2.7', supportsImage: true, maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
   { id: 'minimax-m2.5', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
   // 远端目录独有（不在 45 条快照里，但会话实测在用）；补进能力表才能下发 maxTokens。
+  // ⚠️ 它**没有** `contextWindow`（无实测证据，不编）⇒ 宿主
+  //    `dsh-compaction-basic` 在 `info.context === void 0` 时抛
+  //    `TargetPressureConfigError`，被 `agent/pre-step` 吞成一条 warn ⇒
+  //    **该模型的自动压缩是静默关闭的**。这是**已登记债务**，不是「忘了写」：
+  //    编一个窗口（例如 1,048,576）会让它在 90 万 token 才压缩，比静默关闭更糟。
+  //    同型条目见 `tests/unit/baizhi.spec.ts` 的「未声明 contextWindow」用例。
   { id: 'minimax-m3.1-flash', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
   { id: 'glm-5.1', supportsImage: true, maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
   { id: 'glm-5', maxTokens: BAIZHI_MAX_OUTPUT_TOKENS },
@@ -212,11 +218,20 @@ export const BAIZHI_FALLBACK_MODELS: readonly BaizhiModelEntry[] = BAIZHI_KNOWN_
   }),
 )
 
-/** 查某个模型 id 的已知能力；未知 id 返回 `undefined`（**不要**返回空对象假装知道）。 */
+/**
+ * 查某个模型 id 的已知能力；未知 id 返回 `undefined`（**不要**返回空对象假装知道）。
+ *
+ * ⚠️ **大小写不敏感**（2026-11-08 审计实测的零守卫路径）：原实现是精确 `===`，
+ *    上游若把 id 改成 `Qwen3.6-Plus`，能力表就查不到 ⇒
+ *    `baizhiMaxOutputTokensFor('Qwen3.6-Plus')` 静默回落 100,000，
+ *    而 qwen 的上游硬限是 65,536 ⇒ 用户手填大预算时**上游 400**。
+ *    这里只**放宽**匹配（不改写 id 本身），不会让两个不同模型相撞。
+ */
 export function baizhiCapabilityOf(modelId: string): BaizhiCapability | undefined {
   const id = modelId.trim()
   if (id.length === 0) return undefined
-  const found = BAIZHI_KNOWN_CAPABILITIES.find((capability) => capability.id === id)
+  const key = id.toLowerCase()
+  const found = BAIZHI_KNOWN_CAPABILITIES.find((capability) => capability.id.toLowerCase() === key)
   if (found === undefined) return undefined
   // 剥掉内部的 `id`：`BaizhiCapability` 只描述**能力**，身份由调用方手里的 id 表达。
   // 不剥的话返回的其实是「能力和 id 混在一起」的条目，调用方做深比较/序列化时会多出字段。
