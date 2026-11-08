@@ -25,8 +25,12 @@ const STYLES = `
    改为 0 后页头与内容对齐到同一条 24px 基准线，并净得 48px 横向空间
    （页头按钮多，这 48px 直接决定「渠道原生搜索」开关是否换行）。
    注意：本文件是 JS 模板字符串，注释里不能出现反引号。
-   ⚠️ 不要加回来：它省不了任何东西，只会重新制造那层错位。 */
-.dim-jh-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0; border-bottom: 1px solid var(--dsw-alias-border-default, #e5e5e5); }
+   ⚠️ 不要加回来：它省不了任何东西，只会重新制造那层错位。
+   ⚠️⚠️ 2026-11-09 审计（P3）：.dim-jh-header 这条规则**已删除** ——
+   plugin-src/client/jet-hub.js 里的 header className="dim-jh-header" 在
+   2026-11-05 侧边栏重构时整块删掉了，全仓零引用。本文件上面第 30-37 行
+   自己写着「留在样式表里的『无引用规则』没有任何价值」，那就不能只删
+   brand / brandDesc 而把这条留下。 */
 /* ⚠️ 页头左侧的标题块**已整块删除**（2026-10-07）：
    ① 「Jet Hub」标题本体（.dim-jh-brand / .dim-jh-brandName）—— 页头一排已有
       7 个按钮，标题只占宽度、不带任何操作。CSS 一并删除（留在样式表里的
@@ -514,10 +518,14 @@ const STYLES = `
    不是 input type=checkbox。这样键盘推进由浏览器原生处理，视觉只跟
    aria 属性走，不会出现「视觉开着但可访问性上是关的」。
    ⚠️ 禁用态用 opacity 而不是 display: none —— 用户要能看到「这里有开关，
-   只是现在点不了」（原因在 title 里）。 */
+   只是现在点不了」（原因在 title 里）。
+   ⚠️⚠️ 2026-11-09 审计（F1）：**选择器必须挂 [aria-disabled='true']
+   而不是 :disabled** —— 那个按钮已经改用 aria-disabled + 点击早退
+   （Chromium 不为 disabled 的控件显示原生 tooltip ⇒ 原因读不到）。
+   改回 :disabled 会让「点不动」变成「看不出点不动也看不出为什么」。 */
 .dim-jh-providerSwitch { flex: none; position: relative; width: 36px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: #c9cdd4; cursor: pointer; transition: background-color .15s ease; }
 .dim-jh-providerSwitch[aria-checked='true'] { background: #1677ff; }
-.dim-jh-providerSwitch:disabled { opacity: .5; cursor: default; }
+.dim-jh-providerSwitch[aria-disabled='true'] { opacity: .5; cursor: default; }
 .dim-jh-providerSwitchThumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .15); transition: transform .15s ease; }
 .dim-jh-providerSwitch[aria-checked='true'] .dim-jh-providerSwitchThumb { transform: translateX(16px); }
 /* 面板级状态提示（探测结果 / 锁定状态 / 领取结果 / 新手任务 / 登录链接 / 补偿卡）。

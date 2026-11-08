@@ -51,7 +51,14 @@ const reactStub = {
     const k = cursor++
     if (!(k in slots)) slots[k] = {}
     const s = slots[k]!
-    if (!('cur' in s)) s.cur = initial
+    // ⚠️⚠️ 必须同时写 `current`：真实 React 的 ref 对象上的属性就叫 `current`，
+    //    而本替身原先只写了一个 `cur` 字段 —— 于是 `useRef(0)` 之后
+    //    `++ref.current` 是 `++undefined` = **NaN**，而
+    //    `NaN !== NaN` 恒真 ⇒ 任何「按序号丢弃过期响应」的闸门在本替身下
+    //    **永远丢弃**（2026-11-09 审计实测：`loadProviderStatuses` 一次都
+    //    没写进 state，症状是 `providerStatuses` 恒为 null）。
+    //    `cur` 保留只为不破坏既有用例的写法。
+    if (!('cur' in s)) { s.cur = initial; (s as { current?: T }).current = initial }
     return s as unknown as { current: T }
   },
   useEffect(fn: () => void | (() => void), deps?: unknown[]) {
@@ -803,3 +810,286 @@ describe('定时签到面板：关闭即保存（接线层，行为级）', { ti
       }
     })
   })
+
+/**
+ * ⚠️⚠️ **账号管理行「供应商开关」的点击接线**（2026-11-09 审计 M6 / F1）。
+ *
+ * ## 为什么必须另起一段
+ *
+ * PR #52 自己在描述里写：「`closeSettings` 丢了 `onClosed` 参数 ⇒ 点『网关』/
+ * 『用量』/『供应商开关』什么都不发生，而 **127 条测试全绿**」。它把这一类
+ * 缺陷写得很清楚 —— 然后**在同一个 PR 里又造了一个同型的**：
+ *
+ * 域C 变异 M6 把开关的 `onClick` 体整个包进 `if (false)`，**148 条全绿**。
+ * 原因是 `provider-toggle.spec.ts` 那 130 条几乎全是**源码字符串 / 切片断言**
+ * （除 `providerSwitchState` 纯函数），而 `model-center-panel.spec.ts:55-56`
+ * 又写着「行为守卫在 `provider-toggle.spec.ts`」—— **循环指认，谁都没测**。
+ *
+ * 本段补的就是这一层：**真渲染 + 真 event handler + 真 RPC 桩**，
+ * 断言「点下去到底发没发 `provider.setEnabled`」。
+ *
+ * ## 顺带锁住 F1（禁用原因可见）
+ *
+ * `disabled` 会把 Chromium 的原生 tooltip 关掉（`switchState.reason` 挂在
+ * `title` 上）⇒ 用户与屏幕阅读器都拿不到「为什么点不动」。改用
+ * `aria-disabled` + 点击早退之后，**禁用时点下去必须一次请求都不发** ——
+ * 这条断言同时守住「早退没被删」和「没有把 disabled 换成静默可点」。
+ */
+describe('★★ 供应商开关的点击接线（真实组件 + 真 event handler）', () => {
+  beforeEach(() => {
+    slots = []
+    committed = []
+    cursor = 0
+    pendingEffects = []
+    root = undefined
+    installDocument()
+  })
+
+  /**
+   * 直接渲染 `ProviderPanel`。
+   *
+   * ⚠️⚠️ **不能从 `JetHubPage` 往下走**：本文件的 react 替身**不调用函数组件**，
+   * 从 `JetHubPage` 渲染出来只看得到 `<ProviderPanel …>` 这个**元素本身**、
+   * 看不到它内部的开关。这正是「源码文本断言 + 循环指认」漏掉 M6 的形态：
+   * 断言「有 onClick」看得见，断言「点了真发请求」看不见。
+   * ⇒ `jet-hub.js` 把 `ProviderPanel` 导出了，**仅供本段使用**。
+   */
+  async function renderPanel(overrides: Record<string, unknown> = {}): Promise<void> {
+    const mod = await import('../../plugin-src/client/jet-hub.js') as unknown as {
+      ProviderPanel: (p: unknown) => unknown
+    }
+    const panel = mod.ProviderPanel
+    expect(typeof panel, 'ProviderPanel 必须被导出（本段的前提，不是被测行为）').toBe('function')
+    const props: Record<string, unknown> = {
+      provider: 'codearts',
+      rpcCall: async () => ({}),
+      providerStatuses: {},
+      providerBusy: new Set<string>(),
+      onToggleProvider: () => {},
+      ...overrides,
+    }
+    // 渲染两拍：第一拍挂 effect，第二拍把 effect 里 setState 的结果画出来。
+    for (let round = 0; round < 2; round += 1) {
+      cursor = 0
+      pendingEffects = []
+      root = panel(props)
+      await flush(3)
+    }
+  }
+
+  function switches(): AnyNode[] {
+    return findAll((node) => node.props?.className === 'dim-jh-providerSwitch')
+  }
+
+  it('★★ 点「已启用」的开关 ⇒ 必须真的调 onToggleProvider(provider, false)', async () => {
+    const calls: Array<[string, boolean]> = []
+    await renderPanel({
+      providerStatuses: { codearts: { models: { total: 3, disabled: 0 } } },
+      onToggleProvider: (id: string, enabled: boolean) => { calls.push([id, enabled]) },
+    })
+
+    const all = switches()
+    expect(all.length, '账号管理行里找不到供应商开关 ⇒ 本段失效（组件结构已变）').toBe(1)
+    const enabledSwitch = all[0]!
+    expect(enabledSwitch.props['aria-checked'], '健康供应商必须显示为「已启用」').toBe('true')
+    expect(enabledSwitch.props['aria-disabled'], '健康的供应商开关不得是禁用态').toBe('false')
+
+    ;(enabledSwitch.props.onClick as () => void)()
+    await flush(4)
+
+    // 判别力：把 onClick 体整段包进 `if (false)` ⇒ 这里变 0（域C 变异 M6 实测）。
+    expect(calls.length, '★ 点开关必须真的调 onToggleProvider（否则用户点了没反应）').toBe(1)
+    expect(calls[0], '「已启用」的开关点下去 = 关闭它').toEqual(['codearts', false])
+  })
+
+  it('★★ 点「已关闭」的开关 ⇒ 必须调 onToggleProvider(provider, true)（IKP8OF 出口）', async () => {
+    const calls: Array<[string, boolean]> = []
+    await renderPanel({
+      // ⚠️ 已关闭 + total 0 是**真实可达**形态（账号被删光）：开关必须仍可点开，
+      //    否则用户既关不掉也打不开（IKP8OF 死锁）。
+      providerStatuses: { codearts: { models: { total: 0, disabled: 0 }, closed: true } },
+      onToggleProvider: (id: string, enabled: boolean) => { calls.push([id, enabled]) },
+    })
+
+    const all = switches()
+    expect(all.length, '找不到供应商开关 ⇒ 本段失效').toBe(1)
+    const closed = all[0]!
+    expect(closed.props['aria-checked'], '已关闭的供应商必须显示为「已关闭」').toBe('false')
+    expect(closed.props['aria-disabled'], '已关闭的供应商开关必须可点（IKP8OF）').toBe('false')
+
+    ;(closed.props.onClick as () => void)()
+    await flush(4)
+
+    expect(calls.length, '★ 点「已关闭」的开关必须真的调 onToggleProvider').toBe(1)
+    expect(calls[0], '「已关闭」的开关点下去 = 打开它').toEqual(['codearts', true])
+  })
+
+  it('★★ 禁用态的开关点下去必须一次都不调（aria-disabled 的早退腿）', async () => {
+    const calls: Array<[string, boolean]> = []
+    await renderPanel({
+      // ⚠️ 空 statuses ⇒ `providerSwitchState(undefined)` ⇒ 「状态尚未读取」⇒ 禁用。
+      providerStatuses: {},
+      onToggleProvider: (id: string, enabled: boolean) => { calls.push([id, enabled]) },
+    })
+
+    const all = switches()
+    expect(all.length, '找不到供应商开关 ⇒ 本段失效').toBe(1)
+    const disabledSwitch = all[0]!
+    expect(disabledSwitch.props['aria-disabled'], '状态未知时开关必须是禁用态').toBe('true')
+    // 原因必须挂在 title 上（F1：`disabled` 会让 Chromium 连原生 tooltip 都不给）。
+    expect(String(disabledSwitch.props.title), '禁用时必须给出原因').toContain('状态尚未读取')
+
+    ;(disabledSwitch.props.onClick as () => void)()
+    await flush(4)
+
+    // `aria-disabled` 只是「告诉」AT，早退才是真拦 —— 删掉早退 ⇒ 这里变 1。
+    expect(calls.length, '★★ 禁用态的开关点下去必须一次都不调').toBe(0)
+  })
+})
+
+/**
+ * ⚠️⚠️ 2026-11-09 审计（P2 死 import）：底部操作行的「网关」按钮原先**硬编码**
+ * 文字 `'网关'`，于是 `gatewayButtonLabel` 从 `./openai-gateway-panel.js`
+ * 引入后**零使用** —— 旧页头那个「网关 **●**」的运行态圆点搬过来时静默消失，
+ * 运行/停止的差别只剩 `title` 里的一句话。
+ *
+ * ⚠️ 为什么必须单独写一条：`openai-gateway-panel.spec.ts:66-73` 仍在测
+ * `gatewayButtonLabel` 那个**纯函数本身**（返回 `'网关 ●'` / `'网关'`），
+ * 它照样全绿 —— 死的是**接线**，不是函数。
+ * ⇒ 判据必须打在「渲染出 JetHubPage 之后，底部那个按钮的文字是什么」。
+ */
+describe('底部操作行的「网关」按钮：运行态圆点必须接上（2026-11-09 审计 P2）', { timeout: 30_000 }, () => {
+  beforeEach(() => {
+    slots = []
+    committed = []
+    cursor = 0
+    pendingEffects = []
+    root = undefined
+  })
+
+  /** 底部操作行里「网关」那个按钮的可见文字（拼起来）。 */
+  function railGatewayText(): string {
+    const buttons = findAll(
+      (node) => node.type === 'button' && node.props?.className === 'dim-jh-btn dim-jh-railAction',
+    )
+    // 四个按钮的 className 完全相同，只能靠「点开的是网关弹窗」区分 ——
+    // 这里反过来用「文字里含『网关』」找，因为正是它自己要被断言。
+    const gateway = buttons.find((node) => textsIn([node]).some((text) => text.startsWith('网关')))
+    expect(gateway, '底部操作行里找不到「网关」按钮 ⇒ 本段失效（结构已变）').toBeDefined()
+    return textsIn([gateway]).join('')
+  }
+
+  it('★★ 网关正在运行 ⇒ 底部按钮必须显示「网关 ●」（圆点不得丢）', async () => {
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+    const rpcCall = async (method: string): Promise<unknown> => {
+      // 只关心网关；其余一律给空壳（本用例不看它们）。
+      if (method === 'gateway.getEnabled') return { running: true }
+      return {}
+    }
+    await render({ rpcCall })
+
+    // 判别力：把 `gatewayButtonLabel(gatewayStatus)` 改回硬编码 `'网关'`
+    // ⇒ 这里拿到 `'网关'`，`toContain('●')` 变红。
+    expect(railGatewayText(), '★★ 网关运行中时底部按钮必须带圆点（否则用户看不出它开着）').toContain('●')
+  })
+
+  it('★ 反向对照：网关没在运行 ⇒ 不得凭空画出圆点', async () => {
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+    const rpcCall = async (method: string): Promise<unknown> => {
+      if (method === 'gateway.getEnabled') return { running: false }
+      return {}
+    }
+    await render({ rpcCall })
+
+    // ⚠️ 这条不是同义反复：把 `gatewayButtonLabel(status)` 换成一律返回
+    //    `'网关 ●'` 的常量，上一条仍然绿、这一条变红。
+    expect(railGatewayText(), '★ 网关没运行时不得显示圆点').not.toContain('●')
+  })
+})
+
+/**
+ * ⚠️⚠️ 2026-11-09 审计（F2）：`loadProviderStatuses` 原先**失败就 `setProviderStatuses(null)`**，
+ * 于是**一次瞬态失败（429 / 502 / 超时）就让全部供应商开关变灰**，而唯一恢复路径是
+ * 「设置 → 打开供应商开关 → 刷新」—— 那条路径在提示文案里一个字都没提。
+ *
+ * 修法 = 失败时**保留上一次读到的汇总**（它是「稍旧」不是「错的」，再点一次
+ * 服务端会自己纠正）。
+ *
+ * ⚠️ 为什么必须写行为级：只断言源码里没有 `setProviderStatuses(null)` 会被
+ * 「`if (false) setProviderStatuses(null)`」「设成 `{}`」这类写法绕过
+ * （本仓 `client-ui.md` 记的 `if (false)` 短路禁用）。
+ */
+describe('provider.status 读失败：开关不得集体变灰（2026-11-09 审计 F2）', { timeout: 30_000 }, () => {
+  beforeEach(() => {
+    slots = []
+    committed = []
+    cursor = 0
+    pendingEffects = []
+    root = undefined
+  })
+
+  it('★★ 已有状态之后读失败 ⇒ 开关必须保持可点（只降级成「可能旧」，不是「全不可用」）', async () => {
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+
+    // ⚠️ 「已打开」而不是「已关闭」：页面有个一次性纠偏 effect 会把 `selected`
+    //    切到自定义序里第一个**已打开**的供应商，用「已关闭」会把 codearts
+    //    从渲染里换掉（本用例就找不到它了）。
+    const OPEN = { models: { total: 3, disabled: 0 } }
+    // ⚠️ 用**开关**而不是「第几次调用」来切失败：本文件的 react 替身里
+    //    `useCallback` 每次渲染都返回新函数 ⇒ effect 依赖恒变 ⇒ 首屏就会
+    //    发多次 `provider.status`（后到的会把先到的按序号丢弃）。
+    //    按调用次数切会让「第一次成功」被这些重入吃掉。
+    let shouldFail = false
+    const rpcCall = async (method: string): Promise<unknown> => {
+      if (method === 'provider.status') {
+        if (shouldFail) throw new Error('502 Bad Gateway')
+        return { statuses: { codearts: OPEN } }
+      }
+      return {}
+    }
+    // 关闭供应商前会弹 confirm（node 环境没有）—— 本用例只关心「读失败」这一腿。
+    const originalConfirm = (globalThis as Record<string, unknown>).confirm
+    ;(globalThis as Record<string, unknown>).confirm = () => true
+    try {
+      // ⚠️ 多渲染几拍：本文件的 react 替身里 `root` 存的是**上一次**创建的
+      //    元素，props 永远滞后一拍（状态更新要下一拍才反映出来）。
+      for (let i = 0; i < 6; i += 1) await render({ rpcCall })
+
+      // ⚠️ 本文件的 react 替身**不渲染子组件**（见 `ProviderPanel` 的导出注释），
+      //    所以拿不到真正的 `<button role=switch>`。退一步读**传给 ProviderPanel
+      //    的 props** —— 那正是开关状态与可点性的唯一来源，等价于「渲染出来的
+      //    开关长什么样」，且不依赖 DOM 替身。
+      const panelProps = (): Record<string, unknown> | undefined =>
+        // ⚠️ 必须同时匹配 `providerStatuses`：`ProviderLogo` 也收 `provider`，
+        //    只按 provider 找会命中那个图标组件（实测 props 里没有状态）。
+        findAll(
+          (node) => typeof node.type === 'function'
+            && node.props?.provider === 'codearts'
+            && 'providerStatuses' in node.props,
+        )[0]?.props
+
+      const before = panelProps()
+      expect(before, '找不到 codearts 的 ProviderPanel ⇒ 本段失效').toBeDefined()
+      expect((before!.providerStatuses as Record<string, unknown>).codearts, '第一拍必须读到「已启用」').toEqual(OPEN)
+
+      // 关掉它 ⇒ 成功后重拉状态，而这一次 `provider.status` 抛 502。
+      shouldFail = true
+      await (before!.onToggleProvider as (id: string, enabled: boolean) => Promise<void>)('codearts', false)
+      await flush(6)
+      // ⚠️ 必须**再渲染**：`root` 里存的是上一次创建的元素，不重渲染就还是
+      //    切换前的 props（这条漏过一次 —— 变异 ME 因此假绿）。
+      for (let i = 0; i < 4; i += 1) await render({ rpcCall })
+
+      const after = panelProps()
+      expect(after, '读失败后 ProviderPanel 必须还在（不许整块消失）').toBeDefined()
+      // 判别力：把 catch 里的「刻意不置 null」改回 `setProviderStatuses(null)`
+      // ⇒ 这里拿到 `null` ⇒ 每个开关都退化成「状态尚未读取」+ 禁用 ⇒ 变红。
+      expect(
+        (after!.providerStatuses as Record<string, unknown>).codearts,
+        '★★ 一次读失败不得把已读到的汇总清成 null（那会让整页供应商管理不可用）',
+      ).toEqual(OPEN)
+    } finally {
+      ;(globalThis as Record<string, unknown>).confirm = originalConfirm
+    }
+  })
+})

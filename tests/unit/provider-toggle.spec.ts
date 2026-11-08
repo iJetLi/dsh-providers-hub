@@ -1724,9 +1724,16 @@ describe('供应商弹窗的自定义排序（2026-10-06 拖拽需求）', () =>
         .toContain('onToggleProvider?.(provider, !switchState.checked)')
     })
 
-    it('★★ 忙碌/禁用时不得可点（disabled 必须吃进两个来源）', () => {
+    it('★★ 忙碌/禁用时不得可点（aria-disabled 必须吃进两个来源）', () => {
+      // ⚠️⚠️ 2026-11-09 审计（F1）：这里原本断言 `disabled: …`。改成
+      //    `aria-disabled` 是因为 Chromium 不为 disabled 的表单控件显示原生
+      //    tooltip，而「为什么点不动」（`switchState.reason`）只挂在 title 上
+      //    ⇒ 用户与屏幕阅读器都读不到原因。
+      //    ⚠️ 但**属性本身不是拦截**：真正拦住点击的是 onClick 里的早退，
+      //    那一腿由 `checkin-panel-wiring.spec.ts` 的「禁用态的开关点下去
+      //    必须一次都不调」用**行为级**用例守（本文件只有源码文本断言）。
       expect(providerPanelSource()).toContain(
-        'disabled: switchState.disabled === true || switchBusy,',
+        "'aria-disabled': switchState.disabled === true || switchBusy ? 'true' : 'false',",
       )
     })
 
@@ -1754,7 +1761,12 @@ describe('供应商弹窗的自定义排序（2026-10-06 拖拽需求）', () =>
       expect(styles, '滑块必须位移到右侧').toContain(
         '.dim-jh-providerSwitch[aria-checked=\'true\'] .dim-jh-providerSwitchThumb { transform: translateX(16px); }',
       )
-      expect(styles, '禁用态必须降低不透明度').toContain('.dim-jh-providerSwitch:disabled { opacity: .5;')
+      // ⚠️ 2026-11-09 审计（F1）：选择器从 `:disabled` 改成 `[aria-disabled='true']`
+      //    —— 开关本体已改用 `aria-disabled` + 点击早退（理由见上一条用例）。
+      //    改回 `:disabled` 会让「点不动」变成「看不出点不动、也看不出为什么」。
+      expect(styles, '禁用态必须降低不透明度').toContain(
+        ".dim-jh-providerSwitch[aria-disabled='true'] { opacity: .5;",
+      )
       // ⚠️⚠️ 2026-11-06 十一审（审查员 e4e74842 报的 P1-3）。
       //
       // 上面四条只断言「规则**名**存在」。而「两个白圆」那个真机 bug 的**直接

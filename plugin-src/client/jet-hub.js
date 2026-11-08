@@ -3269,7 +3269,16 @@ function accioResetSeconds(packages, now) {
  *    开启/关闭的功能，你把整个移过来干嘛」⇒ 改成当前供应商自己的真开关。
  *    那个 `onOpenProviderSwitches` 回调已删除，不要再加回来。
  */
-function ProviderPanel({
+/**
+ * 单个供应商的账号面板。
+ *
+ * ⚠️ 导出只是为了**行为级单测**能直接渲染它（`tests/unit/checkin-panel-wiring.spec.ts`
+ * 的「供应商开关的点击接线」段）。本文件里的 react 替身**不会**调用函数组件，
+ * 所以从 `JetHubPage` 往下走只能拿到 `<ProviderPanel …>` 这个元素本身、
+ * 拿不到它内部的开关 —— 那正是「源码文本断言 + 循环指认」漏掉 M6 的形态。
+ * 生产代码里没有第二处引用它。
+ */
+export function ProviderPanel({
   provider,
   rpcCall,
   providerStatuses,
@@ -5495,8 +5504,19 @@ function ProviderPanel({
       //    你把整个移过来干嘛」—— 第一版做成了弹窗入口，被否）。
       //
       //    语义直接对应 `provider.setEnabled`（见 `toggleProvider` 的长注释）：
-      //    关闭 = 停用它的全部账号 + 写「关闭意图」（模型整体不再可选，
-      //    **但黑名单不动**）；打开 = 反过来。
+      //    关闭 = 停用它的全部账号 + 把**当前目录里的每一个模型**写进黑名单
+      //    + 写「关闭意图」；打开 = 反过来 —— 而反过来的那一步是
+      //    `clearModelsWithProviderClosed()` 里的 `delete next[provider]`，
+      //    **会把该供应商的黑名单整份清空**（连用户手工关掉的模型一起）。
+      //
+      //    ⚠️⚠️ 2026-11-09 审计（P1）：本段原写「但黑名单不动」，与
+      //    `src/account-pool.ts:1580-1598`（关：逐条 `perProvider[id] = true`）
+      //    和 `:1636+`（开：`delete next[provider]`）**相反**。一次性探针实测：
+      //    手工关掉 glm-5.3 → 关供应商 → 再开供应商 ⇒ 黑名单变 `{}`，
+      //    那 5 个手工关掉的模型被**静默一起打开**。
+      //    真正的「只写意图、不动黑名单」在服务端是另一个端点
+      //    （`model.setAllDisabled` 的 `'keep'` 分支），本开关**不走**那条路 ——
+      //    别再照着「黑名单不动」去改实现或写文案。
       //
       //    ⚠️ 判据一律走 `./provider-toggle.js` 的 `providerSwitchState()` ——
       //    它同时给出 checked / disabled / reason 三件套，其中「已关闭优先于
@@ -5507,11 +5527,22 @@ function ProviderPanel({
         role: 'switch',
         'aria-checked': switchState.checked ? 'true' : 'false',
         'aria-label': `${providerLabel}：${switchState.checked ? '已启用' : '已关闭'}`,
-        disabled: switchState.disabled === true || switchBusy,
+        // ⚠️ 2026-11-09 审计（F1）：**不能用 `disabled`** —— Chromium 不为
+        //    disabled 的表单控件显示原生 tooltip，而「为什么点不动」正是用户
+        //    最需要看到的那句话：`switchState.reason` 只挂在 title 上，
+        //    disabled 时既没有 tooltip、`aria-label` 里也只有「已启用/已关闭」，
+        //    于是**用户和屏幕阅读器都拿不到原因**（测试全绿，因为它断言的是
+        //    返回值字符串而不是 DOM 行为）。
+        //    改用 WAI-ARIA 的标准做法：`aria-disabled` + 点击早退。仍然可聚焦、
+        //    tooltip 照常显示、屏幕阅读器读出「不可用」，而行为上依然点不动。
+        'aria-disabled': switchState.disabled === true || switchBusy ? 'true' : 'false',
         title: switchState.reason
           ?? `点击${switchState.checked ? '关闭' : '打开'}「${providerLabel}」`
-          + '（关闭 = 停用它的全部账号；模型黑名单保持不动）',
+          + '（关闭 = 停用它的全部账号，并把当前目录里的模型全部关掉；'
+          + '再打开时这些模型会一起恢复，**包括手工关掉的**）',
         onClick: () => {
+          // 与 `aria-disabled` 成对：属性只是「告诉」AT，早退才是真拦。
+          if (switchState.disabled === true || switchBusy) return
           void onToggleProvider?.(provider, !switchState.checked)
         },
       },
@@ -9841,9 +9872,19 @@ export function JetHubPage({ rpcCall }) {
    * 一次请求拿全部 8 个（而不是逐个查）：服务端全程只用同步内存副本，
    * 不产生网络往返（见 `provider.status` 的注释）。
    *
-   * **失败不阻断账号管理**：读不到就把 `providerStatuses` 置为 null，让 rail
-   * 退化为不分组平铺（仍可正常选择供应商、管理账号），只在页头提示一句。
+   * **失败不阻断账号管理**：读不到时**保留上一次读到的汇总**（它是「稍旧」，
+   * 不是「错的」—— 再点一次开关服务端会自己纠正），让 rail 仍按分组显示、
+   * 开关仍可点；只有**从未读到过**（`providerStatuses` 还是初始的 null）才
+   * 退化为不分组平铺，并在页头提示一句。
    * 若在这里抛错，整个设置页会白屏 —— 那是「左侧装饰性功能拖垮主功能」的糟糕取舍。
+   *
+   * ⚠️⚠️ 2026-11-09 审计（F2）：原实现是失败就 `setProviderStatuses(null)`，
+   * 于是**一次瞬态失败（429 / 502 / 超时）就让全部 8 个开关变灰**，而唯一
+   * 恢复路径是「设置 → 打开供应商开关 → **刷新**」—— 那条路径在提示文案里
+   * 一个字都没提，用户只会看到一片点不动的开关、以为供应商管理坏了。
+   * 改成保留旧值后，失败的代价从「功能全不可用」降成「可能显示几秒前的状态」。
+   * ⚠️ 只保留旧值**不能**同时保留「已读到」这个事实以外的东西：
+   * `providerStatusFailed` 仍然置 true（页头提示要能一直挂着）。
    */
   const loadProviderStatuses = React.useCallback(async () => {
     // 每次发起都领一个新序号；回来时若已不是最新的，直接丢弃（见 ref 上的注释）。
@@ -9856,11 +9897,13 @@ export function JetHubPage({ rpcCall }) {
     } catch (caught) {
       console.error('[jet-hub] load provider statuses failed:', caught);
       if (!mounted.current || seq !== providerStatusSeqRef.current) return;
-      setProviderStatuses(null);
+      // ⚠️ 刻意**不**置 null（见方法头注释）：保留旧值 ⇒ 开关仍可点；
+      //    从未成功过时它本来就是 null，行为与改前逐字一致。
       setProviderStatusFailed(true);
       setProviderNotice({
         tone: 'warn',
-        text: `供应商开关状态读取失败（${caught?.message || '未知错误'}），已按原顺序显示供应商；账号管理不受影响。`,
+        text: `供应商开关状态读取失败（${caught?.message || '未知错误'}），显示的是上一次读到的状态；`
+          + '账号管理不受影响。可在「设置 → 打开供应商开关」里点「刷新」重试。',
       });
     }
   }, [rpcCall]);
@@ -10533,7 +10576,11 @@ export function JetHubPage({ rpcCall }) {
         'aria-busy': checkinBusy ? 'true' : 'false',
       },
       renderRailIcon('checkin'),
-      React.createElement('span', null, checkinBusy ? '签到' : '签到')),
+      // ⚠️ 2026-11-09 审计（P3）：原来写成 `checkinBusy ? '签到' : '签到'` ——
+      //    两个分支逐字相同，是纯死三元（旧页头那版是 `签到中…`/`一键签到`，
+      //    搬过来时把分支改同了却没删掉三元）。直接写常量，`aria-busy`
+      //    仍然承担「正在跑」的可访问性语义。
+      React.createElement('span', null, '签到')),
       React.createElement('button', {
         className: 'dim-jh-btn dim-jh-railAction',
         title: gatewayButtonTitle(gatewayStatus),
@@ -10552,7 +10599,13 @@ export function JetHubPage({ rpcCall }) {
         },
       },
       renderRailIcon('gateway'),
-      React.createElement('span', null, '网关')),
+      // ⚠️⚠️ 2026-11-09 审计（P2）：这里原本硬编码 `'网关'`，于是
+      //    `gatewayButtonLabel` 从 `./openai-gateway-panel.js` 引入后**零使用**
+      //    （死 import）—— 旧页头靠它渲染「网关 **●**」的运行态圆点，
+      //    搬到底部操作行时丢了，运行/停止的差别只剩 `title` 里的一句话。
+      //    而 `openai-gateway-panel.spec.ts:66-73` 仍在测那个纯函数 ⇒
+      //    所有测试全绿、圆点却不见了。必须走 `gatewayButtonLabel(status)`。
+      React.createElement('span', null, gatewayButtonLabel(gatewayStatus))),
       React.createElement('button', {
         className: 'dim-jh-btn dim-jh-railAction',
         title: 'Token 用量：按渠道（直连/网关）、供应商与模型统计本机请求的 token 消耗。',
