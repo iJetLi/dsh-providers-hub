@@ -144,6 +144,28 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
   let expired = 0;
   let longTerm = 0;
   let permanent = 0;
+  /**
+   * `permanent` 桶里，**上游明说这池子会过期、但逐笔时刻拿不到**的那部分
+   * （包上带 `expiryUnknown: true`）。
+   *
+   * ⚠️⚠️ 为什么是**子量**而不是第 5 个桶（Gitee issue **IKTLMX**，2026-11-08）：
+   * 「没有到期时间」此前被一律读成**真·永久**，卡片写「永久 3000」。而 Qoder
+   * 的「个人资源包」官方用量页把它拆成 **30 × 100 credits 的每日领取、逐笔
+   * 30 天后作废**（报障者截图：有效期 `2026-11-07` … `2026-12-07` 每天一条）
+   * ⇒ 说「永久」是**事实错误**，而「临期」桶存在的唯一目的正是防用户
+   * 错过作废。
+   *
+   * 为什么不单独成桶：`permanent` 这个桶**同时承重三件事** ——
+   * ① `credential-resolver.ts` 的 `allowPermanent`（永久锁拦不拦这笔额度）、
+   * ② 聚合轮换的候选排序、③ 与后端 `splitBuddyCreditsByExpiry` 的逐格同判
+   * （`packageExpiryMs` 那份判据的红线）。把它改成第 5 桶会让「锁定永久积分」
+   * 对 Qoder 直接失效（那正是 `provider-registry.ts:306` 明写「`permanentLock`
+   * 锁的正是『未知到期』那一桶」的原因）。⇒ **只动展示，不动分桶**。
+   *
+   * ⇒ 守恒式仍是四段：`permanent + longTerm + expiring + expired === total`，
+   *   而 `unknownExpiry` 是 `permanent` 的**子量**（`0 ≤ unknownExpiry ≤ permanent`）。
+   */
+  let unknownExpiry = 0;
   /** 临期桶里**最早**的作废时刻（倒计时用）；无临期包时 `null`。 */
   let earliestExpiringAt = null;
   /**
@@ -218,13 +240,21 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
        */
       const expiringPart = Number(pkg.expiringRemaining);
       const hasExpiring = Number.isFinite(expiringPart) && expiringPart > 0;
+      let toPermanent = remaining;
       if (hasExpiring) {
         const capped = Math.min(expiringPart, remaining);
         expiring += capped;
-        permanent += remaining - capped;
-      } else {
-        permanent += remaining;
+        toPermanent = remaining - capped;
       }
+      permanent += toPermanent;
+      /**
+       * ⚠️ 包自己声明了「会过期、只是拿不到逐笔时刻」（`expiryUnknown`）⇒
+       *    记进 `unknownExpiry` 子量，让展示层把「永久」改口径成「到期未知」。
+       *    分桶**不动**（理由见 `unknownExpiry` 的声明处）。
+       * ⚠️ 与上面的 `expiringRemaining` 拆法不冲突：那里已拆进 `expiring` 的部分
+       *    有明确时刻依据，剩下的才轮到「未知」口径。
+       */
+      if (pkg.expiryUnknown === true) unknownExpiry += toPermanent;
       continue;
     }
     if (end <= at) {
@@ -256,7 +286,7 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
   }
   // ⚠️ `expired` 只在**有已作废额度时**才出现（与 `modelRateLimits` 那类「无值即不写键」
   //    同款式）：否则每个调用方都要为「多一个恒 0 的键」改断言，而它对 0 值毫无信息量。
-  return { expiring, ...(expired > 0 ? { expired } : {}), longTerm, permanent, earliestExpiringAt, earliestExpiringAmount, exclusivePoolRemaining };
+  return { expiring, ...(expired > 0 ? { expired } : {}), longTerm, permanent, ...(unknownExpiry > 0 ? { unknownExpiry } : {}), earliestExpiringAt, earliestExpiringAmount, exclusivePoolRemaining };
 }
 
 /** 这个包属于哪一桶的中文标签（tooltip 前缀用）。 */
@@ -300,14 +330,19 @@ export function formatExpiryHint(pkg, windowDays, now) {
 }
 
 /**
- * 账号卡片上那行「永久 Y · 长期 Z · 临期 X」的文案；无有效分类时返回 null。
+ * 账号卡片上那行「永久 Y · 到期未知 W · 长期 Z · 临期 X」的文案；无有效分类时返回 null。
  *
- * ⚠️ **三档顺序固定：永久 → 长期 → 临期**（用户 2026-10-12 定）：
+ * ⚠️ **顺序固定：永久 → 到期未知 → 长期 → 临期 → 已过期**：
  * 与「余额由远及近」的直觉一致，且临期放最后便于一眼扫到。
  *
  * ⚠️ 用词「长期」不是「永久」（用户 2026-09-29 定）：有到期日的积分即使很远
- * 也不能叫永久 —— 说「永久」是错的（用户明确纠正过）。只有**服务端没给
- * 到期时间**的才是真·永久。
+ * 也不能叫永久 —— 说「永久」是错的（用户明确纠正过）。
+ *
+ * ⚠️⚠️ 而「服务端没给到期时间」**也不等于**真·永久（2026-11-08，issue IKTLMX）：
+ * Qoder 的「个人资源包」就是「上游只给聚合标量、但官方页面写明逐笔 30 天作废」
+ * 的形态 ⇒ 这类包带 `expiryUnknown: true`，必须显示成「到期未知」而不是「永久」。
+ * 「永久」只留给**平台明说不会按积分到期**的池子（如 Qoder 的套餐额度哨兵、
+ * Loomy 的永久积分）。判据是包上的标记，不在本函数里猜。
  *
  * @param split - `splitCreditsByExpiry` 的返回值。
  * @param format - 数值格式化函数（按单位）。
@@ -317,7 +352,17 @@ export function formatExpirySplitLine(split, format) {
   if (!split) return null;
   const parts = [];
   // 只显示**非零**桶：0 值进文案只会让一行变长而无信息（用户看不到「永久 0」的价值）。
-  const permanent = split.permanent > 0 ? format(split.permanent) : null;
+  // ⚠️ `permanent` 要**减掉** `unknownExpiry` 子量：后者是「会过期但没日期」，
+  //    口径与真·永久相反，两者必须分别成段（顺序：永久在前、到期未知紧随）。
+  const unknownAmount = Number.isFinite(split.unknownExpiry) && split.unknownExpiry > 0
+    ? split.unknownExpiry
+    : 0;
+  const permanentTotal = Number.isFinite(split.permanent) && split.permanent > 0
+    ? split.permanent
+    : 0;
+  const knownPermanent = Math.max(0, permanentTotal - unknownAmount);
+  const permanent = knownPermanent > 0 ? format(knownPermanent) : null;
+  const unknownExpiry = unknownAmount > 0 ? format(unknownAmount) : null;
   const longTerm = split.longTerm > 0 ? format(split.longTerm) : null;
   // ⚠️ `expiring` 已由 `splitCreditsByExpiry` 排除掉已作废部分（2026-11-02），
   //    这里直接用；「已过期」是独立的第 4 段。
@@ -325,6 +370,7 @@ export function formatExpirySplitLine(split, format) {
   const expiring = split.expiring > 0 ? format(split.expiring) : null;
   const expired = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push(`永久 ${permanent}`);
+  if (unknownExpiry !== null) parts.push(`到期未知 ${unknownExpiry}`);
   if (longTerm !== null) parts.push(`长期 ${longTerm}`);
   if (expiring !== null) parts.push(`临期 ${expiring}`);
   if (expired !== null) parts.push(`已过期 ${expired}`);
@@ -332,15 +378,23 @@ export function formatExpirySplitLine(split, format) {
 }
 
 /**
- * 三档分桶的**带色分段**（供胶囊/卡片逐段渲染，各带各的 tone）。
+ * 分桶的**带色分段**（供胶囊/卡片逐段渲染，各带各的 tone）。
+ *
+ * 段顺序与 `formatExpirySplitLine` 一致：`永久`（ok）→ `到期未知`（warn）→
+ * `长期`（warn）→ `临期`（error，带倒计时）→ `已过期`（error）。
  *
  * ## 为什么需要它（而不是复用 `formatExpirySplitLine` 的字符串）
  *
- * 字符串版本把三档拼成一句、只能整体一个颜色 —— 而用户要的正是
+ * 字符串版本把各档拼成一句、只能整体一个颜色 —— 而用户要的正是
  * 「永久绿 / 长期黄 / 临期红」（2026-10-12 明确要求）。React 侧要逐段渲染
  * 才能各带 `data-tone`，故这里返回**结构化分段**。
  *
- * 临期段额外带**倒计时**（`倒计时` 字段），因为「临期 100」只说了有多少会作废，
+ * ⚠️ 「到期未知」是 2026-11-08（issue IKTLMX）新增的段：上游明说会过期、
+ *    但只给聚合标量（Qoder 的「个人资源包」= 30 × 100 credits 逐笔 30 天作废）
+ *    ⇒ 不能显示成绿色「永久」。它是 `permanent` 的**子量**，两者金额相加
+ *    === `split.permanent`（见 `splitCreditsByExpiry` 的 `unknownExpiry`）。
+ *
+ * 临期段额外带**倒计时**（`countdown` 字段），因为「临期 100」只说了有多少会作废，
  * 没说**还有多久** —— 而那正是要补的决策信息。
  *
  * @returns `[{ key, text, tone, countdown? }]`；无内容时 `[]`。
@@ -349,7 +403,17 @@ export function formatExpirySplitLine(split, format) {
 export function expirySplitParts(split, format, now) {
   if (!split) return [];
   const parts = [];
-  const permanent = split.permanent > 0 ? format(split.permanent) : null;
+  // ⚠️ 与 `formatExpirySplitLine` **同口径**（同一条判据只留一处语义）：
+  //    `permanent` 减掉 `unknownExpiry` 子量后才是「真·永久」。
+  const unknownAmount = Number.isFinite(split.unknownExpiry) && split.unknownExpiry > 0
+    ? split.unknownExpiry
+    : 0;
+  const permanentTotal = Number.isFinite(split.permanent) && split.permanent > 0
+    ? split.permanent
+    : 0;
+  const knownPermanent = Math.max(0, permanentTotal - unknownAmount);
+  const permanent = knownPermanent > 0 ? format(knownPermanent) : null;
+  const unknownExpiryText = unknownAmount > 0 ? format(unknownAmount) : null;
   const longTerm = split.longTerm > 0 ? format(split.longTerm) : null;
   // ⚠️ 数值与格式化文本分成两个变量：临期段要用**数值**做比较
   //    （`earliestAmount < expiringAmount`）。拿格式化后的字符串做 `<`
@@ -360,6 +424,10 @@ export function expirySplitParts(split, format, now) {
   const expiring = expiringAmount > 0 ? format(expiringAmount) : null;
   const expiredText = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push({ key: 'permanent', text: `永久 ${permanent}`, tone: 'ok' });
+  // ⚠️ 「到期未知」用 `warn` 不用 `ok`：这不比「永久」安全 —— 用户看见绿字
+  //    就不会去抢救，而这批额度**确实会作废**（issue IKTLMX）。也不上 `error`：
+  //    `error` 留给「临期」那档（有确切倒计时，紧迫性更高）。
+  if (unknownExpiryText !== null) parts.push({ key: 'unknownExpiry', text: `到期未知 ${unknownExpiryText}`, tone: 'warn' });
   if (longTerm !== null) parts.push({ key: 'longTerm', text: `长期 ${longTerm}`, tone: 'warn' });
   if (expiring !== null) {
     const at = split.earliestExpiringAt;

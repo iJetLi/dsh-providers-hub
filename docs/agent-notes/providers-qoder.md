@@ -827,3 +827,79 @@ Qoder 服务端按**设备指纹**（`Cosy-MachineToken` + `Cosy-MachineType`）
   Linux 上 UMID 的真实数据目录**尚未在 Linux 实测**，不能断言「不需要追加」——
   若 Linux 用户拿不到身份，应先用 `QODER_RUNTIME_INFO` 指向真实可执行文件验证。若 Linux 用户仍拿不到身份，
   应先用 `QODER_RUNTIME_INFO` 指向真实的 `runtime-info` 验证，再谈路径扩展。
+
+## ⚠️⚠️ 「积分显示永久，但实际有到期时间」（issue IKTLMX，2026-11-08）
+
+### 报障
+
+账号卡片写「积分 **3000 永久 3000**」，而 Qoder 官方「用量明细」页把同一批 3,000 拆成
+**30 个资源包 × 100 credits**，逐条带有效期 `2026-11-07` … `2026-12-07`（每天一条、
+等距推进，末尾 6 条标橙色「即将到期」）⇒ 每笔 **30 天后作废**。
+
+→ 显示「永久」不只是文案不准，而是**废掉了「临期」桶的唯一功能**：那 3,000 最迟
+30 天内归零，用户看见绿字「永久」就不会去抢救。
+
+### 真机取证（8 个账号，只读 GET；结论：**上游确实不给日期**）
+
+- `/sash/api/v2/me/usage` 的 `addOnQuota` 形状恒为
+  `{total, used, remaining, percentage, unit:'credits', detailUrl}` —— **无任何日期字段**
+  （实测 1200 / 1500 / 2700×3）。
+- 8 个真实账号（`qoder` 5 + `qodercn` 3）**全 HTTP 200**；`expiresAt` 恒
+  `253402214400000`（`9999-12-31` 永久哨兵）—— 那是 `userQuota`（套餐额度）的
+  语义，**`addOnQuota` 不该继承它**。
+- `dedicatedResourcePackages` 在 8 个账号上一律 `undefined`（该支路是**企业**「专用
+  资源包」概念，对个人账号是死代码）。
+- 24 条候选逐包端点（`resource-packages` / `usage/packages` / `billing/usage` …）
+  全回 `{"errorCode":"NotFound"}`；13 个 `Cosy-ClientType` 取值（`1`…`11` / `app` /
+  `ide` / `cli`）**响应逐字节相同** ⇒ 不是客户端类型门控。
+- 真数据源在**官方网页**：`https://g.alicdn.com/qbase/qoder/0.0.750/index.js` 里的
+  `g(t)` 把 `details[].expiresAt` 归一成 `quota_detail`，端点
+  `/api/v2/me/usages/big_model_credits` —— 但它要 **Web 会话 Cookie**，不认 OAuth
+  `access_token`（9 个 Cookie 名 + `Bearer` 全试 ⇒ 401；挂 openapi 网关 ⇒ 404）。
+  本机也无 Qoder IDE 可逆向（`D:\Qoder\resources\app.asar` 不存在）。
+
+### 根因：不是解析 bug，是「**到期未知**」被渲染成「**永久**」
+
+`src/qoder-credits.ts` 的 `parseQoderUsage` 对 `addOnQuota` **刻意不传**
+`expiresAtMs`（传了就是把套餐的 9999 哨兵按到资源包头上，那个决定是对的）⇒
+`toPackage` 不写 `deductionEndTime` ⇒ 客户端 `splitCreditsByExpiry` 走
+`!known` 分支 ⇒ 进 `permanent` 桶 ⇒ 卡片打印「永久 3000」。
+
+### 修法：`expiryUnknown` **子量**（只动展示，不动分桶）
+
+- `CreditPackage.expiryUnknown?: boolean`（`src/credits.ts`）标记「**会过期、但拿不到
+  逐笔到期**」；`toPackage` 只在显式传 `true` 时写该键（`addOnQuota` 那一路）。
+- `splitCreditsByExpiry` 新增 `unknownExpiry` 累加器，**是 `permanent` 的子量、
+  不是并列的第 5 个桶**（守恒式仍是四段 `permanent + longTerm + expiring +
+  expired === total`）。
+- 展示层（`formatExpirySplitLine` / `expirySplitParts`）把
+  `permanent` 减掉 `unknownExpiry` 后才是「永久」，并新增一段
+  **「到期未知」**（tone = `warn`）。
+
+⚠️⚠️ **为什么不能改成第 5 个桶**：`permanent` 同时承重三件事 ——
+① 永久锁（`src/credential-resolver.ts` 的 `allowPermanent`）② 聚合轮换候选排序
+③ 与后端 `splitBuddyCreditsByExpiry` 的逐格同判（`packageExpiryMs` 判据红线）。
+`src/provider-registry.ts:306` 明写「`permanentLock` 锁的正是「未知到期」那一桶」——
+拆桶会让「锁定永久积分」对 Qoder **直接失效**。
+
+⚠️ **不能反推日期**：`remaining / 100 = N` 只在「每天都领」时给出最早到期
+≈ `now + (30 - N)` 天（N=30 ⇒ 今天到期，与截图吻合）。但**漏领会更早** ⇒
+推导是**乐观上界**，比「永久」更危险。本仓红线是**绝不编造日期**。
+
+⚠️ **也不能反过来一律标「未知」**：Loomy 那种平台**明确**说永久的池子必须还是
+「永久」，否则同样是假话。判据是包上的标记，逐渠道判断。
+
+### 守卫变异（7 条，全 RED）
+
+`expiryUnknown === true` 改 `false`（分桶层）／`unknownExpiry += toPermanent` 改
+`+= 0`（金额）／`knownPermanent` 不减子量（展示层重复计数）／删「到期未知」分段／
+tone 改 `ok`／`toPackage(...{expiryUnknown: true})` 去掉选项（上游解析层）／
+`toPackage` 返回体去掉透传。全部实测变红；反向对照（不带标记 ⇒ 键**不出现**、
+仍显示「永久」）也在用例里。
+
+### 已登记债务（未修，如实标注）
+
+- **`dedicatedResourcePackages` 对个人账号恒 `undefined`** ⇒ 该支路的逐包到期
+  解析（`expiredTime`）在个人账号上**不可达**。企业/团队账号未取证。
+- 报障者账号（`qoder-98bbe7b1`）不在本机，无法用他自己的号复跑。
+

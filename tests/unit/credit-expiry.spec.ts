@@ -707,6 +707,118 @@ describe('formatExpirySplitLine（卡片那一行）', () => {
 })
 
 /**
+ * ## ⚠️⚠️ 「到期未知」子量（Gitee issue **IKTLMX**，2026-11-08）
+ *
+ * 报障：Qoder 的「个人资源包」3,000 分在账号卡片上显示成 **「永久 3000」**，
+ * 而官方用量页把它拆成 **30 × 100 credits 的每日领取、逐笔 30 天后作废**
+ * （报障截图实测有效期 `2026-11-07` … `2026-12-07`，每天一条、末尾 6 条标
+ * 「即将到期」）。
+ *
+ * 根因**不是解析 bug** —— 上游 `/sash/api/v2/me/usage` 的 `addOnQuota` 确实只有
+ * 聚合标量、**没有任何日期字段**（2026-11-08 实测：8 个真实账号全 200、
+ * 13 个 `Cosy-ClientType` 取值响应逐字节相同、24 条候选逐包端点全 404、
+ * 官方网页端点要 Web 会话 Cookie 且不认 OAuth `access_token`）。
+ * 缺陷是「**到期未知**」在展示层被读成「**永不到期**」。
+ *
+ * ## 判据：`unknownExpiry` 是 `permanent` 的**子量**，不是第 5 个桶
+ *
+ * `permanent` 桶同时承重三件事：① 永久锁（`credential-resolver.ts` 的
+ * `allowPermanent`）② 聚合轮换候选排序 ③ 与后端 `splitBuddyCreditsByExpiry`
+ * 的逐格同判。改成第 5 桶会让「锁定永久积分」对 Qoder 直接失效
+ * （`provider-registry.ts:306` 明写「`permanentLock` 锁的正是『未知到期』那一桶」）
+ * ⇒ **只动展示，不动分桶**，守恒式仍是四段。
+ */
+describe('★ expiryUnknown（「到期未知」子量，IKTLMX）', () => {
+  const format = (v: number) => String(Math.round(v))
+
+  it('★ 带 expiryUnknown 且无日期 ⇒ 仍落 permanent 桶，同时记子量', () => {
+    const split = splitCreditsByExpiry(
+      [pkg({ name: '个人资源包', remaining: 3000, total: 3000, deductionEndTime: undefined, expiryUnknown: true })],
+      WINDOW_DAYS,
+      NOW,
+    )
+    // 分桶**一格不变**：选号 / 永久锁 / 聚合轮换读的都还是 `permanent`。
+    expect(split.permanent).toBe(3000)
+    // 子量是 `permanent` 的一部分，不是额外的桶 ⇒ 守恒式不受影响。
+    expect(split.unknownExpiry).toBe(3000)
+    expect(split.longTerm).toBe(0)
+    expect(split.expiring).toBe(0)
+  })
+
+  it('★ 反向对照：不带 expiryUnknown ⇒ 不写子量（旧 provider 逐字不变）', () => {
+    const split = splitCreditsByExpiry(
+      [pkg({ name: '个人资源包', remaining: 3000, total: 3000, deductionEndTime: undefined })],
+      WINDOW_DAYS,
+      NOW,
+    )
+    expect(split.permanent).toBe(3000)
+    // ⚠️ 键**根本不该出现**（与 `expired` 同款「无值即不写键」约定）——
+    //    否则每个调用方都要为「多一个恒 0 的键」改断言。
+    expect(Object.hasOwn(split, 'unknownExpiry')).toBe(false)
+  })
+
+  it('★ 混合（真永久 + 未知）⇒ 两段金额相加 === permanent', () => {
+    const split = splitCreditsByExpiry(
+      [
+        pkg({ name: '永久积分', remaining: 100, total: 100, deductionEndTime: undefined }),
+        pkg({ name: '个人资源包', remaining: 3000, total: 3000, deductionEndTime: undefined, expiryUnknown: true }),
+      ],
+      WINDOW_DAYS,
+      NOW,
+    )
+    expect(split.permanent).toBe(3100)
+    expect(split.unknownExpiry).toBe(3000)
+    expect(formatExpirySplitLine(split, format)).toBe('永久 100 · 到期未知 3000')
+  })
+
+  it('★ 与 expiringRemaining 并存：临期按标量拆出，剩下的才进「未知」', () => {
+    // CodeArts 型（有「其中 N 即将到期」标量）+ Qoder 型（会过期但无日期）
+    // 落在同一个包上时，两个子量不得互相吞掉。
+    const split = splitCreditsByExpiry(
+      [pkg({ name: '个人资源包', remaining: 3000, total: 3000, deductionEndTime: undefined, expiringRemaining: 500, expiryUnknown: true })],
+      WINDOW_DAYS,
+      NOW,
+    )
+    expect(split.expiring).toBe(500)
+    expect(split.permanent).toBe(2500)
+    expect(split.unknownExpiry).toBe(2500)
+  })
+
+  it('★★ 卡片行：「到期未知」不得被渲染成「永久」', () => {
+    // 只有未知量 ⇒ 一个「永久」都不许出现（这正是报障的那句话）。
+    expect(formatExpirySplitLine({ permanent: 3000, longTerm: 0, expiring: 0, unknownExpiry: 3000 }, format))
+      .toBe('到期未知 3000')
+    // 真永久也在时，两段并存、顺序固定（永久在前）。
+    expect(formatExpirySplitLine({ permanent: 3100, longTerm: 0, expiring: 0, unknownExpiry: 3000 }, format))
+      .toBe('永久 100 · 到期未知 3000')
+  })
+
+  it('★★ 分段渲染：到期未知用 warn（黄），不是 ok（绿）', () => {
+    // ⚠️ 绿色会读成「不用管」——而这批额度**确实会作废**，正是要提醒的对象。
+    expect(expirySplitParts({ permanent: 3000, longTerm: 0, expiring: 0, unknownExpiry: 3000 }, format, NOW))
+      .toEqual([{ key: 'unknownExpiry', text: '到期未知 3000', tone: 'warn' }])
+    expect(expirySplitParts({ permanent: 3100, longTerm: 0, expiring: 0, unknownExpiry: 3000 }, format, NOW))
+      .toEqual([
+        { key: 'permanent', text: '永久 100', tone: 'ok' },
+        { key: 'unknownExpiry', text: '到期未知 3000', tone: 'warn' },
+      ])
+  })
+
+  it('★★ 子量不得大于 permanent（否则展示层会算出负的「永久」）', () => {
+    const split = splitCreditsByExpiry(
+      [pkg({ name: '个人资源包', remaining: 3000, total: 3000, deductionEndTime: undefined, expiryUnknown: true })],
+      WINDOW_DAYS,
+      NOW,
+    )
+    expect(split.unknownExpiry!).toBeLessThanOrEqual(split.permanent)
+    // `knownPermanent = permanent - unknownExpiry` 被 `Math.max(0, …)` 夹住 ⇒
+    // 即使上游把子量报大了也只退化成「不显示永久」，不会出现「永久 -1000」。
+    expect(formatExpirySplitLine({ permanent: 100, longTerm: 0, expiring: 0, unknownExpiry: 5000 }, format))
+      .toBe('到期未知 5000')
+  })
+})
+
+/**
  * 三档**带色分段**（`expirySplitParts`）—— 用户 2026-10-12 明确要求
  * 「永久（绿）/ 长期（黄）/ 临期（红 + 倒计时）」。
  *

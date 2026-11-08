@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fetchQoderBalanceDetailed, fetchQoderCreditBalance, QODER_USAGE_PATH } from '../../src/qoder-credits.js'
+import { fetchQoderBalanceDetailed, fetchQoderCreditBalance, QODER_PLAN_PACKAGE, QODER_USAGE_PATH } from '../../src/qoder-credits.js'
 import { QODER, QODER_CN } from '../../src/qoder-product.js'
 import { buildQoderCredential, parseQoderTokenPayload, type QoderCredential } from '../../src/qoder.js'
 
@@ -57,6 +57,39 @@ describe('Qoder 积分余额', () => {
     const balance = await fetchQoderCreditBalance(cred, QODER, fetcher)
     // 300（套餐剩余）+ 100（资源包剩余）
     expect(balance!.total).toBe(400)
+  })
+
+  /**
+   * ## ⚠️⚠️ 「资源包」必须标 `expiryUnknown`（Gitee issue **IKTLMX**，2026-11-08）
+   *
+   * 报障：账号卡片写「积分 3000 **永久** 3000」，而 Qoder 官方用量页把它拆成
+   * **30 × 100 credits 的每日领取、逐笔 30 天后作废**（截图实测有效期
+   * `2026-11-07` … `2026-12-07`，每天一条、末尾 6 条标「即将到期」）。
+   *
+   * 上游确实**不给**逐笔到期（`addOnQuota` 只有 `{total,used,remaining,
+   * percentage,unit,detailUrl}`，8 个真实账号 + 13 个 `Cosy-ClientType` 变体
+   * + 24 条候选端点全部证实没有日期字段）⇒ 这不是解析 bug，是
+   * 「**到期未知**」被展示成「**永久**」的语义错位。修法只动展示：分桶仍是
+   * `permanent`（永久锁 / 选号 / 聚合轮换零变化），卡片改口径成「到期未知」。
+   */
+  it('★ 资源包标 expiryUnknown；套餐额度不标（9999 哨兵是真·永久）', async () => {
+    const fetcher = vi.fn(async () => usageResponse({
+      userQuota: { total: 500, used: 200, remaining: 300, percentage: 0.4, unit: 'credits' },
+    })) as unknown as typeof fetch
+    const balance = await fetchQoderCreditBalance(cred, QODER, fetcher)
+    const addOn = balance!.packages.find((item) => item.name === '资源包')
+    const plan = balance!.packages.find((item) => item.name === QODER_PLAN_PACKAGE)
+    expect(addOn?.expiryUnknown).toBe(true)
+    // ⚠️ 反过来：套餐额度的 `expiresAt = 9999-12-31` 是服务端**明说**不按积分
+    //    到期（语义是订阅刷新日）⇒ 标成「未知」同样是假话。
+    expect(plan).toBeDefined()
+    expect(Object.hasOwn(plan as object, 'expiryUnknown')).toBe(false)
+  })
+
+  it('★ 反向对照：没有 addOnQuota 的账号不产出「未知」包', async () => {
+    const fetcher = vi.fn(async () => usageResponse({ addOnQuota: undefined })) as unknown as typeof fetch
+    const balance = await fetchQoderCreditBalance(cred, QODER, fetcher)
+    expect(balance!.packages.every((item) => item.expiryUnknown !== true)).toBe(true)
   })
 
   it('累加专用资源包（dedicatedResourcePackages）', async () => {

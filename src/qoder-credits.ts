@@ -431,6 +431,24 @@ function toPackage(
      * `expiredTime` 那条既有路径）都**不传**。
      */
     expiresAtMs?: number
+    /**
+     * 该池**会过期、但逐笔到期拿不到**（Gitee issue **IKTLMX**）。
+     *
+     * ⚠️ **只有 `addOnQuota` 那一条传 `true`**：官方用量页把它拆成
+     * 「30 × 100 credits，逐笔 30 天后作废」的每日领取批次，而
+     * `/sash/api/v2/me/usage` 只回一个聚合 `remaining` + 一个网页链接
+     * （`detailUrl`）⇒ 日期**结构上不可得**（2026-11-08 实测：13 个
+     * `Cosy-ClientType` 取值响应逐字节相同，24 条候选逐包端点全 404，
+     * 网页端 `/api/v2/me/usages/big_model_credits` 要 Web 会话 Cookie、
+     * 不认 OAuth `access_token` ⇒ 401）。
+     *
+     * ⇒ 置位后分桶**仍计入 `permanent`**（选号 / 永久锁 / 聚合轮换零变化），
+     *   只把卡片文案从「永久」改成「到期未知」—— 见 `CreditPackage.expiryUnknown`。
+     *
+     * ⚠️ `userQuota` **不得**置位：它的 `9999` 哨兵是服务端明说「不按积分到期」
+     *   （语义是订阅刷新日），那是**真·永久**。
+     */
+    expiryUnknown?: boolean
   } = {},
 ): CreditPackage | undefined {
   const total = readNumber(quota, 'total')
@@ -569,6 +587,7 @@ function toPackage(
     cycleEndTime: '',
     expiredTime: expIsPermanent ? '' : expiredTimeRaw,
     ...(deductionEndTime !== undefined ? { deductionEndTime } : {}),
+    ...(options.expiryUnknown === true ? { expiryUnknown: true as const } : {}),
   }
 }
 
@@ -774,7 +793,13 @@ function parseQoderUsage(qoderUsage: Record<string, unknown>): CreditBalance | n
   if (userQuota !== undefined) packages.push(userQuota)
   // ⚠️ 刻意**不传** `expiresAtMs`：`addOnQuota` 没有任何日期字段，
   //    传了就是把套餐的哨兵按到资源包头上。
-  const addOnQuota = toPackage('资源包', qoderUsage.addOnQuota)
+  // ⚠️⚠️ 但**必须**传 `expiryUnknown`（Gitee issue IKTLMX，2026-11-08）：
+  //    「上游没给日期」**不等于**「永不到期」。这一池是官方用量页里
+  //    「30 × 100 credits、逐笔 30 天后作废」的每日领取批次，说「永久」是
+  //    事实错误（报障者截图：有效期 2026-11-07 … 2026-12-07）。置位后分桶
+  //    行为一格不变（仍是 `permanent`，永久锁 / 选号 / 聚合轮换都不受影响），
+  //    只有卡片文案改成「到期未知」。
+  const addOnQuota = toPackage('资源包', qoderUsage.addOnQuota, { expiryUnknown: true })
   if (addOnQuota !== undefined) packages.push(addOnQuota)
 
   const dedicated = qoderUsage.dedicatedResourcePackages
