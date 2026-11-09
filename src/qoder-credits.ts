@@ -391,6 +391,13 @@ function readNumber(source: unknown, key: string): number | undefined {
   return undefined
 }
 
+/** 安全读布尔字段（只认真正的布尔值；缺失/其它类型一律 `undefined` = 未知）。 */
+function readBoolean(source: unknown, key: string): boolean | undefined {
+  if (typeof source !== 'object' || source === null) return undefined
+  const value = (source as Record<string, unknown>)[key]
+  return typeof value === 'boolean' ? value : undefined
+}
+
 /** 安全读字符串字段。 */
 function readString(source: unknown, key: string): string | undefined {
   if (typeof source !== 'object' || source === null) return undefined
@@ -826,18 +833,43 @@ function parseQoderUsage(qoderUsage: Record<string, unknown>): CreditBalance | n
   // `orgResourcePackage`（`{used, remaining, percentage, unit, cap, available}`）——
   // 不解析它 ⇒ 企业账号报「积分查询失败（响应未包含任何额度包）」。
   // ⚠️ 该层没有 `total`，`cap` 即总额 —— 映射后复用同一 `toPackage`
-  //（红线：同一语义只留一份实现）；`remaining` 缺失时由 `cap - used` 兑底。
-  // ⚠️ 到期：该层同样没有任何日期字段。企业额度是否随订阅周期过期**未验证**
-  //（两方向都无证据），按 `CreditPackage.expiryUnknown` 的置位纪律
-  //（「只在上游确实会过期、而本仓确实拿不到日期时置位」）**不置位**
-  // ⇒ 落既有「无日期 → 长期」路径；若将来拿到「随订阅周期清零」的证据，
-  // 在此置 `expiryUnknown: true` 即可（分桶行为不变，只改文案）。
+  //（红线：同一语义只留一份实现）。
+  //
+  // ⚠️⚠️ 三条边界（2026-11-09 PR #182 审计，全部实测过）：
+  //  ① **`cap` 不能直接当 `total` 用**。上游会漏字段、给 `0` 或负值，直接透传
+  //     会产出「remaining 3000 / total 0」的**假分母**（面板按
+  //     `${remaining} / ${total}` 渲染成「3000 / 0」，与 `src/credits.ts`
+  //     「不得并列显示假分母」冲突）。`cap` 非正数时用 `used + remaining` 兜底；
+  //     两者都读不到 ⇒ **不产出包**（保持 `null` = 查不到，而不是「余额 0」）。
+  //  ② **到期必须置 `expiryUnknown`**（Gitee issue **IKTLMX** 的置位纪律）。
+  //     本层没有任何逐包日期字段，而同一响应的 `qoderUsage.expiresAt` 只归属
+  //     套餐额度（见上）⇒ 企业池正是「会过期、但拿不到逐笔日期」的形态，
+  //     不置位就会渲染成「**永久**」。置位后分桶仍是 `permanent`
+  //    （永久锁 / 选号 / 聚合轮换零变化），只把卡片文案改成「到期未知」。
+  //  ③ **`available === false` ⇒ `active: false`**（该池当前不可用，不得进入
+  //     聚合轮换 / 套餐徽标）。`available` 的确切语义上游没有文档 ⇒ 只对
+  //     显式 `false` 降级，缺失/非布尔值一律按可用处理。
   const orgPkg = qoderUsage.orgResourcePackage
   if (typeof orgPkg === 'object' && orgPkg !== null && !Array.isArray(orgPkg)) {
     const cap = readNumber(orgPkg, 'cap')
-    const normalized = cap !== undefined ? { ...orgPkg, total: cap } : orgPkg
-    const pkg = toPackage('企业资源包', normalized)
-    if (pkg !== undefined) packages.push(pkg)
+    const remaining = readNumber(orgPkg, 'remaining')
+    // 至少要有一个「额度数字」才认这个包；只有 `used` 不构成合法形状。
+    if (cap !== undefined || remaining !== undefined) {
+      const used = readNumber(orgPkg, 'used')
+      const total = cap !== undefined && cap > 0
+        ? cap
+        : Math.max(0, (used ?? 0) + (remaining ?? 0))
+      const pkg = toPackage(
+        '企业资源包',
+        { ...orgPkg, total },
+        {
+          // 显式 `false` 才降级；`true` / 缺失 / 非布尔值都按可用处理。
+          active: readBoolean(orgPkg, 'available') !== false,
+          expiryUnknown: true,
+        },
+      )
+      if (pkg !== undefined) packages.push(pkg)
+    }
   }
 
   // 一个包都没解析出来 → 视为「查不到」（响应形状与预期不符），

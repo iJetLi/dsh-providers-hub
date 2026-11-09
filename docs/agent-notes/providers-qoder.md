@@ -903,3 +903,70 @@ tone 改 `ok`／`toPackage(...{expiryUnknown: true})` 去掉选项（上游解�
   解析（`expiredTime`）在个人账号上**不可达**。企业/团队账号未取证。
 - 报障者账号（`qoder-98bbe7b1`）不在本机，无法用他自己的号复跑。
 
+
+## ⚠️⚠️ 企业账号的额度在 `orgResourcePackage`（PR #182，2026-11-09）
+
+### 报障与形态
+
+Qoder 中国版**企业账号**（`qoderUsage.userType === 'enterprise'`）积分区显示
+「积分查询失败（响应未包含任何额度包）」。根因：该形态 `userQuota` / `addOnQuota`
+**都不下发**，额度只在 `orgResourcePackage` 里，而老解析只认前两者 ⇒ 一个包都拿不到。
+
+⚠️ 它与 `displayMode === 'enterprise'`（上游只给网页链接、不给数字的那条早退分支）
+**不是同一形态** —— 实测企业账号的 `displayMode` 仍是 `'qoder'`。两条互不重叠，
+别再合并。
+
+### 形状（2026-11-09 qodercn 真实凭据，逐字段）
+
+```json
+{
+  "displayMode": "qoder",
+  "qoderUsage": {
+    "userType": "enterprise",
+    "usageType": "credits",
+    "expiresAt": 1796832000000,
+    "orgResourcePackage": {
+      "used": 0, "remaining": 3000, "percentage": 0,
+      "unit": "credits", "cap": 3000, "available": true
+    },
+    "isPlanQuotaProrated": false
+  }
+}
+```
+
+- **没有 `total`**：`cap` 即总额（映射成 `total` 后复用同一 `toPackage`）。
+- **没有任何逐包日期字段**；同一响应的 `expiresAt` 语义归属 `userQuota`（套餐额度），
+  不适用于本层。
+
+### 三条边界（2026-11-09 审计返工，全部实测定）
+
+1. **`cap` 不能直接当 `total` 透传**。上游会漏字段、给 `0` 或负值 ⇒ 产出
+   「remaining 3000 / total 0」的**假分母**（面板按 `${remaining} / ${total}`
+   渲染成「3000 / 0」，与 `src/credits.ts` 的「不得并列显示假分母」冲突）。
+   修法：`cap` 非正数时用 `used + remaining` 兜底；**两者都读不到 ⇒ 不产出包**
+   （保持 `null` = 查不到，而不是「余额 0」——只有 `used` 的形状就是这一格）。
+2. **必须置 `expiryUnknown: true`**（IKTLMX 置位纪律）：本层没有任何逐笔日期
+   ⇒ 正是「会过期、但拿不到日期」的形态，不置位卡片会写「**永久**」。
+   置位后分桶仍是 `permanent`（永久锁 / 选号 / 聚合轮换零变化），只改文案。
+3. **`available === false` ⇒ `active: false`**：该池当前不可用，不得进入聚合轮换
+   （`src/aggregate-expiry.ts` 只认 `active === true`）与套餐徽标。`available`
+   的确切语义上游没有文档 ⇒ 只对**显式 `false`** 降级，缺失/非布尔值按可用处理。
+
+### 守卫与变异（`tests/unit/qoder-credits.spec.ts`）
+
+fixture 刻意让 `cap 5000 ≠ remaining 3000 ≠ used+remaining 5000`（三个候选值互不
+相同），否则「`total: cap` 改成 `total: remaining`」会**全绿**（初版 fixture
+`cap === remaining === cap - used`，就是这么漏的）。5 条企业用例：主路径（断言
+`total` / `remaining` / `used` / `unit` / `active` / `expiryUnknown`）、`cap` 缺失
+兜底、`cap: 0` 兜底、只有 `used` ⇒ `null`、`available: false` ⇒ `active: false`。
+
+### 未解（如实登记）
+
+- `available` 的四种语义（该池不可用 / 该包不可领 / 账号级开关 / 其它）**无样本**，
+  只按「显式 `false` 降级」保守处理。
+- `expiresAt` 在企业形态的真实语义（订阅刷新日 vs 合同到期）**未定**；本仓刻意
+  不挂成 `deductionEndTime`（挂错等于编造日期），只标「到期未知」。
+- 企业账号的**套餐徽标仍为空**：`src/badge-subscription.ts` 的 `qoderPlanSelector`
+  精确比 `'套餐额度'`，而本层包名是「企业资源包」⇒ 不命中。要不要显示是产品决定，
+  本次未动。
+- 企业池是否按席位共享、`percentage` 的真实分母 **未验证**（单账号单样本）。
