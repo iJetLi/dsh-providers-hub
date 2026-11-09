@@ -391,6 +391,13 @@ function readNumber(source: unknown, key: string): number | undefined {
   return undefined
 }
 
+/** 安全读布尔字段（只认真正的布尔值；缺失/其它类型一律 `undefined` = 未知）。 */
+function readBoolean(source: unknown, key: string): boolean | undefined {
+  if (typeof source !== 'object' || source === null) return undefined
+  const value = (source as Record<string, unknown>)[key]
+  return typeof value === 'boolean' ? value : undefined
+}
+
 /** 安全读字符串字段。 */
 function readString(source: unknown, key: string): string | undefined {
   if (typeof source !== 'object' || source === null) return undefined
@@ -597,9 +604,12 @@ function toPackage(
  * 返回 `null` 表示**查不到**（网络失败 / 401 / 响应形状非法），
  * 与「余额为 0」严格区分 —— 失败时 UI 应显示原因而不是 0。
  *
- * 企业版账号（`displayMode === 'enterprise'`）返回 `null`：
- * 那种模式不提供额度数字，只给一个外部链接（`enterpriseUsage.detailUrl`），
- * 报 0 会误导用户以为没额度。
+ * 企业版账号有**两种互不重叠的形态**，别混为一谈：
+ * - `displayMode === 'enterprise'`：那种模式不提供额度数字，只给一个外部链接
+ *   （`enterpriseUsage.detailUrl`），报 0 会误导用户以为没额度 ⇒ 返回 `null`；
+ * - `userType === 'enterprise'`（2026-11-09 实测）：`displayMode` 仍是 `'qoder'`，
+ *   额度数字在 `qoderUsage.orgResourcePackage`，由 `parseQoderUsage` 正常解析，
+ *   **不**落本函数的企业分支。
  */
 export async function fetchQoderCreditBalance(
   credential: QoderCredential,
@@ -648,6 +658,10 @@ export interface QoderBalanceOptions {
  * 2. **HTTP 层**：401/403 = 凭据；其它非 2xx = 服务端（带状态码）。
  * 3. **形状层**：非 JSON / 非对象 / 缺 `qoderUsage` / 一个包都没解析出来。
  * 4. **企业版**：`displayMode === 'enterprise'` ⇒ 上游本就不给数字（不是故障）。
+ *    ⚠️ 与 `userType === 'enterprise'`（额度在 `orgResourcePackage`、
+ *    `displayMode` 仍是 `'qoder'`）**不是同一形态** —— 后者由
+ *    `parseQoderUsage` 正常解析，不会走到这里的企业分支。
+ *
  *
  * @returns 成功时 `{ balance }`；失败时 `{ balance: null, error }`。
  *   ⚠️ 永远返回 `balance` 字段（共享骨架靠 `balance` 判定成败，
@@ -809,6 +823,50 @@ function parseQoderUsage(qoderUsage: Record<string, unknown>): CreditBalance | n
         readString(item, 'name') ?? readString(item, 'id') ?? '专用资源包',
         item,
         { expiredTime: readString(item, 'expiresAt') ?? readString(item, 'expires_at') ?? '' },
+      )
+      if (pkg !== undefined) packages.push(pkg)
+    }
+  }
+
+  // 企业版账号（`userType: 'enterprise'`，2026-11-09 qodercn 真实凭据实测）：
+  // 该形态下 `userQuota` / `addOnQuota` **都不下发**，额度只在
+  // `orgResourcePackage`（`{used, remaining, percentage, unit, cap, available}`）——
+  // 不解析它 ⇒ 企业账号报「积分查询失败（响应未包含任何额度包）」。
+  // ⚠️ 该层没有 `total`，`cap` 即总额 —— 映射后复用同一 `toPackage`
+  //（红线：同一语义只留一份实现）。
+  //
+  // ⚠️⚠️ 三条边界（2026-11-09 PR #182 审计，全部实测过）：
+  //  ① **`cap` 不能直接当 `total` 用**。上游会漏字段、给 `0` 或负值，直接透传
+  //     会产出「remaining 3000 / total 0」的**假分母**（面板按
+  //     `${remaining} / ${total}` 渲染成「3000 / 0」，与 `src/credits.ts`
+  //     「不得并列显示假分母」冲突）。`cap` 非正数时用 `used + remaining` 兜底；
+  //     两者都读不到 ⇒ **不产出包**（保持 `null` = 查不到，而不是「余额 0」）。
+  //  ② **到期必须置 `expiryUnknown`**（Gitee issue **IKTLMX** 的置位纪律）。
+  //     本层没有任何逐包日期字段，而同一响应的 `qoderUsage.expiresAt` 只归属
+  //     套餐额度（见上）⇒ 企业池正是「会过期、但拿不到逐笔日期」的形态，
+  //     不置位就会渲染成「**永久**」。置位后分桶仍是 `permanent`
+  //    （永久锁 / 选号 / 聚合轮换零变化），只把卡片文案改成「到期未知」。
+  //  ③ **`available === false` ⇒ `active: false`**（该池当前不可用，不得进入
+  //     聚合轮换 / 套餐徽标）。`available` 的确切语义上游没有文档 ⇒ 只对
+  //     显式 `false` 降级，缺失/非布尔值一律按可用处理。
+  const orgPkg = qoderUsage.orgResourcePackage
+  if (typeof orgPkg === 'object' && orgPkg !== null && !Array.isArray(orgPkg)) {
+    const cap = readNumber(orgPkg, 'cap')
+    const remaining = readNumber(orgPkg, 'remaining')
+    // 至少要有一个「额度数字」才认这个包；只有 `used` 不构成合法形状。
+    if (cap !== undefined || remaining !== undefined) {
+      const used = readNumber(orgPkg, 'used')
+      const total = cap !== undefined && cap > 0
+        ? cap
+        : Math.max(0, (used ?? 0) + (remaining ?? 0))
+      const pkg = toPackage(
+        '企业资源包',
+        { ...orgPkg, total },
+        {
+          // 显式 `false` 才降级；`true` / 缺失 / 非布尔值都按可用处理。
+          active: readBoolean(orgPkg, 'available') !== false,
+          expiryUnknown: true,
+        },
       )
       if (pkg !== undefined) packages.push(pkg)
     }
