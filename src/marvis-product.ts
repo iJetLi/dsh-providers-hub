@@ -127,8 +127,13 @@ export function findMarvisFallback(modelId: string): MarvisFallbackModel | undef
  */
 export function normalizeMarvisModelId(model: string): string {
   const trimmed = model.trim()
-  if (trimmed === '0') return 'main-auto'
-  if (trimmed === 'deepseek-v4-1-flash-261017') return 'main-auto'
+  // ⚠️ **大小写不敏感**（2026-11-10 对抗性审计 I6）：`MAIN-AUTO` / `Main-Auto`
+  //    原样透传会目录未命中 ⇒ 静默退化成「未知模型」（text-only、无上下文、
+  //    无图片能力），而且**不报错** —— 用户只会发现「图发不出去了」。
+  const lower = trimmed.toLowerCase()
+  if (lower === '0') return 'main-auto'
+  if (lower === 'deepseek-v4-1-flash-261017') return 'main-auto'
+  if (lower === 'main-auto') return 'main-auto'
   return trimmed
 }
 
@@ -222,8 +227,7 @@ export function classifyMarvisError(
 
   // ① 上下文超限（文本判据，先于一切）
   if (
-    lower.includes('maximum context length')
-    || lower.includes('context length')
+    lower.includes('context length')
     || lower.includes('context window')
     || (lower.includes('context') && lower.includes('limit'))
     || lower.includes('context_length_exceeded')

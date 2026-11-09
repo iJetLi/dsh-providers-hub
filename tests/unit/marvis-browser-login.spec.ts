@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   authorizeUrlOf,
@@ -9,7 +9,7 @@ import {
 import { MARVIS_REDIRECT_URI } from '../../src/marvis.js'
 
 describe('authorizeUrlOf', () => {
-  const guid = 'f4642360411b4132d5917bf04f615b8a'
+  const guid = 'fedcba9876543210fedcba9876543210'
 
   it('★ QQ 走 graph.qq.com，且 login_type 在 redirect_uri 的 query 里', () => {
     const url = new URL(authorizeUrlOf('1', guid, '0.5'))
@@ -129,7 +129,7 @@ describe('createChromiumMarvisLogin', () => {
     const login = await createChromiumMarvisLogin({
       ...baseDeps,
       loginType: '1',
-      guid: 'f4642360411b4132d5917bf04f615b8a',
+      guid: 'fedcba9876543210fedcba9876543210',
       state: '0.5',
       sessionFactory: async () => session,
     })
@@ -187,6 +187,30 @@ describe('createChromiumMarvisLogin', () => {
       now: () => 0,
     })
     expect(await login.waitForCallbackUrl(1_000)).toBeUndefined()
+    login.close()
+  })
+
+  /**
+   * ⚠️ 2026-11-10 对抗性审计 I3：这条守卫原来的写法（`now: () => 0` + 1 秒
+   * 超时）**测不到** —— 注入的 `now` 根本没被读，而 1 秒 ≪ 5 秒默认超时，
+   * 把「累计等待」改成比较时钟也照样绿。
+   * 真正有牙的判据是：**no-op sleep 下循环次数必须是有限的 `timeout / poll`**
+   * —— 按墙钟等待的实现在这里会一直转下去（用例挂死）。
+   */
+  it('★★ 超时按「累计等待」算：no-op sleep 下循环次数 = timeout / poll', async () => {
+    const { session } = createFakeSession()
+    const sleep = vi.fn(async () => {})
+    const login = await createChromiumMarvisLogin({
+      ...baseDeps,
+      loginType: '1',
+      guid: 'g',
+      sessionFactory: async () => session,
+      sleep,
+      pollIntervalMs: 500,
+      now: () => 0,
+    })
+    expect(await login.waitForCallbackUrl(1_000)).toBeUndefined()
+    expect(sleep).toHaveBeenCalledTimes(2)
     login.close()
   })
 

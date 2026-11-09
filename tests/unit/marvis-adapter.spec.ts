@@ -13,8 +13,8 @@ import type { MarvisCredential } from '../../src/marvis.js'
 const CREDENTIAL: MarvisCredential = {
   access_token: 'mv-test-access-token',
   refresh_token: 'test-refresh-token-0001',
-  openid: '864D89036E52CC338D18484131FE053D',
-  guid: 'f4642360411b4132d5917bf04f615b8a',
+  openid: '0123456789abcdef0123456789abcdef',
+  guid: 'fedcba9876543210fedcba9876543210',
   login_type: '1',
 }
 
@@ -123,6 +123,19 @@ describe('★ 模型 id 归一', () => {
     expect((await adapter.resolveModel(MARVIS.id, 'deepseek-v4-1-flash-261017')).id).toBe(
       'main-auto',
     )
+  })
+
+  /**
+   * ⚠️ 2026-11-10 对抗性审计 I6：`MAIN-AUTO` 原样透传会目录未命中 ⇒ 静默退化
+   * 成「未知模型」（text-only / 无上下文 / 无图片），且**不报错**。
+   */
+  it('★★ 大小写变体同样归一（否则静默退化成未知模型）', async () => {
+    const adapter = makeAdapter()
+    const upper = await adapter.resolveModel(MARVIS.id, 'MAIN-AUTO')
+    expect(upper.id).toBe('main-auto')
+    expect(upper.name).toBe('DeepSeek V4.1 Flash')
+    expect(upper.context).toEqual({ contextWindow: 1_000_000 })
+    expect(upper.inputModalities).toEqual(['text', 'image'])
   })
 
   it('★ 未知 id 原样保留（静默替换成别的模型比报错更糟）', async () => {
@@ -320,6 +333,106 @@ describe('★ 错误分类与槽轮换', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(markLimited).toHaveBeenCalledTimes(1)
     expect(markLimited.mock.calls[0]?.[0]).toBe('marvis-a1')
+  })
+
+  /**
+   * ⚠️ 2026-11-10 对抗性审计 I1：`context_window` 分支此前**零行为级覆盖**
+   * （变异 `&& false` ⇒ 589 条全绿）。后果不是「多换一个号」而是：落进下面
+   * 的默认「限流」分支 ⇒ 给账号写一个到**次日 UTC+8 零点**的标记 ⇒ 用户只是
+   * 消息太长却被封一整天，且终态码被宿主换成「额度已用尽」（IKJVCW）。
+   */
+  it('★★ 上下文超限 ⇒ CONTEXT_WINDOW_EXCEEDED，不换号、不写限流标记', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ code: 400, msg: 'maximum context length is 128000 tokens' }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    const markLimited = vi.fn()
+    let code: string | undefined
+    try {
+      await collect(makeAdapter({
+        slots: [
+          { id: 'marvis-a1', credential: CREDENTIAL },
+          { id: 'marvis-a2', credential: CREDENTIAL },
+        ],
+        markLimited,
+      }))
+    } catch (error) {
+      code = (error as { code?: string }).code
+    }
+    expect(code).toBe('CONTEXT_WINDOW_EXCEEDED')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(markLimited).not.toHaveBeenCalled()
+  })
+
+  /**
+   * ⚠️ 2026-11-10 对抗性审计 I2：`if (delivered) throw error` 此前**零覆盖**
+   * （变异成 `if (false)` ⇒ 全绿）。后果是**真副作用**：流式已经吐了一半正文
+   * （甚至工具调用）之后断流，再换号重放 ⇒ 用户看到正文重复、工具被执行两次。
+   */
+  it('★★ 已经吐出内容后断流 ⇒ 直接抛出，不得换号重放', async () => {
+    // ⚠️ 这里**刻意**用子类替掉 `streamVia`（而不是伪造一个会中途报错的
+    //    ReadableStream）：后者会被 `consumeOpenAiSse` 当成「流正常结束」吃掉，
+    //    用例会变成测 SSE 解析器而不是测轮换循环的 `delivered` 闸门。
+    const calls: string[] = []
+    class ThrowingAdapter extends MarvisAdapter {
+      protected override async *streamVia(): AsyncIterable<never> {
+        calls.push('a1')
+        yield { type: 'text-delta', text: '前半段' }
+        throw Object.assign(new Error('socket hang up'), { code: 'TRANSPORT' })
+      }
+    }
+    const adapter = new ThrowingAdapter({
+      product: MARVIS,
+      accountPool: makePool(),
+      slots: async () => [
+        { id: 'marvis-a1', credential: CREDENTIAL },
+        { id: 'marvis-a2', credential: CREDENTIAL },
+      ],
+    })
+    const seen: string[] = []
+    let failed = false
+    try {
+      for await (const chunk of adapter.stream({
+        model: 'main-auto',
+        messages: [{ role: 'user', content: 'hi' }],
+      } as never)) {
+        if (chunk.type === 'text-delta') seen.push(chunk.text)
+      }
+    } catch {
+      failed = true
+    }
+    expect(failed).toBe(true)
+    // 只跑过一个槽：换号重放会让「前半段」在第二个账号上再出现一遍。
+    expect(calls).toEqual(['a1'])
+    expect(seen.join('')).toBe('前半段')
+  })
+
+  /**
+   * ⚠️ 2026-11-10 对抗性审计 I7：槽位耗尽的终态码**零断言**（改成 `'SERVER'`
+   * 仍全绿）。它必须是额度码，宿主才会给「额度已用尽」而不是「服务器错误」。
+   */
+  it('★★ 所有槽位都限流 ⇒ 终态码是 QUOTA_EXCEEDED', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('rate limit exceeded', {
+        status: 429,
+        headers: { 'content-type': 'text/plain', 'retry-after': '1' },
+      })),
+    )
+    let code: string | undefined
+    try {
+      await collect(makeAdapter({
+        slots: [
+          { id: 'marvis-a1', credential: CREDENTIAL },
+          { id: 'marvis-a2', credential: CREDENTIAL },
+        ],
+        markLimited: () => undefined,
+      }))
+    } catch (error) {
+      code = (error as { code?: string }).code
+    }
+    expect(code).toBe('QUOTA_EXCEEDED')
   })
 
   it('★ 取消 ⇒ 原样抛出，不换号', async () => {

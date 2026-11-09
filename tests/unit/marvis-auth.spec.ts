@@ -94,13 +94,13 @@ const MAGPIE_ENTRY = {
   refresh: 'test-refresh-token-0001',
   access: 'mv-test-access-token',
   expires: 1_796_660_878_059,
-  accountId: 'QQ·Jet',
-  uid: '864D89036E52CC338D18484131FE053D',
+  accountId: 'QQ·测试用户',
+  uid: '0123456789abcdef0123456789abcdef',
   metadata: {
-    openid: '864D89036E52CC338D18484131FE053D',
-    guid: 'f4642360411b4132d5917bf04f615b8a',
+    openid: '0123456789abcdef0123456789abcdef',
+    guid: 'fedcba9876543210fedcba9876543210',
     loginType: '1',
-    nickname: 'Jet',
+    nickname: '测试用户',
   },
 }
 
@@ -110,17 +110,17 @@ describe('importCredentialFromMagpie', () => {
     expect(credential).toMatchObject({
       access_token: 'mv-test-access-token',
       refresh_token: 'test-refresh-token-0001',
-      openid: '864D89036E52CC338D18484131FE053D',
-      guid: 'f4642360411b4132d5917bf04f615b8a',
+      openid: '0123456789abcdef0123456789abcdef',
+      guid: 'fedcba9876543210fedcba9876543210',
       login_type: '1',
-      nickname: 'Jet',
+      nickname: '测试用户',
       expires_at: '1796660878059',
     })
   })
 
   it('★ 也认单条 entry（用户只粘了值那一层）', () => {
     expect(importCredentialFromMagpie(JSON.stringify(MAGPIE_ENTRY))?.openid).toBe(
-      '864D89036E52CC338D18484131FE053D',
+      '0123456789abcdef0123456789abcdef',
     )
   })
 
@@ -138,7 +138,7 @@ describe('importCredentialFromMagpie', () => {
 
   it('trim 掉首尾空白（从文件复制常带换行）', () => {
     expect(importCredentialFromMagpie(`\n  ${JSON.stringify(MAGPIE_ENTRY)}  \n`)?.openid).toBe(
-      '864D89036E52CC338D18484131FE053D',
+      '0123456789abcdef0123456789abcdef',
     )
   })
 })
@@ -229,7 +229,7 @@ describe('MarvisAuth.fetchUserProfile', () => {
   it('取到昵称与头像', async () => {
     const { ctx } = makeContext()
     const fetchImpl = vi.fn(async () =>
-      jsonResponse({ ret: 0, nick_name: 'Jet', head_img_url: 'https://x/y.png' }),
+      jsonResponse({ ret: 0, nick_name: '测试用户', head_img_url: 'https://x/y.png' }),
     )
     const auth = new MarvisAuth(ctx, { fetchImpl: fetchImpl as unknown as typeof fetch })
     const profile = await auth.fetchUserProfile({
@@ -239,7 +239,7 @@ describe('MarvisAuth.fetchUserProfile', () => {
       guid: 'g',
       login_type: '1',
     })
-    expect(profile).toEqual({ nickname: 'Jet', avatar: 'https://x/y.png' })
+    expect(profile).toEqual({ nickname: '测试用户', avatar: 'https://x/y.png' })
   })
 
   it('★ 失败返回空对象而不抛（昵称只是展示名，不能挡登录）', async () => {
@@ -353,7 +353,7 @@ describe('MarvisAuth.loginViaBrowser', () => {
           ],
         })
       }
-      return jsonResponse({ ret: 0, nick_name: 'Jet', head_img_url: 'https://a/b.png' })
+      return jsonResponse({ ret: 0, nick_name: '测试用户', head_img_url: 'https://a/b.png' })
     })
     const auth = new MarvisAuth(ctx, {
       fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -364,8 +364,126 @@ describe('MarvisAuth.loginViaBrowser', () => {
       }),
     })
     const credential = await auth.loginViaBrowser('1')
-    expect(credential?.nickname).toBe('Jet')
+    expect(credential?.nickname).toBe('测试用户')
     expect(credential?.access_token).toBe('mv_1')
     expect(credential?.guid).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
+describe('★ 2026-11-09 审计修复（兜底有效期 / 终态续期 / 昵称兜底）', () => {
+  const NOW = 1_700_000_000_000
+
+  function callbackResponse(cookies: readonly string[], status = 302): Response {
+    const headers = new Headers()
+    for (const cookie of cookies) headers.append('set-cookie', cookie)
+    return new Response(null, { status, headers })
+  }
+
+  it('★★ 回调没带 access_token_expire_time ⇒ QQ 兜底 30 天（不是「每轮都续期」）', async () => {
+    const { ctx } = makeContext()
+    const fetchImpl = vi.fn(async () =>
+      callbackResponse(['openid=OID1', 'accesstoken=mv_1', 'refreshtoken=rt_1']),
+    )
+    const auth = new MarvisAuth(ctx, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    })
+    const credential = await auth.exchangeCode({ code: 'C', loginType: '1', guid: 'g' })
+    // ⚠️ 留空会让 `shouldRefreshNow(undefined) === true` ⇒ 30 分钟一次、48 次/天。
+    expect(credential.expires_at).toBe(String(NOW + 30 * 24 * 60 * 60 * 1_000))
+  })
+
+  it('★★ 微信兜底 2 小时（微信的 access_token 本来就短）', async () => {
+    const { ctx } = makeContext()
+    const fetchImpl = vi.fn(async () =>
+      callbackResponse(['openid=OID1', 'accesstoken=mv_1', 'refreshtoken=rt_1']),
+    )
+    const auth = new MarvisAuth(ctx, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    })
+    const credential = await auth.exchangeCode({ code: 'C', loginType: '2', guid: 'g' })
+    expect(credential.expires_at).toBe(String(NOW + 2 * 60 * 60 * 1_000))
+  })
+
+  it('★★ 回调给的是**秒**（10 位）时也换算成毫秒（不能当毫秒用）', async () => {
+    const { ctx } = makeContext()
+    const fetchImpl = vi.fn(async () =>
+      callbackResponse([
+        'openid=OID1',
+        'accesstoken=mv_1',
+        'refreshtoken=rt_1',
+        'access_token_expire_time=1700003600',
+      ]),
+    )
+    const auth = new MarvisAuth(ctx, { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => NOW })
+    const credential = await auth.exchangeCode({ code: 'C', loginType: '1', guid: 'g' })
+    expect(credential.expires_at).toBe('1700003600000')
+  })
+
+  it('★★ 续期 code -107 ⇒ 抛 RefreshTokenExpiredError（终态，不再白重试）', async () => {
+    const { ctx, store } = makeContext()
+    const refName = 'MARVIS_ACCOUNT_A'
+    store.seed(refName, JSON.stringify({
+      access_token: 'mv_old', refresh_token: 'rt_old', openid: 'o', guid: 'g', login_type: '1',
+    }))
+    const fetchImpl = vi.fn(async () => jsonResponse({ code: -107, msg: 'RC_NO_AUTH_ERR' }))
+    const auth = new MarvisAuth(ctx, { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => NOW })
+    const pool = new FakePool([account('marvis-a', refName, NOW - 1)])
+    await expect(
+      auth.refreshAccountCredential(refName, pool.asPool(), 'marvis-a'),
+    ).rejects.toMatchObject({ name: 'RefreshTokenExpiredError' })
+  })
+
+  it('★★ 瞬态业务码**不得**标终态（否则一次抖动把账号标死）', async () => {
+    const { ctx, store } = makeContext()
+    const refName = 'MARVIS_ACCOUNT_A'
+    store.seed(refName, JSON.stringify({
+      access_token: 'mv_old', refresh_token: 'rt_old', openid: 'o', guid: 'g', login_type: '1',
+    }))
+    const fetchImpl = vi.fn(async () => jsonResponse({ code: -1, msg: 'busy' }))
+    const auth = new MarvisAuth(ctx, { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => NOW })
+    const pool = new FakePool([account('marvis-a', refName, NOW - 1)])
+    await expect(
+      auth.refreshAccountCredential(refName, pool.asPool(), 'marvis-a'),
+    ).rejects.not.toMatchObject({ name: 'RefreshTokenExpiredError' })
+  })
+
+  it('★★ refreshAll 遇终态 ⇒ 把账号标成不可续期（且不向上抛）', async () => {
+    const { ctx, store } = makeContext()
+    const refName = 'MARVIS_ACCOUNT_A'
+    store.seed(refName, JSON.stringify({
+      access_token: 'mv_old', refresh_token: 'rt_old', openid: 'o', guid: 'g', login_type: '1',
+    }))
+    const fetchImpl = vi.fn(async () => jsonResponse({ code: -107, msg: 'RC_NO_AUTH_ERR' }))
+    const auth = new MarvisAuth(ctx, { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => NOW })
+    const pool = new FakePool([account('marvis-a', refName, NOW - 1)])
+    await expect(auth.refreshAll(pool.asPool())).resolves.toBeUndefined()
+    expect(pool.updates).toEqual([{ id: 'marvis-a', patch: { refreshable: false } }])
+  })
+
+  it('★★ 资料接口失败 ⇒ 昵称回退 openid 前 8 位（否则多账号全叫「QQ」）', async () => {
+    const { ctx } = makeContext()
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).includes('marvis_oauth')) {
+        return callbackResponse([
+          'openid=864D89036E52CC33',
+          'accesstoken=mv_1',
+          'refreshtoken=rt_1',
+        ])
+      }
+      return new Response('', { status: 500 })
+    })
+    const auth = new MarvisAuth(ctx, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+      browserLoginFactory: async () => ({
+        close: () => {},
+        waitForCallbackUrl: async () =>
+          'https://yybadaccess.3g.qq.com/marvis_client_login/marvis_oauth?login_type=QC&code=C1&state=0.5',
+      }),
+    })
+    const credential = await auth.loginViaBrowser('1')
+    expect(credential?.nickname).toBe('864D8903')
   })
 })

@@ -99,6 +99,38 @@ export function readMagpieMarvisCredential(
   return { credential }
 }
 
+/**
+ * 凭据的**兜底有效期**（上游没给 `access_token_expire_time` / `expires_in` 时用）。
+ *
+ * ## ⚠️ 为什么必须有兜底（2026-11-09 审计 P2）
+ *
+ * 兑换的回调 cookie 与续期响应**都可能**不带有效期（magpie 的
+ * `expiry.mjs` 同样按 `access_token_expire_time → expires_in → 兜底` 三级取）。
+ * 缺值时如果留空，`ProviderAccountEntry.expiresAt` 就是 `undefined`，而
+ * `shouldRefreshNow(undefined) === true`（`src/expiry-sync.ts:112`）⇒ 该账号
+ * **每一轮调度都会被续期一次**（30 分钟一次，48 次/天/账号），且一旦续期失败
+ * 就是 48 次/天的失败请求。两个值取自 magpie 的 `ttlFor()`：
+ * QQ 30 天、微信 2 小时（微信的 access_token 本来就短）。
+ */
+const MARVIS_QQ_TTL_MS = 30 * 24 * 60 * 60 * 1_000
+const MARVIS_WECHAT_TTL_MS = 2 * 60 * 60 * 1_000
+
+/** 按登录方式取兜底有效期（`'1'`=QQ ⇒ 30 天；`'2'`=微信 ⇒ 2 小时）。 */
+function marvisFallbackTtlMs(loginType: '1' | '2'): number {
+  return loginType === '2' ? MARVIS_WECHAT_TTL_MS : MARVIS_QQ_TTL_MS
+}
+
+/**
+ * 续期失败的**终态**判据（refresh_token 已死 ⇒ 只能重新登录）。
+ *
+ * ⚠️ 用 `name` 而不是 `instanceof`：`src/refresh.ts` 的 `isRefreshTokenExpired`
+ * 明确记过这个坑 —— 多个 provider 各自导出同名类，跨模块 `instanceof` 恒为
+ * false，会让「真死号」被当成可重试而无限重试。
+ */
+function isMarvisTerminalRefreshFailure(error: unknown): boolean {
+  return error instanceof Error && error.name === 'RefreshTokenExpiredError'
+}
+
 export interface MarvisCredentialStore {
   resolve(ref: CredentialRef): Promise<{ value: string } | undefined>
   set(ref: CredentialRef, value: string): Promise<void>
@@ -314,6 +346,12 @@ export class MarvisAuth extends Service {
         throw new Error('Marvis 登录响应缺少 refresh_token（该账号将无法自动续期）')
       }
       const expiresAt = Number(cookies['access_token_expire_time'] ?? '')
+      // ⚠️ 上游没给绝对值时**必须**兜底，否则 `expiresAt` 缺失 ⇒ 每轮都续期（见
+      //    `marvisFallbackTtlMs` 的注释）。秒/毫秒的换算与 `credentialExpiresAtMs`
+      //    同口径：`> 1e12` 才是毫秒，否则是秒。
+      const expiresAtMs = Number.isFinite(expiresAt) && expiresAt > 0
+        ? (expiresAt > 1e12 ? expiresAt : expiresAt * 1_000)
+        : this.now() + marvisFallbackTtlMs(params.loginType)
       const nickname = cookies['nickname']
       return {
         access_token: accessToken,
@@ -322,7 +360,7 @@ export class MarvisAuth extends Service {
         guid: params.guid,
         login_type: params.loginType,
         ...(nickname === undefined || nickname === '' ? {} : { nickname }),
-        ...(Number.isFinite(expiresAt) && expiresAt > 0 ? { expires_at: String(expiresAt) } : {}),
+        expires_at: String(expiresAtMs),
       }
     }
 
@@ -420,9 +458,16 @@ export class MarvisAuth extends Service {
       if (code === null || code === '') return undefined
       const credential = await this.exchangeCode({ code, loginType, guid, state })
       const profile = await this.fetchUserProfile(credential)
+      /**
+       * ⚠️ 昵称兜底（2026-11-09 审计）：资料接口失败 / 上游没给 `nick_name` 时退到
+       * **openid 前 8 位**，而不是留空。留空的净后果是多个 QQ 账号在面板里**全叫
+       * 「QQ」**、无法区分（`marvisAccountLabel` 只在有昵称时拼平台名）。
+       */
+      const nickname = profile.nickname ?? credential.nickname
+        ?? (credential.openid === '' ? undefined : credential.openid.slice(0, 8))
       return {
         ...credential,
-        ...(profile.nickname === undefined ? {} : { nickname: profile.nickname }),
+        ...(nickname === undefined ? {} : { nickname }),
       }
     } finally {
       login.close()
@@ -508,9 +553,19 @@ export class MarvisAuth extends Service {
       throw new Error(`Marvis 续期响应不是 JSON（HTTP ${String(response.status)}）：${text.slice(0, 200)}`)
     }
     if (json.code !== 0) {
-      throw new Error(
-        `Marvis 续期失败（code ${String(json.code)} ${String(json.msg ?? '')}）`,
-      )
+      const message = `Marvis 续期失败（code ${String(json.code)} ${String(json.msg ?? '')}）`
+      /**
+       * ⚠️ 终态 vs 瞬态（2026-11-09 审计 P2）：`-107`（RC_NO_AUTH_ERR，授权码/
+       * refresh_token 已失效）与 `-101` 是**确定性**失败，再打 48 次/天也不会好。
+       * 用 `name` 而不是自定义类：`src/refresh.ts` 的 `isRefreshTokenExpired`
+       * 明确按 `name` 判定（跨模块 `instanceof` 会因类身份不同而穿透，本仓踩过）。
+       */
+      if (json.code === -107 || json.code === -101) {
+        const fatal = new Error(message)
+        fatal.name = 'RefreshTokenExpiredError'
+        throw fatal
+      }
+      throw new Error(message)
     }
     const info = json.user_info ?? {}
     const accessToken = typeof info.access_token === 'string' && info.access_token !== ''
@@ -546,6 +601,15 @@ export class MarvisAuth extends Service {
         await this.refreshAccountCredential(refName, pool, account.id)
       } catch (error) {
         this.warn(`[marvis] 续期账号 ${account.id} 失败：${String(error)}`)
+        /**
+         * 终态失败（refresh_token 已失效）⇒ 打上 `refreshable: false`，否则调度器
+         * 会**永远**每 30 分钟重试一次（`refreshAll` 刻意不看 `refreshable`，
+         * 但面板与「重测」按钮据此给用户「需要重新登录」的出路）。
+         * 瞬态失败（网络 / 5xx）**不动**标记 —— 那会让一次抖动把账号标死。
+         */
+        if (isMarvisTerminalRefreshFailure(error)) {
+          await pool.updateAccount(account.id, { refreshable: false }).catch(() => undefined)
+        }
       }
     }
   }

@@ -39,16 +39,16 @@ import {
 const CREDENTIAL: MarvisCredential = {
   access_token: 'mv-test-access-token',
   refresh_token: 'test-refresh-token-0001',
-  openid: '864D89036E52CC338D18484131FE053D',
-  guid: 'f4642360411b4132d5917bf04f615b8a',
+  openid: '0123456789abcdef0123456789abcdef',
+  guid: 'fedcba9876543210fedcba9876543210',
   login_type: '1',
-  nickname: 'Jet',
+  nickname: '测试用户',
 }
 
 const ACCOUNT: MarvisAccount = {
   accessToken: 'mv-test-access-token',
-  openid: '864D89036E52CC338D18484131FE053D',
-  guid: 'f4642360411b4132d5917bf04f615b8a',
+  openid: '0123456789abcdef0123456789abcdef',
+  guid: 'fedcba9876543210fedcba9876543210',
   loginType: '1',
 }
 
@@ -57,9 +57,9 @@ describe('parseMarvisCredential', () => {
     expect(parseMarvisCredential(JSON.stringify(CREDENTIAL))).toMatchObject({
       access_token: 'mv-test-access-token',
       refresh_token: 'test-refresh-token-0001',
-      openid: '864D89036E52CC338D18484131FE053D',
+      openid: '0123456789abcdef0123456789abcdef',
       login_type: '1',
-      nickname: 'Jet',
+      nickname: '测试用户',
     })
   })
 
@@ -86,8 +86,8 @@ describe('marvisAccountOf / 过期判定', () => {
   it('凭据 → 请求头用的账号对象', () => {
     expect(marvisAccountOf(CREDENTIAL)).toEqual({
       accessToken: 'mv-test-access-token',
-      openid: '864D89036E52CC338D18484131FE053D',
-      guid: 'f4642360411b4132d5917bf04f615b8a',
+      openid: '0123456789abcdef0123456789abcdef',
+      guid: 'fedcba9876543210fedcba9876543210',
       loginType: '1',
     })
   })
@@ -194,6 +194,18 @@ describe('llmHeaders（推理腿）', () => {
     expect(custom['Marvis-Response-ID']).toBe('r1')
   })
 
+  /**
+   * ⚠️ 2026-11-10 对抗性审计：默认值此前**零断言**（只测了「可覆盖」）⇒
+   * 把默认从 `auto_discovery` 改成别的（或删掉整个头）都不会红。
+   * 上游靠它区分「自动发现」与「用户主动发起的会话」，删了是**静默降级**。
+   */
+  it('★ 默认值：Marvis-AgentTag = auto_discovery / Marvis-Scene = preload_summary', () => {
+    const headers = llmHeaders(ACCOUNT)
+    expect(headers['Marvis-AgentTag']).toBe('auto_discovery')
+    expect(headers['Marvis-Scene']).toBe('preload_summary')
+    expect(headers['Marvis-Protocol-Version']).toBe('1000')
+  })
+
   it('每次调用都重新现签 uskey（同一账号两次不同）', () => {
     expect(llmHeaders(ACCOUNT)['Ual-Access-MarvisExt'])
       .not.toBe(llmHeaders(ACCOUNT)['Ual-Access-MarvisExt'])
@@ -228,7 +240,7 @@ describe('marvisExt / 标签', () => {
   })
 
   it('账号展示名 = <QQ|微信>·<昵称>', () => {
-    expect(marvisAccountLabel('Jet', '1')).toBe('QQ·Jet')
+    expect(marvisAccountLabel('测试用户', '1')).toBe('QQ·测试用户')
     expect(marvisAccountLabel('小明', '2')).toBe('微信·小明')
     expect(marvisAccountLabel(undefined, '1')).toBe('QQ')
   })

@@ -14,8 +14,9 @@ import { newMarvisDeviceGuid } from '../../src/marvis-device.js'
 describe('newMarvisDeviceGuid', () => {
   it('是 32 位小写 hex（与 Marvis 自己发的 svid 同形）', () => {
     const guid = newMarvisDeviceGuid()
+    // ⚠️ 只留这一条：`{32}` 已经含长度，再写 `toHaveLength(32)` 是同义反复
+    //    （2026-11-10 对抗性审计 Minor）。
     expect(guid).toMatch(/^[0-9a-f]{32}$/)
-    expect(guid).toHaveLength(32)
   })
 
   it('两次不同（不能退化成常量）', () => {

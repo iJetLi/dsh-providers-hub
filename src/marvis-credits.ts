@@ -130,7 +130,11 @@ export async function fetchMarvisBalanceDetailed(
     }
   }
 
-  if (parsed.code !== 0) {
+  // ⚠️ 业务码可能是**字符串 `"0"`**（与 `classifyMarvisError` 的 `businessCodeOf`
+  //    同一口径）：同一份上游报文，钱包腿判「失败」而分类腿判「成功」是最糟的
+  //    自相矛盾 —— 积分行会报「业务码 0」。2026-11-10 对抗性审计 I4。
+  const businessCode = typeof parsed.code === 'string' ? Number(parsed.code) : parsed.code
+  if (businessCode !== 0) {
     const message = typeof parsed.msg === 'string' && parsed.msg.length > 0 ? parsed.msg : ''
     return {
       balance: null,

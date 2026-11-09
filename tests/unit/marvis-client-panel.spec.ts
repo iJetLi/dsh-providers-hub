@@ -174,56 +174,17 @@ describe('MarvisLoginModal（真渲染）', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 接线（源码级）
+// 接线（**行为级**，不在这里）
 // ---------------------------------------------------------------------------
 
-const jetHubSource = readFileSync(resolve(HERE, '../../plugin-src/client/jet-hub.js'), 'utf8')
-
-function stripComments (source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1')
-}
-
-const jetHubCode = stripComments(jetHubSource)
-
-describe('jet-hub.js 的 Marvis 接线（源码级）', () => {
-  it('★★ `createAccount` 里是**独立**一条 if，且排在 opencode 之前', () => {
-    const marvisIf = jetHubCode.indexOf("if (provider === 'marvis')")
-    const opencodeIf = jetHubCode.indexOf("if (provider === 'opencode')")
-    expect(marvisIf).toBeGreaterThanOrEqual(0)
-    expect(opencodeIf).toBeGreaterThanOrEqual(0)
-    expect(marvisIf).toBeLessThan(opencodeIf)
-    // 合并成 `|| provider === 'marvis'` 是这条守卫要防的形态：
-    // 那种写法下 opencode 的 key 弹窗分支会把 marvis 一起吞掉。
-    expect(jetHubCode).not.toMatch(/provider === 'opencode' \|\| provider === 'marvis'/)
-    expect(jetHubCode).not.toMatch(/provider === 'marvis' \|\| provider === 'opencode'/)
-    // 而且必须是「开弹窗 + return」，不是落进通用路径。
-    expect(jetHubCode).toMatch(/if \(provider === 'marvis'\) \{\s*setCredentialModal\(\{ provider, error: '' \}\);\s*return;/)
-  })
-
-  it('★ 登录提交真的打 `account.create`，字段名与宿主逐字一致', () => {
-    expect(jetHubCode).toContain("rpcCall('account.create'")
-    expect(jetHubCode).toMatch(/provider: 'marvis',\s*mode: 'browser',\s*marvisLoginType: loginType,/)
-    // ⚠️ 2026-11-09 用户报障：导入分支**不许**再带 `magpieCredential` ——
-    //    带了就要用户自己找文件、复制 JSON；文件由宿主的 `readMagpieCredential()` 读。
-    expect(jetHubCode).toMatch(/provider: 'marvis',\s*mode: 'magpie-import',/)
-    expect(jetHubCode).not.toContain('magpieCredential: text')
-    // 回调也必须是零参数（`onImport: (text) => …` 会把用户粘贴的文本再带回来）。
-    expect(jetHubCode).toContain('onImport: () => void submitMarvisMagpieImport()')
-    // 登录成功后必须起轮询（宿主返回空 loginUrl，走不了 window.open 那条腿）。
-    expect(jetHubCode).toMatch(/startLoginPoll\(\{ accountId, provider: 'marvis' \}\)/)
-  })
-
-  it('★ 两个按钮分别传上游码值 `1` / `2`（不是 QC / WX）', () => {
-    expect(jetHubCode).toContain("onQq: () => void submitMarvisLogin('1')")
-    expect(jetHubCode).toContain("onWechat: () => void submitMarvisLogin('2')")
-  })
-
-  it('★ 弹窗必须被渲染挂上（漏了 = 点「新建账号」后什么都不发生）', () => {
-    expect(jetHubCode).toMatch(
-      /credentialModal && credentialModal\.provider === 'marvis' \? React\.createElement\(MarvisLoginModal,/,
-    )
-    expect(jetHubCode).toContain("import { MarvisLoginModal } from './marvis-login-modal.js';")
-  })
-})
+/**
+ * ⚠️ 2026-11-10 集成审计 Important 1：本文件原先有 4 条「源码文本」接线断言
+ * （`indexOf` / `toContain` / `toMatch`）。审计实测把它们对应的实现整段包进
+ * `if (false) { … }`、给渲染分派加 `false &&`、再掏空 `createAccount` 的早退
+ * 分支体 —— **4 条里 3 条照绿**，而 CI 全绿的那份代码点「QQ 登录」零请求。
+ *
+ * ⇒ 接线判据已搬到 `tests/unit/jet-hub-panel-wiring.spec.ts` 的
+ * 「腾讯 Marvis 登录接线（行为级）」：真渲染 `ProviderPanel`、真点「新建账号」、
+ * 拿渲染出来的弹窗元素、**真调它的回调**，断言打出去的 `account.create` 载荷。
+ * 那里才是唯一有牙的写法（本仓库 2026-10-22 白屏事故的教训）。
+ */

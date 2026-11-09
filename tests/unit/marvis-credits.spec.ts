@@ -8,8 +8,8 @@ import type { MarvisCredential } from '../../src/marvis.js'
 const CREDENTIAL: MarvisCredential = {
   access_token: 'mv-test-access-token',
   refresh_token: 'test-refresh-token-0001',
-  openid: '864D89036E52CC338D18484131FE053D',
-  guid: 'f4642360411b4132d5917bf04f615b8a',
+  openid: '0123456789abcdef0123456789abcdef',
+  guid: 'fedcba9876543210fedcba9876543210',
   login_type: '1',
 }
 
@@ -44,7 +44,7 @@ describe('★ 钱包响应解析', () => {
         code: 0,
         msg: '',
         data: {
-          openid: '864D89036E52CC338D18484131FE053D',
+          openid: '0123456789abcdef0123456789abcdef',
           total_tokens: '10000000',
           used_tokens: '100',
           frozen_tokens: '0',
@@ -73,6 +73,33 @@ describe('★ 钱包响应解析', () => {
       cycleEndTime: '',
       expiredTime: '',
     })
+  })
+
+  /**
+   * ⚠️ 2026-11-10 对抗性审计 I4：上游可能把业务码序列化成**字符串 `"0"`**。
+   * 判 `parsed.code !== 0` 会把它当失败 ⇒ 积分行报「业务码 0」（自相矛盾），
+   * 而同一个 0 在 `classifyMarvisError` 的 `businessCodeOf` 里是成功的。
+   */
+  it('★★ 业务码是字符串 "0" ⇒ 仍然成功（不是「业务码 0」失败）', async () => {
+    const { balance, error } = await fetchMarvisBalanceDetailed(CREDENTIAL, undefined, {
+      fetchImpl: fake(JSON.stringify({
+        code: '0',
+        data: { total_tokens: '100', used_tokens: '0', avail_tokens: '100', status: 1 },
+      })),
+    })
+    expect(error).toBeUndefined()
+    expect(balance?.packages[0]?.remaining).toBe(100)
+  })
+
+  /** ⚠️ 审计 I5：`status` 也见过字符串形态；`=== 1` 会让账号被判死、从轮换里消失。 */
+  it('★★ status 是字符串 "1" ⇒ active:true（否则账号静默退出轮换）', async () => {
+    const { balance } = await fetchMarvisBalanceDetailed(CREDENTIAL, undefined, {
+      fetchImpl: fake(JSON.stringify({
+        code: 0,
+        data: { total_tokens: '100', used_tokens: '0', avail_tokens: '100', status: '1' },
+      })),
+    })
+    expect(balance?.packages[0]?.active).toBe(true)
   })
 
   it('★ status !== 1 ⇒ active:false（账号被限制）', async () => {

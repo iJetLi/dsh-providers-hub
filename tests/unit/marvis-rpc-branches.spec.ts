@@ -33,7 +33,7 @@ import type { MarvisBrowserLogin } from '../../src/marvis-browser-login.js'
 // 夹具
 // ════════════════════════════════════════════════════════════════════════
 
-const OPENID = '864D89036E52CC338D18484131FE053D'
+const OPENID = '0123456789abcdef0123456789abcdef'
 const ACCESS = 'mv-constructor-access-token'
 const REFRESH = 'constructor-refresh-token'
 /** 回调 URL 的形状（`state` 必须是小数，与 `authorizeUrlOf` 一致）。 */
@@ -90,11 +90,11 @@ function makeFetch(options: {
       headers.append('set-cookie', `refreshtoken=${REFRESH}`)
       headers.append('set-cookie', 'access_token_expire_time=1796660878059')
       headers.append('set-cookie', 'login_type=1')
-      headers.append('set-cookie', 'nickname=Jet')
+      headers.append('set-cookie', 'nickname=test-user')
       return new Response('', { status: 302, headers })
     }
     if (url.includes('/marvis_client/marvis_get_user_info')) {
-      return new Response(JSON.stringify({ ret: 0, nick_name: options.nickname ?? 'Jet', head_img_url: '' }), {
+      return new Response(JSON.stringify({ ret: 0, nick_name: options.nickname ?? '测试用户', head_img_url: '' }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })
@@ -330,7 +330,7 @@ describe("★ account.create({ provider: 'marvis', mode: 'browser' }) 三段式"
     expect(saved?.access_token).toBe(ACCESS)
     expect(saved?.openid).toBe(OPENID)
     // 昵称 / 有效期回填。
-    expect(entry?.nickname).toBe('QQ·Jet')
+    expect(entry?.nickname).toBe('QQ·测试用户')
     expect(entry?.expiresAt).toBe(1796660878059)
   })
 
@@ -403,9 +403,9 @@ describe("★ account.create({ provider: 'marvis', mode: 'magpie-import' }) 同�
       access: ACCESS,
       refresh: REFRESH,
       expires: 1796660878059,
-      accountId: 'QQ·Jet',
+      accountId: 'QQ·测试用户',
       uid: OPENID,
-      metadata: { openid: OPENID, guid: 'f4642360411b4132d5917bf04f615b8a', loginType: '1', nickname: 'Jet' },
+      metadata: { openid: OPENID, guid: 'fedcba9876543210fedcba9876543210', loginType: '1', nickname: '测试用户' },
     },
   })
 
@@ -423,7 +423,7 @@ describe("★ account.create({ provider: 'marvis', mode: 'magpie-import' }) 同�
     const entry = pool.findAccount(value.accountId)
     expect(entry?.provider).toBe('marvis')
     expect(entry?.refreshable).toBe(true)
-    expect(entry?.nickname).toBe('QQ·Jet')
+    expect(entry?.nickname).toBe('QQ·测试用户')
     expect(entry?.expiresAt).toBe(1796660878059)
     expect(store.saved(entry!.credentialRef)?.openid).toBe(OPENID)
   })
