@@ -837,7 +837,14 @@ export function gatewayButtonTitle(status) {
 export function gatewayEndpoint(status) {
   const address = status?.address
   if (!address) return '';
+  const publicEndpoint = gatewayPublicEndpoint(status)
+  if (publicEndpoint !== '') return publicEndpoint;
   return gatewayHttpUrl(address.host, address.port, '/v1');
+}
+
+export function gatewayPublicEndpoint(status) {
+  const value = status?.publicUrl
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : '';
 }
 
 /**
@@ -988,7 +995,7 @@ export function gatewayStatusLines(status) {
       // ⚠️ 绑 0.0.0.0（局域网开关）时，抄走的字面量在任何设备上都连不上
       // （0.0.0.0 不是一台具体设备的地址）——必须当场说明要换成什么。
       // 判据复用宿主侧 isWildcardHost（与本文件其它 host 判据同源）。
-      isWildcardHost(status.address?.host)
+      isWildcardHost(status.address?.host) && gatewayPublicEndpoint(status) === ''
         ? '其它设备请把地址里的 0.0.0.0 换成本机的局域网 IP（ipconfig 可查）。'
         : '',
       // ⚠️ 暴露面变了必须**明说**（issue IKL7UN）。原先「只绑定 127.0.0.1」是

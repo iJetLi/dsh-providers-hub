@@ -1757,7 +1757,7 @@ describe('供应商弹窗的自定义排序（2026-10-06 拖拽需求）', () =>
 
     it('★★ CSS 两态必须都在（开=蓝色，关=灰色，滑块位移）', () => {
       expect(styles, '开关本体').toContain('.dim-jh-providerSwitch {')
-      expect(styles, '打开态必须是蓝色').toMatch(/\.dim-jh-providerSwitch\[aria-checked='true'\] \{ background: #1677ff/)
+      expect(styles, '打开态必须是蓝色').toMatch(/\.dim-jh-providerSwitch\[aria-checked='true'\] \{ background: var\(--dsw-alias-brand-primary, #1677ff\)/)
       expect(styles, '滑块必须位移到右侧').toContain(
         '.dim-jh-providerSwitch[aria-checked=\'true\'] .dim-jh-providerSwitchThumb { transform: translateX(16px); }',
       )

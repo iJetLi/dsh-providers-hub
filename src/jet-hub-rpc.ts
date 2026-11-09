@@ -27,7 +27,7 @@ import { AccountPool, asProxyText } from './account-pool.js'
 import { AUTO_PROVIDER as AUTO_PROVIDER_ID } from './auto-adapter.js'
 import { resolveAutoBadgeRewrite, type AutoBadgeState } from './auto-badge.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
-import { isGatewayEnabled, isGatewayHostFromEnv } from './openai-gateway/config.js'
+import { gatewayPublicUrl, isGatewayEnabled, isGatewayHostFromEnv } from './openai-gateway/config.js'
 import { collectGatewayEffortViews, collectGatewayModels, toGatewayModelIds, type GatewayModelSource } from './openai-gateway/models.js'
 import {
   applyGatewayDesiredState,
@@ -10549,6 +10549,7 @@ function registerJetHubEndpoints(
           // 「期望运行但没监听」的结构化原因（Issue #11 建议 ②）：
           // `running: false` 本身分不清「用户关的」与「起不来的」。
           lastError: await degrade('失败原因', () => gatewayLastError(), null),
+          publicUrl: await degrade('对外地址', () => gatewayPublicUrl(process.env), null),
           // ⚠️ 明文凭据：只用于设置页展示与复制，**不进日志**。
           apiKey: apiKey === null
             ? null
