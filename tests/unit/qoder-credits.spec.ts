@@ -104,6 +104,53 @@ describe('Qoder 积分余额', () => {
   })
 
   /**
+   * ★ 企业账号（`userType: 'enterprise'`）的额度在 `orgResourcePackage`
+   * （2026-11-09 qodercn 真实凭据实测）：该形态 `userQuota` / `addOnQuota`
+   * **都不下发**，老解析一个包都拿不到 ⇒「积分查询失败（响应未包含任何额度包）」。
+   *
+   * ⚠️ 与 `displayMode === 'enterprise'`（上游只给网页链接、不给数字的那个分支）
+   * **不是同一形态** —— 实测企业账号的 `displayMode` 仍是 `'qoder'`。
+   *
+   * 该层没有 `total`，`cap` 即总额；也没有任何日期字段。到期是否随订阅周期
+   * 过期未验证（两方向都无证据），按 `expiryUnknown` 置位纪律**不置位**
+   * ⇒ 固化：不产出 `expiryUnknown`、不产出 `deductionEndTime`（落「长期」）。
+   */
+  it('★ 企业账号：orgResourcePackage（cap=总额）解析为「企业资源包」', async () => {
+    // 实测响应逐字段照搬（只替 userId）：displayMode 仍是 'qoder'，
+    // expiresAt 是企业订阅刷新日（1796832000000），但语义归属 userQuota，
+    // 该层不下发 ⇒ 不应被误挂到任何包上。
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      displayMode: 'qoder',
+      qoderUsage: {
+        userId: '01a1be49-d496-739d-a853-2cd75ca1dbc0',
+        userType: 'enterprise',
+        usageType: 'credits',
+        totalUsagePercentage: 0,
+        isQuotaExceeded: false,
+        expiresAt: 1796832000000,
+        upgradeUrl: 'https://qoder.cn/pricing?client=qoder',
+        orgResourcePackage: {
+          used: 0, remaining: 3000, percentage: 0, unit: 'credits',
+          cap: 3000, available: true,
+        },
+        isPlanQuotaProrated: false,
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch
+    const balance = await fetchQoderCreditBalance(cred, QODER_CN, fetcher)
+    expect(balance).not.toBeNull()
+    expect(balance!.total).toBe(3000)
+    expect(balance!.packages.length).toBe(1)
+    const org = balance!.packages[0]!
+    expect(org.name).toBe('企业资源包')
+    expect(org.total).toBe(3000)
+    expect(org.remaining).toBe(3000)
+    // 无日期字段 ⇒ 不写 deductionEndTime（不编造日期）
+    expect(Object.hasOwn(org as object, 'deductionEndTime')).toBe(false)
+    // 过期策略未验证 ⇒ 按 expiryUnknown 置位纪律不置位
+    expect(Object.hasOwn(org as object, 'expiryUnknown')).toBe(false)
+  })
+
+  /**
    * ★★ **`dedicatedResourcePackages` 的永久哨兵也必须被拦住**
    * （2026-10-21 合并审计发现，真实缺陷）。
    *

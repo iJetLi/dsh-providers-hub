@@ -597,9 +597,12 @@ function toPackage(
  * 返回 `null` 表示**查不到**（网络失败 / 401 / 响应形状非法），
  * 与「余额为 0」严格区分 —— 失败时 UI 应显示原因而不是 0。
  *
- * 企业版账号（`displayMode === 'enterprise'`）返回 `null`：
- * 那种模式不提供额度数字，只给一个外部链接（`enterpriseUsage.detailUrl`），
- * 报 0 会误导用户以为没额度。
+ * 企业版账号有**两种互不重叠的形态**，别混为一谈：
+ * - `displayMode === 'enterprise'`：那种模式不提供额度数字，只给一个外部链接
+ *   （`enterpriseUsage.detailUrl`），报 0 会误导用户以为没额度 ⇒ 返回 `null`；
+ * - `userType === 'enterprise'`（2026-11-09 实测）：`displayMode` 仍是 `'qoder'`，
+ *   额度数字在 `qoderUsage.orgResourcePackage`，由 `parseQoderUsage` 正常解析，
+ *   **不**落本函数的企业分支。
  */
 export async function fetchQoderCreditBalance(
   credential: QoderCredential,
@@ -648,6 +651,10 @@ export interface QoderBalanceOptions {
  * 2. **HTTP 层**：401/403 = 凭据；其它非 2xx = 服务端（带状态码）。
  * 3. **形状层**：非 JSON / 非对象 / 缺 `qoderUsage` / 一个包都没解析出来。
  * 4. **企业版**：`displayMode === 'enterprise'` ⇒ 上游本就不给数字（不是故障）。
+ *    ⚠️ 与 `userType === 'enterprise'`（额度在 `orgResourcePackage`、
+ *    `displayMode` 仍是 `'qoder'`）**不是同一形态** —— 后者由
+ *    `parseQoderUsage` 正常解析，不会走到这里的企业分支。
+ *
  *
  * @returns 成功时 `{ balance }`；失败时 `{ balance: null, error }`。
  *   ⚠️ 永远返回 `balance` 字段（共享骨架靠 `balance` 判定成败，
@@ -812,6 +819,25 @@ function parseQoderUsage(qoderUsage: Record<string, unknown>): CreditBalance | n
       )
       if (pkg !== undefined) packages.push(pkg)
     }
+  }
+
+  // 企业版账号（`userType: 'enterprise'`，2026-11-09 qodercn 真实凭据实测）：
+  // 该形态下 `userQuota` / `addOnQuota` **都不下发**，额度只在
+  // `orgResourcePackage`（`{used, remaining, percentage, unit, cap, available}`）——
+  // 不解析它 ⇒ 企业账号报「积分查询失败（响应未包含任何额度包）」。
+  // ⚠️ 该层没有 `total`，`cap` 即总额 —— 映射后复用同一 `toPackage`
+  //（红线：同一语义只留一份实现）；`remaining` 缺失时由 `cap - used` 兑底。
+  // ⚠️ 到期：该层同样没有任何日期字段。企业额度是否随订阅周期过期**未验证**
+  //（两方向都无证据），按 `CreditPackage.expiryUnknown` 的置位纪律
+  //（「只在上游确实会过期、而本仓确实拿不到日期时置位」）**不置位**
+  // ⇒ 落既有「无日期 → 长期」路径；若将来拿到「随订阅周期清零」的证据，
+  // 在此置 `expiryUnknown: true` 即可（分桶行为不变，只改文案）。
+  const orgPkg = qoderUsage.orgResourcePackage
+  if (typeof orgPkg === 'object' && orgPkg !== null && !Array.isArray(orgPkg)) {
+    const cap = readNumber(orgPkg, 'cap')
+    const normalized = cap !== undefined ? { ...orgPkg, total: cap } : orgPkg
+    const pkg = toPackage('企业资源包', normalized)
+    if (pkg !== undefined) packages.push(pkg)
   }
 
   // 一个包都没解析出来 → 视为「查不到」（响应形状与预期不符），
