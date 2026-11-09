@@ -805,3 +805,133 @@ describe('严格手动顺序开关（行为级：渲染 / 点击 / 不渲染）'
     expect(set[0]?.payload).toEqual({ provider: 'trae', enabled: true })
   })
 })
+
+/**
+ * ★★ **腾讯 Marvis 的登录接线**（行为级）—— 2026-11-10 集成审计 Important 1。
+ *
+ * ## 为什么不能只留源码文本断言
+ *
+ * 原先这四条在 `marvis-client-panel.spec.ts` 里是纯 `toContain` / `toMatch`。
+ * 审计实测：把 `submitMarvisLogin`（1063 字符）与 `submitMarvisMagpieImport`
+ * （827 字符）**整段包进 `if (false) { … }`**、给渲染分派加 `false &&`、
+ * 再掏空 `createAccount` 的早退分支体 —— **4 条里 3 条照绿**。
+ *
+ * 而 CI 全绿的那份代码，用户点「QQ 登录」「微信登录」「从 magpie 导入」
+ * 是：零请求、弹窗不关、无任何提示。
+ *
+ * ⇒ 这里真渲染 `ProviderPanel`（provider='marvis'）、真点「新建账号」、
+ * 再拿渲染出来的 `MarvisLoginModal` 元素、**真调它的回调**，断言打出去的 RPC。
+ */
+describe('腾讯 Marvis 登录接线（行为级）', () => {
+  /** 只在请求 Marvis 面板时返回可用响应（其余 provider 走默认空壳）。 */
+  function marvisResponder(method: string, payload?: unknown): unknown {
+    // ⚠️ 这里返回的是**响应体本身**（`rpcCall` 不拆 `value` 信封）——
+    //    写成 `{ok:true, value:{accountId}}` 会让客户端读到 `undefined`，
+    //    于是「宿主未返回账号 id」分支早退，提示永远不出现。
+    if (method === 'account.create') {
+      return { ok: true, accountId: 'marvis-4d4933fc', loginUrl: '' }
+    }
+    if (method === 'login.poll') return { ok: true, done: true, success: true }
+    void payload
+    return { ok: true, order: [], statuses: {}, accounts: [] }
+  }
+
+  type Call = { method: string; payload: unknown }
+  type El = { type: unknown; props: Record<string, unknown> }
+
+  /** 渲染 Marvis 面板 → 点「新建账号」→ 重新渲染（hook 槽位保留 ⇒ 弹窗出现）。 */
+  async function openMarvisModal(): Promise<{ calls: Call[]; modal: El | undefined }> {
+    const calls: Call[] = []
+    const rpcCall = async (method: string, payload?: unknown) => {
+      calls.push({ method, payload })
+      return marvisResponder(method, payload)
+    }
+    resetRender()
+    const mod = await import('../../plugin-src/client/jet-hub.js')
+    const panel = (mod as unknown as { __providersPanelForTest?: (props: unknown) => unknown })
+      .__providersPanelForTest
+    expect(typeof panel, '__providersPanelForTest 未导出 ⇒ 接线层无法被行为级守卫覆盖').toBe('function')
+    panel?.({ provider: 'marvis', rpcCall })
+
+    const createButton = elements.find((element) => {
+      if (element.type !== 'button') return false
+      const props = element.props as Record<string, unknown> | null | undefined
+      return props?.['aria-label'] === '新建账号'
+    }) as El | undefined
+    expect(createButton, 'Marvis 面板没有「新建账号」按钮').toBeDefined()
+    await (createButton?.props.onClick as (() => unknown) | undefined)?.()
+
+    // 第二次渲染：state 里已有 credentialModal ⇒ 弹窗元素出现。
+    // ⚠️ 只清 `elements` 与 `cursor`（hook 槽位要**保留**，否则 state 回到初始值，
+    //    弹窗永远不出现 —— 这正是行为级测试与「跑一次就算」的分界）。
+    elements = []
+    cursor = 0
+    panel?.({ provider: 'marvis', rpcCall })
+    const modal = elements.find((element) => {
+      const props = element.props as Record<string, unknown> | null | undefined
+      return typeof props?.onQq === 'function' && typeof props?.onImport === 'function'
+    }) as El | undefined
+    return { calls, modal }
+  }
+
+  it('★★ 弹窗真的挂上了（点「新建账号」后出现 Marvis 登录弹窗）', async () => {
+    const { modal } = await openMarvisModal()
+    expect(modal, '弹窗没被渲染 ⇒ 用户点「新建账号」后什么都不发生').toBeDefined()
+  })
+
+  it('★★ 点「QQ 登录」⇒ account.create 带 browser 模式与 login_type=1', async () => {
+    const { calls, modal } = await openMarvisModal()
+    await (modal?.props.onQq as (() => unknown) | undefined)?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const create = calls.filter((call) => call.method === 'account.create')
+    expect(create, 'QQ 登录没有打 account.create ⇒ 点了没反应').toHaveLength(1)
+    expect(create[0]?.payload).toMatchObject({
+      provider: 'marvis',
+      mode: 'browser',
+      marvisLoginType: '1',
+    })
+  })
+
+  it('★★ 点「微信登录」⇒ login_type=2（两条 OAuth 链不能接反）', async () => {
+    const { calls, modal } = await openMarvisModal()
+    await (modal?.props.onWechat as (() => unknown) | undefined)?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const create = calls.filter((call) => call.method === 'account.create')
+    expect(create).toHaveLength(1)
+    expect(create[0]?.payload).toMatchObject({ provider: 'marvis', marvisLoginType: '2' })
+  })
+
+  it('★★ 点「从 magpie 导入」⇒ magpie-import 模式，且**不带**任何粘贴内容', async () => {
+    const { calls, modal } = await openMarvisModal()
+    await (modal?.props.onImport as (() => unknown) | undefined)?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const create = calls.filter((call) => call.method === 'account.create')
+    expect(create, '导入没有打 account.create').toHaveLength(1)
+    const payload = create[0]?.payload as Record<string, unknown>
+    expect(payload).toMatchObject({ provider: 'marvis', mode: 'magpie-import' })
+    // ⚠️ 带空串会被宿主误报成「解析失败」；带文本则说明又退回让用户粘贴。
+    expect(Object.hasOwn(payload, 'magpieCredential')).toBe(false)
+  })
+
+  /**
+   * ⚠️ 轮询本身在 harness 里起不来（`useEffect` 是空实现 ⇒ `mounted.current`
+   * 恒 false，`startLoginPoll` 第一行就早退）。可观察的那一半是**提交后写出的
+   * 提示**：它证明「拿到 accountId 之后真的往下走了」，`if (false)` 包体、
+   * 掏空函数体都会让它消失。
+   */
+  it('★★ 登录提交后必须给用户「去浏览器窗口完成授权」的提示', async () => {
+    const { modal } = await openMarvisModal()
+    const before = writes.length
+    await (modal?.props.onQq as (() => unknown) | undefined)?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const notices = writes
+      .slice(before)
+      .map((entry) => entry.value as { text?: unknown } | null | undefined)
+      .filter((value): value is { text: string } =>
+        value !== null && typeof value === 'object' && typeof value.text === 'string')
+    expect(
+      notices.some((notice) => notice.text.includes('浏览器窗口已打开')),
+      '提交后没有任何提示 ⇒ 用户不知道要去窗口里授权（观感 = 点了没反应）',
+    ).toBe(true)
+  })
+})

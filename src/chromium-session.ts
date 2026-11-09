@@ -1378,6 +1378,22 @@ export function parseWmctrlList(output: string, pid: number): string[] {
   return ids
 }
 
+/**
+ * 一条 CDP **事件**（没有 `id` 的消息，如 `Fetch.requestPaused`）。
+ *
+ * ⚠ **页面级事件必须按 `sessionId` 过滤**：`Target.attachToTarget
+ * { flatten: true }` 之后，所有页面的事件都会从**同一条** WebSocket
+ * 上冒出来，多条腿（多个登录流程、多个 tab）共用一条连接时，
+ * 不过滤就会把别人的 `requestId` 当成自己的去 fulfill。
+ */
+export interface CdpEvent {
+  method: string
+  params: Record<string, unknown>
+  sessionId?: string
+}
+
+export type CdpEventListener = (event: CdpEvent) => void
+
 /** 极简 CDP 客户端（用 Node 内置 WebSocket，**零第三方依赖**）。 */
 export class CdpConnection {
   private nextId = 0
@@ -1386,21 +1402,77 @@ export class CdpConnection {
     reject: (error: Error) => void
   }>()
 
+  /** 事件订阅者（有序集合；退订即删除）。 */
+  private readonly listeners = new Set<CdpEventListener>()
+
   constructor(private readonly ws: WebSocket) {
     ws.addEventListener('message', (event: MessageEvent) => {
-      let message: { id?: number; error?: unknown; result?: unknown }
+      let message: {
+        id?: number
+        method?: string
+        params?: unknown
+        sessionId?: string
+        error?: unknown
+        result?: unknown
+      }
       try {
         message = JSON.parse(String(event.data)) as typeof message
       } catch {
         return
       }
-      if (message.id === undefined) return
+      // 事件（无 id）走订阅者；命令响应（有 id）走 pending。
+      // 顺序不能反过来：响应一旦被当成事件分发给订阅者，订阅者可能
+      // 对 `params` 做解构而抛错（虽然被吞掉，但白跑一次）。
+      if (message.id === undefined) {
+        if (typeof message.method === 'string') {
+          this.dispatch({
+            method: message.method,
+            params: (message.params ?? {}) as Record<string, unknown>,
+            ...(message.sessionId === undefined ? {} : { sessionId: message.sessionId }),
+          })
+        }
+        return
+      }
       const slot = this.pending.get(message.id)
       if (slot === undefined) return
       this.pending.delete(message.id)
       if (message.error !== undefined) slot.reject(new Error(JSON.stringify(message.error)))
       else slot.resolve(message.result)
     })
+  }
+
+  /**
+   * 订阅 CDP 事件（无 `id` 的消息）。
+   *
+   * @returns 退订函数（**幂等**：重复调用不抛错）。
+   *
+   * ⚠ **订阅者抛错必须被吞掉**（见 {@link dispatch}）：这里挂在
+   * `ws.addEventListener('message')` 的回调里，抛出去就是未捕获异常。
+   * 在浏览器登录这种「用户正等着」的路径上，那等于整个流程静默卡死
+   * —— 比明确失败更难排查。
+   */
+  subscribe(listener: CdpEventListener): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  /**
+   * 把一条事件分发给所有订阅者。
+   *
+   * ⚠ 遍历的是**副本**：订阅者在回调里退订（很常见，比如「拿到就退」）
+   * 不会让 `Set` 在迭代中被改动。单个订阅者抛错只影响它自己 ——
+   * 一条事件分发不完不得让整条 WebSocket 的连接循环停摆。
+   */
+  private dispatch(event: CdpEvent): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(event)
+      } catch {
+        // 订阅者自己的错误由它自己记日志；这里只保证循环继续。
+      }
+    }
   }
 
   /**

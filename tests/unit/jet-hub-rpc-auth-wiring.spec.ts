@@ -120,6 +120,12 @@ const AUTH_SERVICE: Readonly<Record<string, string>> = {
   //    `${product.id}Auth` 派生 ⇒ `baizhiAuth`。它是静态 Key 型渠道，没有
   //    refresh 端点，但仍要占一个真实 auth 键位（与 monkeycode / qiniu 同型）。
   baizhi: 'baizhiAuth',
+  // ⚠️ 腾讯 Marvis（2026-11-09）：服务名由 `${product.id}Auth` 派生 ⇒
+  //    `marvisAuth`。它有**真实** refresh 端点（`POST /marvis_client_login/
+  //    marvis_refresh_token`，body 的 `loginType` 恒 `'Marvis'`、access_token
+  //    不变只重置有效期）⇒ 必须占一个真实 auth 键位，否则「过期账号自愈」
+  //    与续期分派都会静默落到 undefined。
+  marvis: 'marvisAuth',
 }
 
 /**
@@ -349,9 +355,10 @@ describe('★ registerJetHubRpc 的命名对象接线（真跑 apply + account.r
     // ⚠️ 2026-11-01 加 magicrewintl（MagiCrew 国际版）：23 → 24。
     // ⚠️ 2026-11-02 加 monkeycode（MonkeyCode）：24 → 25。
     // ⚠️ 2026-11-02 同日再加 monkeycodeintl（国际站，拆站）+ baizhi（百智云）：25 → 27。
+    // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis）：27 → 28。
     //    （三审 F🟢-5：本处原只写到 25，而断言已是 27 —— 注释漏了一步就会让
     //     下一个加 provider 的人以为“上次是 25”而把数字写回 25。）
-    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(27)
+    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(28)
     // 另一方向（原断言的**全部**证明力都在这条上，单独留着免得它随上面那条一起消失）：
     // 表里的每个键都必须是 registry 里真实存在的 provider id（防拼写错误造成的僵尸项）。
     for (const id of Object.keys(AUTH_SERVICE)) {

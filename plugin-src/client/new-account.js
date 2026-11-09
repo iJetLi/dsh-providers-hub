@@ -45,6 +45,12 @@
  *   `global` → `zh.accio.com`），选错区域的后果是**登录页根本打不开该账号**
  *   （国际用户拿中国版登录页登不进去）。区域由服务端按账号下发、**不能事后推断**，
  *   故必须在登录前由用户指定。
+ * ⚠️ **`marvis` 刻意不在本白名单里**（2026-11-09 真机报障）：它确实也要先选
+ *   QQ / 微信，但它的选择 UI 是**自己的** `MarvisLoginModal`（由 `createAccount`
+ *   里那条独立 `if (provider === 'marvis')` 早退打开），而本白名单驱动的是
+ *   **ZCode 那个渠道弹窗** —— 一旦把 marvis 加进来，用户点「+ 新建账号」看到的
+ *   就是「添加 ZCode 账号」+ cn BigModel / z.ai 两个渠道（用户截图实证）。
+ *   ⇒ 判据是「**弹窗组件是哪一个**」，不是「要不要问一句」。
  * - `autoclaw` / `autoclawintl`：两者都有「一键导入本机桌面端凭据」与
  *   「手机验证码登录」两条路，且**读的是不同的 userData 目录**
  *   （`AutoClaw-official` / `AutoClaw-oversea-official`）。
@@ -63,7 +69,9 @@
  *   语义不可互换 ⇒ 合并成同一个形参会静默串台（A 家选了「本机导入」发给 B 家）。
  *   故 astudio 占第 4 位、autoclaw 占第 5 位，两个都是可选的。
  */
-const PROVIDERS_ASKING_OPTIONS = Object.freeze(['zcode', 'accio', 'astudio', 'autoclaw', 'autoclawintl']);
+const PROVIDERS_ASKING_OPTIONS = Object.freeze([
+  'zcode', 'accio', 'astudio', 'autoclaw', 'autoclawintl',
+]);
 
 /**
  * 该 provider 的「新建账号」是否**需要先问一句**（即是否弹预选窗）。
@@ -114,7 +122,9 @@ export function newAccountAsksChannel(provider) {
  * @returns {{ provider: string, zcodeProvider?: string, accioRegion?: string,
  *   astudioLoginMethod?: string, autoclawMode?: string }}
  */
-export function buildCreateAccountPayload(provider, zcodeProvider, accioRegion, astudioLoginMethod, autoclawMode) {
+export function buildCreateAccountPayload(
+  provider, zcodeProvider, accioRegion, astudioLoginMethod, autoclawMode,
+) {
   // 排除法：先把「载荷里没有任何专属字段」的 provider 早退掉（方向与白名单相反）。
   // ⚠️⚠️ **`autoclawintl` 必须在这里**（2026-10-20 修）：原实现只列了 `autoclaw`
   //    ⇒ 国际版的载荷被早退成 `{ provider }`，丢掉 `autoclawMode`
@@ -127,6 +137,10 @@ export function buildCreateAccountPayload(provider, zcodeProvider, accioRegion, 
   }
   if (provider === 'zcode') return { provider, zcodeProvider };
   if (provider === 'accio') return { provider, accioRegion };
+  // ⚠️ **这里没有 marvis 分支**（2026-11-09 真机报障）：marvis 的登录方式由它自己的
+  //    `MarvisLoginModal` 选，`createAccount` 在调用本函数**之前**就早退到那条独立
+  //    `if (provider === 'marvis')` 了。若在这里加回 marvis 分支，唯一的效果是
+  //    让人误以为「白名单里也该有它」—— 而那正是把 ZCode 弹窗弹给 marvis 的成因。
   // ⚠ 两家各返回**自己那一个**字段：绝不合并成一个字段，否则宿主读到的是
   //    另一个 provider 的值（静默串台，且两边各自都「看起来传对了」）。
   if (provider === 'astudio') return { provider, astudioLoginMethod: astudioLoginMethod ?? 'local' };

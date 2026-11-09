@@ -198,6 +198,13 @@ import { ModelscopeAuth } from './modelscope-auth.js'
 import { ModelscopeAdapter, registerModelscopeLlm } from './modelscope-adapter.js'
 import { MODELSCOPE } from './modelscope-product.js'
 import { modelscopeModelsUrl, modelscopeHeaders, type ModelscopeCredential } from './modelscope.js'
+// 腾讯 Marvis（2026-11-09）。OpenAI 兼容 + OAuth 授权码（QQ / 微信），
+// 目录**只有** `main-auto` 一条（上游无目录端点），余额与推理同一个 host。
+// 见 `src/marvis-product.ts` / `src/marvis-adapter.ts` 模块头。
+import { MarvisAuth } from './marvis-auth.js'
+import { MarvisAdapter, registerMarvisLlm, type MarvisSlot } from './marvis-adapter.js'
+import { MARVIS } from './marvis-product.js'
+import { parseMarvisCredential, type MarvisCredential } from './marvis.js'
 // ⚠️ **本 fork 独有**的 provider（上游 rc.11 仍无 qiniu）。七牛云 AI 与 modelscope
 // **同格**：OpenAI 兼容 + 长期有效的静态 API Key（无 refresh、无余额端点），
 // 故整套实现是 modelscope 范式的镜像。见 `src/qiniu-product.ts` 模块头的出处表。
@@ -813,6 +820,20 @@ export const probeById: Record<string, NonNullable<ProviderRuntime['probe']>> = 
         apiKey: (credential as BaizhiCredential).access_token,
       }],
       product: BAIZHI,
+    }),
+  },
+  // 腾讯 Marvis（2026-11-09）—— OAuth 凭据（QQ / 微信），探测只喂**这一份**。
+  //
+  // ⚠️ 必须**单独一条**：`probeById` 按 provider id 取工厂，漏了这一条 ⇒
+  //    「重测」按钮点了没反应（查不到就直接回「不支持探测」，全程静默），
+  //    而 Marvis 没有 `rateLimit: false` 豁免 ⇒ 按钮**一定**会渲染。
+  // ⚠️ 不传 `warn` / `accountPool`：`probeById` 是**模块级**常量（在 `apply()`
+  //    之前求值），此处没有 `ctx`、也没有池 ⇒ 不会写任何限流标记。
+  marvis: {
+    createProbeAdapter: (ref, credential) => new MarvisAdapter({
+      credentialRef: credentialRef(ref),
+      slots: async () => [{ id: MARVIS.id, credential: credential as MarvisCredential }],
+      product: MARVIS,
     }),
   },
   // ZCode（智谱）→ Anthropic Messages 体 + 阿里云 captcha 参数。
@@ -4105,6 +4126,54 @@ export function apply(ctx: Context): void {
   // 故这里**不需要**再 ctx.provide('astudioAuth' / 'astudioLlm')。
   // 不注册斜杠命令：入口在 Jet Hub 的 AStudio 面板。
   const astudio = new AstudioAuth(ctx)
+  // ===== 腾讯 Marvis（2026-11-09）=====
+  //
+  // 形态：OpenAI 兼容（`/v1/chat/completions`）+ OAuth 授权码（QQ / 微信）。
+  // 目录**只有一条** `main-auto`（上游无目录端点，见 `src/marvis-product.ts`）。
+  //
+  // ⚠️ 与 modelscope / qiniu 的槽制同形：`slots()` 由**接线层**解析，适配器
+  //    不直接读凭据库。区别只在槽里装的是 `MarvisCredential`（要放进请求头
+  //    与 `Marvis-Ext` 指纹串），而不是裸 API Key。
+  //
+  // ⚠️ **不要**给模型网关加 UAL 签名头（`Ual-Access-Signature` 等）：
+  //    实测加了会 403 → 被归一成 401「登录态过期」。签名只属于 `/v3/*` 业务
+  //    接口，见 `src/marvis.ts` 的 `businessHeaders` 注释。
+  const marvisAuth = new MarvisAuth(ctx)
+  const marvisAdapter = registerMarvisLlm(ctx, {
+    // 单凭据回退 ref：池里没有 marvis 账号时用它（与其余 provider 同约定）。
+    credentialRef: credentialRef(MARVIS.defaultCredentialRef),
+    slots: async (modelId?: string): Promise<readonly MarvisSlot[]> => {
+      const entries = await pool.listAccounts(MARVIS.id)
+      const usable = await Promise.all(entries.map(async (entry) => {
+        // 与其余 provider 同款：停用账号不参与自动选号。
+        if (!entry.enabled) return undefined
+        // ⚠️ 模型级限流标记：`modelId` 缺省时**不查**（目录路径刻意不传，
+        //    传了会让被限流的账号把整个目录拖空）。
+        if (modelId !== undefined && modelId.length > 0) {
+          const resetAt = entry.modelRateLimits?.[modelId]
+          if (typeof resetAt === 'number' && resetAt > Date.now()) return undefined
+        }
+        const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+        if (!resolved) return undefined
+        const credential = parseMarvisCredential(resolved.value)
+        if (credential === undefined) return undefined
+        return { id: entry.id, credential }
+      }))
+      return usable.filter((slot): slot is MarvisSlot => slot !== undefined)
+    },
+    accountPool: pool,
+    product: MARVIS,
+    // 限流标记的**写入端**（缺了它 `slots()` 里的读端是死代码，适配器里的
+    // `markLimited?.()` 也恒为 no-op ⇒ 429 之后永远重打同一个号）。
+    markLimited: async (slotId, modelId, resetAtMs) => {
+      await pool.updateModelRateLimit(slotId, modelId, resetAtMs)
+    },
+    // ⚠️ 换号/风控/上游故障时适配器会 `warn?.(...)`（2026-11-09 评审 I5）：
+    //    不传这一格时，生产里每次「换下一个账号」都**零日志** —— 用户报障
+    //    「偶发失败」时无法判断是哪个号被换掉了、为什么。本仓其余 13 处同款。
+    warn: (message) => ctx.logger?.warn?.(message),
+    readImage: makeReadImage(ctx),
+  })
   // 超级麦吉（Magicrew 国内站，2026-10-29）。MagicrewAuth 构造时自 provide（服务名 magicrewAuth）。
   const magicrewAuth = new MagicrewAuth(ctx)
   /**
@@ -6071,6 +6140,9 @@ async function fetchBalanceReading(
     //    退化到 `llm.listModels`（已按黑名单过滤）⇒ 「关闭整个 provider」时
     //    漏写黑名单 ⇒ 出现「provider 显示已关闭、模型却仍可选用」的矛盾态。
     modelscope: pruned(MODELSCOPE.id, modelscopeAdapter),
+    // ⚠️ 腾讯 Marvis（2026-11-09）：必须进这张表，理由与 modelscope / qiniu
+    //    逐条相同（`provider.status` 的「已关闭」判据读的是不套黑名单的全量目录）。
+    marvis: pruned(MARVIS.id, marvisAdapter),
     // ⚠️ **本 fork 独有**（qiniu，2026-10-29）。必须进这张表，理由与 modelscope
     //    逐条相同：`provider.status` 的「已关闭」判据是 `total > 0 &&
     //    disabled === total`，读的是 `listAllModels()` 那份**不套黑名单**的全量
@@ -6492,6 +6564,10 @@ async function fetchBalanceReading(
       //    续期 / 积分 / 探测三条链路全部**静默失效**（`provider-runtime.ts`
       //    的注册表是按本数组逐个 `registerProviderRuntime` 建的）。
       ['baizhi', baizhi],
+      // ⚠️ 腾讯 Marvis（2026-11-09）：必须**单独一行**。漏加 = 它不进注册表
+      //    ⇒ 续期 / 积分 / 探测三条链路全部**静默失效**。
+      //    ⚠️ 位置：必须在 `['magicrew', …]` 之前（与 registry 声明序一致）。
+      ['marvis', marvisAuth],
       // ⚠️ 超级麦吉（Magicrew，2026-10-29）：值必须是 `registerJetHubRpc` 的
       //    `auths.magicrew` 是**同一个对象**，否则守卫用例布在该实例上的 spy
       //    收不到本循环的调用（本仓库复发过 6 次）。
@@ -6709,6 +6785,10 @@ async function fetchBalanceReading(
     //    registry 数组里 `['magicrew', magicrewAuth]` 的**同一个实例**，否则
     //    `provider-runtime-wiring.spec.ts` 布在该实例上的 spy 收不到调用。
     magicrew: magicrewAuth,
+    // ⚠️ 腾讯 Marvis（2026-11-09）：值必须是上面 registry 数组里
+    //    `['marvis', marvisAuth]` 的**同一个实例**，否则 spec 布在该实例上的
+    //    spy 收不到调用（本仓库复发过 6 次）。
+    marvis: marvisAuth,
     // ⚠️ MagiCrew 国际站（2026-11-01）：必须与上面 `['magicrewintl', magicrewIntlAuth]`
     //    是**同一个实例**，否则 spec 布在该实例上的 spy 收不到调用。
     magicrewintl: magicrewIntlAuth,

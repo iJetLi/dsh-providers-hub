@@ -98,8 +98,11 @@ const EXPECTED_WIRED = [
   //    「有 `active && remaining > 0` 的包 ⇒ NEVER、一个都没有 ⇒ UNUSABLE」。
   //    ⚠️ 两站账号池不互通 ⇒ 折算原语必须各传各的 product（国际站 cookie 打
   //    国内站回 401，传错则恒 UNUSABLE）。
+  // ⚠️ 腾讯 Marvis（`marvis`，2026-11-09）：属「有余额但不下发到期时间」那一类
+  //    （钱包只有 total/used/frozen）⇒ 有余额即 `NEVER`、烧光即 `UNUSABLE`。
+  //    ⚠️ 三处必须同改：本清单 + `WIRED_EXPIRY_PROVIDERS` + `createProviderExpiry()`。
   'accio', 'astudio', 'autoclaw', 'autoclawintl', 'baizhi', 'buddy', 'codearts',
-  'lobsterai', 'loomy', 'magicrew', 'magicrewintl', 'minimax', 'minimaxintl',
+  'lobsterai', 'loomy', 'magicrew', 'magicrewintl', 'marvis', 'minimax', 'minimaxintl',
   'modelscope', 'monkeycode', 'monkeycodeintl', 'officeace', 'qoder', 'qodercn',
   'trae', 'workbuddy', 'zcode',
 ]

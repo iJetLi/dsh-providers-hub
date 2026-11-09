@@ -187,6 +187,44 @@ const CREDENTIAL_ASSIGNMENT = new RegExp(
 )
 
 /**
+ * **账号级身份标识**（`openid` / `guid` / `svid` / 32 位 hex 的 `uid`）绝不入库。
+ *
+ * ## 为什么单独一条（2026-11-10 集成审计 Important 2）
+ *
+ * 上面那条 `CREDENTIAL_ASSIGNMENT` 的字段名表里**没有** `openid` / `guid`，
+ * 而它的值规则是「≥16 位、不含引号空白」—— 32 位 hex 正好满足。于是 Marvis
+ * 的单测里 **13 处真实 QQ openid、6 处真实设备 guid** 一字不差地通过，
+ * 直到用 `~/.dsh/.credentials.yaml` 交叉验证才被发现。
+ *
+ * ⚠️ 为什么不把 `openid|guid` 直接加进上面那条的字段名表：`uid` / `guid`
+ * 在全仓被大量用作**普通夹具**（`uid-…` 16 位、uuid 36 位等），加进去会一次
+ * 打红十几个无关 spec —— 判据要么有牙、要么就会被逐个加白名单架空。
+ * 所以这里**只认 32 位 hex**：那是 Marvis/QQ 的真实形状，也是 uuid 之外
+ * 唯一会撞上「账号标识」的形态。
+ */
+const IDENTITY_LITERAL = new RegExp(
+  [
+    // ⚠️ 前置边界 `(?<![A-Za-z0-9_$])` 不是装饰：没有它 `uid` 会命中
+    //    `const uuid = '7c54…'` 里的尾巴（`uuid` 的第 2~4 个字符就是 `uid`），
+    //    实测一次打红一个无关 spec。
+    '(?<![A-Za-z0-9_$])["\']?(?:open_?id|guid|svid|uid)["\']?\\s*[:=]\\s*["\']',
+    '([0-9a-fA-F]{32})["\']',
+  ].join(''),
+  'g',
+)
+
+/**
+ * 身份标识判据的**构造样例白名单**（逐条列出，同上一条的纪律）。
+ *
+ * ⚠️ 目前只有 Marvis 单测里的两个**合成**值：`0123…`（openid）与
+ * `fedc…`（设备 guid）。它们形状合法、但内容是人手敲的顺序十六进制。
+ */
+const SYNTHETIC_IDENTITIES: ReadonlySet<string> = new Set([
+  '0123456789abcdef0123456789abcdef',
+  'fedcba9876543210fedcba9876543210',
+])
+
+/**
  * 凭据类判据的**构造样例白名单**。
  *
  * ⚠️ 必须**逐条列出**（与 {@link CONSTRUCTOR_SAMPLES} 同一纪律）：白名单若写成
@@ -221,6 +259,11 @@ const CREDENTIAL_CONSTRUCTOR_SAMPLES: ReadonlySet<string> = new Set([
   'tok-probe-minimax',
   'bm-token',
   'ms-wire-test-key',
+  // ⚠️ 腾讯 Marvis（2026-11-09）单测的构造样例：形状合法（`mv_` 前缀 +
+  //    够长）但**纯属手写假值**，不含任何真实凭据。逐条列出（同一条纪律：
+  //    不用「含 test 字样就放过」的启发式）。
+  'mv-test-access-token',
+  'test-refresh-token-0001',
   'sk-opencode-test-key-0123456789',
   'sk-opencode-disabled-key-0123456789',
   // ⚠️ 2026-10-31 对抗审计收编的探针假 key（qiniu 泄漏面 / 闸门有牙性，
@@ -421,6 +464,19 @@ describe('仓库内不得残留真实个人敏感信息', () => {
       '发现疑似真实凭据的字面量 ⇒ 改成运行时读取、轮换该凭据，或（确属厂商公开参数时）逐条登记进白名单',
     ).toEqual([])
   })
+  /** 账号级身份标识（openid / guid / svid）绝不入库 —— 见 {@link IDENTITY_LITERAL}。 */
+  it('入库文件里（含 tests/）没有 32 位 hex 形态的账号标识', () => {
+    const hits: string[] = []
+    for (const { path, text } of ALL_FILES) {
+      for (const m of text.matchAll(IDENTITY_LITERAL)) {
+        const value = m[1] ?? ''
+        if (SYNTHETIC_IDENTITIES.has(value)) continue
+        hits.push(`${path}: ${value.slice(0, 4)}…（第 ${text.slice(0, m.index).split('\n').length} 行）`)
+      }
+    }
+    expect(hits, '发现疑似真实账号标识（openid / guid / svid）⇒ 换成合成值').toEqual([])
+  })
+
   /**
    * ⚠️ **新增的判据本身必须有效**（否则就是同义反复）。
    *
@@ -487,5 +543,13 @@ describe('仓库内不得残留真实个人敏感信息', () => {
     expect('oc_sk_1a2b3c4d5e6f_A1b2C3d4E5f6G7h8'.match(SK_STYLE_KEY)).toBeNull()
     expect('eyJhbGciOiJSUzI1NiIs.eyJzdWIiOiIxIn0.abcdef'.match(JWT_TOKEN)).not.toBeNull()
     expect('accessKeySecret: \'zsak6eadrbawz683wf5r3m2snrwj868r\''.match(CREDENTIAL_ASSIGNMENT)).not.toBeNull()
+    // ⚠️ 2026-11-10 新增的身份标识判据也必须自证有牙（并且不能反过来打 `uuid`）：
+    //    真实泄漏的形状是 `openid: '<32 hex>'` / `guid: '<32 hex>'`。
+    // ⚠️ 样例本身**不能**以 `<字段名>: '<32 hex>'` 的形状出现在本文件里，
+    //    否则这条用例自己会被上面那条扫描打红；所以拼装后再 match。
+    const hex = '9f2c1d4b7a8e3f5061728394a5b6c7d8'
+    expect(`openid: '${hex}'`.match(IDENTITY_LITERAL)).not.toBeNull()
+    expect(`guid: '${hex}'`.match(IDENTITY_LITERAL)).not.toBeNull()
+    expect(`const uuid = '${hex}'`.match(IDENTITY_LITERAL)).toBeNull()
   })
 })

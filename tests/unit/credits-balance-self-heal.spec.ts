@@ -670,6 +670,11 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     // ⚠️ Codely（Unity，2026-10-22 A6）：常量名 `CODERLY` 与 id `codely` 不同形
     //    （源码里叫 CODERLY、provider id 叫 codely）—— 同样不能靠大写推。
     CODERLY: 'codely',
+    // ⚠️ 腾讯 Marvis（2026-11-09）：常量名 `MARVIS` 与 id `marvis` 同形，
+    //    但本表**逐条列举**（不靠大写推）—— 与其余项同一纪律：常量名与 id
+    //    不同形的那几家（MINIMAX_INTL / AUTOCLAW_INTL / CODERLY）正是这条
+    //    纪律存在的理由。
+    MARVIS: 'marvis',
   }
 
   /**
@@ -745,7 +750,10 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     const { constants } = selfHealSetParts()
     expect(constants.slice().sort()).toEqual([
       'ACCIO', 'ASTUDIO', 'AUTOCLAW', 'AUTOCLAW_INTL', 'CLINE', 'CODERLY', 'GEMINI',
-      'LOBSTERAI', 'MINIMAX', 'MINIMAX_INTL', 'OFFICEACE', 'QODER', 'QODER_CN', 'RACCOON',
+      'LOBSTERAI',
+      // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis）：有真实 refresh 端点。
+      'MARVIS',
+      'MINIMAX', 'MINIMAX_INTL', 'OFFICEACE', 'QODER', 'QODER_CN', 'RACCOON',
       'TRAE',
     ])
   })
@@ -755,7 +763,7 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     const inSet = new Set([...literals, ...constants.map((c) => ID_OF[c] ?? c)])
     expect([...inSet].sort()).toEqual([
       'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'cline', 'codearts', 'codely',
-      'gemini', 'lobsterai', 'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace',
+      'gemini', 'lobsterai', 'magicrew', 'magicrewintl', 'marvis', 'minimax', 'minimaxintl', 'officeace',
       'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy',
     ])
     // 反向：两家没有 refresh 端点，必须**静默跳过**而非尝试续期。

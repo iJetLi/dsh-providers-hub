@@ -82,6 +82,12 @@ const PRIMARY_CHANNEL: Readonly<Record<string, 'id' | 'name'>> = Object.freeze({
   //    **永远看不到 accio**（症状是静默的：它只是不在候选表里）。
   //    ⚠️ 判据同 qoder：**该渠道的 id 对人类与其它渠道都无信息**，不是「哪个方便」。
   accio: 'name',
+  // ⚠️ 腾讯 Marvis（2026-11-09）：与 qoder / accio **同因**，且理由更强 ——
+  //    它的 id 是 `main-auto`，一个**服务端自动路由槽位**（实测落到
+  //    `deepseek-v4-1-flash-261017`，而 `app-auto` 落到另一个模型）⇒ id 本身
+  //    **不携带模型身份**，且会随上游路由策略变化。真名只在展示名里
+  //    （`DeepSeek V4.1 Flash`）⇒ 必须走 name 通道。
+  marvis: 'name',
 })
 
 /** 该 provider 的归一化主通道；未声明者默认 `id`。 */

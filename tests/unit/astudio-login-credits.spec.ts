@@ -772,6 +772,9 @@ describe('AStudio Provider Credits & Jet Hub RPC 接线验证', () => {
       //    （`JetHubAuths` 是全量 Record，漏一个就编译失败 —— 这正是它该起的作用）。
       monkeycodeintl: blank(),
       baizhi: blank(),
+      // ⚠️ marvis（2026-11-09）：`JetHubAuths` 的键是 **provider id**，值是 auth 实例。
+      //    漏这一格时 `pnpm typecheck:tests` 会直接编译失败（不是运行时才炸）。
+      marvis: blank(),
       astudio: astudioAuth,
     }
 

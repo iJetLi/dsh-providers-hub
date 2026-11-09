@@ -63,10 +63,10 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
     //    签到不能做（每日临时积分领取要过验证码，实测 400
     //    `captcha binding mismatch`）⇒ 与两站的 `{balance:true,dailyCheckin:true}`
     //    只差签到一项（2026-11-02 同日二版更正：一版曾写 `balance: false`）。
-    expect(PROVIDER_REGISTRY).toHaveLength(29)
+    expect(PROVIDER_REGISTRY).toHaveLength(30)
     // ⚠️ 2026-10-22（A6）：codely **已翻 `channel: true`** —— 它的推理 / 目录 / 余额 / 签到 / 续期全部已接线，
     //    而 `channel` 在生产代码里**零个读取点** ⇒ 原来那个 `false` 只是为了让守卫不变红而选的，它同时把 codely 挡在聚合目录之外。现在真实接线已完成，翻正。
-    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(28)
+    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(29)
     expect(
       PROVIDER_REGISTRY.find((d) => d.id === 'codely')?.channel,
       'codely 已接线完成，必须是 channel: true（否则它的模型永不进聚合目录）',
@@ -117,6 +117,20 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
     // ⚠️ 守的是**相对位置**而非绝对下标：新增 provider 时下标必然漂移。
     expect(ia - ii, 'MagiCrew 国际版必须紧邻 aggregate 之前').toBe(1)
     expect(ii - im, '国际版必须紧邻国内版之后（两站成组）').toBe(1)
+  })
+
+  it('★ marvis 的声明序在 aggregate 之前（设置页左栏的默认渲染序）', () => {
+    // 未自定义 `providerOrder` 时左栏完全按声明序渲染（`sortOpenProvidersByOrder`
+    // 对空序是恒等函数）⇒ 插在 `aggregate` 之后会让它在左栏落到聚合下面。
+    const ids = PROVIDER_REGISTRY.map((d) => d.id)
+    const im = ids.indexOf('marvis')
+    const ia = ids.indexOf('aggregate')
+    expect(im, 'registry 里找不到 marvis').toBeGreaterThan(-1)
+    expect(ia, 'registry 里找不到 aggregate').toBeGreaterThan(-1)
+    expect(im, 'Marvis 必须排在聚合之上').toBeLessThan(ia)
+    // ⚠️ 守的是**相对位置**而非绝对下标：新增 provider 时下标必然漂移。
+    //    插在 magicrew 之前（两站成组紧贴 aggregate，见上一条用例）。
+    expect(ids.indexOf('magicrew') - im, 'Marvis 必须紧邻 magicrew 之前').toBe(1)
   })
 
   it('★ 真实排出的左栏顺序与声明序一致（复刻客户端排序口径，非源码断言）', async () => {
@@ -396,12 +410,12 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     expect(x).toEqual(['zcode'])
   })
 
-  it('channel === true 的 19 家都有 settingsNamespace 除了 opencode', () => {
+  it('channel === true 的 20 家都有 settingsNamespace 除了 opencode', () => {
     const withNs = PROVIDER_REGISTRY.filter((d) => d.settingsNamespace !== undefined)
       .map((d) => d.id).sort()
     expect(withNs).toEqual([
       'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'cline', 'codearts', 'gemini', 'lobsterai', 'loomy',
-      'minimax', 'minimaxintl', 'officeace', 'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy', 'zcode',
+      'marvis', 'minimax', 'minimaxintl', 'officeace', 'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy', 'zcode',
     ])
   })
 })

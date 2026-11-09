@@ -114,6 +114,9 @@ describe('registerJetHubRpc：auths 是命名对象（类型层守卫）', () =>
       //    （`JetHubAuths` 是全量 Record，漏一个就编译失败 —— 这正是它该起的作用）。
       monkeycodeintl: stub,
       baizhi: stub,
+      // ⚠️ marvis（2026-11-09）：`JetHubAuths` 的键是 **provider id**，值是 auth 实例。
+      //    漏这一格时 `pnpm typecheck:tests` 会直接编译失败（不是运行时才炸）。
+      marvis: stub,
     })
     // 运行时只要求端点真的注册了（证明桩搭对了，上面那行的类型检查才有意义）。
     expect(registered.length).toBeGreaterThan(0)

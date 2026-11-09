@@ -147,6 +147,17 @@ import {
 // ⚠️ 2026-11-01：MagiCrew 国际版（`magicrewintl`）接入 —— 登录/导入/轮询分支
 //    两站共用同一份实现，只差这个 `product` 常量（host / webOrigin / 凭据 ref 前缀）。
 import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
+// ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：OAuth（QQ / 微信）+ 从 magpie 导入。
+import { importCredentialFromMagpie, type MarvisAuth } from './marvis-auth.js'
+import { MARVIS } from './marvis-product.js'
+import {
+  // ⚠️ 必须改名：本文件已从 `buddy.ts` 导入了同名的 `credentialExpiresAtMs`
+  //    （buddy 系的凭据是 `{expiresAt}`，Marvis 的是毫秒**字符串**）。
+  credentialExpiresAtMs as marvisCredentialExpiresAtMs,
+  marvisAccountLabel,
+  parseMarvisCredential,
+  type MarvisCredential,
+} from './marvis.js'
 import { isAstudioRefreshable, type AstudioCredential } from './astudio.js'
 import { loginNeedsExternalAction } from './login-failure.js'
 import {
@@ -1765,6 +1776,15 @@ export interface JetHubAuths {
    *    `tests/unit/credits-balance-self-heal.spec.ts` 的 `SELF_HEAL_EXEMPT` 记录理由。
    */
   readonly baizhi: BaizhiAuth
+  /**
+   * 腾讯 Marvis（`marvis`，2026-11-09）—— **本 fork 独有**。
+   *
+   * ⚠️ 值是 `MarvisAuth` **Service 实例**（与 modelscope / qiniu 同款）。
+   * ⚠️ 它**有**真实 refresh 端点（`POST /marvis_client_login/marvis_refresh_token`）
+   *    ⇒ **必须**登记进 `SELF_HEAL_REFRESHABLE_PROVIDERS`（漏了症状是积分行
+   *    恒「未登录」而上游其实只需一次 refresh，且日志零字 —— issue IKKHL5）。
+   */
+  readonly marvis: MarvisAuth
 }
 
 /**
@@ -1791,6 +1811,51 @@ export function authOf(auths: JetHubAuths, provider: string): JetHubAuthLike | u
 function magicrewExpiresAtPatch(credential: MagicrewCredential): { expiresAt?: number } {
   const expiresAt = magicrewExpiresAtMs(credential)
   return expiresAt === undefined ? {} : { expiresAt }
+}
+
+/**
+ * 腾讯 Marvis 的 `expiresAt` 补丁（与 {@link magicrewExpiresAtPatch} 同形）。
+ *
+ * ⚠️ `MarvisCredential.expires_at` 是**毫秒时间戳字符串**（上游 `Set-Cookie` 的
+ * `access_token_expire_time` 原样），`credentialExpiresAtMs` 负责「秒 / 毫秒」
+ * 两种口径的归一（`> 1e12` 当毫秒，否则 ×1000）。
+ */
+function marvisExpiresAtPatch(credential: MarvisCredential): { expiresAt?: number } {
+  const expiresAt = marvisCredentialExpiresAtMs(credential)
+  return expiresAt === undefined ? {} : { expiresAt }
+}
+
+/**
+ * 在账号池里找「**同一个 Marvis 账号**」的既有条目 —— 唯一一份判重实现。
+ *
+ * ## 判据：`openid`
+ * `account.create` 每次都生成新的 `${provider}-${shortId()}` 与
+ * `MARVIS_ACCOUNT_${suffix}`，而同一个 QQ / 微信账号反复登录拿到的是**同一个
+ * `openid`**（它是账号的稳定身份；`access_token` 会随重登轮换、
+ * `guid` 每次登录都是新造的虚拟设备）⇒ 只有 `openid` 能判重。
+ *
+ * ⚠️ 与 magicrew 的三条边界逐条同款：读不到凭据的账号**跳过**（无法判定 ≠ 失配）、
+ *    非 JSON / 缺 `openid` 的条目**跳过**、`skipAccountId` 排除本次自己的占位条目。
+ */
+async function findMarvisAccountByOpenid(params: {
+  ctx: Context
+  pool: AccountPool
+  openid: string
+  /** 网页版登录腿：跳过**本次自己**的占位条目。 */
+  skipAccountId?: string
+}): Promise<ProviderAccountEntry | undefined> {
+  const { ctx, pool, openid, skipAccountId } = params
+  if (openid.length === 0) return undefined
+  for (const existing of pool.listAccountsByProvider(MARVIS.id)) {
+    if (existing.id === skipAccountId) continue
+    const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
+      .catch(() => undefined)
+    // ⚠️ 边界 ①：读不到 ⇒ 跳过（既不判「重复」也不判「不重复」）。
+    if (resolved === undefined) continue
+    const parsed = parseMarvisCredential(resolved.value)
+    if (parsed !== undefined && parsed.openid === openid) return existing
+  }
+  return undefined
 }
 
 /**
@@ -2799,6 +2864,15 @@ function registerJetHubEndpoints(
     //   一次性终态「需人工重新登录」，不进重试循环。
     // 漏登记的后果与 accio 同款：凭据其实只需一次重取，面板却永报「未登录」。
     ASTUDIO.id,
+    // ⚠️ 腾讯 Marvis（2026-11-09）：**有**真实 refresh 端点
+    //    （`POST /marvis_client_login/marvis_refresh_token`，body 的
+    //    `loginType` 恒 Marvis 这个字面量、不是 QC/WX 码）⇒ 不属
+    //    「设计上没有 refresh 端点」的那类豁免。
+    //    ⚠️ 本注释**不得**出现带单引号的 Marvis 字面量 —— 对应的守卫会扫
+    //    Set 体里的单引号字符串，注释里的引号会被当成一个 Set 成员（实测踩过）。
+    //    ⚠️ 上游的 access_token **不变**、只重置有效期 ⇒ 续期必须把新的
+    //    `expires_at` 写回池（否则调度器永不武装）。
+    MARVIS.id,
     AUTOCLAW.id,
     // ⚠️ autoclawintl（AutoClaw 国际版，2026-10-20）：与 `autoclaw` 共用同一个
     //    auth 类，**有**真实 refresh 端点（`/userapi/v1/refresh`，实测国际站
@@ -3317,6 +3391,11 @@ function registerJetHubEndpoints(
         // ⚠️ 百智云同款：它的三段式（`baizhi.startSession` 走的是另一个入口，
         //    但 `account.create { mode:'browser' }` 那条同样登记了 pendingAt）。
         && entry.provider !== BAIZHI.id
+        // ⚠️ 腾讯 Marvis 同款（2026-11-09 评审 I1）：它的 `account.create
+        //    { mode:'browser' }` 分支同样登记 `magicrewBrowserLoginPendingAt`。
+        //    漏这一家 ⇒ 宿主崩溃/重启后那张「凭据未配置」的幽灵卡片**永不收口**，
+        //    用户只能自己删号（且删除会连带清掉可能已写好的凭据）。
+        && entry.provider !== MARVIS.id
       ) continue
       // 判据 1：有在途任务 ⇒ 用户可能正在窗口里登录，绝不碰。
       if (magicrewBrowserLoginInFlight.has(entry.id)) continue
@@ -5012,6 +5091,190 @@ function registerJetHubEndpoints(
          * 会把同一个账号认成新账号）。命中既有账号时把新凭据写回**它自己的 ref**
          * 并回填昵称 / 有效期，返回**原来的** `accountId`。
          */
+        /**
+         * ## 腾讯 Marvis（2026-11-09）
+         *
+         * 两条登录路径，按 `req.mode` 分流：
+         *
+         * | mode | 形态 | 时长 | 失败形态 |
+         * |---|---|---|---|
+         * | `'browser'` | 开隔离浏览器 → QQ / 微信 授权 → 回调带 `code` → 兑换 | 分钟级（等用户） | 先建占位条目，`login.poll` 报终态并**删掉**它 |
+         * | `'magpie-import'` | **宿主自己读**本机 magpie 的 `plugin-auth.json`（凭据已含 access/refresh/openid/guid） | 毫秒级（无上游请求） | 立刻回可读错误、**不建账号** |
+         *
+         * ⚠️ 判重按 **`openid`**（不是 `access_token`）：Marvis 续期**不换**
+         *    access_token 只重置有效期，但重登会签发新的 ⇒ 用 token 判重会
+         *    「每登一次多一张卡」（`src/account-pool.ts` 里 AutoClaw 的同型事故）。
+         * ⚠️ `guid` 每次登录都**新造**（token 与设备绑定，用本机 svid 会让多个
+         *    账号互相顶号）⇒ 它绝不能当身份判据。
+         */
+        if (provider === MARVIS.id && req.mode === 'magpie-import') {
+          /**
+           * ## 为什么默认由**宿主**去读文件
+           *
+           * 2026-11-09 用户报障：弹窗里放 textarea 让用户自己打开
+           * `~/.config/magpie/plugin-auth.json` 抄一段 JSON —— 而这个文件就在
+           * 本机、插件自己就能读。把「找文件 + 精确复制」外包给用户没有任何收益，
+           * 只会多出「漏一个括号就报凭据不完整」的失败面。
+           *
+           * `req.magpieCredential` 仍然接受（自动化脚本 / 老客户端），但**空串与
+           * 缺省都当作「没给」**⇒ 走文件读取。判据必须是 `trim() !== ''`：
+           * 客户端如果发来空串（表单没填就点了按钮），不能把它当成「用户提供了
+           * 一段空 JSON」而报解析失败 —— 那样用户看到的原因是错的。
+           */
+          const pasted = typeof req.magpieCredential === 'string' ? req.magpieCredential.trim() : ''
+          const imported = pasted === ''
+            ? auths.marvis.readMagpieCredential()
+            : (() => {
+                const credential = importCredentialFromMagpie(pasted)
+                return credential === undefined
+                  ? { error: '没有从粘贴内容里读到 Marvis 凭据：需要 access / refresh / metadata.openid / metadata.guid 四个字段。' }
+                  : { credential }
+              })()
+          if ('error' in imported) {
+            // ⚠️ 读不到 ⇒ **不建账号**（占位条目只会变成幽灵卡片）。
+            //
+            // ⚠️⚠️ `error` **必须是对象**（`{code,message}`），不能是字符串：
+            //     `reply()` 会用 `{...result.error, details:{}}` 归一化，而展开
+            //     一个字符串得到的是 `{"0":"没","1":"有",…}` ⇒ 客户端拿不到
+            //     `code`/`message`，直接抛
+            //     `connection: invalid server-response failure`（2026-11-09 真机
+            //     报障：弹窗里只有这一句，用户看不出是「文件没读到」）。
+            return { ok: false, error: { code: 'bad-request', message: imported.error } }
+          }
+          const credential = imported.credential
+          // ⚠️ 顺序：先写凭据、再建/改账号（与 magicrew 的 local-browser 分支同款）。
+          const existing = await findMarvisAccountByOpenid({
+            ctx,
+            pool,
+            openid: credential.openid,
+            skipAccountId: id,
+          })
+          if (existing !== undefined) {
+            await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+            await pool.updateAccount(existing.id, {
+              nickname: marvisAccountLabel(credential.nickname, credential.login_type),
+              ...marvisExpiresAtPatch(credential),
+            })
+            return { ok: true, value: { accountId: existing.id, loginUrl: '', reused: true } }
+          }
+          await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
+          await pool.addAccount({
+            id,
+            provider: MARVIS.id,
+            nickname: marvisAccountLabel(credential.nickname, credential.login_type),
+            enabled: true,
+            credentialRef: refName,
+            refreshable: true,
+            createdAt: Date.now(),
+            ...marvisExpiresAtPatch(credential),
+          })
+          return { ok: true, value: { accountId: id, loginUrl: '' } }
+        }
+
+        if (provider === MARVIS.id && req.mode === 'browser') {
+          /**
+           * ① 占位条目：**先登记再开窗**。顺序不可颠倒 —— `login.poll` 在这之后
+           *    任何一刻到达都必须能查到它（客户端 1 秒一拍，而开浏览器要几百毫秒）。
+           */
+          await pool.addAccount({
+            id,
+            provider: MARVIS.id,
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            refreshable: true,
+            createdAt: Date.now(),
+          })
+          magicrewBrowserLoginPendingAt.set(id, Date.now())
+          /** 登录渠道：缺省 QQ（`'1'`），`'2'` = 微信。 */
+          const loginType = req.marvisLoginType === '2' ? '2' as const : '1' as const
+          /**
+           * ② 后台任务（**不 await**）：开窗 → 等用户扫码/点授权 → 截获回调 →
+           *    兑换凭据 → 落库。与 magicrew / monkeycode 同一条纪律。
+           */
+          const task = (async (): Promise<{ done: boolean, success?: boolean, error?: string }> => {
+            let credential: MarvisCredential | undefined
+            try {
+              credential = await auths.marvis.loginViaBrowser(loginType)
+            } catch (error) {
+              // 抛错 = 真失败（浏览器起不来 / 兑换被拒）。文案原样交给 `failLogin`。
+              const message = await failLogin(id, error)
+              return message === undefined
+                ? { done: true, success: true }
+                : { done: true, success: false, error: message }
+            }
+            if (credential === undefined) {
+              // `undefined` = 用户没登完（超时 / 关窗）。仍是**终态**：
+              // 占位条目留着就是幽灵卡片（IKLI7J 的形态）⇒ 同样走 `failLogin`。
+              const message = await failLogin(id, new Error('网页登录未完成（超时或窗口已关闭）'))
+              return message === undefined
+                ? { done: true, success: true }
+                : { done: true, success: false, error: message }
+            }
+            // 这一步之后凭据已在库里 ⇒ 任何失败都**不得**再删号（`failLogin` 自己会判）。
+            const existing = await findMarvisAccountByOpenid({
+              ctx,
+              pool,
+              openid: credential.openid,
+              skipAccountId: id,
+            })
+            if (existing !== undefined) {
+              /**
+               * ⚠️⚠️ **必须**先记合并重定向（2026-11-09 评审 C1，IKLI7J 同型）。
+               *
+               * 本分支会删掉自己的占位条目 ⇒ `login.poll` 的四道出口全部落空：
+               * `loginFailureOf`(undefined) → `accounts.find`(占位已删) →
+               * `takeFreshLoginMergedRedirect`(从没记过) →
+               * `magicrewBrowserLoginInFlight.has`(任务已结束) ⇒ 永远
+               * `{done:false}`。用户看到的是「授权成功、账号也建好了，弹窗却转
+               * 5 分钟圈然后报超时」，且该路径不 `loadAccounts()` ⇒ 卡片不刷新。
+               *
+               * 这是**主路径**：`findMarvisAccountByOpenid` 按 openid 判重，
+               * 同一账号第二次登录必然命中本分支。
+               */
+              rememberLoginMergedRedirect(id, existing.id)
+              /**
+               * ⚠️ **顺序不能反：先删自己的占位，再写旧卡的凭据**（2026-11-02 二审自纠）。
+               *
+               * `account-pool.removeAccount` 内部会 `credentials.unset(自己条目的 ref)`。
+               * 正常情况两张卡的 ref 由不同的 Key 派生、不会相同；但**万一相同**
+               * （上游哪天改成复用同一把 Key），先写后删就会把刚写进旧卡的那份凭据
+               * 一起清掉 —— 表现为旧卡突然「凭据未配置」，且没有任何错误日志。
+               * 反过来先删，最坏只是旧卡没写成、占位已消失，用户重登一次即可。
+               */
+              await pool.removeAccount(id).catch(() => undefined)
+              await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+              await pool.updateAccount(existing.id, {
+                nickname: marvisAccountLabel(credential.nickname, credential.login_type),
+                ...marvisExpiresAtPatch(credential),
+              })
+              return { done: true, success: true }
+            }
+            await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
+            await pool.updateAccount(id, {
+              nickname: marvisAccountLabel(credential.nickname, credential.login_type),
+              ...marvisExpiresAtPatch(credential),
+            })
+            return { done: true, success: true }
+          })()
+          magicrewBrowserLoginInFlight.set(id, task)
+          /**
+           * ③ 任务结束后**必须**清两张表（`finally` 而不是 `.then`）：否则一次失败
+           *    就把这个 id 永久钉在表里（表无界增长、同一 id 再也开不了新一轮）。
+           */
+          void (async () => {
+            try {
+              await task
+            } catch {
+              // 不该发生：上面两个分支都把异常收成了返回值。仍要兜住 ——
+              // 一次未捕获拒绝会跳过下面的清理。
+            }
+            magicrewBrowserLoginInFlight.delete(id)
+            magicrewBrowserLoginPendingAt.delete(id)
+          })()
+          return { ok: true, value: { accountId: id, loginUrl: '' } }
+        }
+
         if (magicrewSite !== undefined && magicrewAuthOf !== undefined && req.mode === 'local-browser') {
           let credential: MagicrewCredential | undefined
           try {
@@ -11066,11 +11329,28 @@ function registerJetHubEndpoints(
   }
 }
 
-/** 构造带 rpcId 的响应 JSON */
+/**
+ * 构造带 rpcId 的响应 JSON。
+ *
+ * ⚠️ 失败结果的 `error` 有**两种**形状：`{ code, message }`（正常）与裸字符串
+ * （早期几个分支的写法）。后者若直接透传，客户端会看到
+ * `{"0":"没","1":"有",…}` ⇒ 拿不到 `code`/`message` ⇒ 抛
+ * `connection: invalid server-response failure`（2026-11-09 marvis 真机报障）。
+ * ⇒ 这里**统一兜底**成对象：字符串包成 `bad-request`，缺 `details` 的补空对象。
+ * 各分支自己的形状保持不变（只是不再能漏到 wire 上）。
+ */
 function reply(rpcId: string, result: unknown): Response {
-  const value = typeof result === 'object' && result !== null && (result as Record<string, unknown>).ok === false
-    ? { ...result as Record<string, unknown>, error: { ...(result as Record<string, unknown>).error as Record<string, unknown>, details: {} } }
-    : result
+  let value = result
+  if (typeof result === 'object' && result !== null && (result as Record<string, unknown>).ok === false) {
+    const record = result as Record<string, unknown>
+    const error = record.error
+    value = {
+      ...record,
+      error: typeof error === 'string'
+        ? { code: 'bad-request', message: error, details: {} }
+        : { ...(error as Record<string, unknown>), details: {} },
+    }
+  }
   return Response.json({ type: 'server-response', rpcId, result: value })
 }
 
