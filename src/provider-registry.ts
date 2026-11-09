@@ -1331,7 +1331,8 @@ export function creditCapabilitiesOf(): Record<string, CreditsCapability> {
  * 来源是 `src/index.ts` 里**每一处** `balance: { kind: 'buddy' | 'loomy' }`
  * 的 `product`（2026-11-09 逐处清点）。加渠道时**必须同步**，
  * `tests/unit/strict-manual-order-wiring.spec.ts` 会扫描 `src/index.ts`
- * 的真实装配并对账 —— 漏一家会**变红**，而不是静默少一个开关。
+ * 的真实装配做**双向差集**（表多一条 / 少一条都变红），并逐条核对
+ * `isBalanceTieredProvider` —— 漏一家**不会**静默少一个开关。
  *
  * ⚠️ **`officeace` 刻意不在表里**：它的分档只发生在**锁定永久积分**时
  *（`officeace-lock.ts` 的 `permanentLocked() === false` 分支直接走

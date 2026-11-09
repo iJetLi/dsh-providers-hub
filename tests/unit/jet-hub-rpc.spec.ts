@@ -7274,3 +7274,127 @@ describe('★★ credits.balances 的 accountIds 裁剪', () => {
     expect(code).toMatch(/requestedIds\.has\(entry\.id\)/)
   })
 })
+
+/**
+ * 「严格手动顺序」的**两个 RPC 端点**（2026-11-09 审计：零覆盖）。
+ *
+ * ## 为什么必须单独钉
+ *
+ * 对抗审计实测：把 `strictManualOrder.getEnabled` 的返回值改成恒 `false`
+ * 之后，定向 4 个文件 72/72 **全绿**。症状是面板永远显示「关」——
+ * 用户开了开关、重启后开关自己弹回去，而且没有任何报错可归因。
+ *
+ * ## 判据为什么包含「回读」那一格
+ *
+ * `setEnabled` 的返回**不是** `req.enabled` 的复读，而是 `pool.strictManualOrder()`
+ * 的**回读**（见端点注释：客户端据此做非乐观更新）。若实现改成直接回显入参，
+ * 「落盘失败但仍回 true」就会让面板显示已打开 —— 本文件用「一个拒绝写入的池」
+ * 把这两种实现区分开（回显实现 ⇒ 红）。
+ */
+describe('strictManualOrder 端点接线', () => {
+  type Handler = (request: Request) => Promise<Response>
+
+  interface StrictPoolStub {
+    /** 模拟「落盘后的真实值」。 */
+    enabled: boolean
+    /** 模拟「写入被拒」（例如只读后端）：池自己不改值。 */
+    readonly rejectWrites: boolean
+    readonly setCalls: Array<{ provider: string; enabled: boolean }>
+  }
+
+  function makeHandler(state: StrictPoolStub): Handler {
+    let handler: Handler | undefined
+    const ctx = {
+      get: (key: string) => key === 'connection'
+        ? {
+            fetch: {
+              register: (config: { path: string; fetch: Handler }) => {
+                if (config.path === JET_HUB_API_PATH) handler = config.fetch
+              },
+            },
+          }
+        : undefined,
+      inject: (_deps: string[], callback: (ctx: unknown) => void) => { callback(ctx) },
+      logger: { warn: () => {}, info: () => {} },
+      credentials: { resolve: async () => undefined, set: async () => {}, unset: async () => {} },
+    }
+    const pool = {
+      listAccountsByProvider: () => [],
+      strictManualOrder: () => state.enabled,
+      setStrictManualOrder: async (provider: string, enabled: boolean) => {
+        state.setCalls.push({ provider, enabled })
+        if (!state.rejectWrites) state.enabled = enabled
+      },
+    }
+    registerJetHubRpc(ctx as never, pool as never, {} as never)
+    if (handler === undefined) throw new Error('endpoint handler was not registered')
+    return handler
+  }
+
+  async function call(handler: Handler, method: string, payload: unknown): Promise<{
+    ok: boolean
+    value?: { enabled: boolean }
+    error?: { code: string; message: string }
+  }> {
+    const response = await handler(new Request('http://localhost/api/jet-hub', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'rpc-strict',
+        method: 'jet-hub',
+        payload: { method, payload },
+      }),
+    }))
+    const body = await response.json() as { result: { ok: boolean; value?: { enabled: boolean }; error?: { code: string; message: string } } }
+    return body.result
+  }
+
+  it('getEnabled 返回池的当前值（池为 true ⇒ 必须 true）', async () => {
+    const handler = makeHandler({ enabled: true, rejectWrites: false, setCalls: [] })
+    const result = await call(handler, 'strictManualOrder.getEnabled', { provider: 'buddy' })
+    expect(result.ok).toBe(true)
+    expect(result.value).toEqual({ enabled: true })
+  })
+
+  it('getEnabled 缺 provider ⇒ bad-request（不静默当成空渠道）', async () => {
+    const handler = makeHandler({ enabled: true, rejectWrites: false, setCalls: [] })
+    const result = await call(handler, 'strictManualOrder.getEnabled', {})
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('bad-request')
+  })
+
+  it('setEnabled 把 provider / enabled 原样传给池，并返回**回读**值', async () => {
+    const state: StrictPoolStub = { enabled: false, rejectWrites: false, setCalls: [] }
+    const handler = makeHandler(state)
+    const result = await call(handler, 'strictManualOrder.setEnabled', {
+      provider: 'buddy',
+      enabled: true,
+    })
+    expect(state.setCalls).toEqual([{ provider: 'buddy', enabled: true }])
+    expect(result.ok).toBe(true)
+    expect(result.value).toEqual({ enabled: true })
+  })
+
+  it('★ 写入被拒时不得回显入参（回读实现 ⇒ 值仍为 false）', async () => {
+    const state: StrictPoolStub = { enabled: false, rejectWrites: true, setCalls: [] }
+    const handler = makeHandler(state)
+    const result = await call(handler, 'strictManualOrder.setEnabled', {
+      provider: 'buddy',
+      enabled: true,
+    })
+    expect(result.ok).toBe(true)
+    expect(result.value).toEqual({ enabled: false })
+  })
+
+  it('setEnabled 的 enabled 非布尔 ⇒ bad-request（不做默认值猜测）', async () => {
+    const state: StrictPoolStub = { enabled: false, rejectWrites: false, setCalls: [] }
+    const handler = makeHandler(state)
+    for (const bad of ['true', 1, null, undefined]) {
+      const result = await call(handler, 'strictManualOrder.setEnabled', { provider: 'buddy', enabled: bad })
+      expect(result.ok, String(bad)).toBe(false)
+      expect(result.error?.code, String(bad)).toBe('bad-request')
+    }
+    expect(state.setCalls).toEqual([])
+  })
+})

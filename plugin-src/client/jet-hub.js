@@ -3511,6 +3511,15 @@ function ProviderPanel({
    */
   const [strictManualOrder, setStrictManualOrder] = React.useState(false);
   const [strictOrderBusy, setStrictOrderBusy] = React.useState(false);
+  /**
+   * 读开关**失败**的可见标记（2026-11-09 审计 P3）。
+   *
+   * 原先失败只打 console ⇒ 面板静默显示「关」。用户开着这个开关、某次读失败后
+   * 看到的是「关」，会以为自己的设置丢了（而且没有任何可归因的提示）。
+   * 这里只把**状态行文案**换成「读取失败 —— 点击按钮可重试」，
+   * 不弹红条：读不到时行为仍等于默认（与升级前一致），夸大它的严重性反而误导。
+   */
+  const [strictOrderReadFailed, setStrictOrderReadFailed] = React.useState(false);
   const mounted = React.useRef(true);
   /**
    * 最新账号列表的 ref 镜像。
@@ -3614,11 +3623,14 @@ function ProviderPanel({
     try {
       const res = await rpcCall('strictManualOrder.getEnabled', { provider });
       if (!mounted.current) return;
+      setStrictOrderReadFailed(false);
       setStrictManualOrder(res?.enabled === true);
     } catch (caught) {
       // ⚠️ 不把错误摊成面板红条：这是**次要状态**，读不到就按默认行为走，
       //    而默认行为与升级前逐字节一致（不会误导用户去点一个不存在的开关）。
+      //    但**状态行必须说出来**（否则「读失败」与「用户自己关掉了」同形）。
       console.error('[jet-hub] read strict manual order failed:', caught);
+      if (mounted.current) setStrictOrderReadFailed(true);
     }
   }, [rpcCall, provider, canStrictOrder]);
   const toggleStrictManualOrder = React.useCallback(async (nextEnabled) => {
@@ -3627,6 +3639,7 @@ function ProviderPanel({
       const res = await rpcCall('strictManualOrder.setEnabled', { provider, enabled: nextEnabled });
       if (!mounted.current) return;
       // ⚠️ 以**后端回传**为准，不做乐观更新（与 sessionBalance / nativeSearch 同取向）。
+      setStrictOrderReadFailed(false);
       setStrictManualOrder(res?.enabled === true);
     } catch (caught) {
       console.error('[jet-hub] toggle strict manual order failed:', caught);
@@ -5768,7 +5781,7 @@ function ProviderPanel({
               'aria-pressed': String(strictManualOrder),
               title: strictManualOrder
                 ? '当前：完全按拖拽顺序选号。档位只用于判断「这个号还能不能用」（锁定永久积分时只剩永久积分的号仍被跳过）。点击回到「余额分档优先」。'
-                : `当前：先按积分到期档位排序，${strictManualOrder === false ? '拖拽顺序只在同档内生效' : ''}`
+                : '当前：先按积分到期档位排序，拖拽顺序只在同档内生效'
                   + ' ⇒ 某号没有临期积分时会被排到后面，看起来像「拖拽没生效」。'
                   + '点击改为完全按拖拽顺序选号。',
               onClick: () => {
@@ -5781,11 +5794,15 @@ function ProviderPanel({
             React.createElement('span', {
               className: 'dim-jh-orderModeHint',
               title: ORDER_HINT_SUBTLE,
-            }, strictManualOrder
-              // 开着：只剩「锁定永久积分」这一条筛选，说清它是**保留**的。
-              ? '选号顺序 = 上面的序号（限额/锁定仍会跳过不可用的号）'
-              // 关着：直接给出可操作的那一步。
-              : '当前先按积分到期档位排 —— 要让序号说了算，请打开右侧开关'),
+            }, strictOrderReadFailed
+              // 读失败时**明说**（否则与「用户自己关掉了」同形）；按钮仍可点，
+              // 点击会走 setEnabled 并以后端回传为准 —— 也就是重试。
+              ? '读取开关状态失败 —— 点击按钮可重试'
+              : strictManualOrder
+                // 开着：只剩「锁定永久积分」这一条筛选，说清它是**保留**的。
+                ? '选号顺序 = 上面的序号（限额/锁定仍会跳过不可用的号）'
+                // 关着：直接给出可操作的那一步。
+                : '当前先按积分到期档位排 —— 要让序号说了算，请打开右侧开关'),
           )
         : null,
       React.createElement('div', { className: 'dim-jh-headerActions' },

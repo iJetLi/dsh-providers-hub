@@ -17,7 +17,7 @@ import {
   rankLoomyAccountsByManualOrder,
 } from '../../src/loomy-balance-rank.js'
 import { sanitizeStrictManualOrder } from '../../src/jet-hub-store.js'
-import { isBalanceTieredProvider } from '../../src/provider-registry.js'
+import { BALANCE_TIERED_PROVIDERS, isBalanceTieredProvider } from '../../src/provider-registry.js'
 
 const NOW = 1_800_000_000_000
 const DAY = 24 * 60 * 60 * 1000
@@ -51,7 +51,7 @@ const account = (id: string) => ({ id, credentialRef: id })
  * ① 严格模式下**先后完全按传入顺序**（档位不再重排）；
  * ② 但**可用性判据必须保留** —— 否则「锁定永久积分」会被绕过（这是本修法
  *    最危险的出错方向：不是排序难看，而是**不可撤回地烧掉永久积分**）；
- * ③ 默认（不传 / `false`）与被改造前**逐字节等价**。
+ * ③ 开关**关闭**时仍走老路径（`rank…ByBalance`），行为与改造前一致。
  */
 
 /** 一眼能看出「谁先谁后」的三个号：只有 b 有临期积分。 */
@@ -91,14 +91,18 @@ describe('rankBuddyAccountsByManualOrder（严格手动顺序）', () => {
     expect(ranked.map(a => a.id)).toEqual(['ok', 'broken'])
   })
 
-  it('③ 不传 strictManualOrder 时与改造前逐字节等价（默认行为不变）', () => {
-    const legacy = rankBuddyAccountsByBalance([...MIXED])
+  it('③ `strictManualOrder: false` 与完全不传等价（开关不由本函数解释）', () => {
+    // 本函数**就是**严格模式的实现 —— 它不再看 `strictManualOrder` 这个开关，
+    // 「走哪条路」由调用方（Selector）决定。这里钉住「传 false 不会被误读成
+    // 退回档位排序」：两次结果必须逐项相同。
+    const omitted = rankBuddyAccountsByManualOrder([...MIXED])
     const explicitFalse = rankBuddyAccountsByManualOrder([...MIXED], { strictManualOrder: false })
-    // 严格函数在**不锁定时**对所有「可用」号一视同仁 ⇒ 与默认排序的差别只在档位先后。
-    expect(legacy.map(a => a.id)).not.toEqual(explicitFalse.map(a => a.id))
-    // 但两者对「不可用」的判据必须一致：末位都必须是不可用的那个。
-    expect(buddyTierUsable(buddyBalanceTier(legacy[0]!))).toBe(true)
-    expect(buddyTierUsable(buddyBalanceTier(explicitFalse[0]!))).toBe(true)
+    expect(explicitFalse.map(a => a.id)).toEqual(omitted.map(a => a.id))
+    // 且它确实**不同**于档位排序 —— 否则「开关切换」这件事本身就没有内容可测。
+    expect(omitted.map(a => a.id))
+      .not.toEqual(rankBuddyAccountsByBalance([...MIXED]).map(a => a.id))
+    // 两者对「可用」的判据必须一致：都能确认首位是可用的。
+    expect(buddyTierUsable(buddyBalanceTier(omitted[0]!))).toBe(true)
   })
 
   it('不修改入参数组', () => {
@@ -150,10 +154,15 @@ describe('sanitizeStrictManualOrder（稀疏表归一化）', () => {
 })
 
 describe('isBalanceTieredProvider（哪些渠道会做余额分档）', () => {
-  it('分档渠道在表里', () => {
-    for (const id of ['buddy', 'trae', 'qoder', 'qodercn', 'loomy', 'minimax', 'minimaxintl', 'autoclaw', 'magicrew', 'astudio', 'lobsterai', 'workbuddy']) {
+  it('分档渠道在表里（正向名单必须与 BALANCE_TIERED_PROVIDERS 同长）', () => {
+    // ⚠️ 名单少一家 = 那家「打开开关也拿不到严格排序」而这里的用例照样绿
+    //    （审计实测：本行原先漏了 autoclawintl / magicrewintl 两个国际站）。
+    //    真正的对账在 `strict-manual-order-wiring.spec.ts`（扫 index.ts 装配）；
+    //    这两处是**互补**的：那边钉「表 ↔ 装配」，这边钉「表 ↔ 用户可见渠道」。
+    for (const id of BALANCE_TIERED_PROVIDERS) {
       expect(isBalanceTieredProvider(id), id).toBe(true)
     }
+    expect(BALANCE_TIERED_PROVIDERS).toHaveLength(14)
   })
 
   it('纯手动序的渠道不在表里（拖拽对它们是绝对的）', () => {

@@ -2999,7 +2999,7 @@ export class AccountPool {
     await this.writeAccounts(next)
 
     this.ctx.logger?.info?.(
-      `[jet-hub] 已记录限流: 账号 ${accountId} 模型 ${modelId} 重置于 ${new Date(resetAtMs).toISOString()}`
+      `[jet-hub] 已记录限流: 账号 ${accountId} 模型 ${normalizedModelId} 重置于 ${new Date(resetAtMs).toISOString()}`
       + (sank ? '（已沉到本 provider 末尾，解禁后不再抢占首位）' : ''),
     )
   }
