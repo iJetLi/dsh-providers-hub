@@ -73,6 +73,10 @@ import { fetchRaccoonCreditBalance } from './raccoon-credits.js'
 import { fetchModelscopeBalanceDetailed } from './modelscope-credits.js'
 import type { ModelscopeCredential } from './modelscope.js'
 import { MODELSCOPE } from './modelscope-product.js'
+// ⚠️ 腾讯 Marvis（2026-11-09）：钱包余额原语（`/v3/marvis_get_wallet`）。
+import { fetchMarvisBalanceDetailed } from './marvis-credits.js'
+import type { MarvisCredential } from './marvis.js'
+import { MARVIS } from './marvis-product.js'
 // ⚠️ **本 fork 独有**（超级麦吉 Magicrew，2026-10-29）：积分余额原语。
 import { fetchMagicrewBalanceDetailed } from './magicrew-credits.js'
 // ⚠️ **本 fork 独有**（Magicrew 每日签到，2026-11-01 用户要求接入）：
@@ -509,6 +513,33 @@ export function createProviderCredits(
     modelscope: {
       fetchBalanceDetailed: async (credential) =>
         fetchModelscopeBalanceDetailed(credential as ModelscopeCredential, MODELSCOPE),
+    },
+
+    /**
+     * 腾讯 Marvis（2026-11-09）：**本 fork 独有**。
+     *
+     * 真端点 `POST https://yybadaccess.3g.qq.com/v3/marvis_get_wallet`（UAL 业务
+     * 签名头 + body `"{}"`），实测 200 返回
+     * `{total_tokens:"10000000", used_tokens:"0", frozen_tokens:"0",
+     *   avail_tokens:"10000000", total_cost:0, status:1}` ——
+     * ⚠️ **数字是字符串**（解析在 `fetchMarvisBalanceDetailed` 内），且
+     * ⚠️ **没有任何日期字段** ⇒ 包必须标 `expiryUnknown`（不得编造每日重置时刻）。
+     *
+     * ⚠️ 用 `fetchBalanceDetailed`（不是 `fetchBalance`）：401/403 / 业务码非 0 /
+     * 缺字段三种失败的**用户动作**完全不同（重新登录 / 上游改版 / 账号未开通），
+     * 压成笼统的「查询失败」会误导。
+     */
+    marvis: {
+      fetchBalanceDetailed: async (credential) =>
+        fetchMarvisBalanceDetailed(credential as MarvisCredential, MARVIS),
+      /**
+       * ⚠️ 2026-11-09 整支评审 M5：Marvis **没有**签到端点（钱包 `/v3/marvis_get_wallet`
+       * 是只读的，9 条候选端点全 404）。UI 隐藏了「一键签到」按钮，但绕过 UI 调
+       * `credits.claimAll` 时若不给这句，用户拿到的是泛化的
+       * `unsupported provider: marvis` —— 而 `provider-runtime.ts` 的头注释明写
+       * 「能力缺失必须给可读文案、不得退化成 unsupported provider」。
+       */
+      claimUnavailableReason: 'Marvis 没有每日签到接口：令牌额度由服务端每日发放，无需手动领取',
     },
 
     /**

@@ -638,6 +638,9 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   //    （`/v1/credits`、`/v1/balance`、`/v1/usage` 实测全 404「Gateway 路由不存在」）。
   //    ⚠️ 单位是 **1/100 积分**（23505 ⇒ 235.05），换算在 buildBaizhiBalance 里做。
   baizhi: '/api/v1/user/wallet/balance',
+  // ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：钱包端点与推理**同一个 host**
+  //    （`yybadaccess.3g.qq.com`），只是路径不同（`/v3/` vs `/v1/`）。
+  marvis: '/v3/marvis_get_wallet',
 }
 
 /**
@@ -672,6 +675,12 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     //    （那是刻意的降级，不是缺陷）⇒ 超集必须带上它，否则下面那张
     //    「余额请求打到自己端点」的表会对 monkeycode 恒读过。
     session_cookie: 'spec_session=1',
+    // ⚠️ 腾讯 Marvis（2026-11-09）的余额请求头由 `businessHeaders()` 从凭据派生
+    //    （`Ual-Access-Openid` / `Ual-Access-Guid` / `Ual-Access-Login-Type`）⇒
+    //    超集必须带上这四个字段，否则请求根本发不出去、本表那条会恒读过。
+    openid: 'oid-spec',
+    guid: '0123456789abcdef0123456789abcdef',
+    login_type: '1',
   })
 
   it('手写端点清单与 registry 逐项对齐（漏一家即红并点名）', () => {
@@ -841,7 +850,8 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    它是全仓首例「**同一家 provider 的两套凭据分走两个域**」：`sk-` 走
     //    推理网关（`x-api-key`），控制台 cookie 走积分（cookie）。只有后者能查
     //    余额 ⇒ 只填 Key 的账号会走 401 降级路径，不会被当成「零余额」。
-    expect(expected.length).toBe(23)
+    // ⚠️ 2026-11-09 并入 marvis（腾讯 Marvis，钱包 `/v3/marvis_get_wallet`）⇒ 23 → 24。
+    expect(expected.length).toBe(24)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
     //    都是 `createProviderCredits({ loomy, raccoon, zcode })`。deps 只应影响**实现**，

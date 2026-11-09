@@ -1453,6 +1453,13 @@ export class AggregateAdapter extends LlmAdapter {
     //    `WIRED_EXPIRY_PROVIDERS` 与 `provider-expiry.ts` 的条目，
     //    且后者必须传 `MAGICREW_INTL`（传国内版会拿国内基址查国际账号余额）。
     'magicrewintl',
+    // ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：`channel: true` ⇒ 必须进本数组，
+    //    否则它的模型**永不进聚合目录、静默不可见**。
+    //    ⚠️⚠️ **本数组只是第一道门**（模型层归并）。决定「在不在候选表里」的是
+    //    `aggregate-expiry.ts` 的 `WIRED_EXPIRY_PROVIDERS` —— Marvis 已接入
+    //    （折算原语 `marvisExpiry`，属「有余额但不下发到期时间」那一类：
+    //    有余额即 `NEVER`、烧光即 `UNUSABLE`）。
+    'marvis',
   ])
 
   /**

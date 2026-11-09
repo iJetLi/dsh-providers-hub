@@ -220,6 +220,10 @@ describe('★★ 接线的**透传**腿（`provider-expiry.ts` 的 `context.cach
     //    也接了 `context.cachedBalance` 透传（与 `magicrew` 逐字同构，只差 product 常量）。
     //    漏登记 ⇒ 本表与生产漂移（本用例即清单，多一个少一个都红）。
     'magicrewintl',
+    // ⚠️ 2026-11-09：腾讯 Marvis 的 `provider-expiry.ts` 条目也把
+    //    `context.cachedBalance` 透传给了 `marvisExpiry`（与 modelscope /
+    //    magicrew 同构）。漏登记 ⇒ 本表与生产漂移（本用例即清单）。
+    'marvis',
   ] as const
 
   it('★★ 所有接了 `cachedBalance` 透传的渠道都必须真的透传（本表即清单）', async () => {

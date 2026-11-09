@@ -93,6 +93,11 @@ const PROVIDER_IDS = readProviderIds()
  */
 // ⚠️ 2026-10-17 合并后有**四个**专属字段（astudio 与 autoclaw 各一）——
 //    判据「恰好一个」正是「两家的字段不得互相串台」的那道闸门。
+// ⚠️ **marvis 不在这个表里**（2026-11-09 真机报障）：它的登录方式是 QQ / 微信，
+//    但选择 UI 是它**自己的** `MarvisLoginModal`（`createAccount` 里那条独立
+//    `if (provider === 'marvis')` 早退打开），根本不经过本文件的载荷函数。
+//    曾经加进来过，结果它同时进了 ZCode 的渠道白名单 ⇒ 点「+ 新建账号」弹的是
+//    「添加 ZCode 账号」+ cn BigModel / z.ai（用户截图实证）。
 const EXCLUSIVE_FIELDS = ['zcodeProvider', 'accioRegion', 'astudioLoginMethod', 'autoclawMode']
 
 /**
@@ -154,7 +159,7 @@ describe('A. 「+ 新建账号」必须按 provider 分支（IKJLK3 A1/A2/A3）'
     }
   })
 
-  it('★ 只有 zcode / accio / astudio / autoclaw 两家需要先问一句，其余点按钮即登录', () => {
+  it('★ 只有 zcode / accio / astudio / autoclaw / autoclawintl 走渠道弹窗，其余点按钮即登录', () => {
     expect(newAccountAsksChannel('zcode')).toBe(true)
     // ⚠ accio 的预选项是**登录区域**：区域决定登录页域名，而区域由服务端按账号
     //   下发、登录前无从推断 ⇒ 选错就登不进去（国际用户拿中国版登录页）。
@@ -164,6 +169,12 @@ describe('A. 「+ 新建账号」必须按 provider 分支（IKJLK3 A1/A2/A3）'
     // ⚠️ autoclawintl（2026-10-20）：与国内版**同样需要预选**（一键导入 / 短信），
     //    且它读的是**不同的 userData 目录** ⇒ 漏判会让它静默走短信分支。
     expect(newAccountAsksChannel('autoclawintl')).toBe(true)
+    // ⚠️⚠️ **marvis 必须是 false**（2026-11-09 真机报障，用户截图）：
+    //    它确实要选 QQ / 微信，但那个选择框是**它自己的** `MarvisLoginModal`
+    //    （`createAccount` 的独立早退分支打开的）。加进本白名单的唯一后果是
+    //    点「+ 新建账号」弹出 **ZCode 的渠道弹窗**（cn BigModel / z.ai）——
+    //    两个选项对 marvis 都是死值，且用户看到的标题是「添加 ZCode 账号」。
+    expect(newAccountAsksChannel('marvis')).toBe(false)
     // ⚠ 这条对**全部** provider 取一遍：A1 的形态是「弹窗对 provider 零分支」，
     //   只抽查两三个 provider 的话，新增一个 provider 漏判就会静默溜过去。
     for (const id of PROVIDER_IDS) {
@@ -206,6 +217,16 @@ describe('A. 「+ 新建账号」必须按 provider 分支（IKJLK3 A1/A2/A3）'
       .toEqual({ provider: 'autoclawintl', autoclawMode: 'local' })
     expect(buildCreateAccountPayload('autoclawintl', undefined, undefined, undefined, 'sms'))
       .toEqual({ provider: 'autoclawintl', autoclawMode: 'sms' })
+  })
+
+  it('★★ marvis 的载荷**不带任何**专属字段（登录方式由它自己的弹窗传）', () => {
+    // ⚠️ 这一格就是 2026-11-09 真机报障的回归守卫：marvis 一旦在这里产出
+    //    `marvisLoginType`，就说明有人把它又加回了渠道白名单 —— 而那条白名单
+    //    驱动的是 **ZCode 弹窗**（用户会看到「添加 ZCode 账号」+ cn BigModel / z.ai）。
+    //    真正的登录方式由 `MarvisLoginModal` 的回调直接传给 `account.create`
+    //    （`marvis-client-panel.spec.ts` 里以源码断言守着那两处调用）。
+    expect(buildCreateAccountPayload('marvis')).toEqual({ provider: 'marvis' })
+    expect(buildCreateAccountPayload('marvis', 'zai', 'global')).toEqual({ provider: 'marvis' })
   })
 
   it('★ astudio 与 autoclaw 的登录方式**互不串台**（2026-10-17 合并引入的真实风险）', () => {

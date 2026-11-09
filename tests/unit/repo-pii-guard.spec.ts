@@ -221,6 +221,11 @@ const CREDENTIAL_CONSTRUCTOR_SAMPLES: ReadonlySet<string> = new Set([
   'tok-probe-minimax',
   'bm-token',
   'ms-wire-test-key',
+  // ⚠️ 腾讯 Marvis（2026-11-09）单测的构造样例：形状合法（`mv_` 前缀 +
+  //    够长）但**纯属手写假值**，不含任何真实凭据。逐条列出（同一条纪律：
+  //    不用「含 test 字样就放过」的启发式）。
+  'mv-test-access-token',
+  'test-refresh-token-0001',
   'sk-opencode-test-key-0123456789',
   'sk-opencode-disabled-key-0123456789',
   // ⚠️ 2026-10-31 对抗审计收编的探针假 key（qiniu 泄漏面 / 闸门有牙性，

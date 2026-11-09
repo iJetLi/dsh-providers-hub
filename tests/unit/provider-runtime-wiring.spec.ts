@@ -122,6 +122,11 @@ const AUTH_SERVICE_OF: ReadonlyArray<readonly [string, string]> = [
   // 但 `refreshAccountCredential` 要做有效期对账回写池内 `expiresAt`，
   // 所以必须注册 auth 实例（漏注册 = 注册表与 registry 漂移，本用例点名变红）。
   ['baizhi', 'baizhiAuth'],
+  // ⚠️ 腾讯 Marvis（2026-11-09）：服务名由 `${product.id}Auth` 派生 ⇒
+  //    `marvisAuth`。它有**真实** refresh 端点（`POST /marvis_client_login/
+  //    marvis_refresh_token`）⇒ 必须注册 auth 实例（漏注册 = 续期链路静默失效，
+  //    而 access_token 过期后每次推理都 401）。
+  ['marvis', 'marvisAuth'],
 ]
 
 /**
@@ -455,7 +460,8 @@ describe('★ index.ts 的能力注册表接线（行为断言，替代源码文
     //    故只需登记 `AUTH_SERVICE_OF`，不需动 `AUTH_EXEMPT`。
     // ⚠️ 2026-11-02 加 monkeycodeintl：25 → 26 个 auth 键。
     // 2026-11-02: baizhi 接入后 26 -> 27。
-    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(27)
+    // 2026-11-09: marvis 接入后 27 -> 28。
+    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(28)
     expect(
       registeredRuntimeIds().sort(),
       'registry 里有账号的 provider 必须都注册进能力注册表（左侧多出 = 清单里多了僵尸项，' +
@@ -571,6 +577,12 @@ describe('★ index.ts 的 probe 域接线（Task 8 复审补齐：此前零守�
     //    registry 里**省略 `rateLimit`（= true）**自洽，且必须同时进
     //    `WRITES_RATE_LIMIT_PROVIDERS` 与 `probeById`（否则标记永远清不掉）。
     ['baizhi-adapter.ts', ['baizhi']],
+    // ⚠️ 腾讯 Marvis（2026-11-09）**会写** `modelRateLimits`：
+    //    `marvis-adapter.ts` 在 429 / 额度耗尽 / 风控三条都调注入的 `markLimited`
+    //    （额度对齐 UTC+8 次日零点、429 指数退避封顶 30 分钟）⇒ 与 registry 里
+    //    **省略 `rateLimit`（= true）**自洽，且必须同时进
+    //    `WRITES_RATE_LIMIT_PROVIDERS` 与 `probeById`（否则标记永远清不掉）。
+    ['marvis-adapter.ts', ['marvis']],
   ]
 
   /**

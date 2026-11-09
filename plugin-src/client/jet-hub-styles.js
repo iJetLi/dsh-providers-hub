@@ -88,6 +88,8 @@ const STYLES = `
       故这里一条规则覆盖两行。 */
 .dim-jh-providerIcon.monkeycode { background: white; }
 /* 百智云：官方 favicon 是透明底 + 深灰单色图形（已去掉 dark-mode 变白）⇒ 白底容器。 */
+/* 腾讯 Marvis：占位图标自带蓝底 ⇒ 容器底色用白，避免与蓝底叠加偏色。 */
+.dim-jh-providerIcon.marvis { background: white; }
 .dim-jh-providerIcon.baizhi { background: white; }
 .dim-jh-providerIcon.buddy { background: white; }
 .dim-jh-providerIcon.workbuddy { background: white; }

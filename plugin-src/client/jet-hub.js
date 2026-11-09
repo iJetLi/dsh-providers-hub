@@ -68,6 +68,7 @@ import {
   disablingLeavesNoEnabledAccount,
 } from './account-model-link.js';
 import { buildCreateAccountPayload, newAccountAsksChannel } from './new-account.js';
+import { MarvisLoginModal } from './marvis-login-modal.js';
 import {
   copyToClipboard,
   formatModelIdList,
@@ -4683,6 +4684,90 @@ function ProviderPanel({
       if (mounted.current) setCreating(false);
     }
   };
+  /**
+   * 腾讯 Marvis 的浏览器登录（本 fork 独有，2026-11-09）。
+   *
+   * `loginType` 是**上游的码值**：`'1'` = QQ、`'2'` = 微信（不是 `'QC'` / `'WX'`，
+   * 那两个是 `login_type` **参数名**侧的取值，宿主 `account.create` 只认码值）。
+   *
+   * ⚠️ 宿主返回的 `loginUrl` 是**空串**（它自己开浏览器窗口，不是把 URL 交给前端
+   * `window.open`）⇒ 这里**不能**走 `loginUrl` 分支，必须直接
+   * `startLoginPoll({ accountId, provider })`（同 MonkeyCode / 百智云）。
+   */
+  const submitMarvisLogin = async (loginType) => {
+    if (magicrewInFlightRef.current) return;
+    magicrewInFlightRef.current = true;
+    setCreating(true);
+    setError(null);
+    try {
+      const created = await rpcCall('account.create', {
+        provider: 'marvis',
+        mode: 'browser',
+        marvisLoginType: loginType,
+      });
+      if (mounted.current) setCredentialModal(null);
+      const accountId = created && created.accountId ? created.accountId : '';
+      if (!accountId) {
+        if (mounted.current) {
+          setCredentialModal((m) => m ? { ...m, error: '宿主未返回账号 id，请重试' } : m);
+        }
+        return;
+      }
+      setProbeNotice({
+        tone: 'ok',
+        text: '浏览器窗口已打开，请在窗口里完成授权（完成后会自动建号并拉取额度）。',
+        details: []
+      });
+      startLoginPoll({ accountId, provider: 'marvis' });
+    } catch (caught) {
+      if (mounted.current) {
+        setCredentialModal((m) => m ? { ...m, error: caught && caught.message ? caught.message : '登录失败' } : m);
+      }
+    } finally {
+      magicrewInFlightRef.current = false;
+      if (mounted.current) setCreating(false);
+    }
+  };
+  /**
+   * 「从 magpie 导入」：**不传内容**，让宿主自己去读本机的
+   * `~/.config/magpie/plugin-auth.json`。
+   *
+   * ⚠️ 2026-11-09 用户报障：这一格原先把 textarea 里的内容当 `magpieCredential`
+   *    发上去，等于要求用户自己找文件、精确复制一段 JSON。文件在本机、读取方
+   *    也是本机进程 ⇒ 这件事该由宿主做。载荷里**不再带** `magpieCredential`：
+   *    带了空串会被宿主当成「用户给了一段空 JSON」（错误原因就错位了）。
+   *
+   * ⚠️ 同步路径（`mode:'magpie-import'`）**不产生** 转圈轮询 —— 宿主当场要么
+   * 建好账号、要么回可读错误 ⇒ 失败文案留在弹窗内，成功则关窗 + 刷新列表。
+   */
+  const submitMarvisMagpieImport = async () => {
+    if (magicrewInFlightRef.current) return;
+    magicrewInFlightRef.current = true;
+    setCreating(true);
+    setError(null);
+    try {
+      const created = await rpcCall('account.create', {
+        provider: 'marvis',
+        mode: 'magpie-import',
+      });
+      if (mounted.current) setCredentialModal(null);
+      await loadAccounts();
+      setProbeNotice({
+        tone: 'ok',
+        text: created && created.reused
+          ? '已复用本机已有的 Marvis 账号凭据，未新建账号。'
+          : '已从 magpie 凭据导入 Marvis 账号。',
+        details: []
+      });
+    } catch (caught) {
+      if (mounted.current) {
+        setCredentialModal((m) => m ? { ...m, error: caught && caught.message ? caught.message : '导入失败' } : m);
+      }
+    } finally {
+      magicrewInFlightRef.current = false;
+      if (mounted.current) setCreating(false);
+    }
+  };
   const startBaizhiSession = async (accountId) => {
     if (!accountId) return;
     const inFlight = baizhiSessionRef.current;
@@ -4816,6 +4901,14 @@ function ProviderPanel({
     if (pollRef.current !== 0) {
       setProbeNotice({ tone: 'warn', text: '上一次登录仍在进行中，请先完成或等待它结束。', details: [] })
       return
+    }
+    // ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：凭据只能由 QQ / 微信两条 OAuth
+    //    授权链之一产出，且 `login_type`（`'1'` / `'2'`）**事后无法从凭据反推**
+    //    ⇒ 必须先弹窗让用户选一条。**独立一条 if**（禁止合并成 `||`）：
+    //    本仓库记录过「合并后守卫只覆盖前一家、第二家从此不设防」的事故。
+    if (provider === 'marvis') {
+      setCredentialModal({ provider, error: '' });
+      return;
     }
     // ⚠️ opencode 的登录**不跳浏览器**，而是开自绘弹窗粘贴 API key；
     // 走 `setKeyModal` 而不是下面的 `account.create` 流程。
@@ -6777,6 +6870,16 @@ function ProviderPanel({
         setKeyModal({ provider: manualProvider, error: '' });
       },
       onClose: () => setCredentialModal(null)
+    }) : null,
+    // 腾讯 Marvis（本 fork 独有，2026-11-09）：两条 OAuth 链 + 「从 magpie 导入」。
+    // ⚠️ 与上面几家共用 `credentialModal` 这个 state，但渲染**独立组件**。
+    credentialModal && credentialModal.provider === 'marvis' ? React.createElement(MarvisLoginModal, {
+      error: credentialModal.error || '',
+      busy: creating,
+      onQq: () => void submitMarvisLogin('1'),
+      onWechat: () => void submitMarvisLogin('2'),
+      onImport: () => void submitMarvisMagpieImport(),
+      onClose: () => setCredentialModal(null),
     }) : null,
     // ⚠️ 白名单（2026-11-02 四审 H-1）：原先末支是整条排除式（`credentialModal ?`），
     //    任何 provider 误用都会落到本弹窗 ⇒ 看到 Magicrew 文案、并按错的 provider 打 RPC。
@@ -8947,13 +9050,16 @@ function GatewayPanel({ status, busy, notice, onToggle, onToggleAllowLan, onRelo
 //    见 `src/aggregate-expiry.ts` 的同名表）。漏记会让空态文案少报三家 ——
 //    而「决定候选表可见性的是后端那张表」，两边必须集合相等（有 spec 守着）。
 //    ⚠️ 数组字面量里**不要写注释**：那条守卫用 `split(',')` 抽 id，注释会被当成一项。
+// ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：钱包端点有「跨账号的到期余额探测」
+//    语义（`marvisExpiry` 走共享 `fetchBalanceWithCache`）⇒ 必须与后端
+//    `WIRED_EXPIRY_PROVIDERS` 集合相等（有 spec 守着）。
 const AGG_WIRED_CHANNEL_IDS = [
   'buddy', 'workbuddy', 'loomy', 'codearts', 'zcode', 'lobsterai', 'trae',
   'accio', 'officeace', 'modelscope', 'autoclaw', 'autoclawintl',
   'qoder', 'qodercn',
   'astudio', 'minimax', 'minimaxintl',
   'magicrew', 'magicrewintl',
-  'monkeycode', 'monkeycodeintl', 'baizhi',
+  'monkeycode', 'monkeycodeintl', 'baizhi', 'marvis',
 ];
 
 /**

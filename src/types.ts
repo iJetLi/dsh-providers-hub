@@ -364,7 +364,7 @@ export interface RpcCreateAccountRequest {
    * ⚠️ 来自客户端自报的 RPC 载荷（无 schema 校验）⇒ 读取侧按字面量白名单判，
    * 未登记的值一律当作缺省路径（**不报错、不静默改变语义**）。
    */
-  mode?: 'local-browser' | 'browser'
+  mode?: 'local-browser' | 'browser' | 'magpie-import'
   /**
    * 手机号（**仅 Loomy 需要**）。
    *
@@ -463,6 +463,27 @@ export interface RpcCreateAccountRequest {
    * ⚠️ 缺省 = 空串 = 直连，与既有行为**逐字一致**。
    */
   qoderProxy?: string
+  /**
+   * 登录渠道（**仅腾讯 Marvis 需要**）。
+   *
+   * Marvis 只有两种 OAuth：`'1'` = QQ、`'2'` = 微信。缺省 `'1'`（与
+   * `MarvisCredential.login_type` 的取值域逐字相同 —— 不是 `'QQ'` / `'WX'`）。
+   *
+   * ⚠️ 来自客户端自报的 RPC 载荷（无 schema 校验）⇒ 读取侧按字面量白名单判，
+   *    未登记的值一律当作缺省（`'1'`），不报错。
+   */
+  marvisLoginType?: '1' | '2'
+  /**
+   * magpie 的 `plugin-auth.json` 片段（**仅 Marvis 的 `mode: 'magpie-import'` 需要**）。
+   *
+   * 用户从 `~/.config/magpie/plugin-auth.json` 里复制 `marvis` 那一项（可以是整份
+   * 文件、也可以是那一项本身）粘进来 ⇒ 凭据已含 `access` / `refresh` /
+   * `metadata.openid` / `metadata.guid`，**不需要任何上游请求**。
+   *
+   * ⚠️ 它与 `password` 同一条纪律：**只用于一次性导入**，解析后立刻转成
+   *    `MarvisCredential` 落凭据库，绝不原样留存。
+   */
+  magpieCredential?: string
 }
 export interface RpcCreateAccountResponse {
   accountId: string

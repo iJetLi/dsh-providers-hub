@@ -125,6 +125,11 @@ export const REFRESH_PROVIDERS = [
   // ⚠️ 2026-11-02 拆站：国际站是**独立部署**（独立账号池 / cookie / 网关），
   //    `channel: true` ⇒ 必须进批量续期表，否则它的 `account.refresh` 覆盖为零。
   'monkeycodeintl',
+  // ⚠️ 腾讯 Marvis（`marvis`，2026-11-09）：**有**真实 refresh 端点
+  //    （`POST /marvis_client_login/marvis_refresh_token`），`refreshAccountCredential`
+  //    续期并回写池内 `expiresAt` ⇒ 不属 loomy / zcode 那类豁免。
+  //    漏了它这一家的 `account.refresh` 行为覆盖就降为零。
+  'marvis',
 ] as const
 
 /**

@@ -321,6 +321,11 @@ export const WRITES_RATE_LIMIT_PROVIDERS: readonly string[] = Object.freeze([
   //    漏登记 = 标记写进去却在 `probeById` 里查不到 ⇒「重测 / 重置」清不掉
   //    （与 monkeycode / qiniu 同型同因）。
   'baizhi',
+  // ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：`marvis-adapter.ts` **会写**
+  //    `modelRateLimits`（429 → 指数退避封顶 30 分钟、额度耗尽 → 对齐 UTC+8
+  //    次日零点、风控 → 同样走冷却）。漏登记 = 标记写进去却在 `probeById` 里
+  //    查不到 ⇒「重测 / 重置」清不掉，冷却永不解除。
+  'marvis',
   ])
 
 /** **期望**注册进 `probeById` 的 provider id（会写标记 − {@link PROBE_EXEMPT}）。 */

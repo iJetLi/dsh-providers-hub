@@ -69,6 +69,7 @@ import { AutoclawAdapter } from '../../src/autoclaw-adapter.js'
 import { AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
 // ⚠️ **本 fork 独有**（modelscope，2026-10-16）。
 import { MagicrewAdapter } from '../../src/magicrew-adapter.js'
+import { MarvisAdapter } from '../../src/marvis-adapter.js'
 import { MAGICREW_FALLBACK_CONTEXT_WINDOW, MAGICREW_INTL } from '../../src/magicrew-product.js'
 import { ModelscopeAdapter } from '../../src/modelscope-adapter.js'
 // ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）。
@@ -712,6 +713,26 @@ id: 'autoclaw',
         resolveCredential: async () => ({ jwt: 'J', organizationCode: 'org1' } as never),
       } as never),
     },
+    // ⚠️ 腾讯 Marvis（2026-11-09）：`channel: true` ⇒ 必须进本表，否则它不过
+    //    本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
+    //    ⚠️ 上游**没有目录端点**（9 条候选全 404/400）⇒ 目录恒为单条
+    //    `main-auto`；本段只对拍跨家契约，所以「只有一条」正是可预期的形状。
+    {
+      id: 'marvis',
+      make: () => new MarvisAdapter({
+        ...NO_CRED,
+        slots: async () => [{
+          id: 'marvis',
+          credential: {
+            access_token: 'mv-test-access-token',
+            refresh_token: 'test-refresh-token-0001',
+            openid: 'oid-parity',
+            guid: '0123456789abcdef0123456789abcdef',
+            login_type: '1',
+          } as never,
+        }],
+      } as never),
+    },
     // ⚠️ Codely（Unity，2026-10-22 A6）：`channel` 已翻 true ⇒ 必须进本表，
     //    否则它不过本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
     {
@@ -903,7 +924,8 @@ id: 'autoclaw',
     // ⚠️ 2026-11-02 **拆站**：monkeycodeintl（MonkeyCode 国际站）是独立部署，
     //    `channel: true` ⇒ 26 → 27。
     // ⚠️ 2026-11-02 并入 baizhi（百智云，`channel: true`）⇒ 27 → 28。
-    expect(CASES).toHaveLength(28)
+    // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis，`channel: true`）⇒ 28 → 29。
+    expect(CASES).toHaveLength(29)
   })
 
   it('★★ `catalog` 具备 `refresh` 的家，适配器上必须**存在** `refresh` 成员（转发接线）', () => {

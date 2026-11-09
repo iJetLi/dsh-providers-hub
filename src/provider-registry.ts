@@ -1118,6 +1118,43 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
   },
 
   {
+    // 腾讯 Marvis（2026-11-09 接入）。
+    //
+    // ## 为什么只有一条模型
+    // 上游**没有模型目录端点**（累计试过 9 条候选路径，全 404 / 400），模型列表
+    // 只能静态兜底。槽位里只有 `main-auto` 是用户要的（服务端自动路由），实测
+    // 落到 `deepseek-v4-1-flash-261017`；`deepseek-v4-pro-external` / `hy3-*` /
+    // `claude-*` / `gpt-5.4` / `hunyuan-*` 本账号无授权（400 无效模型 id）或
+    // 不在用户选择范围内 ⇒ **目录只列一条**。
+    // ⚠️ 真实模型 id（`deepseek-v4-1-flash-261017`）**不能直传**：上游回
+    //    `400 {"code":4130001,"msg":"客户端AI业务错误: 无效模型id"}`，
+    //    只有槽位名可作 `model` 上行 —— 归一逻辑见 `normalizeMarvisModelId`。
+    //
+    // ## 能力登记的依据
+    // · `balance: true`：`POST /v3/marvis_get_wallet` 实测 200，
+    //   `{total_tokens:"10000000", used_tokens:"0", frozen_tokens:"0", …}`
+    //   （**字符串数字**，且**没有任何日期字段** ⇒ 包里只能标 `expiryUnknown`）。
+    // · 省略 `dailyCheckin`：**没有**签到端点。省略的语义就是「后端无可调用
+    //   端点」，与「忘了写」不同 —— 一键签到会把它记成 inactive 而不是 failed。
+    // · 省略 `creditPackages`：余额是单一口袋 + 可选「冻结中」子量，没有任何
+    //   到期批次 ⇒ 名单型展示只会凭空造日期。
+    // · 省略 `rateLimit`（= true）：请求级换号**真的**会写 `modelRateLimits`
+    //   （429 / 额度耗尽 / 风控三条都调 `markLimited`）⇒ 限流按钮必须有。
+    // · 省略 `accountTest`：探活要真发一次推理（消耗真实 token 配额）。
+    // · 省略 `permanentLock` / `usesExpiryWindow`：上游不给任何到期时间，
+    //   两者都以「包带到期时间」为前提。
+    id: 'marvis',
+    label: '腾讯 Marvis',
+    displayName: '腾讯 Marvis',
+    logoClass: 'marvis',
+    credits: { balance: true },
+    // ⚠️ 必须 `llm-<id>`（老契约 DSH ≤0.1.6 的 namespace）。
+    settingsNamespace: 'llm-marvis',
+    // ⚠️ `channel: true`：它持有账号与凭据，是普通渠道；`false` 只留给 `aggregate`。
+    channel: true,
+  },
+
+  {
     // Magicrew（超级麦吉国内站，2026-10-29 接入）。
     // ⚠️ 位置要求（用户明确）：**排在 aggregate 之前 = 倒数第二**。
     //    守因为未自定义 `providerOrder` 时，左栏完全按本表的**声明序**渲染

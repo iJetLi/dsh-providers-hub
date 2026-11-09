@@ -66,6 +66,8 @@ import {
   traeExpiry,
   // ⚠️ **本 fork 独有**（魔搭，2026-10-17）
   modelscopeExpiry,
+  // ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）
+  marvisExpiry,
   // ⚠️ AutoClaw（智谱，2026-10-17 审计 P0 修复新增）
   autoclawExpiry,
   // ⚠️ Qoder（国际版 / 中国版共用，2026-10-20 新增）
@@ -86,6 +88,9 @@ import { QODER, QODER_CN, type QoderProduct } from './qoder-product.js'
 import type { QoderCredential } from './qoder.js'
 // ⚠️ **本 fork 独有**（魔搭，2026-10-17）
 import { MODELSCOPE } from './modelscope-product.js'
+// ⚠️ 腾讯 Marvis（2026-11-09）：钱包无日期字段 ⇒ 折算只看「有没有余额」。
+import { MARVIS } from './marvis-product.js'
+import type { MarvisCredential } from './marvis.js'
 // ⚠️ MonkeyCode 两站 + 百智云（本 fork 独有，2026-11-02）：折算原语吃 product，
 //    两站必须各传各的（账号池不互通、域名不同：国际站 cookie 打国内站回 401）。
 import { MONKEYCODE, MONKEYCODE_INTL } from './monkeycode-product.js'
@@ -272,6 +277,19 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
       credentialExpiry: (c, context) => modelscopeExpiry(
         c as ModelscopeCredential,
         MODELSCOPE,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
+    // ⚠️ 腾讯 Marvis（2026-11-09）：与 modelscope **同格**（钱包只有剩余/总量，
+    //    没有任何日期字段 ⇒ 有余额即 `NEVER`、烧光即 `UNUSABLE`）。
+    //    ⚠️ 三处必须同改（本表 + `WIRED_EXPIRY_PROVIDERS` + 折算原语
+    //    `marvisExpiry`）—— 漏任何一处都是**静默**的（聚合轮换列表里看不到它）。
+    marvis: {
+      credentialExpiry: (c, context) => marvisExpiry(
+        c as MarvisCredential,
+        MARVIS,
         context?.cachedBalance === undefined
           ? undefined
           : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,

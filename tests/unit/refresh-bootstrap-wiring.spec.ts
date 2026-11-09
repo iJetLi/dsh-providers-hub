@@ -157,7 +157,7 @@ describe('续期调度器：启动必须先跑一轮', () => {
     // 2026-11-02 fork: monkeycode (channel:true) added -> 24 -> 25.
     // 2026-11-02 fork: monkeycodeintl (channel:true, 拆站) added -> 25 -> 26.
     // 2026-11-02: baizhi 接入后 26 -> 27。
-    expect(expected, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(27)
+    expect(expected, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(28)
     // ⚠️ 反方向：期望集里的每一个都必须**确实**在 registry 里有声明（防手抄漂移）。
     for (const id of expected) {
       expect(PROVIDER_REGISTRY.some((d) => d.id === id), `registry 缺少声明：${id}`).toBe(true)

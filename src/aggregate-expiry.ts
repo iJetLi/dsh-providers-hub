@@ -57,6 +57,10 @@ import { fetchTraeCreditBalance } from './trae-credits.js'
 import { fetchModelscopeBalanceDetailed } from './modelscope-credits.js'
 import { MODELSCOPE } from './modelscope-product.js'
 import type { ModelscopeCredential } from './modelscope.js'
+// 腾讯 Marvis（2026-11-09）：钱包只有「剩余 / 总量」，没有任何到期时间。
+import { fetchMarvisBalanceDetailed } from './marvis-credits.js'
+import { MARVIS } from './marvis-product.js'
+import type { MarvisCredential } from './marvis.js'
 // ⚠️ AutoClaw（智谱）：钱包余额折算（2026-10-17 审计 P0 修复新增）。
 import { fetchAutoclawBalanceDetailed } from './autoclaw-credits.js'
 import { AUTOCLAW } from './autoclaw-product.js'
@@ -259,6 +263,12 @@ export const WIRED_EXPIRY_PROVIDERS: readonly string[] = Object.freeze([
   'monkeycode',
   'monkeycodeintl',
   'baizhi',
+  // ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：折算原语见 `marvisExpiry`，
+  //    属「**有余额但不下发到期时间**」那一类（钱包报文只有 total/used/frozen）
+  //    ⇒ 有余额即 `NEVER`、烧光即 `UNUSABLE`。
+  //    ⚠️⚠️ **决定候选表可见性的是本表、不是 `AGGREGATE_CHANNELS`** ——
+  //    只加后者 ⇒ 归一化再对也没用，症状**静默**（该陷阱已复发 7 次）。
+  'marvis',
   // ⚠️ **Qoder**（中国版 / 国际版，2026-10-20，用户要求补齐三档分档 + 永久锁）。
   //    折算原语见 `qoderExpiry`（两站共用，只换 product）。
   //
@@ -1445,6 +1455,36 @@ export async function modelscopeExpiry(
       // ⚠️ `fetchBalanceDetailed` 用 `balance: null + error` 表达失败
       //    （见 `ProviderBalanceDetail` 的注释），而 `sharedPackageExpiry`
       //    认的是「`null` ⇒ UNUSABLE」⇒ 取 `balance` 即可。
+      return result.balance
+    },
+  ))
+}
+
+/**
+ * 腾讯 Marvis（2026-11-09）：**本 fork 独有**。
+ *
+ * ## 判据
+ * 钱包只给 `total_tokens` / `used_tokens` / `frozen_tokens` / `avail_tokens`，
+ * **没有任何日期字段** ⇒ 与 modelscope 同一条红线：
+ * · 有 `active && remaining > 0` 的包 ⇒ `NEVER`（可路由）；
+ * · 否则 `UNUSABLE`（**不得**编造「每日 0 点重置」—— 那是 Qoder / Magicrew
+ *   那类**真给了** `cycleEndTime` 的家才有的结论）。
+ *
+ * ⚠️ 上游 README 写「每日 1000 万计费 token」，但那是**计费口径**（缓存读 ×0、
+ *    输入输出 ×0.5），钱包里的 `total_tokens` 是同一个 10_000_000 的**显示口径**
+ *    ⇒ 不能用「剩余 / 每日额度」反推日期（本仓红线：绝不编造日期）。
+ */
+export async function marvisExpiry(
+  credential: MarvisCredential,
+  product: typeof MARVIS,
+  /** 共享读数入口（见 {@link buddyExpiry} 的同名参数）。 */
+  cached?: () => Promise<CreditBalance | null | undefined>,
+): Promise<number> {
+  return sharedPackageExpiry(() => fetchBalanceWithCache(
+    cached,
+    async () => {
+      const result = await fetchMarvisBalanceDetailed(credential, product)
+      // ⚠️ 同 modelscope：`balance: null` ⇒ UNUSABLE。
       return result.balance
     },
   ))

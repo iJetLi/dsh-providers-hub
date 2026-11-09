@@ -158,6 +158,27 @@ describe('主通道声明（T4：qoder 的 id 是内部代号）', () => {
     expect(channelOf('accio')).toBe('name')
   })
 
+  /**
+   * ⚠️ 腾讯 Marvis（2026-11-09）：`main-auto` 是**服务端自动路由槽位** ——
+   * 实测它落到 `deepseek-v4-1-flash-261017`，而 `app-auto` 落到另一个模型
+   * （`deepseek-v4-flash-202605`）⇒ id 本身**不携带模型身份**，且会随上游路由
+   * 策略变化。真名只在展示名里（`DeepSeek V4.1 Flash`）⇒ 必须走 name 通道，
+   * 与 qoder / accio 同因。
+   */
+  it('★ marvis 走 name 通道（main-auto 是自动路由槽位，id 不携带模型身份）', () => {
+    expect(channelOf('marvis')).toBe('name')
+  })
+
+  it('★ 回归：marvis 的 main-auto 与 codearts 的 deepseek-v4.1-flash 归到同一个键', () => {
+    // ⚠️ 判据是「**跨渠道同键**」，不是「字符串相等」—— 后者是近同义反复。
+    //    展示名逐字相同（`DeepSeek V4.1 Flash`）⇒ 两边归一化后必须同一个键，
+    //    否则聚合里会出现两个「DeepSeek V4.1 Flash」，用户按名字根本分不出。
+    const marvisKey = canonicalKeyFor('marvis', 'main-auto', 'DeepSeek V4.1 Flash')?.key
+    const codeartsKey = canonicalKeyFor('codearts', 'deepseek-v4.1-flash', 'DeepSeek V4.1 Flash')?.key
+    expect(marvisKey).toBeDefined()
+    expect(marvisKey).toBe(codeartsKey)
+  })
+
   it('★ 回归：accio 的 Qwen 3.8 Flash 必须与 loomy / qoder / trae 归到同一个键', () => {
     // ⚠️ 判据是「**跨渠道同键**」，不是「字符串相等」—— 后者是近同义反复
     //    （见上面那条用例的注释：全分支终审 M1 已删过一组这种断言）。
