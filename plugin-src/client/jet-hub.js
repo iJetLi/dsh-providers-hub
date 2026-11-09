@@ -6,6 +6,7 @@ import {
   supportsDailyCheckin,
   supportsOnboardingTasks,
   supportsRateLimit,
+  supportsBalanceTier,
   supportsAccountTest,
   supportsPermanentLock,
   supportsSubscriptionQuota,
@@ -422,6 +423,21 @@ const MODEL_LIST_HELP = '列出该 Provider 的全部模型。每个模型后面
  */
 const ORDER_HINT_TEXT = '拖动卡片调整排序，按顺序选号。限额账号会沉到末尾、恢复后不复位，'
   + '避免长期占位将其他号额度放过期。';
+
+/**
+ * 「余额分档优先」模式下**补充**的一句（只在走余额分档的渠道、且开关关闭时显示）。
+ *
+ * ## 为什么必须有这一句（真实报障）
+ *
+ * 上面那句对**走余额分档的渠道**（buddy 系 / TRAE / Qoder / MiniMax / AutoClaw /
+ * Magicrew / AStudio / Loomy）是**不完全真实**的：那里先按积分到期档位排序，
+ * 拖拽顺序只是**档内**次序。用户把某号拖到首位、而它不再持有临期积分时，
+ * 请求会静默落到别的号上 —— 用户侧的表现就是「拖拽时灵时不灵」。
+ *
+ * 与其让用户去猜，不如在面板上直接说清当前模式，并给出那个能改它的开关。
+ */
+const ORDER_HINT_SUBTLE = '本渠道还会按「积分到期档位」优先：某号没有临期积分时会被排到后面。'
+  + '要完全按上面的序号选号，打开「严格手动顺序」。';
 
 /** 把一次重测/重置的响应汇总成一行可读文案。 */
 function summarizeProbe(kind, res) {
@@ -3484,6 +3500,26 @@ function ProviderPanel({
   const [reordering, setReordering] = React.useState(false);
   // 拖拽提交失败时的提示（如「列表已变化，请刷新」）。
   const [reorderError, setReorderError] = React.useState(null);
+  /**
+   * 「严格手动顺序」开关的当前值（宿主落 `state.json`，按 provider 稀疏表）。
+   *
+   * ⚠️ 初值取 `false`（= 升级前行为），读到之后再更新：**不能**乐观地先猜 true ——
+   * 这个开关会改变选号策略，猜错会让用户在读到真值前看到一段假的状态。
+   *
+   * ⚠️ 只在**走余额分档**的渠道渲染（`supportsBalanceTier`）：其余渠道本就不分档，
+   * 开关没有意义，渲染出来只会让用户以为「关掉它会更严格」。
+   */
+  const [strictManualOrder, setStrictManualOrder] = React.useState(false);
+  const [strictOrderBusy, setStrictOrderBusy] = React.useState(false);
+  /**
+   * 读开关**失败**的可见标记（2026-11-09 审计 P3）。
+   *
+   * 原先失败只打 console ⇒ 面板静默显示「关」。用户开着这个开关、某次读失败后
+   * 看到的是「关」，会以为自己的设置丢了（而且没有任何可归因的提示）。
+   * 这里只把**状态行文案**换成「读取失败 —— 点击按钮可重试」，
+   * 不弹红条：读不到时行为仍等于默认（与升级前一致），夸大它的严重性反而误导。
+   */
+  const [strictOrderReadFailed, setStrictOrderReadFailed] = React.useState(false);
   const mounted = React.useRef(true);
   /**
    * 最新账号列表的 ref 镜像。
@@ -3574,6 +3610,47 @@ function ProviderPanel({
    * 永远停在「查询失败」、控制台每次都留报错。
    */
   const canLoadCredits = supportsCreditBalance(provider);
+  /**
+   * 本渠道的选号是否会**先按余额到期档位排序**（决定要不要渲染「严格手动顺序」）。
+   *
+   * ⚠️ 不分档的渠道**不渲染**该开关：那里拖拽顺序本来就是绝对的，
+   * 渲染一个「打开后行为不变」的开关只会让用户以为它坏了。
+   */
+  const canStrictOrder = supportsBalanceTier(provider);
+  /** 读「严格手动顺序」当前值。失败时**保持默认 `false`** 并留一条 console 提示。 */
+  const loadStrictManualOrder = React.useCallback(async () => {
+    if (!canStrictOrder) return;
+    try {
+      const res = await rpcCall('strictManualOrder.getEnabled', { provider });
+      if (!mounted.current) return;
+      setStrictOrderReadFailed(false);
+      setStrictManualOrder(res?.enabled === true);
+    } catch (caught) {
+      // ⚠️ 不把错误摊成面板红条：这是**次要状态**，读不到就按默认行为走，
+      //    而默认行为与升级前逐字节一致（不会误导用户去点一个不存在的开关）。
+      //    但**状态行必须说出来**（否则「读失败」与「用户自己关掉了」同形）。
+      console.error('[jet-hub] read strict manual order failed:', caught);
+      if (mounted.current) setStrictOrderReadFailed(true);
+    }
+  }, [rpcCall, provider, canStrictOrder]);
+  const toggleStrictManualOrder = React.useCallback(async (nextEnabled) => {
+    setStrictOrderBusy(true);
+    try {
+      const res = await rpcCall('strictManualOrder.setEnabled', { provider, enabled: nextEnabled });
+      if (!mounted.current) return;
+      // ⚠️ 以**后端回传**为准，不做乐观更新（与 sessionBalance / nativeSearch 同取向）。
+      setStrictOrderReadFailed(false);
+      setStrictManualOrder(res?.enabled === true);
+    } catch (caught) {
+      console.error('[jet-hub] toggle strict manual order failed:', caught);
+      if (!mounted.current) return;
+      setReorderError(`「严格手动顺序」切换失败：${caught?.message || '未知错误'}`);
+      // 失败时重读，确保界面不停在一个假的状态上。
+      await loadStrictManualOrder();
+    } finally {
+      if (mounted.current) setStrictOrderBusy(false);
+    }
+  }, [rpcCall, provider, loadStrictManualOrder]);
   /**
    * 「新建账号」弹窗里问的是**登录区域**（accio）而不是**登录渠道**（zcode）。
    *
@@ -3862,6 +3939,8 @@ function ProviderPanel({
     mounted.current = true;
     void loadAccounts();
     void loadCompensation();
+    // 「严格手动顺序」只在分档渠道有意义（`canStrictOrder` 内部已判）。
+    void loadStrictManualOrder();
     // 只有支持余额查询的 provider 才在挂载时拉积分（loadCredits 内部也有一道
     // 门控，这里提前判掉是为了连 loading 状态都不翻）。
     if (canLoadCredits) void loadCredits();
@@ -5260,7 +5339,32 @@ function ProviderPanel({
     const snapshot = accountsRef.current;
     const byId = new Map(snapshot.map(a => [a.id, a]));
     const next = orderedIds.map(id => byId.get(id)).filter(Boolean);
-    if (next.length !== snapshot.length) return;   // 理论不可达：id 集合来自本列表
+    /**
+     * ⚠️ **这里绝不能静默 `return`**（真实缺陷，2026-11-09 报障「拖了没反应」）。
+     *
+     * 原写法 `if (next.length !== snapshot.length) return;` 在并发下是**可达**的：
+     * 拖拽提交期间若有别的路径改写了账号列表（`loadCredits` → `reloadAccountsQuietly`、
+     * 登录轮询、另一次提交的 finally），`accountsRef.current` 会换成新快照，
+     * 而 `orderedIds` 还是旧列表的 id ⇒ 长度不等。
+     *
+     * 症状是**完全无痕**：不落盘、不回滚、不报错、不提示 —— 用户看到卡片弹回原位，
+     * 只会认为「拖拽又不灵了」（正是本功能被报障的形态之一）。
+     *
+     * ⇒ 如实告知并**重读列表**：这条路径下屏幕上那个顺序已经不是最新的了，
+     * 只提示「保存失败」而不刷新，用户再拖一次仍会撞同一个不一致。
+     */
+    if (next.length !== snapshot.length) {
+      console.warn('[jet-hub] reorder skipped: account list changed mid-drag', {
+        expected: snapshot.length,
+        got: next.length,
+      });
+      if (!mounted.current) return;
+      setReorderError('账号列表在拖动期间发生了变化，本次顺序未保存，已重新读取列表');
+      // ⚠️ 不 await：让面板先反映这条提示，列表在后台补齐（失败也已被
+      //    `reloadAccountsQuietly` 内部各自 catch，不会把错误再冒到这里）。
+      void reloadAccountsQuietly();
+      return;
+    }
     accountsRef.current = next;
     setAccounts(next);
     setReordering(true);
@@ -5655,6 +5759,51 @@ function ProviderPanel({
             className: 'dim-jh-orderHint',
             title: ORDER_HINT_TEXT,
           }, ORDER_HINT_TEXT)
+        : null,
+      /**
+       * 「严格手动顺序」开关 + 分档说明（**只在走余额分档的渠道**渲染）。
+       *
+       * ⚠️ 这个开关不是可选的美化项：没有它，上面那句「按顺序选号」对分档渠道
+       *    是一句**半真**的话（真实顺序是「先按积分到期档位、档内才看拖拽序」），
+       *    而那正是「拖拽时灵时不灵」这条报障的根源。关着的时候必须**明说**
+       *    当前是按档位排的，否则用户只会继续以为拖拽坏了。
+       */
+      canStrictOrder
+        ? React.createElement('div', { className: 'dim-jh-orderMode' },
+            React.createElement('button', {
+              className: 'dim-jh-btn',
+              type: 'button',
+              // ⚠️ 与 `provider-toggle` 同款纪律：`disabled` 会让原生 tooltip
+              //    一起失效（Chromium 对 disabled 控件不显示 title），
+              //    故用 aria-disabled + onClick 早退，title 才读得到。
+              'aria-disabled': String(strictOrderBusy),
+              'data-kind': strictManualOrder ? 'primary' : undefined,
+              'aria-pressed': String(strictManualOrder),
+              title: strictManualOrder
+                ? '当前：完全按拖拽顺序选号。档位只用于判断「这个号还能不能用」（锁定永久积分时只剩永久积分的号仍被跳过）。点击回到「余额分档优先」。'
+                : '当前：先按积分到期档位排序，拖拽顺序只在同档内生效'
+                  + ' ⇒ 某号没有临期积分时会被排到后面，看起来像「拖拽没生效」。'
+                  + '点击改为完全按拖拽顺序选号。',
+              onClick: () => {
+                if (strictOrderBusy) return;
+                void toggleStrictManualOrder(!strictManualOrder);
+              },
+            }, strictManualOrder ? '严格手动顺序：开' : '严格手动顺序：关',
+            // 居中的状态说明单独一段，避免与按钮文案抢注意力。
+            ),
+            React.createElement('span', {
+              className: 'dim-jh-orderModeHint',
+              title: ORDER_HINT_SUBTLE,
+            }, strictOrderReadFailed
+              // 读失败时**明说**（否则与「用户自己关掉了」同形）；按钮仍可点，
+              // 点击会走 setEnabled 并以后端回传为准 —— 也就是重试。
+              ? '读取开关状态失败 —— 点击按钮可重试'
+              : strictManualOrder
+                // 开着：只剩「锁定永久积分」这一条筛选，说清它是**保留**的。
+                ? '选号顺序 = 上面的序号（限额/锁定仍会跳过不可用的号）'
+                // 关着：直接给出可操作的那一步。
+                : '当前先按积分到期档位排 —— 要让序号说了算，请打开右侧开关'),
+          )
         : null,
       React.createElement('div', { className: 'dim-jh-headerActions' },
         // 「订阅额度」放在**面板级**（而不是账号卡片的按钮行）：

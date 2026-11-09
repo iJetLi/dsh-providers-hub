@@ -2059,6 +2059,43 @@ export interface RpcSessionBalanceSetEnabledResponse {
 }
 
 /**
+ * RPC: 「严格手动顺序」开关的读取请求（按 provider 维度）。
+ *
+ * ⚠️ **必须带 `provider`**：它是**按渠道的稀疏表**（`buddy` 开了不影响
+ * `qodercn`），不是全局布尔。看完 {@link RpcSessionBalanceGetEnabledResponse}
+ * 那条的读者很容易以为可以省掉这个字段 —— 省掉就只能返回「全体」，而面板
+ * 每张卡片的开关语义是「只改这一家」。
+ */
+export interface RpcStrictManualOrderGetRequest {
+  provider: string
+}
+
+/** RPC: 「严格手动顺序」开关的读取响应。 */
+export interface RpcStrictManualOrderGetResponse {
+  /**
+   * `true` = 拖拽顺序是**唯一**的选号优先级（档位只当可用性判据）；
+   * `false`（缺键默认）= 余额分档优先、档内才看手动顺序（升级前行为）。
+   */
+  enabled: boolean
+}
+
+/** RPC: 「严格手动顺序」开关写入请求。 */
+export interface RpcStrictManualOrderSetRequest {
+  provider: string
+  enabled: boolean
+}
+
+/**
+ * RPC: 「严格手动顺序」开关写入响应。
+ *
+ * ⚠️ 回传的是**落盘后重读的值**，不是请求里的值 —— 与 `sessionBalance.setEnabled`
+ * 同取向：客户端一律以后端回传为准，不做乐观更新。
+ */
+export interface RpcStrictManualOrderSetResponse {
+  enabled: boolean
+}
+
+/**
  * RPC: 「面板入口」的读取响应（插件详情页设置卡片里的下拉）。
  *
  * 语义：Jet Hub 的**唯一**入口位置，两个取值严格互斥 ——

@@ -138,8 +138,13 @@ buddy: no usable credential; log in from the Jet Hub panel first
 - ⚠️ **不要重新引入「按限流重置时间重排候选」的 sort**。早期实现有
   `candidates.sort((a,b) => resetAtA - resetAtB)`，它会让手动顺序形同虚设 ——
   用户把某账号拖到首位，只要另一个账号的重置时间更早，实际选中的仍是后者。
-  现语义是「**手动顺序优先，限流豁免**」：顺序完全由用户决定，而正处于限流期的
-  账号已被 `filter` 排除，不会选到
+  现语义分两档（2026-11-09 订正，别再把两句混成一句）：**走余额分档的 14 家渠道**
+  （`BALANCE_TIERED_PROVIDERS`）默认是「**先按积分到期档位排序、档内才看拖拽顺序**」
+  —— 面板对它们渲染「严格手动顺序」开关（`JetHubState.strictManualOrder`，稀疏表、
+  缺键 = 关 = 升级前行为；打开后拖拽序才是唯一优先级，但档位仍判「能不能用」：
+  锁定永久积分时只剩永久积分的号照旧被跳过）；其余渠道（codearts / raccoon /
+  cline / gemini …）才是「**手动顺序优先，限流豁免**」：顺序完全由用户决定，
+  而正处于限流期的账号已被 `filter` 排除，不会选到
 - `reorderAccounts(provider, orderedIds)`：**只动本 provider 占用的下标**，
   其他 provider 账号位置不变（账号存在一个全局数组里，设置页按 provider 分组渲染）
 - `orderedIds` 必须是该 provider 全部账号 id 的一个**排列**，否则抛错。
@@ -153,6 +158,31 @@ buddy: no usable credential; log in from the Jet Hub panel first
   实际落点一致
 - ⚠️ **移除源元素后目标下标会前移**，必须用 `indexOf` 重算而不能复用原下标，
   否则会插到目标之后。`tests/unit/account-order.spec.ts` 覆盖了这一点
+
+#### 「严格手动顺序」开关（2026-11-09 落地 + 审计返工）
+
+- **存哪**：`JetHubState.strictManualOrder`（`Record<string, boolean>` 稀疏表，缺键 = 关 =
+  升级前行为）。**整体替换陷阱**：`AccountPool.saveState()` 的 `replace` 载荷必须显式带上
+  这个键，否则任何无关写入都会把它抹掉（`tests/unit/strict-manual-order-persist.spec.ts`
+  用「先打开、再做一次 `setProviderClosed`、最后断言键仍在」钉住）。
+- **RPC**：`strictManualOrder.getEnabled` / `setEnabled`。`setEnabled` 返回的是
+  **落盘后重读**的值，不是 `req.enabled` 的复读 —— 客户端据此做非乐观更新；
+  回显实现会让「落盘失败」显示成已打开（用例用「拒绝写入的池」把两者分开）。
+- **面板**：只对 `BALANCE_TIERED_PROVIDERS` 渲染（`supportsBalanceTier(provider)`）。
+  busy 态用 `aria-disabled` + `onClick` 早退（**不用** `disabled`，否则原生 tooltip 一起失效），
+  且 `:hover` 规则必须排除 `[aria-disabled='true']`，否则「忙碌中」仍然高亮。
+  读开关失败**不得静默显示「关」**（与「用户自己关掉了」同形）⇒ 状态行改为「读取失败 —— 点击可重试」。
+- **守卫分层**（四份各钉一段，缺一即静默失效）：
+  | 文件 | 钉什么 |
+  |---|---|
+  | `strict-manual-order.spec.ts` | 两个 rank 纯函数 + Selector 接线 |
+  | `strict-manual-order-wiring.spec.ts` | `src/index.ts` 真实装配 ↔ `BALANCE_TIERED_PROVIDERS` **双向差集** |
+  | `strict-manual-order-resolver.spec.ts` | `createCredentialResolver` 真的把池的开关传给 Selector（buddy / loomy 两条腿） |
+  | `strict-manual-order-persist.spec.ts` | 落盘 round-trip + 整体替换陷阱 + 脏值 sanitize |
+  | `jet-hub-panel-wiring.spec.ts`（末段） | 真渲染 + 真点击：分档渲染、点击发 `setEnabled`、非分档不渲染 |
+- ⚠️ **AST 守卫的已知极限**：`jet-hub-structure-ast.spec.ts` 只钉 `canStrictOrder` 的**条件文本**，
+  钉不住它的**定义** —— 实测把它改成 `= false` 时四个文件全绿（开关永不渲染）。
+  故必须另有真渲染用例（上表最后一行）。
 
 ### ⚠️ 安全策略拦截（11140）：三条通道都要换号 / 标冷却，错误码**绝不能**取 `AUTH`
 
@@ -2117,8 +2147,13 @@ buddy: no usable credential; log in from the Jet Hub panel first
 - ⚠️ **不要重新引入「按限流重置时间重排候选」的 sort**。早期实现有
   `candidates.sort((a,b) => resetAtA - resetAtB)`，它会让手动顺序形同虚设 ——
   用户把某账号拖到首位，只要另一个账号的重置时间更早，实际选中的仍是后者。
-  现语义是「**手动顺序优先，限流豁免**」：顺序完全由用户决定，而正处于限流期的
-  账号已被 `filter` 排除，不会选到
+  现语义分两档（2026-11-09 订正，别再把两句混成一句）：**走余额分档的 14 家渠道**
+  （`BALANCE_TIERED_PROVIDERS`）默认是「**先按积分到期档位排序、档内才看拖拽顺序**」
+  —— 面板对它们渲染「严格手动顺序」开关（`JetHubState.strictManualOrder`，稀疏表、
+  缺键 = 关 = 升级前行为；打开后拖拽序才是唯一优先级，但档位仍判「能不能用」：
+  锁定永久积分时只剩永久积分的号照旧被跳过）；其余渠道（codearts / raccoon /
+  cline / gemini …）才是「**手动顺序优先，限流豁免**」：顺序完全由用户决定，
+  而正处于限流期的账号已被 `filter` 排除，不会选到
 - `reorderAccounts(provider, orderedIds)`：**只动本 provider 占用的下标**，
   其他 provider 账号位置不变（账号存在一个全局数组里，设置页按 provider 分组渲染）
 - `orderedIds` 必须是该 provider 全部账号 id 的一个**排列**，否则抛错。

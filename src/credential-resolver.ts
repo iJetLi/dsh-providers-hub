@@ -189,6 +189,16 @@ export interface ResolverPool<TCredential = unknown> {
    * `DSH_ZCODE_SESSION_BALANCE`（默认开）—— 只为单测替身保留。
    */
   sessionBalanceEnabled?(): boolean
+  /**
+   * 「严格手动顺序」开关（可选能力；真实 `AccountPool` 已实现）。
+   *
+   * **开** = 拖拽序是唯一优先级判据（档位只当可用性判据）；
+   * **关 / 未实现** = 既有语义（余额分档优先、档内看手动顺序）。
+   *
+   * ⚠️ 每次选号**现读**（面板可随时切换）。未实现时按**关闭**处理：结构化替身
+   * 与单测 stub 不该因为「这个可选方法不存在」而被动获得新行为。
+   */
+  strictManualOrder?(provider: string): boolean
 }
 
 /** 注入的共享设施。 */
@@ -508,6 +518,9 @@ export function createCredentialResolver<TCredential>(
         allowPermanent,
         resolveCredential: config.readCredential,
         degradeOnUnknown: plan.degradeLockedWhenUnknown === true,
+        // ⚠️ **每次现读**（面板可随时切换），且**未实现时视为关闭** ——
+        //    单测替身与结构化 stub 不实现它时必须走既有语义（`=== true` 判据）。
+        strictManualOrder: deps.pool.strictManualOrder?.(providerId) === true,
       })
       if (picked.kind === 'account') {
         if (plan.reportPickedAccount !== false) report(picked.account.id)
@@ -551,7 +564,10 @@ export function createCredentialResolver<TCredential>(
       const candidates = candidatesOf(deps.pool, providerId, modelId)
       const allowPermanent = !deps.pool.permanentLocked(providerId)
       if (candidates.length > 0) {
-        const picked = await plan.selector.select(candidates, { allowPermanent })
+        const picked = await plan.selector.select(candidates, {
+          allowPermanent,
+          ...(deps.pool.strictManualOrder?.(providerId) === true ? { strictManualOrder: true } : {}),
+        })
         if (picked.ok) {
           const credential = await config.readCredential(picked.account.credentialRef)
           // ⚠️ 凭据不可用**不换号**（与 buddy 协议的关键差异）：loomy 的分档

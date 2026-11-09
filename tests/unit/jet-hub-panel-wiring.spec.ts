@@ -50,7 +50,7 @@ let writes: Array<{ index: number; value: unknown }> = []
 /** 本次渲染期间传进 `useCallback` 的回调（用于真实调用、观察写入形态）。 */
 let callbacks: unknown[] = []
 /** 本次渲染产出的 React 元素（只留 props：`onClick` 之类挂在这里）。 */
-let elements: Array<{ type: unknown; props: unknown }> = []
+let elements: Array<{ type: unknown; props: unknown; children?: unknown[] }> = []
 
 function slot<T>(initial: T | (() => T)): { v: T } {
   const key = cursor++
@@ -96,7 +96,11 @@ const reactStub = {
   },
   // ⚠️ 记录每次 createElement 的 props：`createAccount` 是**普通函数**（不走 useCallback），
   // 只能从它被挂上去的 onClick 拿到（否则接线层永远够不着「新建账号」这条路径）。
-  createElement: (type: unknown, props: unknown) => { elements.push({ type, props }); return null },
+  // ⚠️ 记录**第三个及之后的实参**（children）：`title` 之外的用户可见文案只能从这里读；
+  //    不记录的话「状态行说了什么」在行为层不可断言（2026-11-09 补）。
+  createElement: (type: unknown, props: unknown, ...children: unknown[]) => {
+    elements.push({ type, props, children }); return null
+  },
   Fragment: 'Fragment',
   StrictMode: 'StrictMode',
   Component: class {},
@@ -672,5 +676,132 @@ describe('账号卡片的三家入口（MonkeyCode / 百智云，行为级）', 
   it('★ 对照：MonkeyCode 面板不得出现百智云的「登录」按钮', async () => {
     await renderWithCards('monkeycode', [ACCOUNT])
     expect(buttonByTitle('百智云控制台'), 'MonkeyCode 面板渲染了百智云专属按钮').toBeUndefined()
+  })
+})
+
+/**
+ * 「严格手动顺序」开关的**客户端行为级**守卫（2026-11-09 审计 M13b）。
+ *
+ * ## 为什么必须在这里（而不是只靠 AST / 源码文本）
+ *
+ * 对抗审计实测：把 `const canStrictOrder = supportsBalanceTier(provider)`
+ * 改成 `= false` 之后，`jet-hub-structure-ast` / `jet-hub-panel-wiring` /
+ * `strict-manual-order` / `client-registration-id` **四个文件全绿** ——
+ * 开关**永不渲染**，用户再也没有那条路可走，而所有源码断言照样成立
+ * （AST 只钉条件表达式的**文本** `canStrictOrder`，钉不住它的**定义**）。
+ *
+ * ⇒ 这里真渲染、真点击：
+ * 1. 分档渠道（`buddy`）**必须**渲染出开关行；
+ * 2. 点一下**必须**发 `strictManualOrder.setEnabled`（且 `enabled` 是取反后的值）；
+ * 3. 非分档渠道（`opencode`）**不得**渲染，也**不得**去读开关；
+ * 4. 后端回传的值是唯一真相（`{enabled:true}` 之后按钮变「开」）。
+ */
+describe('严格手动顺序开关（行为级：渲染 / 点击 / 不渲染）', () => {
+  type Element = { type: unknown; props: Record<string, unknown> | null }
+
+  const classNameOf = (e: Element): unknown => (e.props as Record<string, unknown> | null)?.className
+
+  /** 开关按钮 = `dim-jh-btn` + `title` 以「当前：」开头（替身不记录 children 实参）。 */
+  function strictButton(list: readonly Element[], titlePrefix = '当前：'): Element | undefined {
+    return list.find((e) => classNameOf(e) === 'dim-jh-btn'
+      && String((e.props as Record<string, unknown> | null)?.title ?? '').startsWith(titlePrefix))
+  }
+
+  async function renderStrict(
+    provider: string,
+    responder: (method: string, payload?: unknown) => unknown,
+  ): Promise<{ calls: Array<{ method: string; payload?: unknown }> }> {
+    const calls: Array<{ method: string; payload?: unknown }> = []
+    const rpcCall = async (method: string, payload?: unknown): Promise<unknown> => {
+      calls.push({ method, payload })
+      return responder(method, payload)
+    }
+    const first = await renderPanel(rpcCall, provider)
+    expect(first.ok, first.ok ? '' : `渲染抛错：${String((first as { error: unknown }).error)}`).toBe(true)
+    // 跑挂载期回调，但**只跑到「读开关」那条为止**：
+    // `loadStrictManualOrder` 在 `useCallback` 里（useEffect 被替身吞掉），必须真跑；
+    // 而 `toggleStrictManualOrder` 也在 `callbacks` 里，无参调用会发一次
+    // `setEnabled(undefined)` 把状态搅乱 —— 故一读到 getEnabled 就停。
+    for (const cb of [...callbacks]) {
+      if (typeof cb !== 'function') continue
+      const before = calls.length
+      try { await (cb as () => unknown)() } catch { /* 别的回调抛错与本断言无关 */ }
+      if (calls.slice(before).some((c) => c.method === 'strictManualOrder.getEnabled')) break
+    }
+    // 「重渲染」：复用 hook 槽位（保留刚写入的 state），只重置游标与收集器。
+    elements = []
+    writes = []
+    callbacks = []
+    cursor = 0
+    const mod = await import('../../plugin-src/client/jet-hub.js') as unknown as {
+      __providersPanelForTest?: (props: unknown) => unknown
+    }
+    mod.__providersPanelForTest?.({ provider, rpcCall })
+    return { calls }
+  }
+
+  const responder = (method: string): unknown => {
+    if (method === 'strictManualOrder.getEnabled') return { enabled: true }
+    if (method === 'strictManualOrder.setEnabled') return { enabled: true }
+    if (method === 'account.list') return { ok: true, accounts: [], order: [], statuses: {} }
+    if (method === 'credits.balances') return { ok: true, rows: [] }
+    if (method === 'credits.status') return { ok: true, statuses: {} }
+    if (method === 'credits.permanentLock') return { ok: true, locked: false }
+    return { ok: true }
+  }
+
+  it('★ 分档渠道（buddy）必须渲染出开关行，且显示后端回传的「开」', async () => {
+    await renderStrict('buddy', responder)
+    const row = elements.find((e) => classNameOf(e) === 'dim-jh-orderMode')
+    expect(row, 'buddy 面板没有渲染 dim-jh-orderMode（canStrictOrder 定义被改坏？）').toBeDefined()
+    const button = strictButton(elements as Element[])
+    expect(button, '开关行没有按钮').toBeDefined()
+    const props = button?.props as Record<string, unknown> | null
+    expect(props?.['aria-pressed']).toBe('true')
+    expect(String(props?.title)).toContain('完全按拖拽顺序选号')
+  })
+
+  it('★★ 点一下必须发 strictManualOrder.setEnabled，且 enabled 是取反后的值', async () => {
+    const { calls } = await renderStrict('buddy', responder)
+    const button = strictButton(elements as Element[])
+    expect(button).toBeDefined()
+    await ((button?.props as Record<string, unknown> | null)?.onClick as (() => unknown) | undefined)?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const set = calls.filter((c) => c.method === 'strictManualOrder.setEnabled')
+    expect(set, '点了开关但没有发 setEnabled').toHaveLength(1)
+    expect(set[0]?.payload).toEqual({ provider: 'buddy', enabled: false })
+  })
+
+  it('★ 非分档渠道（opencode）不渲染开关，也不去读开关', async () => {
+    const { calls } = await renderStrict('opencode', responder)
+    expect(elements.find((e) => classNameOf(e) === 'dim-jh-orderMode')).toBeUndefined()
+    expect(calls.filter((c) => c.method === 'strictManualOrder.getEnabled')).toHaveLength(0)
+  })
+
+  it('★ 读开关失败不得静默显示「关」：状态行必须说「读取失败」', async () => {
+    await renderStrict('buddy', (method) => {
+      // 只让 getEnabled 失败；其余照常（否则面板会先在别处炸掉）。
+      if (method === 'strictManualOrder.getEnabled') throw new Error('rpc down')
+      return responder(method)
+    })
+    const hint = elements.find((e) => classNameOf(e) === 'dim-jh-orderModeHint')
+    expect(hint, '开关行没有状态说明').toBeDefined()
+    const text = ((hint as { children?: unknown[] }).children ?? []).join('')
+    expect(text, '读失败时仍显示「关」的文案 ⇒ 与用户自己关掉无法区分').toContain('读取开关状态失败')
+  })
+
+  it('★ 分档渠道的「重开」路径：后端说关 ⇒ 按钮显示「关」且点一下发 enabled=true', async () => {
+    const { calls } = await renderStrict('trae', (method) => {
+      if (method === 'strictManualOrder.getEnabled') return { enabled: false }
+      if (method === 'strictManualOrder.setEnabled') return { enabled: true }
+      return responder(method)
+    })
+    const button = strictButton(elements as Element[])
+    expect(button, '后端说关时按钮仍必须渲染（否则用户无从打开）').toBeDefined()
+    expect((button?.props as Record<string, unknown> | null)?.['aria-pressed']).toBe('false')
+    await ((button?.props as Record<string, unknown> | null)?.onClick as (() => unknown) | undefined)?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const set = calls.filter((c) => c.method === 'strictManualOrder.setEnabled')
+    expect(set[0]?.payload).toEqual({ provider: 'trae', enabled: true })
   })
 })
