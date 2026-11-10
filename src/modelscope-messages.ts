@@ -113,6 +113,7 @@ export function buildModelscopePayload(input: ModelscopePayloadInput): Record<st
     model: input.model,
     messages: input.messages,
     stream: true,
+    stream_options: { include_usage: true },
     tools: buildModelscopeTools(input.tools),
     ...input.system !== undefined && input.system.length > 0 ? { system: input.system } : {},
     ...typeof input.temperature === 'number' && Number.isFinite(input.temperature)
