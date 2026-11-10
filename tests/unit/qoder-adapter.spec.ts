@@ -1155,6 +1155,16 @@ describe('QoderAdapter 排队错误（10605 model_queued）', () => {
         )
         expect(heartbeats.length, '切片数与心跳帧数必须一一对应').toBe(sleeps.length)
         expect(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text === '排到了')).toBe(true)
+        // 除心跳外还必须有一帧**排队提示**，把「排队」这件事本身告诉下游
+        //（只有空心跳时，下游只能知道「连接活着」，不知道在排队）。
+        const notices = chunks.filter((chunk) => chunk.type === 'queue-notice')
+        expect(notices.length, '每轮排队一条提示帧').toBe(1)
+        expect(notices[0]!.info).toMatchObject({
+          queued: true,
+          attempt: 1,
+          waitMs: 10_000,
+          modelKey: 'qfmodel',
+        })
       } finally {
         if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
         else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode

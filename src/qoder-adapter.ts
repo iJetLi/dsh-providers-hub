@@ -2301,27 +2301,50 @@ export class QoderAdapter extends LlmAdapter {
     // ⚠️ 拿不到服务端延迟时**不忙等**：用保守的短退避，避免瞬间烧掉机会
     // （客户端 W7c() 此时会退回 ltA() 指数退避）。
     const totalMs = waitMs ?? 1_000
+    const mode = resolveQueueWaitMode()
+    const modelKeyRaw = (queueInfo as { modelKey?: unknown } | undefined)?.modelKey
+    const modelKey = typeof modelKeyRaw === 'string' ? modelKeyRaw : undefined
+    const retryAfterRaw = (queueInfo as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds
+    const retryAfterSeconds = typeof retryAfterRaw === 'number' ? retryAfterRaw : undefined
+    const accountId = this.options.currentAccountId?.()
     /**
-     * 排队的**唯一可靠痕迹**就是这一行日志。
+     * 排队必须有**外部可观测痕迹**，否则「上游排队」与「进程挂死」完全同形。
      *
      * ⚠️ 真实代价（2026-11-10）：排队期间网关不产出任何帧、也不写任何日志，
-     * 于是「上游排队」与「进程挂死」在外部完全同形 —— 调用方只会看到自己的
-     * 超时，排查时无从下手。本仓库为此排查了整整一晚。
+     * 调用方只会看到自己的超时，排查时无从下手（本仓库为此排查了一整晚）。
      *
      * ⚠️ 只在**首次**排队（以及终态的 `fast` 档）记，不逐次刷：`wait` 档最多
      * 重试 180 次，每次都记会把日志刷满，反而看不见别的错误。
      */
-    if (attempts === 1 || resolveQueueWaitMode() === 'fast') {
-      const modelKey = (queueInfo as { modelKey?: unknown } | undefined)?.modelKey
-      const accountId = this.options.currentAccountId?.()
+    if (attempts === 1 || mode === 'fast') {
       this.options.warn?.(
         `[qoder] ${this.product.id} 上游排队（10605）：等待 ${totalMs}ms`
-        + `（模式 ${resolveQueueWaitMode()}，第 ${attempts} 次`
-        + `${typeof modelKey === 'string' ? `，modelKey=${modelKey}` : ''}`
+        + `（模式 ${mode}，第 ${attempts} 次`
+        + `${modelKey === undefined ? '' : `，modelKey=${modelKey}`}`
         + `${accountId === undefined ? '' : `，account=${accountId}`}）`,
       )
     }
-    if (resolveQueueWaitMode() === 'visible') {
+    if (mode === 'visible') {
+      /**
+       * 先发一帧**排队提示**（`queue-notice`），再进入心跳循环。
+       *
+       * 与「只发空心跳」的区别正是本档的意义：空心跳只能证明「连接还活着」，
+       * 提示帧把**排队这件事本身**告诉下游 —— 面板 / 自研客户端可以据此显示
+       * 「排队中（第 N 轮，预计 M 秒）」，而标准 OpenAI SDK 会忽略这个未知字段，
+       * 不会因为多了它而报错。
+       */
+      yield {
+        type: 'queue-notice',
+        info: {
+          queued: true,
+          provider: this.product.id,
+          attempt: attempts,
+          waitMs: totalMs,
+          ...modelKey === undefined ? {} : { modelKey },
+          ...retryAfterSeconds === undefined ? {} : { retryAfterSeconds },
+          ...accountId === undefined ? {} : { account: accountId },
+        },
+      } as unknown as StreamChunk
       // 分片等待 + 心跳：客户端能持续收到帧，不会把「排队中」当成卡死。
       // ⚠️ 剩下的最后一片可能短于心跳间隔，故按 `Math.min` 收敛，保证总时长
       // 仍然**精确等于** `totalMs`（否则 visible 档会悄悄比 wait 档多等一截）。
