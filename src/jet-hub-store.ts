@@ -148,7 +148,44 @@ export type StrictManualOrderMap = Record<string, boolean>
  * ⚠️ 淘汰是**有损**的（最旧的会话会丢失起点，回落「默认」）。这是刻意的取舍：
  * 宁可让早已删掉的旧会话丢失设置，也不能让 `state.json` 无限增长。
  */
-export type PreferredRotationMap = Record<string, Record<string, { accountId: string, at: number }>>
+/**
+ * 「轮换起点」条目。
+ *
+ * ## ⚠️ 两种形态并存（新格式 + 旧格式兼容）
+ *
+ * | 形态 | 何时写的 | 语义 |
+ * |---|---|---|
+ * | `{ position, at }` | **本版起** | 「用**默认顺序**的第 N 位」—— 拖拽后跟着位次走 |
+ * | `{ accountId, at }` | 早期版本 | 「用**这个账号**」—— 拖拽后仍指向原号 |
+ *
+ * ## 为什么改成存位次（用户 2026-11-10 明确要求）
+ *
+ * 用户的原话：「当前会话选择帐号1，如果我去帐号管理界面手动排序了，
+ * 回来当前会话应该**仍选帐号1**（即新的第 1 位），而不是跟随原来那个号」。
+ *
+ * ⚠️ 副作用（已确认接受）：在首位之前插入/删除账号会让位次指向别的号。
+ *
+ * ## ⚠️ 为什么保留 `accountId` 形态
+ *
+ * 升级用户的 `state.json` 里是旧格式。若直接丢弃 ⇒ **静默丢用户数据**
+ *（本仓反复记录过）。⇒ 旧格式继续可读，只是不再写入。
+ * 换算成位次需要账号池，而 `sanitizePreferredRotation` 是**纯函数**看不到池
+ * ⇒ 换算在 `AccountPool.preferredRotationFor` 里做（见那里的注释）。
+ */
+export type PreferredRotationEntry =
+  | { position: number, at: number }
+  | { accountId: string, at: number }
+  /**
+   * ⚠️ **最老格式**（本功能最早那版，无 `at`）。
+   *
+   * `sanitizePreferredRotation` **原样保留**它（不转换）—— 因为 historically
+   * 它是直接当 accountId 用的。故消费方（`AccountPool.preferredRotationFor`）
+   * 必须自己判 `typeof entry === 'string'`。
+   *
+   * ⚠️ 若在类型里漏掉这一支，in 运算符会在运行时抛 `TypeError`（真实缺陷）。
+   */
+  | string
+export type PreferredRotationMap = Record<string, Record<string, PreferredRotationEntry>>
 
 /**
  * 每个 provider 最多保留多少个**会话**的轮换起点（超出时淘汰 `at` 最小的）。
@@ -173,16 +210,20 @@ export function sanitizePreferredRotation(raw: unknown): PreferredRotationMap {
   for (const [provider, sessions] of Object.entries(raw as Record<string, unknown>)) {
     if (provider.length === 0) continue
     if (typeof sessions !== 'object' || sessions === null || Array.isArray(sessions)) continue
-    const clean: Record<string, { accountId: string, at: number }> = {}
+    const clean: Record<string, PreferredRotationEntry> = {}
     for (const [sessionId, entry] of Object.entries(sessions as Record<string, unknown>)) {
       if (sessionId.length === 0) continue
-      // ⚠️ 只认 `{ accountId, at }` 形态；`accountId` 必须非空串，
-      //    `at` 必须是非负有限数（否则无法按时间淘汰 —— 淘汰需要可比较的值）。
-      // ⚠️ **兼容老格式**（裸字符串 ``"accountId"``，无 ``at``）。
-      //    本功能最早那一版（同日早于 ``at`` 引入）写的就是这个形态，
-      //    直接按「非 object 就丢」会让**升级用户的既有选择静默消失**
-      //    —— 那正是本仓反复记录过的「静默丢用户数据」形态。
-      //    ⇒ 老格式**接收**并补一个 ``at = 0``（= 最旧，淘汰时最先丢，符合直觉）。
+      /**
+       * ⚠️ **三种历史形态都要认**（任一丢弃都是「静默丢用户数据」）：
+       *
+       * | 形态 | 来源 |
+       * |---|---|
+       * | 裸字符串 ``"accountId"`` | 本功能最早那一版（无 ``at``） |
+       * | ``{ accountId, at }`` | 早期版本 |
+       * | ``{ position, at }`` | **本版起** |
+       *
+       * ⚠️ 裸字符串补 ``at = 0``（= 最旧，淘汰时最先丢，符合直觉）。
+       */
       if (typeof entry === 'string') {
         if (entry.length === 0) continue
         clean[sessionId] = { accountId: entry, at: 0 }
@@ -190,10 +231,18 @@ export function sanitizePreferredRotation(raw: unknown): PreferredRotationMap {
       }
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
       const record = entry as Record<string, unknown>
-      const accountId = record.accountId
       const at = record.at
-      if (typeof accountId !== 'string' || accountId.length === 0) continue
+      // ``at`` 必须是非负有限数（淘汰要按它排序）
       if (typeof at !== 'number' || !Number.isFinite(at) || at < 0) continue
+      // ⚠️ 新格式优先认 ``position``；位次必须是正整数（1-based）
+      const position = record.position
+      if (typeof position === 'number' && Number.isInteger(position) && position >= 1) {
+        clean[sessionId] = { position, at }
+        continue
+      }
+      // 旧格式 ``{ accountId, at }`` —— 保留（换算成位次需要账号池，本层看不到）
+      const accountId = record.accountId
+      if (typeof accountId !== 'string' || accountId.length === 0) continue
       clean[sessionId] = { accountId, at }
     }
     if (Object.keys(clean).length === 0) continue
@@ -203,7 +252,6 @@ export function sanitizePreferredRotation(raw: unknown): PreferredRotationMap {
   }
   return result
 }
-
 /**
  * 按 {@link PREFERRED_ROTATION_MAX_SESSIONS} 淘汰最旧的会话（按 ``at`` 升序丢前面的）。
  *
@@ -216,18 +264,29 @@ export function sanitizePreferredRotation(raw: unknown): PreferredRotationMap {
  *    ⇒ 刻意不为此加 tie-breaker：那些条目是**同一时刻的操作**，
  *      丢哪条都会让它回落到「默认」，用户无感。
  */
+/**
+ * 取条目的 ``at``（淘汰排序用）。
+ *
+ * ⚠️ **裸字符串（最老格式）没有 ``at``** ⇒ 统一当 0（= 最旧，淘汰时最先丢）。
+ *    用 ``typeof`` 收窄而不是直接 ``.at`` —— 后者对字符串是 ``undefined``，
+ *    参与算术会得到 ``NaN``，排序行为不可预期。
+ */
+function atOf(entry: PreferredRotationEntry): number {
+  return typeof entry === 'string' ? 0 : entry.at
+}
+
 export function prunePreferredRotation(
-  sessions: Record<string, { accountId: string, at: number }>,
+  sessions: Record<string, PreferredRotationEntry>,
   limit: number = PREFERRED_ROTATION_MAX_SESSIONS,
-): Record<string, { accountId: string, at: number }> {
+): Record<string, PreferredRotationEntry> {
   const keys = Object.keys(sessions)
   if (limit <= 0) return {}
   if (keys.length <= limit) return { ...sessions }
   // 按 `at` 升序（旧的在前）排序后取末尾 limit 个 —— **保留最新的**。
   const kept = keys
-    .sort((a, b) => sessions[a]!.at - sessions[b]!.at)
+    .sort((a, b) => atOf(sessions[a]!) - atOf(sessions[b]!))
     .slice(keys.length - limit)
-  const result: Record<string, { accountId: string, at: number }> = {}
+  const result: Record<string, PreferredRotationEntry> = {}
   for (const key of kept) result[key] = sessions[key]!
   return result
 }

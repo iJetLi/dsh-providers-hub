@@ -118,9 +118,15 @@ describe('不可用原因的说明', () => {
     expect(region).not.toMatch(/15\s*天/)
   })
 
-  it('四类原因都有文案', () => {
-    for (const key of ['disabled', 'policy-blocked', 'rate-limited', 'no-expiring']) {
+  /**
+   * ⚠️ **只剩三类**（用户 2026-11-10 要求）：`account.getRotation` 不再返回停用账号
+   * ⇒ 停用账号在 UI 上根本不出现 ⇒ `disabled` 这个 reason 已成死代码，已删。
+   */
+  it('三类原因都有文案（`disabled` 已随「下拉框不显示停用账号」删除）', () => {
+    for (const key of ['policy-blocked', 'rate-limited', 'no-expiring']) {
       expect(source).toMatch(new RegExp(`'${key}':\\s*'`))
     }
+    // ⚠️ 反向断言：`disabled` **不应再存在**（否则是死代码）
+    expect(source).not.toMatch(/'disabled':\s*'该账号已停用/)
   })
 })

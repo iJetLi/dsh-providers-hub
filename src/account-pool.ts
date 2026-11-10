@@ -1336,7 +1336,49 @@ export class AccountPool {
     this.ensureLoaded()
     if (provider.length === 0) return undefined
     if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
-    return this.preferredRotationCache[provider]?.[sessionId]?.accountId
+    const entry = this.preferredRotationCache[provider]?.[sessionId]
+    if (entry === undefined) return undefined
+
+    /**
+     * ⚠️ **只数「启用」账号**（与下拉框、`account.getRotation` 同口径）。
+     *    停用账号在 UI 上根本不出现，若把它算进位次会让两边错位。
+     */
+    const enabled = this.readAccounts()
+      .filter((a) => a.provider === provider && a.enabled !== false)
+
+    /**
+     * ## ⚠️ 三种历史格式都要认（任一崩掉都是「读偏好直接失败」）
+     *
+     * | 形态 | 来源 | `in` 运算符安全吗 |
+     * |---|---|---|
+     * | 裸字符串 `"acc-id"` | 本功能最早那版 | ❌ **会抛 TypeError** |
+     * | `{ accountId, at }` | 早期版本 | ✅ |
+     * | `{ position, at }` | 本版起 | ✅ |
+     *
+     * ⚠️ **真实缺陷（2026-11-10）**：原写 `'accountId' in entry`，遇到裸字符串
+     *    直接抛 `TypeError: Cannot use 'in' operator to search for 'position' in …`
+     *    ⇒ 读偏好失败 ⇒ 下拉框**永远显示「默认」**（用户报障的正是这个）。
+     * ⚠️ `sanitizePreferredRotation` 会**原样保留**裸字符串（不转换），
+     *    因为它的注释说「补 `at = 0`」—— 但那是**对象**形态，字符串那支没转换。
+     *    ⇒ 这里必须自己判 `typeof entry === 'string'`。
+     */
+    // ① 裸字符串（最老格式）：直接当 accountId
+    if (typeof entry === 'string') {
+      return entry.length > 0 ? entry : undefined
+    }
+    // ② 旧对象格式 `{ accountId, at }`：仍跟随该账号
+    if (typeof entry === 'object' && entry !== null && 'accountId' in entry) {
+      return entry.accountId.length > 0 ? entry.accountId : undefined
+    }
+    /**
+     * 新格式：**位次 → 当前账号**（用户 2026-11-10 要求「跟随位次」）。
+     *
+     * ⚠️ 三条边界**全部回落默认**，绝不 clamp —— clamp 会在账号变少时
+     *    **静默**把设置挪到别的号上，而「回落默认」至少是用户能理解的行为。
+     */
+    const index = entry.position - 1
+    if (index < 0 || index >= enabled.length) return undefined
+    return enabled[index]!.id
   }
 
   /**
@@ -1350,18 +1392,22 @@ export class AccountPool {
   async setPreferredRotation(
     provider: string,
     sessionId: string,
-    accountId: string | null,
+    position: number | null,
   ): Promise<void> {
     this.ensureLoaded()
     if (provider.length === 0 || sessionId.length === 0) return
-    const current = this.preferredRotationCache[provider]?.[sessionId]?.accountId
-    if ((accountId ?? undefined) === current) return
+    // ⚠️ 位次必须是正整数（1-based）；`null` = 恢复默认
+    if (position !== null && (!Number.isInteger(position) || position < 1)) return
+    const current = this.preferredRotationCache[provider]?.[sessionId]
+    const currentPosition = typeof current === 'object' && current !== null && 'position' in current
+      ? current.position
+      : null
+    if (position === currentPosition) return
     const next: PreferredRotationMap = { ...this.preferredRotationCache }
     const sessions = { ...(next[provider] ?? {}) }
     // ⚠️ 写入时**带上 at**：淘汰按它排序（见 `prunePreferredRotation`）。
-    //    同一秒内多次写入时序相同时，`at` 相同不影响正确性（只影响淘汰顺序的稳定性）。
-    if (accountId === null || accountId.length === 0) delete sessions[sessionId]
-    else sessions[sessionId] = { accountId, at: Date.now() }
+    if (position === null) delete sessions[sessionId]
+    else sessions[sessionId] = { position, at: Date.now() }
     if (Object.keys(sessions).length > 0) next[provider] = sessions
     else delete next[provider]
     this.preferredRotationCache = sanitizePreferredRotation(next)
@@ -1372,7 +1418,6 @@ export class AccountPool {
     }
     await this.queueStoreSave()
   }
-
   /**
    * 「面板入口」的当前取值：Jet Hub 的唯一入口位置。
    *

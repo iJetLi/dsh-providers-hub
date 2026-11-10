@@ -280,7 +280,6 @@ export function supportsRotation(provider) {
 
 /** 不可用原因 → 悬浮说明（下拉框选项的 `title`）。 */
 const ROTATION_REASON_TEXT = Object.freeze({
-  'disabled': '该账号已停用 —— 到 Jet Hub 设置页启用后即可选择',
   'policy-blocked': '该账号被上游限制（异常行为）—— 需在面板「重置」后才能恢复',
   'rate-limited': '该账号在当前模型下被限流 —— 等解禁或换账号',
   'no-expiring': '该账号没有「临期窗口内」到期的积分，而「锁定永久积分」已开启 —— 只会消耗永久积分，故跳过',
@@ -1476,6 +1475,8 @@ function UsageBadgeActive(props) {
       const value = res?.value ?? res;
       setRotationState({
         selected: typeof value?.selected === 'string' ? value.selected : null,
+        // ⚠️ 位次才是下拉框的 value（用户 2026-11-10 要求「跟随位次」）
+        selectedPosition: typeof value?.selectedPosition === 'number' ? value.selectedPosition : null,
         stale: value?.stale === true,
         locked: value?.locked === true,
         accounts: Array.isArray(value?.accounts) ? value.accounts : [],
@@ -1493,13 +1494,21 @@ function UsageBadgeActive(props) {
    * ⚠️ 不做乐观更新：失败要把界面**退回去**，否则用户以为选好了、实际没生效
    * （本仓反复出现的「显示与行为分叉」缺陷形态）。
    */
-  async function onPickRotation(accountId) {
+  /**
+   * 写入「轮换起点」。
+   *
+   * ⚠️ 参数是**位次**（字符串，来自 `<select>` 的 value），不是 accountId ——
+   *    用户 2026-11-10 要求「跟随位次」（选「位次 1」后拖拽，回来仍是位次 1）。
+   * ⚠️ `''` = 恢复默认 ⇒ 传 `null`。
+   */
+  async function onPickRotation(positionText) {
     if (typeof writeRotation !== 'function') return;
     if (typeof sessionId !== 'string' || sessionId.length === 0) return;
     setRotationBusy(true);
     setRotationError('');
     try {
-      await writeRotation(provider, sessionId, accountId === '' ? null : accountId);
+      const position = positionText === '' ? null : Number(positionText);
+      await writeRotation(provider, sessionId, position);
       await loadRotation();
     } catch (error) {
       setRotationError(describeBadgeError(error, '轮换起点保存失败'));
@@ -1507,8 +1516,7 @@ function UsageBadgeActive(props) {
     } finally {
       setRotationBusy(false);
     }
-  };
-
+  }
   /**
    * 给一个账号判「能否作为轮换起点」与原因。
    *
@@ -1523,7 +1531,8 @@ function UsageBadgeActive(props) {
    * 恒为可用。缺读数时**不倒向不可用**（宁可让用户选，也不误禁）。
    */
   function reasonOf(account) {
-    if (account.enabled === false) return 'disabled';
+    // ⚠️ 这里**不再判 enabled === false**：ccount.getRotation 已只返回启用账号
+    //    ⇒ 停用账号在 UI 上根本不出现，disabled 这个 reason 已成死代码（用户 2026-11-10 要求）。
     if (account.policyBlocked === true) return 'policy-blocked';
     if (account.rateLimited === true) return 'rate-limited';
     // 锁定永久积分 且 该号无临时积分 ⇒ 与 `buddyBalanceTier(..., {allowPermanent:false})`
@@ -1583,12 +1592,34 @@ function UsageBadgeActive(props) {
   /** 不可用原因 → 选项后缀。⚠️ 必须短（下拉框宽度有限）。 */
   function reasonSuffix(reason) {
     switch (reason) {
-      case 'disabled': return '（已停用）';
       case 'policy-blocked': return '（账号受限）';
       case 'rate-limited': return '（本模型限流）';
       case 'no-expiring': return '（无临时积分）';
       default: return '';
     }
+  }
+
+  /**
+   * 账号的显示文案（**下拉框选项与积分列表共用同一份**）。
+   *
+   * 格式：`位次 N · 昵称（后缀）`
+   *
+   * ## ⚠️ 「位次 N」不是「账号 N」
+   *
+   * 它表示「在**默认顺序**里的第 N 位」，**不是账号标识**：
+   * 改轮换起点只影响**显示顺序**，位次永远按默认顺序算、不变。
+   * （用户 2026-11-10 明确要求用「位次」，避免「编号指向哪个账号」的误解。）
+   *
+   * ## ⚠️ 两处必须用同一个函数
+   *
+   * 否则格式会漂移 —— 本仓反复记录过「同一语义两处实现」的缺陷。
+   * 积分列表在 `renderCredits()` 里调它，下拉框在 `renderRotation()` 里调它。
+   *
+   * @param account - `rotationState.accounts` 的元素（含 `position` / `nickname`）
+   * @param reason - 不可用原因码；`null` = 可用
+   */
+  function accountOptionLabel(account, reason) {
+    return `位次 ${account.position} · ${account.nickname}${reason === null ? '' : reasonSuffix(reason)}`;
   }
 
   /**
@@ -1664,22 +1695,41 @@ function UsageBadgeActive(props) {
       ]);
     }
 
-    const selected = rotationState.selected ?? '';
+    /**
+     * ⚠️ **下拉框的 value 是「位次」**（用户 2026-11-10 要求「跟随位次」）。
+     *
+     * 语义：选「位次 1」后去管理界面拖拽，回来仍是「位次 1」= 新的第 1 个号。
+     * 若用 accountId 则会跟着原号走（不是用户要的）。
+     */
+    const selected = rotationState.selectedPosition === null || rotationState.selectedPosition === undefined
+      ? ''
+      : String(rotationState.selectedPosition);
     const options = [
       React.createElement('option', { key: '__default__', value: '' }, '默认. 不指定，保持默认'),
       ...accounts.map((account) => {
         const reason = reasonOf(account);
+        /**
+         * ⚠️ **`value` 是位次（字符串化），不是 accountId**（用户 2026-11-10 要求）。
+         *
+         * 「跟随位次」的语义：用户选「位次 1」后去管理界面拖拽，回来仍是
+         * 「位次 1」= 新的第 1 个号；若存 accountId 则会跟着原号走（不是用户要的）。
+         *
+         * ⚠️ `<select>` 的 value 只能是字符串 ⇒ 用 `String(position)`，
+         *    读回时 `Number(...)` 还原（见 `onPickRotation`）。
+         */
+        const positionValue = String(account.position);
         return React.createElement('option', {
           key: account.id,
-          value: account.id,
+          value: positionValue,
           // ⚠️ 禁用项仍要能被 `select` 显示为当前值（若用户之前选过、而它现在不可用）
           //    ⇒ 只有「当前未选中它」时才禁用，否则选中值会显示成空白。
-          disabled: reason !== null && account.id !== selected,
-          title: reason === null ? undefined : ROTATION_REASON_TEXT[reason],
-        }, `账号 ${account.position} · ${account.nickname}${reasonSuffix(reason)}`);
+          disabled: reason !== null && positionValue !== selected,
+          // ⚠️ 可用时挂 accountId（用户要求 id 只在 tooltip 里），
+          //    不可用时挂原因（那个信息更有用）。
+          title: reason === null ? account.id : ROTATION_REASON_TEXT[reason],
+        }, accountOptionLabel(account, reason));
       }),
     ];
-
     // 选中的号当前不可用 ⇒ 起点会自动循环到下一个，必须告诉用户（否则他以为没生效）。
     const currentReason = accounts
       .filter((a) => a.id === selected)
@@ -1870,9 +1920,32 @@ function UsageBadgeActive(props) {
       : view.groups.map((group) => `${formatUnits(group.total, group.unit) ?? '?'}${group.label}`).join(' · ');
     // 排序与折叠是**纯逻辑**（含「读不到数的排最后」「稳定排序」两条不变量），
     // 放在 badge-model.js 里由单测锁死 —— 组件里看不见 react 的测试跑不起来。
+    /**
+     * ⚠️ **排序双模式**（用户 2026-11-10 要求）：
+     *
+     * | 模式 | 顺序 |
+     * |---|---|
+     * | 未设起点（默认） | **积分降序**（既有行为，不变） |
+     * | 设了起点 | **起点 → 其余按账号池顺序**（体现轮换循环） |
+     *
+     * `rotationStartId` 从 `rotationState.selected` 取（服务端已把位次翻成 accountId）。
+     */
+    /**
+     * 积分行的显示名 —— **与下拉框共用 `accountOptionLabel`**（格式必然一致）。
+     *
+     * ⚠️ `position` 从 `rotationState` 查（**默认顺序**的位次），
+     *    不能用 `shown.map((row, i) => i + 1)` —— 那样会随起点漂移。
+     * ⚠️ 查不到（账号刚被删）⇒ 回落 `nickname || accountId`（不带位次）。
+     */
+    const accountLabelForCredits = (row) => {
+      const meta = rotationState?.accounts?.find((a) => a.id === row.accountId)
+      if (meta === undefined) return row.nickname || row.accountId
+      return accountOptionLabel(meta, reasonOf(meta))
+    }
     const { shown, hidden } = orderCreditRows(accounts, {
       limit: CREDITS_COLLAPSED_LIMIT,
       expanded: creditsExpanded,
+      ...(rotationState?.selected == null ? {} : { rotationStartId: rotationState.selected }),
     });
     return React.createElement('div', { key: 'credits', className: 'dim-jh-badgeSection' }, [
       // 合计放进节标题右侧，省掉一整行
@@ -1900,8 +1973,8 @@ function UsageBadgeActive(props) {
             React.createElement('span', {
               key: 'l',
               className: 'dim-jh-badgeRowName',
-              title: row.nickname || row.accountId,
-            }, row.nickname || row.accountId),
+              title: row.accountId,
+            }, accountLabelForCredits(row)),
             React.createElement('span', {
               key: 'v',
               className: 'dim-jh-badgeValue',

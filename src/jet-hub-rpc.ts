@@ -7408,8 +7408,30 @@ function registerJetHubEndpoints(
         }
         const modelId = typeof req.modelId === 'string' && req.modelId.length > 0 ? req.modelId : undefined
         const all = await pool.listAllAccounts()
-        const mine = all.filter((a) => a.provider === req.provider)
-        const selected = pool.preferredRotationFor(req.provider, req.sessionId) ?? null
+        /**
+         * ⚠️ **只返回启用账号**（用户 2026-11-10 要求）。
+         *
+         * 积分窗口只显示启用账号（`usage.badge` 用 `enabledIds` 过滤），
+         * 若下拉框含停用的 ⇒ 两边集合不同 ⇒ **位次错位、无法对照**。
+         * ⇒ 两边同口径：只数启用账号。
+         */
+        const mine = all.filter((a) => a.provider === req.provider && a.enabled !== false)
+        const selectedId = pool.preferredRotationFor(req.provider, req.sessionId) ?? null
+        /**
+         * ⚠️ **`selectedPosition` 是客户端要用的那个**（下拉框 value = 位次）。
+         *
+         * 为什么同时保留 `selected`（accountId）：
+         * - `stale` 判据需要它（判断账号是否还在池里）；
+         * - 老客户端可能有依赖（本 PR 内就改了，但保留成本极低）。
+         *
+         * ⚠️ 位次从 `mine`（已过滤停用、已按池序）现算 —— 与下拉框同口径。
+         */
+        const selectedPosition = selectedId === null
+          ? null
+          : (() => {
+            const index = mine.findIndex((a) => a.id === selectedId)
+            return index < 0 ? null : index + 1
+          })()
         /**
          * 锁定永久积分：`true` 时「只剩永久积分」的账号不能作为起点
          * （与 `buddyBalanceTier(..., {allowPermanent:false})` 返回 `none` 等价）。
@@ -7418,10 +7440,11 @@ function registerJetHubEndpoints(
         return {
           ok: true,
           value: {
-            selected,
+            selected: selectedId,
+            selectedPosition,
             locked,
-            /** 选中的 id 已不在账号池里（被删）⇒ 客户端显示「已失效」。 */
-            stale: selected !== null && !mine.some((a) => a.id === selected),
+            /** 选中的账号已不在**启用**列表里（被删/被停用）⇒ 客户端显示「已失效」。 */
+            stale: selectedId !== null && selectedPosition === null,
             accounts: mine.map((a, i) => {
               // ⚠️ 逐模型限流：与 `AccountPool.candidateAccounts` 第四个 filter 同判据
               //（`resetAt` 为 0 或已过期都算不受限）。`modelId` 缺省时不判。
@@ -7453,7 +7476,9 @@ function registerJetHubEndpoints(
                  * 不划算；且「账号 N」在用户心智里首先对应**面板上第 N 张卡片**
                  *（那正是数组序），改了反而更困惑。
                  *
-                 * ⚠️ 全部账号统一连续编号（含不可用的），不跳号。
+                 * ⚠️ **只数启用账号**（mine 已过滤停用的）⇒ 与积分窗口同口径。
+                 * ⚠️ 本字段是「**位次**」（默认顺序的第 N 位），不是账号标识：
+                 *    改轮换起点会让**显示顺序**变，但位次**永远按默认顺序**算、不变。
                  */
                 position: i + 1,
                 enabled: a.enabled !== false,
@@ -7471,24 +7496,35 @@ function registerJetHubEndpoints(
        * ⚠️ 回传**落盘后重读的值**（不做乐观更新，与 `gateway.setEnabled` 同取向）。
        */
       case 'account.setRotation': {
-        const req = payload as { provider?: unknown, sessionId?: unknown, accountId?: unknown }
+        const req = payload as { provider?: unknown, sessionId?: unknown, position?: unknown }
         if (typeof req.provider !== 'string' || req.provider.length === 0) {
           return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
         }
         if (typeof req.sessionId !== 'string' || req.sessionId.length === 0) {
           return { ok: false, error: { code: 'bad-request', message: 'sessionId 必填' } }
         }
-        if (req.accountId !== null && (typeof req.accountId !== 'string' || req.accountId.length === 0)) {
-          return { ok: false, error: { code: 'bad-request', message: 'accountId 必须是账号 id 或 null' } }
+        /**
+         * ⚠️ **`position: null` = 恢复默认**；其余必须是正整数（1-based 位次）。
+         *
+         * ⚠️ 这里收**位次**而不是 `accountId`（用户 2026-11-10 要求「跟随位次」）：
+         *    用户选「第 1 位」后去管理界面拖拽，回来仍是「第 1 位」= 新的那个号。
+         *    代价是插入/删除账号会让位次指向别的号（已确认接受）。
+         */
+        if (req.position !== null
+          && (typeof req.position !== 'number' || !Number.isInteger(req.position) || req.position < 1)) {
+          return { ok: false, error: { code: 'bad-request', message: 'position 必须是正整数或 null' } }
         }
-        // ⚠️ 写入前校验归属：否则用户会得到一个「选了永远不生效」的设置
-        //    （旋转找不到该 id 就原样返回，全程零提示）。
-        if (typeof req.accountId === 'string') {
+        /**
+         * ⚠️ **写入前校验位次在范围内**：否则用户会得到一个「选了永远不生效」的设置
+         *（`preferredRotationFor` 越界回落默认，全程零提示）。
+         */
+        if (typeof req.position === 'number') {
           const all = await pool.listAllAccounts()
-          if (!all.some((a) => a.provider === req.provider && a.id === req.accountId)) {
+          const enabledCount = all.filter((a) => a.provider === req.provider && a.enabled !== false).length
+          if (req.position > enabledCount) {
             return {
               ok: false,
-              error: { code: 'bad-request', message: `账号 ${req.accountId} 不属于 ${req.provider}` },
+              error: { code: 'bad-request', message: `position ${req.position} 超出范围（共 ${enabledCount} 个启用账号）` },
             }
           }
         }
@@ -7496,7 +7532,7 @@ function registerJetHubEndpoints(
           await pool.setPreferredRotation(
             req.provider,
             req.sessionId,
-            typeof req.accountId === 'string' ? req.accountId : null,
+            typeof req.position === 'number' ? req.position : null,
           )
         } catch (error) {
           return {
