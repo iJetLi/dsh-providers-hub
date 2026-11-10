@@ -106,18 +106,18 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
     const children = ph.arguments.slice(2)
     // 2026-10-26 第二次改（用户「信息应该在按钮行上方行，而不是下方行」）：
     // 面板级状态提示从 section 直接子节点搬进 panelHead、排在按钮组**之前**。
-    // 顺序契约：标题 → 6 条状态提示 → 排序提示三元 → 严格手动顺序行 → 按钮组。
+    // 顺序契约：标题 → 7 条状态提示 → 排序提示三元 → 严格手动顺序行 → 按钮组。
     // ⚠️ 2026-11-09：新增「严格手动顺序」行（`.dim-jh-orderMode`，见
     //    `strict-manual-order.spec.ts`）。它**必须**紧跟在排序提示之后、
     //    按钮组之前 —— 这两句是同一个话题（「顺序是怎么用的」），拆开会让
     //    用户以为那个开关管的是别的东西。
     expect(
       children.length,
-      `panelHead 应包 1 标题 + 6 条状态提示 + 1 排序提示 + 1 严格手动顺序行 + 1 按钮组 = 10 个子项，实际 ${children.length} 个`
-      + `（多出来的是被括号错位圈进来的：第 11 个起是 ${children.slice(10)
+      `panelHead 应包 1 标题 + 7 条状态提示 + 1 排序提示 + 1 严格手动顺序行 + 1 按钮组 = 11 个子项，实际 ${children.length} 个`
+      + `（多出来的是被括号错位圈进来的：第 12 个起是 ${children.slice(11)
         .map((c) => source.slice(c.getStart(sf), c.getStart(sf) + 40).replace(/\s+/g, ' '))
         .join(' | ')}）`,
-    ).toBe(10)
+    ).toBe(11)
     // ⚠️ 2026-11-06：第一个子项从 `.dim-jh-panelTitle` 变成
     //    `.dim-jh-panelTitleRow`（标题 + 最右侧的「供应商开关」图标**包了一层
     //    行容器**）。**不能**直接把标题改成 `flex: 1 1 auto` 了事 —— 那样
@@ -168,7 +168,7 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
    *    section 之外的别处也有，改错位置不会变红。必须 AST 定位到 panelHead
    *    的子节点序列，逐个判 className 与位置。
    */
-  it('★★ 六条状态提示都在 panelHead 内、且都排在按钮组之前', () => {
+  it('★★ 七条状态提示都在 panelHead 内、且都排在按钮组之前', () => {
     const ph = panelHeadCall()
     expect(ph, '找不到 .dim-jh-panelHead').toBeTruthy()
     const children = ph.arguments.slice(2)
@@ -183,27 +183,27 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
     })
     expect(
       noticeNodes.length,
-      `按钮组之前应有 6 条状态提示（探测/锁定/领取/新手任务/登录链接/补偿卡），实际 ${noticeNodes.length} 条`
+      `按钮组之前应有 7 条状态提示（探测/锁定/领取/新手任务/登录链接/回调链接/补偿卡），实际 ${noticeNodes.length} 条`
       + '（少了说明有提示还留在 section 直接子级 ⇒ 会落到按钮行下方）',
-    ).toBe(6)
+    ).toBe(7)
   })
 
   /**
-   * ★ 六条提示的**条件**必须是那六个具体变量。
+   * ★ 七条提示的**条件**必须是那七个具体变量。
    *
    * ⚠️ 只数「按钮组之前有几个 .dim-jh-probeNotice」是不够的：把
    *    `probeNotice ? ... : null` 改成 `null ? ... : null` 之后，节点数不变、
    *    文本里照样有那个类名 ⇒ 上一条用例仍然绿，而这条提示从此永不显示
    *    （变异验证实测 NO-TEETH，正是这条用例补上的）。
    */
-  it('★★ 六条状态提示的条件必须是各自的变量（不许被短路成恒 null）', () => {
+  it('★★ 七条状态提示的条件必须是各自的变量（不许被短路成恒 null）', () => {
     const ph = panelHeadCall()
     expect(ph, '找不到 .dim-jh-panelHead').toBeTruthy()
     const children = ph.arguments.slice(2)
     const actionsIdx = children.findIndex((c) => classNameOf(c) === 'dim-jh-headerActions')
     const before = children.slice(0, actionsIdx).map((c) => source.slice(c.getStart(sf), c.getEnd()))
 
-    const expected = ['probeNotice', 'lockNotice', 'claimNotice', 'onboardingNotice', 'loginUrlForManual', 'compensationCard']
+    const expected = ['probeNotice', 'lockNotice', 'claimNotice', 'onboardingNotice', 'loginUrlForManual', 'showCodeartsCallback', 'compensationCard']
     for (const name of expected) {
       /**
        * ⚠️⚠️ 判据必须是**精确标识符 + 词边界**，不能 `startsWith`（2026-10-27 对抗审计 P1-3）。
@@ -290,7 +290,7 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
     const joined = childTexts.join('\n')
     // ⚠️ 2026-10-26 第二次改后：补偿卡片已搬进 panelHead（用户要求「信息应该在
     //    按钮行上方行」），故这里**不再**断言补偿卡在 section 下 —— 它现在
-    //    必须出现在 panelHead 内（由上面那条「六条状态提示」用例守）。
+    //    必须出现在 panelHead 内（由上面那条「七条状态提示」用例守）。
     expect(joined, '账号列表必须挂在 section 下').toContain("className: 'dim-jh-accountList'")
     const after = childTexts.slice(phIdx + 1).join('\n')
     expect(after, '账号列表必须在 panelHead 之后').toContain("className: 'dim-jh-accountList'")

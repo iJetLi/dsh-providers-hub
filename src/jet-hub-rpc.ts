@@ -22,7 +22,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { dedupeMinimaxAccount } from './minimax-dedup.js'
-import { openIncognitoWindow } from './login.js'
+import { openIncognitoWindow, type ManualCallbackSubmitResult } from './login.js'
 import { AccountPool, asProxyText } from './account-pool.js'
 import { AUTO_PROVIDER as AUTO_PROVIDER_ID } from './auto-adapter.js'
 import { resolveAutoBadgeRewrite, type AutoBadgeState } from './auto-badge.js'
@@ -337,6 +337,7 @@ import type {
   RpcListAccountsRequest,
   RpcCreateAccountRequest,
   RpcPollLoginRequest,
+  RpcSubmitCallbackRequest,
   RpcPollLoginResponse,
   RpcUpdateAccountRequest,
   RpcDeleteAccountRequest,
@@ -3194,6 +3195,26 @@ function registerJetHubEndpoints(
   const pendingOfficeAceState = new Map<string, PendingOfficeAceState>()
 
   /**
+   * CodeArts（华为云）**手动回调链接**的在途表：占位账号 id → 本轮的提交入口。
+   *
+   * ## 为什么需要它
+   *
+   * CodeArts 的 OAuth 回调被定向到宿主本机的
+   * `http://127.0.0.1:<port>/oauth/callback?code=…`。用户在**另一台设备**
+   * （常见：手机）上完成登录时，那个浏览器打不开宿主的 `127.0.0.1` ⇒
+   * 跳转失败，但地址栏里留下一条**合法**的回调链接。
+   * `account.submitCallback` 把这条链接交回来，由这里存下的**同一轮**收码器
+   * 完成换取 —— 端口 / PKCE / DPoP 都是授权时那一份，故 `redirect_uri` 天然一致。
+   *
+   * ⚠️ 与 `pendingOfficeAceState` 同一纪律：**只在本进程内存里**。
+   *    宿主重启后这张表空了 ⇒ `account.submitCallback` 报「会话已失效」，
+   *    前端据此提示用户重建账号，而不是让用户对着一条永远用不上的链接反复粘贴。
+   *
+   * ⚠️ 只服务 `provider === 'codearts'`：其余 provider 的登录分支一个字节都不碰。
+   */
+  const pendingCodeArtsCallbacks = new Map<string, (raw: unknown) => ManualCallbackSubmitResult>()
+
+  /**
    * OfficeAce 登录中间态的有效期（毫秒）。
    *
    * ## 为什么必须有（Gitee issue IKM741 的 A 档：登录中止留幽灵占位账号）
@@ -5032,6 +5053,44 @@ function registerJetHubEndpoints(
         return { ok: true, value: { accounts: await enrichAccountIdentity(accounts, req.provider) } }
       }
 
+      /**
+       * 手动提交 CodeArts（华为云）的 OAuth 回调链接。
+       *
+       * 仅在 `account.create` 的 codearts 分支登记过的占位账号可提交；
+       * 链接里**必须**带本机回调端口（`redirect_uri` 要与授权时逐字一致），
+       * 解析由 `login.ts` 的 `parseManualCallbackUrl` 一处完成。
+       *
+       * ⚠️ 失败一律 `ok:false` + 可读原因，**不抛** ——
+       *    用户输入错误不该让宿主进程异常退出。
+       */
+      case 'account.submitCallback': {
+        const req = payload as RpcSubmitCallbackRequest
+        const accountId = typeof req?.accountId === 'string' ? req.accountId : ''
+        const callbackUrl = typeof req?.callbackUrl === 'string' ? req.callbackUrl : ''
+        if (accountId.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: '未指定账号 id（accountId）' } }
+        }
+        const submit = pendingCodeArtsCallbacks.get(accountId)
+        if (submit === undefined) {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: '这轮登录已经结束或不在本进程内（宿主重启 / 超时 / 已成功）。'
+                + '请重新点击「+ 新建账号」后再粘贴回调链接。',
+            },
+          }
+        }
+        const outcome = submit(callbackUrl)
+        if (outcome.ok !== true) {
+          return {
+            ok: false,
+            error: { code: 'bad-request', message: outcome.message ?? '回调链接无法使用（未给出原因）' },
+          }
+        }
+        return { ok: true, value: { accepted: true } }
+      }
+
       case 'account.create': {
         const req = payload as RpcCreateAccountRequest
         const { provider } = req
@@ -5987,7 +6046,17 @@ function registerJetHubEndpoints(
             ctx.logger.warn(`[jet-hub] background codearts login failed for ${id}: ${String(error)}`)
             // 登录失败：记终态原因（供 login.poll 报给前端）+ 移除占位条目，不留幽灵账号
             void failLogin(id, error)
+          }).finally(() => {
+            // ⚠️ 无论成败都摘掉本轮的「手动回调链接」提交入口：
+            //    成功后再留着，后续误提交会撞上已落定的收码器、回一句误导性的
+            //    「这轮登录已经结束」；失败/超时后留着更是纯内存泄漏。
+            pendingCodeArtsCallbacks.delete(id)
           })
+
+          // 登记本轮的「手动回调链接」提交入口。
+          // ⚠️ 必须在 `started` 到手后、**返回 accountId 之前**登记：
+          //    客户端拿到 accountId 就可能立刻提交，中间不能有空窗。
+          pendingCodeArtsCallbacks.set(id, started.submitManualCallback)
 
           // ⚠️⚠️ **宿主侧直接拉起无痕窗口**（2026-10-21，用户报障「新建账号会缓存
           //    上一个账号的登录信息并自动登录」）：与 OfficeAce（2026-10-13）**完全
