@@ -590,16 +590,23 @@ export interface RpcPollLoginRequest {
 }
 
 /**
- * RPC: 手动提交 CodeArts（华为云）的 OAuth 回调链接。
+ * RPC: 手动提交回调链接（codearts 华为云 / TRAE 字节跳动）。
  *
  * 用途：授权回调被定向到**宿主本机**的 `127.0.0.1:<port>`，用户在手机 /
  * 另一台电脑上完成登录时那一跳打不开，但地址栏里留下一条合法的回调链接。
  * 把它交回来即可在本机完成原来只有浏览器能完成的那一步。
+ *
+ * 两家机制不同（codearts 回传 `code` 需交换、TRAE 直传 token），但「人工搬运
+ * 回调链接」是同一语义 ⇒ 共用本端点；由登记时的 provider 决定转调哪个提交入口。
  */
 export interface RpcSubmitCallbackRequest {
   /** `account.create` 返回的占位账号 id（本进程内存里的那一轮登录）。 */
   accountId: string
-  /** 用户粘贴的整条回调链接（含 `code=` 或 `secret=`，以及端口）。 */
+  /**
+   * 用户粘贴的整条回调链接。
+   * - codearts：`http://127.0.0.1:<port>/oauth/callback?code=…`（或旧流程 `secret=`）；
+   * - TRAE：`http://127.0.0.1:<port>/authorize?refreshToken=…&userInfo=…&userJwt=…`。
+   */
   callbackUrl: string
 }
 /**

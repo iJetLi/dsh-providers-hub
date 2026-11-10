@@ -3206,13 +3206,26 @@ function registerJetHubEndpoints(
    * `account.submitCallback` 把这条链接交回来，由这里存下的**同一轮**收码器
    * 完成换取 —— 端口 / PKCE / DPoP 都是授权时那一份，故 `redirect_uri` 天然一致。
    *
+   * ## TRAE（2026-11-10 加入）为何共用同一张表
+   *
+   * TRAE 的回调**直传 token**（`refreshToken` / `userJwt.Token`，无 `?code=`），
+   * 手动粘贴同样是「把浏览器那一跳的内容人工搬回宿主」这一个语义；
+   * 端点按登记时的 provider 转调各自的提交入口，不感知两家机制差异
+   *（codearts 有端口/PKCE 约束、TRAE 没有 —— 那是 `submitManualCallback`
+   * 自己的事，端点不做第二次判断）。
+   *
    * ⚠️ 与 `pendingOfficeAceState` 同一纪律：**只在本进程内存里**。
    *    宿主重启后这张表空了 ⇒ `account.submitCallback` 报「会话已失效」，
    *    前端据此提示用户重建账号，而不是让用户对着一条永远用不上的链接反复粘贴。
    *
-   * ⚠️ 只服务 `provider === 'codearts'`：其余 provider 的登录分支一个字节都不碰。
+   * ⚠️ 键是**占位账号 id**，值带 `provider`（诊断用）与对应 provider 的提交入口。
+   *    新增支持某家 provider 时：在该家 `account.create` 分支 set、
+   *    后台收口 `finally` 里 delete —— 漏 delete 是纯内存泄漏。
    */
-  const pendingCodeArtsCallbacks = new Map<string, (raw: unknown) => ManualCallbackSubmitResult>()
+  const pendingManualCallbacks = new Map<string, {
+    provider: string
+    submit: (raw: unknown) => ManualCallbackSubmitResult
+  }>()
 
   /**
    * OfficeAce 登录中间态的有效期（毫秒）。
@@ -5054,11 +5067,12 @@ function registerJetHubEndpoints(
       }
 
       /**
-       * 手动提交 CodeArts（华为云）的 OAuth 回调链接。
+       * 手动提交 OAuth / token 回调链接（codearts 与 TRAE）。
        *
-       * 仅在 `account.create` 的 codearts 分支登记过的占位账号可提交；
-       * 链接里**必须**带本机回调端口（`redirect_uri` 要与授权时逐字一致），
-       * 解析由 `login.ts` 的 `parseManualCallbackUrl` 一处完成。
+       * 仅在 `account.create` 的对应分支登记过的占位账号可提交；
+       * 解析与机制约束由各家自己的 `submitManualCallback` 负责
+       *（codearts：`parseManualCallbackUrl`，端口/PKCE/DPoP 必须与授权一致；
+       * TRAE：`parseTraeCallbackDetailed`，回调直传 token、无端口约束）。
        *
        * ⚠️ 失败一律 `ok:false` + 可读原因，**不抛** ——
        *    用户输入错误不该让宿主进程异常退出。
@@ -5070,8 +5084,8 @@ function registerJetHubEndpoints(
         if (accountId.length === 0) {
           return { ok: false, error: { code: 'bad-request', message: '未指定账号 id（accountId）' } }
         }
-        const submit = pendingCodeArtsCallbacks.get(accountId)
-        if (submit === undefined) {
+        const pending = pendingManualCallbacks.get(accountId)
+        if (pending === undefined) {
           return {
             ok: false,
             error: {
@@ -5081,7 +5095,7 @@ function registerJetHubEndpoints(
             },
           }
         }
-        const outcome = submit(callbackUrl)
+        const outcome = pending.submit(callbackUrl)
         if (outcome.ok !== true) {
           return {
             ok: false,
@@ -6050,13 +6064,13 @@ function registerJetHubEndpoints(
             // ⚠️ 无论成败都摘掉本轮的「手动回调链接」提交入口：
             //    成功后再留着，后续误提交会撞上已落定的收码器、回一句误导性的
             //    「这轮登录已经结束」；失败/超时后留着更是纯内存泄漏。
-            pendingCodeArtsCallbacks.delete(id)
+            pendingManualCallbacks.delete(id)
           })
 
           // 登记本轮的「手动回调链接」提交入口。
           // ⚠️ 必须在 `started` 到手后、**返回 accountId 之前**登记：
           //    客户端拿到 accountId 就可能立刻提交，中间不能有空窗。
-          pendingCodeArtsCallbacks.set(id, started.submitManualCallback)
+          pendingManualCallbacks.set(id, { provider: 'codearts', submit: started.submitManualCallback })
 
           // ⚠️⚠️ **宿主侧直接拉起无痕窗口**（2026-10-21，用户报障「新建账号会缓存
           //    上一个账号的登录信息并自动登录」）：与 OfficeAce（2026-10-13）**完全
@@ -6280,7 +6294,15 @@ function registerJetHubEndpoints(
             ctx.logger.warn(`[jet-hub] background ${TRAE.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：记终态原因（供 login.poll 报给前端）+ 移除占位条目，不留幽灵账号
             void failLogin(id, error)
+          }).finally(() => {
+            // ⚠️ 无论成败都摘掉本轮的「手动回调链接」提交入口：
+            //    成功后留着，后续误提交会撞上已落定的换取；失败/超时后留着是纯泄漏。
+            pendingManualCallbacks.delete(id)
           })
+
+          // 登记本轮的「手动回调链接」提交入口（与 codearts 同一端点、同一张表）。
+          // ⚠️ 必须在返回 accountId 之前登记：客户端拿到 accountId 就可能立刻提交。
+          pendingManualCallbacks.set(id, { provider: TRAE.id, submit: started.submitManualCallback })
           return { ok: true, value: { accountId: id, loginUrl: started.loginUrl } }
         } else if (provider === CLINE.id) {
           // Cline 是 **WorkOS 设备码轮询**登录（见 src/cline-oauth.ts）：

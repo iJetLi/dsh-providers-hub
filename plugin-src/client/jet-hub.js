@@ -3634,14 +3634,16 @@ function ProviderPanel({
   /**
    * 是否渲染「手动粘贴回调链接」输入框。
    *
-   * 只有 CodeArts（华为云）需要：它的授权回调落在**宿主本机**的
-   * `127.0.0.1:<port>`，用户在手机 / 另一台电脑上完成登录时那一跳打不开。
+   * CodeArts（华为云）与 TRAE（字节跳动）需要：它们的回调都落在**宿主本机**的
+   * `127.0.0.1:<port>`，用户在手机 / 另一台电脑上完成登录时那一跳打不开
+   *（codearts 回传 code 需本机交换；TRAE 直传 token 材料）。
    *
    * ⚠️ 必须写成**单个标识符**（不是内联的复合条件）：`jet-hub-structure-ast.spec.ts`
    * 的提示守卫要求每个面板级提示的渲染条件是自己的变量，这样「条件被换成前缀
    * 相同的另一个标识符 / 被短路成恒 null」都能被抓到。
    */
-  const showCodeartsCallback = codeartsCallback !== null && provider === 'codearts';
+  const showCodeartsCallback = codeartsCallback !== null
+    && (provider === 'codearts' || provider === 'trae');
   /** 读「严格手动顺序」当前值。失败时**保持默认 `false`** 并留一条 console 提示。 */
   const loadStrictManualOrder = React.useCallback(async () => {
     if (!canStrictOrder) return;
@@ -5217,12 +5219,13 @@ function ProviderPanel({
         //   `catch` 完全吞掉：用户只剩 5 分钟后一句「登录超时」，真实原因永不上屏
         //   （独立审计攻击 5d 实测）。这里只记痕迹，不打断轮询（可能只是瞬时故障），
         //   超时时一并展示。
-        // ⚠️ 只有 CodeArts（华为云）需要「手动粘贴回调链接」这一格：
-        //    它的回调落在宿主本机 127.0.0.1，别的设备上的浏览器打不开。
+        // ⚠️ 只有 CodeArts（华为云）与 TRAE（字节跳动）需要「手动粘贴回调链接」
+        //    这一格：它们的回调都落在宿主本机 127.0.0.1，别的设备上的浏览器
+        //    打不开（codearts 回传 code 需交换；TRAE 直传 token）。
         //    ⚠️ 其余 provider 走完全相同的 startLoginPoll 调用，
         //    不得因为这里多一个分支而改变行为（本文件既有纪律：
         //    每家 provider 的差异只在它自己的分支里）。
-        if (provider === 'codearts' && accountId) {
+        if ((provider === 'codearts' || provider === 'trae') && accountId) {
           setCodeartsCallback({ accountId, value: '', error: '', busy: false });
         }
         startLoginPoll({ accountId, provider, loginWindow });
@@ -5891,7 +5894,9 @@ function ProviderPanel({
           React.createElement('input', {
             className: 'dim-jh-input',
             type: 'text',
-            placeholder: 'http://127.0.0.1:端口/oauth/callback?code=…',
+            placeholder: provider === 'trae'
+              ? 'http://127.0.0.1:端口/authorize?refreshToken=…&userInfo=…&userJwt=…'
+              : 'http://127.0.0.1:端口/oauth/callback?code=…',
             value: codeartsCallback.value,
             disabled: codeartsCallback.busy,
             spellCheck: false,
