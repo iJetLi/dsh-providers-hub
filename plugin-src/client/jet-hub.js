@@ -3641,7 +3641,8 @@ function ProviderPanel({
    * 的提示守卫要求每个面板级提示的渲染条件是自己的变量，这样「条件被换成前缀
    * 相同的另一个标识符 / 被短路成恒 null」都能被抓到。
    */
-  const showCodeartsCallback = codeartsCallback !== null && provider === 'codearts';
+  const showCodeartsCallback = codeartsCallback !== null
+    && (provider === 'codearts' || provider === 'trae');
   /** 读「严格手动顺序」当前值。失败时**保持默认 `false`** 并留一条 console 提示。 */
   const loadStrictManualOrder = React.useCallback(async () => {
     if (!canStrictOrder) return;
@@ -5222,7 +5223,7 @@ function ProviderPanel({
         //    ⚠️ 其余 provider 走完全相同的 startLoginPoll 调用，
         //    不得因为这里多一个分支而改变行为（本文件既有纪律：
         //    每家 provider 的差异只在它自己的分支里）。
-        if (provider === 'codearts' && accountId) {
+        if ((provider === 'codearts' || provider === 'trae') && accountId) {
           setCodeartsCallback({ accountId, value: '', error: '', busy: false });
         }
         startLoginPoll({ accountId, provider, loginWindow });
@@ -5891,7 +5892,9 @@ function ProviderPanel({
           React.createElement('input', {
             className: 'dim-jh-input',
             type: 'text',
-            placeholder: 'http://127.0.0.1:端口/oauth/callback?code=…',
+            placeholder: provider === 'trae'
+              ? 'http://127.0.0.1:端口/authorize?refreshToken=…&userInfo=…&userJwt=…'
+              : 'http://127.0.0.1:端口/oauth/callback?code=…',
             value: codeartsCallback.value,
             disabled: codeartsCallback.busy,
             spellCheck: false,

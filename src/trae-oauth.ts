@@ -61,6 +61,13 @@ export interface TraeLoginFlowResult {
   refreshable: boolean
 }
 
+/** `startTraeLoginFlow().submitManualCallback` 的结果。 */
+export interface ManualTraeCallbackSubmitResult {
+  ok: boolean
+  /** 失败时可直接展示给用户的原因。 */
+  message?: string
+}
+
 /**
  * 由 machineId + deviceId 派生稳定的 `login_trace_id`（hex16）。
  *
@@ -596,6 +603,8 @@ export async function startTraeLoginFlow(
   loginUrl: string
   result: Promise<TraeLoginFlowResult>
   close: () => Promise<void>
+  /** 手动提交回调链接（手机/另一台电脑完成授权后，把地址栏链接粘回来）。 */
+  submitManualCallback: (raw: unknown) => ManualTraeCallbackSubmitResult
 }> {
   const machineId = generateMachineId()
   const deviceId = generateDeviceId()
@@ -607,7 +616,20 @@ export async function startTraeLoginFlow(
   // ── 1. 先把结果 Promise 的拒绝通道与请求处理器挂好 ──
   let rejectResult: ((error: Error) => void) | undefined
   let loginUrl = ''
+  /**
+   * 本轮是否已被**手动提交**消费。浏览器回调那条腿不需要它（HTTP 请求天然
+   * 单次），但手动提交可以重复发生 —— 必须挡住第二次，否则同一个
+   * `refreshToken` 会被 ExchangeToken 轮换两次、第二次必然失败。
+   */
+  const settledRef = { settled: false }
+  /** resultPromise 的落定句柄（手动提交在 server.on('request') 之外也要能落定）。 */
+  const resolveRef: {
+    resolve: (value: TraeLoginFlowResult) => void
+    reject: (reason: unknown) => void
+  } = { resolve: () => {}, reject: () => {} }
   const resultPromise = new Promise<TraeLoginFlowResult>((resolve, reject) => {
+    resolveRef.resolve = resolve
+    resolveRef.reject = reject
     rejectResult = reject
     resultTimer = setTimeout(() => {
       server.close()
@@ -692,6 +714,75 @@ export async function startTraeLoginFlow(
   const callbackUrl = `http://127.0.0.1:${actualPort}/authorize`
   loginUrl = buildTraeLoginURL(options.product, machineId, deviceId, callbackUrl)
 
+  /**
+   * 手动提交回调链接（手机 / 另一台电脑完成授权后，把地址栏整条链接粘回来）。
+   *
+   * ## 与 CodeArts 的关键差异（为什么这里没有端口/PKCE 约束）
+   *
+   * TRAE 回调**直传 token 材料**（`refreshToken` / `userJwt.Token`），不是
+   * OAuth 的 `?code=` 交换：交换请求（`exchangeTraeCallback`）只带
+   * `ClientID` + `RefreshToken`，**不带** `redirect_uri` ⇒ 链接里的端口
+   * 是否与本机监听端口一致**不影响**换取成败。
+   * `machineId` / `deviceId` 在登录时已生成并保留在本闭包里，手动提交与
+   * 浏览器回调走**同一个** `exchangeTraeCallback`（同一 session、同一落定通道）。
+   *
+   * ## 幂等与落定
+   *
+   * 复用 `resultPromise` 的 resolve/reject：本函数自己不另设落定标志，
+   * 而是把「是否已落定」交给 `settledRef`（resolve 只能成功一次，但**重复
+   * resolve 不报错**；真正的约束是「别把第二次提交的 exchange 也发出去」，
+   * 否则同一个 refreshToken 会被轮换两次、第二次必然失败）。
+   *
+   * ⚠️ 失败**返回可读文案而不抛**：RPC 层原样回给前端，用户输入错误
+   * 不该让宿主进程异常退出。解析复用 `parseTraeCallbackDetailed`
+   *（它已经给出两种失败的可读原因，包括「上游走了 PKCE 新流程」）。
+   */
+  const submitManualCallback = (raw: unknown): ManualTraeCallbackSubmitResult => {
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+      return {
+        ok: false,
+        message: '回调链接是空的。请把手机（或另一台电脑）浏览器地址栏里的整条链接复制过来粘贴。',
+      }
+    }
+    // 允许整条 URL 或裸 query（/authorize?… 与 ?refreshToken=… 都接受）。
+    const text = raw.trim()
+    const normalized = /^https?:\/\//i.test(text) || text.startsWith('/authorize')
+      ? text
+      : `/authorize?${text.replace(/^\?/, '')}`
+    // ⚠️ parseTraeCallbackDetailed 只看 query 串；「127.0.0.1 拒绝连接」的
+    //    那一页地址栏里就是完整 URL，原样传入即可。
+    const parsed = parseTraeCallbackDetailed(normalized)
+    if (!parsed.ok) {
+      return { ok: false, message: `回调链接无法使用：${parsed.reason}` }
+    }
+    if (settledRef.settled) {
+      return {
+        ok: false,
+        message: '这轮登录已经结束了（成功或超时），这份回调未再使用。请重新点击「+ 新建账号」。',
+      }
+    }
+    settledRef.settled = true
+    // 与浏览器回调同一条换取路径：同一 session（machineId/deviceId）、
+    // 同一 product、同一 fetcher、同一 resultPromise。
+    void exchangeTraeCallback(parsed.info, { machineId, deviceId }, options.product, options.fetcher)
+      .then((credential) => {
+        if (resultTimer) clearTimeout(resultTimer)
+        server.close()
+        resolveRef.resolve({
+          access: JSON.stringify(credential),
+          expires: credentialExpiresAtMs(credential) ?? 0,
+          loginUrl,
+          refreshable: credential.refresh_token.length > 0,
+        })
+      })
+      .catch((error: unknown) => {
+        if (resultTimer) clearTimeout(resultTimer)
+        server.close()
+        resolveRef.reject(error instanceof Error ? error : new Error(String(error)))
+      })
+    return { ok: true }
+  }
+
   return {
     loginUrl,
     result: resultPromise,
@@ -702,6 +793,7 @@ export async function startTraeLoginFlow(
       if (resultTimer) clearTimeout(resultTimer)
       server.close(() => resolve())
     }),
+    submitManualCallback,
   }
 }
 
