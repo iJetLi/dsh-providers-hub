@@ -1107,6 +1107,80 @@ describe('QoderAdapter 排队错误（10605 model_queued）', () => {
       })).rejects.toThrow()
     })
 
+    it('排队首次必定写一条 warn（否则「排队」与「挂死」在日志上无法区分）', async () => {
+      const warn = vi.fn()
+      let call = 0
+      const fetchImpl = vi.fn(async () => {
+        call += 1
+        return call === 1
+          ? queueResponse(REAL_QUEUED)
+          : envelopeResponse([textFrame('排到了'), finishFrame])
+      }) as unknown as typeof fetch
+
+      await collectWith(makeAdapter({
+        fetchImpl, warn, sleep: async () => {},
+      }), { model: 'qfmodel', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+
+      // 只记首次：wait 档最多重试 180 次，逐次记录会把日志刷满
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls[0]![0])).toMatch(/排队/)
+      expect(String(warn.mock.calls[0]![0])).toMatch(/10605|等待/)
+    })
+
+    it('visible 档：排队期间按心跳切片产出空帧，客户端不会看到「零字节干等」', async () => {
+      const previousMode = process.env.DSH_QODER_QUEUE_WAIT_MODE
+      const previousBeat = process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+      process.env.DSH_QODER_QUEUE_WAIT_MODE = 'visible'
+      process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = '1000'
+      try {
+        let call = 0
+        const fetchImpl = vi.fn(async () => {
+          call += 1
+          return call === 1
+            ? queueResponse(REAL_QUEUED)
+            : envelopeResponse([textFrame('排到了'), finishFrame])
+        }) as unknown as typeof fetch
+
+        const sleeps: number[] = []
+        const chunks = await collectWith(makeAdapter({
+          fetchImpl, sleep: async (ms) => { sleeps.push(ms) },
+        }), { model: 'qfmodel', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+
+        // 30s 排队被压到 10s，再按 1s 心跳切片 ⇒ 10 片、总时长不变
+        expect(sleeps.every((ms) => ms <= 1_000), '每片不超过心跳间隔').toBe(true)
+        expect(sleeps.reduce((sum, ms) => sum + ms, 0), '总等待时长与 wait 档一致').toBe(10_000)
+        // 每一片都要有且仅有一个空 text-delta（正文不增加字符，只让通道有字节）
+        const heartbeats = chunks.filter(
+          (chunk) => chunk.type === 'text-delta' && chunk.text === '',
+        )
+        expect(heartbeats.length, '切片数与心跳帧数必须一一对应').toBe(sleeps.length)
+        expect(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text === '排到了')).toBe(true)
+      } finally {
+        if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
+        else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode
+        if (previousBeat === undefined) delete process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+        else process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = previousBeat
+      }
+    })
+
+    it('fast 档：排队不等待、立刻抛错（把「等还是换模型」交还调用方）', async () => {
+      const previousMode = process.env.DSH_QODER_QUEUE_WAIT_MODE
+      process.env.DSH_QODER_QUEUE_WAIT_MODE = 'fast'
+      try {
+        const fetchImpl = vi.fn(async () => queueResponse(REAL_QUEUED)) as unknown as typeof fetch
+        const sleeps: number[] = []
+        await expect(collectWith(makeAdapter({
+          fetchImpl, sleep: async (ms) => { sleeps.push(ms) },
+        }), { model: 'qfmodel', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] }))
+          .rejects.toThrow(/排队|fast/i)
+        // 关键：一次 sleep 都不能有 —— 有的话就成了「又等又报错」，比 wait 档更糟
+        expect(sleeps).toEqual([])
+      } finally {
+        if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
+        else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode
+      }
+    })
+
     it('真认证失败（非 10605 的 403）仍走 refresh + AUTH（不误判为排队）', async () => {
       const refresh = vi.fn(async () => {})
       const fetchImpl = vi.fn(async () => new Response(
