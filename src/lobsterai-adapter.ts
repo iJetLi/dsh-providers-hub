@@ -325,7 +325,7 @@ export function buildLobsteraiModelsQuery(
 export interface LobsteraiAdapterOptions {
   credentialRef: CredentialRef
   /** 从凭据存储解析凭据。 */
-  resolveCredential: (modelId?: string) => Promise<LobsteraiCredential | undefined>
+  resolveCredential: (modelId?: string, sessionId?: string) => Promise<LobsteraiCredential | undefined>
   /** 静默续期凭据。 */
   refresh: () => Promise<void>
   /** 动态拉取远端模型列表；失败时回退到 `product.fallbackModels`。 */
@@ -1150,10 +1150,10 @@ export class LobsteraiAdapter extends LlmAdapter {
     }
 
     // 1. 获取凭据（过期则先静默续期）
-    let credential = await this.options.resolveCredential(options.model)
+    let credential = await this.options.resolveCredential(options.model, options.sessionId)
     if (credential === undefined || isLobsteraiExpired(credential)) {
       await this.options.refresh()
-      credential = await this.options.resolveCredential(options.model)
+      credential = await this.options.resolveCredential(options.model, options.sessionId)
     }
     if (credential === undefined || credential.access_token.length === 0) {
       throw new LlmError('lobsterai: no usable credential; log in first', 'MISSING_CREDENTIAL')
@@ -1239,7 +1239,7 @@ export class LobsteraiAdapter extends LlmAdapter {
     let response = await this.send(credential, body, options)
     if (!response.ok && (response.status === 401 || response.status === 403)) {
       await this.options.refresh()
-      const refreshed = await this.options.resolveCredential(options.model)
+      const refreshed = await this.options.resolveCredential(options.model, options.sessionId)
       if (refreshed === undefined || refreshed.access_token.length === 0) {
         throw new LlmError('lobsterai: credential expired and refresh failed', 'AUTH', { status: response.status })
       }

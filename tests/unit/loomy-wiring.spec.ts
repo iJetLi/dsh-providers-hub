@@ -110,8 +110,11 @@ describe('Loomy 在 index.ts 的接线', () => {
       resolve(here, '../../src/loomy-adapter.ts'), 'utf8',
     )
     // 适配器侧：声明与调用都带 modelId
-    expect(adapterSource).toMatch(/resolveCredential: \(modelId\?: string\)/)
-    expect(adapterSource).toContain('this.options.resolveCredential(options.model)')
+    // ⚠️ 2026-11-11：签名多了第二参 `sessionId`（「轮换起点」的作用域键）。
+    //    本用例原本只守「modelId 透传」，改为同时接受两参形态 ——
+    //    `modelId` 仍是**第一参**，故该用例的原始意图不变。
+    expect(adapterSource).toMatch(/resolveCredential: \(modelId\?: string, sessionId\?: string\)/)
+    expect(adapterSource).toContain('this.options.resolveCredential(options.model, options.sessionId)')
 
     // 宿主侧：loomy 的工厂配置块不得把 modelId 吞掉 —— 工厂**不接受** modelId
     // 作为配置项（它是每次调用的实参），故这里断言「配置块里没有 modelId 相关

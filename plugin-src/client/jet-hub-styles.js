@@ -1450,6 +1450,26 @@ const STYLES = `
 .dim-jh-badgePrefBtn:hover { color: var(--dsw-alias-label-primary); }
 /* 选中项自带描边：浅色下只靠白色底与底色区分太弱 */
 .dim-jh-badgePrefBtn[aria-pressed="true"] { border: .5px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-brand-primary); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .06); }
+/* 「轮换起点」行：**要显眼**（用户 2026-11-10 要求「做得显眼一点」，后改为黄色字体）。
+   ⚠️ 它改的是「请求用哪个号发」，比上面的显示偏好更重要 ⇒ 用独立卡片 +
+   黄色调 + 左侧色条，而不是像显示偏好那样只做一条细分隔线。
+   ⚠️ 颜色刻意用黄色而不是品牌色：品牌色与上面的分段控件同色，
+   反而看不出这是**另一类**设置。 */
+.dim-jh-badgeRotation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; padding: 6px 8px; border: .5px solid color-mix(in srgb, #d9a40b 45%, var(--dsw-alias-border-l2)); border-left: 2.5px solid #d9a40b; border-radius: 6px; background: color-mix(in srgb, #d9a40b 8%, transparent); }
+.dim-jh-badgeRotationLabel { flex: none; color: #b8860b; font-size: 10px; font-weight: 700; line-height: 1.6; white-space: nowrap; letter-spacing: .02em; }
+/* 「轮换起点」的说明图标（用户 2026-11-11 要求加 tooltip）。
+   ⚠️ 它是**独立可悬停目标**：select 的 title 在展开下拉时浏览器不显示，
+      而标签文字很短、不易精准悬停 ⇒ 图标补上这两个缺口。
+   ⚠️ 刻意不加 hover 变色 / 指针手型 —— 它**不可点**（本仓记过「点了没反应」的教训），
+      视觉上不该暗示可交互。
+   ⚠️ 注释里不写反引号与尖括号：本文件整体是模板字符串，
+      反引号会提前闭合字符串，尖括号会被当成 JSX（真实构建失败，2026-11-11 踩到）。 */
+.dim-jh-badgeRotationInfo { flex: none; color: color-mix(in srgb, #b8860b 70%, var(--dsw-alias-label-secondary)); font-size: 10px; line-height: 1.6; cursor: help; user-select: none; }
+/* 说明 / 诊断文字：同色但更淡，不抢标签的视觉重量。 */
+.dim-jh-badgeRotationHint { color: color-mix(in srgb, #b8860b 80%, var(--dsw-alias-label-secondary)); font-size: 10px; line-height: 1.6; }
+/* ⚠️ flex:1 + min-width:0：昵称可能很长，缺 min-width 会让本行撑破弹窗宽度。 */
+.dim-jh-badgeSelect { flex: 1; min-width: 0; padding: 3px 5px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 5px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: inherit; font-size: 11px; line-height: 1.6; cursor: pointer; }
+.dim-jh-badgeSelect:disabled { opacity: .6; cursor: default; }
 /* 分区：细分隔线分组，间距 5px（比 4px 多 1px 呼吸：账号备注是 10px 灰字，
    紧贴下一个账号名会读成同一块；再大就不「小巧」了）
    ⚠️ 分隔线用**全不透明**的 border-l2：此前用 color-mix 降到 75%，浅色下几乎看不见。 */

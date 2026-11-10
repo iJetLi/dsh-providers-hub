@@ -352,6 +352,66 @@ export interface BuddyTierOptions {
    * 选择上 —— 故传 `true` 时「锁定永久积分」这道门照旧生效。
    */
   strictManualOrder?: boolean
+  /**
+   * 「轮换起点」：本会话指定的起始账号 id（`undefined` = 默认起点）。
+   *
+   * 语义：**只把轮换的起点挪到该账号**，不改任何档位/可用性判据。
+   * 详见 {@link rotateFromPreferred}。
+   */
+  rotationStartId?: string
+}
+
+/**
+ * 「轮换起点」的**唯一实现**：把已排好序的候选从指定账号处绕一圈。
+ *
+ * ## 语义（用户 2026-11-10 需求）
+ *
+ * ```
+ * 策略顺序：A → B → C → D →（回到 A）
+ * 选 C 后： C → D → A → B →（回到 C）
+ * ```
+ *
+ * ⚠️ **只挪起点，不改任何策略**：
+ * - 档位判据照旧（临期优先仍然成立）；
+ * - 可用性过滤照旧（锁定永久积分时「只剩永久」仍不可用）；
+ * - 失败换号照旧（`tried` 循环在旋转后的数组上跑）。
+ *
+ * ## ⚠️ 起点落在「往后第一个可用项」
+ *
+ * 用户选的号**可能当前不可用**（例如上午选的号、下午临时积分用完了）。
+ * 此时**不是**回落默认，而是**循环到下一个可用**（用户明确要求）。
+ *
+ * ## 三条不变量
+ *
+ * 1. **集合不变**：只旋转，不增删（长度与元素身份都不变）；
+ * 2. **保序**：起点之后 / 之前的各自保持原相对顺序；
+ * 3. **找不到就原样**：`rotationStartId` 不在候选里（账号被删/新被限流）⇒
+ *    与未设置**逐字节相同**，不报错。
+ *
+ * @param ranked - **已按策略排好序**的候选（⚠️ 必须排在旋转之前）
+ * @param options - 与排序同一份选项（需要 `allowPermanent` 判可用性）
+ * @returns **新数组**
+ */
+export function rotateFromPreferred<T extends BuddyAccountBalance>(
+  ranked: readonly T[],
+  options: BuddyTierOptions = {},
+): T[] {
+  const startId = options.rotationStartId
+  if (startId === undefined || startId.length === 0) return [...ranked]
+  const index = ranked.findIndex((account) => account.id === startId)
+  // 不变量 3：已不在候选里 ⇒ 原样（= 默认起点）。
+  if (index < 0) return [...ranked]
+  // ⚠️ 从 index 起**向后**找第一个可用项（step = 0 时先检查自己）。
+  let anchor = -1
+  for (let step = 0; step < ranked.length; step += 1) {
+    const at = (index + step) % ranked.length
+    if (buddyTierUsable(buddyBalanceTier(ranked[at]!, options))) { anchor = at; break }
+  }
+  // 全不可用 ⇒ 原样，交给上层报出真实原因（不要在这里抛）。
+  if (anchor < 0) return [...ranked]
+  // 起点已是首位 ⇒ 无需旋转（但仍返回新数组，保持「不改入参」约定）。
+  if (anchor === 0) return [...ranked]
+  return [...ranked.slice(anchor), ...ranked.slice(0, anchor)]
 }
 
 /**

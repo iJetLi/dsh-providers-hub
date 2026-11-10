@@ -185,7 +185,7 @@ export interface MinimaxAdapterOptions {
   /** 单凭据回退 ref（无账号池时）。 */
   credentialRef: CredentialRef
   /** 解析当前可用凭据。 */
-  resolveCredential: (modelId?: string) => Promise<MinimaxCredential | undefined>
+  resolveCredential: (modelId?: string, sessionId?: string) => Promise<MinimaxCredential | undefined>
   /** 凭据失效时的处理。 */
   refresh: () => Promise<void>
   /** 拉取远端模型目录；失败时适配器回退兜底表。 */
@@ -707,7 +707,7 @@ export class MinimaxAdapter extends LlmAdapter {
      * （本机实测），事后无法区分。故判定的时机只能卡在 307 那一跳。
      */
     let geoRouted = false
-    let credential = await this.options.resolveCredential(options.model)
+    let credential = await this.options.resolveCredential(options.model, options.sessionId)
     if (credential === undefined || isMinimaxExpiringWithin(credential, MINIMAX_ONDEMAND_MIN_VALIDITY_MS)) {
       /**
        * ⚠️⚠️ **续期失败不得让请求直接死掉**（2026-10-27 审计修）。
@@ -735,7 +735,7 @@ export class MinimaxAdapter extends LlmAdapter {
        */
       try {
         await this.options.refresh()
-        credential = await this.options.resolveCredential(options.model)
+        credential = await this.options.resolveCredential(options.model, options.sessionId)
       } catch (error) {
         if (credential === undefined || credential.access_token === '') {
           // 手上根本没有可用凭据 ⇒ 只能报错（与原行为一致）
@@ -1056,7 +1056,7 @@ export class MinimaxAdapter extends LlmAdapter {
         )
       }
       const refreshed = refreshError === undefined
-        ? await this.options.resolveCredential(options.model)
+        ? await this.options.resolveCredential(options.model, options.sessionId)
         : undefined
       if (refreshed === undefined || refreshed.access_token.length === 0) {
         /**

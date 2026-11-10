@@ -281,7 +281,7 @@ export interface TraeAdapterOptions {
    *
    * 与 `LoomyAdapterOptions.resolveCredential` 同款（那里是既有正确实现）。
    */
-  resolveCredential: (modelId?: string) => Promise<TraeCredential | undefined>
+  resolveCredential: (modelId?: string, sessionId?: string) => Promise<TraeCredential | undefined>
   /** 静默续期凭据。 */
   refresh: () => Promise<void>
   /** 动态拉取远端模型列表；失败时回退到 `product.fallbackModels`。 */
@@ -1164,12 +1164,12 @@ export class TraeAdapter extends LlmAdapter {
     // ⚠️ **必须传 `options.model`**：这是选号主路径，`resolveCredential` 会把
     // 它透传给 `getAvailableAccount` 的 `modelId` 过滤限流账号。传空串等于
     // 不按模型过滤，限流标记被忽略（用户报障「没有切换」的根因之一）。
-    let credential = await this.options.resolveCredential(options.model)
+    let credential = await this.options.resolveCredential(options.model, options.sessionId)
     if (credential === undefined || isTraeExpired(credential)) {
       await this.options.refresh()
       // ⚠️ 传 `options.model`：选号必须按**本轮的模型**过滤限流账号，
       // 否则刚标记的限流账号会被再次选中（见 options 类型处的说明）。
-      credential = await this.options.resolveCredential(options.model)
+      credential = await this.options.resolveCredential(options.model, options.sessionId)
     }
     if (credential === undefined || credential.access_token.length === 0) {
       throw new LlmError('trae: no usable credential; log in first', 'MISSING_CREDENTIAL')
@@ -1381,7 +1381,7 @@ export class TraeAdapter extends LlmAdapter {
     if (!response.ok && (response.status === 401 || response.status === 403)) {
       await this.options.refresh()
       // 与主路径一致：按本模型选号（跳过正在限流的账号）。
-      const refreshed = await this.options.resolveCredential(options.model)
+      const refreshed = await this.options.resolveCredential(options.model, options.sessionId)
       if (refreshed === undefined || refreshed.access_token.length === 0) {
         throw new LlmError('trae: credential expired and refresh failed', 'AUTH', { status: response.status })
       }

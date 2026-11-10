@@ -256,6 +256,63 @@ export const CLAIM_NOTICE_WARN_MS = 20_000;
 export const CREDITS_COLLAPSED_LIMIT = 5;
 
 /**
+ * 「轮换起点」下拉框的**支持范围**（用户 2026-11-10 需求）。
+ *
+ * ⚠️ **这是显式排除表，不是「全部渠道」** —— 每条都有实现依据：
+ *
+ * | 渠道 | 为什么不支持 |
+ * |---|---|
+ * | `zcode` | 选号走 rendezvous **会话亲和**，优先级由哈希决定；插一个起点会与哈希互相干扰 |
+ * | `loomy` | 分档语义是 `dailyBalance`（今日赠送额度），与 buddy 系的 `expiring/permanent` 不同；本轮未接入 |
+ * | `aggregate` | 虚拟 provider，本身不选号（按上游渠道轮换） |
+ *
+ * ⚠️ 新增渠道时必须确认选号层**真的接了这一项** —— 只放行不接线，
+ * 用户「选了没反应」，比不渲染更糟。
+ */
+const ROTATION_EXCLUDED = Object.freeze(['zcode', 'loomy', 'aggregate']);
+
+/** 该渠道是否支持「轮换起点」下拉框。 */
+export function supportsRotation(provider) {
+  return typeof provider === 'string'
+    && provider.length > 0
+    && !ROTATION_EXCLUDED.includes(provider);
+}
+
+/** 不可用原因 → 悬浮说明（下拉框选项的 `title`）。 */
+const ROTATION_REASON_TEXT = Object.freeze({
+  'disabled': '该账号已停用 —— 到 Jet Hub 设置页启用后即可选择',
+  'policy-blocked': '该账号被上游限制（异常行为）—— 需在面板「重置」后才能恢复',
+  'rate-limited': '该账号在当前模型下被限流 —— 等解禁或换账号',
+  'no-expiring': '该账号没有「临期窗口内」到期的积分，而「锁定永久积分」已开启 —— 只会消耗永久积分，故跳过',
+});
+
+/**
+ * 「轮换起点」的说明文案（用户 2026-11-11 要求加 tooltip）。
+ *
+ * ## 为什么必须写清这五件事（每条都来自真实误解）
+ *
+ * | 要点 | 不写会怎样 |
+ * |---|---|
+ * | **只改起点、不改策略** | 以为它改变了优先级顺序（v1 废弃命名「优先账号」就是这个坑） |
+ * | **环形轮换的例子** | 以为「选 4」=「只用 4」，不知道后面还会走到 5、6、1… |
+ * | **起点优先于档位** | 以为它遵守「临期优先」，实际会先烧永久积分（方案 A 的取舍） |
+ * | **「默认」≠ 手动第一个** | 余额分档渠道下，默认是「临期积分最多的号」 |
+ * | **只对当前会话生效** | 换会话发现设置「没了」 |
+ *
+ * ⚠️ 文案里**不出现**「优先账号」—— 那是 v1 的废弃命名。
+ */
+const ROTATION_TIP_LABEL = '只改「从哪个账号开始轮换」，不改任何选号策略。\n\n'
+  + '例：7 个账号，选「账号 4」⇒ 按 4 → 5 → 6 → 7 → 1 → 2 → 3 轮换；'
+  + '不可用的账号会自动跳过。\n\n'
+  + '「默认」= 按渠道原有策略决定起点：余额分档的渠道会优先用在临期积分更多的账号。\n\n'
+  + '⚠️ 起点优先于积分档位 —— 若指定一个「只有永久积分」的账号，'
+  + '会从它开始，也就会先消耗永久积分。\n\n'
+  + '本设置只对当前会话生效，换会话回到「默认」。';
+
+/** `<select>` 上的一句话版（下拉展开时浏览器不显示 `title`，故长文案挂在标签与 ⓘ 上）。 */
+const ROTATION_TIP_SELECT = '选择从哪个账号开始轮换（仅当前会话生效）';
+
+/**
  * 目录解析失败后的重试退避（毫秒）。
  *
  * ⚠️ 覆盖「宿主在该槽位注入期还没接上 `remote.session`」这一实际情形
@@ -596,6 +653,7 @@ export function UsageBadge(props) {
  */
 function UsageBadgeActive(props) {
   const { provider, providerLabel, readBadge, writePreference, setAutoCheckin, dismissAutoCheckin, claimCredits } = props;
+  const { sessionId, readRotation, writeRotation } = props;
   const label = providerLabel(provider);
 
   /** `{ value, at }`：宿主返回的读数 + **到达**本地的时刻（兜底显示用）。 */
@@ -615,6 +673,17 @@ function UsageBadgeActive(props) {
   /** 本地偏好镜像：写入后立刻生效，不等待下一轮轮询（否则像「点了没反应」）。 */
   const [preference, setPreference] = React.useState(null);
   const [prefError, setPrefError] = React.useState('');
+  /**
+   * 「轮换起点」：本会话指定的起始账号（用户 2026-11-10 需求）。
+   *
+   * ⚠️ 与上面的 `preference` **完全不同**：那个改「显示什么数字」，这个改
+   *「从哪个号开始轮换」。两者共用 state 会让语义彻底混淆。
+   *
+   * `rotationState = { selected, stale, accounts }`；`null` = 还没读到。
+   */
+  const [rotationState, setRotationState] = React.useState(null);
+  const [rotationError, setRotationError] = React.useState('');
+  const [rotationBusy, setRotationBusy] = React.useState(false);
   /** 自动签到开关的写入错误（与偏好分开：两者是不同的设置项，别互相顶掉）。 */
   const [autoError, setAutoError] = React.useState('');
   /**
@@ -698,6 +767,24 @@ function UsageBadgeActive(props) {
     setAutoError('');
     // 「展开其余 N 个」是**本渠道**的一次操作，换渠道即失效（理由见它的声明处）。
     setCreditsExpanded(false);
+    setRotationState(null);
+    setRotationError('');
+    /**
+     * 「轮换起点」的加载**挂在这里**（用户 2026-11-11 报障后改）。
+     *
+     * ## ⚠️⚠️ 为什么可以直接写 `loadRotation()`（不需要 ref / useCallback）
+     *
+     * `loadRotation` 是 **`function` 声明** ⇒ 函数作用域内**提升**，
+     * 无论它在源码里写得多么靠后（它在 L~1400，而本 effect 在 L~770）
+     * 都能在这里直接调用。
+     *
+     * 这正是上游 `renderPopover` / `wrapPopover` 的写法 —— 它们也定义在
+     * 组件级 `return` **之后**，靠提升才能被 `return` 里的 JSX 引用。
+     *
+     * ⚠️ 依赖数组保持 `[provider]`：这是既有 effect，改成别的会让
+     * 余额读数跟着重跑（副作用：多打一轮上游请求）。
+     */
+    void loadRotation();
   }, [provider]);
 
   React.useEffect(() => {
@@ -1237,6 +1324,9 @@ function UsageBadgeActive(props) {
         ? null
         : React.createElement('div', { key: 'autoErr', className: 'dim-jh-badgeFail', role: 'alert' }, autoError),
       renderPreference(),
+      // 「轮换起点」独占下一行 —— 与上面的「显示偏好」语义完全不同
+      //（一个改显示什么数字，一个改从哪个号开始轮换），共用一行会让人以为切了显示就换了号。
+      renderRotation(),
     ];
 
     // 首屏：读数未到 / 首次就失败 —— 说明白，但**不**渲染会说出
@@ -1311,6 +1401,334 @@ function UsageBadgeActive(props) {
     }, children);
     if (typeof document === 'undefined' || document.body === null || document.body === undefined) return node;
     return createPortal(node, document.body, 'jet-hub-badge-pop');
+  }
+
+  /**
+   * 「轮换起点」的读取（打开面板 / 换渠道 / 换会话时各一次）。
+   *
+   * ## ⚠️⚠️ 为什么是 `function` 声明而不是 `const` + `useCallback`
+   *
+   * **真实缺陷（2026-11-11 真机，排查四轮才定位）**：本组件在 **L1240** 就有
+   * 组件级 `return`（折叠态直接返回胶囊），而本函数的位置在 **L1398** ——
+   * 即 `return` **之后**。
+   *
+   * - `function` 声明会**提升**，放在 `return` 之后仍可被调用
+   *   （上游的 `renderPopover` / `wrapPopover` 正是这么写的）；
+   * - `const` **不提升**，那一行**永远不会执行**。
+   *
+   * 症状极具误导性：界面一直停在「读取中」，**console 一条日志都没有**，
+   * 而所有静态检查（RPC 位置 / props 注入 / 依赖数组）全部正常。
+   *
+   * ⇒ 改用 `function` 声明。它也不再需要 `useCallback`（本来只是为了稳定身份，
+   *   而 effect 现在直接调用 `loadRotation()`，不经过 ref）。
+   *
+   * ⚠️ 三条不请求的情形（无一可省）：
+   * 1. **`sessionId` 为空** —— 宿主没给会话 id 时本功能不可能生效（选号层按它查），
+   *    渲染一个「选了没用」的下拉框比不渲染更糟；
+   * 2. **不支持该渠道** —— `supportsRotation` 白名单之外（loomy / zcode / aggregate）；
+   * 3. **`readRotation` 未注入** —— 宿主跑的是旧代码（客户端新、宿主旧）。
+   */
+  async function loadRotation() {
+    if (!supportsRotation(provider)) return;
+    // ⚠️ 三条早退都必须**留下可见原因**（否则用户与我都在猜，见 renderRotation 的注释）。
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      setRotationState(null);
+      setRotationError('本会话未拿到会话标识');
+      return;
+    }
+    if (typeof readRotation !== 'function') {
+      setRotationState(null);
+      setRotationError('宿主未提供该接口（插件版本不匹配）');
+      return;
+    }
+    try {
+      // ⚠️ 传 `modelId`：服务端用它判「逐模型限流」（与 `candidateAccounts` 同判据）。
+      //    面板打开时可能还没选模型 ⇒ 传 `undefined`，此时该判据不生效（不倒向不可用）。
+      //
+      // ⚠️⚠️ `props.resolveDirectory` 是**惰性取值函数**（见它在上层组件的长注释：
+      //     真机事故 2026-10-02，在槽位 inject 期直接求值会让整个输入区渲染中断）。
+      //     这里在 **effect 内**调用它，失败被本函数自己的 try/catch 兜住，
+      //     影响面收敛到「拿不到 modelId」⇒ 只是限流判据不生效。
+      let currentModel;
+      try {
+        const directory = typeof props.resolveDirectory === 'function' ? props.resolveDirectory() : undefined;
+        const current = directory?.store?.getSnapshot?.()?.current;
+        currentModel = typeof current?.model === 'string' ? current.model : undefined;
+      } catch {
+        currentModel = undefined;
+      }
+      /**
+       * ⚠️ **超时兜底（诊断用，且应长期保留）**：
+       *
+       * 用户 2026-11-11 二次报障「一直停在读取中」⇒ RPC 的 Promise **从未 settle**。
+       * 没有超时的话，界面会永远卡住且**零信息**（`await` 挂着不抛也不返回）。
+       * ⇒ 8 秒未返回就当成失败，把「超时」显示出来。
+       *
+       * ⚠️ 这里的 `Promise.race` 不会取消底层请求（没有 AbortSignal 通路），
+       * 只是为了**不让 UI 无限等待**；迟到的结果被丢弃（`loadRotation` 下次会重取）。
+       */
+      const res = await Promise.race([
+        readRotation(provider, sessionId, currentModel),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('RPC 超时（8s 未返回）')), 8000);
+        }),
+      ]);
+      const value = res?.value ?? res;
+      setRotationState({
+        selected: typeof value?.selected === 'string' ? value.selected : null,
+        stale: value?.stale === true,
+        locked: value?.locked === true,
+        accounts: Array.isArray(value?.accounts) ? value.accounts : [],
+      });
+      setRotationError('');
+    } catch (error) {
+      setRotationState(null);
+      setRotationError(describeBadgeError(error, '轮换起点读取失败'));
+    }
+  }
+
+  /**
+   * 「轮换起点」的写入；`accountId === ''` = 恢复默认。
+   *
+   * ⚠️ 不做乐观更新：失败要把界面**退回去**，否则用户以为选好了、实际没生效
+   * （本仓反复出现的「显示与行为分叉」缺陷形态）。
+   */
+  async function onPickRotation(accountId) {
+    if (typeof writeRotation !== 'function') return;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+    setRotationBusy(true);
+    setRotationError('');
+    try {
+      await writeRotation(provider, sessionId, accountId === '' ? null : accountId);
+      await loadRotation();
+    } catch (error) {
+      setRotationError(describeBadgeError(error, '轮换起点保存失败'));
+      await loadRotation();
+    } finally {
+      setRotationBusy(false);
+    }
+  };
+
+  /**
+   * 给一个账号判「能否作为轮换起点」与原因。
+   *
+   * ## ⚠️ 判据的来源划分（必须清楚，否则会与选号层漂移）
+   *
+   * | 判据 | 谁判 | 为什么 |
+   * |---|---|---|
+   * | `enabled` / 封禁 / 逐模型限流 | **服务端**（`account.getRotation` 回 `enabled` / `policyBlocked` / `rateLimited`） | 它手上有 `modelId` 与池，判据与 `AccountPool.candidateAccounts` **同一份** |
+   * | 锁定永久 + 无临时积分 | **客户端** | 需要余额读数；服务端不查（否则每次开面板都打一轮上游） |
+   *
+   * ⚠️ 第 2 条只在**有余额读数**时判：无余额概念的渠道（codearts / cline …）
+   * 恒为可用。缺读数时**不倒向不可用**（宁可让用户选，也不误禁）。
+   */
+  function reasonOf(account) {
+    if (account.enabled === false) return 'disabled';
+    if (account.policyBlocked === true) return 'policy-blocked';
+    if (account.rateLimited === true) return 'rate-limited';
+    // 锁定永久积分 且 该号无临时积分 ⇒ 与 `buddyBalanceTier(..., {allowPermanent:false})`
+    // 返回 `none` 等价（选号层会跳过它，故起点也必须跳过）。
+    if (rotationState?.locked === true) {
+      const expiring = expiringOf(account.id);
+      // ⚠️ 只有**明确读到** `expiring === 0` 才判 —— 读不到（`undefined`）不倒向不可用。
+      if (expiring === 0) return 'no-expiring';
+    }
+    return null;
+  }
+
+  /**
+   * 从徽标读数里算某账号的「临期」余额（`undefined` = 读不到 / 无该概念）。
+   *
+   * ⚠️ **复用弹窗已经在渲染的同一份读数**（`value.accounts[].balance.packages`），
+   * **不新增请求**。分桶用既有的 `splitCreditsByExpiry`（与弹窗那几行
+   *「长期 / 临期」**同一份实现**）—— 自己再写一遍必然与选号层漂移。
+   *
+   * ⚠️ 读不到时返回 `undefined`，**不倒向「不可用」**：
+   * 无余额概念的渠道（codearts / cline / token 计费）本来就恒可用。
+   */
+  function expiringOf(accountId) {
+    const rows = value?.accounts;
+    if (!Array.isArray(rows)) return undefined;
+    const row = rows.find((r) => r?.accountId === accountId || r?.id === accountId);
+    if (row === undefined) return undefined;
+    const packages = row?.balance?.packages;
+    if (!Array.isArray(packages)) return undefined;
+    /**
+     * ⚠️⚠️ **这里曾有三处错误，合起来必然抛 `TypeError`**（真实缺陷，2026-11-11 真机）：
+     *
+     * 用户开启「锁定永久积分」后打开弹窗，整枚徽标被错误边界接住：
+     * `Cannot read properties of null (reading 'expiring')`。
+     *
+     * 1. **参数传错**：签名是 `splitCreditsByExpiry(packages, windowDays, now)`
+     *    （第一参就是**包数组**），我却传了 `{ packages }` ⇒ 不是数组 ⇒ 返回 `null`；
+     * 2. **漏传 `windowDays`**：`normalizeWindowDays(undefined)` 返回 `null`
+     *    ⇒ **即使参数形态对了，仍然返回 `null`**（这条最隐蔽 —— 修了第 1 条
+     *    还是会崩）。窗口天数必须用宿主导出的 `value.windowDays`，
+     *    与 `renderCredits` 里那个 `windowDays` **同源**，不得自己写死 15；
+     * 3. **判据漏判 `null`**：我写的是 `=== undefined`，挡不住 `null`
+     *    ⇒ 下一行 `split.expiring` 抛。
+     *
+     * ## 为什么只在「锁定永久积分」时崩
+     *
+     * 本函数只在 `rotationState.locked === true` 时被调用（`reasonOf` 的
+     * `no-expiring` 判据）⇒ 未锁定时这条路径**根本不执行**，所以前几轮测试没碰到。
+     *
+     * ⇒ 现在：传对参数 + 带上 `windowDays` + 用 `== null` 兜底。
+     */
+    const split = splitCreditsByExpiry(packages, value?.windowDays);
+    if (split == null) return undefined;
+    return split.expiring;
+  }
+
+  /** 不可用原因 → 选项后缀。⚠️ 必须短（下拉框宽度有限）。 */
+  function reasonSuffix(reason) {
+    switch (reason) {
+      case 'disabled': return '（已停用）';
+      case 'policy-blocked': return '（账号受限）';
+      case 'rate-limited': return '（本模型限流）';
+      case 'no-expiring': return '（无临时积分）';
+      default: return '';
+    }
+  }
+
+  /**
+   * 「轮换起点」下拉框（用户 2026-11-10 需求）。
+   *
+   * ## 语义
+   *
+   * **只改轮换起点，不改任何选号策略**：档位判据、可用性过滤、失败换号全部照旧。
+   *
+   * ```
+   * 策略顺序：A → B → C → D →（回到 A）
+   * 选 C 后： C → D → A → B →（回到 C）
+   * ```
+   *
+   * ## ⚠️ 为什么用 `disabled` 而不是「可选但弹 toast」
+   *
+   * 原生 `<select>` 的 `disabled` 项**点不动、不触发 `change`** ⇒ 拿不到「用户点了它」
+   * 这个动作 ⇒ **技术上无法弹 toast**。故按用户决定：**禁用 + 后缀文字**说明原因。
+   *
+   * ## ⚠️ 编号必须**连续**（含不可用项）
+   *
+   * 跳号会让用户以为「账号 3 不存在」。且旋转起点是按**全部账号的策略位次**算的，
+   * 与显示必须一致。
+   */
+  function renderRotation() {
+    if (!supportsRotation(provider)) return null;
+    /**
+     * ⚠️⚠️ **本函数绝不能静默 return null**（真实缺陷，2026-11-10 用户报障
+     * 「重启后没看到下拉框」）：
+     *
+     * 原来的实现有四条 `return null` 早退，其中三条会**什么都不显示** ⇒
+     * 用户无法区分「功能不存在」「RPC 失败」「没有账号」这三种完全不同的原因，
+     * 我也只能靠猜。本仓的既有纪律是「失败要说清原因」
+     * （见 `readError` / `describeBadgeError` 那一套），这里必须同样处理。
+     *
+     * ⇒ 现在：**只有「该渠道确实不支持」才静默**；其余情形一律渲染一行，
+     *    把「读到什么 / 缺什么」明说出来。
+     */
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      return React.createElement('div', { key: 'rotation', className: 'dim-jh-badgeRotation' }, [
+        React.createElement('span', { key: 'l', className: 'dim-jh-badgeRotationLabel' }, '轮换起点'),
+        React.createElement('span', { key: 'e', className: 'dim-jh-badgeNote' }, '本会话未拿到会话标识，暂不可用'),
+      ]);
+    }
+    if (rotationError !== '') {
+      return React.createElement('div', { key: 'rotation', className: 'dim-jh-badgeRotation' }, [
+        React.createElement('span', { key: 'l', className: 'dim-jh-badgeRotationLabel' }, '轮换起点'),
+        React.createElement('span', { key: 'e', className: 'dim-jh-badgeFail' }, rotationError),
+      ]);
+    }
+    if (rotationState === null) {
+      /**
+       * 首帧 / 还没读到 —— 只写「读取中…」，**不带诊断信息**。
+       *
+       * ⚠️ 排查期这里曾显示过 `sid … / rr … / err …` 的诊断串，**已移除**：
+       * 提 PR 前必须清掉，理由有两条：
+       * 1. `sid` 会暴露**会话 id 的末 8 位**给任何看到弹窗的人（截图外泄风险）；
+       * 2. 诊断串是给开发者看的，用户读不懂，且它的存在本身会让界面显得不专业。
+       *
+       * 失败原因由上面两个分支负责（`rotationError !== ''` 时会显示真实错误），
+       * 故这里不需要再重复。
+       */
+      return React.createElement('div', { key: 'rotation', className: 'dim-jh-badgeRotation' }, [
+        React.createElement('span', { key: 'l', className: 'dim-jh-badgeRotationLabel' }, '轮换起点'),
+        React.createElement('span', { key: 'e', className: 'dim-jh-badgeRotationHint' }, '读取中…'),
+      ]);
+    }
+    const accounts = rotationState.accounts;
+    if (accounts.length === 0) {
+      return React.createElement('div', { key: 'rotation', className: 'dim-jh-badgeRotation' }, [
+        React.createElement('span', { key: 'l', className: 'dim-jh-badgeRotationLabel' }, '轮换起点'),
+        React.createElement('span', { key: 'e', className: 'dim-jh-badgeNote' }, '该渠道还没有账号'),
+      ]);
+    }
+
+    const selected = rotationState.selected ?? '';
+    const options = [
+      React.createElement('option', { key: '__default__', value: '' }, '默认. 不指定，保持默认'),
+      ...accounts.map((account) => {
+        const reason = reasonOf(account);
+        return React.createElement('option', {
+          key: account.id,
+          value: account.id,
+          // ⚠️ 禁用项仍要能被 `select` 显示为当前值（若用户之前选过、而它现在不可用）
+          //    ⇒ 只有「当前未选中它」时才禁用，否则选中值会显示成空白。
+          disabled: reason !== null && account.id !== selected,
+          title: reason === null ? undefined : ROTATION_REASON_TEXT[reason],
+        }, `账号 ${account.position} · ${account.nickname}${reasonSuffix(reason)}`);
+      }),
+    ];
+
+    // 选中的号当前不可用 ⇒ 起点会自动循环到下一个，必须告诉用户（否则他以为没生效）。
+    const currentReason = accounts
+      .filter((a) => a.id === selected)
+      .map((a) => reasonOf(a))
+      .find((r) => r !== null) ?? null;
+
+    return React.createElement('div', { key: 'rotation', className: 'dim-jh-badgeRotation' }, [
+      React.createElement('span', {
+        key: 'l',
+        className: 'dim-jh-badgeRotationLabel',
+        // 完整说明挂在**标签**上：`<select>` 的 `title` 在下拉展开时浏览器不显示，
+        // 而标签不参与下拉 ⇒ 随时可悬停。
+        title: ROTATION_TIP_LABEL,
+      }, '轮换起点'),
+      /**
+       * `ⓘ` 图标 —— 用户 2026-11-11 要求「加 tooltip 说明作用」。
+       *
+       * ⚠️ 为什么除了标签还要它：标签文字很短，鼠标要精准停在四个字上才出提示；
+       * 图标是**独立可悬停目标**，且不参与 `<select>` 的下拉展开。
+       * ⚠️ 刻意**不加 `onClick`** —— 点了没反应比没有图标更困惑（本仓记过这条）。
+       * `role="img"` + `aria-label` 让读屏也能拿到说明。
+       */
+      React.createElement('span', {
+        key: 'info',
+        className: 'dim-jh-badgeRotationInfo',
+        role: 'img',
+        'aria-label': ROTATION_TIP_LABEL,
+        title: ROTATION_TIP_LABEL,
+      }, 'ⓘ'),
+      React.createElement('select', {
+        key: 'sel',
+        className: 'dim-jh-badgeSelect',
+        value: selected,
+        disabled: rotationBusy === true,
+        'aria-label': '轮换起点',
+        title: ROTATION_TIP_SELECT,
+        onChange: (event) => { void onPickRotation(event.target.value); },
+      }, options),
+      rotationState.stale
+        ? React.createElement('span', { key: 'stale', className: 'dim-jh-badgeFail' }, '已失效，请重选')
+        : null,
+      currentReason === null || rotationState.stale
+        ? null
+        : React.createElement('div', { key: 'hint', className: 'dim-jh-badgeNote' },
+          `账号当前不可用${reasonSuffix(currentReason)}，已自动从下一个开始`),
+      rotationError === ''
+        ? null
+        : React.createElement('span', { key: 'err', className: 'dim-jh-badgeFail' }, rotationError),
+    ]);
   }
 
   /**

@@ -123,6 +123,116 @@ export type PermanentLockMap = Record<string, boolean>
 export type StrictManualOrderMap = Record<string, boolean>
 
 /**
+ * 「轮换起点」的会话级偏好：provider → (sessionId → 账号 id)。
+ *
+ * ## ⚠️ 为什么是两层稀疏表（provider 再 session）
+ *
+ * - **按 provider**：各家账号池互不相通，同一会话在 workbuddy 与 codearts 下各选一个；
+ * - **按 session**：这正是「当前会话」语义 —— 换会话回到默认，否则「起点」会变成事实上的全局固定。
+ *
+ * ## ⚠️ 为什么存 `accountId` 而不是「第 N 个」
+ *
+ * 用户视觉上是「账号 N」，但**位次会随拖拽/增删变化**。存位次会让用户
+ * 拖一下顺序就静默改掉起点。位次只在渲染时现算（见 RPC `account.getPreferred`）。
+ *
+ * ## ⚠️ 为什么**必须**记 `at`
+ *
+ * 最初设计刻意不记时间戳，理由是「本表只由用户显式写入，不会快速增长」。
+ * **那个判断是错的**：键是 `sessionId`，而用户**每开一个新会话**就可能选一次起点
+ * ⇒ 表随会话数**单调增长且永不回收**（`state.json` 会被无限撑大，
+ * 而它是**整体读入内存**的）。
+ *
+ * ⇒ 现在记 `at`（写入时刻 ms）并**按 provider 淘汰最旧的会话**
+ *（上限 {@link PREFERRED_ROTATION_MAX_SESSIONS}）。
+ *
+ * ⚠️ 淘汰是**有损**的（最旧的会话会丢失起点，回落「默认」）。这是刻意的取舍：
+ * 宁可让早已删掉的旧会话丢失设置，也不能让 `state.json` 无限增长。
+ */
+export type PreferredRotationMap = Record<string, Record<string, { accountId: string, at: number }>>
+
+/**
+ * 每个 provider 最多保留多少个**会话**的轮换起点（超出时淘汰 `at` 最小的）。
+ *
+ * 取 64：正常用户同时活跃的会话是个位数；64 足以覆盖「忘了关的旧会话」，
+ * 而单条 ≈ 100 字节 ⇒ 单 provider 至多 ≈ 6 KB。
+ */
+export const PREFERRED_ROTATION_MAX_SESSIONS = 64
+
+/**
+ * 归一化「轮换起点」表（{@link JetHubState.preferredRotation}）。
+ *
+ * 判据：非对象/数组 ⇒ 空表；provider 或 sessionId 为空串 ⇒ 丢弃；
+ * 值必须是非空字符串；**清完后为空的层一并丢弃**（不留空对象）。
+ *
+ * ⚠️ **读写两侧都要调用**（与本仓 `sanitizeStrictManualOrder` 同款）：
+ * 老契约后端不经过 schema，只靠这个函数。
+ */
+export function sanitizePreferredRotation(raw: unknown): PreferredRotationMap {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const result: PreferredRotationMap = {}
+  for (const [provider, sessions] of Object.entries(raw as Record<string, unknown>)) {
+    if (provider.length === 0) continue
+    if (typeof sessions !== 'object' || sessions === null || Array.isArray(sessions)) continue
+    const clean: Record<string, { accountId: string, at: number }> = {}
+    for (const [sessionId, entry] of Object.entries(sessions as Record<string, unknown>)) {
+      if (sessionId.length === 0) continue
+      // ⚠️ 只认 `{ accountId, at }` 形态；`accountId` 必须非空串，
+      //    `at` 必须是非负有限数（否则无法按时间淘汰 —— 淘汰需要可比较的值）。
+      // ⚠️ **兼容老格式**（裸字符串 ``"accountId"``，无 ``at``）。
+      //    本功能最早那一版（同日早于 ``at`` 引入）写的就是这个形态，
+      //    直接按「非 object 就丢」会让**升级用户的既有选择静默消失**
+      //    —— 那正是本仓反复记录过的「静默丢用户数据」形态。
+      //    ⇒ 老格式**接收**并补一个 ``at = 0``（= 最旧，淘汰时最先丢，符合直觉）。
+      if (typeof entry === 'string') {
+        if (entry.length === 0) continue
+        clean[sessionId] = { accountId: entry, at: 0 }
+        continue
+      }
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+      const record = entry as Record<string, unknown>
+      const accountId = record.accountId
+      const at = record.at
+      if (typeof accountId !== 'string' || accountId.length === 0) continue
+      if (typeof at !== 'number' || !Number.isFinite(at) || at < 0) continue
+      clean[sessionId] = { accountId, at }
+    }
+    if (Object.keys(clean).length === 0) continue
+    // ⚠️ 淘汰放在**读取侧**也做一次：老文档（超上限）读进来时就收敛，
+    //    不必等下一次写入。与 `prunePreferredRotation` 同源。
+    result[provider] = prunePreferredRotation(clean)
+  }
+  return result
+}
+
+/**
+ * 按 {@link PREFERRED_ROTATION_MAX_SESSIONS} 淘汰最旧的会话（按 ``at`` 升序丢前面的）。
+ *
+ * ⚠️ **纯函数**：返回新对象，不改入参（与 `sanitizePreferredRotation` 同约定）。
+ * ⚠️ `limit <= 0` ⇒ 返回空表（确定性结果，不是「全留」）。
+ *
+ * ⚠️ **`at` 完全相同时**（同一毫秒内连续写入多条）：淘汰结果依赖 `Object.keys`
+ *    的插入顺序 —— `Array.prototype.sort` 在 ES2019+ 是稳定的，故**实测确定**。
+ *    但这依赖「字符串键按插入序」这个实现细节，不是语言规范保证。
+ *    ⇒ 刻意不为此加 tie-breaker：那些条目是**同一时刻的操作**，
+ *      丢哪条都会让它回落到「默认」，用户无感。
+ */
+export function prunePreferredRotation(
+  sessions: Record<string, { accountId: string, at: number }>,
+  limit: number = PREFERRED_ROTATION_MAX_SESSIONS,
+): Record<string, { accountId: string, at: number }> {
+  const keys = Object.keys(sessions)
+  if (limit <= 0) return {}
+  if (keys.length <= limit) return { ...sessions }
+  // 按 `at` 升序（旧的在前）排序后取末尾 limit 个 —— **保留最新的**。
+  const kept = keys
+    .sort((a, b) => sessions[a]!.at - sessions[b]!.at)
+    .slice(keys.length - limit)
+  const result: Record<string, { accountId: string, at: number }> = {}
+  for (const key of kept) result[key] = sessions[key]!
+  return result
+}
+
+/**
  * Jet Hub 的**唯一**入口位置。
  *
  * 两个取值严格互斥，任一时刻只有一个入口存在（见 {@link JetHubState.panelEntry}）。
@@ -241,6 +351,22 @@ export interface JetHubState {
    * —— 没有任何不可逆后果。缺键语义为**启用**（2026-10-30 用户要求的默认）。
    */
   sessionBalanceEnabled?: boolean
+  /**
+   * 「轮换起点」：某 provider 在某**会话**下指定的起始账号。
+   *
+   * 语义：**只把选号轮换的起点挪到该账号**，不改任何选号策略 ——
+   * 档位判据、可用性过滤、失败换号全部照旧。
+   *
+   * ```
+   * 策略顺序：A → B → C → D → A（循环）
+   * 选 C 后： C → D → A → B → C
+   * ```
+   *
+   * ⚠️ 与「优先级」的区别：不是「先烧这个号」，而是「从它开始数」。
+   * ⚠️ 缺键 = 默认起点（与升级前**逐字节一致**）。
+   * ⚠️ 存 `accountId` 而非位次：位次会随拖拽/增删变化。
+   */
+  preferredRotation?: PreferredRotationMap
   /**
    * 「严格手动顺序」开关表（{@link StrictManualOrderMap}）：
    * provider id → 是否**完全**按用户拖拽的顺序取号。
@@ -449,6 +575,9 @@ export const jetHubSchema = Schema.object({
   // ⚠️ 绝不能写成 `Schema.boolean().default(false)` —— 它是**按 provider 的稀疏表**，
   //   不是全局布尔；写成布尔会把「只给某一家开」这件事从数据形状上抹掉。
   strictManualOrder: Schema.dict(Schema.any()).default({}),
+  // 「轮换起点」：**默认空表** = 升级前行为。schema 只负责类型，合法性由
+  // sanitizePreferredRotation 读写两侧统一判（与上一行同款）。
+  preferredRotation: Schema.dict(Schema.any()).default({}),
   // 缺键 = 「仅侧栏」（升级前的默认就是显示那一行；改掉是显式动作）。
   // ⚠️ 用 `Schema.string()` 而不是 `Schema.union([...])`：schema 只负责类型，
   // 取值合法性由 `sanitizePanelEntry` 在**读写两侧**统一判（老契约后端不经过
@@ -1210,6 +1339,7 @@ class SettingsStore implements JetHubStore {
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
         strictManualOrder?: unknown
+        preferredRotation?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
         panelEntry?: unknown
@@ -1240,6 +1370,7 @@ class SettingsStore implements JetHubStore {
       sessionBalanceEnabled: sanitizeSessionBalanceEnabled(value.sessionBalanceEnabled),
       // 老文档没这个键 → 空表（= 全部走余额分档，升级前行为）。
       strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
+      preferredRotation: sanitizePreferredRotation(value.preferredRotation),
       // 老文档没新键 → 按老布尔迁移（只有明确 false 才是「仅设置页」）；两者都没有 → 仅侧栏。
       panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
       // 老文档没这个键 → 空数组（未自定义），展示侧按声明顺序渲染。
@@ -1301,6 +1432,7 @@ class SettingsStore implements JetHubStore {
       //    症状极难归因：用户只会看到「拖拽又不灵了」，而面板序号还停在 1。
       //    过一遍 sanitize：入参可能来自任何调用方，脏值不该被写进文档。
       strictManualOrder: sanitizeStrictManualOrder(state.strictManualOrder),
+      preferredRotation: sanitizePreferredRotation(state.preferredRotation),
       // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同因，是同一个
       //    `replace` 整体替换陷阱的第二个受害者）：漏键会让用户改过的
       //    「面板入口」在**任何**一次账号/黑名单/网关/顺序写入时被抹掉，
@@ -1652,6 +1784,7 @@ class FileStore implements JetHubStore {
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
         strictManualOrder?: unknown
+        preferredRotation?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
         panelEntry?: unknown
@@ -1680,6 +1813,7 @@ class FileStore implements JetHubStore {
         sessionBalanceEnabled: sanitizeSessionBalanceEnabled(value.sessionBalanceEnabled),
         // 老文档没这个键 → 空表（= 全部走余额分档，与升级前行为一致）。
         strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
+        preferredRotation: sanitizePreferredRotation(value.preferredRotation),
         // 老文档没新键 → 按老布尔迁移（与 `SettingsStore` 同一判据）；两者都没有 → 仅侧栏。
         panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
         // 老文档没这个键 → 空数组（未自定义），展示侧按声明顺序渲染。
@@ -1784,6 +1918,7 @@ class FileStore implements JetHubStore {
         sessionBalanceEnabled: true,
         // 同上：恢复出的文档不含严格手动顺序信息 → 空表（与全新安装一致）。
         strictManualOrder: {},
+        preferredRotation: {},
         // 同上：恢复出的文档不含面板入口信息 → 默认「仅侧栏」（与全新安装一致）。
         panelEntry: DEFAULT_PANEL_ENTRY,
         // 凭据文件里也没有顺序信息 → 空数组（未自定义，与全新安装一致）。

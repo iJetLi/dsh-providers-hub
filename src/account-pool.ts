@@ -2,8 +2,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { BuddyCredential } from './buddy.js'
 import type { BuddyProduct } from './product.js'
-import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizeProviderClosed, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
-import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
+import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
+import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, PreferredRotationMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
@@ -307,6 +307,37 @@ export function isPolicyBlockedAccount(
   return isValidResetAtMs(entry.policyBlockedAtMs)
 }
 
+/**
+ * 「轮换起点」在**无余额档位**路径上的旋转（池选号专用）。
+ *
+ * ## 与 `buddy-balance-rank.ts` 的 `rotateFromPreferred` 的分工
+ *
+ * | | 本函数 | `rotateFromPreferred` |
+ * |---|---|---|
+ * | 用于 | 池选号（codearts / cline / gemini / opencode …） | 余额分档渠道（buddy 系 / trae / qoder …） |
+ * | 判可用性 | **不需要** —— 候选已过 enabled / 封禁 / 限流 ⇒ 全是可用项 | 需要（锁定永久积分时「只剩永久」不可用） |
+ * | 语义 | 纯旋转 | 旋转 + **起点跳到往后第一个可用项** |
+ *
+ * ⚠️ **刻意不合并**：合并会把「需要余额才能判可用性」这件事带进池选号路径，
+ *    而那条路径**拿不到余额**（也不该为它查一次）。
+ *
+ * ## 三条不变量
+ *
+ * 1. **集合不变**：只旋转，不增删；
+ * 2. **保序**：起点前后各保持原相对顺序；
+ * 3. **找不到 / 首位 ⇒ 原样**（仍返回新数组，不改入参）。
+ */
+function rotateFromAccountId<T extends { id: string }>(
+  candidates: readonly T[],
+  rotationStartId: string | undefined,
+): T[] {
+  const copy = [...candidates]
+  if (rotationStartId === undefined || rotationStartId.length === 0) return copy
+  const index = copy.findIndex((c) => c.id === rotationStartId)
+  if (index <= 0) return copy
+  return [...copy.slice(index), ...copy.slice(0, index)]
+}
+
 export class AccountPool {
   /** 持久化后端；两个后端都不可用时是仅内存实现。 */
   private readonly store: JetHubStore
@@ -433,6 +464,7 @@ export class AccountPool {
    * 「用户仍需要显式开一次开关」，那是可见、可逆的。
    */
   private strictManualOrderCache: StrictManualOrderMap = {}
+  private preferredRotationCache: PreferredRotationMap = {}
   /**
    * 「面板入口」的进程内副本：Jet Hub 的唯一入口位置（两个取值互斥）。
    *
@@ -590,6 +622,7 @@ export class AccountPool {
       // 严格手动顺序同理：老文档没有该键 → 空表（= 全部走余额分档，与升级前一致）。
       // 过一遍 sanitize：老契约后端可能绕过 schema 直接给出原始文档。
       this.strictManualOrderCache = sanitizeStrictManualOrder(state.strictManualOrder)
+          this.preferredRotationCache = sanitizePreferredRotation(state.preferredRotation)
     }
     this.loadLocks(state)
   }
@@ -693,6 +726,7 @@ export class AccountPool {
         //    漏键 ⇒ 用户开过的「严格手动顺序」在**任何**一次其它写入时被抹掉，
         //    重启后静默回到余额分档优先（用户只看到「拖拽又不灵了」）。
         strictManualOrder: this.strictManualOrderCache,
+            preferredRotation: this.preferredRotationCache,
         // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同一个整体替换陷阱）：
         //    漏键会让用户改过的面板入口在**任何**一次账号/黑名单/网关/顺序写入时
         //    被静默清掉，重启后入口又变回默认「仅侧栏」。
@@ -1283,6 +1317,57 @@ export class AccountPool {
     this.loaded = true
     if (this.store.kind === 'memory') {
       this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，严格手动顺序开关仅本次会话有效')
+      return
+    }
+    await this.queueStoreSave()
+  }
+
+  /**
+   * 「轮换起点」：某 provider 在某**会话**下指定的起始账号 id。
+   *
+   * `undefined` = 默认起点（不干预）。**只挪起点，不改任何选号策略**。
+   *
+   * ⚠️ 空 `sessionId` 恒返回 `undefined` —— 空串会让「默认」与「某会话」撞成同一个键。
+   * ⚠️ **每次现读，不缓存**：用户随时可能在面板上改。
+   * ⚠️ 返回的 id **可能已失效**（账号被删/停用）：本方法不做存在性校验，
+   *    消费方按「找不到就原样」处理（见 `rotateFromPreferred`）。
+   */
+  preferredRotationFor(provider: string, sessionId: string | undefined): string | undefined {
+    this.ensureLoaded()
+    if (provider.length === 0) return undefined
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    return this.preferredRotationCache[provider]?.[sessionId]?.accountId
+  }
+
+  /**
+   * 写入「轮换起点」；`accountId` 传 `null` = 恢复默认起点。
+   *
+   * ⚠️ 与 {@link setStrictManualOrder} 同款：走同一条写队列（`queueStoreSave`），
+   * 不能自己 `store.save(...)` —— 那会与账号/黑名单的写入乱序覆盖。
+   * ⚠️ 稀疏表：`null` 时**删键**，整层空了连 provider 层一起删
+   *    （与 `sanitizePreferredRotation`「空层不保留」对称）。
+   */
+  async setPreferredRotation(
+    provider: string,
+    sessionId: string,
+    accountId: string | null,
+  ): Promise<void> {
+    this.ensureLoaded()
+    if (provider.length === 0 || sessionId.length === 0) return
+    const current = this.preferredRotationCache[provider]?.[sessionId]?.accountId
+    if ((accountId ?? undefined) === current) return
+    const next: PreferredRotationMap = { ...this.preferredRotationCache }
+    const sessions = { ...(next[provider] ?? {}) }
+    // ⚠️ 写入时**带上 at**：淘汰按它排序（见 `prunePreferredRotation`）。
+    //    同一秒内多次写入时序相同时，`at` 相同不影响正确性（只影响淘汰顺序的稳定性）。
+    if (accountId === null || accountId.length === 0) delete sessions[sessionId]
+    else sessions[sessionId] = { accountId, at: Date.now() }
+    if (Object.keys(sessions).length > 0) next[provider] = sessions
+    else delete next[provider]
+    this.preferredRotationCache = sanitizePreferredRotation(next)
+    this.loaded = true
+    if (this.store.kind === 'memory') {
+      this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，轮换起点仅本次会话有效')
       return
     }
     await this.queueStoreSave()
@@ -2634,6 +2719,13 @@ export class AccountPool {
     provider: string,
     modelId: string,
     excludeAccountIds?: ReadonlySet<string>,
+    /**
+     * 「轮换起点」：本会话指定的起始账号 id（可选；`undefined` = 默认起点）。
+     *
+     * ⚠️ **只旋转，不增删** —— 它不可用时仍会选中别的号（`tried` 循环照旧）。
+     * ⚠️ 本路径**没有余额档位**（候选已过 enabled / 封禁 / 限流）⇒ 纯旋转即可。
+     */
+    rotationStartId?: string,
   ): Promise<{ entry: ProviderAccountEntry; credential: TCredential } | null> {
     const candidates = this.candidateAccounts(provider, modelId, excludeAccountIds)
     if (candidates.length === 0) return null
@@ -2647,7 +2739,10 @@ export class AccountPool {
     //
     // 注意 candidates 来自 readAccounts() 的 filter，而 filter 保持原数组
     // 顺序，故这里天然就是手动顺序，无需任何排序。
-    return await this.resolveFirstCredential<TCredential>(provider, candidates)
+    return await this.resolveFirstCredential<TCredential>(
+      provider,
+      rotateFromAccountId(candidates, rotationStartId),
+    )
   }
 
   /**

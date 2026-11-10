@@ -23,7 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { dedupeMinimaxAccount } from './minimax-dedup.js'
 import { openIncognitoWindow } from './login.js'
-import { AccountPool, asProxyText } from './account-pool.js'
+import { AccountPool, asProxyText, isPolicyBlockedAccount } from './account-pool.js'
 import { AUTO_PROVIDER as AUTO_PROVIDER_ID } from './auto-adapter.js'
 import { resolveAutoBadgeRewrite, type AutoBadgeState } from './auto-badge.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
@@ -7372,6 +7372,144 @@ function registerJetHubEndpoints(
 
       // 拖拽排序：重写该 provider 账号在池中的顺序。
       // 该顺序是自动选号与限流换号的候选优先级，因此不是纯 UI 操作。
+      /**
+       * 「轮换起点」读取（用户 2026-11-10 需求）。
+       *
+       * 返回该 provider 的**全部**账号，每个带 `eligible`（当前能否作为起点）与
+       * `reason`（不能的原因）。客户端按 `eligible` 决定是否 `disabled`，
+       * 并把原因写进选项后缀 —— **不弹 toast**（原生 `disabled` 项点不动、拿不到事件）。
+       *
+       * ## `position` 的口径
+       *
+       * = **策略排序后的位次**（1-based），**不是**数组下标。
+       * 用户看到「账号 3」就对应「起点 = 策略第 3 位」，与旋转的实际起点一致。
+       *
+       * ⚠️ **全部账号统一连续编号**（含不可用的）：不跳号，避免用户误以为「账号 3 不存在」。
+       *
+       * ## `eligible` 的三条判据（与选号层逐字一致）
+       *
+       * 1. `enabled === false` ⇒ `disabled`
+       * 2. 封禁标记存在 ⇒ `policy-blocked`
+       * 3. 锁定永久积分 且 `expiring === 0` ⇒ `no-expiring`
+       * 4. 该模型限流未到期 ⇒ `rate-limited`
+       *
+       * ⚠️ 第 3 条需要**余额**（只有 buddy 系有余额概念）。本端点**不查余额**
+       *（那会变成每次打开面板都打一轮上游）⇒ 对无余额概念的渠道恒为可用；
+       * 对余额分档渠道，用**面板已有的 `credits.balances` 读数**在**客户端**判 ——
+       * 见 `usage-badge.js` 的 `eligibleOf()`。服务端只回 `enabled` / 封禁 / 限流三条。
+       */
+      case 'account.getRotation': {
+        const req = payload as { provider?: unknown, sessionId?: unknown, modelId?: unknown }
+        if (typeof req.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        if (typeof req.sessionId !== 'string' || req.sessionId.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'sessionId 必填（本功能只在会话内可用）' } }
+        }
+        const modelId = typeof req.modelId === 'string' && req.modelId.length > 0 ? req.modelId : undefined
+        const all = await pool.listAllAccounts()
+        const mine = all.filter((a) => a.provider === req.provider)
+        const selected = pool.preferredRotationFor(req.provider, req.sessionId) ?? null
+        /**
+         * 锁定永久积分：`true` 时「只剩永久积分」的账号不能作为起点
+         * （与 `buddyBalanceTier(..., {allowPermanent:false})` 返回 `none` 等价）。
+         */
+        const locked = pool.permanentLocked(req.provider) === true
+        return {
+          ok: true,
+          value: {
+            selected,
+            locked,
+            /** 选中的 id 已不在账号池里（被删）⇒ 客户端显示「已失效」。 */
+            stale: selected !== null && !mine.some((a) => a.id === selected),
+            accounts: mine.map((a, i) => {
+              // ⚠️ 逐模型限流：与 `AccountPool.candidateAccounts` 第四个 filter 同判据
+              //（`resetAt` 为 0 或已过期都算不受限）。`modelId` 缺省时不判。
+              const resetAt = modelId === undefined ? undefined : a.modelRateLimits?.[modelId]
+              const rateLimited = typeof resetAt === 'number' && resetAt !== 0 && Date.now() < resetAt
+              return {
+                id: a.id,
+                nickname: a.nickname,
+                /**
+                 * 账号位次（1-based）。
+                 *
+                 * ## ⚠️ 口径：**账号池数组序列**，不是「策略排序后的位次」
+                 *
+                 * 余额分档渠道（buddy 系 / trae / qoder …）在实际选号时会**按积分档位
+                 * 重排**（临期在前），故本字段与「策略位次」可能不同：
+                 *
+                 * ```
+                 * 数组序： 1.账号A  2.账号B(仅永久)  3.账号C(临期)
+                 * 策略序： 1.账号A  2.账号C          3.账号B
+                 * ```
+                 *
+                 * ⇒ 用户看到「账号 2」选中的是**账号 B 本身**（功能正确），
+                 *   但 B 在策略序里可能是第 3 位。
+                 *
+                 * ## 为什么不改成「策略位次」
+                 *
+                 * 那需要**查一遍余额**（可能触网、还要 60s 缓存），而本端点是
+                 * 「打开面板就读」的轻量查询。为了一个纯展示的序号打一轮上游
+                 * 不划算；且「账号 N」在用户心智里首先对应**面板上第 N 张卡片**
+                 *（那正是数组序），改了反而更困惑。
+                 *
+                 * ⚠️ 全部账号统一连续编号（含不可用的），不跳号。
+                 */
+                position: i + 1,
+                enabled: a.enabled !== false,
+                policyBlocked: isPolicyBlockedAccount(a),
+                rateLimited,
+              }
+            }),
+          },
+        }
+      }
+
+      /**
+       * 「轮换起点」写入；`accountId: null` = 恢复默认起点。
+       *
+       * ⚠️ 回传**落盘后重读的值**（不做乐观更新，与 `gateway.setEnabled` 同取向）。
+       */
+      case 'account.setRotation': {
+        const req = payload as { provider?: unknown, sessionId?: unknown, accountId?: unknown }
+        if (typeof req.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        if (typeof req.sessionId !== 'string' || req.sessionId.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'sessionId 必填' } }
+        }
+        if (req.accountId !== null && (typeof req.accountId !== 'string' || req.accountId.length === 0)) {
+          return { ok: false, error: { code: 'bad-request', message: 'accountId 必须是账号 id 或 null' } }
+        }
+        // ⚠️ 写入前校验归属：否则用户会得到一个「选了永远不生效」的设置
+        //    （旋转找不到该 id 就原样返回，全程零提示）。
+        if (typeof req.accountId === 'string') {
+          const all = await pool.listAllAccounts()
+          if (!all.some((a) => a.provider === req.provider && a.id === req.accountId)) {
+            return {
+              ok: false,
+              error: { code: 'bad-request', message: `账号 ${req.accountId} 不属于 ${req.provider}` },
+            }
+          }
+        }
+        try {
+          await pool.setPreferredRotation(
+            req.provider,
+            req.sessionId,
+            typeof req.accountId === 'string' ? req.accountId : null,
+          )
+        } catch (error) {
+          return {
+            ok: false,
+            error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) },
+          }
+        }
+        return {
+          ok: true,
+          value: { selected: pool.preferredRotationFor(req.provider, req.sessionId) ?? null },
+        }
+      }
+
       case 'account.reorder': {
         const req = payload as RpcReorderAccountsRequest
         if (typeof req.provider !== 'string' || req.provider.length === 0) {
