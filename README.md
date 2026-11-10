@@ -11,7 +11,7 @@ deepseek-harness 插件：统一管理多个 AI 编程服务的账号，并把�
 的模型选择器。支持**多账号池**（同一服务登录多个账号，按可用性自动选号）与
 **凭据静默续期**（到期前自动刷新，无需再次打开浏览器）。
 
-- **18 个 provider 路由**，外加 1 个**聚合**路由（见下）
+- **29 个 provider 路由**，外加 1 个**聚合**路由（见下）
 - 登录、状态、续期、积分领取**全部在 Jet Hub 设置页完成**，不注册任何斜杠命令
 - 附带一个**本机 OpenAI 兼容网关**，供其它客户端复用已登录账号
 
@@ -368,7 +368,7 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 > **优先**落到同一账号、不同会话分散到不同账号；**没有 `sessionId` 的请求**（例如本机
 > OpenAI 网关的一次性调用）每次随机选号。其余 provider 仍按上面的手动顺序优先。
 >
-> ⚠️ **但「手动顺序优先」对走余额分档的 14 家渠道默认不成立**：它们先按积分到期
+> ⚠️ **但「手动顺序优先」对走余额分档的 15 家渠道默认不成立**：它们先按积分到期
 > 档位排序、档内才看拖拽顺序（这就是「拖拽时灵时不灵」的由来）。面板对这些渠道
 > 渲染「**严格手动顺序**」开关，打开后拖拽序才是唯一优先级（锁定永久积分时
 > 只剩永久积分的号仍会被跳过）；开关按渠道独立保存，默认关 = 升级前行为。
@@ -387,28 +387,39 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 
 ## 支持的渠道
 
-18 个 provider 路由，互不覆盖，可同时使用。
+29 个 provider 路由（按协议源流分组排序），互不覆盖，可同时使用。
 
 | id | 渠道 | 登录方式 | 积分能力 |
 |---|---|---|---|
 | `codearts` | CodeArts（华为云） | 浏览器回调 | 余额 + 每日签到 |
 | `buddy` | CodeBuddy（腾讯） | 浏览器授权 + 轮询 | 余额 + 每日签到 + 成长任务 + 锁定永久积分 |
 | `workbuddy` | WorkBuddy（国际版） | 同上 | 余额 + 锁定永久积分（**无签到**） |
+| `marvis` | 腾讯 Marvis（应用宝 AI 助手） | QQ / 微信 OAuth（隔离窗口 + 回调拦截） | 余额（钱包额度；**无签到**） |
 | `lobsterai` | LobsterAI（有道） | 浏览器回调 | 余额 + 每日签到 |
 | `qoder` | Qoder（阿里系） | 设备码轮询 | 余额 + 每日领取 |
 | `qodercn` | Qoder 中国版 | 同上（共用实现） | 余额 + 每日领取 |
 | `trae` | TRAE（字节跳动） | 浏览器回调 | 余额 + 签到 |
 | `cline` | Cline | WorkOS 设备码轮询 | 余额 |
 | `loomy` | Loomy（讯飞） | 短信验证码 | 余额（两个池）+ 每日额度 + 新手任务 |
+| `astudio` | AStudio（讯飞） | 本机导入 / 认证页扫码 | 余额 + 每日签到（含积分包 / 永久锁定） |
 | `raccoon` | Raccoon Work（商汤） | 微信扫码 / 短信 | 余额 + 一次性登录奖励 |
+| `magicrew` | 超级麦吉 | 本机浏览器导入 / 网页版登录 / 手机号+密码 | 余额 + 每日签到 + 新手任务 |
+| `magicrewintl` | MagiCrew（国际版） | 同上（共用实现） | 余额 + 每日签到 + 新手任务 |
 | `minimax` | MiniMax Code (中国版) | OAuth 设备码 + PKCE | 余额 + 每日签到 |
 | `minimaxintl` | MiniMax Code (国际版) | 同上（共用实现） | 余额 + 每日签到 |
 | `zcode` | ZCode（智谱 z.ai） | OAuth 设备码 | 余额 + 每日领取（含**营销活动**投放，如 1024 程序员节 5 亿 token） |
+| `autoclaw` | AutoClaw（智谱） | 一键导入本机桌面端 / 手机验证码 | 余额 + 每日签到（含积分包 / 永久锁定） |
+| `autoclawintl` | AutoClaw（国际版） | 同上（读国际版 userData 目录） | 余额 + 每日签到（含积分包 / 永久锁定） |
 | `opencode` | OpenCode | — | 余额 |
 | `gemini` | Gemini Code Assist | 浏览器回调 | 余额 |
 | `officeace` | OfficeAce（华为 MaaS / 果办） | 华为云 OAuth PKCE | 余额 + 自动领取（**无手动签到入口**） |
 | `accio` | Accio（阿里） | 浏览器回调 | 余额（三类桶；**无签到**） |
+| `modelscope` | ModelScope（魔搭） | 粘贴 API Key（长期静态 Key） | 余额（**无签到**） |
 | `qiniu` | Qiniu（七牛云） | 粘贴 API Key | **无**（用量只在控制台可见） |
+| `codely` | Codely（Unity 团结引擎） | 设备码轮询 | 余额 + 每日签到 |
+| `monkeycode` | MonkeyCode | 浏览器登录（备用：粘贴 Key + Signing Secret） | 余额 + 每日签到 |
+| `monkeycodeintl` | MonkeyCode 国际站 | 同上（共用实现） | 余额 + 每日签到 |
+| `baizhi` | 百智云 | 浏览器登录（备用：粘贴 Key） | 余额 + 每日签到 |
 
 各渠道的能力与限制要点：
 

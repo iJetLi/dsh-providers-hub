@@ -8,7 +8,7 @@
 
 ## 概述
 
-本插件已集成 **17 个 provider**（完整清单与能力见 README 的「支持的渠道」；
+本插件已集成 **29 个 provider**（完整清单与能力见 README 的「支持的渠道」；
 ⚠️ 按 `PROVIDER_REGISTRY` 里的**真实渠道**数，不含 `aggregate`（它是跨渠道聚合的
 虚拟入口，`channel: false`）），按**协议源流**分成多支脉系。最早的两支是：
 
@@ -21,6 +21,14 @@
 此后陆续加入的 `qoder` / `qodercn` / `trae` / `cline` / `loomy` / `raccoon` /
 `zcode` / `opencode` / `gemini` / `officeace` / `accio` **各自成支**（协议互不同源），
 它们的实测结论与逐条坑点分散登记在 `docs/agent-notes/providers-*.md`。
+
+> 📌 **accio（第 17 个）之后的成员**（本文其余章节尚未逐条展开，各自的实测结论散在
+> `docs/agent-notes/providers-*.md` 或源码模块头注释里）：`astudio`、`autoclaw` /
+> `autoclawintl`（智谱，读不同 userData 目录）、`magicrew` / `magicrewintl`、
+> `modelscope`、`codely`、`monkeycode` / `monkeycodeintl`、`baizhi`，以及
+> `marvis`（腾讯 Marvis，**QQ / 微信 OAuth + 双套鉴权**：模型网关不带 UAL 签名、
+> `/v3/*` 钱包必须带签名，见 `src/marvis.ts` 模块头）。它们与本 fork 的其它
+> 「本 fork 独有」渠道一样，都要求把「八处静默失效的接线」全部补齐（见 AGENTS.md）。
 
 因此你要添加的 provider 如果属于**已有脉系**（比如再加一个腾讯系产品），只需加一份 `BuddyProduct` 配置并注册实例；如果是**全新的脉系**（全新的API协议、认证方式、签到流程），需要仿照 LobsterAI 创建一套独立但遵循相同架构模式的实现。
 
