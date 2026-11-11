@@ -1050,6 +1050,51 @@ const STYLES = `
 .dim-jh-ledgerTable .dim-jh-ledgerError { cursor: help; font-weight: 600; }
 .dim-jh-ledgerTable .dim-jh-ledgerSuccess { color: var(--dsw-alias-state-success-primary, #25803c); }
 .dim-jh-ledgerPagination { display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding: 7px 0; color: var(--dsw-alias-label-tertiary, #8f959e); font-size: 11px; }
+/* ══════════════════════════════════════════════════════════════════════════
+   「Token 用量」的**内嵌外壳**（pane 形态）—— 右侧栏标签页用。
+
+   ⚠️⚠️ 这一块**只加** .dim-jh-ledgerPane 自己的规则，不改上面任何一条：
+   modal 外壳的每一行都被 tests/unit/token-ledger-panel.spec.ts 按源码文本断言着，
+   动它等于让上游自己的用例变红。
+
+   ⚠️⚠️ **为什么用 @container 而不是 @media**：右侧栏宽度是**视口**的
+   45%（dsh-client-ui-layout 的 RIGHTBAR_DEFAULT_RATIO = .45；1440 视口约
+   648px、最低可拖到 300px），而上面那条窄屏降级写的是 media max-width 700px
+   —— 媒体查询看的是**视口**宽，1440 视口下面板只有 648px 却**永远不会**触发它。
+   故内嵌形态下明细表（8 列定宽 + 模型列 auto）会横向溢出、汇总树会被挤变形。
+   本文件已在 .dim-jh-accountMeta 处采用同一手法（见该处注释），这里沿用。
+
+   ⚠️ 本文件整体是 JS 模板字符串：注释里**禁止反引号**（会提前闭合模板，
+   esbuild 报 Expected ";" but found ... 并把指针指到注释那一行）。本轮就踩了一次。
+   ══════════════════════════════════════════════════════════════════════════ */
+.dim-jh-ledgerPane {
+  box-sizing: border-box; display: flex; flex-direction: column;
+  width: 100%; height: 100%; min-width: 0; min-height: 0;
+  padding: 10px 12px 12px; overflow: hidden;
+  /* 容器查询锚点：让下面的 @container 按**面板**宽而不是视口宽生效。 */
+  container-type: inline-size;
+}
+/* 内容区：模态那支用 .dim-jh-modalBody（flex:1 / min-height:0 / overflow-y:auto），
+   pane 这支刻意不复用 —— 模态的 .dim-jh-modalBody 没有横向约束，而面板需要
+   「纵向滚、横向交给表格自己滚」。 */
+.dim-jh-ledgerPaneBody { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+/* 面板里的标题行不必再跟自己抢高度：宿主标签页已经给了外框。 */
+.dim-jh-ledgerPane > .dim-jh-modalHead { flex: none; }
+/* 说明行在面板里可以换行（弹窗里靠 nowrap + ellipsis 省高度，面板不缺这一行）。 */
+.dim-jh-ledgerPane > .dim-jh-modalHint { flex: none; white-space: normal; overflow-wrap: anywhere; }
+/* ⚠️ 8 列定宽（62+46+... + 模型列 auto）在 300~800px 的面板里必然超宽：
+   给**横向滚动**容器，而不是压缩各列 —— 压缩会让数字列对不齐、模型名断成三行，
+   比横向滚动更糟（这条判据与上方 700px 媒体查询里的那格同源）。 */
+@container (max-width: 720px) {
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable { font-size: 10px; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable th,
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable td { padding: 3px 2px; overflow-wrap: anywhere; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerEntryTools { align-items: stretch; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerEntryCount { flex: 1 1 50%; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerSearch { flex-basis: 100%; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerSelect { flex: 1 1 30%; max-width: none; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerHeatmapWrap { overflow-x: auto; }
+}
 @media (max-width: 700px) {
   .dim-jh-modal--ledger { padding: 14px 12px; }
   .dim-jh-ledgerPerf { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }

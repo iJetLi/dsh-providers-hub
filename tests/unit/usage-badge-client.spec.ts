@@ -1055,12 +1055,24 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
 })
 
 describe('用量徽标：依赖与样式', () => {
-  it('package.json 声明四个客户端依赖（含 modelDirectories 与 plugin-manager）', () => {
+  /**
+   * ⚠️⚠️ 判据从「**等于**这张精确数组」改成「**包含**每一条必需依赖」
+   * （2026-11-12，右侧栏 Token 用量标签页落地时）。
+   *
+   * 原写法 `toEqual([...])` 会把「加一条新依赖」变成**必然变红**：加 sidebar-right
+   * 那条腿时它当场红了，而实现是对的 —— 那正是本仓记录过的「既有测试贴死写法」
+   * 形态（`zcode-channel-dialog.spec.ts` 的 `onClick` 字面量同款）。
+   *
+   * ⚠️ 放宽的是**写法**，不是**意图**：判据仍是「这几条必须在、且不得被删」。
+   * 逐条断言（而不是 `toContain` 整段字符串）保住了「少一条就红」这条牙。
+   */
+  it('package.json 声明客户端依赖（含 modelDirectories / plugin-manager / sidebar-right）', () => {
     const pkg = JSON.parse(read('package.json')) as {
       dsh?: { client?: { platform?: string; inject?: string[] } }
     }
     expect(pkg.dsh?.client?.platform).toBe('web')
-    expect(pkg.dsh?.client?.inject).toEqual([
+    const inject = pkg.dsh?.client?.inject ?? []
+    for (const dependency of [
       '@deepseek-ai/dsh-client-connection',
       '@deepseek-ai/dsh-client-ui-settings',
       '@deepseek-ai/dsh-client-ui-model-selection',
@@ -1068,7 +1080,12 @@ describe('用量徽标：依赖与样式', () => {
       // 由 plugin-manager 提供，不声明的话本 bundle 可能先于它到达、
       // `slots.inject` 一直等服务 ⇒ 卡片永不出现，且不报错。
       '@deepseek-ai/dsh-client-ui-plugin-manager',
-    ])
+      // ⚠️ 第 5 项（2026-11-12 新增）：右侧栏「Token 用量」标签页的类型注册与
+      // keyed 槽位都由 sidebar-right 提供。同上，缺它只会「晚到达 / 不出现」。
+      '@deepseek-ai/dsh-client-ui-sidebar-right',
+    ]) {
+      expect(inject, `dsh.client.inject 缺少 ${dependency}`).toContain(dependency)
+    }
   })
 
   it('徽标用到的每个样式类都在 jet-hub-styles.js 里定义', () => {

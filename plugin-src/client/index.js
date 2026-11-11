@@ -85,6 +85,7 @@ import { JET_HUB_RPC_CHANNEL, providerLabel } from './jet-hub.js'
 import { startCarrierContribution } from './zcode-carrier.js'
 import { UsageBadge } from './usage-badge.js'
 import { registerJetHubPanelEntries } from './panel-entry.js'
+import { registerJetHubLedgerTab } from './ledger-tab.js'
 import { JetHubPanelEntryCard } from './settings-card.js'
 // ⚠️ 本文件注册的另外两处槽位也要包边界（2026-10-25 审计 A3-3）：
 // 2026-10-22 之前只有 `panel-entry.js` 那两处（main / settings.section）包了，
@@ -144,6 +145,21 @@ export function apply(ctx) {
    * 就会变成「同一个组件两条注册路径」，正是该文件头警告的那种分叉。
    */
   registerJetHubPanelEntries(ctx, rpcCall)
+
+  /**
+   * 「Token 用量」**右侧栏标签页**（`sidebarRightTabs` + `sidebar.right.pane.tab`）。
+   *
+   * ⚠️ 与上面那个注册器**刻意分开**：
+   *
+   * - 面板入口（仅侧栏 / 仅设置页）是**互斥二选一**，归 `panel-entry.js` 管；
+   *   右侧栏标签页是**始终存在**的第三个入口，不受那个下拉影响。
+   * - `panel-entry.js` 的守卫按 `ctx.slots.inject('main'` / `'settings.section'`
+   *   精确切片，把无关注册塞进去会让那些判据切错窗口。
+   *
+   * ⚠️ 它对 `sidebarRightTabs` 是**软依赖**（`ctx.inject` 里判存在再注册）：
+   * 老宿主没有这个服务时整段跳过，插件其余部分照常工作。
+   */
+  registerJetHubLedgerTab(ctx, rpcCall)
 
   /**
    * **插件详情页**上的自有设置卡片（`plugins.bundle.config`）。
