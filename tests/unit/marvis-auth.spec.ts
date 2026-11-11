@@ -290,6 +290,52 @@ describe('MarvisAuth.refreshAccountCredential', () => {
     expect(pool.updates).toEqual([{ id: 'marvis-a', patch: { expiresAt: 1_700_000_000_000 + 3_600_000 } }])
   })
 
+  it('★★ 续期响应的 `expires_in` 是**字符串**时也必须推进 expiresAt（真机形态）', async () => {
+    const { ctx, store } = makeContext()
+    const refName = 'MARVIS_ACCOUNT_A'
+    store.seed(
+      refName,
+      JSON.stringify({
+        access_token: 'mv_old',
+        refresh_token: 'rt_old',
+        openid: 'o',
+        guid: 'g',
+        login_type: '2',
+        // ⚠️ 必须与「续期推进后的值」**不同**：初版这里写的是 now + 7_200_000，
+        //    而「沿用旧值」那条腿算出来恰好同一个数 ⇒ 变异全绿（同义反复）。
+        expires_at: String(1_699_000_000_000),
+      }),
+    )
+    // ⚠️ 2026-11-11 真机报文逐字：上游把 expires_in 下发成**字符串** `"7200"`。
+    //    只认 number 的判据会让它恒 undefined ⇒ 沿用旧 expires_at ⇒ 面板永远
+    //    「已过期」，而 token 每 30 分钟都在被正常刷新（用户报障的完整成因）。
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        code: 0,
+        msg: 'RC_SUCCESS',
+        user_info: {
+          uid: '0',
+          login_type: 'WX',
+          open_id: '',
+          access_token: 'mv_old',
+          refresh_token: '',
+          guid: '',
+          expires_in: '7200',
+        },
+      }),
+    )
+    const auth = new MarvisAuth(ctx, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => 1_700_000_000_000,
+    })
+    const pool = new FakePool([account('marvis-a', refName)])
+    await auth.refreshAccountCredential(refName, pool.asPool(), 'marvis-a')
+
+    const expected = 1_700_000_000_000 + 7_200_000
+    expect(store.saved(refName)?.expires_at).toBe(String(expected))
+    expect(pool.updates).toEqual([{ id: 'marvis-a', patch: { expiresAt: expected } }])
+  })
+
   it('★ 续期响应的 refresh_token 是空串时保留旧值（否则账号变单向门）', async () => {
     const { ctx, store } = makeContext()
     const refName = 'MARVIS_ACCOUNT_A'

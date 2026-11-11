@@ -121,6 +121,32 @@ function marvisFallbackTtlMs(loginType: '1' | '2'): number {
 }
 
 /**
+ * 把上游的「有效期秒数」解析成数字 —— **数字与数字字符串都收**。
+ *
+ * ⚠️⚠️ 2026-11-11 真机实测（微信账号，`POST /marvis_client_login/marvis_refresh_token`）：
+ * 上游把 `expires_in` 下发成**字符串** —— `{"code":0,"msg":"RC_SUCCESS",
+ * "user_info":{…,"expires_in":"7200"}}`。
+ *
+ * 初版判据是 `typeof info.expires_in === 'number'`，于是它恒 `undefined` ⇒ 走
+ * 「沿用旧凭据到期时间」那条腿 ⇒ **续期成功也不推进 `expiresAt`** ⇒ 面板永远停在
+ * 登录时的兜底值（微信 2 小时）⇒ 显示「已过期」；而 token 每 30 分钟都在被正常
+ * 刷新 ⇒ 用户看到的是「凭证已过期，却还能正常用模型、正常扣积分」（真实报障）。
+ *
+ * ⇒ 判据必须与 `exchangeCode` 里 `access_token_expire_time` 的解析**同口径**
+ * （都过 `Number(...)`）。本仓已登记过多起「一文件两套同义判据」（PR !62），
+ * 这里正是同一形态：同一个「有效期」字段，登录腿收字符串、续期腿只认数字。
+ *
+ * 非正数 / 不可解析 ⇒ `undefined`（调用方据此走兜底；**绝不**写 0 —— 0 会被
+ * 读成「已过期」，比缺字段更糟）。
+ */
+function readMarvisExpiresIn(value: unknown): number | undefined {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() !== '' ? Number(value.trim()) : Number.NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
+
+/**
  * 续期失败的**终态**判据（refresh_token 已死 ⇒ 只能重新登录）。
  *
  * ⚠️ 用 `name` 而不是 `instanceof`：`src/refresh.ts` 的 `isRefreshTokenExpired`
@@ -574,9 +600,9 @@ export class MarvisAuth extends Service {
     const refreshToken = typeof info.refresh_token === 'string' && info.refresh_token !== ''
       ? info.refresh_token
       : credential.refresh_token
-    const expiresIn = typeof info.expires_in === 'number' && Number.isFinite(info.expires_in)
-      ? info.expires_in
-      : undefined
+    // ⚠️ 上游把 `expires_in` 下发成字符串（`"7200"`）⇒ 必须过 `readMarvisExpiresIn`
+    //    的宽容判据，否则续期成功也不推进 `expiresAt`（症状见该函数头注释）。
+    const expiresIn = readMarvisExpiresIn(info.expires_in)
     const expiresAt = expiresIn === undefined ? credentialExpiresAtMs(credential) : this.now() + expiresIn * 1_000
     const next: MarvisCredential = {
       ...credential,
