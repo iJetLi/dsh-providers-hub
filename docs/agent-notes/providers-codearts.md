@@ -708,3 +708,93 @@ PR #175 把「SSE 流内 `TM.00001041`」从「进入 10s 重试自愈」改成�
 - 变异验证（**6/6 有牙**）：删 gatewayBusy 分支 ⇒ 1 红；码改 `RATE_LIMIT` ⇒ 1 红；
   删 concurrency 分支 ⇒ 1 红；删 tenant 分支 ⇒ 1 红；删 `isAuthError` 排除 ⇒ **3 红**；
   去掉数字边界 ⇒ **2 红**。
+
+## ⚠️⚠️ 账号卡片的显示名：名字在 `refresh_token` 里，**没有任何在线端点**（2026-11-12）
+
+### 报障
+
+用户原话：「codearts 模型商中，登录的帐号获取不到用户名，图中不显示用户名，只显示
+一些 hash，区分不了帐号」。面板上五张卡片分别是 `codearts-89d2d92a` / `codearts-1637c1a6`
+/ … —— 全是池 id 的前 8 位十六进制。
+
+### 根因：名字在凭据里被**丢掉**，不是上游没下发
+
+| 环节 | 事实 |
+|---|---|
+| `src/oauth.ts` 的 `credentialFromTokenResponse` | 只映射 `credentials.*` / `refresh_token` / PKCE / DPoP，**不含任何用户字段** |
+| `src/jet-hub-rpc.ts` 的 codearts 登录分支 | `nickname: credential.user_name ?? id` ⇒ 新式凭据**没有** `user_name` ⇒ 恒回落池 id |
+| `src/service.ts` 的 `refreshCredential` | 只原样保留**已存在**的 `domain_id`/`user_id`/`user_name` ⇒ 空的一直是空 |
+
+而 `refresh_token` 是 JWT，载荷里带一个**内嵌 base64 JSON** 的 `user_profile`：
+
+```jsonc
+// refresh_token 的 payload 键全集（9 个真实账号逐个核对，逐字节相同）
+{ "exp", "iat", "iss", "type", "user_profile", "client_id", "cnf", "jti", "federation", "family_id", "counter" }
+
+// user_profile 解出来
+{ "account_id": "01a19d50…", "account_name": "alice",
+  "principal_is_root_user": true, "principal_urn": "iam::01a19d50…:user:alice" }
+```
+
+⚠️ **`iss` / `type` 不是命名空间判据**，`user_profile` 才是。
+
+### ⚠️⚠️ 没有任何可用的在线端点（逐个只读实测，别再找）
+
+| 端点 | 结果 |
+|---|---|
+| `/snap-manager/v1/statistics/plugin` | 200，键全集 `metrics` / `model_metrics` / `start_date` / `end_date` / `package` / `show` / `is_teadmin` / `is_white_list` —— **零用户名字段** |
+| `/snap-manager/v1/user/info`、`/user/profile` | 404 `APIG.0101`（API 未发布） |
+| `/v1/user/info`、`opengw…/api/v1/user/info` | 404 `APIG.0101` |
+| `/v1/model/builtin` | 200，只有模型目录 |
+| IAM `v3.0/OS-USER/users` | **403**（临时 AK/SK + security_token 没有 IAM 读权限） |
+
+⇒ 解 JWT 不只是「更省」，是**唯一**可行路径；且优于网络方案（零请求、无地域/代理
+依赖、凭据过期也不会退化成默认名）。
+
+### 修法：新增 `src/codearts-identity.ts` + 两处接线
+
+1. **`codeartsAccountName(credential)`** —— 纯函数、零 IO、零日志。取值顺序：
+   `principal_urn` 末段 → `account_name` → 两者不同则 `子用户名@账号名`（子用户消歧；
+   root 时相同 ⇒ **裸名，不加后缀**）→ 无 JWT 时退凭据顶层 `user_name` → 全无 ⇒ `undefined`。
+2. **登录分支**：`nickname: codeartsAccountName(credential) ?? id`（解不出必须回落 id ——
+   空串会让卡片渲染成空白行）。
+3. **`enrichAccountIdentity` 新增 `enrichCodeartsIdentity` 分支** —— `account.list` 返回前
+   逐条补 `nickname` + `accountName`。
+
+### ⚠️ 为什么走 enrich，而**不**写 `state.json`、不加 `repairAccountNicknames`
+
+- 不写池 ⇒ 不存在「旧进程下次落盘把回填盖回去」那个坑（trae / lobsterai 的昵称回填
+  踩过，见 `providers-buddy.md` 末节「改昵称类修复必须重启宿主才生效」）；
+- 存量账号（本机 9 个）与将来登录的账号**走同一条 enrich 代码** ⇒ 零迁移、零一次性脚本；
+- 客户端**一行不用改**：卡片本来就是 `nickname || id`，enrich 把占位昵称换成真名即可。
+
+### ⚠️ 三条纪律（都有用例守着）
+
+1. **只改「占位昵称」**：`nickname === id` 才动。用户手动改过昵称（`account.update`）时
+   **原样返回、连凭据都不读** —— 否则会把用户起的名字覆盖成 IAM 用户名；
+2. **解不出就 `undefined`**，绝不编造（不拿 AK 哈希当名字、不填常量）；
+3. **逐条独立失败**：凭据缺失 / 坏 JSON / 解不出 ⇒ 保留原条目，`account.list` 整体仍成功
+   （列表可用性远比这一个展示字段重要）。
+
+### ⚠️ 实测边界
+
+- **`user_profile` 的 base64 形状不统一**：9 个真实账号里 **6 个带 `=` 填充、3 个不带**
+  ⇒ 必须用 `Buffer.from(x, 'base64url')`（两种都吃），别自己写 `atob` + 手工补 `=`；
+- 子用户名只在 `principal_urn` 末段；`account_name` 是**账号（租户）名**。本机 9 个全是
+  root（`principal_is_root_user: true`）⇒ 输出为裸名，与用户预期一致；
+- ⚠️ `access_key_id` 是**临时 AK、每次续期都换**，不是稳定身份（`src/backup.ts` 拿它当
+  判重键是另一个问题，别混用）；真正稳定的是 `user_profile.account_id`。
+
+### 守卫
+
+- `tests/unit/codearts-identity.spec.ts`（20 条）：root / 子用户 / 两种 base64 字母表 /
+  缺 `user_profile` / 非 JWT / 坏 JSON / 空白名 / 老 ticket 回退 / 不改写入参 / 控制台零输出。
+- `tests/unit/codearts-account-name-rpc.spec.ts`（7 条，**行为级**：真起 RPC 跑 `account.list`）：
+  占位昵称拿到真名、多账号名字互不相同、用户改过的昵称原样保留**且不读凭据**、
+  三种失败形态回落 id 且列表仍 ok、老 ticket 回退、**不写账号池**、别的 provider 不受影响。
+  ⚠️ 源码文本断言在这里是无效守卫（`if (false)` 能骗过，见 `AGENTS.md`）。
+- 变异验证（**4/5 有牙**）：改取值顺序（优先 `account_name`）⇒ 1 红；删「用户改过昵称」
+  早退 ⇒ 1 红；解不出时编造常量名 ⇒ 1 红；断开 `enrichAccountIdentity` 分发 ⇒ **3 红**。
+  ⚠️ **如实登记一处无牙**：「解不出时回落 `account.id`」这个变异**无牙**（27 条全绿）——
+  因为占位昵称本来就是 id，变异态与修复态输出**逐字节相同**。不为它编恒真用例。
+
