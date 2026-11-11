@@ -168,7 +168,11 @@ describe('codeartsIdentity：**绝不编造**', () => {
   })
 
   it('refresh_token 不是 3 段 JWT（上游将来可能换成不透明串）⇒ undefined，不抛错', () => {
-    expect(codeartsAccountName({ refresh_token: 'opaque-token-without-dots' })).toBeUndefined()
+    // ⚠️ 样本刻意保持**短**（< 16 字符）：`repo-pii-guard.spec.ts` 有一条判据是
+    //    「凭据字段名 + ≥16 位高熵字面量」⇒ 长样本会被判成疑似真实凭据（本文件
+    //    第一版用 `'opaque-token-without-dots'` 就被它当场抓红）。**不放宽那条守卫**，
+    //    改成让样本不触发它 —— 判据的有牙性比样本的可读性重要。
+    expect(codeartsAccountName({ refresh_token: 'no-dots' })).toBeUndefined()
     expect(codeartsAccountName({ refresh_token: 'a.b' })).toBeUndefined()
   })
 
@@ -200,7 +204,8 @@ describe('codeartsIdentity：老 ticket 凭据回退', () => {
 
   it('refresh_token 解不出时**也**退到顶层 user_name（不是直接放弃）', () => {
     expect(codeartsAccountName({
-      refresh_token: 'opaque-token',
+      // 同上：短样本，避免命中 `repo-pii-guard.spec.ts` 的「字段名 + 高熵」判据。
+      refresh_token: 'broken',
       user_name: 'legacy-user',
     })).toBe('legacy-user')
   })
