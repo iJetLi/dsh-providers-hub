@@ -48,6 +48,7 @@ import { QiniuKeyModal, QiniuKeyEditModal } from './qiniu-key-modal.js';
 // 参数分流）。未引入这两行时，寄主早已有 `monkeycode.setApiKey` /
 // `baizhi.setApiKey` 但**零客户端调用点** ⇒ 用户填错 Key 只能删卡重建。
 import { BaizhiKeyModal } from './baizhi-key-modal.js';
+import { SyncModelsSection } from './sync-models-section.js';
 import { MonkeycodeKeyModal } from './monkeycode-key-modal.js';
 // ⚠️ 2026-10-22 整页白屏事故的兜底层（见该文件头的事故说明）。
 import { normalizeProbeNotice, safeNoticeDetails } from './notice-shape.js';
@@ -8495,7 +8496,7 @@ function GatewayCards({ cards, renderRow, isExpanded, onToggle, onCopy, isCopied
  * 3. **状态全部来自宿主侧**（`gateway.getEnabled`），前端不拿 `enabled` 自行
  *    推导运行态 —— 端口冲突与 env 停用都会让两者不一致。
  */
-function GatewayPanel({ status, busy, notice, onToggle, onToggleAllowLan, onReload, onClose }) {
+function GatewayPanel({ status, busy, notice, onToggle, onToggleAllowLan, onReload, onClose, rpcCall }) {
   const [copied, setCopied] = React.useState(false);
   const [revealed, setRevealed] = React.useState(false);
   const [modelsOpen, setModelsOpen] = React.useState(false);
@@ -8958,6 +8959,11 @@ function GatewayPanel({ status, busy, notice, onToggle, onToggleAllowLan, onRelo
               copyNoun: '个模型的档位对照',
             }))
         : null),
+    // ── 第 4 段：模型同步（2026-11-11）──
+    // ⚠️ 位置从「设置弹窗」搬到这里的理由：同步的**就是上面这份模型目录**，
+    //    用户点「网关」本就是为了看目录 ⇒ 入口在这里才找得到。
+    //    （用户实测：藏在设置弹窗第 5 节时完全没发现。）
+    React.createElement(SyncModelsSection, { rpcCall }),
     // ── 网关弹窗脚注 ──
     // ⚠️ 这段是**安全声明**，随着 host 可配（issue IKL7UN）它必须跟着实际监听
     // 地址变化 —— 写死「只绑定 127.0.0.1」在容器部署下是错误陈述（详见
@@ -11046,7 +11052,10 @@ export function JetHubPage({ rpcCall }) {
                 disabled: nativeSearchBusy,
                 onChange: (event) => void toggleNativeSearch(event.target.checked),
               }),
-              React.createElement('span', null, '为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索'))))));
+              React.createElement('span', null, '为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索')))),
+          // 模型同步已移到「网关」面板（2026-11-11，用户实测设置在弹窗里找不到）：
+          // 同步的就是网关的模型目录，入口跟着目录走才符合直觉。
+          ));
   }
 
   const renderRail = () => {
@@ -11384,6 +11393,7 @@ export function JetHubPage({ rpcCall }) {
           onToggleAllowLan: toggleGatewayAllowLan,
           onReload: loadGatewayStatus,
           onClose: () => setShowGateway(false),
+          rpcCall,
         })
       : null,
     // 「Token 用量」弹窗：同样是覆盖层（createElement 形式 —— 与其它弹窗

@@ -306,6 +306,7 @@ import { pickTestModel,
 } from './account-probe.js'
 import { exportBackup, importBackup } from './backup.js'
 import { handleOpencodeRpc } from './opencode-rpc.js'
+import { handleSyncRpc } from './sync-rpc.js'
 import { geminiFetchForAccount } from './gemini-proxy.js'
 import { qoderFetchForAccount } from './qoder-proxy.js'
 import { minimaxIntlFetchForAccount } from './minimax-proxy.js'
@@ -4755,6 +4756,14 @@ function registerJetHubEndpoints(
     //    抛错/失败对象），否则主 switch 会被这里短路。
     if (method.startsWith('monkeycode.')) {
       const handled = await handleMonkeycodeRpc(ctx, pool as never, method, payload, MONKEYCODE)
+      if (handled !== undefined) return handled
+    }
+    // ⚠️ **本 fork 独有**（2026-11-11）：「把网关模型目录一键同步到 pi / ZCode」。
+    //    同款前缀改道（Jet Hub 只有一条 RPC 通道，主 switch 的 `default` 不让路）。
+    //    ⚠️ 前缀用 `sync.`：现有方法名里没有这一族（`model.*` / `account.*` /
+    //    `gateway.*` / `credits.*` 均不以此开头），故不会误吞。
+    if (method.startsWith('sync.')) {
+      const handled = await handleSyncRpc(ctx, method, payload)
       if (handled !== undefined) return handled
     }
     // ⚠️ 国际站（2026-11-02）：`monkeycodeintl.` **不会**被上面的
