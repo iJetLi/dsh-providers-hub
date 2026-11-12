@@ -42,6 +42,32 @@ export function splitPinnedProviders(providers) {
 }
 
 /**
+ * 左侧导航的「分区」：置顶块 + 已打开/已关闭两组。
+ *
+ * ⚠️ 为什么单独抽出来：`renderRail` 里剩下的只有 `React.createElement` 的拼装，
+ * 而「聚合必须从渠道里被拆走」这件事**只能靠源码正则**验证（`renderRail` 是闭包、
+ * 没有导出）。实测过两个能绕过的变异：
+ *   - `const { pinned } = splitPinnedProviders(PROVIDERS); const channels = PROVIDERS;`
+ *     ⇒ 源码断言仍命中（`splitPinnedProviders(PROVIDERS)` 还在），9 条全绿；
+ *   - `groupProviders(PROVIDERS, …)` 换成 `groupProviders(channels, …)`（`channels`
+ *     是别名）⇒ 同上，`not.toContain('groupProviders(PROVIDERS, …)')` 也命中。
+ * ⇒ 把「拆分 + 分组」抽成这个**纯函数**，由 `tests/unit/rail-pinned-aggregate.spec.ts`
+ * 行为级断言（传真的 `PROVIDERS` 进来，看 `open`/`closed` 里到底有没有聚合）。
+ *
+ * @param {readonly {id?: string}[]} providers 全量供应商（`PROVIDERS`）
+ * @param {Record<string, {closed?: boolean}> | null} statuses 供应商状态；`null` = 还没读到
+ * @returns {{ pinned: {id?: string}[], channels: {id?: string}[], open: {id?: string}[], closed: {id?: string}[] }}
+ *   `pinned` 是置顶渠道（不进任何一组）、`channels` 是拆掉置顶后的普通渠道、
+ *   `open`/`closed` 只在 `statuses !== null` 时有内容（`null` 时都是 `[]`）。
+ */
+export function buildRailSections(providers, statuses) {
+  const { pinned, channels } = splitPinnedProviders(providers);
+  if (statuses === null) return { pinned, channels, open: [], closed: [] };
+  const { open, closed } = groupProviders(channels, statuses);
+  return { pinned, channels, open, closed };
+}
+
+/**
  * 按「已打开 / 已关闭」把供应商分成两组。
  *
  * - 组内**保持传入顺序**（即 `PROVIDERS` 的声明顺序），不做任何重排：用户对

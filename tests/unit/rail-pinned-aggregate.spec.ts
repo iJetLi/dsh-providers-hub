@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   PINNED_PROVIDER_IDS,
+  buildRailSections,
   groupProviders,
   isPinnedProvider,
   splitPinnedProviders,
@@ -16,6 +17,28 @@ const styles = readFileSync(resolve(HERE, '../../plugin-src/client/jet-hub-style
 const css = styles.replace(/\/\*[\s\S]*?\*\//g, '')
 
 const P = (id: string) => ({ id })
+
+describe('buildRailSections（左侧导航的分区，行为级）', () => {
+  // ⚠️ 这一格挡的是「源码断言可绕」：`renderRail` 是闭包、只能靠正则验证，
+  // 而 `const { pinned } = splitPinnedProviders(PROVIDERS); const channels = PROVIDERS;`
+  // 这种写法能让三条源码断言全绿（实测 9 条绿）、聚合却回到了渠道组里。
+  // 把「拆分 + 分组」抽成纯函数后，这里传**真的 PROVIDERS** 进来断言。
+  it('聚合不在任何一组里（已打开 / 已关闭都不得出现它），其余渠道一个不少', () => {
+    const sections = buildRailSections(PROVIDER_REGISTRY, {})
+    expect(sections.pinned.map((p) => p.id)).toEqual(['aggregate'])
+    const groupIds = [...sections.open, ...sections.closed].map((p) => p.id)
+    expect(groupIds).not.toContain('aggregate')
+    expect(groupIds).toHaveLength(PROVIDER_REGISTRY.length - 1)
+  })
+
+  it('状态缺失（statuses === null）时只把普通渠道交给列表', () => {
+    const sections = buildRailSections(PROVIDER_REGISTRY, null)
+    expect(sections.pinned.map((p) => p.id)).toEqual(['aggregate'])
+    expect(sections.channels.map((p) => p.id)).not.toContain('aggregate')
+    expect(sections.open).toEqual([])
+    expect(sections.closed).toEqual([])
+  })
+})
 
 describe('splitPinnedProviders（纯逻辑）', () => {
   it('聚合被拆到置顶块，其余保持原顺序', () => {
@@ -50,17 +73,27 @@ describe('splitPinnedProviders（纯逻辑）', () => {
 
 describe('左侧导航接线（源码级）', () => {
   const start = hub.indexOf('const renderRail = () =>')
-  const rail = hub.slice(start, hub.indexOf('};', start))
+  // ⚠️ 先剥注释再断言：函数体里用注释写了「不要这样写」的**反例**（含
+  // `splitPinnedProviders(PROVIDERS)` 等字样），不剥注释会让 `not.toContain`
+  // 反而红。注释不是接线。
+  const rail = hub
+    .slice(start, hub.indexOf('};', start))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
 
-  it('renderRail 先拆出置顶块，分组只吃普通渠道', () => {
-    expect(rail).toContain('splitPinnedProviders(PROVIDERS)')
-    expect(rail).toContain('groupProviders(channels, providerStatuses)')
-    expect(rail).not.toContain('groupProviders(PROVIDERS, providerStatuses)')
+  it('renderRail 的分区来自 buildRailSections（拆分 + 分组都在纯函数里）', () => {
+    expect(rail).toContain('buildRailSections(PROVIDERS, providerStatuses)')
+    // ⚠️ 拆分/分组**不得**写回这个闭包：闭包没有导出、只能靠源码正则验证，
+    // 而实测有两种写法（`const { pinned } = splitPinnedProviders(PROVIDERS); const channels = PROVIDERS;`
+    // 与把 `groupProviders(channels, …)` 换成别名）能让「拆出置顶块」「分组只吃普通渠道」
+    // 这三条断言**全绿**、聚合却回到渠道组里。行为级守卫见上面的 `buildRailSections` describe。
+    expect(rail).not.toContain('splitPinnedProviders(PROVIDERS)')
+    expect(rail).not.toContain('groupProviders(')
   })
 
   it('置顶块排在两个分组之前；状态未读到时也排在最前', () => {
     expect(rail).toMatch(/return \[\s*pinnedBlock,/)
-    expect(rail).toContain('return [pinnedBlock, ...channels.map(')
+    expect(rail).toContain('return [pinnedBlock, ...sections.channels.map(')
   })
 
   it('置顶行带强调类名与副标题，且仍是 role=tab 的按钮（导航语义不变）', () => {

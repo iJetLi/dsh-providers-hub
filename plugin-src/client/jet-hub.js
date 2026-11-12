@@ -137,6 +137,7 @@ import {
   toggleRejection,
 } from './aggregate-panel-logic.js';
 import {
+  buildRailSections,
   groupProviders,
   isPinnedProvider,
   splitPinnedProviders,
@@ -11142,16 +11143,20 @@ export function JetHubPage({ rpcCall }) {
   }
 
   const renderRail = () => {
-    const { pinned, channels } = splitPinnedProviders(PROVIDERS);
-    const pinnedBlock = pinned.length > 0
+    // ⚠️ 「聚合从渠道里被拆走」这件事由 `buildRailSections`（纯函数，已导出）保证，
+    // 行为级用例在 `tests/unit/rail-pinned-aggregate.spec.ts`。**不要**把拆分逻辑写回
+    // 这个闭包：闭包没有导出、只能靠源码正则验证，而实测有两种写法能同时满足那三条
+    // 源码断言（`const { pinned } = splitPinnedProviders(PROVIDERS); const channels = PROVIDERS;`
+    // 以及把 `groupProviders(channels, …)` 换成别名）—— 两句都绿、聚合却回到了渠道组里。
+    const sections = buildRailSections(PROVIDERS, providerStatuses);
+    const pinnedBlock = sections.pinned.length > 0
       ? React.createElement('div', { className: 'dim-jh-railPinned', key: 'pinned' },
           React.createElement('div', { className: 'dim-jh-railGroupTitle' }, '跨渠道'),
-          pinned.map(p => renderProviderRow(p)))
+          sections.pinned.map(p => renderProviderRow(p)))
       : null;
     if (providerStatuses === null) {
-      return [pinnedBlock, ...channels.map(p => renderProviderRow(p))];
+      return [pinnedBlock, ...sections.channels.map(p => renderProviderRow(p))];
     }
-    const { open, closed } = groupProviders(channels, providerStatuses);
     const group = (title, list, key) => React.createElement('div', { className: 'dim-jh-railGroup', key },
       React.createElement('div', { className: 'dim-jh-railGroupTitle' }, title),
       list.map(p => renderProviderRow(p)));
@@ -11162,11 +11167,11 @@ export function JetHubPage({ rpcCall }) {
       // 而不是被缀到末尾（真实缺陷，2026-10-17 用户报障
       // 「minimax 国际版的顺序应该在中国版下面」）。
       group(
-        `已打开 (${open.length})`,
-        sortOpenProvidersByOrder(open, providerOrder, PROVIDERS.map(p => p.id)),
+        `已打开 (${sections.open.length})`,
+        sortOpenProvidersByOrder(sections.open, providerOrder, PROVIDERS.map(p => p.id)),
         'open',
       ),
-      group(`已关闭 (${closed.length})`, closed, 'closed'),
+      group(`已关闭 (${sections.closed.length})`, sections.closed, 'closed'),
     ];
   };
 

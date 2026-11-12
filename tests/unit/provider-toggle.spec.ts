@@ -399,8 +399,8 @@ describe('供应商开关的接线（源码级回归）', () => {
   it('rail 渲染出两个分组标题并带计数', () => {
     expect(source).toContain('dim-jh-railGroup')
     expect(source).toContain('dim-jh-railGroupTitle')
-    expect(source).toContain('`已打开 (${open.length})`')
-    expect(source).toContain('`已关闭 (${closed.length})`')
+    expect(source).toContain('`已打开 (${sections.open.length})`')
+    expect(source).toContain('`已关闭 (${sections.closed.length})`')
   })
 
   /**
@@ -1865,16 +1865,16 @@ describe('供应商弹窗的自定义排序（2026-10-06 拖拽需求）', () =>
       // `providerOrder` 里缺失的新增 provider 补回声明位置
       //（否则 `minimaxintl` 会被缀到末尾）。故判据不能写死旧的两参形态 ——
       // 用正则在「已打开组」那段里找调用，允许任意实参列表。
-      expect(source).toMatch(/sortOpenProvidersByOrder\(\s*open,\s*providerOrder\b/)
+      expect(source).toMatch(/sortOpenProvidersByOrder\(\s*sections\.open,\s*providerOrder\b/)
       // 关闭组不参与自定义排序（用户口径：「这个逻辑不变」）。
-      expect(source).toContain("group(`已关闭 (${closed.length})`, closed, 'closed')")
+      expect(source).toContain("group(`已关闭 (${sections.closed.length})`, sections.closed, 'closed')")
       /**
        * ⚠️ **第三个实参必须真的传**（否则修复静默失效）：
        * `sortOpenProvidersByOrder` 在缺省第三参时会退化为「缺失项缀尾」的旧行为 ——
        * 那正是用户报障的形态。这条断言是本修复的**唯一源码级闸门**。
        */
       expect(source).toMatch(
-        /sortOpenProvidersByOrder\(\s*open,\s*providerOrder,\s*PROVIDERS\.map\(p => p\.id\)/,
+        /sortOpenProvidersByOrder\(\s*sections\.open,\s*providerOrder,\s*PROVIDERS\.map\(p => p\.id\)/,
       )
     })
 
