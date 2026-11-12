@@ -754,18 +754,22 @@ PR #175 把「SSE 流内 `TM.00001041`」从「进入 10s 重试自愈」改成�
 ### 修法：新增 `src/codearts-identity.ts` + 两处接线
 
 1. **`codeartsAccountName(credential)`** —— 纯函数、零 IO、零日志。取值顺序：
-   `principal_urn` 末段 → `account_name` → 两者不同则 `子用户名@账号名`（子用户消歧；
-   root 时相同 ⇒ **裸名，不加后缀**）→ 无 JWT 时退凭据顶层 `user_name` → 全无 ⇒ `undefined`。
+   `principal_urn` 末段 → `account_name` → 两者不同则 `子用户名@账号名`（**子用户**消歧；
+   `principal_is_root_user === true` 或两名相同 ⇒ **裸名，不加后缀** —— 主账号名字唯一，
+   拼 `a@b` 会渲染出一个不存在的账号名）→ 无 JWT 时退凭据顶层 `user_name` → 全无 ⇒ `undefined`。
 2. **登录分支**：`nickname: codeartsAccountName(credential) ?? id`（解不出必须回落 id ——
    空串会让卡片渲染成空白行）。
 3. **`enrichAccountIdentity` 新增 `enrichCodeartsIdentity` 分支** —— `account.list` 返回前
-   逐条补 `nickname` + `accountName`。
+   逐条补 `nickname` + `accountName`。⚠️ `accountName` 是**预留字段**：本仓**当前没有
+   任何读取者**（客户端卡片走 `nickname || id`），给上的理由只是「与 zcode 分支同型，
+   别一家有一家没有」，不是当前收益。
 
 ### ⚠️ 为什么走 enrich，而**不**写 `state.json`、不加 `repairAccountNicknames`
 
 - 不写池 ⇒ 不存在「旧进程下次落盘把回填盖回去」那个坑（trae / lobsterai 的昵称回填
   踩过，见 `providers-buddy.md` 末节「改昵称类修复必须重启宿主才生效」）；
-- 存量账号（本机 9 个）与将来登录的账号**走同一条 enrich 代码** ⇒ 零迁移、零一次性脚本；
+- 存量账号（PR 作者机器 9 个 / 本次复核机器 4 个）与将来登录的账号**走同一条 enrich 代码**
+  ⇒ 零迁移、零一次性脚本；
 - 客户端**一行不用改**：卡片本来就是 `nickname || id`，enrich 把占位昵称换成真名即可。
 
 ### ⚠️ 三条纪律（都有用例守着）
@@ -778,20 +782,32 @@ PR #175 把「SSE 流内 `TM.00001041`」从「进入 10s 重试自愈」改成�
 
 ### ⚠️ 实测边界
 
-- **`user_profile` 的 base64 形状不统一**：9 个真实账号里 **6 个带 `=` 填充、3 个不带**
+- **`user_profile` 的 base64 形状不统一**：PR 作者机器上 9 个真实账号里 **6 个带 `=` 填充、
+  3 个不带**；**本次复核机器 4 个账号全部不带**（段长 851 / 883 / 899 需补位，920 恰为 4 的倍数）
   ⇒ 必须用 `Buffer.from(x, 'base64url')`（两种都吃），别自己写 `atob` + 手工补 `=`；
-- 子用户名只在 `principal_urn` 末段；`account_name` 是**账号（租户）名**。本机 9 个全是
-  root（`principal_is_root_user: true`）⇒ 输出为裸名，与用户预期一致；
+- 子用户名只在 `principal_urn` 末段；`account_name` 是**账号（租户）名**。上述 9 + 4 个账号
+  **全是 root**（`principal_is_root_user: true`）⇒ 输出为裸名，与用户预期一致；
+  ⚠️ 子用户 `子用户名@账号名` 这条腿**只有单测 fixture 覆盖，真实账号零实测**；
 - ⚠️ `access_key_id` 是**临时 AK、每次续期都换**，不是稳定身份（`src/backup.ts` 拿它当
   判重键是另一个问题，别混用）；真正稳定的是 `user_profile.account_id`。
 
 ### 守卫
 
-- `tests/unit/codearts-identity.spec.ts`（20 条）：root / 子用户 / 两种 base64 字母表 /
-  缺 `user_profile` / 非 JWT / 坏 JSON / 空白名 / 老 ticket 回退 / 不改写入参 / 控制台零输出。
+- `tests/unit/codearts-identity.spec.ts`（22 条）：root / **root 两名不同 ⇒ 仍裸名** / 子用户 /
+  两种 base64 字母表 / 缺 `user_profile` / 非 JWT / **2 段 JWT 中段是合法载荷（段数判断有牙）** /
+  坏 JSON / 空白名 / 老 ticket 回退 / 不改写入参 / 控制台零输出。
 - `tests/unit/codearts-account-name-rpc.spec.ts`（7 条，**行为级**：真起 RPC 跑 `account.list`）：
   占位昵称拿到真名、多账号名字互不相同、用户改过的昵称原样保留**且不读凭据**、
-  三种失败形态回落 id 且列表仍 ok、老 ticket 回退、**不写账号池**、别的 provider 不受影响。
+  三种失败形态回落 id 且列表仍 ok、老 ticket 回退、**不写账号池**、**别的 provider 不受影响**
+  （⚠️ 这条必须**同池**放 buddy + codearts：只放 buddy 时删掉 `provider === 'codearts'`
+  分发行仍全绿 —— 双重重恒真假绿，已修）。
+
+### 未修已登记
+
+- **Token 用量面板仍显示池 id**（`plugin-src/client/token-ledger-panel.js:246` 的
+  `accountLabel` 原样返回 `codearts-xxxxxxxx`）：用户报障的「区分不了账号」在**该标签页
+  依然存在**。它与本文的 `account.list` 是两条独立数据链路（`usage.tokenLedger` 自带
+  `accountId`、不经 `account.list`），**应开独立 PR**，不要塞进本 PR。
   ⚠️ 源码文本断言在这里是无效守卫（`if (false)` 能骗过，见 `AGENTS.md`）。
 - 变异验证（**4/5 有牙**）：改取值顺序（优先 `account_name`）⇒ 1 红；删「用户改过昵称」
   早退 ⇒ 1 红；解不出时编造常量名 ⇒ 1 红；断开 `enrichAccountIdentity` 分发 ⇒ **3 红**。

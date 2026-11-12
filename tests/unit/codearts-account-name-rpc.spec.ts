@@ -288,11 +288,26 @@ describe('account.list × codearts：显示真实 IAM 用户名', () => {
       refreshable: false,
       createdAt: Date.now(),
     })
+    // ⚠️ **必须同池放一个 codearts 账号**：只放 buddy 的话，删掉 `enrichAccountIdentity`
+    //    里 `provider === 'codearts'` 那行分发，本用例仍全绿（buddy 的昵称 !== id，被早退拦住；
+    //    而它又没有凭据可读）—— 那是一重假绿。同池放上 codearts 后，删分发 ⇒ 下面第二条断言必红。
+    await seedAccount(pool, credentials, {
+      id: 'codearts-spec0002',
+      nickname: 'codearts-spec0002',
+      credential: credentialWith(refreshTokenWith(ROOT_PROFILE)),
+    })
     const listed = await call('account.list', { provider: 'buddy' })
     const [account] = listed.value.accounts as Array<{ nickname: string; accountName?: string }>
     // 名字里含 `codearts` 也不能被 codearts 的 enrich 吃掉。
     expect(account.nickname).toBe('codearts-lookalike')
     expect(account.accountName).toBeUndefined()
+    // buddy 的凭据一次都没被读：分派按 provider 走，不会误读别的 provider 的 ref。
     expect(credentials.resolved).toEqual([])
+
+    // ⚠️ 这一条才是真正钉住 `provider === 'codearts'` 分发行的腿：删掉那行，
+    //    同池的 codearts 账号会回落显示占位 id ⇒ 红。
+    const codeartsListed = await call('account.list', { provider: 'codearts' })
+    const [codeartsAccount] = codeartsListed.value.accounts as Array<{ nickname: string }>
+    expect(codeartsAccount.nickname).toBe('alice')
   })
 })

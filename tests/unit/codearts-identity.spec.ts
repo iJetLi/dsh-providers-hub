@@ -95,6 +95,21 @@ describe('codeartsIdentity：取值顺序', () => {
     expect(codeartsAccountName(credential)).not.toBe('acme')
   })
 
+  it('root 账号即便两名不同 ⇒ 仍是裸名（`principal_is_root_user` 不得被拼成 `a@b`）', () => {
+    // 结构可达：IAM 用户名与账号显示名因大小写/显示名分叉时，主账号**没有**子用户可消歧，
+    // 拼接会渲染出一个不存在的账号名（`alice@Alice`）。`principal_is_root_user` 就是权威标记。
+    const credential = {
+      refresh_token: refreshTokenWith({
+        account_id: 'acc-root',
+        account_name: 'Alice',
+        principal_is_root_user: true,
+        principal_urn: 'iam::acc-root:user:alice',
+      }),
+    }
+    expect(codeartsAccountName(credential)).toBe('Alice')
+    expect(codeartsAccountName(credential)).not.toContain('@')
+  })
+
   it('同时给出 accountId（IAM 账号 id，跨续期稳定）', () => {
     expect(codeartsIdentity({ refresh_token: refreshTokenWith(ROOT_PROFILE) }).accountId)
       .toBe('01a19d50056f7354a3a13363256be613')
@@ -178,6 +193,18 @@ describe('codeartsIdentity：**绝不编造**', () => {
 
   it('载荷中段是坏 base64 ⇒ undefined，不抛错', () => {
     expect(codeartsAccountName({ refresh_token: 'hdr.@@@not-base64@@@.sig' })).toBeUndefined()
+  })
+
+  it('2 段 JWT（中段是**合法**载荷 JSON）⇒ 仍 undefined（`parts.length !== 3` 那一格是承重的）', () => {
+    // ⚠️ 上一条的 `'a.b'` 中段解不出 JSON ⇒ 删掉 3 段判断也同样 undefined（无牙）。
+    //    本用例把中段换成真实载荷（含 `user_profile` 的合法 JSON），删掉判断后
+    //    就会解出 `alice` ⇒ 这一格有牙。
+    const payload = {
+      user_profile: Buffer.from(JSON.stringify(ROOT_PROFILE), 'utf8').toString('base64'),
+    }
+    const header = Buffer.from('{"typ":"JWT","alg":"RS256"}', 'utf8').toString('base64url')
+    const twoSegment = `${header}.${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')}`
+    expect(codeartsAccountName({ refresh_token: twoSegment })).toBeUndefined()
   })
 
   it('account_name / urn 末段都是空白 ⇒ undefined（空白不是名字）', () => {

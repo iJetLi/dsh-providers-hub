@@ -154,8 +154,9 @@ function readUrnUserName(profile: Record<string, unknown>): string | undefined {
  * 1. `refresh_token` → `user_profile` → `principal_urn` 末段（**最具体**：子用户时
  *    这里是子用户名，而 `account_name` 是租户/账号名）；
  * 2. 退 `user_profile.account_name`；
- * 3. 两者都有且**不同** ⇒ `<urn 末段>@<account_name>`（子用户消歧）；
- *    相同（root）⇒ 裸名，**不加任何后缀**（本机 9 个真实账号全走这一格，观感不变）；
+ * 3. 两者都有且**不同** ⇒ 子用户走 `<urn 末段>@<account_name>`（消歧）；
+ *    相同或者 `principal_is_root_user === true`（主账号，名字唯一、无须消歧）
+ *    ⇒ 裸名，**不加任何后缀**（本机 9 个真实账号全走这一格，观感不变）；
  * 4. 没有 `refresh_token` / 不是 JWT（老 ticket 凭据）⇒ 退凭据顶层 `user_name`；
  * 5. 全无 ⇒ 返回空对象（`name` 不设键）。
  *
@@ -170,11 +171,21 @@ export function codeartsIdentity(credential: CodeArtsIdentitySource | undefined)
       const accountName = readName(profile, 'account_name')
       const urnName = readUrnUserName(profile)
       const accountId = readName(profile, 'account_id')
-      const name = urnName === undefined
-        ? accountName
-        : accountName === undefined || accountName === urnName
-          ? urnName
-          : `${urnName}@${accountName}`
+      // ⚠️ `principal_is_root_user` 是「这是主账号」的权威标记，而主账号的名字**唯一**
+      //    （没有子用户可消歧）。不加这一格的话，一旦 IAM 用户名与账号名因大小写 /
+      //    显示名而分叉（结构可达），root 账号会被拼成 `a@b` —— 渲染出一个**不存在的
+      //    账号名**（本机 4 个账号全是 root 且两名相同，故该分支零实测）。
+      const isRoot = profile.principal_is_root_user === true
+      let name: string | undefined
+      if (urnName === undefined) {
+        name = accountName
+      } else if (accountName === undefined || accountName === urnName) {
+        name = urnName
+      } else if (isRoot) {
+        name = accountName
+      } else {
+        name = `${urnName}@${accountName}`
+      }
       return {
         ...name === undefined ? {} : { name },
         ...accountId === undefined ? {} : { accountId },

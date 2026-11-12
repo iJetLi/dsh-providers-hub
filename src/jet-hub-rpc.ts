@@ -4716,8 +4716,11 @@ function registerJetHubEndpoints(
    * 2. **逐条独立失败**：凭据读不到 / JSON 坏 / 解不出名字 ⇒ 保留原条目
    *    （卡片回落显示 id）。列表可用性远比这一个展示字段重要；
    * 3. **同时给 `accountName`**：它是上游既有的「只存在于凭据里的展示名」字段
-   *    （见 `ProviderAccountStatus.accountName`），Token 面板等其它消费者按
-   *    `nickname → accountName → id` 取值，给上它能让这些视图一起受益。
+   *    （见 `ProviderAccountStatus.accountName`），与 zcode 分支同口径。
+   *    ⚠️ 本仓**当前没有任何读取者**（`grep -rn 'accountName' src/ plugin-src/`
+   *    只有 zcode 自己的赋值与类型定义；客户端卡片走 `nickname || id`，见
+   *    `jet-hub.js` 的 `accountDisplayName`），所以它是**预留字段**、不是当前收益；
+   *    给上的理由只是「两家同型字段别一家有一家没有」，将来加消费方时不必再来改。
    */
   async function enrichCodeartsIdentity(
     accounts: readonly ProviderAccountStatus[],
