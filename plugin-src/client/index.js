@@ -260,6 +260,25 @@ export function apply(ctx) {
         };
       },
       providerLabel,
+      /**
+       * 当前**会话** id —— 「轮换起点」的作用域键。
+       *
+       * ⚠️⚠️ **必须用宿主在 `inject(sessionId)` 里给的这个**：宿主 dispatch 时
+       * 会把同一个 id 作为 `GenerateOptions.sessionId` 传给适配器，而选号层正是
+       * 按它查偏好。插件自己编一个 ⇒ 键对不上 ⇒ **选了永远不生效且零报错**。
+       */
+      sessionId,
+      /** 「轮换起点」读取（打开面板时调一次）。`modelId` 用于判「逐模型限流」。 */
+      readRotation: (provider, sid, modelId) =>
+        rpcCall('account.getRotation', { provider, sessionId: sid, modelId }),
+      /**
+       * 「轮换起点」写入；`position === null` = 恢复默认起点。
+       *
+       * ⚠️ 传**位次**（1-based），不是 accountId —— 用户 2026-11-10 要求「跟随位次」：
+       *    选「位次 1」后去管理界面拖拽，回来仍是「位次 1」= 新的第 1 个号。
+       */
+      writeRotation: (provider, sid, position) =>
+        rpcCall('account.setRotation', { provider, sessionId: sid, position }),
       readBadge: (provider, options) => rpcCall('usage.badge', { provider, ...options }),
       /**
        * 聚合 provider「上次**实际**转发成功的渠道」（P3）。

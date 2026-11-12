@@ -46,6 +46,7 @@ import {
   buddyTierUsable,
   rankBuddyAccountsByBalance,
   rankBuddyAccountsByManualOrder,
+  rotateFromPreferred,
   splitBuddyCreditsByExpiry,
   type BuddyAccountBalance,
   type BuddyBalanceTier,
@@ -523,10 +524,20 @@ export class BuddyBalanceSelector<
     const balances = await Promise.all(candidates.map((c) => this.balanceOf(c)))
     const byId = new Map(candidates.map((c, i) => [c.id, { account: c, balance: balances[i]! }]))
 
-    const ranked = options.strictManualOrder === true
+    const rankedByStrategy = options.strictManualOrder === true
       // 严格手动顺序：档位只当「可用 / 不可用」判据，先后完全按用户的拖拽序。
       ? rankBuddyAccountsByManualOrder(balances, options)
       : rankBuddyAccountsByBalance(balances, options)
+    /**
+     * 「轮换起点」：**唯一旋转点**，必须在两种策略各自排完序之后。
+     *
+     * ⚠️ 不能放进那两个排序函数里 —— 会变成「同一语义两份实现」，
+     *    且默认模式与严格模式各一份，必然漂移。
+     * ⚠️ 必须在排序**之后** —— 放在前面会被排序覆盖掉。
+     * ⚠️ `rotationStartId` 为 `undefined` 时 `rotateFromPreferred` 原样返回
+     *    ⇒ 与改动前**逐字节相同**（本功能的唯一回归面）。
+     */
+    const ranked = rotateFromPreferred(rankedByStrategy, options)
     const first = ranked[0]
     if (first === undefined) {
       return { ok: false, reason: noAccountReason(balances) }
@@ -692,6 +703,14 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
      * 共用一条通道 —— 将来谁给 `tierOptions` 换形状都会连带改掉选号策略。
      */
     strictManualOrder?: boolean
+    /**
+     * 「轮换起点」：本会话指定的起始账号 id（`undefined` = 默认起点）。
+     *
+     * 与 {@link BuddyTierOptions.rotationStartId} 同义 —— 本字段只是把它从
+     * resolver 透传到 `selector.select()` 的**通道**，判据仍只有一处
+     * （`rotateFromPreferred`）。
+     */
+    rotationStartId?: string
   },
 ): Promise<
   | {
@@ -735,6 +754,9 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
         // ⚠️ 每次迭代都带上：降级分支会把 `allowPermanent` 翻真，而本项与它无关，
         //    不能因为走了降级就把「严格手动顺序」丢掉（那会让用户开了开关却偶发失效）。
         ...(options.strictManualOrder === true ? { strictManualOrder: true } : {}),
+        // 「轮换起点」：同样每次迭代都带上（与 strictManualOrder 同因）——
+        // 降级会改变 `allowPermanent`、从而改变「哪些号可用」，起点必须跟着重算。
+        ...(options.rotationStartId === undefined ? {} : { rotationStartId: options.rotationStartId }),
       },
     )
     if (!picked.ok) {

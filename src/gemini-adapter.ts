@@ -196,7 +196,7 @@ export interface GeminiAdapterOptions {
   /** 单凭据回退 ref（无账号池时）。 */
   credentialRef: CredentialRef
   /** 解析当前可用凭据。 */
-  resolveCredential: (modelId?: string) => Promise<GeminiCredential | undefined>
+  resolveCredential: (modelId?: string, sessionId?: string) => Promise<GeminiCredential | undefined>
   /** 凭据失效时的处理（续期或换号，由接线侧决定）。 */
   refresh: () => Promise<void>
   /** 账号池（目录门控、黑名单、限流切号）。 */
@@ -526,10 +526,10 @@ export class GeminiAdapter extends LlmAdapter {
       )
     }
 
-    let credential = await this.options.resolveCredential(options.model)
+    let credential = await this.options.resolveCredential(options.model, options.sessionId)
     if (credential === undefined || isGeminiExpired(credential)) {
       await this.options.refresh()
-      credential = await this.options.resolveCredential(options.model)
+      credential = await this.options.resolveCredential(options.model, options.sessionId)
     }
     if (credential === undefined || credential.access_token === '') {
       throw new LlmError('gemini: no usable credential; log in first', 'MISSING_CREDENTIAL')
@@ -820,7 +820,7 @@ export class GeminiAdapter extends LlmAdapter {
         if (status === 401 && !refreshedOnce) {
           refreshedOnce = true
           await this.options.refresh().catch(() => {})
-          const refreshed = await this.options.resolveCredential(options.model).catch(() => undefined)
+          const refreshed = await this.options.resolveCredential(options.model, options.sessionId).catch(() => undefined)
           if (refreshed !== undefined && refreshed.access_token !== '') {
             credential = refreshed
             continue

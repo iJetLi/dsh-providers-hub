@@ -698,8 +698,18 @@ const NATIVE_SEARCH_TIMEOUT_MS = 20_000
 export interface QoderAdapterOptions {
   /** 默认凭据 ref（仅用于类型/日志，实际解析走 `resolveCredential`）。 */
   credentialRef: CredentialRef
-  /** 从凭据存储解析凭据。 */
-  resolveCredential: (modelId?: string) => Promise<QoderCredential | undefined>
+  /**
+   * 从凭据存储解析凭据。
+   *
+   * ⚠️⚠️ **第二参 sessionId 是「轮换起点」的作用域键**（用户 2026-11-11 报障）：
+   * 适配器必须把 `GenerateOptions.sessionId` 透传进来，否则选号层的
+   * `preferredRotationFor(provider, undefined)` 恒返回 `undefined`
+   * ⇒ **下拉框选了永远不生效、且零报错**。
+   *
+   * 这曾是一个真实缺陷：本接口原签名只有 `modelId`，全仓各适配器的
+   * 调用点**无一传 sessionId** ⇒ 功能上线后用户实测「选了 0959 仍用 4016」。
+   */
+  resolveCredential: (modelId?: string, sessionId?: string) => Promise<QoderCredential | undefined>
   /** 静默续期凭据。 */
   refresh: () => Promise<void>
   /** 多账号池（用于限流时切换账号与模型黑名单）。 */
@@ -1595,10 +1605,10 @@ export class QoderAdapter extends LlmAdapter {
     }
 
     // 1. 获取凭据（过期则先静默续期）
-    let credential = await this.options.resolveCredential(options.model)
+    let credential = await this.options.resolveCredential(options.model, options.sessionId)
     if (credential === undefined || isQoderExpired(credential)) {
       await this.options.refresh()
-      credential = await this.options.resolveCredential(options.model)
+      credential = await this.options.resolveCredential(options.model, options.sessionId)
     }
     if (credential === undefined || credential.access_token.length === 0) {
       throw new LlmError('qoder: no usable credential; log in first', 'MISSING_CREDENTIAL')
@@ -1988,7 +1998,7 @@ export class QoderAdapter extends LlmAdapter {
         if (!authRefreshed) {
           authRefreshed = true
           await this.options.refresh()
-          const refreshed = await this.options.resolveCredential(options.model)
+          const refreshed = await this.options.resolveCredential(options.model, options.sessionId)
           if (refreshed === undefined || refreshed.access_token.length === 0) {
             throw new LlmError(`${label}: credential expired and refresh failed`, 'AUTH', { status: response.status })
           }

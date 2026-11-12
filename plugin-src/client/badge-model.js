@@ -712,10 +712,46 @@ function balanceOrder(row) {
  */
 export function orderCreditRows(rows, options = {}) {
   const limit = Number.isFinite(options.limit) ? options.limit : 0;
-  const ordered = [...(Array.isArray(rows) ? rows : [])]
-    .sort((a, b) => balanceOrder(b) - balanceOrder(a));
+  const copy = Array.isArray(rows) ? rows : [];
+  /**
+   * ## ⚠️ 双模式（用户 2026-11-10 要求）
+   *
+   * | 模式 | 顺序 |
+   * |---|---|
+   * | 未设起点（`rotationStartId` 缺席） | **积分降序**（既有行为，不变） |
+   * | 设了起点 | **起点 → 其余保持传入顺序**（= 账号池顺序，体现轮换循环） |
+   *
+   * ### 为什么「设了起点」要改顺序
+   *
+   * 积分窗口与「轮换起点」下拉框在**同一个弹窗**里，用户要能对照着看。
+   * 设了起点时按轮换顺序排（起点最前），用户一眼看出「下一发先用谁」。
+   *
+   * ### ⚠️ 默认模式**语义不变**
+   *
+   * 未设起点时仍是积分降序 ⇒ 既有 14 处测试**不需要改**。
+   */
+  const startId = options.rotationStartId;
+  const ordered = typeof startId === 'string' && startId.length > 0
+    ? rotateRows(copy, startId)
+    : [...copy].sort((a, b) => balanceOrder(b) - balanceOrder(a));
   const hidden = Math.max(0, ordered.length - limit);
   return { shown: options.expanded === true ? ordered : ordered.slice(0, limit), hidden };
+}
+
+/**
+ * 把 `startId` 对应的行**提到最前**，其余保持原相对顺序（环形）。
+ *
+ * ⚠️ 与选号层的 `rotateFromPreferred` **不是同义判据**：
+ * - 那个排的是 `{id, expiringBalance, permanentBalance}`（服务端，要判档位可用性）；
+ * - 这个排的是 `{accountId, balance}`（客户端展示行，无档位概念）。
+ * 两者类型与判据都不同，且**跨进程边界**（服务端 vs 浏览器）⇒ 无法共用。
+ *
+ * ⚠️ 起点不在列表（账号刚被删）⇒ **原样返回**（不报错、不乱序）。
+ */
+function rotateRows(rows, startId) {
+  const index = rows.findIndex((row) => row?.accountId === startId);
+  if (index <= 0) return [...rows];
+  return [...rows.slice(index), ...rows.slice(0, index)];
 }
 
 /**

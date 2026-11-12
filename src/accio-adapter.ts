@@ -287,7 +287,7 @@ export interface AccioAdapterOptions {
    * ⚠️ 入参是**本轮要用的模型 id**：多账号池的选号会按它过滤限流账号，
    * 传空串会让限流过滤整体短路（与 `TraeAdapterOptions.resolveCredential` 同因）。
    */
-  resolveCredential: (modelId?: string) => Promise<AccioCredential | undefined>
+  resolveCredential: (modelId?: string, sessionId?: string) => Promise<AccioCredential | undefined>
   /** 静默续期凭据（过期 / 401 时调用）。 */
   refresh: () => Promise<void>
   /** 动态拉取远端模型目录；失败或未登录时回退 `product.fallbackModels`。 */
@@ -1511,10 +1511,10 @@ export class AccioAdapter extends LlmAdapter {
 
     // 2. 凭据（过期则先静默续期）。
     // ⚠️ 传 `options.model`：多账号池按它过滤限流账号（与 trae 同因）。
-    let credential = await this.options.resolveCredential(options.model)
+    let credential = await this.options.resolveCredential(options.model, options.sessionId)
     if (credential === undefined || isAccioExpired(credential)) {
       await this.options.refresh()
-      credential = await this.options.resolveCredential(options.model)
+      credential = await this.options.resolveCredential(options.model, options.sessionId)
     }
     if (credential === undefined || credential.access_token === '') {
       throw new LlmError('accio: no usable credential; log in first', 'MISSING_CREDENTIAL')
@@ -1693,7 +1693,7 @@ export class AccioAdapter extends LlmAdapter {
         console.warn(`accio: 续期失败（不阻断本轮）：${errorMessage(error)}`)
         return sent
       }
-      const refreshed = await this.options.resolveCredential(options.model)
+      const refreshed = await this.options.resolveCredential(options.model, options.sessionId)
       if (refreshed === undefined || refreshed.access_token === '') return sent
       /**
        * ⚠️⚠️ **反查必须先于 `credential` 赋值**（对抗审计 P1-2，2026-10-18 实证）。
