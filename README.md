@@ -306,6 +306,7 @@ start.cmd
 | `DSH_PORT` | `8123` | Web UI 端口 |
 | `DSH_OPENAI_GATEWAY_PORT` | `8326` | 本机 OpenAI 网关端口 |
 | `DSH_OPENAI_GATEWAY_HOST` | `127.0.0.1` | 网关监听地址 |
+| `DSH_OPENAI_GATEWAY_PUBLIC_URL` | 未设置 | 客户端应当使用的**对外地址**（网关前面有反代 / 端口映射时填，如 `http://192.168.1.10:8080/v1`）；设置页优先显示它。只接受 http(s)，不得带口令或查询串 |
 
 Web UI：`http://<DSH_HOST>:<DSH_PORT>`；网关：`http://<网关地址>:<端口>/v1`。
 

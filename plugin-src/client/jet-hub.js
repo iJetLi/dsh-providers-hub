@@ -138,6 +138,8 @@ import {
 } from './aggregate-panel-logic.js';
 import {
   groupProviders,
+  isPinnedProvider,
+  splitPinnedProviders,
   nextProviderOrderAfterDrop,
   nextProviderOrderAfterGroupDrop,
   providerSwitchRows,
@@ -10841,6 +10843,7 @@ export function JetHubPage({ rpcCall }) {
    */
   const renderProviderRow = (p) => {
     const closed = providerStatuses?.[p.id]?.closed === true;
+    const pinned = isPinnedProvider(p.id);
     // 已关闭的供应商整行置灰（2026-11-06 用户要求「已关闭的供应商置灰」）。
     // ⚠️ 置灰的是**行容器**的类，但 CSS 只作用在 `.dim-jh-provider`（按钮）
     //    上，**不动开关** —— 开关在关闭态本来就是灰色的，再叠一层不透明度
@@ -10851,11 +10854,12 @@ export function JetHubPage({ rpcCall }) {
       className: closed ? 'dim-jh-providerRow dim-jh-providerRowClosed' : 'dim-jh-providerRow',
       key: p.id,
       'data-provider': p.id,
+      'data-pinned': pinned ? 'true' : undefined,
     },
       React.createElement('button', {
         type: 'button',
         role: 'tab',
-        className: 'dim-jh-provider',
+        className: pinned ? 'dim-jh-provider dim-jh-provider--pinned' : 'dim-jh-provider',
         'aria-selected': p.id === selected,
         // 标题带上关闭状态：行本身已经没有开关，用户得知道去哪儿打开它。
         // ⚠️ 按钮名是「供应商」（页头），文案要与它一致，否则用户找不到。
@@ -10871,7 +10875,10 @@ export function JetHubPage({ rpcCall }) {
       // 只有 WorkBuddy 一行超宽 21px），且列表总高不变（384px）；若不加，行高会
       // 从 48px 被顶到 58px、总高 424px。这是一处左侧的可见变化，已在交付说明中注明。
       React.createElement('span', { className: 'dim-jh-providerLabel' },
-        React.createElement('strong', null, p.label))));
+        React.createElement('strong', null, p.label),
+        pinned
+          ? React.createElement('small', { className: 'dim-jh-providerSub' }, '按额度跨渠道选号')
+          : null)));
   };
 
   /**
@@ -11135,14 +11142,21 @@ export function JetHubPage({ rpcCall }) {
   }
 
   const renderRail = () => {
+    const { pinned, channels } = splitPinnedProviders(PROVIDERS);
+    const pinnedBlock = pinned.length > 0
+      ? React.createElement('div', { className: 'dim-jh-railPinned', key: 'pinned' },
+          React.createElement('div', { className: 'dim-jh-railGroupTitle' }, '跨渠道'),
+          pinned.map(p => renderProviderRow(p)))
+      : null;
     if (providerStatuses === null) {
-      return PROVIDERS.map(p => renderProviderRow(p));
+      return [pinnedBlock, ...channels.map(p => renderProviderRow(p))];
     }
-    const { open, closed } = groupProviders(PROVIDERS, providerStatuses);
+    const { open, closed } = groupProviders(channels, providerStatuses);
     const group = (title, list, key) => React.createElement('div', { className: 'dim-jh-railGroup', key },
       React.createElement('div', { className: 'dim-jh-railGroupTitle' }, title),
       list.map(p => renderProviderRow(p)));
     return [
+      pinnedBlock,
       // ⚠️ 第三个实参 = **声明顺序**（注册表全量 id）。传它才能让
       // `providerOrder` 里缺失的**新增** provider 落回它该在的位置，
       // 而不是被缀到末尾（真实缺陷，2026-10-17 用户报障
@@ -11313,7 +11327,7 @@ export function JetHubPage({ rpcCall }) {
       renderCheckinStatus(a),
       autoCheckinError === ''
         ? null
-        : React.createElement('div', { className: 'dim-jh-checkinHint', role: 'alert', style: { color: '#d93025' } }, autoCheckinError),
+        : React.createElement('div', { className: 'dim-jh-checkinHint', role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary, #d93025)' } }, autoCheckinError),
     );
   }
 

@@ -24,6 +24,23 @@
 
 import { orderAfterDrop } from './account-order.js';
 
+export const PINNED_PROVIDER_IDS = Object.freeze(['aggregate']);
+
+export function isPinnedProvider(id) {
+  return PINNED_PROVIDER_IDS.includes(id);
+}
+
+export function splitPinnedProviders(providers) {
+  const list = Array.isArray(providers) ? providers : [];
+  const pinned = [];
+  const channels = [];
+  for (const provider of list) {
+    if (isPinnedProvider(provider?.id)) pinned.push(provider);
+    else channels.push(provider);
+  }
+  return { pinned, channels };
+}
+
 /**
  * 按「已打开 / 已关闭」把供应商分成两组。
  *

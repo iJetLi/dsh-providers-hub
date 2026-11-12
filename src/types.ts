@@ -1951,6 +1951,7 @@ export interface RpcGatewayStatusResponse {
    * - `factory-missing`：插件装配异常，压根没有可用的网关实例工厂
    */
   lastError: RpcGatewayLastError | null
+  publicUrl?: string | null
 }
 
 /** 网关「期望运行但未监听」的结构化原因（见 {@link RpcGatewayStatusResponse.lastError}）。 */

@@ -407,6 +407,25 @@ export function isGatewayHostFromEnv(env: NodeJS.ProcessEnv = process.env): bool
   return raw !== undefined && raw.trim() !== ''
 }
 
+export function gatewayPublicUrl(env: Readonly<Record<string, string | undefined>>): string | null {
+  const raw = env.DSH_OPENAI_GATEWAY_PUBLIC_URL
+  if (raw === undefined || raw.trim() === '') return null
+  const text = raw.trim()
+  let url: URL
+  try {
+    url = new URL(text)
+  } catch {
+    throw new Error(`DSH_OPENAI_GATEWAY_PUBLIC_URL 不是合法地址（${text}）：应形如 https://example.com/v1`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`DSH_OPENAI_GATEWAY_PUBLIC_URL 只接受 http / https（${text}）`)
+  }
+  if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+    throw new Error(`DSH_OPENAI_GATEWAY_PUBLIC_URL 不得带用户名口令、查询串或片段（${text}）`)
+  }
+  return text.replace(/\/+$/, '')
+}
+
 /** {@link resolveGatewayConfig} 的可选项。 */
 export interface ResolveGatewayConfigOptions {
   /**

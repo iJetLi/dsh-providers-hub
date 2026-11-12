@@ -74,9 +74,9 @@ const STYLES = `
    省下的每一像素都直接变成标签可用宽度，比加宽 rail 划算 —— 正是靠这 4px
    才把「不截断」所需的 rail 宽度从 232px 压到 228px。 */
 .dim-jh-provider { width: 100%; min-height: 48px; display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); border-radius: 14px; color: inherit; background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: 0 2px 8px rgb(31 35 41 / 3%); font: inherit; text-align: left; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
-.dim-jh-provider:hover { border-color: color-mix(in srgb, #1677ff 25%, var(--dsw-alias-border-l2, #eef0f3)); background: color-mix(in srgb, #1677ff 2%, var(--dsw-alias-bg-layer-3, #fff)); box-shadow: 0 5px 16px rgb(31 35 41 / 5%); }
-.dim-jh-provider[aria-selected="true"] { border-color: color-mix(in srgb, #1677ff 43%, var(--dsw-alias-border-l2, #dfe1e5)); color: #1677ff; background: color-mix(in srgb, #1677ff 12%, var(--dsw-alias-bg-layer-3, #fff)); box-shadow: 0 3px 12px rgb(51 112 255 / 7%); }
-.dim-jh-provider:focus-visible { outline: none; border-color: color-mix(in srgb, #1677ff 72%, var(--dsw-alias-border-l2, #dfe1e5)); box-shadow: 0 0 0 1px color-mix(in srgb, #1677ff 24%, transparent) inset, 0 3px 12px rgb(51 112 255 / 7%); }
+.dim-jh-provider:hover { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 25%, var(--dsw-alias-border-l2, #eef0f3)); background: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 2%, var(--dsw-alias-bg-layer-3, #fff)); box-shadow: 0 5px 16px rgb(31 35 41 / 5%); }
+.dim-jh-provider[aria-selected="true"] { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 43%, var(--dsw-alias-border-l2, #dfe1e5)); color: var(--dsw-alias-brand-primary, #1677ff); background: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 12%, var(--dsw-alias-bg-layer-3, #fff)); box-shadow: 0 3px 12px rgb(51 112 255 / 7%); }
+.dim-jh-provider:focus-visible { outline: none; border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 72%, var(--dsw-alias-border-l2, #dfe1e5)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 24%, transparent) inset, 0 3px 12px rgb(51 112 255 / 7%); }
 
 /* 图标容器：align dsh-im .dim-logo */
 .dim-jh-providerIcon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; box-shadow: 0 1px 3px rgb(31 35 41 / 7%); overflow: hidden; }
@@ -156,6 +156,9 @@ const STYLES = `
    留下一条看着像「rail 没铺满」的空白。用户报障原话：
    「去掉开关后右边有片空白，要省略让右边的账号池区域显示更宽」。 */
 .dim-jh-providerRow { display: grid; grid-template-columns: minmax(0, 1fr); }
+.dim-jh-railPinned { display: grid; gap: 8px; padding-bottom: 10px; margin-bottom: 2px; border-bottom: 1px dashed var(--dsw-alias-border-l2, #e5e6eb); }
+.dim-jh-provider--pinned { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 40%, var(--dsw-alias-border-l2, #eef0f3)); background: linear-gradient(135deg, color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 16%, var(--dsw-alias-bg-layer-3, #fff)), var(--dsw-alias-bg-layer-3, #fff) 75%); }
+.dim-jh-providerSub { overflow: hidden; font-size: 11px; line-height: 15px; font-weight: 400; color: var(--dsw-alias-label-tertiary, #8f959e); text-overflow: ellipsis; white-space: nowrap; }
 .dim-jh-providerRow .dim-jh-provider { min-width: 0; }
 /* 已关闭的供应商整行置灰（2026-11-06 用户要求「已关闭的供应商置灰」）。
    ⚠️ 只降不透明度、**不改布局** —— 行高/宽度必须与打开态逐像素一致，否则
@@ -179,7 +182,7 @@ const STYLES = `
 
 /* 账号卡片 */
 .dim-jh-accountCard { position: relative; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: 0 2px 8px rgb(31 35 41 / 3%); transition: border-color .16s ease, box-shadow .16s ease, opacity .16s ease; }
-.dim-jh-accountCard:hover { border-color: color-mix(in srgb, #1677ff 22%, var(--dsw-alias-border-l2, #eef0f3)); box-shadow: 0 5px 16px rgb(31 35 41 / 5%); }
+.dim-jh-accountCard:hover { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 22%, var(--dsw-alias-border-l2, #eef0f3)); box-shadow: 0 5px 16px rgb(31 35 41 / 5%); }
 .dim-jh-accountCard[data-enabled="false"] { opacity: 0.62; }
 
 /* 拖拽排序 */
@@ -190,8 +193,8 @@ const STYLES = `
 /* 正在被拖动的卡片：淡出以表明它已"拿起" */
 .dim-jh-accountCard[data-dragging="true"] { opacity: 0.4; border-style: dashed; }
 /* 拖拽悬停的目标位置：插入线。上方=插到该卡片之前，下方=之后。 */
-.dim-jh-accountCard[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 3px; border-radius: 2px; background: #1677ff; }
-.dim-jh-accountCard[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 3px; border-radius: 2px; background: #1677ff; }
+.dim-jh-accountCard[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary, #1677ff); }
+.dim-jh-accountCard[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary, #1677ff); }
 /* 序号徽标：让当前优先级一目了然（顺序即自动选号优先级） */
 .dim-jh-accountOrder { flex: none; min-width: 18px; padding: 0 5px; border-radius: 6px; font-size: 11px; line-height: 17px; font-weight: 600; text-align: center; color: var(--dsw-alias-label-secondary, #5f6672); background: rgb(31 35 41 / 6%); }
 /* 排序提示：与按钮组同处 .dim-jh-panelHead 第二行（用户 2026-10-26
@@ -218,13 +221,13 @@ const STYLES = `
 /* 顶部一行：状态点 + 名称 + 状态标签 */
 .dim-jh-accountTop { display: flex; align-items: center; gap: 8px; }
 .dim-jh-accountStatus { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-label-tertiary, #9aa0a6); }
-.dim-jh-accountStatus[data-on="true"] { background: #22c55e; box-shadow: 0 0 0 3px rgb(34 197 94 / 14%); }
+.dim-jh-accountStatus[data-on="true"] { background: var(--dsw-alias-state-success-primary, #22c55e); box-shadow: 0 0 0 3px rgb(34 197 94 / 14%); }
 .dim-jh-accountName { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); text-overflow: ellipsis; white-space: nowrap; }
 .dim-jh-accountTag { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 11px; line-height: 17px; font-weight: 500; }
-.dim-jh-accountTag[data-tone="on"] { color: #15803d; background: rgb(34 197 94 / 12%); }
+.dim-jh-accountTag[data-tone="on"] { color: var(--dsw-alias-state-success-primary, #15803d); background: rgb(34 197 94 / 12%); }
 .dim-jh-accountTag[data-tone="off"] { color: var(--dsw-alias-label-tertiary, #8f959e); background: rgb(143 149 158 / 12%); }
 /* 「限额中」标记：与 metaRow 的 warn 同色系，让「沉到底部的原因」一眼可辨。 */
-.dim-jh-accountTag[data-tone="warn"] { color: #b45309; background: rgb(227 116 0 / 12%); }
+.dim-jh-accountTag[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary, #b45309); background: rgb(227 116 0 / 12%); }
 /* 状态徽章兼作启停开关（用户 2026-10-26：把底部「停用」按钮的功能合并进来）。
    ⚠️ 只加「可点」的观感，不动 data-tone 的配色 —— 绿 / 灰两态与合并前逐字一致。 */
 /* 用户反馈「不明显」（2026-10-26）：只给 cursor 不够 —— 胶囊本身太像一个
@@ -239,11 +242,11 @@ const STYLES = `
 .dim-jh-accountTag[data-clickable="true"][data-tone="off"] { border-color: rgb(143 149 158 / 40%); }
 .dim-jh-accountTag[data-clickable="true"]:hover { filter: brightness(0.94); }
 /* hover 时把边框也压深：只靠背景亮度变化，在浅色主题下几乎看不出。 */
-.dim-jh-accountTag[data-clickable="true"][data-tone="on"]:hover { border-color: #15803d; }
+.dim-jh-accountTag[data-clickable="true"][data-tone="on"]:hover { border-color: var(--dsw-alias-state-success-primary, #15803d); }
 .dim-jh-accountTag[data-clickable="true"][data-tone="off"]:hover { border-color: var(--dsw-alias-label-tertiary, #8f959e); }
 .dim-jh-accountTag[data-clickable="true"]:active { transform: translateY(1px); }
 /* 焦点圈：去掉它等于把「键盘可达」退化回只能用鼠标。 */
-.dim-jh-accountTag[data-clickable="true"]:focus-visible { outline: 2px solid #1677ff; outline-offset: 1px; }
+.dim-jh-accountTag[data-clickable="true"]:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #1677ff); outline-offset: 1px; }
 
 /* 元信息：键值对齐的网格 */
 /* ⚠️ 2026-10-27 用户报障「面板在仅设置页时按钮与信息重叠，其次将积分和详细积分
@@ -258,7 +261,7 @@ const STYLES = `
 .dim-jh-metaRow { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: baseline; gap: 8px; }
 .dim-jh-metaRow dt { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 .dim-jh-metaRow dd { min-width: 0; margin: 0; overflow: hidden; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #646a73); text-overflow: ellipsis; white-space: nowrap; }
-.dim-jh-metaRow dd[data-tone="warn"] { color: #e37400; }
+.dim-jh-metaRow dd[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary, #e37400); }
 /* 积分未取到时的弱化提示。与 warn 区分：这不是异常，只是还没有数据 */
 .dim-jh-metaRow dd[data-tone="muted"] { color: var(--dsw-alias-label-tertiary, #8f959e); }
 .dim-jh-metaRow code { padding: 1px 5px; border-radius: 5px; background: var(--dsw-alias-bg-layer-2, #f4f5f7); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
@@ -291,7 +294,7 @@ const STYLES = `
 .dim-jh-metaRow dd.dim-jh-creditValue > * { display: inline; }
 /* 段间间距（替代原 flex gap: 6px）。用相邻兄弟选择器，首段不带左边距。 */
 .dim-jh-metaRow dd.dim-jh-creditValue > * + * { margin-left: 6px; }
-.dim-jh-creditTotal { font-size: 13px; font-weight: 600; color: #1677ff; font-variant-numeric: tabular-nums; }
+.dim-jh-creditTotal { font-size: 13px; font-weight: 600; color: var(--dsw-alias-brand-primary, #1677ff); font-variant-numeric: tabular-nums; }
 .dim-jh-creditPackages { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 分桶说明（三档带色）：永久绿 / 长期黄 / 临期红 + 倒计时（用户 2026-10-12）。
    ⚠️ 颜色语义与 credit-expiry.js 的 expirySplitParts 一一对应：
@@ -306,9 +309,9 @@ const STYLES = `
 .dim-jh-creditPoolPart[data-tone="muted"] { color: var(--dsw-alias-label-tertiary, #8f959e); }
 .dim-jh-creditPoolSep { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 已失效额度：弱化的橙色提示，与主数值的蓝色明确区分 */
-.dim-jh-creditExpired { font-size: 11px; color: #b45309; }
+.dim-jh-creditExpired { font-size: 11px; color: var(--dsw-alias-state-warn-primary, #b45309); }
 /* 用量（本月消耗）—— 三审 F🟡-8：与「已失效额度」同级但中性色，不得混成橙色警告 */
-.dim-jh-creditUsage { font-size: 11px; color: #6b7280; }
+.dim-jh-creditUsage { font-size: 11px; color: var(--dsw-alias-label-tertiary, #6b7280); }
 /* 独立池（AStudio 星火积分等）：与上方三档分桶并列的事实标注。
    用中性灰而**不是** warn 橙 —— 它不是「快过期」的告警，而是「这笔钱不能混用」
    的说明；用橙色会与临期档抢注意力。 */
@@ -405,11 +408,11 @@ const STYLES = `
 
 /* 按钮：align dsh-im .dim-deliveryButton */
 .dim-jh-btn { font-size: 12px; line-height: 18px; padding: 4px 12px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 8px; background: var(--dsw-alias-bg-layer-3, #fff); cursor: pointer; color: var(--dsw-alias-label-primary, #1f2329); white-space: nowrap; transition: border-color .15s ease, background .15s ease, color .15s ease; }
-.dim-jh-btn:hover:not(:disabled):not([aria-disabled='true']) { border-color: color-mix(in srgb, #1677ff 40%, var(--dsw-alias-border-l2, #dfe1e5)); color: #1677ff; background: color-mix(in srgb, #1677ff 6%, var(--dsw-alias-bg-layer-3, #fff)); }
-.dim-jh-btn[data-kind="primary"] { background: #1677ff; color: #fff; border-color: #1677ff; }
-.dim-jh-btn[data-kind="primary"]:hover:not(:disabled):not([aria-disabled='true']) { background: #0f5fce; border-color: #0f5fce; color: #fff; }
-.dim-jh-btn[data-kind="danger"] { color: #d93025; border-color: color-mix(in srgb, #d93025 35%, var(--dsw-alias-border-l2, #dfe1e5)); }
-.dim-jh-btn[data-kind="danger"]:hover:not(:disabled) { color: #b3261e; border-color: #d93025; background: rgb(217 48 37 / 6%); }
+.dim-jh-btn:hover:not(:disabled):not([aria-disabled='true']) { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 40%, var(--dsw-alias-border-l2, #dfe1e5)); color: var(--dsw-alias-brand-primary, #1677ff); background: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 6%, var(--dsw-alias-bg-layer-3, #fff)); }
+.dim-jh-btn[data-kind="primary"] { background: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #1677ff)); color: var(--dsw-alias-label-primary-foreground, #fff); border-color: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #1677ff)); }
+.dim-jh-btn[data-kind="primary"]:hover:not(:disabled):not([aria-disabled='true']) { background: var(--dsw-alias-button-primary-hover, #0f5fce); border-color: var(--dsw-alias-button-primary-hover, #0f5fce); color: var(--dsw-alias-label-primary-foreground, #fff); }
+.dim-jh-btn[data-kind="danger"] { color: var(--dsw-alias-state-error-primary, #d93025); border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 35%, var(--dsw-alias-border-l2, #dfe1e5)); }
+.dim-jh-btn[data-kind="danger"]:hover:not(:disabled) { color: var(--dsw-alias-label-danger, #b3261e); border-color: var(--dsw-alias-state-error-primary, #d93025); background: rgb(217 48 37 / 6%); }
 .dim-jh-btn:disabled { opacity: 0.5; cursor: default; }
 
 /* 设置弹窗里的一个分区（供应商 / 定时签到 / 备份与恢复 / 渠道原生搜索）。
@@ -426,7 +429,7 @@ const STYLES = `
    包整行会让行尾空白也变成命中区。inline-flex 让可点区贴合内容。 */
 .dim-jh-checkinToggle { flex: none; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 .dim-jh-checkinTime { width: 92px; padding: 4px 8px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: var(--dsw-alias-label-primary, #1f2329); font: inherit; font-size: 12px; }
-.dim-jh-checkinTime:focus { outline: none; border-color: #1677ff; box-shadow: 0 0 0 2px color-mix(in srgb, #1677ff 20%, transparent); }
+.dim-jh-checkinTime:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1677ff); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 20%, transparent); }
 .dim-jh-checkinHint { font-size: 11px; line-height: 1.6; color: var(--dsw-alias-label-tertiary, #8f959e); }
 .dim-jh-checkinStatus { margin-top: 2px; padding: 6px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); font-size: 11px; line-height: 1.6; color: var(--dsw-alias-label-secondary, #4e5969); }
 /* 「还没读回来」的骨架：**固定高度、无文字**（2026-11-01 审计 P3-1）。
@@ -468,7 +471,7 @@ const STYLES = `
 }
 
 /* 限流 TTL 徽章 */
-.dim-jh-ttlBadge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: rgb(227 116 0 / 10%); color: #b45309; font-size: 11px; line-height: 17px; font-weight: 500; }
+.dim-jh-ttlBadge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: rgb(227 116 0 / 10%); color: var(--dsw-alias-state-warn-primary, #b45309); font-size: 11px; line-height: 17px; font-weight: 500; }
 
 /* 面板标题区：标题独占一行，操作按钮另起一行。
    此前用单行 space-between 把标题与 5 个按钮挤在一起，面板一窄就溢出被裁掉。
@@ -535,9 +538,10 @@ const STYLES = `
    （Chromium 不为 disabled 的控件显示原生 tooltip ⇒ 原因读不到）。
    改回 :disabled 会让「点不动」变成「看不出点不动也看不出为什么」。 */
 .dim-jh-providerSwitch { flex: none; position: relative; width: 36px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: #c9cdd4; cursor: pointer; transition: background-color .15s ease; }
-.dim-jh-providerSwitch[aria-checked='true'] { background: #1677ff; }
+.dim-jh-providerSwitch[aria-checked='true'] { background: var(--dsw-alias-brand-primary, #1677ff); }
 .dim-jh-providerSwitch[aria-disabled='true'] { opacity: .5; cursor: default; }
 .dim-jh-providerSwitchThumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .15); transition: transform .15s ease; }
+.dim-jh-providerSwitch[aria-checked='true'] .dim-jh-providerSwitchThumb { background: var(--dsw-alias-label-primary-foreground, #fff); }
 .dim-jh-providerSwitch[aria-checked='true'] .dim-jh-providerSwitchThumb { transform: translateX(16px); }
 /* 面板级状态提示（探测结果 / 锁定状态 / 领取结果 / 新手任务 / 登录链接 / 补偿卡）。
    ⚠️ 2026-10-26 用户要求「信息应该在按钮行上方行，而不是下方行」：这些提示
@@ -615,9 +619,9 @@ const STYLES = `
 
 /* 上一次「重测 / 重置」的结果提示 */
 .dim-jh-probeNotice { margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); background: var(--dsw-alias-bg-layer-2, #f7f8fa); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #646a73); }
-.dim-jh-probeNotice[data-tone="ok"] { border-color: color-mix(in srgb, #22c55e 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(34 197 94 / 8%); color: #15803d; }
-.dim-jh-probeNotice[data-tone="warn"] { border-color: color-mix(in srgb, #e37400 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(227 116 0 / 8%); color: #b45309; }
-.dim-jh-probeNotice[data-tone="error"] { border-color: color-mix(in srgb, #d93025 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(217 48 37 / 8%); color: #b3261e; }
+.dim-jh-probeNotice[data-tone="ok"] { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(34 197 94 / 8%); color: var(--dsw-alias-state-success-primary, #15803d); }
+.dim-jh-probeNotice[data-tone="warn"] { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #e37400) 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(227 116 0 / 8%); color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dim-jh-probeNotice[data-tone="error"] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(217 48 37 / 8%); color: var(--dsw-alias-label-danger, #b3261e); }
 .dim-jh-probeDetails { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 2px; }
 .dim-jh-probeDetails li { font-size: 12px; line-height: 18px; }
 /* 授权链接 + 复制按钮同行。链接不设 min-width: 0 时，300+ 字符的 URL 会把按钮顶出可视区。 */
@@ -669,8 +673,8 @@ const STYLES = `
 .dim-jh-modelPanelCount { font-size: 12px; line-height: 18px; font-weight: 400; color: var(--dsw-alias-label-tertiary, #8f959e); }
 .dim-jh-modalHint { flex: none; margin: 10px 0 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 弹窗提示里的强调词：danger=危险操作（覆盖/不可撤销），warn=警示（妥善保管） */
-.dim-jh-emph-danger { color: #b3261e; font-weight: 600; }
-.dim-jh-emph-warn { color: #b45309; font-weight: 600; }
+.dim-jh-emph-danger { color: var(--dsw-alias-label-danger, #b3261e); font-weight: 600; }
+.dim-jh-emph-warn { color: var(--dsw-alias-state-warn-primary, #b45309); font-weight: 600; }
 .dim-jh-modal .dim-jh-probeNotice { flex: none; margin: 10px 0 0; }
 /* .dim-jh-modelBulkBar（模型列表顶部「打开全部 / 关闭全部」工具条）已于
    2026-10-26 随按钮一起删除。分组按钮走 .dim-jh-modelGroupBtn，不受影响。
@@ -682,7 +686,7 @@ const STYLES = `
 .dim-jh-modelSearch { flex: 1 1 140px; min-width: 140px; width: auto; }
 .dim-jh-modelStatusFilter { flex: none; display: flex; align-items: center; gap: 6px; }
 /* 选中的筛选按钮高亮：三个按钮外观一致时用户看不出当前筛的是什么。 */
-.dim-jh-modelStatusFilter .dim-jh-btn[data-active="true"] { border-color: #1677ff; color: #1677ff; background: color-mix(in srgb, #1677ff 10%, var(--dsw-alias-bg-layer-3, #fff)); font-weight: 600; }
+.dim-jh-modelStatusFilter .dim-jh-btn[data-active="true"] { border-color: var(--dsw-alias-brand-primary, #1677ff); color: var(--dsw-alias-brand-primary, #1677ff); background: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 10%, var(--dsw-alias-bg-layer-3, #fff)); font-weight: 600; }
 /* 列表区独立滚动：头部与说明固定，模型多时只滚中间 */
 /* ⚠️ overflow-x: hidden 是**兜底**，不是主修复（主修复见下方 grid 的 minmax）。
    没有它时，任何一行的偶然溢出都会让整个弹窗出现横向滚动条，而横向滚动条会把
@@ -730,8 +734,8 @@ const STYLES = `
    否则会提前终止字符串、把后面的 CSS 当成代码解析（实测报 TS2304）。 */
 .dim-jh-modal .dim-jh-modelRow { position: relative; }
 .dim-jh-modal .dim-jh-modelRow[data-dragging="true"] { opacity: 0.4; border-style: dashed; }
-.dim-jh-modal .dim-jh-modelRow[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -5px; height: 3px; border-radius: 2px; background: #1677ff; }
-.dim-jh-modal .dim-jh-modelRow[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -5px; height: 3px; border-radius: 2px; background: #1677ff; }
+.dim-jh-modal .dim-jh-modelRow[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -5px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary, #1677ff); }
+.dim-jh-modal .dim-jh-modelRow[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -5px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary, #1677ff); }
 /* 拖拽柄在弹窗行里略收窄：行高比账号卡片矮（padding 7px vs 14px），
    16px 宽的柄会顶着模型名，缩到 14px 并把 gap 让出来。 */
 .dim-jh-modal .dim-jh-modelRow .dim-jh-dragHandle { width: 14px; }
@@ -781,8 +785,8 @@ const STYLES = `
   cursor: pointer;
 }
 .dim-jh-modelRestore:hover:not(:disabled) {
-  color: #1677ff;
-  border-color: color-mix(in srgb, #1677ff 40%, var(--dsw-alias-border-l2, #dfe1e5));
+  color: var(--dsw-alias-brand-primary, #1677ff);
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 40%, var(--dsw-alias-border-l2, #dfe1e5));
 }
 .dim-jh-modelRestore:disabled { opacity: 0.5; cursor: default; }
 /* 顶部批量恢复条 */
@@ -1124,9 +1128,10 @@ const STYLES = `
 /* 开关：基于 checkbox 绘制，保持原生语义（可聚焦、可键盘操作、可读屏） */
 .dim-jh-switch { flex: none; appearance: none; -webkit-appearance: none; position: relative; width: 34px; height: 20px; margin: 0; border-radius: 999px; background: var(--dsw-alias-border-l2, #d0d3d9); cursor: pointer; transition: background .18s ease; }
 .dim-jh-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgb(31 35 41 / 20%); transition: transform .18s ease; }
-.dim-jh-switch:checked { background: #1677ff; }
+.dim-jh-switch:checked { background: var(--dsw-alias-brand-primary, #1677ff); }
+.dim-jh-switch:checked::after { background: var(--dsw-alias-label-primary-foreground, #fff); }
 .dim-jh-switch:checked::after { transform: translateX(14px); }
-.dim-jh-switch:focus-visible { outline: none; box-shadow: 0 0 0 2px color-mix(in srgb, #1677ff 30%, transparent); }
+.dim-jh-switch:focus-visible { outline: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 30%, transparent); }
 .dim-jh-switch:disabled { opacity: 0.5; cursor: default; }
 
 /* 「渠道原生搜索」开关（页头，取代原「关闭」按钮）。
@@ -1143,12 +1148,12 @@ const STYLES = `
    文字完全看不见（用户报障）。这里对齐官方 Input 原语用的 bg-layer-1，
    并去掉 fallback 以免再次掩盖 token 拼错。 */
 .dim-jh-input { box-sizing: border-box; width: 100%; padding: 6px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-1); font-size: 13px; color: var(--dsw-alias-label-primary); }
-.dim-jh-input:focus { outline: none; border-color: #1677ff; box-shadow: 0 0 0 2px color-mix(in srgb, #1677ff 20%, transparent); }
+.dim-jh-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1677ff); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 20%, transparent); }
 /* placeholder 用官方 Input 的 dimmed 色：默认色在深色模式下对比度不足。 */
 .dim-jh-input::placeholder { color: var(--dsw-alias-label-dimmed); }
 /* 加密勾选行：勾选框 + 文案一行排开 */
 .dim-jh-checkRow { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; font-size: 13px; color: var(--dsw-alias-label-primary, #1f2329); cursor: pointer; }
-.dim-jh-checkRow input[type="checkbox"] { margin: 0; accent-color: #1677ff; }
+.dim-jh-checkRow input[type="checkbox"] { margin: 0; accent-color: var(--dsw-alias-brand-primary, #1677ff); }
 /* 两次口令输入：纵向堆叠 */
 .dim-jh-formRows { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
 /* ── 账号勾选（导出选账号 / 导入选账号）── */
@@ -1163,7 +1168,7 @@ const STYLES = `
 .dim-jh-accountPickMeta { flex: none; font-size: 11px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* ── 导入方式单选（整体还原 / 单独导入）── */
 .dim-jh-modePick { display: flex; flex-direction: column; margin: 4px 0 8px; }
-.dim-jh-modePick input[type="radio"] { margin: 0; accent-color: #1677ff; }
+.dim-jh-modePick input[type="radio"] { margin: 0; accent-color: var(--dsw-alias-brand-primary, #1677ff); }
 /* 弹窗底部动作区：右对齐（生成/确认按钮） */
 .dim-jh-modalActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 /* ── 备份 / 恢复弹窗的方向切换条（2026-10-27 合并两个入口后新增）──
@@ -1173,8 +1178,8 @@ const STYLES = `
    本仓库反复记录过「两套样式看起来不像同一个 UI」。 */
 .dim-jh-backupTabs { display: flex; gap: 8px; margin: 2px 0 10px; }
 /* 选中态：与 .dim-jh-btn[data-kind="primary"] 逐字同形（背景/边框/文字三处）。 */
-.dim-jh-backupTabs .dim-jh-btn[data-active="true"] { background: #1677ff; color: #fff; border-color: #1677ff; font-weight: 600; }
-.dim-jh-backupTabs .dim-jh-btn[data-active="true"]:hover:not(:disabled) { background: #0f5fce; border-color: #0f5fce; color: #fff; }
+.dim-jh-backupTabs .dim-jh-btn[data-active="true"] { background: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #1677ff)); color: var(--dsw-alias-label-primary-foreground, #fff); border-color: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #1677ff)); font-weight: 600; }
+.dim-jh-backupTabs .dim-jh-btn[data-active="true"]:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover, #0f5fce); border-color: var(--dsw-alias-button-primary-hover, #0f5fce); color: var(--dsw-alias-label-primary-foreground, #fff); }
 
 
 /* ── Cline「订阅额度」弹窗（官方额度窗口 + 请求记录）── */
@@ -1373,7 +1378,7 @@ const STYLES = `
    「占位宽度」变成「内容宽度」，胶囊会突然变宽 19px 而这行代码看着毫无变化。 */
 .dim-jh-badgeBtn { box-sizing: border-box; display: flex; align-items: center; gap: 5px; max-width: 216px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 1.5; cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; transition: background .15s ease, color .15s ease, border-color .15s ease; }
 .dim-jh-badgeBtn:hover { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); }
-.dim-jh-badgeBtn[aria-expanded="true"] { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); border-color: color-mix(in srgb, #1677ff 45%, var(--dsw-alias-border-l2)); }
+.dim-jh-badgeBtn[aria-expanded="true"] { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 45%, var(--dsw-alias-border-l2)); }
 /* 聚合「待首次请求」占位胶囊（用户报障 2026-10-08：「也没胶囊了？」）。
    ⚠️ 刻意与 .dim-jh-badgeBtn **外观一致但不共用类名**：那个类名带 cursor:pointer
    与 :hover 反馈，而这里没有任何可点的东西（无历史 ⇒ 没有余额可展开）。
@@ -1455,14 +1460,14 @@ const STYLES = `
    ⚠️ 2026-10-02 用户反馈「浅色模式下按钮和线条不太明显」：这里从「完全透明」
    改回**主题描边 + layer-2 底**（浅色下 layer-2 与弹窗底色太接近，靠描边才立得住）。 */
 .dim-jh-badgeRefresh { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: .5px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; line-height: 1; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
-.dim-jh-badgeRefresh:hover:not(:disabled) { border-color: color-mix(in srgb, #1677ff 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-brand-primary); }
+.dim-jh-badgeRefresh:hover:not(:disabled) { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-brand-primary); }
 .dim-jh-badgeRefresh:disabled { opacity: .5; cursor: default; }
 /* 自动签到状态灯：与刷新键**同尺寸同描边**（浅色下靠描边才立得住），紧挨它左侧。
    ⚠️ 状态**不只用颜色**表达：灯本身有形态差异（关=空心环 / 开=实心点 /
    今天已跑=实心点带外环 / 进行中=省略号），且 title 与 aria-label 都带完整文字说明，
    故色觉障碍与读屏都能分辨「开还是关、今天跑没跑」。 */
 .dim-jh-badgeAuto { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: .5px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-tertiary); font: inherit; font-size: 12px; line-height: 1; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
-.dim-jh-badgeAuto:hover { border-color: color-mix(in srgb, #1677ff 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-3); }
+.dim-jh-badgeAuto:hover { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-3); }
 .dim-jh-badgeAutoDot { width: 7px; height: 7px; box-sizing: border-box; border-radius: 999px; background: transparent; border: 1.5px solid currentColor; }
 .dim-jh-badgeAuto[data-state="on"],
 .dim-jh-badgeAuto[data-state="done"] { color: var(--dsw-alias-state-success-primary); }
@@ -1481,7 +1486,7 @@ const STYLES = `
 .dim-jh-badgeAutoStatus { margin-top: 5px; padding: 5px 6px 6px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
 .dim-jh-badgeAutoCloseRow { display: flex; justify-content: flex-end; margin-bottom: 2px; }
 .dim-jh-badgeAutoClose { width: 14px; height: 14px; display: grid; place-items: center; border: .5px solid var(--dsw-alias-border-l2); border-radius: 4px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-tertiary); font: inherit; font-size: 10px; line-height: 1; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
-.dim-jh-badgeAutoClose:hover { border-color: color-mix(in srgb, #1677ff 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-brand-primary); }
+.dim-jh-badgeAutoClose:hover { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-brand-primary); }
 .dim-jh-badgeAutoStatusHead { font-size: 10.5px; line-height: 1.5; color: var(--dsw-alias-label-secondary); }
 .dim-jh-badgeAutoChannels { display: flex; flex-wrap: wrap; gap: 2px 5px; margin-top: 3px; font-size: 10px; line-height: 1.6; color: var(--dsw-alias-label-tertiary); }
 /* 分隔符跟在条目**后面**（不是用 ::before 加在下一个前面）：十余个渠道在 280px 里必然
@@ -1539,7 +1544,7 @@ const STYLES = `
 .dim-jh-badgeClaim { gap: 5px; }
 .dim-jh-badgeClaimRow { display: flex; gap: 5px; }
 .dim-jh-badgeAction { flex: 1; min-width: 0; padding: 3px 7px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; font-size: 10.5px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; transition: background .15s ease, color .15s ease, border-color .15s ease; }
-.dim-jh-badgeAction:hover:not(:disabled) { border-color: color-mix(in srgb, #1677ff 45%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, #1677ff 10%, var(--dsw-alias-bg-layer-2)); color: var(--dsw-alias-brand-primary); }
+.dim-jh-badgeAction:hover:not(:disabled) { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 45%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 10%, var(--dsw-alias-bg-layer-2)); color: var(--dsw-alias-brand-primary); }
 .dim-jh-badgeAction:disabled { opacity: .55; cursor: default; }
 .dim-jh-badgeNotice { font-size: 10px; line-height: 14px; color: var(--dsw-alias-label-secondary); }
 .dim-jh-badgeNotice[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary); }
@@ -1807,6 +1812,9 @@ const STYLES = `
   .dim-jh-railGroup { display: contents; }
   .dim-jh-railGroupTitle { display: none; }
   .dim-jh-providerRow { flex: none; }
+  .dim-jh-railPinned { display: contents; }
+  .dim-jh-providerRow[data-pinned="true"] { padding-right: 8px; border-right: 1px solid var(--dsw-alias-border-default, #e5e5e5); }
+  .dim-jh-providerSub { display: none; }
   .dim-jh-provider { width: auto; min-height: 40px; padding: 6px 10px; }
   .dim-jh-panel { padding: 14px 12px; }
 }
@@ -1914,7 +1922,7 @@ const STYLES = `
 /* 焦点环：跟随本文件既有约定（outline:none + box-shadow），与 .dim-jh-switch /
    .dim-jh-zcSelect 一致。官方设置页的选择器**没有** outline 规则，故这里也不加，
    否则同一张插件页上本卡片会比其他控件多一圈描边。 */
-.dim-jh-cardSelector:focus-visible { outline: none; box-shadow: 0 0 0 2px color-mix(in srgb, #1677ff 30%, transparent); }
+.dim-jh-cardSelector:focus-visible { outline: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 30%, transparent); }
 `
 
 
