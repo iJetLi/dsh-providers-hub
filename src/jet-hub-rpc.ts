@@ -1522,6 +1522,28 @@ type LlmServiceLike = {
  * （见各适配器的同名方法）。DSH 的 `llm` 服务只保证 `listModels`，故它与
  * `listProviders` 都声明为可选。
  */
+/**
+ * 读「对外地址」，任何失败都降级为 `null`（与 `gateway.getEnabled` 里
+ * `degrade('对外地址', …)` 同口径）。
+ *
+ * ⚠️ **三个网关 RPC 都必须回传该字段**（`gateway.getEnabled` /
+ * `gateway.setEnabled` / `gateway.setAllowLan`）：客户端 `setGatewayStatus(res)`
+ * 拿到响应就整份覆盖本地状态（`plugin-src/client/jet-hub.js` 三处），漏一处
+ * ⇒ 用户拨一下开关，面板就把「对外地址」冲成 `undefined`，地址退回
+ * `0.0.0.0` 并重新弹出「把 0.0.0.0 换成本机局域网 IP」的提示（PR #54 审计 P1）。
+ *
+ * 三个 RPC 统一走本函数（而不是各自 `try/catch`）是刻意的：口径分叉过一次，
+ * 分叉的代价就是上面那条静默失效。
+ */
+function gatewayPublicUrlOrNull(logger: { warn: (message: string) => void }, step: string): string | null {
+  try {
+    return gatewayPublicUrl(process.env)
+  } catch (error) {
+    logger.warn(`[jet-hub] ${step} 的「对外地址」读取失败，该字段降级为默认值：${String(error)}`)
+    return null
+  }
+}
+
 function llmServiceOf(ctx: Context): LlmServiceLike | undefined {
   const direct = (ctx as unknown as { llm?: LlmServiceLike }).llm
   if (direct !== undefined && direct !== null) return direct
@@ -10634,7 +10656,7 @@ function registerJetHubEndpoints(
           // 「期望运行但没监听」的结构化原因（Issue #11 建议 ②）：
           // `running: false` 本身分不清「用户关的」与「起不来的」。
           lastError: await degrade('失败原因', () => gatewayLastError(), null),
-          publicUrl: await degrade('对外地址', () => gatewayPublicUrl(process.env), null),
+          publicUrl: gatewayPublicUrlOrNull(ctx.logger, 'gateway.getEnabled'),
           // ⚠️ 明文凭据：只用于设置页展示与复制，**不进日志**。
           apiKey: apiKey === null
             ? null
@@ -10699,6 +10721,8 @@ function registerJetHubEndpoints(
           allowLan: pool.gatewayAllowLan(),
           hostFromEnv: isGatewayHostFromEnv(process.env),
           address: blockedByEnv ? null : gatewayAddress() ?? null,
+          // ⚠️ 三个网关 RPC 都必须回传（见 `gatewayPublicUrlOrNull` 的注释）。
+          publicUrl: gatewayPublicUrlOrNull(ctx.logger, 'gateway.setEnabled'),
           // 「期望运行但没监听」的结构化原因（Issue #11 建议 ②）。
           lastError: gatewayLastError(),
           apiKey: key === null ? null : { value: key.value, fromEnv: key.fromEnv, path: key.path },
@@ -10759,6 +10783,8 @@ function registerJetHubEndpoints(
           allowLan: pool.gatewayAllowLan(),
           hostFromEnv,
           address: blockedByEnv ? null : gatewayAddress() ?? null,
+          // ⚠️ 三个网关 RPC 都必须回传（见 `gatewayPublicUrlOrNull` 的注释）。
+          publicUrl: gatewayPublicUrlOrNull(ctx.logger, 'gateway.setAllowLan'),
           // 「期望运行但没监听」的结构化原因（Issue #11 建议 ②）。
           lastError: gatewayLastError(),
           apiKey: key === null ? null : { value: key.value, fromEnv: key.fromEnv, path: key.path },

@@ -1951,7 +1951,17 @@ export interface RpcGatewayStatusResponse {
    * - `factory-missing`：插件装配异常，压根没有可用的网关实例工厂
    */
   lastError: RpcGatewayLastError | null
-  publicUrl?: string | null
+  /**
+   * 对外地址（env `DSH_OPENAI_GATEWAY_PUBLIC_URL` 的解析结果），非法值降级为 `null`。
+   *
+   * ⚠️ **必填**（不是 `?`）：三个网关 RPC（`gateway.getEnabled` /
+   * `gateway.setEnabled` / `gateway.setAllowLan`）都必须回传它 —— 客户端
+   * `setGatewayStatus(res)` 拿到响应就整份覆盖本地状态（`plugin-src/client/jet-hub.js`
+   * 三处），漏一处 ⇒ 用户拨一下开关，面板就把该字段冲成 `undefined`，地址退回
+   * `0.0.0.0` 并重新弹出「把 0.0.0.0 换成本机局域网 IP」的提示（PR #54 审计 P1）。
+   * 写成必填，新增构造点漏字段时由 `tsc` 拦下，不再靠人记。
+   */
+  publicUrl: string | null
 }
 
 /** 网关「期望运行但未监听」的结构化原因（见 {@link RpcGatewayStatusResponse.lastError}）。 */
