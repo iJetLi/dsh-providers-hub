@@ -39,6 +39,7 @@ import {
   setGatewayDesiredEnabled,
 } from './openai-gateway/runtime.js'
 import type { CodeArtsAuth } from './service.js'
+import { codeartsAccountName } from './codearts-identity.js'
 import type { CodeArtsCredential } from './types.js'
 import type { BuddyAuth } from './buddy-auth.js'
 import type { LobsteraiAuth } from './lobsterai-auth.js'
@@ -4545,6 +4546,7 @@ function registerJetHubEndpoints(
     provider: string,
   ): Promise<ProviderAccountStatus[]> {
     if (provider === ZCODE.id) return enrichZcodeIdentity(accounts)
+    if (provider === 'codearts') return enrichCodeartsIdentity(accounts)
     // ⚠️⚠️ **本 fork 独有**（modelscope，2026-10-17）：卡片要显示**打码**的
     //    API Key 并提供「编辑」入口（`modelscope.setApiKey`）。
     //    ⚠️ **只下发打码串，绝不下发明文** —— 凭据经 RPC 明文下发等于把它
@@ -4681,6 +4683,60 @@ function registerJetHubEndpoints(
         })
       } catch {
         // 凭据损坏/未配置：保留原条目（这些账号在卡片上会由额度那一栏报错说明）。
+        out.push(account)
+      }
+    }
+    return out
+  }
+
+  /**
+   * CodeArts 专有的身份补全：真实 IAM 用户名。
+   *
+   * ## 为什么必须在 RPC 层补，而不是写进账号池
+   *
+   * 账号池条目（`~/.dsh/jet-hub/state.json`）只有 `id`/`provider`/`nickname`/
+   * `credentialRef` 等字段，而登录时写进去的是**占位**池 id（`codearts-xxxxxxxx`）。
+   * 卡片渲染走 `nickname || id`，占位串非空 ⇒ 真名**永远显示不出来**。
+   * 而名字只在**凭据**里（`refresh_token` 的 `user_profile`，见
+   * `src/codearts-identity.ts`）。
+   *
+   * ## ⚠️ 只改**本次列表的返回值**，不写池
+   *
+   * 这是与 `enrichZcodeIdentity` 同款的取舍，也是本改动能「零迁移」的原因：
+   * - **不写 `state.json`** ⇒ 不存在「旧进程下次落盘把回填盖回去」那个坑
+   *   （本仓库在 trae/lobsterai 的昵称回填上踩过，见 `providers-buddy.md` 末节）；
+   * - **不需要启动期 `repairAccountNicknames`** ⇒ 少一条会污染用户数据的写路径；
+   * - 存量账号（本机 9 个）与将来登录的账号**走同一条代码**。
+   *
+   * ## 三条纪律
+   *
+   * 1. **只改「占位昵称」那一格**：`nickname === id` 才动。用户手动改过昵称
+   *    （`account.update`，值是任意字符串）时**原样返回、连凭据都不读** ——
+   *    否则会把用户起的名字覆盖成 IAM 用户名，属无谓且有害的写入；
+   * 2. **逐条独立失败**：凭据读不到 / JSON 坏 / 解不出名字 ⇒ 保留原条目
+   *    （卡片回落显示 id）。列表可用性远比这一个展示字段重要；
+   * 3. **同时给 `accountName`**：它是上游既有的「只存在于凭据里的展示名」字段
+   *    （见 `ProviderAccountStatus.accountName`），Token 面板等其它消费者按
+   *    `nickname → accountName → id` 取值，给上它能让这些视图一起受益。
+   */
+  async function enrichCodeartsIdentity(
+    accounts: readonly ProviderAccountStatus[],
+  ): Promise<ProviderAccountStatus[]> {
+    const out: ProviderAccountStatus[] = []
+    for (const account of accounts) {
+      // 已有真昵称（人起的或上次登录写进去的）⇒ 一行都不动、不读凭据。
+      if (account.nickname !== account.id) { out.push(account); continue }
+      try {
+        const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+        if (!resolved) { out.push(account); continue }
+        const credential = parseCodeArtsCredential(resolved.value)
+        if (credential === undefined) { out.push(account); continue }
+        const name = codeartsAccountName(credential)
+        // 解不出 ⇒ 保留原条目（`nickname` 仍是池 id，卡片显示 id，与改动前一致）。
+        if (name === undefined) { out.push(account); continue }
+        out.push({ ...account, nickname: name, accountName: name })
+      } catch {
+        // 凭据损坏/未配置：保留原条目（卡片由额度那一栏自行报错说明）。
         out.push(account)
       }
     }
@@ -5987,9 +6043,23 @@ function registerJetHubEndpoints(
           started.result.then(async (loginResult) => {
             const credential = parseCodeArtsCredential(loginResult.access)
             await pool.updateAccount(id, {
-              nickname: credential?.user_name !== undefined && credential.user_name.length > 0
-                ? credential.user_name
-                : id,
+              /**
+               * ⚠️ **名字的真源是 `refresh_token`，不是 `credential.user_name`**
+               * （2026-11-12，真实报障「CodeArts 卡片只显示 `codearts-xxxxxxxx`，
+               * 多账号无法区分」）。
+               *
+               * 新式 IAM OAuth 换来的凭据**没有**顶层 `user_name` —— 那个字段只有
+               * 老 ticket 流程（`src/login.ts` 的 `parseCredentialResponse`）才写。
+               * 于是原来的 `credential.user_name ?? id` 对今天登录的账号**恒为 id**，
+               * 而卡片渲染走 `nickname || id` ⇒ 占位串永远盖住真名。
+               *
+               * 名字一直在 `refresh_token`（JWT）的 `user_profile` 里，见
+               * `src/codearts-identity.ts` 的模块头（含为什么没有可用的在线端点）。
+               *
+               * ⚠️ 解不出时**必须**回落 `id`（而不是空串）：空串会让卡片渲染成
+               * 空白行，而 `id` 至少可读、可搜、可用于删号确认。
+               */
+              nickname: (credential === undefined ? undefined : codeartsAccountName(credential)) ?? id,
               expiresAt: credential?.expires_at !== undefined
                 ? (Number.isNaN(Date.parse(credential.expires_at)) ? undefined : Date.parse(credential.expires_at))
                 : undefined,
