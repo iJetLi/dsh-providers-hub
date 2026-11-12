@@ -108,17 +108,44 @@ function makeCtx() {
   const injections = []
   /** `slots.register(spec, Component)` 的登记记录（用来断言注册的是哪个组件）。 */
   const registrations = []
+  /**
+   * ⚠️ `ctx.inject([...], cb)` 的登记（服务级**软**注入，与上面的槽位注入不是一回事）。
+   *
+   * `registerJetHubLedgerTab`（右侧栏 Token 用量标签页）走的就是这条：它对
+   * `sidebarRightTabs` 是**软依赖**（服务不在就整段跳过），故必须经由 `ctx.inject`
+   * 而不是 `export const inject`（后者是硬依赖，缺服务的宿主上整条插件不激活）。
+   *
+   * ⚠️ 替身**默认不提供** `sidebarRightTabs` 服务（`services` 留空）：这样
+   * 「服务缺席时优雅跳过」这条腿是被真实执行的，而不是靠注释声明。
+   */
+  const serviceInjections = []
+  const services = {}
   return {
     effects,
     slotInjections,
     injections,
     registrations,
+    serviceInjections,
+    services,
     ctx: {
       connection: { send: async () => ({}) },
       effect(callback, name) {
         effects.push(name)
         // `ctx.effect` 会执行回调并把返回值当清理函数；这里如实执行。
         const stop = callback()
+        return typeof stop === 'function' ? stop : () => {}
+      },
+      /**
+       * 服务级软注入：把 `services` 里**有**的那几个交给回调，返回值当清理函数。
+       * 缺的服务不会出现在 `scoped` 上 —— 与真 cordis 的 `ctx.inject` 语义一致。
+       */
+      inject(deps, callback) {
+        serviceInjections.push({ deps, callback })
+        const scoped = {}
+        for (const dep of deps) {
+          if (services[dep] !== undefined) scoped[dep] = services[dep]
+        }
+        const stop = callback(scoped)
         return typeof stop === 'function' ? stop : () => {}
       },
       slots: {

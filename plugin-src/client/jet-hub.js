@@ -2712,7 +2712,26 @@ function downloadCsv(filename, headers, rows) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function TokenLedgerPanel({ rpcCall, onClose }) {
+/**
+ * Token 用量面板。
+ *
+ * ## 两种外壳（`chrome`）
+ *
+ * - `'modal'`（默认）：整屏覆盖层 + 「完成」按钮 —— Jet Hub 页头那个入口用的形态。
+ * - `'pane'`：**不渲染遮罩、不渲染「完成」**，只留标题行 + 说明 + 内容区 ——
+ *   给「右侧栏标签页」这类**宿主已经是容器**的地方用（见 `ledger-tab.js`）。
+ *
+ * ⚠️⚠️ **两种外壳共用同一个组件、同一份 hooks 与同一份 JSX**，只在外层与「完成」
+ * 按钮上分叉。**不要**把 state 抽到新的子组件里：`tests/unit/token-ledger-account-wiring.spec.ts`
+ * 是直接调本组件、让它自己的 hooks 跑起来断言渲染树里的账号名的 —— 一旦 state 下沉，
+ * 那份真渲染守卫只展开一层就会**静默变成空转**（本仓库记录过的「假绿」形态）。
+ *
+ * ⚠️ `chrome` 的默认值必须是 `'modal'`：既有调用点（Jet Hub 页头的覆盖层）不传它，
+ * 行为必须逐字节不变。
+ *
+ * @param {{ rpcCall: Function, onClose?: Function, chrome?: 'modal'|'pane' }} props
+ */
+function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
   const mounted = React.useRef(true);
   React.useEffect(() => () => { mounted.current = false; }, []);
 
@@ -3185,6 +3204,47 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
                 renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))))
           : (providerRow.accounts ?? []).flatMap((accountRow) => accountRow.models.map((modelRow) =>
               renderModelRow(modelRow, providerRow.provider + '#' + modelRow.model))))))));
+
+  /**
+   * ── 内嵌外壳（`chrome === 'pane'`）：给「宿主已经是容器」的地方用（右侧栏标签页）──
+   *
+   * 与下面 modal 分支**刻意各写一份 JSX**，不是偷懒。理由有两条，都必须守住：
+   *
+   * 1. **modal 那一支必须与上游逐字节相同**：`tests/unit/token-ledger-panel.spec.ts`
+   *    用 `client.slice(modalIdx, client.indexOf('dim-jh-modalBody', modalIdx))`
+   *    切窗口断言 `dim-jh-modalHint` 与 `createElement('p', {…title:` —— 把 JSX 抽成
+   *    变量会让窗口立刻切空，**上游自己的用例当场变红**。这份 PR 不该动那条判据。
+   * 2. 两件外壳的**结构确实不同**：pane 没有遮罩（`position: fixed` 会盖住整个应用）、
+   *    没有 `aria-modal`（标签页本身就是控件，再加模态语义会让读屏软件误判）、
+   *    没有「完成」（关闭是标签页自己的 ×）。
+   *
+   * ⚠️ 唯一共用的是**内容三件套**（`renderHistory` / `renderSummary` / `renderEntries`）
+   * 与说明文案。它们的分叉由 `tests/unit/ledger-tab-wiring.spec.ts` 逐条盯着：
+   * 那条用例断言两种外壳都调用了这三个渲染函数（各一次），删掉任一份就红。
+   */
+  if (chrome === 'pane') {
+    return React.createElement('div', { className: 'dim-jh-ledgerPane', 'data-chrome': 'pane' },
+      React.createElement('div', { className: 'dim-jh-modalHead' },
+        React.createElement('div', { className: 'dim-jh-modalTitle' },
+          React.createElement('strong', null, 'Token 用量'),
+          React.createElement('span', { className: 'dim-jh-modalSubtitle' }, ledgerSubtitle())),
+        React.createElement('div', { className: 'dim-jh-modelPanelActions' },
+          React.createElement('button', {
+            className: 'dim-jh-btn',
+            disabled: phase === 'loading',
+            title: '重新读取本机 Token 账本。',
+            onClick: () => void load(),
+          }, phase === 'loading' ? '读取中…' : '刷新'))),
+      React.createElement('p', {
+        className: 'dim-jh-modalHint',
+        title: '总处理量 = 输入 + 输出；缓存写入不重复计入。输出速率的均值对离群样本敏感；P50/P90 是完整分布估算。速率要求解码时长至少 100ms。明细最多保留最近 500 笔，重启清空；按日累计写入 token-ledger.json。',
+      },
+        '按渠道、供应商、账号和模型统计用量。悬停数字查看 Token 拆分与性能口径；逐笔明细重启后清空，按日历史会保留。'),
+      React.createElement('div', { className: 'dim-jh-ledgerPaneBody' },
+        renderHistory(),
+        renderSummary(),
+        renderEntries()));
+  }
 
   return React.createElement('div', {
     className: 'dim-jh-modalOverlay',
@@ -9873,6 +9933,21 @@ export const __providersPanelForTest = ProviderPanel;
  * 不是公共 API：客户端 bundle 内部使用，外部不要依赖。
  */
 export const __creditBalanceRowForTest = CreditBalanceRow;
+
+/**
+ * 「Token 用量」面板，供测试真正渲染。
+ *
+ * ⚠️ 与上面两个导出同一条取舍：本组件要等账本 RPC 回来、hooks 跑过几轮才会
+ * 产出可断言的内容，`JetHubPage` 顶层渲染走不到那条路径。
+ *
+ * ⚠️⚠️ 它同时是**两种外壳共用的唯一实现**的证据：`ledger-tab-wiring.spec.ts`
+ * 用 `chrome: 'pane'` 直接渲染它，断言内容三件套（历史 / 汇总 / 明细）各渲染
+ * 一次且**没有**「完成」按钮；`token-ledger-account-wiring.spec.ts` 用默认
+ * `chrome: 'modal'` 断言账号名与列顺序。两份守卫盯的是同一个组件的两个分支。
+ *
+ * 不是公共 API：客户端 bundle 内部使用，外部不要依赖。
+ */
+export const __tokenLedgerPanelForTest = TokenLedgerPanel;
 
 export function JetHubPage({ rpcCall }) {
   const [selected, setSelected] = React.useState(PROVIDERS[0].id);
