@@ -224,10 +224,10 @@ const STYLES = `
 .dim-jh-accountStatus[data-on="true"] { background: var(--dsw-alias-state-success-primary, #22c55e); box-shadow: 0 0 0 3px rgb(34 197 94 / 14%); }
 .dim-jh-accountName { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); text-overflow: ellipsis; white-space: nowrap; }
 .dim-jh-accountTag { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 11px; line-height: 17px; font-weight: 500; }
-.dim-jh-accountTag[data-tone="on"] { color: var(--dsw-alias-state-success-primary, #15803d); background: rgb(34 197 94 / 12%); }
+.dim-jh-accountTag[data-tone="on"] { color: #15803d; background: rgb(34 197 94 / 12%); }
 .dim-jh-accountTag[data-tone="off"] { color: var(--dsw-alias-label-tertiary, #8f959e); background: rgb(143 149 158 / 12%); }
 /* 「限额中」标记：与 metaRow 的 warn 同色系，让「沉到底部的原因」一眼可辨。 */
-.dim-jh-accountTag[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary, #b45309); background: rgb(227 116 0 / 12%); }
+.dim-jh-accountTag[data-tone="warn"] { color: #b45309; background: rgb(227 116 0 / 12%); }
 /* 状态徽章兼作启停开关（用户 2026-10-26：把底部「停用」按钮的功能合并进来）。
    ⚠️ 只加「可点」的观感，不动 data-tone 的配色 —— 绿 / 灰两态与合并前逐字一致。 */
 /* 用户反馈「不明显」（2026-10-26）：只给 cursor 不够 —— 胶囊本身太像一个
@@ -309,7 +309,7 @@ const STYLES = `
 .dim-jh-creditPoolPart[data-tone="muted"] { color: var(--dsw-alias-label-tertiary, #8f959e); }
 .dim-jh-creditPoolSep { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 已失效额度：弱化的橙色提示，与主数值的蓝色明确区分 */
-.dim-jh-creditExpired { font-size: 11px; color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dim-jh-creditExpired { font-size: 11px; color: #b45309; }
 /* 用量（本月消耗）—— 三审 F🟡-8：与「已失效额度」同级但中性色，不得混成橙色警告 */
 .dim-jh-creditUsage { font-size: 11px; color: var(--dsw-alias-label-tertiary, #6b7280); }
 /* 独立池（AStudio 星火积分等）：与上方三档分桶并列的事实标注。
@@ -471,7 +471,7 @@ const STYLES = `
 }
 
 /* 限流 TTL 徽章 */
-.dim-jh-ttlBadge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: rgb(227 116 0 / 10%); color: var(--dsw-alias-state-warn-primary, #b45309); font-size: 11px; line-height: 17px; font-weight: 500; }
+.dim-jh-ttlBadge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: rgb(227 116 0 / 10%); color: #b45309; font-size: 11px; line-height: 17px; font-weight: 500; }
 
 /* 面板标题区：标题独占一行，操作按钮另起一行。
    此前用单行 space-between 把标题与 5 个按钮挤在一起，面板一窄就溢出被裁掉。
@@ -619,8 +619,8 @@ const STYLES = `
 
 /* 上一次「重测 / 重置」的结果提示 */
 .dim-jh-probeNotice { margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); background: var(--dsw-alias-bg-layer-2, #f7f8fa); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #646a73); }
-.dim-jh-probeNotice[data-tone="ok"] { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(34 197 94 / 8%); color: var(--dsw-alias-state-success-primary, #15803d); }
-.dim-jh-probeNotice[data-tone="warn"] { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #e37400) 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(227 116 0 / 8%); color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dim-jh-probeNotice[data-tone="ok"] { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(34 197 94 / 8%); color: #15803d; }
+.dim-jh-probeNotice[data-tone="warn"] { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #e37400) 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(227 116 0 / 8%); color: #b45309; }
 .dim-jh-probeNotice[data-tone="error"] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(217 48 37 / 8%); color: var(--dsw-alias-label-danger, #b3261e); }
 .dim-jh-probeDetails { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 2px; }
 .dim-jh-probeDetails li { font-size: 12px; line-height: 18px; }
@@ -674,7 +674,7 @@ const STYLES = `
 .dim-jh-modalHint { flex: none; margin: 10px 0 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 弹窗提示里的强调词：danger=危险操作（覆盖/不可撤销），warn=警示（妥善保管） */
 .dim-jh-emph-danger { color: var(--dsw-alias-label-danger, #b3261e); font-weight: 600; }
-.dim-jh-emph-warn { color: var(--dsw-alias-state-warn-primary, #b45309); font-weight: 600; }
+.dim-jh-emph-warn { color: #b45309; font-weight: 600; }
 .dim-jh-modal .dim-jh-probeNotice { flex: none; margin: 10px 0 0; }
 /* .dim-jh-modelBulkBar（模型列表顶部「打开全部 / 关闭全部」工具条）已于
    2026-10-26 随按钮一起删除。分组按钮走 .dim-jh-modelGroupBtn，不受影响。

@@ -22,13 +22,17 @@ function withoutVarFallbacks(css: string): string {
   return css.replace(/var\(--[\w-]+,\s*#[0-9a-fA-F]{3,8}\)/g, 'VAR')
 }
 
+// ⚠️ `#15803d` / `#b45309` 刻意**不在**表里（PR #54 正向审计 P1）：
+// 它们是「深绿 / 深琥珀**文字**」的原色（白底对比度 5.60 / 5.02，11px 达标），
+// 而 DSH 主题的 `--dsw-alias-state-success-primary` / `-warn-primary` 是**填充亮色**
+// （实测 #2e8e52 / #c08a33，当 11px 文字只有 4.11 / 3.03，不达标）。
+// 所以这两处**文字色保留裸字面量**，只让背景/边框走变量；把它们放回表里会把
+// 「文字看不清」这个缺陷重新钉死（见 pr54-pos-audit.md P1）。
 const SEMANTIC: Record<string, string> = {
   '#1677ff': '--dsw-alias-brand-primary',
   '#d93025': '--dsw-alias-state-error-primary',
   '#b3261e': '--dsw-alias-label-danger',
-  '#15803d': '--dsw-alias-state-success-primary',
   '#22c55e': '--dsw-alias-state-success-primary',
-  '#b45309': '--dsw-alias-state-warn-primary',
   '#e37400': '--dsw-alias-state-warn-primary',
   '#6b7280': '--dsw-alias-label-tertiary',
 }
