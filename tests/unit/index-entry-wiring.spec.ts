@@ -238,4 +238,35 @@ describe('index.js 接线（行为级）', () => {
     expect(joined, '样式安装的 effect 不见了').toContain('install styles')
     expect(joined, '载体贡献循环的 effect 不见了').toContain('zcode')
   })
+
+  /**
+   * ⚠️⚠️ 接缝守卫（2026-11-12 PR #65 审计补的，**真缺陷**）：
+   *
+   * `apply()` 里 `registerJetHubLedgerTab(ctx, rpcCall)` 是右侧栏「Token 用量」标签页
+   * **唯一的入口** —— 删掉它，引导卡不出现、标签页没有，整条功能从产品里消失。
+   * 而在补这条用例之前，**没有任何断言盯着这行**：副本变异（整行删除 / 短路成
+   * `if (false)`）实测 107/107 全绿 —— 与本仓 `client-ui.md` 记的 2026-10-24
+   * 「`void registerJetHubPanelEntries` 全绿 10600 条」逐字同型。
+   *
+   * 判据必须打在**真被调用 + 真拿到 rpcCall** 上：
+   * - 走 `makeCtx().inject` 的真实路径（`serviceInjections` 只有真调用才会长出来）；
+   * - 依赖名精确等于 `['sidebarRightTabs']`（写成 `sidebarRightTabsX` 会静默落空）；
+   * - 回调是函数（宿主靠它把服务交进来）。
+   *
+   * 不要退化成「源码里有 `registerJetHubLedgerTab(`」：那在 `if (false) { … }` 死分支里
+   * 照样命中，本仓库已复发多次。
+   */
+  it('★★ apply() 必须真的把「Token 用量」标签页接上（删掉这行功能就消失）', () => {
+    const harness = makeCtx()
+    apply(harness.ctx)
+
+    expect(
+      harness.serviceInjections,
+      'apply() 没有调用 registerJetHubLedgerTab ⇒ 右侧栏「Token 用量」标签页不会出现',
+    ).toHaveLength(1)
+
+    const [{ deps, callback }] = harness.serviceInjections
+    expect(deps, '软注入的依赖名必须是 sidebarRightTabs（写错会静默落空）').toEqual(['sidebarRightTabs'])
+    expect(typeof callback, 'ctx.inject 的回调必须是函数').toBe('function')
+  })
 })

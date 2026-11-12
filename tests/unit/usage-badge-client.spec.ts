@@ -223,9 +223,15 @@ describe('用量徽标：槽位接线', () => {
     // ⇒ desktop 徽标永久不显示。
     const m = /export const inject = \[([^\]]*)\]/.exec(codeOf(index))
     expect(m, '应能解析 export const inject').not.toBeNull()
+    // ⚠️⚠️ 必须**解析成数组**再判元素（2026-11-12 审计 P2-8）：直接拿捕获到的
+    // 字符串做 `toContain("'remote'")` 时，`'remote.session'` 会**顺带命中**
+    // ⇒ 漏写 `remote` 也能绿，而真机上那正是「徽标永久不显示」的那个事故。
     const list = m![1]!
+      .split(',')
+      .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
+      .filter((item) => item.length > 0)
     for (const svc of ['modelDirectories', 'sessions', 'remote', 'remote.session']) {
-      expect(list, `inject 缺少 ${svc}`).toContain(`'${svc}'`)
+      expect(list, `inject 缺少 ${svc}`).toContain(svc)
     }
   })
 

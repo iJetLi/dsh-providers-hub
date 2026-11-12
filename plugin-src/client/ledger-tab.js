@@ -36,9 +36,22 @@
  *
  * ## 为什么 `order: 40`
  *
- * 宿主引导卡按 `order` 升序排。现有占用（实测本机 profile）：
- * 工作区文件 10 / 代码审查和变更 20 / 新建终端 20 / 上下文 20 / 浏览器 30 /
- * **（空档）** / 会话数据诊断 60。取 40 落在「浏览器」与「会话数据诊断」之间。
+ * 宿主引导卡按 `order` 升序排（`dsh-client-ui-sidebar-right/lib/client.js` 的
+ * `guideEntries.sort((l, r) => l.order - r.order)`）。取 40 只保证落在
+ * 「浏览器（30）」与「会话数据诊断（60）」之间 —— **不保证是空档**。
+ *
+ * ⚠️⚠️ 2026-11-12 审计更正：本文件初版写「工作区文件 10 / 代码审查和变更 20 /
+ * 新建终端 20 / 上下文 20 / 浏览器 30 /（空档）/ 会话数据诊断 60」，那条枚举
+ * **不可复现**（漏了 forge=15，且把三个 20 记错；仓库里也没有任何测量记录）。
+ * 本机 profile 逐包提取的实际值是 **10 / 15 / 20 / 30 / 60**，另有
+ * `dsh-client-ui-browser-view`、`dsh-better-sidebar`、`dshmarket` 各占 **40**
+ * ⇒ 40 在本机**已被占用**，同值时按注册先后排（宿主不是稳定排序）。
+ *
+ * 复现（本机 profile 根目录，逐包取 guide 条目的 order）：
+ * `grep -rn "order: [0-9]" ~/.dsh/profiles/web/node_modules --include=client.js`
+ *
+ * 撞号**不影响功能**（引导卡只是排位，不参与派发），故不改常量；但注释不得
+ * 再声称「空档」—— 那是编造的证据。
  *
  * @module plugin-src/client/ledger-tab.js
  */
@@ -53,8 +66,9 @@ import * as React from 'react';
  *
  * 为什么不新增一个正式导出名：那会多一条「同一个组件两个 export」的分叉面，
  * 而本仓库对这类分叉的判据是「删掉任一处会绿」（`__tokenLedgerPanelForTest`
- * 已被两份 spec 引用，`token-ledger-account-wiring.spec.ts` 直接 require 它）。
- * 复用同一个符号，比新增一个更难被静默改坏。
+ * 已被 `tests/unit/ledger-pane-chrome.spec.ts` 真渲染、
+ * `tests/unit/ledger-tab-wiring.spec.ts` 以 mock 形式引用）。复用同一个符号，
+ * 比新增一个更难被静默改坏。
  */
 import { __tokenLedgerPanelForTest as TokenLedgerPanel } from './jet-hub.js';
 import { withErrorBoundary } from './error-boundary.js';
@@ -114,7 +128,12 @@ const LedgerTabBody = withErrorBoundary(
  * ⚠️ **不**再在外面套一层 `ctx.effect`：那会让同一个 disposer 有两个持有者，
  * 关掉时被调两次（`SlotCore.register` 的 disposer 不保证幂等）。
  *
- * @param {import('@deepseek-ai/cordis').Context} ctx 客户端根上下文。
+ * @param {any} ctx 客户端根上下文（需要 `inject` 与 `slots`）。
+ *   ⚠️ 刻意写 `any` 而不是 `import('@deepseek-ai/cordis').Context`：本仓所有
+ *   `plugin-src/client/*.js` 都走这条口径（`panel-entry.js:133` 逐字同款），
+ *   换成真实类型会让 `ctx.slots` / `ctx.inject` 的服务名（`sidebarRightTabs`）
+ *   全部报 TS2339 —— 那些服务由宿主**声明合并**提供，本仓没有对应的本地
+ *   类型入口，写死类型反而会与宿主版本耦合。
  * @param {(endpoint: string, payload?: unknown, signal?: AbortSignal) => Promise<unknown>} rpcCall
  *   Jet Hub 的管理 RPC 调用器（与面板入口共用同一份，绝不另建一条连接）。
  * @returns {(() => void) | undefined} 服务存活期的清理函数（交给 cordis / 宿主），

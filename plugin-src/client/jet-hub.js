@@ -2722,9 +2722,9 @@ function downloadCsv(filename, headers, rows) {
  *   给「右侧栏标签页」这类**宿主已经是容器**的地方用（见 `ledger-tab.js`）。
  *
  * ⚠️⚠️ **两种外壳共用同一个组件、同一份 hooks 与同一份 JSX**，只在外层与「完成」
- * 按钮上分叉。**不要**把 state 抽到新的子组件里：`tests/unit/token-ledger-account-wiring.spec.ts`
- * 是直接调本组件、让它自己的 hooks 跑起来断言渲染树里的账号名的 —— 一旦 state 下沉，
- * 那份真渲染守卫只展开一层就会**静默变成空转**（本仓库记录过的「假绿」形态）。
+ * 按钮上分叉。**不要**把 state 抽到新的子组件里：`tests/unit/ledger-pane-chrome.spec.ts`
+ * 是直接调本组件、让它自己的 hooks 跑起来断言渲染树里的 provider / 模型名的 —— 一旦
+ * state 下沉，那份真渲染守卫只展开一层就会**静默变成空转**（本仓库记录过的「假绿」形态）。
  *
  * ⚠️ `chrome` 的默认值必须是 `'modal'`：既有调用点（Jet Hub 页头的覆盖层）不传它，
  * 行为必须逐字节不变。
@@ -9941,9 +9941,10 @@ export const __creditBalanceRowForTest = CreditBalanceRow;
  * 产出可断言的内容，`JetHubPage` 顶层渲染走不到那条路径。
  *
  * ⚠️⚠️ 它同时是**两种外壳共用的唯一实现**的证据：`ledger-tab-wiring.spec.ts`
- * 用 `chrome: 'pane'` 直接渲染它，断言内容三件套（历史 / 汇总 / 明细）各渲染
- * 一次且**没有**「完成」按钮；`token-ledger-account-wiring.spec.ts` 用默认
- * `chrome: 'modal'` 断言账号名与列顺序。两份守卫盯的是同一个组件的两个分支。
+ * 断言注册进去的正文组件真的把它以 `chrome: 'pane'` 交给宿主；
+ * `ledger-pane-chrome.spec.ts` 分别用 `chrome: 'pane'` 与默认 `chrome: 'modal'`
+ * 真渲染它，断言内容三件套（历史 / 汇总 / 明细）在、且 pane 分支**没有**「完成」
+ * 按钮也没有遮罩。两份守卫盯的是同一个组件的两个分支。
  *
  * 不是公共 API：客户端 bundle 内部使用，外部不要依赖。
  */

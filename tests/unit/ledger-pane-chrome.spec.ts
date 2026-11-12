@@ -25,6 +25,7 @@
  * @module tests/unit/ledger-pane-chrome.spec.ts
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 
 // ── 替身 React：按槽位保存 state / 按 deps 重跑 effect（本仓既有形态） ──
 const reactStub = vi.hoisted(() => {
@@ -339,9 +340,86 @@ describe('pane 外壳（右侧栏标签页）', () => {
     expect(seen, 'pane 没有读历史').toContain('usage.tokenLedgerHistory')
   })
 
-  it('rpcCall 缺失时 pane 不抛（老宿主 / 测试替身的边角）', async () => {
+  /**
+   * ⚠️ 原来这条只写 `expect(tree).toBeTruthy()` —— 恒真（树永远是对象），
+   * 删掉 `load()` 的 catch、甚至让它抛穿，都照样绿（2026-11-12 审计 P2-6）。
+   * 真正的契约是：**没有 rpcCall 时不白屏**，给用户一句可读的失败与一个重试入口。
+   */
+  it('★ rpcCall 缺失时渲染失败提示 + 重试（不抛、也不留一片空白）', async () => {
     const tree = await render({ chrome: 'pane' })
-    // 缺 rpcCall 时组件会走「读取中 / 读取失败」的既有分支，但**不能**抛
-    expect(tree).toBeTruthy()
+    const alerts = findAll(tree, (node) => node.props?.role === 'alert')
+    expect(alerts, '没有 rpcCall 时既没内容也没提示 —— 用户看到一片空白').toHaveLength(1)
+    expect(
+      textsOf(tree).join(' '),
+      '失败提示里没有异常原文（用户/我们都没法定位）',
+    ).toContain('rpcCall is not a function')
+    expect(textsOf(tree), '失败提示里没有重试入口').toContain('重试')
+  })
+})
+
+/**
+ * 样式表侧的三条接缝。
+ *
+ * ⚠️⚠️ 2026-11-12 审计 P2-5：本 PR 新增的 `.dim-jh-ledgerPane*` 整块 CSS
+ * **零守卫** —— 删掉 `.dim-jh-ledgerPane` 规则里 269 个字符（含
+ * `container-type: inline-size`）之后 107 条相关用例全绿，而浏览器里
+ * `@container` 整块**静默失效**（不报错，只是永不匹配 ⇒ 窄面板下明细表横向溢出）。
+ *
+ * 判据全部在**剥掉注释**的文本上做：本仓库已登记过「把声明包进 CSS 注释仍命中」
+ * 的假绿（`credit-row-narrow-layout.spec.ts` 文件头 ②）。
+ */
+describe('样式表：pane 外壳的 CSS 接缝', () => {
+  const styles = readFileSync(new URL('../../plugin-src/client/jet-hub-styles.js', import.meta.url), 'utf8')
+  /** 剥掉 `/* … *\/` 注释后的样式文本（所有「某条声明在不在」都在它上面判）。 */
+  const bare = styles.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  /**
+   * 取一条**精确选择器**的规则体（选择器 + 空格 + `{` 后到第一个 `}`）。
+   *
+   * ⚠️ 只取第一条匹配 ⇒ 拿到的是**基础**规则，不是 `@container` 里的覆盖规则。
+   * 需要覆盖规则时用 `blockOf` 先切范围。
+   */
+  function ruleOf(selector: string): string {
+    const at = bare.indexOf(`${selector} {`)
+    if (at < 0) return ''
+    const open = bare.indexOf('{', at)
+    const close = bare.indexOf('}', open)
+    return bare.slice(open + 1, close)
+  }
+
+  it('★★ 根容器是容器查询锚点（丢了 container-type ⇒ 720px 覆盖整块静默失效）', () => {
+    const rule = ruleOf('.dim-jh-ledgerPane')
+    expect(rule, '找不到 .dim-jh-ledgerPane 规则 —— 标签页外壳没有样式').not.toBe('')
+    expect(
+      rule,
+      '缺 container-type: inline-size —— 下面的 @container 永远不会匹配（浏览器不报错）',
+    ).toContain('container-type: inline-size')
+    // 面板在标签页里已被宿主框住，自己不能再抢视口
+    expect(rule, 'pane 根容器带 position: fixed —— 会盖住整个应用').not.toContain('position: fixed')
+  })
+
+  it('★★ 内容区自己滚（复用 modalBody 会让 8 列定宽横向溢出）', () => {
+    const rule = ruleOf('.dim-jh-ledgerPaneBody')
+    expect(rule, '找不到 .dim-jh-ledgerPaneBody 规则').not.toBe('')
+    expect(rule, '缺纵向滚动 —— 长账本会把面板撑高').toContain('overflow-y: auto')
+    expect(rule, '缺横向裁剪 —— 8 列定宽会撑破面板').toContain('overflow-x: hidden')
+    expect(rule, 'pane 内容区不该用弹窗的滚动类').not.toContain('dim-jh-modalBody')
+  })
+
+  it('★ 窄面板（@container max-width: 720px）里有明细表降级', () => {
+    const at = bare.indexOf('@container (max-width: 720px)')
+    expect(at, '找不到 @container (max-width: 720px) 块').toBeGreaterThanOrEqual(0)
+    const block = bare.slice(at, bare.indexOf('@media', at))
+    expect(
+      block,
+      '@container 块里没有 .dim-jh-ledgerPaneBody .dim-jh-ledgerTable 的字号降级 —— 窄面板下明细表会溢出',
+    ).toContain('.dim-jh-ledgerPaneBody .dim-jh-ledgerTable')
+    // ⚠️ 两条不同选择器各判一次：只判一条时「删掉其中一条腿」仍是绿的
+    //    （2026-11-12 变异实测：删 ledgerTable 的两条规则后，只判 table 的
+    //    断言仍被 `…Table td` 那条命中 ⇒ 无牙）。热力图那条是另一个独立目标。
+    expect(
+      block,
+      '@container 块里没有 .dim-jh-ledgerHeatmapWrap 的横向滚动降级 —— 热力图会撑破面板',
+    ).toContain('.dim-jh-ledgerPaneBody .dim-jh-ledgerHeatmapWrap')
   })
 })

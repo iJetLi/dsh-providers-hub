@@ -68,7 +68,14 @@ vi.mock('react', () => {
 })
 
 // ── 替身 `jet-hub.js`：本文件不渲染面板，只需要那个符号能被 import 到 ──
+//
+// ⚠️ 键名必须是 `__tokenLedgerPanelForTest`（`ledger-tab.js` 的 import 名）：
+// 只给 `TokenLedgerPanel` 时那个 import 拿到的是 `undefined`，`createElement`
+// 的替身照样返回对象 ⇒ 判据看着过了、面板其实不存在。2026-11-12 审计补记。
 vi.mock('../../plugin-src/client/jet-hub.js', () => ({
+  __tokenLedgerPanelForTest: function TokenLedgerPanel() {
+    return null
+  },
   TokenLedgerPanel: function TokenLedgerPanel() {
     return null
   },
@@ -221,6 +228,53 @@ describe('ledger-tab 注册：正文槽位', () => {
     const second = register()
     const pick = (harness) => harness.registrations.find((row) => row.spec?.name === 'sidebar.right.pane.tab')
     expect(pick(first).component).toBe(pick(second).component)
+  })
+
+  /**
+   * ⚠️⚠️ 接缝守卫（2026-11-12 PR #65 审计补的，**真缺陷**）：
+   *
+   * 正文里 `createElement(TokenLedgerPanel, { rpcCall, chrome: 'pane' })` 的
+   * `chrome: 'pane'` 决定面板走**标签页外壳**还是默认的**弹窗外壳**。
+   * 把它删掉（或写成别的值）后，`TokenLedgerPanel` 会退回默认的 `modal`：
+   * 标签页里渲染出 `position: fixed` 的 `.dim-jh-modalOverlay` —— 一块**盖住整个
+   * 应用**的遮罩，而且带一个 `onClose === undefined` 的「完成」按钮。
+   *
+   * 而在补这条用例之前，**没有任何断言盯着这个字段**：`ledger-pane-chrome.spec.ts`
+   * 是**自己**把 `chrome: 'pane'` 传进面板的（它验的是「面板认得这个外壳」），
+   * 完全没有覆盖「正文有没有把它传下去」—— 删掉后 107/107 全绿。
+   *
+   * 判据取的是**真渲染出来的元素**（`createElement` 的入参），不是源码文本：
+   * 源码里 `chrome: 'pane'` 写在死分支里照样能命中。
+   */
+  it('★★ 正文必须把 chrome 传成 pane（漏传 ⇒ 标签页里渲染全屏遮罩）', () => {
+    const { registrations } = register()
+    const body = registrations.find((row) => row.spec?.name === 'sidebar.right.pane.tab')
+    expect(body, '没有注册正文槽位').toBeTruthy()
+
+    // 边界类只负责兜异常：先取它渲染出的 Inner（正文函数），再真调用一次。
+    const boundary = new body.component(body.spec.inject('session-1'))
+    const rendered = boundary.render()
+    expect(typeof rendered?.type, '边界的 render 没有产出正文组件').toBe('function')
+
+    const panelElement = rendered.type(rendered.props)
+    expect(
+      panelElement?.props?.chrome,
+      '正文没有把 chrome:"pane" 交给面板 —— 会退回默认 modal 外壳（全屏遮罩 + 无主的「完成」按钮）',
+    ).toBe('pane')
+    expect(
+      typeof panelElement?.props?.rpcCall,
+      '正文没有把 rpcCall 交给面板',
+    ).toBe('function')
+  })
+
+  it('★ 拿不到 rpcCall 时渲染 null（不抛、也不用空函数冒充）', () => {
+    const { registrations } = register()
+    const body = registrations.find((row) => row.spec?.name === 'sidebar.right.pane.tab')
+    const boundary = new body.component({})
+    const rendered = boundary.render()
+    // ⚠️ 用 `=== null` 而不是 `toBeFalsy`：`undefined` 意味着「忘了 return」，
+    // 与本条要守的「显式什么都不画」是两件事。
+    expect(rendered.type({}), '没有 rpcCall 时正文必须显式 return null').toBeNull()
   })
 })
 
