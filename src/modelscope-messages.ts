@@ -101,6 +101,12 @@ export interface ModelscopePayloadInput {
  *
  * 契约细节（每条都对齐仓库既有适配器）：
  * - `stream` **恒 true**：本适配器只走 SSE 路径，没有非流式分支；
+ * - `stream_options: { include_usage: true }` **恒带**：魔搭的 SSE 只有请求里
+ *   声明它才会在末帧下发 `usage`（2026-11-13 真机探针，同一账号同一模型：
+ *   不带 ⇒ 16 帧 **零** usage；带了 ⇒ 18 帧含 `prompt_tokens 73 / completion_tokens
+ *   36 / reasoning_tokens 33`，且上游 HTTP 200 接受该字段）。不带的话
+ *   `consumeOpenAiSse` 产不出 `usage` 块 ⇒ 网关的两条出口都省略 `usage` ⇒
+ *   账本把这次调用记成 0 token（Issue #60，`Qwen/Qwen3.8-Flash-Next` 35 次调用全无用量）；
  * - `system` 只有非空才带（空串会被上游当成一条空 system 消息）；
  * - `max_tokens` **只放行安全正整数** —— 0 / 负数 / NaN 会让 DSH 侧抛
  *   `INVALID_MODEL_MAX_TOKENS`，把整轮对话搞崩（不是降级，是崩）；
