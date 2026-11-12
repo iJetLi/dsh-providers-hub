@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, exist
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applySync, collectSyncModels, localGatewayBaseUrl, previewSync, type SyncModelSource } from '../../src/sync-service.js'
+import { planPiSync } from '../../src/sync-targets.js'
 import { resolveSyncPaths } from '../../src/sync-apply.js'
 
 /**
@@ -146,6 +147,7 @@ describe('previewSync — 只算不写', () => {
     const zcodePath = seedZcode()
     const piBefore = readFileSync(piPath, 'utf-8')
     const zcodeBefore = readFileSync(zcodePath, 'utf-8')
+
     await previewSync(fakeLlm(), { home })
     expect(readFileSync(piPath, 'utf-8')).toBe(piBefore)
     expect(readFileSync(zcodePath, 'utf-8')).toBe(zcodeBefore)
@@ -282,6 +284,7 @@ describe('applySync — 落盘 / 备份 / 幂等 / 回滚', () => {
     const zcodePath = seedZcode(['codearts/GLM-5.2'])
     const piBefore = readFileSync(piPath, 'utf-8')
     const zcodeBefore = readFileSync(zcodePath, 'utf-8')
+
     await expect(applySync({ listProviders: () => [], listModels: async () => [] }, { home })).rejects.toThrow(/没有返回任何模型|目录为空/)
     expect(readFileSync(piPath, 'utf-8')).toBe(piBefore)
     expect(readFileSync(zcodePath, 'utf-8')).toBe(zcodeBefore)
@@ -561,6 +564,7 @@ describe('目标选择（targets）', () => {
     const piPath = seedPi()
     const zcodePath = seedZcode()
     const zcodeBefore = readFileSync(zcodePath, 'utf-8')
+
     const result = await applySync(fakeLlm(), { home, targets: ['pi'] })
     expect(result.applied.map(a => a.target)).toEqual(['pi'])
     // 未选中的目标要出现在 skipped 里并说明原因（否则用户分不清「没选」与「失败」）
@@ -593,6 +597,224 @@ describe('目标选择（targets）', () => {
     seedZcode()
     const before = readFileSync(piPath, 'utf-8')
     await expect(applySync(fakeLlm(), { home, targets: [] })).rejects.toThrow(/没有选择任何要同步的 agent/)
+    expect(readFileSync(piPath, 'utf-8')).toBe(before)
+  })
+})
+
+/**
+ * 审计回归（2026-11-12，PR #184 对抗性审计）。
+ *
+ * 这三条都对应实测过的**静默数据销毁 / 部分成功不可见**路径。
+ */
+describe('审计回归 —— 失败可见性与保护集', () => {
+  it('⚠️⚠️ 个别模型 resolveModelInfo 失败不得删掉目标里已有的它，也不得把渠道报成失败', async () => {
+    const piPath = seedPi([
+      { id: 'codearts/GLM-5.2', name: 'GLM-5.2', contextWindow: 202752, maxTokens: 65536, input: ['text'] },
+    ])
+    const zcodePath = seedZcode(['codearts/GLM-5.2'])
+    // 目标里已有该模型的能力规则（真实配置里它就是这么来的）——本轮拿不到窗口时不能连规则一起删
+    const seededZcode = JSON.parse(readFileSync(zcodePath, 'utf-8'))
+    seededZcode.config.modelConfigRules.providerModelRules.push({
+      providerId: 'dsh-openai-gateway',
+      modelId: 'codearts/GLM-5.2',
+      contextWindow: 202752,
+      maxTokens: 65536,
+    })
+    writeFileSync(zcodePath, JSON.stringify(seededZcode, null, 2) + '\n', 'utf-8')
+
+    const flaky: SyncModelSource = {
+      listProviders: () => [{ id: 'codearts' }],
+      listModels: async () => [
+        { id: 'GLM-5.2', name: 'GLM-5.2' },
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+      ],
+      resolveModelInfo: async (_provider: string, id: string) => {
+        if (id === 'GLM-5.2') throw new Error('解析失败')
+        return { context: { contextWindow: 1000000 } }
+      },
+    } as SyncModelSource
+
+    const preview = await previewSync(flaky, { home })
+    // 渠道本身是好的 ⇒ 不能报「渠道失败」（否则 UI 会误导成整条不可用）
+    expect(preview.failedProviders).toEqual([])
+    expect(preview.usableModelCount).toBe(1)
+    const piTarget = preview.targets.find(t => t.target === 'pi')!
+    expect(piTarget.ok).toBe(true)
+    expect(piTarget.diff.skipped).toEqual(['codearts/GLM-5.2'])
+    // 关键不变式：skipped 与 removed 不能同时出现
+    expect(piTarget.diff.removed).toEqual([])
+
+    await applySync(flaky, { home })
+    const pi = JSON.parse(readFileSync(piPath, 'utf-8'))
+    expect(pi.providers['dsh-gateway'].models.map((m: any) => m.id))
+      .toEqual(['codearts/GLM-5.2', 'codearts/deepseek-v4-flash'])
+    // ZCode 侧同理：受保护的模型必须还在（旧 provider 会被迁到 dsh-<渠道>，但模型不能丢）
+    const zcode = JSON.parse(readFileSync(zcodePath, 'utf-8'))
+    const zProvider = zcode.config.providerConfigRules.providerRules
+      .find((p: any) => p.providerId === 'dsh-codearts')
+    expect(zProvider).toBeTruthy()
+    expect(zProvider.config.personalModelIds).toContain('codearts/GLM-5.2')
+    const zRules = zcode.config.modelConfigRules.providerModelRules
+    expect(zRules.some((r: any) => r.modelId === 'codearts/GLM-5.2')).toBe(true)
+  })
+
+  it('⚠️ 第二个目标写入失败时，错误里必须点名「已回滚的目标」并给出备份目录', async () => {
+    const piPath = seedPi()
+    seedZcode()
+    const piBefore = readFileSync(piPath, 'utf-8')
+    const error = await applySync(fakeLlm(), {
+      home,
+      validate: async (target: string) => {
+        if (target === 'zcode') throw new Error('模拟写入失败')
+      },
+    }).then(() => null, (caught: Error) => caught)
+    expect(error).toBeTruthy()
+    expect(error!.message).toContain('zcode')
+    expect(error!.message).toContain('模拟写入失败')
+    // ⚠️ 多目标是「全有或全无」：pi 已经被还原到同步前的字节，
+    //    用户不需要再担心「它到底改没改」（旧实现只报告「已经写了」，留半成品）。
+    expect(error!.message).toContain('pi')
+    expect(error!.message).toContain('备份')
+    expect(readFileSync(piPath, 'utf-8')).toBe(piBefore)
+  })
+
+  it('⚠️ 计划阶段抛错（同名 provider 指向别家）只跳过该目标，不让整次同步失败', async () => {
+    seedPi()
+    const zcodePath = seedZcode([])
+    // 手工建了一条 dsh-codearts，但端点指向别处 ⇒ 重建时该 providerId 已被占用
+    const config = JSON.parse(readFileSync(zcodePath, 'utf-8'))
+    config.config.providerConfigRules.providerRules.push({
+      providerId: 'dsh-codearts',
+      providerName: 'dsh-codearts',
+      enabled: true,
+      config: {
+        access: { type: 'api-key', apiKey: 'k' },
+        api: { type: 'openai-chat-completions', baseUrl: 'https://elsewhere.example/v1' },
+        personalModelIds: [],
+        modelOrder: [],
+      },
+    })
+    writeFileSync(zcodePath, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+    const before = readFileSync(zcodePath, 'utf-8')
+
+    const result = await applySync(fakeLlm(), { home })
+    expect(result.applied.map(a => a.target)).toEqual(['pi'])
+    const zSkip = result.skipped.find(s => s.target === 'zcode')!
+    // 不静默覆盖用户手工 provider，而是明确拒绝并说明原因
+    expect(zSkip.reason).toContain('dsh-codearts')
+    expect(zSkip.reason).toContain('已拒绝同步')
+    expect(readFileSync(zcodePath, 'utf-8')).toBe(before)
+  })
+})
+
+describe('审计回归 —— 目录采集缓存', () => {
+  /** 包一层计数：`SyncModelSource` 的每个方法各被调了几次。 */
+  function countingLlm(base: SyncModelSource) {
+    const counts = { listProviders: 0, listModels: 0, resolveModelInfo: 0 }
+    const source: SyncModelSource = {
+      listProviders: () => { counts.listProviders += 1; return base.listProviders() },
+      listModels: async (provider: string) => { counts.listModels += 1; return base.listModels(provider) },
+      resolveModelInfo: async () => {
+        counts.resolveModelInfo += 1
+        return { context: { contextWindow: 100000 } }
+      },
+    }
+    return { source, counts }
+  }
+
+  it('⚠️ preview 与 apply 共用同一份目录快照（apply 不再重新采集）', async () => {
+    seedPi([])
+    seedZcode([])
+    const { source, counts } = countingLlm(fakeLlm())
+
+    await previewSync(source, { home })
+    const afterPreview = { ...counts }
+    // 一次采集 = 3 个 provider 各一次 listModels（broken 抛错）+ 3 个模型各一次 resolveModelInfo
+    expect(afterPreview.listModels).toBe(3)
+    expect(afterPreview.resolveModelInfo).toBe(3)
+
+    await applySync(source, { home })
+    // apply 复用预览那一份 ⇒ 零新增采集。这正是「保护集不漂移」的前提：
+    // 两次采集之间目录一变，failedProviders 就会不同 ⇒「预览说保留、落盘却删除」。
+    expect(counts.listModels).toBe(afterPreview.listModels)
+    expect(counts.resolveModelInfo).toBe(afterPreview.resolveModelInfo)
+  })
+
+  it('force:true 会重新采集（UI「刷新」按钮必须能真的重读网关）', async () => {
+    seedPi([])
+    seedZcode([])
+    const { source, counts } = countingLlm(fakeLlm())
+
+    await previewSync(source, { home })
+    expect(counts.listModels).toBe(3)
+
+    await previewSync(source, { home, force: true })
+    expect(counts.listModels).toBe(6)
+  })
+})
+
+describe('审计回归 —— 多目标事务与写后复算', () => {
+  it('⚠️ ZCode 写入失败时，已经写成功的 pi 必须被还原', async () => {
+    const piPath = seedPi([{ id: 'codearts/old-model', name: 'codearts/old-model', contextWindow: 1000, maxTokens: 100, input: ['text'] }])
+    const zcodePath = seedZcode(['codearts/old-model'])
+    const piBefore = readFileSync(piPath, 'utf-8')
+    const zcodeBefore = readFileSync(zcodePath, 'utf-8')
+
+    await expect(applySync(fakeLlm(), {
+      home,
+      validate: (target) => {
+        if (target === 'zcode') throw new Error('模拟 ZCode 写入失败')
+      },
+    })).rejects.toThrow(/模拟 ZCode 写入失败/)
+
+    // 全有或全无：不能留下「pi 改了、ZCode 没改」的半成品状态
+    // （用户点一次「同步」是一个原子意图，半成品比干脆失败更难恢复）
+    expect(readFileSync(piPath, 'utf-8')).toBe(piBefore)
+    expect(readFileSync(zcodePath, 'utf-8')).toBe(zcodeBefore)
+  })
+
+  it('回滚成功时错误文案要说明「已自动回滚」并给出备份目录', async () => {
+    seedPi([])
+    seedZcode([])
+    let message = ''
+    try {
+      await applySync(fakeLlm(), {
+        home,
+        validate: (target) => {
+          if (target === 'zcode') throw new Error('模拟写入失败')
+        },
+      })
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('已自动回滚')
+    expect(message).toContain('备份：')
+    expect(message).toContain('pi')
+  })
+
+  it('⚠️ 写后幂等复算失败必须回滚（M09：删掉复算时这条会红）', async () => {
+    const piPath = seedPi([])
+    const before = readFileSync(piPath, 'utf-8')
+    let planCalls = 0
+
+    await expect(applySync(fakeLlm(), {
+      home,
+      targets: ['pi'],
+      // 正常实现下 `plan` 对刚写入的配置必然返回空 diff —— 所以「写后复算」
+      // 这条防御在无注入时不可能失败，也就永远不可能有用例守它（审计 M09）。
+      // 这里包一层，让第二次（= 复算）故意报告仍有差异。
+      targetOps: (target, paths, models, gatewayBaseUrl) => ({
+        path: paths.piModels,
+        plan: (config: any, planOptions?: any) => {
+          planCalls += 1
+          const planned = planPiSync(config, models, gatewayBaseUrl, planOptions)
+          return planCalls >= 2
+            ? { ...planned, diff: { added: ['ghost/model'], removed: [], updated: [], skipped: [], protectedModels: [] } }
+            : planned
+        },
+      }),
+    })).rejects.toThrow(/写入后复算仍有差异/)
+
     expect(readFileSync(piPath, 'utf-8')).toBe(before)
   })
 })

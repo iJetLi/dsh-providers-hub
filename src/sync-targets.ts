@@ -113,17 +113,35 @@ function clone<T>(value: T): T {
  */
 function normalizeEndpoint(raw: unknown): string {
   if (typeof raw !== 'string' || !raw.trim()) return ''
+  const trimmed = raw.trim()
   try {
-    const url = new URL(raw.trim())
-    return `${url.protocol}//${url.host}`.toLowerCase()
+    const url = new URL(trimmed)
+    // ⚠️ `new URL('localhost:8326')` **不抛错**，而是把 `localhost` 当成 scheme、
+    //    host 留空 ⇒ 所有裸 `host:port` 会归一成同一个 `localhost://`，
+    //    于是 8326 与 9999 被判成同一端点（实测会匹配到错的 provider）。
+    if (url.host) return `${url.protocol}//${url.host}`.toLowerCase()
+    throw new Error('empty host')
   } catch {
-    return raw.trim().toLowerCase().replace(/\/+$/, '')
+    // 裸 `host:port` / `127.0.0.1:8326`：补 scheme 再解析一次
+    try {
+      const url = new URL(`http://${trimmed}`)
+      if (url.host) return `${url.protocol}//${url.host}`.toLowerCase()
+    } catch {
+      // 落到下面的原串比较
+    }
+    return trimmed.toLowerCase().replace(/\/+$/, '')
   }
 }
 
 /** 能力值是否可安全写入配置：必须是正的有限数（0 / 负数 / NaN 一律拒）。 */
 function usableNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
+/** 逐元素比较两个字符串数组（`input` 模态列表用）。 */
+function sameStringArray(left: unknown, right: readonly string[]): boolean {
+  if (!Array.isArray(left) || left.length !== right.length) return false
+  return left.every((value, index) => value === right[index])
 }
 
 /**
@@ -223,13 +241,11 @@ export function planPiSync(
 
   const added: string[] = []
   const updated: string[] = []
-  const nextModels = ok.map(model => {
-    const kept = previous.get(model.id)
+  const byId = new Map(ok.map(model => [model.id, model]))
+
+  /** 用目录值覆盖本地条目；本地独有字段（reasoning 等）由展开保留。 */
+  const buildEntry = (model: SyncModel, kept: any): Record<string, unknown> => {
     const entry: Record<string, unknown> = { ...(kept ?? {}) }
-    if (!kept) added.push(model.id)
-    else if (kept.contextWindow !== model.contextWindow
-      || (usableNumber(model.maxTokens) && kept.maxTokens !== model.maxTokens)) updated.push(model.id)
-    // 目录侧的字段覆盖本地值；本地独有的字段（reasoning 等）由上面的展开保留
     entry.id = model.id
     entry.name = model.name ?? model.id
     entry.contextWindow = model.contextWindow
@@ -238,19 +254,46 @@ export function planPiSync(
     if (usableNumber(model.maxTokens)) entry.maxTokens = model.maxTokens
     entry.input = [...model.input]
     return entry
-  })
-
-  const keptIds = new Set(ok.map(model => model.id))
-  // ⚠️ 采集失败的渠道：把目标里**已有**的模型原样留回去（不是「不删」，是「保留」）。
-  //    只判 removed 是错的 —— 它们不在 nextModels 里就会被写成不存在。
-  const isProtected = makeProtectedCheck(options.failedProviders)
-  const protectedModels: string[] = []
-  for (const [id, previousEntry] of previous) {
-    if (keptIds.has(id) || !isProtected(id)) continue
-    protectedModels.push(id)
-    nextModels.push(previousEntry)
   }
-  const removed = [...previous.keys()].filter(id => !keptIds.has(id) && !isProtected(id))
+
+  // ⚠️ 两种「本次写不进去」都必须**保留目标现有条目**，绝不能判 removed：
+  //    ① 渠道采集失败（token 过期 / 网络抖动）；
+  //    ② 目录侧该模型能力值凑不齐（`skipped`）—— 它只是「这次没拿到窗口」，
+  //       不等于「这个模型下架了」。整条删掉 = 一次目录抖动就删用户配置。
+  const isProtected = makeProtectedCheck(options.failedProviders)
+  const skippedSet = new Set(skipped)
+  const keepAsIs = (id: string) => isProtected(id) || skippedSet.has(id)
+  const protectedModels: string[] = []
+
+  // 先按旧顺序铺（保留既有条目的位置），再把新增模型追加到末尾：
+  // 直接 `ok.map` + `push(previousEntry)` 会把受保护模型挪到数组末尾，
+  // 覆盖用户手排的 modelOrder。
+  const nextModels: any[] = []
+  const emitted = new Set<string>()
+  for (const [id, previousEntry] of previous) {
+    const model = byId.get(id)
+    if (model) {
+      nextModels.push(buildEntry(model, previousEntry))
+      emitted.add(id)
+      if (previousEntry.contextWindow !== model.contextWindow
+        || (usableNumber(model.maxTokens) && previousEntry.maxTokens !== model.maxTokens)
+        || previousEntry.name !== (model.name ?? model.id)
+        || !sameStringArray(previousEntry.input, model.input)) updated.push(id)
+      continue
+    }
+    if (!keepAsIs(id)) continue
+    nextModels.push(previousEntry)
+    emitted.add(id)
+    if (isProtected(id)) protectedModels.push(id)
+  }
+  for (const model of ok) {
+    if (emitted.has(model.id)) continue
+    nextModels.push(buildEntry(model, undefined))
+    emitted.add(model.id)
+    added.push(model.id)
+  }
+
+  const removed = [...previous.keys()].filter(id => !emitted.has(id))
   provider.models = nextModels
   result.providers![key] = provider
   return { config: result, diff: { added, removed, updated, skipped, protectedModels } }
@@ -270,6 +313,16 @@ const ZCODE_PROVIDER_PREFIX = 'dsh-'
 /** 渠道 id → 它在 ZCode 里对应的 provider id（如 `codearts` → `dsh-codearts`）。 */
 export function zcodeProviderIdFor(channel: string): string {
   return ZCODE_PROVIDER_PREFIX + channel
+}
+
+/**
+ * `zcodeProviderIdFor` 的逆运算：从 providerId 反推渠道名。
+ * 不带前缀的 provider 返回 `''`（它不是本功能生成的）。
+ */
+export function channelOfZcodeProviderId(providerId: string): string {
+  return providerId.startsWith(ZCODE_PROVIDER_PREFIX)
+    ? providerId.slice(ZCODE_PROVIDER_PREFIX.length)
+    : ''
 }
 
 /**
@@ -321,12 +374,19 @@ export function planZcodeSync(
 
   // 旧模型：把所有管理中 provider 的模型按渠道汇总（升级前是「一条装全部」）
   const oldByChannel = new Map<string, string[]>()
+  // ⚠️ 没有 `<channel>/` 前缀的旧 id（例如 `gpt-4o`）无法归属任何渠道。
+  //    过去直接 `continue` ⇒ 它既不进 old 也不进 new，被静默删掉且 diff 完全不提。
+  //    现在收集起来如实计进 removed，至少让用户看见「这条被移除了」。
+  const unroutableOld: string[] = []
   for (const rule of managed) {
     const list = Array.isArray(rule?.config?.personalModelIds) ? rule.config.personalModelIds : []
     for (const id of list) {
       if (typeof id !== 'string' || !id) continue
       const channel = providerOfModelId(id)
-      if (!channel) continue
+      if (!channel) {
+        if (!unroutableOld.includes(id)) unroutableOld.push(id)
+        continue
+      }
       const bucket = oldByChannel.get(channel) ?? []
       bucket.push(id)
       oldByChannel.set(channel, bucket)
@@ -334,6 +394,7 @@ export function planZcodeSync(
   }
 
   const { ok, skipped } = partitionModels(models)
+  const skippedSet = new Set(skipped)
   const newByChannel = new Map<string, SyncModel[]>()
   for (const model of ok) {
     const channel = providerOfModelId(model.id)
@@ -366,14 +427,23 @@ export function planZcodeSync(
       continue
     }
     const fresh = newByChannel.get(channel) ?? []
-    if (fresh.length === 0) continue
+    if (fresh.length === 0) {
+      // 目录里这条渠道一个可写模型都没有。但旧配置里如果还有本轮 `skipped` 的模型，
+      // 必须连渠道一起保留 —— 否则它们会跟着 provider 一起消失。
+      const skippedOld = old.filter(id => skippedSet.has(id))
+      if (skippedOld.length > 0) finalByChannel.set(channel, skippedOld)
+      continue
+    }
     const freshIds = fresh.map(model => model.id)
     const freshSet = new Set(freshIds)
     const oldSet = new Set(old)
-    finalByChannel.set(channel, [
-      ...old.filter(id => freshSet.has(id)),
+    // ⚠️ 本轮 `skipped` 的旧 id 必须保留：它只是「这次没拿到窗口」，不是「模型下架」。
+    //    不保留会被从 personalModelIds 与能力规则里同时删除。
+    //    另外用 `new Set` 去掉升级残留造成的重复 id（旧 provider 与新 provider 同装一条）。
+    finalByChannel.set(channel, [...new Set([
+      ...old.filter(id => freshSet.has(id) || skippedSet.has(id)),
       ...freshIds.filter(id => !oldSet.has(id)),
-    ])
+    ])])
   }
 
   // diff：按模型 id 算（跨 provider 迁移不算变更，只有真的增/删才算）
@@ -387,6 +457,8 @@ export function planZcodeSync(
   for (const [channel, ids] of oldByChannel) {
     if (!finalByChannel.has(channel)) removed.push(...ids)
   }
+  // 无渠道前缀的旧 id 无法路由，会被移出 personalModelIds；如实计入 removed 而不是静默丢
+  removed.push(...unroutableOld)
 
   // ── 能力规则（缺 contextWindow 会让模型在 ZCode 里不可用）──
   result.config!.modelConfigRules = result.config!.modelConfigRules ?? {}
@@ -394,11 +466,16 @@ export function planZcodeSync(
   const existingRules: any[] = Array.isArray(modelRules.providerModelRules) ? modelRules.providerModelRules : []
   const managedIds = new Set(managed.map(entry => String(entry?.providerId)))
 
-  /** 判定某条能力规则是否属于「本功能管理范围」（含已消失渠道的旧 rule，需一并清理）。 */
-  const isManagedRule = (entry: any): boolean => {
-    const pid = String(entry?.providerId ?? '')
-    return managedIds.has(pid) || pid.startsWith(ZCODE_PROVIDER_PREFIX)
-  }
+  /**
+   * 判定某条能力规则是否属于「本功能管理范围」（含已消失渠道的旧 rule，需一并清理）。
+   *
+   * ⚠️ 判据**只有「provider 的端点指向网关」**（`managedIds` 由端点算出）。
+   *    曾经额外用 `pid.startsWith('dsh-')` 兜底，结果把用户**手工创建**、
+   *    id 恰好以 `dsh-` 开头但端点指向别家的 provider 一起接管：
+   *    provider 条目保留、能力规则却被删光 ⇒ 该 provider 的模型全部缺
+   *    contextWindow 变成不可用，而 diff 一行都不显示（实测）。
+   */
+  const isManagedRule = (entry: any): boolean => managedIds.has(String(entry?.providerId ?? ''))
 
   // 旧窗口值：既用于判断 updated，也用于受保护渠道原样保留
   const oldWindow = new Map<string, unknown>()
@@ -408,21 +485,24 @@ export function planZcodeSync(
     if (mid) oldWindow.set(mid, entry?.config?.properties?.contextWindow)
   }
 
-  // 非管理范围的规则原样保留；管理范围的只保留「受保护渠道」的那些。
+  // 非管理范围的规则原样保留；管理范围的只保留「受保护渠道」或「本轮 skipped 模型」的那些。
   //
-  // ⚠️ 受保护渠道的规则必须把 providerId **改写成** `dsh-<渠道>`：旧条目
-  //    （如 `dsh-openai-gateway`）随后会被移除，若规则继续指向它，ZCode 就会
-  //    找不到 provider ⇒ 模型不可用 —— 那等于变相删除，与「受保护」相反。
+  // ⚠️ 受保护渠道的规则**不能**把 providerId 改写成 `dsh-<渠道>`：该渠道的 provider
+  //    本轮是原样保留的（不重建），改写后规则会指向一个不存在的 provider，
+  //    ZCode 找不到 provider ⇒ 模型直接不可用（实测）。
+  //    skipped 模型则相反：它们的旧 provider 会被移除，规则必须跟着迁到新 provider。
   const keptRules = existingRules
     .filter(entry => {
       if (!isManagedRule(entry)) return true
       const mid = typeof entry?.modelId === 'string' ? entry.modelId : ''
-      return protectedChannels.has(providerOfModelId(mid))
+      return protectedChannels.has(providerOfModelId(mid)) || skippedSet.has(mid)
     })
     .map(entry => {
       if (!isManagedRule(entry)) return entry
       const mid = typeof entry?.modelId === 'string' ? entry.modelId : ''
-      return { ...entry, providerId: zcodeProviderIdFor(providerOfModelId(mid)) }
+      const channel = providerOfModelId(mid)
+      if (protectedChannels.has(channel)) return entry
+      return { ...entry, providerId: zcodeProviderIdFor(channel) }
     })
 
   const updated: string[] = []
@@ -440,12 +520,39 @@ export function planZcodeSync(
   modelRules.providerModelRules = keptRules
 
   // ── provider 条目：移除管理中的旧条目，按渠道重建 ──
-  const keptProviders = rules.filter(entry => !managedIds.has(String(entry?.providerId)))
+  /**
+   * 保留的 provider 条目。
+   *
+   * ⚠️ 受保护渠道（未勾选 / 采集失败 / 目标独有）的 provider 必须**原样保留**：
+   *    过去按 `!managedIds.has(pid)` 过滤，会把受保护渠道也滤掉、再用模板重建一条，
+   *    结果 `enabled` / `providerName` / `access.apiKey` 全被模板值覆盖（实测）。
+   */
+  const keptProviders = rules.filter(entry => {
+    const pid = String(entry?.providerId ?? '')
+    if (!managedIds.has(pid)) return true
+    // ① 已经是「按渠道命名」的 provider（dsh-<渠道>）：受保护渠道原样保留
+    const channel = channelOfZcodeProviderId(pid)
+    if (channel !== '' && protectedChannels.has(channel)) return true
+    // ② 升级前的形态（一条 provider 装多个渠道，如 dsh-openai-gateway）：
+    //    只要它还装着**受保护渠道**的模型，就整体保留 ——
+    //    否则该渠道的模型会随着这条 provider 一起消失。
+    const ids = Array.isArray(entry?.config?.personalModelIds) ? entry.config.personalModelIds : []
+    return ids.some((id: unknown) => typeof id === 'string' && protectedChannels.has(providerOfModelId(id)))
+  })
+  const keptProviderIds = new Set(keptProviders.map(entry => String(entry?.providerId)))
   const baseConfig = template.config ?? {}
   for (const [channel, ids] of finalByChannel) {
+    if (protectedChannels.has(channel)) continue
+    const providerId = zcodeProviderIdFor(channel)
+    if (keptProviderIds.has(providerId)) {
+      throw new SyncPlanError(
+        `ZCode 里已存在名为 ${providerId} 的 provider，但它不指向网关（${gatewayBaseUrl}）；`
+        + '为避免覆盖你手工配置的 provider，已拒绝同步。请先重命名或删除该 provider 后重试。',
+      )
+    }
     keptProviders.push({
-      providerId: zcodeProviderIdFor(channel),
-      providerName: zcodeProviderIdFor(channel),
+      providerId,
+      providerName: providerId,
       enabled: template.enabled !== false,
       config: {
         ...baseConfig.group === undefined ? {} : { group: baseConfig.group },
@@ -457,6 +564,7 @@ export function planZcodeSync(
         modelOrder: [...ids],
       },
     })
+    keptProviderIds.add(providerId)
   }
   result.config!.providerConfigRules!.providerRules = keptProviders
 

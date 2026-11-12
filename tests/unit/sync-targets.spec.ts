@@ -351,17 +351,24 @@ describe('失败渠道保护 —— 临时故障不得误删', () => {
     expect(plan.config.providers['dsh-gateway'].models.map((m: any) => m.id)).not.toContain('codearts/gone')
   })
 
-  it('⚠️⚠️ ZCode：受保护渠道的模型与能力规则原样保留，且 providerId 必须跟着迁到 dsh-<渠道>', () => {
+  it('⚠️⚠️ ZCode：受保护渠道的 provider / 模型 / 能力规则全部原样保留（不重建、不改写 providerId）', () => {
     const config = zcodeConfig(['codearts/a'], [
       { providerId: 'dsh-openai-gateway', modelId: 'codearts/a', config: { properties: { contextWindow: 100 } } },
     ])
     const plan = planZcodeSync(config, [model('minimax/x')], GATEWAY_BASE, { failedProviders: ['codearts'] })
-    expect(zcodeProviderOf(plan, 'codearts').config.personalModelIds).toEqual(['codearts/a'])
+    // 受保护渠道不重建：仍挂在原来的 provider 上，字段一个不改
+    const legacy = plan.config.config.providerConfigRules.providerRules
+      .find((p: any) => p.providerId === 'dsh-openai-gateway')
+    expect(legacy).toBeTruthy()
+    expect(legacy.config.personalModelIds).toEqual(['codearts/a'])
+    expect(legacy.enabled).toBe(true)
+    // 也没有凭空多出一条 dsh-codearts
+    expect(zcodeProviderOf(plan, 'codearts')).toBeFalsy()
     const rules = plan.config.config.modelConfigRules.providerModelRules
     const kept = rules.find((r: any) => r.modelId === 'codearts/a')
     expect(kept).toBeTruthy()
-    // ⚠️ 旧 provider 已被移除，规则若仍指向它 ⇒ ZCode 找不到 provider ⇒ 模型不可用
-    expect(kept.providerId).toBe('dsh-codearts')
+    // ⚠️ provider 没重建 ⇒ providerId 绝不能改写成 dsh-codearts（否则规则指向不存在的 provider）
+    expect(kept.providerId).toBe('dsh-openai-gateway')
     expect(kept.config.properties.contextWindow).toBe(100)
     expect(plan.diff.removed).toEqual([])
     expect(plan.diff.protectedModels).toEqual(['codearts/a'])
@@ -380,5 +387,149 @@ describe('失败渠道保护 —— 临时故障不得误删', () => {
     const plan = planPiSync(config, [model('minimax/x')], GATEWAY_BASE, { failedProviders: ['zcode-cpa'] })
     expect(plan.diff.removed).toEqual([])
     expect(plan.diff.protectedModels).toEqual(['zcode-cpa/innno/deepseek-v4-pro'])
+  })
+})
+
+/**
+ * 审计回归（2026-11-12，PR #184 对抗性审计）。
+ *
+ * 每一条都对应一个**实测过的**数据销毁路径 —— 不是「理论上可能」。
+ * 修法见 `src/sync-targets.ts` 里对应的 ⚠️ 注释。
+ */
+describe('审计回归 —— 不得静默删除用户配置', () => {
+  it('⚠️⚠️ pi：目录侧能力值缺失（skipped）不得删掉目标里已有的模型', () => {
+    const config = piConfig([
+      { id: 'codearts/a', name: 'codearts/a', contextWindow: 1000000, maxTokens: 128000, input: ['text'] },
+      { id: 'codearts/b', name: 'codearts/b', contextWindow: 1000000, maxTokens: 128000, input: ['text'] },
+    ])
+    // b 这次没拿到窗口（上游抖动 / resolveModelInfo 失败）
+    const plan = planPiSync(config, [model('codearts/a'), { ...model('codearts/b'), contextWindow: 0 }], GATEWAY_BASE)
+    expect(plan.diff.skipped).toEqual(['codearts/b'])
+    // 关键：skipped 与 removed 不能同时出现（旧实现两者都报）
+    expect(plan.diff.removed).toEqual([])
+    expect(plan.config.providers['dsh-gateway'].models.map((m: any) => m.id))
+      .toEqual(['codearts/a', 'codearts/b'])
+  })
+
+  it('⚠️⚠️ ZCode：skipped 的模型必须留在 personalModelIds 与能力规则里', () => {
+    const config = zcodeConfig(['codearts/a', 'codearts/b'], [
+      { providerId: 'dsh-openai-gateway', modelId: 'codearts/b', config: { properties: { contextWindow: 100 } } },
+    ])
+    const plan = planZcodeSync(config, [model('codearts/a'), { ...model('codearts/b'), contextWindow: NaN }], GATEWAY_BASE)
+    expect(plan.diff.skipped).toContain('codearts/b')
+    expect(plan.diff.removed).not.toContain('codearts/b')
+    expect(zcodeProviderOf(plan, 'codearts').config.personalModelIds).toContain('codearts/b')
+    const rules = plan.config.config.modelConfigRules.providerModelRules
+    const kept = rules.find((r: any) => r.modelId === 'codearts/b')
+    expect(kept).toBeTruthy()
+    // 旧 provider 被删了，规则必须跟着迁到新 provider，否则悬空
+    expect(kept.providerId).toBe('dsh-codearts')
+  })
+
+  it('⚠️⚠️ 手工创建、id 以 dsh- 开头但端点指向别家的 provider，其能力规则不得被删', () => {
+    const config = zcodeConfig(['codearts/a'])
+    config.config.providerConfigRules.providerRules.push({
+      providerId: 'dsh-custom',
+      providerName: 'dsh-custom',
+      enabled: true,
+      config: {
+        access: { type: 'api-key', apiKey: 'custom-own-key' },
+        api: { type: 'openai-chat-completions', baseUrl: 'https://api.my-own-vendor.example/v1' },
+        personalModelIds: ['custom/foo'],
+        modelOrder: ['custom/foo'],
+      },
+    })
+    config.config.modelConfigRules.providerModelRules.push({
+      providerId: 'dsh-custom', modelId: 'custom/foo', config: { properties: { contextWindow: 200000 } },
+    })
+    const plan = planZcodeSync(config, [model('codearts/a')], GATEWAY_BASE)
+    const rules = plan.config.config.modelConfigRules.providerModelRules
+    const custom = rules.find((r: any) => r.modelId === 'custom/foo')
+    expect(custom).toBeTruthy()
+    expect(custom.providerId).toBe('dsh-custom')
+    expect(custom.config.properties.contextWindow).toBe(200000)
+    // provider 本身也必须原样在（含它自己的 key）
+    const provider = plan.config.config.providerConfigRules.providerRules
+      .find((p: any) => p.providerId === 'dsh-custom')
+    expect(provider.config.access.apiKey).toBe('custom-own-key')
+    expect(provider.config.personalModelIds).toEqual(['custom/foo'])
+  })
+
+  it('⚠️ 受保护渠道的 provider 字段不得被模板覆盖（enabled / providerName / apiKey）', () => {
+    const config = zcodeConfig(['codearts/a'])
+    // 用户手工停用了 dsh-minimax（端点仍指向网关 ⇒ 属于管理范围）
+    config.config.providerConfigRules.providerRules.push({
+      providerId: 'dsh-minimax',
+      providerName: '我自己的 MiniMax',
+      enabled: false,
+      config: {
+        access: { type: 'api-key', apiKey: 'my-own-minimax-key' },
+        api: { type: 'openai-chat-completions', baseUrl: GATEWAY_BASE },
+        personalModelIds: ['minimax/x'],
+        modelOrder: ['minimax/x'],
+      },
+    })
+    const plan = planZcodeSync(config, [model('codearts/a')], GATEWAY_BASE, { failedProviders: ['minimax'] })
+    const kept = plan.config.config.providerConfigRules.providerRules
+      .find((p: any) => p.providerId === 'dsh-minimax')
+    expect(kept.enabled).toBe(false)
+    expect(kept.providerName).toBe('我自己的 MiniMax')
+    expect(kept.config.access.apiKey).toBe('my-own-minimax-key')
+    expect(kept.config.personalModelIds).toEqual(['minimax/x'])
+  })
+
+  it('⚠️ 无渠道前缀的旧模型必须如实报 removed（不能静默消失）', () => {
+    const config = zcodeConfig(['bare-model', 'codearts/a'])
+    const plan = planZcodeSync(config, [model('codearts/a')], GATEWAY_BASE)
+    expect(plan.diff.removed).toContain('bare-model')
+    expect(zcodeProviderOf(plan, 'codearts').config.personalModelIds).toEqual(['codearts/a'])
+  })
+
+  it('⚠️ 网关改了模型名或新增视觉能力时必须落盘（不能报「已是目标状态」）', () => {
+    const config = piConfig([
+      { id: 'codearts/a', name: 'old-name', contextWindow: 1000000, maxTokens: 128000, input: ['text'] },
+    ])
+    const next = { ...model('codearts/a'), name: 'new-name', input: ['text', 'image'] }
+    const plan = planPiSync(config, [next], GATEWAY_BASE)
+    expect(plan.diff.updated).toEqual(['codearts/a'])
+    const written = plan.config.providers['dsh-gateway'].models.find((m: any) => m.id === 'codearts/a')
+    expect(written.name).toBe('new-name')
+    expect(written.input).toEqual(['text', 'image'])
+  })
+
+  it('⚠️ 升级残留（旧 provider 与新 provider 同装一条模型）不得写出重复 id', () => {
+    const config = zcodeConfig(['codearts/a'])
+    // 模拟「上一轮已建 dsh-codearts、旧 dsh-openai-gateway 还没清掉」的中间态
+    config.config.providerConfigRules.providerRules.push({
+      providerId: 'dsh-codearts',
+      providerName: 'dsh-codearts',
+      enabled: true,
+      config: {
+        access: { type: 'api-key', apiKey: 'k' },
+        api: { type: 'openai-chat-completions', baseUrl: GATEWAY_BASE },
+        personalModelIds: ['codearts/a'],
+        modelOrder: ['codearts/a'],
+      },
+    })
+    const plan = planZcodeSync(config, [model('codearts/a')], GATEWAY_BASE)
+    const provider = zcodeProviderOf(plan, 'codearts')
+    expect(provider.config.personalModelIds).toEqual(['codearts/a'])
+    expect(provider.config.modelOrder).toEqual(['codearts/a'])
+  })
+
+  it('⚠️ 裸 host:port 的 baseUrl 必须按端口区分（旧实现不同端口归一成同一个端点）', () => {
+    const config = piConfig([])
+    // 两个裸地址，端口不同；8326 在前会被旧实现误命中
+    const rules: Record<string, any> = config.providers
+    rules['other-port'] = {
+      ...rules['dsh-gateway'],
+      name: 'other-port',
+      baseUrl: 'localhost:9999',
+      models: [],
+    }
+    rules['dsh-gateway'].baseUrl = 'localhost:8326'
+    // 裸查询 8326 必须命中 8326 那条，而不是「第一个裸条目」
+    expect(findPiProvider(config, 'localhost:8326')).toBe('dsh-gateway')
+    expect(() => findPiProvider(config, 'localhost:8327')).toThrow(SyncPlanError)
   })
 })

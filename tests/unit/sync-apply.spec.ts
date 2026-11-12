@@ -145,3 +145,40 @@ describe('applyJsonPlan — 备份 / 写入 / 校验 / 回滚', () => {
     expect(readdirSync(join(root, 'backups'))).toHaveLength(2)
   })
 })
+
+describe('applyJsonPlan — 保留原文件的 BOM 与换行符', () => {
+  // 这两个配置文件是**别人的应用**在读的，重写风格属于破坏性变更：
+  // - 吞掉 BOM：PowerShell 5 / .NET 默认解码器会按 ANSI 代码页读，中文模型名乱码；
+  // - 把 CRLF 改成 LF：用户的 git diff 从此整文件变红，手工合并时分不清真假改动。
+  it('⚠️ 原文件带 UTF-8 BOM 时，写回必须仍带 BOM', async () => {
+    const path = join(root, 'bom.json')
+    writeFileSync(path, '\ufeff' + JSON.stringify({ v: 0 }, null, 2) + '\n', 'utf-8')
+
+    await applyJsonPlan(path, { v: 1 })
+
+    const bytes = readFileSync(path)
+    expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf])
+    // 且 BOM 之外确实是新内容（不是「原样没写」）
+    expect(readJsonConfig<{ v: number }>(path).v).toBe(1)
+  })
+
+  it('⚠️ 原文件是 CRLF 时，写回必须仍是 CRLF', async () => {
+    const path = join(root, 'crlf.json')
+    writeFileSync(path, JSON.stringify({ v: 0 }, null, 2).replace(/\n/g, '\r\n') + '\r\n', 'utf-8')
+
+    await applyJsonPlan(path, { v: 1 })
+
+    const text = readFileSync(path, 'utf-8')
+    expect(text).toContain('\r\n')
+    // 去掉所有 CRLF 后不应再剩裸 LF（否则就是混合换行）
+    expect(text.replace(/\r\n/g, '')).not.toContain('\n')
+  })
+
+  it('原文件是 LF 时不要擅自加 CRLF', async () => {
+    const path = seed('lf.json', { v: 0 })
+
+    await applyJsonPlan(path, { v: 1 })
+
+    expect(readFileSync(path, 'utf-8')).not.toContain('\r')
+  })
+})

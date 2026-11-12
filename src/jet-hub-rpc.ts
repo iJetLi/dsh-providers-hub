@@ -28,7 +28,7 @@ import { AUTO_PROVIDER as AUTO_PROVIDER_ID } from './auto-adapter.js'
 import { resolveAutoBadgeRewrite, type AutoBadgeState } from './auto-badge.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
 import { isGatewayEnabled, isGatewayHostFromEnv } from './openai-gateway/config.js'
-import { collectGatewayEffortViews, collectGatewayModels, toGatewayModelIds, type GatewayModelSource } from './openai-gateway/models.js'
+import { collectGatewayCatalogSnapshot, toGatewayModelIds, type GatewayModelSource } from './openai-gateway/models.js'
 import {
   applyGatewayDesiredState,
   gatewayAddress,
@@ -1544,17 +1544,20 @@ async function collectGatewayCatalog(
   providers: readonly { id: string }[],
   onError: (provider: string, error: unknown) => void,
 ): Promise<RpcGatewayModel[]> {
-  const source: GatewayModelSource = {
-    listProviders: () => providers,
-    listModels: (provider) => llm!.listModels(provider),
-  }
-  const resolve = llm?.resolveModelInfo
-  if (typeof resolve === 'function') {
-    source.resolveModelInfo = (provider, model) => resolve.call(llm, provider, model)
-  }
-  const groups = await collectGatewayModels(source, onError)
-  const views = await collectGatewayEffortViews(source, groups, onError)
-  return toGatewayModelIds(groups, views)
+  if (llm === undefined) return []
+  // ⚠️ 必须走 collectGatewayCatalogSnapshot（带 30 秒缓存），不要在这里自己
+  // 组一个 GatewayModelSource 再裸采集：`source` 每次新建会让缓存 key 永远
+  // 不命中（WeakMap 里攒一堆死条目），而且设置页每次打开都会重新打 12 个
+  // `listModels` + 每个模型一次 `resolveModelInfo`（实测 369 次）。
+  //
+  // `LlmServiceLike` 与 `GatewayModelSource` 结构等价，只差 `listProviders`
+  // 在本模块是可选的 —— 所以这里用断言，并把兜底清单作为 `providers` 传进去
+  // （`collectGatewayModels` 会优先用它，不再调 `llm.listProviders()`）。
+  const source = llm as unknown as GatewayModelSource
+  const catalog = await collectGatewayCatalogSnapshot(source, { providers, onError })
+  // ⚠️ 刻意不 applyGatewayContextWindows：`RpcGatewayModel` 没有 `contextWindow`
+  // 字段（设置页不展示窗口），带上去只是多传数据。
+  return toGatewayModelIds(catalog.groups, catalog.details.effortViews)
 }
 
 /**

@@ -59,23 +59,47 @@ export function SyncModelsSection({ rpcCall }) {
   const [error, setError] = React.useState(null)
   const [result, setResult] = React.useState(null)
   const mounted = React.useRef(true)
+  /**
+   * 预览请求序号：只接受**最后一次发起**的请求结果。
+   *
+   * ⚠️ 连点渠道会并发多个 `load`，没有闸门时旧的响应可能后到并覆盖新的，
+   *    界面就会出现「摘要写已勾选 1 个渠道、折叠标题写已选 2/2、同步按钮却是亮的」
+   *    这种自相矛盾状态（实测）。
+   */
+  const requestSeq = React.useRef(0)
 
-  /** 单次预览请求（不处理默认勾选）。 */
+  /**
+   * 单次预览请求（不处理默认勾选）。
+   *
+   * `force: true` 让服务端跳过 30 秒目录缓存 —— 「刷新」按钮必须能真的重读网关，
+   * 否则点下去只会拿到缓存、界面纹丝不动（看起来像按钮坏了）。
+   * ⚠️ 只有「刷新」用它：`sync.apply` 刻意不接受 force，见 `sync-rpc.ts` 的 `readForce`。
+   */
   const fetchPreview = React.useCallback(
-    async providers => rpcCall('sync.preview', providers === undefined ? {} : { providers }),
+    async (providers, force) => rpcCall('sync.preview', {
+      ...providers === undefined ? {} : { providers },
+      ...force === true ? { force: true } : {},
+    }),
     [rpcCall],
   )
 
   /**
    * 拉预览。
    * @param providers 渠道白名单；`undefined` 表示「首次加载，先拿清单」
+   * @param options `keepResult: true` = 保留上一次的 apply 结果
+   *   （`run` 成功之后的重拉用：那份结果记录的是**刚刚写进磁盘**的事实，
+   *   清掉它用户就永远看不到「新增了几项、备份在哪」，而这正是回滚的唯一线索）。
+   * @param options `force: true` = 跳过服务端 30 秒目录缓存（「刷新」按钮用）
    */
-  const load = React.useCallback(async providers => {
+  const load = React.useCallback(async (providers, options) => {
+    const keepResult = options?.keepResult === true
+    const force = options?.force === true
+    const seq = ++requestSeq.current
     setPhase('loading')
     setError(null)
     try {
-      let value = await fetchPreview(providers)
-      if (!mounted.current || !value) return
+      let value = await fetchPreview(providers, force)
+      if (!mounted.current || seq !== requestSeq.current || !value) return
       if (providers === undefined) {
         // 首次：先拿到渠道清单，再用默认勾选集重拉。
         //
@@ -87,17 +111,26 @@ export function SyncModelsSection({ rpcCall }) {
         const defaults = defaultSelectedProviders(value)
         setSelected(defaults)
         if (defaults.length > 0) {
-          const narrowed = await fetchPreview(defaults)
-          if (!mounted.current || !narrowed) return
+          // ⚠️ 复用同一次请求的 force 语义：首次加载的第二次请求若不带 force，
+          //    在「第一次已强制刷新」之后仍会命中缓存 —— 无害但没必要，
+          //    更重要的是两次请求必须看到**同一份**目录，否则显示的 diff 会自相矛盾。
+          const narrowed = await fetchPreview(defaults, force)
+          if (!mounted.current || seq !== requestSeq.current || !narrowed) return
           value = narrowed
         }
       }
       setPreview(value)
       setPhase('ready')
+      // 新一轮预览成功 ⇒ 上一轮的 apply 结果已过时（它的 diff 基于旧目录）。
+      // 但 `run` 成功后的重拉必须保留（否则「已写入 / 备份目录」一帧都看不到）。
+      if (!keepResult) setResult(null)
     } catch (caught) {
-      if (!mounted.current) return
+      if (!mounted.current || seq !== requestSeq.current) return
       setError(caught?.message || '无法读取同步预览')
       setPhase('error')
+      // ⚠️ 失败时必须清掉上一次的成功结果：否则红字错误与绿字「已写入」同屏，
+      //    旧 diff 还留在屏幕上、按钮仍可点，用户会照着已失效的预览去确认写入。
+      setResult(null)
     }
   }, [fetchPreview])
 
@@ -116,21 +149,31 @@ export function SyncModelsSection({ rpcCall }) {
 
   /** 执行同步：成功后重拉预览，让 diff 反映落盘后的真实状态。 */
   const run = React.useCallback(async () => {
+    // ⚠️ 目标列表必须在**调用时**算。曾经直接用渲染期变量 `targetList`
+    //    而它又不在依赖数组里 ⇒ 闭包永久捕获上一次渲染的白名单：用户取消勾选
+    //    ZCode 后点「同步」，payload.targets 仍是 ['pi','zcode']（实测 UI 上
+    //    ZCode 的 checkbox 已经是 false）。只在「只改目标、不动渠道」这条路径复现。
+    const targets = selectedTargets ?? defaultSelectedTargets(preview)
     setPhase('applying')
     setError(null)
     setResult(null)
     try {
-      const value = await rpcCall('sync.apply', { providers: selected ?? [], targets: targetList })
+      const value = await rpcCall('sync.apply', { providers: selected ?? [], targets })
       if (!mounted.current) return
       setResult(value)
       setPhase('ready')
-      await load(selected ?? [])
+      // ⚠️ 必须保留刚写下的结果：`setResult(value)` 之后如果这里把 result 清掉，
+      //    「新增 N 项 / 备份在 dir」会在同一批渲染里被抹掉，用户永远看不见
+      //    —— 而备份目录是出问题时唯一的回滚线索。
+      await load(selected ?? [], { keepResult: true })
     } catch (caught) {
       if (!mounted.current) return
+      // 失败时不能留着上一次的成功结果（会让红字错误与绿字「已写入」同屏）
+      setResult(null)
       setError(caught?.message || '同步失败')
       setPhase('error')
     }
-  }, [rpcCall, selected, load])
+  }, [rpcCall, selected, selectedTargets, preview, load])
 
   const busy = phase === 'loading' || phase === 'applying'
   const rows = preview?.targets ?? []
@@ -229,7 +272,8 @@ export function SyncModelsSection({ rpcCall }) {
         className: 'dim-jh-btn',
         title: '重新读取网关模型目录并计算差异（不会写文件）。',
         disabled: busy,
-        onClick: () => void load(selectedList),
+        // force：跳过服务端 30 秒缓存，否则点刷新会命中缓存、界面看起来「没反应」
+        onClick: () => void load(selectedList, { force: true }),
       }, '刷新'),
       React.createElement('button', {
         className: 'dim-jh-btn',

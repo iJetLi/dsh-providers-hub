@@ -9,7 +9,7 @@ import { gatewayHttpUrl, isLoopbackHost, resolveGatewayConfig, type OpenAiGatewa
 import { markGatewayChannel } from './channel.js'
 import { toGenerateOptions, OpenAiGatewayError, parseModelRoute, normalizeReasoningEffort, normalizeMaxTokens, type OpenAiChatRequest, type ReasoningEffortNotice } from './messages.js'
 import type { AttachmentBridge, ImageLimits } from './images.js'
-import { applyGatewayContextWindows, collectGatewayEffortViews, collectGatewayModelDetails, collectGatewayModelIds, collectGatewayModels, toGatewayModelIds, toOpenAiModels } from './models.js'
+import { applyGatewayContextWindows, collectGatewayCatalogSnapshot, toGatewayModelIds, toOpenAiModels } from './models.js'
 import { effortResolutions } from './effort-view.js'
 import { CANONICAL_REASONING_EFFORTS } from '../reasoning-ladder.js'
 import { findCaseInsensitiveSuggestion, looksLikeMissingModel } from './model-errors.js'
@@ -336,19 +336,25 @@ export function createOpenAiGateway(options: OpenAiGatewayOptions): OpenAiGatewa
   const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
   const handleModels = async (response: ServerResponse): Promise<void> => {
+    // ⚠️ 走 collectGatewayCatalogSnapshot 而不是裸采集：这条链路上有四个调用点
+    // （本端点、`/v1/reasoning-efforts`、设置页 `gateway.getEnabled`、`sync.preview`），
+    // 每次都全量采集一次 = 12 个 `listModels` + 每个模型一次 `resolveModelInfo`
+    // （实测 369 次）。缓存 30 秒后，客户端反复扫目录不再放大上游请求。
+    //
     // 逐个 catch 的容错在 collectGatewayModels 里（设置页的 RPC 复用同一份，
-    // 两处各写一遍必然漂移）。
-    const groups = await collectGatewayModels(options.llm, (provider, error) => {
-      logger.warn(`[openai-gateway] ${provider} 模型目录读取失败，已从 /v1/models 跳过：${describe(error)}`)
-    })
-    // 档位视图是**附加信息**：某个模型解析不出来就只是它没有该字段，
-    // 绝不能让整份目录跟着失败（同理，见 collectGatewayEffortViews 的注释）。
-    const { effortViews, contextWindows } = await collectGatewayModelDetails(options.llm, groups, (provider, error) => {
-      logger.warn(`[openai-gateway] ${provider}：${describe(error)}`)
+    // 两处各写一遍必然漂移）；档位/窗口是**附加信息**，某个模型解析不出来
+    // 只是它没有该字段，绝不能让整份目录跟着失败。
+    const catalog = await collectGatewayCatalogSnapshot(options.llm, {
+      onError: (provider, error) => {
+        logger.warn(`[openai-gateway] ${provider}：${describe(error)}`)
+      },
     })
     jsonResponse(response, 200, {
       object: 'list',
-      data: toOpenAiModels(applyGatewayContextWindows(groups, contextWindows), effortViews),
+      data: toOpenAiModels(
+        applyGatewayContextWindows(catalog.groups, catalog.details.contextWindows),
+        catalog.details.effortViews,
+      ),
     })
   }
 
@@ -368,17 +374,18 @@ export function createOpenAiGateway(options: OpenAiGatewayOptions): OpenAiGatewa
    * 这里给人和脚本查，那里给会自动扫目录的工具查；各算一遍必然漂移。
    */
   const handleReasoningEfforts = async (response: ServerResponse): Promise<void> => {
-    const groups = await collectGatewayModels(options.llm, (provider, error) => {
-      logger.warn(`[openai-gateway] ${provider} 模型目录读取失败，已从 /v1/reasoning-efforts 跳过：${describe(error)}`)
-    })
-    const effortViews = await collectGatewayEffortViews(options.llm, groups, (provider, error) => {
-      logger.warn(`[openai-gateway] ${provider}：${describe(error)}`)
+    // 与 `/v1/models` 共用同一份缓存快照 —— 两个端点**必须同源**（各算一遍
+    // 必然漂移，而漂移的症状正是「这里说有两档、那里说没有」）。
+    const catalog = await collectGatewayCatalogSnapshot(options.llm, {
+      onError: (provider, error) => {
+        logger.warn(`[openai-gateway] ${provider}：${describe(error)}`)
+      },
     })
     jsonResponse(response, 200, {
       object: 'list',
       // 客户端能说出口的全部档位名（由弱到强）。CC Switch 的档位多选器就是这 8 个。
       canonical: [...CANONICAL_REASONING_EFFORTS],
-      data: toGatewayModelIds(groups, effortViews).map((model) => {
+      data: toGatewayModelIds(catalog.groups, catalog.details.effortViews).map((model) => {
         const reasoning = model.reasoning
         const declared = reasoning?.efforts.map((effort) => effort.id) ?? []
         return {
@@ -443,7 +450,9 @@ export function createOpenAiGateway(options: OpenAiGatewayOptions): OpenAiGatewa
     if (!hintLoaded) {
       hintLoaded = true
       try {
-        modelIdsHint = (await collectGatewayModelIds(options.llm)).map((model) => model.id)
+        // 复用目录缓存：这条提示是少数路径，但没必要为此再打一遍 12 个 provider。
+        modelIdsHint = toGatewayModelIds((await collectGatewayCatalogSnapshot(options.llm)).groups)
+          .map((model) => model.id)
       } catch {
         modelIdsHint = []
       }

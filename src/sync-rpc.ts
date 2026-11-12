@@ -67,6 +67,21 @@ function readTargets(payload: unknown): { ok: true; value?: readonly string[] } 
 }
 
 /**
+ * 从 payload 里读「强制重新采集目录」标志。
+ *
+ * ⚠️ **只有 `sync.preview` 认它**（UI 的「刷新」按钮）。`sync.apply` 必须命中
+ * 同一份 30 秒缓存，否则「预览看到的目录」与「落盘用的目录」不是同一个快照
+ * ⇒ `failedProviders` 一变，保护集就漂移（旧缺陷：预览说保留、落盘却删除）。
+ *
+ * 非 `true` 一律当 `false`：这是「要不要多打一次上游」的开关，
+ * 拼错的取值静默当成「不刷新」比当成「刷新」安全。
+ */
+function readForce(payload: unknown): boolean {
+  if (payload === null || typeof payload !== 'object') return false
+  return (payload as { force?: unknown }).force === true
+}
+
+/**
  * 可注入的同步选项。
  *
  * 生产调用（`jet-hub-rpc.ts` 的前缀改道）**不传**，走 `resolveSyncPaths()` 的默认路径；
@@ -116,7 +131,11 @@ export async function handleSyncRpc(
         const parsedTargets = readTargets(payload)
         if (!parsedTargets.ok) return fail(parsedTargets.message)
         // 渠道白名单与目标白名单来自本次请求；路径等注入项仍走 options（测试用）
-        const merged: SyncOptions = { ...options, providers: parsed.value, targets: parsedTargets.value as SyncTargetId[] | undefined }
+        //
+        // ⚠️ `force` 只对 preview 生效（见 readForce 的注释）：apply 必须复用
+        // 同一份目录快照，否则保护集会漂移。
+        const force = options.force === true || (method === 'sync.preview' && readForce(payload))
+        const merged: SyncOptions = { ...options, providers: parsed.value, targets: parsedTargets.value as SyncTargetId[] | undefined, force }
         /**
          * 打印收到的白名单。
          *

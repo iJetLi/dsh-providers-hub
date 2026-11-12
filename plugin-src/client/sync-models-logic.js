@@ -80,11 +80,22 @@ export function canApplySync(preview, selectedTargets) {
   })
 }
 
-/** 执行结果的一句话总结（含备份目录）。 */
+/** 执行结果的一句话总结（含备份目录与**实际**增删数量）。 */
 export function applyResultSummary(result) {
   const applied = Array.isArray(result?.applied) ? result.applied : []
   const skipped = Array.isArray(result?.skipped) ? result.skipped : []
-  const lines = applied.map(entry => TARGET_LABEL[entry.target] + ' 已写入，备份：' + entry.backupDir)
+  const lines = applied.map(entry => {
+    // ⚠️ 必须把 added/removed 报出来：之前只写「X 已写入，备份：dir」，
+    //    而 apply 结束后组件立刻重拉预览 ⇒ 被删掉的模型在预览与结果里都看不见。
+    const diff = entry?.diff ?? {}
+    const parts = [
+      Array.isArray(diff.added) && diff.added.length > 0 ? `新增 ${diff.added.length}` : '',
+      Array.isArray(diff.removed) && diff.removed.length > 0 ? `移除 ${diff.removed.length}` : '',
+      Array.isArray(diff.updated) && diff.updated.length > 0 ? `更新 ${diff.updated.length}` : '',
+    ].filter(Boolean)
+    const detail = parts.length > 0 ? parts.join(' / ') + '；' : ''
+    return TARGET_LABEL[entry.target] + ' 已写入（' + detail + '备份：' + entry.backupDir + '）'
+  })
   for (const entry of skipped) lines.push(TARGET_LABEL[entry.target] + ' 未写入：' + entry.reason)
   if (lines.length === 0) return ['没有任何目标被写入']
   return lines

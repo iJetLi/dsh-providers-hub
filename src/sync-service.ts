@@ -18,8 +18,10 @@
  * @module src/sync-service.ts
  */
 
+import { writeFileSync } from 'node:fs'
+
 import { DEFAULT_GATEWAY_HOST, DEFAULT_GATEWAY_PORT, resolveGatewayConfig } from './openai-gateway/config.js'
-import { collectGatewayModelDetails, collectGatewayModels, applyGatewayContextWindows, type GatewayModelSource } from './openai-gateway/models.js'
+import { applyGatewayContextWindows, collectGatewayCatalogSnapshot, type GatewayModelSource } from './openai-gateway/models.js'
 import { SyncApplyError, applyJsonPlan, readJsonConfig, resolveSyncPaths, type SyncPaths } from './sync-apply.js'
 import {
   isDiffEmpty,
@@ -81,31 +83,43 @@ export interface SyncCatalog {
 /**
  * 采集网关目录并记录失败渠道。
  *
- * `collectGatewayModels` 的 `onError` 是唯一的失败信号（它自己承诺永不抛错），
- * 在这里整流成 {@link SyncCatalog}。
+ * ## ⚠️ 走 30 秒缓存，不要在这里裸采集
+ *
+ * `collectGatewayCatalogSnapshot` 是全链路唯一的采集入口（`/v1/models`、
+ * `/v1/reasoning-efforts`、设置页 `gateway.getEnabled`、本模块四个调用点共用）。
+ * 不缓存时一次采集 = 12 个 `listModels` + **每个模型**一次 `resolveModelInfo`
+ * （实测 369 次）—— 而打开一次「同步模型」面板，组件挂载就连发两次 preview
+ * ⇒ 738 次。
+ *
+ * 缓存对**保护集**尤其重要：`failedProviders` 与目录必须是同一份快照，
+ * 否则 `previewSync` 与 `applySync` 各采一次、两次之间目录一变，
+ * 保护集就漂移（旧缺陷：预览说「保留」、落盘却「删除」）。
+ *
+ * ## ⚠️⚠️ 必须补全 contextWindow（2026-11-11 真实报障）
+ *
+ * `llm.listModels()` 只保证返回 `{ id, name }` —— `contextWindow` 不在其中。
+ * 网关的 `/v1/models` 之所以能给出 `context_window`，是因为它额外走了
+ * `collectGatewayModelDetails()`（逐个 `resolveModelInfo`）+ `applyGatewayContextWindows()`。
+ * 初版直接拿 `listModels` 的裸结果，于是 361 个模型**全部缺 contextWindow**
+ * ⇒ 全被判为「不可写」⇒ 用户看到「已勾选 19/19」却「本次同步 0 个模型」。
+ * 这里复用与网关**完全相同**的那条补全路径，两边才不会漂。
+ *
+ * ⚠️ 逐模型解析失败**不算渠道级失败**（渠道本身是好的，只是某几个模型
+ * 拿不到窗口）：这些模型只会缺 `contextWindow` → 被下游判为 `skipped`，而
+ * 「skipped 的模型如果目标里已有就必须保留」由 `planPiSync` / `planZcodeSync`
+ * 负责（见 `src/sync-targets.ts` 的 skip 分支，保护粒度 = **单个模型**）。
+ * 若把整条渠道塞进 `failedProviders`，一个模型抖动会冻结整条渠道
+ * （新模型也进不来），反而更差。
+ *
+ * @param options.force 强制重新采集。⚠️ UI 的「刷新」按钮**必须**传 `true`，
+ *   否则点刷新会命中缓存、看起来「没反应」。
  */
-export async function collectSyncCatalog(llm: SyncModelSource): Promise<SyncCatalog> {
-  const failedProviders: string[] = []
-  const groups = await collectGatewayModels(llm, provider => {
-    if (!failedProviders.includes(provider)) failedProviders.push(provider)
-  })
-
-  /**
-   * ⚠️⚠️ **必须补全 contextWindow**（2026-11-11 真实报障）。
-   *
-   * `llm.listModels()` 只保证返回 `{ id, name }` —— `contextWindow` 不在其中。
-   * 网关的 `/v1/models` 之所以能给出 `context_window`，是因为它额外走了
-   * `collectGatewayModelDetails()`（逐个 `resolveModelInfo`）+ `applyGatewayContextWindows()`。
-   *
-   * 初版直接拿 `listModels` 的裸结果，于是 361 个模型**全部缺 contextWindow**
-   * ⇒ 全被判为「不可写」⇒ 用户看到「已勾选 19/19」却「本次同步 0 个模型」。
-   * 这里复用与网关**完全相同**的那条补全路径，两边才不会漂。
-   *
-   * 能力值解析失败**不算渠道失败**（渠道本身是好的，只是某几个模型拿不到窗口）：
-   * 故用独立回调收集，不影响 `failedProviders` 的保护语义。
-   */
-  const { contextWindows } = await collectGatewayModelDetails(llm, groups)
-  const enriched = applyGatewayContextWindows(groups, contextWindows)
+export async function collectSyncCatalog(
+  llm: SyncModelSource,
+  options?: { readonly force?: boolean },
+): Promise<SyncCatalog> {
+  const catalog = await collectGatewayCatalogSnapshot(llm, { force: options?.force === true })
+  const enriched = applyGatewayContextWindows(catalog.groups, catalog.details.contextWindows)
 
   const models: SyncModel[] = []
   for (const group of enriched) {
@@ -125,7 +139,7 @@ export async function collectSyncCatalog(llm: SyncModelSource): Promise<SyncCata
       })
     }
   }
-  return { models, failedProviders }
+  return { models, failedProviders: [...catalog.failedProviders] }
 }
 
 /** 单个目标的预览结果。 */
@@ -178,6 +192,14 @@ export interface SyncOptions {
   home?: string
   env?: NodeJS.ProcessEnv
   /**
+   * 强制重新采集网关目录（忽略 30 秒缓存）。
+   *
+   * ⚠️ 只有 UI 的「刷新」按钮该传 `true`。`sync.preview` 与 `sync.apply`
+   * **必须看到同一份**目录，否则保护集会漂移（一个是 30 秒前的快照、
+   * 一个是现在的，`failedProviders` 一变就「预览说保留、落盘却删除」）。
+   */
+  force?: boolean
+  /**
    * 只同步这些渠道（provider id）。缺省 = 目录里的全部渠道。
    *
    * ⚠️ 空数组表示「一个都没选」，与缺省**语义不同**：空数组会被当成
@@ -221,7 +243,11 @@ function protectedProviderIds(
   existingModelIds: readonly string[] = [],
 ): string[] {
   const all = new Set(catalog.models.map(model => providerOfModelId(model.id)))
-  const protectedSet = new Set(catalog.failedProviders)
+  // ⚠️ 这里**刻意不**再写 `new Set(catalog.failedProviders)`：采集失败的渠道
+  //    必然不出现 `catalog.models` 里，第三腿（目标里有、目录里没有）已经
+  //    完整覆盖它。两份同义判据并列时，删掉任一份行为都不变 —— 审计里的
+  //    M03 变异（把这行改成空集）曾让 44 条用例全绿，这就是「守卫没牙」。
+  const protectedSet = new Set<string>()
   if (providers !== undefined) {
     const selected = new Set(providers)
     for (const provider of all) {
@@ -344,7 +370,7 @@ function targetOps(target: SyncTargetId, paths: SyncPaths, models: readonly Sync
 export async function previewSync(llm: SyncModelSource, options: SyncOptions = {}): Promise<SyncPreviewResult> {
   const paths = options.paths ?? resolveSyncPaths(options.home, options.env)
   const gatewayBaseUrl = localGatewayBaseUrl(options.env)
-  const catalog = await collectSyncCatalog(llm)
+  const catalog = await collectSyncCatalog(llm, { force: options.force === true })
 
   // 先读两个目标的现状：既用于「哪些渠道已在目标里」的展示，也避免下面各算一遍。
   // 读失败是**正常状态**（用户可能还没加过网关 provider），只记 null。
@@ -432,6 +458,30 @@ export interface SyncApplyResult {
 }
 
 /**
+ * `applySync` 的选项：在 `SyncOptions` 之上加两个**单测注入点**。
+ *
+ * 两个注入点都不是「为测试而存在」的抽象 —— 它们各自对应一条**无法从外部观测**
+ * 的防御（写后幂等复算、写入失败回滚），只能靠替换协作者来证明它真的会拦。
+ */
+export interface SyncApplyOptions extends SyncOptions {
+  /** 注入点：写入后的复读校验；生产用缺省幂等复算；单测可注入必失败函数验证回滚。 */
+  validate?: (target: SyncTargetId, path: string) => void | Promise<void>
+  /**
+   * 注入点：替换「目标 → 计划器」的装配。
+   *
+   * 生产用缺省。单测可以包一层，让 `plan` 在**第二次**调用（写后幂等复算）
+   * 时返回非空 diff —— 这是唯一能验证那条防御真的生效的方式：正常实现下
+   * `plan` 对刚写入的配置必然返回空 diff，删掉复算也不会影响任何用例（审计 M09）。
+   */
+  targetOps?: (
+    target: SyncTargetId,
+    paths: SyncPaths,
+    models: readonly SyncModel[],
+    gatewayBaseUrl: string,
+  ) => { path: string; plan: (config: any, options?: SyncPlanOptions) => { config: any; diff: SyncDiff } }
+}
+
+/**
  * 执行同步：逐目标重新读盘 → 重新算计划 → 备份 → 写入 → 复读校验。
  *
  * ⚠️ **不复用 preview 的结果**：preview 与 apply 之间用户可能手改过配置文件，
@@ -439,11 +489,13 @@ export interface SyncApplyResult {
  *
  * ⚠️ diff 为空的目标**不写文件**：否则每次点按钮都会产生一份无意义的备份目录。
  *
- * @param validate 注入点：生产用缺省幂等校验；单测可注入必失败函数验证回滚。
+ * ⚠️ **多目标是「全有或全无」**：任一目标写入失败，前面已写成功的目标会被
+ *    逐个还原到原字节。用户点一次「同步」是一个原子意图，留下半改状态比失败更糟
+ *    （见 `written` 的注释）。
  */
 export async function applySync(
   llm: SyncModelSource,
-  options: SyncOptions & { validate?: (target: SyncTargetId, path: string) => void | Promise<void> } = {},
+  options: SyncApplyOptions = {},
 ): Promise<SyncApplyResult> {
   const paths = options.paths ?? resolveSyncPaths(options.home, options.env)
   const gatewayBaseUrl = localGatewayBaseUrl(options.env)
@@ -456,6 +508,16 @@ export async function applySync(
 
   const applied: SyncApplyEntry[] = []
   const skipped: SyncApplyResult['skipped'] = []
+  /**
+   * 已落盘目标的原始字节（跨目标回滚栈）。
+   *
+   * ⚠️ 多目标是**逐个写**的，文件系统没有跨文件事务。两种做法：
+   * ① 只如实报告「已经改了哪些」；② 失败时全部还原。
+   * 这里选 ② —— 用户点一次「同步」是一个原子意图，留下「pi 改了、ZCode 没改」
+   * 的半成品状态，比干脆失败更难恢复（用户不知道 pi 该不该手动撤）。
+   */
+  const written: { target: SyncTargetId; path: string; backupDir: string; original: Buffer }[] = []
+  const resolveOps = options.targetOps ?? targetOps
 
   /**
    * 本次真正要写的目标。
@@ -475,21 +537,27 @@ export async function applySync(
   }
 
   for (const target of activeTargets) {
-    const ops = targetOps(target, paths, models, gatewayBaseUrl)
-    let config: any
+    const ops = resolveOps(target, paths, models, gatewayBaseUrl)
+    let next: any
+    let diff: any
+    let protectedProviders: string[]
     try {
-      config = readJsonConfig(ops.path)
+      const config = readJsonConfig(ops.path)
+      // 保护集按该目标的现状算：它可能有网关目录里根本没有的手工渠道
+      const existingIds = target === 'pi'
+        ? existingPiModelIds(config, gatewayBaseUrl)
+        : existingZcodeModelIds(config, gatewayBaseUrl)
+      protectedProviders = protectedProviderIds(catalog, options.providers, existingIds)
+      // ⚠️ `ops.plan` 必须一起兜住：它会因「ZCode 里已有同名但指向别家的 provider」
+      //    这类情况主动抛错，跑到 try 外面会让**上一个已经落盘的目标**变成
+      //    「同步失败」后面看不见的既成事实（只剩一句「同步失败」）。
+      const planned = ops.plan(config, { failedProviders: protectedProviders })
+      next = planned.config
+      diff = planned.diff
     } catch (error) {
       skipped.push({ target, path: ops.path, reason: (error as Error).message })
       continue
     }
-
-    // 保护集按该目标的现状算：它可能有网关目录里根本没有的手工渠道
-    const existingIds = target === 'pi'
-      ? existingPiModelIds(config, gatewayBaseUrl)
-      : existingZcodeModelIds(config, gatewayBaseUrl)
-    const protectedProviders = protectedProviderIds(catalog, options.providers, existingIds)
-    const { config: next, diff } = ops.plan(config, { failedProviders: protectedProviders })
     if (isDiffEmpty(diff)) {
       skipped.push({ target, path: ops.path, reason: '已是目标状态，无需写入' })
       continue
@@ -506,8 +574,32 @@ export async function applySync(
       if (options.validate) await options.validate(target, written)
     }
 
-    const { backupDir } = await applyJsonPlan(ops.path, next, validate)
-    applied.push({ target, path: ops.path, backupDir, diff })
+    try {
+      const { backupDir, original } = await applyJsonPlan(ops.path, next, validate)
+      written.push({ target, path: ops.path, backupDir, original })
+      applied.push({ target, path: ops.path, backupDir, diff })
+    } catch (error) {
+      // 跨目标回滚：把已经写成功的目标全部还原到原字节。
+      // 注意 `written` 里**没有**当前失败的这个目标 —— `applyJsonPlan` 自己
+      // 已经做过一次单目标回滚（成功时才会 push 进来）。
+      const rollbackFailures: string[] = []
+      for (const item of [...written].reverse()) {
+        try {
+          writeFileSync(item.path, item.original)
+        } catch (rollbackError) {
+          rollbackFailures.push(`${item.target}（${(rollbackError as Error).message}）`)
+        }
+      }
+      const restored = written.map(item => `${item.target}（备份：${item.backupDir}）`).join('、')
+      const detail = `${target} 写入失败：${(error as Error).message}`
+      if (written.length === 0) throw new SyncApplyError(detail)
+      throw new SyncApplyError(rollbackFailures.length === 0
+        ? `${detail}\n已自动回滚：${restored}。目标文件均已还原到同步前的状态。`
+        : `${detail}\n`
+          + `⚠️ 自动回滚部分失败：${rollbackFailures.join('、')}。`
+          + `其余已还原：${restored}。`
+          + '上述失败的目标可能处于不一致状态，请用对应备份目录人工还原。')
+    }
   }
 
   return { gatewayBaseUrl, modelCount: models.length, applied, skipped }
