@@ -130,7 +130,12 @@ export interface AstudioAdapterOptions {
    */
   auth?: AstudioAuth
   /** 取当前凭据；缺省 `auth.currentCredential()`。 */
-  resolveCredential?: () => Promise<AstudioCredential | undefined>
+  /**
+   * ⚠️ **第二参 `sessionId` 是「轮换起点」的作用域键**（PR #59 正向审计 P1-b）：
+   * 适配器必须把 `GenerateOptions.sessionId` 透传进来，否则选号层永远拿到
+   * `undefined` ⇒ 面板选的起点**静默失效**（tsc 因函数参数逆变不报）。
+   */
+  resolveCredential?: (modelId?: string, sessionId?: string) => Promise<AstudioCredential | undefined>
   /** 401 后的**一次**权威重取；缺省 `auth.refreshOnce()`。 */
   refresh?: () => Promise<AstudioRefreshOutcome | undefined>
   /** 读远端模型目录；缺省 `auth.fetchCatalogModels()`（GET model-manager/models）。 */
@@ -168,7 +173,7 @@ export class AstudioAdapter extends LlmAdapter {
   private readonly product: AstudioProduct
   private readonly fetchImpl: typeof fetch
   private readonly warnImpl: (message: string) => void
-  private readonly resolveCredentialImpl: () => Promise<AstudioCredential | undefined>
+  private readonly resolveCredentialImpl: (modelId?: string, sessionId?: string) => Promise<AstudioCredential | undefined>
   private readonly refreshImpl: () => Promise<AstudioRefreshOutcome | undefined>
   private readonly fetchRemoteModelsImpl: (() => Promise<readonly AstudioCatalogModel[]>) | undefined
 
@@ -453,7 +458,7 @@ export class AstudioAdapter extends LlmAdapter {
    * 不带时流里没有 usage 帧，计费与统计双缺，故该键由 `buildAstudioChatRequest` 恒补）。
    */
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const credential = await this.resolveCredentialImpl()
+    const credential = await this.resolveCredentialImpl(options.model, options.sessionId)
     if (credential === undefined || credential.access_token.length === 0) {
       throw new LlmError(
         'astudio: 没有可用凭据；请在 AStudio 客户端登录后重试（本 provider 读磁盘 userdata\\astron-session.json）',

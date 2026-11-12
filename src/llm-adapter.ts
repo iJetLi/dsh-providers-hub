@@ -613,7 +613,18 @@ function clampCodeArtsMaxTokens(value: number | undefined): number | undefined {
 
 export interface CodeArtsAdapterOptions {
   credentialRef: CredentialRef
-  resolveCredential: () => Promise<CodeArtsCredential | undefined>
+  /**
+   * ⚠️⚠️ **第二参 `sessionId` 是「轮换起点」的作用域键**（PR #59 正向审计 P1-b）。
+   *
+   * 适配器必须把 `GenerateOptions.sessionId` 透传进来，否则选号层的
+   * `preferredRotationFor(provider, sessionId)` 永远拿到 `undefined` ⇒
+   * 面板上选好的起点**完全不生效**（且零报错、tsc 也不报 —— 函数参数逆变，
+   * 签名少一个参数在 TypeScript 里是合法的）。
+   *
+   * 同一个坑在同仓 10 个适配器上已经踩过一轮（`rotation-session-id-wiring.spec.ts`
+   * 的 `ADAPTERS` 守着它们）；codearts 原先不在那张表里，故结构性看不见。
+   */
+  resolveCredential: (modelId?: string, sessionId?: string) => Promise<CodeArtsCredential | undefined>
   refresh: () => Promise<void>
   /** 动态拉取远端模型列表；失败时调用方回退到静态列表。 */
   fetchRemoteModels?: () => Promise<RemoteModel[]>
@@ -2155,10 +2166,10 @@ export class CodeArtsAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    let credential = await this.options.resolveCredential()
+    let credential = await this.options.resolveCredential(options.model, options.sessionId)
     if (credential === undefined || Date.parse(credential.expires_at) <= Date.now()) {
       await this.options.refresh()
-      credential = await this.options.resolveCredential()
+      credential = await this.options.resolveCredential(options.model, options.sessionId)
     }
     if (credential === undefined || !credential.access_key_id || !credential.secret_access_key || !credential.security_token) {
       throw new LlmError('codearts: no usable credential; log in first', 'MISSING_CREDENTIAL')
@@ -2704,7 +2715,7 @@ export class CodeArtsAdapter extends LlmAdapter {
         if (isAuthError(response.status, errorText) && !authRefreshed) {
           authRefreshed = true
           await this.options.refresh()
-          credential = await this.options.resolveCredential()
+          credential = await this.options.resolveCredential(options.model, options.sessionId)
           if (credential === undefined || !credential.access_key_id || !credential.secret_access_key || !credential.security_token) {
             throw new LlmError('codearts: credential missing after refresh; log in again', 'MISSING_CREDENTIAL')
           }

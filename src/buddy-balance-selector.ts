@@ -711,6 +711,17 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
      * （`rotateFromPreferred`）。
      */
     rotationStartId?: string
+    /**
+     * 「轮换起点的定位基准」：**全量启用账号**的 id 列表（池序、不过滤封禁/限流）。
+     *
+     * 与 {@link BuddyTierOptions.enabledAccountIds} 同义 —— 本字段只是把它从
+     * resolver 透传到 `selector.select()` 的**通道**，判据仍只有一处
+     * （`rotateFromPreferred`）。
+     *
+     * ⚠️ 存在的理由（PR #59 正向审计 P1-a）：起点账号被封禁 / 被目标模型限流时
+     * 它**不在候选集里**，只按 `ranked.findIndex(id)` 会静默回落默认第一个号。
+     */
+    enabledAccountIds?: readonly string[]
   },
 ): Promise<
   | {
@@ -757,6 +768,9 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
         // 「轮换起点」：同样每次迭代都带上（与 strictManualOrder 同因）——
         // 降级会改变 `allowPermanent`、从而改变「哪些号可用」，起点必须跟着重算。
         ...(options.rotationStartId === undefined ? {} : { rotationStartId: options.rotationStartId }),
+        // 「起点定位基准」同理：每次迭代都带上（降级会改变 `allowPermanent`，
+        // 从而改变「哪些号可用」，起点落点必须跟着重算）。
+        ...(options.enabledAccountIds === undefined ? {} : { enabledAccountIds: options.enabledAccountIds }),
       },
     )
     if (!picked.ok) {

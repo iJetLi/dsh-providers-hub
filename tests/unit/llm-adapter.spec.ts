@@ -4160,3 +4160,24 @@ describe('CodeArtsAdapter 残缺目录自愈（★ IKJVTF I3）', () => {
       }
     })
   })
+
+describe('★★ 「轮换起点」必须透传到 resolveCredential（PR #59 正向审计 P1-b）', () => {
+  it('stream() 把 model 与 sessionId 一起交给 resolveCredential', async () => {
+    const seen: Array<[string | undefined, string | undefined]> = []
+    const adapter = new CodeArtsAdapter({
+      credentialRef: CREDENTIAL_REF,
+      resolveCredential: async (modelId?: string, sessionId?: string) => {
+        seen.push([modelId, sessionId])
+        return validCredential
+      },
+      refresh: async () => {},
+      fetchImpl: async () => new Response('not found', { status: 404 }),
+    })
+    try {
+      for await (const _ of adapter.stream({ ...streamOptions, sessionId: 'session-abc' } as never)) { /* noop */ }
+    } catch { /* 404 预期抛出 */ }
+    // ⚠️ 错的实现（无参 `resolveCredential`）会得到 [[undefined, undefined]] ——
+    // 选号层于是永远拿不到 sessionId，面板选的起点**静默失效**。
+    expect(seen).toEqual([['GLM-5.2', 'session-abc']])
+  })
+})

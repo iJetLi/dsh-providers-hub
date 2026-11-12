@@ -132,3 +132,47 @@ describe('两种策略都生效（strictManualOrder 不再是例外）', () => {
     expect(ids(out)).toEqual(['d', 'e', 'a', 'b', 'c'])
   })
 })
+
+/**
+ * ★★ PR #59 正向审计 P1-a：**起点不在候选集里**（账号级封禁 / 目标模型限流，
+ * 被 `candidatesOf` 滤掉）时，必须**循环到下一个可用**，不能静默回落默认。
+ *
+ * 池序（`enabledAccountIds`）是 a b c d e，候选集只有 a c e（b、d 被封禁/限流）。
+ */
+describe('★★ 起点被封禁 / 被限流（不在候选集里）⇒ 循环到下一个可用', () => {
+  const pool = ['a', 'b', 'c', 'd', 'e']
+  const candidates = [mk('a', 100, 0), mk('c', 100, 0), mk('e', 100, 0)]
+
+  it('★ 选被封禁的 b ⇒ 从 c 开始（而不是回落默认的 a）', () => {
+    const out = rotateFromPreferred(candidates, { rotationStartId: 'b', enabledAccountIds: pool })
+    // 错的实现（找不到就原样）会得到 ['a', 'c', 'e'] —— 正是用户想避开的。
+    expect(ids(out)).toEqual(['c', 'e', 'a'])
+  })
+
+  it('选被封禁的 d ⇒ 从 e 开始', () => {
+    const out = rotateFromPreferred(candidates, { rotationStartId: 'd', enabledAccountIds: pool })
+    expect(ids(out)).toEqual(['e', 'a', 'c'])
+  })
+
+  it('起点在候选里 ⇒ 仍按候选直接命中（本修法不改变既有语义）', () => {
+    const out = rotateFromPreferred(candidates, { rotationStartId: 'e', enabledAccountIds: pool })
+    expect(ids(out)).toEqual(['e', 'a', 'c'])
+  })
+
+  it('★ 老调用方不传 enabledAccountIds ⇒ 找不到就原样（既有语义逐字节不变）', () => {
+    const out = rotateFromPreferred(candidates, { rotationStartId: 'b' })
+    expect(ids(out)).toEqual(['a', 'c', 'e'])
+  })
+
+  it('起点已被删除（不在 enabledAccountIds 里）⇒ 原样（不变量 3）', () => {
+    const out = rotateFromPreferred(candidates, { rotationStartId: 'zzz', enabledAccountIds: pool })
+    expect(ids(out)).toEqual(['a', 'c', 'e'])
+  })
+
+  it('★ 起点之后那个候选也不可用 ⇒ 继续向后绕（跳过 none 档）', () => {
+    const mixed = [mk('a', 100, 0), mk('c', 0, 0), mk('e', 100, 0)]
+    const out = rotateFromPreferred(mixed, { rotationStartId: 'b', enabledAccountIds: pool })
+    // b 不在候选 ⇒ 从「池位次 ≥ 1」的第一个候选 c 起；c 是 none 档 ⇒ 继续到 e
+    expect(ids(out)).toEqual(['e', 'a', 'c'])
+  })
+})

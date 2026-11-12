@@ -89,7 +89,12 @@ export interface MagicrewAdapterOptions {
   readonly warn?: (message: string) => void
   readonly now?: () => number
   readonly accountPool?: AccountPool
-  readonly resolveCredential?: () => Promise<MagicrewCredential | undefined>
+  /**
+   * ⚠️ **第二参 `sessionId` 是「轮换起点」的作用域键**（PR #59 正向审计 P1-b）：
+   * 适配器必须把 `GenerateOptions.sessionId` 透传进来，否则选号层永远拿到
+   * `undefined` ⇒ 面板选的起点**静默失效**（tsc 因函数参数逆变不报）。
+   */
+  readonly resolveCredential?: (modelId?: string, sessionId?: string) => Promise<MagicrewCredential | undefined>
   readonly fetchRemoteModels?: () => Promise<readonly MagicrewCatalogModel[]>
   /**
    * 读图入口（任务 6 在 `index.ts` 桥接 `ctx.attachments.readImage`）。
@@ -188,7 +193,7 @@ export class MagicrewAdapter extends LlmAdapter {
   private readonly fetchImpl: typeof fetch
   private readonly warnImpl: (message: string) => void
   private readonly nowImpl: () => number
-  private readonly resolveCredentialImpl: () => Promise<MagicrewCredential | undefined>
+  private readonly resolveCredentialImpl: (modelId?: string, sessionId?: string) => Promise<MagicrewCredential | undefined>
   /**
    * 倍率表（model_id → inputPoints/outputPoints），由 loadModelPoints 填充。
    * 懒加载、失败静默：装饰性信息，拉不到就当没有，绝不影响目录本身。
@@ -311,7 +316,7 @@ export class MagicrewAdapter extends LlmAdapter {
    * 否则会把这段 JSON 当 SSE 读，症状退化成「没收到任何内容块」，与真因相距很远。
    */
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const credential = await this.resolveCredentialImpl()
+    const credential = await this.resolveCredentialImpl(options.model, options.sessionId)
     if (credential === undefined || credential.apiKey === undefined || credential.apiKey.length === 0) {
       throw new LlmError('超级麦吉账号未登录或缺少 api_key，请重新登录', 'AUTH')
     }

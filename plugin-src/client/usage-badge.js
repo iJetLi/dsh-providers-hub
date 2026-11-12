@@ -1731,10 +1731,18 @@ function UsageBadgeActive(props) {
       }),
     ];
     // 选中的号当前不可用 ⇒ 起点会自动循环到下一个，必须告诉用户（否则他以为没生效）。
-    const currentReason = accounts
-      .filter((a) => a.id === selected)
-      .map((a) => reasonOf(a))
-      .find((r) => r !== null) ?? null;
+    //
+    // ⚠️⚠️ 2026-11-13（PR #59 对抗审计 P2）：这里原先写
+    //   `accounts.filter((a) => a.id === selected)`，而 `selected` 是**位次字符串**
+    //   （`String(selectedPosition)`，如 "1"/"2"），`a.id` 是 accountId ⇒ **永不相等**
+    //   ⇒ `currentReason` 恒 `null` ⇒ 下面那句「已自动从下一个开始」**永不渲染**
+    //   （死代码；审计实测「把这段换成恒 null」与现状逐字节等价）。
+    //   修法：按位次取数组里那一项（与 `account.getRotation` 的 `position = i + 1` 同口径）。
+    const currentPosition = Number(selected);
+    const currentAccount = Number.isInteger(currentPosition) && currentPosition >= 1
+      ? accounts[currentPosition - 1]
+      : undefined;
+    const currentReason = currentAccount === undefined ? null : reasonOf(currentAccount);
 
     return React.createElement('div', { key: 'rotation', className: 'dim-jh-badgeRotation' }, [
       React.createElement('span', {

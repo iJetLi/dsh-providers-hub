@@ -359,6 +359,21 @@ export interface BuddyTierOptions {
    * 详见 {@link rotateFromPreferred}。
    */
   rotationStartId?: string
+  /**
+   * 「轮换起点的定位基准」：**全量启用账号**的 id 列表（池序，**不过滤**封禁/限流）。
+   *
+   * ⚠️ 存在的理由（PR #59 正向审计 P1-a）：`rotationStartId` 指向的账号
+   * 可能**不在候选集里**（被账号级封禁 / 被目标模型限流）—— 此时只按
+   * `ranked.findIndex(id === startId)` 判会得到「找不到就原样」，于是
+   * **静默回落默认第一个号**（恰是用户想避开的那个）。
+   *
+   * 提供本列表后，`rotateFromPreferred` 能算出「起点在池里的位次」，再从
+   * 候选里取「位次 ≥ 起点」的第一个 —— 即用户明确要求的「循环到下一个可用」。
+   *
+   * `undefined` / 空数组 / 起点已被删除（不在本列表里）⇒ 保持既有语义
+   * （找不到就原样，不报错）。
+   */
+  enabledAccountIds?: readonly string[]
 }
 
 /**
@@ -378,18 +393,31 @@ export interface BuddyTierOptions {
  *
  * ## ⚠️ 起点落在「往后第一个可用项」
  *
- * 用户选的号**可能当前不可用**（例如上午选的号、下午临时积分用完了）。
- * 此时**不是**回落默认，而是**循环到下一个可用**（用户明确要求）。
+ * 用户选的号**可能当前不可用**，分两种成因，**都必须循环到下一个可用**、
+ * 不能回落默认（用户明确要求）：
+ *
+ * 1. **在候选集里但档位不可用**（`none` 档）—— 向后扫时跳过；
+ * 2. **压根不在候选集里**（账号级封禁 / 目标模型限流，被 `candidatesOf` 滤掉）
+ *    —— 此时只按 `ranked.findIndex(id)` 会得到 `-1`，于是**静默回落默认第一个号**
+ *    （恰是用户想避开的）。PR #59 正向审计 P1-a 实测。
+ *
+ * 成因 2 的修法：调用方额外传 {@link BuddyTierOptions.enabledAccountIds}
+ * （**全量启用账号**的 id 列表，池序、不过滤封禁/限流）。本函数据它算出起点
+ * 的**池位次**，再从候选里取「池位次 ≥ 起点」的第一个 —— 候选是按策略序
+ * 排的，故那个就是「起点之后」的第一个候选。
  *
  * ## 三条不变量
  *
  * 1. **集合不变**：只旋转，不增删（长度与元素身份都不变）；
  * 2. **保序**：起点之后 / 之前的各自保持原相对顺序；
- * 3. **找不到就原样**：`rotationStartId` 不在候选里（账号被删/新被限流）⇒
- *    与未设置**逐字节相同**，不报错。
+ * 3. **找不到就原样**：`rotationStartId` 指向的账号**已被删除**（不在
+ *    `enabledAccountIds` 里）⇒ 与未设置**逐字节相同**，不报错。
+ *    ⚠️ 与「起点被封禁/限流」**刻意区分**：后者账号还在，用户的选择仍有意义，
+ *    故循环到下一个可用；前者选择已无处可指，回落默认才是唯一合理语义。
  *
  * @param ranked - **已按策略排好序**的候选（⚠️ 必须排在旋转之前）
- * @param options - 与排序同一份选项（需要 `allowPermanent` 判可用性）
+ * @param options - 与排序同一份选项（需要 `allowPermanent` 判可用性，
+ *   可选 `enabledAccountIds` 定位「不在候选里的起点」）
  * @returns **新数组**
  */
 export function rotateFromPreferred<T extends BuddyAccountBalance>(
@@ -398,9 +426,19 @@ export function rotateFromPreferred<T extends BuddyAccountBalance>(
 ): T[] {
   const startId = options.rotationStartId
   if (startId === undefined || startId.length === 0) return [...ranked]
-  const index = ranked.findIndex((account) => account.id === startId)
-  // 不变量 3：已不在候选里 ⇒ 原样（= 默认起点）。
-  if (index < 0) return [...ranked]
+  const directIndex = ranked.findIndex((account) => account.id === startId)
+  const enabledAccountIds = options.enabledAccountIds ?? []
+  let index = directIndex
+  if (index < 0) {
+    // 成因 2：起点不在候选集里。先在全量启用账号里定位它的池位次。
+    const startPosition = enabledAccountIds.indexOf(startId)
+    // 不变量 3：账号已被删除 ⇒ 原样（= 默认起点）。
+    if (startPosition < 0) return [...ranked]
+    // 候选按策略序排；「池位次 ≥ 起点」的第一个就是「起点之后」的第一个候选。
+    index = ranked.findIndex((account) => enabledAccountIds.indexOf(account.id) >= startPosition)
+    // 起点是最后一位、其后没有候选 ⇒ 绕回开头（循环语义）。
+    if (index < 0) index = 0
+  }
   // ⚠️ 从 index 起**向后**找第一个可用项（step = 0 时先检查自己）。
   let anchor = -1
   for (let step = 0; step < ranked.length; step += 1) {

@@ -41,6 +41,11 @@ const ADAPTERS = [
   'lobsterai-adapter.ts',
   'raccoon-adapter.ts',
   'loomy-adapter.ts',
+  // ⚠️ PR #59 正向审计 P1-b 补进来的三个：原先**完全没有**透传 sessionId 的渠道。
+  // 它们不在本表里 ⇒ 「结构性看不见」：面板渲染下拉框、落盘成功、选号层不生效且零报错。
+  'llm-adapter.ts',
+  'astudio-adapter.ts',
+  'magicrew-adapter.ts',
 ]
 
 const read = (f: string) => readFileSync(join(SRC, f), 'utf8')

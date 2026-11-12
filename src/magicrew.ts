@@ -81,7 +81,10 @@ export interface MagicrewServiceOptions {
    * `async () => undefined`），而用户明明已登录。且它落 `AUTH`，宿主会把文案吞掉
    * ⇒ 症状是「已登录却永远说没登录」，几乎无法归因。
    */
-  readonly resolveCredential?: () => Promise<MagicrewCredential | undefined>
+  /**
+   * ⚠️ **第二参 `sessionId` 是「轮换起点」的作用域键**（PR #59 正向审计 P1-b）。
+   */
+  readonly resolveCredential?: (modelId?: string, sessionId?: string) => Promise<MagicrewCredential | undefined>
   /**
    * 拉远端目录。缺省时目录只有静态兜底（**静默退化**：无日志、无报错，
    * 用户只会看到「模型列表里没有新模型」）。

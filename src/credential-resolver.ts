@@ -598,6 +598,25 @@ export function createCredentialResolver<TCredential>(
       const rotationStartId = free === true
         ? undefined
         : deps.pool.preferredRotationFor?.(providerId, sessionId)
+      /**
+       * 「轮换起点的定位基准」：**全量启用账号**的 id 列表（池序、不过滤封禁/限流）。
+       *
+       * ⚠️ 存在的理由（PR #59 正向审计 P1-a）：起点账号被**账号级封禁**或被
+       * **目标模型限流**时，`candidatesOf` 已把它滤掉 ⇒ 它不在 `ranked` 里 ⇒
+       * `rotateFromPreferred` 会「找不到就原样」，于是**静默回落默认第一个号**
+       * —— 恰是用户选起点想避开的那个。
+       *
+       * 拿这份**未过滤**的列表，`rotateFromPreferred` 才能算出起点的池位次，
+       * 再从候选里取「位次 ≥ 起点」的第一个（用户明确要求的「循环到下一个可用」）。
+       *
+       * ⚠️ 只在配了起点时才算：无起点时既不查池也不过滤，行为与改动前逐字节相同。
+       */
+      const enabledAccountIds = rotationStartId === undefined
+        ? undefined
+        : deps.pool
+            .listAccountsByProvider(providerId)
+            .filter(a => a.enabled)
+            .map(a => a.id)
       const picked = await pickBuddyAccount<TCredential>(plan.selector, candidates, {
         allowPermanent,
         resolveCredential: config.readCredential,
@@ -606,6 +625,7 @@ export function createCredentialResolver<TCredential>(
         //    单测替身与结构化 stub 不实现它时必须走既有语义（`=== true` 判据）。
         strictManualOrder: deps.pool.strictManualOrder?.(providerId) === true,
         ...(rotationStartId === undefined ? {} : { rotationStartId }),
+        ...(enabledAccountIds === undefined ? {} : { enabledAccountIds }),
       })
       if (picked.kind === 'account') {
         if (plan.reportPickedAccount !== false) report(picked.account.id)

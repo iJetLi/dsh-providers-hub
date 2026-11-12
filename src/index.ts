@@ -1331,7 +1331,7 @@ export function apply(ctx: Context): void {
   // 与 buddy / workbuddy / lobsterai / qoder / trae 的既有做法一致。
   const codearts = registerCodeArtsLlm(ctx, {
     credentialRef: credentialRef(CODEARTS_CREDENTIAL_REF),
-    resolveCredential: async () => {
+    resolveCredential: async (modelId?: string, sessionId?: string) => {
       // CodeArts **只认账号池**，与其余五个 provider 一致。
       //
       // ⚠️ 早期它额外支持「单凭据模式」（`CODEARTS_ACCESS_TOKEN`）：登录后把凭据
@@ -1341,7 +1341,19 @@ export function apply(ctx: Context): void {
       //
       // 这里仍保留 `credentialRef` 选项，仅为满足适配器契约与报错文案
       // （其余 provider 同样传各自的默认 ref，但都不再作为回退来源）。
-      const available = await pool.getAvailableAccount<CodeArtsCredential>('codearts', '')
+      // ⚠️⚠️ 「轮换起点」必须在这里解析成具体账号 id（PR #59 正向审计 P1-b）：
+      // codearts 原先**完全不认起点** —— 面板渲染下拉框、`account.setRotation`
+      // 落盘与回读都成功，但选号层从不读它，功能**静默失效且零报错**
+      //（适配器签名少一个参数，tsc 因函数参数逆变也不报）。
+      const rotationStartId = sessionId === undefined
+        ? undefined
+        : pool.preferredRotationFor('codearts', sessionId)
+      const available = await pool.getAvailableAccount<CodeArtsCredential>(
+        'codearts',
+        modelId ?? '',
+        undefined,
+        rotationStartId,
+      )
       return available?.credential
     },
     // 续期按**账号池里的具体账号**走：`refreshAccountCredential` 读写的是
