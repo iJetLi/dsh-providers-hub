@@ -279,6 +279,11 @@ export interface ProviderAccountStatus extends ProviderAccountEntry {
    */
   modelscopeKeyMask?: string
   /**
+   * Qoder 账号是否已保存网页会话 Cookie（用于读资源包逐笔到期）。
+   * 只下发布尔值，Cookie 本身绝不下发。
+   */
+  qoderWebSession?: boolean
+  /**
    * 七牛云 API Key 的**打码串**（宿主侧 `maskQiniuKey` 生成，形如 `sk-a…wxyz`）。
    *
    * ⚠️ 只下发打码串，**绝不下发明文**（凭据经 RPC 明文下发等于把它摊到客户端的

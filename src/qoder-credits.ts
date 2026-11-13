@@ -74,6 +74,7 @@ import { withQoderMachineHeadersAsync } from './qoder-machine.js'
 import { qoderBearerToken, type QoderCredential } from './qoder.js'
 import type { QoderProduct } from './qoder-product.js'
 import type { ProviderBalanceDetail } from './provider-runtime.js'
+import { QODER_ADD_ON_PACKAGE, type QoderGrant } from './qoder-web-usage.js'
 
 /** 用量接口路径（挂 `openApiBase`）。 */
 export const QODER_USAGE_PATH = '/sash/api/v2/me/usage'
@@ -813,7 +814,7 @@ function parseQoderUsage(qoderUsage: Record<string, unknown>): CreditBalance | n
   //    事实错误（报障者截图：有效期 2026-11-07 … 2026-12-07）。置位后分桶
   //    行为一格不变（仍是 `permanent`，永久锁 / 选号 / 聚合轮换都不受影响），
   //    只有卡片文案改成「到期未知」。
-  const addOnQuota = toPackage('资源包', qoderUsage.addOnQuota, { expiryUnknown: true })
+  const addOnQuota = toPackage(QODER_ADD_ON_PACKAGE, qoderUsage.addOnQuota, { expiryUnknown: true })
   if (addOnQuota !== undefined) packages.push(addOnQuota)
 
   const dedicated = qoderUsage.dedicatedResourcePackages
@@ -1089,6 +1090,8 @@ interface QoderClaimResult {
   amount?: number
   /** 服务端拒绝码（如 ）。 */
   failureCode?: string
+  /** 本笔积分的到期时刻（毫秒；响应顶层 `expiresAt` ISO 串解析而来）。 */
+  expiresAtMs?: number
 }
 
 /** 解析 claim 响应。 */
@@ -1107,7 +1110,16 @@ function parseClaimResult(body: unknown): QoderClaimResult {
     ...typeof root.replayed === 'boolean' ? { replayed: root.replayed } : {},
     ...failureCode !== undefined ? { failureCode: failureCode.trim() } : {},
     ...benefitAmount(root) !== undefined ? { amount: benefitAmount(root)! } : {},
+    ...claimExpiresAtMs(root) !== undefined ? { expiresAtMs: claimExpiresAtMs(root)! } : {},
   }
+}
+
+/** 领取响应顶层 `expiresAt`（ISO 串，实测 `2026-10-21T14:54:12.176671Z`）→ 毫秒。 */
+function claimExpiresAtMs(root: Record<string, unknown>): number | undefined {
+  const raw = readString(root, 'expiresAt') ?? readString(root, 'expires_at')
+  if (raw === undefined) return undefined
+  const ms = Date.parse(raw)
+  return Number.isFinite(ms) && ms > 0 && !isPermanentSentinelMs(ms) ? ms : undefined
 }
 
 /**
@@ -1167,7 +1179,13 @@ export async function claimQoderCampaign(
     const suffix = failureCode === undefined ? '' : `，failureCode=${result.failureCode}`
     return { kind: 'failed', code: -1, message: `领取未成功（status=${result.status ?? '未返回'}）${suffix}` }
   }
-  return { kind: 'claimed', credit: result.amount ?? 0, streakDays: 0, isStreakDay: false }
+  const credit = result.amount ?? 0
+  return {
+    kind: 'claimed', credit, streakDays: 0, isStreakDay: false,
+    ...credit > 0 && result.expiresAtMs !== undefined
+      ? { grants: [{ amount: credit, expiresAtMs: result.expiresAtMs }] }
+      : {},
+  }
 }
 
 /** 非 JSON 响应的可读原因（凭据失效时网关返回 HTML）。 */
@@ -1246,6 +1264,7 @@ export async function claimQoderDailyCheckin(
   }
 
   let total = 0
+  const grants: QoderGrant[] = []
   let firstError: string | undefined
   /**
    * ⚠️ already-claimed 的**具体原因**也要往上透传（2026-11-03 审计 P1）：
@@ -1256,8 +1275,10 @@ export async function claimQoderDailyCheckin(
   let firstAlreadyClaimed: string | undefined
   for (const target of targets) {
     const outcome = await claimQoderCampaign(credential, product, target.campaignId, fetcher)
-    if (outcome.kind === 'claimed') total += outcome.credit
-    else if (outcome.kind === 'failed' && firstError === undefined) firstError = outcome.message
+    if (outcome.kind === 'claimed') {
+      total += outcome.credit
+      if (outcome.grants !== undefined) grants.push(...outcome.grants)
+    } else if (outcome.kind === 'failed' && firstError === undefined) firstError = outcome.message
     else if (outcome.kind === 'already-claimed' && firstAlreadyClaimed === undefined) {
       firstAlreadyClaimed = outcome.message
     }
@@ -1265,7 +1286,12 @@ export async function claimQoderDailyCheckin(
   // ⚠️ 三条返回都带 `stale`：刷新前领到的是**昨天那条**的补领 —— 它是一次
   // 真实动作（该如实报「领取成功」），但**不证明今天已被处理**，记账方必须
   // 能把这两种情况分开（否则当天 10 点刷新后的额度就没人领了）。
-  if (total > 0) return { kind: 'claimed', credit: total, streakDays: 0, isStreakDay: false, ...stale }
+  if (total > 0) {
+    return {
+      kind: 'claimed', credit: total, streakDays: 0, isStreakDay: false, ...stale,
+      ...grants.length > 0 ? { grants } : {},
+    }
+  }
   if (firstError !== undefined) return { kind: 'failed', code: -1, message: firstError }
   return { kind: 'already-claimed', message: firstAlreadyClaimed ?? '今天已领取', ...stale }
 }

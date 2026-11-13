@@ -2268,6 +2268,12 @@ export class AccountPool {
     try {
       await this.ctx.credentials.unset(credentialRef(entry.credentialRef))
     } catch { /* 凭据可能已被删除 */ }
+    // Qoder 的网页会话 Cookie 与领取记录存在独立条目里，随账号一并清理。
+    if (entry.provider === 'qoder' || entry.provider === 'qodercn') {
+      try {
+        await this.ctx.credentials.unset(credentialRef(`${entry.credentialRef}_web`))
+      } catch { /* 本就不存在 */ }
+    }
     // ⚠ **必须重新读一次**（真实缺陷，审查发现）：`credentials.unset` 会挂起若干
     // 微任务/IO，期间并发的 `addAccount` 已经把新条目写进 `this.cache` 与磁盘。
     // 若此时拿 `await` **之前**的快照做 filter 再整体写回，那个新账号会被静默丢失

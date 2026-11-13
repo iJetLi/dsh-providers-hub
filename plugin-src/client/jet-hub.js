@@ -37,6 +37,7 @@ import {
   MinimaxIntlProxyModal,
   QoderProxyModal,
 } from './opencode-proxy-modal.js';
+import { QoderWebSessionModal } from './qoder-web-session-modal.js';
 // ⚠️ **本 fork 独有**（魔搭，2026-10-17 审计 P0 修复）：与 opencode 同属
 //    「不跳浏览器、手工粘贴 API Key」的 provider，故复用同一条自绘弹窗通路。
 //    ⚠️ 本 import 此前**不存在** ⇒ `modelscope-key-modal.js` 整份 140 行从未进 bundle，
@@ -1085,6 +1086,8 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
   // ⚠️ **本 fork 独有**：modelscope 的「令牌」按钮同理（传了才渲染），
   // 第二参是宿主算好的**打码**串。
   onOpenProxy, onRotateFingerprint, onEditModelscopeKey, onEditQiniuKey,
+  // Qoder 专属：「网页会话」按钮（传了才渲染）；第二参是是否已保存。
+  onOpenWebSession,
   // ⚠️ **本 fork 独有**（MonkeyCode 两站 / 百智云）：两个「改 Key」+ 一个「登录」。
   // 同为 props 存在性开关（而非 provider 硬判断），见各自按钮处注释。
   onEditMonkeycodeKey, onEditBaizhiKey, onReadSession }) {
@@ -1272,6 +1275,15 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
                 || '',
             ),
           }, '代理')
+        : null,
+      onOpenWebSession
+        ? React.createElement('button', {
+            className: 'dim-jh-btn',
+            title: account.qoderWebSession
+              ? '网页会话：已保存（资源包按官网明细显示逐笔到期，点击修改）'
+              : '粘贴官网登录 Cookie，显示资源包每一笔的到期日；不设置则按领取记录推算',
+            onClick: () => onOpenWebSession(account.id, Boolean(account.qoderWebSession)),
+          }, account.qoderWebSession ? '会话✓' : '会话')
         : null,
       onRotateFingerprint
         ? React.createElement('button', {
@@ -4003,6 +4015,8 @@ function ProviderPanel({
    * 共用一个 state 会让开代理弹窗把登录链接顶掉（表现为链接凭空消失）。
    */
   const [proxyModal, setProxyModal] = React.useState(null);
+  // Qoder「网页会话」弹窗：独立 state，不与代理弹窗互相顶掉。
+  const [webSessionModal, setWebSessionModal] = React.useState(null);
   // ⚠️ **本 fork 独有**（modelscope，2026-10-17）：「编辑访问令牌」弹窗状态
   // { accountId, currentMasked, error } 或 null。
   // ⚠️ **独立于** `keyModal`（添加账号用）：两者语义不同（新增 vs 替换），
@@ -7382,6 +7396,7 @@ function ProviderPanel({
                 ...(provider === 'qoder' || provider === 'qodercn'
                   ? {
                       onOpenProxy: (id, current) => setProxyModal({ provider, accountId: id, current }),
+                      onOpenWebSession: (id, hasSession) => setWebSessionModal({ provider, accountId: id, hasSession }),
                     }
                   : {}),
                 // ⚠️ **MiniMax 国际站也要「代理」按钮**：`agent.minimax.io` 按出口
@@ -7497,6 +7512,20 @@ function ProviderPanel({
           // 其余组件解构时忽略多余的 props，故统一透传不影响它们。
           provider: proxyModal.provider,
           onClose: () => setProxyModal(null),
+        })
+      : null,
+    webSessionModal ? React.createElement(QoderWebSessionModal, {
+          ctx: { rpc: (payload) => rpcCall(payload.method, payload.payload) },
+          accountId: webSessionModal.accountId,
+          provider: webSessionModal.provider,
+          hasSession: webSessionModal.hasSession,
+          onClose: (changed) => {
+            setWebSessionModal(null);
+            if (changed) {
+              void loadAccounts();
+              void loadCredits(true);
+            }
+          },
         })
       : null,
     // 「添加 opencode 账号」弹窗：自绘而非 window.prompt ——
