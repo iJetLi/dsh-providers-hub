@@ -45,6 +45,7 @@ import type { AccountPool } from './account-pool.js'
 // 适配器不直接碰 `state.json`（保持「适配器不持有持久化」的分层）。
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateRejectionMap } from './jet-hub-store.js'
 import { buildVirtualModels, type VirtualModel } from './aggregate-catalog.js'
+import { bindAggregateDispatch } from './aggregate-dispatch-context.js'
 // ⚠️ `NEVER` / `UNUSABLE` **必须**从这里导入（Task 3 的共享底座）。它们从不在
 // `auto-adapter.ts` 里 `export` —— 从那里导入会编译失败（Task 3 复审已确认）。
 // ⚠️ `ExpiryProbe` 也在这里：它是**纯类型**，而 `aggregate-expiry.ts`（探针实现）
@@ -2883,7 +2884,10 @@ export class AggregateAdapter extends LlmAdapter {
          */
         let pendingProvider: string | undefined
         try {
-          for await (const chunk of self.streamThrough(target, options)) {
+          // ⚠️ 派发必须带上「聚合调用」标记（见 `aggregate-dispatch-context.ts`）：
+          //    渠道据此把「暂时排队」改判为「本候选失败」，让这里能切到下一个候选，
+          //    而不是被 qoder 的排队等待锁死（2026-11-14 生产故障）。
+          for await (const chunk of bindAggregateDispatch(() => self.streamThrough(target, options))) {
             // ⚠️⚠️ **必须在置 `emitted` 之前**判这个失败帧（顺序是语义性的）。
             //
             // 为什么需要这一段：`streamThrough` 走的是**嵌套公共入口**

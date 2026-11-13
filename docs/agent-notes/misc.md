@@ -206,6 +206,16 @@
      总时长与 `wait` 档**严格一致**。
    - ⚠️ **两条消费路径都要有守卫**：HTTP 403 形态与 SSE 内嵌 10605 帧各一处
      `for await (…) yield frame`；只测一条时另一条删掉仍全绿（2026-11-13 实测）。
+   - ⚠️⚠️ **聚合调用一律按 `fast` 处理，无视环境变量（2026-11-14 生产故障）**：
+     聚合只在候选**报错**时切换 ⇒ `wait` 档静默等待让聚合等不到错误，`visible`
+     档的空 `text-delta` 被 `isVisibleContent` 判「已产出内容」⇒ 禁止切换，两者都把
+     请求锁死在 qoder 上。判据是 `src/aggregate-dispatch-context.ts` 的
+     `AsyncLocalStorage` 标记（聚合 `dispatch` 用 `bindAggregateDispatch` 包派发，
+     qoder 用 `resolveEffectiveQueueWaitMode()` 读）。⚠️ 必须**逐次包 `next()`**：
+     异步生成器在调用 `next()` 的上下文里恢复，只包创建会在第二个 chunk 起丢标记。
+     ⚠️ 不走 `GenerateOptions` 私有字段：宿主 `adapterStream` 会重组 options，
+     不保证透传。测试：`tests/unit/aggregate-qoder-queue.spec.ts`（真实
+     `QoderAdapter` + 仿宿主嵌套生成器；去掉 `bindAggregateDispatch` 后 5 条变红）。
    ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
    `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]` **不含 `QUEUE`/`AUTH`**，
    且它的退避是**固定参数**（`initialDelayMs=500`、`maxDelayMs=10_000`、

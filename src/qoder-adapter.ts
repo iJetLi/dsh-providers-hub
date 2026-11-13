@@ -28,6 +28,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AccountPool } from './account-pool.js'
+import { isInsideAggregateDispatch } from './aggregate-dispatch-context.js'
 import { createModelCatalog, isCatalogFreshFor, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
@@ -502,6 +503,27 @@ export function resolveQueueWaitMode(): QoderQueueWaitMode {
   const raw = (process.env.DSH_QODER_QUEUE_WAIT_MODE ?? '').trim().toLowerCase()
   if (raw === 'visible' || raw === 'fast' || raw === 'wait') return raw
   return 'wait'
+}
+
+/**
+ * 本次排队**实际生效**的策略：聚合派发内一律 `fast`，否则按环境变量。
+ *
+ * ## 为什么聚合调用要无视 `DSH_QODER_QUEUE_WAIT_MODE`（真实故障，2026-11-14）
+ *
+ * 聚合（`aggregate/*`）只在候选**报错**时切换下一个候选：
+ * - `wait` 档静默等待（上限 30 分钟）⇒ 聚合永远等不到错误，请求被锁死在 qoder 上；
+ * - `visible` 档先吐空 `text-delta` 心跳 ⇒ 被聚合的 `isVisibleContent` 判成
+ *   「已产出内容」⇒ **禁止切换**（防两段回答拼接），同样锁死。
+ *
+ * 只有 `fast`（立刻抛 `QUEUE`）能让聚合换到下一个能用的候选。直连 qoder 时没有
+ * 「下一个候选」可换，仍按环境变量等待 / 向下游报排队，行为不变。
+ *
+ * ⚠️ 判据来自 `aggregate-dispatch-context.ts` 的异步上下文，不读请求字段
+ *（宿主不保证透传私有字段，理由见该模块头）。
+ */
+export function resolveEffectiveQueueWaitMode(): { mode: QoderQueueWaitMode; viaAggregate: boolean } {
+  if (isInsideAggregateDispatch()) return { mode: 'fast', viaAggregate: true }
+  return { mode: resolveQueueWaitMode(), viaAggregate: false }
 }
 
 /**
@@ -2286,7 +2308,7 @@ export class QoderAdapter extends LlmAdapter {
      * 调用之间环境变量被改过，就会出现「按 `fast` 判定、按 `visible` 分支执行」
      * 的错配（本 PR 初版就是两处各读一次）。
      */
-    const mode = resolveQueueWaitMode()
+    const { mode, viaAggregate } = resolveEffectiveQueueWaitMode()
     const waitMs = qoderQueueDelayMs(queueInfo)
     // ⚠️ 拿不到服务端延迟时**不忙等**：用保守的短退避，避免瞬间烧掉机会
     // （客户端 W7c() 此时会退回 ltA() 指数退避）。
@@ -2314,7 +2336,7 @@ export class QoderAdapter extends LlmAdapter {
       this.options.warn?.(
         `[qoder] ${this.product.id} 上游排队（10605）：`
         + `${mode === 'fast' ? '未等待' : `等待 ${waitMsForLog}ms`}`
-        + `（模式 ${mode}，第 ${attempts} 次`
+        + `（模式 ${mode}${viaAggregate ? '（聚合调用，交由聚合切换下一个候选）' : ''}，第 ${attempts} 次`
         + `${modelKey === undefined ? '' : `，modelKey=${modelKey}`}`
         + `${accountId === undefined ? '' : `，account=${accountId}`}`
         + `${retryAfterSeconds === undefined ? '' : `，retryAfterSeconds=${retryAfterSeconds}`}）`,
@@ -2325,7 +2347,9 @@ export class QoderAdapter extends LlmAdapter {
       // 终态也必须留痕（见 warnQueue 的注释）。
       warnQueue(0)
       throw new LlmError(
-        'qoder: 上游模型排队中（DSH_QODER_QUEUE_WAIT_MODE=fast，未等待）',
+        viaAggregate
+          ? 'qoder: 上游模型排队中（聚合调用不等待，交由聚合切换下一个候选）'
+          : 'qoder: 上游模型排队中（DSH_QODER_QUEUE_WAIT_MODE=fast，未等待）',
         'QUEUE',
       )
     }
