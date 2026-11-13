@@ -300,14 +300,22 @@ describe('fast 档的错误码：必须是 `QUEUE`（可分类重试的那一格
    * 且绕过 `dead-model-store` 的 `IGNORED_CODES` 豁免（对抗审计 M11 实测：
    * 把 `QUEUE` 改成 `SERVER` 时全仓 144 条**全绿**）。
    */
-  it('★★ 直连 fast 档：`code === \'QUEUE\'`，且一次都不等', async () => {
+  it('★★ 直连 fast 档：`code === \'QUEUE\'`，一次都不等，且日志**不许**提「聚合」', async () => {
     setMode('fast')
-    const { qoder, sleeps } = makeQueuedQoder()
+    const { qoder, sleeps, warns } = makeQueuedQoder()
     await expect(async () => {
       for await (const _ of qoder.stream({ model: 'qfmodel', messages: MESSAGES } as never)) {
         // 不该有 chunk
       }
     }).rejects.toMatchObject({ code: 'QUEUE' })
     expect(sleeps).toEqual([])
+    /**
+     * ⚠️ 直连时的日志**必须与 base 逐字节相同**（正向审计实测：同一字符串）。
+     * 若 `viaAggregate` 恒 `true`，这里会变成「聚合调用…」⇒ 排障时用户会
+     * 以为自己走了聚合（而其实没有）。
+     */
+    const log = warns.join('\n')
+    expect(log).toContain('未等待')
+    expect(log, '直连不该出现「聚合调用」字样').not.toContain('聚合调用')
   })
 })
