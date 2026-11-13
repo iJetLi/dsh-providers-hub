@@ -1348,9 +1348,13 @@ export function apply(ctx: Context): void {
       const rotationStartId = sessionId === undefined
         ? undefined
         : pool.preferredRotationFor('codearts', sessionId)
+      // WARN modelId 恒传空串：codearts 刻意不做模型级限流（见
+      // ratelimit-misreport-behavior.spec.ts 的「已知例外」一节）。PR #59 顺手
+      // 写成 modelId ?? '' 会让它开始按模型过滤 —— 症状是「限流标记把账号
+      // 筛空 ⇒ 取不到号 ⇒ 误报未登录」，正是该 spec 明写要防的第 13 个受害者。
       const available = await pool.getAvailableAccount<CodeArtsCredential>(
         'codearts',
-        modelId ?? '',
+        '',
         undefined,
         rotationStartId,
       )
