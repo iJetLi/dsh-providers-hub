@@ -636,7 +636,7 @@ function createOAuthCallbackReceiver(
       })
   }
 
-  return { result, acceptCode, acceptSecret, isSettled: () => settled }
+  return { result, acceptCode, acceptSecret, isSettled: () => settled, expire: () => { settled = true } }
 }
 
 /** 新式 OAuth 的本地回调服务器：收到 code（新流程）或 secret（旧流程回退）后换取凭据并 resolve。 */
@@ -741,7 +741,15 @@ export type ManualCallbackErrorCode =
 const MANUAL_CALLBACK_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 /** 形如 `https://…` 的绝对 URL。 */
 const MANUAL_CALLBACK_ABSOLUTE_URL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//
-/** 回调路径（与 `REDIRECT_PATH` 同值；此处独立一份是为了让解析器不依赖导入顺序）。 */
+/**
+ * 回调路径。
+ *
+ * ⚠️ 与 `REDIRECT_PATH`（`./oauth.js`，本文件顶部已 import）**必须同值**：
+ * 解析器判的是「这一跳是不是授权回调」，而服务器认的是 `REDIRECT_PATH` ——
+ * 两者一旦漂移，用户粘回来的合法链接会被判 `WRONG_PATH`，而**没有任何报错**。
+ * 保留独立常量只为让错误文案（「应为 /oauth/callback」）有一个具名来源；
+ * 相等关系由 `tests/unit/codearts-manual-callback.spec.ts` 断言。
+ */
 const MANUAL_CALLBACK_PATH = '/oauth/callback'
 
 const MANUAL_CALLBACK_REASONS: Readonly<Record<ManualCallbackErrorCode, string>> = {
@@ -773,13 +781,46 @@ function manualCallbackDeclaredPort(text: string): string | undefined {
   return match === null ? undefined : match[1]
 }
 
+/**
+ * `NO_PORT` 的**文案分流**（PR #57 正向审计 P2-2）。
+ *
+ * 同一个错误码背后有三种不同的粘贴失误，修法完全不同 —— 一句话糊在一起，
+ * 用户只会重粘一次同样的东西：
+ *
+ * | 形态 | 用户实际做的 | 该说什么 |
+ * |---|---|---|
+ * | `…:0/oauth/callback?code=…` | 端口被写成 0 | 这不可能是真实回调 |
+ * | `?code=…`（只有查询串） | 只复制了问号之后 | 把主机与端口一起带上 |
+ * | 其它（无端口） | 少复制了 `:端口` | 整条复制 |
+ */
+function manualCallbackMissingPort(text: string): ManualCallbackParseResult {
+  if (/:0(?=[/?#]|$)/.test(text)) {
+    return {
+      kind: 'error',
+      code: 'NO_PORT',
+      message: '这条回调链接的端口号是 0，不可能是真实的授权回调地址。'
+        + '请回到「无法访问此页面」那一页，重新复制整条地址栏。',
+    }
+  }
+  if (text.trimStart().startsWith('?')) {
+    return {
+      kind: 'error',
+      code: 'NO_PORT',
+      message: '只粘到了查询串（`?code=…`）。请把前面的'
+        + ' `http://127.0.0.1:端口/oauth/callback` 一起带上 —— 端口决定这是哪一轮登录。',
+    }
+  }
+  return manualCallbackError('NO_PORT')
+}
+
 function manualCallbackReadParams(
   params: URLSearchParams,
   port: number | undefined,
+  rawText: string,
 ): ManualCallbackParseResult {
   const code = params.get('code')
   if (typeof code === 'string' && code.trim().length > 0) {
-    if (port === undefined) return manualCallbackError('NO_PORT')
+    if (port === undefined) return manualCallbackMissingPort(rawText)
     return { kind: 'code', code: code.trim(), port }
   }
   const secret = params.get('secret')
@@ -804,10 +845,15 @@ function manualCallbackParseAbsolute(text: string): ManualCallbackParseResult {
   if (!MANUAL_CALLBACK_LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) {
     return manualCallbackError('NOT_LOOPBACK')
   }
-  if (url.pathname !== MANUAL_CALLBACK_PATH && !url.pathname.startsWith(MANUAL_CALLBACK_PATH)) {
+  // ⚠️ **精确相等**，不是 `startsWith`（PR #57 正向审计 P1-2）：
+  //   前缀判会放行 `/oauth/callbackevil` 与 `/oauth/callback/`，
+  //   而它们都不是 portal 的真实回调路径；反过来把常量写短一个字符
+  //   （`/oauth/callbac`）时前缀判**仍然全绿**，真实链接却被全拒。
+  //   这里没有「未来可能多一段路径」的兼容诉求 —— portal 的回调是固定形态。
+  if (url.pathname !== MANUAL_CALLBACK_PATH) {
     return manualCallbackError('WRONG_PATH')
   }
-  return manualCallbackReadParams(url.searchParams, manualCallbackPort(url.port))
+  return manualCallbackReadParams(url.searchParams, manualCallbackPort(url.port), text)
 }
 
 function manualCallbackParseQueryOnly(text: string): ManualCallbackParseResult {
@@ -822,7 +868,7 @@ function manualCallbackParseQueryOnly(text: string): ManualCallbackParseResult {
   } else {
     query = withoutHash
   }
-  return manualCallbackReadParams(new URLSearchParams(query), undefined)
+  return manualCallbackReadParams(new URLSearchParams(query), undefined, text)
 }
 
 /**
@@ -873,6 +919,15 @@ export interface OAuthCallbackReceiver {
   acceptSecret: (secret: string) => boolean
   /** 这一轮是否已经落定（成功或失败）。 */
   isSettled: () => boolean
+  /**
+   * 把这一轮标记为**已结算**（超时 / 外部取消）。
+   *
+   * ⚠️ 缺了它，超时之后收码器仍是「未落定」：`close()` 关掉了服务器，
+   * 但用户随后粘回来的链接仍会被 `acceptCode` 接受，返回一个**真值 promise**，
+   * 于是 `submitManualCallback` 回 `{ ok: true }` —— 而那一轮登录其实早已超时。
+   * 用户看到「提交成功」却永远等不到账号出现（PR #57 正向审计 P3-8）。
+   */
+  expire: () => void
 }
 
 /**
@@ -935,7 +990,13 @@ export async function startOAuthFlow(options: LoginFlowOptions = {}): Promise<St
   const resultWithUrl = Promise.race([
     result,
     new Promise<never>((_, reject) => {
-      const timer = setTimeout(() => reject(new Error('CodeArts OAuth login timed out')), OAUTH_CALLBACK_TIMEOUT_MS)
+      const timer = setTimeout(() => {
+        // ⚠️ 超时**必须**把收码器标记为已结算（PR #57 正向审计 P3-8）：
+        //   下面 `finally` 会关掉服务器，但收码器不知道「这一轮已经结束」，
+        //   用户随后粘回来的链接仍会被接受并回 `{ ok: true }`。
+        if (!receiver.isSettled()) receiver.expire()
+        reject(new Error('CodeArts OAuth login timed out'))
+      }, options.callbackTimeoutMs ?? OAUTH_CALLBACK_TIMEOUT_MS)
       timer.unref?.()
     }),
   ]).then((outcome) => ({ ...outcome, loginUrl }))

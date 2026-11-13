@@ -2247,6 +2247,14 @@ export interface LoginFlowOptions {
   maxAttempts?: number
   /** 登录流程选择：'oauth'（默认）或 'ticket'（旧流程回退）。 */
   flow?: 'oauth' | 'ticket'
+  /**
+   * 回调等待预算（毫秒）；默认 180 秒。
+   *
+   * ⚠️ 只为**可测**而存在：超时后必须把收码器标记为已结算，否则用户粘回来的
+   * 链接会被接受并回「成功」（PR #57 正向审计 P3-8）。没有这个入口就只能
+   * 真等 180 秒，超时分支的守卫等于没有。
+   */
+  callbackTimeoutMs?: number
 }
 
 /**

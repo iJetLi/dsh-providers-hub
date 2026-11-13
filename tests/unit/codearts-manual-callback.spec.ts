@@ -28,6 +28,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { parseManualCallbackUrl, startOAuthFlow } from '../../src/login.js'
+import { REDIRECT_PATH } from '../../src/oauth.js'
 
 /** 从 loginUrl 里取本轮回调端口（portal 就是靠它构造 redirect_uri 的）。 */
 function portOf(loginUrl: string): number {
@@ -253,6 +254,85 @@ describe('浏览器原始回调路径未被手动提交改动（回归）', () =
       // ⚠️ 真实插件按换取结果选目标页；把这句写死成 true 会让用户看到「登录成功」而账号根本没建。
       expect(response.headers.get('location') ?? '').toContain('login_succeed=false')
       await expect(started.result).rejects.toThrow()
+    } finally {
+      await started.close()
+    }
+  })
+})
+
+
+/**
+ * ★★ 路径判据必须**精确**，且与回调服务器的 `REDIRECT_PATH` 同源。
+ *
+ * PR #57 正向审计 P1-2 实证：原实现是
+ * `url.pathname !== MANUAL_CALLBACK_PATH && !url.pathname.startsWith(MANUAL_CALLBACK_PATH)`
+ * ⇒ 把常量写短一个字符（`/oauth/callbac`）时 27 条用例**全绿**，
+ * 而真实 portal 的 `…/oauth/callback` 会被全拒；反过来 `/oauth/callbackevil`
+ * 与 `/oauth/callback/` 都被放行 —— 与 `WRONG_PATH` 的文案「应为 /oauth/callback」
+ * 自相矛盾。
+ */
+describe('回调路径判据（PR #57 正向审计 P1-2）', () => {
+  it('解析器认的路径必须与回调服务器的 REDIRECT_PATH 逐字相同', () => {
+    // 用服务器**真实**认的那个常量构造链接：两个常量一旦漂移，这里立刻变
+    // WRONG_PATH —— 这是「两处同义常量必须同值」唯一的行为级判据。
+    expect(parseManualCallbackUrl(`http://127.0.0.1:50000${REDIRECT_PATH}?code=X`))
+      .toEqual({ kind: 'code', code: 'X', port: 50000 })
+  })
+
+  it('前缀、尾斜杠都不许放行（`/oauth/callbackevil`、`/oauth/callback/` 都不是真实回调）', () => {
+    expect(parseManualCallbackUrl('http://127.0.0.1:50000/oauth/callbackevil?code=1').kind).toBe('error')
+    expect(parseManualCallbackUrl('http://127.0.0.1:50000/oauth/callback/?code=1').kind).toBe('error')
+    expect(parseManualCallbackUrl('http://127.0.0.1:50000/oauth/callbac?code=1').kind).toBe('error')
+  })
+})
+
+/**
+ * ★ `NO_PORT` 的三个子原因必须**文案分流**（PR #57 正向审计 P2-2）：
+ * 同码不同因，修法完全不同 —— 一句话糊在一起，用户只会重粘一次同样的东西。
+ */
+describe('NO_PORT 文案分流（PR #57 正向审计 P2-2）', () => {
+  it('端口写成 0 ⇒ 直说「端口是 0」，不是泛泛的「缺端口」', () => {
+    const parsed = parseManualCallbackUrl('http://127.0.0.1:0/oauth/callback?code=1')
+    expect(parsed.kind).toBe('error')
+    if (parsed.kind !== 'error') return
+    expect(parsed.code).toBe('NO_PORT')
+    expect(parsed.message).toContain('端口号是 0')
+  })
+
+  it('只粘了查询串 ⇒ 提示把 http://127.0.0.1:端口/oauth/callback 一起带上', () => {
+    const parsed = parseManualCallbackUrl('?code=R')
+    expect(parsed.kind).toBe('error')
+    if (parsed.kind !== 'error') return
+    expect(parsed.code).toBe('NO_PORT')
+    expect(parsed.message).toContain('http://127.0.0.1:端口/oauth/callback')
+  })
+
+  it('单纯缺端口 ⇒ 仍是「整条复制（应含 :端口）」', () => {
+    const parsed = parseManualCallbackUrl('http://127.0.0.1/oauth/callback?code=1')
+    expect(parsed.kind).toBe('error')
+    if (parsed.kind !== 'error') return
+    expect(parsed.code).toBe('NO_PORT')
+    expect(parsed.message).toContain('整条复制')
+  })
+})
+
+/**
+ * ★★ 超时后收码器必须**已结算**（PR #57 正向审计 P3-8）。
+ *
+ * 原实现超时只 reject 那个 race 的 promise，收码器仍「未落定」⇒ 用户随后
+ * 粘回链接时 `acceptCode` 照常被接受、`submitManualCallback` 回 `{ ok: true }`
+ * ⇒ 用户看到「提交成功」却永远等不到账号（那一轮早已超时）。
+ *
+ * ⚠️ 必须可测：`callbackTimeoutMs` 就是为此新增的入口 —— 没有它只能真等
+ * 180 秒，这条守卫等于不存在。
+ */
+describe('超时后必须拒绝后续的手动提交（PR #57 正向审计 P3-8）', () => {
+  it('超时 ⇒ result 落定失败，且 submitManualCallback 回 ok:false', async () => {
+    const started = await startOAuthFlow({ openBrowser: () => {}, fetcher: vi.fn(), callbackTimeoutMs: 5 })
+    try {
+      await expect(started.result).rejects.toThrow(/timed out/)
+      const submitted = started.submitManualCallback('http://127.0.0.1:50000/oauth/callback?code=LATE')
+      expect(submitted.ok, '超时后仍接受手动提交 ⇒ 用户看到「成功」但永远不会登录成功').toBe(false)
     } finally {
       await started.close()
     }

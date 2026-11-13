@@ -3492,6 +3492,21 @@ function ProviderPanel({
    */
   const [codeartsCallback, setCodeartsCallback] = React.useState(null);
   /**
+   * 「提交回调链接」的**同步单飞**闸门（PR #57 对抗审计 P3-a）。
+   *
+   * ⚠️⚠️ `codeartsCallback.busy` 是**渲染后态**：两次点击若落在同一帧里，
+   * 两次调用读到的闭包都是 `busy === false` ⇒ 下面那个 `if (busy) return`
+   * **形同虚设**，同一份一次性 `code` 会被提交两次。
+   *
+   * 后果不是「多发一个请求」那么轻：第二次的失败文案「这轮登录已经结束」
+   * 会被 `catch` 写进 `error`，而它显示在一条**正在成功**的登录上 ——
+   * 用户据此以为登录坏了，去重开一次，反而把第一次的进度覆盖掉。
+   *
+   * ⇒ 用 `useRef` 做**同步**单飞：`ref` 的写入与读取都在同一帧内生效，
+   * 与 React 何时重渲染无关。`finally` 里释放（成功 / 失败都不留死锁）。
+   */
+  const codeartsSubmitInFlightRef = React.useRef(false);
+  /**
    * 出口代理弹窗状态：{ accountId, current } 或 null。
    *
    * ⚠️ **独立于** `loginUrlForManual`：那个是登录链接兜底弹窗，两者共存时
@@ -5361,20 +5376,27 @@ function ProviderPanel({
     if (!codeartsCallback) return;
     const { accountId, value, busy } = codeartsCallback;
     if (busy) return;
+    // ⚠️⚠️ 同帧重入的**唯一**有效闸门：`busy` 还没被渲染出去（见 ref 的注释）。
+    if (codeartsSubmitInFlightRef.current) return;
     if (typeof value !== 'string' || value.trim().length === 0) {
       setCodeartsCallback((current) => (current
         ? { ...current, error: '请先把回调链接粘贴进来（整条地址栏内容，含 code=… 或 secret=…）。' }
         : current));
       return;
     }
+    codeartsSubmitInFlightRef.current = true;
     setCodeartsCallback((current) => (current ? { ...current, busy: true, error: '' } : current));
     try {
       await rpcCall('account.submitCallback', { accountId, callbackUrl: value });
       // 宿主已受理：交给既有的 login.poll 统一收口（成功 / 失败文案同一通道）。
+      // ⚠️ 成功后**刻意不释放** `busy`（保持「提交中…」，由轮询的终态出口收尾）；
+      //    但 `ref` 必须释放 —— 否则用户「取消」后再新建账号会被永久挡住。
     } catch (caught) {
       setCodeartsCallback((current) => (current
         ? { ...current, busy: false, error: caught?.message || '回调链接提交失败（宿主未给出原因）。' }
         : current));
+    } finally {
+      codeartsSubmitInFlightRef.current = false;
     }
   };
   const startLoginPoll = ({ accountId, provider, loginWindow = null }) => {

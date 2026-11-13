@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 /**
  * `ProviderPanel` 的**接线层行为级**守卫（2026-10-25 审计 P1-3 / A3-1 / B3）。
@@ -933,5 +933,294 @@ describe('腾讯 Marvis 登录接线（行为级）', () => {
       notices.some((notice) => notice.text.includes('浏览器窗口已打开')),
       '提交后没有任何提示 ⇒ 用户不知道要去窗口里授权（观感 = 点了没反应）',
     ).toBe(true)
+  })
+})
+
+
+/**
+ * ★★「手动粘贴回调链接」的**客户端接线**（PR #57 正向审计 P1-1 / 对抗审计 P1-b）。
+ *
+ * ## 为什么必须行为级
+ *
+ * PR #57 自带的 27 条用例全部只测 `src/login.ts` 的纯函数。两轮独立审计各自实证：
+ * 删掉三处出口清理（`setCodeartsCallback(null)`，`plugin-src/client/jet-hub.js:5402/5424/5433`）、
+ * 入口恒假（`:3708` 追加 `&& false`）、busy 闸门（`:5975`）、`aria-disabled`（`:5973`）、
+ * `type: 'button'`（`:5971`）、`provider === 'codearts'` 限定（`:3708`）、
+ * `if (!codeartsCallback) return`（`:5361`）等九处，
+ * **全量 13203 条仍然全绿**（失败用例名与基线逐条相同）。
+ *
+ * 最坏的形态是 `catch` 里把 `busy` 写成 `true` ⇒ 输入框与按钮**永久禁用**、
+ * 零重试路径 —— 而测试全绿。判据只能是「真渲染 → 真点 → 真看渲染产物 / 真发 RPC」。
+ */
+describe('「手动粘贴回调链接」的客户端接线（codearts，PR #57 审计 P1-b）', () => {
+  /** 与「登录开窗」组同款的 window 垫片（那段是局部函数，这里复制一份）。 */
+  function withWindow<T>(
+    impl: { confirm: (message: string) => boolean; open: (...args: unknown[]) => unknown },
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const host = globalThis as unknown as { window?: unknown; confirm?: unknown; alert?: unknown }
+    const previousWindow = host.window
+    const previousConfirm = host.confirm
+    const previousAlert = host.alert
+    host.window = impl
+    // ⚠️ 裸 `confirm` 也要垫：`createAccount` 里既有 `window.confirm` 也有裸 `confirm`。
+    host.confirm = (message: string) => impl.confirm(message)
+    host.alert = () => {}
+    return fn().finally(() => {
+      host.window = previousWindow
+      host.confirm = previousConfirm
+      host.alert = previousAlert
+    })
+  }
+
+  type Box = { type: unknown; props: Record<string, unknown> | null; children?: unknown[] }
+
+  const boxes = (): Box[] => elements as Box[]
+
+  /** 按 `aria-label` 精确取元素（「新建账号」按钮的唯一稳定锚点）。 */
+  const byLabel = (label: string): Box | undefined =>
+    boxes().find((e) => (e.props as Record<string, unknown> | null)?.['aria-label'] === label)
+
+  /** 回调链接输入框：`dim-jh-input` + placeholder 含 `127.0.0.1`。 */
+  const callbackInput = (): Box | undefined =>
+    boxes().find((e) => {
+      const props = e.props as Record<string, unknown> | null
+      return props?.className === 'dim-jh-input'
+        && typeof props?.placeholder === 'string'
+        && props.placeholder.includes('127.0.0.1')
+    })
+
+  /** 按按钮可见文案取 `dim-jh-btn`（提交 / 取消）。 */
+  const buttonWithText = (needle: string): Box | undefined =>
+    boxes().find((e) => {
+      const props = e.props as Record<string, unknown> | null
+      const text = (e.children ?? []).map((child) => String(child)).join('')
+      return props?.className === 'dim-jh-btn' && text.includes(needle)
+    })
+
+  /**
+   * 重渲染：**只清渲染产物**，保留 `hooks` 槽位。
+   *
+   * ⚠️ `resetRender()` 会连 `hooks` 一起清（那是「模拟一次挂载」的语义），
+   * 而这里必须模拟的是**同一次挂载内的重渲染** —— 否则 `codeartsCallback`
+   * 会被重置回 `null`，输入框永远不会出现。
+   */
+  async function rerender(rpcCall: (method: string, payload?: unknown) => Promise<unknown>): Promise<void> {
+    elements = []
+    writes = []
+    callbacks = []
+    cursor = 0
+    const mod = await import('../../plugin-src/client/jet-hub.js')
+    const panel = (mod as unknown as { __providersPanelForTest?: (props: unknown) => unknown }).__providersPanelForTest
+    if (typeof panel !== 'function') throw new Error('__providersPanelForTest 未导出')
+    panel({ provider: 'codearts', rpcCall })
+  }
+
+  /** 让挂起的微任务与 `setTimeout(0)` 都跑完（`createAccount` 里有多段 await）。 */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  const CALLBACK_URL = 'http://127.0.0.1:8080/oauth/callback?code=abc123'
+
+  interface RpcEntry { method: string; payload?: unknown }
+  type Rpc = (method: string, payload?: unknown) => Promise<unknown>
+
+  /** 标准 RPC 桩（`account.submitCallback` 可注入成功 / 失败 / 挂起）。 */
+  function makeRpc(calls: RpcEntry[], submitCallback: () => Promise<unknown>): Rpc {
+    return async (method, payload) => {
+      calls.push({ method, payload })
+      if (method === 'account.create') {
+        return {
+          ok: true,
+          accountId: 'codearts-spec-1',
+          loginUrl: 'https://auth.huaweicloud.com/authui/login?state=AAA',
+          // ⚠️ `=== true` 走「宿主已开无痕窗」分支 ⇒ 我们垫的 `confirm` 返回 false
+          //    ⇒ `skipClientOpen = true` ⇒ 不调 `window.open`（本文件不测开窗）。
+          incognitoOpened: true,
+        }
+      }
+      if (method === 'account.submitCallback') return submitCallback()
+      return { ok: true, order: [], statuses: {} }
+    }
+  }
+
+  /** 渲染 → 点「新建账号」→ 重渲染（此时回调链接输入框应出现）。 */
+  async function openCallbackState(rpcCall: Rpc): Promise<void> {
+    const r = await renderPanel(rpcCall, 'codearts')
+    expect(r.ok, r.ok ? '' : `渲染抛错：${String((r as { error: unknown }).error)}`).toBe(true)
+    const button = byLabel('新建账号')
+    expect(button, 'codearts 面板没有「新建账号」按钮').toBeDefined()
+    await withWindow({ confirm: () => false, open: () => ({ closed: false }) }, async () => {
+      await ((button?.props as Record<string, unknown> | null)?.['onClick'] as (() => unknown) | undefined)?.()
+      await flush()
+    })
+    await rerender(rpcCall)
+    await flush()
+  }
+
+  /** 往输入框里写值（触发 `onChange` ⇒ `setCodeartsCallback`），再重渲染。 */
+  async function typeCallbackUrl(rpcCall: Rpc, value: string): Promise<void> {
+    const input = callbackInput()
+    expect(input, '没有回调链接输入框').toBeDefined()
+    const onChange = (input?.props as Record<string, unknown> | null)?.['onChange'] as ((event: unknown) => unknown) | undefined
+    expect(typeof onChange, '输入框没有 onChange').toBe('function')
+    await (onChange as (event: unknown) => unknown)({ target: { value } })
+    await rerender(rpcCall)
+    await flush()
+  }
+
+  /** 点「提交回调链接」按钮（返回按钮元素，供后续断言）。 */
+  async function clickSubmit(): Promise<Box | undefined> {
+    const submit = buttonWithText('提交回调链接')
+    expect(submit, '没有「提交回调链接」按钮').toBeDefined()
+    await ((submit?.props as Record<string, unknown> | null)?.['onClick'] as (() => unknown) | undefined)?.()
+    await flush()
+    return submit
+  }
+
+  /** 提交中 / 可重试的判据：按钮文案（`busy` 只由它表达）。 */
+  const submitLabel = (): string =>
+    (buttonWithText('提交')?.children ?? []).map((child) => String(child)).join('')
+
+  // ── 探针：本文件所有「提交」都走 `setInterval` 的登录轮询，测试结束必须清掉 ──
+  const intervals: Array<ReturnType<typeof setInterval>> = []
+  let realSetInterval: typeof globalThis.setInterval
+
+  beforeAll(() => {
+    realSetInterval = globalThis.setInterval
+    // ⚠️ 不换成假定时器：本文件大量用 `await new Promise((r) => setTimeout(r, 0))`
+    //    推进微任务，假定时器会把它们一起冻住。只记录句柄、测试后清掉。
+    globalThis.setInterval = ((fn: () => void, ms?: number, ...args: unknown[]) => {
+      const id = realSetInterval(fn, ms, ...args)
+      intervals.push(id)
+      return id
+    }) as typeof globalThis.setInterval
+  })
+
+  afterAll(() => {
+    globalThis.setInterval = realSetInterval
+  })
+
+  afterEach(() => {
+    for (const id of intervals) clearInterval(id)
+    intervals.length = 0
+  })
+
+  it('★★ 点「新建账号」后必须渲染回调链接输入框（删掉渲染分支 ⇒ 功能从产品消失）', async () => {
+    const calls: RpcEntry[] = []
+    await openCallbackState(makeRpc(calls, async () => ({ ok: true, value: { accepted: true } })))
+    const input = callbackInput()
+    expect(input, '没有渲染回调链接输入框').toBeDefined()
+    expect(String((input?.props as Record<string, unknown> | null)?.['placeholder'] ?? '')).toContain('127.0.0.1')
+  })
+
+  it('★★ 提交按钮必须真的发 account.submitCallback，且 payload 是粘贴的原文', async () => {
+    const calls: RpcEntry[] = []
+    const rpcCall = makeRpc(calls, async () => ({ ok: true, value: { accepted: true } }))
+    await openCallbackState(rpcCall)
+    await typeCallbackUrl(rpcCall, CALLBACK_URL)
+    await clickSubmit()
+    const submits = calls.filter((entry) => entry.method === 'account.submitCallback')
+    expect(submits, '提交按钮没有发 account.submitCallback').toHaveLength(1)
+    expect((submits[0].payload as { accountId?: string; callbackUrl?: string }).accountId).toBe('codearts-spec-1')
+    expect((submits[0].payload as { callbackUrl?: string }).callbackUrl).toBe(CALLBACK_URL)
+    // ⚠️ `type: 'button'` 必须有：按钮若落在表单里，默认 submit 会连带提交表单
+    //    （PR #57 对抗审计 M20 实证：删掉它 38 条用例全绿）。
+    expect((buttonWithText('提交')?.props as Record<string, unknown> | null)?.['type']).toBe('button')
+  })
+
+  it('★★ RPC 失败后必须恢复可重试（busy 回 false），并给行内错误', async () => {
+    const calls: RpcEntry[] = []
+    const rpcCall = makeRpc(calls, async () => {
+      throw new Error('不是合法的回调链接（缺少 code 参数）')
+    })
+    await openCallbackState(rpcCall)
+    await typeCallbackUrl(rpcCall, CALLBACK_URL)
+    await clickSubmit()
+    await rerender(rpcCall)
+    await flush()
+    // ① 行内错误必须渲染出来（`role="alert"`；成功时是 `status`）
+    const alerts = boxes().filter((e) => (e.props as Record<string, unknown> | null)?.['role'] === 'alert')
+    expect(alerts.length, '失败后没有任何 role="alert" 的行内错误').toBeGreaterThan(0)
+    // ② 失败后必须能重试：`busy` 卡死就永远点不动（最坏的变异形态）
+    expect(submitLabel(), '失败后按钮仍停在「提交中…」').toBe('提交回调链接')
+    expect((buttonWithText('提交')?.props as Record<string, unknown> | null)?.['aria-disabled']).toBe('false')
+    // ③ 再点一次必须真的再发一次（不是靠文案骗人）
+    await clickSubmit()
+    expect(calls.filter((entry) => entry.method === 'account.submitCallback')).toHaveLength(2)
+  })
+
+  it('★★ 同一帧连点两次只许发一次（`busy` 是渲染后态，挡不住同帧重入）', async () => {
+    const calls: RpcEntry[] = []
+    // `submitCallback` 永远挂起：模拟「RPC 还在飞」
+    const rpcCall = makeRpc(calls, () => new Promise(() => {}))
+    await openCallbackState(rpcCall)
+    await typeCallbackUrl(rpcCall, CALLBACK_URL)
+    const submit = buttonWithText('提交回调链接')
+    expect(submit, '没有「提交回调链接」按钮').toBeDefined()
+    const onClick = (submit?.props as Record<string, unknown> | null)?.['onClick'] as (() => unknown) | undefined
+    expect(typeof onClick).toBe('function')
+    // ⚠️ 两次点击之间**不重渲染** —— 闭包里的 `busy` 仍是 `false`，
+    //    只有同步单飞（`useRef`）能拦住第二次。
+    await (onClick as () => unknown)?.()
+    await (onClick as () => unknown)?.()
+    await flush()
+    expect(
+      calls.filter((entry) => entry.method === 'account.submitCallback'),
+      '同一帧连点发了两次 ⇒ 第二次会把「这轮登录已经结束」误显示在一条正在成功的登录上',
+    ).toHaveLength(1)
+  })
+
+  it('★★ 轮询成功（`done:true`）后必须清掉输入框（三处清理出口之二）', async () => {
+    const calls: RpcEntry[] = []
+    const rpcCall = makeRpc(calls, async () => ({ ok: true, value: { accepted: true } }))
+    // ⚠️ 轮询间隔是 1000ms（`startLoginPoll` 的 `setInterval(…, 1000)`），
+    //    这里必须真等一拍 —— 不换成假定时器（同 `beforeAll` 的说明）。
+    const doneRpc: Rpc = async (method, payload) => {
+      if (method === 'login.poll') {
+        calls.push({ method, payload })
+        return { ok: true, done: true }
+      }
+      return rpcCall(method, payload)
+    }
+    await openCallbackState(doneRpc)
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    await rerender(doneRpc)
+    await flush()
+    expect(callbackInput(), '轮询成功后输入框还在 ⇒ 清理出口失效').toBeUndefined()
+  })
+
+  it('★★ 轮询终态失败（`success:false`）必须清掉输入框并展示原因（三处清理出口之三）', async () => {
+    const calls: RpcEntry[] = []
+    const rpcCall = makeRpc(calls, async () => ({ ok: true, value: { accepted: true } }))
+    const failRpc: Rpc = async (method, payload) => {
+      if (method === 'login.poll') {
+        calls.push({ method, payload })
+        return { ok: true, done: true, success: false, error: '授权被拒绝：用户取消' }
+      }
+      return rpcCall(method, payload)
+    }
+    await openCallbackState(failRpc)
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    await rerender(failRpc)
+    await flush()
+    expect(callbackInput(), '终态失败后输入框还在 ⇒ 清理出口失效').toBeUndefined()
+    // ⚠️ 失败原因必须上屏（Gitee issue IKLI7J 的「静默失败」形态）
+    const texts = boxes().flatMap((entry) => (entry.children ?? []).map((child) => String(child))).join(' ')
+    expect(texts, '终态失败没有把原因展示给用户').toContain('授权被拒绝')
+  })
+
+  it('★★ 「取消」必须清掉输入框（三处清理出口之一）', async () => {
+    const calls: RpcEntry[] = []
+    const rpcCall = makeRpc(calls, async () => ({ ok: true, value: { accepted: true } }))
+    await openCallbackState(rpcCall)
+    expect(callbackInput(), '前置条件：输入框应存在').toBeDefined()
+    const cancel = buttonWithText('取消')
+    expect(cancel, '没有「取消」按钮').toBeDefined()
+    await ((cancel?.props as Record<string, unknown> | null)?.['onClick'] as (() => unknown) | undefined)?.()
+    await rerender(rpcCall)
+    await flush()
+    expect(callbackInput(), '点了「取消」输入框还在 ⇒ 清理出口失效').toBeUndefined()
   })
 })
