@@ -699,6 +699,95 @@ Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限
 - **语言**：TypeScript
 - **许可**：MIT
 
+## ⚠️⚠️ 思考档位「默认取最强」（PR #70，2026-11-13）
+
+**功能**：用户选完模型后，**默认**使用该模型声明的最强思考档（`max` / `xhigh` 等）；
+可在设置弹窗的「思考强度」里关掉。关掉后**逐字节**回到改动前的行为。
+
+### 为什么走「改适配器声明的 `defaultEffort`」这一条路（四条路线只有它可行）
+
+| 路线 | 结局 |
+|---|---|
+| ① 请求期改写（`agent/request` 瀑布 / `prepareRequest`） | ❌ 宿主 `dsh-agent-loop/lib/index.js` 的 `prepareRequest` 有硬不变式：`proposedConfig.reasoningEffort !== selection.reasoningEffort` 就**直接抛错**（「use agent.model.select() before step preparation」），整轮对话起不来 |
+| ② 逐个适配器改 `defaultEffort` 常量 | ❌ 二十余处，且 trae / buddy / zcode 等档位来自**远端目录**，不在常量里 ⇒ 必然漂移 |
+| ③ 在 `stream()` 里补档位 | ❌ 界面标签不变、网关 `resolveCallWithInfo` 仍按声明校验、二十个适配器各写一份 |
+| ④ **注册期包住 `resolveModel` / `prepareCall` 的返回值**（`src/reasoning-default.ts`） | ✅ 一处覆盖全部渠道，选择器 / 请求体 / 网关三端同时一致 |
+
+### 三条不变式（改这个文件时不得破坏）
+
+1. **选出的档位必须来自模型自己声明的 `efforts`** —— 否则宿主 `normalizeModelInfo`
+   抛 `INVALID_MODEL_REASONING`、`resolveCallWithInfo` 抛 `UNSUPPORTED_REASONING_EFFORT`。
+2. **无变化时原样返回入参（同一引用）** —— 下游有 `deepFreeze` 与函数/对象身份比较。
+3. **模型没声明档位时一个字都不动**（`reasoning` 缺席 ⇒ 原样返回）。
+
+另：封顶 `max`（不选 `ultra`）。`REASONING_EFFORT_RANK` 里 `ultra: 9 > max: 8`，
+但本仓此前**没有任何渠道**把 `ultra` 当真实 wire 值（只为翻译存在）；聚合渠道声明了
+8 个规范档，不封顶会让默认档变 `ultra`。只有模型**仅**声明了更强档时才退回。
+
+### 两条腿缺一不可（只包一条 = 假绿）
+
+- **腿 A（选择器/目录）**：宿主 `dsh-llm/lib/index.js:2119` 的 `resolveModelInfoFor`
+  → `adapter.resolveModel(...)`，消费方是 `session.modelCatalog` → 模型选择器读
+  `model.reasoning.defaultEffort`（`dsh-client-ui-model-selection/lib/client.js:1201`）。
+- **腿 B（生产请求）**：`dsh-llm/lib/index.js:2225` 的 `prepareCall`
+  → `adapter.prepareCall(...)`。基类默认实现**会**调 `resolveModel`，但动态适配器
+  **可以覆盖掉**（源码注释逐字「Dynamic adapters override this」）⇒ 两条腿
+  **不可互相替代**。只包 A = 「选择器显示 Max、请求仍按 high 发」。
+
+### 开关：独立文件 + 只有显式 `false` 才算关闭
+
+- 文件 `$DSH_HOME/jet-hub/reasoning-preferences.json`，`SCHEMA = 'dsh-codearts-auth/reasoning-preferences/v1'`。
+- **不塞 `state.json`**：它是 home 级、多 profile 共享、**整体替换**语义 ⇒ 同机另一
+  工作区的旧版本代码做任何整体写入都会把新字段静默抹掉（症状是「怎么又变回 high 了」）。
+- `sanitizeStrongestReasoningEnabled(raw) = raw !== false` —— 只有显式 `false` 才关闭；
+  字符串 `'false'` **不算**（脏数据不是用户意图）。与 `sanitizeNativeWebSearchEnabled` 同构。
+- **读取失败按「开启」处理**（抛错当关闭会让功能无缘无故消失，且用户彻底失去自救路径）。
+- 开关是**回调而非布尔**：`configureStrongestReasoningEnabled(() => store.load())`
+  —— 每次请求都走 `prepareCall`，必须现读（缓存布尔值 = 「改了不生效要重启」）。
+- 文件层有**模块级缓存**（`parsedCache`）：`session.modelCatalog` 会对**目录里每个模型**
+  各调一次 `resolveModel`，实测单次 `load()` **102 µs**（500 个模型多 51 ms 同步阻塞）；
+  `save()` 落盘后**必须**同步刷新缓存（写者与读者同进程）。单测用
+  `resetReasoningPreferenceCache()` 模拟「重启后首次读」。
+
+### 标题请求必须降档（Issue IKKVDH 的原始形态）
+
+默认档被抬到 `max` 后，会话命名请求只给 **64 token** 思考预算 ⇒ 思考吃满、正文
+0 字符。**只降档不改预算不够**（实测 `effort:low` + 64 token 同样吃满）；
+**必须在开关开着时才降**（否则是白降，实测 153 思考 + 10 字正文）。
+判据只有一处：`titleEffortWhenStrongest()`（内部判开关），`session-title.ts`
+**不得**自己判开关、也不得直接用 `weakestThinkingEffort`。
+
+### 代价（是功能本身，不是缺陷）
+
+思考 token 计入 `completion_tokens`、与正文**共享额度** ⇒ 长回答更早撞 `length`、
+首字更慢。设置弹窗里有一句 `.dim-jh-settingsNote` 讲这件事（不要删）。
+
+### 两条容易误读的事实
+
+- **「推翻四处既有决策」= 运行时覆盖，不是改常量**：`git diff --name-only` 里
+  **没有** `trae-adapter.ts` / `loomy-adapter.ts` / `cline-product.ts` /
+  `aggregate-adapter.ts` —— 它们的 `defaultEffort` 常量逐字节未动，只是开关**开着**
+  时被覆盖；关掉即回到各自的值。
+- **平局方向两侧相反**：`strongestDeclaredEffort` 同 rank 取「规范名更靠后」者
+  （`high` 胜 `on`），`weakestThinkingEffort` 反之（`on` 胜 `high`）。因为
+  `CANONICAL_REASONING_EFFORTS` 不含 `on`/`off`/`light`/`extra_high`
+  ⇒ `canonicalIndex('on') = -1`。**不是缺陷**，但排障时看到标题请求实发
+  `reasoning_effort: 'on'` 不要惊讶。
+
+### `PROVIDERS_WITHOUT_REASONING` 当前是「测试契约」
+
+`src/reasoning-default.ts` 的 `PROVIDERS_WITHOUT_REASONING` /
+`providerWithoutReasoning` / `registeredChannelIds` 在 `src/` 与 `plugin-src/`
+**零读取**（只有 `tests/unit/model-catalog-parity.spec.ts` 与
+`tests/unit/reasoning-default.spec.ts` 用）。**不要**按旧注释去面板里找灰字提示
+（不存在，面板渲染的是与 provider 无关的静态句）；将来若要渲染，**必须**消费这份
+名单，不要在客户端再列一份。
+
+**守卫**：`tests/unit/reasoning-default.spec.ts`（23 条，含「两条腿经真实
+`registerAdapterIdempotent` 都生效」与私有字段/访问器透传）、
+`tests/unit/reasoning-preferences.spec.ts`（7 条）、
+`tests/unit/checkin-panel-wiring.spec.ts`（接线层 2 条，真渲染点中开关）。
+
 ## ⚠⚠️ Gemini 必须过墙而插件不读系统代理（Issue IKLTZ2，2026-10-18 修）
 
 **症状**（用户报障形态）：浏览器**能**打开 Google 授权页并点「同意」，回到面板却

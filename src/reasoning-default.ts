@@ -130,7 +130,14 @@ export type DeclaredReasoning = NonNullable<LlmResolvedModelInfo['reasoning']>
  * @param efforts - 模型声明的档位 id（顺序无关）。
  * @returns 最强档的 id；模型没有任何「开思考」的已知档位时返回 `undefined`。
  */
-export function strongestDeclaredEffort(efforts: readonly string[]): string | undefined {
+export function strongestDeclaredEffort(efforts: readonly string[] | null | undefined): string | undefined {
+  // ⚠️ 形状防御（2026-11-13 对抗审计 P1-②）：本层对**全部 20 家适配器**无差别施加，
+  //    而它在调用链上的位置**没有任何 try/catch**（`llm-register-compat.ts` 那处只包
+  //    「包装」这一次调用、不包「每请求调用」）⇒ 一旦某家产出 `undefined` / `null` /
+  //    非数组（远端目录驱动的渠道完全可能），该渠道**每个请求**都抛 `TypeError`，
+  //    整条渠道不可用（不是降级）。实测：`undefined`/`null`/`{}` 都会抛
+  //    `TypeError: efforts is not iterable`。故先判形状、拿不到就当「没有档位」。
+  if (!Array.isArray(efforts)) return undefined
   const capRank = reasoningRankOf(EFFORT_CAP) ?? Number.POSITIVE_INFINITY
   let capped: { effort: string; rank: number } | undefined
   let any: { effort: string; rank: number } | undefined
@@ -158,7 +165,11 @@ export function strongestDeclaredEffort(efforts: readonly string[]): string | un
  * @param efforts - 模型声明的档位 id（顺序无关）。
  * @returns 最弱的非关闭档；模型没有任何「开思考」档位时返回 `undefined`。
  */
-export function weakestThinkingEffort(efforts: readonly string[]): string | undefined {
+export function weakestThinkingEffort(efforts: readonly string[] | null | undefined): string | undefined {
+  // ⚠️ 同 `strongestDeclaredEffort` 的形状防御（对抗审计 P1-②）：标题腿也在请求路径上，
+  //    抛错会让**标题请求**整轮失败（宿主拿不到标题，落回 fallback），且日志里只有
+  //    一句无上下文的 `TypeError`。拿不到档位就返回 `undefined`（= 保留原档位）。
+  if (!Array.isArray(efforts)) return undefined
   let best: { effort: string; rank: number } | undefined
   for (const effort of efforts) {
     const rank = reasoningRankOf(effort)
@@ -227,31 +238,50 @@ export function withStrongestDefaultEffort<T extends { reasoning?: DeclaredReaso
   // ⚠️ 开关关掉时**原样返回入参**（同一引用）：下游会 `deepFreeze` / 比较身份，
   //    且「关掉 = 逐字节回到改动前」这条承诺靠的就是这里什么都不做。
   if (!strongestReasoningEnabled()) return info
-  const reasoning = info.reasoning
-  if (reasoning === undefined || reasoning.efforts.length === 0) return info
-  const declared = reasoning.efforts.map((effort) => String(effort.id))
+  const reasoning = info.reasoning as DeclaredReasoning | null | undefined
+  // ⚠️⚠️ 形状防御（2026-11-13 对抗审计 P1-②）：只判 `undefined` 与「空数组」不够 ——
+  //    实测 `reasoning: null` 抛 `reading 'efforts'`、`[]` / `'max'` / `{}` 抛
+  //    `reading 'length'`、`{efforts:'max'}` 抛 `efforts.map is not a function`。
+  //    本层在 `prepareCall` / `resolveModel` 的返回值上无差别施加，且**抛点在任何
+  //    try/catch 之外** ⇒ 一家违约就是该渠道**每个请求**都失败（不是降级）。
+  //    拿不到合法形状时原样返回（等价于「没有档位可提」），绝不替上游修数据。
+  if (reasoning === null || typeof reasoning !== 'object') return info
+  if (!Array.isArray(reasoning.efforts) || reasoning.efforts.length === 0) return info
+  // 元素也必须是对象（`[null, {id:'max'}]` 实测会抛 `reading 'id'`）。
+  const declared = reasoning.efforts
+    .filter((effort): effort is { id: unknown } => typeof effort === 'object' && effort !== null)
+    .map((effort) => String((effort as { id?: unknown }).id))
   const strongest = strongestDeclaredEffort(declared)
   // 没有可选的「开思考」档（如 modelscope 的 `['none']`）⇒ 保持原声明。
   if (strongest === undefined || strongest === String(reasoning.defaultEffort)) return info
-  const effort = reasoning.efforts.find((candidate) => String(candidate.id) === strongest)
+  // ⚠️ 这里也要 `?.`：`efforts` 里混进 `null` 时，`String(candidate.id)` 会抛
+  //    `reading 'id'`（上面的 filter 只清了 `declared` 这一份副本）。
+  const effort = reasoning.efforts.find((candidate) => String((candidate as { id?: unknown } | null)?.id) === strongest)
   if (effort === undefined) return info
   return { ...info, reasoning: { ...reasoning, defaultEffort: effort.id } } as T
 }
 
 /**
- * **不声明任何思考档位**的渠道（Jet Hub 面板里给灰字提示用）。
+ * **不声明任何思考档位**的渠道。
+ *
+ * ⚠️ **当前是「测试契约」，生产代码零读取**（2026-11-13 主审核实，PR #70 审计 D2）：
+ * `grep -rn "PROVIDERS_WITHOUT_REASONING|providerWithoutReasoning" src/ plugin-src/`
+ * 在 `src/` 与 `plugin-src/` **都是零命中**，只有 `tests/unit/model-catalog-parity.spec.ts`
+ * 的第 (j) 格（跑真实适配器逐家点名）与 `tests/unit/reasoning-default.spec.ts` 读它。
+ * 客户端那句「没有『思考档位』的供应商不参与这一默认值」是**通用文案**，没有按名单分支。
+ * ⇒ 不要按下面的注释去面板里找灰字提示（不存在的）；将来若要渲染，**必须**消费本名单，
+ * 而不是在客户端再列一份（两处各列一份必然漂移）。
  *
  * ⚠️ 这份名单是**行为事实**，不是配置：它列的每一家适配器的 `resolveModel`
- * 都**从不**返回 `reasoning`。名单由 `tests/unit/model-catalog-parity.spec.ts`
- * 的第 (j) 格钉住（跑真实适配器，逐家点名）。
+ * 都**从不**返回 `reasoning`。
  *
  * ⚠️ **`reasoning` 字段缺席有两种成因**，必须分开（本名单只收第 ① 种）：
  * ① **结构上没有**（本名单）：适配器的 `toCatalogEntry` 里根本不写该字段 ——
- *    灰字对它们永远成立；
+ *    判据对它们永远成立；
  * ② **暂时没有**（远端驱动，冷缓存时为空）：`trae` / `lobsterai` / `accio` /
  *    `qiniu` 的档位来自上游目录，没有远端数据时 `efforts` 是空数组、`reasoning`
  *    整个缺席 —— 热缓存下它们有档位。
- * ⇒ ② 类渠道**绝不能**进本名单：那会让面板对它们说「没有思考档位」，而用户
+ * ⇒ ② 类渠道**绝不能**进本名单：那会让判据对它们说「没有思考档位」，而用户
  *    一拉目录就能看到档位选择器（对用户说假话）。
  */
 export const PROVIDERS_WITHOUT_REASONING: readonly string[] = Object.freeze([
@@ -284,7 +314,11 @@ export function providerWithoutReasoning(provider: string): boolean {
 }
 
 /**
- * 已注册渠道全集（守卫用例与面板共用，避免两处各列一份）。
+ * 已注册渠道全集（**守卫用例专用**，避免两处各列一份）。
+ *
+ * ⚠️ 与 {@link PROVIDERS_WITHOUT_REASONING} 一样，生产代码**零读取**（2026-11-13
+ * 主审核实）：只有 `tests/unit/reasoning-default.spec.ts` 用它做「名单与真实
+ * 适配器对拍」。面板当前不消费（不要以为改这里会影响 UI）。
  *
  * ⚠️ 取自 `PROVIDER_REGISTRY`（渠道权威清单），**不含** `aggregate` / `auto`
  * 这两个本插件自造的虚拟 provider —— 它们的档位由聚合层机械投影，不参与上述判据。
@@ -345,8 +379,26 @@ export function withStrongestReasoningDefault<T extends object>(providers: reado
           return rewritten === record.model ? call : { ...(call as object), model: rewritten }
         })
       }
-      // 其余成员原样透传，且 `this` 绑回**原适配器**（私有字段 #x 对 Proxy 不可见）。
-      return Reflect.get(obj, prop, receiver)
+      /**
+       * 其余成员原样透传，但 `this` **必须**是原适配器（`obj`），绝不能是 `receiver`。
+       *
+       * ⚠️⚠️ 这里原先写的是 `return Reflect.get(obj, prop, receiver)`，注释还自称
+       * 「`this` 绑回原适配器」—— **与事实相反**（2026-11-13 审计 D1 实测）：
+       * `receiver` 是 **Proxy 自己**，于是
+       * - 访问器：`get peek() { return this.#secret }` 抛
+       *   `TypeError: Cannot read private member #secret from an object whose class did not declare it`；
+       * - 方法：`Reflect.get` 取到的是原型上的函数对象，直接调用时 `this` = Proxy ⇒ 同样抛。
+       * 本仓适配器目前都没有 `#private` 成员（`grep "readonly #\|private #" src/*.ts` 零命中）
+       * ⇒ 线上无症状，但这是给未来适配器与第三方插件埋的雷。
+       *
+       * 两处都写 `obj`：数据属性与 `receiver` 无关；访问器要以 `obj` 为 `this` 求值；
+       * 方法再 `.bind(obj)` 兜住「被摘下后单独调用」。缓存绑定结果，保证函数身份稳定
+       * （下游会按身份比较）。与 `src/dead-model-store.ts` 的透传分支同形 ——
+       * ⚠️ 那一处传的也是 `receiver`，对访问器有**同一个**隐患（已一并修）。
+       */
+      const value = Reflect.get(obj, prop, obj) as unknown
+      if (typeof value !== 'function') return value
+      return wrapOnce(prop, () => value.bind(obj))
     },
   })
 }
@@ -381,11 +433,17 @@ function grewEffort(provider: string, info: unknown): unknown {
   const after = withStrongestDefaultEffort(record as { reasoning?: DeclaredReasoning })
   if (after === record) return info
   const next = after.reasoning?.defaultEffort
-  const key = `${provider}/${String(record.id ?? '?')}`
+  const model = `${provider}/${String(record.id ?? '?')}`
+  // ⚠️ 去重键**必须带档位跃迁**（2026-11-13 对抗审计 P3-①）：远端驱动渠道的
+  //    `efforts` 会随目录变化（冷缓存为空 → 目录回来 → 远端把 max 撤成 high）。
+  //    若键只到 `provider/model`，首次提升后**永久静默** —— 之后档位怎么变都没有
+  //    日志，排障时「看起来一直没变」。带上 `before→next` 后，去重语义变成
+  //    「每次跃迁一条」，同一步内仍然只打一条（不会每步刷屏）。
+  const key = `${model} ${String(before)} → ${String(next)}`
   if (!announced.has(key)) {
     announced.add(key)
     console.info(
-      `[jet-hub] 思考档位默认取最强：${key} `
+      `[jet-hub] 思考档位默认取最强：${model} `
       + `${before === undefined ? '（原本未声明默认档）' : String(before)} → ${String(next)}`,
     )
   }

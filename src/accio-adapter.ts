@@ -1539,13 +1539,21 @@ export class AccioAdapter extends LlmAdapter {
     if (currentAccountId !== '') reportLedgerAccount(this.product.id, currentAccountId)
 
     // 4. 会话命名的思考与预算决策（issue IKKVDH）。
-    // ⚠️ Accio **关不掉思考**（实测四类字段全部无效，见文件头第 3 条）⇒
-    // `declaredEfforts` 恒为空 ⇒ 走 `planSessionTitleThinking` 的**抬预算**分支
-    // （64 → 512），否则思考会把 64 token 吃满、正文零产出、标题静默失败。
+    // ⚠️ Accio **关不掉思考**（实测四类字段全部无效，见文件头第 3 条）—— 但那是说
+    // 「声明里没有 `off`/`none` 这一档」，**不是**「没有档位」。
+    // ⚠️⚠️ 这里原先硬编码 `declaredEfforts: []`，注释还写「恒为空」—— 那是 PR #70 之前
+    // 的口径：抬档前 `requestedEffort` 可能就是 `high`，512 预算够用。PR #70 把默认档
+    // 抬到 `max` 后，`weakest === undefined` ⇒ 标题请求原样发 `max` + 512 ⇒ 思考吃满、
+    // 正文零产出（issue IKKVDH 原形在 accio 上**复发**，2026-11-13 对抗审计 P2-①）。
+    // 修法 = 取**该模型真实声明**的档位：`thinkingOffEffortOf` 仍返回 `undefined`（没有
+    // 关闭档 ⇒ 不会被误判成「关得掉」），而 `weakestThinkingEffort` 能降到 `low`。
+    const declaredEfforts = this.catalogEntries()
+      .find((entry) => entry.id === options.model)
+      ?.reasoning?.efforts.map((effort) => String(effort.id)) ?? []
     const titlePlan = planSessionTitleThinking({
       purpose: options.purpose,
       requestedEffort: options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort),
-      declaredEfforts: [],
+      declaredEfforts,
       maxTokens: options.maxTokens,
     })
 

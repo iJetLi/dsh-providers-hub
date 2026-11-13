@@ -742,9 +742,13 @@ export function withDeadModelPruning<T extends object>(
           }
         })
       }
-      // 其余成员原样透传；方法需绑定原对象作为 this。
+      // 其余成员原样透传；`this` 必须是原对象 `obj`（不是 `receiver` = Proxy 自己）。
       // 缓存绑定结果：每次访问返回同一个函数，避免下游比较函数身份时失配。
-      const value = Reflect.get(obj, prop, receiver) as unknown
+      // ⚠️ 第三个参数原本传的是 `receiver`：数据属性无所谓，但**访问器**会以 Proxy 为
+      //    `this` 求值 ⇒ `get x() { return this.#private }` 抛 `TypeError: Cannot read
+      //    private member ...`（2026-11-13 PR #70 审计 D1 实测，本仓当前无 `#private`
+      //    成员 ⇒ 线上无症状；与 `src/reasoning-default.ts` 的同一处一并修正）。
+      const value = Reflect.get(obj, prop, obj) as unknown
       if (typeof value !== 'function') return value
       return wrapOnce(prop, () => value.bind(obj))
     },

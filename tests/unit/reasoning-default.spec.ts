@@ -32,8 +32,11 @@ import {
   weakestThinkingEffort,
   withStrongestDefaultEffort,
   withStrongestReasoningDefault,
+  type DeclaredReasoning,
 } from '../../src/reasoning-default.js'
-import { reasoningRankOf } from '../../src/reasoning-ladder.js'
+import { reasoningRankOf, CANONICAL_REASONING_EFFORTS } from '../../src/reasoning-ladder.js'
+import { CLINE_REASONING_EFFORTS } from '../../src/cline-product.js'
+import { LOOMY_EFFORTS } from '../../src/loomy-product.js'
 
 // ⚠️ 日志去重态是**进程级**的（见 `reasoning-default.ts` 的 `announced`）：
 //    用例之间必须复位，否则「只在首次打日志」那几条会随执行顺序变化。
@@ -269,22 +272,38 @@ describe('★★ 注册漏斗：resolveModel 与 prepareCall 两条腿都必须�
     expect(call.model).not.toHaveProperty('reasoning')
   })
 
-  it('⚠️ 包装保留原型方法与 `this`（私有字段可见）', async () => {    class PrivateAdapter {
+  it('⚠️ 包装保留原型方法与 `this`（私有字段可见）', async () => {
+    // ⚠️⚠️ 这条用例 2026-11-13 审计 D2 前是**假绿**：`listModels` 返回字面量（不读
+    // `#secret`）、`resolveModel` 走的是**被拦截腿**（`.apply(target)`，`this` 本来就对）
+    // ⇒ 把 Proxy 的透传分支改回 `Reflect.get(obj, prop, receiver)`（`this` = Proxy）
+    // 依然全绿。现在 `listModels` 与 getter 都**真的读** `#secret`，变异才会变红。
+    class PrivateAdapter {
       readonly #secret = 's3cr3t'
       async resolveModel(provider: string, model: string): Promise<Record<string, unknown>> {
         return { provider, id: model, name: this.#secret }
       }
+      /** 透传分支（非拦截方法）：必须能读到 `#secret`，否则 `this` 被绑到了 Proxy。 */
       async listModels(): Promise<readonly { id: string; name: string }[]> {
-        return [{ id: 'm', name: 'M' }]
+        return [{ id: 'm', name: this.#secret }]
+      }
+      /** 透传分支（访问器）：`Reflect.get(obj, prop, proxy)` 会把 getter 的 `this` 变成 Proxy。 */
+      get peek(): string {
+        return this.#secret
       }
     }
     const wrapped = withStrongestReasoningDefault(['p'], new PrivateAdapter()) as unknown as {
       resolveModel(p: string, m: string): Promise<Record<string, unknown>>
       listModels(): Promise<readonly { id: string; name: string }[]>
+      peek: string
     }
     // 展开成普通对象会让原型方法全部消失（`listModels is not a function`）。
-    expect(await wrapped.listModels()).toEqual([{ id: 'm', name: 'M' }])
+    expect(await wrapped.listModels(), '非拦截方法必须能以原适配器为 this 调用').toEqual([
+      { id: 'm', name: 's3cr3t' },
+    ])
+    expect(wrapped.peek, 'getter 必须能以原适配器为 this 求值').toBe('s3cr3t')
     expect((await wrapped.resolveModel('p', 'm')).name).toBe('s3cr3t')
+    // 身份稳定：同一个 prop 反复取到同一个绑定后的函数（下游会按函数身份缓存）。
+    expect(wrapped.listModels).toBe(wrapped.listModels)
   })
 })
 
@@ -307,6 +326,41 @@ describe('日志去重：每步 prepareCall 不得刷屏', () => {
       console.info = original
     }
     expect(calls.filter((line) => line.includes('思考档位默认取最强')).length, '应只有首次一条').toBe(1)
+  })
+
+  it('★ 档位跃迁变化后必须**再打一条**（去重键带 before → next，P3-①）', async () => {
+    // ⚠️ 远端驱动渠道（trae / lobsterai / accio / qiniu）的 `efforts` 会随目录变化：
+    //    冷缓存为空 → 目录回来 → 远端把 max 撤成 high。若去重键只到 `provider/model`，
+    //    首次提升后**永久静默**，排障时看起来「一直没变」。
+    const calls: string[] = []
+    const original = console.info
+    console.info = (...args: unknown[]) => { calls.push(args.join(' ')) }
+    try {
+      let efforts = ['low', 'high', 'max']
+      // 上游声明的默认档（= 改动前的行为），本层把它抬到该模型的最强档。
+      const adapter = {
+        async resolveModel(): Promise<unknown> {
+          return {
+            id: 'm',
+            reasoning: { efforts: efforts.map((id) => ({ id, name: id })), defaultEffort: 'high' },
+          }
+        },
+      }
+      const wrapped = withStrongestReasoningDefault(['p'], adapter) as unknown as {
+        resolveModel(p: string, m: string): Promise<unknown>
+      }
+      await wrapped.resolveModel('p', 'm') // high → max（第一条）
+      await wrapped.resolveModel('p', 'm') // 同一次跃迁 ⇒ 去重
+      efforts = ['low', 'high', 'xhigh'] // 远端把 max 撤成 xhigh
+      await wrapped.resolveModel('p', 'm') // high → xhigh（第二条，**必须**出现）
+      await wrapped.resolveModel('p', 'm') // 去重
+    } finally {
+      console.info = original
+    }
+    const lines = calls.filter((line) => line.includes('思考档位默认取最强'))
+    expect(lines.length, '两次不同的档位跃迁必须各打一条').toBe(2)
+    expect(lines[0]).toContain('high → max')
+    expect(lines[1]).toContain('high → xhigh')
   })
 })
 
@@ -351,7 +405,10 @@ describe('★ 开关：关掉后必须完全回到改动前的行为', () => {
     expect(titleEffortWhenStrongest(['light', 'high', 'extra_high'])).toBe('light')
   })
 
-  it('⚠️ 开关是**每次现读**的：中途切换立刻生效（不需要重启）', async () => {
+  it('⚠️ 开关回调是**每次现调**的：中途切换立刻生效（不需要重启）', async () => {
+    // 「现调」指的是 `configureStrongestReasoningEnabled` 传进来的**回调**每次调用都重新
+    // 求值（本用例用一个闭包变量模拟）。文件层另有一份进程内缓存（`parsedCache`），
+    // 但 `save()` 落盘成功后会同 tick 刷新它 ⇒ 用户在设置里拨开关仍然立刻生效。
     let on = true
     configureStrongestReasoningEnabled(() => on)
     const { llm, registered } = fakeLlm()
@@ -408,5 +465,109 @@ describe('⚠️ PROVIDERS_WITHOUT_REASONING 与实际声明对拍', () => {
     for (const id of ['trae', 'buddy', 'zcode', 'aggregate', '', 'unknown-provider']) {
       expect(providerWithoutReasoning(id)).toBe(false)
     }
+  })
+})
+
+/**
+ * ★ 真实声明对拍（2026-11-13 正向审计 D4）。
+ *
+ * 本功能「推翻四处既有决策」—— 但那四家的 `defaultEffort` 常量**逐字节未动**
+ * （`git diff --name-only` 里没有它们），只是注册后被本层覆盖。既有的 156 处
+ * `defaultEffort` 断言全部直接 `new XxxAdapter(...)`、**绕过注册漏斗**，所以
+ * 一条都不会红 —— 也就是说「覆盖后的实际生效值」此前**零测试**。
+ *
+ * 这四条用**真实的产品常量**（都不带副作用，纯数据）把实际生效值锁死：
+ * 以后谁改了某家的档位清单、或把 `EFFORT_CAP` 挪走，这里会立刻红。
+ */
+describe('★ 真实适配器声明对拍：覆盖后的实际生效档位', () => {
+  it('cline：声明到 max（UI 名 Extra）⇒ 落 max，且不是 high', () => {
+    const declared = CLINE_REASONING_EFFORTS.map((effort) => effort.id)
+    // 前提自证：Cline 的档位清单里确实有 max、且 high 不是最强
+    expect(declared).toContain('max')
+    expect(declared).toContain('none')
+    expect(strongestDeclaredEffort(declared)).toBe('max')
+    // 覆盖的是「默认档」这一格，档位清单本身不动
+    const info = { reasoning: { efforts: CLINE_REASONING_EFFORTS.map((effort) => ({ ...effort })) } }
+    expect(withStrongestDefaultEffort(info).reasoning?.defaultEffort).toBe('max')
+    // 反向钉子：清单本身逐条未动（本层只加 defaultEffort）
+    expect(withStrongestDefaultEffort(info).reasoning?.efforts).toEqual(CLINE_REASONING_EFFORTS)
+  })
+
+  it('aggregate：8 个规范档里有 ultra，但**封顶 max**（本仓没有任何渠道真发 ultra）', () => {
+    // 前提自证：规范档里 ultra 的 rank 确实高于 max
+    expect(reasoningRankOf('ultra')).toBeGreaterThan(reasoningRankOf('max') as number)
+    expect(CANONICAL_REASONING_EFFORTS).toContain('ultra')
+    expect(strongestDeclaredEffort([...CANONICAL_REASONING_EFFORTS])).toBe('max')
+  })
+
+  it('aggregate 的兜底：只声明了 ultra 时退回 ultra（不能返回 undefined 把档位丢掉）', () => {
+    expect(strongestDeclaredEffort(['ultra'])).toBe('ultra')
+  })
+
+  it('loomy：远端只有 xhigh 上限 ⇒ 落 xhigh，不编造 max', () => {
+    expect(LOOMY_EFFORTS).not.toContain('max')
+    expect(strongestDeclaredEffort([...LOOMY_EFFORTS])).toBe('xhigh')
+  })
+
+  it('trae：上游 default_level 采信的是 high / extra_high ⇒ 覆盖成声明里最强的那档', () => {
+    // 取 trae 真实远端形状的代表：有 extra_high 没有 max
+    const declared = ['minimal', 'low', 'medium', 'high', 'extra_high']
+    expect(reasoningRankOf('extra_high')).toBeGreaterThan(reasoningRankOf('high') as number)
+    expect(strongestDeclaredEffort(declared)).toBe('extra_high')
+  })
+
+  it('⚠️ 封顶只有一处在守太脆：显式钉住「max 与 ultra 同时声明 ⇒ 取 max」', () => {
+    // 不依赖任何 adapter 的档位表（aggregate 那条靠它的 8 档里同时含 max 与 ultra；
+    // 一旦那张表去掉 ultra，那条守卫会**无声失效**）。
+    expect(CANONICAL_REASONING_EFFORTS).toContain('max')
+    expect(strongestDeclaredEffort(['max', 'ultra'])).toBe('max')
+    // 反向对照：只有 ultra 时才必须退到 ultra（否则「档位被丢掉」）
+    expect(strongestDeclaredEffort(['ultra'])).toBe('ultra')
+  })
+})
+
+/**
+ * ★ 形状防御（2026-11-13 对抗审计 P1-②）。
+ *
+ * 本层对**全部 20 家适配器**无差别施加，而它在调用链上的位置**没有任何
+ * try/catch**（`llm-register-compat.ts` 那处只包「包装」、不包「每请求调用」）
+ * ⇒ 一旦某家（或被远端目录驱动后）产出违约形状，该渠道**每个请求**都抛
+ * `TypeError`，整条渠道不可用（不是降级）。
+ *
+ * 五个形状是审计探针实测会抛的：`reasoning: null` / `[]` / `'max'` /
+ * `{defaultEffort:'max'}` / `{efforts:'max'}` / `efforts:[null]`。
+ * 判据：**一律原样返回入参（同一引用）、绝不抛**。
+ */
+describe('⚠️ 形状防御：违约元数据必须原样透传，绝不抛', () => {
+  const hostile: readonly [string, unknown][] = [
+    ['reasoning: null', { reasoning: null }],
+    ['reasoning: []（数组）', { reasoning: [] }],
+    ["reasoning: 'max'（字符串）", { reasoning: 'max' }],
+    ['reasoning: {}（无 efforts）', { reasoning: {} }],
+    ["reasoning: { efforts: 'max' }（不是数组）", { reasoning: { efforts: 'max' } }],
+    ['reasoning: { efforts: [] }（空数组）', { reasoning: { efforts: [] } }],
+    ['reasoning: { efforts: [null] }（元素不是对象）', { reasoning: { efforts: [null] } }],
+  ]
+
+  it.each(hostile)('★ %s ⇒ 原样返回同一对象', (_label, info) => {
+    // 断言用 toBe（同一引用），既能抓「抛错」也能抓「偷偷换了新对象」
+    expect(withStrongestDefaultEffort(info as { reasoning?: DeclaredReasoning })).toBe(info)
+  })
+
+  it('★ 两个档位选择器对 undefined / null / 非数组都返回 undefined（不抛）', () => {
+    for (const bad of [undefined, null, 100, 'max', {}]) {
+      expect(strongestDeclaredEffort(bad as unknown as readonly string[])).toBeUndefined()
+      expect(weakestThinkingEffort(bad as unknown as readonly string[])).toBeUndefined()
+    }
+    // 反向对照：合法输入必须照常工作（否则上面的守卫会把功能整体关掉）
+    expect(strongestDeclaredEffort(['low', 'max'])).toBe('max')
+    expect(weakestThinkingEffort(['low', 'max'])).toBe('low')
+  })
+
+  it('⚠️ 半合法输入（含 null 元素但有真档位）⇒ 过滤脏元素后**照常**提起档位', () => {
+    // 这条不是「原样透传」：`efforts` 里有真档位 ⇒ 功能必须生效，
+    // 只是不能让 `null` 元素把它打崩（实测未守卫时抛 `reading 'id'`）。
+    const info = { reasoning: { efforts: [null as unknown as { id: string }, { id: 'max' }] } }
+    expect(withStrongestDefaultEffort(info).reasoning?.defaultEffort).toBe('max')
   })
 })

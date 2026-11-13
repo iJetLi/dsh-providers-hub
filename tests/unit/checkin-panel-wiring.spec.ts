@@ -728,6 +728,77 @@ describe('定时签到面板：关闭即保存（接线层，行为级）', { ti
       expect(textsIn([hint!]).join('')).toContain('重新打开 DSH')
     })
 
+    /**
+     * ⚠️ 2026-11-13 对抗审计 P2-②：上面两条只断言「点了会发 RPC」，**从不读
+     * `checked` / `disabled`** ⇒ 三处 state 语义（默认开 / 缺字段也算开 /
+     * 提交中禁用）删掉照样绿。这三条把用户面的三个承诺钉住。
+     */
+    it('★★ 开关默认「开」，且宿主回 {}/缺字段时也必须显示「开」', async () => {
+      // 复刻：旧宿主 / 字段缺失时 `getEnabled` 回 `{}`。
+      // ⚠️ 实现若写成 `res?.enabled === true`，这里会显示「关」—— 而宿主的
+      //    `sanitize` 语义是「缺键一律开」⇒ 用户看到关、实际是开，且**再点一次
+      //    才会纠正**（这正是 M25 打穿的那条缝）。
+      page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+      const rpcCall = async (method: string): Promise<unknown> => (method.startsWith('reasoningDefault.')
+        ? {}
+        : {})
+      installDocument()
+      await render({ rpcCall })
+      ;(railAction('设置').props.onClick as () => void)()
+      await flush(3)
+      await render({ rpcCall })
+
+      const section = findAll((node) => node.props?.className === 'dim-jh-settingsSection'
+        && textsIn([node]).includes('思考强度'))[0]
+      expect(section, '设置弹窗里找不到「思考强度」分区（开关被删了？）').toBeTruthy()
+      const switches = findAll((node) => node.type === 'input'
+        && node.props?.className === 'dim-jh-switch')
+        .filter((node) => subtreeContains(section!, node))
+      expect(switches.length, '「思考强度」分区里没有开关').toBe(1)
+      expect(switches[0]!.props.checked, '缺字段时必须显示「开」（与 sanitize 缺键语义一致）')
+        .toBe(true)
+      expect(switches[0]!.props.disabled, '空闲时不得禁用').toBe(false)
+    })
+
+    it('★★ 提交中必须禁用开关（防双写：连续两次点击会写两遍盘）', async () => {
+      page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+      let release: (() => void) | undefined
+      const rpcCall = async (method: string): Promise<unknown> => {
+        if (method === 'reasoningDefault.setEnabled') {
+          // 卡住：不 resolve，直到用例显式放行
+          await new Promise<void>((resolve) => { release = resolve })
+          return { enabled: false }
+        }
+        return { enabled: true }
+      }
+      installDocument()
+      await render({ rpcCall })
+      ;(railAction('设置').props.onClick as () => void)()
+      await flush(3)
+      await render({ rpcCall })
+
+      // ⚠️ 每次重渲染都会生成**新的**节点对象 ⇒ 必须每拍重新定位分区，
+      //    否则拿旧 `section` 去 `subtreeContains` 新开关恒为 false（空数组）。
+      const findSwitches = (): readonly { props: Record<string, unknown> }[] => {
+        const section = findAll((node) => node.props?.className === 'dim-jh-settingsSection'
+          && textsIn([node]).includes('思考强度'))[0]
+        if (section === undefined) return []
+        return findAll((node) => node.type === 'input'
+          && node.props?.className === 'dim-jh-switch')
+          .filter((node) => subtreeContains(section, node)) as never
+      }
+      ;(findSwitches()[0]!.props.onChange as (event: unknown) => void)({ target: { checked: false } })
+      await flush(1)
+      await render({ rpcCall })
+      expect(findSwitches()[0]!.props.disabled, '提交中必须禁用（否则用户连点会写两遍盘）')
+        .toBe(true)
+      release?.()
+      await flush(3)
+      await render({ rpcCall })
+      expect(findSwitches()[0]!.props.disabled, '提交结束后必须解禁（否则开关永久卡死）')
+        .toBe(false)
+    })
+
     it('★★★ 设置弹窗开着时点「网关」⇒ 设置必须真的关掉（出口① 的 setShowSettings 不能被删）', async () => {
       // ⚠️⚠️ 2026-11-06 十一审（审查员 A10 变异）。
       //

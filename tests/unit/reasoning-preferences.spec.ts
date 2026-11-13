@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   REASONING_PREFERENCES_FILE,
   createReasoningPreferenceStore,
+  resetReasoningPreferenceCache,
   sanitizeStrongestReasoningEnabled,
 } from '../../src/reasoning-preferences.js'
 
@@ -82,6 +83,10 @@ describe('文件后端：写进去必须能读回来', () => {
     // ⚠️ `save` 是 async：不 await 就写盘还没落，随后的 writeFileSync 会撞 ENOENT。
     await store.save(true)
     writeFileSync(path, '{ 这不是 JSON', 'utf-8')
+    // ⚠️ 本文件有进程内缓存（见 `src/reasoning-preferences.ts` 的 `parsedCache`）：
+    //    上面 `save(true)` 已经把 `true` 写进缓存，不清掉的话下面的 `load()` 根本不读盘、
+    //    也就不会走「坏文档」分支 ⇒ 这条 warn 断言会假红。清缓存 = 模拟「重启后首次读」。
+    resetReasoningPreferenceCache()
     expect(store.load(), '坏文档必须回落默认开，而不是抛错或判关').toBe(true)
     expect(warnings.length, '读坏文档必须留痕').toBeGreaterThan(0)
   })
@@ -91,6 +96,31 @@ describe('文件后端：写进去必须能读回来', () => {
     const store = createReasoningPreferenceStore(fakeCtx() as never)
     await store.save(true)
     writeFileSync(join(home, 'jet-hub', REASONING_PREFERENCES_FILE), 'false', 'utf-8')
+    // 同上：外部改文件后必须清缓存才重读（生产路径里文件只由 `save()` 改，见模块注释）。
+    resetReasoningPreferenceCache()
     expect(store.load(), '裸 false 应被认成关闭').toBe(false)
+  })
+
+  /**
+   * ★★★ 缓存本身的行为（PR #70 审计 D1 的守卫）。
+   *
+   * 判据用**行为**而不是计时：`save(false)` ⇒ 删掉文件 ⇒ `load()` 必须仍返回 `false`
+   * （= 没读盘，读了就会因文件不存在落到默认 `true`）；清缓存后再 `load()` 必须变 `true`
+   * （= 缓存是唯一原因）。
+   *
+   * 这条为什么重要：`load()` 在 `buildModelCatalog` 的**逐模型**热路径上
+   * （宿主 `dsh-api-session-controller/lib/index.js:473-497` 对每个模型各调一次
+   * `resolveModelInfo`），实测单次读盘 102 us ⇒ 上千模型的目录每次构建多 100 ms+
+   * 同步阻塞事件循环。把缓存删掉会让本用例变红（而不是让某处变慢）。
+   */
+  it('★★★ 同进程内第二次 load 不再读盘（缓存），save 后立刻生效', async () => {
+    process.env.DSH_JET_HUB_STATE_DIR = home
+    const store = createReasoningPreferenceStore(fakeCtx() as never)
+    const path = join(home, 'jet-hub', REASONING_PREFERENCES_FILE)
+    await store.save(false)
+    rmSync(path, { force: true })
+    expect(store.load(), '文件已被删除却仍读到 false ⇒ 说明走了缓存（这正是期望）').toBe(false)
+    resetReasoningPreferenceCache()
+    expect(store.load(), '清缓存后必须重新读盘：文件不存在 ⇒ 默认开').toBe(true)
   })
 })

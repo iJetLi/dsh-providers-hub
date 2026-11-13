@@ -726,3 +726,49 @@ describe('gemini：标题请求在关不掉时抬预算', () => {
   })
 })
 
+
+// ───────────────── ⑤ accio 的 `declaredEfforts` 必须取真实声明 ─────────────────
+
+/**
+ * ⚠️⚠️ 2026-11-13 对抗审计 P2-①：`src/accio-adapter.ts` 曾硬编码
+ * `declaredEfforts: []`，注释还写「Accio 关不掉思考 ⇒ 恒为空」—— 那是 PR #70
+ * **之前**的口径。PR #70 把默认档抬到 `max` 后，`weakest === undefined`
+ * ⇒ 标题请求原样发 `max` + 512 ⇒ 思考吃满、正文零产出（issue IKKVDH 原形在
+ * accio 上**复发**，而同 PR 声称修的就是它）。
+ *
+ * 判据：用**真实的** `accioReasoningOf` 产出档位，再走 `planSessionTitleThinking` ——
+ * 必须降到 `low`（不是 `max`），且预算抬到 512。这条同时钉住「关不掉 ≠ 没有档位」。
+ */
+describe('★ accio：标题请求必须用真实声明的档位降档（P2-①）', () => {
+  it('★★ 远端声明 low..max ⇒ 标题降档到 low，且不是 max', async () => {
+    const { accioReasoningOf } = await import('../../src/accio-adapter.js')
+    const reasoning = accioReasoningOf({
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'high',
+    })
+    expect(reasoning).toBeDefined()
+    const declared = reasoning!.efforts.map((effort) => String(effort.id))
+    // 前提自证：accio 确实**声明了**档位，而且没有任何「关闭档」
+    expect(declared).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(thinkingOffEffortOf(declared)).toBeUndefined()
+
+    const plan = planSessionTitleThinking({
+      purpose: 'session-title',
+      requestedEffort: 'max', // = 被本 PR 抬上去的默认档
+      declaredEfforts: declared,
+      maxTokens: 64,
+    })
+    expect(plan.effort).toBe('low')
+    expect(plan.maxTokens).toBe(SESSION_TITLE_MIN_MAX_TOKENS)
+  })
+
+  it('⚠️ 反向对照：若仍传空数组（改动前的形态）⇒ 档位停在 max（本用例存在的理由）', () => {
+    const plan = planSessionTitleThinking({
+      purpose: 'session-title',
+      requestedEffort: 'max',
+      declaredEfforts: [],
+      maxTokens: 64,
+    })
+    expect(plan.effort).toBe('max')
+  })
+})

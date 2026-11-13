@@ -81,8 +81,53 @@ class MemoryReasoningStore implements ReasoningPreferenceStore {
   }
 }
 
+/**
+ * 进程内的已解析值（按文档路径索引）。
+ *
+ * ## 为什么必须有缓存（2026-11-13 主审实测，PR #70 审计 D1）
+ *
+ * `load()` 落在**模型目录构建的热路径**上：宿主的 `buildModelCatalog`
+ * （`dsh-api-session-controller/lib/index.js:473-497`）对**每个 provider 的每个
+ * 模型**各调一次 `ctx.llm.resolveModelInfo(...)` ⇒ 一次目录构建 = N 次
+ * `adapter.resolveModel` ⇒ N 次 `enabledSource()` ⇒ **N 次 `existsSync` +
+ * `readFileSync` + `JSON.parse`**。实测单次 `load()` **102 us**（`D:/tmp/bench70.mjs`，
+ * 500 次 = 50.99 ms），真实目录（codearts 460 + cline 471 + opencode 470 …）轻松
+ * 上千个模型 ⇒ 每次打开模型选择器都**同步阻塞事件循环 100 ms 以上**。
+ * 本仓同类事故登记在 `docs/agent-notes/providers-cline.md`（Issue IKL3YH：
+ * 目录构建 O(N²)，N=471 实测 312 ms → 1.5 ms）。
+ *
+ * ## 为什么缓存是安全的（不需要「每次现读才生效」）
+ *
+ * 写者与读者**在同一个进程**（`reasoningDefault.setEnabled` 的 `save()` 就在这里），
+ * 所以 `save()` 成功后把新值写进缓存即可，开关立刻生效、无需重启。唯一的代价是
+ * **进程外**的改文件（手工编辑 / 另一个工作区里的进程）不会被运行中的进程看到 ——
+ * 那本来就不是本文件的受支持路径（文档里写的是「用设置面板开关」），且启动时会重读。
+ *
+ * ## 两个后端实例共享一份缓存（按**路径**索引）
+ *
+ * `src/index.ts` 与 `src/jet-hub-rpc.ts` 各自 `createReasoningPreferenceStore(ctx)`，
+ * 得到两个 `FileReasoningStore` 实例，但它们读写**同一个文件** ⇒ 缓存按路径索引，
+ * 面板侧 `save()` 写完，注册侧下一轮 `prepareCall` 立刻读到新值，**不必等重启**。
+ * （即使各自缓存一份也仍然正确 —— 那只是多一次读盘 —— 但按路径共享可以省掉它。）
+ */
+const parsedCache = new Map<string, boolean>()
+
+/** 清空进程内缓存（供单测模拟「重启后重读」与「外部改文件」两种情形）。 */
+export function resetReasoningPreferenceCache(): void {
+  parsedCache.clear()
+}
+
 /** 文件后端：`$DSH_HOME/jet-hub/reasoning-preferences.json`（原子写：tmp + rename）。 */
-class FileReasoningStore implements ReasoningPreferenceStore {
+/**
+ * 落盘实现。
+ *
+ * ⚠️ **导出只为单测注入接缝**（2026-11-13 对抗审计 P1-①）：RPC 层承诺「响应回**落盘值**
+ * 而不是回传入参」，而那条承诺只在「`save()` 静默失败」时才可见 —— 单测要能把
+ * `save` 换成「不抛错但不落盘」的桩，否则该条承诺永远无法被验证（实测把实现改成
+ * 回传入参，165 条定向用例全绿）。生产代码**不要**直接 new 它，走
+ * {@link createReasoningPreferenceStore}。
+ */
+export class FileReasoningStore implements ReasoningPreferenceStore {
   readonly kind = 'file' as const
 
   constructor(
@@ -91,6 +136,14 @@ class FileReasoningStore implements ReasoningPreferenceStore {
   ) {}
 
   load(): boolean {
+    const cached = parsedCache.get(this.path)
+    if (cached !== undefined) return cached
+    const value = this.readFromDisk()
+    parsedCache.set(this.path, value)
+    return value
+  }
+
+  private readFromDisk(): boolean {
     try {
       if (!existsSync(this.path)) return true
       const parsed = JSON.parse(readFileSync(this.path, 'utf-8')) as unknown
@@ -114,6 +167,8 @@ class FileReasoningStore implements ReasoningPreferenceStore {
       'utf-8',
     )
     renameSync(tmp, this.path)
+    // 落盘成功后同步缓存：下一个请求（可能是同一 tick 里的目录构建）立刻读到新值。
+    parsedCache.set(this.path, enabled)
   }
 }
 
