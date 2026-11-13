@@ -212,10 +212,22 @@
      请求锁死在 qoder 上。判据是 `src/aggregate-dispatch-context.ts` 的
      `AsyncLocalStorage` 标记（聚合 `dispatch` 用 `bindAggregateDispatch` 包派发，
      qoder 用 `resolveEffectiveQueueWaitMode()` 读）。⚠️ 必须**逐次包 `next()`**：
-     异步生成器在调用 `next()` 的上下文里恢复，只包创建会在第二个 chunk 起丢标记。
+     异步生成器在调用 `next()` 的上下文里恢复，而 `open()[Symbol.asyncIterator]()`
+     只造迭代器、**一帧代码都不跑**（探针实测「只包创建」= `insideFrames: 0 / 8`，
+     不是「从第二个 chunk 起丢」）。
      ⚠️ 不走 `GenerateOptions` 私有字段：宿主 `adapterStream` 会重组 options，
      不保证透传。测试：`tests/unit/aggregate-qoder-queue.spec.ts`（真实
      `QoderAdapter` + 仿宿主嵌套生成器；去掉 `bindAggregateDispatch` 后 5 条变红）。
+   - ⚠️⚠️ **但标记只在「还有下一个候选」时才挂（真实回归，对抗审计 + 独立复现
+     双双实测）**：挂上标记 = 渠道把排队判成**本候选失败**；若本候选是最后一个，
+     切换条件 `index + 1 < targets.length` 为假 ⇒ 无处可切 ⇒ **本可恢复的排队被
+     翻成硬失败**。`buildVirtualModels()`（`src/aggregate-catalog.ts`）**不按
+     `candidates >= 2` 过滤** ⇒ 任何渠道**独有**的模型（qoder 的 `ultimate` /
+     `performance` / `efficient` / `sonus` / `cantus`，走 `name` 通道）在聚合里
+     都是单候选 —— 这是**常态**不是边缘。实测对照：不挂标记 ⇒ `ok`（等 2 次排队
+     后第 3 次成功）；挂标记 ⇒ 立刻 `code=QUEUE`。修法 = `hasNextCandidate`
+     三元；`fast` 档仍由 `resolveQueueWaitMode()` 负责（用户显式选择不许被抹掉）。
+     守卫：`tests/unit/aggregate-qoder-single-candidate.spec.ts`（2 条）。
    ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
    `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]` **不含 `QUEUE`/`AUTH`**，
    且它的退避是**固定参数**（`initialDelayMs=500`、`maxDelayMs=10_000`、

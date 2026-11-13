@@ -2887,7 +2887,27 @@ export class AggregateAdapter extends LlmAdapter {
           // ⚠️ 派发必须带上「聚合调用」标记（见 `aggregate-dispatch-context.ts`）：
           //    渠道据此把「暂时排队」改判为「本候选失败」，让这里能切到下一个候选，
           //    而不是被 qoder 的排队等待锁死（2026-11-14 生产故障）。
-          for await (const chunk of bindAggregateDispatch(() => self.streamThrough(target, options))) {
+          //
+          // ⚠️⚠️ **但只在「还有下一个候选」时才挂标记**（真实回归，对抗审计 + 独立
+          //    复现双双实测）：挂上标记后渠道把排队判成本候选失败，而失败后的切换
+          //    条件是 `index + 1 < targets.length` —— 本候选是**最后一个**时无处可切，
+          //    于是**本可恢复的排队被翻成硬失败**。
+          //
+          //    实测（`tests/unit/aggregate-qoder-single-candidate.spec.ts`）：单候选
+          //    虚拟模型 + 上游排队两次后第 3 次恢复 ⇒ 不挂标记时拿到 `ok`（等了 2 次），
+          //    挂标记时立刻 `code=QUEUE` 失败。单候选是**常态**而非边缘情况 ——
+          //    `buildVirtualModels()`（`src/aggregate-catalog.ts`）不按 `candidates >= 2`
+          //    过滤，任何渠道**独有**的模型（如 qoder 的 `ultimate`、`performance`）
+          //    在聚合里都只有一个候选。
+          //
+          //    最后一个候选没有退路，「等」总比「死」好；用户显式设
+          //    `DSH_QODER_QUEUE_WAIT_MODE=fast` 时仍会立即失败 —— 那是用户的选择，
+          //    由 `resolveQueueWaitMode()` 负责，与本标记无关。
+          const hasNextCandidate = index + 1 < targets.length
+          const stream = hasNextCandidate
+            ? bindAggregateDispatch(() => self.streamThrough(target, options))
+            : self.streamThrough(target, options)
+          for await (const chunk of stream) {
             // ⚠️⚠️ **必须在置 `emitted` 之前**判这个失败帧（顺序是语义性的）。
             //
             // 为什么需要这一段：`streamThrough` 走的是**嵌套公共入口**

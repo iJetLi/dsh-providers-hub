@@ -148,7 +148,9 @@ describe('聚合调用 qoder：排队即切换下一个候选', () => {
       expect(sleeps).toEqual([])
       expect(fetchImpl).toHaveBeenCalledTimes(1)
       // 排队必须留痕，且说清是「聚合调用」导致的不等待（排障时与直连 fast 档区分）。
-      expect(warns.some((w) => /排队/.test(w) && /聚合/.test(w))).toBe(true)
+      // ⚠️ 判据必须**精确到整句**：只查「排队」「聚合」两个子串时，把文案换成
+      //    「排队聚合」也照样绿（对抗审计 E30 实测）。
+      expect(warns.join('\n')).toContain('（聚合调用，交由聚合切换下一个候选）')
     })
   }
 })
@@ -200,5 +202,112 @@ describe('bindAggregateDispatch：标记跨 yield 保持', () => {
   it('不经 bindAggregateDispatch 的调用看不到标记', () => {
     expect(isInsideAggregateDispatch()).toBe(false)
     expect(resolveEffectiveQueueWaitMode().viaAggregate).toBe(false)
+  })
+})
+
+describe('bindAggregateDispatch：三条转发腿各自都在上下文内（P2 守卫）', () => {
+  /**
+   * ⚠️ 必须用**手写 `AsyncIterator` 对象**，不能用异步生成器 —— 生成器由引擎
+   * 提供 `return`/`throw`，替身一换就测不到「转发时有没有 `run`」这一层，
+   * 而 `bindAggregateDispatch` 正是靠**手动**转发这三条腿。
+   *
+   * ⚠️ 第一条 `next()` 必须**给一个值**：`for await` 在 `done: true` 上直接结束、
+   * 循环体不执行 ⇒ `break` 也不会发生 ⇒ `return` 腿测不到（我第一版就写成
+   * 恒 `done: true`，`insideAtReturn` 恒 `undefined`）。
+   */
+  function makeRawIterator(options: {
+    onReturn?: (inside: boolean) => void
+    onThrow?: (inside: boolean) => void
+  }): { iterable: AsyncIterable<number>; nextInside: boolean[] } {
+    const nextInside: boolean[] = []
+    let calls = 0
+    const iterable: AsyncIterable<number> = {
+      [Symbol.asyncIterator](): AsyncIterator<number> {
+        return {
+          next: async () => {
+            nextInside.push(isInsideAggregateDispatch())
+            calls += 1
+            return calls === 1 ? { done: false, value: 1 } : { done: true, value: undefined }
+          },
+          return: async () => {
+            options.onReturn?.(isInsideAggregateDispatch())
+            return { done: true, value: undefined }
+          },
+          throw: async () => {
+            options.onThrow?.(isInsideAggregateDispatch())
+            return { done: true, value: undefined }
+          },
+        }
+      },
+    }
+    return { iterable, nextInside }
+  }
+
+  it('★★ `open` 在上下文内被调用（中间件在创建期就看得到标记）', () => {
+    let insideAtOpen: boolean | undefined
+    const { iterable } = makeRawIterator({})
+    const bound = bindAggregateDispatch(() => {
+      insideAtOpen = isInsideAggregateDispatch()
+      return iterable
+    })
+    // `open` 只在取迭代器时才跑（`bindAggregateDispatch` 是惰性的）。
+    expect(insideAtOpen).toBeUndefined()
+    void bound[Symbol.asyncIterator]()
+    expect(insideAtOpen).toBe(true)
+  })
+
+  it('★★ `next` 转发时在上下文内', async () => {
+    const { iterable, nextInside } = makeRawIterator({})
+    for await (const _ of bindAggregateDispatch(() => iterable)) {
+      // 消费第一个值（让循环体跑起来），第二次 `next()` 才拿到 `done`
+    }
+    expect(nextInside).toEqual([true, true])
+  })
+
+  it('★★ `return` 转发时在上下文内（提前 `break` 的清理腿）', async () => {
+    let insideAtReturn: boolean | undefined
+    const { iterable } = makeRawIterator({ onReturn: (inside) => { insideAtReturn = inside } })
+    for await (const _ of bindAggregateDispatch(() => iterable)) {
+      break
+    }
+    expect(insideAtReturn).toBe(true)
+  })
+
+  it('★★ `throw` 转发时在上下文内', async () => {
+    let insideAtThrow: boolean | undefined
+    const seen: AsyncIterable<number> = {
+      [Symbol.asyncIterator](): AsyncIterator<number> {
+        return {
+          next: async () => ({ done: false, value: 1 }),
+          throw: async () => {
+            insideAtThrow = isInsideAggregateDispatch()
+            return { done: true, value: undefined }
+          },
+        }
+      },
+    }
+    const iterator = bindAggregateDispatch(() => seen)[Symbol.asyncIterator]()
+    await iterator.next()
+    await iterator.throw?.(new Error('boom'))
+    expect(insideAtThrow).toBe(true)
+  })
+})
+
+describe('fast 档的错误码：必须是 `QUEUE`（可分类重试的那一格）', () => {
+  /**
+   * ⚠️ 为什么这条必须有：`QUEUE` 是**终态**（不在 `DEFAULT_RETRYABLE_CODES`
+   * 里，宿主不会白重试）；若把它写成 `SERVER`，宿主会**白重试 5 次**、
+   * 且绕过 `dead-model-store` 的 `IGNORED_CODES` 豁免（对抗审计 M11 实测：
+   * 把 `QUEUE` 改成 `SERVER` 时全仓 144 条**全绿**）。
+   */
+  it('★★ 直连 fast 档：`code === \'QUEUE\'`，且一次都不等', async () => {
+    setMode('fast')
+    const { qoder, sleeps } = makeQueuedQoder()
+    await expect(async () => {
+      for await (const _ of qoder.stream({ model: 'qfmodel', messages: MESSAGES } as never)) {
+        // 不该有 chunk
+      }
+    }).rejects.toMatchObject({ code: 'QUEUE' })
+    expect(sleeps).toEqual([])
   })
 })
