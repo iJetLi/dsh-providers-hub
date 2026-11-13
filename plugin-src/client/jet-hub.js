@@ -289,10 +289,7 @@ const GROWTH_TASK_PROVIDERS = new Set(['buddy']);
  *
  * ## 为什么需要这张表
  *
- * 这类渠道的 OAuth 都把 `redirect_uri` 指向 `http://127.0.0.1:<port>/…`
- * （见宿主 `src/oauth.ts` 的 `REDIRECT_PATH`、`src/lobsterai-oauth.ts`、
- * `src/trae-oauth.ts` 的 `/authorize`、`src/gemini-oauth.ts` 的 `localhost`、
- * `src/accio-auth.ts`、`src/astudio-oauth.ts`、`src/autoclaw-oauth.ts`）。
+ * 这类渠道的 OAuth 都把 `redirect_uri` 指向 `http://127.0.0.1:<port>/<回调路径>`
  * 这个回环地址**只在运行 DSH 的那台机器上有效**。
  *
  * 用户经外网（反代 / 端口转发 / 远程桌面）访问 DSH 时，浏览器在**用户本机**，
@@ -304,17 +301,53 @@ const GROWTH_TASK_PROVIDERS = new Set(['buddy']);
  *
  * ## ⚠️ 判据是「是否开本地回调端口」，不是「授权页在哪」
  *
- * 只收**真的起了 `createServer` 等回调**的渠道。设备码 / 轮询式渠道
- *（qoder 系、raccoon、minimax、cline、zcode、buddy 系）根本没有回调地址可粘 ——
- * 给它们渲染输入框只会让用户去找一条不存在的地址。
+ * 只收**真的起了 `createServer` 等 OAuth 回调**的渠道。共 **6** 家，
+ * 各自的回调路径**互不相同**（宿主源码为准，别照抄任何一家）：
  *
- * ⚠️ astudio / autoclaw 系的 `loginUrl` **本身就是本机载体页**
- *（`http://127.0.0.1:<port>/…login`），远程访问时连授权页都打不开。
- * 但它们**确实**开了回调服务器（`astudio-oauth.ts` 的 `listenOnRandomPort`、
- * `autoclaw-oauth.ts` 的 `server.listen`），而用户完全可能已经用端口转发
- * 把授权页那一段打通、只差最后这次回调 ⇒ 照样收进来（用户要求「全部回调式的都加」）。
- * 它们的输入框在授权页打不开时不会被用到，但**不会误伤**：多渲染一格，
- * 远小于「用户被挡在门外且没有任何出路」的代价。
+ * | 渠道 | 回调路径 | 宿主实现 |
+ * |---|---|---|
+ * | `codearts` | `/oauth/callback` | `src/oauth.ts` 的 `REDIRECT_PATH`（**只有它用这个常量**） |
+ * | `gemini` | `/oauth-callback` | `src/gemini-oauth.ts` 的 `GEMINI_CALLBACK_PATH`（host 是 `localhost`） |
+ * | `accio` | `/auth/callback` | `src/accio-auth.ts` 的 `ACCIO_CALLBACK_PATH` |
+ * | `lobsterai` | `/auth/callback` | `src/lobsterai.ts` 的 `LOBSTERAI_CALLBACK_PATH` |
+ * | `autoclawintl` | `/auth/callback-zai` | `src/autoclaw-oauth.ts` 的 `AUTOCLAW_OAUTH_CALLBACK_PATH` |
+ * | `trae` | `/authorize` | `src/trae.ts` 的 `TRAE_CALLBACK_PATH` |
+ *
+ * ⚠⚠ **`astudio` 不在表里**（PR #8 审计 P1-2，2026-11-13 实测）：它虽然也
+ * `listenOnRandomPort`（`src/astudio-oauth.ts`），但开的是**登录载体页**，
+ * 路径全集 `ASTUDIO_CARRIER_PATHS` = login / loginAlt / geeCaptcha / sendSms /
+ * smsLogin / passwordLogin / wechat QR / poll —— **没有任何 OAuth 回调路径**，
+ * 且全文件 `searchParams` 零命中（不解析 query）。登录结果由 `/astudio/poll`
+ * 的页面轮询交付（`scanRes.status === 'scanned'` ⇒ `completeAstudioLogin`）。
+ * ⇒ 浏览器**永远不会**停在一条可粘贴的 `127.0.0.1` 回调地址上。
+ *
+ * ⚠⚠ **国内 `autoclaw` 也不在表里**（PR #8 审计 P1-2，与 `autoclawintl` 分开）：
+ * 它**没有** Z.ai OAuth 登录入口（客户端 `autoclawSmsAvailable = provider ===
+ * 'autoclaw'`、`autoclawZaiAvailable = provider === 'autoclawintl'`，两站点分裂），
+ * 只有短信 + 一键导入本机桌面端凭据；而 `src/autoclaw-oauth.ts:1386` 的回调处理器
+ * 又用 `if (product.id !== AUTOCLAW_INTL.id) { res.writeHead(404); return }`
+ * 把 Z.ai 回调**限死为仅国际版**。⇒ 国内版粘任何地址都只会拿到 404。
+ *
+ * ⚠⚠ **为什么这两家必须移出（不是「多渲染一格无害」）**：粘贴框一旦渲染，
+ * 用户就会去粘**载体页**地址；宿主盲发 GET 拿到 HTML 的 `200` ⇒ 旧实现回
+ * `ok:true` ⇒ 客户端**刻意不释放** `busy`（终态由 `login.poll` 收口）⇒
+ * 按钮永久停在「提交中…」，5 分钟后报「登录超时」= **假成功，比明确报错更糟**。
+ * 这是本仓「静默失效」的高危形态，故判据必须收窄到「真的能落定」。
+ *
+ * ⚠️ 其余渠道没有地址可粘，一律**不得**渲染输入框：`loomy` 与 `raccoon`
+ *（`src/loomy-wechat-login.ts` / `src/raccoon-login-page.ts` 虽然真 `createServer`，
+ * 开的是**本机载体页 + 上游轮询**，浏览器不会停在回调地址上）、`marvis`
+ *（`src/marvis-browser-login.ts` 走 CDP Fetch 拦截，`createServer` 计数 0）、
+ * `qoder` 系 / `zcode` / `minimax` / `cline` / buddy 系（设备码或 API key）。
+ *
+ * ## ⚠️⚠️ 这是「第二份清单」
+ *
+ * 宿主 `src/jet-hub-rpc.ts` 的 `login.submitCallback` 端点**不需要**按 provider
+ * 登记（它盲发 GET，各家的回调服务器自己处理）。但**本表是「粘贴框对某家是否
+ * 可见」的唯一开关** —— 新增回环回调渠道时**两处都要加**，漏这一处会让功能
+ * 从产品**静默消失**（宿主端点还在，但没有任何 UI 能调到它）。
+ * 守卫：`tests/unit/loopback-callback-providers.spec.ts`（该有的必须有框、
+ * 不该有的必须没有、两条通道不许互相串发）。
  */
 const PROVIDERS_WITH_LOOPBACK_CALLBACK = new Set([
   'codearts',
@@ -322,8 +355,6 @@ const PROVIDERS_WITH_LOOPBACK_CALLBACK = new Set([
   'trae',
   'gemini',
   'accio',
-  'astudio',
-  'autoclaw',
   'autoclawintl',
 ]);
 
@@ -3761,9 +3792,14 @@ function ProviderPanel({
   /**
    * 是否渲染「手动粘贴回调链接」输入框。
    *
-   * 判据是「该渠道是否开了本机回调端口」，不是按 provider 写死清单：
-   * 见 `PROVIDERS_WITH_LOOPBACK_CALLBACK`。设备码 / 轮询式渠道（qoder 系、
-   * raccoon、minimax、cline、zcode、buddy 系）**没有回调地址可粘**，
+   * 判据是「该渠道是否真的开了 OAuth 回调端口」，收在
+   * `PROVIDERS_WITH_LOOPBACK_CALLBACK`（一份**显式**清单，共 6 家）——
+   * 别在这里内联条件，也别改成「按 provider 猜」：漏一家的后果是
+   * 那家的粘贴框**静默消失**，多一家则让用户拿不到任何可用地址。
+   *
+   * ⚠️ **载体页 / 设备码 / 轮询式渠道一律不得渲染**（它们没有回调地址可粘）：
+   * `astudio`、国内 `autoclaw`（短信 + 一键导入）、`loomy`、`raccoon`、
+   * `marvis`（CDP 拦截）、qoder 系、zcode、minimax、cline、buddy 系。
    * 给它们渲染输入框只会让用户去找一条不存在的地址。
    *
    * ⚠️ 必须写成**单个标识符**（不是内联的复合条件）：`jet-hub-structure-ast.spec.ts`
@@ -5446,8 +5482,8 @@ function ProviderPanel({
    *   `loginWindow` = 客户端自己开的那扇窗（宿主开窗的 provider 传 `null`）。
    */
   /**
-   * 提交用户手动粘贴的**本机回调链接**（codearts / trae / gemini / accio /
-   * astudio / autoclaw / lobsterai …）。
+   * 提交用户手动粘贴的**本机回调链接**（`PROVIDERS_WITH_LOOPBACK_CALLBACK` 那 6 家：
+   * codearts / lobsterai / trae / gemini / accio / autoclawintl）。
    *
    * ⚠️ 两条通道：codearts / trae 走 `account.submitCallback`（宿主侧有专用解析器，
    *    能给出「回调未携带 refreshToken」这类精确原因）；其余回环渠道走
@@ -5477,9 +5513,11 @@ function ProviderPanel({
       // ⚠️ 两条通道**刻意分开**（不是历史包袱）：
       //    - codearts / trae 在宿主侧登记了**专用解析器**（`pendingManualCallbacks`），
       //      能给出「回调未携带 refreshToken」「路径不是本次回调」这类**精确**原因；
-      //    - 其余回环渠道（gemini / accio / astudio / autoclaw / lobsterai …）没有
-      //      专用解析器，交给宿主盲发一次 GET —— 它们自己的回调服务器本来就在等这个
-      //      请求，`state` 校验、换 token、写凭据全部原样复用。
+      //    - 其余回环渠道（gemini / accio / lobsterai / autoclawintl）没有专用解析器，
+      //      交给宿主盲发一次 GET —— 它们自己的回调服务器本来就在等这个请求，
+      //      `state` 校验、换 token、写凭据全部原样复用。
+      //      ⚠️ `astudio` / 国内 `autoclaw` **不在**集合里：它们没有可落定的 OAuth
+      //      回调（载体页 / 短信），粘地址只会拿到 404 —— 详见 Set 上方注释。
       //    合并成一条会让前两家丢掉精确文案，或让后几家多维护一份按 provider 的解析。
       if (provider === 'codearts' || provider === 'trae') {
         await rpcCall('account.submitCallback', { accountId, callbackUrl: value });
@@ -6075,9 +6113,14 @@ function ProviderPanel({
           React.createElement('input', {
             className: 'dim-jh-input',
             type: 'text',
-            placeholder: provider === 'trae'
-              ? 'http://127.0.0.1:端口/authorize?refreshToken=…&userInfo=…&userJwt=…'
-              : 'http://127.0.0.1:端口/oauth/callback?code=…',
+            // ⚠⚠ **不许写死具体路径**（PR #8 审计 P3）：七家回环渠道的回调路径
+            //    各不相同 —— codearts `/oauth/callback`、gemini `/oauth-callback`、
+            //    accio / lobsterai `/auth/callback`、autoclaw(+intl)
+            //    `/auth/callback-zai`、trae `/authorize`。原先只给 trae 一家写了
+            //    专属提示，其余六家一律展示 `/oauth/callback?code=…`，
+            //    用户照抄格式手拼就会拼出错路径、拿到 404 且不知所云。
+            //    ⇒ 提示只说明「什么形状」，路径与参数由浏览器填好，原样粘就行。
+            placeholder: 'http://127.0.0.1:端口/…（授权完成后浏览器地址栏里的完整地址，原样粘贴）',
             value: manualCallback.value,
             disabled: manualCallback.busy,
             spellCheck: false,

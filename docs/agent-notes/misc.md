@@ -1108,6 +1108,58 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
   可点击链接（`loginUrlForManual`）。`tests/unit/jet-hub-rpc.spec.ts` 有源码级
   断言锁死这条（剔除注释行后匹配，因注释里保留了该缺陷的叙述）
 
+### 远程访问时「手动粘贴回调链接」（PR #8，2026-11-13）
+
+**症状**：用户经反代 / 端口转发 / 远程桌面访问 DSH 时，浏览器在**用户本机**，
+回调地址 `http://127.0.0.1:<port>/…` 指向用户自己的电脑 ⇒ 授权完成后浏览器报
+「拒绝连接」，宿主永远收不到 `code` ⇒ 前端干等 5 分钟后报「登录超时」。
+这是**网络拓扑问题**，不是任何 provider 的协议缺陷。
+
+**修法**：用户在登录弹窗里把浏览器地址栏那条回调 URL **原样粘回来**，
+**宿主自己**发一次 `GET`（宿主就在那台机器上，回调服务器正在监听）⇒ 各 provider
+的 `createServer` 处理器**一行都不用改**（`code` / `secret` / `token`·`fingerprint`
+三条分支全部自动支持）。新增 provider 自动支持，**不存在第二份要同步维护的清单**。
+
+- **两条通道刻意分开**（不是历史包袱）：`codearts` / `trae` 走
+  `account.submitCallback`（宿主侧有**专用解析器**，能给出「回调未携带
+  refreshToken」「路径不是本次回调」这类精确原因）；其余回环渠道走
+  `login.submitCallback`（宿主**盲发 GET**）。合并成一条会让前两家丢掉精确文案。
+- **类型名必须分开**：`RpcSubmitCallbackRequest = { accountId, callbackUrl }` 与
+  `RpcLoginSubmitCallbackRequest = { url }` **不能同名** —— TS 接口合并会并成
+  「三个字段全必填」，编译期不报错、运行时两条通道互相污染。
+- **`login.submitCallback` 的安全边界**（它是 SSRF 入口，不是通用 GET 代理）：
+  只接受回环 hostname（`127.0.0.1` / `localhost` / `::1` / `[::1]`，**fail-closed**）、
+  只接受 `http(s)`、`redirect: 'manual'`（`secret` 分支的 307 跳外网 portal 无意义，
+  跟随只会掩盖真实状态码）、15 秒超时；404 与 `ECONNREFUSED` / `TimeoutError`
+  给**不同**的可操作文案（前者=路径贴错，后者九成是本次登录已超时）。
+- **`PROVIDERS_WITH_LOOPBACK_CALLBACK` 的判据是「是否真的开了 OAuth 回调端口」**，
+  共 **6** 家（各家路径互不相同，别照抄任何一家）：codearts `/oauth/callback`
+ （`src/oauth.ts` 的 `REDIRECT_PATH`，**只有它用这个常量**）、gemini `/oauth-callback`
+ （host 是 `localhost`）、accio / lobsterai `/auth/callback`、autoclawintl
+  `/auth/callback-zai`、trae `/authorize`。
+  ⚠️⚠️ **两家必须排除**（否则是「假成功」，比明确报错更糟 —— 用户粘载体页地址、
+  宿主盲发 GET 拿到 HTML 的 200、旧实现回 `ok:true`、客户端刻意不释放 `busy`
+  ⇒ 按钮永久「提交中…」、5 分钟后报「登录超时」）：
+  - **`astudio`**：确实 `listenOnRandomPort`，但开的是**登录载体页**，
+    `ASTUDIO_CARRIER_PATHS` 里没有任何 OAuth 回调路径，登录结果由 `/astudio/poll`
+    轮询交付。
+  - **国内 `autoclaw`**（与 `autoclawintl` 分开）：只有短信 + 一键导入本机凭据
+    （`autoclawSmsAvailable = provider === 'autoclaw'` /
+    `autoclawZaiAvailable = provider === 'autoclawintl'`），而
+    `src/autoclaw-oauth.ts:1386` 又用 `product.id !== AUTOCLAW_INTL.id` 把 Z.ai
+    回调**限死为仅国际版** ⇒ 国内版粘任何地址都 404。
+  ⚠️ `marvis`（CDP 拦截，无端口）、`loomy` / `raccoon`（本机载体页 + 上游轮询）、
+  `qoder` 系 / `zcode` / `minimax` / `cline` / buddy 系（设备码）同样没有地址可粘。
+- **粘贴提示不许写死具体路径**：七家路径各不相同，写死任一个都会让用户照抄拼错；
+  文案只说「授权完成后浏览器地址栏里的完整地址，原样粘贴」。
+- **非 2xx/3xx 必须 `ok:false`**（`jet-hub/callback-rejected`；`404` 保持 `bad-request`）：
+  `400` = `state` 不匹配（过期地址）、`5xx` = 换凭据失败 —— 包成成功等于
+  「错误归因 + 白烧一轮授权」，与 issue IKJOZA 红线同型。
+- 守卫：`tests/unit/loopback-callback-providers.spec.ts`（该有的 6 家必须有粘贴框 +
+  提交按钮、不该有的 6 家必须没有、两条通道不许互相串发）、
+  `tests/unit/login-submit-callback.spec.ts`（服务端：SSRF 白名单 / 请求形态 /
+  非 2xx 全失败 / 入参长度与 userinfo / 四类可操作失败文案）。
+
 ## ⚠️ 两条通用判据：一文件两套同义判据 / `String(undefined)`（PR !62 复审，2026-10-06）
 
 这两条不是某个 provider 的局部知识，而是**在 buddy 成长任务复审里连撞两次**的

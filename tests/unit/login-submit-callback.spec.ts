@@ -272,3 +272,115 @@ describe('★ login.submitCallback：失败必须可区分', () => {
     expect(result.value).toBeUndefined()
   })
 })
+
+/**
+ * ⚠️⚠️ **非 2xx/3xx 必须走失败分支**（PR #8 对抗审计 P2-1，2026-11-13 实测）。
+ *
+ * 旧实现只把 `404` 当失败、其余一律 `ok: true` —— 而**真实失败**的形态恰恰是
+ * `400`（`state` 与本次登录不匹配 ⇒ 粘贴的是上一轮的过期地址）与 `500`
+ *（回调处理器换凭据失败）。把它们包成成功会让客户端停在「提交中…」到 5 分钟
+ * 上限，然后报「登录超时或未完成」= **错误归因**，把用户推去白烧一轮授权。
+ *
+ * 这与 issue IKJOZA 的红线同型：「RPC 的 catch 不得把失败包成 `ok:true`」。
+ */
+describe('★ login.submitCallback：非 2xx/3xx 一律失败（P2-1）', () => {
+  it('400 → ok:false，点名 state 不匹配 = 过期地址', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('bad state', { status: 400 })))
+    const { call } = setup()
+
+    const result = await call({ url: 'http://127.0.0.1:13761/oauth-callback?code=a&state=old' })
+
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('jet-hub/callback-rejected')
+    // 用户必须知道「重贴正确地址能成」而不是「重新授权一遍」。
+    expect(result.error?.message).toContain('state')
+    expect(result.error?.message).toContain('过期')
+  })
+
+  it('500 → ok:false，点名「换取凭据失败」', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('exchange failed', { status: 500 })))
+    const { call } = setup()
+
+    const result = await call({ url: 'http://127.0.0.1:13761/auth/callback?code=a' })
+
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('jet-hub/callback-rejected')
+    expect(result.error?.message).toContain('凭据')
+  })
+
+  /**
+   * 逐格钉住「除了 2xx/3xx 都不许成功」——单测一个 400 挡不住
+   * 「把 `>= 400` 改成 `=== 400`」这种收窄（其余状态码又静默漏回成功）。
+   */
+  it.each([400, 401, 403, 409, 410, 418, 429, 500, 502, 503])(
+    '★ %i → 一律 ok:false（绝不漏回成功）',
+    async (status) => {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('x', { status })))
+      const { call } = setup()
+
+      const result = await call({ url: 'http://127.0.0.1:13761/oauth/callback?code=a' })
+
+      expect(result.ok, `${status} 被包成了成功：客户端会永久停在「提交中…」`).toBe(false)
+      expect(result.value).toBeUndefined()
+      expect(result.error?.code).toBe('jet-hub/callback-rejected')
+    },
+  )
+
+  /**
+   * ⚠️ `3xx` **必须**算成功：`redirect: 'manual'` 下 `secret` 分支回 307 跳 portal
+   * 结果页 —— 那正是「已交给对应分支处理」的信号。把它判成失败会与
+   * `src/login.ts` 的真实形态相反（对抗审计 M06 实测 `redirect` 变异有牙）。
+   */
+  it.each([200, 204, 301, 302, 307])('★ %i 是成功（反向对照：别把成功也判成失败）', async (status) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status })))
+    const { call } = setup()
+
+    const result = await call({ url: 'http://127.0.0.1:13761/oauth/callback?code=a' })
+
+    expect(result.ok).toBe(true)
+    expect(result.value).toEqual({ status })
+  })
+})
+
+describe('★ login.submitCallback：入参加固（P3）', () => {
+  it('★ 带用户名/口令的地址 → bad-request，且不发请求', async () => {
+    const fetchStub = vi.fn()
+    vi.stubGlobal('fetch', fetchStub)
+    const { call } = setup()
+
+    const result = await call({ url: 'http://user:pw@127.0.0.1:13761/x' })
+
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('bad-request')
+    expect(result.error?.message).toContain('用户名')
+    // 拒绝必须发生在发请求**之前**（否则已经是「把口令发出去」了）。
+    expect(fetchStub).not.toHaveBeenCalled()
+  })
+
+  it('★ 超长地址（> 4 KB）→ bad-request，且不发请求', async () => {
+    const fetchStub = vi.fn()
+    vi.stubGlobal('fetch', fetchStub)
+    const { call } = setup()
+
+    const result = await call({ url: `http://127.0.0.1:13761/x?pad=${'a'.repeat(5000)}` })
+
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('bad-request')
+    expect(result.error?.message).toContain('过长')
+    expect(fetchStub).not.toHaveBeenCalled()
+  })
+
+  it('★ 禁止端口（`bad port`）→ 可读文案，不是 `fetch failed`', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause: { message: 'bad port' } })
+    }))
+    const { call } = setup()
+
+    const result = await call({ url: 'http://127.0.0.1:1/x' })
+
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('jet-hub/callback-unreachable')
+    expect(result.error?.message).toContain('端口')
+    expect(result.error?.message).not.toContain('fetch failed')
+  })
+})

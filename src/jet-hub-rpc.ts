@@ -8245,9 +8245,15 @@ function registerJetHubEndpoints(
        *
        * ## 为什么必须由宿主代跑
        *
-       * 回调式 provider 都把浏览器重定向到 `http://127.0.0.1:<port>/oauth/callback?code=…`
-       * （见 `src/oauth.ts` 的 `REDIRECT_PATH` 与 `src/login.ts` 的两套回调服务器）。
+       * 回调式 provider 都把浏览器重定向到 `http://127.0.0.1:<port>/<各自的回调路径>`
        * 这个回环地址**只在运行 DSH 的那台机器上有效**。
+       *
+       * ⚠️ **各家路径互不相同**（PR #8 审计 P2-1 实测，别照抄任何一家）：
+       * codearts `/oauth/callback`（`src/oauth.ts` 的 `REDIRECT_PATH`，**只有它用这个常量**）、
+       * gemini `/oauth-callback`（`src/gemini-oauth.ts` 的 `GEMINI_CALLBACK_PATH`，
+       * 且 host 是 `localhost` 而非 `127.0.0.1`）、
+       * lobsterai 与 accio `/auth/callback`、autoclaw 国际版 `/auth/callback-zai`、
+       * trae `/authorize`。
        *
        * 用户经外网（反向代理 / 端口转发 / 远程桌面）访问 DSH 时，浏览器在**用户本机**，
        * `127.0.0.1` 指向用户自己的电脑 ⇒ 回调打到一台没有监听端口的机器上，浏览器报
@@ -8264,8 +8270,13 @@ function registerJetHubEndpoints(
        * - `token` / `fingerprint` 分支（`startCallbackServer` 的老流程）→ 直接落凭据
        *
        * 换 token、写凭据、`login.poll` 报 `done` 的既有链路**原样复用**，
-       * 这也是本端点刻意做成「一次 HTTP GET」而不是「按 provider 各写一遍」的原因：
-       * 新增 provider 时它自动支持，不存在第二份需要同步维护的清单。
+       * 这也是本端点刻意做成「一次 HTTP GET」而不是「按 provider 各写一遍」的原因。
+       *
+       * ⚠️ **但「不存在第二份清单」是假话**（PR #8 审计 P2-2）：客户端
+       * `plugin-src/client/jet-hub.js` 的 `PROVIDERS_WITH_LOOPBACK_CALLBACK` **就是**
+       * 第二份，而且它是「粘贴框对某家是否可见」的唯一开关 —— 新增回环渠道时
+       * **两处都要加**，漏客户端那处功能从产品静默消失（宿主端点还在、但没人能调到）。
+       * 宿主侧这一半不需要按 provider 登记（这正是本端点复用的价值）。
        *
        * ## ⚠️ 本端点成功 ≠ 登录成功
        *
@@ -8274,12 +8285,43 @@ function registerJetHubEndpoints(
        * 宿主这一侧只负责把请求送达。客户端**必须**继续轮询，不得据 `status` 收尾。
        */
       case 'login.submitCallback': {
+        /**
+         * 把回调服务器的状态码翻成**可操作**的文案（见下方 `response.status >= 400`）。
+         */
+        const describeCallbackRejection = (status: number, path: string): string => {
+          if (status === 404) {
+            return '本地回调服务返回 404：这条地址的路径不是本次登录的回调路径，'
+              + '请确认粘贴的是浏览器地址栏里的完整回调地址。'
+          }
+          if (status === 400) {
+            return '本地回调服务拒绝了这条地址（400）：`state` 与本次登录不匹配，'
+              + '多半是**过期**的回调地址。请重新点「+ 新建账号」，'
+              + '拿到新的授权页后尽快完成授权并粘贴回调地址。'
+          }
+          if (status >= 500) {
+            return `本地回调服务接收了回调，但换取凭据失败（${status}）：`
+              + '请查看宿主日志里的上游错误，或重新点「+ 新建账号」再试一次。'
+          }
+          return `本地回调服务拒绝了这次请求（${status}，路径 ${path}）：`
+            + '请确认粘贴的是本次登录的回调地址。'
+        }
         const req = payload as RpcLoginSubmitCallbackRequest
         const raw = typeof req.url === 'string' ? req.url.trim() : ''
         if (raw.length === 0) {
           return {
             ok: false,
             error: { code: 'bad-request', message: '回调地址为空，请把浏览器地址栏里的完整地址粘贴进来' },
+          }
+        }
+        /**
+         * ⚠️ **长度上限**（PR #8 对抗审计 P3-①）：真实回调地址 < 2 KB，而不设限时
+         * 一条 1 MB 的「地址」会被原样发成本机请求行 —— 既是资源消耗，也让日志被刷屏。
+         * 上限给足余量（4 KB），正常地址不可能触到。
+         */
+        if (raw.length > 4096) {
+          return {
+            ok: false,
+            error: { code: 'bad-request', message: `回调地址过长（${raw.length} 字符），请只粘贴浏览器地址栏里的那一行。` },
           }
         }
         let target: URL
@@ -8301,19 +8343,40 @@ function registerJetHubEndpoints(
           }
         }
         /**
+         * ⚠️ **拒绝带用户名/口令的地址**（PR #8 对抗审计 P3-②）。
+         *
+         * `http://user:pw@127.0.0.1:1/x` 的 `hostname` 确实是回环，故旧闸放行 ——
+         * 然后 `fetch` 会把它变成 `Authorization: Basic …` 发到本机**任意端口**。
+         * 虽然 Node 的 `fetch` 自己也会拒绝（`Request cannot be constructed from a
+         * URL that includes credentials`），但那条报错对用户毫无意义；这里先给出
+         * 可读原因，且**不**依赖运行时的隐式拒绝（换实现即失效）。
+         */
+        if (target.username !== '' || target.password !== '') {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: '回调地址里不应带用户名/口令（`user:pass@`）。请粘贴浏览器地址栏里那条完整地址。',
+            },
+          }
+        }
+        /**
          * ⚠️ **只接受回环地址**，这是本端点的安全边界（它不是通用 HTTP 代理）。
          *
          * 不加这道闸，任何能调 RPC 的客户端都能让宿主向**任意内网/本机端口**发 GET
          * —— 一个 SSRF 入口，且宿主的网络位置往往比浏览器更靠内。
          *
          * ⚠️ 逐字列出回环写法（含 IPv6 方括号形态）：`URL.hostname` 对
-         * `http://[::1]:1/` 返回 `[::1]`（**带方括号**），故两种都要收。
+         * `http://[::1]:1/` 返回 `[::1]`（**带方括号**）—— 实测 Node 26 对
+         * `[0:0:0:0:0:0:0:1]` 也归一成 `[::1]`，故**只写带方括号那一支**；
+         * 裸 `'::1'` 永远不可能匹配（PR #8 对抗审计 M30 实测死代码，已删）。
          * ⚠️ 这里**不**做「认不出来就放行」——认不出来一律拒（fail-closed）。
+         * 该判据已被 28 条敌对输入实测（子域伪装 / `@` 混淆 / 反斜杠 / `0.0.0.0` /
+         * `[::]` / 八进制 / 十进制 / 十六进制 / 尾点 / `%00` / 换行），零越权。
          */
         const callbackHost = target.hostname.toLowerCase()
         const isLoopback = callbackHost === '127.0.0.1'
           || callbackHost === 'localhost'
-          || callbackHost === '::1'
           || callbackHost === '[::1]'
         if (!isLoopback) {
           return {
@@ -8338,17 +8401,41 @@ function registerJetHubEndpoints(
             signal: AbortSignal.timeout(15_000),
           })
           /**
-           * 回调服务器只对**路径不匹配**的请求回 404（见 `src/login.ts` 里两处
-           * `response.writeHead(404).end('Not found')`）。其余形态（200 / 204 / 307）
-           * 都表示「已交给对应分支处理」。
+           * ⚠️ **响应体必须丢弃并 cancel**（PR #8 对抗审计 P3-⑦）：本端点只关心
+           * 状态码，回调服务器那两张 HTML 结果卡片（成功 / 失败）对宿主毫无用处；
+           * 不读也不 cancel 会让连接挂在 keep-alive 池里等超时。
            */
-          if (response.status === 404) {
+          await response.body?.cancel()
+          /**
+           * ⚠️⚠️ **非 2xx/3xx 必须走失败分支**（PR #8 对抗审计 P2-1，2026-11-13
+           * 实测 301/302/307/400/401/403/409/410/429/500/502/503）。
+           *
+           * 旧写法只把 `404` 当失败、其余一律 `ok: true`，而那恰恰是**真实失败**的
+           * 形态：`400` = `state` 与本次登录不匹配（`src/gemini-oauth.ts:499-503`、
+           * `src/lobsterai-oauth.ts:264-267`、`src/accio-auth.ts:502-517`）、
+           * `500` = 换凭据失败（`src/lobsterai-oauth.ts:284`）。
+           *
+           * 后果链（实测）：客户端 `await rpcCall(...)` **不读返回值**、且刻意不释放
+           * `busy`（终态由 `login.poll` 收口）⇒ 失败被包成成功 ⇒ 输入框永久停在
+           * 「提交中…」⇒ 5 分钟后报「登录超时或未完成」= **错误归因**（真因是
+           * `state` 不匹配，重贴正确地址立刻能成），并把用户推去白烧一轮授权。
+           * ⇒ 与 issue IKJOZA「RPC 的 catch 不得把失败包成 ok:true」同型，必须修。
+           *
+           * `ok:false` 会在客户端抛错、走到输入框的**行内**错误（不走
+           * `setError` + `setPhase('error')`），界面与轮询都不受影响。
+           */
+          if (response.status >= 400) {
             return {
               ok: false,
               error: {
-                code: 'bad-request',
-                message: '本地回调服务返回 404：这条地址的路径不是本次登录的回调路径，'
-                  + '请确认粘贴的是浏览器地址栏里的完整回调地址。',
+                /**
+                 * ⚠️ **`404` 保持 `bad-request`**（既有契约：路径贴错属于**入参**
+                 * 问题，客户端据此把错误显示在输入框旁）；其余状态码是「回调服务器
+                 * 有监听但拒绝/失败」，用独立码 `jet-hub/callback-rejected` 便于排障
+                 * 时一眼区分「地址根本不存在」与「地址存在但这轮已过期」。
+                 */
+                code: response.status === 404 ? 'bad-request' : 'jet-hub/callback-rejected',
+                message: describeCallbackRejection(response.status, target.pathname),
               },
             }
           }
@@ -8372,8 +8459,22 @@ function registerJetHubEndpoints(
           const refused = code === 'ECONNREFUSED' || /ECONNREFUSED/.test(message)
           const timedOut = (error instanceof Error && error.name === 'TimeoutError')
             || /aborted|timeout/i.test(message)
+          /**
+           * ⚠️ `bad port` / 端口越界（PR #8 对抗审计 P3-⑤）：`fetch` 对
+           * 「禁止访问的端口」（如 `:1`）抛 `TypeError: fetch failed`，`cause.message`
+           * 是 `bad port`、`cause.code` 是 `undefined` ⇒ 旧代码落到「其它」分支，
+           * 给用户一句 `fetch failed`，无法判断是贴错了端口还是地址不完整。
+           */
+          const causeMessage = error && typeof error === 'object' && 'cause' in error
+            ? String((error.cause as { message?: unknown } | undefined)?.message ?? '')
+            : ''
+          const badPort = /bad port|invalid port|ERR_SOCKET_BAD_PORT/i.test(message)
+            || /bad port|invalid port|ERR_SOCKET_BAD_PORT/i.test(causeMessage)
           let hint: string
-          if (refused) {
+          if (badPort) {
+            hint = '这条地址的端口号不可用（Node 禁止访问该端口，或端口越界）：'
+              + '请确认粘贴的是本次登录回调地址里的端口（授权页一般会显示）。'
+          } else if (refused) {
             hint = '该端口上没有服务在监听：多半是本次登录已超时结束。'
               + '请重新点「+ 新建账号」，拿到新的授权页后尽快完成授权并粘贴回调地址。'
           } else if (timedOut) {

@@ -1334,7 +1334,7 @@ describe('「手动粘贴回调链接」的客户端接线（trae，PR #58 审�
     globalThis.setInterval = realSetInterval
   })
 
-  it('★★ trae 面板点「新建账号」后必须出现回调链接输入框，且 placeholder 是 /authorize 形态', async () => {
+  it('★★ trae 面板点「新建账号」后必须出现回调链接输入框，且 placeholder 不写死具体路径', async () => {
     const calls: RpcEntry[] = []
     const rpcCall = makeRpc(calls, async () => ({ ok: true, value: { accepted: true } }))
     const r = await renderPanel(rpcCall, 'trae')
@@ -1351,7 +1351,18 @@ describe('「手动粘贴回调链接」的客户端接线（trae，PR #58 审�
 
     const input = callbackInput()
     expect(input, 'trae 点「新建账号」后没有渲染回调链接输入框（showManualCallback 的 trae 分支被删？）').toBeDefined()
-    expect(String((input?.props as Record<string, unknown> | null)?.['placeholder'])).toContain('/authorize?refreshToken=')
+    // ⚠️ PR #8 审计 P3（2026-11-13）：placeholder **不再按 provider 写死路径**。
+    //    七家回环渠道的回调路径各不相同（codearts `/oauth/callback`、gemini
+    //    `/oauth-callback`、accio/lobsterai `/auth/callback`、autoclaw(+intl)
+    //    `/auth/callback-zai`、trae `/authorize`），原先只给 trae 一家写了专属提示，
+    //    其余六家一律展示 `/oauth/callback?code=…`，用户照抄格式手拼就会拼错。
+    //    ⇒ 现在统一说「地址栏里的完整地址，原样粘贴」，路径由浏览器填好。
+    //    这里反过来钉住「不许再写死任何具体路径」。
+    const hint = String((input?.props as Record<string, unknown> | null)?.['placeholder'])
+    expect(hint, 'trae 的粘贴提示必须说明「原样粘贴」').toContain('原样粘贴')
+    for (const path of ['/oauth/callback', '/oauth-callback', '/auth/callback', '/authorize']) {
+      expect(hint.includes(path), `粘贴提示不许写死 ${path}（七家路径各不相同）`).toBe(false)
+    }
   })
 
   it('★★ trae 粘贴链接后点提交，必须真的发出 account.submitCallback 且 payload 是粘贴原文', async () => {

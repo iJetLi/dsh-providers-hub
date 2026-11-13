@@ -640,8 +640,13 @@ export interface RpcPollLoginResponse {
  * ## 为什么需要它
  *
  * 回调式 provider 的 OAuth 都把浏览器重定向到
- * `http://127.0.0.1:<port>/oauth/callback?code=…`（见 `src/oauth.ts` 的
- * `REDIRECT_PATH`）。这个地址**只在运行 DSH 的那台机器上有效**。
+ * `http://127.0.0.1:<port>/<各自的回调路径>`。这个地址**只在运行 DSH 的那台
+ * 机器上有效**。
+ *
+ * ⚠️ **各家路径互不相同**（PR #8 审计 P2-1 实测，别照抄任何一家）：
+ * codearts `/oauth/callback`（`src/oauth.ts` 的 `REDIRECT_PATH`，**只有它用这个
+ * 常量**）、gemini `/oauth-callback`（且 host 是 `localhost`）、lobsterai 与
+ * accio `/auth/callback`、autoclaw 国际版 `/auth/callback-zai`、trae `/authorize`。
  *
  * 用户通过外网（反向代理 / 端口转发 / 远程桌面）访问 DSH 时，浏览器跑在
  * **用户本地**，`127.0.0.1` 指向用户自己的电脑 ⇒ 回调打到一台没有监听端口的
@@ -663,8 +668,11 @@ export interface RpcPollLoginResponse {
  * 那个类型是 `account.submitCallback` 的入参（`{ accountId, callbackUrl }`），
  * 它要求账号已经在宿主侧登记了专用解析器。本端点**不需要 accountId** ——
  * 它只把 URL 交给宿主盲发一次 GET，由各 provider 自己的回调服务器处理。
- * 同名声明会被 TypeScript 接口合并成一个「三个字段全必填」的类型，
- * 编译期不报错、运行时两条通道互相污染 ⇒ 必须换名。
+ * 同名声明会被 TypeScript 接口合并成一个「三个字段全必填」的类型 ——
+ * **危害在编译期**（PR #8 审计 P3 修正：运行时本就不校验、`payload as T` 照旧，
+ * 所以不会「互相污染」；真实后果是**合并后错通道的载荷看起来合法**：
+ * 只传 `{ url }` 的调用点不再报 TS2345，一路编译通过、运行时在
+ * `pendingManualCallbacks.get(undefined)` 处静默查不到）⇒ 必须换名。
  */
 export interface RpcLoginSubmitCallbackRequest {
   /** 浏览器地址栏里那条完整回调 URL（含 `code` / `state` 等查询参数）。 */
@@ -678,8 +686,13 @@ export interface RpcLoginSubmitCallbackRequest {
  * 真正的成功判据仍是 `login.poll` 报 `{done:true, success:true}`
  * （回调处理器内部还要拿 `code` 去换 token，那是异步的）。
  *
- * 各 provider 的取值：`200`（直接拿到 token）/ `204`（OPTIONS 预检）/
- * `307`（codearts 换成功后跳 portal 结果页）/ `400`（缺少 code 或 secret）。
+ * 只有**成功**（2xx / 3xx）才会走到这里。各 provider 的典型取值：
+ * `200`（回调处理器已受理，`code` 换 token 在后台继续）/ `204`（OPTIONS 预检）/
+ * `307`（`secret` 分支换成功后跳 portal 结果页）。
+ *
+ * ⚠️ **`400` / `5xx` 不再是成功路径的值**（PR #8 对抗审计 P2-1）：`400` 是
+ * `state` 不匹配（过期地址）、`5xx` 是换凭据失败，两者都必须返回
+ * `ok:false` —— 否则客户端拿不到失败信号、按钮永久停在「提交中…」。
  */
 export interface RpcLoginSubmitCallbackResponse {
   status: number
