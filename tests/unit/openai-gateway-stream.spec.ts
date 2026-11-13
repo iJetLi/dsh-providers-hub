@@ -43,6 +43,48 @@ describe('OpenAI gateway stream conversion', () => {
     expect(response.choices[0].message.content).toBe('ab')
     expect(response.choices[0].finish_reason).toBe('length')
   })
+
+  /**
+   * 排队提示帧必须能穿到下游。
+   *
+   * ## 守的是什么
+   *
+   * `visible` 档只发空心跳时，下游只能判断「连接还活着」，无法知道**在排队**。
+   * 提示帧把排队这件事本身带出去（`qoder_queue`），而标准 OpenAI SDK 按协议
+   * 忽略未知字段 —— 两边都不受损。
+   *
+   * ## 最常见的假绿
+   *
+   * 只断言 `output.join('')` 含 `qoder_queue`：把它塞进 error 帧同样能过，
+   * 但那是**另一条出口**。故这里同时锚定「正文照常产出」与「delta 为空」。
+   */
+  it('排队提示帧 → qoder_queue 字段（且不污染正文）', async () => {
+    const output: string[] = []
+    for await (const item of toOpenAiSse(chunks([
+      { type: 'queue-notice', info: { queued: true, attempt: 1, waitMs: 10_000, modelKey: 'qfmodel' } } as unknown as StreamChunk,
+      { type: 'text-delta', index: 0, text: '排到了' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]), 'req-q', 'qoder/qfmodel')) output.push(item)
+
+    const joined = output.join('')
+    expect(joined).toContain('"qoder_queue"')
+    expect(joined).toContain('"waitMs":10000')
+    expect(joined).toContain('"modelKey":"qfmodel"')
+    // 提示帧本身不带正文（`delta` 为空对象），后续正文照常
+    expect(joined).toContain('"delta":{}')
+    expect(joined).toContain('"content":"排到了"')
+  })
+
+  it('非流式聚合忽略排队提示帧（不得污染 message.content）', async () => {
+    const response = await collectOpenAiCompletion(chunks([
+      { type: 'queue-notice', info: { queued: true, attempt: 1 } } as unknown as StreamChunk,
+      { type: 'text-delta', index: 0, text: 'ok' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]), 'req-q2', 'qoder/qfmodel')
+
+    expect(response.choices[0].message.content).toBe('ok')
+    expect(JSON.stringify(response)).not.toContain('qoder_queue')
+  })
 })
 
 /**

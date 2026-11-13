@@ -105,6 +105,17 @@ function failureMessage(reason: Extract<FinishReason, { kind: 'error' | 'aborted
 }
 
 function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, unknown> | undefined {
+  /**
+   * 排队提示帧（provider 专有，目前只有 qoder 的 `visible` 档会发）。
+   *
+   * ⚠️ 走**前置分支**而不是给下面的 `switch` 加 `case`：`StreamChunk` 是外部包的
+   * 联合类型，凭空加一个分支会让 `chunk.type` 的穷尽性收窄报错（not comparable），
+   * 而这里要的只是「原样透传给下游」，它不参与任何状态累积（不改 content / usage）。
+   */
+  const noticeType = (chunk as { type?: unknown }).type
+  if (noticeType === 'queue-notice') {
+    return { delta: {}, notice: (chunk as { info?: unknown }).info ?? {} }
+  }
   switch (chunk.type) {
     case 'text-delta':
       state.content += chunk.text
@@ -203,7 +214,12 @@ export async function* toOpenAiSse(
       if ('finish_reason' in event) {
         yield line({ ...baseChunk(requestId, model, event.delta as Record<string, unknown>, event.finish_reason as string) })
       } else {
-        yield line(baseChunk(requestId, model, event.delta as Record<string, unknown>))
+        const base = baseChunk(requestId, model, event.delta as Record<string, unknown>)
+        // 排队提示帧：`qoder_queue` 是**非标准字段**，标准 OpenAI SDK 按协议会忽略它，
+        // 愿意读的客户端（面板 / 自研）据此显示「排队中（第 N 轮，预计 M 秒）」，
+        // 而不是只能看到一个没有 explain 的空心跳。
+        const notice = 'notice' in event ? event.notice : undefined
+        yield line(notice === undefined ? base : { ...base, qoder_queue: notice })
       }
     }
     if (state.finishReason === undefined) {

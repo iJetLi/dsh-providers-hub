@@ -476,6 +476,49 @@ function resolveQueueTimeoutMs(): number {
 }
 
 /**
+ * 排队等待策略（`DSH_QODER_QUEUE_WAIT_MODE`）。
+ *
+ * 为什么需要这个开关（真实故障，2026-11-10）：Qoder 高峰期会把请求放进**模型级
+ * 队列**（业务码 `10605`）。默认的 `wait` 档在网关内部静默等待，**期间一个字节
+ * 都不发给客户端**，而上限是 30 分钟 —— 于是调用方（OpenViking / 各类 OpenAI
+ * SDK）总是先被自己的超时（100~120 秒）掐断，表现为「连接建立了、什么都不回、
+ * 最后超时」，与「死机」无法区分。同类项目（qoder2api-hub / qoder2api /
+ * 9router-qoder-plus）都因此引入了「可见 / 快速失败」两档。
+ *
+ * - `wait`（**默认**，保持既有行为）：内部等待后重试，期间不产出任何帧。
+ * - `visible`：等待**分片进行**，每片产出一帧空 `text-delta` 心跳。空串不会
+ *   改动正文（`content += ''`），只让 SSE 通道持续有字节 —— 客户端与中间层
+ *   因此不会把「排队中」误判成卡死。
+ * - `fast`：**不等待**，立刻抛 `QUEUE` 错误，把「等还是换模型」的决定交还给
+ *   调用方（OpenViking 等多凭据客户端会据此切到备用模型，而不是干等）。
+ *
+ * ⚠️ 排队**不是**账号故障：三档都**不换号、不刷新凭据、不写冷却**
+ *（与 qoder2api-hub 的 `ShouldFailover=false` 同判据 —— 队列是模型级的，
+ * 换号对同一模型无效，还会把多个号一起打进冷却）。
+ */
+export type QoderQueueWaitMode = 'wait' | 'visible' | 'fast'
+
+export function resolveQueueWaitMode(): QoderQueueWaitMode {
+  const raw = (process.env.DSH_QODER_QUEUE_WAIT_MODE ?? '').trim().toLowerCase()
+  if (raw === 'visible' || raw === 'fast' || raw === 'wait') return raw
+  return 'wait'
+}
+
+/**
+ * `visible` 档的心跳间隔（毫秒）。
+ *
+ * 5 秒取自同类项目的经验值：短于大多数中间层（nginx / Cloudflare / 各类反代）
+ * 的空闲超时（常见 15~60 秒），又不至于把日志和连接刷爆。
+ * 可用 `DSH_QODER_QUEUE_HEARTBEAT_MS` 覆盖（单测需要把它压到毫秒级）。
+ */
+function resolveQueueHeartbeatMs(): number {
+  const raw = process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+  if (raw === undefined || raw.length === 0) return 5_000
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5_000
+}
+
+/**
  * 读 `AbortSignal.aborted`（**刻意做成函数**）。
  *
  * 为什么不能内联 `signal?.aborted === true`：TS 会在 `await` 之前的一次
@@ -1969,7 +2012,14 @@ export class QoderAdapter extends LlmAdapter {
         const queueInfo = parseQoderQueueError(errorText)
 
         if (queueInfo !== undefined) {
-          await this.waitForQueue(queueInfo, ++queueAttempts, queueDeadline, options)
+          // ⚠️ 必须 `for await … yield`：`waitForQueueFrames` 是异步生成器，
+          // `visible` 档的心跳帧要靠这里转交给上层（见该方法的注释）。
+          for await (const frame of this.waitForQueueFrames(
+            queueInfo,
+            ++queueAttempts,
+            queueDeadline,
+            options,
+          )) yield frame
           continue
         }
 
@@ -2066,12 +2116,12 @@ export class QoderAdapter extends LlmAdapter {
           step = await iterator.next()
         } catch (error) {
           if (error instanceof ModelQueuedError) {
-            await this.waitForQueue(
+            for await (const frame of this.waitForQueueFrames(
               queueInfoOf(error),
               ++queueAttempts,
               queueDeadline,
               options,
-            )
+            )) yield frame
             queued = true
             break
           }
@@ -2219,13 +2269,25 @@ export class QoderAdapter extends LlmAdapter {
    * 排队等待（HTTP 层与 SSE 层**共用**）。
    *
    * 两处形态必须走同一套判据，否则会再次出现「只修了一条路径」的缺陷。
+   *
+   * ⚠️ 自 2026-11-10 起该方法**是异步生成器**：`visible` 档要在等待期间产出
+   * 心跳帧，故调用方必须 `for await (…) yield frame` 而不是 `await` ——
+   * 直接 `await` 一个生成器只会拿到生成器对象、永远不执行（语法上不报错，
+   * 是最容易漏的改法）。
    */
-  private async waitForQueue(
+  private async *waitForQueueFrames(
     queueInfo: QoderQueueInfo | undefined,
     attempts: number,
     deadline: number,
     options: GenerateOptions,
-  ): Promise<void> {
+  ): AsyncGenerator<StreamChunk, void, undefined> {
+    // `fast`：不问「等多久」，立刻把排队作为结论抛回去（见 resolveQueueWaitMode）。
+    if (resolveQueueWaitMode() === 'fast') {
+      throw new LlmError(
+        'qoder: 上游模型排队中（DSH_QODER_QUEUE_WAIT_MODE=fast，未等待）',
+        'QUEUE',
+      )
+    }
     // ⚠️ **先判时间、再判次数**：时间上限是硬约束（用户可调），次数上限只是
     // 防御性兜底。反过来写会让「180 次空转」在绝大多数情况下先生效，
     // 使 `DSH_QODER_QUEUE_TIMEOUT_MS` **形同虚设**（写用例时实测到了）。
@@ -2241,13 +2303,78 @@ export class QoderAdapter extends LlmAdapter {
         `qoder: 排队重试超过上限（${QUEUE_MAX_ATTEMPTS} 次）`,
         'QUEUE',
       )
-    }    if (options.signal?.aborted === true) {
+    }
+    if (options.signal?.aborted === true) {
       throw new LlmError('qoder: 排队等待期间请求已取消', 'QUEUE')
     }
     const waitMs = qoderQueueDelayMs(queueInfo)
     // ⚠️ 拿不到服务端延迟时**不忙等**：用保守的短退避，避免瞬间烧掉机会
     // （客户端 W7c() 此时会退回 ltA() 指数退避）。
-    await this.sleep(waitMs ?? 1_000, options.signal)
+    const totalMs = waitMs ?? 1_000
+    const mode = resolveQueueWaitMode()
+    const modelKeyRaw = (queueInfo as { modelKey?: unknown } | undefined)?.modelKey
+    const modelKey = typeof modelKeyRaw === 'string' ? modelKeyRaw : undefined
+    const retryAfterRaw = (queueInfo as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds
+    const retryAfterSeconds = typeof retryAfterRaw === 'number' ? retryAfterRaw : undefined
+    const accountId = this.options.currentAccountId?.()
+    /**
+     * 排队必须有**外部可观测痕迹**，否则「上游排队」与「进程挂死」完全同形。
+     *
+     * ⚠️ 真实代价（2026-11-10）：排队期间网关不产出任何帧、也不写任何日志，
+     * 调用方只会看到自己的超时，排查时无从下手（本仓库为此排查了一整晚）。
+     *
+     * ⚠️ 只在**首次**排队（以及终态的 `fast` 档）记，不逐次刷：`wait` 档最多
+     * 重试 180 次，每次都记会把日志刷满，反而看不见别的错误。
+     */
+    if (attempts === 1 || mode === 'fast') {
+      this.options.warn?.(
+        `[qoder] ${this.product.id} 上游排队（10605）：等待 ${totalMs}ms`
+        + `（模式 ${mode}，第 ${attempts} 次`
+        + `${modelKey === undefined ? '' : `，modelKey=${modelKey}`}`
+        + `${accountId === undefined ? '' : `，account=${accountId}`}）`,
+      )
+    }
+    if (mode === 'visible') {
+      /**
+       * 先发一帧**排队提示**（`queue-notice`），再进入心跳循环。
+       *
+       * 与「只发空心跳」的区别正是本档的意义：空心跳只能证明「连接还活着」，
+       * 提示帧把**排队这件事本身**告诉下游 —— 面板 / 自研客户端可以据此显示
+       * 「排队中（第 N 轮，预计 M 秒）」，而标准 OpenAI SDK 会忽略这个未知字段，
+       * 不会因为多了它而报错。
+       */
+      yield {
+        type: 'queue-notice',
+        info: {
+          queued: true,
+          provider: this.product.id,
+          attempt: attempts,
+          waitMs: totalMs,
+          ...modelKey === undefined ? {} : { modelKey },
+          ...retryAfterSeconds === undefined ? {} : { retryAfterSeconds },
+          ...accountId === undefined ? {} : { account: accountId },
+        },
+      } as unknown as StreamChunk
+      // 分片等待 + 心跳：客户端能持续收到帧，不会把「排队中」当成卡死。
+      // ⚠️ 剩下的最后一片可能短于心跳间隔，故按 `Math.min` 收敛，保证总时长
+      // 仍然**精确等于** `totalMs`（否则 visible 档会悄悄比 wait 档多等一截）。
+      const heartbeatMs = resolveQueueHeartbeatMs()
+      let remaining = totalMs
+      while (remaining > 0) {
+        const slice = Math.min(remaining, heartbeatMs)
+        await this.sleep(slice, options.signal)
+        remaining -= slice
+        // ⚠️ 这次检查**不是**循环条件的重复：它检测的是「**等待期间**被中止」。
+        if (isAborted(options.signal)) {
+          throw new LlmError('qoder: 排队等待期间请求已取消', 'QUEUE')
+        }
+        // 空串 `text-delta`：消费端是 `content += ''`，不改动正文与用量，
+        // 只是让 SSE 通道上真的有字节流过（这就是本档的全部意义）。
+        yield { type: 'text-delta', text: '' } as unknown as StreamChunk
+      }
+      return
+    }
+    await this.sleep(totalMs, options.signal)
     // ⚠️ 这次检查**不是**上一次的重复：它检测的是「**等待期间**被中止」。
     // `AbortSignal.aborted` 是随时间的可变状态，但 TS 会静态窄化成字面量
     // `false` 而报「无重叠」—— 故经**不透明函数**读取，避免静态收窄掩盖
