@@ -69,7 +69,33 @@ const reactStub = vi.hoisted(() => {
     },
     useLayoutEffect(fn) { Promise.resolve().then(() => { try { fn() } catch { /* ignore */ } }) },
     useCallback(fn) { return fn },
-    useMemo(fn) { return fn() },
+    /**
+     * ⚠️⚠️ `useMemo` **必须实现真正的 deps 比较**（2026-11-13 PR #69 正向审计 P2-③）：
+     * 初版写成 `useMemo(fn) { return fn() }` —— deps 参数**根本没声明** ⇒ 每次渲染
+     * 都重算 ⇒ 「`accountNames` 不在依赖数组里」这个缺陷**永远测不出来**
+     * （实测：删掉 `visibleEntries` 的 `accountNames` 依赖后 11 条全绿）。
+     *
+     * 本替身按**槽位**缓存（`__rewind()` 只重置 cursor、不清 slots ⇒ 重渲染拿得到
+     * 上一次的值），deps 用 `Object.is` 浅比较 —— 与 React 的语义一致到「够测出缺失
+     * 依赖」这一层（不做 exhaustive-deps 的静态分析，那是 lint 的职责）。
+     * ⚠️ deps 不是数组（`undefined`）时按 React 语义**每次重算**。
+     */
+    useMemo(fn, deps) {
+      const k = cursor++
+      if (!(k in slots)) slots[k] = {}
+      const slot = slots[k]
+      const next = Array.isArray(deps) ? deps : null
+      const prev = slot.memoDeps
+      const same =
+        next !== null &&
+        Array.isArray(prev) &&
+        prev.length === next.length &&
+        next.every((dep, i) => Object.is(dep, prev[i]))
+      if (same) return slot.memoValue
+      slot.memoDeps = next
+      slot.memoValue = fn()
+      return slot.memoValue
+    },
     createElement(type, props, ...children) { return { type, props: props ?? {}, children } },
     Fragment: 'Fragment',
     StrictMode: 'StrictMode',
@@ -414,15 +440,42 @@ describe('最近请求：搜索框能筛模型，也能筛账号', () => {
     expect(tableRows(prefixed).length, '带 provider 前缀搜不到').toBeGreaterThan(0)
   })
 
-  it('★★★ 账号名**晚到**时也能搜：名字回来后再输入昵称必须命中（依赖数组守卫）', async () => {
+  it('★★★ 账号名**晚到**时也能搜：先输入昵称、名字后到，仍必须命中（依赖数组守卫）', async () => {
     const { rpc, release } = makeDeferredRpc()
 
-    // 第一拍：账本已到、账号名**还没到** ⇒ 此时搜昵称应当 0 条（还没索引）
+    // ⚠️⚠️ 顺序是这条用例的全部要点（2026-11-13 PR #69 正向审计 P2-③）：
+    //    必须是「**先**输入查询、**后**名字到达」。
+    //    初版写的是「先等名字到达、再输入查询」—— 那样输入动作本身改了 `entryQuery`，
+    //    依赖数组只要含 `entryQuery` 就会重算，于是**即使 `accountNames` 不在依赖里
+    //    也照样能搜到** ⇒ 用例恒绿（实测：删掉该依赖后 11 条全绿）。
+    //    真实失败形态是：用户先把昵称敲进去（此刻索引里只有裸 id ⇒ 0 条），
+    //    随后 `account.list` 回来，若 `accountNames` 不在依赖里 ⇒ **不重算 ⇒ 仍是 0 条**，
+    //    而屏幕上的账号列已经变成昵称 —— 用户对着昵称搜，一条都搜不到。
     reactStub.__reset()
     let tree = panel!({ rpcCall: rpc, onClose: () => {} })
     await flush(4)
+    // 先把账本取数的 effect 跑完（`account.list` 仍挂着不放行）
+    for (let round = 0; round < 4; round += 1) {
+      const effects = reactStub.__takeEffects()
+      if (effects.length === 0) break
+      reactStub.__rewind()
+      tree = panel!({ rpcCall: rpc, onClose: () => {} })
+      await flush(2)
+    }
 
-    // 放行账号名，并让 effect 跑完
+    // 第一拍：名字**还没到** ⇒ 先输入昵称（此刻必然 0 条）
+    const firstInput = searchInput(tree)
+    const firstOnChange = firstInput.props.onChange as (e: { target: { value: string } }) => void
+    firstOnChange({ target: { value: 'alice' } })
+    reactStub.__rewind()
+    tree = panel!({ rpcCall: rpc, onClose: () => {} })
+    await flush(2)
+    expect(
+      tableRows(tree).length,
+      '名字还没到就先输入昵称，此处必须 0 条（否则后半段的「必须命中」是同义反复）',
+    ).toBe(0)
+
+    // 第二拍：放行账号名，并让 effect 跑完（只改 `accountNames`，**不改** entryQuery）
     release()
     await flush(4)
     for (let round = 0; round < 4; round += 1) {
@@ -433,14 +486,10 @@ describe('最近请求：搜索框能筛模型，也能筛账号', () => {
       await flush(4)
     }
 
-    // 名字已就位 ⇒ 输入昵称必须能命中
-    const input = searchInput(tree)
-    const onChange = input.props.onChange as (e: { target: { value: string } }) => void
-    onChange({ target: { value: 'alice' } })
+    // 第三拍：名字已就位、查询词没变 ⇒ 依赖数组必须让 `visibleEntries` 重算
     reactStub.__rewind()
     const after = panel!({ rpcCall: rpc, onClose: () => {} })
     await flush(2)
-
     expect(
       tableRows(after).length,
       '账号名晚到后仍搜不到 ⇒ `accountNames` 不在 useMemo 依赖数组里，名字到了搜索索引没重算',

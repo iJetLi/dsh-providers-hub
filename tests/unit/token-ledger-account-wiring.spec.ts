@@ -229,8 +229,39 @@ const ACCOUNTS: Record<string, Array<Record<string, unknown>>> = {
   ],
 }
 
-function makeRpc(): { calls: Array<{ method: string; payload: unknown }>; rpcCall: (m: string, p?: unknown) => Promise<unknown> } {
-  const calls: Array<{ method: string; payload: unknown }> = []
+/**
+ * 一天的历史聚合（含账号层）—— 给「历史日树」那条行为级用例用。
+ *
+ * ⚠️⚠️ 为什么必须有这份 fixture（2026-11-13 PR #69 对抗审计 P1 / A-1）：
+ * `renderDayTree` 只在 `expandedDay !== null` 时执行，而**三条 spec 的历史桩全是空数组
+ * 或没有任何用例点开日期** ⇒ 历史日树的账号层**零渲染覆盖**。实测：把
+ * `plugin-src/client/jet-hub.js:3649-3651` 换成「死调用 + `return []`」，
+ * 88 条全绿 exit 0 —— 而「历史视图也按 provider→账号→模型 归档」正是本 PR 的两件事之一。
+ * 唯一会红的只有两条**源码计数**断言（死分支里的调用同样满足 `=== 2`）。
+ */
+const HISTORY_WITH_ACCOUNTS = {
+  history: [{
+    day: '2026-11-11',
+    totals: { requests: 3, totalTokens: 120 },
+    channels: [{
+      channel: 'direct',
+      totals: { requests: 3, totalTokens: 120 },
+      providers: [{
+        provider: 'qodercn',
+        totals: { requests: 3, totalTokens: 120 },
+        // 单账号 + 单模型 ⇒ 走「合并成一行」（账号 → 模型）
+        accounts: [{
+          accountId: 'qodercn-c5a414d5',
+          totals: { requests: 3, totalTokens: 120 },
+          models: [{ model: 'dfmodel', requests: 3, totalTokens: 120 }],
+        }],
+      }],
+    }],
+  }],
+  totals: { requests: 3, totalTokens: 120 },
+}
+
+function makeRpc(): { calls: Array<{ method: string; payload: unknown }>; rpcCall: (m: string, p?: unknown) => Promise<unknown> } {  const calls: Array<{ method: string; payload: unknown }> = []
   const rpcCall = async (method: string, payload?: unknown): Promise<unknown> => {
     calls.push({ method, payload })
     if (method === 'usage.tokenLedger') return { snapshot: SNAPSHOT }
@@ -490,7 +521,7 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     expect(findAll((node) => node.props?.className === 'dim-jh-ledgerTableScroll')).toHaveLength(1)
   })
 
-  it('★ account.list 失败必须静默：面板照常显示，账号回落 id', async () => {
+  it('★ account.list 失败必须**不冒泡**（面板照常显示、账号回落 id），但**必须留一条诊断**', async () => {
     const calls: string[] = []
     const rpcCall = async (method: string, payload?: unknown): Promise<unknown> => {
       calls.push(method)
@@ -499,14 +530,95 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
       if (method === 'account.list') throw new Error('模拟凭据读取失败')
       return {}
     }
-    // ⚠️ 不 catch ⇒ 名字加载的 rejection 若冒泡，这里会直接把用例打红。
+    // ⚠️⚠️ 这里同时守两件事（2026-11-13 PR #69 正向审计 P2-④ / 我的 D4）：
+    //   ① **不许冒泡**（初版注释写「静默失败」是对的，但漏了另一半）；
+    //   ② **必须有诊断** —— 失败后该 provider 已被登记为「拉过」，
+    //      整个挂载期不会再拉 ⇒ 账号列恒显裸 id。而「全是裸 id」有三种成因
+    //      （provider 真没有账号 / 端点拒答 / 连接断开），零日志时三者**无法区分**，
+    //      等于把三种症状压成一个不可诊断的形态。
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // ⚠️ 不 catch ⇒ 名字加载的 rejection 若冒泡，这里会直接把用例打红。
+      await renderPanel(rpcCall)
+      const labels = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountName')
+        .map((node) => textsIn([node]).join(''))
+      // 账本主数据照常显示，名字回落**内部 id**（这是对的：账号可能真被删了）。
+      expect(labels).toContain('qodercn-c5a414d5')
+      expect(labels).toContain('workbuddy-4c6e5683')
+      // 面板本体没被顶掉。
+      expect(findAll((node) => node.type === 'table').length).toBe(1)
+      // ★ 诊断必须在（否则失败与「本来就没有名字」同形）。
+      const warned = warn.mock.calls.map((args) => args.map(String).join(' ')).join('\n')
+      expect(warned, 'account.list 失败后必须留一条 console.warn（否则不可诊断）').toContain('账号名失败')
+      // 诊断里必须点名是哪个渠道（本快照的账本里有 qodercn 与 workbuddy 两家）。
+      expect(warned, '诊断里必须点名是哪个渠道').toContain('qodercn')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('★★★ 历史日树（点开某天）必须按 provider → 账号 → 模型 归档，且 provider 行不许套账号色块', async () => {
+    const rpcCall = async (method: string, payload?: unknown): Promise<unknown> => {
+      if (method === 'usage.tokenLedger') return { snapshot: SNAPSHOT }
+      if (method === 'usage.tokenLedgerHistory') return HISTORY_WITH_ACCOUNTS
+      if (method === 'account.list') {
+        const provider = (payload as { provider?: unknown } | undefined)?.provider
+        const list = typeof provider === 'string' ? ACCOUNTS[provider] ?? [] : []
+        return { accounts: list }
+      }
+      return {}
+    }
     await renderPanel(rpcCall)
-    const labels = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountName')
-      .map((node) => textsIn([node]).join(''))
-    // 账本主数据照常显示，名字回落**内部 id**（这是对的：账号可能真被删了）。
-    expect(labels).toContain('qodercn-c5a414d5')
-    expect(labels).toContain('workbuddy-4c6e5683')
-    // 面板本体没被顶掉。
-    expect(findAll((node) => node.type === 'table').length).toBe(1)
+
+    // ① 热力图必须真的渲染出单元格（没有它，「点开某天」这个入口就不存在）
+    const cells = findAll((node) => node.props?.className === 'dim-jh-ledgerHeatmapCell')
+    expect(cells.length, '历史视图没渲染出热力图单元格').toBeGreaterThan(0)
+    const cell = cells.find((node) => String(node.props.title ?? '').startsWith('2026-11-11'))
+    expect(cell, '找不到 2026-11-11 的用量格').toBeTruthy()
+
+    // ② 点开那一天（`onClick` 里 setExpandedDay ⇒ 重新渲染）
+    ;(cell!.props.onClick as () => void)()
+    cursor = 0
+    pendingEffects = []
+    root = panel!({ rpcCall, onClose: () => {} })
+    await flush(4)
+
+    // ③ 当日明细树必须出现（历史日树的根是 `dim-jh-ledgerCard`，实时汇总卡也用同一个
+    //    类名 ⇒ 必须按「卡片头显示的那一天」挑，不能按下标）
+    const cards = findAll((node) => node.props?.className === 'dim-jh-ledgerCard')
+      .filter((node) => textsIn([node]).join(' ').includes('2026-11-11'))
+    expect(cards.length, '点开日期后没有出现当日明细树').toBe(1)
+    const card = cards[0]!
+    const inCard: AnyNode[] = []
+    walk([card], (node) => { inCard.push(node) })
+
+    // ④ provider 层：channel 行 + provider 行都是 `dim-jh-ledgerProvider`
+    expect(
+      inCard.filter((node) => node.props?.className === 'dim-jh-ledgerProvider').length,
+      '历史树里 provider 行必须存在（不许套账号色块 —— 那正是 2026-11-11 的报障）',
+    ).toBeGreaterThan(0)
+    expect(
+      inCard.filter((node) => node.props?.className === 'dim-jh-ledgerProviderName')
+        .map((node) => textsIn([node]).join('')),
+      'provider 名必须是渠道/供应商名，不能是账号名',
+    ).toContain('qodercn')
+
+    // ⑤ 账号层：**必须真的渲染出来**（死代码 / 提前 return [] 会让这里 0 条）
+    expect(
+      inCard.filter((node) => node.props?.className === 'dim-jh-ledgerAccount').length,
+      '历史树的账号层没渲染 —— 本 PR 的核心（历史视图也按账号归档）失效',
+    ).toBeGreaterThan(0)
+    expect(
+      inCard.filter((node) => node.props?.className === 'dim-jh-ledgerAccountName')
+        .map((node) => textsIn([node]).join('')),
+      '历史树的账号行必须显示 account.list 给的昵称（不是裸池 id）',
+    ).toContain('M籾 959')
+
+    // ⑥ 单模型账号在历史树里也必须**合并**成一行（与实时卡同一条判据）
+    expect(
+      inCard.filter((node) => node.props?.className === 'dim-jh-ledgerAccountModel').length,
+      '单模型账号在历史树里没有合并出模型行',
+    ).toBe(1)
+    expect(textsIn([card]).join(' '), '合并行必须有 → 箭头').toContain('→')
   })
 })

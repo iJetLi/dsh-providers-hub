@@ -167,6 +167,20 @@ describe('账号显示名 · nameMap 优先级与回落', () => {
       .toBe('qoder-bb211a53')
   })
 
+  it('★★ nameMap 里的值是**纯空格** ⇒ 同样回落 id（判据必须是 trim 之后非空）', () => {
+    // 2026-11-13 PR #69 对抗审计 P2 / B-1 实测：只判 `length > 0` 时，
+    // `'   '` 的 length 是 3 ⇒ 原样采纳 ⇒ 界面上出现一行**纯空白**的账号名，
+    // 比显示裸池 id 更让人困惑（「这一行是谁」无从判断）。
+    // 而本函数上方的注释恰恰写着「空串也不能用」—— 注释对，实现只挡了空串。
+    expect(accountLabel('qoder-bb211a53', new Map([['qoder-bb211a53', '   ']])))
+      .toBe('qoder-bb211a53')
+    expect(accountLabel('qoder-bb211a53', new Map([['qoder-bb211a53', '\t\n ']])))
+      .toBe('qoder-bb211a53')
+    // 反向对照：首尾带空格的**真实**名字必须原样保留（trim 只用于判空，不改值）
+    expect(accountLabel('qoder-bb211a53', new Map([['qoder-bb211a53', ' 清 ']])))
+      .toBe(' 清 ')
+  })
+
   it('accountId 为空串 ⇒ 「未归属」，nameMap 不参与（空 key 不是账号）', () => {
     expect(accountLabel('', new Map([['', '不该被读到']]))).toBe('未归属')
     expect(accountLabel(undefined, new Map())).toBe('未归属')
@@ -196,6 +210,22 @@ describe('账号显示名 · nameMap 优先级与回落', () => {
     expect(map.has('c')).toBe(false)
     expect(map.has('d')).toBe(false)
     expect(map.has('')).toBe(false)
+    expect(map.size).toBe(2)
+  })
+
+  it('★★ buildAccountNameMap：**纯空格**昵称必须让位给 accountName（不许盖掉上游真名）', () => {
+    // 2026-11-13 PR #69 对抗审计 P2 / B-1：`nickname` 是用户手填的，
+    // 一个手滑的空格也是合法输入；只判 `length > 0` 会让这行空白**盖掉**
+    // `accountName`（宿主从凭据里读出的上游真实用户名）⇒ 账号列变成一片空白。
+    const map = buildAccountNameMap([
+      { id: 'a', nickname: '   ', accountName: 'upstream-name' },
+      { id: 'b', nickname: '\t\n ', accountName: 'mylzscy4' },
+      { id: 'c', nickname: '   ', accountName: '   ' },
+    ])
+    expect(map.get('a')).toBe('upstream-name')
+    expect(map.get('b')).toBe('mylzscy4')
+    // 两者都是空白 ⇒ 不进映射（让 accountLabel 回落 id）
+    expect(map.has('c')).toBe(false)
     expect(map.size).toBe(2)
   })
 
@@ -442,8 +472,16 @@ describe('用量树三层视觉契约（provider / 账号 / 模型）', () => {
   it('★ 第一层 provider：淡色块 + 灰色竖线 + 11.5px 粗体，且不缩进', () => {
     const head = ruleOf('.dim-jh-ledgerProviderHead')
     expect(head, '找不到 .dim-jh-ledgerProviderHead 规则').not.toBe('')
-    // 淡色块（color-mix 半透明，自动跟随主题明暗）
-    expect(head).toMatch(/color-mix\(in srgb,\s*var\(--dsw-alias-bg-layer-3/)
+    // 淡色块：用**前景色小比例混色**（4%），两种主题下都可见。
+    expect(head).toMatch(/background:\s*color-mix\(in srgb,\s*var\(--dsw-alias-label-primary,\s*#1f2329\)\s*4%/)
+    // ⚠️⚠️ 回归守卫（2026-11-13 审计 D1/P1，本 PR 初版就是错的）：
+    //    **绝不能**用 --dsw-alias-bg-layer-2 / -3 铺底色 —— 宿主那三层在**浅色主题下
+    //    全是 #fff**（body{--dsw-alias-bg-layer-1/-2/-3: var(--dsw-static-neutral-bluish-00)}，
+    //    而 bluish-00 = #fff），而弹窗底色就是 -layer-1 ⇒ 色块与背景**逐字节相同**，
+    //    「三层视觉语言」的底色维度整条失效。深色下才有 #232324/#2c2c2e/#353638 的差异。
+    //    ⇒ 这里的否定断言是那次缺陷的墓碑；顺带也守住了「别把编造的 #2a2b2f 回退值写回来」
+    //    （该字面量在整个 DSH 安装里 0 命中，是初版自己编的）。
+    expect(head).not.toMatch(/--dsw-alias-bg-layer-[23]/)
     // 左侧 3px 灰色竖线 = 「容器级」
     expect(head).toMatch(/border-left:\s*3px\s+solid\s+var\(--dsw-alias-border-l2/)
     // 粗体，「标题」的信号
@@ -486,7 +524,23 @@ describe('用量树三层视觉契约（provider / 账号 / 模型）', () => {
     // ③ 退一步：整个账号头里都不该出现 brand-primary（它可能被挪到别处再犯）
     expect(head).not.toContain('--dsw-alias-brand-primary')
     // ④ 浓色块（层级高于 provider 的淡色块）
-    expect(head).toMatch(/background:\s*var\(--dsw-alias-bg-layer-3/)
+    //    ⚠️ 同样**不能**用 bg-layer-*：浅色主题下它是 #fff，与弹窗底色逐字节相同
+    //    （2026-11-13 审计 D1/P1 —— 详见 provider 那条用例里的长注释）。
+    expect(head).toMatch(/background:\s*color-mix\(in srgb,\s*var\(--dsw-alias-label-primary,\s*#1f2329\)\s*7%/)
+    expect(head).not.toMatch(/--dsw-alias-bg-layer-[23]/)
+    // ⑤ ⚠️ 核心不变式：账号的混色比例必须**大于** provider 的 ——
+    //    「淡色块 → 浓色块」是这层设计的全部意义。两条各自写死 4%/7% 就够，
+    //    但那样两个数字可以一起被改成 1%/1%（层级塌平）而两条用例**都绿**，
+    //    所以这里再比一次大小关系。
+    const accountPct = Number.parseInt(
+      head.match(/--dsw-alias-label-primary,\s*#1f2329\)\s*(\d+)%/)?.[1] ?? '0', 10,
+    )
+    const providerPct = Number.parseInt(
+      ruleOf('.dim-jh-ledgerProviderHead').match(/--dsw-alias-label-primary,\s*#1f2329\)\s*(\d+)%/)?.[1] ?? '0', 10,
+    )
+    expect(providerPct, 'provider 的混色比例必须 > 0，否则没有色块').toBeGreaterThan(0)
+    expect(accountPct, '账号的色块必须比 provider 更浓，否则「淡→浓」的层级塌掉')
+      .toBeGreaterThan(providerPct)
   })
 
   it('★★★ 三层缩进必须递增：provider 0 < 账号 30 < 模型 54（档位 D）', () => {
@@ -554,6 +608,35 @@ describe('用量树三层视觉契约（provider / 账号 / 模型）', () => {
     const media = styles.slice(styles.indexOf('@media (max-width: 700px)'))
     expect(media).toMatch(/\.dim-jh-ledgerAccount\s*\{[^}]*margin-left:\s*14px/)
     expect(media).toMatch(/\.dim-jh-ledgerModel\s*\{[^}]*padding:\s*2px 0 2px 26px/)
+  })
+
+  it('★★ 窄面板下「总处理」必须放得进容器（统计组宽不得超过可用宽）', () => {
+    // 2026-11-13 PR #69 对抗审计 P2 / B-2：宿主右侧栏最低可拖到 300px，
+    // 而 `.dim-jh-ledgerPane` 的水平内边距是 12+12=24px ⇒ 可用内容宽 276px，
+    // 却给统计组写死 `width: 300px` ⇒ 右侧「总处理」多出 24px，
+    // 而 `.dim-jh-ledgerPaneBody{overflow-x:hidden}` 把它**裁掉且没有滚动条**
+    // ⇒ 用户看到「总处理」数字被切一半，且不知道右边还有内容。
+    //
+    // ⚠️⚠️ 修法**只能**是「组宽不得超过容器」（max-width: 100%）：
+    // 面板体的 `overflow-x: hidden` 是 tests/unit/ledger-pane-chrome.spec.ts:405
+    // 的既有契约（8 列定宽明细表靠它裁），改成 auto 会让那条契约红。
+    // 两个窄档块都要写 —— 少一处，那种窗口尺寸下仍然溢出。
+    const container = styles.slice(
+      styles.indexOf('@container (max-width: 720px)'),
+      styles.indexOf('@media (max-width: 700px)'),
+    )
+    expect(container, '找不到 @container 窄档块').not.toBe('')
+    expect(container).toMatch(/\.dim-jh-ledgerPaneBody \.dim-jh-ledgerStatGroup\s*\{[^}]*max-width:\s*100%/)
+    const media = styles.slice(styles.indexOf('@media (max-width: 700px)'))
+    expect(media).toMatch(/\.dim-jh-ledgerStatGroup\s*\{[^}]*max-width:\s*100%/)
+    // 反向对照：宽屏那条基础规则必须仍是定宽 460px（只有窄档收窄，
+    // 否则弹窗里 9 列 + 统计组的排布会跟着变形）。
+    const base = styles.match(/^\.dim-jh-ledgerStatGroup\s*\{([^}]*)\}/m)?.[1] ?? ''
+    expect(base, '缺少基础 .dim-jh-ledgerStatGroup 规则').not.toBe('')
+    expect(base).toMatch(/width:\s*460px/)
+    expect(base, '基础规则不该带 max-width（窄档才需要）').not.toMatch(/max-width/)
+    // 反向对照：明细表自己的横向滚动容器必须还在（9 列定宽靠它，不是靠面板体）
+    expect(container).toMatch(/\.dim-jh-ledgerPaneBody \.dim-jh-ledgerTableScroll\s*\{[^}]*overflow-x:\s*auto/)
   })
 
   it('★ 模型行不再按账号数分支，且 data-single 属性不得复活', () => {

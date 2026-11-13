@@ -252,8 +252,13 @@ export function ledgerSubtitle() {
  *
  * @param accountId 账号池条目 id；空串 = 「未归属」（凭据解析没回报的请求）。
  * @param nameMap 可选的 id → 显示名映射（`Map` 或普通对象都认）。
- *   ⚠️ **必须可选**：不传时行为与加参数前**逐字节相同**（既有 32 条测试里的
- *   `accountLabel('qoder-bb211a53') === 'qoder-bb211a53'` 就是这条契约的守卫）。
+ *   ⚠️ **必须可选**：不传时**除 `'-'` 这一格之外**与加参数前**逐字节相同**
+ *   （既有 32 条测试里的 `accountLabel('qoder-bb211a53') === 'qoder-bb211a53'`
+ *   就是这条契约的守卫）。
+ *   ⚠️⚠️ **`'-'` 是唯一的例外，而且是本 PR 的修复目标**：加参数前它原样返回
+ *   `'-'`（界面上凭空出现一行叫 `-` 的账号），现在返回 `（未知帐号）`。
+ *   2026-11-13 PR #69 正向审计 P2 实测：把 JSDoc 写成「**逐字节**相同」是假话，
+ *   而被点名当守卫的那 32 条用例**恰恰全部绕开 `'-'`** ⇒ 别再把这句话写回去。
  * @returns 显示名；**任何一步取不到都回落 id**，绝不返回空串。
  *
  * ⚠️ **查不到时必须回落 id**（不是空、也不是「已删除」）：账本是**日聚合**，
@@ -299,7 +304,13 @@ export function accountLabel(accountId, nameMap) {
    */
   if (accountId === '-') return '（未知帐号）';
   const mapped = nameMap instanceof Map ? nameMap.get(accountId) : nameMap?.[accountId];
-  if (typeof mapped === 'string' && mapped.length > 0) return mapped;
+  // ⚠️⚠️ 判据必须是 **`trim()` 之后非空**，不能只判 `length > 0`
+  //    （2026-11-13 PR #69 对抗审计 P2 / B-1 实测）：`'   '` 的 `length` 是 3，
+  //    只判长度会把它原样采纳 ⇒ 界面上出现一行**纯空白**的账号名，
+  //    比显示裸 id 更让人困惑（而本函数上方的注释恰恰写着「空串也不能用」——
+  //    注释对、实现只挡了空串这一种形态）。
+  //    `account.list` 的 `nickname` 允许用户手填，一个空格也是合法输入。
+  if (typeof mapped === 'string' && mapped.trim().length > 0) return mapped;
   return accountId;
 }
 
@@ -324,8 +335,12 @@ export function buildAccountNameMap(accounts) {
     if (typeof account.id !== 'string' || account.id.length === 0) continue;
     const nickname = typeof account.nickname === 'string' ? account.nickname : '';
     const accountName = typeof account.accountName === 'string' ? account.accountName : '';
-    const label = nickname.length > 0 ? nickname : (accountName.length > 0 ? accountName : '');
-    if (label.length > 0) map.set(account.id, label);
+    // ⚠️ 与 `accountLabel` 同一条判据：**`trim()` 之后**非空才算有名字
+    //    （纯空格昵称必须让位给 `accountName`，否则一个手滑的空格会把上游真实用户名盖掉）。
+    const label = nickname.trim().length > 0
+      ? nickname
+      : (accountName.trim().length > 0 ? accountName : '');
+    if (label.trim().length > 0) map.set(account.id, label);
   }
   return map;
 }
@@ -340,8 +355,17 @@ export function buildAccountNameMap(accounts) {
  * ⚠️ 缺 provider 时**只回模型名**，不拼出 `undefined/model` 或 `/model` 这种脏串：
  * 账本里的 `provider` 恒有值，但这条判据要挡住「字段被截断 / 旧数据」的形态。
  *
- * ⚠️ 本函数住在这里（而不是 `jet-hub.js`）是因为它是**纯取值口径**，且
- * `jet-hub.js` 依赖 react、单测环境导入不了 —— 放在本文件才能被直接测。
+ * ⚠️ 本函数住在这里（而不是 `jet-hub.js`）是因为它是**纯取值口径**，放本文件能被
+ * 单测**直接**导入、不必先拉起 react 替身（本仓的 react 替身有 6 个 hook 要挨个打桩，
+ * 且每个 spec 各写一份 —— 见 `tests/unit/ledger-entry-search.spec.ts` 顶部）。
+ *
+ * ⚠️⚠️ 但**不要**把理由写成「`jet-hub.js` 依赖 react、单测环境导入不了」——
+ * 那是假话，2026-11-13 PR #69 正向审计 P2 用两条实证打穿：
+ *   ① 本 PR 自己的 `tests/unit/token-ledger-account-wiring.spec.ts:252` 就
+ *      `const mod = await import('../../plugin-src/client/jet-hub.js')`；
+ *   ② `tests/unit/jet-hub-tdz.spec.ts` 的 `:85` / `:88` / `:99` / `:129` 更是四次
+ *      导入并真渲染 `JetHubPage`（该文件的全部意义就是证明它能被导入）。
+ * 而且 `AGENTS.md` 的 client-ui 节**已记录**这句被证伪过 —— 属**复发**，别再写回去。
  */
 export function ledgerEntryModelText(entry) {
   const model = typeof entry?.model === 'string' ? entry.model : '';

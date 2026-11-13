@@ -1092,13 +1092,27 @@ const STYLES = `
 
 /* ── 第一层：provider（容器级）—— 缩进 0 ──
    淡色块 + 左侧 3px 灰色竖线 + 11.5px 粗体。
-   ⚠️ 色块用 color-mix 做半透明：不引入新颜色，自动跟随主题明暗；
-      老浏览器无 color-mix 时回退到 bg-layer-2（有底色但更淡，层级不塌）。 */
+
+   ⚠️⚠️ 底色**不能**用 --dsw-alias-bg-layer-2 / -3（2026-11-13 审计 P1 实测）：
+   宿主那三层在**浅色主题下全是同一个值** ——
+     body                     { --dsw-alias-bg-layer-1: #fff; -2: #fff; -3: #fff }
+     body[data-ds-dark-theme] { -1: #232324; -2: #2c2c2e; -3: #353638 }
+   （取自 dsh-client-ui-theme/lib/client.js 的 design_platform_css_default）
+   而弹窗自身的底色就是 -layer-1 = #fff ⇒ 浅色主题下「色块」与背景**逐字节相同**，
+   三层视觉语言的「底色」维度整条失效（只剩缩进与左边 3px 竖线）。
+   ⚠️ 写回退值也救不了：变量存在时回退值永不生效 —— 与下面第 1 条是同一条教训。
+
+   ⇒ 改用**跟随主题的混色**：把前景色 --dsw-alias-label-primary 按小比例掺进透明，
+   两种主题下都可见、都自动跟随明暗，且不引入新颜色：
+     浅色：4% x #0f1115 叠 #fff    = #f5f5f6（provider）
+     深色：4% x #f9fafb 叠 #232324 = #2c2c2d（provider）
+   账号层用 7% ⇒ 浅 #eeeeef / 深 #323233 ⇒ 仍然「账号比 provider 更浓」，
+   与设计意图（淡色块 → 浓色块）方向一致。
+   ⚠️ 不要退回任何 --dsw-alias-bg-layer-* 常量：那是本缺陷的成因。 */
 .dim-jh-ledgerProviderHead {
   display: flex; align-items: baseline; gap: 8px;
   margin: 2px 0 3px; padding: 5px 8px; border-radius: 6px;
-  background: var(--dsw-alias-bg-layer-2, #f7f8fa);
-  background: color-mix(in srgb, var(--dsw-alias-bg-layer-3, #2a2b2f) 58%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-label-primary, #1f2329) 4%, transparent);
   border-left: 3px solid var(--dsw-alias-border-l2, #d0d3d9);
 }
 .dim-jh-ledgerProviderName { min-width: 0; font-size: 11.5px; line-height: 17px; font-weight: 700; color: var(--dsw-alias-label-primary, #1f2329); overflow-wrap: anywhere; }
@@ -1106,13 +1120,15 @@ const STYLES = `
 
 /* ── 第二层：账号（分组头）—— 缩进 30px ──
    ⚠️ 单账号与多账号样式完全一致（用户 2026-11-11 决策）：层级由色块与缩进表达，
-   不由账号数表达。原先的 data-single 分支已删除，不要再加回来。 */
+   不由账号数表达。原先的 data-single 分支已删除，不要再加回来。
+   ⚠️ 底色用 7% 混色（比 provider 的 4% 更浓），原因见上面 providerHead 的注释 ——
+      --dsw-alias-bg-layer-3 在浅色主题下是 #fff，与背景同色。 */
 .dim-jh-ledgerAccount { min-width: 0; margin-left: 30px; }
 .dim-jh-ledgerAccount + .dim-jh-ledgerAccount { border-top: .5px dashed var(--dsw-alias-border-l3, #eef0f3); }
 .dim-jh-ledgerAccountHead {
   display: flex; align-items: baseline; gap: 8px;
   margin: 3px 0 2px; padding: 5px 8px; border-radius: 6px;
-  background: var(--dsw-alias-bg-layer-3, #2a2b2f);
+  background: color-mix(in srgb, var(--dsw-alias-label-primary, #1f2329) 7%, transparent);
   /* ⚠️ 必须是 deepseek-450（真蓝），不是 brand-primary（深色主题下是近白）。 */
   border-left: 3px solid var(--dsw-static-deepseek-450, #5686fe);
 }
@@ -1220,9 +1236,6 @@ const STYLES = `
 .dim-jh-ledgerDateRange input { width: 136px; padding: 3px 6px; font-size: 11px; }
 .dim-jh-ledgerExport { flex: none; }
 /* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。
-   「账号」列（9 列版新增）**截断而不是换行**：账号名是给人认人的标签，
-   换行会把整张表的行高撑乱；完整值靠 title 悬停（用户决策 Q2-A）。 */
-/* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。
    账号列（9 列版新增）**截断而不是换行**：账号名是给人认人的标签，
    换行会把整张表的行高撑乱；完整值靠 title 悬停（用户决策 Q2-A）。
    ⚠️ max-width 与列宽（LEDGER_ENTRY_COLUMNS 里 account 的 172px）是两回事：
@@ -1300,7 +1313,15 @@ const STYLES = `
      ⚠️ 本文件整体是 JS 模板字符串：注释里**禁止反引号**（会提前闭合模板，
      esbuild 报 Expected ";"、tsc 报一串看不懂的 Cannot find name）。
      ══════════════════════════════════════════════════════════════════════════ */
-  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup { width: 300px; gap: 6px; }
+  /* ⚠️⚠️ max-width 不是修饰（2026-11-13 PR #69 对抗审计 P2 / B-2）：
+     宿主右侧栏最低可拖到 300px，面板水平内边距 12+12=24px ⇒ 可用内容宽只有 276px，
+     而统计组写死 width: 300px ⇒ 右侧「总处理」多出的 24px 被父级的
+     overflow-x: hidden **静默裁掉**（用户看到数字被切一半，且没有滚动条提示右边还有内容）。
+     ⚠️ 修法只能是「组宽不得超过容器」：面板体的 overflow-x: hidden 是
+     tests/unit/ledger-pane-chrome.spec.ts:405 的既有契约（8 列定宽明细表靠它裁），
+     改成 auto 会让那条契约红 —— 而且明细表本来就有自己的
+     .dim-jh-ledgerTableScroll 横向滚动容器。 */
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup { width: 300px; max-width: 100%; gap: 6px; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerAccount { margin-left: 14px; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
@@ -1326,7 +1347,7 @@ const STYLES = `
   .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
   /* ⚠️ 窄屏统计组必须收窄：460px 在 <700px 会把账号名挤没（甚至撑出横向滚动）。
      收窄到 300px 并允许组内「首字」格省略 —— 数字仍对齐，长文本靠 title 悬停看全。 */
-  .dim-jh-ledgerStatGroup { width: 300px; gap: 6px; }
+  .dim-jh-ledgerStatGroup { width: 300px; max-width: 100%; gap: 6px; }
   .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
   /* ⚠️ 窄屏 9 列 + 固定像素列宽必然超宽：**横向滚动**而不是压缩各列。
      压缩会把 9 列一起挤变形（数字列对不齐、模型名断成三行），比横向滚动更糟。

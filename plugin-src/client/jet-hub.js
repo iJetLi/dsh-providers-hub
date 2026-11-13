@@ -3049,9 +3049,20 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
             return next;
           });
         },
-        // ⚠️ **静默失败**（含该 provider 没有账号、端点拒答、连接断开）：
-        //    名字是辅助信息，账本主数据照常显示，只是回落 id。
-        () => {},
+        // ⚠️ **不冒泡成面板报错**（名字是辅助信息，账本主数据照常显示，只是回落 id），
+        //    但**必须有诊断**（2026-11-13 PR #69 正向审计 P2 / 我自己的 D4）：
+        //    该 provider 已被上面登记为「拉过」⇒ 整个挂载期不会再拉 ⇒ 账号列恒显裸 id，
+        //    而「全是裸 id」有三种成因（provider 真没有账号 / 端点拒答 / 连接断开），
+        //    零日志时**无法区分**，等于把三种症状压成一个不可诊断的形态。
+        // ⚠️ 同时**撤销登记**：本次失败不算「拉过」，将来 `ledgerProviderKey` 变化
+        //    导致 effect 重跑时能重试（不额外加定时器 —— 那会带来卸载后仍触发的清理负担）。
+        (error) => {
+          namedProviders.current.delete(provider);
+          console.warn(
+            '[jet-hub] 读取 ' + provider + ' 的账号名失败（该渠道的账号列将回落裸池 id）:',
+            error,
+          );
+        },
       );
     }
   }, [ledgerProviderKey, rpcCall]);

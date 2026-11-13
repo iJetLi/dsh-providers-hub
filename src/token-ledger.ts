@@ -144,7 +144,19 @@ export interface TokenLedgerModelRow {
 
 /** 一个 provider 下、某个账号的聚合（模型行 + 自身小计）。 */
 export interface TokenLedgerAccountRow {
-  /** 账号池条目 id；空串 = 未归属（凭据解析没回报的请求）。 */
+  /**
+   * 账号池条目 id。
+   *
+   * ⚠️⚠️ **两条聚合路径的空值形态不一样，两种都必须认**（2026-11-13 PR #69 双向审计）：
+   * - **内存聚合**（本文件 `:781` 附近）与**落盘日聚合**（`:1055` 附近）都用哨兵
+   *   **`'-'`** —— `Map` 的键不能缺失，所以「凭据没回报账号」的请求统一落 `'-'` 桶。
+   *   `'-'` 是**真实存在的分组**（`channel: false` 的纯签到渠道命中的就是它），不是脏数据。
+   * - **明细**（`TokenLedgerEntry.accountId`）同样情形是**空串**（可选字段，取不到就没有）。
+   *
+   * 客户端因此必须两条腿都在：`'-'` 渲染成「（未知帐号）」、空串渲染成「未归属」，
+   * 其余原样显示（见 `plugin-src/client/token-ledger-panel.js` 的 `accountLabel`）。
+   * 只写「空串」一种形态会让 `'-'` 原样漏到界面上（本 PR 修的正是这条）。
+   */
   accountId: string
   models: TokenLedgerModelRow[]
   totals: Omit<TokenLedgerModelRow, 'model'>
