@@ -19,6 +19,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AggregateAdapter, AGGREGATE_PROVIDER } from '../../src/aggregate-adapter.js'
+import { pickDiversified } from '../../src/aggregate-core.js'
 import { bindAggregateDispatch, isInsideAggregateDispatch } from '../../src/aggregate-dispatch-context.js'
 import { QoderAdapter, resolveEffectiveQueueWaitMode } from '../../src/qoder-adapter.js'
 import { QODER } from '../../src/qoder-product.js'
@@ -151,6 +152,89 @@ describe('聚合调用 qoder：排队即切换下一个候选', () => {
       expect(warns.some((w) => /排队/.test(w) && /聚合/.test(w))).toBe(true)
     })
   }
+})
+
+describe('pickDiversified：auto 名额不被一家占满', () => {
+  const c = (provider: string, id: string) => ({ provider, realId: id })
+  it('第一轮每家最多 2 个，保持原序；名额有剩再按原序补齐', () => {
+    const ranked = [c('qoder', 'a'), c('qoder', 'b'), c('qoder', 'c'), c('qoder', 'd'), c('buddy', 'x'), c('trae', 'y')]
+    expect(pickDiversified(ranked, 4).map((x) => `${x.provider}/${x.realId}`))
+      .toEqual(['qoder/a', 'qoder/b', 'buddy/x', 'trae/y'])
+    expect(pickDiversified(ranked, 6).map((x) => `${x.provider}/${x.realId}`))
+      .toEqual(['qoder/a', 'qoder/b', 'buddy/x', 'trae/y', 'qoder/c', 'qoder/d'])
+  })
+  it('只有一家渠道时总名额不变（补齐轮用回同家）', () => {
+    const ranked = [c('qoder', 'a'), c('qoder', 'b'), c('qoder', 'c')]
+    expect(pickDiversified(ranked, 3)).toHaveLength(3)
+  })
+  it('名额小于第一轮时按原序截断，不改传入数组', () => {
+    const ranked = [c('buddy', 'x'), c('qoder', 'a'), c('qoder', 'b')]
+    const snapshot = JSON.stringify(ranked)
+    expect(pickDiversified(ranked, 2).map((x) => x.provider)).toEqual(['buddy', 'qoder'])
+    expect(JSON.stringify(ranked)).toBe(snapshot)
+  })
+})
+
+describe('aggregate/auto：qoder 整体排队时轮到别家（复现 2026-11-14 生产日志）', () => {
+  it('qoder 免费模型排在最前且全部排队 ⇒ 仍能切到 buddy 拿到回答', async () => {
+    setMode(undefined)
+    const { qoder, sleeps } = makeQueuedQoder()
+    const sent: string[] = []
+    const ctx = {
+      logger: { warn: () => {}, info: () => {}, error: () => {} },
+      llm: {
+        listProviders: () => [{ id: 'qoder' }, { id: 'buddy' }, { id: 'codearts' }],
+        // m1 有三家候选 ⇒ 最长候选表 = 3 ⇒ auto 的名额 = 3。
+        // qoder 的三个模型都是免费（倍率 0）⇒ 排序后 auto 的前 3 名全是 qoder（故障原形）。
+        listModels: async (provider: string) => (provider === 'qoder'
+          ? [{ id: 'm1', name: 'M1 · 免费' }, { id: 'm2', name: 'M2 · 免费' }, { id: 'm3', name: 'M3 · 免费' }]
+          : [{ id: 'm1', name: `M1 · ${provider} · x1` }]),
+        resolveModelInfo: async (provider: string, id: string) => ({ provider, id }),
+        stream: (o: { provider: string; model: string; messages: unknown }) => {
+          sent.push(`${o.provider}/${o.model}`)
+          return (async function* () {
+            await new Promise((resolve) => { setTimeout(resolve, 0) })
+            if (o.provider !== 'qoder') {
+              yield { type: 'text-delta', index: 0, text: 'ok' }
+              return
+            }
+            try {
+              for await (const chunk of qoder.stream({ model: 'qfmodel', messages: o.messages } as never)) yield chunk
+            } catch (error) {
+              const e = error as { message?: string; code?: string }
+              yield { type: 'finish', reason: { kind: 'error', failure: { message: e.message ?? '', code: e.code } } }
+            }
+          })()
+        },
+      },
+    } as never
+    const pool = {
+      disabledModelsFor: () => new Set<string>(),
+      getAvailableAccount: async () => ({ entry: { id: 'a1' }, credential: {} }),
+    } as never
+    const adapter = new AggregateAdapter(ctx, {
+      accountPool: pool,
+      // buddy / codearts 都是永久积分（NEVER），与 qoder 同档 ⇒ 按倍率排，qoder 免费在前。
+      expiryProbe: async () => Number.POSITIVE_INFINITY,
+      allowed: () => ({
+        m1: { qoder: { m1: true } },
+        m2: { qoder: { m2: true } },
+        m3: { qoder: { m3: true } },
+      }),
+    })
+
+    const call = await adapter.prepareCall(AGGREGATE_PROVIDER, 'auto')
+    let text = ''
+    for await (const chunk of call.stream({ messages: MESSAGES } as never)) {
+      const ch = chunk as { type: string; text?: string }
+      if (ch.type === 'text-delta' && typeof ch.text === 'string') text += ch.text
+    }
+
+    expect(text, 'qoder 全部排队后应由别家给出回答').toBe('ok')
+    expect(sent.slice(0, 2).every((s) => s.startsWith('qoder/')), '排序偏好不变：免费的 qoder 仍先试').toBe(true)
+    expect(sent[2], '第 3 个名额让给别家，而不是 qoder 的第 3 个模型').toMatch(/^(buddy|codearts)\//)
+    expect(sleeps).toEqual([])
+  })
 })
 
 describe('直连 qoder：仍按环境变量处理（行为不变）', () => {

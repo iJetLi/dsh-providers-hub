@@ -55,6 +55,7 @@ import { bindAggregateDispatch } from './aggregate-dispatch-context.js'
 import {
   NEVER,
   UNUSABLE,
+  pickDiversified,
   rankCandidates,
   resolveCandidateGate,
   type CandidateGate,
@@ -2347,7 +2348,11 @@ export class AggregateAdapter extends LlmAdapter {
     // `resolved: false` 的保守值，不会让 `Promise.all` reject。
     // ⚠️ **保序**：`Promise.all` 的结果与输入同序 ⇒ `targets` 的顺序仍是
     // `rankCandidates` 给出的临期序（派发顺序是这个适配器的核心语义，绝不能乱）。
-    const picked = ranked.slice(0, limit)
+    // ⚠️ `auto` 的池是所有渠道的所有模型：直接 `slice` 会让同一渠道占满名额（2026-11-14
+    //    生产故障：前 9 名全是 qoder，账号整体排队时 9 次切换全在 qoder 内部打转）。
+    //    ⇒ 第一轮每家最多 2 个、再按原序补齐（见 `pickDiversified`）。指定虚拟模型的
+    //    候选表本来就是「每家一个」，保持原样。
+    const picked = model === AGGREGATE_AUTO_MODEL ? pickDiversified(ranked, limit) : ranked.slice(0, limit)
     const capabilities = await Promise.all(
       picked.map((candidate) => this.capabilityOf(candidate.provider, candidate.realId, signal)),
     )

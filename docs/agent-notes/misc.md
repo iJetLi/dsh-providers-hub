@@ -220,6 +220,11 @@
      `queueAttempts += 1` 之前 —— 400 `TM.00001041` / 状态端点确认排队 / SSE 内嵌排队错误
      三个入口都汇到这里，单测逐一覆盖（`llm-adapter.spec.ts`「聚合调用时排队即失败」）。
      以后新增「渠道内静默排队等待」的适配器，都要在等待前查 `isInsideAggregateDispatch()`。
+     ⚠️⚠️ **`auto` 的名额不能被一家占满**（同日上线后实测）：`auto` 池排序后只取前
+     `maxAttemptsFor` 个；qoder 未接临期（`NEVER`）且免费模型倍率最低 ⇒ 前 9 名全是 qoder，
+     账号整体排队时 9 次切换全在 qoder 内部、别家一个没轮到。修法 = `aggregate-core.ts` 的
+     `pickDiversified`（第一轮每家最多 `AUTO_PER_PROVIDER_FIRST_PASS`=2 个、保序、名额有剩
+     再按原序补齐），只用于 `auto`。用例：`aggregate-qoder-queue.spec.ts`（改回 `slice` 即红）。
    ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
    `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]` **不含 `QUEUE`/`AUTH`**，
    且它的退避是**固定参数**（`initialDelayMs=500`、`maxDelayMs=10_000`、
