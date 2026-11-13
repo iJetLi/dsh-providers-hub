@@ -1,6 +1,6 @@
 {
   "name": "dsh-providers-hub",
-  "version": "0.2.1-rc.2",
+  "version": "0.2.1-rc.3",
   "description": "DeepSeek Harness plugin: one hub for AI coding providers — account login, multi-account pools, silent credential refresh, credit claiming, and a local OpenAI-compatible gateway",
   "type": "module",
   "main": "lib/index.js",

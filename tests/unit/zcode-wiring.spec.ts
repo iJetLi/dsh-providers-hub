@@ -420,7 +420,8 @@ describe('ZCode 客户端接入（缺口 3 / 4 / 5）', () => {
     // 2026-11-01 fork: magicrewintl（MagiCrew 国际版）added -> 25 -> 26.
     // 2026-11-02 fork: monkeycode -> 27；monkeycodeintl + baizhi -> 29.
     // 2026-11-09 fork: marvis -> 29 -> 30.
-    expect(ids).toHaveLength(30)
+    // 2026-11-13 fork: doubao（豆包）-> 30 -> 31.
+    expect(ids).toHaveLength(31)
   })
 
   it('展示名与产品配置一致（避免两处漂移）', () => {
@@ -668,7 +669,8 @@ describe('ZCode RPC 分派（缺口 2：接线）', () => {
     // 2026-11-01 fork: magicrewintl（MagiCrew 国际版）added -> 25 -> 26.
     // 2026-11-02 fork: monkeycode -> 27；monkeycodeintl + baizhi -> 29.
     // 2026-11-09 fork: marvis -> 29 -> 30.
-    expect(clientIds.length).toBe(30)
+    // 2026-11-13 fork: doubao -> 30 -> 31（客户端图标表同步加了一项）。
+    expect(clientIds.length).toBe(31)
     // ⚠️ **21 个 auth 键**（23 个客户端 id − opencode − aggregate）。
     //    ⚠️ 2026-10-22（A6）：codely **已接续期**（`CodelyAuth` 签名修正为单参
     //    `refreshAll(pool)`，并接入 `index.ts` 的 `auths`）⇒ 它不再是豁免项。
@@ -677,9 +679,10 @@ describe('ZCode RPC 分派（缺口 2：接线）', () => {
     // 2026-11-02 fork: monkeycode（`MonkeycodeAuth`）：24 -> 25.
     // 2026-11-02: monkeycodeintl + baizhi 接入后 25 -> 27。
     // 2026-11-09: marvis（`MarvisAuth`）接入后 27 -> 28。
+    // 2026-11-13: doubao 是 `channel: false`（无 auth 服务）⇒ 键位仍是 28。
     expect(keys).toHaveLength(28)
     const withoutKey = clientIds.filter((id) => !keys.includes(id))
-    expect([...withoutKey].sort()).toEqual(['aggregate', 'opencode'])
+    expect([...withoutKey].sort()).toEqual(['aggregate', 'doubao', 'opencode'])
   })
 
   it('★ 不占键位的是 opencode 与 aggregate（豁免被验证，不是被假设）', () => {
@@ -701,7 +704,7 @@ describe('ZCode RPC 分派（缺口 2：接线）', () => {
     //    而不是「不需要续期」。
     //    断言写成数组（而非 `toHaveLength(2)`）是为了在**将来多出豁免**时
     //    立刻可见是哪几个。
-    expect([...withoutKey].sort()).toEqual(['aggregate', 'opencode'])
+    expect([...withoutKey].sort()).toEqual(['aggregate', 'doubao', 'opencode'])
   })
 })
 

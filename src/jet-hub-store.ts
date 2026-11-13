@@ -1672,6 +1672,13 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   //    顺序由 `ACCOUNT_REF_RE` 内部的**长度降序排序**保证，与本数组书写顺序无关
   //    （与 `MINIMAX` / `MINIMAXINTL` 同型）。
   ['AUTOCLAWINTL', 'autoclawintl'],
+  // ⚠️ **本 fork 独有**（豆包，2026-10-29）—— 同款坑第 **十** 次。
+  // ⚠️ 本次是**由守卫抓出来的**（`jet-hub-store.spec.ts` 的
+  //    「恢复表覆盖客户端 PROVIDERS 的全部 provider」当场红、并点名 doubao）：
+  //    豆包接入时漏登记本表 ⇒ `DOUBAO_ACCOUNT_*` 的账号在 `state.json` 缺失时
+  //    **静默消失**（凭据还在 `.credentials.yaml` 里，只是索引建不出来）。
+  //    这正是那张表存在的理由，也是「守卫比人眼可靠」的又一例。
+  ['DOUBAO', 'doubao'],
 ]
 
 /**

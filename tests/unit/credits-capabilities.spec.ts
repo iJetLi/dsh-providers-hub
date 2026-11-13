@@ -344,7 +344,7 @@ describe('模型限流按钮门控（重测 / 重置）', () => {
     //   写点、不在 `probeById` 里 ⇒ 两个按钮恒为惰性（点了零请求、零清除）。
     // - magicrewintl（2026-11-01）：与 magicrew **同一份实现、同一份 registry 字段语义**
     //   ⇒ 必然一起为 false（漏登记会让本条理由失真，与 autoclawintl 同型）。
-    expect(disabled).toEqual(['astudio', 'autoclaw', 'autoclawintl', 'gemini', 'loomy', 'magicrew', 'magicrewintl', 'officeace'])
+    expect(disabled).toEqual(['astudio', 'autoclaw', 'autoclawintl', 'doubao', 'gemini', 'loomy', 'magicrew', 'magicrewintl', 'officeace'])
   })
 
   it('★ 「产品取舍」那一类也必须被点名（不得悄悄混进「管辖不到」里）', () => {

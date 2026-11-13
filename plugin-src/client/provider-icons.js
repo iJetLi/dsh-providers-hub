@@ -261,6 +261,15 @@ const GEMINI_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53M
 const AGGREGATE_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PGNpcmNsZSBjeD0iNSIgY3k9IjUiIHI9IjIuNiIgZmlsbD0iIzRGOERGNyIvPjxjaXJjbGUgY3g9IjUiIGN5PSIxOSIgcj0iMi42IiBmaWxsPSIjOUI3MkNCIi8+PGNpcmNsZSBjeD0iMTkiIGN5PSIxMiIgcj0iMi42IiBmaWxsPSIjNEY4REY3Ii8+PHBhdGggZD0iTTcgNi4yIDE2LjQgMTFNNyAxNy44IDE2LjQgMTMiIHN0cm9rZT0iIzlCNzJDQiIgc3Ryb2tlLXdpZHRoPSIxLjciIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgZmlsbD0ibm9uZSIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEuNSIgZmlsbD0iIzlCNzJDQiIvPjwvc3ZnPg==';
 
 /**
+ * 豆包（Doubao）面板图标（内联 SVG data URL，手绘占位）。
+ *
+ * ⚠️ **占位图标**：暂无豆包官方小尺寸 SVG，先用「蓝色圆角方块 + 笑脸」占位
+ *   （豆包品牌主色 #3370FF 的近似），与 QINI_ICON 同款做法 —— 拿到官方图标后
+ *    替换本常量即可，键名 `doubao` 不动。
+ */
+const DOUBAO_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzMzNzBGRiIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTAiIHI9IjQiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIxMC40IiBjeT0iOS42IiByPSIwLjkiIGZpbGw9IiMzMzcwRkYiLz48Y2lyY2xlIGN4PSIxMy42IiBjeT0iOS42IiByPSIwLjkiIGZpbGw9IiMzMzcwRkYiLz48cGF0aCBkPSJNNyAxNi41YzEuNiAyIDguNCAyIDEwIDAiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg=='
+
+/**
  * OfficeAce（华为 ModelArts MaaS）图标：红底 OA 字样。
  *
  * ⚠️ 与其余 icon 同款内联 SVG data URL（避免额外资源请求）。
@@ -364,6 +373,8 @@ export const PROVIDER_ICONS = {
   //    （`provider-registry.spec.ts` 有行为断言）。
   autoclawintl: AUTOCLAW_ICON,
   modelscope: MODELSCOPE_ICON,
+  // ⚠️ 与 registry 的声明序一致：doubao 排在 magicrew 之前（magicrew 仍紧邻 aggregate）。
+  doubao: DOUBAO_ICON,
   // ⚠️ 与 registry 的声明序一致：magicrew 紧邻 aggregate 之前（倒数第二）。
   magicrew: MAGICREW_ICON,
   // ⚠️ **MagiCrew 国际版**（2026-11-01）：与国内版**共用同一个图标**

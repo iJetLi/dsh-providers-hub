@@ -476,6 +476,26 @@ function shortId(): string {
 }
 
 /**
+ * 豆包凭据的**账号指纹**：cookie 头里 `sessionid` 的值（同一账号恒定、
+ * 不同账号不同）。
+ *
+ * ⚠️ 取不到（cookie 缺失 / 畸形）返回 `undefined` —— 判重据此跳过，
+ * **不**把「读不出指纹」的账号错判成互不相同。
+ */
+function doubaoSessionIdOf(credential: unknown): string | undefined {
+  const cookie = (credential as { cookie?: unknown } | null | undefined)?.cookie
+  if (typeof cookie !== 'string' || cookie.length === 0) return undefined
+  for (const pair of cookie.split(';')) {
+    const eq = pair.indexOf('=')
+    if (eq <= 0) continue
+    if (pair.slice(0, eq).trim() !== 'sessionid') continue
+    const value = pair.slice(eq + 1).trim()
+    return value.length > 0 ? value : undefined
+  }
+  return undefined
+}
+
+/**
  * OfficeAce 登录中间态的有效期（毫秒）—— **判据的唯一实现处**。
  *
  * ## 为什么必须有（Gitee issue IKM741 的 A 档：登录中止留幽灵占位账号）
@@ -1836,11 +1856,18 @@ export function authOf(auths: JetHubAuths, provider: string): JetHubAuthLike | u
  * ⚠️ 拿不到时刻时返回**空对象**（不是 `{ expiresAt: undefined }`）：后者会在内存
  * 池条目上留下一个「值为 undefined 的键」—— 与「从来没有过这个键」在展示上等价，
  * 却让「读不到就**不写**」这条纪律在数据里看不出区别。空对象最诚实。
+ *
+ * ⚠️ 为什么必须在**登录那一刻**就写进池（2026-11-04 真机报障「有效期 未知」）：
+ *    `account.list` 的 `expiresAt` 只来自**池条目**（`ProviderAccountEntry.expiresAt`），
+ *    **不读凭据文件**。登录只 `credentials.set` 而不 `pool.updateAccount({ expiresAt })`
+ *    ⇒ 卡片读到 `undefined` ⇒ 恒显示「未知」，且**永远不会自己补上**
+ *    （OfficeAce / Codely / Magicrew 三条都踩过同一个坑）。
  */
 function magicrewExpiresAtPatch(credential: MagicrewCredential): { expiresAt?: number } {
   const expiresAt = magicrewExpiresAtMs(credential)
   return expiresAt === undefined ? {} : { expiresAt }
 }
+
 
 /**
  * 腾讯 Marvis 的 `expiresAt` 补丁（与 {@link magicrewExpiresAtPatch} 同形）。
@@ -2953,6 +2980,12 @@ function registerJetHubEndpoints(
     //    ⚠️ 显式豁免登记在 `credits-balance-self-heal.spec.ts` 的 `SELF_HEAL_EXEMPT`
     //    —— 那张表是**反向守卫**（JetHubAuths 每个键都必须在自愈表或豁免表里），
     //    漏登记会红。
+    // ⚠️ **豆包（doubao）不进本表的理由**（2026-11-04 由守卫点名后核实）：
+    //    它的凭据是**浏览器 cookie 串**（`sessionid` 等），上游**没有** refresh
+    //    端点，续期的唯一方式是人工重扫码 ⇒ 自愈链对它无事可做。
+    //    与 loomy / zcode / modelscope / qiniu 同属「设计上没有 refresh 端点」，
+    //    故显式豁免登记在 `credits-balance-self-heal.spec.ts` 的
+    //    `NO_REFRESH_ENDPOINT`（那里是**反向守卫**，漏登记会红）。
   ])
 
   /**
@@ -3683,6 +3716,17 @@ function registerJetHubEndpoints(
    * ⚠️ 只对**成功**也记：成功后再进这里也没有意义（`credential.nickname` 已存在）。
    */
   const magicrewProfileTried = new Set<string>()
+
+  /**
+   * ⚠️⚠️ **豆包（Doubao）扫码登录的在途任务**（与 `magicrewBrowserLoginInFlight`
+   * 同型，2026-11-03 接入）：`account.create`（`mode: 'browser'`）起一轮
+   * 「开可见浏览器 → 等用户扫码 → `Storage.getCookies` 读 cookie+设备身份 → 落库」，
+   * `login.poll` 单飞 `await` 它（客户端 1 秒一拍、无闸门，两拍重叠会开两个窗口）。
+   */
+  const doubaoLoginInFlight = new Map<
+    string,
+    Promise<{ done: boolean, success?: boolean, error?: string }>
+  >()
 
   /**
    * 网页版登录占位条目的**最短保留时长**（收口阈值）。
@@ -5010,10 +5054,14 @@ function registerJetHubEndpoints(
         if (req.provider === OFFICEACE.id && accounts.some((a) => a.expiresAt === undefined)) {
           for (const account of accounts) {
             if (account.expiresAt !== undefined) continue
-            // ⚠️ 逐账号 resolve：该账号自己的 `credentialRef`（**不是** ref 名）。
-            const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
-              .catch(() => null)
-            if (!resolved) continue
+            // ⚠️ 逐账号 resolve：该账号自己的 credentialRef（**不是** ref 名）。
+            // ⚠️⚠️ credentialRef() 对非法形态**同步抛错**，.catch() 接不住
+            //    ⇒ 必须包 try（否则一条脏 ref 会让整个 ccount.list 抛 500）。
+            let resolved: { value?: string } | undefined
+            try {
+              resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+            } catch { resolved = undefined }
+            if (resolved?.value === undefined) continue
             let expiresAt = Number.NaN
             try {
               // ⚠️ `expiresAt` 是 STS 的 ISO 8601 字符串（不是数值时间戳 ——
@@ -5099,6 +5147,7 @@ function registerJetHubEndpoints(
          * ⚠️ 回填**只写 `nickname`**，不写 `phone`：上游给的 phone 是 **10 位本地号**，
          * 与 `magicrewDisplayNickname` 的 11 位脱敏判据**不同形**，写进去会得到错位掩码。
          */
+
         if (req.provider === 'magicrew' || req.provider === 'magicrewintl') {
           for (const account of accounts) {
             const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
@@ -5943,6 +5992,104 @@ function registerJetHubEndpoints(
             error: {
               code: 'bad-request',
               message: `${magicrewSiteName}请用「从本机浏览器导入」或「网页登录」，不支持手机号密码登录`,
+            },
+          }
+        }
+
+        /**
+         * ⚠️⚠️ **豆包（Doubao）扫码登录**（`mode: 'browser'`，2026-11-03 接入）。
+         *
+         * 与 magicrew 的 `mode: 'browser'` 同型三段式：
+         * ① 占位条目（先登记再开窗，`login.poll` 靠它知道「id 存在」）；
+         * ② 后台任务：`DoubaoLoginSession.open()`（可见窗口 + 一次性 profile）→
+         *    `waitForCredential()`（轮询 `sessionid`，最长 4 分钟）→ 落库 → 回填；
+         * ③ 立刻返回 `{ accountId, loginUrl: '' }`。
+         *
+         * ⚠️ **账号隔离**：每次登录一个全新临时 profile ⇒ 该账号的 cookie 与
+         *    device_id/web_id 都是**本账号自己的**（一次性 profile 天然产出独立
+         *    设备身份，实测见 `doubao-login.ts` 的端到端验证）。
+         *
+         * ⚠️ **判重**：cookie 里的 `sessionid` 值即账号指纹 —— 同一账号重复登录
+         *    只刷新既有条目，不造第二张卡。
+         *
+         * ⚠️ 失败收尾走 `failLogin`（不自己 `removeAccount`）。
+         */
+        if (provider === 'doubao' && req.mode === 'browser') {
+          await pool.addAccount({
+            id,
+            provider: 'doubao',
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+          const task = (async (): Promise<{ done: boolean, success?: boolean, error?: string }> => {
+            const { DoubaoLoginSession } = await import('./doubao-login.js')
+            const session = await DoubaoLoginSession.open({
+              log: (message) => { ctx.logger?.info?.(`[jet-hub] ${message}`) },
+            })
+            let credential: import('./doubao.js').DoubaoCredential | undefined
+            try {
+              credential = await session.waitForCredential(240_000)
+            } catch (error) {
+              const message = await failLogin(id, error)
+              return message === undefined
+                ? { done: true, success: true }
+                : { done: true, success: false, error: message }
+            } finally {
+              // 无论成败都收窗（杀进程 + 删一次性 profile）。
+              session.close()
+            }
+            if (credential === undefined) {
+              const message = await failLogin(id, new Error('扫码登录未完成（超时或窗口已关闭）'))
+              return message === undefined
+                ? { done: true, success: true }
+                : { done: true, success: false, error: message }
+            }
+            // 判重：sessionid 指纹命中既有条目 ⇒ 只刷新它，删掉占位条目。
+            const fingerprint = doubaoSessionIdOf(credential)
+            if (fingerprint !== undefined) {
+              for (const existing of pool.listAccountsByProvider('doubao')) {
+                if (existing.id === id) continue
+                let existingFingerprint: string | undefined
+                try {
+                  const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
+                  existingFingerprint = resolved === undefined
+                    ? undefined
+                    : doubaoSessionIdOf(JSON.parse(resolved.value))
+                } catch { existingFingerprint = undefined }
+                if (existingFingerprint !== fingerprint) continue
+                await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+                await pool.updateAccount(existing.id, { nickname: '豆包账号' })
+                await ctx.credentials.unset(credentialRef(refName)).catch(() => undefined)
+                await pool.removeAccount(id).catch(() => undefined)
+                return { done: true, success: true }
+              }
+            }
+            // 新账号：凭据写到自己的 ref。
+            await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
+            await pool.updateAccount(id, { nickname: '豆包账号' })
+            return { done: true, success: true }
+          })()
+          doubaoLoginInFlight.set(id, task)
+          void (async () => {
+            try { await task } catch { /* 上面已把异常收成返回值 */ }
+            doubaoLoginInFlight.delete(id)
+          })()
+          return { ok: true, value: { accountId: id, loginUrl: '' } }
+        }
+
+        /**
+         * 豆包只有扫码登录（`mode: 'browser'`）一条路 —— 不带 mode 落到这里
+         * ⇒ 明确报错，不静默降级。
+         */
+        if (provider === 'doubao') {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: '豆包请用「扫码登录」（会打开浏览器窗口，用手机豆包 App 扫码）',
             },
           }
         }
@@ -8037,6 +8184,18 @@ function registerJetHubEndpoints(
              * ⚠️ 但**不能**无限挂着：占位条目由 `account.list` 的
              * `sweepAbandonedMagicrewBrowserLogins` 按 TTL 收口。
              */
+            return { ok: true, value: { done: false } }
+          }
+          /**
+           * ⚠️ 豆包扫码登录（2026-11-03）：与 magicrew 同型 —— `await` 在途任务
+           * （单飞），表里没有就回 `{done:false}` 交给客户端 5 分钟表收口。
+           * 豆包占位条目**没有** TTL 收口器：任务结束（成功/失败）时 `failLogin`
+           * 或判重路径会处理它；宿主重启后表空了 ⇒ 浏览器窗口也没了
+           * （进程随宿主树退出）⇒ 用户重新点登录即可，占位条目由用户手删。
+           */
+          if (entry.provider === 'doubao') {
+            const shared = doubaoLoginInFlight.get(req.accountId)
+            if (shared !== undefined) return { ok: true, value: await shared }
             return { ok: true, value: { done: false } }
           }
           return { ok: true, value: { done: false } }

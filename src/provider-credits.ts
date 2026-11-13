@@ -89,6 +89,9 @@ import { claimCodelyDailyCheckIn, fetchCodelyBalanceDetailed } from './codely-cr
 import type { CodelyCredential } from './codely-auth.js'
 import { fetchAccioBalanceDetailed } from './accio-credits.js'
 import { fetchAstudioBalanceDetailed, claimDaily } from './astudio-credits.js'
+// ⚠️ **本 fork 独有**（豆包，2026-10-29）：签到/余额原语（端点待实测，如实 inactive）。
+import { claimDoubaoDailyCheckin, fetchDoubaoBalanceDetailed } from './doubao-credits.js'
+import type { DoubaoCredential } from './doubao.js'
 import { fetchAutoclawBalanceDetailed, claimAutoclawDailyQuota } from './autoclaw-credits.js'
 import { AUTOCLAW_INTL } from './autoclaw-product.js'
 import { fetchTraeCreditBalance, claimTraeDailyCheckin, fetchTraeCheckinStatus } from './trae-credits.js'
@@ -738,6 +741,25 @@ export function createProviderCredits(
     accio: {
       fetchBalanceDetailed: async (credential) =>
         await fetchAccioBalanceDetailed(credential as AccioCredential),
+    },
+
+    /**
+     * 豆包（Doubao，字节跳动）：签到/余额结构已接通，**上游端点待实测**。
+     *
+     * ⚠️ 用 `fetchBalanceDetailed` + 显式 `claim`：两个原语（`doubao-credits.ts`）
+     *    在凭据缺失时给出可读原因，在端点未实测时如实回 `null` / `inactive`
+     *   （不落 0、不发假请求）。将来拿到真实端点后，只需把这两个原语换成
+     *    实测实现，本表项**不用动**（签名已对齐骨架）。
+     */
+    doubao: {
+      fetchBalanceDetailed: async (credential) =>
+        await fetchDoubaoBalanceDetailed(credential as DoubaoCredential),
+      claim: async (credential) =>
+        await claimDoubaoDailyCheckin(credential as DoubaoCredential),
+      // ⚠️ `precheckStatus: false`：本家没有独立的签到状态端点（claim 内部
+      //    直接回 inactive），骨架默认会用 buddy 式 `fetchCheckinStatus` 去打它
+      //    —— 那是一次发错端点的真实请求。与 codely / loomy 同因。
+      precheckStatus: false,
     },
 
     /**

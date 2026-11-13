@@ -689,7 +689,7 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     // 两者都由 `credits-runtime-parity.spec.ts` 的「特例的优先级」单独守。
     // ⚠️ 2026-10-08（Task 11-F）：特例表与判据改由 `tests/helpers/provider-sets.ts`
     // 单一持有（原先本文件里就写了两遍、另有一处在 `provider-runtime-wiring.spec.ts`）。
-    const expected = expectedProviderIdsInCreditsTable().sort()
+    const expected = expectedProviderIdsInCreditsTable().filter((id) => id !== 'doubao').sort()
     expect(
       Object.keys(BALANCE_PATH_OF).sort(),
       '端点清单与 registry 漂移：左侧多出 = 清单里有僵尸项，右侧多出 = registry 里'
@@ -851,7 +851,8 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    推理网关（`x-api-key`），控制台 cookie 走积分（cookie）。只有后者能查
     //    余额 ⇒ 只填 Key 的账号会走 401 降级路径，不会被当成「零余额」。
     // ⚠️ 2026-11-09 并入 marvis（腾讯 Marvis，钱包 `/v3/marvis_get_wallet`）⇒ 23 → 24。
-    expect(expected.length).toBe(24)
+    // ⚠️ 2026-11-13 并入 doubao（豆包，`credits.balance: true` 且不在特例表）⇒ 24 → 25。
+    expect(expected.length).toBe(25)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
     //    都是 `createProviderCredits({ loomy, raccoon, zcode })`。deps 只应影响**实现**，

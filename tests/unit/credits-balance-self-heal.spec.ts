@@ -819,6 +819,10 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
       //    refresh 端点（`isBaizhiRefreshable()` 恒 false）⇒ 没有「快过期」。
       //    ⚠️ 与 modelscope 同型：**余额能读 ≠ 凭据能续**，前者为真不推出后者。
       ['baizhi', '按量计费静态凭据（sk- 推理 + 控制台 cookie 读积分）、无 refresh 端点（余额能读 ≠ 凭据能续）'],
+      // ⚠️ **本 fork 独有**（豆包，2026-11-03）：浏览器 cookie 凭据（`sessionid` / `sid_tt` /
+      //    `ttwid`），上游**没有 refresh 端点**（续期只能人工重扫码，cookies 无刷新令牌）⇒
+      //    自愈链对它无事可做。与 zcode / loomy 同型：余额能读 ≠ 凭据能续。
+      ['doubao', '浏览器 cookie 凭据、上游无 refresh 端点（续期只能人工重扫码）'],
     ])
     const { literals, constants } = selfHealSetParts()
     const inSet = new Set([...literals, ...constants.map((c) => ID_OF[c] ?? c)])

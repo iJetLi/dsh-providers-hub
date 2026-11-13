@@ -19,7 +19,8 @@ describe('autoCheckinExcluded：宿主消费取决于 registry', () => {
     const excluded = PROVIDER_REGISTRY
       .filter((d) => d.autoCheckinExcluded === true)
       .map((d) => d.id)
-    expect(excluded, '当前应只有 zcode').toEqual(['zcode'])
+    // ⚠️ 2026-11-03 加 doubao（签到带 a_bogus 签名需起浏览器 ⇒ 与 zcode 同型排除）。
+    expect(excluded, '当前应只有 zcode + doubao').toEqual(['zcode', 'doubao'])
     for (const id of excluded) {
       expect(isAutoCheckinExcluded(id), `${id} 应被排除`).toBe(true)
     }

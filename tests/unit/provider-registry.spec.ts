@@ -63,7 +63,9 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
     //    签到不能做（每日临时积分领取要过验证码，实测 400
     //    `captcha binding mismatch`）⇒ 与两站的 `{balance:true,dailyCheckin:true}`
     //    只差签到一项（2026-11-02 同日二版更正：一版曾写 `balance: false`）。
-    expect(PROVIDER_REGISTRY).toHaveLength(30)
+    // ⚠️ 2026-11-13 并入 doubao（豆包）⇒ 30 → 31；它声明 `channel: false`
+    //    （纯签到渠道、无模型目录/适配器/auth 服务）⇒ channel 计数不变仍 29。
+    expect(PROVIDER_REGISTRY).toHaveLength(31)
     // ⚠️ 2026-10-22（A6）：codely **已翻 `channel: true`** —— 它的推理 / 目录 / 余额 / 签到 / 续期全部已接线，
     //    而 `channel` 在生产代码里**零个读取点** ⇒ 原来那个 `false` 只是为了让守卫不变红而选的，它同时把 codely 挡在聚合目录之外。现在真实接线已完成，翻正。
     expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(29)
@@ -367,7 +369,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     // - magicrew（2026-10-29）：**与 astudio 同族** —— 零 `updateModelRateLimit` 写点、
   //   也不在 `probeById` 里 ⇒「重测 / 重置」两个按钮点下去是**零请求、零清除**
   //   （`account.retest` 走 `adapterForProbe` 会抛「magicrew 没有探测适配器」）。
-  expect(off).toEqual(['astudio', 'autoclaw', 'autoclawintl', 'gemini', 'loomy', 'magicrew', 'magicrewintl', 'modelscope', 'officeace'])
+  expect(off).toEqual(['astudio', 'autoclaw', 'autoclawintl', 'doubao', 'gemini', 'loomy', 'magicrew', 'magicrewintl', 'modelscope', 'officeace'])
   })
 
   it('accountTest === true 恰好是 gemini', () => {
@@ -407,7 +409,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
 
   it('autoCheckinExcluded 恰好是 zcode', () => {
     const x = PROVIDER_REGISTRY.filter((d) => d.autoCheckinExcluded === true).map((d) => d.id)
-    expect(x).toEqual(['zcode'])
+    expect(x).toEqual(['zcode', 'doubao'])
   })
 
   it('channel === true 的 20 家都有 settingsNamespace 除了 opencode', () => {
