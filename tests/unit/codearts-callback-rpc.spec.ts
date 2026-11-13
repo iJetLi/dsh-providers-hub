@@ -37,9 +37,19 @@ interface RpcEnvelope {
 function registerSubmitEndpoints(outcome: { ok: boolean; message?: string }): {
   call: (method: string, payload: unknown) => Promise<RpcEnvelope>
   submitted: unknown[]
+  /**
+   * 让「在途登录」的 `result` **落定**。
+   *
+   * ⚠️ 不给这个口子的话，`result` 是永不落定的 Promise ⇒ RPC 层的
+   * `.finally(() => pendingManualCallbacks.delete(id))` **永不执行** ⇒
+   * 清理腿在任何用例里都是死代码（PR #58 对抗审计 M11a/M11b 实证：
+   * 删掉两处 `.finally` 都是 13 条全绿）。
+   */
+  settle: () => void
 } {
   let handler: Handler | undefined
   const submitted: unknown[] = []
+  let settle: () => void = () => {}
 
   const makeAuth = (id: string) => ({
     async startLogin(): Promise<{
@@ -50,7 +60,10 @@ function registerSubmitEndpoints(outcome: { ok: boolean; message?: string }): {
     }> {
       return {
         loginUrl: `https://example.test/${id}/login`,
-        result: new Promise<never>(() => {}),
+        result: new Promise<never>((_resolve) => {
+          // 只记录句柄，不真的 resolve 成业务值：RPC 层只关心「有没有落定」。
+          settle = () => { _resolve(undefined as never) }
+        }),
         close: async () => {},
         submitManualCallback: (raw: unknown) => {
           submitted.push(raw)
@@ -126,7 +139,11 @@ function registerSubmitEndpoints(outcome: { ok: boolean; message?: string }): {
     return body.result
   }
 
-  return { call, submitted }
+  // ⚠️ 必须包一层：`settle` 在 `startLogin()` 被调用时才被赋值，
+  //    直接 `return { …, settle }` 会在**返回那一刻**把默认的 no-op 存进对象，
+  //    之后 `startLogin` 再怎么改局部变量都到不了调用方（我第一版就这么写的，
+  //    表现为「settle 调了但 .finally 永不执行」）。
+  return { call, submitted, settle: () => settle() }
 }
 
 /** 起一轮 codearts 登录，返回它发出的 `accountId`（在途表现已登记）。 */
@@ -190,4 +207,49 @@ describe('account.submitCallback（手动粘贴回调链接，PR #57 对抗审�
     })
     expect(response).toEqual({ ok: true, value: { accepted: true } })
   })
+  /**
+   * ★★ TRAE 分支（PR #58）：`account.submitCallback` 现在服务两家，
+   * 「TRAE 分支漏了 `pendingManualCallbacks.set`」与「codearts 分支」是
+   * **两处独立代码**，只测 codearts 抓不到 TRAE 那处。
+   */
+  it('★★ trae 分支也必须在途表登记（删 TRAE 分支的 set 就红）', async () => {
+    const { call, submitted } = registerSubmitEndpoints({ ok: true })
+    const created = await call('account.create', { provider: 'trae' })
+    expect(created.ok).toBe(true)
+    const accountId = (created.value as { accountId?: unknown } | undefined)?.accountId
+    expect(typeof accountId).toBe('string')
+    const url = 'http://127.0.0.1:18080/authorize?refreshToken=RT-x&userInfo=%7B%7D&userJwt=%7B%7D'
+    const response = await call('account.submitCallback', { accountId, callbackUrl: url })
+    expect(response).toEqual({ ok: true, value: { accepted: true } })
+    // 原文必须真的交给 TRAE 的登录服务（不是被 codearts 那个闭包接走）。
+    expect(submitted).toEqual([url])
+  })
+  /**
+   * ★★ 在途表必须随登录结束被清掉（PR #58 对抗审计 M11a / M11b）。
+   *
+   * 两处 `.finally(() => pendingManualCallbacks.delete(id))` 是**两段独立代码**
+   * （codearts 分支 / trae 分支），所以用 `it.each` 各跑一遍 —— 只测一家
+   * 抓不到另一家漏写。
+   */
+  it.each(['codearts', 'trae'] as const)(
+    '★★ %s：登录落定后必须在途表条目被清掉（删该分支的 .finally(delete) 就红）',
+    async (provider) => {
+      const { call, settle } = registerSubmitEndpoints({ ok: true })
+      const created = await call('account.create', { provider })
+      expect(created.ok).toBe(true)
+      const accountId = (created.value as { accountId?: unknown } | undefined)?.accountId
+      expect(typeof accountId).toBe('string')
+      settle()
+      // 让 `.finally` 所在的微任务链跑完（then → catch → finally 至少 3 跳）；
+      // 10ms 是实测够用的余量（纯 setTimeout(0) 在本机偶发不足）。
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      const response = await call('account.submitCallback', {
+        accountId,
+        callbackUrl: 'http://127.0.0.1:18080/authorize?refreshToken=RT-late',
+      })
+      expect(response.ok).toBe(false)
+      expect(response.error?.message ?? '').toContain('这轮登录已经结束')
+    },
+  )
 })
+

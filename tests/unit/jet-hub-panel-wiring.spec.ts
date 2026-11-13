@@ -1224,3 +1224,163 @@ describe('「手动粘贴回调链接」的客户端接线（codearts，PR #57 �
     expect(callbackInput(), '点了「取消」输入框还在 ⇒ 清理出口失效').toBeUndefined()
   })
 })
+/**
+ * ★★ TRAE 的手动回调链接接线（PR #58 正向审计 P1-b）。
+ *
+ * ## 为什么必须单独一组
+ *
+ * 本 PR 只改了三个字面量（`showCodeartsCallback` 的 `|| provider === 'trae'`、
+ * codearts 分支的条件、placeholder 的三元），而 #57 那 7 条用例**全部固定
+ * `provider = 'codearts'`** ⇒ 把 `|| provider === 'trae'` 删掉仍然全绿：
+ * - `jet-hub-structure-ast.spec.ts` 只认「`showCodeartsCallback ?` 这一条子项存在」，
+ *   字面量还在 ⇒ 它抓不到「trae 分支被删」；
+ * - 因此**必须**用真渲染 + 真点「新建账号」+ 真粘链接，才能让「trae 面板根本
+ *   不出输入框」这个变异变红。
+ *
+ * ## 与 codearts 组的差异
+ *
+ * TRAE 的链接形态是 `/authorize?refreshToken=…&userInfo=…&userJwt=…`（token
+ * 直传，不是 OAuth code），placeholder 也据此切换 —— 两条断言都要打到。
+ */
+describe('「手动粘贴回调链接」的客户端接线（trae，PR #58 审计 P1-b）', () => {
+  type Box = { type: unknown; props: Record<string, unknown> | null; children?: unknown[] }
+  const boxes = (): Box[] => elements as Box[]
+  const byLabel = (label: string): Box | undefined =>
+    boxes().find((e) => (e.props as Record<string, unknown> | null)?.['aria-label'] === label)
+  const callbackInput = (): Box | undefined =>
+    boxes().find((e) => {
+      const props = e.props as Record<string, unknown> | null
+      return props?.className === 'dim-jh-input'
+        && typeof props?.placeholder === 'string'
+        && props.placeholder.includes('127.0.0.1')
+    })
+  const buttonWithText = (needle: string): Box | undefined =>
+    boxes().find((e) => {
+      const props = e.props as Record<string, unknown> | null
+      const text = (e.children ?? []).map((child) => String(child)).join('')
+      return props?.className === 'dim-jh-btn' && text.includes(needle)
+    })
+
+  function withWindow<T>(
+    impl: { confirm: (message: string) => boolean; open: (...args: unknown[]) => unknown },
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const host = globalThis as unknown as { window?: unknown; confirm?: unknown; alert?: unknown }
+    const previousWindow = host.window
+    const previousConfirm = host.confirm
+    const previousAlert = host.alert
+    host.window = impl
+    host.confirm = (message: string) => impl.confirm(message)
+    host.alert = () => {}
+    return fn().finally(() => {
+      host.window = previousWindow
+      host.confirm = previousConfirm
+      host.alert = previousAlert
+    })
+  }
+
+  /** 同一次挂载内的重渲染（只清渲染产物，保留 hooks 槽位）。 */
+  async function rerenderTrae(rpcCall: (method: string, payload?: unknown) => Promise<unknown>): Promise<void> {
+    elements = []
+    writes = []
+    callbacks = []
+    cursor = 0
+    const mod = await import('../../plugin-src/client/jet-hub.js')
+    const panel = (mod as unknown as { __providersPanelForTest?: (props: unknown) => unknown }).__providersPanelForTest
+    if (typeof panel !== 'function') throw new Error('__providersPanelForTest 未导出')
+    panel({ provider: 'trae', rpcCall })
+  }
+
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  const TRAE_CALLBACK_URL = 'http://127.0.0.1:18080/authorize?refreshToken=RT-abc&userInfo=%7B%7D'
+
+  interface RpcEntry { method: string; payload?: unknown }
+  type Rpc = (method: string, payload?: unknown) => Promise<unknown>
+
+  function makeRpc(calls: RpcEntry[], submitCallback: () => Promise<unknown>): Rpc {
+    return async (method, payload) => {
+      calls.push({ method, payload })
+      if (method === 'account.create') {
+        return {
+          ok: true,
+          accountId: 'trae-spec-1',
+          loginUrl: 'https://www.trae.cn/authorize?state=AAA',
+          incognitoOpened: true,
+        }
+      }
+      if (method === 'account.submitCallback') return submitCallback()
+      return { ok: true, order: [], statuses: {} }
+    }
+  }
+
+  const intervals: Array<ReturnType<typeof setInterval>> = []
+  let realSetInterval: typeof globalThis.setInterval
+  beforeAll(() => {
+    realSetInterval = globalThis.setInterval
+    globalThis.setInterval = ((fn: () => void, ms?: number, ...args: unknown[]) => {
+      const id = realSetInterval(fn, ms, ...args)
+      intervals.push(id)
+      return id
+    }) as typeof globalThis.setInterval
+  })
+  afterEach(() => {
+    for (const id of intervals.splice(0)) clearInterval(id)
+  })
+  afterAll(() => {
+    globalThis.setInterval = realSetInterval
+  })
+
+  it('★★ trae 面板点「新建账号」后必须出现回调链接输入框，且 placeholder 是 /authorize 形态', async () => {
+    const calls: RpcEntry[] = []
+    const rpcCall = makeRpc(calls, async () => ({ ok: true, value: { accepted: true } }))
+    const r = await renderPanel(rpcCall, 'trae')
+    expect(r.ok, r.ok ? '' : `渲染抛错：${String((r as { error: unknown }).error)}`).toBe(true)
+
+    const button = byLabel('新建账号')
+    expect(button, 'trae 面板没有「新建账号」按钮').toBeDefined()
+    await withWindow({ confirm: () => false, open: () => ({ closed: false }) }, async () => {
+      await ((button?.props as Record<string, unknown> | null)?.['onClick'] as (() => unknown) | undefined)?.()
+      await flush()
+    })
+    await rerenderTrae(rpcCall)
+    await flush()
+
+    const input = callbackInput()
+    expect(input, 'trae 点「新建账号」后没有渲染回调链接输入框（showCodeartsCallback 的 trae 分支被删？）').toBeDefined()
+    expect(String((input?.props as Record<string, unknown> | null)?.['placeholder'])).toContain('/authorize?refreshToken=')
+  })
+
+  it('★★ trae 粘贴链接后点提交，必须真的发出 account.submitCallback 且 payload 是粘贴原文', async () => {
+    const calls: RpcEntry[] = []
+    const rpcCall = makeRpc(calls, async () => ({ ok: true, value: { accepted: true } }))
+    const r = await renderPanel(rpcCall, 'trae')
+    expect(r.ok).toBe(true)
+
+    const button = byLabel('新建账号')
+    await withWindow({ confirm: () => false, open: () => ({ closed: false }) }, async () => {
+      await ((button?.props as Record<string, unknown> | null)?.['onClick'] as (() => unknown) | undefined)?.()
+      await flush()
+    })
+    await rerenderTrae(rpcCall)
+    await flush()
+
+    const input = callbackInput()
+    const onChange = (input?.props as Record<string, unknown> | null)?.['onChange'] as ((event: unknown) => unknown) | undefined
+    expect(typeof onChange).toBe('function')
+    await (onChange as (event: unknown) => unknown)({ target: { value: TRAE_CALLBACK_URL } })
+    await rerenderTrae(rpcCall)
+    await flush()
+
+    const submit = buttonWithText('提交回调链接')
+    expect(submit, '没有「提交回调链接」按钮').toBeDefined()
+    await ((submit?.props as Record<string, unknown> | null)?.['onClick'] as (() => unknown) | undefined)?.()
+    await flush()
+
+    const submitted = calls.find((entry) => entry.method === 'account.submitCallback')
+    expect(submitted, 'trae 的「提交回调链接」没有发出 account.submitCallback').toBeDefined()
+    expect(submitted?.payload).toEqual({ accountId: 'trae-spec-1', callbackUrl: TRAE_CALLBACK_URL })
+  })
+})

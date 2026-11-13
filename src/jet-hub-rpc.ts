@@ -3223,27 +3223,28 @@ function registerJetHubEndpoints(
   const pendingOfficeAceState = new Map<string, PendingOfficeAceState>()
 
   /**
-   * CodeArts（华为云）**手动回调链接**的在途表：占位账号 id → 本轮的提交入口。
+   * **手动回调链接**的在途表：占位账号 id → 本轮的提交入口。
    *
    * ## 为什么需要它
    *
-   * CodeArts 的 OAuth 回调被定向到宿主本机的
-   * `http://127.0.0.1:<port>/oauth/callback?code=…`。用户在**另一台设备**
-   * （常见：手机）上完成登录时，那个浏览器打不开宿主的 `127.0.0.1` ⇒
-   * 跳转失败，但地址栏里留下一条**合法**的回调链接。
+   * 两家 provider 的 OAuth 回调都被定向到宿主本机
+   * （codearts `http://127.0.0.1:<port>/oauth/callback?code=…`、
+   * trae `http://127.0.0.1:<port>/authorize?refreshToken=…`）。用户在
+   * **另一台设备**（常见：手机）上完成登录时，那个浏览器打不开宿主的
+   * `127.0.0.1` ⇒ 跳转失败，但地址栏里留下一条**合法**的回调链接。
    * `account.submitCallback` 把这条链接交回来，由这里存下的**同一轮**收码器
-   * 完成换取 —— 端口 / PKCE / DPoP 都是授权时那一份，故 `redirect_uri` 天然一致。
+   * 完成换取 —— 端口 / PKCE / DPoP / machineId 都是授权时那一份。
    *
    * ⚠️ 与 `pendingOfficeAceState` 同一纪律：**只在本进程内存里**。
    *    宿主重启后这张表空了 ⇒ `account.submitCallback` 报「会话已失效」，
    *    前端据此提示用户重建账号，而不是让用户对着一条永远用不上的链接反复粘贴。
    *
-   * ⚠️ 只服务 `provider === 'codearts'`：其余 provider 的登录分支一个字节都不碰。
+   * ⚠️ **值的类型就是「提交入口」本身**，不带 provider 字段：转调在**登记**
+   *    那一刻就绑定好了（各 provider 分支把自己那个闭包塞进来），读取侧不需要
+   *    再判一次 provider —— 判了也只能得到「登记时已知」的同一答案，属于死字段
+   *    （PR #58 正向审计）。
    */
-  const pendingManualCallbacks = new Map<string, {
-    provider: string
-    submit: (raw: unknown) => ManualCallbackSubmitResult
-  }>()
+  const pendingManualCallbacks = new Map<string, (raw: unknown) => ManualCallbackSubmitResult>()
 
   /**
    * OfficeAce 登录中间态的有效期（毫秒）。
@@ -5151,11 +5152,18 @@ function registerJetHubEndpoints(
       }
 
       /**
-       * 手动提交 CodeArts（华为云）的 OAuth 回调链接。
+       * 手动提交回调链接（codearts 华为云 / trae 字节跳动）。
        *
-       * 仅在 `account.create` 的 codearts 分支登记过的占位账号可提交；
-       * 链接里**必须**带本机回调端口（`redirect_uri` 要与授权时逐字一致），
-       * 解析由 `login.ts` 的 `parseManualCallbackUrl` 一处完成。
+       * 仅在 `account.create` 的**对应 provider 分支**登记过的占位账号可提交：
+       * - codearts：链接里必须带本机回调端口（`redirect_uri` 要与授权时逐字一致），
+       *   解析由 `login.ts` 的 `parseManualCallbackUrl` 一处完成；
+       * - trae：回调**直传 token 材料**（`refreshToken` / `userInfo` / `userJwt`），
+       *   交换不带 `redirect_uri` ⇒ 端口不一致不影响，解析由
+       *   `trae-oauth.ts` 的 `normalizeTraeManualCallbackText` +
+       *   `parseTraeCallbackDetailed` 完成。
+       *
+       * 转调哪个提交入口在**登记时**就绑定好了（见 `pendingManualCallbacks`），
+       * 本 case 不需要再判 provider。
        *
        * ⚠️ 失败一律 `ok:false` + 可读原因，**不抛** ——
        *    用户输入错误不该让宿主进程异常退出。
@@ -5178,7 +5186,7 @@ function registerJetHubEndpoints(
             },
           }
         }
-        const outcome = pending.submit(callbackUrl)
+        const outcome = pending(callbackUrl)
         if (outcome.ok !== true) {
           return {
             ok: false,
@@ -6167,7 +6175,7 @@ function registerJetHubEndpoints(
           // 登记本轮的「手动回调链接」提交入口。
           // ⚠️ 必须在 `started` 到手后、**返回 accountId 之前**登记：
           //    客户端拿到 accountId 就可能立刻提交，中间不能有空窗。
-          pendingManualCallbacks.set(id, { provider: 'codearts', submit: started.submitManualCallback })
+          pendingManualCallbacks.set(id, started.submitManualCallback)
 
           // ⚠️⚠️ **宿主侧直接拉起无痕窗口**（2026-10-21，用户报障「新建账号会缓存
           //    上一个账号的登录信息并自动登录」）：与 OfficeAce（2026-10-13）**完全
@@ -6399,7 +6407,7 @@ function registerJetHubEndpoints(
 
           // 登记本轮的「手动回调链接」提交入口（与 codearts 同一端点、同一张表）。
           // ⚠️ 必须在返回 accountId 之前登记：客户端拿到 accountId 就可能立刻提交。
-          pendingManualCallbacks.set(id, { provider: TRAE.id, submit: started.submitManualCallback })
+          pendingManualCallbacks.set(id, started.submitManualCallback)
           return { ok: true, value: { accountId: id, loginUrl: started.loginUrl } }
         } else if (provider === CLINE.id) {
           // Cline 是 **WorkOS 设备码轮询**登录（见 src/cline-oauth.ts）：

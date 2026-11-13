@@ -519,6 +519,49 @@ function listenOrReject(
   })
 }
 
+/** 回调服务器只绑回环地址（见 `listenWithFallback`）⇒ 手动提交也只接受回环 host。 */
+const TRAE_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
+/**
+ * 手动粘贴文本里的 host（无 authority 的相对路径 / 裸 query 时返回 `undefined`）。
+ *
+ * `parseTraeCallbackDetailed` 对相对路径会补 `http://127.0.0.1` 再解析，
+ * 所以这里只关心「整条 URL」形态 —— 用于把「粘错了页面」提前判掉。
+ */
+function manualCallbackHostOf(text: string): string | undefined {
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return undefined
+  try {
+    return new URL(text).hostname
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 把用户粘的文本归一成 `parseTraeCallbackDetailed` 能吃的形态。
+ *
+ * 四类输入（2026-11-13 PR #58 审计实测）：
+ * 1. 完整 URL（`http://127.0.0.1:50000/authorize?…`）⇒ 原样；
+ * 2. 相对路径（`/authorize?…`）⇒ 原样（解析器会补 `http://127.0.0.1`）；
+ * 3. 裸 query（`?refreshToken=…` / `refreshToken=…`）⇒ 补成 `/authorize?…`；
+ * 4. **无 scheme 的完整 URL（`127.0.0.1:50000/authorize?…`）⇒ 补 `http://`**。
+ *
+ * ⚠️ 第 4 类曾落进第 3 类 ⇒ 整条串被当成**参数名**
+ * （`/authorize?127.0.0.1:50000/authorize?refreshToken=…`）⇒ 解析器报
+ * 「回调未携带 refreshToken / userJwt.Token / code」。用户粘的明明是一条
+ * 合法链接，却被告知缺参数，且无法自行诊断 —— 本轮审计实测复现。
+ *
+ * ⚠️ 判据只看「`host:port` 形态的 authority + 可选路径/查询」，**不**用
+ * `^[^/?#]+:\d+` 那种宽口径：后者会把裸 query 里的 `code=123:456` 也当成
+ * authority（`code=123` + 端口 `456`），反而给出「你粘的是 code=123 的地址」。
+ */
+export function normalizeTraeManualCallbackText(text: string): string {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return text
+  if (text.startsWith('/authorize')) return text
+  if (/^[A-Za-z0-9.\-\[\]:]+:\d+(?:[/?#]|$)/.test(text)) return `http://${text}`
+  return `/authorize?${text.replace(/^\?/, '')}`
+}
+
 /**
  * 启动回调服务器：优先用 `preferredPort`，被占用时回退到系统分配的随机端口。
  *
@@ -633,6 +676,13 @@ export async function startTraeLoginFlow(
     rejectResult = reject
     resultTimer = setTimeout(() => {
       server.close()
+      // ⚠️ 超时也要**落定「本轮已被消费」标志**：否则用户在超时之后粘回链接时
+      //    `settledRef.settled` 仍是 false ⇒ 会真的发一次 ExchangeToken
+      //    （refreshToken 轮换是**破坏性**的：第二次必失败），而 resolve 已被
+      //    丢弃 ⇒ 用户看到「提交成功」却永远等不到账号。
+      //    RPC 层的 `.finally` 会删条目兜底，但那条兜底依赖微任务时序，
+      //    不能当判据（PR #58 正向审计 P3）。
+      settledRef.settled = true
       reject(new Error('TRAE 登录超时'))
     }, TRAE_LOGIN_TIMEOUT_MS)
     // 不让登录超时定时器**独占事件循环**：它只是一个兜底窗口（默认 10 分钟），
@@ -744,11 +794,21 @@ export async function startTraeLoginFlow(
         message: '回调链接是空的。请把手机（或另一台电脑）浏览器地址栏里的整条链接复制过来粘贴。',
       }
     }
-    // 允许整条 URL 或裸 query（/authorize?… 与 ?refreshToken=… 都接受）。
+    // 允许整条 URL / 相对路径 / 裸 query（四类形态见 normalizeTraeManualCallbackText）。
     const text = raw.trim()
-    const normalized = /^https?:\/\//i.test(text) || text.startsWith('/authorize')
-      ? text
-      : `/authorize?${text.replace(/^\?/, '')}`
+    const normalized = normalizeTraeManualCallbackText(text)
+    // ⚠️ 回调服务器只绑 127.0.0.1（见 listenWithFallback 的注释），因此粘贴的
+    //    链接若指向别的 host，一定是「粘错了页面」（例如授权页地址）。这里给
+    //    明确原因，而不是一路走到 ExchangeToken 才报一句看不懂的失败。
+    const host = manualCallbackHostOf(normalized)
+    if (host !== undefined && !TRAE_LOOPBACK_HOSTS.has(host)) {
+      return {
+        ok: false,
+        message: '回调地址应当指向宿主本机（127.0.0.1 / localhost / [::1]）—— '
+          + `你粘的是 ${host} 的地址，多半是授权页而不是授权完成后的回调页。`
+          + '请在授权完成后复制浏览器地址栏里的那条链接。',
+      }
+    }
     // ⚠️ parseTraeCallbackDetailed 只看 query 串；「127.0.0.1 拒绝连接」的
     //    那一页地址栏里就是完整 URL，原样传入即可。
     const parsed = parseTraeCallbackDetailed(normalized)
