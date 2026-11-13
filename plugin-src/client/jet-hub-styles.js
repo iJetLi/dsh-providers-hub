@@ -837,6 +837,24 @@ const STYLES = `
   color: var(--dsw-alias-warning, #d48806);
   background: color-mix(in srgb, var(--dsw-alias-warning, #d48806) 12%, transparent);
 }
+/* ── 「需福利包」角标（Gitee issue IKJOF7）──
+   标在「只由 benefit（免费额度）通道提供」的模型上：这类模型不带 maas_type 头
+   会回 002002009.404，纯积分制账号则先被 4004.200 拒、降级重试后仍是 404 ——
+   用户看到的最终错误与「模型名写错」同形，看不出真正原因。
+   ⚠️ 与「已下架」**必须视觉可区分**：已下架是琥珀色 + 整行左侧竖条 + 名字变琥珀
+   （那是「上游拿掉了」）；本角标是**信息性**的，只染这一枚标签、不动整行、不动
+   名字与开关 —— 用户仍可正常开关它（换账号后就能用）。
+   ⚠️ 本块内禁止出现反引号（样式是模板字符串，注释里的反引号会提前闭合模板）。 */
+.dim-jh-modelBenefitOnly {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary, #8f959e);
+  background: color-mix(in srgb, var(--dsw-alias-label-tertiary, #8f959e) 14%, transparent);
+}
 .dim-jh-modelRestore {
   flex: none;
   padding: 2px 10px;

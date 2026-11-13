@@ -1494,6 +1494,24 @@ export interface RpcModelListEntry {
    * 恢复路径。这是「误判代价不对称」的必然要求：能藏，但必须能找回。
    */
   dead: boolean
+  /**
+   * `true` = 该模型**只由 benefit（免费额度）通道提供**（Gitee issue IKJOF7）。
+   *
+   * ⚠️ **缺失 = 不该下这个判断**，既不是 `false` 也不是「确认不需要福利包」：
+   * 判据是远端 `opengw gateway/config` 的 benefit 集合，而冷缓存 / 远端降级时
+   * 那份集合是「**未确认**」。把「未确认」渲染成任何一种标记都会在冷启动那一帧
+   * 给每条模型挂错提示（与 `dead-model-store.ts` 的「拿读不到反推已下架」同型）。
+   *
+   * ⚠️ 只有 `codearts` 会写这个字段（benefit 是它独占的概念），其余供应商恒缺失。
+   *
+   * ## 为什么值得占一个字段
+   *
+   * 这类模型不带 `maas_type: benefit` 头会回 `002002009.404 The model is not
+   * registered`，而纯积分制账号没有福利包 ⇒ 最终错误与「模型名写错」**同形**，
+   * 用户看不出真正原因是「要走福利通道」。设置页标一句「需福利包」就把这条
+   * 因果讲清楚了。
+   */
+  benefitOnly?: boolean
 }
 
 /** RPC: 列出某 provider 的模型响应 */

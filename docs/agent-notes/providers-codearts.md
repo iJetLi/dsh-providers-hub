@@ -814,3 +814,116 @@ PR #175 把「SSE 流内 `TM.00001041`」从「进入 10s 重试自愈」改成�
   ⚠️ **如实登记一处无牙**：「解不出时回落 `account.id`」这个变异**无牙**（27 条全绿）——
   因为占位昵称本来就是 id，变异态与修复态输出**逐字节相同**。不为它编恒真用例。
 
+## ⚠️⚠️ 「需福利包」角标：判据必须**三态**，写成 `!== false` 会让整页模型都被标（Gitee IKJOF7，2026-11-13）
+
+### 报障与症状
+
+issue「积分制账号下 `maas_type: benefit` 被拒时，去头重试兜底在宿主进程内不生效」。
+其中**唯一真正落在本仓**的那一条是：`glm-5.3-flash` 这类模型在纯积分制账号上
+永远不可用，但**报错与「模型名写错」逐字节同形**：
+
+```text
+① 带 maas_type: benefit  → InferHub.4004.200（积分制账号没有福利包）
+② 自动去头重试            → 002002009.404 The model is not registered
+```
+
+② 那句 404 的**真实含义是「这个模型只按 benefit 通道注册，你没有福利包」**，但字面
+读起来像「模型不存在」⇒ 用户去改名、换账号、报 bug，三条路都走不通。
+
+⚠️ 判据只能来自**远端** `opengw gateway/config` 的 `result.models`（`src/models.ts` 的
+`fetchCodeArtsRemoteModels` → `benefitMemoryCache`）。2026-10-26 本机复测：同一账号下
+`deepseek-v4.1-flash` 不带该头出流正常、带上即 `4004.200`；`glm-5.3-flash` 不带该头
+`002002009.404` —— **两者都属于 benefit 通道，但只有后者「离开 benefit 就活不了」**。
+**不许再造静态表**（已因静态表腐坏删过两轮）。
+
+### ⚠️⚠️ 核心陷阱：`isCodeArtsBenefitModelKnown` 是**二分**的，展示层需要**三态**
+
+```ts
+// 旧实现：未确认 与 确认不在集合里 都返回 false —— 展示层拿它当判据就会撒谎
+export function isCodeArtsBenefitModelKnown(model: string): boolean {
+  if (benefitMemoryCache === undefined) benefitMemoryCache = loadBenefitCache()
+  return benefitMemoryCache !== undefined && benefitMemoryCache.includes(model)
+}
+```
+
+冷启动 / 远端降级时 `benefitMemoryCache` 是 `undefined`。若客户端写成
+`model.benefitOnly !== false` / `|| false` / `Boolean(...)`，那一帧**整页每一个模型**
+都会挂上「需福利包」—— 与 `dead-model-store.ts` 里「拿读不到反推已下架」是**同一条
+禁令**（`docs/agent-notes/client-ui.md` 已记）。
+
+修法：加一个三态读取口，让二分判据**委托**它，两套判据共用同一份缓存（避免
+「刚拉完远端目录」那一瞬间分叉）：
+
+```ts
+export function codeArtsBenefitModelIds(): readonly string[] | undefined   // undefined = 未确认
+export function isCodeArtsBenefitModelKnown(model: string): boolean {      // 门禁层用二分
+  const ids = codeArtsBenefitModelIds()
+  return ids !== undefined && ids.includes(model)
+}
+```
+
+### 接线
+
+| 层 | 契约 |
+|---|---|
+| `src/jet-hub-rpc.ts` 的 `model.list` | `const benefitOnlyIds = req.provider === 'codearts' ? codeArtsBenefitModelIds() : undefined`；**只有确认命中才写 `{ benefitOnly: true }`**；未确认 / 确认不在 / 非 codearts ⇒ 字段**彻底缺席** |
+| `src/types.ts` 的 `RpcModelListEntry` | `benefitOnly?: boolean` —— **缺失 = 不该下这个判断**（既不是 `false`，也不是「确认不需要」）。与既有的 `isFree?: boolean` 同一约定：「未知不编造」 |
+| `plugin-src/client/jet-hub.js` 的 `ModelToggle` | `const benefitOnly = model.benefitOnly === true;` —— **只能是 `=== true`** |
+
+`!== false` / `?? false` / `Boolean()` / `'benefitOnly' in model` 四种写法里，
+前两种会把「未确认」渲染成角标，后两种对脏数据（`'true'` / `1` / `{}`）放行。
+
+### 为什么是**标记**不是**过滤/禁用**
+
+| 方案 | 为什么不行 |
+|---|---|
+| 不渲染这类模型 | 账号今天可能领到福利包 ⇒ 用户失去「换个账号立刻可用」的路径 |
+| 渲染但禁用开关 | 同上，且违背 `rateLimit: false` 那套「禁用要能说清为什么」的既有取向 |
+| 渲染 + 角标 + `title` 讲清因果 | ✅ 用户能自己判断「是账号问题还是模型问题」 |
+
+### 视觉
+
+`.dim-jh-modelBenefitOnly`：灰底灰字小角标，**只染这一枚标签、不动整行、不禁用开关**。
+必须与「已下架」（`.dim-jh-modelDead`）**视觉可区分** —— 后者是琥珀色 + 整行左侧竖条 +
+名字变琥珀，含义是「系统判定上游拿掉了，只能『重新显示』」；本角标含义是「换账号就能用」。
+两者可同时成立，**都不许丢**。
+
+⚠️ 该样式块在 `plugin-src/client/jet-hub-styles.js` 的模板字符串里 —— **注释里禁止反引号**
+（会提前终止字符串，本仓已踩过）。
+
+### 守卫（为什么必须真渲染）
+
+`tests/unit/model-benefit-hint.spec.ts`（7 条）真调 `__modelToggleForTest`：
+
+- ★★★ 字段缺席（未确认）⇒ **不渲染** ← 本文件唯一的命门
+- ★★★ 显式 `false` ⇒ 不渲染；脏数据 `'true'` / `1` / `{}` / `[]` ⇒ 不渲染
+- ★★★ `true` ⇒ 恰好一枚，文案 `需福利包`，`title` 同时含 `maas_type` / `福利包` / `自动` / `002002009.404`
+- ★★ 角标是标记不是门禁（checkbox 仍 1 个、`disabled === false`、`onChange` 照常触发 `onToggle`）
+- ★★ 与「已下架」共存（两枚角标都在）
+- ★ 角标排在 `dim-jh-modelId` 之前（窄面板下不被 ellipsis 先裁掉）
+
+`tests/unit/jet-hub-rpc.spec.ts` 的 `★ model.list 的 benefitOnly`（4 条）打服务端三态：
+命中 ⇒ 只有那一条带 `true` 且其余字段**缺席**；未确认 ⇒ 一条都不标（并断言目录非空，
+证明「不是没模型才没标记」）；确认空集合 ⇒ 不标；**非 codearts（`trae`）恒不带该字段**。
+
+⚠️ 源码文本断言在这里**完全无效**：`!== false` 与 `=== true` 在源码里都是「一个比较」，
+正则分辨不出来；只有「未知状态必须不渲染」这一格能区分。
+
+### 变异验证（4/4 有牙）
+
+| 变异 | 红因（原文） |
+|---|---|
+| 服务端漏掉 `includes` 判据（确认过集合就给每个模型打标） | `非 benefit 模型不许带该字段: expected true to be false` |
+| 服务端无条件 `true` | `未确认时整页模型都会被误标 —— 这是本字段最危险的错法: expected [ … ] to deeply equal []` |
+| 服务端去掉 `req.provider === 'codearts'` | `benefit 概念只属于 codearts: expected [ { id: 'glm-5.3-flash', …(4) } ] to deeply equal []` |
+| 客户端 `=== true` → `!== false` | `未确认时不许挂角标: expected [ { type: 'span', …(2) } ] to have a length of +0 but got 1` |
+
+### 未修已登记（同一个 issue 的另外三项）
+
+- **benefit 自愈两处零日志**：`src/llm-adapter.ts` 的「领一次 → 去头 → 补头」全程不写
+  日志，线上无法判断用户走到了哪一步。2026-10-05 的诊断分支 `16e246e` 从未合入 master
+  （`git merge-base --is-ancestor 16e246e HEAD` = NO）。
+- **`instanceof LlmError` 跨模块 class 分裂**：**已证伪**，不是成因 —— 抛点
+  `src/llm-adapter.ts:3259` 与判定点 `:2648` 在**同一文件、同一 ESM 绑定**；若是类身份
+  分裂，同文件的 `class CodeArtsAdapter extends LlmAdapter` 会先崩。且 reporter 自己在
+  2026-10-15 已回「不是，我的华为账号出问题了」。

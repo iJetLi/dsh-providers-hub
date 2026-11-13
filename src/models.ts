@@ -1038,6 +1038,27 @@ export function setBenefitMemoryCache(ids: string[] | undefined): void {
  * 一次。因此**没有静态表也不会卡死新模型**，只是首次多一轮往返。
  */
 export function isCodeArtsBenefitModelKnown(model: string): boolean {
+  const ids = codeArtsBenefitModelIds()
+  return ids !== undefined && ids.includes(model)
+}
+
+/**
+ * benefit（免费额度）模型 id 集合的**三态**读取（`undefined` = 未确认）。
+ *
+ * ## 为什么必须能区分「未确认」与「确认无」
+ *
+ * {@link isCodeArtsBenefitModelKnown} 对「未确认」与「确认无」都返回 `false` ——
+ * 那个二分对**要不要带头**是正确的默认（不带，靠自愈补头），但**不能**用来
+ * 给用户下判断。设置页要标「该模型需要福利包」时，若拿 `false` 当判据，
+ * 冷缓存（还没拉到远端目录）下**每一条模型都会被标上**，用户会以为全站模型
+ * 都不可用 —— 与 `dead-model-store.ts` 里「拿读不到反推已下架」是同一条禁令。
+ *
+ * ⇒ 展示层的判据必须是本函数（三态），门禁层才用二分的那两个。
+ *
+ * ⚠️ 两个函数**共用同一份内存/磁盘缓存**（本函数是唯一读取口），不得各读一份：
+ * 两套判据会在「刚拉完远端目录」的那一瞬间分叉。
+ */
+export function codeArtsBenefitModelIds(): readonly string[] | undefined {
   if (benefitMemoryCache === undefined) benefitMemoryCache = loadBenefitCache()
-  return benefitMemoryCache !== undefined && benefitMemoryCache.includes(model)
+  return benefitMemoryCache
 }

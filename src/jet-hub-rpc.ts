@@ -22,6 +22,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { dedupeMinimaxAccount } from './minimax-dedup.js'
+import { codeArtsBenefitModelIds } from './models.js'
 import { openIncognitoWindow, type ManualCallbackSubmitResult } from './login.js'
 import { type ManualTraeCallbackSubmitResult } from './trae-oauth.js'
 import { AccountPool, asProxyText, isPolicyBlockedAccount } from './account-pool.js'
@@ -10084,6 +10085,36 @@ function registerJetHubEndpoints(
             if (!known.has(id)) catalog.push({ id, name: id })
           }
         }
+        /**
+         * 「该模型只由 benefit（免费额度）通道提供」的**展示用**标记（IKJOF7）。
+         *
+         * ## 为什么要有它
+         *
+         * `glm-5.3-flash` 这类模型只按 benefit 通道注册（`src/models.ts` 的
+         * `isCodeArtsBenefitModelKnown` 头注释记着实测：不带 `maas_type: benefit`
+         * 回 `002002009.404 The model is not registered`）。纯积分制账号没有福利包
+         * ⇒ 请求先带头上游回 `InferHub.4004.200`、插件自动降级去头重试、再回 404
+         * ⇒ 用户看到的最终错误是「模型未注册」，与「模型名写错了」**同形**，
+         * 完全看不出真正原因是「这个模型要走福利通道」（Gitee issue IKJOF7）。
+         *
+         * 设置页标一句「需福利包」就能把这条因果讲清楚，代价是一个字段。
+         *
+         * ## ⚠️ 判据必须用三态（`codeArtsBenefitModelIds`），不是二分
+         *
+         * 冷缓存 / 远端降级下集合是 `undefined`（**未确认**）—— 此时**必须什么
+         * 都不标**。若用 `isCodeArtsBenefitModelKnown`（对「未确认」也返回 false）
+         * 反着写、或把「不在集合里」当「不是 benefit 模型」显示成某种标记，
+         * 都会在冷启动那一帧给**每一条**模型挂上错的判断。本端点在没有确认信息时
+         * 的唯一正确输出是「不标记」。
+         *
+         * ## ⚠️ 只对 codearts 生效
+         *
+         * benefit 是 codearts 独占的概念（`opengw gateway/config` 的 `result.models`）。
+         * 其余 14 家的 `provider` 走到这里一律不带该字段 —— 不写 `false`、不写
+         * `undefined` 以外的任何值，让「不适用」与「确认不需要福利包」在字段层面
+         * 也保持可区分（与 `isFree` 的「未知不编造」同一约定）。
+         */
+        const benefitOnlyIds = req.provider === 'codearts' ? codeArtsBenefitModelIds() : undefined
         const value: RpcModelListResponse = {
           models: catalog.map((model) => ({
             id: model.id,
@@ -10102,6 +10133,11 @@ function registerJetHubEndpoints(
             // 模型列表按「计费/来源」分组，把「适配器没报」当成「按量计费」是
             // 保守归组，但字段本身仍保持「未知」语义（与全仓约定一致）。
             ...model.isFree === undefined ? {} : { isFree: model.isFree },
+            // ⚠️ 同上：只有**确认**它在该集合里才写 `true`；未确认 / 确认不在 /
+            //    非 codearts ⇒ 字段彻底缺席（不写 `false`）。
+            ...benefitOnlyIds !== undefined && benefitOnlyIds.includes(model.id)
+              ? { benefitOnly: true }
+              : {},
           })),
         }
         return { ok: true, value }

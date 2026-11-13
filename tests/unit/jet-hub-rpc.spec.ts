@@ -32,6 +32,11 @@ import { clearProviderRuntimes, registerProviderRuntime } from '../../src/provid
 import { descriptorOf } from '../../src/provider-registry.js'
 // ⚠️ 目录失效表的读写（Task 9 的接线守卫要用它判「端点有没有真的失效目录」）。
 import { catalogInvalidatedAt, clearCatalogInvalidations } from '../../src/model-catalog.js'
+// 「需福利包」标记（IKJOF7）：`model.list` 的 `benefitOnly` 判据来自这里的
+// **三态**读取口（`undefined` = 未确认），用例要能分别构造三种状态。
+// ⚠️ 只传 `undefined` 就是「清回未确认」—— 下一次读取会再去磁盘找，
+//    而 `tests/setup-isolation.ts` 把缓存目录指到了临时目录（那里没有该文件）。
+import { setBenefitMemoryCache } from '../../src/models.js'
 // ⚠️ 两个**真实**适配器类（不是替身）：接线守卫的判据是「端点跑完后下一次读目录
 //   必须真的再打一次上游」，用真适配器才量得到 `fetchRemoteModels` 被再次调用。
 import { LoomyAdapter } from '../../src/loomy-adapter.js'
@@ -1247,6 +1252,74 @@ describe('model.list / model.setDisabled 端点', () => {
     clearDeadModels('buddy')
     clearDeadModels('cline')
     clearDeadModels('trae')
+    // benefit 集合也是进程级内存缓存，必须逐例清回「未确认」，
+    // 否则后面「未确认 ⇒ 不标记」那条用例会读到上一例灌进去的集合。
+    setBenefitMemoryCache(undefined)
+  })
+
+  /**
+   * 「需福利包」标记（Gitee issue **IKJOF7**）。
+   *
+   * `glm-5.3-flash` 这类模型只按 benefit（免费额度）通道注册：不带
+   * `maas_type: benefit` 回 `002002009.404`，纯积分制账号则先被 `4004.200` 拒、
+   * 降级去头重试后仍是 404 ⇒ 用户看到的最终错误与「模型名写错」**同形**。
+   * 设置页挂一枚「需福利包」角标就能把因果讲清楚。
+   *
+   * ⚠️ 这三条打的是**同一个字段的三个状态**，少任何一条都会放走一类真实缺陷：
+   * - 命中却不标 ⇒ 功能等于没做（改动前就是 0 处命中）；
+   * - 未确认却标 ⇒ 冷启动那一帧**整页模型**都挂角标（判据写成 `!== false` 就这结果）；
+   * - 确认不在集合里却标 ⇒ 常规模型被误报成「需福利包」。
+   */
+  describe('★ model.list 的 benefitOnly（IKJOF7「需福利包」标记）', () => {
+    const BENEFIT_MODELS = [
+      { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash' },
+      { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' },
+    ]
+
+    it('★★★ 命中远端 benefit 集合 ⇒ 恰好那一条带 benefitOnly，其余字段缺席', async () => {
+      setBenefitMemoryCache(['glm-5.3-flash'])
+      const { call } = registerEndpoints({ models: BENEFIT_MODELS })
+
+      const result = await call('model.list', { provider: 'codearts' })
+
+      expect(result.ok).toBe(true)
+      const models = (result.value as { models: Array<Record<string, unknown>> }).models
+      expect(models.find(m => m.id === 'glm-5.3-flash')?.benefitOnly).toBe(true)
+      // ⚠️ 不写 `false`：缺席才是「不适用/未确认」，与 `isFree` 同一约定。
+      expect('benefitOnly' in models.find(m => m.id === 'deepseek-v4.1-flash')!, '非 benefit 模型不许带该字段').toBe(false)
+    })
+
+    it('★★★ 未确认（集合读不到）⇒ 一条都不许标', async () => {
+      // 冷缓存 / 远端降级的真实形态：内存缓存是 undefined，磁盘也没有该文件。
+      setBenefitMemoryCache(undefined)
+      const { call } = registerEndpoints({ models: BENEFIT_MODELS })
+
+      const result = await call('model.list', { provider: 'codearts' })
+
+      const models = (result.value as { models: Array<Record<string, unknown>> }).models
+      expect(models, '前置：目录非空才能证明「不是没模型才没标记」').toHaveLength(2)
+      expect(models.filter(m => 'benefitOnly' in m), '未确认时整页模型都会被误标 —— 这是本字段最危险的错法').toEqual([])
+    })
+
+    it('★★ 确认是空集合 ⇒ 同样一条都不标（但这是「确认无」，与未确认等价于本字段）', async () => {
+      setBenefitMemoryCache([])
+      const { call } = registerEndpoints({ models: BENEFIT_MODELS })
+
+      const models = ((await call('model.list', { provider: 'codearts' }))).value as { models: Array<Record<string, unknown>> }
+      expect(models.models.filter(m => 'benefitOnly' in m)).toEqual([])
+    })
+
+    it('★★ 非 codearts 渠道 ⇒ 恒不带该字段（benefit 是 codearts 独占概念）', async () => {
+      // ⚠️ 灌一个**含该模型 id** 的集合，若实现忘了判 provider，这里就会误标。
+      setBenefitMemoryCache(['glm-5.3-flash'])
+      const { call } = registerEndpoints({ models: BENEFIT_MODELS })
+
+      const result = await call('model.list', { provider: 'trae' })
+
+      const models = (result.value as { models: Array<Record<string, unknown>> }).models
+      expect(models).toHaveLength(2)
+      expect(models.filter(m => 'benefitOnly' in m), 'benefit 概念只属于 codearts').toEqual([])
+    })
   })
 
   /** 从 connection.fetch.register 捕获到的处理器。 */

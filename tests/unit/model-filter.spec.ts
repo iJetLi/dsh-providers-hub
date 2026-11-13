@@ -227,7 +227,15 @@ describe('ModelListPanel 搜索/筛选/多选接线（源码级回归）', () =>
   it('ModelToggle 内只有 1 个 checkbox（多选会破坏「点模型名切换开关」）', () => {
     const start = normalized.indexOf('function ModelToggle')
     expect(start, '未找到 ModelToggle').toBeGreaterThan(-1)
-    const body = normalized.slice(start, start + 1600)
+    // ⚠️⚠️ 窗口必须是**整个组件**，不能是固定字符数。
+    // 2026-11-13 给 `ModelToggle` 加「需福利包」角标（Gitee IKJOF7）时，
+    // 原先固定 1600 字符的窗口被新增的注释挤满 —— 那个**唯一**的 checkbox
+    // 落到了窗口之外，断言直接变成 `0 === 1` 假红。
+    // 反方向同样危险：固定窗口还会**假绿**，真有第二个 checkbox 落在 1600
+    // 之外就数不到。所以按「到下一个顶层 function 声明为止」来切。
+    const rest = normalized.slice(start)
+    const nextFn = rest.indexOf('\nfunction ', 1)
+    const body = nextFn === -1 ? rest : rest.slice(0, nextFn)
     const boxes = body.match(/type: 'checkbox'/g) ?? []
     expect(boxes.length, 'ModelToggle 内出现了多个 checkbox，会破坏既有点击交互').toBe(1)
     // 也不得残留多选相关的类名与状态

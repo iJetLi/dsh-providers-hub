@@ -1582,7 +1582,8 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
  * 点击会冒泡到 label 并**顺带切换可见性开关** —— 必须拦下。
  *
  * @param {{ provider: string,
- *           model: {id: string, name?: string, disabled?: boolean, dead?: boolean},
+ *           model: {id: string, name?: string, disabled?: boolean, dead?: boolean,
+ *                   benefitOnly?: boolean},
  *           busy: boolean, onToggle: Function, onRestore: Function }} props
  *
  * ⚠️ `provider` 是 2026-10-26 新增的入参（`ProviderLogo` 接线要用它取图标），
@@ -1592,6 +1593,25 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
  */
 function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
   const dead = model.dead === true;
+  /**
+   * 「需福利包」标记（Gitee issue IKJOF7）。
+   *
+   * ## 判据只能是 `=== true`
+   *
+   * 服务端只在**确认**该模型属于远端 benefit 集合时才写 `benefitOnly: true`；
+   * 冷缓存 / 远端降级时该字段**彻底缺席**（见 `src/types.ts` 的字段注释）。
+   * 写成 `!== false` 或 `model.benefitOnly || false` 会让「未确认」显示成
+   * 「确认需要」—— 冷启动那一帧于是整页模型都挂上这枚角标。
+   *
+   * ## 为什么是标记而不是过滤
+   *
+   * 这里**不许**隐藏或禁用这条模型：① 账号可能今天就领到福利包（插件的
+   * `claimBenefitOnce()` 会在首次请求时自动试一次）；② 远端集合随时会变，
+   * 拿它当门禁就会重演「静态表交错导致首条消息 4004」那两轮事故
+   * （`src/models.ts` 的 `isCodeArtsBenefitModelKnown` 头注释记着代价）。
+   * 标记只负责讲清因果，可操作性一律保留。
+   */
+  const benefitOnly = model.benefitOnly === true;
   return React.createElement('label', {
     className: 'dim-jh-modelRow',
     'data-disabled': model.disabled ? 'true' : 'false',
@@ -1608,6 +1628,19 @@ function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
     React.createElement('span', { className: 'dim-jh-modelInfo' },
       React.createElement('strong', { className: 'dim-jh-modelName' }, model.name || model.id),
       dead ? React.createElement('span', { className: 'dim-jh-modelDead' }, '已下架') : null,
+      // ⚠️ 角标放在 id **之前**：`dim-jh-modelId` 有 `max-width: 46%` 与 ellipsis，
+      //    挂在它后面会被挤到行尾、窄面板下先被裁掉 —— 而这枚标记的全部价值
+      //    就是「一眼看见」。title 承担完整解释（与「已下架」同一条取舍：
+      //    行内只放 ≤ 5 个字的帽子）。
+      benefitOnly
+        ? React.createElement('span', {
+          className: 'dim-jh-modelBenefitOnly',
+          title: '该模型只由 benefit（免费额度）通道提供：请求必须带 maas_type: benefit。'
+            + '账号需要能领到福利包 —— 插件会在首次请求时自动替你领一次（幂等），'
+            + '领不到就没法用这个模型，最终会如实报「002002009.404 模型未注册」。'
+            + '纯积分制账号通常属于这种情况；换一个有福利包的账号即可。',
+        }, '需福利包')
+        : null,
       React.createElement('code', { className: 'dim-jh-modelId' }, model.id)),
     dead
       // ⚠️ 失效模型**不渲染可见性开关**：它已被剔除出目录，开关没有意义；
@@ -10592,6 +10625,19 @@ function AggregatePanel({ rpcCall }) {
  * 模块作用域里的 `PROVIDERS` / 十几个 provider 判据函数，拆出去会引入循环依赖。
  */
 export const __providersPanelForTest = ProviderPanel;
+
+/**
+ * 单个模型的开关行（`ModelToggle`），供测试真正渲染。
+ *
+ * ⚠️ 为什么需要这个导出（Gitee issue **IKJOF7** 的「需福利包」标记）：
+ * 这枚角标的判据是 `model.benefitOnly === true` —— 而 `!== false`、
+ * `|| false`、`benefitOnly ?? false` 都能让它照常渲染，只有「未知状态必须
+ * 不渲染」这一格能把它们区分开。源码文本断言完全抓不到这层差别（本仓
+ * `if (false)` 旁路事故已记录过同型），必须真正渲染九种 `model` 形状去比。
+ *
+ * 与 `__providersPanelForTest` 同款取舍：不是公共 API，外部不要依赖。
+ */
+export const __modelToggleForTest = ModelToggle;
 
 /**
  * 账号卡片上的**积分行**，供测试真正渲染。
