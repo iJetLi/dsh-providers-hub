@@ -82,6 +82,7 @@ describe('★ Jet Hub 语义色走主题变量', () => {
     '--dsw-alias-border-default|#e5e5e5',
     '--dsw-alias-border-l2|#d0d3d8',
     '--dsw-alias-border-l2|#d0d3d9',
+    '--dsw-alias-border-l1|#eef0f3',
     '--dsw-alias-border-l2|#dfe1e5',
     '--dsw-alias-border-l2|#e5e6eb',
     '--dsw-alias-border-l2|#eee',

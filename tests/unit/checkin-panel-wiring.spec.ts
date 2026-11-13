@@ -113,6 +113,18 @@ function findAll(pred: (node: AnyNode) => boolean): AnyNode[] {
   return out
 }
 
+/**
+ * `target` 是否在 `subtree` 之内（含自身）。
+ *
+ * ⚠️ 用**对象身份**而非结构比较：`JSON.stringify` 比较在两个开关的 props 恰好
+ * 相同的形态下会把「另一个分区的开关」判成同一个（本仓库踩过同型假绿）。
+ */
+function subtreeContains(subtree: AnyNode, target: AnyNode): boolean {
+  let hit = false
+  walk([subtree], (node) => { if (node === target) hit = true })
+  return hit
+}
+
 let page: ((props: unknown) => unknown) | undefined
 
 /** 渲染一次（保留 hooks，重置游标与树）。 */
@@ -657,6 +669,63 @@ describe('定时签到面板：关闭即保存（接线层，行为级）', { ti
       await render({ rpcCall: rpc.rpcCall })
       expect(findAll((node) => node.props?.className === 'dim-jh-modalOverlay').length,
         '「设置」按钮必须打开设置弹窗').toBe(1)
+    })
+
+    /**
+     * 「思考强度」开关（2026-11-11 用户功能）。
+     *
+     * 这一条是为**真实报障**补的：用户实测「点击无效」。成因是宿主进程还在跑旧
+     * 代码（客户端 bundle 热替换了、宿主侧 RPC 端点不存在）⇒ 客户端 catch 后把
+     * 开关复原，界面**没有任何提示**。所以判据有两条腿：
+     * ① 点击必须真的发出 `reasoningDefault.setEnabled`（不是「只改了个 state」）；
+     * ② 宿主拒绝时**必须把失败说出来**（否则用户只能看到「点了又弹回去」）。
+     */
+    it('★★★ 点「思考强度」开关必须发出 reasoningDefault.setEnabled', async () => {
+      const rpc = makeRpc()
+      installDocument()
+      await render({ rpcCall: rpc.rpcCall })
+      ;(railAction('设置').props.onClick as () => void)()
+      await flush(3)
+      await render({ rpcCall: rpc.rpcCall })
+
+      // 定位：先找标题为「思考强度」的分区，再取该分区子树里的 checkbox。
+      // ⚠️ 必须按**分区**定位而不是「第一个 switch」：设置弹窗里现在有 3 个开关
+      //    （定时签到 / 渠道原生搜索 / 思考强度），取第一个会测到别人身上。
+      const section = findAll((node) => node.props?.className === 'dim-jh-settingsSection'
+        && textsIn([node]).includes('思考强度'))[0]
+      expect(section, '设置弹窗里找不到「思考强度」分区（开关被删了？）').toBeTruthy()
+      const switches = findAll((node) => node.type === 'input'
+        && node.props?.className === 'dim-jh-switch')
+        .filter((node) => subtreeContains(section!, node))
+      expect(switches.length, '「思考强度」分区里没有开关').toBe(1)
+
+      ;(switches[0]!.props.onChange as (event: unknown) => void)({ target: { checked: false } })
+      await flush(5)
+
+      const writes = rpc.calls.filter((call) => call.method === 'reasoningDefault.setEnabled')
+      expect(writes.length, '点开关没有发出 reasoningDefault.setEnabled').toBe(1)
+      expect((writes[0]!.payload as { enabled?: unknown }).enabled, '写下去的值不对').toBe(false)
+    })
+
+    it('★★ 宿主没有这条 RPC（旧宿主）⇒ 必须显示失败提示，不能静默弹回', async () => {
+      // 复刻真实报障：宿主还在跑旧代码，`reasoningDefault.*` 落进 default 分支。
+      const calls: Array<{ method: string; payload: unknown }> = []
+      const rpcCall = async (method: string, payload?: unknown): Promise<unknown> => {
+        calls.push({ method, payload })
+        if (method.startsWith('reasoningDefault.')) {
+          throw new Error('bad-request: unknown method: reasoningDefault.setEnabled')
+        }
+        return {}
+      }
+      installDocument()
+      await render({ rpcCall })
+      ;(railAction('设置').props.onClick as () => void)()
+      await flush(3)
+      await render({ rpcCall })
+
+      const hint = findAll((node) => node.props?.className === 'dim-jh-settingsInlineFail')[0]
+      expect(hint, '宿主缺 RPC 时必须给出显式失败提示（否则用户只看到「点了又弹回去」）').toBeTruthy()
+      expect(textsIn([hint!]).join('')).toContain('重新打开 DSH')
     })
 
     it('★★★ 设置弹窗开着时点「网关」⇒ 设置必须真的关掉（出口① 的 setShowSettings 不能被删）', async () => {

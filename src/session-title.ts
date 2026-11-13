@@ -59,6 +59,7 @@
  */
 
 import { isThinkingOffEffort } from './reasoning-ladder.js'
+import { titleEffortWhenStrongest } from './reasoning-default.js'
 
 /**
  * DSH 给辅助标题请求打的用途标记（`GenerateOptions.purpose` 的取值之一）。
@@ -154,8 +155,9 @@ export interface SessionTitleThinkingPlan {
  * 1. 非标题请求 → **逐字段原样返回**（保证普通对话零行为变化）；
  * 2. 标题请求且**关得掉**（模型声明了 `off`/`none` 档，或 `disableByOmission`
  *    为真）→ 下发「关闭思考」档、**预算不动**；
- * 3. 标题请求但**关不掉** → 保留原档位、把预算抬到
- *    {@link SESSION_TITLE_MIN_MAX_TOKENS}（只在原预算更小时抬，绝不调小）。
+ * 3. 标题请求但**关不掉** → 档位**降到最弱**的一档（2026-11-11 起；此前是
+ *    「保留原档位」），并把预算抬到 {@link SESSION_TITLE_MIN_MAX_TOKENS}
+ *    （只在原预算更小时抬，绝不调小）。
  *
  * @param input.purpose - `GenerateOptions.purpose`。
  * @param input.requestedEffort - 调用方给的档位（DSH 会把模型默认档注入这里）。
@@ -189,9 +191,31 @@ export function planSessionTitleThinking(input: {
     // 否则调用方一「补默认档」就把思考又打开了。
     return { isTitle: true, effort: undefined, thinkingOff: true, maxTokens: input.maxTokens }
   }
+  /**
+   * ⚠️ **关不掉时：降到最弱的一档 **并且** 抬高预算**（两件事都要做）。
+   *
+   * 2026-11-11 起本插件的默认档被 `reasoning-default.ts` 抬到**最强**档
+   * （用户要求）。标题请求只给 64 token，若照原样保留「最强档」，思考会把预算
+   * 吃满、正文 0 字符 —— 正是 issue IKKVDH 的原始形态，只是触发条件从
+   * 「high」变成了「max/extra_high」。
+   *
+   * ⚠️ **只降档不改预算是不够的**：实测（模块头那张表）`effort:low` + 64 token
+   * 同样是「64 吃满、正文 0 字符」⇒ 思考只要开着就至少吃掉几十个 token，64 永远
+   * 不够。故两条腿缺一不可：档位取最弱（少吃）、预算抬到下限（够吃）。
+   *
+   * ⚠️ 这**不是**「静默降档」（原注释里被否掉的那种）：标题请求是一次**内部
+   * 辅助请求**，用户从不在界面上为它选档位，且它的档位本来就由本函数全权决定
+   * （`disableByOmission` 分支同理）。普通对话路径完全不受影响（上面第一段早退）。
+   *
+   * ⚠️⚠️ **降档只在「默认取最强档」开着时发生**（`titleEffortWhenStrongest`）：
+   * 开关关掉后默认档回到各家自己的 `high`，此时再降档就是一次**白降**
+   * （64 token 本来就够 `high` 用，实测 153 思考 + 10 字正文），用户看不到原因。
+   */
+  const weakest = titleEffortWhenStrongest(input.declaredEfforts)
   return {
     isTitle: true,
-    effort: input.requestedEffort,
+    // 有可用非关闭档 ⇒ 用最弱那一档；一个都没有（档位为空/只剩关闭档）⇒ 保留调用方的。
+    effort: weakest ?? input.requestedEffort,
     thinkingOff: false,
     // ⚠️ 抬预算前先确认原值是**正安全整数**：`Math.max(NaN, 512)` 仍是 `NaN`，
     // 而 `NaN` 经 `JSON.stringify` 会变成 `null` 发给上游（DSH 只校验

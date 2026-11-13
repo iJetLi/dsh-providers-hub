@@ -2066,6 +2066,31 @@ export interface RpcGatewaySetAllowLanRequest {
   allowLan: boolean
 }
 
+/**
+ * RPC: 「默认取最强思考档」开关的读取响应（2026-11-11）。
+ *
+ * 开 = 在模型选择器里选完模型后，思考强度自动落在该模型支持的最高档；
+ * 关 = 逐字节回到改动前的行为（各家适配器自己声明的 `defaultEffort`）。
+ */
+export interface RpcReasoningDefaultGetEnabledResponse {
+  enabled: boolean
+}
+
+/** RPC: 「默认取最强思考档」开关写入请求。 */
+export interface RpcReasoningDefaultSetEnabledRequest {
+  enabled: boolean
+}
+
+/**
+ * RPC: 「默认取最强思考档」开关写入响应。
+ *
+ * ⚠️ 回传的是**落盘后重读的值**，不是请求里的值 —— 与 `gateway.setEnabled`
+ * 同取向：客户端一律以后端回传为准，不做乐观更新。
+ */
+export interface RpcReasoningDefaultSetEnabledResponse {
+  enabled: boolean
+}
+
 /** RPC: 「渠道原生搜索」开关的读取响应。 */
 export interface RpcNativeSearchGetEnabledResponse {
   /** `true` = 支持原生搜索的渠道走自己后端的搜索接口；`false` = 全部回官方搜索。 */

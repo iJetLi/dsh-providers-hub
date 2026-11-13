@@ -416,6 +416,9 @@ import type {
   RpcNativeSearchGetEnabledResponse,
   RpcNativeSearchSetEnabledRequest,
   RpcNativeSearchSetEnabledResponse,
+  RpcReasoningDefaultGetEnabledResponse,
+  RpcReasoningDefaultSetEnabledRequest,
+  RpcReasoningDefaultSetEnabledResponse,
   RpcSessionBalanceGetEnabledResponse,
   RpcSessionBalanceSetEnabledRequest,
   RpcSessionBalanceSetEnabledResponse,
@@ -451,6 +454,7 @@ import {
   BADGE_PREFERENCES,
   createBadgePreferenceStore,
 } from './badge-preferences.js'
+import { createReasoningPreferenceStore } from './reasoning-preferences.js'
 import { createUsageBadge, type BadgeRpcResult } from './usage-badge.js'
 import { createAutoCheckin, createAutoCheckinStore } from './auto-checkin.js'
 
@@ -4405,6 +4409,18 @@ function registerJetHubEndpoints(
    * `badge-preferences.ts` 的文件头。
    */
   const badgePreferences = createBadgePreferenceStore(ctx)
+
+  /**
+   * 「默认取最强思考档」偏好（独立文档 `reasoning-preferences.json`，2026-11-11）。
+   *
+   * ⚠️ 与 `index.ts` 里接线给 `configureStrongestReasoningEnabled` 的**不是同一个
+   * 实例**：两处各自 `createReasoningPreferenceStore(ctx)`，但都读写**同一个文件**、
+   * 且 `index.ts` 那侧是**每次现读**（回调）⇒ 这里写完盘，下一轮请求立刻读到新值。
+   * 刻意不共享实例是既有的做法（`createProviderCredits` 也是两处独立调用，见
+   * 其注释「两处是两个独立调用，语义相同、不共享状态」）：这里更简单，因为
+   * 唯一的状态就在磁盘上。
+   */
+  const reasoningPreferences = createReasoningPreferenceStore(ctx)
 
   /**
    * 「每日首次启动自动签到」（独立文档 `auto-checkin.json`）。
@@ -11265,6 +11281,38 @@ function registerJetHubEndpoints(
           models,
           modelsSource,
         }
+        return { ok: true, value }
+      }
+
+      // ── 「默认取最强思考档」总开关（2026-11-11 用户功能）──
+      //
+      // 语义：**开**（默认）= 选完模型后思考强度自动取该模型声明的最高档；
+      // **关** = 逐字节回到改动前（各家适配器自己的 `defaultEffort`）。
+      // 消费方是 `src/reasoning-default.ts` 的 `withStrongestDefaultEffort` 与
+      // `session-title.ts` 的降档腿 —— 两者**同开同关**（见 `reasoning-default.ts`
+      // 里 `titleEffortWhenStrongest` 的注释）。
+      //
+      // ⚠️ 读的是偏好文档（每次现读），不是进程内缓存的值：写盘后下一轮请求
+      // 立即生效，不需要重启，也没有需要失效的派生状态。
+      case 'reasoningDefault.getEnabled': {
+        const value: RpcReasoningDefaultGetEnabledResponse = { enabled: reasoningPreferences.load() }
+        return { ok: true, value }
+      }
+
+      case 'reasoningDefault.setEnabled': {
+        const req = payload as RpcReasoningDefaultSetEnabledRequest
+        // ⚠️ 与 `gateway.setEnabled` 同约定：**不做默认值猜测** ——
+        // 默认成 true 会静默打开用户特意关闭的开关。
+        if (typeof req.enabled !== 'boolean') {
+          return { ok: false, error: { code: 'bad-request', message: '非空布尔 enabled 必填' } }
+        }
+        await reasoningPreferences.save(req.enabled)
+        ctx.logger.info(
+          `[jet-hub] ${req.enabled ? '打开' : '关闭'}「默认取最强思考档」`
+          + `${req.enabled ? '（选完模型后一律用最高档）' : '（回到各家自己的默认档）'}`,
+        )
+        // 回读落盘值（而不是回传入参）：见 `RpcReasoningDefaultSetEnabledResponse` 的注释。
+        const value: RpcReasoningDefaultSetEnabledResponse = { enabled: reasoningPreferences.load() }
         return { ok: true, value }
       }
 
