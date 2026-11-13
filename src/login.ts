@@ -552,19 +552,101 @@ export function buildOAuthLoginUrl(port: number, pkce: PkcePair, ticketId: strin
     + `&ticket_id=${ticketId}&plugin-name=${LOGIN_PLUGIN_NAME}&plugin-version=${LOGIN_PLUGIN_VERSION}`
 }
 
-/** 新式 OAuth 的本地回调服务器：收到 code（新流程）或 secret（旧流程回退）后换取凭据并 resolve。 */
-export function startOAuthCallbackServer(
+/**
+ * OAuth 回调收码闸门 —— 授权码**唯一的落点**（手动回调链接）。
+ *
+ * ## 为什么抽出来
+ *
+ * `code` 有两条来路：
+ * 1. 浏览器被 portal 跳回本地回调服务器（原路径）；
+ * 2. 用户在**别的设备**上完成登录后，把回调链接**手动粘贴**进设置页。
+ *
+ * 手机/另一台电脑的浏览器打不开宿主本机的 `127.0.0.1:<port>`，那条跳转必然失败，
+ * 但地址栏里躺着一个**合法的 code** —— 它只对签发它的 PKCE/DPoP 与端口有效。
+ *
+ * 两条来路必须**走同一段收码逻辑**：code 一次性、只能换一次；换取用的
+ * `code_verifier` / DPoP 密钥对 / 回调端口三者缺一不可
+ * （`redirect_uri` 必须与授权时逐字一致，见 `exchangeAuthorizationCode`）。
+ * 若手动那条另写一套，必然出现「一条能换、一条换不了」或「各换一次把 code 烧掉」。
+ *
+ * ## 幂等与竞态
+ *
+ * `settled` 闸门是必须的：用户可能在浏览器跳转成功的**同一瞬间**又粘一次，
+ * 或先粘错再粘对 ⇒ 第二次 `exchangeAuthorizationCode` 必然报 code 已被使用，
+ * 不拦就会把**已经成功**的那次结果 reject 掉。
+ */
+function createOAuthCallbackReceiver(
   ticketId: string,
   pkce: PkcePair,
   keyPair: DpopKeyPair,
   options: LoginFlowOptions,
-): Promise<{ port: number; server: ReturnType<typeof createServer>; result: Promise<LoginFlowResult> }> {
+): OAuthCallbackReceiver {
   let resolveResult!: (value: LoginFlowResult) => void
   let rejectResult!: (reason: unknown) => void
   const result = new Promise<LoginFlowResult>((resolve, reject) => {
     resolveResult = resolve
     rejectResult = reject
   })
+  let settled = false
+
+  const acceptSecret = (secret: string): boolean => {
+    if (settled || typeof secret !== 'string' || secret.trim() === '') return false
+    settled = true
+    // 旧流程回退：portal 判定 OAuth 授权不可用时以 secret+redirect 回调。
+    // 后台轮询 ticket 端点换取凭据（plugin-name/version 必须用 portal 那套）。
+    void pollForCredential(ticketId, secret.trim(), {
+      ...options,
+      pluginName: LOGIN_PLUGIN_NAME,
+      pluginVersion: LOGIN_PLUGIN_VERSION,
+    }).then(
+      (credential) => resolveResult({ access: JSON.stringify(credential), expires: expiresFromCredential(credential), loginUrl: '' }),
+      (error) => rejectResult(error),
+    )
+    return true
+  }
+
+  /**
+   * 用授权码换凭据（新式流程）。
+   *
+   * @param port - `redirect_uri` 里的端口，**必须是 portal 看到的那个**：
+   *   本地服务器这条腿是它自己的监听端口；手动粘贴这条腿来自**链接本身**。
+   *   ⚠️ 不能改用手动路径时「当前服务器」的端口 —— 那是另一个地址，
+   *   STS 会以 `redirect_uri` 不匹配直接拒掉。
+   * @returns 交换结果（**永不拒绝**）；已被占用或参数不合法时 `undefined`。
+   *
+   * ⚠️⚠️ 返回的 promise **绝不能 reject**：手动提交那条路径会丢弃它
+   *   （只关心「有没有接管」），一个被丢弃的拒绝就是**未处理的 Promise 拒绝**
+   *   ⇒ 宿主日志里冒出 `Unhandled Rejection`，而用户其实只是粘错了一条链接。
+   *   真实成败仍由 `result` 的 resolve/reject 表达（那是调用方 await 的那一个）。
+   */
+  const acceptCode = (code: string, port: number): Promise<boolean> | undefined => {
+    if (settled || typeof code !== 'string' || code.trim() === '') return undefined
+    if (!Number.isInteger(port) || port <= 0 || port > 65_535) return undefined
+    // 先占住闸门：换 token 是一次网络往返，期间的重复提交必须被拒。
+    settled = true
+    return exchangeAuthorizationCode(code.trim(), pkce.codeVerifier, port, keyPair, options.fetcher)
+      .then((token) => {
+        const credential = credentialFromTokenResponse(token, pkce, keyPair)
+        resolveResult({ access: JSON.stringify(credential), expires: expiresFromCredential(credential), loginUrl: '' })
+        return true
+      }, (error) => {
+        rejectResult(error instanceof Error ? error : new Error(String(error)))
+        // 浏览器那一侧据此把 307 跳到 login_succeed=false；本 promise 不 reject。
+        return false
+      })
+  }
+
+  return { result, acceptCode, acceptSecret, isSettled: () => settled }
+}
+
+/** 新式 OAuth 的本地回调服务器：收到 code（新流程）或 secret（旧流程回退）后换取凭据并 resolve。 */
+export function startOAuthCallbackServer(
+  ticketId: string,
+  pkce: PkcePair,
+  keyPair: DpopKeyPair,
+  options: LoginFlowOptions,
+): Promise<{ port: number; server: ReturnType<typeof createServer>; result: Promise<LoginFlowResult>; receiver: OAuthCallbackReceiver }> {
+  const receiver = createOAuthCallbackReceiver(ticketId, pkce, keyPair, options)
 
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', `http://127.0.0.1:${request.socket.localPort}`)
@@ -582,37 +664,28 @@ export function startOAuthCallbackServer(
     if (callbackSecret) {
       const redirectTo = url.searchParams.get('redirect') ?? buildPortalLoginResultUrl(true)
       response.writeHead(307, { ...CORS_HEADERS, Location: redirectTo }).end()
-      void pollForCredential(ticketId, callbackSecret, {
-        ...options,
-        pluginName: LOGIN_PLUGIN_NAME,
-        pluginVersion: LOGIN_PLUGIN_VERSION,
-      }).then(
-        (credential) => resolveResult({ access: JSON.stringify(credential), expires: expiresFromCredential(credential), loginUrl: '' }),
-        (error) => rejectResult(error),
-      )
+      receiver.acceptSecret(callbackSecret)
       return
     }
     const code = url.searchParams.get('code')
     if (code) {
       // localPort 在监听中的服务器上必然存在；?? 0 仅用于类型收窄。
-      void exchangeAuthorizationCode(code, pkce.codeVerifier, request.socket.localPort ?? 0, keyPair, options.fetcher).then(
-        (token) => {
-          const credential = credentialFromTokenResponse(token, pkce, keyPair)
-          // 对齐真实插件：换取成功后 307 重定向浏览器到 portal 登录结果页。
-          response.writeHead(307, { ...CORS_HEADERS, Location: buildPortalLoginResultUrl(true) }).end()
-          resolveResult({ access: JSON.stringify(credential), expires: expiresFromCredential(credential), loginUrl: '' })
-        },
-        (error) => {
-          response.writeHead(307, { ...CORS_HEADERS, Location: buildPortalLoginResultUrl(false) }).end()
-          rejectResult(error)
-        },
-      )
+      const exchanged = receiver.acceptCode(code, request.socket.localPort ?? 0)
+      if (exchanged === undefined) {
+        response.writeHead(400).end('This callback is already in progress')
+        return
+      }
+      // 对齐真实插件：换取成功 307 到 login_succeed=true，失败则 307 到 false。
+      // ⚠️ `acceptCode` 的 promise **永不 reject**，故这里只需判布尔值。
+      exchanged.then((succeeded) => {
+        response.writeHead(307, { ...CORS_HEADERS, Location: buildPortalLoginResultUrl(succeeded) }).end()
+      })
       return
     }
     response.writeHead(400).end('Missing authorization code or secret')
   })
 
-  return listenOnCallbackPort(server).then((port) => ({ port, server, result }))
+  return listenOnCallbackPort(server).then((port) => ({ port, server, result: receiver.result, receiver }))
 }
 
 /** 新式 OAuth 回调等待预算（浏览器打开 + 用户操作，180 秒）。 */
@@ -645,6 +718,163 @@ function listenOnCallbackPort(
   })
 }
 
+/** 手动回调链接解析失败时统一使用的前缀（RPC 层原样展示，不再改写）。 */
+export const MANUAL_CALLBACK_FAIL_PREFIX = '回调链接无法使用'
+
+/** 手动粘贴的回调链接解析结果。 */
+export type ManualCallbackParseResult =
+  | { kind: 'code'; code: string; port: number }
+  | { kind: 'secret'; secret: string }
+  | { kind: 'error'; code: ManualCallbackErrorCode; message: string }
+
+/** 解析失败的原因码（`message` 才是给用户看的文案）。 */
+export type ManualCallbackErrorCode =
+  | 'EMPTY'
+  | 'NOT_A_URL'
+  | 'NOT_LOOPBACK'
+  | 'WRONG_PATH'
+  | 'NO_PORT'
+  | 'PORT_OUT_OF_RANGE'
+  | 'NO_CODE'
+
+/** 本机回调允许的主机名（portal 只会把浏览器跳到这些）。 */
+const MANUAL_CALLBACK_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+/** 形如 `https://…` 的绝对 URL。 */
+const MANUAL_CALLBACK_ABSOLUTE_URL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//
+/** 回调路径（与 `REDIRECT_PATH` 同值；此处独立一份是为了让解析器不依赖导入顺序）。 */
+const MANUAL_CALLBACK_PATH = '/oauth/callback'
+
+const MANUAL_CALLBACK_REASONS: Readonly<Record<ManualCallbackErrorCode, string>> = {
+  EMPTY: '回调链接是空的。请把手机（或另一台电脑）浏览器地址栏里的整条链接复制过来粘贴。',
+  NOT_A_URL: '这不像一条回调链接（无法解析成网址）。请从地址栏整条复制，不要只复制一部分。',
+  NOT_LOOPBACK: '这条链接的主机不是本机回调地址。授权回调只会跳转到 127.0.0.1 / localhost —— '
+    + '若你复制的是 portal 的结果页（codearts.huaweicloud.com/portal/login…），它不含授权码。',
+  WRONG_PATH: '这条链接的路径不是授权回调路径（应为 /oauth/callback）。'
+    + 'portal 的「登录成功」结果页不含授权码，请回到跳转失败的那一页复制地址栏。',
+  NO_PORT: '这条回调链接里没有可用的端口号，无法知道是哪一轮登录的回调。请整条复制（应含 :端口）。',
+  PORT_OUT_OF_RANGE: '这条链接的端口号超出有效范围（1–65535），不像真实的授权回调地址。',
+  NO_CODE: '这条回调链接里既没有 code 也没有 secret，无法完成登录。'
+    + '请确认复制的是「跳转失败 / 无法访问」那一页的地址栏，而不是已成功的页面。',
+}
+
+function manualCallbackError(code: ManualCallbackErrorCode): ManualCallbackParseResult {
+  return { kind: 'error', code, message: MANUAL_CALLBACK_REASONS[code] }
+}
+
+function manualCallbackPort(text: string): number | undefined {
+  if (!/^\d{1,5}$/.test(text)) return undefined
+  const port = Number(text)
+  return port > 0 && port <= 65_535 ? port : undefined
+}
+
+/** 从一段文本里抓显式声明的端口（`new URL` 对越界端口会直接抛，故先自己判）。 */
+function manualCallbackDeclaredPort(text: string): string | undefined {
+  const match = /:(\d{1,5})(?=[/?#]|$)/.exec(text)
+  return match === null ? undefined : match[1]
+}
+
+function manualCallbackReadParams(
+  params: URLSearchParams,
+  port: number | undefined,
+): ManualCallbackParseResult {
+  const code = params.get('code')
+  if (typeof code === 'string' && code.trim().length > 0) {
+    if (port === undefined) return manualCallbackError('NO_PORT')
+    return { kind: 'code', code: code.trim(), port }
+  }
+  const secret = params.get('secret')
+  if (typeof secret === 'string' && secret.trim().length > 0) {
+    return { kind: 'secret', secret: secret.trim() }
+  }
+  return manualCallbackError('NO_CODE')
+}
+
+function manualCallbackParseAbsolute(text: string): ManualCallbackParseResult {
+  let url: URL
+  try {
+    url = new URL(text)
+  } catch {
+    const rest = text.split('://')[1] ?? ''
+    const declared = manualCallbackDeclaredPort(`http://${rest}`)
+    if (declared !== undefined && manualCallbackPort(declared) === undefined) {
+      return manualCallbackError('PORT_OUT_OF_RANGE')
+    }
+    return manualCallbackError('NOT_A_URL')
+  }
+  if (!MANUAL_CALLBACK_LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) {
+    return manualCallbackError('NOT_LOOPBACK')
+  }
+  if (url.pathname !== MANUAL_CALLBACK_PATH && !url.pathname.startsWith(MANUAL_CALLBACK_PATH)) {
+    return manualCallbackError('WRONG_PATH')
+  }
+  return manualCallbackReadParams(url.searchParams, manualCallbackPort(url.port))
+}
+
+function manualCallbackParseQueryOnly(text: string): ManualCallbackParseResult {
+  const hashAt = text.indexOf('#')
+  const withoutHash = hashAt >= 0 ? text.slice(0, hashAt) : text
+  const questionAt = withoutHash.indexOf('?')
+  let query: string
+  if (withoutHash.startsWith('?')) {
+    query = withoutHash.slice(1)
+  } else if (questionAt >= 0) {
+    query = withoutHash.slice(questionAt + 1)
+  } else {
+    query = withoutHash
+  }
+  return manualCallbackReadParams(new URLSearchParams(query), undefined)
+}
+
+/**
+ * 解析用户在**另一台设备**上复制回来的 OAuth 回调链接 —— 纯函数。
+ *
+ * ## 为什么需要它
+ *
+ * portal 把授权跳转定向到宿主本机的 `http://127.0.0.1:<port>/oauth/callback?code=…`。
+ * 用户在手机上完成登录时，那个浏览器打不开宿主所在的 `127.0.0.1` ⇒ 跳转必然失败，
+ * 但地址栏里留下一条**完全合法**的回调链接。用户把它复制回来粘贴，
+ * 就能在本机完成原来只有浏览器才能完成的那一跳。
+ *
+ * ## 纪律
+ *
+ * 1. **纯函数**：结果只取决于入参，故每一种坏输入都能在单测里逐条断言。
+ * 2. **文案由这里给出**：调用方不得再各写一份同义判据。
+ * 3. 返回的 `port` 一律是**链接里那个**端口，绝不是「当前服务器」的端口 ——
+ *    `redirect_uri` 必须与授权时逐字一致。
+ *
+ * @param raw - 用户粘贴的原文（允许首尾空白、尖括号、引号包裹）。
+ */
+export function parseManualCallbackUrl(raw: unknown): ManualCallbackParseResult {
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  if (text.length === 0) return manualCallbackError('EMPTY')
+  // 从邮件 / 微信 / 文档里复制时常见的包裹字符。
+  const stripped = text.replace(/^[<"']+|[>"']+$/g, '').trim()
+  if (stripped.length === 0) return manualCallbackError('EMPTY')
+  if (MANUAL_CALLBACK_ABSOLUTE_URL_RE.test(stripped)) {
+    return manualCallbackParseAbsolute(stripped)
+  }
+  const looksLikeQuery = stripped.includes('?') || stripped.startsWith('#')
+    || /^(?:code|secret)=/.test(stripped) || /[?&](?:code|secret)=/.test(stripped)
+  if (looksLikeQuery) return manualCallbackParseQueryOnly(stripped)
+  return manualCallbackError('NOT_A_URL')
+}
+
+/** 一轮 OAuth 回调的收码器（本地回调服务器与手动粘贴链接共用同一个实例）。 */
+export interface OAuthCallbackReceiver {
+  /** 这一轮的最终结果；成功后 resolve 凭据，失败后 reject。 */
+  result: Promise<LoginFlowResult>
+  /**
+   * 用授权码换凭据。已被占用或端口不合法时返回 `undefined`（**不抛**）。
+   *
+   * @param port - `redirect_uri` 里的端口，必须与 portal 授权时那个一致。
+   */
+  acceptCode: (code: string, port: number) => Promise<boolean> | undefined
+  /** 旧流程回退：用 secret 轮询 ticket 端点。已被占用或不合法时返回 `false`。 */
+  acceptSecret: (secret: string) => boolean
+  /** 这一轮是否已经落定（成功或失败）。 */
+  isSettled: () => boolean
+}
+
 /**
  * 已启动但尚未完成的 OAuth 登录流程。
  *
@@ -663,6 +893,22 @@ export interface StartedOAuthFlow {
   result: Promise<LoginFlowResult>
   /** 关闭回调服务器；**幂等**，可重复调用。 */
   close: () => Promise<void>
+  /**
+   * 手动提交回调链接（另一台设备完成登录后，把地址栏整条链接粘回来）。
+   *
+   * ⚠️ 只解析 + 交给**同一轮**的收码器，不另写一套换取逻辑：
+   * 两处各写一份必然出现「一条能换、一条换不了」或「各换一次把 code 烧掉」。
+   * ⚠️ 失败**返回可读文案而不抛**：RPC 层原样回给前端，用户输入错误
+   * 不该让宿主进程异常退出。
+   */
+  submitManualCallback: (raw: unknown) => ManualCallbackSubmitResult
+}
+
+/** `StartedOAuthFlow.submitManualCallback` 的结果。 */
+export interface ManualCallbackSubmitResult {
+  ok: boolean
+  /** 失败时可直接展示给用户的原因。 */
+  message?: string
 }
 
 /**
@@ -676,7 +922,7 @@ export async function startOAuthFlow(options: LoginFlowOptions = {}): Promise<St
   const ticketId = randomBytes(32).toString('hex')
   const pkce = generatePkcePair()
   const keyPair = await generateDpopKeyPair()
-  const { port, server, result } = await startOAuthCallbackServer(ticketId, pkce, keyPair, options)
+  const { port, server, result, receiver } = await startOAuthCallbackServer(ticketId, pkce, keyPair, options)
   const loginUrl = buildOAuthLoginUrl(port, pkce, ticketId)
 
   let closed = false
@@ -698,7 +944,30 @@ export async function startOAuthFlow(options: LoginFlowOptions = {}): Promise<St
   // 或立刻超时），那一段窗口里 Node 会把它当成未处理拒绝并打印告警。
   resultWithUrl.catch(() => {}).finally(() => { void close() })
 
-  return { loginUrl, result: resultWithUrl, close }
+  /**
+   * 手动提交回调链接（另一台设备完成登录后粘回来）。
+   *
+   * ⚠️ 不另写收码逻辑：只解析并交给**同一轮**的 `receiver`。
+   * ⚠️ 端口一律取链接里的那个 —— `redirect_uri` 必须与授权时逐字一致。
+   */
+  const submitManualCallback = (raw: unknown): ManualCallbackSubmitResult => {
+    const parsed = parseManualCallbackUrl(raw)
+    if (parsed.kind === 'error') {
+      return { ok: false, message: `${MANUAL_CALLBACK_FAIL_PREFIX}：${parsed.message}` }
+    }
+    const accepted = parsed.kind === 'code'
+      ? receiver.acceptCode(parsed.code, parsed.port) !== undefined
+      : receiver.acceptSecret(parsed.secret)
+    if (!accepted) {
+      return {
+        ok: false,
+        message: '这轮登录已经结束了（成功或超时），这份回调未再使用。请重新点击「+ 新建账号」。',
+      }
+    }
+    return { ok: true }
+  }
+
+  return { loginUrl, result: resultWithUrl, close, submitManualCallback }
 }
 
 /**

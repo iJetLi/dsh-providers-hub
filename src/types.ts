@@ -588,6 +588,20 @@ export interface RpcPollLoginRequest {
   accountId: string
   provider: string
 }
+
+/**
+ * RPC: 手动提交 CodeArts（华为云）的 OAuth 回调链接。
+ *
+ * 用途：授权回调被定向到**宿主本机**的 `127.0.0.1:<port>`，用户在手机 /
+ * 另一台电脑上完成登录时那一跳打不开，但地址栏里留下一条合法的回调链接。
+ * 把它交回来即可在本机完成原来只有浏览器能完成的那一步。
+ */
+export interface RpcSubmitCallbackRequest {
+  /** `account.create` 返回的占位账号 id（本进程内存里的那一轮登录）。 */
+  accountId: string
+  /** 用户粘贴的整条回调链接（含 `code=` 或 `secret=`，以及端口）。 */
+  callbackUrl: string
+}
 /**
  * RPC: 轮询登录进度（`login.poll`）。
  *

@@ -3479,6 +3479,19 @@ function ProviderPanel({
   /** 兜底登录链接的复制结果：null=未复制，true=已复制，false=复制失败。 */
   const [loginLinkCopied, setLoginLinkCopied] = React.useState(null);
   /**
+   * CodeArts（华为云）**手动回调链接**输入框。
+   *
+   * 为什么只有 codearts 需要：它的授权回调被定向到
+   * `http://127.0.0.1:<端口>/oauth/callback?code=…`，而 127.0.0.1 指的是
+   * **宿主所在的那台机器**。用户在**手机**（或另一台电脑）上完成登录时，
+   * 那个浏览器打不开宿主的 127.0.0.1 ⇒ 跳转失败、停在错误页，
+   * 但地址栏里已经是一条**合法**的回调链接（含一次性 code）。
+   * 把它复制回来粘贴，就能在本机完成原来只有浏览器能完成的那一跳。
+   *
+   * 形状：`{ accountId, value, error, busy }`；`null` 表示当前不在等待回调。
+   */
+  const [codeartsCallback, setCodeartsCallback] = React.useState(null);
+  /**
    * 出口代理弹窗状态：{ accountId, current } 或 null。
    *
    * ⚠️ **独立于** `loginUrlForManual`：那个是登录链接兜底弹窗，两者共存时
@@ -3682,6 +3695,17 @@ function ProviderPanel({
    * 渲染一个「打开后行为不变」的开关只会让用户以为它坏了。
    */
   const canStrictOrder = supportsBalanceTier(provider);
+  /**
+   * 是否渲染「手动粘贴回调链接」输入框。
+   *
+   * 只有 CodeArts（华为云）需要：它的授权回调落在**宿主本机**的
+   * `127.0.0.1:<port>`，用户在手机 / 另一台电脑上完成登录时那一跳打不开。
+   *
+   * ⚠️ 必须写成**单个标识符**（不是内联的复合条件）：`jet-hub-structure-ast.spec.ts`
+   * 的提示守卫要求每个面板级提示的渲染条件是自己的变量，这样「条件被换成前缀
+   * 相同的另一个标识符 / 被短路成恒 null」都能被抓到。
+   */
+  const showCodeartsCallback = codeartsCallback !== null && provider === 'codearts';
   /** 读「严格手动顺序」当前值。失败时**保持默认 `false`** 并留一条 console 提示。 */
   const loadStrictManualOrder = React.useCallback(async () => {
     if (!canStrictOrder) return;
@@ -5257,6 +5281,14 @@ function ProviderPanel({
         //   `catch` 完全吞掉：用户只剩 5 分钟后一句「登录超时」，真实原因永不上屏
         //   （独立审计攻击 5d 实测）。这里只记痕迹，不打断轮询（可能只是瞬时故障），
         //   超时时一并展示。
+        // ⚠️ 只有 CodeArts（华为云）需要「手动粘贴回调链接」这一格：
+        //    它的回调落在宿主本机 127.0.0.1，别的设备上的浏览器打不开。
+        //    ⚠️ 其余 provider 走完全相同的 startLoginPoll 调用，
+        //    不得因为这里多一个分支而改变行为（本文件既有纪律：
+        //    每家 provider 的差异只在它自己的分支里）。
+        if (provider === 'codearts' && accountId) {
+          setCodeartsCallback({ accountId, value: '', error: '', busy: false });
+        }
         startLoginPoll({ accountId, provider, loginWindow });
       } else {
         setError('后端未返回登录地址（loginUrl 为空）。');
@@ -5316,6 +5348,35 @@ function ProviderPanel({
    * @param {{ accountId: string, provider: string, loginWindow?: object|null }} params
    *   `loginWindow` = 客户端自己开的那扇窗（宿主开窗的 provider 传 `null`）。
    */
+  /**
+   * 提交用户手动粘贴的 CodeArts（华为云）回调链接。
+   *
+   * ⚠️ 失败**绝不**走 `setError` + `setPhase('error')`：那条路径会把整个设置页
+   *    判成「新建账号失败」并让轮询停摆 —— 而用户只是粘错了一行字，
+   *    浏览器里那一跳**可能还在进行**，此刻收掉界面等于把好登录也一起杀掉。
+   *    ⇒ 输入框自己的行内错误（`error` 字段），真·终态失败仍由 `login.poll`
+   *      的统一三态报出（与其余 provider 同一通道）。
+   */
+  const submitCodeartsCallback = async () => {
+    if (!codeartsCallback) return;
+    const { accountId, value, busy } = codeartsCallback;
+    if (busy) return;
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      setCodeartsCallback((current) => (current
+        ? { ...current, error: '请先把回调链接粘贴进来（整条地址栏内容，含 code=… 或 secret=…）。' }
+        : current));
+      return;
+    }
+    setCodeartsCallback((current) => (current ? { ...current, busy: true, error: '' } : current));
+    try {
+      await rpcCall('account.submitCallback', { accountId, callbackUrl: value });
+      // 宿主已受理：交给既有的 login.poll 统一收口（成功 / 失败文案同一通道）。
+    } catch (caught) {
+      setCodeartsCallback((current) => (current
+        ? { ...current, busy: false, error: caught?.message || '回调链接提交失败（宿主未给出原因）。' }
+        : current));
+    }
+  };
   const startLoginPoll = ({ accountId, provider, loginWindow = null }) => {
     // ⚠️ 超时**不用**另起的 `setTimeout`，而是记 deadline 在轮询里判：这样全场只有
     //   一个句柄（pollRef），卸载清理与超时都不会漏掉第二个定时器。
@@ -5338,6 +5399,7 @@ function ProviderPanel({
         //   把原因写死会给排障者一个错误的第一个假设。
         if (loginWindow && !loginWindow.closed) loginWindow.close();
         setLoginUrlForManual(null);
+        setCodeartsCallback(null);
         setError('登录超时或未完成（已等待 5 分钟）：可能是授权未完成、授权被拒，'
           + '或账号条目已被删除。请重新点击「+ 新建账号」再试一次；'
           + '若账号其实已经添加，可点「重新读取」查看。'
@@ -5359,6 +5421,7 @@ function ProviderPanel({
         if (pollRes?.success === false) {
           if (loginWindow && !loginWindow.closed) loginWindow.close();
           setLoginUrlForManual(null);
+          setCodeartsCallback(null);
           setError(pollRes.error || '登录失败（宿主未给出原因），请重新点击「+ 新建账号」。');
           setPhase('error');
           stopPoll();
@@ -5367,6 +5430,7 @@ function ProviderPanel({
         if (!pollRes?.done) return;
         if (loginWindow && !loginWindow.closed) loginWindow.close();
         setLoginUrlForManual(null);
+        setCodeartsCallback(null);
         await loadAccounts();
         stopPoll();
       } catch (caught) {
@@ -5872,6 +5936,54 @@ function ProviderPanel({
             ? React.createElement('ul', { className: 'dim-jh-probeDetails' },
                 onboardingNotice.details.map((line, index) =>
                   React.createElement('li', { key: index }, line)))
+            : null)
+        : null,
+      // CodeArts（华为云）**手动回调链接**输入框。
+      // 只用既有类名（dim-jh-probeNotice / dim-jh-input / dim-jh-loginLinkRow /
+      // dim-jh-btn），不新增选择器。role='alert' 只在有错误时给 ——
+      // 成功了就别让读屏器再念一遍。
+      showCodeartsCallback
+        ? React.createElement('div', {
+            className: 'dim-jh-probeNotice',
+            'data-tone': codeartsCallback.error ? 'warn' : 'ok',
+            role: codeartsCallback.error ? 'alert' : 'status',
+          },
+          React.createElement('div', null,
+            '浏览器若停在「无法访问 127.0.0.1」或「授权完成但打不开页面」，'
+            + '把那一页地址栏里的整条回调链接复制到下面 —— '
+            + '登录会在本机完成（手机登录尤其需要这一步）：'),
+          React.createElement('input', {
+            className: 'dim-jh-input',
+            type: 'text',
+            placeholder: 'http://127.0.0.1:端口/oauth/callback?code=…',
+            value: codeartsCallback.value,
+            disabled: codeartsCallback.busy,
+            spellCheck: false,
+            autoComplete: 'off',
+            onChange: (event) => {
+              const next = event?.target?.value ?? '';
+              setCodeartsCallback((current) => (current ? { ...current, value: next, error: '' } : current));
+            },
+          }),
+          React.createElement('div', { className: 'dim-jh-loginLinkRow' },
+            // type='button' 必须有：按钮若落在表单里，默认 submit 会连带提交表单。
+            React.createElement('button', {
+              className: 'dim-jh-btn',
+              type: 'button',
+              'aria-disabled': String(codeartsCallback.busy),
+              onClick: () => {
+                if (codeartsCallback.busy) return;
+                void submitCodeartsCallback();
+              },
+            }, codeartsCallback.busy ? '提交中…' : '提交回调链接'),
+            React.createElement('button', {
+              className: 'dim-jh-btn',
+              type: 'button',
+              title: '取消后可以重新点「+ 新建账号」',
+              onClick: () => setCodeartsCallback(null),
+            }, '取消')),
+          codeartsCallback.error
+            ? React.createElement('div', { className: 'dim-jh-probeDetails' }, codeartsCallback.error)
             : null)
         : null,
       // 弹窗被拦截：给出可点击的登录链接 + 复制按钮。不劫持当前页面（见 createAccount 的说明）。

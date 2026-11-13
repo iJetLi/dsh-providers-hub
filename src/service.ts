@@ -1,6 +1,9 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
-import { runLoginFlow, runOAuthFlow, startOAuthFlow, type StartedOAuthFlow } from './login.js'
+import {
+  runLoginFlow, runOAuthFlow, startOAuthFlow,
+  type ManualCallbackSubmitResult, type StartedOAuthFlow,
+} from './login.js'
 import {
   RefreshTokenExpiredError,
   credentialFromTokenResponse,
@@ -219,14 +222,28 @@ export class CodeArtsAuth extends Service {
    */
   async startLogin(
     options: { refName?: string; accountId?: string; pool?: AccountPool } & LoginFlowOptions = {},
-  ): Promise<{ loginUrl: string; result: Promise<LoginResult>; close: () => Promise<void> }> {
+  ): Promise<{
+    loginUrl: string
+    result: Promise<LoginResult>
+    close: () => Promise<void>
+    /** 手动提交回调链接（另一台设备完成登录后粘回来）。RPC 层直接转调。 */
+    submitManualCallback: (raw: unknown) => ManualCallbackSubmitResult
+  }> {
     this.active = true
     const started: StartedOAuthFlow = await startOAuthFlow(options)
     const result = started.result.then((flow) => this.persistLogin(flow, options))
     // 与 startOAuthFlow 同理：结果可能早于调用方 await 而落定，
     // 先挂空处理器避免「未处理的拒绝」告警（错误仍会传给真正的消费者）。
     result.catch(() => {})
-    return { loginUrl: started.loginUrl, result, close: started.close }
+    // ⚠️ **必须透传**：RPC 层拿到的就是本方法的返回值，漏这一行会让
+    //    `account.submitCallback` 在生产上拿到 `undefined` —— 类型层不报错
+    //    （可选键），症状是「用户粘了合法链接，却被告知会话已失效」。
+    return {
+      loginUrl: started.loginUrl,
+      result,
+      close: started.close,
+      submitManualCallback: started.submitManualCallback,
+    }
   }
 
   /**
