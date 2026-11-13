@@ -80,8 +80,16 @@ function doubaoSigninCandidates(lookup: BrowserLookup): string[] {
         'D:\\Program File\\Doubao\\app\\Doubao.exe',
       ]
     : []
-  return [env[DOUBAO_BROWSER_ENV], ...windows]
-    .filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0)
+  // ⚠️ 环境变量先 trim：理由与 doubao-login.ts 同款（`'   '` 会假装"已设置"）。
+  return [env[DOUBAO_BROWSER_ENV]?.trim(), ...windows]
+    /**
+     * ⚠️ **必须拒绝相对路径**（`isAbsolute`）：`DSH_DOUBAO_BROWSER_PATH=chrome.exe`
+     * 会让 `existsSync` 相对**当前工作目录**命中一个同名文件（实测返回
+     * `audit-rel-chrome.exe`）—— 共享腿 `browserCandidates` 本来就按绝对路径过滤，
+     * 项目腿不跟上的话两边就分叉了（同 `client-ui` 笔记「一文件两套同义判据」）。
+     */
+    .filter((candidate): candidate is string =>
+      typeof candidate === 'string' && candidate.length > 0 && isAbsolute(candidate))
 }
 
 export function doubaoSigninBrowserExecutable(lookup: BrowserLookup = {}): string | undefined {

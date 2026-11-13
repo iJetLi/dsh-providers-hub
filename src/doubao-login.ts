@@ -82,15 +82,29 @@ function doubaoLoginCandidates(lookup: BrowserLookup): string[] {
         'D:\\Program File\\Doubao\\app\\Doubao.exe',
       ]
     : []
-  return [env[DOUBAO_BROWSER_ENV], ...windows]
-    .filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0)
+  /**
+   * ⚠️ 环境变量先 `trim()`：`DSH_DOUBAO_BROWSER_PATH='   '`（用户在面板里敲了空格）
+   * 本来会当成"已设置"，于是 `isAbsolute` 判它不合法、候选链空转，
+   * 而日志又会回显"看到的值 = '   '" —— 用户以为配了、实际没配（对抗审计 P3）。
+   */
+  return [env[DOUBAO_BROWSER_ENV]?.trim(), ...windows]
+    /**
+     * ⚠️ **必须拒绝相对路径**（`isAbsolute`）：`DSH_DOUBAO_BROWSER_PATH=chrome.exe`
+     * 会让 `existsSync` 相对**当前工作目录**命中一个同名文件（实测返回
+     * `audit-rel-chrome.exe`）—— 共享腿 `browserCandidates` 本来就按绝对路径过滤，
+     * 项目腿不跟上的话两边就分叉了（同 `client-ui` 笔记「一文件两套同义判据」）。
+     */
+    .filter((candidate): candidate is string =>
+      typeof candidate === 'string' && candidate.length > 0 && isAbsolute(candidate))
 }
 
 export function doubaoLoginBrowserExecutable(lookup: BrowserLookup = {}): string | undefined {
   const exists = lookup.exists ?? existsSync
   for (const candidate of doubaoLoginCandidates(lookup)) if (exists(candidate)) return candidate
   // 跨平台兜底：macOS 扫 `/Applications` 与 `~/Applications` 的 .app 包、
-  // Linux 扫 PATH 与 AppStream 元数据、Windows 补 scoop / Edge / Chromium。
+  // Linux 扫 `/usr/bin`、`/opt` 与 snap/flatpak 的 `exports/bin/`、Windows 补
+  // scoop / Edge / Chromium。⚠️ 刻意不列 flatpak 的 `appstream/` 元数据目录 ——
+  // 那不是可执行文件，列了会「探测成功 → spawn 时 EACCES」（见 chromium-session.ts）。
   return findBrowserExecutable(lookup)
 }
 
@@ -172,7 +186,15 @@ export async function clickDoubaoLoginButton(
       if (!loginEl) return 'not-found'
       const r = loginEl.getBoundingClientRect()
       if (!(r.width > 0) || !(r.height > 0)) return 'no-box'
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+      const cx = r.left + r.width / 2
+      const cy = r.top + r.height / 2
+      // ⚠️ 遮挡判据：受信任点击打在**坐标**上，被浮层盖住（或滚出视口）时
+      //    会落到浮层/别处，而按钮自己收不到任何事件 —— 那种情况下报
+      //    'trusted' 就是**假成功**（用户看到「已点击」但二维码没弹）。
+      //    合成事件用 dispatchEvent 直接派给元素本身，能绕过遮挡 ⇒ 退回它反而对。
+      const hit = document.elementFromPoint(cx, cy)
+      if (!hit || !(hit === loginEl || loginEl.contains(hit))) return 'covered'
+      return { x: cx, y: cy }
     })()`,
     awaitPromise: true,
     returnByValue: true,
@@ -182,9 +204,15 @@ export async function clickDoubaoLoginButton(
     log('[doubao-login] 页面上没找到「登录」按钮（可能需要手动点）')
     return 'not-found'
   }
+  if (value === 'covered') log('[doubao-login] 登录按钮被浮层遮挡或在视口外，改用合成事件序列')
   const point = value as { x?: unknown; y?: unknown } | null | undefined
-  const x = typeof point?.x === 'number' ? point.x : undefined
-  const y = typeof point?.y === 'number' ? point.y : undefined
+  /**
+   * ⚠️ 必须是**有限数**：`typeof NaN === 'number'`、`typeof Infinity === 'number'`，
+   * 只判 `typeof` 会让它们一路走到 `Input.dispatchMouseEvent` ——
+   * CDP 收到非法坐标的行为是实现细节（静默落空 / 报错），两者都不是我们要的。
+   */
+  const x = typeof point?.x === 'number' && Number.isFinite(point.x) ? point.x : undefined
+  const y = typeof point?.y === 'number' && Number.isFinite(point.y) ? point.y : undefined
   if (x !== undefined && y !== undefined) {
     for (const type of ['mousePressed', 'mouseReleased'] as const) {
       await cdp.send('Input.dispatchMouseEvent', {
@@ -200,7 +228,7 @@ export async function clickDoubaoLoginButton(
     return 'trusted'
   }
   // 按钮在、但盒子是 0×0 或被裁 ⇒ 拿不到可点的坐标，退回合成事件序列。
-  await cdp.send('Runtime.evaluate', {
+  const dispatched = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
       const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'))
       const loginEl = btns.find((b) => b.textContent && b.textContent.trim() === '登录')
@@ -219,7 +247,16 @@ export async function clickDoubaoLoginButton(
     })()`,
     awaitPromise: true,
     returnByValue: true,
-  }, sessionId)
+  }, sessionId) as { result?: { value?: unknown } } | undefined
+  /**
+   * ⚠️ **必须看第二次求值的返回值**：两次求值之间页面可能已经变了（二维码自动
+   * 刷新会把按钮换掉），此时合成事件一个都派不出去 —— 还 log「已点击」就是
+   * **假成功**，用户以为点了、其实什么都没发生（对抗审计 P3）。
+   */
+  if (dispatched?.result?.value !== true) {
+    log('[doubao-login] 派发合成事件时「登录」按钮已消失，本次未点击')
+    return 'not-found'
+  }
   log('[doubao-login] 已用合成事件序列点击「登录」（按钮无可点盒子）')
   return 'synthetic'
 }

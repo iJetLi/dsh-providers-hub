@@ -143,6 +143,14 @@ describe('★ 豆包浏览器探测：候选链必须兜到跨平台发现（IKV
 interface CdpCall {
   method: string
   params: Record<string, unknown>
+  /**
+   * ⚠️⚠️ **必须记录第三个实参**。第一版替身写的是 `send(method, params)` ——
+   * `sessionId` 被**静默吞掉**，于是「事件打到页面会话上」这条判据根本没有观察面：
+   * 把三处 `}, sessionId)` 全改成 `})`（= 发到浏览器级、没人接）依然 **15 passed 全绿**。
+   * 这是本仓「替身少一个字段 ⇒ 整条分支静默失效」的又一例（同 client-ui 笔记的
+   * `useRef` 只写 `cur` 不写 `current`）。
+   */
+  sessionId?: string
 }
 
 /**
@@ -155,8 +163,8 @@ function makeCdp(values: unknown[]): { cdp: DoubaoClickCdp; calls: CdpCall[] } {
   const calls: CdpCall[] = []
   const queue = [...values]
   const cdp: DoubaoClickCdp = {
-    async send(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-      calls.push({ method, params })
+    async send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<unknown> {
+      calls.push({ method, params, sessionId })
       if (method === 'Runtime.evaluate') {
         const value = queue.shift()
         return { result: { value } }
@@ -165,6 +173,44 @@ function makeCdp(values: unknown[]): { cdp: DoubaoClickCdp; calls: CdpCall[] } {
     },
   }
   return { cdp, calls }
+}
+
+/**
+ * ★★★ 把合成事件那段**页面脚本真的跑一遍**，记录 `dispatchEvent` 的实参顺序。
+ *
+ * 为什么必须这么做：合成事件是**一整段交给 CDP `Runtime.evaluate` 的字符串**，
+ * 用例拿到的只是文本。原先这里用 `expression.indexOf(name)` 比下标，于是四个
+ * bypass **全绿**（对抗审计实测）：
+ *   ① 五个 `dispatchEvent` 各包一层 `if (false)` ⇒ 一个都不派发，文本照样在；
+ *   ② 事件名只写在注释里 ⇒ `indexOf` 命中注释；
+ *   ③ 源码顺序对、执行时用 `[4,3,2,1,0]` 反索引 ⇒ 实际倒序；
+ *   ④ 五个字面量塞进一个**没人用**的对象 ⇒ 文本有、执行没有。
+ * 而且合法重构（把序列搬进 helper）会让文本断言**假红**。
+ *
+ * 这里的做法是构造最小 `document` / `PointerEvent` / `MouseEvent` 替身，
+ * 用 `new Function` 把**原文**执行一次并记录实参 —— 上面四个 bypass 全部变红，
+ * 而「搬 helper 但顺序不变」保持绿。文本断言永远替代不了「跑一遍」。
+ */
+function runSyntheticScript(expression: string): string[] {
+  const seen: string[] = []
+  const loginEl = {
+    textContent: '登录',
+    getBoundingClientRect: () => ({ left: 10, top: 20, width: 100, height: 40 }),
+    contains: () => false,
+    dispatchEvent: (event: { kind: string }): boolean => {
+      seen.push(event.kind)
+      return true
+    },
+  }
+  const document = { querySelectorAll: () => [loginEl] }
+  class FakePointerEvent { readonly kind: string; constructor(type: string) { this.kind = `pointer:${type}` } }
+  class FakeMouseEvent { readonly kind: string; constructor(type: string) { this.kind = type } }
+  // eslint-disable-next-line no-new-func -- 被测对象**就是**一段字符串脚本
+  const run = new Function('document', 'PointerEvent', 'MouseEvent', `return ${expression}`) as (
+    doc: unknown, pe: unknown, me: unknown,
+  ) => unknown
+  run(document, FakePointerEvent, FakeMouseEvent)
+  return seen
 }
 
 describe('★★★ 登录按钮点击：必须派发真鼠标事件（IKV5HC 第三条）', () => {
@@ -183,7 +229,15 @@ describe('★★★ 登录按钮点击：必须派发真鼠标事件（IKV5HC �
     expect(dispatches, '必须有两次鼠标事件（按下 + 抬起）').toHaveLength(2)
     expect(dispatches[0].params).toMatchObject({ type: 'mousePressed', x: 100, y: 200, button: 'left', buttons: 1, clickCount: 1 })
     expect(dispatches[1].params).toMatchObject({ type: 'mouseReleased', x: 100, y: 200, button: 'left', buttons: 0, clickCount: 1 })
-    // 事件必须打到**页面会话**上（不带 sessionId 会发到浏览器级、没人接）。
+    /**
+     * ⚠️⚠️ 事件必须打到**页面会话**上 —— 不带 `sessionId` 时 `Input.dispatchMouseEvent`
+     * 发到**浏览器级**，页面里没人接，点了个寂寞。
+     *
+     * 第一版这里只有下面那行 `expect(log)`（它只证明我们走到了 trusted 分支），
+     * 于是一个「把三处 `}, sessionId)` 全删掉」的变异**全绿** —— 判据自己没牙。
+     */
+    expect(dispatches.map((call) => call.sessionId), '鼠标事件必须带页面 sessionId').toEqual(['S1', 'S1'])
+    expect(calls[0].sessionId, '定位按钮的那次求值也必须带 sessionId').toBe('S1')
     expect(log).toHaveBeenCalledWith(expect.stringContaining('受信任'))
   })
 
@@ -201,12 +255,22 @@ describe('★★★ 登录按钮点击：必须派发真鼠标事件（IKV5HC �
     /**
      * ⚠️ 这五个事件缺一不可：`click()` 只发最后一个，而豆包的处理器挂在
      * `pointerdown` / `mousedown` 上 —— **少发一个就回到缺陷原形**。
+     *
+     * ⚠️⚠️ 判据是**把脚本真跑一遍**看实际派发顺序，不是比文本下标 ——
+     * 文本下标能被「包 `if (false)`」「写进注释」「反索引」「塞进死对象」四种方式
+     * 绕过（对抗审计实测四个 bypass 全绿），也可能被合法重构弄成假红。
      */
-    const order = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', "'click'"].map((name) => expression.indexOf(name))
-    for (const [index, at] of order.entries()) {
-      expect(at, `合成序列里缺少第 ${index + 1} 个事件（${['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'][index]}）`).toBeGreaterThan(-1)
-    }
-    expect([...order].sort((a, b) => a - b), '五个事件必须按 pointerdown → mousedown → pointerup → mouseup → click 排列').toEqual(order)
+    expect(runSyntheticScript(expression), '五个事件必须按 pointerdown → mousedown → pointerup → mouseup → click 实际派发').toEqual([
+      'pointer:pointerdown', 'mousedown', 'pointer:pointerup', 'mouseup', 'click',
+    ])
+    /**
+     * ⚠️⚠️ 只断言事件**名字**不够：把 `new PointerEvent('pointerdown', …)` 改成
+     * `new MouseEvent('pointerdown', …)` 后字符串照样在、用例全绿 —— 而豆包的处理器
+     * 就是按 `pointerdown` + `event.pointerType` 工作的（`MouseEvent` 没有 `pointerType`）。
+     * 所以必须断言**构造器**。这一格是审计抓出来的真无牙。
+     */
+    expect(expression, '按下/抬起必须是真 PointerEvent').toContain("new PointerEvent('pointerdown'")
+    expect(expression).toContain("new PointerEvent('pointerup'")
   })
 
   it('★★ 按钮压根没找到 ⇒ `not-found`，且**不**再发第二段求值（别对着空气派发事件）', async () => {
@@ -219,6 +283,28 @@ describe('★★★ 登录按钮点击：必须派发真鼠标事件（IKV5HC �
     expect(calls.filter((call) => call.method === 'Runtime.evaluate')).toHaveLength(1)
     expect(calls.some((call) => call.method === 'Input.dispatchMouseEvent')).toBe(false)
     expect(log).toHaveBeenCalledWith(expect.stringContaining('没找到'))
+  })
+
+  it('★★★ 坐标是 `NaN` / `Infinity` ⇒ 不许当受信任点击（`typeof` 判据挡不住）', async () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { cdp, calls } = makeCdp([{ x: bad, y: 200 }, true])
+
+      const outcome = await clickDoubaoLoginButton(cdp, 'S1')
+
+      expect(outcome, `${String(bad)} 不是可点的坐标`).toBe('synthetic')
+      expect(calls.some((call) => call.method === 'Input.dispatchMouseEvent')).toBe(false)
+    }
+  })
+
+  it('★★★ 派发合成事件时按钮已消失 ⇒ 不许报 `synthetic`（否则是"点了但什么都没发生"的假成功）', async () => {
+    const { cdp } = makeCdp(['no-box', false])
+    const log = vi.fn()
+
+    const outcome = await clickDoubaoLoginButton(cdp, 'S1', log)
+
+    expect(outcome).toBe('not-found')
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('已消失'))
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('已用合成事件序列点击'))
   })
 })
 
@@ -263,5 +349,135 @@ describe('★ 找不到浏览器时的提示：必须分平台说人话 + 点名
     expect(hint).toContain('/Applications')
     expect(hint).toContain('DSH_DOUBAO_BROWSER_PATH')
     expect(hint).not.toContain('chrome.exe')
+  })
+})
+
+describe('★★ 环境变量覆盖必须**优先于**跨平台兜底', () => {
+  it('★★★ 覆盖值与兜底浏览器同时存在 ⇒ 必须选覆盖值', () => {
+    const OVERRIDE = 'D:\\tools\\chrome.exe'
+    const FALLBACK = 'C:\\Users\\jet\\scoop\\apps\\chromium\\current\\chrome.exe'
+    const found = doubaoLoginBrowserExecutable({
+      platform: 'win32',
+      env: { DSH_DOUBAO_BROWSER_PATH: OVERRIDE },
+      home: 'C:\\Users\\jet',
+      exists: (p) => p === OVERRIDE || p === FALLBACK,
+    })
+    /**
+     * ⚠️ 只测「覆盖值存在时返回它」会被「把兜底搬到链首」的变异蒙过 ——
+     * 那种情况下两条 exists 都真、返回的是兜底那个。必须让**两者都存在**。
+     */
+    expect(found).toBe(OVERRIDE)
+  })
+})
+
+// ── 遮挡 / 视口外（P2-1）──
+
+describe('★★★ 登录按钮被浮层遮挡或在视口外 ⇒ 不许报 `trusted`（假成功）', () => {
+  it('★★★ `elementFromPoint` 命中别人 ⇒ 退回合成事件序列，并说清原因', async () => {
+    const { cdp, calls } = makeCdp(['covered', true])
+    const log = vi.fn()
+
+    const outcome = await clickDoubaoLoginButton(cdp, 'S1', log)
+
+    /**
+     * ⚠️ 受信任点击打在**坐标**上：被引导浮层盖住时才点得到按钮，于是
+     * `dispatchMouseEvent` 会落到浮层上，按钮自己**一个事件都收不到**，
+     * 而旧代码照样 `return 'trusted'` ⇒ 用户看到「已点击」但二维码没弹（假成功）。
+     * 合成事件是 `dispatchEvent` 到元素本身，能绕过遮挡 ⇒ 退回它才对。
+     */
+    expect(outcome).toBe('synthetic')
+    expect(calls.some((call) => call.method === 'Input.dispatchMouseEvent')).toBe(false)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('遮挡'))
+    // 遮挡判据必须**真的**在页面里算（不能靠 TS 侧猜）
+    const expression = String(calls[0].params.expression)
+    expect(expression).toContain('elementFromPoint')
+  })
+})
+
+// ── 相对路径必须被拒绝（P3-6）──
+
+describe('★★ 候选链只认绝对路径（否则 `existsSync` 相对 CWD 命中）', () => {
+  const REL = 'audit-rel-chrome.exe'
+
+  it('★★★ `DSH_DOUBAO_BROWSER_PATH` 是相对路径 ⇒ 登录侧**忽略**它', () => {
+    // 共享腿 `browserCandidates` 本来就按绝对路径过滤，项目腿不跟上就会两边分叉
+    const found = doubaoLoginBrowserExecutable({
+      platform: 'win32',
+      env: { DSH_DOUBAO_BROWSER_PATH: REL },
+      home: 'C:\\Users\\jet',
+      exists: (p) => p === REL,
+    })
+    expect(found).not.toBe(REL)
+  })
+
+  /**
+   * ⚠️ `trim()` 不是洁癖：用户在面板里粘路径时很容易带上空格
+   * （`DSH_DOUBAO_BROWSER_PATH=" /opt/my-chrome "`）。不做 trim 的话
+   * `isAbsolute(' /opt/my-chrome ')` 判 false ⇒ 变量白设，而提示里还会回显
+   * 「看到的值 = ' /opt/my-chrome '」—— 用户以为配对了、实际没生效。
+   */
+  it('★★★ 环境变量两侧带空格 ⇒ 先 trim 再用（否则 `isAbsolute` 判 false、变量白设）', () => {
+    const found = doubaoLoginBrowserExecutable({
+      platform: 'darwin',
+      env: { DSH_DOUBAO_BROWSER_PATH: '  /opt/my-chrome  ' },
+      home: '/Users/jet',
+      exists: (candidate) => candidate === '/opt/my-chrome',
+    })
+
+    expect(found).toBe('/opt/my-chrome')
+  })
+
+  it('★★★ 签到侧同款', () => {
+    const found = doubaoSigninBrowserExecutable({
+      platform: 'win32',
+      env: { DSH_DOUBAO_BROWSER_PATH: REL },
+      home: 'C:\\Users\\jet',
+      exists: (p) => p === REL,
+    })
+    expect(found).not.toBe(REL)
+  })
+})
+
+// ── 豆包内核优先于通用 Chrome 兜底（M13 无牙的补丁）──
+
+describe('★★ Windows: 豆包客户端内核排在**通用** Chrome 兜底之前', () => {
+  it('★★★ 两条都在 ⇒ 必须选豆包内核（存量用户的解析结果不能漂）', () => {
+    const KERNEL = 'D:\\Program File\\Doubao\\app\\Doubao.exe'
+    const FALLBACK = 'C:\\Users\\jet\\scoop\\apps\\chromium\\current\\chrome.exe'
+    const found = doubaoLoginBrowserExecutable({
+      platform: 'win32',
+      env: {},
+      home: 'C:\\Users\\jet',
+      exists: (p) => p === KERNEL || p === FALLBACK,
+    })
+    expect(found).toBe(KERNEL)
+  })
+})
+
+// ── 生产接线：`clickLoginButton` 必须真的调三态实现（P2-3）──
+
+describe('★★★ 生产接线守卫：`clickLoginButton` 不得退回 `loginEl.click()`', () => {
+  it('★★★ 方法体必须调用 `clickDoubaoLoginButton`，且源文件里不许再有 `loginEl.click()`', async () => {
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync(new URL('../../src/doubao-login.ts', import.meta.url), 'utf8')
+    const start = source.indexOf('private async clickLoginButton')
+    expect(start, 'clickLoginButton 不见了（改名？）').toBeGreaterThan(-1)
+    const end = source.indexOf('\n  }', start)
+    const body = source.slice(start, end > start ? end : start + 1500)
+
+    /**
+     * ⚠️ 这条是**接线**守卫，不是行为守卫：`DoubaoLoginSession.open()` 要真起浏览器，
+     * 单测里没法跑完。但没有它，把 `await clickDoubaoLoginButton(this.cdp, sessionId, this.log)`
+     * 整行删掉（或换回 `loginEl.click()`）**19 条用例全绿** —— 功能从产品里静默消失。
+     * 本仓既有的 `jet-hub-structure-ast.spec.ts` 就是这个套路。
+     */
+    expect(body, '必须委托给三态实现').toContain('clickDoubaoLoginButton')
+    /**
+     * ⚠️ 扫**代码**而不是全文：这个文件有三处 doc 注释在讲「为什么不能只
+     * `loginEl.click()`」（那是给人读的取证），全文扫描会把它们当违规。
+     * 剥注释这一步不能省 —— 第一版就是这么假红的。
+     */
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(code, '旧实现（只发合成 click）不许复活').not.toContain('loginEl.click()')
   })
 })

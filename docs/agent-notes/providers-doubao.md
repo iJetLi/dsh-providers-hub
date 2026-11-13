@@ -159,20 +159,29 @@ join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData','Local'), ...),
 | `src/baizhi-browser-login.ts` | 246 | `deps.executablePath ?? (deps.resolveBrowser ?? findBrowserExecutable)()` |
 | `src/magicrew-browser-login.ts` | 879 | 同上 |
 | `src/marvis-browser-login.ts` | 299 | 同上 |
-| `src/monkeycode-browser-login.ts` | 52 | 同上 |
+| `src/monkeycode-browser-login.ts` | 294 | 同上（52 是 `import` 行，别抄错） |
 
 ⇒ 豆包是**唯一漏掉**的那个。自己再抄一份 macOS 路径 = 造第二份口径
 （`docs/agent-notes/misc.md` 的「一文件两套同义判据」），而 `chromium-session.ts`
 的 `browserCandidates()` 已经覆盖 macOS 的 `.app` 包（Chrome / Chromium / Edge /
 Brave，且**必须**用 `posix.join` —— 用 `join` 会在 Windows 上拼出
 `/Applications\Google Chrome.app\…`，Issue IKJKNT 的成因之一）、Linux 的
-`PATH` + AppStream 元数据、Windows 的 scoop / Edge / Chromium。
+`/usr/bin` 与 `/opt` 下的固定路径 + snap / flatpak 的 `exports/bin/`、Windows 的
+scoop / Edge / Chromium。
+
+⚠️ **Linux 侧刻意不列 AppStream 元数据目录**（`…/flatpak/appstream/…`）：
+判据只有 `existsSync`、不做「能不能执行」，列了会「探测成功 → spawn 时 EACCES」，
+**比不列更糟**（`src/chromium-session.ts:726-732`，反例锁在
+`tests/unit/zcode-browser-linux.spec.ts`）。我第一版抄了句「Linux 的 AppStream 元数据」，
+是**错的**，已删。
 
 ### 5.3 修法的两个要点
 
 1. **顺序**：本项目自己的候选链**在前**（`DSH_DOUBAO_BROWSER_PATH` 仍最优先、
    豆包客户端内核仍排在通用 Chrome 之前），跨平台探测只在「前五条一条都不存在」
-   时才走到 ⇒ **存量 Windows 用户的解析结果逐字节不变**。
+   时才走到 ⇒ **原本就能解析成功的 Windows 用户，解析结果逐字节不变**。
+   ⚠️ 反过来说：**原本五条都不存在的那批用户（正是修复目标）结果会变** ——
+   从「`undefined` ⇒ 报错」变成「命中跨平台探测」。「不变」只能限定在前一种人群。
 2. **两个函数一起改**：`doubaoLoginBrowserExecutable` 与
    `doubaoSigninBrowserExecutable` 是**两份**候选链（历史原因），只修登录会变成
    「扫码能进、签到照样报错」，症状与「豆包今天没活动」同形。
@@ -259,11 +268,15 @@ if (exe === undefined)
 
 ### 5.8 守卫与变异
 
-`tests/unit/doubao-browser-discovery.spec.ts`（**19 条**）：两个函数 × 6 格
-（macOS / Linux / Windows 存量不变 / `DSH_DOUBAO_BROWSER_PATH` 优先 / 都没有 ⇒
-`undefined` / 真实 macOS 候选链首项）+ 2 条反向对照（Windows 链不含 `.app`）
-+ 3 条点击三态 + **4 条提示文案**（darwin 含 `/Applications` 且不含 `chrome.exe` /
-win32 反之 / 回显 `DSH_DOUBAO_BROWSER_PATH` 的值与「（未设置）」/ 签到同款）。
+`tests/unit/doubao-browser-discovery.spec.ts`（**28 条**，分 5 个 describe）：
+
+| describe | 条数 | 覆盖 |
+|---|---|---|
+| 跨平台发现 | 10 | 两个函数 × 6 格（macOS / Linux / Windows 存量不变 / 环境变量优先 / 都没有 ⇒ `undefined` / 真实 macOS 候选链首项）+ 2 条反向对照 + **Windows 内核 vs 通用兜底优先级** + **环境变量优先于兜底** |
+| 提示文案 | 4 | darwin 含 `/Applications` 且**不含** `chrome.exe`；win32 反之；回显变量值与「（未设置）」；签到同款 |
+| 相对路径 | 3 | `DSH_DOUBAO_BROWSER_PATH=xxx.exe` 不许被相对 CWD 命中（两个函数各 1）+ **两侧带空格 ⇒ 先 `trim()`** |
+| 点击三态 | 8 | trusted（含 **sessionId 透传**）/ **NaN · Infinity 不许当坐标** / no-box ⇒ synthetic（**顺序靠把脚本真跑一遍**）/ **covered ⇒ synthetic** / **派发时按钮消失 ⇒ `not-found`** / not-found |
+| 生产接线 | 1 | `clickLoginButton` 必须委托 `clickDoubaoLoginButton`，且代码里不许再出现 `loginEl.click()` |
 `tests/unit/doubao-browser-missing-hint.spec.ts`（**2 条**）：两个消费者的错误文本。
 
 **变异 13/13 有牙**（脚本 `D:/tmp/ikv5hc_mut3.py` + `ikv5hc_mut4.py`，每格
@@ -282,6 +295,20 @@ win32 反之 / 回显 `DSH_DOUBAO_BROWSER_PATH` 的值与「（未设置）」/ 
 | M10/M13 | 两个**消费者**回退成旧硬编码文案 | `expected [Function] to throw error matching /DSH_DOUBAO_BROWSER_PATH/ but got '登录失败：…'` / `expected '未找到可用的浏览器 —— …' to contain 'DSH_DOUBAO_BROWSER_PATH'` |
 | M11/M12 | 两条错误里不再追加 `*BrowserHint()` | 同上（`to contain 'DSH_DOUBAO_BROWSER_PATH'`） |
 
+第二轮（审计驱动，脚本 `D:/tmp/ikv5hc_mut5.py`，**8/8 有牙**，判据含
+`Test Files … failed` 与 `Tests … failed` **双读**，语法错会显示成 `no tests` 被单独识别）：
+
+| 编号 | 变异 | 失败原文（摘） |
+|---|---|---|
+| M14 | 五个 `dispatchEvent` 各包 `if (false)`（文本还在、一发不发） | `五个事件必须按 … 实际派发: expected [] to deeply equal [ … ]` |
+| M15 | `pointerup` 与 `mouseup` 换位（执行顺序错） | 同上（数组第 3、4 项互换） |
+| M16 | 删 `Number.isFinite` | `NaN 不是可点的坐标: expected 'trusted' to be 'synthetic'` |
+| M17 | 不看第二次求值返回值 | `expected 'synthetic' to be 'not-found'` |
+| M18 | 环境变量不 `trim()` | `expected undefined to be '/opt/my-chrome'` |
+| M19 | 项目候选链不判 `isAbsolute` | `expected 'audit-rel-chrome.exe' …`（相对 CWD 命中） |
+| M20 | 鼠标事件不带 `sessionId` | `鼠标事件必须带页面 sessionId` |
+| M21 | 跨平台兜底抢到项目候选链**之前** | 环境变量优先级那条红（scoop chromium 抢走覆盖值） |
+
 ### 5.9 一条**数据损失**教训（写在这里因为就发生在本轮的变异脚本里）
 
 变异脚本收尾写了「把文件读回来再写回去」的兜底：
@@ -296,3 +323,59 @@ for p in (LOGIN, SIGNIN):
 上一个提交再重新落地。教训：**任何「还原」都只能从内存变量回写**，绝不能在同一
 表达式里既读又写同一个路径；并且每格结束就该 `[RESTORE] identical=True` 对账，
 而不是只在收尾赌一把。
+
+### 5.10 第二轮返工：**合成事件顺序必须「把脚本真跑一遍」**（对抗审计 P1-①）
+
+第一版的顺序判据是纯文本：
+
+```ts
+const order = ['pointerdown', 'mousedown', …].map((name) => expression.indexOf(name))
+expect([...order].sort((a, b) => a - b)).toEqual(order)   // ⚠️ 全 -1 时恒真
+```
+
+对抗审计实测**四个 bypass 全绿**：① 五个 `dispatchEvent` 各包 `if (false)`；
+② 事件名只写在注释里；③ 源码顺序对、执行用 `[4,3,2,1,0]` 反索引；
+④ 五个字面量塞进一个没人用的对象。而「把序列搬进 helper」这种**合法重构**却会
+**假红**。而且当 `order` 全是 `-1` 时 `[...order].sort()` 与 `order` 相等 ⇒
+`toEqual` **恒真**（这行判据自己就是假绿源）。
+
+修法：**执行原文**。合成事件是「一整段交给 `Runtime.evaluate` 的字符串」，
+所以用例把它放进最小沙箱跑一次，记录 `dispatchEvent` 的**实参顺序**：
+
+```ts
+function runSyntheticScript(expression: string): string[] {
+  const seen: string[] = []
+  const loginEl = {
+    textContent: '登录',
+    getBoundingClientRect: () => ({ left: 10, top: 20, width: 100, height: 40 }),
+    dispatchEvent: (event: { kind: string }) => { seen.push(event.kind); return true },
+  }
+  const document = { querySelectorAll: () => [loginEl] }
+  class FakePointerEvent { constructor(type: string) { this.kind = `pointer:${type}` } }
+  class FakeMouseEvent { constructor(type: string) { this.kind = type } }
+  const run = new Function('document', 'PointerEvent', 'MouseEvent', `return ${expression}`)
+  run(document, FakePointerEvent, FakeMouseEvent)
+  return seen
+}
+```
+
+断言 `toEqual(['pointer:pointerdown', 'mousedown', 'pointer:pointerup', 'mouseup', 'click'])`
+⇒ 上面四个 bypass 全红、合法重构保持绿。**「能跑的就别只比文本」**。
+（同源教训见 `docs/agent-notes/client-ui.md` 的 `if (false)` 短路与 PR #69 的
+`useMemo` deps 未声明 —— 文本断言永远挡不住「留着但失效」。）
+
+同时按审计补掉的三处**客户端行为**坑：
+
+1. **遮挡**：受信任点击打在**坐标**上，被浮层盖住时事件落到浮层、按钮零事件，
+   旧代码照样报 `'trusted'` ⇒ 求值时加 `document.elementFromPoint(cx, cy)`
+   判「命中的是不是按钮自己」，不是就返回 `'covered'` 退回合成事件序列
+   （合成事件 `dispatchEvent` 到元素本身，能绕过遮挡）。
+2. **`NaN` / `Infinity`**：`typeof NaN === 'number'` 照样过 ⇒ 必须 `Number.isFinite`。
+3. **派发时按钮已消失**（二维码自动刷新会换掉按钮）：不看第二次求值的返回值就会
+   log「已用合成事件序列点击」而**实际零派发** ⇒ 必须 `!== true` 就返回 `'not-found'`。
+
+以及一处方法论：**「套件级失败」不是「断言有牙」**。审计把 `try {` 留着只删
+`catch` ⇒ 语法错 ⇒ 整个文件 `no tests`，而只读 `assertionResults` 的抽取器会把它
+记成 GREEN。变异脚本必须**同读** `Tests … failed` 与 `Test Files … failed`
+（本次脚本用 `Test Files (\d+) failed` + `Tests (\d+) failed` 双判据，
+并对 `no tests` 单独判 `INVALID-SYNTAX`）。

@@ -540,9 +540,15 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
   （`channel: false` —— 没有适配器、也没有模型目录，故它不会出现在对话框的模型
   选择器里）。点「+ 新建账号」会起一个**可见**的 Chrome 窗口打开豆包，用手机豆包
   App 扫码后从该会话读 `sessionid` 落池；每日签到与积分查询也走同一个浏览器会话。
-  ⚠️ **本机必须有 Chromium 内核浏览器**：候选链 = `DSH_DOUBAO_BROWSER_PATH` →
-  豆包客户端内核 → **跨平台自动探测**（macOS 的 `/Applications/*.app` 包、Linux 的
-  `PATH` 与 AppStream 元数据、Windows 的 scoop / Chrome / Edge / Chromium）。
+  ⚠️ **本机必须有 Chromium 内核浏览器**。候选链（Windows 专属项**只在 Windows 上**参与）：
+  `DSH_DOUBAO_BROWSER_PATH` → `C:\Program Files\Google\Chrome\Application\chrome.exe`
+  → `%ProgramFiles%\…\chrome.exe` → `%LOCALAPPDATA%\…\chrome.exe` →
+  `D:\Program File\Doubao\app\Doubao.exe`（豆包客户端内核）→ **跨平台自动探测**
+  （macOS 的 `/Applications` 与 `~/Applications` 下的 `.app` 包；Linux 的 `/usr/bin`、
+  `/opt` 与 snap/flatpak 的 `exports/bin/`；Windows 的 scoop / Edge / Chromium）。
+  ⚠️ 只有**绝对路径**才算命中 —— 相对路径交给 `existsSync` 会以当前工作目录为准。
+  ⚠️ 找不到时提示会**分平台**说人话、回显 `DSH_DOUBAO_BROWSER_PATH` 的当前值、
+  并逐条列出试过的路径（复用 `browserNotFoundMessage`，与其余五家一致）。
   ✅ **2026-11-13 修（Gitee issue IKV5HC）**：修复前候选链**全是 Windows 路径**
   （`C:\Program Files\…\chrome.exe`、`D:\Program File\Doubao\…`），于是 macOS /
   Linux 上**必然**报「豆包登录需要本机有 Chromium 内核浏览器…未找到可执行文件」，
@@ -552,10 +558,13 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
   ⇒ 多账号各自独立，不共享「每设备每天一次」的签到配额。
   ⚠️ 自动点击页面上的「登录」按钮优先派发**受信任鼠标事件**
   （CDP `Input.dispatchMouseEvent` 的 `mousePressed` + `mouseReleased`，
-  Chromium 会自行派生 `pointerdown` / `mousedown` / …）；只有在按钮**拿不到可点
-  盒子**（`0×0` / 被浮层裁掉）时才退回合成事件序列 —— 因为豆包的处理器挂在
-  `pointerdown` / `mousedown` 上，而 `HTMLElement.click()` **只发 `click`**，
-  自动点击会静默失效、用户得手动点。
+  Chromium 会自行派生 `pointerdown` / `mousedown` / …）；以下三种情形退回
+  **合成事件序列**（`pointerdown → mousedown → pointerup → mouseup → click`）：
+  按钮拿不到可点盒子（`0×0`）、**被浮层盖住或在视口外**（`document.elementFromPoint`
+  命中的不是按钮 —— 受信任点击打在坐标上，会落到浮层上，按钮一个事件都收不到）、
+  按钮压根找不到。合成事件直接 `dispatchEvent` 到元素本身，能绕过遮挡。
+  ⚠️ 为什么不能只发 `click()`：豆包的处理器挂在 `pointerdown` / `mousedown` 上，
+  而 `HTMLElement.click()` **只发 `click`**，自动点击会静默失效、用户得手动点。
 
 ### 一键领取积分
 
