@@ -58,26 +58,53 @@ describe('OpenAI gateway stream conversion', () => {
    * 只断言 `output.join('')` 含 `qoder_queue`：把它塞进 error 帧同样能过，
    * 但那是**另一条出口**。故这里同时锚定「正文照常产出」与「delta 为空」。
    */
+  /**
+   * 提示帧的形状是「合法 `text-delta` + 私有字段 `qoderQueue`」。
+   *
+   * ⚠️ 为什么不是 `type: 'queue-notice'`：`StreamChunk` 是 `dsh-llm` 的闭合联合，
+   * 宿主两条组装器的 `default` 都是 `assertNever` ⇒ 联合外类型**硬抛**
+   *（2026-11-13 实测：`unreachable variant in BlockAssembler.push`）。
+   */
+  function noticeFrame(queue: Record<string, unknown>): StreamChunk {
+    return { type: 'text-delta', index: 0, text: '', qoderQueue: queue } as unknown as StreamChunk
+  }
+
+  /** 把 SSE 行解析成 JSON 帧（跳过 `[DONE]` 与空行）。 */
+  function parseSseFrames(output: string[]): Array<Record<string, unknown>> {
+    return output
+      .join('')
+      .split('\n')
+      .filter((line) => line.startsWith('data: ') && !line.includes('[DONE]'))
+      .map((line) => JSON.parse(line.slice('data: '.length)) as Record<string, unknown>)
+  }
+
   it('排队提示帧 → qoder_queue 字段（且不污染正文）', async () => {
     const output: string[] = []
     for await (const item of toOpenAiSse(chunks([
-      { type: 'queue-notice', info: { queued: true, attempt: 1, waitMs: 10_000, modelKey: 'qfmodel' } } as unknown as StreamChunk,
+      noticeFrame({ queued: true, attempt: 1, waitMs: 10_000, modelKey: 'qfmodel' }),
       { type: 'text-delta', index: 0, text: '排到了' },
       { type: 'finish', reason: { kind: 'stop' } },
     ]), 'req-q', 'qoder/qfmodel')) output.push(item)
 
-    const joined = output.join('')
-    expect(joined).toContain('"qoder_queue"')
-    expect(joined).toContain('"waitMs":10000')
-    expect(joined).toContain('"modelKey":"qfmodel"')
-    // 提示帧本身不带正文（`delta` 为空对象），后续正文照常
-    expect(joined).toContain('"delta":{}')
-    expect(joined).toContain('"content":"排到了"')
+    // ⚠️ 判据必须**逐帧**，不能用 `output.join('').toContain(...)`：
+    // finish 帧同样含 `"delta":{}`，提示帧被删掉后那条断言仍然是绿的
+    //（2026-11-13 对抗审计实测）。
+    const frames = parseSseFrames(output)
+    const notices = frames.filter((frame) => 'qoder_queue' in frame)
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toMatchObject({
+      choices: [{ index: 0, delta: {} }],
+      qoder_queue: { queued: true, attempt: 1, waitMs: 10_000, modelKey: 'qfmodel' },
+    })
+    // 提示帧不得贡献正文
+    expect(JSON.stringify(notices[0])).toContain('"delta":{}')
+    // 正文照常产出
+    expect(frames.some((frame) => JSON.stringify(frame).includes('"content":"排到了"'))).toBe(true)
   })
 
   it('非流式聚合忽略排队提示帧（不得污染 message.content）', async () => {
     const response = await collectOpenAiCompletion(chunks([
-      { type: 'queue-notice', info: { queued: true, attempt: 1 } } as unknown as StreamChunk,
+      noticeFrame({ queued: true, attempt: 1 }),
       { type: 'text-delta', index: 0, text: 'ok' },
       { type: 'finish', reason: { kind: 'stop' } },
     ]), 'req-q2', 'qoder/qfmodel')

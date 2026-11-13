@@ -1149,17 +1149,26 @@ describe('QoderAdapter 排队错误（10605 model_queued）', () => {
         // 30s 排队被压到 10s，再按 1s 心跳切片 ⇒ 10 片、总时长不变
         expect(sleeps.every((ms) => ms <= 1_000), '每片不超过心跳间隔').toBe(true)
         expect(sleeps.reduce((sum, ms) => sum + ms, 0), '总等待时长与 wait 档一致').toBe(10_000)
-        // 每一片都要有且仅有一个空 text-delta（正文不增加字符，只让通道有字节）
+        // 每一片都要有且仅有一个空 text-delta（正文不增加字符，只让通道有字节）。
+        // ⚠️ 提示帧本身也是空 `text-delta`（它多带私有字段 `qoderQueue`），
+        // 故判据必须把提示帧**排除**，否则切片数会被它多算一片。
+        const isNotice = (chunk: Record<string, unknown>): boolean =>
+          (chunk as { qoderQueue?: unknown }).qoderQueue !== undefined
         const heartbeats = chunks.filter(
-          (chunk) => chunk.type === 'text-delta' && chunk.text === '',
+          (chunk) => chunk.type === 'text-delta' && chunk.text === '' && !isNotice(chunk),
         )
         expect(heartbeats.length, '切片数与心跳帧数必须一一对应').toBe(sleeps.length)
         expect(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text === '排到了')).toBe(true)
         // 除心跳外还必须有一帧**排队提示**，把「排队」这件事本身告诉下游
         //（只有空心跳时，下游只能知道「连接活着」，不知道在排队）。
-        const notices = chunks.filter((chunk) => chunk.type === 'queue-notice')
+        const notices = chunks.filter(isNotice)
         expect(notices.length, '每轮排队一条提示帧').toBe(1)
-        expect(notices[0]!.info).toMatchObject({
+        // ⚠️ 提示帧**必须是合法 StreamChunk 成员**：宿主的 BlockAssembler /
+        // AssistantStreamAccumulator 的 default 是 assertNever，联合外类型会硬抛
+        //（2026-11-13 实测：`unreachable variant in BlockAssembler.push`）。
+        expect(notices[0]!.type).toBe('text-delta')
+        expect(notices[0]!.index).toBe(0)
+        expect((notices[0] as { qoderQueue?: unknown }).qoderQueue).toMatchObject({
           queued: true,
           attempt: 1,
           waitMs: 10_000,
@@ -1173,18 +1182,210 @@ describe('QoderAdapter 排队错误（10605 model_queued）', () => {
       }
     })
 
+    it('visible 档：余数单独成片（2500ms / 1000ms 心跳 ⇒ [1000, 1000, 500]）', async () => {
+      const previousMode = process.env.DSH_QODER_QUEUE_WAIT_MODE
+      const previousBeat = process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+      process.env.DSH_QODER_QUEUE_WAIT_MODE = 'visible'
+      process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = '1000'
+      try {
+        let call = 0
+        const fetchImpl = vi.fn(async () => {
+          call += 1
+          return call === 1
+            // `parseQueueError` 对 `retryAfterSeconds` 做 `Math.trunc`，非整数秒会被截断
+            // ⇒ 用毫秒字段 `retry_after_ms` 才能构造出「余数单独成片」的 2500ms。
+            ? queueResponse({ ...REAL_QUEUED, retry_after_ms: 2_500 })
+            : envelopeResponse([textFrame('排到了'), finishFrame])
+        }) as unknown as typeof fetch
+
+        const sleeps: number[] = []
+        await collectWith(makeAdapter({
+          fetchImpl, sleep: async (ms) => { sleeps.push(ms) },
+        }), { model: 'qfmodel', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+
+        // `Math.min(remaining, heartbeat)` 的收敛：余数必须单独成片，
+        // 不能把余数并进最后一片（那会让某一片超长、心跳失效）。
+        expect(sleeps).toEqual([1_000, 1_000, 500])
+        expect(sleeps.reduce((sum, ms) => sum + ms, 0), '总时长必须严格等于 wait 档').toBe(2_500)
+      } finally {
+        if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
+        else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode
+        if (previousBeat === undefined) delete process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+        else process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = previousBeat
+      }
+    })
+
+    it('visible 档：心跳间隔非法（0 / 非数字）⇒ 归一成 5000ms，不得死循环', async () => {
+      // 2026-11-13 对抗审计实测：`resolveQueueHeartbeatMs` 的 `> 0` 若被改松成
+      // `>= 0`，`slice = 0` 会让 `remaining` 永不减少 ⇒ `visible` 档死循环
+      //（探针 60s 挂死）。两处守卫缺一不可，这里守的是归一化那一层。
+      const previousMode = process.env.DSH_QODER_QUEUE_WAIT_MODE
+      const previousBeat = process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+      process.env.DSH_QODER_QUEUE_WAIT_MODE = 'visible'
+      process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = '0'
+      try {
+        let call = 0
+        const fetchImpl = vi.fn(async () => {
+          call += 1
+          return call === 1
+            ? queueResponse(REAL_QUEUED)
+            : envelopeResponse([textFrame('排到了'), finishFrame])
+        }) as unknown as typeof fetch
+
+        const sleeps: number[] = []
+        await collectWith(makeAdapter({
+          fetchImpl, sleep: async (ms) => { sleeps.push(ms) },
+        }), { model: 'qfmodel', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+
+        expect(sleeps.length, '必须真的分片（0 会让它一片都不切、随后死循环）').toBeGreaterThan(0)
+        expect(sleeps.every((ms) => ms <= 5_000), '非法心跳退回 5000ms').toBe(true)
+        expect(sleeps.reduce((sum, ms) => sum + ms, 0), '总时长仍等于 wait 档').toBe(10_000)
+      } finally {
+        if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
+        else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode
+        if (previousBeat === undefined) delete process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+        else process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = previousBeat
+      }
+    })
+
+    it('wait 档：等待中被取消 ⇒ 只发一次上游请求（不得再重试一次）', async () => {
+      // 2026-11-13 对抗审计实测：把这条 abort 检查整段删掉，140 条用例**全绿**
+      // —— 因为原用例只 `rejects.toThrow()`。真实后果是用户点「停止」后仍多等
+      // 一整片 10s，并**多发一次真实上游请求**（烧额度）。
+      const controller = new AbortController()
+      let calls = 0
+      const fetchImpl = vi.fn(async () => {
+        calls += 1
+        return queueResponse(REAL_QUEUED)
+      }) as unknown as typeof fetch
+
+      await expect(collectWith(makeAdapter({
+        fetchImpl,
+        sleep: async () => { controller.abort() },
+      }), {
+        model: 'qfmodel',
+        signal: controller.signal,
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      })).rejects.toThrow(/取消/)
+
+      expect(calls, '取消后不得再发上游请求').toBe(1)
+    })
+
+    it('visible 档：服务端没给延迟 ⇒ 退回 1000ms（不忙等）', async () => {
+      const previousMode = process.env.DSH_QODER_QUEUE_WAIT_MODE
+      process.env.DSH_QODER_QUEUE_WAIT_MODE = 'visible'
+      try {
+        const noDelay = {
+          isQueued: true, modelKey: 'qfmodel', queueCount: 0, queueType: 'p3',
+          serviceAvailable: false,
+        }
+        let call = 0
+        const fetchImpl = vi.fn(async () => {
+          call += 1
+          return call === 1
+            ? queueResponse(noDelay)
+            : envelopeResponse([textFrame('排到了'), finishFrame])
+        }) as unknown as typeof fetch
+
+        const sleeps: number[] = []
+        await collectWith(makeAdapter({
+          fetchImpl, sleep: async (ms) => { sleeps.push(ms) },
+        }), { model: 'qfmodel', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+
+        // 拿不到 `retryAfterSeconds` 时必须用保守的 1s，而不是 0（0 = 忙等）
+        expect(sleeps).toEqual([1_000])
+      } finally {
+        if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
+        else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode
+      }
+    })
+
+    it('visible 档：心跳期间被取消 ⇒ 立刻抛错（不得等完整个排队时长）', async () => {
+      // 2026-11-13 对抗审计实测：把心跳循环里的 abort 检查删掉，5 条用例**全绿**
+      // —— 真实后果是用户点「停止」后仍要等完 10s 排队才返回。
+      const previousMode = process.env.DSH_QODER_QUEUE_WAIT_MODE
+      const previousBeat = process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+      process.env.DSH_QODER_QUEUE_WAIT_MODE = 'visible'
+      process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = '1000'
+      try {
+        const controller = new AbortController()
+        const sleeps: number[] = []
+        const fetchImpl = vi.fn(async () => queueResponse(REAL_QUEUED)) as unknown as typeof fetch
+
+        await expect(collectWith(makeAdapter({
+          fetchImpl,
+          sleep: async (ms: number) => { sleeps.push(ms); controller.abort() },
+        }), {
+          model: 'qfmodel',
+          signal: controller.signal,
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        })).rejects.toThrow(/取消/)
+
+        // 只允许睡一片：检查若被摘掉，会一路睡满 10 片
+        expect(sleeps).toEqual([1_000])
+      } finally {
+        if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
+        else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode
+        if (previousBeat === undefined) delete process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+        else process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = previousBeat
+      }
+    })
+
+    it('visible 档：产出的每一帧都必须是合法 StreamChunk（形状不得越出联合）', async () => {
+      const previousMode = process.env.DSH_QODER_QUEUE_WAIT_MODE
+      const previousBeat = process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+      process.env.DSH_QODER_QUEUE_WAIT_MODE = 'visible'
+      process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = '1000'
+      try {
+        let call = 0
+        const fetchImpl = vi.fn(async () => {
+          call += 1
+          return call === 1
+            ? queueResponse(REAL_QUEUED)
+            : envelopeResponse([textFrame('排到了'), finishFrame])
+        }) as unknown as typeof fetch
+
+        const chunksOut = await collectWith(makeAdapter({
+          fetchImpl, sleep: async () => {},
+        }), { model: 'qfmodel', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
+
+        // ① 不得出现联合外的类型（宿主的 assertNever 会硬抛）
+        expect(chunksOut.every((chunk) => chunk.type !== 'queue-notice')).toBe(true)
+        // ② 每个 `text-delta` 都必须带合法 `index`（缺了宿主直接抛
+        //    `text-delta index must be a non-negative safe integer`）
+        const deltas = chunksOut.filter((chunk) => chunk.type === 'text-delta')
+        expect(deltas.length).toBeGreaterThan(0)
+        expect(deltas.every((chunk) => {
+          const index = (chunk as { index?: unknown }).index
+          return typeof index === 'number' && Number.isInteger(index) && index >= 0
+        }), 'text-delta 必须带合法 index').toBe(true)
+        // ③ 提示帧仍然在（形状合法 ≠ 信息丢失）
+        expect(chunksOut.filter((chunk) => (chunk as { qoderQueue?: unknown }).qoderQueue !== undefined))
+          .toHaveLength(1)
+      } finally {
+        if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
+        else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode
+        if (previousBeat === undefined) delete process.env.DSH_QODER_QUEUE_HEARTBEAT_MS
+        else process.env.DSH_QODER_QUEUE_HEARTBEAT_MS = previousBeat
+      }
+    })
+
     it('fast 档：排队不等待、立刻抛错（把「等还是换模型」交还调用方）', async () => {
       const previousMode = process.env.DSH_QODER_QUEUE_WAIT_MODE
       process.env.DSH_QODER_QUEUE_WAIT_MODE = 'fast'
       try {
+        const warn = vi.fn()
         const fetchImpl = vi.fn(async () => queueResponse(REAL_QUEUED)) as unknown as typeof fetch
         const sleeps: number[] = []
         await expect(collectWith(makeAdapter({
-          fetchImpl, sleep: async (ms) => { sleeps.push(ms) },
+          fetchImpl, warn, sleep: async (ms) => { sleeps.push(ms) },
         }), { model: 'qfmodel', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] }))
           .rejects.toThrow(/排队|fast/i)
         // 关键：一次 sleep 都不能有 —— 有的话就成了「又等又报错」，比 wait 档更糟
         expect(sleeps).toEqual([])
+        // 终态也必须留痕：`fast` 在 warn 之前 throw 过，日志就一条都不会写
+        //（2026-11-13 对抗审计实测：`warns: []`、只剩一条 QUEUE 错误）。
+        expect(String(warn.mock.calls[0]![0])).toMatch(/fast|未等待/)
       } finally {
         if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
         else process.env.DSH_QODER_QUEUE_WAIT_MODE = previousMode

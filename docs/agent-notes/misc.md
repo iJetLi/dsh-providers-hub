@@ -187,6 +187,25 @@
    - ⚠️ **该环境变量不能写成 `parseInt(…) || 默认值`**：`0` 是合法值（表示「不等」，
      单测靠它验证开关），而 `0` 是 falsy 会被 `||` 静默换成 30 分钟。
 
+   ⚠️⚠️ **排队体验三档（2026-11-13，PR #63）**：`DSH_QODER_QUEUE_WAIT_MODE`
+   = `wait`（默认，逐字节同旧行为）/ `visible`（等待切成心跳片、每片产出一帧空
+   `text-delta`，并额外发一帧排队提示）/ `fast`（不等、立刻抛 `QUEUE`）；
+   `DSH_QODER_QUEUE_HEARTBEAT_MS`（默认 **5000**，非正数/非数字归一成 5000）。
+   - ⚠️⚠️ **提示帧必须是合法的 `StreamChunk` 成员**：宿主 `dsh-llm` 的
+     `BlockAssembler.push` 与 `AssistantStreamAccumulator.push` 的 `default` 是
+     `assertNever`，**任何联合外类型都会硬抛**（`unreachable variant in …`）。
+     修法 = 「空 `text-delta`（`text: ''` + **`index: 0`**）+ 私有字段
+     `qoderQueue`」：类型合法、宿主忽略未知字段、网关的 `consumeChunk` 再把它
+     摘成 `qoder_queue`。⚠️ 缺 `index` 同样会抛（`text-delta index must be a
+     non-negative safe integer`）—— **两个形状各自都能崩，不能只修一个**。
+   - ⚠️ **`fast` 是终态，日志必须写在 `throw` 之前**：初版把 `warn` 放在早退
+     之后 ⇒ `|| mode === 'fast'` 恒假 ⇒ 用户只看到一条 `QUEUE` 错误、日志零字。
+   - ⚠️ **心跳片必须严格收敛**：`slice = Math.min(remaining, heartbeat)`，且
+     `slice` 必须是**正数**（`<= 0` 会让 `remaining` 永不减少 ⇒ `visible` 档
+     死循环，60s 挂死）；余数单独成片（2500ms / 1000ms ⇒ `[1000, 1000, 500]`），
+     总时长与 `wait` 档**严格一致**。
+   - ⚠️ **两条消费路径都要有守卫**：HTTP 403 形态与 SSE 内嵌 10605 帧各一处
+     `for await (…) yield frame`；只测一条时另一条删掉仍全绿（2026-11-13 实测）。
    ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
    `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]` **不含 `QUEUE`/`AUTH`**，
    且它的退避是**固定参数**（`initialDelayMs=500`、`maxDelayMs=10_000`、

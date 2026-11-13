@@ -28,14 +28,26 @@ function sourceFiles(): string[] {
 }
 
 /**
- * 找出所有发射 `text-delta` 的文件。
+ * 找出所有发射**正文** `text-delta` 的文件。
  *
  * 判据：`yield { type: 'text-delta'` 或 `yield {...text-delta...}` 形态。
+ *
+ * ⚠️ **只发射空 `text-delta`（`text: ''`）的文件不算正文出口**：
+ * 空串里不可能出现 DSML 标记，归一化对它没有意义；而这类帧有自己的用途
+ * （qoder 排队 `visible` 档的心跳 / 排队提示帧，PR #63）。
+ * 2026-11-13 实测：不排除时 `qoder-adapter.ts` 会被误判成第 10 个正文出口，
+ * ①②③ 三条守卫同时变红 —— **判据必须只认「可能承载正文」的出口**。
  */
 function textDeltaEmitters(): string[] {
   return sourceFiles().filter((f) => {
     const c = readFileSync(join(SRC_DIR, f), 'utf8')
-    return /type:\s*'text-delta'/.test(c)
+    const hits = [...c.matchAll(/type:\s*'text-delta'/g)]
+    if (hits.length === 0) return false
+    // 该 `type` 之后 200 字符内出现 `text: ''` ⇒ 这一帧是空帧（不承载正文）。
+    return hits.some((hit) => {
+      const tail = c.slice(hit.index ?? 0, (hit.index ?? 0) + 200)
+      return !/text:\s*''/.test(tail)
+    })
   })
 }
 
@@ -82,6 +94,16 @@ describe('DSML 归一化接线覆盖（防回归）', () => {
       return !/dsmlFix\.flush\(\)/.test(c)
     })
     expect(noFlush, `以下出口没有 flush（流尾字符会丢）：${noFlush.join(', ')}`).toEqual([])
+  })
+
+  it('⑤ 只发射**空** text-delta 的文件不算正文出口（qoder 排队心跳 / 提示帧，PR #63）', () => {
+    // 判据的「排除空帧」那一腿必须真的生效：不排除时 qoder-adapter.ts 会被
+    // 误判成第 10 个正文出口（2026-11-13 实测 ①②③ 三条同时红）。
+    expect(textDeltaEmitters()).not.toContain('qoder-adapter.ts')
+    // 反向钉子：真实正文出口仍必须被认出来（防止判据被改成恒假 ⇒ 守卫空转）。
+    expect(textDeltaEmitters()).toContain('openai-compat.ts')
+    expect(textDeltaEmitters()).toContain('llm-adapter.ts')
+    expect(textDeltaEmitters().length).toBeGreaterThanOrEqual(9)
   })
 
   it('④ 归一化实现必须只有 sse.ts 一处（不得各写各的）', () => {

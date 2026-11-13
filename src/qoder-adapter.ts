@@ -2281,8 +2281,49 @@ export class QoderAdapter extends LlmAdapter {
     deadline: number,
     options: GenerateOptions,
   ): AsyncGenerator<StreamChunk, void, undefined> {
+    /**
+     * ⚠️ 模式只解析**一次**：同一次等待里读两遍 `process.env` 是 TOCTOU —— 两次
+     * 调用之间环境变量被改过，就会出现「按 `fast` 判定、按 `visible` 分支执行」
+     * 的错配（本 PR 初版就是两处各读一次）。
+     */
+    const mode = resolveQueueWaitMode()
+    const waitMs = qoderQueueDelayMs(queueInfo)
+    // ⚠️ 拿不到服务端延迟时**不忙等**：用保守的短退避，避免瞬间烧掉机会
+    // （客户端 W7c() 此时会退回 ltA() 指数退避）。
+    const totalMs = waitMs ?? 1_000
+    const modelKeyRaw = (queueInfo as { modelKey?: unknown } | undefined)?.modelKey
+    const modelKey = typeof modelKeyRaw === 'string' ? modelKeyRaw : undefined
+    const retryAfterRaw = (queueInfo as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds
+    const retryAfterSeconds = typeof retryAfterRaw === 'number' ? retryAfterRaw : undefined
+    const accountId = this.options.currentAccountId?.()
+    /**
+     * 排队必须有**外部可观测痕迹**，否则「上游排队」与「进程挂死」完全同形。
+     *
+     * ⚠️ 真实代价（2026-11-10）：排队期间网关不产出任何帧、也不写任何日志，
+     * 调用方只会看到自己的超时，排查时无从下手（本仓库为此排查了一整晚）。
+     *
+     * ⚠️ 只在**首次**排队（以及终态的 `fast` 档）记，不逐次刷：`wait` 档最多
+     * 重试 180 次，每次都记会把日志刷满，反而看不见别的错误。
+     *
+     * ⚠️⚠️ `fast` 是**终态**：它在下面直接 `throw`，若把日志写在 throw 之后，
+     * 这一档将**一条都不写** —— 而它恰恰是最需要线索的一档（用户只看到一条
+     * `QUEUE` 错误，没有任何「哪个模型在排队」的信息）。故抽成闭包，两处都调。
+     */
+    const warnQueue = (waitMsForLog: number): void => {
+      if (attempts !== 1 && mode !== 'fast') return
+      this.options.warn?.(
+        `[qoder] ${this.product.id} 上游排队（10605）：`
+        + `${mode === 'fast' ? '未等待' : `等待 ${waitMsForLog}ms`}`
+        + `（模式 ${mode}，第 ${attempts} 次`
+        + `${modelKey === undefined ? '' : `，modelKey=${modelKey}`}`
+        + `${accountId === undefined ? '' : `，account=${accountId}`}`
+        + `${retryAfterSeconds === undefined ? '' : `，retryAfterSeconds=${retryAfterSeconds}`}）`,
+      )
+    }
     // `fast`：不问「等多久」，立刻把排队作为结论抛回去（见 resolveQueueWaitMode）。
-    if (resolveQueueWaitMode() === 'fast') {
+    if (mode === 'fast') {
+      // 终态也必须留痕（见 warnQueue 的注释）。
+      warnQueue(0)
       throw new LlmError(
         'qoder: 上游模型排队中（DSH_QODER_QUEUE_WAIT_MODE=fast，未等待）',
         'QUEUE',
@@ -2307,33 +2348,7 @@ export class QoderAdapter extends LlmAdapter {
     if (options.signal?.aborted === true) {
       throw new LlmError('qoder: 排队等待期间请求已取消', 'QUEUE')
     }
-    const waitMs = qoderQueueDelayMs(queueInfo)
-    // ⚠️ 拿不到服务端延迟时**不忙等**：用保守的短退避，避免瞬间烧掉机会
-    // （客户端 W7c() 此时会退回 ltA() 指数退避）。
-    const totalMs = waitMs ?? 1_000
-    const mode = resolveQueueWaitMode()
-    const modelKeyRaw = (queueInfo as { modelKey?: unknown } | undefined)?.modelKey
-    const modelKey = typeof modelKeyRaw === 'string' ? modelKeyRaw : undefined
-    const retryAfterRaw = (queueInfo as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds
-    const retryAfterSeconds = typeof retryAfterRaw === 'number' ? retryAfterRaw : undefined
-    const accountId = this.options.currentAccountId?.()
-    /**
-     * 排队必须有**外部可观测痕迹**，否则「上游排队」与「进程挂死」完全同形。
-     *
-     * ⚠️ 真实代价（2026-11-10）：排队期间网关不产出任何帧、也不写任何日志，
-     * 调用方只会看到自己的超时，排查时无从下手（本仓库为此排查了一整晚）。
-     *
-     * ⚠️ 只在**首次**排队（以及终态的 `fast` 档）记，不逐次刷：`wait` 档最多
-     * 重试 180 次，每次都记会把日志刷满，反而看不见别的错误。
-     */
-    if (attempts === 1 || mode === 'fast') {
-      this.options.warn?.(
-        `[qoder] ${this.product.id} 上游排队（10605）：等待 ${totalMs}ms`
-        + `（模式 ${mode}，第 ${attempts} 次`
-        + `${modelKey === undefined ? '' : `，modelKey=${modelKey}`}`
-        + `${accountId === undefined ? '' : `，account=${accountId}`}）`,
-      )
-    }
+    warnQueue(totalMs)
     if (mode === 'visible') {
       /**
        * 先发一帧**排队提示**（`queue-notice`），再进入心跳循环。
@@ -2344,8 +2359,19 @@ export class QoderAdapter extends LlmAdapter {
        * 不会因为多了它而报错。
        */
       yield {
-        type: 'queue-notice',
-        info: {
+        /**
+         * ⚠️⚠️ **必须是合法的 `StreamChunk` 成员**：宿主的两条组装器
+         * （`dsh-llm` 的 `BlockAssembler.push` 与 `AssistantStreamAccumulator.push`）
+         * 的 `default` 分支是 `assertNever`，任何联合外类型都会**硬抛**
+         * （2026-11-13 实测：`unreachable variant in BlockAssembler.push`）。
+         * 故这里用「空 `text-delta` + 私有字段 `qoderQueue`」：类型合法，
+         * 宿主忽略未知字段，网关的 `consumeChunk` 再把 `qoderQueue` 摘成
+         * `qoder_queue`（见 `src/openai-gateway/stream.ts`）。
+         */
+        type: 'text-delta',
+        index: 0,
+        text: '',
+        qoderQueue: {
           queued: true,
           provider: this.product.id,
           attempt: attempts,
@@ -2354,14 +2380,21 @@ export class QoderAdapter extends LlmAdapter {
           ...retryAfterSeconds === undefined ? {} : { retryAfterSeconds },
           ...accountId === undefined ? {} : { account: accountId },
         },
-      } as unknown as StreamChunk
+      } as StreamChunk
       // 分片等待 + 心跳：客户端能持续收到帧，不会把「排队中」当成卡死。
       // ⚠️ 剩下的最后一片可能短于心跳间隔，故按 `Math.min` 收敛，保证总时长
       // 仍然**精确等于** `totalMs`（否则 visible 档会悄悄比 wait 档多等一截）。
       const heartbeatMs = resolveQueueHeartbeatMs()
       let remaining = totalMs
       while (remaining > 0) {
+        /**
+         * ⚠️ 必须是**正数**：`resolveQueueHeartbeatMs()` 已把 `<= 0` 归一到默认值，
+         * 但这条守卫仍要留 —— 否则一旦有人改松那个归一化（例如 `>= 0`），
+         * `slice = 0` 会让 `remaining` 永不减少 ⇒ `visible` 档**死循环**
+         * （2026-11-13 对抗审计实测：60s 挂死、无任何用例设过 0 心跳）。
+         */
         const slice = Math.min(remaining, heartbeatMs)
+        if (!(slice > 0)) break
         await this.sleep(slice, options.signal)
         remaining -= slice
         // ⚠️ 这次检查**不是**循环条件的重复：它检测的是「**等待期间**被中止」。
@@ -2370,7 +2403,9 @@ export class QoderAdapter extends LlmAdapter {
         }
         // 空串 `text-delta`：消费端是 `content += ''`，不改动正文与用量，
         // 只是让 SSE 通道上真的有字节流过（这就是本档的全部意义）。
-        yield { type: 'text-delta', text: '' } as unknown as StreamChunk
+        // ⚠️ `index: 0` 不能省：`AssistantStreamAccumulator` 对缺 `index` 的
+        // `text-delta` 直接抛 `text-delta index must be a non-negative safe integer`。
+        yield { type: 'text-delta', index: 0, text: '' }
       }
       return
     }

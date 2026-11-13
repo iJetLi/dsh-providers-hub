@@ -105,21 +105,26 @@ function failureMessage(reason: Extract<FinishReason, { kind: 'error' | 'aborted
 }
 
 function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, unknown> | undefined {
-  /**
-   * 排队提示帧（provider 专有，目前只有 qoder 的 `visible` 档会发）。
-   *
-   * ⚠️ 走**前置分支**而不是给下面的 `switch` 加 `case`：`StreamChunk` 是外部包的
-   * 联合类型，凭空加一个分支会让 `chunk.type` 的穷尽性收窄报错（not comparable），
-   * 而这里要的只是「原样透传给下游」，它不参与任何状态累积（不改 content / usage）。
-   */
-  const noticeType = (chunk as { type?: unknown }).type
-  if (noticeType === 'queue-notice') {
-    return { delta: {}, notice: (chunk as { info?: unknown }).info ?? {} }
-  }
   switch (chunk.type) {
-    case 'text-delta':
+    case 'text-delta': {
+      /**
+       * 排队提示帧（provider 专有，目前只有 qoder 的 `visible` 档会发）。
+       *
+       * ⚠️⚠️ 它是**合法的 `text-delta`**（`text` 为空串），只是多带一个私有字段
+       * `qoderQueue`。**不能**给 `StreamChunk` 联合加新成员：宿主的两条组装器
+       * （`dsh-llm` 的 `BlockAssembler.push` 与 `AssistantStreamAccumulator.push`）
+       * 的 `default` 分支是 `assertNever`，任何联合外类型都会**硬抛**
+       * （2026-11-13 实测：`unreachable variant in BlockAssembler.push`）。
+       * 多带的字段会被它们忽略，所以「合法成员 + 私有字段」是唯一不扩宿主契约的形状。
+       *
+       * ⚠️ 提示帧**不能**贡献正文：`delta` 必须是空对象（`content` 留空），
+       * 否则每轮排队都会往回复里注入一个字符（2026-11-13 对抗审计实测）。
+       */
+      const queue = (chunk as { qoderQueue?: unknown }).qoderQueue
+      if (queue !== undefined) return { delta: {}, notice: queue }
       state.content += chunk.text
       return { delta: { content: chunk.text } }
+    }
     case 'reasoning-delta':
       state.reasoning += chunk.text
       return { delta: { reasoning_content: chunk.text } }
