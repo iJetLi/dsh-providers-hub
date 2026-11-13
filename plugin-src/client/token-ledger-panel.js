@@ -242,9 +242,113 @@ export function ledgerSubtitle() {
   return '本机流水 · 明细重启清空 · 日累计已存盘';
 }
 
-/** 账号显示名：空串（未归属）给中性占位，其余原样。 */
-export function accountLabel(accountId) {
-  return typeof accountId === 'string' && accountId.length > 0 ? accountId : '未归属';
+/**
+ * 账号显示名。
+ *
+ * 优先级：`nickname`（用户在 Jet Hub 面板自填的备注）→ `accountName`（上游真实
+ * 用户名，如 `mylzscy4`）→ **内部 id**。`nameMap` 由调用方从 `account.list` 建好
+ * 再传进来 —— 账本（`src/token-ledger.ts`）本身只存 `accountId`，**不碰凭据**，
+ * 拿不到 `accountName`。
+ *
+ * @param accountId 账号池条目 id；空串 = 「未归属」（凭据解析没回报的请求）。
+ * @param nameMap 可选的 id → 显示名映射（`Map` 或普通对象都认）。
+ *   ⚠️ **必须可选**：不传时行为与加参数前**逐字节相同**（既有 32 条测试里的
+ *   `accountLabel('qoder-bb211a53') === 'qoder-bb211a53'` 就是这条契约的守卫）。
+ * @returns 显示名；**任何一步取不到都回落 id**，绝不返回空串。
+ *
+ * ⚠️ **查不到时必须回落 id**（不是空、也不是「已删除」）：账本是**日聚合**，
+ * 账号删掉以后它过去的用量还留在账本里，用户要看得到「有个账号用了多少」。
+ * 而「这次没读到名字」与「账号真被删了」在客户端**无法区分**，所以不能加任何
+ * 类似「（已删除）」的后缀 —— 那会把「凭据坏了一次」误标成「账号没了」。
+ *
+ * ⚠️ **`nameMap` 里是空串也不能用**：`account.list` 的 `nickname` / `accountName`
+ * 偶尔会是空串（老凭据没有 `account_name`），直接采纳会渲染出一个**空白账号行**，
+ * 比显示裸 id 更让人困惑。
+ */
+export function accountLabel(accountId, nameMap) {
+  if (typeof accountId !== 'string' || accountId.length === 0) return '未归属';
+  /**
+   * ⚠️⚠️ **`'-'` 是服务端的「空账号」哨兵，不是真账号 id**（用户 2026-11-11 报障：
+   * 界面上出现了一行账号叫 `-`）。
+   *
+   * 来源（`src/token-ledger.ts` 两处，内存聚合与落盘日聚合各一份）：
+   *
+   * ```ts
+   * const accountKey = entry.accountId !== undefined && entry.accountId.length > 0
+   *   ? entry.accountId : '-'        // ← Map 键不能缺失，故用 '-' 占位
+   * ```
+   *
+   * 然后 `TokenLedgerAccountRow.accountId` 就原样带着这个 `'-'` 传给客户端。
+   * ⚠️ 而**明细**（`TokenLedgerEntry.accountId`）在同样情形下是**空串** ——
+   * 两条数据路径的空值形态不同，`accountLabel` 必须**同时认这两种**。
+   */
+  /**
+   * ⚠️ 文案是**「（未知帐号）」带全角括号**（用户 2026-11-11 最终定稿）。
+   *
+   * 沿革：`-`（裸哨兵）→ `未归属` → `（无账号）` → **`（未知帐号）`**。
+   *
+   * 为什么最终选「未知帐号」而不是「无账号」：
+   * - 「无账号」读起来像「这个 provider 一个账号都没有」，但它实际讲的是
+   *   **这一笔请求的账号没记录到**（凭据解析没回报），provider 底下往往还有别的号；
+   * - 「未知帐号」与既有术语一致：账本注释里对空 accountId 的措辞就是
+   *   「未知账号与『没有账号体系』不能混成一个假 id」。
+   *
+   * 括号的意义：它是**占位符**而不是真实账号名。不加括号时用户会以为
+   * 「未知帐号」是某个账号的昵称（真实报障：那行看起来像个正常账号）。
+   * ⚠️ 用**全角括号**（`（）`）而不是半角：界面其余占位文案都用全角。
+   */
+  if (accountId === '-') return '（未知帐号）';
+  const mapped = nameMap instanceof Map ? nameMap.get(accountId) : nameMap?.[accountId];
+  if (typeof mapped === 'string' && mapped.length > 0) return mapped;
+  return accountId;
+}
+
+/**
+ * 从 `account.list` 的返回里建「账号 id → 显示名」映射。
+ *
+ * 名字优先级与 {@link accountLabel} 一致：`nickname` → `accountName`。
+ * 两者都取不到的账号**不进映射**（不是塞空串）—— 这样 `accountLabel` 会回落 id，
+ * 而不是渲染空白。
+ *
+ * ⚠️ **纯函数、不读凭据**：`accountName` 是宿主 `account.list` 现从各账号自己的
+ * credential ref 里读出来的派生值（见 `ProviderAccountStatus.accountName` 的注释），
+ * 客户端只消费、不重算 —— 两端各写一份必然漂移。
+ * ⚠️ 参数形态宽容（`undefined` / 非数组 / 元素非对象都跳过）：这个函数的失败会让
+ * 整个 Token 面板报销，而它只是「锦上添花的名字」。
+ */
+export function buildAccountNameMap(accounts) {
+  const map = new Map();
+  if (!Array.isArray(accounts)) return map;
+  for (const account of accounts) {
+    if (account === null || typeof account !== 'object') continue;
+    if (typeof account.id !== 'string' || account.id.length === 0) continue;
+    const nickname = typeof account.nickname === 'string' ? account.nickname : '';
+    const accountName = typeof account.accountName === 'string' ? account.accountName : '';
+    const label = nickname.length > 0 ? nickname : (accountName.length > 0 ? accountName : '');
+    if (label.length > 0) map.set(account.id, label);
+  }
+  return map;
+}
+
+/**
+ * 「最近请求」表里模型格的显示文本：`provider/model`。
+ *
+ * ⚠️ 用户 2026-11-11 要求「模型显示应该是 provider/模型名的格式，跟上游原来的一样」。
+ * 上游明细表原本只显示**裸模型 id**（`entry.model`），不是我们改坏的 ——
+ * 本函数是**新增**的展示口径。`TokenLedgerEntry.provider` 一直都在，故服务端零改动。
+ *
+ * ⚠️ 缺 provider 时**只回模型名**，不拼出 `undefined/model` 或 `/model` 这种脏串：
+ * 账本里的 `provider` 恒有值，但这条判据要挡住「字段被截断 / 旧数据」的形态。
+ *
+ * ⚠️ 本函数住在这里（而不是 `jet-hub.js`）是因为它是**纯取值口径**，且
+ * `jet-hub.js` 依赖 react、单测环境导入不了 —— 放在本文件才能被直接测。
+ */
+export function ledgerEntryModelText(entry) {
+  const model = typeof entry?.model === 'string' ? entry.model : '';
+  const provider = typeof entry?.provider === 'string' ? entry.provider : '';
+  if (model.length === 0) return '';
+  if (provider.length === 0) return model;
+  return provider + '/' + model;
 }
 
 /**

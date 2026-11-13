@@ -158,6 +158,7 @@ import {
   accountLabel,
   avgPerfDetailTooltip,
   avgPerfText,
+  buildAccountNameMap,
   channelCardTitle,
   channelLabel,
   channelOrder,
@@ -171,6 +172,7 @@ import {
   historyTitle,
   HISTORY_RANGES,
   ledgerSubtitle,
+  ledgerEntryModelText,
   rangeDaysOf,
   tokenSummaryText,
   tokenSummaryTooltip,
@@ -2716,6 +2718,65 @@ function downloadCsv(filename, headers, rows) {
 }
 
 /**
+ * 「最近请求」表的列头。
+ *
+ * ⚠️⚠️ **顺序与 `renderEntries` 里 `<td>` 的顺序严格一一对应**（9 列）。只改一处会
+ * 让**所有列整体错位**（比不加列更糟），故两边都从这一个常量读 —— 原先列头是
+ * 内联字面量、行是手写 8 个 `td`，两处各写一份正是错位的来源。
+ *
+ * 「账号」放在「渠道」之后、「模型」之前：渠道 → 账号 → 模型是自然的层级递减。
+ * 表头 `title` 说明账号名的来源与回落规则（悬停时用户能自己判断「为什么这行是 id」）。
+ *
+ * ⚠️ `width` 是给 `table-layout: fixed` 用的列宽（合计 100%）。**必须有**：
+ * fixed 布局下不写宽度就是等分，8 列时每列约 112px 还能凑合，加到 9 列就只剩
+ * 约 101px —— 模型名列（`dfmodel` / `deepseek-v4.1-flash`）会被压到换行成三行。
+ * 账号列刻意给得比模型列窄：名字是给人认人的短标签，模型名才是这一行的主要信息。
+ */
+const LEDGER_ENTRY_COLUMNS = Object.freeze([
+  Object.freeze({ key: 'time', label: '时间', title: '请求发起时刻（本地时间）；悬停看完整日期', width: '62px' }),
+  Object.freeze({ key: 'channel', label: '渠道', title: '直连 = DSH 宿主对话；网关 = OpenAI 兼容网关', width: '46px' }),
+  Object.freeze({
+    key: 'account',
+    label: '账号',
+    title: '服务本笔请求的账号：优先显示备注名（nickname），其次上游用户名（accountName）；'
+      + '两者都取不到时显示内部 id（悬停可看完整 id）。账本不存名字，名字由各账号的凭据现读。',
+    width: '172px',
+  }),
+  Object.freeze({
+    key: 'model',
+    label: '模型',
+    title: 'provider/模型（与上游其它处的写法一致）。完整 id 一行显示；窄屏可横向滚动。',
+    /**
+     * ⚠️ 模型列**吃掉剩余宽度**（`auto`），不给固定像素。
+     *
+     * 实测（960px 弹窗、11.5px 字体）：最长组合
+     *   workbuddy/deepseek-v4.1-flash-free = 187.3px（+12 内边距 = 199.3px）
+     * 而其余 8 列实际只需 62+46+172+104+58+86+58+60 = 646px。912 − 646 = 266px。
+     * ⇒ 给 `auto` 时模型列拿到 266px，余量 67px；给死 200px 则会**截断**（差 7.5px）。
+     * ⚠️ 别改成固定百分比 —— 那正是改前「时间 10%/渠道 8% 各浪费 50px、
+     *    模型只拿到 182px 而放不下」的病根（用户 2026-11-11 报障）。
+     */
+    width: 'auto',
+  }),
+  Object.freeze({
+    key: 'tokens',
+    label: 'TOKEN',
+    title: '总处理量 = 未命中缓存输入 + 缓存命中输入 + 输出；缓存写入单列展示，不重复计入总量',
+    width: '104px',
+  }),
+  Object.freeze({ key: 'ttft', label: '首字', title: '首个内容块的耗时；没有内容帧时显示 —', width: '58px' }),
+  Object.freeze({ key: 'tps', label: '速率', title: '输出 token / 解码时长；解码不足 100ms 时不测', width: '86px' }),
+  Object.freeze({ key: 'duration', label: '耗时', title: '整笔请求的总耗时', width: '58px' }),
+  Object.freeze({ key: 'status', label: '状态', title: '成功 / 失败（悬停看失败原因）', width: '60px' }),
+]);
+
+/** 「最近请求」CSV 导出的列头 —— 与 {@link LEDGER_ENTRY_COLUMNS} 同序，账号列同位置。 */
+const LEDGER_ENTRY_CSV_COLUMNS = Object.freeze([
+  '时间', '渠道', '账号', '模型', '状态', '总处理量', '输入', '输出', '缓存命中', '缓存写入', '推理',
+  '首字毫秒', '输出tok每秒', '耗时毫秒', '错误',
+]);
+
+/**
  * Token 用量面板。
  *
  * ## 两种外壳（`chrome`）
@@ -2731,6 +2792,10 @@ function downloadCsv(filename, headers, rows) {
  *
  * ⚠️ `chrome` 的默认值必须是 `'modal'`：既有调用点（Jet Hub 页头的覆盖层）不传它，
  * 行为必须逐字节不变。
+ *
+ * ⚠️ 模型格的取值口径在 `./token-ledger-panel.js` 的 `ledgerEntryModelText` ——
+ * 它是纯函数，放在那边才能被单测直接导入（本文件依赖 react，单测环境没有）。
+ * 这里只负责把它接进渲染与导出。
  *
  * @param {{ rpcCall: Function, onClose?: Function, chrome?: 'modal'|'pane' }} props
  */
@@ -2832,6 +2897,90 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
 
   React.useEffect(() => { void loadHistory(historyRange); }, [historyRange, historyFromDay, historyToDay, loadHistory]);
 
+  /**
+   * 账号 id → 显示名（`nickname` → `accountName` → 回落 id，见 `accountLabel`）。
+   *
+   * 空 `Map` = 还没加载到。⚠️ **只影响名字**：表/树的主体数据来自账本，
+   * 名字取不到时 `accountLabel` 回落内部 id —— 绝不能因为「查名字失败」
+   * 就让整个 Token 面板报错（本仓库记录过太多次「辅助信息失败拖垮主视图」）。
+   */
+  const [accountNames, setAccountNames] = React.useState(() => new Map());
+  /** 已经拉过名字的 provider（每个 provider 每挂载只拉一次）。 */
+  const namedProviders = React.useRef(new Set());
+
+  /**
+   * 账本里出现过的 provider（实时汇总 ∪ 历史日树 ∪ 明细），排序后拼成串当依赖。
+   *
+   * ⚠️⚠️ **必须按 provider 逐家取，不能只调一次 `account.list`**：该端点的请求
+   * 体是 `{ provider }`（`RpcListAccountsRequest`），宿主实现是
+   * `pool.listAccounts(req.provider)` —— 过滤条件是 `a.provider === provider`。
+   * 传 `{}` 时 `provider` 是 `undefined`，**恒返回空数组且不报错**（症状是
+   * 「账号列全是裸 id」，与「名字没实现」完全同形）。
+   *
+   * ⚠️ 只拉**账本里出现过的**、不拉全部 29 家：`account.list` 对每个账号都要
+   * 读一次凭据（`pool.listAccounts` 里的 `credentials.describe`），magicrew 还会
+   * 顺带打上游取昵称 —— 为给用量面板配名字而扫全池，等于打开一次弹窗就把所有
+   * 渠道的后台接口跑一遍。
+   */
+  const ledgerProviderKey = React.useMemo(() => {
+    const ids = new Set();
+    const collect = (rows) => {
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const providers = Array.isArray(row?.providers) ? row.providers : [];
+        for (const providerRow of providers) {
+          const id = providerRow?.provider;
+          if (typeof id === 'string' && id.length > 0) ids.add(id);
+        }
+      }
+    };
+    collect(snapshot?.channels);
+    for (const day of Array.isArray(history?.history) ? history.history : []) collect(day?.channels);
+    // 明细里可能有「聚合树里还没出现」的 provider（例如刚发完第一笔请求）。
+    for (const entry of Array.isArray(snapshot?.entries) ? snapshot.entries : []) {
+      const id = entry?.provider;
+      if (typeof id === 'string' && id.length > 0) ids.add(id);
+    }
+    return [...ids].sort().join(',');
+  }, [snapshot, history]);
+
+  /**
+   * 拉账号名。
+   *
+   * ⚠️ 依赖只有 `[ledgerProviderKey, rpcCall]` —— **不随日期窗口/筛选/翻页重拉**
+   * （那些都会改 `snapshot` / 各项筛选 state，挂上去等于每切一次窗口就把所有
+   * provider 的凭据重读一遍）。key 不变时 effect 不执行；`namedProviders` 再挡一层
+   * 「同一 provider 只拉一次」。
+   * ⚠️ 逐家独立失败 ⇒ 静默（那个 provider 的账号回落裸 id），绝不冒泡成面板报错。
+   * ⚠️ 逐家**就地合并**（不等最慢的那家）：一次 `account.list` 要读该家全部账号的
+   * 凭据，串成 `Promise.all` 会让一个慢渠道把整张表的名字一起拖住。
+   */
+  React.useEffect(() => {
+    const wanted = ledgerProviderKey.length === 0 ? [] : ledgerProviderKey.split(',');
+    const pending = wanted.filter((id) => !namedProviders.current.has(id));
+    if (pending.length === 0) return;
+    for (const id of pending) namedProviders.current.add(id);
+    for (const provider of pending) {
+      void rpcCall('account.list', { provider }).then(
+        (res) => {
+          // ⚠️ 用 `mounted`（只在卸载时置 false），**不用** effect 的 alive 守卫：
+          //    effect 重跑时若丢弃在飞结果，这些 provider 已被登记为「拉过」
+          //    ⇒ 名字永远补不回来（账号列从此恒显裸 id）。
+          if (!mounted.current) return;
+          const map = buildAccountNameMap(res?.accounts);
+          if (map.size === 0) return;
+          setAccountNames((prev) => {
+            const next = new Map(prev);
+            for (const [id, name] of map) if (!next.has(id)) next.set(id, name);
+            return next;
+          });
+        },
+        // ⚠️ **静默失败**（含该 provider 没有账号、端点拒答、连接断开）：
+        //    名字是辅助信息，账本主数据照常显示，只是回落 id。
+        () => {},
+      );
+    }
+  }, [ledgerProviderKey, rpcCall]);
+
   const channels = React.useMemo(() => {
     const list = Array.isArray(snapshot?.channels) ? [...snapshot.channels] : [];
     list.sort((a, b) => channelOrder(a?.channel, b?.channel));
@@ -2850,15 +2999,160 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
     className: 'dim-jh-ledgerPerf', title: avgPerfDetailTooltip(row),
   }, avgPerfText(row));
 
+  /**
+   * 模型行（多模型账号下的缩进行）。
+   *
+   * ⚠️ 右侧统计**必须包同一个 `dim-jh-ledgerStatGroup`**（与账号行同宽），
+   * 否则模型行的「次数」与账号行的「次数」不在同一竖线上 —— 那正是本次要修的
+   * 「参差不齐」。两者的区别只有左半部分（账号行有账号名/箭头/模型名，模型行有 ↳）。
+   */
   const renderModelRow = (modelRow, key) => React.createElement('div', {
     key, className: 'dim-jh-ledgerModel',
   },
     React.createElement('span', { className: 'dim-jh-ledgerModelName', title: modelRow.model }, modelRow.model),
-    React.createElement('span', { className: 'dim-jh-ledgerModelReq', title: '请求数（含失败）' },
-      modelRow.requests + ' 次'),
-    perfCell(modelRow),
-    React.createElement('span', { className: 'dim-jh-ledgerModelTokens', title: tokenSummaryTooltip(modelRow) },
-      tokenSummaryText(modelRow)));
+    React.createElement('span', { className: 'dim-jh-ledgerStatGroup' },
+      React.createElement('span', { className: 'dim-jh-ledgerModelReq', title: '请求数（含失败）' },
+        modelRow.requests + ' 次'),
+      perfCell(modelRow),
+      // ⚠️ 模型行的「总处理」**加粗**：用户要「一眼看到每个帐号下每个模型的请求总量」。
+      React.createElement('span', { className: 'dim-jh-ledgerModelTokens', title: tokenSummaryTooltip(modelRow) },
+        tokenSummaryText(modelRow))));
+
+  /**
+   * 一个账号的渲染 —— **单模型合并、多模型分层**（用户 2026-11-11 需求）。
+   *
+   * ## 规则
+   *
+   * | 账号下的模型数 | 渲染 |
+   * |---|---|
+   * | **1 个** | **合并成一行**：`账号 → 模型  次数  [右对齐统计]`，统计取**模型的** |
+   * | ≥2 个 | 保持原样：账号行（账号统计）+ 缩进的模型行（各自统计） |
+   * | 0 个 | 只渲染账号行（防御：空 models 会被合并成分残缺行） |
+   *
+   * ## 为什么单模型要合并
+   *
+   * 实测本机账本：44 个账号桶里 **20 个（45.5%）只有 1 个模型**。
+   * 这些账号原本占两行、且两行的统计数字**完全相同**（单模型时账号小计 == 模型小计）
+   * ⇒「4 行只表达了 2 条信息」。合并后一行讲完，多模型账号不受影响。
+   *
+   * ## ⚠️ 三个必须守住的细节
+   *
+   * 1. **判据是 `models.length === 1`**，不是「有模型」也不是「账号数」。
+   * 2. **`models.length === 0` 必须走「不合并」分支**：否则会渲染出
+   *    「账号 → 」后面没有模型的残缺行。
+   * 3. **`accountId` 为空（「未归属」）也要能合并** —— 本机真实数据里就有
+   *    `direct|qodercn|`（空 accountId）+ 单模型 `dfmodel`。判据不能因为
+   *    `accountId` 是空串就跳过合并。
+   *
+   * ## ⚠️ 统计信息**右对齐**（用户 2026-11-11 第二次修正）
+   *
+   * 第一版把「21 次 / 首字 / 总处理」紧跟在模型名后面 ⇒ 与多模型时的布局不一致
+   * （多模型时这些都在最右侧、`margin-left: auto` 顶开）。
+   * 现在两者共用同一套「左侧标签 + 右侧统计」骨架：
+   *
+   * ```
+   * 单模型：[账号 → 模型]  .........  [21 次] [首字…] [总处理…]
+   * 多模型：[账号]         .........  [      ] [首字…] [总处理…]
+   *         ↳ [模型]       .........  [226 次] [首字…] [总处理…]
+   * ```
+   *
+   * @param accountRow 账号聚合行（`TokenLedgerAccountRow`）
+   * @param keyPrefix 列表 key 的前缀（实时卡用 `provider#accountId#`，历史树同）
+   */
+  const renderAccountRow = (accountRow, keyPrefix) => {
+    const models = Array.isArray(accountRow?.models) ? accountRow.models : [];
+    const single = models.length === 1 ? models[0] : null;
+    /**
+     * 统计行的取值：
+     * - **单模型**：取**模型**的（单模型时与账号小计数值相同，但「这一行讲的是
+     *   这个模型」语义更准）；
+     * - **多模型**：取**账号**的（这一行讲的是账号合计）。
+     */
+    const statRow = single ?? accountRow.totals;
+    /**
+     * ⚠️⚠️ 请求次数**两种情形都显示**，且位置相同（用户 2026-11-11 需求：
+     * 「多模型的统计信息都像单模型一样，放在行中间吧」）。
+     *
+     * 改前多模型账号行**没有**次数（只有首字/速率 + 总处理），单模型行有 ⇒
+     * 同一棵树里「有次数」和「没次数」两种排法，右对齐的数字列参差不齐。
+     * 现在统一成：
+     *
+     * ```
+     * 单模型：[账号 → 模型] ...... [21 次] [首字…] [总处理]
+     * 多模型：[账号]         ...... [36 次] [首字…] [总处理]
+     *         ↳ [模型]       ...... [226 次] [首字…] [总处理]
+     * ```
+     *
+     * ⚠️ 多模型的次数 = **账号合计**（`accountRow.totals.requests`），不是某个模型
+     * 的 —— 它是那一行的「这一组一共发了多少次」，与右侧的账号合计口径一致。
+     */
+    const reqRow = single ?? accountRow.totals;
+    return React.createElement('div', {
+      key: keyPrefix + accountRow.accountId,
+      className: 'dim-jh-ledgerAccount',
+    },
+      React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
+        React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
+          accountLabel(accountRow.accountId, accountNames)),
+        // 单模型：`→ 模型名` 拼在账号名后面（模型名用等宽体与账号名区分开）
+        ...(single === null ? [] : [
+          React.createElement('span', { key: 'arrow', className: 'dim-jh-ledgerAccountArrow' }, '→'),
+          React.createElement('span', {
+            key: 'model',
+            className: 'dim-jh-ledgerAccountModel',
+            title: single.model,
+          }, single.model),
+        ]),
+        /**
+         * ⚠️⚠️ 右侧统计包成**固定宽度的组**（`dim-jh-ledgerStatGroup`）。
+         *
+         * 用户 2026-11-11 第三次修正：「统计信息（红框内）要放在行中间」。
+         *
+         * 改前靠 `margin-left: auto` 把每一格各自推到最右 ⇒ 因为每组内容宽度不同，
+         * 「次数」一列的**起始位置参差不齐**（实测 6 行的起始 x 是
+         * 714 / 720 / 726 / 726 / 732 / 720 —— 4 种位置），账号名后面留一大片空白。
+         *
+         * 修法：整组给固定宽度 460px，`margin-left: auto` 推到右边，**组内左对齐**
+         * ⇒ 所有行的「次数」都从同一条竖线开始（实测全部 510px）。
+         *
+         * ```
+         * [账号 → 模型]              | 338 次  首字 …  总处理 …
+         * [账号]                     | 90 次   首字 …  总处理 …   ← 同一竖线
+         *   ↳ [模型]                 | 75 次   首字 …  总处理 …
+         * ```
+         */
+        React.createElement('span', { className: 'dim-jh-ledgerStatGroup' },
+          React.createElement('span', {
+            key: 'req',
+            className: 'dim-jh-ledgerAccountReq',
+            title: '请求数（含失败）',
+          }, reqRow.requests + ' 次'),
+          perfCell(statRow),
+          /**
+           * ⚠️⚠️ **只有「单个模型」的 Total 才加粗**（用户 2026-11-11 第四次修正）：
+           * 「当帐号行有两个模型及以上时，帐号行的总处理是不加粗的，保持原来的就行…
+           *  我只要每个模型的总处理结果是加粗的就行，这样方便我一眼看到每个帐号下
+           *  每个模型的请求总量」。
+           *
+           * | 行 | 语义 | 样式 |
+           * |---|---|---|
+           * | 单模型合并行 | 就是那个模型的用量 | `ledgerModelTokens`（**加粗亮白**）|
+           * | 多模型账号行 | 账号合计（不代表任何单个模型） | `ledgerAccountSum`（灰，不加粗）|
+           * | 缩进模型行 | 单个模型的用量 | `ledgerModelTokens`（**加粗亮白**）|
+           *
+           * ⇒ 判据是 `single === null`（多模型）→ 用 AccountSum；否则用 ModelTokens。
+           * ⚠️ 别为了「账号行也统一」把它改成无条件 ModelTokens —— 那会让账号合计看起来
+           *    像一个模型的用量，正是用户这次要修掉的。
+           */
+          React.createElement('span', {
+            className: single === null ? 'dim-jh-ledgerAccountSum' : 'dim-jh-ledgerModelTokens',
+            title: tokenSummaryTooltip(statRow),
+          }, tokenSummaryText(statRow)))),
+      // 多模型才继续渲染缩进的模型行；单模型已合并进上面那行。
+      ...(single === null
+        ? models.map((modelRow) => renderModelRow(modelRow, keyPrefix + accountRow.accountId + '#' + modelRow.model))
+        : []));
+  };
 
   const renderSummary = () => {
     if (phase === 'loading' && snapshot === null) {
@@ -2887,24 +3181,28 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
             onClick: () => setSelected(key),
           }, key === null ? '全部' : channelLabel(key))))
       : null;
-    /** 一个 provider 的内部：多账号分层 / 单账号平铺（一比一的中间层是纯噪音）。 */
+    /**
+     * 一个 provider 的内部：**账号层一律渲染**（渠道 → provider → 账号 → 模型）。
+     *
+     * ⚠️ 单账号也分层（用户 2026-11-10 决策 Q3）。改前是 `accounts.length > 1`
+     * 才分层、单个账号直接平铺模型行 —— 那条「一比一的中间层是纯噪音」的判断
+     * 被用户推翻了：账号名现在是**真实用户名**（`nickname` → `accountName`），
+     * 用户要靠它区分「这一行到底走的哪个号」，而单账号恰恰是他最容易忽略的
+     * 「原来走的是这个号」的那一格。故判据改成 `> 0`，且**不加开关**。
+     *
+     * ⚠️ `length === 0` 必须落到 `return []`：进 `.map` 会渲染出一个**空账号容器**
+     * （有边框、没内容），比不渲染更糟。
+     */
     const renderProviderBody = (providerRow) => {
       const accounts = providerRow.accounts ?? [];
-      if (accounts.length > 1) {
-        return accounts.map((accountRow) => React.createElement('div', {
-          key: providerRow.provider + '#' + accountRow.accountId, className: 'dim-jh-ledgerAccount',
-        },
-          React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-            React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
-              accountLabel(accountRow.accountId)),
-            perfCell(accountRow.totals),
-            React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
-              tokenSummaryText(accountRow.totals))),
-          accountRow.models.map((modelRow) =>
-            renderModelRow(modelRow, modelRow.model))));
-      }
-      return accounts.flatMap((accountRow) => accountRow.models.map((modelRow) =>
-        renderModelRow(modelRow, providerRow.provider + '#' + modelRow.model)));
+      if (accounts.length === 0) return [];
+      /**
+       * ⚠️ 单账号与多账号**样式完全一致**（用户 2026-11-11 决策）—— 故这里**不再**
+       * 产出 `data-single`，也不按账号数改缩进：层级由账号行的色块表达，不由缩进
+       * 表达。原先那条「单账号不缩进」的分支已删除，`data-single` 属性与它的两条
+       * CSS 规则一并移除（留着就是永远不生效的死代码，下一个改样式的人会以为它还在管用）。
+       */
+      return accounts.map((accountRow) => renderAccountRow(accountRow, accountRow.accountId + '#'));
     };
 
     return React.createElement(React.Fragment, null,
@@ -2937,7 +3235,37 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
       if (entryChannel !== 'all' && entry.channel !== entryChannel) return false;
       if (entryStatus === 'success' && entry.error !== undefined) return false;
       if (entryStatus === 'error' && entry.error === undefined) return false;
-      if (query && !String(entry.model ?? '').toLowerCase().includes(query)) return false;
+      /**
+       * 搜索同时匹配**模型**与**账号**（用户 2026-11-12 要求：红框那个输入框
+       * 原先只能筛模型，「做成可以筛选模型或帐号」）。
+       *
+       * ⚠️⚠️ 账号这边**必须两条腿都在**：`accountId` 与 `accountLabel(...)`。
+       * 这一点有**实测反证**（2026-11-12）：
+       * - 只查 `accountLabel` ⇒ 我一度以为够了（"没有昵称时它回落 id"），
+       *   但**有昵称时它就返回昵称、把 id 吞掉了** ⇒ 输入 `bbbb2222` 得到 0 条，
+       *   用例当场变红。故 id 必须单独查。
+       * - 只查 `accountId` ⇒ 用户照着屏幕敲昵称（「张三」）搜不到，且不报错 ——
+       *   这是最难自证的形态，也是当初要求改这个框的直接原因。
+       *
+       * ⚠️ 依赖数组里**必须有 `accountNames`**：它是异步从 `account.list` 回来的，
+       * 不进依赖 ⇒ 名字到了但搜索索引还是旧的（输入昵称仍 0 条）。
+       * ⚠️ 但这条**无法用当前单测替身验证**：替身的 `useMemo` 是 `fn()`
+       * （每次重渲染都重算），依赖数组根本不参与 ⇒ 只能靠代码审查守。
+       */
+      if (query) {
+        /**
+         * ⚠️⚠️ **模型这边必须用 `ledgerEntryModelText(entry)`，不能用 `entry.model`。**
+         *
+         * 模型列**显示**的是 `provider/model`（如 `codearts/deepseek-v4.1-flash`），
+         * 而 `entry.model` 只有后半截。只匹配 `entry.model` ⇒ 用户照着屏幕敲
+         * `codearts/` 或 `codearts/deepseek` 会得到 0 条。
+         * 这与账号那条是**同一个缺陷形态**：搜索索引必须覆盖「屏幕上能看到的文本」。
+         */
+        const model = ledgerEntryModelText(entry).toLowerCase();
+        const accountId = String(entry.accountId ?? '').toLowerCase();
+        const accountName = String(accountLabel(entry.accountId, accountNames)).toLowerCase();
+        if (!model.includes(query) && !accountId.includes(query) && !accountName.includes(query)) return false;
+      }
       return true;
     });
     const tokenValue = totalTokensOf;
@@ -2948,16 +3276,27 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
       return b.ts - a.ts;
     });
     return filtered;
-  }, [entries, entryChannel, entryQuery, entrySort, entryStatus]);
+  }, [entries, entryChannel, entryQuery, entrySort, entryStatus, accountNames]);
   React.useEffect(() => { setEntryPage(1); }, [entryChannel, entryQuery, entrySort, entryStatus]);
   const entryPageCount = Math.max(1, Math.ceil(visibleEntries.length / 50));
   const safeEntryPage = Math.min(entryPage, entryPageCount);
   const pageEntries = visibleEntries.slice((safeEntryPage - 1) * 50, safeEntryPage * 50);
 
+  /**
+   * 导出当前筛选后的明细。
+   *
+   * ⚠️ CSV 的列顺序必须与表格**同序**（都含「账号」列，且都在「渠道」之后）——
+   * 用户会拿导出去核对界面，两处顺序一错就等于两份互相矛盾的报表。
+   * 账号列导出的是**显示名**（与界面一致），不是内部 id：内部 id 对 Excel 里的人
+   * 没有意义，而界面上认的就是这个名字。
+   * 模型列同理导出 `provider/model`（与界面同一份实现 `ledgerEntryModelText`），
+   * 否则「界面写着 workbuddy/xxx、CSV 里只有 xxx」又是一处自相矛盾。
+   */
   const exportEntries = () => downloadCsv('token-usage-details.csv',
-    ['时间', '渠道', '模型', '状态', '总处理量', '输入', '输出', '缓存命中', '缓存写入', '推理', '首字毫秒', '输出tok每秒', '耗时毫秒', '错误'],
+    [...LEDGER_ENTRY_CSV_COLUMNS],
     visibleEntries.map((entry) => [
-      Number.isFinite(entry.ts) ? new Date(entry.ts).toISOString() : '', channelLabel(entry.channel), entry.model,
+      Number.isFinite(entry.ts) ? new Date(entry.ts).toISOString() : '', channelLabel(entry.channel),
+      accountLabel(entry.accountId, accountNames), ledgerEntryModelText(entry),
       entry.error === undefined ? '成功' : '失败',
       // ⚠️ 未收到 usage 的失败行导出**空串**而非 0：界面用 `—` 与真实的 0 严格区分
       //（见 token-ledger.ts 的「0 会被读成瞬间完成、没花 token」注释），
@@ -2977,7 +3316,11 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
       React.createElement('span', { className: 'dim-jh-ledgerEntryCount' }, `${visibleEntries.length} / ${entries.length}`),
       React.createElement('input', {
         className: 'dim-jh-input dim-jh-ledgerSearch', type: 'search', value: entryQuery,
-        placeholder: '筛选模型', 'aria-label': '按模型筛选请求',
+        // ⚠️ 文案要如实说「两个都能筛」：只说「筛选模型」时用户不会去试账号名
+        // （用户 2026-11-12 要求把这里做成「模型或帐号」）。
+        placeholder: '筛选模型 / 帐号',
+        'aria-label': '按模型或账号筛选请求',
+        title: '匹配模型名（含 provider 前缀）、账号显示名与账号 id；不区分大小写',
         onChange: (event) => setEntryQuery(event.target.value),
       }),
       React.createElement('select', {
@@ -3012,21 +3355,42 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
     if (visibleEntries.length === 0) return React.createElement('div', { key: 'entries' }, toolbar,
       React.createElement('div', { className: 'dim-jh-empty' }, '没有符合当前筛选条件的请求。'));
     return React.createElement('div', { key: 'entries' }, toolbar,
+      // ⚠️ 明细表包在**滚动容器**里：9 列是固定像素宽（合计约 912px），
+      //    窄屏放不下时横向滚动而不是压缩各列 —— 压缩会把 9 列一起挤变形
+      //    （数字列对不齐、模型名断成三行），比横向滚动更糟。
+      React.createElement('div', { className: 'dim-jh-ledgerTableScroll' },
       React.createElement('table', { className: 'dim-jh-ledgerTable' },
+      // ⚠️ `table-layout: fixed` 下必须有列宽，否则 9 列等分把模型名压成三行
+      //（8 列时勉强够，加一列就崩）。列宽与表头同源（`LEDGER_ENTRY_COLUMNS`）。
+      React.createElement('colgroup', null,
+        LEDGER_ENTRY_COLUMNS.map((column) =>
+          React.createElement('col', { key: column.key, style: { width: column.width } }))),
       React.createElement('thead', null,
         React.createElement('tr', null,
-          ['时间', '渠道', '模型', 'TOKEN', '首字', '速率', '耗时', '状态'].map((h) =>
-            React.createElement('th', {
-              key: h,
-              title: h === 'TOKEN' ? '总处理量 = 未命中缓存输入 + 缓存命中输入 + 输出；缓存写入单列展示，不重复计入总量' : undefined,
-            }, h)))),
+          // ⚠️ 列头与下面的 `<td>` 由同一个列定义表驱动（`LEDGER_ENTRY_COLUMNS`）：
+          //    两处各写一份必然错位，而错位是「所有列都不对」——比不加列更糟。
+          LEDGER_ENTRY_COLUMNS.map((column) =>
+            React.createElement('th', { key: column.key, title: column.title }, column.label)))),
       React.createElement('tbody', null, pageEntries.map((entry, index) => React.createElement('tr', {
         key: entry.ts + '-' + index,
         'data-error': entry.error !== undefined ? 'true' : 'false',
       },
         React.createElement('td', { title: new Date(entry.ts).toLocaleString() }, formatEntryTime(entry.ts)),
         React.createElement('td', null, channelLabel(entry.channel)),
-        React.createElement('td', { className: 'dim-jh-ledgerEntryModel' }, entry.model),
+        // ⚠️ 账号格：只显示名字，**完整 id 靠悬停**（用户 2026-11-10 决策 Q2-A）。
+        //    `entry.accountId` 是可选的（取不到时为空串）⇒ `accountLabel('')` 给「未归属」。
+        //    ⚠️ `title` 为空串时不挂这个属性（空 title 在浏览器里表现为**没有** tooltip，
+        //    留着它只会让人以为「悬停没反应是坏的」）。
+        React.createElement('td', {
+          className: 'dim-jh-ledgerEntryAccount',
+          title: typeof entry.accountId === 'string' && entry.accountId.length > 0 ? entry.accountId : '未归属账号',
+        }, accountLabel(entry.accountId, accountNames)),
+        // ⚠️ 模型格显示 `provider/model`（用户 2026-11-11 要求，见 ledgerEntryModelText）。
+        //    `title` 挂完整串：窄屏下模型列可能被省略号截断，悬停要能看全。
+        React.createElement('td', {
+          className: 'dim-jh-ledgerEntryModel',
+          title: ledgerEntryModelText(entry),
+        }, ledgerEntryModelText(entry)),
         React.createElement('td', { title: tokenSummaryTooltip(entry) }, entryTokenText(entry)),
         React.createElement('td', null, formatTtft(entry)),
         React.createElement('td', null, formatTps(entry)),
@@ -3035,7 +3399,7 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
           className: entry.error !== undefined ? 'dim-jh-ledgerError' : 'dim-jh-ledgerSuccess',
           title: entry.error !== undefined ? entry.error : '请求成功',
           'aria-label': entry.error !== undefined ? '失败详情：' + entry.error : '请求成功',
-        }, entry.error !== undefined ? '失败 ⓘ' : '成功 ✓'))))),
+        }, entry.error !== undefined ? '失败 ⓘ' : '成功 ✓')))))),
       React.createElement('div', { className: 'dim-jh-ledgerPagination' },
         React.createElement('span', null, `第 ${safeEntryPage} / ${entryPageCount} 页，每页 50 条`),
         React.createElement('button', {
@@ -3185,28 +3549,31 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
         perfCell(channelRow.totals),
         React.createElement('span', { className: 'dim-jh-ledgerProviderSum', title: tokenSummaryTooltip(channelRow.totals) },
           tokenSummaryText(channelRow.totals))),
+      // ⚠️⚠️ provider 行**必须**用 `dim-jh-ledgerProvider`：这里原先写的是
+      //    `dim-jh-ledgerAccount`，于是 `buddy` / `qodercn` 这些**供应商**被套上了
+      //    账号行的色块样式，界面上看起来「provider 变成了账号」（用户 2026-11-11 报障）。
+      //    实时汇总卡那边一直是对的，只有历史日树写错了 —— 两处各写一份类名正是
+      //    这次分叉的来源，改样式时**两边一起核对**。
       channelRow.providers.map((providerRow) => React.createElement('div', {
-        key: providerRow.provider, className: 'dim-jh-ledgerAccount',
+        key: providerRow.provider, className: 'dim-jh-ledgerProvider',
       },
-        React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-          React.createElement('span', { className: 'dim-jh-ledgerAccountName' }, providerRow.provider),
+        React.createElement('div', { className: 'dim-jh-ledgerProviderHead' },
+          React.createElement('span', { className: 'dim-jh-ledgerProviderName' }, providerRow.provider),
           perfCell(providerRow.totals),
-          React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(providerRow.totals) },
+          React.createElement('span', { className: 'dim-jh-ledgerProviderSum', title: tokenSummaryTooltip(providerRow.totals) },
             tokenSummaryText(providerRow.totals))),
-        (providerRow.accounts ?? []).length > 1
-          ? providerRow.accounts.map((accountRow) => React.createElement('div', {
-              key: providerRow.provider + '#' + accountRow.accountId, className: 'dim-jh-ledgerAccount',
-              style: { padding: '0 0 0 8px' },
-            },
-              React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-                React.createElement('span', { className: 'dim-jh-ledgerAccountName' },
-                  accountLabel(accountRow.accountId)),
-                React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
-                  tokenSummaryText(accountRow.totals))),
-              accountRow.models.map((modelRow) =>
-                renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))))
-          : (providerRow.accounts ?? []).flatMap((accountRow) => accountRow.models.map((modelRow) =>
-              renderModelRow(modelRow, providerRow.provider + '#' + modelRow.model))))))));
+        // ⚠️ 与实时汇总卡**同一条判据**：账号层一律渲染（单账号也分层），0 个账号
+        //    给空数组。历史日树原先还是「>1 才分层」，与改后的实时卡分叉 —— 同一天
+        //    的数据在两处显示不同的层级，用户会以为其中一份算错了。
+        // ⚠️ 也**不再**按账号数缩进/挂 `data-single`：样式统一，层级靠账号行色块表达
+        //    （用户 2026-11-11 决策「单账号与多账号完全一样」）。历史树原先那条
+        //    内联 `padding` 会把同一套色块挤歪，故一并删掉。
+        // ⚠️⚠️ 账号行**必须复用 `renderAccountRow`**，不许在这里再写一份：
+        //    单模型合并（账号 → 模型）的判据只有一处实现才可能两处同时正确。
+        //    历史日树曾经因为「各写一份」漏掉过 `>1 → >0` 与 provider 类名两次修正。
+        (providerRow.accounts ?? []).length > 0
+          ? (providerRow.accounts ?? []).map((accountRow) => renderAccountRow(accountRow, ''))
+          : [])))));
 
   /**
    * ── 内嵌外壳（`chrome === 'pane'`）：给「宿主已经是容器」的地方用（右侧栏标签页）──

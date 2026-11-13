@@ -422,6 +422,26 @@ const STYLES = `
    底部之后，那五条规则全部失去 DOM 对应，已删除。 */
 .dim-jh-settingsSection { display: flex; flex-direction: column; gap: 8px; }
 .dim-jh-settingsSectionTitle { font-size: 13px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); }
+/* 分区之间的分隔线：设置弹窗现在有 5 个分区（供应商 / 定时签到 / 备份恢复 /
+   渠道原生搜索 / 思考强度），只靠 gap 已经分不清边界（用户 2026-11-11 报障
+   「设置界面怎么出现下拉条了」时，视觉上也正是一整片挤在一起）。
+   ⚠️ 用 border-top 而不是加 margin：margin 会让「内容超限」更早发生，
+   而这里要的恰恰是把同样的内容**排得更紧、更清晰**。
+   首个分区不画线（:first-child），否则顶部多一条悬空横线。 */
+.dim-jh-settingsSection + .dim-jh-settingsSection { padding-top: 10px; border-top: 1px solid var(--dsw-alias-border-l1, #eef0f3); }
+/* 开关 + 文字的一行（可点区只包开关与文字，不包整行 —— 同 .dim-jh-checkinToggle
+   的既有口径：包整行会让行尾空白也变成命中区）。 */
+/* ⚠️ 允许换行：文案较长，窄弹窗下必须能折到第二行，否则会把弹窗撑出横向滚动条
+   （横向滚动条会把右侧内容推出可视区，是本仓库踩过的形态）。 */
+.dim-jh-settingsToggleLine { display: inline-flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #4e5969); cursor: pointer; user-select: none; }
+.dim-jh-settingsToggleLine > input { flex: none; margin-top: 3px; }
+.dim-jh-settingsToggleLineFailed { color: var(--dsw-alias-label-tertiary, #8f959e); }
+.dim-jh-settingsToggleText { min-width: 0; }
+/* 分区内的说明文字：比 .dim-jh-modalHint 更紧（后者带 10px 顶边距，在分区里
+   会把每个分区都撑高，5 个分区累计就是用户看到的那条滚动条）。 */
+.dim-jh-settingsNote { margin: 0; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #8f959e); }
+/* 分区内的行内失败提示（读取不到宿主状态等）：必须显眼但不喧宾夺主。 */
+.dim-jh-settingsInlineFail { padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 8%, transparent); font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-danger, #b3261e); }
 .dim-jh-settingsSectionActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dim-jh-checkinRow { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #4e5969); }
 .dim-jh-checkinRow > label { flex: none; }
@@ -722,6 +742,14 @@ const STYLES = `
 .dim-jh-modelStatusFilter { flex: none; display: flex; align-items: center; gap: 6px; }
 /* 选中的筛选按钮高亮：三个按钮外观一致时用户看不出当前筛的是什么。 */
 .dim-jh-modelStatusFilter .dim-jh-btn[data-active="true"] { border-color: var(--dsw-alias-brand-primary, #1677ff); color: var(--dsw-alias-brand-primary, #1677ff); background: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 10%, var(--dsw-alias-bg-layer-3, #fff)); font-weight: 600; }
+/* 设置弹窗容器：**单独抬高上限**（用户 2026-11-11 报障「设置界面出现下拉条」）。
+   ⚠️ 根因不是「少写了一条 CSS」，而是**内容变多了**：设置弹窗从 4 个分区变成 5 个
+   （新增「思考强度」），而 .dim-jh-modal 的 max-height 是 640px ⇒ 刚好越界，
+   于是列表区开始滚动。这里只改设置弹窗这一处，**不动 .dim-jh-modal 的通用上限**
+   —— 其它弹窗（模型中心等）内容本来就少，抬高它们会让空弹窗显得突兀。
+   ⚠️ 仍保留滚动能力（overflow 在 .dim-jh-modalBody 上不变）：窗口很矮时
+   （笔记本 768p）必须还能滚，否则底部按钮会被裁掉、用户点不到「完成」。 */
+.dim-jh-settingsModal { max-height: min(760px, calc(100vh - 48px)); }
 /* 列表区独立滚动：头部与说明固定，模型多时只滚中间 */
 /* ⚠️ overflow-x: hidden 是**兜底**，不是主修复（主修复见下方 grid 的 minmax）。
    没有它时，任何一行的偶然溢出都会让整个弹窗出现横向滚动条，而横向滚动条会把
@@ -1036,18 +1064,134 @@ const STYLES = `
 .dim-jh-ledgerCardSum { margin-left: auto; font-size: 11.5px; line-height: 17px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary, #4e5969); white-space: nowrap; }
 .dim-jh-ledgerProvider { padding: 4px 10px 6px; }
 .dim-jh-ledgerProvider + .dim-jh-ledgerProvider { border-top: .5px solid var(--dsw-alias-border-l3, #eef0f3); }
-/* 账号层（第 2 期）：只在多账号（或含「未归属」）时渲染，缩进一层；
-   单账号 provider 不展开 —— 一比一的中间层是纯噪音。 */
-.dim-jh-ledgerAccount { min-width: 0; }
-.dim-jh-ledgerAccount + .dim-jh-ledgerAccount { border-top: .5px dashed var(--dsw-alias-border-l3, #eef0f3); }
-.dim-jh-ledgerAccountHead { display: flex; align-items: baseline; gap: 8px; padding: 3px 0 1px 8px; }
-.dim-jh-ledgerAccountName { min-width: 0; font-size: 11.5px; line-height: 17px; font-weight: 600; color: var(--dsw-alias-label-secondary, #4e5969); overflow-wrap: anywhere; }
-.dim-jh-ledgerAccountSum { margin-left: auto; flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
-.dim-jh-ledgerProviderHead { display: flex; align-items: baseline; gap: 8px; padding: 4px 0 2px; }
-.dim-jh-ledgerProviderName { min-width: 0; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); overflow-wrap: anywhere; }
+/* ══════════════════════════════════════════════════════════════════════════
+   用量树的三层视觉语言（2026-11-11 定稿，用户从 4 个方案里选的「方案 3 + 档位 D」）
+
+   provider（容器级）→ 账号（分组头）→ 模型（内容），三层同时靠三种手段拉开：
+   ① 底色：淡色块 → 浓色块 → 无底色
+   ② 缩进：0 → 30px → 54px
+   ③ 字号/颜色：11.5px 粗体 → 12px 主文字 → 11px 最暗
+
+   ⚠️⚠️ 两个真实报障（2026-11-11）必须记住：
+
+   1. 色条曾经是白的 —— 我原先用 --dsw-alias-brand-primary，但它在 DSH 的深色主题下
+      等于 --dsw-static-neutral-bluish-50 = #f9fafb（近白）。它是反色/对比色（给
+      「深色按钮上的白字」用），不是蓝色。真正的蓝色品牌色是
+      --dsw-static-deepseek-450 = #5686fe。CSS 里写了 #1677ff 回退值也没用 ——
+      变量存在时回退值永远不生效，所以肉眼看到的是白条。
+      ⚠️ 别再改成 brand-primary；要用蓝就写 --dsw-static-deepseek-450。
+
+   2. provider 曾被画成账号 —— 历史日树的 provider 行写的是
+      className: 'dim-jh-ledgerAccount'（实时卡那边一直是对的）。两个类名撞车后，
+      账号的色块样式直接把 buddy / qodercn 染成了账号。现已改为
+      dim-jh-ledgerProvider，两处类名必须各自独立。
+
+   ⚠️ 本文件用模板字符串承载 CSS：注释里写反引号会提前闭合、esbuild 直接报错
+      （本次已踩过三次，由 token-ledger-panel.spec.ts 的闸门兜住）。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 第一层：provider（容器级）—— 缩进 0 ──
+   淡色块 + 左侧 3px 灰色竖线 + 11.5px 粗体。
+   ⚠️ 色块用 color-mix 做半透明：不引入新颜色，自动跟随主题明暗；
+      老浏览器无 color-mix 时回退到 bg-layer-2（有底色但更淡，层级不塌）。 */
+.dim-jh-ledgerProviderHead {
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 2px 0 3px; padding: 5px 8px; border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2, #f7f8fa);
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-3, #2a2b2f) 58%, transparent);
+  border-left: 3px solid var(--dsw-alias-border-l2, #d0d3d9);
+}
+.dim-jh-ledgerProviderName { min-width: 0; font-size: 11.5px; line-height: 17px; font-weight: 700; color: var(--dsw-alias-label-primary, #1f2329); overflow-wrap: anywhere; }
 .dim-jh-ledgerProviderSum { margin-left: auto; flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
-.dim-jh-ledgerModel { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 0 2px 10px; }
-.dim-jh-ledgerModelName { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 17px; color: var(--dsw-alias-label-secondary, #4e5969); overflow-wrap: anywhere; }
+
+/* ── 第二层：账号（分组头）—— 缩进 30px ──
+   ⚠️ 单账号与多账号样式完全一致（用户 2026-11-11 决策）：层级由色块与缩进表达，
+   不由账号数表达。原先的 data-single 分支已删除，不要再加回来。 */
+.dim-jh-ledgerAccount { min-width: 0; margin-left: 30px; }
+.dim-jh-ledgerAccount + .dim-jh-ledgerAccount { border-top: .5px dashed var(--dsw-alias-border-l3, #eef0f3); }
+.dim-jh-ledgerAccountHead {
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 3px 0 2px; padding: 5px 8px; border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-3, #2a2b2f);
+  /* ⚠️ 必须是 deepseek-450（真蓝），不是 brand-primary（深色主题下是近白）。 */
+  border-left: 3px solid var(--dsw-static-deepseek-450, #5686fe);
+}
+.dim-jh-ledgerAccountName {
+  min-width: 0; font-size: 12px; line-height: 18px; font-weight: 600;
+  color: var(--dsw-alias-label-primary, #1f2329); overflow-wrap: anywhere;
+}
+.dim-jh-ledgerAccountSum { margin-left: auto; flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
+
+/* ── 单模型账号的合并行（用户 2026-11-11 需求）──
+   「账号 → 模型」拼在账号行里，**右侧统计与多模型时同款布局**：
+   次数 + 首字/速率 + 总处理全部右对齐（margin-left: auto 由第一个右侧元素吃掉）。
+   ⚠️ 顺序必须是 [账号] [→] [模型] ...... [次数] [首字…] [总处理]，
+      中间那一段靠 margin-left: auto 顶到右边 —— 与 .dim-jh-ledgerModel
+      的多模型行完全同构（那边是 [↳] [模型] ...... [次数] [首字…] [总处理]）。
+   ⚠️ 结果：单模型行与多模型行的**数字右缘对齐**，一眼能纵向比对。 */
+.dim-jh-ledgerAccountArrow {
+  flex: none; font-size: 11px; line-height: 16px;
+  color: var(--dsw-alias-label-tertiary, #8f959e); opacity: .85;
+}
+/* 模型名：等宽体 + label-secondary（比账号名淡一档，但比 tertiary 亮 ——
+   用户从 3 个方案里选的「对比度更强」那一版）。 */
+.dim-jh-ledgerAccountModel {
+  min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 16px; font-weight: 400;
+  color: var(--dsw-alias-label-secondary, #4e5969); overflow-wrap: anywhere;
+}
+/* 次数：统计组的**第一格**。
+   ⚠️ 它不再吃 margin-left: auto —— 推右的职责已交给父级
+   .dim-jh-ledgerStatGroup（用户 2026-11-11：「统计信息要放在行中间」，
+   靠单格各自 auto 会把「次数」推到参差不齐的位置）。 */
+.dim-jh-ledgerAccountReq {
+  flex: none; font-size: 10.5px; line-height: 15px;
+  font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   统计组（2026-11-11 用户第三次修正：「统计信息放在行中间」）
+
+   账号行与模型行**共用同一个组**，保证「次数 / 首字 / 总处理」三列在整棵树里
+   纵向对齐。
+
+   改前：每个统计格各自 margin-left: auto ⇒ 被推成「各自最右」，
+        而每组内容宽度不同 ⇒ 「次数」起始位置参差不齐（实测 4 种位置：
+        714 / 720 / 726 / 732），账号名后面留一大片空白。
+
+   改后：整组固定 460px、margin-left: auto 推到右边、**组内左对齐**
+        ⇒ 所有行的「次数」从同一条竖线开始（实测全部 510px）。
+        组内的「总处理」再用 margin-left: auto 顶到组尾，保持右缘也齐。
+
+   ⚠️ 460px 是实测出来的：最长的「首字 10.76s · P50 233.2 tok/s」约 175px +
+      「338 次」约 45px + 「总处理 106.35M」约 100px + 两个 8px 间隙 ≈ 336px，
+      给到 460px 是为了**长文本不折行**且组不贴边。
+   ⚠️ 窄屏（<700px）会把组宽收窄，见媒体查询。
+   ══════════════════════════════════════════════════════════════════════════ */
+.dim-jh-ledgerStatGroup {
+  display: flex; align-items: baseline; gap: 8px;
+  flex: none; margin-left: auto; width: 460px;
+}
+/* 组内最后一格（总处理）顶到组尾 ⇒ 各行的「总处理」右缘仍然对齐。 */
+.dim-jh-ledgerStatGroup > .dim-jh-ledgerModelTokens,
+.dim-jh-ledgerStatGroup > .dim-jh-ledgerAccountSum { margin-left: auto; }
+
+/* ── 第三层：模型（内容）—— 缩进 54px，最暗最小，带 ↳ 前导 ──
+   ⚠️ ↳ 用 ::before 而不是塞进文本节点：它是纯装饰，不该被复制/导出/读屏念出来
+      （CSV 导出与 accountLabel 都不该看到它）。 */
+/* ⚠️ 模型行（多模型账号下）:
+   左缩进 54px + **右内边距 8px**。
+   右内边距不是随便加的：账号色块（.dim-jh-ledgerAccountHead）有 padding: 5px 8px
+   ⇒ 色块内统计的右缘比色块外缘内收 8px。模型行若右侧不留 8px，它的「总处理」
+   就会比账号行的「总处理」往右多出 8px —— 实测（2026-11-11）合并行 sumRight=1132
+   而模型行 tokensRight=1144，两条右缘**对不齐**，纵向比数字时会觉得错位。
+   ⇒ 两边都收到同一个内缘，数字列才真正对齐。 */
+.dim-jh-ledgerModel { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 8px 2px 54px; }
+.dim-jh-ledgerModel::before {
+  content: "↳"; flex: none; font-size: 10.5px; line-height: 15px;
+  color: var(--dsw-alias-label-tertiary, #8f959e); opacity: .7;
+}
+.dim-jh-ledgerModelName { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #8f959e); overflow-wrap: anywhere; }
 .dim-jh-ledgerModelReq { flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
 .dim-jh-ledgerModelTokens { flex: none; font-size: 11.5px; line-height: 17px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-primary, #1f2329); white-space: nowrap; }
 /* 均值格（首字 · 速率）：三级汇总行（渠道/账号/模型）共用，等宽数字对齐。 */
@@ -1075,12 +1219,23 @@ const STYLES = `
 .dim-jh-ledgerDateRange label { display: flex; align-items: center; gap: 5px; color: var(--dsw-alias-label-tertiary, #8f959e); font-size: 11px; }
 .dim-jh-ledgerDateRange input { width: 136px; padding: 3px 6px; font-size: 11px; }
 .dim-jh-ledgerExport { flex: none; }
-/* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。 */
+/* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。
+   「账号」列（9 列版新增）**截断而不是换行**：账号名是给人认人的标签，
+   换行会把整张表的行高撑乱；完整值靠 title 悬停（用户决策 Q2-A）。 */
+/* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。
+   账号列（9 列版新增）**截断而不是换行**：账号名是给人认人的标签，
+   换行会把整张表的行高撑乱；完整值靠 title 悬停（用户决策 Q2-A）。
+   ⚠️ max-width 与列宽（LEDGER_ENTRY_COLUMNS 里 account 的 172px）是两回事：
+   列宽由 colgroup 决定，这里只是**兜底不让它撑破**（colgroup 缺失或旧产物时）。 */
+.dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 172px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dim-jh-ledgerEntryTools { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 12px 0 5px; }
 .dim-jh-ledgerEntryTools strong { margin-right: 2px; font-size: 13px; color: var(--dsw-alias-label-primary, #1f2329); }
 .dim-jh-ledgerEntryCount { margin-right: auto; color: var(--dsw-alias-label-tertiary, #8f959e); font-size: 11px; font-variant-numeric: tabular-nums; }
 .dim-jh-ledgerSearch { flex: 1 1 130px; width: auto; min-width: 120px; padding: 4px 7px; font-size: 11px; }
 .dim-jh-ledgerSelect { min-width: 82px; max-width: 130px; padding: 4px 6px; border: 1px solid var(--dsw-alias-border-l2, #d0d3d9); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: var(--dsw-alias-label-primary, #1f2329); font-size: 11px; }
+/* ⚠️ table-layout 必须是 **fixed**：列宽由 colgroup 的像素值决定，
+   最后一列（模型）给 auto 吃掉剩余宽度。改成 auto 会让浏览器按内容
+   重新分配，把右侧数字列挤成不等宽（数字对不齐，比列宽不准更难看）。 */
 .dim-jh-ledgerTable { width: 100%; margin-top: 4px; border-collapse: collapse; table-layout: fixed; font-size: 11.5px; line-height: 17px; }
 .dim-jh-ledgerTable th { position: sticky; top: 0; z-index: 1; padding: 4px 6px; text-align: left; font-weight: 600; color: var(--dsw-alias-label-tertiary, #8f959e); background: var(--dsw-alias-bg-layer-1, #fff); border-bottom: .5px solid var(--dsw-alias-border-l3, #e5e5e5); }
 .dim-jh-ledgerTable td { padding: 3px 6px; border-bottom: .5px solid var(--dsw-alias-border-l3, #f0f1f3); font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary, #4e5969); vertical-align: baseline; }
@@ -1133,6 +1288,25 @@ const STYLES = `
   .dim-jh-ledgerPaneBody .dim-jh-ledgerSearch { flex-basis: 100%; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerSelect { flex: 1 1 30%; max-width: none; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerHeatmapWrap { overflow-x: auto; }
+  /* ══════════════════════════════════════════════════════════════════════════
+     以下四条是给**本 PR 新增的「账号」列**配套的窄屏规则。
+
+     本 PR 把明细表从 8 列加到 **9 列**（新增「账号」172px），并把统计信息收进
+     固定宽 StatGroup。同一块面板塞进右侧栏（视口 45%，1440 视口约 648px）时，
+     这四处各自都会撑破，故必须收窄。
+
+     ⚠️ 它们只作用于 dim-jh-ledgerPaneBody 之内 —— **modal 弹窗不受影响**：
+     弹窗宽 960px，那套 9 列 + StatGroup 正是为它实测调出来的（改这里等于改弹窗观感）。
+     ⚠️ 本文件整体是 JS 模板字符串：注释里**禁止反引号**（会提前闭合模板，
+     esbuild 报 Expected ";"、tsc 报一串看不懂的 Cannot find name）。
+     ══════════════════════════════════════════════════════════════════════════ */
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup { width: 300px; gap: 6px; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerAccount { margin-left: 14px; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 72px; }
+  /* 9 列定宽必然超宽 ⇒ 横向滚动，而不是压缩各列（压缩会让数字列对不齐）。 */
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTableScroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
 @media (max-width: 700px) {
   .dim-jh-modal--ledger { padding: 14px 12px; }
@@ -1143,6 +1317,21 @@ const STYLES = `
   .dim-jh-ledgerSelect { flex: 1 1 30%; max-width: none; }
   .dim-jh-ledgerTable { font-size: 10px; }
   .dim-jh-ledgerTable th, .dim-jh-ledgerTable td { padding: 3px 2px; overflow-wrap: anywhere; }
+  /* 窄屏 9 列：账号列再收窄，其余列让位（模型列本来就允许换行）。 */
+  .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 72px; }
+  /* ⚠️ 窄屏必须收窄三层缩进：宽屏的 30/54px 在 <700px 时会把模型名
+     （deepseek-v4.1-flash 这类长名）挤成三行、把行高撑乱。
+     缩进减半后层级仍然看得出来（14/26px 相对 0 仍然错开），只是不再浪费宽度。 */
+  .dim-jh-ledgerAccount { margin-left: 14px; }
+  .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
+  /* ⚠️ 窄屏统计组必须收窄：460px 在 <700px 会把账号名挤没（甚至撑出横向滚动）。
+     收窄到 300px 并允许组内「首字」格省略 —— 数字仍对齐，长文本靠 title 悬停看全。 */
+  .dim-jh-ledgerStatGroup { width: 300px; gap: 6px; }
+  .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
+  /* ⚠️ 窄屏 9 列 + 固定像素列宽必然超宽：**横向滚动**而不是压缩各列。
+     压缩会把 9 列一起挤变形（数字列对不齐、模型名断成三行），比横向滚动更糟。
+     只给明细表加滚动容器，不影响上面的汇总卡。 */
+  .dim-jh-ledgerTableScroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
 
 /* ── 模型列表的「计费/来源」分组（订阅 / 免费 / Cline Cloud / 按量计费）──
