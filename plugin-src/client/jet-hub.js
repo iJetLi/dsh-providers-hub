@@ -60,6 +60,7 @@ import {
   formatPackageTooltip,
   splitCreditsByExpiry,
   expirySplitParts,
+  expiryDateHints,
   daysUntilExpiry,
   formatExpiryHint,
   exclusivePoolRemainingOf,
@@ -735,7 +736,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    * ⚠️ 与 `expiryText` 同源（都走 `credit-expiry.js`），这里额外要结构化分段
    * 是为了让 React 逐段设 `data-tone` —— 单个字符串只能整体一个颜色。
    */
-  const expiryParts = expirySplitParts(split, formatForUnit, now);
+  const expiryParts = expirySplitParts(split, formatForUnit, now, expiryDateHints(all, windowDays, now));
   /**
    * **独立池**（如 AStudio 的星火积分）：服务端给的是两个互不相通的池，
    * 那笔钱**不能**当通用积分用。分桶按金额聚合、天然丢池名 ⇒ 单独摘出来标注，
