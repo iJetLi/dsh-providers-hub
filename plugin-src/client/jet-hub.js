@@ -10353,6 +10353,12 @@ export function JetHubPage({ rpcCall }) {
    *    （CodeArts 的积分 ≠ CodeBuddy 的积分），所以这两个数是「总量参考」，不是可折算的
    *    等价额度。原先的按单位分列红线依然适用于**一键签到**的提示文案，这里不冲突。
    *
+   * ⚠️⚠️ **「总积分」遇到 `totalKnown === false` 的包必须退化成 `—`**：那种包上游只给
+   *    当前余额，`packages[].total` 只是 `remaining` 的冗余拷贝（`src/credits.ts:211`），
+   *    加进去会让「总积分」恒等于「剩余积分」—— 正是 2026-11-05 报障的「分母跟着余额跑」
+   *    （`100/100 → 98/98`）。统计带把两格**并排**显示，是那条红线最容易被违反的位置。
+   *    命中渠道：`baizhi` / `monkeycode`（`totalKnown:false` 的产出点）。
+   *
    * ## 数据源与时机
    *
    * - 账号数走 `account.list`（读账号池**内存副本**，不发上游请求）→ 首帧就能出。
@@ -10416,6 +10422,17 @@ export function JetHubPage({ rpcCall }) {
     let totalCredits = 0;
     let remainingCredits = 0;
     let partial = false;
+    // ⚠️⚠️ 有包的「周期总额」是不可知的（`totalKnown === false`）⇒ 总积分**不能**给出数字。
+    //
+    //    这种包上游只下发当前余额，`CreditPackage.total` 只是 `remaining` 的**冗余拷贝**
+    //    （`src/credits.ts:211` 逐字写明「面板**不得**把两者并列显示 —— 否则每次消耗后
+    //    都会出现 `100/100 → 98/98` 这种『分母跟着余额跑』的假读数」，用户 2026-11-05
+    //    报障）。统计带把「总积分」与「剩余积分」**并排**显示，正是那条红线禁止的形态：
+    //    只要有一个这样的包，两格数字就会恒等，读起来像「一分没花」。
+    //
+    //    产出点（`totalKnown: false`）：`src/baizhi-credits.ts:419/439/459`、
+    //    `src/monkeycode-credits.ts:533`。渲染时整格退化成 `—`（见 `renderGlobalStats`）。
+    let totalUnknown = false;
     for (const list of balances) {
       if (list === null) { partial = true; continue }
       for (const entry of list) {
@@ -10425,6 +10442,7 @@ export function JetHubPage({ rpcCall }) {
         remainingCredits += Number(balance.total) || 0;
         for (const pkg of (balance.packages ?? [])) {
           if (pkg?.active === false) continue;
+          if (pkg?.totalKnown === false) { totalUnknown = true; continue }
           totalCredits += Number(pkg?.total) || 0;
         }
       }
@@ -10435,6 +10453,7 @@ export function JetHubPage({ rpcCall }) {
       remainingCredits,
       creditsLoading: false,
       creditsPartial: partial,
+      totalUnknown,
     });
   }, [rpcCall]);
 
@@ -10458,22 +10477,30 @@ export function JetHubPage({ rpcCall }) {
         : value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     };
     const creditsPending = globalStats.creditsLoading || globalStats.totalCredits === null;
+    // 周期总额不可知（`totalKnown === false`）⇒ **不显示假分母**（与账号面板
+    // `pkg.totalKnown === false ? remaining : \`${remaining} / ${total}\`` 同一条红线）。
+    const totalValue = globalStats.totalUnknown === true ? null : globalStats.totalCredits;
+    const partialTitle = globalStats.creditsPartial === true
+      ? '（部分渠道读取失败，实际数值可能更高）'
+      : '';
     const cells = [
       {
         key: 'total',
         label: '总积分',
-        value: fmt(globalStats.totalCredits),
+        value: fmt(totalValue),
         unit: creditsPending ? '' : '积分',
         tone: 'info',
-        title: '全部账号本计费周期的额度总量（各 provider 单位不同，仅供总量参考）',
+        title: globalStats.totalUnknown === true
+          ? '部分账号的上游只下发当前余额、下发不了本周期总额，无法给出可靠的总量'
+          : '全部账号本计费周期的额度总量（各 provider 单位不同，仅供总量参考）',
       },
       {
         key: 'remaining',
         label: '剩余积分',
         value: fmt(globalStats.remainingCredits),
         unit: creditsPending ? '' : '积分',
-        tone: 'ok',
-        title: '全部账号当前可用余额（与 IDE 顶部的 Credits Balance 同口径）',
+        tone: globalStats.creditsPartial === true ? 'warn' : 'ok',
+        title: '全部账号当前可用余额（与 IDE 顶部的 Credits Balance 同口径）' + partialTitle,
       },
       {
         key: 'accounts',

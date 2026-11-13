@@ -689,6 +689,9 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     // 两者都由 `credits-runtime-parity.spec.ts` 的「特例的优先级」单独守。
     // ⚠️ 2026-10-08（Task 11-F）：特例表与判据改由 `tests/helpers/provider-sets.ts`
     // 单一持有（原先本文件里就写了两遍、另有一处在 `provider-runtime-wiring.spec.ts`）。
+    // ⚠️ 2026-11-13 排除 doubao：它在 credits 表里（签到 `claim` 走这张表）但
+    //    **没有余额端点** ⇒ 不该出现在手写端点清单里。余额那一腿由
+    //    `credits.balances` 端点短路成空列表（见 `src/jet-hub-rpc.ts` 的 doubao 分支）。
     const expected = expectedProviderIdsInCreditsTable().filter((id) => id !== 'doubao').sort()
     expect(
       Object.keys(BALANCE_PATH_OF).sort(),
@@ -852,6 +855,10 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    余额 ⇒ 只填 Key 的账号会走 401 降级路径，不会被当成「零余额」。
     // ⚠️ 2026-11-09 并入 marvis（腾讯 Marvis，钱包 `/v3/marvis_get_wallet`）⇒ 23 → 24。
     // ⚠️ 2026-11-13 并入 doubao（豆包，`credits.balance: true` 且不在特例表）⇒ 24 → 25。
+    //    ⚠️ 它**有** `balance: true` 但**没有**余额端点 —— 那不是矛盾：`balance`
+    //    在这里的语义是「进 credits 表」（签到 `claim` 走同一张表），余额那一腿
+    //    由 `credits.balances` 端点短路成空列表（`src/jet-hub-rpc.ts` 的 doubao 分支）。
+    //    上面「手写端点清单」那条已把 doubao 排除（它没有端点路径可写）。
     expect(expected.length).toBe(25)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
@@ -1002,6 +1009,29 @@ describe('provider 边界：拒绝是兜底契约，判据来自 registry', () =
     // 反向：确认上面那圈里真的既有 true 也有 false，否则断言恒真。
     expect(PROVIDER_REGISTRY.some((d) => d.credits.balance === true)).toBe(true)
     expect(PROVIDER_REGISTRY.some((d) => d.credits.balance !== true)).toBe(true)
+  })
+
+  it('★ doubao 的 credits.balances 短路成空列表（无余额概念，2026-11-13 审计返工）', async () => {
+    // 判据的「咬合点」：给豆包注入一个**哨兵实现**（真回 999）并落一个真账号。
+    // 若短路被删，端点会走查表分派 ⇒ 响应变成 1 条 `{ balance: { total: 999 } }`
+    // ⇒ 客户端统计带把它加进「剩余积分」并可能置 creditsPartial。
+    const sentinel = {
+      fetchBalanceDetailed: async () => ({
+        balance: { total: 999, packages: [], expiredTotal: 0 },
+      }),
+    } as unknown as ProviderCredits
+    const { call, pool, credentials } = makeRpc({ doubao: sentinel })
+    await seed(pool, 'doubao', 'doubao-1', 'DOUBAO_ACCOUNT_SPEC')
+    await credentials.set('DOUBAO_ACCOUNT_SPEC', JSON.stringify({ cookie: 'sessionid=abc' }))
+    vi.stubGlobal('fetch', async () => { throw new Error('豆包没有余额端点，不得发任何网络请求') })
+    const result = await call('credits.balances', { provider: 'doubao' })
+    expect(result.ok).toBe(true)
+    expect(
+      result.value,
+      '★ 豆包必须回空列表 —— 它有 `credits.balance: true`（为了进 credits 表让签到 `claim` 可用）'
+      + '但没有余额端点；放它进查表分派会让客户端拿到 `balance: null` 并把「部分渠道读取失败」'
+      + '永久置位（页头剩余积分永远挂 warn 色假警报）',
+    ).toEqual({ accounts: [] })
   })
 
   it('credits.status 对 registry 里的每个渠道都被接受（未知 id 除外）', async () => {

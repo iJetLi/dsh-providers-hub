@@ -1129,6 +1129,18 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //    返回 `checked_in:true, reward_amount:200, continuous_days:2, idempotent:true`。
     //    签到带 `a_bogus` 签名（页面 `bdms.frontierSign` 生成）⇒ 走 CDP 页面会话，
     //    实现在 `src/doubao-signin.ts` 的 `claimDoubaoDailyViaPage`。
+    // ⚠️⚠️ **`balance: true` 的语义是「本渠道进 credits 表」，不是「上游有余额」**
+    //   （2026-11-13 审计返工，PR #29 初版把两件事混成一件）：
+    //   这张表同时服务 `credits.claimAll`（签到）与 `credits.balances`（余额），
+    //   而 `credits-runtime-parity.spec.ts` 有两条硬不变式把「表里有哪些渠道」
+    //   绑在 `credits.balance === true` 上（`Object.keys(table) === 余额能力集`）。
+    //   豆包的**签到**必须走这张表（`claimDoubaoDailyCheckin`），故这里必须是 `true`。
+    //   ⚠️ 但上游**没有**积分余额概念（签到给的是「每日额度权益」，不是积分包；
+    //   `src/doubao-credits.ts:15-16` 逐字写明「无独立余额端点」）⇒ 余额那一腿
+    //   由 `credits.balances` 端点**短路成空列表**（见 `src/jet-hub-rpc.ts` 的
+    //   doubao 分支），绝不让一个注定为 `null` 的读数冒出去。
+    //   ⚠️ 为什么不能改 `false`：那会让 `createProviderCredits()` 少一条
+    //   ⇒ `credits.claimAll` 对豆包回 `unsupported provider: doubao` ⇒ 签到静默失效。
     credits: { balance: true, dailyCheckin: true },
     // ⚠️ **签到有代价 ⇒ 不进每日自动链**（2026-11-03，与 zcode captcha 同型）：
     //    签到要带 `a_bogus` 签名，它由豆包页面上下文的 `bdms.frontierSign` 生成 ⇒
@@ -1147,8 +1159,10 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //    但本渠道**没有模型目录 / 适配器 / auth 服务**（纯签到渠道，无推理链路）。
     //    `channel: true` 会点燃 `refresh-targets-derived.spec.ts` 的「channel ⇒ 必须有
     //    modelAdapters 目录」守卫（报错「关闭 provider 后模型仍可选」），而 doubao 根本
-    //    没有目录可关。`credits.balance: true` 的判据独立于 `channel`（见 provider-sets.ts
-    //    的 `expectedProviderIdsInCreditsTable`），故积分表照常读它 —— 签到入口不受影响。
+    //    没有目录可关。`credits` 的两个判据都独立于 `channel`：`dailyCheckin: true`
+    //    让签到入口照常出现（`checkinProviders()` 按 `supportsDailyCheckin` 过滤），
+    //    `balance: true` 让豆包进 credits 表（签到的 `claim` 走同一张表；余额那一腿
+    //    由端点短路成空列表，见上方 `credits` 那条）。
     //    将来接推理链路（目录/适配器/auth）时把本行翻 `true` 并补齐派生登记。
     channel: false,
   },

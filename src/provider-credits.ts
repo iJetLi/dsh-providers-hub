@@ -744,21 +744,35 @@ export function createProviderCredits(
     },
 
     /**
-     * 豆包（Doubao，字节跳动）：签到/余额结构已接通，**上游端点待实测**。
+     * 豆包（Doubao，字节跳动）：**签到端点已真机实测**（2026-11-03），余额无概念。
      *
-     * ⚠️ 用 `fetchBalanceDetailed` + 显式 `claim`：两个原语（`doubao-credits.ts`）
-     *    在凭据缺失时给出可读原因，在端点未实测时如实回 `null` / `inactive`
-     *   （不落 0、不发假请求）。将来拿到真实端点后，只需把这两个原语换成
-     *    实测实现，本表项**不用动**（签名已对齐骨架）。
+     * ⚠️ 用 `fetchBalanceDetailed` + 显式 `claim` 两个原语（`doubao-credits.ts`）：
+     *    前者**无条件**回 `{ balance: null, error: '豆包无积分余额概念…' }` ——
+     *    这是如实的「没有这个概念」，不是「还没实测」。**正常路径不会调用到它**：
+     *    `credits.balances` 端点在查表分派**之前**就把豆包短路成
+     *    `{ accounts: [] }`（`src/jet-hub-rpc.ts`），故统计带永远拿到空列表、
+     *    不会因为没有余额而把 `creditsPartial` 误置位。保留它只为让本表形状
+     *    统一（`credits.claimAll` 与 `credits.balances` 共用这张表），且万一有
+     *    调用方绕过端点时仍能拿到可读原因而不是抛出。
+     * ⚠️ 签到侧是**实测**的（`POST DOUBAO_CHECKIN_PATH` 回
+     *    `checked_in:true, reward_amount:200, continuous_days:2, idempotent:true`，
+     *    2026-11-03 真机 + `docs/agent-notes/providers-doubao.md`）。
+     *    ⚠️ 此前本段注释写「上游端点待实测」「本家没有独立的签到状态端点」两句
+     *    **都是错的**（2026-11-13 审计 P2 更正）：状态端点确实存在
+     *    （`DOUBAO_CHECKIN_STATUS_PATH = '/alice/ug/campaign/landing/get'`，
+     *    被 `buildCheckinPageScript` 真请求），只是它**不能短路签到**。
      */
     doubao: {
       fetchBalanceDetailed: async (credential) =>
         await fetchDoubaoBalanceDetailed(credential as DoubaoCredential),
       claim: async (credential) =>
         await claimDoubaoDailyCheckin(credential as DoubaoCredential),
-      // ⚠️ `precheckStatus: false`：本家没有独立的签到状态端点（claim 内部
-      //    直接回 inactive），骨架默认会用 buddy 式 `fetchCheckinStatus` 去打它
-      //    —— 那是一次发错端点的真实请求。与 codely / loomy 同因。
+      // ⚠️ `precheckStatus: false` 的**真实理由**（2026-11-13 更正）：状态端点
+      //    `landing/get` 虽存在，但**已签账号也回空活动**（签完当天就没有可领对象
+      //    了，2026-11-03 实测）⇒ 据它短路会把「今天已签」误报成「没有活动」
+      //    （`src/doubao-signin.ts:214-217` 逐字记着这条）。预检拿不到确定性结论，
+      //    只会白发一次带 `a_bogus` 签名的请求（那要现场起一棵浏览器进程树）。
+      //    与 codely / loomy 同因。
       precheckStatus: false,
     },
 

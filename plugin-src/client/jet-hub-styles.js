@@ -634,9 +634,18 @@ const STYLES = `
 /* min-width 给到 120px：积分动辄 5~7 位（如 1,234,567.89），96px 会把数字挤出卡片。 */
 .dim-jh-globalStat { flex: 1 1 120px; min-width: 120px; display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); border-left-width: 3px; background: var(--dsw-alias-bg-layer-2, #f7f8fa); }
 .dim-jh-globalStat[data-tone="info"] { border-left-color: #3370ff; }
-.dim-jh-globalStat[data-tone="ok"] { border-left-color: #22c55e; }
-.dim-jh-globalStat[data-tone="warn"] { border-left-color: #e37400; }
-.dim-jh-globalStat[data-tone="danger"] { border-left-color: #d93025; }
+/* ⚠️⚠️ 这三条**必须**走 var(--dsw-alias-…, 回退值)，不能裸写语义色。
+   PR #29 首版就是裸写的（#22c55e / #e37400 / #d93025），被
+   tests/unit/jet-hub-styles-theme-tokens.spec.ts 当场抓住（3 条 offender）——
+   那是 PR #54 建立的红线：裸写会让「宿主换主题时统计带的色条不跟」，
+   而回退值写错又会「悄悄换掉主题色」。回退值逐字取自该 spec 的
+   FALLBACK_SNAPSHOT 白名单（新增组合必须先证明是原值再登记，不许顺手加）。
+   ℹ️ info / muted 两格的 #3370ff / #8f959e **刻意保留裸字面量**：
+   它们不在该 spec 的 SEMANTIC 表里（表只覆盖 error/danger/success/warn 四类），
+   强行包 var 反而要新增一条未登记的回退组合。 */
+.dim-jh-globalStat[data-tone="ok"] { border-left-color: var(--dsw-alias-state-success-primary, #22c55e); }
+.dim-jh-globalStat[data-tone="warn"] { border-left-color: var(--dsw-alias-state-warn-primary, #e37400); }
+.dim-jh-globalStat[data-tone="danger"] { border-left-color: var(--dsw-alias-state-error-primary, #d93025); }
 .dim-jh-globalStat[data-tone="muted"] { border-left-color: #8f959e; }
 /* 字号取法：标签比正文小一档（12px vs 13px）、数值大两档（20px）。
    目的是让统计带读起来是「同一层级的摘要」而不是新的一层，避免与下方账号卡片标题（16px）打架。 */

@@ -164,7 +164,13 @@ describe('jet-hub 全局统计带', () => {
     ).not.toMatch(/targets\.map\(/)
     // ③ 对照组：必须至少有一家 `balance:false` 的渠道存在，否则这条判据可能空跑
     expect(supportsCreditBalance('qiniu'), 'qiniu 的 balance:false 是实测结论，判据靠它区分').toBe(false)
-    expect(supportsCreditBalance('doubao'), '纯签到渠道（channel:false）但有余额端点，对照它').toBe(true)
+    // ⚠️ 豆包登记 `balance: true`（它在 credits 表里 ⇒ 签到 `claim` 可用），
+    //    但它**没有余额端点** ⇒ `credits.balances` 端点对它短路回
+    //    `{ accounts: [] }`（`src/jet-hub-rpc.ts`），故统计带拿到空列表、
+    //    `creditsPartial` 不会被它误置位。这条断言锁的就是「客户端仍会去问它」——
+    //    若哪天有人把豆包的 `balance` 改 `false`，`credits.claimAll` 会回
+    //    `unsupported provider` 而**签到静默失效**（见 provider-registry 那条注释）。
+    expect(supportsCreditBalance('doubao'), '纯签到渠道（channel:false）但进 credits 表，对照它').toBe(true)
   })
 
   it('⑥ 两段 await 之后都判 mounted（卸载后 setState 会告警并可能污染已卸载组件）', () => {
@@ -192,5 +198,75 @@ describe('jet-hub 全局统计带', () => {
     }
     // 窄屏：靠 wrap 折行，不允许横向溢出。
     expect(styles).toContain('.dim-jh-globalStats { gap: 6px')
+  })
+
+  /**
+   * ★★★ **`totalKnown === false` 的包不得计入「总积分」**（2026-11-13 审计 P1）。
+   *
+   * ## 为什么这是 P1 而不是 P3
+   *
+   * 这种包的上游只下发当前余额，`CreditPackage.total` 只是 `remaining` 的**冗余拷贝**
+   * （`src/credits.ts:211` 逐字写明「面板**不得**把两者并列显示 —— 否则每次消耗后都会
+   * 出现 `100/100 → 98/98` 这种『分母跟着余额跑』的假读数」，用户 2026-11-05 报障）。
+   * 统计带把「总积分」与「剩余积分」**并排**显示 ⇒ 只要池里有一个 `baizhi` /
+   * `monkeycode` 账号，两格数字就恒等，读起来像「一分没花」，把「额度告急」这条
+   * 唯一需要用户动作的信号抹掉。
+   *
+   * 产出点：`src/baizhi-credits.ts:419/439/459`、`src/monkeycode-credits.ts:533`。
+   *
+   * ⚠️ 判据为什么是「跳过」而不是「按 remaining 加」：后者会让总积分等于剩余，
+   *    即报障原状；也不是「加 0」—— 那会把「不可知」写成「没有额度」。
+   */
+  it('★★★ totalKnown:false 的包不计入总积分（否则两格恒等 = 假分母）', () => {
+    const fn = bodyOf('loadGlobalStats')
+    // ① 必须真的判了这个字段（删掉 = 报障原状）
+    expect(
+      fn,
+      '★★★ `pkg.totalKnown === false` 必须被排除在总积分求和之外 —— 这种包的 total'
+      + ' 只是 remaining 的拷贝，加进去会让「总积分」恒等于「剩余积分」（假分母）',
+    ).toMatch(/pkg\?\.totalKnown\s*===\s*false/)
+    // ② 判据必须与 `totalCredits +=` 在**同一条 if 链**上（分开写可能先加后判）
+    expect(fn).toMatch(
+      /if\s*\(pkg\?\.totalKnown\s*===\s*false\)\s*\{\s*totalUnknown\s*=\s*true;\s*continue\s*\}/,
+    )
+    // ③ 跳过之后必须**真的把 totalCredits 的累加放在后面**（否则等于没跳过）
+    const skipAt = fn.indexOf('totalUnknown = true')
+    const addAt = fn.indexOf('totalCredits +=')
+    expect(skipAt).toBeGreaterThan(-1)
+    expect(addAt, 'totalCredits 的累加必须在跳过分支之后').toBeGreaterThan(skipAt)
+    // ④ 渲染侧：不可知时整格退化成 —（不能显示一个半成品数字）
+    const render = bodyOf('renderGlobalStats')
+    expect(render).toMatch(/globalStats\.totalUnknown\s*===\s*true\s*\?\s*null\s*:\s*globalStats\.totalCredits/)
+  })
+
+  /**
+   * ★★ **`creditsPartial` 必须真的被渲染出来**（2026-11-13 审计 P2）。
+   *
+   * 原实现把 `creditsPartial` 写进 state 却**从不读取** —— 设计注释承诺的
+   * 「任一 provider 失败只让它记 0 并标记 `creditsPartial`」在 UI 上完全没有出口，
+   * 用户看到的是一格**静默偏小**的剩余积分（与「真就这么少」同形）。
+   *
+   * ⚠️ 判据必须落在**渲染**上：只断言 `setGlobalStats` 里传了 `creditsPartial`
+   *    是无牙的（写入 ≠ 展示），实测原实现在这条断言下全绿。
+   */
+  it('★★ creditsPartial 有渲染出口（只写不读 = 静默偏小）', () => {
+    const render = bodyOf('renderGlobalStats')
+    expect(
+      render,
+      '★★ `creditsPartial` 必须在渲染里被读（tone 或 title），否则「部分失败」对用户'
+      + ' 完全不可见，读数看起来像「真就这么少」',
+    ).toMatch(/globalStats\.creditsPartial\s*===\s*true/)
+    // 出口 ①：tone 必须**真的**切到 warn（颜色变化；写成常量 'ok' 时用户看不出差别）。
+    expect(
+      render,
+      "★★ 部分失败时「剩余积分」的 tone 必须切到 'warn'（否则读数和「全读到了」同形）",
+    ).toMatch(/tone:\s*globalStats\.creditsPartial\s*===\s*true\s*\?\s*'warn'\s*:\s*'ok'/)
+    // 出口 ②：悬浮说明必须**真的拼进** title（`partialTitle` 定义成空串 = 文案消失，
+    //         而 `creditsPartial === true` 那句仍在 ⇒ 只判前者是假绿，实测如此）。
+    expect(
+      render,
+      '★★ 部分失败的说明必须拼进 title（`+ partialTitle`），否则悬浮里一个字都没有',
+    ).toMatch(/'[^']*'\s*\+\s*partialTitle/)
+    expect(render).toMatch(/const\s+partialTitle\s*=\s*globalStats\.creditsPartial\s*===\s*true/)
   })
 })

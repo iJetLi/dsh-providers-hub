@@ -6026,12 +6026,64 @@ function registerJetHubEndpoints(
           })
           const task = (async (): Promise<{ done: boolean, success?: boolean, error?: string }> => {
             const { DoubaoLoginSession } = await import('./doubao-login.js')
-            const session = await DoubaoLoginSession.open({
-              log: (message) => { ctx.logger?.info?.(`[jet-hub] ${message}`) },
-            })
-            let credential: import('./doubao.js').DoubaoCredential | undefined
+            /**
+             * ⚠️⚠️ **`open()` 必须在 `try` 之内**（PR #29 审计返工，2026-11-13）。
+             *
+             * 首版是 `const session = await DoubaoLoginSession.open(…)` 写在 `try`
+             * **外面**。而 `open()` 会抛的**最常见**情形恰恰是「用户机器上没有
+             * Chrome / 豆包客户端」（`doubao-login.ts` 的
+             * `doubaoLoginBrowserExecutable()` 返回 `undefined` ⇒ 直接 throw），
+             * 其次是 CDP 30 秒未就绪。那时的实际后果是**三条同时发生**：
+             *
+             * 1. `failLogin` **不会被调用** ⇒ 占位账号（无凭据）永久留在池里，
+             *    用户看到一张点不开的「豆包账号」卡片；
+             * 2. 外层那条 `void (async () => { … })()` 的 catch 是**空块**（只有一句
+             *    注释）⇒ 把 rejection **静默吞掉** ⇒ 日志零字，无从诊断；
+             * 3. `doubaoLoginInFlight` 已被删 ⇒ `login.poll` 恒回 `{ done: false }`
+             *    ⇒ 客户端转圈满 **5 分钟**（客户端自己的轮询上限）才报超时。
+             *
+             * 合起来正是本仓库登记过的缺陷形态：「登录失败只剩静默转圈 5 分钟」
+             * + 幽灵账号（`docs/agent-notes/protocol-wire.md` 的 Issue IKLI7J）。
+             *
+             * 现在整段罩在一个 `try` 里：任何一步失败（开窗 / 扫码等待 / 落库 /
+             * 回填）都走 `failLogin` 记终态（它自己先判 `loginCredentialLanded`：
+             * **凭据已在 ⇒ 就当成功、不删号**），`finally` 收窗。
+             */
+            // ⚠️ 不能用 `InstanceType<typeof DoubaoLoginSession>` —— 它的构造器是
+            //    **private**（只允许走静态 `open()`），`InstanceType` 的约束会拒绝。
+            let session: Awaited<ReturnType<(typeof DoubaoLoginSession)['open']>> | undefined
             try {
-              credential = await session.waitForCredential(240_000)
+              session = await DoubaoLoginSession.open({
+                log: (message) => { ctx.logger?.info?.(`[jet-hub] ${message}`) },
+              })
+              const credential = await session.waitForCredential(240_000)
+              if (credential === undefined) {
+                throw new Error('扫码登录未完成（超时或窗口已关闭）')
+              }
+              // 判重：sessionid 指纹命中既有条目 ⇒ 只刷新它，删掉占位条目。
+              const fingerprint = doubaoSessionIdOf(credential)
+              if (fingerprint !== undefined) {
+                for (const existing of pool.listAccountsByProvider('doubao')) {
+                  if (existing.id === id) continue
+                  let existingFingerprint: string | undefined
+                  try {
+                    const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
+                    existingFingerprint = resolved === undefined
+                      ? undefined
+                      : doubaoSessionIdOf(JSON.parse(resolved.value))
+                  } catch { existingFingerprint = undefined }
+                  if (existingFingerprint !== fingerprint) continue
+                  await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+                  await pool.updateAccount(existing.id, { nickname: '豆包账号' })
+                  await ctx.credentials.unset(credentialRef(refName)).catch(() => undefined)
+                  await pool.removeAccount(id).catch(() => undefined)
+                  return { done: true, success: true }
+                }
+              }
+              // 新账号：凭据写到自己的 ref。
+              await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
+              await pool.updateAccount(id, { nickname: '豆包账号' })
+              return { done: true, success: true }
             } catch (error) {
               const message = await failLogin(id, error)
               return message === undefined
@@ -6039,42 +6091,16 @@ function registerJetHubEndpoints(
                 : { done: true, success: false, error: message }
             } finally {
               // 无论成败都收窗（杀进程 + 删一次性 profile）。
-              session.close()
+              session?.close()
             }
-            if (credential === undefined) {
-              const message = await failLogin(id, new Error('扫码登录未完成（超时或窗口已关闭）'))
-              return message === undefined
-                ? { done: true, success: true }
-                : { done: true, success: false, error: message }
-            }
-            // 判重：sessionid 指纹命中既有条目 ⇒ 只刷新它，删掉占位条目。
-            const fingerprint = doubaoSessionIdOf(credential)
-            if (fingerprint !== undefined) {
-              for (const existing of pool.listAccountsByProvider('doubao')) {
-                if (existing.id === id) continue
-                let existingFingerprint: string | undefined
-                try {
-                  const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
-                  existingFingerprint = resolved === undefined
-                    ? undefined
-                    : doubaoSessionIdOf(JSON.parse(resolved.value))
-                } catch { existingFingerprint = undefined }
-                if (existingFingerprint !== fingerprint) continue
-                await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
-                await pool.updateAccount(existing.id, { nickname: '豆包账号' })
-                await ctx.credentials.unset(credentialRef(refName)).catch(() => undefined)
-                await pool.removeAccount(id).catch(() => undefined)
-                return { done: true, success: true }
-              }
-            }
-            // 新账号：凭据写到自己的 ref。
-            await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
-            await pool.updateAccount(id, { nickname: '豆包账号' })
-            return { done: true, success: true }
           })()
           doubaoLoginInFlight.set(id, task)
           void (async () => {
-            try { await task } catch { /* 上面已把异常收成返回值 */ }
+            // ⚠️ 走到这里说明 `failLogin` **自己**抛了（它已在上面把业务失败收成返回值）：
+            //    记一条 warn 再吞，绝不静默（否则又是「日志零字 + 转圈 5 分钟」）。
+            try { await task } catch (error) {
+              ctx.logger?.warn?.(`[jet-hub] 豆包登录收尾异常（${id}）：${String(error)}`)
+            }
             doubaoLoginInFlight.delete(id)
           })()
           return { ok: true, value: { accountId: id, loginUrl: '' } }
@@ -9312,6 +9338,32 @@ function registerJetHubEndpoints(
               //（实测症状：`officeace 必须回传 windowDays`）。
               windowDays: buddyExpiringWindowDays(),
             } satisfies RpcCreditsBalancesResponse,
+          }
+        }
+
+        // ⚠️⚠️ **豆包（doubao）：没有余额概念 ⇒ 短路成空列表**（2026-11-13 审计返工）。
+        //
+        // 它与上面两个特例**不同因**：不是「形态不匹配」，而是**这个概念不存在**。
+        // 豆包签到给的是「每日额度权益」（`reward_amount: 200`），不是积分包
+        // （`src/doubao-credits.ts:15-16` 逐字写明「无独立余额端点」），故
+        // `fetchDoubaoBalanceDetailed` 只能**无条件**回 `{ balance: null, error: … }`。
+        //
+        // ⚠️ 如果放它进下面的查表分派，会得到一条**假警报链**：
+        //   `collectCreditBalances` 逐账号产出 `{ id, balance: null, error }`
+        //   ⇒ 客户端统计带（`loadGlobalStats`）把 `balance === null` 记成
+        //   `creditsPartial = true` ⇒ **只要池里有一个豆包号，页头「剩余积分」
+        //   就永远挂着「部分渠道读取失败，实际数值可能更高」的 warn 色**
+        //   （假警报与「真就这么少」同形，用户无从分辨）。
+        //
+        // ⚠️ 也不能把 registry 的 `credits.balance` 改 `false` 来躲：那会让
+        //   `createProviderCredits()` 少一条 ⇒ `credits.claimAll` 对豆包回
+        //   `unsupported provider: doubao` ⇒ **一键签到静默失效**（表被两条
+        //   硬不变式绑在 `balance === true` 上，见 `credits-runtime-parity.spec.ts`）。
+        //   ⇒ 正确做法是**这一腿**短路：表里留着（签到要用），余额读数给空。
+        if (req.provider === 'doubao') {
+          return {
+            ok: true,
+            value: { accounts: [] } satisfies RpcCreditsBalancesResponse,
           }
         }
 
