@@ -6,6 +6,7 @@ import {
   accountLabel,
   avgPerfText,
   avgPerfTooltip,
+  buildAccountNameMap,
   channelCardTitle,
   channelLabel,
   channelOrder,
@@ -21,6 +22,7 @@ import {
   historyTitle,
   HISTORY_RANGES,
   ledgerSubtitle,
+  ledgerEntryModelText,
   rangeDaysOf,
   tokenSummaryText,
   todayDayKey,
@@ -134,6 +136,73 @@ describe('账号维度（第 2 期）', () => {
     expect(accountLabel('')).toBe('未归属')
     expect(accountLabel(undefined)).toBe('未归属')
     expect(accountLabel('qoder-bb211a53')).toBe('qoder-bb211a53')
+  })
+})
+
+/**
+ * 账号显示名（第 5 期，2026-11-10）：`nickname` → `accountName` → 内部 id。
+ *
+ * ⚠️ 第二参**必须可选**：不传时行为与加参数前逐字节相同（上面那条
+ * `accountLabel('qoder-bb211a53')` 就是这条契约的守卫，不许为迁就新代码改它）。
+ */
+describe('账号显示名 · nameMap 优先级与回落', () => {
+  it('nameMap 命中 ⇒ 用映射里的名字（昵称）', () => {
+    const names = new Map([['qodercn-c5a414d5', 'M籾 959']])
+    expect(accountLabel('qodercn-c5a414d5', names)).toBe('M籾 959')
+  })
+
+  it('nameMap 未命中 ⇒ 回落 id（账号删了但账本还有历史，这是对的）', () => {
+    const names = new Map([['other-account', '别的号']])
+    expect(accountLabel('qoder-bb211a53', names)).toBe('qoder-bb211a53')
+  })
+
+  it('nameMap 为 undefined ⇒ 回落 id（向后兼容：旧调用点不传第二参）', () => {
+    expect(accountLabel('qoder-bb211a53', undefined)).toBe('qoder-bb211a53')
+  })
+
+  it('nameMap 里的值是空串 ⇒ 回落 id（不许渲染成空白账号行）', () => {
+    expect(accountLabel('qoder-bb211a53', new Map([['qoder-bb211a53', '']]))).toBe('qoder-bb211a53')
+    // 非字符串（脏数据）同样回落。
+    expect(accountLabel('qoder-bb211a53', new Map([['qoder-bb211a53', 42 as unknown as string]])))
+      .toBe('qoder-bb211a53')
+  })
+
+  it('accountId 为空串 ⇒ 「未归属」，nameMap 不参与（空 key 不是账号）', () => {
+    expect(accountLabel('', new Map([['', '不该被读到']]))).toBe('未归属')
+    expect(accountLabel(undefined, new Map())).toBe('未归属')
+  })
+
+  it('nameMap 传普通对象（非 Map）也能工作', () => {
+    expect(accountLabel('qoder-bb211a53', { 'qoder-bb211a53': '超级清' })).toBe('超级清')
+    expect(accountLabel('qoder-bb211a53', {})).toBe('qoder-bb211a53')
+  })
+
+  it('★ buildAccountNameMap：nickname 优先于 accountName，都没有则不进映射', () => {
+    const map = buildAccountNameMap([
+      { id: 'a', nickname: '用户备注', accountName: 'upstream-name' },
+      { id: 'b', nickname: '', accountName: 'mylzscy4' },
+      { id: 'c', nickname: '', accountName: '' },
+      { id: 'd' },
+      { id: '', nickname: '没有 id' },
+      null,
+      undefined,
+      'not-an-object',
+      42,
+    ])
+    expect(map.get('a')).toBe('用户备注')
+    // nickname 空串**不是**名字 ⇒ 用 accountName（真实姓名）
+    expect(map.get('b')).toBe('mylzscy4')
+    // 两者都没有 ⇒ 不进映射（让 accountLabel 回落 id，而不是渲染空白）
+    expect(map.has('c')).toBe(false)
+    expect(map.has('d')).toBe(false)
+    expect(map.has('')).toBe(false)
+    expect(map.size).toBe(2)
+  })
+
+  it('buildAccountNameMap：非数组输入给空 Map（不抛）', () => {
+    expect(buildAccountNameMap(undefined).size).toBe(0)
+    expect(buildAccountNameMap(null).size).toBe(0)
+    expect(buildAccountNameMap({} as unknown as unknown[]).size).toBe(0)
   })
 })
 
@@ -335,5 +404,366 @@ describe('用量热力图 · 渲染接线与样式契约', () => {
     const end = styles.lastIndexOf('`')
     const css = styles.slice(start + 1, end)
     expect(css).not.toMatch(/`/)
+  })
+})
+
+/**
+ * 用量树的**三层视觉契约**（2026-11-11 两轮报障的终稿）。
+ *
+ * ## 第一轮：账号与模型区分度不足
+ * 根因是两层**字号与颜色完全相同**（都 11.5px / 都 `--dsw-alias-label-secondary`），
+ * 只靠 600 字重与等宽字体族区分 ⇒ 读起来是「四行平铺」。
+ *
+ * ## 第二轮：① 色条是白的 ② provider 被画成账号
+ * - ① 我用了 `--dsw-alias-brand-primary`，而它在 DSH 深色主题下 =
+ *   `--dsw-static-neutral-bluish-50` = **#f9fafb（近白）**。它是反色/对比色，
+ *   不是蓝色；真正的蓝是 `--dsw-static-deepseek-450` = #5686fe。
+ *   ⚠️ 写了 `#1677ff` 回退值也没用 —— **变量存在时回退值永不生效**。
+ * - ② 历史日树的 provider 行错用了 `dim-jh-ledgerAccount` 类名 ⇒ 供应商被染成账号。
+ *
+ * ## 终稿（用户选定「方案 3 + 档位 D」）
+ * provider（0px 缩进 / 淡色块 / 灰竖线 / 11.5px 粗体）
+ *   → 账号（30px / 浓色块 / 蓝条 / 12px 主色）
+ *   → 模型（54px / 无底色 / 11px 最暗 / ↳ 前导）
+ *
+ * ⚠️ 断言是**数值级**的，不是「有没有某个类名」：类名在、但字号/颜色/缩进改回
+ * 相同值，正是这些缺陷复发的形态。
+ */
+describe('用量树三层视觉契约（provider / 账号 / 模型）', () => {
+  const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+
+  /** 取出某个选择器的**第一条**声明块（只认 `{ … }`，不做嵌套解析）。 */
+  const ruleOf = (selector: string): string => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const m = styles.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 's'))
+    return m?.[1] ?? ''
+  }
+
+  it('★ 第一层 provider：淡色块 + 灰色竖线 + 11.5px 粗体，且不缩进', () => {
+    const head = ruleOf('.dim-jh-ledgerProviderHead')
+    expect(head, '找不到 .dim-jh-ledgerProviderHead 规则').not.toBe('')
+    // 淡色块（color-mix 半透明，自动跟随主题明暗）
+    expect(head).toMatch(/color-mix\(in srgb,\s*var\(--dsw-alias-bg-layer-3/)
+    // 左侧 3px 灰色竖线 = 「容器级」
+    expect(head).toMatch(/border-left:\s*3px\s+solid\s+var\(--dsw-alias-border-l2/)
+    // 粗体，「标题」的信号
+    expect(ruleOf('.dim-jh-ledgerProviderName')).toMatch(/font-weight:\s*700/)
+    // ⚠️ provider 是容器级，**不许**有左缩进（它是最外层）。
+    //    判据必须同时认 `padding-left` **与四值简写** `padding: a b c d` ——
+    //    只查 `padding-left` 时，写成 `padding: 4px 10px 6px 20px` 的变异**无牙**
+    //    （2026-11-11 变异验证实测抓到的假守卫）。
+    //    ⚠️ 但没有左缩进 ≠ 左内边距为 0：现有规则是 `padding: 4px 10px 6px`
+    //    （三值 = 上 8 横 下），左边距就是那个 `10px`，是**有意的**（与卡片内缘对齐）。
+    //    真正要守的是「provider 不被推得比账号更靠右」—— 见下面与账号缩进的比较。
+    const providerRule = ruleOf('.dim-jh-ledgerProvider')
+    expect(providerRule).not.toMatch(/padding-left:\s*[1-9]/)
+    const shorthand = providerRule.match(/padding:\s*([^;]+);/)?.[1] ?? ''
+    const parts = shorthand.trim().split(/\s+/).filter((p) => p.length > 0)
+    // 四值简写的第 4 个是左；三值/两值时第 2 个是左；单值时全是
+    const leftPad = parts.length === 4 ? parts[3] : (parts.length >= 2 ? parts[1] : parts[0])
+    const providerLeft = Number.parseFloat(leftPad ?? '0') || 0
+    // ⚠️ 核心不变式：provider 的**有效左偏移必须严格小于账号的**。
+    //    账号有 30px 的 `margin-left` ⇒ provider 的左内边距（10px）远小于它。
+    //    给 provider 加到 ≥ 20px 就会与账号齐平/超出，层级塌掉 ⇒ 这条必须红。
+    //    ⚠️ 判据用「左内边距」而不是「总偏移」，因为两者是不同层级的量：
+    //    账号的 30px 是 margin，provider 的 10px 是 padding，比的是**视觉左缘**。
+    const accountLeft = Number.parseFloat(
+      ruleOf('.dim-jh-ledgerAccount').match(/margin-left:\s*([^;]+);/)?.[1] ?? '0',
+    ) || 0
+    expect(providerLeft, 'provider 的左内边距必须明显小于账号缩进，否则不再是容器级')
+      .toBeLessThan(accountLeft / 2)
+  })
+
+  it('★★★ 第二层账号：蓝条必须是 deepseek-450（真蓝），**绝不能**是 brand-primary', () => {
+    const head = ruleOf('.dim-jh-ledgerAccountHead')
+    expect(head, '找不到 .dim-jh-ledgerAccountHead 规则').not.toBe('')
+
+    // ① 必须是真正的蓝色变量
+    expect(head).toMatch(/border-left:\s*3px\s+solid\s+var\(--dsw-static-deepseek-450/)
+    // ②⚠️⚠️ 回归守卫：品牌色 brand-primary 在深色主题下是 #f9fafb（近白）——
+    //    用它画出来的就是一条白条（真实报障）。这条断言是那次 bug 的墓碑。
+    expect(head).not.toMatch(/border-left:[^;]*--dsw-alias-brand-primary/)
+    // ③ 退一步：整个账号头里都不该出现 brand-primary（它可能被挪到别处再犯）
+    expect(head).not.toContain('--dsw-alias-brand-primary')
+    // ④ 浓色块（层级高于 provider 的淡色块）
+    expect(head).toMatch(/background:\s*var\(--dsw-alias-bg-layer-3/)
+  })
+
+  it('★★★ 三层缩进必须递增：provider 0 < 账号 30 < 模型 54（档位 D）', () => {
+    const indentOf = (block: string, prop: string): number | null => {
+      const m = block.match(new RegExp(`${prop}:\\s*([^;]+);`))
+      if (m === null) return 0 // 没写 = 0
+      const v = Number.parseFloat(m[1]!)
+      return Number.isFinite(v) ? v : 0
+    }
+    const account = indentOf(ruleOf('.dim-jh-ledgerAccount'), 'margin-left')
+    // `.dim-jh-ledgerModel` 的 padding 是四值简写，取第 4 个（左）
+    const modelPad = ruleOf('.dim-jh-ledgerModel').match(/padding:\s*([^;]+);/)?.[1] ?? ''
+    const model = Number.parseFloat(modelPad.split(/\s+/)[3] ?? '0')
+
+    expect(account, '账号缩进必须是 30px（档位 D）').toBe(30)
+    expect(model, '模型缩进必须是 54px（档位 D）').toBe(54)
+    // ⚠️ 核心不变式：三层必须**严格递增**，否则层级又糊了
+    expect(account).toBeGreaterThan(0)
+    expect(model).toBeGreaterThan(account)
+  })
+
+  it('★★ 账号名与模型名不同级：字号更大 + 颜色更高一档', () => {
+    const acct = ruleOf('.dim-jh-ledgerAccountName')
+    const model = ruleOf('.dim-jh-ledgerModelName')
+    expect(acct, '找不到 .dim-jh-ledgerAccountName 规则').not.toBe('')
+    expect(model, '找不到 .dim-jh-ledgerModelName 规则').not.toBe('')
+
+    // ① 字号：账号 12px，模型 11px（相同就是本缺陷的原形态）
+    expect(acct).toMatch(/font-size:\s*12px/)
+    expect(model).toMatch(/font-size:\s*11px/)
+
+    // ② 颜色：账号 primary，模型 tertiary（相同就是本缺陷的原形态）
+    expect(acct).toMatch(/color:\s*var\(--dsw-alias-label-primary/)
+    expect(model).toMatch(/color:\s*var\(--dsw-alias-label-tertiary/)
+
+    // ③ 反向对照：两段不得是同一组「字号 + 颜色」
+    const sig = (block: string): string => {
+      const size = block.match(/font-size:\s*([^;]+);/)?.[1]?.trim() ?? ''
+      const color = block.match(/color:\s*([^;]+);/)?.[1]?.trim() ?? ''
+      return `${size}|${color}`
+    }
+    expect(sig(acct)).not.toBe(sig(model))
+  })
+
+  it('★ 模型层有 ↳ 前导（装饰，用 ::before 而非文本节点）', () => {
+    const before = styles.match(/\.dim-jh-ledgerModel::before\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(before, '缺少 .dim-jh-ledgerModel::before 规则').not.toBe('')
+    expect(before).toMatch(/content:\s*"↳"/)
+    // ⚠️ 必须是伪元素：塞进 children 会被 CSV 导出/复制/读屏念出来。
+    expect(client).not.toMatch(/dim-jh-ledgerModelName',[^)]*'↳'/)
+  })
+
+  it('★★★ provider 与账号**必须用各自的类名**（历史日树曾把 provider 画成账号）', () => {
+    // ⚠️ 真实报障：历史日树的 provider 行写的是 className: 'dim-jh-ledgerAccount'，
+    //    于是 buddy / qodercn 这些供应商被套上账号的色块。判据打在**渲染出的 props** 上。
+    //    这里做源码级粗筛：仓库里不存在「用 ledgerAccount 承载 provider 行」的写法。
+    expect(client).not.toMatch(/key:\s*providerRow\.provider,\s*className:\s*'dim-jh-ledgerAccount'/)
+    // 反向对照：provider 行确实用的是 -Provider
+    const providerRows = client.match(/key:\s*providerRow\.provider,\s*className:\s*'dim-jh-ledgerProvider'/g) ?? []
+    // 实时卡 + 历史日树 = 2 处（少一处就是又分叉了）
+    expect(providerRows).toHaveLength(2)
+  })
+
+  it('★ 窄屏必须收窄三层缩进（54px 在 <700px 会把模型名挤成三行）', () => {
+    const media = styles.slice(styles.indexOf('@media (max-width: 700px)'))
+    expect(media).toMatch(/\.dim-jh-ledgerAccount\s*\{[^}]*margin-left:\s*14px/)
+    expect(media).toMatch(/\.dim-jh-ledgerModel\s*\{[^}]*padding:\s*2px 0 2px 26px/)
+  })
+
+  it('★ 模型行不再按账号数分支，且 data-single 属性不得复活', () => {
+    // ⚠️ 判据只认**属性写法**与 **CSS 选择器**，不认注释 ——
+    //    注释里提到 data-single 是在解释「为什么删掉」，那是应该存在的。
+    expect(client).not.toMatch(/'data-single'\s*:/)
+    expect(styles).not.toMatch(/\[data-single/)
+    expect(client).not.toMatch(/\[data-single/)
+  })
+})
+
+/**
+ * 「最近请求」明细表：**模型列 = provider/model** + 列宽排布（2026-11-11 用户需求）。
+ *
+ * 用户原话：「列表中，模型显示应该是 provider/模型名的格式，跟上游原来的一样才行」
+ * 以及「你合理排布一下时间、渠道的长度（因为时间长度固定，渠道列只有直连和网关，
+ * 基本长度固定），以放下模型列一行显示」。
+ *
+ * ⚠️ 事实澄清：**上游原本就只显示裸模型 id**（`entry.model`），不是我们改坏的。
+ *   `provider/model` 是本轮**新增**的展示口径。`TokenLedgerEntry.provider` 一直都在，
+ *   故服务端零改动。
+ *
+ * ## 实测依据（960px 弹窗 / 11.5px 字体，见提交说明）
+ *
+ * | 内容 | 实测宽 |
+ * |---|---|
+ * | 时间 `00:19:26` | 42.2px |
+ * | 渠道 `直连`/`网关` | 23px |
+ * | 账号 `account-names@example.com`（原样本已脱敏，此处为**同长度**示例地址） | 154.5px |
+ * | 最长模型串 `workbuddy/deepseek-v4.1-flash-free` | 187.3px（+12 内边距 = 199.3） |
+ *
+ * 改前的病根：时间给 9%、渠道给 8%（各自浪费约 50px），模型只拿到 182px ⇒ **截断**。
+ */
+describe('明细表 · 模型列格式与列宽排布', () => {
+  const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+
+  it('★ ledgerEntryModelText：拼成 provider/模型', () => {
+    expect(ledgerEntryModelText({ provider: 'workbuddy', model: 'deepseek-v4.1-flash' }))
+      .toBe('workbuddy/deepseek-v4.1-flash')
+    expect(ledgerEntryModelText({ provider: 'qodercn', model: 'dfmodel' })).toBe('qodercn/dfmodel')
+  })
+
+  it('★ 缺 provider 时只回模型名，不拼出 undefined/ 或 /model 脏串', () => {
+    // 账本里 provider 恒有值，但字段被截断/旧数据的形态不该渲染成脏串。
+    expect(ledgerEntryModelText({ model: 'dfmodel' })).toBe('dfmodel')
+    expect(ledgerEntryModelText({ provider: '', model: 'dfmodel' })).toBe('dfmodel')
+    expect(ledgerEntryModelText({ provider: 'qoder' })).toBe('')
+    expect(ledgerEntryModelText(undefined)).toBe('')
+    expect(ledgerEntryModelText(null)).toBe('')
+  })
+
+  it('★★★ 明细表的模型格必须用 ledgerEntryModelText（不是裸 entry.model）', () => {
+    // ⚠️ 判据打在**渲染表达式**上：写回 `entry.model` 就是本需求未实现。
+    expect(client).toMatch(/className:\s*'dim-jh-ledgerEntryModel',\s*title:\s*ledgerEntryModelText\(entry\)/s)
+    expect(client).toMatch(/\}, ledgerEntryModelText\(entry\)\)/)
+    // 反向：模型格那一段里不许再出现裸 `entry.model)`（导出另算，见下条）
+    const modelCell = client.match(/className: 'dim-jh-ledgerEntryModel'[\s\S]{0,180}?\)/)?.[0] ?? ''
+    expect(modelCell, '模型格应当只经 ledgerEntryModelText 取值').not.toMatch(/\}, entry\.model\)/)
+  })
+
+  it('★★ CSV 导出的模型列必须与界面同口径（provider/模型）', () => {
+    // 界面写 workbuddy/xxx、CSV 只写 xxx 就是两处自相矛盾。
+    expect(client).toMatch(/accountLabel\(entry\.accountId, accountNames\), ledgerEntryModelText\(entry\)/)
+  })
+
+  it('★★★ 列宽必须是「实测值」而不是百分比（百分比正是改前的病根）', () => {
+    // 时间/渠道压到贴紧内容：42.2 / 23px 的内容给 62 / 46px（含内边距）。
+    expect(client).toMatch(/key: 'time'[^}]*width: '62px'/)
+    expect(client).toMatch(/key: 'channel'[^}]*width: '46px'/)
+    // 账号 172px：实测最长账号名 154.5px + 内边距 12px = 166.5px ⇒ 160px 会截断。
+    expect(client).toMatch(/key: 'account'[^}]*width: '172px'/)
+    // 模型列吃剩余宽度（auto），不是固定 200px（差 7.5px 会截断）。
+    expect(client).toMatch(/key: 'model'[^}]*width: 'auto'/)
+    // 右侧数字列按实测分配。
+    expect(client).toMatch(/key: 'tokens'[^}]*width: '104px'|key: 'tokens',\s*\n\s*label: 'TOKEN',[\s\S]{0,120}?width: '104px'/)
+    expect(client).toMatch(/key: 'ttft'[^}]*width: '58px'/)
+    expect(client).toMatch(/key: 'tps'[^}]*width: '86px'/)
+    expect(client).toMatch(/key: 'duration'[^}]*width: '58px'/)
+    expect(client).toMatch(/key: 'status'[^}]*width: '60px'/)
+    // ⚠️ 反向：整个列定义表里一个百分比都不许留（会退回「等分/浪费」的老形态）。
+    const colBlock = client.slice(client.indexOf('const LEDGER_ENTRY_COLUMNS'), client.indexOf('const LEDGER_ENTRY_CSV_COLUMNS'))
+    expect(colBlock).not.toMatch(/width:\s*'\d+%'/)
+  })
+
+  it('★★ 列宽总计必须 ≈ 912px（960 弹窗 − 左右内边距），给模型列留足余量', () => {
+    const colBlock = client.slice(client.indexOf('const LEDGER_ENTRY_COLUMNS'), client.indexOf('const LEDGER_ENTRY_CSV_COLUMNS'))
+    const fixed = [...colBlock.matchAll(/width:\s*'(\d+)px'/g)].map((m) => Number(m[1]))
+    // 8 列固定（model 是 auto）+ 列数校验：少一列说明有人删了列。
+    expect(fixed).toHaveLength(8)
+    const sum = fixed.reduce((a, b) => a + b, 0)
+    // 固定列合计必须 < 912，余量是模型列的（实测需要 199.3px）。
+    expect(sum).toBeLessThan(912)
+    expect(912 - sum, '模型列剩余宽度必须大于实测最长串 199.3px').toBeGreaterThan(199.3)
+  })
+
+  it('★ 窄屏必须横向滚动，不许压缩各列（9 列固定宽必然超宽）', () => {
+    expect(styles).toMatch(/\.dim-jh-ledgerTableScroll\s*\{[^}]*overflow-x:\s*auto/)
+    // 渲染层也必须有这个容器，否则样式挂不上去。
+    expect(client).toMatch(/className: 'dim-jh-ledgerTableScroll'/)
+  })
+
+  it('★ 模型格的 title 挂完整串（窄屏省略号截断时靠悬停看全）', () => {
+    expect(client).toMatch(/title:\s*ledgerEntryModelText\(entry\)/)
+  })
+})
+
+/**
+ * 单模型账号合并 —— **实现只能有一份**（2026-11-11）。
+ *
+ * ⚠️ 这条守卫是变异验证抓出来的：把历史日树的 `renderAccountRow(...)` 换回
+ * 手写的一段 JSX 后，全部测试**依然全绿** —— 因为所有行为测试只渲染了
+ * `renderSummary`（实时卡）那条路径，历史日树那条**从来没被渲染过**。
+ *
+ * 真实后果与「provider 被画成账号」同型：同一份数据在两处显示不同结构，
+ * 用户会以为其中一份算错了（本仓库已因此复发过两次：
+ * `>1 → >0` 与 provider 类名各漏过一次历史树）。
+ *
+ * ⇒ 判据只能打在**源码结构**上：`renderAccountRow` 必须恰好被两处调用
+ * （实时卡 + 历史日树），且历史日树里**不许**再出现手写的账号头。
+ */
+describe('单模型合并 · 实现唯一性（历史日树必须复用，不许各写一份）', () => {
+  it('★★★ renderAccountRow 必须恰好有 2 个调用点（实时卡 + 历史日树）', () => {
+    // 调用形态是 `renderAccountRow(accountRow, ...)`；定义形态是
+    // `const renderAccountRow = (accountRow, keyPrefix) =>`，两者不会互相匹配。
+    const calls = client.match(/renderAccountRow\(accountRow,/g) ?? []
+    expect(calls.length, 'renderAccountRow 必须被调用 2 次：实时卡 1 次 + 历史日树 1 次')
+      .toBe(2)
+  })
+
+  it('★★★ 历史日树里不许再有手写的账号头（必须走 renderAccountRow）', () => {
+    // 历史日树那一段的锚点：`renderDayTree`
+    const dayTree = client.slice(client.indexOf('const renderDayTree'))
+    // 它内部若出现「手写的账号容器 + 账号头」就是又分叉了
+    expect(dayTree).not.toMatch(/className:\s*'dim-jh-ledgerAccount',\s*\n?\s*\},\s*\n?\s*React\.createElement\('div',\s*\{\s*className:\s*'dim-jh-ledgerAccountHead'/)
+    // 正向：历史树确实调用了共用实现
+    expect(dayTree).toMatch(/renderAccountRow\(/)
+  })
+
+  it('★★ 合并行的统计必须取**模型**的（不是账号小计）', () => {
+    // ⚠️ 单模型时两者数值相同 ⇒ 行为测试测不出来（变异实测无牙）。
+    //    只能打在实现上：`statRow` 必须优先取 `single`。
+    expect(client).toMatch(/const statRow = single \?\? accountRow\.totals;/)
+    // 反向：不许写成 always-account（那就是需求未实现）
+    expect(client).not.toMatch(/const statRow = accountRow\.totals;?\s*\n/)
+  })
+
+  it('★★★ 合并行与模型行的**数字右缘必须对齐**（实测抓到的 12px 错位）', () => {
+    // ⚠️ 真实缺陷（2026-11-11 浏览器实测）：账号色块有 `padding: 5px 8px`，
+    //    模型行原本右侧不留白 ⇒ 合并行「总处理」右缘 1132px、模型行 1144px，
+    //    纵向比数字时明显错一截。
+    //    修法：模型行也留 8px 右内边距，两边收到同一个内缘。
+    const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+    const modelRule = styles.match(/\.dim-jh-ledgerModel\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(modelRule, '找不到 .dim-jh-ledgerModel 规则').not.toBe('')
+    // 四值 padding 的第 2 个（右）必须是 8px
+    const pad = modelRule.match(/padding:\s*([^;]+);/)?.[1]?.trim() ?? ''
+    const parts = pad.split(/\s+/)
+    const right = parts.length === 4 ? parts[1] : (parts.length >= 2 ? parts[1] : parts[0])
+    expect(right, '模型行右内边距必须与账号色块的 8px 一致，否则数字右缘对不齐').toBe('8px')
+    // 账号色块的横向内边距也必须是 8px（两边同源才好维护）
+    const headRule = styles.match(/\.dim-jh-ledgerAccountHead\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(headRule).toMatch(/padding:\s*5px\s+8px/)
+  })
+
+  it('★★★ 账号行的「总处理」只有**单模型**才加粗（多模型账号合计保持不加粗）', () => {
+    // ⚠️ 用户 2026-11-11 第四次修正：「当帐号行有两个模型及以上时，帐号行的总处理是
+    //    不加粗的，保持原来的就行…我只要每个模型的总处理结果是加粗的就行，
+    //    这样方便我一眼看到每个帐号下每个模型的请求总量」。
+    //
+    // | 行 | 类名 | 视觉 |
+    // |---|---|---|
+    // | 单模型合并行 | ledgerModelTokens | 加粗亮白 |
+    // | 多模型账号行 | ledgerAccountSum  | 灰、不加粗 |
+    //
+    // ⇒ 判据必须是**条件切换**，不能无条件用其中一个。
+    expect(client).toMatch(/className:\s*single === null \? 'dim-jh-ledgerAccountSum' : 'dim-jh-ledgerModelTokens'/)
+    // 反向：不许无条件 ModelTokens（会让账号合计看起来像单个模型的用量）
+    expect(client).not.toMatch(/className:\s*'dim-jh-ledgerModelTokens',\s*\n\s*title:\s*tokenSummaryTooltip\(statRow\)/)
+  })
+
+  it('★★★ 统计信息必须包在固定宽的 StatGroup 里（否则「次数」列参差不齐）', () => {
+    // ⚠️ 用户 2026-11-11 第三次修正：「统计信息（红框内）要放在行中间」。
+    //    改前每个统计格各自 margin-left:auto ⇒ 被推成各自最右，而内容宽度不同
+    //    ⇒ 「次数」起始位置 4 种（714/720/726/732），账号名后留一大片空白。
+    //    修法：整组固定 460px、组内左对齐 ⇒ 实测全部 510px。
+    const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+    const group = styles.match(/\.dim-jh-ledgerStatGroup\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(group, '缺少 .dim-jh-ledgerStatGroup 规则').not.toBe('')
+    expect(group).toMatch(/width:\s*460px/)
+    expect(group).toMatch(/margin-left:\s*auto/)
+    // ⚠️ 组内的「次数」不许再各自 auto（那会退回参差不齐）
+    const req = styles.match(/\.dim-jh-ledgerAccountReq\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(req).not.toMatch(/margin-left:\s*auto/)
+    // 渲染层：账号行与模型行都必须包这个组
+    expect(client).toMatch(/className:\s*'dim-jh-ledgerStatGroup'/)
+    const groups = client.match(/className: 'dim-jh-ledgerStatGroup'/g) ?? []
+    expect(groups.length, '账号行与模型行各一处 StatGroup').toBe(2)
+  })
+
+  it('★★★ 服务端的 「-」 空账号哨兵必须显示为「（未知帐号）」，不能是裸 `-`', () => {
+    // ⚠️ 用户 2026-11-11 报障：「怎么出现一条没有帐号的呢」——界面上有一行账号叫 `-`。
+    // 根因：`src/token-ledger.ts` 两处（内存聚合 + 落盘日聚合）把空 accountId 归一成
+    // `'-'`（Map 键不能缺失），然后原样传给客户端。
+    // ⚠️ 而**明细**路径在同样情形下是**空串** ⇒ 两种形态都要认。
+    expect(accountLabel('-')).toBe('（未知帐号）')
+    // 空串仍是「未归属」（明细路径的形态，既有契约不许改）
+    expect(accountLabel('')).toBe('未归属')
+    // 正常 id 不受影响
+    expect(accountLabel('qodercn-c5a414d5')).toBe('qodercn-c5a414d5')
+    // nameMap 里若有 '-' 的映射也不该覆盖哨兵语义
+    expect(accountLabel('-', new Map([['-', '不该显示']]))).toBe('（未知帐号）')
   })
 })
