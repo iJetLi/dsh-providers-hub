@@ -228,7 +228,11 @@
      后第 3 次成功）；挂标记 ⇒ 立刻 `code=QUEUE`。修法 = `hasNextCandidate`
      三元；`fast` 档仍由 `resolveQueueWaitMode()` 负责（用户显式选择不许被抹掉）。
      守卫：`tests/unit/aggregate-qoder-single-candidate.spec.ts`（2 条）。
-   ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
+     ⚠️ **codearts 同理**（`llm-adapter.ts` 的排队循环，静默重试最长 30 分钟）：检查点放在
+     `queueAttempts += 1` 之前 —— 400 `TM.00001041` / 状态端点确认排队 / SSE 内嵌排队错误
+     三个入口都汇到这里，单测逐一覆盖（`llm-adapter.spec.ts`「聚合调用时排队即失败」）。
+     以后新增「渠道内静默排队等待」的适配器，都要在等待前查 `isInsideAggregateDispatch()`。
+>   ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
    `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]` **不含 `QUEUE`/`AUTH`**，
    且它的退避是**固定参数**（`initialDelayMs=500`、`maxDelayMs=10_000`、
    `maxRetries=5`），**没有 per-error「服务端指定延迟」的通道** ——

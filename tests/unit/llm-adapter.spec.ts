@@ -16,6 +16,7 @@ import {
   RATE_LIMIT_FALLBACK_MS,
 } from '../../src/llm-adapter.js'
 import { nextUtc8DayStartMs } from '../../src/model-queue.js'
+import { bindAggregateDispatch } from '../../src/aggregate-dispatch-context.js'
 import { setBenefitMemoryCache } from '../../src/models.js'
 import {
   resetCodeArtsBenefitClaimFlight,
@@ -943,6 +944,59 @@ describe('CodeArtsAdapter', () => {
     // 排队中不轮询状态端点：仅重试前查一次。
     expect(calls.queue).toBe(1)
   }, 30_000)
+
+  /**
+   * ⚠️ 聚合调用 codearts 遇到排队：**不等待**，立刻抛 `QUEUE` 交给聚合切换下一个候选
+   *（2026-11-14，与 qoder 同一故障形态：静默重试最长 30 分钟，聚合等不到错误）。
+   * 三个排队入口（400 `TM.00001041` / 状态端点确认排队 / SSE 内嵌排队错误）汇到同一
+   * 检查点，逐一覆盖，防止将来有人把检查挪进某一个分支。
+   */
+  describe('聚合调用时排队即失败（不等待）', () => {
+    const queueEntries: Array<[string, () => Response]> = [
+      ['400 + TM.00001041', () => new Response(
+        JSON.stringify({ error_code: 'TM.00001041', error_msg: '并发会话数已达上限(3个)，请关闭部分会话后重试。' }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      )],
+      ['429 + 状态端点确认 waiting（openpangu 形态）', () => new Response(
+        JSON.stringify({ error_code: 'OTHER.429', error_msg: 'busy' }),
+        { status: 429, headers: { 'content-type': 'application/json' } },
+      )],
+      ['HTTP 200 + SSE 内嵌 81111.429', () => new Response(
+        'data:{"text":"[DONE]","error_code":"InferHub.ModelArts.81111.429","error_msg":"The model TPM limit has been significantly exceeded."}\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )],
+    ]
+    for (const [label, queued] of queueEntries) {
+      it(`${label}：立刻抛 QUEUE，只发一次 chat、不进入 10 秒排队等待`, async () => {
+        const calls = { chat: 0 }
+        const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+          if (String(input).startsWith(QUEUE_STATUS_BASE)) {
+            return new Response(
+              JSON.stringify({ status: 'waiting', queue_position: 1, message: 'queue status' }),
+              { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+          }
+          calls.chat += 1
+          return queued()
+        })
+        const adapter = makeAdapter({ fetchImpl })
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const started = Date.now()
+        try {
+          await expect((async () => {
+            for await (const _ of bindAggregateDispatch(() => adapter.stream(streamOptions))) {
+              // drain
+            }
+          })()).rejects.toMatchObject({ code: 'QUEUE' })
+          expect(warn.mock.calls.some((c) => /排队/.test(String(c[0])) && /聚合/.test(String(c[0])))).toBe(true)
+        } finally {
+          warn.mockRestore()
+        }
+        expect(calls.chat, '不得重试 chat（那就是在排队等待）').toBe(1)
+        expect(Date.now() - started, '不得等待 QUEUE_RETRY_DELAY_MS（10s）').toBeLessThan(5_000)
+      }, 30_000)
+    }
+  })
 
   it('retries the chat request when the SSE stream carries the TPM limit error (81111.429)', async () => {
     // CodeArts 以 HTTP 200 + SSE 内嵌 error_code 返回 TPM 限流
