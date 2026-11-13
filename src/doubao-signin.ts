@@ -30,8 +30,13 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import http from 'node:http'
 import { mkdtempSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
-import { join } from 'node:path'
-import { findBrowserExecutable, type BrowserLookup } from './chromium-session.js'
+import { isAbsolute, join } from 'node:path'
+import {
+  browserCandidates,
+  browserNotFoundMessage,
+  findBrowserExecutable,
+  type BrowserLookup,
+} from './chromium-session.js'
 import {
   DOUBAO_CAMPAIGN_GROUP_CODE,
   DOUBAO_CHECKIN_PATH,
@@ -52,21 +57,55 @@ import {
  * 签到入口同样报「未找到可执行文件」。**两个函数必须一起改**：只修登录
  * 会让「扫码能进、签到照样失败」，症状与「豆包今天没活动」同形。
  */
-export function doubaoSigninBrowserExecutable(lookup: BrowserLookup = {}): string | undefined {
-  const exists = lookup.exists ?? existsSync
+/** 候选链的环境变量名（错误提示要回显它）。 */
+const DOUBAO_BROWSER_ENV = 'DSH_DOUBAO_BROWSER_PATH'
+
+/**
+ * 签到这边的候选链（**不含**跨平台兜底；提示文案要逐条回显）。
+ *
+ * ⚠️⚠️ **Windows 专属候选按平台门控** —— 理由与 `doubao-login.ts` 同名函数
+ * 逐字相同：无条件入链会让 macOS 的提示里出现 `chrome.exe`（Issue IKJKNT 的
+ * 形态），而解析结果并不因此改变。`DSH_DOUBAO_BROWSER_PATH` 不门控。
+ */
+function doubaoSigninCandidates(lookup: BrowserLookup): string[] {
   const env = lookup.env ?? process.env
   const home = lookup.home ?? homedir()
-  const candidates = [
-    env.DSH_DOUBAO_BROWSER_PATH,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    join(env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    // 兜底：豆包客户端内核（也是 Chromium 147，页面环境完整）。
-    'D:\\Program File\\Doubao\\app\\Doubao.exe',
-  ]
-  for (const p of candidates) if (typeof p === 'string' && p.length > 0 && exists(p)) return p
+  const platform = lookup.platform ?? process.platform
+  const windows = platform === 'win32'
+    ? [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        join(env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        // 兜底：豆包客户端内核（也是 Chromium 147，页面环境完整）。
+        'D:\\Program File\\Doubao\\app\\Doubao.exe',
+      ]
+    : []
+  return [env[DOUBAO_BROWSER_ENV], ...windows]
+    .filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0)
+}
+
+export function doubaoSigninBrowserExecutable(lookup: BrowserLookup = {}): string | undefined {
+  const exists = lookup.exists ?? existsSync
+  for (const candidate of doubaoSigninCandidates(lookup)) if (exists(candidate)) return candidate
   // 跨平台兜底（macOS 的 .app 包 / Linux 的 PATH 与 AppStream / Windows 的 scoop、Edge）。
   return findBrowserExecutable(lookup)
+}
+
+/**
+ * 签到找不到浏览器时的提示（分平台说人话 + 回显候选清单）。
+ *
+ * 与 {@link doubaoSigninBrowserExecutable} 同因：修复前那句「未找到可用的浏览器
+ * （Chrome / 豆包内核）——签到需要它的 bdms 签名环境」同样**不分平台、不提变量名、
+ * 不回显候选**。本仓其余五家浏览器登录都用 `browserNotFoundMessage`，豆包不该是例外。
+ */
+export function doubaoSigninBrowserHint(lookup: BrowserLookup = {}): string {
+  const platform = lookup.platform ?? process.platform
+  const env = lookup.env ?? process.env
+  return browserNotFoundMessage(platform, DOUBAO_BROWSER_ENV, {
+    tried: [...doubaoSigninCandidates(lookup), ...browserCandidates(lookup)]
+      .filter((candidate) => candidate.length > 0 && isAbsolute(candidate)),
+    overrideValue: env[DOUBAO_BROWSER_ENV],
+  })
 }
 
 /** 极简 CDP 通道（Node 内置 WebSocket，零依赖）。登录会话（`doubao-login.ts`）也复用它。 */
@@ -267,7 +306,7 @@ export async function claimDoubaoDailyViaPage(
   }
   const exe = options.executablePath ?? doubaoSigninBrowserExecutable()
   if (exe === undefined) {
-    return { kind: 'failed', code: -1, message: '未找到可用的浏览器（Chrome / 豆包内核）——签到需要它的 bdms 签名环境' }
+    return { kind: 'failed', code: -1, message: '未找到可用的浏览器 —— 签到需要它的 bdms 签名环境。' + doubaoSigninBrowserHint() }
   }
   const timeoutMs = options.timeoutMs ?? 60_000
   const log = options.log

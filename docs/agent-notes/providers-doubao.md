@@ -217,9 +217,82 @@ chromium 被当成「找到了」）。
 `loginEl.click()` 也照样绿（本仓「假绿」常客）⇒ 必须数
 `Input.dispatchMouseEvent` 的调用次数与参数。
 
-### 5.6 守卫
+### 5.6 ⚠️⚠️ Windows 专属候选必须**按平台门控**（返工时踩出来的）
 
-`tests/unit/doubao-browser-discovery.spec.ts`（15 条）：两个函数 × 6 格
+第一版只把跨平台兜底加在链尾、自有候选**原样保留**：解析正确了，但**提示文案在
+macOS 上仍然出现 `chrome.exe`** —— 因为 `path.win32.isAbsolute('C:\\Program Files\\…')`
+在任何平台都返回 `true`，过掉了 `browserNotFoundMessage` 里那条 `isAbsolute` 过滤。
+结果正是 IKJKNT 的形态：Mac 用户照着「换/装 chrome.exe」的提示做，越做越懵。
+
+修法：候选链拆成 `doubaoLoginCandidates(lookup)` / `doubaoSigninCandidates(lookup)`，
+Windows 那四条包在 `platform === 'win32' ? [...] : []` 里；`DSH_DOUBAO_BROWSER_PATH`
+**不门控**（任何平台都尊重用户覆盖）。解析结果**逐字不变**（非 Windows 上那几条
+本来就命中不了），但语义自证、提示干净。
+
+⚠️ 判据要**两侧都测**：`darwin` 提示含 `/Applications` 且 **不含** `chrome.exe`；
+`win32` 提示含 `chrome.exe` 且不含 `/Applications`。只测一侧的话，「门控写成恒真」
+和「门控整段删掉」都能蒙过 —— 变异 M9 就是这么被抓出来的。
+
+### 5.7 ⚠️⚠️ 提示文案的守卫必须打在**消费者**上，不是纯函数的返回值上
+
+`doubaoLoginBrowserHint()` 的返回值很容易测，但用户看到的是**抛出来的那条错误**：
+
+```ts
+if (exe === undefined)
+  throw new Error('豆包登录需要本机有 Chromium 内核浏览器，未找到可执行文件。' + doubaoLoginBrowserHint())
+```
+
+把这行改回硬编码文案（或删掉 `+ doubaoLoginBrowserHint()`），纯函数用例**依然全绿**
+而用户又回到旧提示 —— 这是本仓「守卫抓返回值、不抓消费者」的经典假绿形态
+（同 `client-ui` 笔记里「循环指认」那条）。
+
+所以另建 `tests/unit/doubao-browser-missing-hint.spec.ts`，手法：
+1. `vi.mock('./chromium-session.js')` 把 `findBrowserExecutable` 换成恒 `undefined`
+   （其余导出用 `importOriginal` 保真）；
+2. 把 `process.platform` 临时 `defineProperty` 成 `darwin` —— 于是 Windows 专属候选被
+   平台门控挡掉，`existsSync` **再也不可能**在本机（Windows 开发机）命中；
+3. 断言**用户可见的文本**：`DoubaoLoginSession.open()` 的 reject 消息、
+   `claimDoubaoDailyViaPage()` 返回的 `{ kind:'failed', message }`。
+
+⚠️ 不 mock 就永远走不到「找不到」分支 —— 本机真装着 Chrome，这是这类「失败路径」
+用例最常被写假的地方（`baizhi` 笔记里「`fetchImpl` 的 404 桩把所有请求拦掉」同型）。
+
+### 5.8 守卫与变异
+
+`tests/unit/doubao-browser-discovery.spec.ts`（**19 条**）：两个函数 × 6 格
 （macOS / Linux / Windows 存量不变 / `DSH_DOUBAO_BROWSER_PATH` 优先 / 都没有 ⇒
 `undefined` / 真实 macOS 候选链首项）+ 2 条反向对照（Windows 链不含 `.app`）
-+ 3 条点击三态。变异 8/8 有牙。
++ 3 条点击三态 + **4 条提示文案**（darwin 含 `/Applications` 且不含 `chrome.exe` /
+win32 反之 / 回显 `DSH_DOUBAO_BROWSER_PATH` 的值与「（未设置）」/ 签到同款）。
+`tests/unit/doubao-browser-missing-hint.spec.ts`（**2 条**）：两个消费者的错误文本。
+
+**变异 13/13 有牙**（脚本 `D:/tmp/ikv5hc_mut3.py` + `ikv5hc_mut4.py`，每格
+`[ANCHOR] count=1` + `[SELF] self=True` + `[RESTORE] restore=True` + 收尾 sha256 对账）：
+
+| 编号 | 变异 | 失败原文（摘） |
+|---|---|---|
+| M1/M2 | 登录 / 签到的兜底改 `return undefined` | `expected undefined to be '/Applications/Google Chrome.app/Conte…'` |
+| M3 | 兜底改 `findBrowserExecutable()`（丢 lookup） | `expected 'C:\Users\Jet\scoop\apps\chromium\curr…' to be '/Applications…'` |
+| M4 | 删 `env[DOUBAO_BROWSER_ENV]` | `expected 'C:\Program Files\…' to be 'D:\tools\chrome.exe'` |
+| M5 | 只发 `mousePressed` | `expected [ { …(2) } ] to have a length of 2 but got 1` |
+| M6 | `buttons` 恒 0 | `expected { type: 'mousePressed', x: 100, …(4) } to match object { … }` |
+| M7 | 删 `pointerdown` | `合成序列里缺少第 1 个事件: expected -1 to be greater than -1` |
+| M8 | `not-found` 早退 `if (false && …)` | `expected 'synthetic' to be 'not-found'` |
+| M9 | 平台门控失效（`=== 'win32'` → `true`） | `not to contain 'chrome.exe'` |
+| M10/M13 | 两个**消费者**回退成旧硬编码文案 | `expected [Function] to throw error matching /DSH_DOUBAO_BROWSER_PATH/ but got '登录失败：…'` / `expected '未找到可用的浏览器 —— …' to contain 'DSH_DOUBAO_BROWSER_PATH'` |
+| M11/M12 | 两条错误里不再追加 `*BrowserHint()` | 同上（`to contain 'DSH_DOUBAO_BROWSER_PATH'`） |
+
+### 5.9 一条**数据损失**教训（写在这里因为就发生在本轮的变异脚本里）
+
+变异脚本收尾写了「把文件读回来再写回去」的兜底：
+
+```python
+for p in (LOGIN, SIGNIN):
+    io.open(p, 'w', encoding='utf-8', newline='').write(io.open(p, 'w').read())
+```
+
+`open(..., 'w')` **先截断**，读回来是空串 ⇒ **两个源文件被清成 0 字节**，工作区里
+未提交的那部分改动（`*BrowserHint` 与平台门控）全丢，只能从 `git checkout --` 回到
+上一个提交再重新落地。教训：**任何「还原」都只能从内存变量回写**，绝不能在同一
+表达式里既读又写同一个路径；并且每格结束就该 `[RESTORE] identical=True` 对账，
+而不是只在收尾赌一把。

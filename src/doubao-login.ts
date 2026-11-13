@@ -25,8 +25,13 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import http from 'node:http'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
-import { join } from 'node:path'
-import { findBrowserExecutable, type BrowserLookup } from './chromium-session.js'
+import { isAbsolute, join } from 'node:path'
+import {
+  browserCandidates,
+  browserNotFoundMessage,
+  findBrowserExecutable,
+  type BrowserLookup,
+} from './chromium-session.js'
 import { DOUBAO_PAGE_URL, type DoubaoCredential } from './doubao.js'
 import { MiniCdp } from './doubao-signin.js'
 
@@ -49,21 +54,72 @@ import { MiniCdp } from './doubao-signin.js'
  * 逐字节不变（`DSH_DOUBAO_BROWSER_PATH` 仍最优先、豆包客户端内核仍排在
  * 通用 Chrome 之前），只有「前五条一条都不存在」时才会走到跨平台兜底。
  */
-export function doubaoLoginBrowserExecutable(lookup: BrowserLookup = {}): string | undefined {
-  const exists = lookup.exists ?? existsSync
+/** 候选链的环境变量名（错误提示要回显它）。 */
+const DOUBAO_BROWSER_ENV = 'DSH_DOUBAO_BROWSER_PATH'
+
+/**
+ * 本项目自己的候选链（**不含**跨平台兜底；提示文案要逐条回显）。
+ *
+ * ⚠️⚠️ **Windows 专属候选按平台门控**。第一版修复只把「跨平台兜底」加在链尾、
+ * 自有候选原样保留 ⇒ 在 macOS 上解析虽正确（那几条恒不存在），但**提示文案里
+ * 会出现 `C:\Program Files\…\chrome.exe` 与 `/Program Files`**，因为
+ * `path.win32.isAbsolute('C:\\…')` 在 macOS 上也是 `true`，过掉了 `isAbsolute`
+ * 过滤 —— 结果正是 Issue IKJKNT 的形态（Mac 用户照着提示去找 `chrome.exe`）。
+ * 门控后解析结果**逐字不变**，但语义自证、提示干净。
+ *
+ * `DSH_DOUBAO_BROWSER_PATH` **不门控** —— 任何平台都尊重用户覆盖。
+ */
+function doubaoLoginCandidates(lookup: BrowserLookup): string[] {
   const env = lookup.env ?? process.env
   const home = lookup.home ?? homedir()
-  const candidates = [
-    env.DSH_DOUBAO_BROWSER_PATH,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    join(env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    'D:\\Program File\\Doubao\\app\\Doubao.exe',
-  ]
-  for (const p of candidates) if (typeof p === 'string' && p.length > 0 && exists(p)) return p
+  const platform = lookup.platform ?? process.platform
+  const windows = platform === 'win32'
+    ? [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        join(env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        // 兜底：豆包客户端内核（也是 Chromium 147，页面环境完整）。
+        'D:\\Program File\\Doubao\\app\\Doubao.exe',
+      ]
+    : []
+  return [env[DOUBAO_BROWSER_ENV], ...windows]
+    .filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0)
+}
+
+export function doubaoLoginBrowserExecutable(lookup: BrowserLookup = {}): string | undefined {
+  const exists = lookup.exists ?? existsSync
+  for (const candidate of doubaoLoginCandidates(lookup)) if (exists(candidate)) return candidate
   // 跨平台兜底：macOS 扫 `/Applications` 与 `~/Applications` 的 .app 包、
   // Linux 扫 PATH 与 AppStream 元数据、Windows 补 scoop / Edge / Chromium。
   return findBrowserExecutable(lookup)
+}
+
+/**
+ * 找不到浏览器时的**用户可执行提示**（分平台说人话 + 回显候选清单）。
+ *
+ * ## ⚠️⚠️ 为什么必须复用 `browserNotFoundMessage` 而不是自己编一句
+ *
+ * 修复前那句是 `豆包登录需要本机有 Chromium 内核浏览器（Chrome / 豆包客户端），
+ * 未找到可执行文件` —— 三处会把人带偏：
+ *
+ * 1. **不分平台**：macOS / Linux 上「豆包客户端」根本不在候选链里（那几条是
+ *    `D:\Program File\Doubao\app\Doubao.exe` 这种 Windows 路径）；
+ * 2. **不说变量名**：用户唯一真能自救的动作是设 `DSH_DOUBAO_BROWSER_PATH`，
+ *    而原文案一个字都没提；
+ * 3. **不回显候选**：报障人照着提示做只能猜。
+ *
+ * 这正是 Issue IKJKNT 的形态（当时 zcode 的提示让 Mac 用户去找 `chrome.exe`），
+ * 共享模块的 {@link browserNotFoundMessage} 就是那次的产物 —— 本仓其余五家
+ * 浏览器登录**全都**用它，豆包是唯一自己编的。
+ */
+export function doubaoLoginBrowserHint(lookup: BrowserLookup = {}): string {
+  const platform = lookup.platform ?? process.platform
+  const env = lookup.env ?? process.env
+  return browserNotFoundMessage(platform, DOUBAO_BROWSER_ENV, {
+    tried: [...doubaoLoginCandidates(lookup), ...browserCandidates(lookup)]
+      .filter((candidate) => candidate.length > 0 && isAbsolute(candidate)),
+    overrideValue: env[DOUBAO_BROWSER_ENV],
+  })
 }
 
 /** CDP 通道的最小接口（只声明本文件用到的方法，便于单测注入假通道）。 */
@@ -191,7 +247,7 @@ export class DoubaoLoginSession {
   static async open(options: { executablePath?: string; log?: (msg: string) => void } = {}): Promise<DoubaoLoginSession> {
     const exe = options.executablePath ?? doubaoLoginBrowserExecutable()
     if (exe === undefined) {
-      throw new Error('豆包登录需要本机有 Chromium 内核浏览器（Chrome / 豆包客户端），未找到可执行文件')
+      throw new Error('豆包登录需要本机有 Chromium 内核浏览器，未找到可执行文件。' + doubaoLoginBrowserHint())
     }
     const port = await pickFreePort()
     const profileDir = mkdtempSync(join(tmpdir(), 'doubao-login-'))

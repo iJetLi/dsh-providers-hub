@@ -34,9 +34,10 @@ import { browserCandidates } from '../../src/chromium-session.js'
 import {
   clickDoubaoLoginButton,
   doubaoLoginBrowserExecutable,
+  doubaoLoginBrowserHint,
   type DoubaoClickCdp,
 } from '../../src/doubao-login.js'
-import { doubaoSigninBrowserExecutable } from '../../src/doubao-signin.js'
+import { doubaoSigninBrowserExecutable, doubaoSigninBrowserHint } from '../../src/doubao-signin.js'
 
 /** macOS 上 `findBrowserExecutable()` 真的会解析到的路径（`MAC_BROWSER_BUNDLES` 首项）。 */
 const MAC_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
@@ -218,5 +219,49 @@ describe('★★★ 登录按钮点击：必须派发真鼠标事件（IKV5HC �
     expect(calls.filter((call) => call.method === 'Runtime.evaluate')).toHaveLength(1)
     expect(calls.some((call) => call.method === 'Input.dispatchMouseEvent')).toBe(false)
     expect(log).toHaveBeenCalledWith(expect.stringContaining('没找到'))
+  })
+})
+
+// ── 找不到浏览器时的提示文案 ──
+
+describe('★ 找不到浏览器时的提示：必须分平台说人话 + 点名环境变量（IKJKNT 同型）', () => {
+  it('★★★ macOS 上必须提 `/Applications` 与 `DSH_DOUBAO_BROWSER_PATH`，且**不许**再出现 `chrome.exe`', () => {
+    const hint = doubaoLoginBrowserHint({ platform: 'darwin', env: {}, home: '/Users/jet' })
+
+    expect(hint).toContain('/Applications')
+    expect(hint).toContain('DSH_DOUBAO_BROWSER_PATH')
+    /**
+     * ⚠️⚠️ 这正是 Issue IKJKNT 的形态：修复前那句统一写「可用 ZCODE_CHROME_PATH
+     * 指定 **chrome.exe** 路径」，而 macOS 上根本没有 `chrome.exe` 这个名字 ——
+     * 用户照着提示做只会更懵。豆包这次抽了共享文案，**这条断言就是防回退的那一格**。
+     */
+    expect(hint).not.toContain('chrome.exe')
+  })
+
+  it('★★★ Windows 上必须提 `chrome.exe`（与 macOS 的文案必须**不同**）', () => {
+    const hint = doubaoLoginBrowserHint({ platform: 'win32', env: {}, home: 'C:\\Users\\jet' })
+
+    expect(hint).toContain('chrome.exe')
+    expect(hint).not.toContain('/Applications')
+  })
+
+  it('★★ 提示里必须回显 `DSH_DOUBAO_BROWSER_PATH` 在**本进程**里的值（用户最常见的死循环）', () => {
+    const unset = doubaoLoginBrowserHint({ platform: 'darwin', env: {}, home: '/Users/jet' })
+    expect(unset).toContain('（未设置）')
+
+    const set = doubaoLoginBrowserHint({
+      platform: 'darwin',
+      env: { DSH_DOUBAO_BROWSER_PATH: '/opt/chrome' },
+      home: '/Users/jet',
+    })
+    expect(set).toContain('/opt/chrome')
+  })
+
+  it('★★ 签到那边的提示同款（两个入口不能一个说人话、一个不说）', () => {
+    const hint = doubaoSigninBrowserHint({ platform: 'darwin', env: {}, home: '/Users/jet' })
+
+    expect(hint).toContain('/Applications')
+    expect(hint).toContain('DSH_DOUBAO_BROWSER_PATH')
+    expect(hint).not.toContain('chrome.exe')
   })
 })
