@@ -28,11 +28,20 @@
  *
  * ## ⚠️ 为什么必须逐次包 `next()`，不能只包「创建流」那一下
  *
- * 异步生成器的函数体在**调用 `next()` 的那个上下文**里执行。聚合的 `dispatch`
- * 本身也是异步生成器：每次 `yield` 之后，它在**消费者**的上下文里恢复 ⇒ 若只在
- * 创建时 `run()` 一次，第二个 chunk 起内层渠道代码就看不到标记了（而 qoder 的排队
- * 恰恰发生在首个 chunk 之前或任意重试之间）。故 {@link bindAggregateDispatch}
+ * 异步生成器的函数体在**调用 `next()` 的那个上下文**里执行 —— 仅仅
+ * `open()[Symbol.asyncIterator]()` 只是造出迭代器对象，**一帧代码都不跑**
+ * （`adapterStream` 是异步生成器，函数体要等第一次 `next()` 才启动）。故若只在
+ * 创建时 `run()` 一次，内层渠道代码**一帧都看不到标记**（探针实测：「只包创建」
+ * 记录 `insideFrames: 0 / 8`，不是「从第二个 chunk 起丢」）。而 qoder 的排队
+ * 恰恰发生在首个 chunk 之前或任意重试之间。故 {@link bindAggregateDispatch}
  * 把 `next` / `return` / `throw` **每一次**都放进 `run()` 里调。
+ *
+ * ## ⚠️ 挂标记的前提：本候选「还有下一个候选」可切
+ *
+ * 挂上标记 = 渠道把「暂时排队」判成**本候选失败**。若本候选是最后一个，
+ * 聚合的切换条件 `index + 1 < targets.length` 为假 ⇒ 无处可切 ⇒ 本可恢复的
+ * 排队被翻成**硬失败**（真实回归，见 `src/aggregate-adapter.ts` 的 `hasNextCandidate`）。
+ * 调用方必须**只在有退路时**才包这一层。
  *
  * @module src/aggregate-dispatch-context.ts
  */
