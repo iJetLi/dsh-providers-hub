@@ -634,6 +634,57 @@ export interface RpcPollLoginResponse {
   error?: string
 }
 
+/**
+ * RPC: 手动提交 OAuth 回调地址（`login.submitCallback`）。
+ *
+ * ## 为什么需要它
+ *
+ * 回调式 provider 的 OAuth 都把浏览器重定向到
+ * `http://127.0.0.1:<port>/oauth/callback?code=…`（见 `src/oauth.ts` 的
+ * `REDIRECT_PATH`）。这个地址**只在运行 DSH 的那台机器上有效**。
+ *
+ * 用户通过外网（反向代理 / 端口转发 / 远程桌面）访问 DSH 时，浏览器跑在
+ * **用户本地**，`127.0.0.1` 指向用户自己的电脑 ⇒ 回调打到一台没有监听端口的
+ * 机器上，浏览器报「拒绝连接」，宿主永远收不到 `code` ⇒ 前端只能干等到
+ * 5 分钟上限后报「登录超时」。**这是网络拓扑问题，不是任何一个 provider 的
+ * 协议缺陷。**
+ *
+ * ## 修法
+ *
+ * 用户把浏览器地址栏里那条回调 URL **原样复制回来**，由**宿主代替用户**去访问
+ * 它 —— 宿主就在那台机器上，回调服务器正在 `127.0.0.1:<port>` 上监听。
+ * 于是各 provider 的 `createServer` 处理器**一行都不用改**，它们本来就在等这个
+ * 请求；`code` / `secret` / `fingerprint` / `token` 四种回调形态（见
+ * `src/login.ts` 的 `startCallbackServer` 与 `startOAuthCallbackServer`）全部
+ * 自动支持，换 token / 写凭据 / `login.poll` 报 `done` 的既有链路原样复用。
+ *
+ * ## ⚠️ 为什么**不**复用 `RpcSubmitCallbackRequest`
+ *
+ * 那个类型是 `account.submitCallback` 的入参（`{ accountId, callbackUrl }`），
+ * 它要求账号已经在宿主侧登记了专用解析器。本端点**不需要 accountId** ——
+ * 它只把 URL 交给宿主盲发一次 GET，由各 provider 自己的回调服务器处理。
+ * 同名声明会被 TypeScript 接口合并成一个「三个字段全必填」的类型，
+ * 编译期不报错、运行时两条通道互相污染 ⇒ 必须换名。
+ */
+export interface RpcLoginSubmitCallbackRequest {
+  /** 浏览器地址栏里那条完整回调 URL（含 `code` / `state` 等查询参数）。 */
+  url: string
+}
+
+/**
+ * RPC: 手动提交回调地址的响应。
+ *
+ * ⚠️ `status` 只是**回调服务器回给宿主的 HTTP 状态码**，不代表登录已成功：
+ * 真正的成功判据仍是 `login.poll` 报 `{done:true, success:true}`
+ * （回调处理器内部还要拿 `code` 去换 token，那是异步的）。
+ *
+ * 各 provider 的取值：`200`（直接拿到 token）/ `204`（OPTIONS 预检）/
+ * `307`（codearts 换成功后跳 portal 结果页）/ `400`（缺少 code 或 secret）。
+ */
+export interface RpcLoginSubmitCallbackResponse {
+  status: number
+}
+
 export interface RpcUpdateAccountRequest {
   accountId: string
   patch: Partial<Pick<ProviderAccountEntry, 'nickname' | 'enabled'>>

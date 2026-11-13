@@ -203,7 +203,12 @@ describe('★★ 账号管理页结构（AST 级，防括号错位）', () => {
     const actionsIdx = children.findIndex((c) => classNameOf(c) === 'dim-jh-headerActions')
     const before = children.slice(0, actionsIdx).map((c) => source.slice(c.getStart(sf), c.getEnd()))
 
-    const expected = ['probeNotice', 'lockNotice', 'claimNotice', 'onboardingNotice', 'loginUrlForManual', 'showCodeartsCallback', 'compensationCard']
+    /**
+     * ⚠️ 名字跟着实现走：PR #8（2026-11-13）把 `showCodeartsCallback` 改名为
+     * `showManualCallback` —— 该粘贴框服务 8 家回环回调渠道，不再只服务 codearts。
+     * 这条清单是**精确标识符**判据，改名后必须同步，否则会红在「名字对不上」上。
+     */
+    const expected = ['probeNotice', 'lockNotice', 'claimNotice', 'onboardingNotice', 'loginUrlForManual', 'showManualCallback', 'compensationCard']
     for (const name of expected) {
       /**
        * ⚠️⚠️ 判据必须是**精确标识符 + 词边界**，不能 `startsWith`（2026-10-27 对抗审计 P1-3）。

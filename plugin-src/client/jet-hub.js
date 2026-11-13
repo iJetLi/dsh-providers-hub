@@ -285,6 +285,50 @@ export function providerLabel(id) {
 const GROWTH_TASK_PROVIDERS = new Set(['buddy']);
 
 /**
+ * 哪些渠道的登录会把浏览器**重定向到本机回调地址**（`127.0.0.1` / `localhost`）。
+ *
+ * ## 为什么需要这张表
+ *
+ * 这类渠道的 OAuth 都把 `redirect_uri` 指向 `http://127.0.0.1:<port>/…`
+ * （见宿主 `src/oauth.ts` 的 `REDIRECT_PATH`、`src/lobsterai-oauth.ts`、
+ * `src/trae-oauth.ts` 的 `/authorize`、`src/gemini-oauth.ts` 的 `localhost`、
+ * `src/accio-auth.ts`、`src/astudio-oauth.ts`、`src/autoclaw-oauth.ts`）。
+ * 这个回环地址**只在运行 DSH 的那台机器上有效**。
+ *
+ * 用户经外网（反代 / 端口转发 / 远程桌面）访问 DSH 时，浏览器在**用户本机**，
+ * `127.0.0.1` 指向用户自己的电脑 ⇒ 授权完成后浏览器报「拒绝连接」，
+ * 宿主永远收不到 `code` ⇒ 前端只能干等 5 分钟再报「登录超时」。
+ *
+ * 出路是把浏览器地址栏里那条地址**复制回来**交给宿主代跑
+ *（`login.submitCallback`，见 `src/jet-hub-rpc.ts` 同名分支）。
+ *
+ * ## ⚠️ 判据是「是否开本地回调端口」，不是「授权页在哪」
+ *
+ * 只收**真的起了 `createServer` 等回调**的渠道。设备码 / 轮询式渠道
+ *（qoder 系、raccoon、minimax、cline、zcode、buddy 系）根本没有回调地址可粘 ——
+ * 给它们渲染输入框只会让用户去找一条不存在的地址。
+ *
+ * ⚠️ astudio / autoclaw 系的 `loginUrl` **本身就是本机载体页**
+ *（`http://127.0.0.1:<port>/…login`），远程访问时连授权页都打不开。
+ * 但它们**确实**开了回调服务器（`astudio-oauth.ts` 的 `listenOnRandomPort`、
+ * `autoclaw-oauth.ts` 的 `server.listen`），而用户完全可能已经用端口转发
+ * 把授权页那一段打通、只差最后这次回调 ⇒ 照样收进来（用户要求「全部回调式的都加」）。
+ * 它们的输入框在授权页打不开时不会被用到，但**不会误伤**：多渲染一格，
+ * 远小于「用户被挡在门外且没有任何出路」的代价。
+ */
+const PROVIDERS_WITH_LOOPBACK_CALLBACK = new Set([
+  'codearts',
+  'lobsterai',
+  'trae',
+  'gemini',
+  'accio',
+  'astudio',
+  'autoclaw',
+  'autoclawintl',
+]);
+
+
+/**
  * Accio 的「每日额度」桶名 —— 必须与宿主 `src/accio-credits.ts` 的
  * `ACCIO_CREDIT_BUCKETS` 里 `daily` 那一行**逐字一致**。
  *
@@ -3479,22 +3523,26 @@ function ProviderPanel({
   /** 兜底登录链接的复制结果：null=未复制，true=已复制，false=复制失败。 */
   const [loginLinkCopied, setLoginLinkCopied] = React.useState(null);
   /**
-   * CodeArts（华为云）**手动回调链接**输入框。
+   * **手动回调链接**输入框（远程访问 DSH 时回调式登录的唯一出路）。
    *
-   * 为什么只有 codearts 需要：它的授权回调被定向到
-   * `http://127.0.0.1:<端口>/oauth/callback?code=…`，而 127.0.0.1 指的是
-   * **宿主所在的那台机器**。用户在**手机**（或另一台电脑）上完成登录时，
-   * 那个浏览器打不开宿主的 127.0.0.1 ⇒ 跳转失败、停在错误页，
-   * 但地址栏里已经是一条**合法**的回调链接（含一次性 code）。
+   * 哪些渠道需要：见 `PROVIDERS_WITH_LOOPBACK_CALLBACK` —— 它们的授权回调都被
+   * 定向到 `http://127.0.0.1:<端口>/…`，而 127.0.0.1 指的是**宿主所在的那台
+   * 机器**。用户在**手机**（或另一台电脑）上完成登录时，那个浏览器打不开宿主的
+   * 127.0.0.1 ⇒ 跳转失败、停在错误页，但地址栏里已经是一条**合法**的回调链接
+   * （含一次性 code / secret / state）。
    * 把它复制回来粘贴，就能在本机完成原来只有浏览器能完成的那一跳。
+   *
+   * ⚠️ 2026-11-13 起不再只服务 codearts / trae 两家（PR #8）：其余回环渠道走
+   * 宿主的 `login.submitCallback` 盲发 GET，前两家仍走 `account.submitCallback`
+   * 的专用解析器（错误文案更精确）。
    *
    * 形状：`{ accountId, value, error, busy }`；`null` 表示当前不在等待回调。
    */
-  const [codeartsCallback, setCodeartsCallback] = React.useState(null);
+  const [manualCallback, setManualCallback] = React.useState(null);
   /**
    * 「提交回调链接」的**同步单飞**闸门（PR #57 对抗审计 P3-a）。
    *
-   * ⚠️⚠️ `codeartsCallback.busy` 是**渲染后态**：两次点击若落在同一帧里，
+   * ⚠️⚠️ `manualCallback.busy` 是**渲染后态**：两次点击若落在同一帧里，
    * 两次调用读到的闭包都是 `busy === false` ⇒ 下面那个 `if (busy) return`
    * **形同虚设**，同一份一次性 `code` 会被提交两次。
    *
@@ -3505,7 +3553,7 @@ function ProviderPanel({
    * ⇒ 用 `useRef` 做**同步**单飞：`ref` 的写入与读取都在同一帧内生效，
    * 与 React 何时重渲染无关。`finally` 里释放（成功 / 失败都不留死锁）。
    */
-  const codeartsSubmitInFlightRef = React.useRef(false);
+  const manualSubmitInFlightRef = React.useRef(false);
   /**
    * 出口代理弹窗状态：{ accountId, current } 或 null。
    *
@@ -3713,15 +3761,17 @@ function ProviderPanel({
   /**
    * 是否渲染「手动粘贴回调链接」输入框。
    *
-   * 只有 CodeArts（华为云）需要：它的授权回调落在**宿主本机**的
-   * `127.0.0.1:<port>`，用户在手机 / 另一台电脑上完成登录时那一跳打不开。
+   * 判据是「该渠道是否开了本机回调端口」，不是按 provider 写死清单：
+   * 见 `PROVIDERS_WITH_LOOPBACK_CALLBACK`。设备码 / 轮询式渠道（qoder 系、
+   * raccoon、minimax、cline、zcode、buddy 系）**没有回调地址可粘**，
+   * 给它们渲染输入框只会让用户去找一条不存在的地址。
    *
    * ⚠️ 必须写成**单个标识符**（不是内联的复合条件）：`jet-hub-structure-ast.spec.ts`
    * 的提示守卫要求每个面板级提示的渲染条件是自己的变量，这样「条件被换成前缀
    * 相同的另一个标识符 / 被短路成恒 null」都能被抓到。
    */
-  const showCodeartsCallback = codeartsCallback !== null
-    && (provider === 'codearts' || provider === 'trae');
+  const showManualCallback = manualCallback !== null
+    && PROVIDERS_WITH_LOOPBACK_CALLBACK.has(provider);
   /** 读「严格手动顺序」当前值。失败时**保持默认 `false`** 并留一条 console 提示。 */
   const loadStrictManualOrder = React.useCallback(async () => {
     if (!canStrictOrder) return;
@@ -5328,13 +5378,13 @@ function ProviderPanel({
         //   `catch` 完全吞掉：用户只剩 5 分钟后一句「登录超时」，真实原因永不上屏
         //   （独立审计攻击 5d 实测）。这里只记痕迹，不打断轮询（可能只是瞬时故障），
         //   超时时一并展示。
-        // ⚠️ 只有 CodeArts（华为云）需要「手动粘贴回调链接」这一格：
-        //    它的回调落在宿主本机 127.0.0.1，别的设备上的浏览器打不开。
+        // ⚠️ 只有**回环回调**渠道需要「手动粘贴回调链接」这一格：
+        //    它们的回调落在宿主本机 127.0.0.1，别的设备上的浏览器打不开。
         //    ⚠️ 其余 provider 走完全相同的 startLoginPoll 调用，
         //    不得因为这里多一个分支而改变行为（本文件既有纪律：
         //    每家 provider 的差异只在它自己的分支里）。
-        if ((provider === 'codearts' || provider === 'trae') && accountId) {
-          setCodeartsCallback({ accountId, value: '', error: '', busy: false });
+        if (PROVIDERS_WITH_LOOPBACK_CALLBACK.has(provider) && accountId) {
+          setManualCallback({ accountId, value: '', error: '', busy: false });
         }
         startLoginPoll({ accountId, provider, loginWindow });
       } else {
@@ -5396,7 +5446,12 @@ function ProviderPanel({
    *   `loginWindow` = 客户端自己开的那扇窗（宿主开窗的 provider 传 `null`）。
    */
   /**
-   * 提交用户手动粘贴的 CodeArts（华为云）回调链接。
+   * 提交用户手动粘贴的**本机回调链接**（codearts / trae / gemini / accio /
+   * astudio / autoclaw / lobsterai …）。
+   *
+   * ⚠️ 两条通道：codearts / trae 走 `account.submitCallback`（宿主侧有专用解析器，
+   *    能给出「回调未携带 refreshToken」这类精确原因）；其余回环渠道走
+   *    `login.submitCallback`（宿主盲发 GET，各 provider 自己的回调服务器处理）。
    *
    * ⚠️ 失败**绝不**走 `setError` + `setPhase('error')`：那条路径会把整个设置页
    *    判成「新建账号失败」并让轮询停摆 —— 而用户只是粘错了一行字，
@@ -5404,31 +5459,42 @@ function ProviderPanel({
    *    ⇒ 输入框自己的行内错误（`error` 字段），真·终态失败仍由 `login.poll`
    *      的统一三态报出（与其余 provider 同一通道）。
    */
-  const submitCodeartsCallback = async () => {
-    if (!codeartsCallback) return;
-    const { accountId, value, busy } = codeartsCallback;
+  const submitManualCallback = async () => {
+    if (!manualCallback) return;
+    const { accountId, value, busy } = manualCallback;
     if (busy) return;
     // ⚠️⚠️ 同帧重入的**唯一**有效闸门：`busy` 还没被渲染出去（见 ref 的注释）。
-    if (codeartsSubmitInFlightRef.current) return;
+    if (manualSubmitInFlightRef.current) return;
     if (typeof value !== 'string' || value.trim().length === 0) {
-      setCodeartsCallback((current) => (current
+      setManualCallback((current) => (current
         ? { ...current, error: '请先把回调链接粘贴进来（整条地址栏内容，含 code=… 或 secret=…）。' }
         : current));
       return;
     }
-    codeartsSubmitInFlightRef.current = true;
-    setCodeartsCallback((current) => (current ? { ...current, busy: true, error: '' } : current));
+    manualSubmitInFlightRef.current = true;
+    setManualCallback((current) => (current ? { ...current, busy: true, error: '' } : current));
     try {
-      await rpcCall('account.submitCallback', { accountId, callbackUrl: value });
+      // ⚠️ 两条通道**刻意分开**（不是历史包袱）：
+      //    - codearts / trae 在宿主侧登记了**专用解析器**（`pendingManualCallbacks`），
+      //      能给出「回调未携带 refreshToken」「路径不是本次回调」这类**精确**原因；
+      //    - 其余回环渠道（gemini / accio / astudio / autoclaw / lobsterai …）没有
+      //      专用解析器，交给宿主盲发一次 GET —— 它们自己的回调服务器本来就在等这个
+      //      请求，`state` 校验、换 token、写凭据全部原样复用。
+      //    合并成一条会让前两家丢掉精确文案，或让后几家多维护一份按 provider 的解析。
+      if (provider === 'codearts' || provider === 'trae') {
+        await rpcCall('account.submitCallback', { accountId, callbackUrl: value });
+      } else {
+        await rpcCall('login.submitCallback', { url: value });
+      }
       // 宿主已受理：交给既有的 login.poll 统一收口（成功 / 失败文案同一通道）。
       // ⚠️ 成功后**刻意不释放** `busy`（保持「提交中…」，由轮询的终态出口收尾）；
       //    但 `ref` 必须释放 —— 否则用户「取消」后再新建账号会被永久挡住。
     } catch (caught) {
-      setCodeartsCallback((current) => (current
+      setManualCallback((current) => (current
         ? { ...current, busy: false, error: caught?.message || '回调链接提交失败（宿主未给出原因）。' }
         : current));
     } finally {
-      codeartsSubmitInFlightRef.current = false;
+      manualSubmitInFlightRef.current = false;
     }
   };
   const startLoginPoll = ({ accountId, provider, loginWindow = null }) => {
@@ -5453,7 +5519,7 @@ function ProviderPanel({
         //   把原因写死会给排障者一个错误的第一个假设。
         if (loginWindow && !loginWindow.closed) loginWindow.close();
         setLoginUrlForManual(null);
-        setCodeartsCallback(null);
+        setManualCallback(null);
         setError('登录超时或未完成（已等待 5 分钟）：可能是授权未完成、授权被拒，'
           + '或账号条目已被删除。请重新点击「+ 新建账号」再试一次；'
           + '若账号其实已经添加，可点「重新读取」查看。'
@@ -5475,7 +5541,7 @@ function ProviderPanel({
         if (pollRes?.success === false) {
           if (loginWindow && !loginWindow.closed) loginWindow.close();
           setLoginUrlForManual(null);
-          setCodeartsCallback(null);
+          setManualCallback(null);
           setError(pollRes.error || '登录失败（宿主未给出原因），请重新点击「+ 新建账号」。');
           setPhase('error');
           stopPoll();
@@ -5484,7 +5550,7 @@ function ProviderPanel({
         if (!pollRes?.done) return;
         if (loginWindow && !loginWindow.closed) loginWindow.close();
         setLoginUrlForManual(null);
-        setCodeartsCallback(null);
+        setManualCallback(null);
         await loadAccounts();
         stopPoll();
       } catch (caught) {
@@ -5992,15 +6058,15 @@ function ProviderPanel({
                   React.createElement('li', { key: index }, line)))
             : null)
         : null,
-      // CodeArts（华为云）**手动回调链接**输入框。
+      // **手动回调链接**输入框（`PROVIDERS_WITH_LOOPBACK_CALLBACK` 里的渠道）。
       // 只用既有类名（dim-jh-probeNotice / dim-jh-input / dim-jh-loginLinkRow /
       // dim-jh-btn），不新增选择器。role='alert' 只在有错误时给 ——
       // 成功了就别让读屏器再念一遍。
-      showCodeartsCallback
+      showManualCallback
         ? React.createElement('div', {
             className: 'dim-jh-probeNotice',
-            'data-tone': codeartsCallback.error ? 'warn' : 'ok',
-            role: codeartsCallback.error ? 'alert' : 'status',
+            'data-tone': manualCallback.error ? 'warn' : 'ok',
+            role: manualCallback.error ? 'alert' : 'status',
           },
           React.createElement('div', null,
             '浏览器若停在「无法访问 127.0.0.1」或「授权完成但打不开页面」，'
@@ -6012,13 +6078,13 @@ function ProviderPanel({
             placeholder: provider === 'trae'
               ? 'http://127.0.0.1:端口/authorize?refreshToken=…&userInfo=…&userJwt=…'
               : 'http://127.0.0.1:端口/oauth/callback?code=…',
-            value: codeartsCallback.value,
-            disabled: codeartsCallback.busy,
+            value: manualCallback.value,
+            disabled: manualCallback.busy,
             spellCheck: false,
             autoComplete: 'off',
             onChange: (event) => {
               const next = event?.target?.value ?? '';
-              setCodeartsCallback((current) => (current ? { ...current, value: next, error: '' } : current));
+              setManualCallback((current) => (current ? { ...current, value: next, error: '' } : current));
             },
           }),
           React.createElement('div', { className: 'dim-jh-loginLinkRow' },
@@ -6026,20 +6092,20 @@ function ProviderPanel({
             React.createElement('button', {
               className: 'dim-jh-btn',
               type: 'button',
-              'aria-disabled': String(codeartsCallback.busy),
+              'aria-disabled': String(manualCallback.busy),
               onClick: () => {
-                if (codeartsCallback.busy) return;
-                void submitCodeartsCallback();
+                if (manualCallback.busy) return;
+                void submitManualCallback();
               },
-            }, codeartsCallback.busy ? '提交中…' : '提交回调链接'),
+            }, manualCallback.busy ? '提交中…' : '提交回调链接'),
             React.createElement('button', {
               className: 'dim-jh-btn',
               type: 'button',
               title: '取消后可以重新点「+ 新建账号」',
-              onClick: () => setCodeartsCallback(null),
+              onClick: () => setManualCallback(null),
             }, '取消')),
-          codeartsCallback.error
-            ? React.createElement('div', { className: 'dim-jh-probeDetails' }, codeartsCallback.error)
+          manualCallback.error
+            ? React.createElement('div', { className: 'dim-jh-probeDetails' }, manualCallback.error)
             : null)
         : null,
       // 弹窗被拦截：给出可点击的登录链接 + 复制按钮。不劫持当前页面（见 createAccount 的说明）。

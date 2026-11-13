@@ -943,10 +943,11 @@ describe('腾讯 Marvis 登录接线（行为级）', () => {
  * ## 为什么必须行为级
  *
  * PR #57 自带的 27 条用例全部只测 `src/login.ts` 的纯函数。两轮独立审计各自实证：
- * 删掉三处出口清理（`setCodeartsCallback(null)`，`plugin-src/client/jet-hub.js:5402/5424/5433`）、
+ * 删掉三处出口清理（当时叫 `setCodeartsCallback(null)`，PR #8 起改名 `setManualCallback`；
+ * `plugin-src/client/jet-hub.js:5402/5424/5433`）、
  * 入口恒假（`:3708` 追加 `&& false`）、busy 闸门（`:5975`）、`aria-disabled`（`:5973`）、
  * `type: 'button'`（`:5971`）、`provider === 'codearts'` 限定（`:3708`）、
- * `if (!codeartsCallback) return`（`:5361`）等九处，
+ * `if (!manualCallback) return`（`:5361`）等九处，
  * **全量 13203 条仍然全绿**（失败用例名与基线逐条相同）。
  *
  * 最坏的形态是 `catch` 里把 `busy` 写成 `true` ⇒ 输入框与按钮**永久禁用**、
@@ -1002,7 +1003,7 @@ describe('「手动粘贴回调链接」的客户端接线（codearts，PR #57 �
    * 重渲染：**只清渲染产物**，保留 `hooks` 槽位。
    *
    * ⚠️ `resetRender()` 会连 `hooks` 一起清（那是「模拟一次挂载」的语义），
-   * 而这里必须模拟的是**同一次挂载内的重渲染** —— 否则 `codeartsCallback`
+   * 而这里必须模拟的是**同一次挂载内的重渲染** —— 否则 `manualCallback`
    * 会被重置回 `null`，输入框永远不会出现。
    */
   async function rerender(rpcCall: (method: string, payload?: unknown) => Promise<unknown>): Promise<void> {
@@ -1059,7 +1060,7 @@ describe('「手动粘贴回调链接」的客户端接线（codearts，PR #57 �
     await flush()
   }
 
-  /** 往输入框里写值（触发 `onChange` ⇒ `setCodeartsCallback`），再重渲染。 */
+  /** 往输入框里写值（触发 `onChange` ⇒ `setManualCallback`），再重渲染。 */
   async function typeCallbackUrl(rpcCall: Rpc, value: string): Promise<void> {
     const input = callbackInput()
     expect(input, '没有回调链接输入框').toBeDefined()
@@ -1229,10 +1230,10 @@ describe('「手动粘贴回调链接」的客户端接线（codearts，PR #57 �
  *
  * ## 为什么必须单独一组
  *
- * 本 PR 只改了三个字面量（`showCodeartsCallback` 的 `|| provider === 'trae'`、
+ * 本 PR 只改了三个字面量（`showManualCallback` 的 `|| provider === 'trae'`、
  * codearts 分支的条件、placeholder 的三元），而 #57 那 7 条用例**全部固定
  * `provider = 'codearts'`** ⇒ 把 `|| provider === 'trae'` 删掉仍然全绿：
- * - `jet-hub-structure-ast.spec.ts` 只认「`showCodeartsCallback ?` 这一条子项存在」，
+ * - `jet-hub-structure-ast.spec.ts` 只认「`showManualCallback ?` 这一条子项存在」，
  *   字面量还在 ⇒ 它抓不到「trae 分支被删」；
  * - 因此**必须**用真渲染 + 真点「新建账号」+ 真粘链接，才能让「trae 面板根本
  *   不出输入框」这个变异变红。
@@ -1349,7 +1350,7 @@ describe('「手动粘贴回调链接」的客户端接线（trae，PR #58 审�
     await flush()
 
     const input = callbackInput()
-    expect(input, 'trae 点「新建账号」后没有渲染回调链接输入框（showCodeartsCallback 的 trae 分支被删？）').toBeDefined()
+    expect(input, 'trae 点「新建账号」后没有渲染回调链接输入框（showManualCallback 的 trae 分支被删？）').toBeDefined()
     expect(String((input?.props as Record<string, unknown> | null)?.['placeholder'])).toContain('/authorize?refreshToken=')
   })
 
