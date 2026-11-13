@@ -216,6 +216,10 @@
      ⚠️ 不走 `GenerateOptions` 私有字段：宿主 `adapterStream` 会重组 options，
      不保证透传。测试：`tests/unit/aggregate-qoder-queue.spec.ts`（真实
      `QoderAdapter` + 仿宿主嵌套生成器；去掉 `bindAggregateDispatch` 后 5 条变红）。
+     ⚠️ **codearts 同理**（`llm-adapter.ts` 的排队循环，静默重试最长 30 分钟）：检查点放在
+     `queueAttempts += 1` 之前 —— 400 `TM.00001041` / 状态端点确认排队 / SSE 内嵌排队错误
+     三个入口都汇到这里，单测逐一覆盖（`llm-adapter.spec.ts`「聚合调用时排队即失败」）。
+     以后新增「渠道内静默排队等待」的适配器，都要在等待前查 `isInsideAggregateDispatch()`。
    ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
    `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]` **不含 `QUEUE`/`AUTH`**，
    且它的退避是**固定参数**（`initialDelayMs=500`、`maxDelayMs=10_000`、
