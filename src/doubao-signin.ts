@@ -31,6 +31,7 @@ import http from 'node:http'
 import { mkdtempSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
+import { findBrowserExecutable, type BrowserLookup } from './chromium-session.js'
 import {
   DOUBAO_CAMPAIGN_GROUP_CODE,
   DOUBAO_CHECKIN_PATH,
@@ -41,18 +42,31 @@ import {
   type DoubaoCredential,
 } from './doubao.js'
 
-/** 签到用的浏览器可执行文件（任意 Chromium 系即可，**不需要**豆包内核）。 */
-export function doubaoSigninBrowserExecutable(): string | undefined {
+/**
+ * 签到用的浏览器可执行文件（任意 Chromium 系即可，**不需要**豆包内核）。
+ *
+ * ## ⚠️⚠️ 为什么末尾必须兜到 `findBrowserExecutable()`（Gitee issue IKV5HC）
+ *
+ * 与 `doubao-login.ts` 的 {@link doubaoLoginBrowserExecutable} **同因同修**：
+ * 候选链全是 Windows 路径 ⇒ macOS / Linux 上一条都不存在 ⇒ `undefined` ⇒
+ * 签到入口同样报「未找到可执行文件」。**两个函数必须一起改**：只修登录
+ * 会让「扫码能进、签到照样失败」，症状与「豆包今天没活动」同形。
+ */
+export function doubaoSigninBrowserExecutable(lookup: BrowserLookup = {}): string | undefined {
+  const exists = lookup.exists ?? existsSync
+  const env = lookup.env ?? process.env
+  const home = lookup.home ?? homedir()
   const candidates = [
-    process.env.DSH_DOUBAO_BROWSER_PATH,
+    env.DSH_DOUBAO_BROWSER_PATH,
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    join(env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
     // 兜底：豆包客户端内核（也是 Chromium 147，页面环境完整）。
     'D:\\Program File\\Doubao\\app\\Doubao.exe',
   ]
-  for (const p of candidates) if (typeof p === 'string' && p.length > 0 && existsSync(p)) return p
-  return undefined
+  for (const p of candidates) if (typeof p === 'string' && p.length > 0 && exists(p)) return p
+  // 跨平台兜底（macOS 的 .app 包 / Linux 的 PATH 与 AppStream / Windows 的 scoop、Edge）。
+  return findBrowserExecutable(lookup)
 }
 
 /** 极简 CDP 通道（Node 内置 WebSocket，零依赖）。登录会话（`doubao-login.ts`）也复用它。 */

@@ -125,3 +125,101 @@ SHA256(host) 前缀要剥掉**（Chrome 130+）。客户端运行时 Cookies 文
 3. 账号 B（扫码登录）：deviceId/webId 与 A 完全不同 → 服务端按 B 身份评估，
    `inactive`（不在投放范围）——隔离正确。
 4. 守卫：10 spec 472 全绿；`tsc --noEmit` 0 错误。
+
+## 5. ⚠️⚠️ 浏览器探测：候选链必须跨平台（Gitee issue IKV5HC，2026-11-13 修）
+
+### 5.1 症状与根因
+
+macOS 14 用户点「+ 新建账号」/「重新读取」只看到
+
+```
+登录失败：豆包登录需要本机有 Chromium 内核浏览器（Chrome / 豆包客户端），未找到可执行文件。
+```
+
+而他的 Mac 上 **Chrome 装得好好的**。根因：`doubaoLoginBrowserExecutable()` 与
+`doubaoSigninBrowserExecutable()` 的候选链**逐条都是 Windows 路径** ——
+
+```ts
+process.env.DSH_DOUBAO_BROWSER_PATH,
+'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+join(process.env['ProgramFiles'] ?? 'C:\\Program Files', ...),
+join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData','Local'), ...),
+'D:\\Program File\\Doubao\\app\\Doubao.exe',
+```
+
+—— 在 macOS / Linux 上 `existsSync` 一条都不命中 ⇒ `return undefined` ⇒
+`DoubaoLoginSession.open()` 抛「未找到可执行文件」。
+
+### 5.2 为什么必须「兜到 `findBrowserExecutable()`」而不是自己加几条 mac 路径
+
+本仓其余四家浏览器登录**全都是**这个形状：
+
+| 文件 | 行 | 形状 |
+|---|---|---|
+| `src/baizhi-browser-login.ts` | 246 | `deps.executablePath ?? (deps.resolveBrowser ?? findBrowserExecutable)()` |
+| `src/magicrew-browser-login.ts` | 879 | 同上 |
+| `src/marvis-browser-login.ts` | 299 | 同上 |
+| `src/monkeycode-browser-login.ts` | 52 | 同上 |
+
+⇒ 豆包是**唯一漏掉**的那个。自己再抄一份 macOS 路径 = 造第二份口径
+（`docs/agent-notes/misc.md` 的「一文件两套同义判据」），而 `chromium-session.ts`
+的 `browserCandidates()` 已经覆盖 macOS 的 `.app` 包（Chrome / Chromium / Edge /
+Brave，且**必须**用 `posix.join` —— 用 `join` 会在 Windows 上拼出
+`/Applications\Google Chrome.app\…`，Issue IKJKNT 的成因之一）、Linux 的
+`PATH` + AppStream 元数据、Windows 的 scoop / Edge / Chromium。
+
+### 5.3 修法的两个要点
+
+1. **顺序**：本项目自己的候选链**在前**（`DSH_DOUBAO_BROWSER_PATH` 仍最优先、
+   豆包客户端内核仍排在通用 Chrome 之前），跨平台探测只在「前五条一条都不存在」
+   时才走到 ⇒ **存量 Windows 用户的解析结果逐字节不变**。
+2. **两个函数一起改**：`doubaoLoginBrowserExecutable` 与
+   `doubaoSigninBrowserExecutable` 是**两份**候选链（历史原因），只修登录会变成
+   「扫码能进、签到照样报错」，症状与「豆包今天没活动」同形。
+
+### 5.4 可测性：`findBrowserExecutable` 必须能注入
+
+开发机与 CI 都是 Windows ⇒ `platform === 'darwin'` 那条分支**结构上不可测**
+（会静默烂掉，这是 IKJKNT 的老账）。故给两处都加了可选入参
+`BrowserLookup { platform?, env?, home?, exists? }`（`findBrowserExecutable`
+本就有同名字段透传给 `browserCandidates`，本次只是把它**提到签名上**并抽成
+具名类型 `BrowserLookup`）：
+
+```ts
+findBrowserExecutable({ platform: 'darwin', env: {}, home: '/Users/jet',
+                        exists: (p) => p === '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' })
+```
+
+⚠️ 反向教训：**不注入 `exists` 时本机（装了 Chrome）恒能命中** ⇒「什么都没找到
+⇒ `undefined`」那一格在本机**恒为假**，想测只能注入。变异实测：把
+`findBrowserExecutable(lookup)` 改回无参调用，三条用例同时红（本机 scoop
+chromium 被当成「找到了」）。
+
+### 5.5 顺手修的第三条：自动点击「登录」只发 `click`
+
+`clickLoginButton()` 原本是 `if (loginEl) loginEl.click()`。豆包登录按钮的
+处理器挂在 `pointerdown` / `mousedown` 上（报障人实测），而
+`HTMLElement.click()` **只派发 `click`**（`pointerdown` / `mousedown` /
+`pointerup` / `mouseup` 一个都不发）⇒ 处理器不触发、二维码不弹，用户只能手点。
+
+修法两级（判据抽到导出的 `clickDoubaoLoginButton`，返回**三态**
+`'trusted' | 'synthetic' | 'not-found'` 以便单测区分）：
+
+1. **受信任鼠标事件（首选）**：先 `Runtime.evaluate` 取按钮**中心点**，再
+   `Input.dispatchMouseEvent` 发 `mousePressed` + `mouseReleased` ——
+   浏览器进程派发的 `isTrusted === true` 事件，Chromium 会按标准顺序自行派生
+   `pointerdown` / `mousedown` / `pointerup` / `mouseup` / `click`；
+2. **合成事件（兜底）**：按钮存在但**拿不到盒子**（`0×0` / 被浮层裁掉）时，
+   用 JS 按同一顺序 `dispatchEvent` 一整套。这些 `isTrusted === false`，但对
+   「只监听事件、不校验 `isTrusted`」的页面足够。
+
+⚠️ 返回三态而不是 `void` 是**故意的**：只断言「没抛错」的话，把整段换回
+`loginEl.click()` 也照样绿（本仓「假绿」常客）⇒ 必须数
+`Input.dispatchMouseEvent` 的调用次数与参数。
+
+### 5.6 守卫
+
+`tests/unit/doubao-browser-discovery.spec.ts`（15 条）：两个函数 × 6 格
+（macOS / Linux / Windows 存量不变 / `DSH_DOUBAO_BROWSER_PATH` 优先 / 都没有 ⇒
+`undefined` / 真实 macOS 候选链首项）+ 2 条反向对照（Windows 链不含 `.app`）
++ 3 条点击三态。变异 8/8 有牙。

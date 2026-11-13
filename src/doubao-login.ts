@@ -26,20 +26,146 @@ import http from 'node:http'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
+import { findBrowserExecutable, type BrowserLookup } from './chromium-session.js'
 import { DOUBAO_PAGE_URL, type DoubaoCredential } from './doubao.js'
 import { MiniCdp } from './doubao-signin.js'
 
-/** 登录用浏览器（与签到共用候选链；可用 `DSH_DOUBAO_BROWSER_PATH` 覆盖）。 */
-export function doubaoLoginBrowserExecutable(): string | undefined {
+/**
+ * 登录用浏览器（与签到共用候选链；可用 `DSH_DOUBAO_BROWSER_PATH` 覆盖）。
+ *
+ * ## ⚠️⚠️ 为什么末尾必须兜到 `findBrowserExecutable()`（Gitee issue IKV5HC）
+ *
+ * 修复前这张表**全是 Windows 路径**（`C:\Program Files\…\chrome.exe`、
+ * `D:\Program File\Doubao\app\Doubao.exe`），而 `process.platform` 是 macOS /
+ * Linux 时一条都不存在 ⇒ 直接 `return undefined` ⇒ 用户点「+ 新建账号」只看到
+ * 「豆包登录需要本机有 Chromium 内核浏览器…未找到可执行文件」，**而他的 Mac 上
+ * Chrome 装得好好的**（报障人实测：macOS 14 Apple Silicon + Chrome）。
+ *
+ * 本仓其余四家浏览器登录（baizhi / magicrew / marvis / monkeycode）**都**是
+ * `deps.resolveBrowser ?? findBrowserExecutable` 这个形状，豆包是唯一漏掉的
+ * —— 所以这里不是「新增能力」，是**补齐既有的跨平台探测**。
+ *
+ * ⚠️ 顺序刻意保留「本项目自己的候选链在前」：存量 Windows 用户的解析结果
+ * 逐字节不变（`DSH_DOUBAO_BROWSER_PATH` 仍最优先、豆包客户端内核仍排在
+ * 通用 Chrome 之前），只有「前五条一条都不存在」时才会走到跨平台兜底。
+ */
+export function doubaoLoginBrowserExecutable(lookup: BrowserLookup = {}): string | undefined {
+  const exists = lookup.exists ?? existsSync
+  const env = lookup.env ?? process.env
+  const home = lookup.home ?? homedir()
   const candidates = [
-    process.env.DSH_DOUBAO_BROWSER_PATH,
+    env.DSH_DOUBAO_BROWSER_PATH,
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    join(env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
     'D:\\Program File\\Doubao\\app\\Doubao.exe',
   ]
-  for (const p of candidates) if (typeof p === 'string' && p.length > 0 && existsSync(p)) return p
-  return undefined
+  for (const p of candidates) if (typeof p === 'string' && p.length > 0 && exists(p)) return p
+  // 跨平台兜底：macOS 扫 `/Applications` 与 `~/Applications` 的 .app 包、
+  // Linux 扫 PATH 与 AppStream 元数据、Windows 补 scoop / Edge / Chromium。
+  return findBrowserExecutable(lookup)
+}
+
+/** CDP 通道的最小接口（只声明本文件用到的方法，便于单测注入假通道）。 */
+export interface DoubaoClickCdp {
+  send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown>
+}
+
+/**
+ * 点击「登录」按钮的结果 —— **三态**（单测靠它区分「走了真鼠标事件」还是
+ * 「退化成合成事件」，二者对上游风控的可信度不同）。
+ */
+export type DoubaoLoginClickOutcome = 'trusted' | 'synthetic' | 'not-found'
+
+/**
+ * 点击豆包页面上的「登录」按钮（弹出二维码）。
+ *
+ * ## ⚠️⚠️ 为什么不能只 `loginEl.click()`（Gitee issue IKV5HC 第三条）
+ *
+ * 修复前是 `if (loginEl) loginEl.click()`。豆包登录按钮的处理器挂在
+ * `pointerdown` / `mousedown` 上（报障人实测），而 `HTMLElement.click()`
+ * **只派发 `click`**，`pointerdown` / `mousedown` / `pointerup` / `mouseup`
+ * 一个都不发 ⇒ 处理器不触发、二维码不弹，用户得手动点（自动点击形同虚设）。
+ *
+ * ⇒ 两级策略：
+ *
+ * 1. **真鼠标事件（首选）**：先用 `Runtime.evaluate` 取按钮**中心点**，再
+ *    `Input.dispatchMouseEvent` 发 `mousePressed` + `mouseReleased` —— 这是
+ *    **浏览器进程**派发的受信任事件（`isTrusted === true`），Chromium 会按
+ *    标准顺序自行派生 `pointerdown` / `mousedown` / `pointerup` / `mouseup` /
+ *    `click`，与用户真点一下**等价**；
+ * 2. **合成事件（兜底）**：按钮存在但**拿不到盒子**（`0×0`、被浮层裁掉、
+ *    `display:none` 的祖先）时，用 JS 按同一顺序 `dispatchEvent` 一整套
+ *    （`pointerdown → mousedown → pointerup → mouseup → click`）。这些事件
+ *    `isTrusted === false`，但对「只监听事件、不校验 isTrusted」的页面足够。
+ *
+ * ⚠️ 返回三态而不是 `void`：单测必须能区分「走了第 1 级」「退化到第 2 级」
+ * 「按钮压根没找到」—— 只断言「没抛错」的话，把整段换成 `loginEl.click()`
+ * 也照样绿（本仓「假绿」列表里的常客）。
+ */
+export async function clickDoubaoLoginButton(
+  cdp: DoubaoClickCdp,
+  sessionId: string,
+  log: (msg: string) => void = () => {},
+): Promise<DoubaoLoginClickOutcome> {
+  /** 找按钮并取中心点（`Input.dispatchMouseEvent` 的口径就是 CSS 像素）。 */
+  const located = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'))
+      const loginEl = btns.find((b) => b.textContent && b.textContent.trim() === '登录')
+      if (!loginEl) return 'not-found'
+      const r = loginEl.getBoundingClientRect()
+      if (!(r.width > 0) || !(r.height > 0)) return 'no-box'
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  }, sessionId) as { result?: { value?: unknown } } | undefined
+  const value = located?.result?.value
+  if (value === 'not-found') {
+    log('[doubao-login] 页面上没找到「登录」按钮（可能需要手动点）')
+    return 'not-found'
+  }
+  const point = value as { x?: unknown; y?: unknown } | null | undefined
+  const x = typeof point?.x === 'number' ? point.x : undefined
+  const y = typeof point?.y === 'number' ? point.y : undefined
+  if (x !== undefined && y !== undefined) {
+    for (const type of ['mousePressed', 'mouseReleased'] as const) {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type,
+        x,
+        y,
+        button: 'left',
+        buttons: type === 'mousePressed' ? 1 : 0,
+        clickCount: 1,
+      }, sessionId)
+    }
+    log(`[doubao-login] 已用受信任鼠标事件点击「登录」（${x},${y}）`)
+    return 'trusted'
+  }
+  // 按钮在、但盒子是 0×0 或被裁 ⇒ 拿不到可点的坐标，退回合成事件序列。
+  await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'))
+      const loginEl = btns.find((b) => b.textContent && b.textContent.trim() === '登录')
+      if (!loginEl) return false
+      const r = loginEl.getBoundingClientRect()
+      const base = {
+        bubbles: true, cancelable: true, composed: true, button: 0,
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+      }
+      loginEl.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true }))
+      loginEl.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }))
+      loginEl.dispatchEvent(new PointerEvent('pointerup', { ...base, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true }))
+      loginEl.dispatchEvent(new MouseEvent('mouseup', base))
+      loginEl.dispatchEvent(new MouseEvent('click', base))
+      return true
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  }, sessionId)
+  log('[doubao-login] 已用合成事件序列点击「登录」（按钮无可点盒子）')
+  return 'synthetic'
 }
 
 /**
@@ -111,16 +237,9 @@ export class DoubaoLoginSession {
   /** 尝试一次：找到「登录」按钮并点击（弹出二维码）。失败不抛（用户可手动点）。 */
   private async clickLoginButton(): Promise<void> {
     const sessionId = await this.attachPageSession()
-    if (sessionId === undefined) return
-    await this.cdp?.send('Runtime.evaluate', {
-      expression: `(async()=>{
-        const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'))
-        const loginEl = btns.find(b => b.textContent && b.textContent.trim() === '登录')
-        if (loginEl) loginEl.click()
-      })()`,
-      awaitPromise: true, returnByValue: true,
-    }, sessionId)
-    this.log('[doubao-login] 已尝试点击「登录」按钮（弹出二维码）')
+    if (sessionId === undefined || this.cdp === undefined) return
+    // 判据全在 `clickDoubaoLoginButton` 一处（真鼠标事件 → 合成事件兜底）。
+    await clickDoubaoLoginButton(this.cdp, sessionId, this.log)
   }
 
   /** 尝试一次读凭据：`sessionid` 在 ⇒ 组装 `DoubaoCredential`。 */

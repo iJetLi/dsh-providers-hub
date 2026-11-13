@@ -536,6 +536,26 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
   ⚠️ **图片输入未实测**，面板会明确报「暂不支持图片输入」而不是静默丢掉。
   ⚠️ **该渠道不产生限流标记**（也不会被限流探针测出东西），故「重测 / 重置」这组
   按钮对它**整组不渲染** —— 渲染出来只会是点不动的死控件。
+- **`doubao`（豆包 / 字节）**：**只有扫码登录 + 每日签到 + 积分**，**没有模型调用**
+  （`channel: false` —— 没有适配器、也没有模型目录，故它不会出现在对话框的模型
+  选择器里）。点「+ 新建账号」会起一个**可见**的 Chrome 窗口打开豆包，用手机豆包
+  App 扫码后从该会话读 `sessionid` 落池；每日签到与积分查询也走同一个浏览器会话。
+  ⚠️ **本机必须有 Chromium 内核浏览器**：候选链 = `DSH_DOUBAO_BROWSER_PATH` →
+  豆包客户端内核 → **跨平台自动探测**（macOS 的 `/Applications/*.app` 包、Linux 的
+  `PATH` 与 AppStream 元数据、Windows 的 scoop / Chrome / Edge / Chromium）。
+  ✅ **2026-11-13 修（Gitee issue IKV5HC）**：修复前候选链**全是 Windows 路径**
+  （`C:\Program Files\…\chrome.exe`、`D:\Program File\Doubao\…`），于是 macOS /
+  Linux 上**必然**报「豆包登录需要本机有 Chromium 内核浏览器…未找到可执行文件」，
+  而用户的 Mac 上 Chrome 装得好好的。登录与签到**两个**函数都已接上跨平台探测
+  （只修一个会变成「扫码能进、签到照样报错」）。
+  ⚠️ 设备身份由 `accountKey`（= `sessionid`）**确定性派生**出 19 位数字设备号
+  ⇒ 多账号各自独立，不共享「每设备每天一次」的签到配额。
+  ⚠️ 自动点击页面上的「登录」按钮优先派发**受信任鼠标事件**
+  （CDP `Input.dispatchMouseEvent` 的 `mousePressed` + `mouseReleased`，
+  Chromium 会自行派生 `pointerdown` / `mousedown` / …）；只有在按钮**拿不到可点
+  盒子**（`0×0` / 被浮层裁掉）时才退回合成事件序列 —— 因为豆包的处理器挂在
+  `pointerdown` / `mousedown` 上，而 `HTMLElement.click()` **只发 `click`**，
+  自动点击会静默失效、用户得手动点。
 
 ### 一键领取积分
 
