@@ -62,6 +62,8 @@ import { QODER, QODER_CN } from './qoder-product.js'
 import { TRAE } from './trae-product.js'
 import { CLINE } from './cline-product.js'
 import { configureDeadModelStore, withDeadModelPruning } from './dead-model-store.js'
+import { configureStrongestReasoningEnabled } from './reasoning-default.js'
+import { createReasoningPreferenceStore } from './reasoning-preferences.js'
 import type { CodeArtsCredential, BuddyCredential } from './types.js'
 import type { LobsteraiCredential } from './lobsterai.js'
 // 「锁定永久积分」的余额分档需要各家的余额查询函数：分档判据
@@ -1278,6 +1280,19 @@ export function apply(ctx: Context): void {
   // 解析。必须在任何 `registerXxxLlm` 之前调用 —— 各适配器经
   // `registerAdapterIdempotent` 注册时就会包装上剔除逻辑（见该函数注释）。
   configureDeadModelStore(ctx)
+
+  /**
+   * 「默认取最强思考档」开关（2026-11-11 用户功能，见 `reasoning-default.ts`）。
+   *
+   * ⚠️ **必须在这里接线，且早于任何 `registerXxxLlm`**：偏好是**每次请求现读**
+   * 的（回调形式），接线本身只是一次赋值，但放在注册之前能让「启动瞬间就有
+   * 模型请求」（标题生成等）也读到正确值。
+   *
+   * ⚠️ 偏好读的是 `ctx.logger` 与同一份 home 解析 —— 与账号池 / 徽标偏好
+   * 共用 `resolveJetHubHome`，几份文档永远落在同一目录。
+   */
+  const reasoningPreferences = createReasoningPreferenceStore(ctx)
+  configureStrongestReasoningEnabled(() => reasoningPreferences.load())
 
   // ===== Token 账本持久化（第 2 期 · 日聚合落盘）=====
   //

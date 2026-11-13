@@ -422,6 +422,26 @@ const STYLES = `
    底部之后，那五条规则全部失去 DOM 对应，已删除。 */
 .dim-jh-settingsSection { display: flex; flex-direction: column; gap: 8px; }
 .dim-jh-settingsSectionTitle { font-size: 13px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); }
+/* 分区之间的分隔线：设置弹窗现在有 5 个分区（供应商 / 定时签到 / 备份恢复 /
+   渠道原生搜索 / 思考强度），只靠 gap 已经分不清边界（用户 2026-11-11 报障
+   「设置界面怎么出现下拉条了」时，视觉上也正是一整片挤在一起）。
+   ⚠️ 用 border-top 而不是加 margin：margin 会让「内容超限」更早发生，
+   而这里要的恰恰是把同样的内容**排得更紧、更清晰**。
+   首个分区不画线（:first-child），否则顶部多一条悬空横线。 */
+.dim-jh-settingsSection + .dim-jh-settingsSection { padding-top: 10px; border-top: 1px solid var(--dsw-alias-border-l1, #eef0f3); }
+/* 开关 + 文字的一行（可点区只包开关与文字，不包整行 —— 同 .dim-jh-checkinToggle
+   的既有口径：包整行会让行尾空白也变成命中区）。 */
+/* ⚠️ 允许换行：文案较长，窄弹窗下必须能折到第二行，否则会把弹窗撑出横向滚动条
+   （横向滚动条会把右侧内容推出可视区，是本仓库踩过的形态）。 */
+.dim-jh-settingsToggleLine { display: inline-flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #4e5969); cursor: pointer; user-select: none; }
+.dim-jh-settingsToggleLine > input { flex: none; margin-top: 3px; }
+.dim-jh-settingsToggleLineFailed { color: var(--dsw-alias-label-tertiary, #8f959e); }
+.dim-jh-settingsToggleText { min-width: 0; }
+/* 分区内的说明文字：比 .dim-jh-modalHint 更紧（后者带 10px 顶边距，在分区里
+   会把每个分区都撑高，5 个分区累计就是用户看到的那条滚动条）。 */
+.dim-jh-settingsNote { margin: 0; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #8f959e); }
+/* 分区内的行内失败提示（读取不到宿主状态等）：必须显眼但不喧宾夺主。 */
+.dim-jh-settingsInlineFail { padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 8%, transparent); font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-danger, #b3261e); }
 .dim-jh-settingsSectionActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dim-jh-checkinRow { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #4e5969); }
 .dim-jh-checkinRow > label { flex: none; }
@@ -722,6 +742,14 @@ const STYLES = `
 .dim-jh-modelStatusFilter { flex: none; display: flex; align-items: center; gap: 6px; }
 /* 选中的筛选按钮高亮：三个按钮外观一致时用户看不出当前筛的是什么。 */
 .dim-jh-modelStatusFilter .dim-jh-btn[data-active="true"] { border-color: var(--dsw-alias-brand-primary, #1677ff); color: var(--dsw-alias-brand-primary, #1677ff); background: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 10%, var(--dsw-alias-bg-layer-3, #fff)); font-weight: 600; }
+/* 设置弹窗容器：**单独抬高上限**（用户 2026-11-11 报障「设置界面出现下拉条」）。
+   ⚠️ 根因不是「少写了一条 CSS」，而是**内容变多了**：设置弹窗从 4 个分区变成 5 个
+   （新增「思考强度」），而 .dim-jh-modal 的 max-height 是 640px ⇒ 刚好越界，
+   于是列表区开始滚动。这里只改设置弹窗这一处，**不动 .dim-jh-modal 的通用上限**
+   —— 其它弹窗（模型中心等）内容本来就少，抬高它们会让空弹窗显得突兀。
+   ⚠️ 仍保留滚动能力（overflow 在 .dim-jh-modalBody 上不变）：窗口很矮时
+   （笔记本 768p）必须还能滚，否则底部按钮会被裁掉、用户点不到「完成」。 */
+.dim-jh-settingsModal { max-height: min(760px, calc(100vh - 48px)); }
 /* 列表区独立滚动：头部与说明固定，模型多时只滚中间 */
 /* ⚠️ overflow-x: hidden 是**兜底**，不是主修复（主修复见下方 grid 的 minmax）。
    没有它时，任何一行的偶然溢出都会让整个弹窗出现横向滚动条，而横向滚动条会把

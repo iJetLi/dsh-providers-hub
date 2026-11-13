@@ -1044,6 +1044,8 @@ id: 'autoclaw',
     ).toBeGreaterThanOrEqual(listed.length)
 
     // (d)~(f) 逐条 resolveModel（**遍历全部**，不抽样）
+    /** 该家是否**至少有一个**模型声明了思考档位（(j) 用它做双向判据）。 */
+    let anyReasoning = false
     for (const m of listed) {
       const r = await adapter.resolveModel(id, m.id)
       expect(r.id, `${id} resolveModel(${m.id}) 回填了错的 id`).toBe(m.id)
@@ -1052,6 +1054,7 @@ id: 'autoclaw',
 
       const reasoning = r.reasoning
       if (reasoning !== undefined) {
+        anyReasoning = true
         expect(reasoning.efforts.length, `${id} 的 ${m.id} 声明了空 efforts`).toBeGreaterThan(0)
         if (reasoning.defaultEffort !== undefined) {
           expect(
@@ -1067,6 +1070,42 @@ id: 'autoclaw',
           `${id} 的 ${m.id} 声明了非正数 contextWindow（DSH 会抛 INVALID_MODEL_MAX_TOKENS）`,
         ).toBeGreaterThan(0)
       }
+    }
+
+    /**
+     * (j) **「该家结构上有没有思考档位」必须与 `PROVIDERS_WITHOUT_REASONING` 一致**。
+     *
+     * ⚠️ 这一格守的是 2026-11-11 的用户功能：Jet Hub 面板会给名单里的渠道显示
+     *    「该渠道不提供思考档位」的灰字，而对名单外的渠道承诺「选模型后默认最强档」。
+     *    两个方向都是**对用户说假话**（把可调的档位说成没有 / 承诺一个不会发生的事）。
+     *
+     * ⚠️⚠️ **只有「结构上不声明」的家才归名单**：`DISTANT_EFFORTS` 那四家的档位
+     *    来自**远端目录**，本用例没有喂远端数据 ⇒ 冷缓存下恒为空 —— 那不是
+     *    「该家不提供档位」，是**这一格测不到**（热缓存下有）。把它们混进来会
+     *    让面板对它们撒谎，故显式豁免并在此登记理由。
+     */
+    const { providerWithoutReasoning } = await import('../../src/reasoning-default.js')
+    const DISTANT_EFFORTS: ReadonlySet<string> = new Set([
+      // 档位来自上游目录（`reasoning_effort_config` / `thinkingConfig` / …），
+      // 本用例的夹具不注入远端模型表 ⇒ 只能测到冷缓存形态。
+      'trae', 'lobsterai', 'accio', 'qiniu',
+      // ⚠️ opencode 的档位来自 models.dev 的共享**磁盘**缓存（`opencode-capability`
+      // 的 `getOpencodeCapabilitiesSync`）：干净工作区/CI 上没有那份缓存 ⇒ 恒空。
+      // 它**不是**「该家不提供档位」—— 缓存落地后就有档位选择器。
+      'opencode',
+    ])
+    if (providerWithoutReasoning(id)) {
+      expect(
+        anyReasoning,
+        `${id} 在 PROVIDERS_WITHOUT_REASONING 里，但它的模型声明了思考档位 —— `
+        + '面板灰字会对用户说假话（把可调的档位说成没有）。请从名单里删掉它',
+      ).toBe(false)
+    } else if (!DISTANT_EFFORTS.has(id)) {
+      expect(
+        anyReasoning,
+        `${id} 不在 PROVIDERS_WITHOUT_REASONING 里，但它的模型**一个档位都没声明** —— `
+        + '「选模型后默认最强档」对它静默无效，面板那句承诺是假的。请把它加进名单',
+      ).toBe(true)
     }
 
     // (g) 未知 id 不抛错（用户手填模型 id 是正常操作）

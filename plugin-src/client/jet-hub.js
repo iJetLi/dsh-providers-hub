@@ -8679,6 +8679,23 @@ function ModelCenterPanel({ providers, rpcCall, statuses, onStatusReload }) {
       + '关闭开关后该模型不再出现在对话框的模型选择里；'
       + '「已下架」的模型是上游移除的，可用「重新显示」恢复。'
       + '未读取的供应商不参与搜索，点「加载全部」补齐。'),
+    /**
+     * ⚠️ **思考档位**的说明（2026-11-11 新增）。
+     *
+     * 两条信息缺一不可，且都必须是**对外承诺**而不是实现细节：
+     * - 选模型时的默认思考强度 = 该模型声明的最强档（这是本次功能的用户面）；
+     * - 有一批渠道**根本不提供**思考档位，对它们本功能无效 —— 不写这句，
+     *   用户会以为「选了模型却没变强」是插件坏了。
+     *
+     * ⚠️ 名单来自宿主 `src/reasoning-default.ts` 的 `PROVIDERS_WITHOUT_REASONING`
+     * （**唯一权威**）。这里**只做文案渲染**，不再列第二份 id 数组 ——
+     * 两处各列一份必然漂移，而漂移的症状是「面板说 A 家不支持、实际支持」。
+     */
+    React.createElement('p', { className: 'dim-jh-modalHint' },
+      '思考强度：选中模型后默认使用该模型支持的最高档（如 Max / Extra High），'
+      + '可在对话框的模型菜单里手动改回低档。'
+      + '没有「思考档位」的供应商不参与这一默认值，它们只有一个固定的思考行为。'),
+
     toggleError
       ? React.createElement('div', {
           className: 'dim-jh-probeNotice',
@@ -11536,7 +11553,7 @@ export function JetHubPage({ rpcCall }) {
       },
     },
       React.createElement('div', {
-        className: 'dim-jh-modal',
+        className: 'dim-jh-modal dim-jh-settingsModal',
         role: 'dialog',
         'aria-modal': 'true',
         'aria-label': 'Jet Hub 设置',
@@ -11593,7 +11610,7 @@ export function JetHubPage({ rpcCall }) {
           React.createElement('div', { className: 'dim-jh-settingsSection' },
             React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '渠道原生搜索'),
             React.createElement('label', {
-              className: 'dim-jh-nativeSearch',
+              className: 'dim-jh-settingsToggleLine',
               title: (nativeSearchFailed
                 ? '⚠️ 开关状态读取失败，当前显示的是默认值（开启）。点击即可重新提交一次。'
                 : '渠道原生搜索：为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索。'
@@ -11610,10 +11627,58 @@ export function JetHubPage({ rpcCall }) {
                 disabled: nativeSearchBusy,
                 onChange: (event) => void toggleNativeSearch(event.target.checked),
               }),
-              React.createElement('span', null, '为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索')))),
+              React.createElement('span', { className: 'dim-jh-settingsToggleText' },
+                '为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索'))),
+          /**
+           * ⑤ 思考强度（2026-11-11 用户要求「加一个开关，开了就是现在的效果，
+           * 关了就是原来的默认效果」）。
+           *
+           * ⚠️ **默认开**：本功能先于开关上线，默认开才与用户当时看到的、已经
+           * 在用的效果一致 —— 反过来（默认关）等于悄悄把他要求的东西撤销了。
+           *
+           * ⚠️ 文案必须把「开了是什么、关了是什么」**都写出来**：只写「默认取
+           * 最高档」的话，用户关掉后看到思考变弱、却不知道这是不是预期。
+           *
+           * ⚠️⚠️ **读不到状态时必须说出来**（真实报障，2026-11-11 用户实测
+           * 「点击无效」）：宿主侧 RPC 是**进程内**的，插件更新后如果没重启 DSH，
+           * 客户端 bundle 已经热替换、而宿主还是旧代码 ⇒ 这条 RPC 不存在 ⇒
+           * 客户端 catch 后把开关**复原成默认开**，用户看到的就是「点了又弹回去、
+           * 而且没有任何提示」。⇒ 这里给一条明确的失败提示 + 重启指引。
+           */
+          React.createElement('div', { className: 'dim-jh-settingsSection' },
+            React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '思考强度'),
+            React.createElement('label', {
+              className: reasoningDefaultFailed
+                ? 'dim-jh-settingsToggleLine dim-jh-settingsToggleLineFailed'
+                : 'dim-jh-settingsToggleLine',
+              title: (reasoningDefaultFailed
+                ? '⚠️ 开关状态读取失败（多为宿主还在运行旧代码），当前显示的是默认值（开启）。'
+                  + '请完全退出并重新打开 DSH 后再试。'
+                : '默认取最高档：选完模型后，思考强度自动落到该模型支持的最高档'
+                  + '（如 Max / Extra High）。关闭后回到各渠道自己的默认档（多为 High）。'
+                  + '两种模式下都可以在对话框的模型菜单里手动改档。'),
+            },
+              React.createElement('input', {
+                type: 'checkbox',
+                className: 'dim-jh-switch',
+                checked: reasoningDefaultOn,
+                // 与「渠道原生搜索」同取向：读取失败时**不禁用**，让用户仍能切一次
+                //（切一次成功就说明宿主其实是新的，失败提示自然消失）。
+                disabled: reasoningDefaultBusy,
+                onChange: (event) => void toggleReasoningDefault(event.target.checked),
+              }),
+              React.createElement('span', { className: 'dim-jh-settingsToggleText' },
+                '选完模型后自动把思考强度调到最高档（如 Max / Extra High）；'
+                + '关闭则用各渠道自己的默认档')),
+            reasoningDefaultFailed
+              ? React.createElement('div', { className: 'dim-jh-settingsInlineFail', role: 'alert' },
+                '⚠️ 读取不到开关状态（宿主可能仍在运行旧代码）。请完全退出并重新打开 DSH。')
+              : null,
+            React.createElement('p', { className: 'dim-jh-settingsNote' },
+              '开启后思考更充分，但思考 token 计入输出、与正文共享额度，'
+              + '长回答更早触顶、首字更慢。感觉太慢可以关掉这一项。')))));
           // 模型同步已移到「网关」面板（2026-11-11，用户实测设置在弹窗里找不到）：
           // 同步的就是网关的模型目录，入口跟着目录走才符合直觉。
-          ));
   }
 
   const renderRail = () => {
@@ -11703,6 +11768,54 @@ export function JetHubPage({ rpcCall }) {
   }, [rpcCall, loadNativeSearchStatus]);
 
   React.useEffect(() => { void loadNativeSearchStatus(); }, [loadNativeSearchStatus]);
+
+  /**
+   * 「默认取最强思考档」开关（2026-11-11）。
+   *
+   * 与 {@link toggleNativeSearch} **逐字同构**：不做乐观更新、读取失败降级为
+   * 默认值（开）并标记失败、切换失败时回读一次与服务端对齐。
+   *
+   * ⚠️ 默认 `true` 而不是 `false`：本功能先于开关上线，读取未回来之前显示「开」
+   * 才与用户此刻的实际体验一致（显示「关」会让他以为功能已经没了）。
+   */
+  const [reasoningDefaultOn, setReasoningDefaultOn] = React.useState(true);
+  const [reasoningDefaultBusy, setReasoningDefaultBusy] = React.useState(false);
+  const [reasoningDefaultFailed, setReasoningDefaultFailed] = React.useState(false);
+
+  const loadReasoningDefaultStatus = React.useCallback(async () => {
+    try {
+      const res = await rpcCall('reasoningDefault.getEnabled', {});
+      if (!mounted.current) return;
+      setReasoningDefaultOn(res?.enabled !== false);
+      setReasoningDefaultFailed(false);
+    } catch (caught) {
+      // ⚠️ 宿主可能还是旧代码（没有这条 RPC）⇒ 记 warn 并保留默认「开」，
+      //    不要弹错误：功能本身照常在跑（旧宿主里它是硬编码开启的）。
+      console.warn('[jet-hub] load reasoning default status failed:', caught);
+      if (!mounted.current) return;
+      setReasoningDefaultOn(true);
+      setReasoningDefaultFailed(true);
+    }
+  }, [rpcCall]);
+
+  const toggleReasoningDefault = React.useCallback(async (nextEnabled) => {
+    setReasoningDefaultBusy(true);
+    try {
+      const res = await rpcCall('reasoningDefault.setEnabled', { enabled: nextEnabled });
+      if (!mounted.current) return;
+      setReasoningDefaultOn(res?.enabled !== false);
+      setReasoningDefaultFailed(false);
+    } catch (caught) {
+      console.error('[jet-hub] toggle reasoning default failed:', caught);
+      if (!mounted.current) return;
+      // 保留原状态：重新拉一次以确保与服务端一致。
+      await loadReasoningDefaultStatus();
+    } finally {
+      if (mounted.current) setReasoningDefaultBusy(false);
+    }
+  }, [rpcCall, loadReasoningDefaultStatus]);
+
+  React.useEffect(() => { void loadReasoningDefaultStatus(); }, [loadReasoningDefaultStatus]);
 
   // ⚠️ 页头原有的「侧栏」开关已**整块删除**（2026-10-24）：「面板入口」改由
   //    **插件详情页**的自有设置卡片（`plugins.bundle.config`）承担，那里是一个

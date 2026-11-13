@@ -103,16 +103,32 @@ describe('planSessionTitleThinking：决策表', () => {
     expect(plan.maxTokens).toBe(64)
   })
 
-  it('⚠️ 标题请求 + 关不掉 → 保留原档位并把预算抬到下限', () => {
+  it('⚠️ 标题请求 + 关不掉 → 档位**降到最弱**，且预算抬到下限', () => {
     const plan = planSessionTitleThinking({
       purpose: 'session-title',
-      requestedEffort: 'high',
+      requestedEffort: 'extra_high',
       declaredEfforts: ['light', 'high', 'extra_high'],
       maxTokens: 64,
     })
-    // 绝不能自作主张删档位（那会把「关不掉」变成「静默降档」）。
-    expect(plan.effort).toBe('high')
+    // ⚠️ 2026-11-11 起**降档**（此前是「保留原档位」）：本插件的默认档已被抬到
+    //    最强档，若这里保留 extra_high/max，64 token 会被思考吃满、正文 0 字符
+    //    —— 正是 issue IKKVDH 的原始形态。
+    expect(plan.effort).toBe('light')
     expect(plan.thinkingOff).toBe(false)
+    // ⚠️ 降档**不能**代替抬预算：实测 `effort:low` + 64 同样是「吃满、正文 0 字符」
+    //    （见模块头那张表）⇒ 两条腿缺一不可。
+    expect(plan.maxTokens).toBe(SESSION_TITLE_MIN_MAX_TOKENS)
+  })
+
+  it('⚠️ 关不掉且模型没有更弱的档 ⇒ 保留调用方的档位（不编造）', () => {
+    const plan = planSessionTitleThinking({
+      purpose: 'session-title',
+      requestedEffort: 'high',
+      // 只剩一个「开思考」档：没有可降的，只能抬预算。
+      declaredEfforts: ['high'],
+      maxTokens: 64,
+    })
+    expect(plan.effort).toBe('high')
     expect(plan.maxTokens).toBe(SESSION_TITLE_MIN_MAX_TOKENS)
   })
 
