@@ -42,6 +42,7 @@ import {
   exchangeTraeCallback,
   runTraeLoginFlow,
   startTraeLoginFlow,
+  type ManualTraeCallbackSubmitResult,
   type TraeLoginFlowOptions,
 } from './trae-oauth.js'
 import { classifyTraeError, isTraeTerminalError } from './trae-errors.js'
@@ -219,7 +220,13 @@ export class TraeAuth extends Service {
    */
   async startLogin(
     flowOptions: { refName?: string; accountId?: string; pool?: AccountPool } & Partial<TraeLoginFlowOptions> = {},
-  ): Promise<{ loginUrl: string; result: Promise<TraeLoginResult>; close: () => Promise<void> }> {
+  ): Promise<{
+    loginUrl: string
+    result: Promise<TraeLoginResult>
+    close: () => Promise<void>
+    /** 手动提交回调链接（手机/另一台电脑完成授权后粘回来）。RPC 层直接转调。 */
+    submitManualCallback: (raw: unknown) => ManualTraeCallbackSubmitResult
+  }> {
     this.active = true
     const started = await startTraeLoginFlow({
       product: this.product,
@@ -228,7 +235,15 @@ export class TraeAuth extends Service {
     })
     const result = started.result.then((flow) => this.persistLogin(flow, flowOptions))
     result.catch(() => {})
-    return { loginUrl: started.loginUrl, result, close: started.close }
+    // ⚠️ **必须透传**：RPC 层拿到的就是本方法的返回值，漏这一行会让
+    //    `account.submitCallback` 在生产上拿到 `undefined` —— 类型层不报错
+    //    （可选键），症状是「用户粘了合法链接，却被告知会话已失效」。
+    return {
+      loginUrl: started.loginUrl,
+      result,
+      close: started.close,
+      submitManualCallback: started.submitManualCallback,
+    }
   }
 
   /**

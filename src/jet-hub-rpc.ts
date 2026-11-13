@@ -23,6 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { dedupeMinimaxAccount } from './minimax-dedup.js'
 import { openIncognitoWindow, type ManualCallbackSubmitResult } from './login.js'
+import { type ManualTraeCallbackSubmitResult } from './trae-oauth.js'
 import { AccountPool, asProxyText, isPolicyBlockedAccount } from './account-pool.js'
 import { AUTO_PROVIDER as AUTO_PROVIDER_ID } from './auto-adapter.js'
 import { resolveAutoBadgeRewrite, type AutoBadgeState } from './auto-badge.js'
@@ -3239,7 +3240,10 @@ function registerJetHubEndpoints(
    *
    * ⚠️ 只服务 `provider === 'codearts'`：其余 provider 的登录分支一个字节都不碰。
    */
-  const pendingCodeArtsCallbacks = new Map<string, (raw: unknown) => ManualCallbackSubmitResult>()
+  const pendingManualCallbacks = new Map<string, {
+    provider: string
+    submit: (raw: unknown) => ManualCallbackSubmitResult
+  }>()
 
   /**
    * OfficeAce 登录中间态的有效期（毫秒）。
@@ -5163,8 +5167,8 @@ function registerJetHubEndpoints(
         if (accountId.length === 0) {
           return { ok: false, error: { code: 'bad-request', message: '未指定账号 id（accountId）' } }
         }
-        const submit = pendingCodeArtsCallbacks.get(accountId)
-        if (submit === undefined) {
+        const pending = pendingManualCallbacks.get(accountId)
+        if (pending === undefined) {
           return {
             ok: false,
             error: {
@@ -5174,7 +5178,7 @@ function registerJetHubEndpoints(
             },
           }
         }
-        const outcome = submit(callbackUrl)
+        const outcome = pending.submit(callbackUrl)
         if (outcome.ok !== true) {
           return {
             ok: false,
@@ -6157,13 +6161,13 @@ function registerJetHubEndpoints(
             // ⚠️ 无论成败都摘掉本轮的「手动回调链接」提交入口：
             //    成功后再留着，后续误提交会撞上已落定的收码器、回一句误导性的
             //    「这轮登录已经结束」；失败/超时后留着更是纯内存泄漏。
-            pendingCodeArtsCallbacks.delete(id)
+            pendingManualCallbacks.delete(id)
           })
 
           // 登记本轮的「手动回调链接」提交入口。
           // ⚠️ 必须在 `started` 到手后、**返回 accountId 之前**登记：
           //    客户端拿到 accountId 就可能立刻提交，中间不能有空窗。
-          pendingCodeArtsCallbacks.set(id, started.submitManualCallback)
+          pendingManualCallbacks.set(id, { provider: 'codearts', submit: started.submitManualCallback })
 
           // ⚠️⚠️ **宿主侧直接拉起无痕窗口**（2026-10-21，用户报障「新建账号会缓存
           //    上一个账号的登录信息并自动登录」）：与 OfficeAce（2026-10-13）**完全
@@ -6387,7 +6391,15 @@ function registerJetHubEndpoints(
             ctx.logger.warn(`[jet-hub] background ${TRAE.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：记终态原因（供 login.poll 报给前端）+ 移除占位条目，不留幽灵账号
             void failLogin(id, error)
+          }).finally(() => {
+            // ⚠️ 无论成败都摘掉本轮的「手动回调链接」提交入口：
+            //    成功后留着，后续误提交会撞上已落定的换取；失败/超时后留着是纯泄漏。
+            pendingManualCallbacks.delete(id)
           })
+
+          // 登记本轮的「手动回调链接」提交入口（与 codearts 同一端点、同一张表）。
+          // ⚠️ 必须在返回 accountId 之前登记：客户端拿到 accountId 就可能立刻提交。
+          pendingManualCallbacks.set(id, { provider: TRAE.id, submit: started.submitManualCallback })
           return { ok: true, value: { accountId: id, loginUrl: started.loginUrl } }
         } else if (provider === CLINE.id) {
           // Cline 是 **WorkOS 设备码轮询**登录（见 src/cline-oauth.ts）：
