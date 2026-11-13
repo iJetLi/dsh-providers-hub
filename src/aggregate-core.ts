@@ -208,3 +208,60 @@ export function rankCandidates(
       return a.expiry !== b.expiry ? a.expiry - b.expiry : a.price - b.price
     })
 }
+
+/**
+ * `auto` 每个渠道在第一轮里最多占的名额（见 {@link pickDiversified}）。
+ *
+ * 取 2 而不是 1：同一渠道的第二个模型偶尔能过（按模型记账的额度、单模型故障），
+ * 留一个备位；再多就会重现「名额被一家占满」。
+ */
+export const AUTO_PER_PROVIDER_FIRST_PASS = 2
+
+/**
+ * 从已排序的候选里取前 `limit` 个，**第一轮每个渠道最多取 `perProvider` 个**，
+ * 名额有剩再按原序补齐。
+ *
+ * ## 为什么需要（真实故障，2026-11-14 NAS 生产日志）
+ *
+ * `aggregate/auto` 的池是所有渠道的所有模型，排序后只取前 `limit` 个尝试。未接入临期
+ * 折算的渠道（qoder）一律 `NEVER`、免费模型倍率最低 ⇒ **前 9 名全是 qoder**。qoder 的
+ * 账号整体排队（`10605`，9 个模型同一账号、同一 `retryAfterSeconds`）时，9 次切换全在
+ * qoder 内部打转，名额用完直接报错 —— 其它能用的渠道一个都没轮到：
+ * ```
+ * [aggregate] qoder（qfmodel）失败，切换下一个候选 … code=QUEUE
+ * [aggregate] qoder（gfmodel）失败，切换下一个候选 … code=QUEUE
+ * …（共 9 个，全是 qoder）… 最后一个 dmodel 失败后整轮报错
+ * ```
+ *
+ * ## 口径
+ *
+ * - **保序**：第一轮与补齐轮都按 `ranked` 的原序取，排序偏好（临期 → 倍率）不变，
+ *   只是不让一家占满名额；
+ * - **总名额不变**：仍是 `limit`（渠道少时由补齐轮用回同渠道的其余候选）；
+ * - 补齐的候选整体排在第一轮之后：它们是「同渠道的第 3 个及以后」，先试别家更有意义；
+ * - **纯函数**：不改传入数组。
+ */
+export function pickDiversified<T extends { provider: string }>(
+  ranked: readonly T[],
+  limit: number,
+  perProvider: number = AUTO_PER_PROVIDER_FIRST_PASS,
+): T[] {
+  const picked: T[] = []
+  const deferred: T[] = []
+  const taken = new Map<string, number>()
+  for (const candidate of ranked) {
+    if (picked.length >= limit) break
+    const count = taken.get(candidate.provider) ?? 0
+    if (count < perProvider) {
+      taken.set(candidate.provider, count + 1)
+      picked.push(candidate)
+    } else {
+      deferred.push(candidate)
+    }
+  }
+  for (const candidate of deferred) {
+    if (picked.length >= limit) break
+    picked.push(candidate)
+  }
+  return picked
+}
