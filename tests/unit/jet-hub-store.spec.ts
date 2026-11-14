@@ -209,6 +209,7 @@ describe('老契约后端（SettingsStore）', () => {
       aggregateOrderMode: 'expiry',
       loomyPermanentLocked: false,
       gatewayEnabled: true,
+      qoderTrafficGuard: {},
       // save 未携带局域网开关 → 写出关闭（缺省），读回同值。
       gatewayAllowLan: false,
       // save 未携带原生搜索开关 → 写出启用（缺省），读回同值。
@@ -380,6 +381,7 @@ describe('文件后端（FileStore）', () => {
       loomyPermanentLocked: false,
       // 网关开关缺省启用 —— 与升级前行为一致
       gatewayEnabled: true,
+      qoderTrafficGuard: {},
       // 局域网开关缺省关闭 —— 暴露面变大必须是显式选择
       gatewayAllowLan: false,
       // 原生搜索开关缺省启用 —— 与升级前行为一致
@@ -904,6 +906,7 @@ describe('文件后端（FileStore）', () => {
       loomyPermanentLocked: false,
       // 写盘时缺省即启用：读回应如实带回这个默认值。
       gatewayEnabled: true,
+      qoderTrafficGuard: {},
       // 局域网开关缺省关闭：读回同值。
       gatewayAllowLan: false,
       // 原生搜索开关同理：写盘时缺省即启用，读回同值。
