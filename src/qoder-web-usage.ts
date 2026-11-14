@@ -39,7 +39,18 @@ export interface QoderWebPackage {
 
 /** 拆分 `addOnQuota` 的依据。 */
 export type QoderAddOnDetail =
-  | { kind: 'web'; packages: readonly QoderWebPackage[] }
+  | {
+      kind: 'web'
+      packages: readonly QoderWebPackage[]
+      /**
+       * ⚠️ 与 ledger 分支**对称**（2026-11-14 审计 P3）：上游可能给一笔
+       * `status: ACTIVE` 但 `expires_at` **已经过去**的明细。不过滤的话它照样
+       * 吃掉 `left`，随后又被客户端的 `end > at` 丢掉 ⇒ 各档合计**少于**真实余额，
+       * 且 `left` 已归零 ⇒ 连「到期未知」兜底包都不产出（用户看到的总数变小）。
+       * 缺省用 `Date.now()`；生产路径由调用方显式传，单测可钉死。
+       */
+      nowMs?: number
+    }
   | { kind: 'ledger'; grants: readonly QoderGrant[]; nowMs: number }
 
 /** 凭据库里 `<credentialRef>_web` 条目的形状。 */
@@ -55,6 +66,9 @@ export interface QoderWebCredentials {
   set(ref: ReturnType<typeof credentialRef>, value: string): Promise<void>
   unset(ref: ReturnType<typeof credentialRef>): Promise<void>
 }
+
+/** 粘贴输入的字符上限；真实 Cookie 头极少超过 4 KB，留 2 倍余量。 */
+const MAX_COOKIE_INPUT_CHARS = 8192
 
 /** 领取记录最多保留的笔数（每天一笔、30 天作废，留足余量）。 */
 const MAX_GRANTS = 120
@@ -131,9 +145,43 @@ export async function recordQoderGrants(
   await saveQoderWebStore(credentials, accountCredentialRef, { ...store, grants: merged })
 }
 
+/** 账号卡片的最小依赖面（补布尔标记只需要这一格）。 */
+export interface QoderWebFlagTarget {
+  credentialRef: string
+}
+
+/**
+ * 给账号列表补「是否已保存网页会话」的**布尔标记**。
+ *
+ * ⚠️⚠️ 只下发布尔值 —— Cookie 本身绝不下发客户端（本文件开头的红线）。
+ *
+ * 为什么抽成函数而不是在 `jet-hub-rpc.ts` 里就地写：那样「只下发布尔」这条
+ * 不变式**零守卫** —— 把 `{ ...account, qoderWebSession: true }` 写成
+ * `{ ...account, cookie: store.cookie }` 不会有任何用例变红（2026-11-14 审计 P2）。
+ * 抽出来之后，`tests/unit/qoder-web-session-guards.spec.ts` 能断言
+ * 「返回值序列化后不含 Cookie 明文」。
+ *
+ * 没会话时**不加键**（而不是 `false`）：与 `benefitOnly` / `modelscopeKeyMask`
+ * 同款式，避免每个调用方都要为「多一个恒假字段」改断言。
+ */
+export async function withQoderWebSessionFlag<T extends QoderWebFlagTarget>(
+  accounts: readonly T[],
+  credentials: QoderWebCredentials,
+): Promise<Array<T & { qoderWebSession?: boolean }>> {
+  return Promise.all(accounts.map(async (account) => {
+    const store = await loadQoderWebStore(credentials, account.credentialRef)
+    return store.cookie !== undefined ? { ...account, qoderWebSession: true } : { ...account }
+  }))
+}
+
 /** 把用户粘贴的内容归一成 Cookie 头：接受裸 Cookie、`Cookie: …` 行或整段 cURL。 */
 export function normalizeCookieInput(raw: string): string {
-  const text = raw.trim()
+  /**
+   * ⚠️ **粘贴长度上限**（2026-11-14 对抗审计 B-⑧）：以前 13 KB 的整页 HTML
+   * 也能原样进来 —— `cleanCookie` 会把每一行当 candidate 过一遍，既不报错也不
+   * 有用，还会被 `saveQoderWebStore` 写进凭据库。真实 Cookie 头极少超过 4 KB。
+   */
+  const text = raw.slice(0, MAX_COOKIE_INPUT_CHARS).trim()
   if (text === '') return ''
   const curl = /(?:-H|--header)\s+(['"])\s*cookie:\s*([\s\S]*?)\1/i.exec(text)
     ?? /(?:-b|--cookie)\s+(['"])([\s\S]*?)\1/i.exec(text)
@@ -143,12 +191,64 @@ export function normalizeCookieInput(raw: string): string {
   return cleanCookie(text)
 }
 
+/**
+ * 把粘贴内容收成一个**单行** Cookie 头。
+ *
+ * ⚠️⚠️ 换行也是**分隔符**，不是值的一部分（2026-11-14 审计 P1，实测）：
+ * 用户把 Cookie 粘成两行是很自然的动作（长的 Cookie 在开发者工具里会折行），
+ * 而带着 `\n` 的头值会让 `fetch` 直接抛
+ * `Headers.append: "<整个头值>" is an invalid header value` ——
+ * **那条错误消息原样引用了整个 Cookie**，于是凭据经「网络异常」文案流进
+ * 插件日志与 RPC 错误（用户屏幕上）。⇒ 这里按行拆开当分隔符用，
+ * 两行粘贴**变成一个合法的 Cookie**，而不是一个必崩的坏头。
+ *
+ * ⚠️ 控制字符一律丢弃：哪怕用户/上游带了 `\0` / `\x0b`，也不许进请求头。
+ */
 function cleanCookie(value: string): string {
   return value
-    .split(/;\s*/)
+    .split(/;\s*|[\r\n]+/)
     .map((part) => part.trim())
+    .filter((part) => part !== '' && !/[\u0000-\u001f\u007f]/.test(part))
     .filter((part) => /^[^=\s;]+=/.test(part))
     .join('; ')
+}
+
+/**
+ * 把文本里的 Cookie 抹掉（出错文案的**最后一道**防线）。
+ *
+ * ⚠️⚠️ 为什么需要它（2026-11-14 审计 P1，端到端实测）：`cleanCookie` 修好之后
+ * 正常输入不会再产生非法头值，但
+ * 1. **存量坏值**（旧版本已写进凭据库的带换行 Cookie）仍会被读出来用；
+ * 2. 上游/`fetch` 实现换一条错误文案就可能重新引用头值。
+ * 两条都不该让 Cookie 出现在日志或客户端文案里 —— 那是本文件开头的红线
+ * （「绝不下发客户端、绝不写日志或错误消息」）。
+ *
+ * 判据：整串命中就整串抹；否则按 **8 字符窗口**兜底（错误消息可能只引用一段），
+ * 宁可多抹几个字符，不可漏。
+ */
+export function redactQoderCookie(text: string, cookie: string): string {
+  if (text === '' || cookie === '') return text
+  /**
+   * 要抹的**不止整串**：调用方拿到的可能是归一化后的 Cookie（`a=1; b=2`），
+   * 而错误消息里引用的可能是**用户原始粘贴的那一段**（含换行、含单个 `k=v`）。
+   * ⇒ 整串 + 每个 `;` 分段都当 needle（实测：只抹整串会漏掉 `X-Evil: 1`）。
+   */
+  const needles = new Set<string>([cookie])
+  for (const part of cookie.split(';')) {
+    const trimmed = part.trim()
+    if (trimmed !== '') needles.add(trimmed)
+  }
+  let out = text
+  for (const needle of needles) {
+    if (needle.length < 4) continue
+    if (out.includes(needle)) out = out.split(needle).join('***')
+  }
+  // 兜底：错误消息可能只引用了头值的**一段**（8 字符窗口），宁可多抹不可漏。
+  for (let at = 0; at + 8 <= cookie.length && at < 512; at += 1) {
+    const window = cookie.slice(at, at + 8)
+    if (out.includes(window)) out = out.split(window).join('***')
+  }
+  return out
 }
 
 export type QoderWebUsageResult =
@@ -182,8 +282,18 @@ export async function fetchQoderWebPackages(
         signal: AbortSignal.timeout(timeoutMs),
       })
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error)
-      lastFailure = { ok: false, authFailed: false, reason: `网页会话明细查询失败（网络异常：${reason}）` }
+      /**
+       * ⚠️⚠️ **这条文案不能直接拼 `error.message`**（2026-11-14 审计 P1）：
+       * undici 对非法头值的报错是 `Headers.append: "<整个头值>" is an invalid
+       * header value.` —— **把 Cookie 原样引用了一遍**。而这条 `reason` 会
+       * ① 作为 RPC 错误下发到客户端界面、② 被 `ctx.logger.warn` 写进日志。
+       * ⇒ 先抹 Cookie、再剥控制字符（否则日志被换行截断）、最后截断长度。
+       */
+      const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      const safe = redactQoderCookie(raw, cookie)
+        .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+        .slice(0, 200)
+      lastFailure = { ok: false, authFailed: false, reason: `网页会话明细查询失败（网络异常：${safe}）` }
       continue
     }
     if (response.status === 401 || response.status === 403) {
@@ -192,6 +302,15 @@ export async function fetchQoderWebPackages(
     }
     if (!response.ok) {
       lastFailure = { ok: false, authFailed: false, reason: `网页会话明细查询失败（HTTP ${response.status}）` }
+      continue
+    }
+    /**
+     * ⚠️ 200 + HTML 是**会话失效**的典型形态（扫码登录页被回流下来），
+     * 报「响应不是 JSON」会把用户支去查网络（2026-11-14 对抗审计 P2-⑦）。
+     */
+    const contentType = response.headers.get('content-type') ?? ''
+    if (/text\/html/i.test(contentType)) {
+      lastFailure = { ok: false, authFailed: true, reason: '网页会话已失效（返回了登录页），请重新粘贴 Cookie' }
       continue
     }
     let body: unknown
@@ -239,7 +358,12 @@ export function parseQoderWebUsage(body: unknown): QoderWebPackage[] | undefined
   const out: QoderWebPackage[] = []
   for (const row of rows) {
     if (!isRecord(row)) continue
-    const status = typeof row.status === 'string' ? row.status.replace(/^QUOTA_DETAIL_STATUS_/, '') : ''
+    /**
+     * ⚠️ **大小写不敏感**（2026-11-14 对抗审计 A23）：上游只保证枚举名，没保证大小写；
+     * 写成 `status !== 'ACTIVE'` 时，一个 `active` 会让**整份明细静默清空**
+     * （症状是「网页会话明明存着，资源包却仍显示到期未知」，零报错）。
+     */
+    const status = typeof row.status === 'string' ? row.status.replace(/^QUOTA_DETAIL_STATUS_/i, '').toUpperCase() : ''
     if (status !== '' && status !== 'ACTIVE') continue
     if (row.is_active === false) continue
     const total = finite(row.limit_value)
@@ -278,9 +402,12 @@ export function splitAddOnQuota(
   detail: QoderAddOnDetail,
 ): CreditPackage[] | undefined {
   const estimated = detail.kind === 'ledger'
+  const nowMs = detail.kind === 'web' ? (detail.nowMs ?? Date.now()) : detail.nowMs
   const items = detail.kind === 'web'
-    ? detail.packages.filter((p) => p.expiresAtMs > 0).map((p) => ({ amount: p.remaining, expiresAtMs: p.expiresAtMs }))
-    : detail.grants.filter((g) => g.amount > 0 && g.expiresAtMs > detail.nowMs)
+    ? detail.packages
+        .filter((p) => p.expiresAtMs > nowMs)
+        .map((p) => ({ amount: p.remaining, expiresAtMs: p.expiresAtMs }))
+    : detail.grants.filter((g) => g.amount > 0 && g.expiresAtMs > nowMs)
   if (items.length === 0 || !(addOn.remaining > 0)) return undefined
 
   // 先到期先扣 ⇒ 剩下的属于最晚到期的那几笔：从最晚往前分配。
@@ -306,15 +433,31 @@ export function splitAddOnQuota(
       remaining: round2(part.amount),
       total: round2(part.amount),
       used: 0,
+      /**
+       * ⚠️⚠️ **必须 `totalKnown: false`**（2026-11-14 正向审计 P2-2）：这里只有
+       * 「剩余多少」，明细里的 `total` / `used` 在拆分过程中**没有意义**（一笔
+       * 100/100 与一笔 200/300 的「总额」无法按到期日切分）。默认 `true` 会让
+       * hover 浮层拿各包之和当账号总额 ⇒ 三行 `100 / 100` 加起来 300，而卡片
+       * 主行写着 500 = **假分母**（`src/credits.ts:216` 的既有机制就是为此存在）。
+       */
+      totalKnown: false,
       active: addOn.active,
       cycleStartTime: '',
       cycleEndTime: '',
-      expiredTime: new Date(part.expiresAtMs).toISOString(),
+      expiredTime: isoOrEmpty(part.expiresAtMs),
       deductionEndTime: part.expiresAtMs,
     }))
   const rest = round2(left)
   if (rest > 0) {
-    out.push({ ...addOn, name: QODER_ADD_ON_PACKAGE, remaining: rest, total: rest, used: 0, expiryUnknown: true })
+    out.push({
+      ...addOn,
+      name: QODER_ADD_ON_PACKAGE,
+      remaining: rest,
+      total: rest,
+      used: 0,
+      totalKnown: false,
+      expiryUnknown: true,
+    })
   }
   return out
 }
@@ -342,8 +485,31 @@ export function withQoderAddOnDetail(
   }
 }
 
+/**
+ * 毫秒 → 官网口径的「日」（**UTC+8 日界**）。
+ *
+ * ⚠️ 为什么这里写死 +8 而 `formatMonthDay` 用浏览器本地时区：**分组**要与官网的
+ * 日界对齐（同一天领的两笔必须合并成一档），而「到期日」对用户就是他**本地**那天。
+ * 两个口径不同是**有意**的：改任一侧都要重新想一遍（2026-11-14 正向审计 P3-③）。
+ *
+ * ⚠️⚠️ `new Date(超出 ±8.64e15)` 会抛 `RangeError: Invalid time value`，而它会
+ * 把**整条 RPC** 带崩（2026-11-14 对抗审计 E6）—— 上游给一个垃圾时间戳
+ * （`9e15`）是可预期的输入，不是编程错误。故这里兜底成空串（调用方按「无日期」
+ * 处理，同一天的空串会自然合并）。
+ */
 function utc8Day(ms: number): string {
-  return new Date(ms + 8 * 3600_000).toISOString().slice(0, 10)
+  const safe = ms + 8 * 3600_000
+  if (!Number.isFinite(ms) || Math.abs(safe) > 8.64e15) return ''
+  return new Date(safe).toISOString().slice(0, 10)
+}
+
+/**
+ * `new Date(ms).toISOString()` 在 `ms` 超出 ±8.64e15 时抛 `RangeError`
+ * （2026-11-14 对抗审计 E6 实测：上游给 `9e15` ⇒ 整条 RPC 崩）。展示字段宁可留空。
+ */
+function isoOrEmpty(ms: number): string {
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return ''
+  return new Date(ms).toISOString()
 }
 
 function round2(value: number): number {
@@ -360,7 +526,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeStore(raw: unknown): QoderWebStore {
   if (!isRecord(raw)) return {}
-  const cookie = typeof raw.cookie === 'string' && raw.cookie.trim() !== '' ? raw.cookie.trim() : undefined
+  /**
+   * ⚠️ 存储里读出来也**必须过一遍 `cleanCookie`**（2026-11-14 审计 P1）：
+   * 旧版本可能已经把带换行的 Cookie 写进去了（`normalizeStore` 原先只 `trim`），
+   * 那种值会被原样当请求头用 ⇒ 见 `cleanCookie` 的说明。
+   */
+  const cookie = typeof raw.cookie === 'string' ? cleanCookie(raw.cookie) : ''
   const grants = Array.isArray(raw.grants)
     ? raw.grants
       .filter(isRecord)
@@ -368,7 +539,7 @@ function normalizeStore(raw: unknown): QoderWebStore {
       .filter((g) => g.amount > 0 && g.expiresAtMs > 0)
     : []
   return {
-    ...cookie !== undefined ? { cookie } : {},
+    ...cookie !== '' ? { cookie } : {},
     ...grants.length > 0 ? { grants } : {},
   }
 }

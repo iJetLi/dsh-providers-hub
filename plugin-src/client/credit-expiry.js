@@ -378,29 +378,6 @@ export function formatExpirySplitLine(split, format) {
 }
 
 /**
- * 分桶的**带色分段**（供胶囊/卡片逐段渲染，各带各的 tone）。
- *
- * 段顺序与 `formatExpirySplitLine` 一致：`永久`（ok）→ `到期未知`（warn）→
- * `长期`（warn）→ `临期`（error，带倒计时）→ `已过期`（error）。
- *
- * ## 为什么需要它（而不是复用 `formatExpirySplitLine` 的字符串）
- *
- * 字符串版本把各档拼成一句、只能整体一个颜色 —— 而用户要的正是
- * 「永久绿 / 长期黄 / 临期红」（2026-10-12 明确要求）。React 侧要逐段渲染
- * 才能各带 `data-tone`，故这里返回**结构化分段**。
- *
- * ⚠️ 「到期未知」是 2026-11-08（issue IKTLMX）新增的段：上游明说会过期、
- *    但只给聚合标量（Qoder 的「个人资源包」= 30 × 100 credits 逐笔 30 天作废）
- *    ⇒ 不能显示成绿色「永久」。它是 `permanent` 的**子量**，两者金额相加
- *    === `split.permanent`（见 `splitCreditsByExpiry` 的 `unknownExpiry`）。
- *
- * 临期段额外带**倒计时**（`countdown` 字段），因为「临期 100」只说了有多少会作废，
- * 没说**还有多久** —— 而那正是要补的决策信息。
- *
- * @returns `[{ key, text, tone, countdown? }]`；无内容时 `[]`。
- *   `tone` 取值限定在 CSS 里已有的 `ok` / `warn` / `error`。
- */
-/**
  * 卡片分段行要附带的**日期提示**（与 `splitCreditsByExpiry` 同口径现算）。
  *
  * 为什么需要：「长期」一档原本不带任何日期，而「临期」的倒计时只指向最早那一批。
@@ -456,6 +433,29 @@ export function formatMonthDay(ms, now) {
   return d.getFullYear() === ref.getFullYear() ? md : `${d.getFullYear()}年${md}`;
 }
 
+/**
+ * 分桶的**带色分段**（供胶囊/卡片逐段渲染，各带各的 tone）。
+ *
+ * 段顺序与 `formatExpirySplitLine` 一致：`永久`（ok）→ `到期未知`（warn）→
+ * `长期`（warn）→ `临期`（error，带倒计时）→ `已过期`（error）。
+ *
+ * ## 为什么需要它（而不是复用 `formatExpirySplitLine` 的字符串）
+ *
+ * 字符串版本把各档拼成一句、只能整体一个颜色 —— 而用户要的正是
+ * 「永久绿 / 长期黄 / 临期红」（2026-10-12 明确要求）。React 侧要逐段渲染
+ * 才能各带 `data-tone`，故这里返回**结构化分段**。
+ *
+ * ⚠️ 「到期未知」是 2026-11-08（issue IKTLMX）新增的段：上游明说会过期、
+ *    但只给聚合标量（Qoder 的「个人资源包」= 30 × 100 credits 逐笔 30 天作废）
+ *    ⇒ 不能显示成绿色「永久」。它是 `permanent` 的**子量**，两者金额相加
+ *    === `split.permanent`（见 `splitCreditsByExpiry` 的 `unknownExpiry`）。
+ *
+ * 临期段额外带**倒计时**（`countdown` 字段），因为「临期 100」只说了有多少会作废，
+ * 没说**还有多久** —— 而那正是要补的决策信息。
+ *
+ * @returns `[{ key, text, tone, countdown? }]`；无内容时 `[]`。
+ *   `tone` 取值限定在 CSS 里已有的 `ok` / `warn` / `error`。
+ */
 export function expirySplitParts(split, format, now, hints) {
   if (!split) return [];
   const parts = [];
@@ -857,6 +857,14 @@ export function packageExpiryMs(pkg) {
  * 才轮到这里正确地显示「长期」。两条判据缺一不可。
  */
 export function formatPackageExpiry(pkg, now) {
+  /**
+   * ⚠️⚠️ **`expiryUnknown` 必须先于「无日期」判**（2026-11-14 正向审计 P2-3）：
+   * 3 号补丁给 `resourcePackage` 换成逐笔到期的包，其中「差额包」带
+   * `expiryUnknown: true`（到期确实未知）。若落到下面的兜底分支，它会显示成
+   * **「长期」** —— 既与同卡主行的「到期未知」自相矛盾，也正面违反 Issue IKTLMX
+   * 立下的红线「不得把未知渲染成永久」。
+   */
+  if (pkg && pkg.expiryUnknown === true) return '到期未知';
   const end = packageExpiryMs(pkg);
   if (end === null) {
     // 平台没有可解析的到期时间，但可能给了明确的产品口径（如「每日 00:00 过期」）。

@@ -278,6 +278,47 @@ describe('AccountPool', () => {
     expect(resolved).toBeUndefined()
   })
 
+  it('★★ removeAccount 必须一并清理 Qoder 的网页会话条目（`<ref>_web`）', async () => {
+    // Qoder 的网页会话 Cookie 与领取记录住在**独立**凭据条目里
+    // （`src/qoder-web-usage.ts` 的 `qoderWebRefName`）。删账号时漏掉它
+    // 就会出现「账号没了、能登录官网的 Cookie 还留在凭据库里」——
+    // 2026-11-14 审计 P2：这三处接线原本零覆盖。
+    await pool.addAccount(makeMockAccount({
+      id: 'qoder-001',
+      provider: 'qoder',
+      credentialRef: 'QODER_ACCOUNT_1',
+    }))
+    await ctx.credentials.set(credentialRef('QODER_ACCOUNT_1'), JSON.stringify({ access_token: 't' }))
+    await ctx.credentials.set(credentialRef('QODER_ACCOUNT_1_web'), JSON.stringify({ cookie: 'a=1' }))
+
+    await pool.removeAccount('qoder-001')
+
+    expect(await ctx.credentials.resolve(credentialRef('QODER_ACCOUNT_1'))).toBeUndefined()
+    expect(await ctx.credentials.resolve(credentialRef('QODER_ACCOUNT_1_web'))).toBeUndefined()
+  })
+
+  it('★★ `qodercn` 同样要清理（两家共用一份网页会话实现）', async () => {
+    await pool.addAccount(makeMockAccount({
+      id: 'qodercn-001',
+      provider: 'qodercn',
+      credentialRef: 'QODER_CN_ACCOUNT_1',
+    }))
+    await ctx.credentials.set(credentialRef('QODER_CN_ACCOUNT_1_web'), JSON.stringify({ cookie: 'a=1' }))
+
+    await pool.removeAccount('qodercn-001')
+
+    expect(await ctx.credentials.resolve(credentialRef('QODER_CN_ACCOUNT_1_web'))).toBeUndefined()
+  })
+
+  it('★ 非 Qoder 账号**不许**碰 `_web`（同名前缀在别家可能真有用途）', async () => {
+    await pool.addAccount(makeMockAccount())
+    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T1_web'), JSON.stringify({ cookie: 'keep' }))
+
+    await pool.removeAccount('buddy-001')
+
+    expect(await ctx.credentials.resolve(credentialRef('BUDDY_ACCOUNT_T1_web'))).toBeDefined()
+  })
+
   it('should return available account for model', async () => {
     // 为两个账号都设置凭据
     await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T1'), JSON.stringify({ access_token: 'test1' }))

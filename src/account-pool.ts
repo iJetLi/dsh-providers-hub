@@ -8,6 +8,7 @@ import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
 import { maskProxyPassword } from './proxy-mask.js'
+import { qoderWebRefName } from './qoder-web-usage.js'
 // ⚠️ `model-queue.ts` **零 import**（纯函数模块，见其模块头）⇒ 不引入环。
 import { nextUtc8DayStartMs } from './model-queue.js'
 import { readTokenLedgerDayMap, utc8DayKey } from './token-ledger.js'
@@ -2268,10 +2269,17 @@ export class AccountPool {
     try {
       await this.ctx.credentials.unset(credentialRef(entry.credentialRef))
     } catch { /* 凭据可能已被删除 */ }
-    // Qoder 的网页会话 Cookie 与领取记录存在独立条目里，随账号一并清理。
+    /**
+     * Qoder 的网页会话 Cookie 与领取记录存在独立条目里，随账号一并清理。
+     *
+     * ⚠️⚠️ **后缀必须走 `qoderWebRefName()`，不许在这里内联 `${ref}_web`**
+     * （2026-11-14 对抗审计 P2-⑥；本仓红线「同一判据只留一份实现」）：两处各拼一次
+     * 时，将来改命名规则（比如加版本后缀）会只改一处 ⇒ 删号时**漏清 Cookie**，
+     * 而漏清是**静默**的（没人看得到凭据库里多了一条能登录官网的会话）。
+     */
     if (entry.provider === 'qoder' || entry.provider === 'qodercn') {
       try {
-        await this.ctx.credentials.unset(credentialRef(`${entry.credentialRef}_web`))
+        await this.ctx.credentials.unset(credentialRef(qoderWebRefName(entry.credentialRef)))
       } catch { /* 本就不存在 */ }
     }
     // ⚠ **必须重新读一次**（真实缺陷，审查发现）：`credentials.unset` 会挂起若干

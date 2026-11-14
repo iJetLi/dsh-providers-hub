@@ -50,6 +50,7 @@ import {
 } from './quota-format.js';
 import { formatUnits, formatQuotaLine, formatClaimGains, unitLabel, QUOTA_UNIT } from './credits-format.js';
 import {
+  expiryDateHints,
   expirySplitParts,
   formatExpirySplitLine,
   formatPoolSplitLine,
@@ -2242,7 +2243,18 @@ function splitParts(balance, windowDays, provider) {
   if (poolText !== null) return [{ key: 'pool', text: poolText, tone: 'muted' }];
   // 其余渠道：按到期时间分**三档**，逐段带色（永久绿 / 长期黄 / 临期红 + 倒计时）。
   const now = Date.now();
-  const parts = expirySplitParts(splitCreditsByExpiry(packages, windowDays, now), format, now);
+  /**
+   * ⚠️⚠️ **两个消费者必须同时改**（2026-11-14 正向审计 P3-⑤）：设置页账号卡片
+   * （`jet-hub.js` 的 `CreditBalanceRow`）与**本弹窗**是两套独立渲染代码。
+   * 只给卡片传 `expiryDateHints` 会让两处对同一份数据说不同的话（卡片有
+   * 「最早 X月X日到期」、弹窗没有），而两处都是用户能同时看到的。
+   */
+  const parts = expirySplitParts(
+    splitCreditsByExpiry(packages, windowDays, now),
+    format,
+    now,
+    expiryDateHints(packages, windowDays, now),
+  );
   /**
    * **独立池**（AStudio 星火积分等）追加一段无色说明。
    *

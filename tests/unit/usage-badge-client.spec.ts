@@ -1459,3 +1459,25 @@ describe('用量徽标：签到同步重入闸门', () => {
     }
   })
 })
+
+/**
+ * ★★ 徽标 tooltip 也必须拿到日期提示（正向审计 P3-⑤，PR #74 返工）。
+ *
+ * 为什么是源码级断言：本文件开头已写明 `plugin-src/client/usage-badge.js` 依赖
+ * 宿主注入的 `react`、vitest 里根本 import 不了 ⇒ 只能守接线。（**行为**那一腿由
+ * `credit-expiry-date-hints.spec.ts` 覆盖 `expirySplitParts` 的第 4 参。）
+ *
+ * ⚠️ 被守的具体风险：设置页账号卡片（`jet-hub.js`）与徽标弹窗是**两套独立渲染
+ * 代码**，只给一处传 `expiryDateHints` 会让两处对同一份数据说不同的话。
+ */
+describe('徽标三段分成行也必须接日期提示', () => {
+  const source = read('plugin-src/client/usage-badge.js')
+
+  it('★★ 第 4 参必须传 `expiryDateHints(...)`（不许留 undefined）', () => {
+    expect(source).toMatch(/expirySplitParts\([\s\S]{0,400}expiryDateHints\(/)
+  })
+
+  it('★ `expiryDateHints` 必须真的从 credit-expiry 引入（否则运行时 ReferenceError）', () => {
+    expect(source).toMatch(/import \{[\s\S]{0,600}expiryDateHints[\s\S]{0,600}\} from '\.\/credit-expiry\.js'/)
+  })
+})

@@ -216,6 +216,7 @@ import {
   loadQoderWebStore,
   recordQoderGrants,
   withQoderAddOnDetail,
+  withQoderWebSessionFlag,
   type QoderAddOnDetail,
 } from './qoder-web-usage.js'
 import { isTraeRefreshable, traeCredentialExpiresAtMs, traeDisplayNickname } from './trae.js'
@@ -4666,12 +4667,7 @@ function registerJetHubEndpoints(
     if (provider === ZCODE.id) return enrichZcodeIdentity(accounts)
     if (provider === 'codearts') return enrichCodeartsIdentity(accounts)
     // Qoder：卡片要知道该账号是否已存网页会话（只下发布尔，不下发 Cookie）。
-    if (isQoderFamily(provider)) {
-      return Promise.all(accounts.map(async (account) => {
-        const store = await loadQoderWebStore(ctx.credentials, account.credentialRef)
-        return store.cookie !== undefined ? { ...account, qoderWebSession: true } : account
-      }))
-    }
+    if (isQoderFamily(provider)) return withQoderWebSessionFlag(accounts, ctx.credentials)
     // ⚠️⚠️ **本 fork 独有**（modelscope，2026-10-17）：卡片要显示**打码**的
     //    API Key 并提供「编辑」入口（`modelscope.setApiKey`）。
     //    ⚠️ **只下发打码串，绝不下发明文** —— 凭据经 RPC 明文下发等于把它
@@ -9505,7 +9501,8 @@ function registerJetHubEndpoints(
             let addOnDetail: QoderAddOnDetail | undefined
             if (detailed.balance !== null && webStore.cookie !== undefined) {
               const web = await fetchQoderWebPackages(webStore.cookie, product, qoderFetchForAccount(account.id))
-              if (web.ok) addOnDetail = { kind: 'web', packages: web.packages }
+              // `nowMs` 显式传：`splitAddOnQuota` 要用它滤掉「状态 ACTIVE 但已过期」的行。
+              if (web.ok) addOnDetail = { kind: 'web', packages: web.packages, nowMs: Date.now() }
               else ctx.logger.warn(`[jet-hub] ${product.id} 账号 ${account.id} ${web.reason}`)
             }
             if (addOnDetail === undefined && (webStore.grants ?? []).length > 0) {

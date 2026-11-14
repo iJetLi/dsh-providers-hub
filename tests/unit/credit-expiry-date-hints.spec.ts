@@ -9,6 +9,7 @@ import {
   expiryDateHints,
   expirySplitParts,
   formatMonthDay,
+  formatPackageExpiry,
   splitCreditsByExpiry,
 } from '../../plugin-src/client/credit-expiry.js'
 
@@ -73,5 +74,37 @@ describe('卡片分段行的日期提示', () => {
   it('跨年日期带年份', () => {
     expect(formatMonthDay(new Date(2027, 0, 3).getTime(), NOW)).toBe('2027年1月3日')
     expect(formatMonthDay(new Date(2026, 11, 7).getTime(), NOW)).toBe('12月7日')
+  })
+})
+
+describe('逐笔到期包在浮层里的文案（正向审计 P2-3）', () => {
+  /**
+   * ★★★ `splitAddOnQuota` 产出的「差额包」带 `expiryUnknown: true`（到期确实未知）。
+   * 旧 `formatPackageExpiry` 只判「有没有可解析的到期时间」，`end === null` 就落到
+   * 兜底 `'长期'` ⇒ hover 浮层把**未知**渲染成**永久**，与同卡主行的「到期未知」
+   * 自相矛盾，也正面违反 Issue IKTLMX 的红线（不得把未知渲染成永久）。
+   */
+  it('★★★ `expiryUnknown` 必须显示「到期未知」，不许显示「长期」', () => {
+    const unknown = pkg('资源包', 66)
+    // @ts-expect-error 生产里这个字段由 `splitAddOnQuota` 打上
+    unknown.expiryUnknown = true
+
+    expect(formatPackageExpiry(unknown, NOW)).toBe('到期未知')
+    expect(formatPackageExpiry(unknown, NOW)).not.toBe('长期')
+  })
+
+  it('★★ 有到期时间的包照常显示日期（别把 `expiryUnknown` 判据做成短路）', () => {
+    const dated = pkg('资源包', 100, NOW + 5 * 86_400_000)
+
+    // ⚠️ 不许硬编码日期：本函数按**本地时区**取日（见其 JSDoc 里 2026-11-01 的实测），
+    // 硬编码会在非东八区机器上红。只断言「是一个日期 + 带天数」的形状。
+    const text = formatPackageExpiry(dated, NOW)
+    expect(text).toMatch(/^\d{4}-\d{2}-\d{2}（\d+ 天后）$/)
+    expect(text).not.toBe('到期未知')
+    expect(text).not.toBe('长期')
+  })
+
+  it('★ 既无日期也无标记时才落到「长期」（loomy 那种平台明说永久的场景）', () => {
+    expect(formatPackageExpiry(pkg('每日额度', 100), NOW)).toBe('长期')
   })
 })

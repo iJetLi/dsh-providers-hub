@@ -251,3 +251,123 @@ describe('与积分查询 / 领取的接线', () => {
     expect(again.kind).toBe('already-claimed')
   })
 })
+
+// ── 第二轮（双审计返工）新增 ──
+
+describe('splitAddOnQuota 的第二轮加固', () => {
+  /**
+   * ★★★ **守恒不变式**（对抗审计 P2-①）：原用例只断言 `parts.map(...)` 的形状，
+   * 把「每包少 10 credits」注入进去仍全绿 —— 因为 `expect(balance.total).toBe(200)`
+   * 是**同义反复**（`total` 就是从 `remaining` 抄过去的）。这里改成对**和**断言，
+   * 且用不能被 2 位小数抹平的数字（`addOn(377)`、三笔 101/103/107）。
+   */
+  it('★★★ 各包 remaining 之和恒等于 addOn.remaining（逐笔少 1 也要红）', () => {
+    const parts = splitAddOnQuota(addOn(377), {
+      kind: 'web',
+      packages: [
+        { remaining: 101, total: 101, used: 0, expiresAtMs: NOW + 1 * DAY },
+        { remaining: 103, total: 103, used: 0, expiresAtMs: NOW + 2 * DAY },
+        { remaining: 107, total: 107, used: 0, expiresAtMs: NOW + 3 * DAY },
+      ],
+    })!
+
+    expect(parts.reduce((sum, part) => sum + part.remaining, 0)).toBe(377)
+    // 明细合计 311 < 377 ⇒ 差额必须作为「到期未知」兜底包出现在同一组里
+    expect(parts.some((part) => part.expiryUnknown === true && part.remaining === 66)).toBe(true)
+  })
+
+  /**
+   * ★★ **`totalKnown: false`**（正向审计 P2-2）：hook 浮层会把这些包的 `total`
+   * 当成账号总额求和，而拆分后「每包的总额」没有意义（会把 500 显示成 300）。
+   */
+  it('★★ 拆出来的每一包都必须 `totalKnown: false`（浮层不许算假分母）', () => {
+    const parts = splitAddOnQuota(addOn(300), {
+      kind: 'web',
+      packages: [
+        { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 1 * DAY },
+        { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 2 * DAY },
+        { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 3 * DAY },
+      ],
+    })!
+
+    expect(parts).toHaveLength(3)
+    expect(parts.every((part) => part.totalKnown === false)).toBe(true)
+  })
+
+  /**
+   * ★★ **已过期的网页明细必须被滤掉**（正向审计 P3-④）：上游可能给一笔
+   * `status: ACTIVE` 但 `expires_at` 已过去的行。不过滤的话它照样吃掉 `left`，
+   * 随后被客户端的 `end > at` 丢掉 ⇒ 各档合计少于真实余额。
+   */
+  it('★★ `expires_at` 已过去的明细不许参与分配（否则总数会凭空变小）', () => {
+    /**
+     * ⚠️ 夹具必须让**过期那笔有机会被取到**：`addOn.remaining` 要**大于**未过期
+     * 那笔（300 > 200），否则「先到期先扣」在拿到 200 后 `left` 已归零、
+     * 循环 `break`，过期那笔永远轮不到 ⇒ 这个变异会**无牙**（我第一版就是
+     * `addOn(200)`，实测 M4 全绿）。
+     */
+    const parts = splitAddOnQuota(addOn(300), {
+      kind: 'web',
+      nowMs: NOW,
+      packages: [
+        { remaining: 100, total: 100, used: 0, expiresAtMs: NOW - 1 * DAY }, // 已过期
+        { remaining: 200, total: 200, used: 0, expiresAtMs: NOW + 5 * DAY },
+      ],
+    })!
+
+    // 过期那 100 不许参与 ⇒ 只有 200 拿到日期，剩下 100 落「到期未知」
+    expect(parts).toHaveLength(2)
+    expect(parts[0]).toMatchObject({ remaining: 200, deductionEndTime: NOW + 5 * DAY })
+    expect(parts[1]).toMatchObject({ remaining: 100, expiryUnknown: true })
+  })
+})
+
+describe('parseQoderWebUsage 的大小写与边界', () => {
+  /**
+   * ★★ **`status` 必须大小写不敏感**（对抗审计 P2-③）：写成精确 `'ACTIVE'` 时，
+   * 上游一个 `active` 会让**整份明细静默清空**（症状是「会话存着、资源包仍显示
+   * 到期未知」，零报错）。
+   */
+  it('★★ 小写 `active` 必须照常解析（不再是「整份明细静默清空」）', () => {
+    const packages = parseQoderWebUsage({
+      user_id: 'u',
+      resource_package_quota: {
+        quota_detail: [
+          { limit_value: 100, used_value: 0, remaining_value: 100, status: 'active', expires_at: Math.floor((NOW + DAY) / 1000) },
+        ],
+      },
+    })
+
+    expect(packages).toHaveLength(1)
+    expect(packages![0]!.remaining).toBe(100)
+  })
+
+  it('★ 未知状态值仍然跳过（不许把 CANCELLED 当成有效包）', () => {
+    const packages = parseQoderWebUsage({
+      user_id: 'u',
+      resource_package_quota: {
+        quota_detail: [
+          { limit_value: 100, used_value: 0, remaining_value: 100, status: 'QUOTA_DETAIL_STATUS_CANCELLED', expires_at: Math.floor((NOW + DAY) / 1000) },
+        ],
+      },
+    })
+
+    expect(packages).toEqual([])
+  })
+
+  it('★★ 超出 `Date` 范围的时间戳不许让整条 RPC 抛（对抗审计 E6 RangeError）', () => {
+    const packages = parseQoderWebUsage({
+      user_id: 'u',
+      resource_package_quota: {
+        quota_detail: [
+          { limit_value: 100, used_value: 0, remaining_value: 100, status: 'ACTIVE', expires_at: 9e15 },
+        ],
+      },
+    })
+
+    // 解析不崩；`splitAddOnQuota` 的 `utc8Day` 也不能崩
+    expect(packages).toHaveLength(1)
+    const parts = splitAddOnQuota(addOn(100), { kind: 'web', nowMs: NOW, packages: packages! })
+    expect(parts).toBeDefined()
+  })
+})

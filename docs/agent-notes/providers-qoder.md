@@ -990,3 +990,141 @@ fixture 刻意让 `cap 5000 ≠ remaining 3000 ≠ used+remaining 5000`（三个
   精确比 `'套餐额度'`，而本层包名是「企业资源包」⇒ 不命中。要不要显示是产品决定，
   本次未动。
 - 企业池是否按席位共享、`percentage` 的真实分母 **未验证**（单账号单样本）。
+
+## ⚠️⚠️ 网页会话 Cookie 的泄漏面：出错文案必须脱敏（PR #74 返工，2026-11-14）
+
+「逐笔到期」的网页明细来源要用户**粘贴能登录官网的 Cookie**，`src/qoder-web-usage.ts`
+开头的红线是「绝不下发客户端、绝不写日志或错误消息」。这条红线在返工前**被两条真实
+链路打穿**，而且两条都**零守卫**：
+
+### 泄漏链（端到端实测）
+
+1. 用户把 Cookie 粘成**两行**（长 Cookie 在开发者工具里会折行，很自然）；
+2. 旧的 `cleanCookie` 只 `split(/;\s*/)` ⇒ **换行留在头值里**；
+3. `fetch` 收到带 `\n` 的头值 ⇒ 抛
+   `Headers.append: "<整个头值>" is an invalid header value.` ——
+   **错误消息原样引用了整个 Cookie**；
+4. 那条消息被拼进 `reason`，`reason` 有两条去向：
+   - `qoder.setWebSession` 的 `fail(web.reason)` ⇒ **用户屏幕上**（弹窗 `error`）；
+   - credits 端点 `ctx.logger.warn(...)` ⇒ **落盘日志**。
+
+定级 P1 的理由（对照「代理口令的泄漏面：去向决定定级」那次降 P2 的先例）：
+那次 logger 与客户端**都零命中**，这次**两条都命中**，且泄漏物是能登录官网的
+**完整会话凭据**。
+
+### 四条修法（缺一不可）
+
+1. **`cleanCookie` 把换行当分隔符**：`.split(/;\s*|[\r\n]+/)`（`\r\n` / `\n` 都算）。
+   ⇒ 两行粘贴**变成一个合法 Cookie**，而不是一个必崩的坏头。
+2. **控制字符整段丢弃**：`.filter(part => part !== '' && !/[\u0000-\u001f\u007f]/.test(part))`。
+   ⚠️ 判据必须是「**整段丢**」，不是「抹掉控制字符」—— `\u0000evil=2` 抹完是
+   `evil=2`，那是把用户的坏输入**改写成另一个合法 Cookie**发上去。
+3. **出错文案脱敏** `redactQoderCookie(text, cookie)`：整串 + 每个 `;` 分段 + **8 字符
+   窗口**兜底（错误消息可能只引用一段，宁可多抹不可漏），再 `.replace(/[\u0000-\u001f\u007f]+/g, ' ')`
+   （否则日志被换行截断、第二行看起来像新日志），最后 `.slice(0, 200)`。
+   ⚠️ **`qoder-rpc.ts` 那条出口要用「用户原始粘贴内容」再脱一次**：`fetchQoderWebPackages`
+   只按**归一化后**的 Cookie 抹，而原始输入里那些被 `cleanCookie` 丢掉的片段不在其中
+   （实测漏掉 `X-Evil: 1`）。
+4. **读取侧也清洗**：`normalizeStore` 的 cookie 走 `cleanCookie`。只修写入侧的话，
+   **已经落盘**的坏值会一直被读出来当请求头用。
+
+### 判据为什么必须打在「消费者」上
+
+`normalizeCookieInput` / `redactQoderCookie` 的**返回值**用例挡不住泄漏 —— 泄漏发生在
+`fetchQoderWebPackages` 的 `catch` 与 RPC 的 `fail(...)` 两处。故守卫写在：
+`tests/unit/qoder-web-session-guards.spec.ts`（23 条，含「RPC 出口序列化后不含 Cookie」
+「401 不落盘」「空串只删 cookie 保留 grants」「`qodercn` 也要能存」）。
+
+### 接线零覆盖（与 P1 同批挖出）
+
+`qoder.setWebSession` RPC / `accounts.status` 的 `qoderWebSession` 布尔 /
+`removeAccount` 的 `_web` 清理 / 客户端按钮+弹窗 —— 四处**原本零命中**
+（`grep -rn "QoderWebSessionModal\|qoderWebSession\|setWebSession" tests/` 为空）。
+把任一整段删掉，PR 自带的 20 条用例仍全绿。
+
+⚠️ 由此还把 `accounts.status` 的「只下发布尔」抽成了 `withQoderWebSessionFlag()`：
+就地写的话，把 `{ ...account, qoderWebSession: true }` 改成
+`{ ...account, cookie: store.cookie }` **不会有任何用例变红**。
+
+### 变异（10/10 全红）
+
+| # | 变异 | 红因 |
+|---|---|---|
+| M1 | `cleanCookie` 换行不再是分隔符 | `expected '' to be 'a=SECRET1; c2=SECRET2'` |
+| M2 | 不丢弃含控制字符的段 | `expected 'a=1; \u0000evil=2' to be 'a=1'` |
+| M3 | `catch` 不脱敏 | `expected '…网络异常：Headers.append…' to contain '***'` |
+| M4 | `redactQoderCookie` 恒等 | 同上 |
+| M5 | 读取侧只 `trim` | `expected 'a=1\r\nb=2' to be 'a=1; b=2'` |
+| M6 | `accounts.status` 下发 Cookie 明文 | 深度不等 |
+| M7 | RPC 出口漏原始输入 | `not to contain 'X-Evil'` |
+| M8 | 空串不清除 cookie | `expected 'a=1' to be undefined` |
+| M9 | 只查 `qoder` 不查 `qodercn` | `expected false to be true` |
+| M10 | `removeAccount` 不清理 `_web` | 条目仍在 |
+
+⚠️ **M2 的第一版用例是等价变异**（`'a=1\n\u0000\u0001\nb=2'` 里 `\u0000\u0001` 本来就
+过不了 `/^[^=\s;]+=/`）—— 判据没打中就先怀疑判据，别急着写「有牙」。改成
+`'a=1\n\u0000evil=2'` 才测得动。
+
+### 另外两条踩坑
+
+- `credentialRef()` 的语法是 **`^[A-Z][A-Z0-9_]*$`**（POSIX 环境变量名）：
+  `'ref-1_web'` 会 **throw**。而 `loadQoderWebStore` 把它包在 `try/catch` 里 ⇒
+  **静默返回空 store**（假绿），`saveQoderWebStore` 里则直接抛出去。单测的 ref 名
+  必须用合法形态（`QODER_ACCOUNT_1`）。
+- `QoderWebCredentials.resolve` 的返回是 **`{ value } | null | undefined`**（不是裸串）。
+  替身按裸串写 ⇒ `JSON.parse(undefined)` 被同一个 `catch` 吞掉 ⇒ 所有「已存 Cookie」
+  的用例**静默变成「没有 Cookie」**。
+
+## ⚠️⚠️ 逐笔到期的四个「看起来对、其实错」的地方（PR #74 双审计返工，2026-11-14）
+
+第一轮把「Cookie 不许外泄」修完之后，正向 + 对抗两轮审计各自又打穿了四处。
+每一条的共同点：**代码读起来完全合理，但只有把消费者/真实上游形状摆进来才看得见**。
+
+### 1. 「解析不出 Cookie」≠「用户要清除」
+
+`qoder.setWebSession` 的旧实现把两者合并成同一个 `cookie === ''` 分支：
+
+```ts
+const cookie = normalizeCookieInput(rawCookie)
+if (cookie === '') { /* 删掉已存会话，返回 { saved: false } 且 ok: true */ }
+```
+
+于是用户粘了 `https://qoder.com/account/usage`（或未加引号的
+`curl … -H Cookie: …`、或整页 HTML）时：**已存会话被静默删除**、返回 `ok: true`、
+客户端无条件 `close(true)` ⇒ 用户以为「换好了」，实际把能用的会话删了。
+
+判据：**只有真的空输入才算清除意图**；非空但解析不出键值对 ⇒ 报错、一个字都不落盘，
+且报错要**点名「点『清除会话』」**（否则用户不知道往哪走）。回显只给长度，不给内容。
+
+### 2. 拆分出来的包必须 `totalKnown: false`
+
+`splitAddOnQuota` 只有「剩余多少」，逐笔明细里的 `total` / `used` 在拆分过程中
+**没有意义**（一笔 100/100 与一笔 200/300 无法按到期日切开）。默认 `true` 会让
+hover 浮层拿各包之和当账号总额 ⇒ 卡片主行写 500、浮层三行 `100 / 100` 加起来 300
+= **假分母**（`src/credits.ts` 的 `totalKnown` 机制就是为此存在）。
+
+### 3. `expiryUnknown` 必须先于「无日期」判，否则渲染成「长期」
+
+逐笔拆分的「差额包」带 `expiryUnknown: true`（到期确实未知）。`formatPackageExpiry`
+若只判「有没有可解析的到期时间」，`end === null` 就落到兜底 `'长期'` ⇒ 与同卡主行的
+「到期未知」自相矛盾，也正面违反 Issue IKTLMX 的红线「未知不许渲染成永久」。
+
+### 4. `new Date(超界)` 会抛 `RangeError`，而它能把整条 RPC 带崩
+
+`utc8Day(9e15)` 与 `new Date(9e15).toISOString()` 都抛
+`RangeError: Invalid time value`。上游给垃圾时间戳是**可预期的输入**，不是编程错误 ⇒
+两处都要兜底（`utc8Day` 返回空串、`isoOrEmpty` 返回空串），别让展示字段把 RPC 弄崩。
+
+### 另外两条同批修的
+
+- **`status` 大小写不敏感**：写成精确 `'ACTIVE'` 时，上游一个 `active` 会让
+  **整份明细静默清空**（症状：「会话存着，资源包仍显示到期未知」，零报错）。
+- **200 + HTML 登录页 ⇒「会话失效」**：扫码登录页被回流下来时 `response.json()` 抛错，
+  旧实现报「响应不是 JSON」把用户支去查网络；应当按 `content-type` 先判。
+
+### 未修（已登记）
+
+- **不校验 Cookie 归属**：弹窗文案要求「必须是这张卡片对应的账号」，但服务端不校验
+  粘贴的 Cookie 属于哪个账号 ⇒ 粘了别人账号的 Cookie 会把明细记到这个账号下。
+  后果限于**展示错位**（不会串额度、不会串请求），且要拿到别人的会话凭据才能触发。
+- **补齐轮可能仍偏向一家**（`pickDiversified` 的姊妹问题，见 `misc.md`）。
