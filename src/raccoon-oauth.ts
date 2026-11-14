@@ -27,6 +27,7 @@ import {
   RACCOON_IAM_OK_CODE,
   RACCOON_IAM_PREFIX,
   RACCOON_IAM_QR_CREATE_PATH,
+  RACCOON_IAM_QR_EXPIRED_CODE,
   RACCOON_IAM_QR_INVALID_CODE,
   RACCOON_IAM_QR_LOGIN_PATH,
   RACCOON_QR_POLL_INTERVAL_MS,
@@ -192,11 +193,17 @@ async function postIamJson(
       `raccoon: IAM 请求失败：${error instanceof Error ? error.message : String(error)}`,
     )
   }
+  // ⚠️⚠️ **解析失败不能抛**（PR #76 同型教训的另一面）：这个函数有两个消费者 ——
+  //    `createRaccoonQrTicket` 要「抛错让用户看到原因」，而 `pollRaccoonQrLogin` 要
+  //    「识别 401 是过期终态」。若在这里抛，401 + HTML 的网关会走到 `poll` 的
+  //    `catch` 被当成 `pending` ⇒ 用户拿着一个**永远不可能成功**的二维码一直等
+  //    （正是 IKVA90 的症状）。所以这里只把状态码翻译成 `HTTP_<code>` 信封，
+  //    交给调用方按语义决定「抛」还是「判终态」。
   let parsed: unknown
   try {
     parsed = await response.json()
   } catch {
-    throw new Error(`raccoon: IAM 响应不是 JSON（HTTP ${response.status}）`)
+    parsed = undefined
   }
   return { envelope: parseIamEnvelope(parsed, response.status), status: response.status }
 }
@@ -234,7 +241,9 @@ export async function createRaccoonQrTicket(
   if (typeof rawCode !== 'string' || rawCode.length === 0) {
     throw new Error('raccoon: 申请扫码二维码失败（响应里没有 qrcode_code）')
   }
-  if (typeof rawScanPath !== 'string' || !rawScanPath.startsWith('/')) {
+  // 必须拒绝协议相对 URL（`//evil.example/steal`）：它同样 startsWith('/')，
+  // 但 `new URL(它, apiBase)` 会把 origin 换成外域 ⇒ 二维码指向攻击者。
+  if (typeof rawScanPath !== 'string' || !rawScanPath.startsWith('/') || rawScanPath.startsWith('//')) {
     throw new Error('raccoon: 申请扫码二维码失败（响应里没有可用的 scan_path）')
   }
   const rawExpiresIn = envelope.data.expires_in
@@ -287,10 +296,17 @@ export function buildQrImageUrl(product: RaccoonProduct, ticket: RaccoonQrTicket
  * 误判成 `success` 会让流程拿到空 token 后卡死，误判成 `canceled` 则会让
  * 用户正在扫码的二维码被无故刷新。
  *
- * ⚠️⚠️ 唯一的**终态**是 IAM 的 `AUTH_QRCODE_INVALID`（HTTP 401）—— 它表示这张
- * 二维码已过期/被消耗，必须让页面重新签发（我们把它合成为 `expired`）。
- * **不能也降级成 `pending`**：那样页面会永远转圈，而这正是 2026-11-14 之前
- * 「扫码后插件一直转圈、零报错」的症状（Gitee IKVA90）。
+ * ⚠️⚠️ **终态有两个码，必须都认**（2026-11-15 真机实测）：
+ * - `401 AUTH_QRCODE_INVALID`：code 不是 IAM 签发的（乱码/伪造）
+ * - `410 AUTH_QRCODE_EXPIRED`：这张票曾经有效，但已过 `expires_in`
+ *   （签一张真票等它自然到期，`t+305s` 实测回这个）
+ *
+ * 两者都必须让页面重新签发（我们合成为 `expired`）。**不能降级成 `pending`**：
+ * 那样页面会永远转圈，而这正是 2026-11-14 之前「扫码后插件一直转圈、零报错」
+ * 的症状（Gitee IKVA90）。
+ *
+ * ⚠️ 反向对照：**5xx 绝不能被当成过期**（否则上游抖一下就会无限重签）。所以这里
+ * 只认精确的 401/410，不写 `httpStatus >= 400`（对抗审计 S2）。
  *
  * ⚠️ 旧端点 `/api/web/auth/v1/login_with_qrcode_code` 已是**僵尸端点**：对任意
  * 字符串恒回 `{"code":0,…,"status":"pending"}`（实测），不再推进任何状态。
@@ -314,8 +330,13 @@ export async function pollRaccoonQrLogin(
   } catch {
     return { status: 'pending' }
   }
-  // 二维码失效：IAM 回 401 + `AUTH_QRCODE_INVALID`（官方前端同样映射成 expired）
-  if (envelope.code === RACCOON_IAM_QR_INVALID_CODE || httpStatus === 401) {
+  // 二维码失效：401 乱码 / 410 真过期都要重新签发（官方前端同样映射成 expired）
+  if (
+    envelope.code === RACCOON_IAM_QR_INVALID_CODE
+    || envelope.code === RACCOON_IAM_QR_EXPIRED_CODE
+    || httpStatus === 401
+    || httpStatus === 410
+  ) {
     return { status: 'expired' }
   }
   if (envelope.code !== RACCOON_IAM_OK_CODE || envelope.data === undefined) {

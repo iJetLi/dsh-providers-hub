@@ -15,8 +15,11 @@
  *   POST /raccoon/sms/verify  → 提交验证码完成登录
  * ```
  *
- * 微信扫码的 `code` 由**宿主侧本地随机生成**（实测服务端接受任意自造 code
- * 并进入 `pending`），完全绕开那个收不到的自定义协议回调。
+ * 微信扫码的 `code` 由 **IAM 服务端签发**（`POST /api/iam/v1/auth/mp/qrcode`）。
+ *
+ * ⚠️ 2026-11-14 起**不能**再本地随机生成：旧端点
+ * `/api/web/auth/v1/login_with_qrcode_code` 已成僵尸（对任意字符串恒回
+ * `pending`、不再推进状态），新端点会直接拒发非签发 code（Gitee IKVA90）。
  *
  * ## 与其余 provider 的契约一致性
  *
@@ -70,6 +73,17 @@ export interface StartedRaccoonLoginFlow {
 /** 流程内部状态（**只存在于宿主侧**）。 */
 interface FlowState {
   /**
+   * 页面是否**已经**拿到过二维码的 SVG。
+   *
+   * ⚠️ 这个字段存在的唯一理由是「签发失败 → 恢复」这条路径：`/raccoon/login` 渲染时
+   *    若 `ticket === undefined`，页面拿到的是「二维码获取失败」的兜底块；之后某次
+   *    `ensureTicket` 恢复成功，`/raccoon/poll` 只回 `{ status: 'pending' }` ⇒ 页面
+   *    没有任何理由重绘 ⇒ 用户永远停在「获取失败」（必须手动刷新）。
+   *    所以 poll 侧要知道「这面页面上现在有没有码」，没有就顺带补一张。
+   * 代价：每次签发/换图只多发一次 SVG，不是每轮轮询都发（2 秒一轮会白烧流量）。
+   */
+  qrDelivered?: boolean
+  /**
    * 扫码票据（**服务端签发**，见 `createRaccoonQrTicket`）。
    *
    * ⚠️ 懒签发：`startRaccoonLoginFlow` 必须**立即返回 `loginUrl`**（否则
@@ -79,10 +93,16 @@ interface FlowState {
   ticket?: RaccoonQrTicket
   /** 最近一次申请票据失败的原因（页面据此展示可读错误 + 短信兜底提示）。 */
   ticketError?: string
+  /**
+   * 正在飞的签发请求（单飞表）。
+   *
+   * ⚠️ 用户连点两次「重新加载」/ 两个标签页同时轮询时 `ensureTicket` 会被并发调用；
+   * 没有它就会**签出两张票**、后一张覆盖前一张，而用户扫的可能是被覆盖的那张
+   * ⇒ 表现为「扫了没反应」（对抗审计 P2 实测 `issued: 2`）。
+   */
+  ticketInflight?: Promise<RaccoonQrTicket | undefined>
   /** 当前展示的短信目标手机号（未发过短信时为空）。 */
   phone: string
-  /** 最近一次轮询的二维码有效期（供页面展示倒计时）。 */
-  lastExpiredAt: string | undefined
 }
 
 /**
@@ -100,15 +120,23 @@ async function ensureTicket(
   fetcher: typeof fetch,
 ): Promise<RaccoonQrTicket | undefined> {
   if (state.ticket !== undefined) return state.ticket
-  try {
-    const ticket = await createRaccoonQrTicket(product, fetcher)
-    state.ticket = ticket
-    state.ticketError = undefined
-    return ticket
-  } catch (error) {
-    state.ticketError = error instanceof Error ? error.message : String(error)
-    return undefined
-  }
+  // 已经有请求在飞 ⇒ 复用同一张票（并发两次调用只签一次）
+  if (state.ticketInflight !== undefined) return state.ticketInflight
+  const inflight = (async (): Promise<RaccoonQrTicket | undefined> => {
+    try {
+      const ticket = await createRaccoonQrTicket(product, fetcher)
+      state.ticket = ticket
+      state.ticketError = undefined
+      return ticket
+    } catch (error) {
+      state.ticketError = error instanceof Error ? error.message : String(error)
+      return undefined
+    } finally {
+      state.ticketInflight = undefined
+    }
+  })()
+  state.ticketInflight = inflight
+  return inflight
 }
 
 /** `startRaccoonLoginFlow` 的选项。 */
@@ -133,7 +161,6 @@ export async function startRaccoonLoginFlow(
   const fetcher = options.fetcher ?? fetch
   const state: FlowState = {
     phone: '',
-    lastExpiredAt: undefined,
   }
 
   let resolveResult!: (value: RaccoonCredential) => void
@@ -227,6 +254,7 @@ async function handleRequest(
 
   if (url.pathname === RACCOON_LOGIN_PAGE_PATHS.login) {
     const ticket = await ensureTicket(state, product, deps.fetcher)
+    state.qrDelivered = ticket !== undefined
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
     response.end(renderRaccoonLoginPage(product, ticket, state.ticketError))
     return
@@ -254,7 +282,6 @@ async function handleRequest(
       writeJson(response, { status: 'success' })
       return
     }
-    if (polled.expiredAt !== undefined) state.lastExpiredAt = polled.expiredAt
     // `canceled`（用户取消）与 `expired`（二维码过期/被消耗）都必须**重签**，
     // 否则页面上的二维码永久不可用 —— 这正是「扫码后一直转圈」的另一个入口。
     const needsRenewal = polled.status === 'canceled' || polled.status === 'expired'
@@ -263,12 +290,17 @@ async function handleRequest(
       state.ticket = undefined
       renewed = await ensureTicket(state, product, deps.fetcher)
     }
+    // 页面何时需要一张新图：①本轮换过票据；②此前因为签发失败而**没拿到过**码
+    // （`/raccoon/login` 渲染的是兜底块，之后 `ensureTicket` 恢复成功）。
+    const needsQr = renewed !== undefined || state.qrDelivered !== true
+    const qrSvg = needsQr ? renderQrSvg(buildQrImageUrl(product, renewed ?? ticket)) : undefined
+    if (qrSvg !== undefined) state.qrDelivered = true
     writeJson(response, {
       status: polled.status,
       ...polled.expiredAt !== undefined ? { expiredAt: polled.expiredAt } : {},
       ...state.ticketError !== undefined ? { message: state.ticketError } : {},
-      // 换图时把新二维码给页面（页面据此替换 `<svg>`）
-      ...renewed !== undefined ? { qr: renderQrSvg(buildQrImageUrl(product, renewed)) } : {},
+      // 换图/补图时把新二维码给页面（页面据此替换 `<svg>`）
+      ...qrSvg !== undefined ? { qr: qrSvg } : {},
     })
     return
   }
@@ -471,6 +503,13 @@ export function renderRaccoonLoginPage(
     <div class="pane" id="paneQr" data-show="1">
       <div class="qr" id="qrBox">${qrSvg}</div>
       <p class="sub">打开微信扫一扫，扫描上方二维码</p>
+      <!--
+        ⚠️ 常驻一句「打不开就用下方」：2026-11-14/15 实测官方二维码落地页
+        /login/mp 全部 404（含微信 UA），而签发本身是**成功**的
+        ⇒ 不会走到 .qr-fallback 那条分支。不常驻提示的话，用户扫进去
+        只看到一个 404 页，而界面上没有任何一句告诉他可以改用短信。
+      -->
+      <p class="sub">扫完打不开页面？可直接改用下方「短信登录」</p>
       <div class="status" id="qrStatus">等待扫码…</div>
     </div>
 
@@ -527,11 +566,17 @@ export function renderRaccoonLoginPage(
         return;
       }
       if (data.status === 'logging') { setQrStatus('已扫码，请在微信中确认…'); return; }
-      if (data.status === 'canceled') {
+      // ⚠️⚠️ “canceled”（用户取消）与 “expired”（过期/已被消耗）**都必须换图**。
+      // 服务端两条都重签并回填 data.qr；页面这边少一个分支的后果是：
+      // 后端换了新码，用户却盯着**已经失效的旧码**、状态还写着「等待扫码…」
+      // —— 零报错一直等到超时（IKVA90 的症状就是这么残留的）。
+      if (data.status === 'canceled' || data.status === 'expired') {
         if (data.qr) { qrBox.innerHTML = data.qr; }
         setQrStatus('二维码已刷新，请重新扫码');
         return;
       }
+      // 首次签发失败、之后恢复：服务端会顺带补一张，这里同样要换上。
+      if (data.qr) { qrBox.innerHTML = data.qr; }
       setQrStatus('等待扫码…');
     }).catch(function () {
       // 轮询偶发失败不打断（下一次继续）

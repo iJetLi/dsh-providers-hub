@@ -183,8 +183,24 @@ describe('renderRaccoonLoginPage', () => {
     expect(html).not.toContain('refresh_token')
   })
 
-  it('轮询间隔与客户端一致（2 秒）', () => {
-    expect(html).toContain('2000')
+  it('页面脚本里的轮询间隔就是票据下发的值（5 秒）', () => {
+    // ⚠️ 原判据 `toContain('2000')` **恒真** —— 生成的 `<svg viewBox="0 0 2000 2000">`
+    //    里就有 `2000`，写死 2000 与用票据值逐字节相同（正向审计实测的无牙格）。
+    //    判据必须打在**赋值语句**上，且取值与默认常量（2000）不同。
+    expect(html).toContain('var POLL_INTERVAL_MS = 5000;')
+  })
+
+  it('★★ 二维码下方必须常驻「改用短信登录」提示（不是只在签发失败时才有）', () => {
+    // 2026-11-14/15 实测：官方二维码落地页 `/login/mp` 全部 404，而**签发是成功的**
+    // ⇒ 页面走不到 `.qr-fallback` 那条「获取失败」分支。提示若不常驻，
+    // 用户扫进一个 404 页、界面上却没有任何一句告诉他可以改用短信。
+    expect(html).toContain('扫完打不开页面？可直接改用下方「短信登录」')
+    // 与兜底块是**两条不同的腿**：兜底块只在签发失败时替换二维码区域。
+    // 本用例的 `html` 是**带 ticket** 渲染的 ⇒ 不应该出现兜底块
+    // （写反了就是「有票据时也在报错」的假红）。
+    expect(html).not.toContain('class="qr-fallback"')
+    const failed = renderRaccoonLoginPage(RACCOON, undefined, 'boom')
+    expect(failed).toContain('class="qr-fallback"')
   })
 
   it('登录 URL 不硬编码进页面（由宿主侧按会话生成）', () => {
@@ -223,7 +239,133 @@ describe('startRaccoonLoginFlow', () => {
     const base = originOf(started.loginUrl)
     const response = await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`)
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ status: 'pending' })
+    const payload = await response.json() as { status: string; qr?: string }
+    expect(payload.status).toBe('pending')
+    // 这条 poll 是页面**第一次**来问（`/raccoon/login` 还没被访问过）⇒ 服务端要顺带
+    // 把二维码带回去，否则页面拿不到图（正向审计 P1-b 的同一条路径）。
+    expect(payload.qr).toContain('<svg')
+  })
+
+  it('★★★ 401 + HTML（非 JSON）必须判「过期」而不是一直 pending（正向审计 P2-a）', async () => {
+    // ⚠️ 原实现里 `response.json()` 抛错**先于** `HTTP_${status}` 兜底 ⇒ 网关把 401
+    //    换成 HTML 时被 `poll` 的 catch 吞成 pending ⇒ 用户拿着永远不可能成功的
+    //    二维码一直等（正是 IKVA90 的症状）。判据必须走**端到端轮询**，不能只测
+    //    `parseIamEnvelope` 纯函数（那样测不到 `postIamJson` 的抛出）。
+    const fetcher = iamFetch(async () => new Response('<html>denied</html>', {
+      status: 401,
+      headers: { 'Content-Type': 'text/html' },
+    }))
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const base = originOf(started.loginUrl)
+    const payload = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`)).json() as {
+      status: string
+    }
+    expect(payload.status).toBe('expired')
+  })
+
+  it('★★★ 签发失败后恢复：poll 必须把二维码补上（正向审计 P1-b）', async () => {
+    // 场景：`/raccoon/login` 渲染时签发失败 ⇒ 页面拿到「二维码获取失败」兜底块；
+    // 之后的某次 poll 里签发恢复成功 ⇒ 必须顺带补一张图，否则用户永远停在
+    // 「获取失败」上、只能手动刷新。
+    // 前两次签发都失败（`/raccoon/login` 一次 + 第一次 poll 一次），第三次才恢复。
+    // ⚠️ 次数必须对齐清楚：`/login` 自己就消耗掉一次签发调用。
+    let issueCalls = 0
+    const fetcher = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/auth/mp/qrcode')) {
+        issueCalls += 1
+        return issueCalls <= 2
+          ? jsonResponse({ code: 'INTERNAL', message: 'boom' }, 500)
+          : jsonResponse({ code: 'OK', message: 'success', data: TICKET })
+      }
+      return jsonResponse({ code: 'OK', data: { status: 'pending' } })
+    })
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const base = originOf(started.loginUrl)
+    // ⚠️ **必须先走一次 `/raccoon/login`**：那是「页面拿到什么」的起点 ——
+    //    签发失败时它渲染兜底块并把 `qrDelivered` 置 false。少了这一步，
+    //    下面「poll 补图」的判据在「`qrDelivered` 恒 true」的变异下也照样绿
+    //    （实测无牙：变异 `state.qrDelivered = true` 全绿）。
+    const page = await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.login}`)
+    expect(await page.text()).toContain('二维码获取失败')
+
+    const first = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`)).json() as {
+      status: string
+      qr?: string
+      message?: string
+    }
+    expect(first.status).toBe('pending')
+    expect(first.qr).toBeUndefined()
+    expect(first.message).toContain('boom')
+
+    const second = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`)).json() as {
+      status: string
+      qr?: string
+    }
+    expect(second.status).toBe('pending')
+    expect(second.qr).toContain('<svg')
+  })
+
+  it('★★ 二维码给过一次之后，普通 pending 不再重复下发（2 秒一轮别白传 SVG）', async () => {
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const base = originOf(started.loginUrl)
+    const first = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`)).json() as {
+      qr?: string
+    }
+    expect(first.qr).toContain('<svg')
+    const second = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`)).json() as {
+      qr?: string
+    }
+    expect(second.qr).toBeUndefined()
+  })
+
+  it('★★★ 并发两次 poll 只签一次票（单飞；否则后一张覆盖前一张，用户扫的是废票）', async () => {
+    // 触发面很平实：用户连点两次「重新加载」、或两个标签页同时打开。
+    // 没有单飞时 `ensureTicket` 会被并发调用两次 ⇒ `issued: 2`，
+    // 而页面上只画了最后一张 ⇒ 用户手机扫的可能是被覆盖掉的那张，表现为「扫了没反应」。
+    let issueCalls = 0
+    let started: { loginUrl: string } | undefined
+    const fetcher = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/auth/mp/qrcode')) {
+        issueCalls += 1
+        // 让第一次签发**慢一点**：只有「先到先占位」的实现才能通过；
+        // 若两次都各自 await，就会签出两张。
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return jsonResponse({ code: 'OK', message: 'success', data: TICKET })
+      }
+      return jsonResponse({ code: 'OK', data: { status: 'pending' } })
+    })
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const base = originOf(started.loginUrl)
+
+    const [a, b] = await Promise.all([
+      fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`),
+      fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`),
+    ])
+    expect(a.status).toBe(200)
+    expect(b.status).toBe(200)
+    expect(issueCalls).toBe(1)
+    started.close?.()
+  })
+
+  it('★★ 页面脚本必须同时处理 canceled 与 expired（否则后端码、页面不换图）', () => {
+    // ⚠️ `html` 是上一个 describe 的局部变量，这里必须自己渲染一份。
+    const page = renderRaccoonLoginPage(RACCOON, {
+      code: TICKET.qrcode_code,
+      scanPath: TICKET.scan_path,
+      expiresInMs: TICKET.expires_in * 1000,
+      pollIntervalMs: TICKET.poll_interval * 1000,
+    })
+    // 纯 HTML 断言只能看源码；但这正是「页面少一个分支」这个缺陷的唯一可测面 ——
+    // 本仓对**内联脚本**的既有做法就是源码断言（真正的行为级验证需要 DOM 环境）。
+    // 判据写成**两个状态在同一行同一条件里**，杜绝「只加了一个分支」。
+    expect(page).toContain("data.status === 'canceled' || data.status === 'expired'")
+    // ⚠️ `if (data.qr) { … }` 在**两个分支**里各有一处（换图分支 + pending 兜底分支），
+    //    只查单行时删掉 pending 那一处仍然绿（实测无牙）。判据必须锚**相邻两行**，
+    //    这样「页面在普通 pending 里不再接管补图」才会变红。
+    expect(page).toContain(
+      'if (data.qr) { qrBox.innerHTML = data.qr; }\n      setQrStatus(\'等待扫码…\');',
+    )
   })
 
   it('扫码成功时 result promise 解析出凭据', async () => {
@@ -434,8 +576,11 @@ describe('startRaccoonLoginFlow', () => {
     // 转义：原文里的 `<script>` 不许以可执行形态出现
     expect(html).toContain('&lt;script&gt;')
     expect(html).not.toContain('<script>alert(1)')
-    // 不许退回本地随机 code（那在新端点上 100% 被拒，只会把明确的失败变成一直转圈）
-    expect(html).not.toMatch(/code=[0-9a-f]{32}/)
+    // ⚠️ 这里原本有一条 `expect(html).not.toMatch(/code=[0-9a-f]{32}/)`（「不许退回本地随机 code」）。
+    // 它被**删除**了：`generateQrCode()` 已经从实现里移除，任何路径都不可能再产出
+    // 32 位 hex 串 ⇒ 该断言**结构性恒真**，删掉它不会损失任何覆盖（对抗审计 P2）。
+    // 「不许退回本地随机 code」真正的守卫是上面那条 `toContain('二维码获取失败')`
+    // —— 只有签发失败才会渲染兜底块。
   })
 
   it('★★★ 轮询拿到 expired 时必须重签新票据，并把新二维码回给页面', async () => {

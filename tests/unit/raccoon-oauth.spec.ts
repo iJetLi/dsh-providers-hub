@@ -70,6 +70,16 @@ describe('createRaccoonQrTicket', () => {
       .rejects.toThrow('qrcode_code')
   })
 
+  it('★★ 协议相对 scan_path（//evil.example）必须拒绝，不许把二维码指向外域', async () => {
+    // `startsWith('/')` 对 `//evil.example/steal` 同样成立，但 `new URL(它, apiBase)`
+    // 会把 origin 换成外域 ⇒ 用户扫的是攻击者的二维码。
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 'OK',
+      data: { qrcode_code: 'qr-1', scan_path: '//evil.example/steal' },
+    }))
+    await expect(createRaccoonQrTicket(RACCOON, fetcher)).rejects.toThrow(/scan_path/)
+  })
+
   it('缺 scan_path（或非绝对路径）时抛错', async () => {
     const fetcher = vi.fn(async () => jsonResponse({
       code: 'OK', data: { qrcode_code: 'qr-x', expires_in: 300, poll_interval: 2 },
@@ -87,9 +97,11 @@ describe('createRaccoonQrTicket', () => {
     expect(ticket.pollIntervalMs).toBe(2_000)
   })
 
-  it('★★ 上界夹取（expires_in 60 分钟 / poll_interval 10 分钟都不许原样下发）', async () => {
+  it('★★ 上界夹取（输入超过上界时不许原样下发）', async () => {
+    // ⚠️ 输入必须**真超**上界：写 3_600（== 上界 3_600 秒）时，「夹取」与「不夹取」
+    //    结果逐字节相同 ⇒ 删掉 `Math.min` 判据照样绿（正向审计实测的无牙格）。
     const fetcher = vi.fn(async () => jsonResponse({
-      code: 'OK', data: { qrcode_code: 'qr-x', scan_path: '/login/mp', expires_in: 3_600, poll_interval: 600 },
+      code: 'OK', data: { qrcode_code: 'qr-x', scan_path: '/login/mp', expires_in: 7_200, poll_interval: 6_000 },
     }))
     const ticket = await createRaccoonQrTicket(RACCOON, fetcher as unknown as typeof fetch)
     expect(ticket.expiresInMs).toBe(3_600_000)
@@ -193,6 +205,33 @@ describe('pollRaccoonQrLogin', () => {
     }, 401))
     const result = await pollRaccoonQrLogin(RACCOON, 'qr-stale', fetcher as unknown as typeof fetch)
     expect(result.status).toBe('expired')
+  })
+
+  it('★★★ AUTH_QRCODE_EXPIRED（HTTP 410）⇒ expired（真机 t+305s 实测）', async () => {
+    // 2026-11-15 真机：签一张真票等它自然到期，`t+305s` 回
+    // `HTTP 410 {"code":"AUTH_QRCODE_EXPIRED","message":"mini-program QR code expired"}`。
+    // 只认 401 会让「票过期」被当成「继续等」⇒ 页面转圈到 5 分钟超时。
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 'AUTH_QRCODE_EXPIRED',
+      message: 'mini-program QR code expired',
+    }, 410))
+    await expect(pollRaccoonQrLogin(RACCOON, 'qr-expired-0001', fetcher)).resolves.toEqual({
+      status: 'expired',
+    })
+  })
+
+  it('★★ 只有 HTTP 410 而 code 缺失时也判 expired', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ message: 'gone' }, 410))
+    await expect(pollRaccoonQrLogin(RACCOON, 'qr-expired-0002', fetcher)).resolves.toEqual({
+      status: 'expired',
+    })
+  })
+
+  it('★★★ 反向对照：HTTP 500 绝不能判 expired（否则上游抖一下无限重签）', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ message: 'internal error' }, 500))
+    await expect(pollRaccoonQrLogin(RACCOON, 'qr-boom-0001', fetcher)).resolves.toEqual({
+      status: 'pending',
+    })
   })
 
   it('★★ 只有 HTTP 401 而 code 缺失时也判 expired（网关换皮的兜底）', async () => {

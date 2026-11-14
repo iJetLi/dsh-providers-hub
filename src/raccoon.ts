@@ -92,23 +92,39 @@ export const RACCOON_IAM_OK_CODE = 'OK'
 /** IAM 的二维码失效码（轮询时下发，HTTP 401）。 */
 export const RACCOON_IAM_QR_INVALID_CODE = 'AUTH_QRCODE_INVALID'
 
+/**
+ * 二维码**真的**过期时 IAM 回的码（HTTP **410**）。
+ *
+ * ⚠️⚠️ 与上面的 `AUTH_QRCODE_INVALID`（HTTP 401）**是两个不同的码，不能合并**：
+ * - `401 AUTH_QRCODE_INVALID`：传进来的 code 根本不是 IAM 签发的（乱码/伪造）。
+ * - `410 AUTH_QRCODE_EXPIRED`：这张票**曾经**有效，但已经过了 `expires_in`。
+ *
+ * 2026-11-15 真机实测：签一张真票后等它自然到期，`t+305s` 回
+ * `HTTP 410 {"code":"AUTH_QRCODE_EXPIRED","message":"mini-program QR code expired"}`。
+ * 只认 401 会让「票过期」被当成「继续等」⇒ 页面转圈到 5 分钟超时（Gitee IKVA90 残留症状）。
+ *
+ * 本仓曾经在这条上写错过：注释引用了正确的 `AUTH_QRCODE_EXPIRED`，常量却写成
+ * `AUTH_QRCODE_INVALID`（对抗审计 P0-1 抓出）。
+ */
+export const RACCOON_IAM_QR_EXPIRED_CODE = 'AUTH_QRCODE_EXPIRED'
+
 /** 扫码登录整体超时（毫秒）。 */
 export const RACCOON_LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 
 /**
  * 扫码状态机的状态值。
  *
- * ⚠️ `expired` **不是服务端下发的状态值**（服务端只有 pending / logging /
- * canceled / success）—— 它由**我们**在 IAM 回 `AUTH_QRCODE_INVALID`（HTTP 401）
- * 时合成：官方前端把该码映射成 `expired` 分支（chunk `5348` 的
- * `"AUTH_QRCODE_EXPIRED"===e.code?"expired":"failed"`），体验上等价。
+ * ⚠️ 这张表**只放服务端真的会下发的状态值**（pending / logging / canceled / success）。
+ * `expired` 不在这里：它是**我们**合成的轮询终态（IAM 回 `AUTH_QRCODE_INVALID`
+ * （HTTP 401）或 `AUTH_QRCODE_EXPIRED`（HTTP 410）时），官方前端同样把它映射成
+ * `expired` 分支（chunk `5348` 的 `"AUTH_QRCODE_EXPIRED"===e.code?"expired":"failed"`），
+ * 体验上等价。放进这张表会让「服务端下发了 expired」这个错误前提看起来成立。
  */
 export const RACCOON_QR_STATUS = {
   pending: 'pending',
   logging: 'logging',
   canceled: 'canceled',
   success: 'success',
-  expired: 'expired',
 } as const
 
 /**
