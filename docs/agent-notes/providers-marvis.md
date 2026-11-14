@@ -161,20 +161,28 @@ token 与 guid 绑定：共用本机 guid 会让第二个号**把第一个号顶
 
 ## 5. 模型目录
 
-- **只有一条**：`main-auto`（展示名 `DeepSeek V4.1 Flash`）。这是**产品决策**，不是上游镜像：
-  2026-11-09 在真实账号上实测 magpie 的整张槽位表（`hy3-preview-agent`、`claude-sonnet-4-6` …），
-  **每个槽位都能正常推理**，但用户裁定只暴露自动路由那一条。
-- `main-auto` 由服务端挑模型（实测落到 `deepseek-v4-1-flash-261017`，响应体的 `model` 字段可证）。
-- ⚠️ `claude-*` 在本账号实测 **`400 4130001 无效模型id`**（未授权）—— 所以「槽位表里有」不等于
-  「这个号能用」。
-- ⚠️ **没有远端目录端点**：实测 9 个候选全 404（`/v1/models`、`/v3/marvis_get_models`、
-  `/v3/marvis_get_model_list`、`/v3/marvis_models`、`/v1/model/list` …），magpie 自己也是静态表
-  ⇒ `catalog()` 只能恒返回静态兜底 `MARVIS_FALLBACK_MODELS`；保留 `createModelCatalog`
-  只是为了黑名单 / 关闭供应商 / 无账号门控与其余家同源。
+- **只有一条**：上行槽位 `deepseek-v4-pro-external`（展示名 `DeepSeek V4.1 Flash`）。这是**产品决策**，
+  不是上游镜像：2026-11-09 在真实账号上实测 magpie 的整张槽位表（`hy3-preview-agent`、
+  `claude-sonnet-4-6` …），**每个槽位都能正常推理**，但用户裁定只暴露一条。
+- ⚠️⚠️ **2026-11-14 用户裁定：槽位从 `main-auto` 切到 `deepseek-v4-pro-external`。**
+  两个槽位的**真实下行是同一个模型**（`deepseek-v4-1-flash-261017`，响应体 `model` 字段可证，
+  探针 2/2 稳定）⇒ 目录只显示这一条，展示名保持 `DeepSeek V4.1 Flash`（对用户透明）。
+- 存量配置里的 `main-auto` / `0` / 真实模型 id 由 `normalizeMarvisModelId` **归一**到新槽位
+  （否则老会话会「目录未命中」静默退化成未知模型：text-only / 无上下文 / 无图片，且不报错）。
+- ⚠️ `claude-*` / `gpt-5.4` 在本账号实测 **`400 4130001 无效模型id`**（未授权）—— 所以「槽位表里有」
+  不等于「这个号能用」；且**槽位按账号/套餐下发**，magpie 静态表的可用集合与 2026-11-14 实测不一致
+  （README 的「18 个槽位」是旧口径）。
+- ⚠️ **DS V4.1 Pro 不存在**：官方注册表无条目，所有猜测槽位 / 真实名直传全部 `400 4130001`。
+- ⚠️ **没有远端目录端点**：实测 10 个候选全 404 / 400（`/v1/models`、`/v1/model/list`、
+  `/v3/marvis_get_models`、`/v3/marvis_get_model_list`、`/v3/marvis_models`、`/v3/model/list`、
+  `/marvis_client/marvis_get_models`、`/v3/marvis_get_config`，含 2 个带 md5 签名的 POST 腿），
+  magpie 自己也是静态表 ⇒ `catalog()` 只能恒返回静态兜底 `MARVIS_FALLBACK_MODELS`；保留
+  `createModelCatalog` 只是为了黑名单 / 关闭供应商 / 无账号门控与其余家同源。
 - `contextWindow: 1_000_000`：`0` 是「不知道」的哨兵值，这里填的是上游宣传值；**实测只验证到
   18k（36k 汉字）**，即「没测到上界」。
-- `supportsImage: true`：2026-11-09 实测收 `{type:'image_url',image_url:{url:'data:image/png;base64,…'}}`
-  并答对颜色 ⇒ 任何「目录里标不支持图片」的说法不可信。
+- `supportsImage: true`：2026-11-14 实测 `deepseek-v4-pro-external` 收
+  `{type:'image_url',image_url:{url:'data:image/png;base64,…'}}` 并**答出颜色**（reasoning 里描述了图片
+  本身 ⇒ 真看到图，不是 200 + 静默忽略）⇒ 任何「目录里标不支持图片」的说法不可信。
 - ⚠️ **刻意不声明 `maxTokens`**（评审 M4 定案）：实测 `32_000 / 65_536 / 131_072 / 1_000_000`
   全部 `200`，上游不校验上界；缺席时走上游默认更安全。别「补全」它。
 - ⚠️ **刻意不声明 `reasoning.efforts`**（用户裁定「抄 magpie」）。但 `marvis-messages.ts` 仍保留

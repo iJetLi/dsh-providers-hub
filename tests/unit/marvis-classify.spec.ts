@@ -151,11 +151,11 @@ describe('marvisErrorKindCode', () => {
   })
 })
 
-describe('Marvis 目录（单条 main-auto）', () => {
+describe('Marvis 目录（单条 deepseek-v4-pro-external）', () => {
   it('只有一条模型，显示名是美化名', () => {
     expect(MARVIS_FALLBACK_MODELS).toHaveLength(1)
     const [only] = MARVIS_FALLBACK_MODELS
-    expect(only?.id).toBe('main-auto')
+    expect(only?.id).toBe('deepseek-v4-pro-external')
     expect(only?.name).toBe('DeepSeek V4.1 Flash')
     expect(only?.contextWindow).toBe(1_000_000)
     expect(only?.supportsImage).toBe(true)
@@ -169,22 +169,22 @@ describe('Marvis 目录（单条 main-auto）', () => {
   })
 
   it('findMarvisFallback 能按 id 找到唯一一条', () => {
-    expect(findMarvisFallback('main-auto')?.name).toBe('DeepSeek V4.1 Flash')
+    expect(findMarvisFallback('deepseek-v4-pro-external')?.name).toBe('DeepSeek V4.1 Flash')
     expect(findMarvisFallback('nope')).toBeUndefined()
   })
 })
 
 describe('normalizeMarvisModelId', () => {
   it('去空白', () => {
-    expect(normalizeMarvisModelId('  main-auto ')).toBe('main-auto')
+    expect(normalizeMarvisModelId('  deepseek-v4-pro-external ')).toBe('deepseek-v4-pro-external')
   })
 
-  it('旧持久化下标 "0" 归一成 main-auto（magpie 曾把数组下标写进配置）', () => {
-    expect(normalizeMarvisModelId('0')).toBe('main-auto')
+  it('旧持久化下标 "0" 归一成 deepseek-v4-pro-external（magpie 曾把数组下标写进配置）', () => {
+    expect(normalizeMarvisModelId('0')).toBe('deepseek-v4-pro-external')
   })
 
   it('真实模型 id 归一成槽位（响应体 model 字段被用户粘进配置过）', () => {
-    expect(normalizeMarvisModelId('deepseek-v4-1-flash-261017')).toBe('main-auto')
+    expect(normalizeMarvisModelId('deepseek-v4-1-flash-261017')).toBe('deepseek-v4-pro-external')
   })
 
   it('未知 id 原样保留（交给上游判 400，而不是静默替换）', () => {

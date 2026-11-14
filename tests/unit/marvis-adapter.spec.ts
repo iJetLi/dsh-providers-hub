@@ -60,7 +60,7 @@ function sseBody(text: string): string {
   ].join('\n')
 }
 
-async function collect(adapter: MarvisAdapter, model = 'main-auto'): Promise<string> {
+async function collect(adapter: MarvisAdapter, model = 'deepseek-v4-pro-external'): Promise<string> {
   const chunks: string[] = []
   for await (const chunk of adapter.stream({
     model,
@@ -71,8 +71,8 @@ async function collect(adapter: MarvisAdapter, model = 'main-auto'): Promise<str
   return chunks.join('')
 }
 
-describe('★ 目录：只有 main-auto，且由共享骨架门控', () => {
-  it('★ 有账号 ⇒ 一条 main-auto，名字是美化名，声明 1M 上下文与图片能力', async () => {
+describe('★ 目录：只有 deepseek-v4-pro-external，且由共享骨架门控', () => {
+  it('★ 有账号 ⇒ 一条 deepseek-v4-pro-external，名字是美化名，声明 1M 上下文与图片能力', async () => {
     const listed = await makeAdapter().listModels(MARVIS.id)
     expect(listed).toHaveLength(1)
     const [entry] = listed as Array<{
@@ -81,7 +81,7 @@ describe('★ 目录：只有 main-auto，且由共享骨架门控', () => {
       inputModalities?: readonly string[]
       contextWindow?: number
     }>
-    expect(entry.id).toBe('main-auto')
+    expect(entry.id).toBe('deepseek-v4-pro-external')
     expect(entry.name).toBe('DeepSeek V4.1 Flash')
     // 宿主 `listModels` 会剥掉 contextWindow，但适配器必须交出去（网关走它）。
     expect(entry.contextWindow).toBe(1_000_000)
@@ -91,7 +91,7 @@ describe('★ 目录：只有 main-auto，且由共享骨架门控', () => {
   })
 
   it('★★ 关闭该模型 ⇒ 从 listModels 消失（黑名单对 Marvis 生效）', async () => {
-    const listed = await makeAdapter({ pool: makePool({ disabled: ['main-auto'] }) }).listModels(
+    const listed = await makeAdapter({ pool: makePool({ disabled: ['deepseek-v4-pro-external'] }) }).listModels(
       MARVIS.id,
     )
     expect(listed).toEqual([])
@@ -108,31 +108,31 @@ describe('★ 目录：只有 main-auto，且由共享骨架门控', () => {
   it('★ listAllModels 必须同步（jet-hub-rpc 会 [...all]）', () => {
     const all = makeAdapter().listAllModels?.()
     expect(Array.isArray(all)).toBe(true)
-    expect(all?.map((m) => m.id)).toEqual(['main-auto'])
+    expect(all?.map((m) => m.id)).toEqual(['deepseek-v4-pro-external'])
   })
 
   it('★ 兜底表只有一条（防止有人顺手加回别的槽位）', () => {
-    expect(MARVIS_FALLBACK_MODELS.map((m) => m.id)).toEqual(['main-auto'])
+    expect(MARVIS_FALLBACK_MODELS.map((m) => m.id)).toEqual(['deepseek-v4-pro-external'])
   })
 })
 
 describe('★ 模型 id 归一', () => {
   it('★ 数组下标 "0" 与真实模型 id 都归一成槽位 id', async () => {
     const adapter = makeAdapter()
-    expect((await adapter.resolveModel(MARVIS.id, '0')).id).toBe('main-auto')
+    expect((await adapter.resolveModel(MARVIS.id, '0')).id).toBe('deepseek-v4-pro-external')
     expect((await adapter.resolveModel(MARVIS.id, 'deepseek-v4-1-flash-261017')).id).toBe(
-      'main-auto',
+      'deepseek-v4-pro-external',
     )
   })
 
   /**
-   * ⚠️ 2026-11-10 对抗性审计 I6：`MAIN-AUTO` 原样透传会目录未命中 ⇒ 静默退化
+   * ⚠️ 2026-11-10 对抗性审计 I6：`DEEPSEEK-V4-PRO-EXTERNAL` 原样透传会目录未命中 ⇒ 静默退化
    * 成「未知模型」（text-only / 无上下文 / 无图片），且**不报错**。
    */
   it('★★ 大小写变体同样归一（否则静默退化成未知模型）', async () => {
     const adapter = makeAdapter()
-    const upper = await adapter.resolveModel(MARVIS.id, 'MAIN-AUTO')
-    expect(upper.id).toBe('main-auto')
+    const upper = await adapter.resolveModel(MARVIS.id, 'DEEPSEEK-V4-PRO-EXTERNAL')
+    expect(upper.id).toBe('deepseek-v4-pro-external')
     expect(upper.name).toBe('DeepSeek V4.1 Flash')
     expect(upper.context).toEqual({ contextWindow: 1_000_000 })
     expect(upper.inputModalities).toEqual(['text', 'image'])
@@ -206,7 +206,7 @@ describe('★ 推理：正常流与 content-type 闸门', () => {
       stream: boolean
       stream_options?: { include_usage?: boolean }
     }
-    expect(payload.model).toBe('main-auto')
+    expect(payload.model).toBe('deepseek-v4-pro-external')
     expect(payload.stream).toBe(true)
     expect(payload.stream_options?.include_usage).toBe(true)
   })
@@ -299,7 +299,7 @@ describe('★ 错误分类与槽轮换', () => {
     expect(markLimited).toHaveBeenCalledTimes(1)
     const [slotId, modelId] = markLimited.mock.calls[0] as unknown as [string, string]
     expect(slotId).toBe('marvis-a1')
-    expect(modelId).toBe('main-auto')
+    expect(modelId).toBe('deepseek-v4-pro-external')
   })
 
   it('★★ 402 额度耗尽 ⇒ **换号 + 写冷却标记**（回归：曾与「槽位耗尽」共用 QUOTA_EXCEEDED，被提前短路）', async () => {
@@ -394,7 +394,7 @@ describe('★ 错误分类与槽轮换', () => {
     let failed = false
     try {
       for await (const chunk of adapter.stream({
-        model: 'main-auto',
+        model: 'deepseek-v4-pro-external',
         messages: [{ role: 'user', content: 'hi' }],
       } as never)) {
         if (chunk.type === 'text-delta') seen.push(chunk.text)
@@ -450,7 +450,7 @@ describe('★ 错误分类与槽轮换', () => {
           { id: 'marvis-a2', credential: CREDENTIAL },
         ],
       }).stream({
-        model: 'main-auto',
+        model: 'deepseek-v4-pro-external',
         messages: [{ role: 'user', content: 'hi' }],
         signal: controller.signal,
       } as never)) {

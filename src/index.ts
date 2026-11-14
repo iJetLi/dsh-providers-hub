@@ -201,7 +201,8 @@ import { ModelscopeAdapter, registerModelscopeLlm } from './modelscope-adapter.j
 import { MODELSCOPE } from './modelscope-product.js'
 import { modelscopeModelsUrl, modelscopeHeaders, type ModelscopeCredential } from './modelscope.js'
 // 腾讯 Marvis（2026-11-09）。OpenAI 兼容 + OAuth 授权码（QQ / 微信），
-// 目录**只有** `main-auto` 一条（上游无目录端点），余额与推理同一个 host。
+// 目录**只有**一条（上行槽位 `deepseek-v4-pro-external`；上游无目录端点），
+// 余额与推理同一个 host。
 // 见 `src/marvis-product.ts` / `src/marvis-adapter.ts` 模块头。
 import { MarvisAuth } from './marvis-auth.js'
 import { MarvisAdapter, registerMarvisLlm, type MarvisSlot } from './marvis-adapter.js'
@@ -4160,7 +4161,8 @@ export function apply(ctx: Context): void {
   // ===== 腾讯 Marvis（2026-11-09）=====
   //
   // 形态：OpenAI 兼容（`/v1/chat/completions`）+ OAuth 授权码（QQ / 微信）。
-  // 目录**只有一条** `main-auto`（上游无目录端点，见 `src/marvis-product.ts`）。
+  // 目录**只有一条**（上行槽位 `deepseek-v4-pro-external`，见 `src/marvis-product.ts`；
+  // 上游无目录端点 ⇒ 静态兜底）。
   //
   // ⚠️ 与 modelscope / qiniu 的槽制同形：`slots()` 由**接线层**解析，适配器
   //    不直接读凭据库。区别只在槽里装的是 `MarvisCredential`（要放进请求头

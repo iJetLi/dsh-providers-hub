@@ -20,7 +20,7 @@
  *
  * ## 断言的核心事实
  *
- * `main-auto` 是**服务端自动路由槽位**，实测落到 `deepseek-v4-1-flash-261017`
+ * `deepseek-v4-pro-external` 是**服务端自动路由槽位**，实测落到 `deepseek-v4-1-flash-261017`
  * （响应体的 `model` 字段）。真实模型 id **不能**直传 —— 直传回
  * `400 {"code":4130001,"msg":"客户端AI业务错误: 无效模型id"}`。
  * 这两条正是「auto 档位 → 实际 ds v4.1 flash」在 wire 上的证据。
@@ -108,13 +108,13 @@ suite('Marvis 真机探针（只读）', () => {
     expect(main!.remaining).toBeLessThanOrEqual(balance.total)
   })
 
-  it.skipIf(credential === undefined)('★★ `main-auto` 真的路由到 `deepseek-*`（响应体的 `model` 是唯一证据）', async () => {
+  it.skipIf(credential === undefined)('★★ `deepseek-v4-pro-external` 真的路由到 `deepseek-*`（响应体的 `model` 是唯一证据）', async () => {
     const account = marvisAccountOf(credential as MarvisCredential)
     const response = await fetch(marvisChatUrl(MARVIS.baseUrl), {
       method: 'POST',
       headers: llmHeaders(account, { accept: 'application/json' }),
       body: JSON.stringify({
-        model: 'main-auto',
+        model: 'deepseek-v4-pro-external',
         messages: [{ role: 'user', content: '回复一个字：好' }],
         max_tokens: 8,
         stream: false,
@@ -127,7 +127,7 @@ suite('Marvis 真机探针（只读）', () => {
       choices?: Array<{ message?: { content?: unknown } }>
       usage?: { prompt_tokens?: unknown; completion_tokens?: unknown }
     }
-    // ⚠️ 这是整个集成的**核心断言**：目录里只有槽位名 `main-auto`，
+    // ⚠️ 这是整个集成的**核心断言**：目录里只有槽位名 `deepseek-v4-pro-external`，
     //    但服务端把它路由到了真实模型 —— 展示名「DeepSeek V4.1 Flash」的依据。
     expect(typeof body.model).toBe('string')
     expect(body.model as string).toMatch(/^deepseek-/)
@@ -140,8 +140,8 @@ suite('Marvis 真机探针（只读）', () => {
       slots: async () => [{ id: 'marvis-e2e', credential: credential as MarvisCredential }],
       product: MARVIS,
     })
-    const resolved = await adapter.resolveModel(MARVIS.id, 'main-auto')
-    expect(resolved.id).toBe('main-auto')
+    const resolved = await adapter.resolveModel(MARVIS.id, 'deepseek-v4-pro-external')
+    expect(resolved.id).toBe('deepseek-v4-pro-external')
     expect(resolved.name).toBe('DeepSeek V4.1 Flash')
     expect(resolved.context?.contextWindow).toBe(1_000_000)
     expect(resolved.inputModalities).toEqual(['text', 'image'])
@@ -150,7 +150,7 @@ suite('Marvis 真机探针（只读）', () => {
 
     const chunks: string[] = []
     for await (const chunk of adapter.stream({
-      model: 'main-auto',
+      model: 'deepseek-v4-pro-external',
       messages: [{ role: 'user', content: '回复一个字：好' }],
       maxTokens: 64,
     } as never)) {
@@ -162,7 +162,7 @@ suite('Marvis 真机探针（只读）', () => {
     expect(chunks.some((type) => type === 'text-delta' || type === 'reasoning-delta' || type === 'block-start')).toBe(true)
   })
 
-  it.skipIf(credential === undefined)('★ 真实模型 id 经适配器**归一**成 `main-auto`（用户从别处抄来的真名也能用）', async () => {
+  it.skipIf(credential === undefined)('★ 真实模型 id 经适配器**归一**成 `deepseek-v4-pro-external`（用户从别处抄来的真名也能用）', async () => {
     const adapter = new MarvisAdapter({
       slots: async () => [{ id: 'marvis-e2e', credential: credential as MarvisCredential }],
       product: MARVIS,
@@ -170,7 +170,7 @@ suite('Marvis 真机探针（只读）', () => {
     // 归一发生在 `resolveModel` 里：真实 id 不是合法的上行 `model` 值，
     // 但用户在别处（日志 / 官方文档）看到的就是它 ⇒ 不能报「未知模型」。
     const resolved = await adapter.resolveModel(MARVIS.id, 'deepseek-v4-1-flash-261017')
-    expect(resolved.id).toBe('main-auto')
+    expect(resolved.id).toBe('deepseek-v4-pro-external')
     expect(resolved.name).toBe('DeepSeek V4.1 Flash')
   })
 

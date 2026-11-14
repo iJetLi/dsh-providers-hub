@@ -1171,11 +1171,12 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     // 腾讯 Marvis（2026-11-09 接入）。
     //
     // ## 为什么只有一条模型
-    // 上游**没有模型目录端点**（累计试过 9 条候选路径，全 404 / 400），模型列表
-    // 只能静态兜底。槽位里只有 `main-auto` 是用户要的（服务端自动路由），实测
-    // 落到 `deepseek-v4-1-flash-261017`；`deepseek-v4-pro-external` / `hy3-*` /
-    // `claude-*` / `gpt-5.4` / `hunyuan-*` 本账号无授权（400 无效模型 id）或
-    // 不在用户选择范围内 ⇒ **目录只列一条**。
+    // 上游**没有模型目录端点**（累计试过 10 条候选路径，全 404 / 400），模型列表
+    // 只能静态兜底。2026-11-14 用户裁定：只显示一条，**上行槽位切到
+    // `deepseek-v4-pro-external`**（此前是 `main-auto`，展示名仍是 `DeepSeek V4.1 Flash`）。
+    // 两者真实下行**同一个**模型 `deepseek-v4-1-flash-261017`（响应体 `model` 可证，
+    // 2026-11-14 探针 2/2 稳定）；`hy3-*` / `claude-*` / `gpt-5.4` / `hunyuan-*`
+    // 本账号无授权（400 无效模型 id）或不在用户选择范围内 ⇒ **目录只列一条**。
     // ⚠️ 真实模型 id（`deepseek-v4-1-flash-261017`）**不能直传**：上游回
     //    `400 {"code":4130001,"msg":"客户端AI业务错误: 无效模型id"}`，
     //    只有槽位名可作 `model` 上行 —— 归一逻辑见 `normalizeMarvisModelId`。

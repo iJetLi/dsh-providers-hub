@@ -243,7 +243,7 @@ export class MarvisAdapter extends LlmAdapter {
     const entry = MARVIS_FALLBACK_MODELS.find((m) => m.id === id)
     if (entry?.supportsImage !== true) {
       throw new LlmError(
-        `marvis: 模型 "${model}" 不支持图片输入（本家只有 main-auto 收图）`,
+        `marvis: 模型 "${model}" 不支持图片输入`,
         'UNSUPPORTED_CONTENT',
       )
     }

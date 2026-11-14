@@ -41,7 +41,7 @@ describe('buildMarvisTools', () => {
 })
 
 describe('buildMarvisPayload', () => {
-  const base = { model: 'main-auto', messages: [{ role: 'user', content: 'hi' }] }
+  const base = { model: 'deepseek-v4-pro-external', messages: [{ role: 'user', content: 'hi' }] }
 
   it('stream 恒 true，且带 stream_options.include_usage（账本要靠它）', () => {
     const payload = buildMarvisPayload(base)
@@ -87,6 +87,6 @@ describe('buildMarvisPayload', () => {
   })
 
   it('model 原样透传（归一化是调用方的事）', () => {
-    expect(buildMarvisPayload({ ...base, model: 'main-auto' }).model).toBe('main-auto')
+    expect(buildMarvisPayload({ ...base, model: 'deepseek-v4-pro-external' }).model).toBe('deepseek-v4-pro-external')
   })
 })
