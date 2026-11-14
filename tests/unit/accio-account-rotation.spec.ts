@@ -13,6 +13,13 @@
  * ⚠️ **判别力在「第二发的 token」**：换号若不生效，第二发仍是 `TOK-A`。
  * 只断言「抛出的错误码对」是**恒真**的（修复前后完全一致）。
  *
+ *
+ * ⚠️⚠️ **不要拿 `pool.marks` 当「不换号」的判据**（PR #76 返工实测）：
+ * `recordsAccioRateLimit()` 只认 `quota` 与 `rate` 两类，而 `AUTH` 与
+ * `PERMISSION_DENIED` **都不写标记** ⇒ 对 403 拒绝页而言，
+ * `expect(pool.marks).toHaveLength(0)` **修复前后都成立**（恒真）。
+ * 实测：把整个判据澋掉后只留这条断言，仍然 `Tests 1 passed`。
+ * 真正能证明「没换号」的是 **`sentTokens(fetcher)`**（第二发的 token）。
  * ⚠️ 每条「必须换号」的用例都配一条**反向对照**（「不该换号的一律不换」），
  * 否则一个「凡错就换号」的实现也能全绿 —— 那是白烧整池（buddy 的 11128
  * 内容级拦截教训）。
@@ -220,7 +227,6 @@ describe('accio 请求级换号 · HTTP 层', () => {
     expect(error).toMatchObject({ code: 'PERMISSION_DENIED' })
     expect(refresh).not.toHaveBeenCalled()
     expect(sentTokens(fetcher)).toEqual(['TOK-A'])
-    expect(pool.marks).toHaveLength(0)
   })
 
   it('HTTP 403 JSON：仍按认证失败先续期、再换号', async () => {
@@ -241,6 +247,211 @@ describe('accio 请求级换号 · HTTP 层', () => {
     expect(error).toBeNull()
     expect(refresh).toHaveBeenCalledTimes(1)
     expect(sentTokens(fetcher)).toEqual(['TOK-A', 'TOK-A', 'TOK-B'])
+  })
+
+  // ⚠️ 下面四条是 **PR #76 返工补的判据边界**（正向 + 对抗双审计都指出原 PR
+  // 只测了 `text/html; charset=UTF-8` 一种写法）。`split(';')[0].trim().toLowerCase()`
+  // 三步**缺一步就逃逸**，实测逐格确认（见 `reports/pr76-independent-check.md`）。
+
+  it('★ 判据边界：`TEXT/HTML` 大写形态同样算网关拒绝页', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher, pool } = makeAdapter(
+      [
+        { id: 'acc-1', credential: cred('TOK-A') },
+        { id: 'acc-2', credential: cred('TOK-B') },
+      ],
+      [
+        new Response('<html>Forbidden</html>', { status: 403, headers: { 'content-type': 'TEXT/HTML' } }),
+        sse(okFrame('不应再次请求')),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toMatchObject({ code: 'PERMISSION_DENIED' })
+    expect(refresh).not.toHaveBeenCalled()
+    expect(sentTokens(fetcher)).toEqual(['TOK-A'])
+  })
+
+  it('★ 判据边界：`text/html ; charset=x`（分号前有空格）同样算', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher, pool } = makeAdapter(
+      [
+        { id: 'acc-1', credential: cred('TOK-A') },
+        { id: 'acc-2', credential: cred('TOK-B') },
+      ],
+      [
+        new Response('<html>Forbidden</html>', {
+          status: 403,
+          headers: { 'content-type': 'text/html ; charset=x' },
+        }),
+        sse(okFrame('不应再次请求')),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toMatchObject({ code: 'PERMISSION_DENIED' })
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('★ 诊断：错误消息必须带上服务端原文（WAF 页里才有「为什么被拒」）', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter } = makeAdapter(
+      [{ id: 'acc-1', credential: cred('TOK-A') }],
+      [
+        new Response('<html><title>rgv587_flag:sm</title>账号已被封禁</html>', {
+          status: 403,
+          headers: { 'content-type': 'text/html; charset=UTF-8' },
+        }),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toMatchObject({ code: 'PERMISSION_DENIED' })
+    // ⚠️ 只断言「关键片段在」——不锁整串（文案会改，诊断能力不能丢）。
+    expect(String((error as { message?: unknown }).message)).toContain('账号已被封禁')
+  })
+
+  // ⚠️⚠️ 下面两条锁的是**当前（不理想）行为**，不是「正确性断言」。
+  // 它们的作用是：将来谁把这两格修好（见 `reports/pr76-audit.md` 的「未修」一节），
+  // 这两条会**红**，从而强制他连报告/文档一起改，而不是悄悄改掉。
+  // 同一张网关拒绝页在 `401` / `application/xhtml+xml` 下**仍会续期 + 换号**，
+  // 而 `401` 恰恰是认证挑战最常见的状态码 —— 这是 PR #76 未覆盖的真实缺口。
+
+  it('⚠️ 已登记缺口：`401 + text/html` 目前仍按认证失败续期换号（不是正确行为）', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher } = makeAdapter(
+      [
+        { id: 'acc-1', credential: cred('TOK-A') },
+        { id: 'acc-2', credential: cred('TOK-B') },
+      ],
+      [
+        new Response('<html>Unauthorized</html>', {
+          status: 401,
+          headers: { 'content-type': 'text/html; charset=UTF-8' },
+        }),
+        new Response('<html>Unauthorized</html>', {
+          status: 401,
+          headers: { 'content-type': 'text/html; charset=UTF-8' },
+        }),
+        sse(okFrame('换号后成功')),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toBeNull()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(sentTokens(fetcher)).toEqual(['TOK-A', 'TOK-A', 'TOK-B'])
+  })
+
+  it('⚠️ 已登记缺口：`403 + application/xhtml+xml` 目前也不被认作拒绝页', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher } = makeAdapter(
+      [
+        { id: 'acc-1', credential: cred('TOK-A') },
+        { id: 'acc-2', credential: cred('TOK-B') },
+      ],
+      [
+        new Response('<html>Forbidden</html>', {
+          status: 403,
+          headers: { 'content-type': 'application/xhtml+xml' },
+        }),
+        new Response('<html>Forbidden</html>', {
+          status: 403,
+          headers: { 'content-type': 'application/xhtml+xml' },
+        }),
+        sse(okFrame('换号后成功')),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toBeNull()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(sentTokens(fetcher)).toEqual(['TOK-A', 'TOK-A', 'TOK-B'])
+  })
+
+  it('★★ 诊断原文里出现「传输错误字样」时，不得把网关拒绝重包成可重试的 TRANSPORT', async () => {
+    // ⚠️⚠️ 这是本 PR 返工时**实测抓到的真回归**（正向审计 P3-⑤ 预警 + 我端到端复现）：
+    // `send()` 现在会把拒绝页原文拼进 message（诊断用），而 WAF 页里
+    // `terminated` / `fetch failed` / `socket hang up` 这类「连接被中断」的描述很常见。
+    // 而 `isTransportError()` 按 message 子串判 ⇒ 无守卫时，一个 403 网关拒绝
+    // 会被重包成**可重试的** `TRANSPORT`，白重试 5 次（比不修更糟）。
+    for (const body of [
+      '<html>connection terminated by WAF</html>',
+      '<html>fetch failed: forbidden</html>',
+      '<html>socket hang up</html>',
+    ]) {
+      const refresh = vi.fn(async () => {})
+      const { adapter, fetcher, pool } = makeAdapter(
+        [{ id: 'acc-1', credential: cred('TOK-A') }],
+        [new Response(body, { status: 403, headers: { 'content-type': 'text/html; charset=UTF-8' } })],
+        { refresh },
+      )
+      // eslint-disable-next-line no-await-in-loop -- 三格互不依赖，串行只为报文可读
+      const { error } = await run(adapter)
+      expect(error, `原文：${body}`).toMatchObject({ code: 'PERMISSION_DENIED' })
+      expect(refresh).not.toHaveBeenCalled()
+      expect(sentTokens(fetcher)).toEqual(['TOK-A'])
+      }
+  })
+
+  it('⚠️ 已登记缺口：`403` 但**缺 content-type** 时仍按认证失败续期换号（不是正确行为）', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher } = makeAdapter(
+      [
+        { id: 'acc-1', credential: cred('TOK-A') },
+        { id: 'acc-2', credential: cred('TOK-B') },
+      ],
+      [
+        new Response('<html>Forbidden</html>', { status: 403 }),
+        new Response('<html>Forbidden</html>', { status: 403 }),
+        sse(okFrame('换号后成功')),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toBeNull()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(sentTokens(fetcher)).toEqual(['TOK-A', 'TOK-A', 'TOK-B'])
+  })
+
+  it('⚠️ 已登记缺口：`403 + text/plain` 同样不被认作拒绝页', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher } = makeAdapter(
+      [
+        { id: 'acc-1', credential: cred('TOK-A') },
+        { id: 'acc-2', credential: cred('TOK-B') },
+      ],
+      [
+        new Response('Forbidden', { status: 403, headers: { 'content-type': 'text/plain' } }),
+        new Response('Forbidden', { status: 403, headers: { 'content-type': 'text/plain' } }),
+        sse(okFrame('换号后成功')),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toBeNull()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(sentTokens(fetcher)).toEqual(['TOK-A', 'TOK-A', 'TOK-B'])
+  })
+
+  it('★★ 反向对照：`402 + text/html` 必须仍归 `QUOTA_EXCEEDED`（不得被 403 判据吞掉）', async () => {
+    // ⚠️ 这是「同一张 HTML 拒绝页」的**额度变体**：上游把「额度耗尽」也包成 HTML。
+    // 若判据写成「任何 4xx + HTML」，就会把额度耗尽降级成 `PERMISSION_DENIED`
+    // ⇒ 丢掉 `QUOTA_EXCEEDED` 语义（客户端不会弹「额度已用尽」、也不会换号）。
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher } = makeAdapter(
+      [{ id: 'acc-1', credential: cred('TOK-A') }],
+      [
+        new Response('<html>payment required</html>', {
+          status: 402,
+          headers: { 'content-type': 'text/html; charset=UTF-8' },
+        }),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toMatchObject({ code: 'QUOTA_EXCEEDED' })
+    expect(sentTokens(fetcher)).toEqual(['TOK-A'])
   })
 
   it('★★ issue 主复现：#1 额度耗尽（HTTP 402）⇒ 换到 #2 并成功', async () => {

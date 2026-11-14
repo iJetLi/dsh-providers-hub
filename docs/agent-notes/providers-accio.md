@@ -1058,6 +1058,7 @@ DSH 会把 **`CatalogEntry.id` 注入给模型当身份** —— 而 accio 原�
 | `quota` | `QUOTA_EXCEEDED`（HTTP 402 / 流内 `error_code:402`） | ✅ | ✅ 至 **UTC+8 当日 24:00** |
 | `rate` | `RATE_LIMIT`（HTTP 429） | ✅ | ✅ 1h |
 | `auth` | `AUTH`（HTTP 401/403） | ✅ | ❌ **绝不写** |
+| ⚠️ **网关拒绝页** | `PERMISSION_DENIED`（HTTP 403 **且** media-type 为 `text/html`） | ❌ **不换号** | ❌ **绝不写** |
 | `other` | `INVALID_REQUEST` / `SERVER` / `EMPTY_RESPONSE` / … | ❌ | ❌ |
 
 ⚠️ **认证类只换号、绝不写冷却**是 2026-10-06「全池被封」事故换来的不变式
@@ -1068,6 +1069,77 @@ DSH 会把 **`CatalogEntry.id` 注入给模型当身份** —— 而 accio 原�
 再加文案腿只会引入过宽判据（把 400 参数错判成额度 ⇒ 白封账号一天）。缺文案腿的代价是
 「上游用文案而非状态码表达额度」时不换号 —— 那是**漏判**，与 minimax 那条
 「宁可漏判不可误伤」同向。
+
+### 11.2.1 ⚠️⚠️ 网关 HTML 拒绝页必须**在 `send()` 里**拦下（PR #76，2026-11-14）
+
+**症状**（GitHub #75 真实报障）：上游网关对删除/封禁的账号回
+
+```
+HTTP/1.1 403 Forbidden
+content-type: text/html; charset=UTF-8
+
+<html>…rgv587_flag:sm…</html>
+```
+
+而 `send()` 当时**只看状态码**（`if (status === 401 || status === 403) return 'AUTH'`）
+⇒ 整条链路把它当「凭据真失效」处理：
+
+1. 先 `await this.options.refresh()` —— **白跑一次一次性的 `refresh_token`**；
+2. 再 `rotate` 换下一个号 —— 拒绝页是**网关级**的，换号一样被拦 ⇒ **白烧整池**；
+3. 每次重试都再烧一次。
+
+点燃条件平常：任何一个被 WAF 拦截的账号。
+
+**为什么必须拦在 `send()` 里**（而不是拦在调用方）：
+`this.fetchImpl(` 全文**只有 1 处**（`:1997`），而 `this.send(` 有 **3 个调用点**
+（`:1686` 首发 / `:1774` 续期后重发 / `:1820` 换号内重发）。
+判据写在 `send()` 里，三条腿**全部经过**；写在调用方只挡得住第一条
+（实测变异 M12：把判据挪出 `send()` 后，「续期重发」与「换号重发」
+两条腿都绕过它 ⇒ 断言红在 `sentTokens` 上）。
+
+**为什么归 `PERMISSION_DENIED` 而不是 `SERVER`**：
+`SERVER` 恰在宿主的 `DEFAULT_RETRYABLE_CODES` 里（`EMPTY_RESPONSE / RATE_LIMIT / SERVER /
+TIMEOUT / TRANSPORT`）⇒ 白重试 5 次。`PERMISSION_DENIED` 不在里面，且客户端
+（`client.js:6036-6041`）对它**原样透传 message**（`AUTH` 会把 message 换成「API 密钥无效」，
+与 `src/buddy-adapter.ts` 那段论证同源），且与 `src/cline-adapter.ts` 的地域限制分支同口径。
+
+**判据必须只有一份**：`mediaTypeOf()`（拆 `;`、`trim`、`toLowerCase`）由
+`isHtmlDenialMediaType()` 与 `assertEventStream()` **共用**。实测只自己写一份会逃逸三格：
+
+| `content-type` | 少 `.toLowerCase()` | 少 `.trim()` |
+|---|---|---|
+| `TEXT/HTML` | ❌ 逃逸 | ✅ |
+| `text/html ; charset=x` | ✅ | ❌ 逃逸 |
+| `text/html;charset=UTF-8` | ✅ | ✅ |
+
+⚠️⚠️ **一个极隐蔽的陷阱**：新文案把「服务端原文」拼进
+`LlmError.message`（诊断用），而 `isTransportError()` 是**按 message 子串**判的
+（`fetch failed` / `terminated` / `econnreset` / `epipe` / `socket hang up`），
+而 WAF 页里这些字样**很常见**（它们本来就是「连接被中断」的描述）⇒
+无守卫时，一个 403 网关拒绝会被**重包成可重试的 `TRANSPORT`**（比不修更糟）。
+实测：`<html>connection terminated by WAF</html>` ⇒ 加守卫前 `code=TRANSPORT`、
+加守卫后 `code=PERMISSION_DENIED`。修法 = `isTransportError()` 前置
+`if (error instanceof LlmError) return false`（与 `buddy`/`codely`/`gemini` 三家的
+`if (error instanceof LlmError) throw error` 同口径：**先让已分类的错误出去**）。
+
+**守卫**（`tests/unit/accio-account-rotation.spec.ts`，6 条新增）：
+`text/html` / `TEXT/HTML` / `text/html ; charset=x` 三种写法各一格、
+诊断原文必须出现、传输字样不得重包为 `TRANSPORT`、
+`402 + text/html` 必须仍归 `QUOTA_EXCEEDED`。**7/7 变异有牙**（无牙者如实登记：
+旧版 `expect(pool.marks).toHaveLength(0)` 是**恒真**的 —— `recordsAccioRateLimit()`
+只认 `quota|rate`，403 族无论有无补丁都不写标记 ⇒ 已删除并在
+文件头写明「不要拿 `pool.marks` 当不换号的判据」）。
+
+**未修已登记**（两份审计各自点到，均需独立全量回归）：
+
+1. **`401 + text/html`** 仍走 `AUTH`（续期 + 换号）—— 而 401 恰恰是认证挑战最常见的状态码；
+2. **`403` + 缺/空 `content-type`**、**`application/xhtml+xml`**、**`text/plain`** 四格同样仍烧
+   `refresh_token`（探针实测 `refresh=1` / `fetch=2`）；
+3. **`assertEventStream()` 的 `SERVER` 码**：同一张拒绝页包成 200 时仍归 `SERVER`
+   ⇒ 白重试 5 次（该函数 JSDoc 原写「不重试」，**与事实相反**，已就地更正注释）。
+
+**设计取舍**：403 + HTML 一律停下、**不再尝试其它账号** —— 拒绝页是网关级判定，
+换号必定再被拦。代价是「万一只有这一个号被 WAF 误伤」时不会自动恢复（用户需重新登录）。
 
 ### 11.3 ⚠️⚠️ **一个循环、两段** —— 初版写成两个独立 `for` 被实测打穿三处
 
