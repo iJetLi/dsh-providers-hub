@@ -235,9 +235,15 @@
      ⚠️⚠️ **`auto` 的名额不能被一家占满**（同日上线后实测）：`auto` 池排序后只取前
      `maxAttemptsFor` 个；qoder 未接临期（`NEVER`）且免费模型倍率最低 ⇒ 前 9 名全是 qoder，
      账号整体排队时 9 次切换全在 qoder 内部、别家一个没轮到。修法 = `aggregate-core.ts` 的
-     `pickDiversified`（第一轮每家最多 `AUTO_PER_PROVIDER_FIRST_PASS`=2 个、保序、名额有剩
-     再按原序补齐），只用于 `auto`。用例：`aggregate-qoder-queue.spec.ts`（改回 `slice` 即红）。
-   ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
+     `pickDiversified`（第一轮每家最多 `AUTO_PER_PROVIDER_FIRST_PASS`=2 个、**轮内**保序、
+     名额有剩再按原序补齐），只用于 `auto`。
+     ⚠️ 配额必须**再按 `limit` 夹一次**（`quota = min(perProvider, limit - 1)`）：只按 2 收时
+     `limit <= 2` 会**完全不分散**，而 `limit = maxAttemptsFor(catalog)` 是「最长候选表的
+     长度」，只登录两家的部署里它恰好就是 2 ⇒ 这是**可达**的，不是理论边界。
+     ⚠️ 具名虚拟模型不走 `pickDiversified` 的理由**不是**「每家一个」（`buildVirtualModels`
+     明文保留同渠道的重复候选），而是**候选数本来就不超过 `limit`**（`slice` 一个都不截断）。
+     用例：`aggregate-qoder-queue.spec.ts`（改回 `slice` 即红）。
+>   ⚠️ **为什么不用 harness 的 `retryPolicy`**：它的 `DEFAULT_RETRYABLE_CODES` 是
    `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]` **不含 `QUEUE`/`AUTH`**，
    且它的退避是**固定参数**（`initialDelayMs=500`、`maxDelayMs=10_000`、
    `maxRetries=5`），**没有 per-error「服务端指定延迟」的通道** ——

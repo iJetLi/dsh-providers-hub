@@ -165,9 +165,32 @@ describe('pickDiversified：auto 名额不被一家占满', () => {
     expect(pickDiversified(ranked, 6).map((x) => `${x.provider}/${x.realId}`))
       .toEqual(['qoder/a', 'qoder/b', 'buddy/x', 'trae/y', 'qoder/c', 'qoder/d'])
   })
-  it('只有一家渠道时总名额不变（补齐轮用回同家）', () => {
+  it('只有一家渠道时总名额不变（补齐轮用回同家的第 3、4 个）', () => {
     const ranked = [c('qoder', 'a'), c('qoder', 'b'), c('qoder', 'c')]
-    expect(pickDiversified(ranked, 3)).toHaveLength(3)
+    // ⚠️ 不能只断言 `toHaveLength(3)`：那样对**顺序与身份**全盲（正序、反序、
+    //    换成别家的三个都过）⇒ 正向审计 P3-④ 实测「把 picked 反序仍绿」。
+    expect(pickDiversified(ranked, 3).map((x) => `${x.provider}/${x.realId}`))
+      .toEqual(['qoder/a', 'qoder/b', 'qoder/c'])
+  })
+  it('★★ 名额本身小于「每家 2 个」时，配额必须跟着收缩（正向审计 P2-1）', () => {
+    const ranked = [c('qoder', 'a'), c('qoder', 'b'), c('qoder', 'c'), c('buddy', 'x')]
+    // 故障形态：`limit` 只取 2 时若仍按 `perProvider = 2` 收，第一轮就吃满
+    // `[qoder/a, qoder/b]` —— 「名额被一家占满」原样存在，修法**静默失效**。
+    // 而 `limit = maxAttemptsFor(catalog)` = 最长候选表的长度，只登录两家的部署里
+    // 它**恰好就是 2** ⇒ 这不是理论边界。
+    expect(pickDiversified(ranked, 2).map((x) => `${x.provider}/${x.realId}`))
+      .toEqual(['qoder/a', 'buddy/x'])
+    // ⚠️ 只有 1 个名额时没有「第二个名额」可分，必须退化成 `slice`（不能为了分散
+    //    而少试候选，那会让「末位候选永远轮不到」重现）。
+    expect(pickDiversified(ranked, 1).map((x) => `${x.provider}/${x.realId}`))
+      .toEqual(['qoder/a'])
+  })
+  it('★ 退化的 perProvider（<= 0 / 非有限）等价 slice（口径已文档化，正向审计 P3-⑧）', () => {
+    const ranked = [c('qoder', 'a'), c('qoder', 'b'), c('qoder', 'c'), c('buddy', 'x')]
+    expect(pickDiversified(ranked, 3, 0).map((x) => `${x.provider}/${x.realId}`))
+      .toEqual(['qoder/a', 'qoder/b', 'qoder/c'])
+    expect(pickDiversified(ranked, 3, Number.POSITIVE_INFINITY).map((x) => `${x.provider}/${x.realId}`))
+      .toEqual(['qoder/a', 'qoder/b', 'qoder/c'])
   })
   it('名额小于第一轮时按原序截断，不改传入数组', () => {
     const ranked = [c('buddy', 'x'), c('qoder', 'a'), c('qoder', 'b')]
@@ -236,6 +259,73 @@ describe('aggregate/auto：qoder 整体排队时轮到别家（复现 2026-11-14
     expect(sent.slice(0, 2).every((s) => s.startsWith('qoder/')), '排序偏好不变：免费的 qoder 仍先试').toBe(true)
     expect(sent[2], '第 3 个名额让给别家，而不是 qoder 的第 3 个模型').toMatch(/^(buddy|codearts)\//)
     expect(sleeps).toEqual([])
+  })
+})
+
+describe('aggregate/auto：只有两家渠道（limit 恰好是 2）时也必须分散（对抗审计 P1-1）', () => {
+  /**
+   * ⚠️⚠️ 这是对抗审计实测出来的**硬边界**：`limit = maxAttemptsFor(catalog)` 是「最长
+   * 候选表的长度」，**只登录两家**的部署里它恰好是 2 —— 而配额若恒为 2，第一轮就吃满
+   * `[qoder/m1, qoder/m2]`，`pickDiversified` 逐元素等价于被证伪的 `slice`，
+   * 2026-11-14 的生产故障**原样复现**（只是把「9 次」换成「2 次」）。
+   *
+   * 夹具刻意做成「两家」：qoder 有 m1/m2/m3 三个免费模型，buddy 只有 m1 ⇒
+   * 虚拟模型 m1 有 2 个候选（`qoder+m1` 与 `buddy+m1`）⇒ `maxAttemptsFor` = **2**。
+   */
+  it('qoder 三个模型全排队 + 只有 buddy 一家备选 ⇒ 仍必须切到 buddy', async () => {
+    setMode(undefined)
+    const { qoder } = makeQueuedQoder()
+    const sent: string[] = []
+    const ctx = {
+      logger: { warn: () => {}, info: () => {}, error: () => {} },
+      llm: {
+        listProviders: () => [{ id: 'qoder' }, { id: 'buddy' }],
+        listModels: async (provider: string) => (provider === 'qoder'
+          ? [{ id: 'm1', name: 'M1 · 免费' }, { id: 'm2', name: 'M2 · 免费' }, { id: 'm3', name: 'M3 · 免费' }]
+          : [{ id: 'm1', name: `M1 · ${provider} · x1` }]),
+        resolveModelInfo: async (provider: string, id: string) => ({ provider, id }),
+        stream: (o: { provider: string; model: string; messages: unknown }) => {
+          sent.push(`${o.provider}/${o.model}`)
+          return (async function* () {
+            await new Promise((resolve) => { setTimeout(resolve, 0) })
+            if (o.provider !== 'qoder') {
+              yield { type: 'text-delta', index: 0, text: 'ok' }
+              return
+            }
+            try {
+              for await (const chunk of qoder.stream({ model: 'qfmodel', messages: o.messages } as never)) yield chunk
+            } catch (error) {
+              const e = error as { message?: string; code?: string }
+              yield { type: 'finish', reason: { kind: 'error', failure: { message: e.message ?? '', code: e.code } } }
+            }
+          })()
+        },
+      },
+    } as never
+    const pool = {
+      disabledModelsFor: () => new Set<string>(),
+      getAvailableAccount: async () => ({ entry: { id: 'a1' }, credential: {} }),
+    } as never
+    const adapter = new AggregateAdapter(ctx, {
+      accountPool: pool,
+      expiryProbe: async () => Number.POSITIVE_INFINITY,
+      allowed: () => ({
+        m1: { qoder: { m1: true } },
+        m2: { qoder: { m2: true } },
+        m3: { qoder: { m3: true } },
+      }),
+    })
+
+    const call = await adapter.prepareCall(AGGREGATE_PROVIDER, 'auto')
+    let text = ''
+    for await (const chunk of call.stream({ messages: MESSAGES } as never)) {
+      const ch = chunk as { type: string; text?: string }
+      if (ch.type === 'text-delta' && typeof ch.text === 'string') text += ch.text
+    }
+
+    expect(text, '只有两家渠道时 qoder 全排队也必须切到 buddy').toBe('ok')
+    expect(sent, 'limit=2 时第一轮每家只取 1 个（配额必须按 limit 收缩）')
+      .toEqual(['qoder/m1', 'buddy/m1'])
   })
 })
 
