@@ -153,6 +153,11 @@ export type ClaimOutcome =
       isStreakDay: boolean
       delayedMessage?: string
       /**
+       * 本次领到的逐笔积分及其到期时刻（毫秒）。目前只有 Qoder 下发
+       * （领取响应顶层 `expiresAt`），用于本地「领取记录」推算资源包逐笔到期。
+       */
+      grants?: ReadonlyArray<{ amount: number; expiresAtMs: number }>
+      /**
        * ★ `credit` 的单位（2026-10-03 新增）。
        *
        * ⚠ **缺省按「积分」处理** ⇒ 其余 provider 行为逐字不变。

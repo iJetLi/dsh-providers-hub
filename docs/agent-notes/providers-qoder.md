@@ -903,6 +903,26 @@ tone 改 `ok`／`toPackage(...{expiryUnknown: true})` 去掉选项（上游解�
   解析（`expiredTime`）在个人账号上**不可达**。企业/团队账号未取证。
 - 报障者账号（`qoder-98bbe7b1`）不在本机，无法用他自己的号复跑。
 
+### 后续：逐笔到期的两个来源（2026-11-14，`src/qoder-web-usage.ts`）
+
+「到期未知」之后补上了能拿到的真日期，两者都没有时行为不变：
+
+1. **网页会话明细**（准确）：`GET {官网}/api/v2/me/usages/big_model_credits` + 用户粘贴的
+   Cookie。只取 `resource_package_quota.quota_detail`（与 `addOnQuota` 同源）——
+   ⚠️ 不取 `total_quota`：真机样本里它可能只列 PLAN 一条。⚠️ `expires_at` 同一响应里
+   毫秒与秒混用 ⇒ `< 1e12` 按秒。⚠️ 中国版两个域名在用（`qoder.com.cn` / `qoder.cn`），
+   Cookie 按域隔离 ⇒ 依次试。
+2. **领取记录**（推算）：每日领取响应顶层 `expiresAt` 在领取成功时落盘；剩余额度按
+   「先到期先扣」分到最晚到期的几笔上 —— 扣费顺序是**假设**，包名必须注明「按领取记录推算」。
+
+- 存储：独立凭据条目 `<credentialRef>_web`（⚠️ ref 名只许 `[A-Za-z0-9_]`，`-web` 会抛）；
+  账号列表只下发布尔 `qoderWebSession`；`removeAccount` 一并清理。
+- ⚠️ 拆分在查完余额**之后**做（`withQoderAddOnDetail`），不进 `fetchQoderBalanceDetailed`：
+  该调用的形状被 `qoder-proxy.spec.ts` 守着（漏传账号出口的回归），且选号 / 永久锁 /
+  聚合轮换走的余额路径本就不该依赖用户是否粘过 Cookie。
+- 守恒：拆出各包之和恒等于 sash 的 `addOnQuota.remaining`；带日期部分多了按先到期先削，
+  少了差额另列「到期未知」。
+
 
 ## ⚠️⚠️ 企业账号的额度在 `orgResourcePackage`（PR #182，2026-11-09）
 

@@ -46,6 +46,14 @@ import { describeFetchError } from './opencode-rpc.js'
 import { targetsProxyEntry } from './network-hint.js'
 import { QODER_USAGE_PATH } from './qoder-credits.js'
 import { QODER, QODER_CN, type QoderProduct } from './qoder-product.js'
+import { qoderFetchForAccount } from './qoder-proxy.js'
+import {
+  fetchQoderWebPackages,
+  loadQoderWebStore,
+  normalizeCookieInput,
+  saveQoderWebStore,
+  type QoderWebCredentials,
+} from './qoder-web-usage.js'
 
 export interface RpcQoderProxyRequest {
   accountId: string
@@ -80,6 +88,20 @@ export interface RpcQoderTestProxyResponse {
 /** 账号池的最小依赖面（结构化类型，避免绑定具体类）。 */
 export interface QoderPoolLike {
   setQoderProxy(accountId: string, proxy: string): Promise<void>
+  listAccountsByProvider(provider: string): ReadonlyArray<{ id: string; credentialRef: string }>
+}
+
+export interface RpcQoderWebSessionRequest {
+  accountId: string
+  /** 浏览器复制的 Cookie（裸 Cookie / `Cookie:` 行 / cURL 都行）；空串 = 清除。 */
+  cookie: string
+}
+
+export interface RpcQoderWebSessionResponse {
+  /** 是否已保存会话（清除后为 false）。 */
+  saved: boolean
+  /** 校验时读到的带日期资源包笔数。 */
+  packages: number
 }
 
 /** 探测连接用的超时（测试按钮不能无限等）。 */
@@ -112,7 +134,7 @@ function productOf(provider: string | undefined): QoderProduct {
  *          方法名误判成「格式错误」）。
  */
 export async function handleQoderRpc(
-  _ctx: Context,
+  ctx: Context,
   pool: QoderPoolLike,
   method: string,
   payload: unknown,
@@ -136,6 +158,35 @@ export async function handleQoderRpc(
         if (!normalized.ok) return fail(normalized.reason)
         await pool.setQoderProxy(req.accountId, normalized.proxy.url)
         return done({ proxy: normalized.proxy.url, label: normalized.proxy.label } satisfies RpcQoderProxyResponse)
+      }
+
+      case 'qoder.setWebSession': {
+        const req = payload as RpcQoderWebSessionRequest
+        if (typeof req?.accountId !== 'string' || req.accountId.length === 0) {
+          return fail('缺少 accountId')
+        }
+        let found: { entry: { id: string; credentialRef: string }; product: QoderProduct } | undefined
+        for (const product of [QODER, QODER_CN]) {
+          const entry = pool.listAccountsByProvider(product.id).find((a) => a.id === req.accountId)
+          if (entry !== undefined) { found = { entry, product }; break }
+        }
+        if (found === undefined) return fail('账号不存在或不是 Qoder 账号')
+        const credentials = (ctx as unknown as { credentials: QoderWebCredentials }).credentials
+        const store = await loadQoderWebStore(credentials, found.entry.credentialRef)
+        const cookie = normalizeCookieInput(typeof req.cookie === 'string' ? req.cookie : '')
+        if (cookie === '') {
+          const { cookie: _drop, ...rest } = store
+          await saveQoderWebStore(credentials, found.entry.credentialRef, rest)
+          return done({ saved: false, packages: 0 } satisfies RpcQoderWebSessionResponse)
+        }
+        // 先用它真查一次再保存：粘错 / 已过期的 Cookie 当场报错，而不是存进去后静默无效。
+        const web = await fetchQoderWebPackages(cookie, found.product, qoderFetchForAccount(found.entry.id))
+        if (!web.ok) return fail(web.reason)
+        await saveQoderWebStore(credentials, found.entry.credentialRef, { ...store, cookie })
+        return done({
+          saved: true,
+          packages: web.packages.filter((p) => p.expiresAtMs > 0).length,
+        } satisfies RpcQoderWebSessionResponse)
       }
 
       case 'qoder.testProxy': {

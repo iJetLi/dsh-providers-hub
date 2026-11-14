@@ -400,7 +400,63 @@ export function formatExpirySplitLine(split, format) {
  * @returns `[{ key, text, tone, countdown? }]`；无内容时 `[]`。
  *   `tone` 取值限定在 CSS 里已有的 `ok` / `warn` / `error`。
  */
-export function expirySplitParts(split, format, now) {
+/**
+ * 卡片分段行要附带的**日期提示**（与 `splitCreditsByExpiry` 同口径现算）。
+ *
+ * 为什么需要：「长期」一档原本不带任何日期，而「临期」的倒计时只指向最早那一批。
+ * Qoder 账号上二者混在一起时（套餐 7 天后刷新 + 资源包 23 天后到期），用户只看到
+ * 一个倒计时，会把它读成资源包的到期时间（用户 2026-11-14 报障「识别出来的到期时间不对」）。
+ *
+ * - `earliestLongTermAt`：「长期」档里最早到期的那一笔（毫秒）；没有则 `null`。
+ * - `expiringIsPlanRefresh`：「临期」最早那一批**全是**套餐额度 —— 它到点是刷新、不是作废后
+ *   一无所有，文案说「套餐 X 日刷新」比单纯倒计时准确。
+ *
+ * 单独成函数而不是塞进 `splitCreditsByExpiry` 的返回值：后者的形状被大量用例逐键比对，
+ * 也被后端同口径实现对照，加键会牵连全部调用方。
+ */
+export function expiryDateHints(packages, windowDays, now) {
+  const days = normalizeWindowDays(windowDays);
+  if (days === null || !Array.isArray(packages)) return null;
+  const windowMs = days * DAY_MS;
+  const at = typeof now === 'number' && Number.isFinite(now) ? now : Date.now();
+  let earliestLongTermAt = null;
+  let earliestExpiringAt = null;
+  let earliestExpiringNames = new Set();
+  for (const pkg of packages) {
+    if (!pkg || pkg.active !== true || isExclusivePool(pkg)) continue;
+    const remaining = Number(pkg.remaining);
+    if (!Number.isFinite(remaining) || remaining <= 0) continue;
+    const end = packageExpiryMs(pkg);
+    if (end === null || end <= at) continue;
+    if (end - at < windowMs) {
+      if (earliestExpiringAt === null || end < earliestExpiringAt) {
+        earliestExpiringAt = end;
+        earliestExpiringNames = new Set([pkg.name]);
+      } else if (end === earliestExpiringAt) {
+        earliestExpiringNames.add(pkg.name);
+      }
+    } else if (earliestLongTermAt === null || end < earliestLongTermAt) {
+      earliestLongTermAt = end;
+    }
+  }
+  return {
+    earliestLongTermAt,
+    expiringIsPlanRefresh: earliestExpiringNames.size === 1 && earliestExpiringNames.has(PLAN_PACKAGE_NAME),
+  };
+}
+
+/** Qoder 套餐额度的包名（与宿主 `QODER_PLAN_PACKAGE` 同一字面量）。 */
+const PLAN_PACKAGE_NAME = '套餐额度';
+
+/** 毫秒 → 「12月7日」；跨年时带年份。按浏览器本地时区。 */
+export function formatMonthDay(ms, now) {
+  const d = new Date(ms);
+  const ref = new Date(typeof now === 'number' && Number.isFinite(now) ? now : Date.now());
+  const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+  return d.getFullYear() === ref.getFullYear() ? md : `${d.getFullYear()}年${md}`;
+}
+
+export function expirySplitParts(split, format, now, hints) {
   if (!split) return [];
   const parts = [];
   // ⚠️ 与 `formatExpirySplitLine` **同口径**（同一条判据只留一处语义）：
@@ -428,7 +484,15 @@ export function expirySplitParts(split, format, now) {
   //    就不会去抢救，而这批额度**确实会作废**（issue IKTLMX）。也不上 `error`：
   //    `error` 留给「临期」那档（有确切倒计时，紧迫性更高）。
   if (unknownExpiryText !== null) parts.push({ key: 'unknownExpiry', text: `到期未知 ${unknownExpiryText}`, tone: 'warn' });
-  if (longTerm !== null) parts.push({ key: 'longTerm', text: `长期 ${longTerm}`, tone: 'warn' });
+  if (longTerm !== null) {
+    const earliestLong = hints && typeof hints.earliestLongTermAt === 'number' ? hints.earliestLongTermAt : null;
+    parts.push({
+      key: 'longTerm',
+      text: `长期 ${longTerm}`,
+      tone: 'warn',
+      ...(earliestLong !== null ? { countdown: `最早 ${formatMonthDay(earliestLong, now)}到期` } : {}),
+    });
+  }
   if (expiring !== null) {
     const at = split.earliestExpiringAt;
     const countdown = typeof at === 'number' && Number.isFinite(at) && at > 0
@@ -479,9 +543,16 @@ export function expirySplitParts(split, format, now) {
       : 0;
     // 倒计时那批没覆盖全部临期（含「完全无日期的批次」）⇒ 必须限定。
     const partial = earliestAmount > 0 && earliestAmount < expiringAmount;
-    const countdownText = countdown.length === 0
+    let countdownText = countdown.length === 0
       ? ''
       : partial ? `其中 ${format(earliestAmount)} 于 ${countdown}后到期` : countdown;
+    // 最早那批是套餐额度 ⇒ 点名「套餐 X 日刷新」，免得倒计时被当成资源包的到期。
+    if (hints && hints.expiringIsPlanRefresh === true && typeof at === 'number' && at > 0 && countdown.length > 0) {
+      const refresh = `套餐 ${formatMonthDay(at, now)}刷新`;
+      countdownText = partial
+        ? `其中套餐 ${format(earliestAmount)} 于 ${formatMonthDay(at, now)}刷新，${countdown}后`
+        : `${refresh}，${countdown}后`;
+    }
     parts.push({
       key: 'expiring',
       text: `临期 ${expiring}`,

@@ -211,6 +211,13 @@ import {
 } from './qoder.js'
 import type { QoderCredential } from './qoder.js'
 import { claimQoderDailyCheckin, fetchQoderBalanceDetailed } from './qoder-credits.js'
+import {
+  fetchQoderWebPackages,
+  loadQoderWebStore,
+  recordQoderGrants,
+  withQoderAddOnDetail,
+  type QoderAddOnDetail,
+} from './qoder-web-usage.js'
 import { isTraeRefreshable, traeCredentialExpiresAtMs, traeDisplayNickname } from './trae.js'
 import type { TraeCredential } from './trae.js'
 import { fetchClineUsageLimits } from './cline-quota.js'
@@ -4658,6 +4665,13 @@ function registerJetHubEndpoints(
   ): Promise<ProviderAccountStatus[]> {
     if (provider === ZCODE.id) return enrichZcodeIdentity(accounts)
     if (provider === 'codearts') return enrichCodeartsIdentity(accounts)
+    // Qoder：卡片要知道该账号是否已存网页会话（只下发布尔，不下发 Cookie）。
+    if (isQoderFamily(provider)) {
+      return Promise.all(accounts.map(async (account) => {
+        const store = await loadQoderWebStore(ctx.credentials, account.credentialRef)
+        return store.cookie !== undefined ? { ...account, qoderWebSession: true } : account
+      }))
+    }
     // ⚠️⚠️ **本 fork 独有**（modelscope，2026-10-17）：卡片要显示**打码**的
     //    API Key 并提供「编辑」入口（`modelscope.setApiKey`）。
     //    ⚠️ **只下发打码串，绝不下发明文** —— 凭据经 RPC 明文下发等于把它
@@ -9134,8 +9148,17 @@ function registerJetHubEndpoints(
             // 签到端点同样走 `openapi.qoder.sh` ⇒ 国际版**必须**有出口代理，
             // 否则一键领取对 qoder 恒失败、对中国版恒成功，看上去像「厂商
             // 不让我们领」。代理按账号取，与中国版直连互不干扰。
-            claim: (credential, _product, entry) =>
-              claimQoderDailyCheckin(credential, product, qoderFetchForAccount(entry.id)),
+            claim: async (credential, _product, entry) => {
+              const outcome = await claimQoderDailyCheckin(credential, product, qoderFetchForAccount(entry.id))
+              // 记下每笔的到期，供「资源包」逐笔到期推算；失败不影响领取结果。
+              if (outcome.kind === 'claimed' && outcome.grants !== undefined) {
+                await recordQoderGrants(ctx.credentials, entry.credentialRef, outcome.grants)
+                  .catch((error: unknown) => ctx.logger.warn(
+                    `[jet-hub] ${product.id} 账号 ${entry.id} 领取记录写入失败：${String(error)}`,
+                  ))
+              }
+              return outcome
+            },
             precheckStatus: false,
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
@@ -9477,10 +9500,21 @@ function registerJetHubEndpoints(
             const detailed = await fetchQoderBalanceDetailed(credential, product, {
               fetcher: qoderFetchForAccount(account.id),
             })
+            // 资源包逐笔到期：先网页会话明细，再本地领取记录（见 `qoder-web-usage.ts`）。
+            const webStore = await loadQoderWebStore(ctx.credentials, account.credentialRef)
+            let addOnDetail: QoderAddOnDetail | undefined
+            if (detailed.balance !== null && webStore.cookie !== undefined) {
+              const web = await fetchQoderWebPackages(webStore.cookie, product, qoderFetchForAccount(account.id))
+              if (web.ok) addOnDetail = { kind: 'web', packages: web.packages }
+              else ctx.logger.warn(`[jet-hub] ${product.id} 账号 ${account.id} ${web.reason}`)
+            }
+            if (addOnDetail === undefined && (webStore.grants ?? []).length > 0) {
+              addOnDetail = { kind: 'ledger', grants: webStore.grants!, nowMs: Date.now() }
+            }
             return {
               accountId: account.id,
               nickname: account.nickname,
-              balance: detailed.balance,
+              balance: withQoderAddOnDetail(detailed.balance, addOnDetail),
               // 查不到时带上原因，卡片显示原因而非 0（与其它 provider 同约定）。
               ...detailed.balance === null
                 ? { error: detailed.error ?? '积分查询失败（原因未知）' }
