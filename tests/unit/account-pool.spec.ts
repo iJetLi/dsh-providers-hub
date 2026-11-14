@@ -2944,6 +2944,47 @@ describe('AccountPool · setAccountsEnabled（供应商级批量启停）', () =
    * 但判据必须分开 —— 网关开关丢键的后果是「回到默认启用」，绝不能反过来
    * 把一次读取失败变成「网关被静默关掉」。
    */
+  describe('Qoder 单账号限流设置', () => {
+    it.each(['SettingsStore', 'FileStore'])('%s：旧状态默认开启，两渠道独立保存', async (store) => {
+      vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', '')
+      try {
+        const context = store === 'SettingsStore' ? createMockContext([makeMockAccount()]) : {}
+        const pool = new AccountPool(context as never)
+        expect(pool.qoderTrafficGuardEnabled('qoder')).toBe(true)
+        expect(pool.qoderTrafficGuardEnabled('qodercn')).toBe(true)
+        await pool.setQoderTrafficGuardEnabled('qoder', false)
+        await pool.setGatewayEnabled(false)
+        const reloaded = new AccountPool(context as never)
+        expect(reloaded.qoderTrafficGuardEnabled('qoder')).toBe(false)
+        expect(reloaded.qoderTrafficGuardEnabled('qodercn')).toBe(true)
+        vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', 'off')
+        expect(reloaded.qoderTrafficGuardEnabled('qodercn')).toBe(false)
+        await reloaded.setQoderTrafficGuardEnabled('qodercn', true)
+        expect(new AccountPool(context as never).qoderTrafficGuardEnabled('qodercn')).toBe(true)
+      } finally {
+        vi.unstubAllEnvs()
+      }
+    })
+
+    it('保存失败时后续写入不会落盘失败的开关值', async () => {
+      vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', '')
+      try {
+        const context = createMockContext([], { failReplaceOf: (call) => call === 0 })
+        const pool = new AccountPool(context as never)
+        const failed = pool.setQoderTrafficGuardEnabled('qoder', false)
+        const succeeded = pool.setQoderTrafficGuardEnabled('qodercn', false)
+        await expect(failed).rejects.toThrow()
+        await succeeded
+        expect(pool.qoderTrafficGuardEnabled('qoder')).toBe(true)
+        const reloaded = new AccountPool(context as never)
+        expect(reloaded.qoderTrafficGuardEnabled('qoder')).toBe(true)
+        expect(reloaded.qoderTrafficGuardEnabled('qodercn')).toBe(false)
+      } finally {
+        vi.unstubAllEnvs()
+      }
+    })
+  })
+
   describe('本机网关开关', () => {
     it('默认启用（老用户升级后行为不变）', () => {
       expect(new AccountPool(createMockContext() as never).gatewayEnabled()).toBe(true)

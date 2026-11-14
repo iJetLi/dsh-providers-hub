@@ -317,7 +317,7 @@ describe('③ 注入点：四个消费点都必须拿到按账号的 fetcher', (
       ['qodercn', probeBlock.slice(atCn, atCnEnd)],
     ] as const) {
       expect(block, `${name} 的探测必须接下第三个形参 entry`)
-        .toMatch(/createProbeAdapter: \(ref, credential, entry\) => new QoderAdapter\(\{/)
+        .toMatch(/createProbeAdapter: \(ref, credential, entry, options\) => new QoderAdapter\(\{/)
       // 反向：两形参写法会把 entry 直接丢弃（gemini 审计 P1-1 的原形）。
       expect(block, `${name} 不得退回两形参写法`)
         .not.toMatch(/createProbeAdapter: \(ref, credential\) =>/)

@@ -7394,6 +7394,12 @@ describe('strictManualOrder 端点接线', () => {
     const pool = {
       listAccountsByProvider: () => [],
       strictManualOrder: () => state.enabled,
+      qoderTrafficGuardEnabled: (provider: string) => provider === 'qoder' ? state.enabled : true,
+      setQoderTrafficGuardEnabled: async (provider: string, enabled: boolean) => {
+        state.setCalls.push({ provider, enabled })
+        if (state.rejectWrites) throw new Error('状态写入失败')
+        state.enabled = enabled
+      },
       setStrictManualOrder: async (provider: string, enabled: boolean) => {
         state.setCalls.push({ provider, enabled })
         if (!state.rejectWrites) state.enabled = enabled
@@ -7428,6 +7434,22 @@ describe('strictManualOrder 端点接线', () => {
     const result = await call(handler, 'strictManualOrder.getEnabled', { provider: 'buddy' })
     expect(result.ok).toBe(true)
     expect(result.value).toEqual({ enabled: true })
+  })
+
+  it('Qoder 限流可通过面板接口读写，拒绝不适用的渠道和非布尔值', async () => {
+    const state: StrictPoolStub = { enabled: true, rejectWrites: false, setCalls: [] }
+    const handler = makeHandler(state)
+    expect(await call(handler, 'qoderTrafficGuard.getEnabled', { provider: 'qoder' }))
+      .toMatchObject({ ok: true, value: { enabled: true } })
+    expect(await call(handler, 'qoderTrafficGuard.setEnabled', { provider: 'qoder', enabled: false }))
+      .toMatchObject({ ok: true, value: { enabled: false } })
+    expect(await call(handler, 'qoderTrafficGuard.getEnabled', { provider: 'qodercn' }))
+      .toMatchObject({ ok: true, value: { enabled: true } })
+    expect(await call(handler, 'qoderTrafficGuard.setEnabled', { provider: 'buddy', enabled: false }))
+      .toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(await call(handler, 'qoderTrafficGuard.setEnabled', { provider: 'qoder', enabled: 'false' }))
+      .toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(state.setCalls).toEqual([{ provider: 'qoder', enabled: false }])
   })
 
   it('getEnabled 缺 provider ⇒ bad-request（不静默当成空渠道）', async () => {

@@ -11694,6 +11694,22 @@ function registerJetHubEndpoints(
         return { ok: true, value }
       }
 
+      case 'qoderTrafficGuard.getEnabled':
+      case 'qoderTrafficGuard.setEnabled': {
+        const req = payload as { provider?: unknown; enabled?: unknown } | undefined
+        const provider = req?.provider
+        if (provider !== 'qoder' && provider !== 'qodercn') {
+          return { ok: false, error: { code: 'bad-request', message: '请选择 Qoder 或 Qoder CN' } }
+        }
+        if (method === 'qoderTrafficGuard.setEnabled') {
+          if (typeof req?.enabled !== 'boolean') {
+            return { ok: false, error: { code: 'bad-request', message: 'enabled 必须是布尔值' } }
+          }
+          await pool.setQoderTrafficGuardEnabled(provider, req.enabled)
+        }
+        return { ok: true, value: { enabled: pool.qoderTrafficGuardEnabled(provider) } }
+      }
+
       // ── 「严格手动顺序」（账号面板上每张渠道卡片一个开关）──
       //
       // 语义：**开** = 拖拽顺序是**唯一**的选号优先级（余额档位退化为「可用 /

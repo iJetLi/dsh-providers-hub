@@ -503,7 +503,12 @@ export interface ProviderRuntime {
      * 那一个**槽（`stream()` 只调 `identitySlots()`，不读目录，且探测路径本就
      * 不传 `markLimited`）⇒ 由这一个 `entry` 就能投影出来，**无需**池。
      */
-    createProbeAdapter(refName: string, credential: unknown, entry?: ProviderAccountEntry): LlmAdapter
+    createProbeAdapter(
+      refName: string,
+      credential: unknown,
+      entry?: ProviderAccountEntry,
+      options?: { qoderTrafficGuardEnabled?: boolean },
+    ): LlmAdapter
   }
 }
 

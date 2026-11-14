@@ -38,6 +38,7 @@ import type { CarrierOutcome } from './captcha-carrier.js'
 import { AccountPool, allAccountsRateLimitedForModel } from './account-pool.js'
 import { geminiFetchForAccount, setGeminiProxyPool } from './gemini-proxy.js'
 import { qoderFetchForAccount, setQoderProxyPool } from './qoder-proxy.js'
+import { qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
 import { foldReasonErrors } from './locked-error-text.js'
 import { MultiAccountRefreshScheduler } from './refresh-scheduler.js'
 import { hasLegacyNamespaceRegistration, settingsOf, suppressAutoSettingsPage } from './settings-compat.js'
@@ -718,24 +719,26 @@ export const probeById: Record<string, NonNullable<ProviderRuntime['probe']>> = 
     //    的取号权威本来就是那个回调（推理通道按 `activeAccountId` 现取、原生
     //    搜索也走它），为探测再造一个 override 字段会让两条路分叉。
     //    探测只有这一个账号 ⇒ 回调恒返回它，与生产语义一致。
-    createProbeAdapter: (ref, credential, entry) => new QoderAdapter({
+    createProbeAdapter: (ref, credential, entry, options) => new QoderAdapter({
       credentialRef: credentialRef(ref),
       resolveCredential: async () => credential as QoderCredential,
       refresh: async () => {},
       product: QODER,
       fetchFor: qoderFetchForAccount,
       currentAccountId: () => entry?.id ?? '',
+      trafficGuardEnabled: () => options?.qoderTrafficGuardEnabled ?? qoderTrafficGuardEnabled(),
     }),
   },
   qodercn: {
     // 同上：两站共用同一个适配器类，只换 product。
-    createProbeAdapter: (ref, credential, entry) => new QoderAdapter({
+    createProbeAdapter: (ref, credential, entry, options) => new QoderAdapter({
       credentialRef: credentialRef(ref),
       resolveCredential: async () => credential as QoderCredential,
       refresh: async () => {},
       product: QODER_CN,
       fetchFor: qoderFetchForAccount,
       currentAccountId: () => entry?.id ?? '',
+      trafficGuardEnabled: () => options?.qoderTrafficGuardEnabled ?? qoderTrafficGuardEnabled(),
     }),
   },
   // Cline → WorkOS 凭据 + 自己的端点。
@@ -2790,6 +2793,7 @@ export function apply(ctx: Context): void {
     fetchRemoteModels: () => qoder.fetchModels(pool),
     // 额度受限时标记「本次实际使用的账号」（理由见 `activeQoderAccountId` 注释）。
     currentAccountId: () => activeQoderAccountId.get(QODER.id),
+    trafficGuardEnabled: () => pool.qoderTrafficGuardEnabled(QODER.id),
     // ⚠️ **推理通道也必须走该账号的出口代理**（真实报障 2026-10-21）：
     //    国际版整站被 SNI 阻断，实测推理同样 10.7s `TRANSPORT: fetch failed`
     //    ⇒ 只接余额不接推理的话，面板显示正常但一发请求就超时。
@@ -2871,6 +2875,7 @@ export function apply(ctx: Context): void {
     // ⚠️ 取「**本次实际使用**的账号」而非池里默认那一个：池的默认账号可能与之
     // 不同（例如本账号被限流、池已切到别的账号），标错就会让标记落在无辜账号上。
     currentAccountId: () => activeQoderAccountId.get(QODER_CN.id),
+    trafficGuardEnabled: () => pool.qoderTrafficGuardEnabled(QODER_CN.id),
     // 同国际版：推理通道也要走该账号的出口代理（两站共用同一个适配器类）。
     fetchFor: qoderFetchForAccount,
   })

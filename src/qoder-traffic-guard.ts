@@ -5,9 +5,11 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 const MIN_REQUEST_GAP_MS = 400
 const accounts = new Map<string, { active: boolean; lastDispatch: number }>()
 
-/** 默认保留原有并发行为。开启后，两个 Qoder 渠道各自按上游账号限流。 */
+export type QoderTrafficProvider = 'qoder' | 'qodercn'
+
+/** 未在面板设置时的默认值。 */
 export function qoderTrafficGuardEnabled(): boolean {
-  return /^(1|on|true)$/i.test(process.env.DSH_QODER_TRAFFIC_GUARD?.trim() ?? '')
+  return !/^(0|off|false)$/i.test(process.env.DSH_QODER_TRAFFIC_GUARD?.trim() ?? '')
 }
 
 /** 预留整个流的并发名额。账号忙时直接报告本地排队，避免积压请求。 */

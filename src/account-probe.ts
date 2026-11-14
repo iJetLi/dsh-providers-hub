@@ -43,6 +43,7 @@ import { runtimeOf } from './provider-runtime.js'
 import type { BuddyCredential } from './buddy.js'
 import type { LobsteraiCredential } from './lobsterai.js'
 import type { QoderCredential } from './qoder.js'
+import type { QoderTrafficProvider } from './qoder-traffic-guard.js'
 import type { ClineCredential } from './cline.js'
 import type { ZcodeCredential } from './zcode.js'
 import type { TraeCredential } from './trae.js'
@@ -126,6 +127,7 @@ const PROBE_TIMEOUT_MS = 120_000
  * 真实的 {@link AccountPool} 结构上即满足此接口。
  */
 export interface ProbePool {
+  qoderTrafficGuardEnabled?(provider: QoderTrafficProvider): boolean
   /** 按 id 查找账号（含已停用）。 */
   findAccount(id: string): ProviderAccountEntry | undefined
   /** 列出某 provider 的全部账号（含已停用）。 */
@@ -204,6 +206,7 @@ export function adapterForProbe(
   refName: string,
   credential: unknown,
   entry?: ProviderAccountEntry,
+  options?: { qoderTrafficGuardEnabled?: boolean },
 ): LlmAdapter {
   const runtime = runtimeOf(provider)
   if (runtime?.probe === undefined) {
@@ -211,7 +214,7 @@ export function adapterForProbe(
     //    探测必然失败而限流标记永远清不掉（zcode / gemini 各踩过一次）。
     throw new Error(`${provider} 没有探测适配器（该 provider 不支持重测）`)
   }
-  return runtime.probe.createProbeAdapter(refName, credential, entry)
+  return runtime.probe.createProbeAdapter(refName, credential, entry, options)
 }
 
 /** 用真实适配器对指定账号的指定模型发一次最小请求。 */
@@ -220,6 +223,7 @@ async function probeWithAdapter(
   credential: ProbeCredential,
   modelId: string,
   timeoutMs: number,
+  options?: { qoderTrafficGuardEnabled?: boolean },
 ): Promise<ProbeModelResult> {
   const signal = AbortSignal.timeout(timeoutMs)
 
@@ -302,7 +306,7 @@ async function probeWithAdapter(
   // `tests/unit/account-probe-adapter.spec.ts` 的对应用例；
   // 「登记了哪些家、哪些家刻意不登记」由 `index.ts` 的 `probeById` 头注释
   // 与 `PROBE_EXEMPT` 说明，本处不再重复一份易腐的清单。
-  const adapter = adapterForProbe(entry.provider, entry.credentialRef, credential, entry)
+  const adapter = adapterForProbe(entry.provider, entry.credentialRef, credential, entry, options)
   try {
     for await (const _chunk of adapter.stream({
       provider: entry.provider,
@@ -411,7 +415,10 @@ function makeDefaultProbe(pool: ProbePool, timeoutMs: number) {
     if (credential === undefined) {
       return { modelId, ok: false, message: '无法确认：凭据不可用' }
     }
-    return probeWithAdapter(entry, credential, modelId, timeoutMs)
+    const qoderTrafficGuardEnabled = entry.provider === 'qoder' || entry.provider === 'qodercn'
+      ? pool.qoderTrafficGuardEnabled?.(entry.provider)
+      : undefined
+    return probeWithAdapter(entry, credential, modelId, timeoutMs, { qoderTrafficGuardEnabled })
   }
 }
 

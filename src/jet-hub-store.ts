@@ -39,6 +39,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { ProviderAccountEntry } from './types.js'
+import type { QoderTrafficProvider } from './qoder-traffic-guard.js'
 import { hasLegacyNamespaceRegistration, readService, settingsOf } from './settings-compat.js'
 
 /** Jet Hub schema namespace（老契约的 settings 命名空间名）。 */
@@ -370,6 +371,7 @@ export interface JetHubState {
    * 缺键语义为**启用**：老用户升级后行为与升级前完全一致。
    */
   gatewayEnabled?: boolean
+  qoderTrafficGuard?: Partial<Record<QoderTrafficProvider, boolean>>
   /**
    * 「允许局域网访问」开关（2026-10-20）：`true` = 网关绑 `0.0.0.0`（全部网卡，
    * 局域网可达）；`false`/缺键 = 只绑回环或 env 配置的本机地址。
@@ -621,6 +623,7 @@ export const jetHubSchema = Schema.object({
   disabledModels: Schema.dict(Schema.any()).default({}),
   loomyPermanentLocked: Schema.boolean().default(false),
   gatewayEnabled: Schema.boolean().default(true),
+  qoderTrafficGuard: Schema.dict(Schema.any()).default({}),
   // 「允许局域网访问」：默认关闭（暴露面变大必须是显式选择）。
   gatewayAllowLan: Schema.boolean().default(false),
   nativeWebSearchEnabled: Schema.boolean().default(true),
@@ -676,6 +679,15 @@ export const jetHubSchema = Schema.object({
  */
 export function sanitizeGatewayEnabled(raw: unknown): boolean {
   return raw !== false
+}
+
+export function sanitizeQoderTrafficGuard(raw: unknown): NonNullable<JetHubState['qoderTrafficGuard']> {
+  if (raw === null || typeof raw !== 'object') return {}
+  const { qoder, qodercn } = raw as Record<string, unknown>
+  return {
+    ...(typeof qoder === 'boolean' ? { qoder } : {}),
+    ...(typeof qodercn === 'boolean' ? { qodercn } : {}),
+  }
 }
 
 /**
@@ -1394,6 +1406,7 @@ class SettingsStore implements JetHubStore {
         aggregateOrderMode?: unknown
         loomyPermanentLocked?: unknown
         gatewayEnabled?: unknown
+        qoderTrafficGuard?: unknown
         gatewayAllowLan?: unknown
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
@@ -1421,6 +1434,7 @@ class SettingsStore implements JetHubStore {
       loomyPermanentLocked: value.loomyPermanentLocked === true,
       // 老文档没这个键 → 启用，与升级前行为一致。
       gatewayEnabled: sanitizeGatewayEnabled(value.gatewayEnabled),
+      qoderTrafficGuard: sanitizeQoderTrafficGuard(value.qoderTrafficGuard),
       // 老文档没这个键 → 关闭（安全默认：暴露面变大必须是显式选择）。
       gatewayAllowLan: sanitizeGatewayAllowLan(value.gatewayAllowLan),
       // 老文档没这个键 → 启用（原生搜索本就是新功能，默认开启才符合「装上就能用」）。
@@ -1469,6 +1483,7 @@ class SettingsStore implements JetHubStore {
       loomyPermanentLocked: state.loomyPermanentLocked === true,
       // 开关丢失只会让网关回到默认启用（可逆），故接受老版本重写时丢掉本键。
       gatewayEnabled: state.gatewayEnabled !== false,
+      qoderTrafficGuard: sanitizeQoderTrafficGuard(state.qoderTrafficGuard),
       // ⚠️ **必须带上本键**（与上一行同因）：`replace` 是整体替换语义 —— 漏键会让
       // 用户打开的「允许局域网访问」在任何一次其它写入时被抹掉，重启后**静默
       // 回到只绑回环**（可逆但用户会以为坏了）。缺键语义为关闭（安全默认）。
@@ -1846,6 +1861,7 @@ class FileStore implements JetHubStore {
         aggregateOrderMode?: unknown
         loomyPermanentLocked?: unknown
         gatewayEnabled?: unknown
+        qoderTrafficGuard?: unknown
         gatewayAllowLan?: unknown
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
@@ -1871,6 +1887,7 @@ class FileStore implements JetHubStore {
         loomyPermanentLocked: value.loomyPermanentLocked === true,
         // 老文档没这个键 → 启用，与升级前行为一致。
         gatewayEnabled: sanitizeGatewayEnabled(value.gatewayEnabled),
+        qoderTrafficGuard: sanitizeQoderTrafficGuard(value.qoderTrafficGuard),
         // 老文档没这个键 → 关闭（安全默认，与读站点 A 同判据）。
         gatewayAllowLan: sanitizeGatewayAllowLan(value.gatewayAllowLan),
         // 老文档没这个键 → 启用，与升级前行为一致。

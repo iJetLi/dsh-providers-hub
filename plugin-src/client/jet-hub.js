@@ -3857,6 +3857,69 @@ function accioResetSeconds(packages, now) {
  * 的开关 —— 那正是「源码文本断言 + 循环指认」漏掉「点开关什么都不发生」的形态。
  * 生产代码里没有第二处引用它。
  */
+function QoderTrafficGuardToggle({ provider, rpcCall }) {
+  const [enabled, setEnabled] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [loadAttempt, setLoadAttempt] = React.useState(0);
+  const saving = React.useRef(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setError('');
+    (async () => {
+      try {
+        const value = await rpcCall('qoderTrafficGuard.getEnabled', { provider });
+        if (typeof value?.enabled !== 'boolean') throw new Error('服务端未返回设置状态');
+        if (!cancelled) setEnabled(value.enabled);
+      } catch (caught) {
+        if (!cancelled) setError('读取单账号限流失败：' + (caught?.message || '未知错误'));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [provider, rpcCall, loadAttempt]);
+
+  const update = async (nextEnabled) => {
+    if (enabled === null || saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      const value = await rpcCall('qoderTrafficGuard.setEnabled', { provider, enabled: nextEnabled });
+      if (typeof value?.enabled !== 'boolean') throw new Error('服务端未返回设置状态');
+      setEnabled(value.enabled);
+    } catch (caught) {
+      setError('保存单账号限流失败：' + (caught?.message || '未知错误'));
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
+  };
+
+  return React.createElement(React.Fragment, null,
+    React.createElement('label', {
+      className: 'dim-jh-nativeSearch',
+      title: '每个账号同时处理 1 条聊天请求，发出请求的间隔至少 400 毫秒。',
+    },
+    React.createElement('input', {
+      className: 'dim-jh-switch',
+      type: 'checkbox',
+      role: 'switch',
+      checked: enabled === true,
+      disabled: busy || enabled === null,
+      onChange: (event) => void update(event.target.checked),
+    }),
+    React.createElement('span', null, '单账号限流')),
+    error ? React.createElement('span', { className: 'dim-jh-settingsInlineFail', role: 'alert' }, error) : null,
+    enabled === null && error
+      ? React.createElement('button', {
+          type: 'button',
+          className: 'dim-jh-btn',
+          onClick: () => setLoadAttempt((attempt) => attempt + 1),
+        }, '重试读取')
+      : null);
+}
+
 function ProviderPanel({
   provider,
   rpcCall,
@@ -6763,6 +6826,9 @@ function ProviderPanel({
               ? React.createElement('path', { d: 'M7 11V7a5 5 0 0 1 10 0v4' })
               : React.createElement('path', { d: 'M7 11V7a5 5 0 0 1 9.9-1' })),
             lockBusy ? '处理中…' : '永久积分')
+          : null,
+        provider === 'qoder' || provider === 'qodercn'
+          ? React.createElement(QoderTrafficGuardToggle, { key: provider, provider, rpcCall })
           : null,
         // 「负载均衡」开关：**只对 ZCode 面板渲染**（supportsSessionBalance）。
         // 与页头开关同款 Switch 形态；挂在按钮行（面板页头最右），与

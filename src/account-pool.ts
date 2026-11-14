@@ -9,6 +9,7 @@ import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-sto
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
 import { maskProxyPassword } from './proxy-mask.js'
 import { qoderWebRefName } from './qoder-web-usage.js'
+import { qoderTrafficGuardEnabled, type QoderTrafficProvider } from './qoder-traffic-guard.js'
 // ⚠️ `model-queue.ts` **零 import**（纯函数模块，见其模块头）⇒ 不引入环。
 import { nextUtc8DayStartMs } from './model-queue.js'
 import { readTokenLedgerDayMap, utc8DayKey } from './token-ledger.js'
@@ -424,6 +425,7 @@ export class AccountPool {
    * 的唯一后果是回到默认启用，用户再关一次即可。
    */
   private gatewayEnabledCache = true
+  private qoderTrafficGuard: NonNullable<JetHubState['qoderTrafficGuard']> = {}
   /**
    * 「允许局域网访问」开关的进程内副本（2026-10-20）。
    *
@@ -601,6 +603,7 @@ export class AccountPool {
       this.aggregateOrderModeCache = state.aggregateOrderMode === 'manual' ? 'manual' : 'expiry'
       // 网关开关同理：老文档没有该键 → 保持默认启用。
       this.gatewayEnabledCache = state.gatewayEnabled !== false
+      this.qoderTrafficGuard = state.qoderTrafficGuard ?? {}
       // 局域网开关同理：老文档没有该键 → 保持默认关闭（安全默认，暴露面变大
       // 必须是显式选择）。与 store 侧 `sanitizeGatewayAllowLan` 同一判据。
       this.gatewayAllowLanCache = state.gatewayAllowLan === true
@@ -696,10 +699,13 @@ export class AccountPool {
    * `.catch()` 派生量更新 {@link storeChain}，让**链本身不被一次失败打断**
    * ——否则后续所有写都会跟着拒绝，账号池进入永不落盘状态。
    */
-  private queueStoreSave(): Promise<void> {
-    if (this.store.kind === 'memory') return Promise.resolve()
+  private queueStoreSave(qoderUpdate?: { provider: QoderTrafficProvider; enabled: boolean }): Promise<void> {
+    if (this.store.kind === 'memory' && qoderUpdate === undefined) return Promise.resolve()
     const next = this.storeChain.then(async () => {
-      await this.store.save({
+      const qoderTrafficGuard = qoderUpdate === undefined
+        ? this.qoderTrafficGuard
+        : { ...this.qoderTrafficGuard, [qoderUpdate.provider]: qoderUpdate.enabled }
+      if (this.store.kind !== 'memory') await this.store.save({
         accounts: this.cache,
         disabledModels: this.modelCache,
         // 与上面两份同源快照（见本方法注释：分两次快照会让同一份文档里的字段互相矛盾）。
@@ -714,6 +720,7 @@ export class AccountPool {
         // ⚠️ 必须与账号、黑名单取自**同一时刻**的快照（见本方法的注释）：
         // 分两次快照会让同一份文档里的字段互相矛盾。
         gatewayEnabled: this.gatewayEnabledCache,
+        qoderTrafficGuard,
         // ⚠️ 必须与上面取自同一时刻的快照（replace 是整体替换语义）：
         //    漏键 ⇒ 用户打开的「允许局域网访问」在任何一次其它写入时被抹掉，
         //    重启后静默回到只绑回环（用户会以为开关坏了）。
@@ -743,6 +750,7 @@ export class AccountPool {
         //    ⇒ 重启后供应商静默回到「已打开」（Gitee issue IKP8OF 原样复发）。
         providerClosed: this.providerClosedCache,
       })
+      this.qoderTrafficGuard = qoderTrafficGuard
     })
     this.storeChain = next.catch(() => {})
     return next
@@ -1167,6 +1175,16 @@ export class AccountPool {
   gatewayEnabled(): boolean {
     this.ensureLoaded()
     return this.gatewayEnabledCache
+  }
+
+  qoderTrafficGuardEnabled(provider: QoderTrafficProvider): boolean {
+    this.ensureLoaded()
+    return this.qoderTrafficGuard[provider] ?? qoderTrafficGuardEnabled()
+  }
+
+  setQoderTrafficGuardEnabled(provider: QoderTrafficProvider, enabled: boolean): Promise<void> {
+    this.ensureLoaded()
+    return this.queueStoreSave({ provider, enabled })
   }
 
   /**

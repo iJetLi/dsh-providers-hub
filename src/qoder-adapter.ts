@@ -763,6 +763,7 @@ const NATIVE_SEARCH_TIMEOUT_MS = 20_000
 
 /** `QoderAdapter` 的构造选项。 */
 export interface QoderAdapterOptions {
+  trafficGuardEnabled?: () => boolean
   /** 默认凭据 ref（仅用于类型/日志，实际解析走 `resolveCredential`）。 */
   credentialRef: CredentialRef
   /**
@@ -1847,7 +1848,7 @@ export class QoderAdapter extends LlmAdapter {
     const maxQueueAttempts = Number.isSafeInteger(parsedAttempts) && parsedAttempts >= 0
       ? parsedAttempts
       : QUEUE_MAX_ATTEMPTS
-    const guardTraffic = qoderTrafficGuardEnabled()
+    const guardTraffic = this.options.trafficGuardEnabled?.() ?? qoderTrafficGuardEnabled()
     let queueAttempts = 0
     let authRefreshed = false
     let duplicateRetried = false

@@ -49,6 +49,7 @@ function makeAdapter(overrides: Partial<ConstructorParameters<typeof QoderAdapte
     resolveCredential: async () => cred,
     refresh: async () => {},
     product: QODER,
+    trafficGuardEnabled: () => false,
     ...overrides,
   })
 }
@@ -947,7 +948,7 @@ describe('QoderAdapter 图片输入', () => {
  */
 describe('Qoder 单账号并发限制', () => {
   it.each([QODER, QODER_CN])('$id：流未结束时拒绝同账号请求，取消后释放名额', async (product) => {
-    vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', 'on')
+    vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', '')
     try {
       let upstreamCancelled = false
       const first = envelopeResponse([textFrame('开始')])
@@ -967,7 +968,7 @@ describe('Qoder 单账号并发限制', () => {
           dispatchTimes.push(performance.now())
           return envelopeResponse([textFrame('下一个'), finishFrame])
         })
-      const adapter = makeAdapter({ product, fetchImpl })
+      const adapter = makeAdapter({ product, fetchImpl, trafficGuardEnabled: undefined })
       const iterator = adapter.stream({
         model: 'auto',
         messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
