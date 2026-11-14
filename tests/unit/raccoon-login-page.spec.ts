@@ -79,13 +79,55 @@ describe('RACCOON_LOGIN_PAGE_PATHS', () => {
   })
 })
 
+/**
+ * 服务端签发的扫码票据（2026-11-14 起唯一可用形态）。
+ *
+ * ⚠️ 旧实现用**本地随机 32 位 hex**；新端点上那恒回 401
+ * （Gitee IKVA90），所以所有用例都必须走「先签发、再轮询」两跳。
+ */
+const TICKET = {
+  qrcode_code: 'qr-test-0001',
+  scan_path: '/login/mp',
+  expires_in: 300,
+  // ⚠️ **故意不用默认的 2 秒**：若用 2 秒，「写死 2000」与「用服务端下发值」
+  // 逐字节相同，那条判据就恒真（本仓记过的「假绿」）。
+  poll_interval: 5,
+  status: 'pending',
+}
+
+/**
+ * 造一个 fetch 桩：**签发端点**（`/auth/mp/qrcode`）恒回成功，
+ * 其余请求交给 `handler`（通常是轮询端点）。
+ *
+ * 为什么必须这样：`startRaccoonLoginFlow` 的首次签发发生在页面请求
+ * `/raccoon/login` 或 `/raccoon/poll` 时（懒签发）。若桩只回轮询响应，
+ * 签发会失败 ⇒ 页面只拿到「二维码获取失败」，用例变成测兜底而不是测主路径。
+ */
+function iamFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
+  return vi.fn(async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith('/auth/mp/qrcode')) {
+      return jsonResponse({ code: 'OK', message: 'success', request_id: 'reqiam-1', data: TICKET })
+    }
+    return handler(url, init)
+  })
+}
+
 describe('renderRaccoonLoginPage', () => {
-  const html = renderRaccoonLoginPage(RACCOON)
+  const html = renderRaccoonLoginPage(RACCOON, {
+    code: TICKET.qrcode_code,
+    scanPath: TICKET.scan_path,
+    expiresInMs: TICKET.expires_in * 1000,
+    pollIntervalMs: TICKET.poll_interval * 1000,
+  })
 
   it('是完整 HTML 文档', () => {
     expect(html.startsWith('<!DOCTYPE html>')).toBe(true)
     expect(html).toContain('</html>')
     expect(html).toContain('charset="utf-8"')
+  })
+
+  it('★★ 轮询间隔取服务端下发的 poll_interval（不是写死 2000）', () => {
+    expect(html).toContain('var POLL_INTERVAL_MS = 5000;')
   })
 
   it('有两个 Tab：微信扫码与短信登录', () => {
@@ -153,13 +195,13 @@ describe('renderRaccoonLoginPage', () => {
 
 describe('startRaccoonLoginFlow', () => {
   it('立即返回指向 127.0.0.1 的 loginUrl（两步式的硬约束）', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
     started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     expect(started.loginUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/raccoon\/login$/)
   })
 
   it('loginUrl 立即可访问，且返回 HTML', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
     started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     const response = await fetchLocal(started.loginUrl)
     expect(response.status).toBe(200)
@@ -169,14 +211,14 @@ describe('startRaccoonLoginFlow', () => {
   })
 
   it('只绑 127.0.0.1，不对外暴露', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
     started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     expect(started.loginUrl).toContain('127.0.0.1')
     expect(started.loginUrl).not.toContain('0.0.0.0')
   })
 
   it('轮询端点返回 pending（尚未扫码）', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
     started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     const base = originOf(started.loginUrl)
     const response = await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`)
@@ -188,11 +230,11 @@ describe('startRaccoonLoginFlow', () => {
     const exp = Math.floor(Date.now() / 1000) + 3600
     const token = jwtWithExp(exp)
     let polls = 0
-    const fetcher = vi.fn(async () => {
+    const fetcher = iamFetch(async () => {
       polls += 1
       return polls < 2
-        ? jsonResponse({ code: 0, data: { status: 'pending' } })
-        : jsonResponse({ code: 0, data: { status: 'success', access_token: token, refresh_token: 'r' } })
+        ? jsonResponse({ code: 'OK', data: { status: 'pending' } })
+        : jsonResponse({ code: 'OK', data: { status: 'success', access_token: token, refresh_token: 'r' } })
     })
     started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     const base = originOf(started.loginUrl)
@@ -205,7 +247,7 @@ describe('startRaccoonLoginFlow', () => {
   })
 
   it('close() 后端口关闭（不再可访问）', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
     const flow = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     const url = flow.loginUrl
     await flow.close()
@@ -213,7 +255,7 @@ describe('startRaccoonLoginFlow', () => {
   })
 
   it('close() 后 result 被 reject（不留悬挂 promise）', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
     const flow = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     const pending = flow.result.catch((e: unknown) => e)
     await flow.close()
@@ -222,7 +264,7 @@ describe('startRaccoonLoginFlow', () => {
   })
 
   it('超时后 result 被 reject', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
     started = await startRaccoonLoginFlow({
       fetcher: fetcher as unknown as typeof fetch,
       timeoutMs: 60,
@@ -281,7 +323,7 @@ describe('startRaccoonLoginFlow', () => {
   it('短信验证端点成功后 result 解析出凭据', async () => {
     const exp = Math.floor(Date.now() / 1000) + 3600
     const token = jwtWithExp(exp)
-    const fetcher = vi.fn(async (url: string) => {
+    const fetcher = iamFetch(async (url: string) => {
       if (String(url).includes('/send_sms')) return jsonResponse({ code: 0, message: 'success' })
       return jsonResponse({
         code: 0,
@@ -321,7 +363,7 @@ describe('startRaccoonLoginFlow', () => {
   })
 
   it('验证码错误时不终止流程（用户可重试）', async () => {
-    const fetcher = vi.fn(async (url: string) => {
+    const fetcher = iamFetch(async (url: string) => {
       if (String(url).includes('/send_sms')) return jsonResponse({ code: 0, message: 'success' })
       return jsonResponse({ code: 100002, message: 'sms code invalid' }, 400)
     })
@@ -348,7 +390,7 @@ describe('startRaccoonLoginFlow', () => {
   })
 
   it('未知路径返回 404', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
     started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     const base = originOf(started.loginUrl)
     const response = await fetchLocal(`${base}/raccoon/nope`)
@@ -356,8 +398,8 @@ describe('startRaccoonLoginFlow', () => {
   })
 
   it('轮询端点把二维码状态透传给页面（logging/canceled）', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({
-      code: 0, data: { status: 'logging', expired_at: '2030-01-01T00:00:00Z' },
+    const fetcher = iamFetch(async () => jsonResponse({
+      code: 'OK', data: { status: 'logging', expired_at: '2030-01-01T00:00:00Z' },
     }))
     started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
     const base = originOf(started.loginUrl)
@@ -365,5 +407,69 @@ describe('startRaccoonLoginFlow', () => {
     const payload = await response.json() as { status: string; expiredAt?: string }
     expect(payload.status).toBe('logging')
     expect(payload.expiredAt).toBe('2030-01-01T00:00:00Z')
+  })
+
+  /**
+   * ★★★ Gitee IKVA90 的两条页面级守卫。
+   *
+   * 背景：扫码链路 2026-11-14 迁到 IAM（服务端签发 `qr-<uuidv7>`），
+   * 旧的「本地随机 32 位 hex」在新轮询端点上恒回 401，症状是
+   * 「扫码后插件一直转圈、零报错」。下面两格分别锁住「签发失败」与
+   * 「票据过期」这两条必须重签的路径。
+   */
+  it('★★ 签发失败时页面仍渲染（二维码区域显示可读原因 + 短信兜底）', async () => {
+    const fetcher = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/auth/mp/qrcode')) {
+        // 错误原因来自网络，必须转义 —— 这里塞一个真的 `<script>` 才测得动
+        return jsonResponse({ code: 'INTERNAL', message: 'IAM 挂了 <script>alert(1)</script>' }, 500)
+      }
+      return jsonResponse({ code: 'OK', data: { status: 'pending' } })
+    })
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const base = originOf(started.loginUrl)
+    const html = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.login}`)).text()
+
+    expect(html).toContain('二维码获取失败')
+    expect(html).toContain('短信登录')
+    // 转义：原文里的 `<script>` 不许以可执行形态出现
+    expect(html).toContain('&lt;script&gt;')
+    expect(html).not.toContain('<script>alert(1)')
+    // 不许退回本地随机 code（那在新端点上 100% 被拒，只会把明确的失败变成一直转圈）
+    expect(html).not.toMatch(/code=[0-9a-f]{32}/)
+  })
+
+  it('★★★ 轮询拿到 expired 时必须重签新票据，并把新二维码回给页面', async () => {
+    let issued = 0
+    const fetcher = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/auth/mp/qrcode')) {
+        issued += 1
+        return jsonResponse({
+          code: 'OK',
+          data: {
+            qrcode_code: `qr-test-${issued}`,
+            scan_path: '/login/mp',
+            expires_in: 300,
+            poll_interval: 2,
+          },
+        })
+      }
+      // 旧票据已失效 —— 若页面不重签，用户会永远卡在这张过期的二维码上
+      return jsonResponse(
+        { code: 'AUTH_QRCODE_INVALID', message: 'mini-program QR code invalid' },
+        401,
+      )
+    })
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const base = originOf(started.loginUrl)
+    const payload = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.poll}`)).json() as {
+      status: string
+      qr?: string
+    }
+
+    expect(payload.status).toBe('expired')
+    // ⚠️ 二维码是**编码后的图形**，里面没有明文 code —— 判据只能是
+    // 「真签发了第二张」+「回给页面一个 SVG」。
+    expect(issued).toBe(2)
+    expect(payload.qr).toContain('<svg')
   })
 })

@@ -866,6 +866,89 @@ raccoon 在 `51ded6a` 修了这处，**loomy 当时未同步**（同一次审计
 
 ---
 
+## ⚠️⚠️ Raccoon 扫码登录已迁到 IAM：本地随机 code 100% 失效（Gitee IKVA90，2026-11-14）
+
+### 症状
+
+用户点「扫码登录」→ 弹出页面 → 用手机扫 → **插件一直转圈、零报错**，直到 5 分钟超时。
+不是「拿不到 token 而报错」，是**连错误都没有**。
+
+### 根因：`qrcode_code` 不再由客户端生成
+
+旧实现（本仓到 `dd81abb` 为止）是 `generateQrCode() = randomBytes(16).toString('hex')`，
+依据是当时客户端里的 `CryptoJS.lib.WordArray.random(16)`。2026-11-14 官网改版后
+**服务端只认自己签发的 `qr-<uuidv7>`**，本地随机码在新端点上恒回 401。
+
+### 四格实测（决定性证据）
+
+| 端点 | IAM 签发的 `qr-…` | 我们的本地随机 code |
+|---|---|---|
+| 旧 `/api/web/auth/v1/login_with_qrcode_code` | `200 {"code":0,…,"status":"pending"}` | `200 {"code":0,…,"status":"pending"}` |
+| 新 `/api/iam/v1/auth/mp/qrcode/login` | `200 {"code":"OK",…,"status":"pending"}` | **`401 {"code":"AUTH_QRCODE_INVALID","message":"mini-program QR code invalid"}`** |
+
+⚠️ **旧端点是僵尸**：对**任意**字符串恒回 `pending`，不再推进任何状态。
+所以「继续打旧端点」不会报错，只会让「二维码早就失效」看起来像「一直在等」——
+这就是「零报错转圈」的来源。
+
+### 新协议（三个事实）
+
+1. **签发**：`POST /api/iam/v1/auth/mp/qrcode`（body `{}` 或 `{product_codes:[…]}`，
+   实测四种取值结果全同）⇒ `{qrcode_code: 'qr-…', scan_path: '/login/mp',
+   expires_in: 300, poll_interval: 2, status: 'pending'}`。
+   `expires_in` 与 `poll_interval` 的单位都是**秒**。
+2. **轮询**：`POST /api/iam/v1/auth/mp/qrcode/login`（body `{qrcode_code}`）。
+3. ⚠️⚠️ **信封是两套**：业务 API 是 `{code: 0}`（数字），IAM 是
+   `{code: 'OK', message, request_id, data}`（**字符串** + `request_id`）。
+   **必须分开解析**（`parseIamEnvelope` vs `parseEnvelope`）—— 合在一起写，
+   任何一方都会静默失效，而且失效方式是「一直 pending」。
+
+### 两个必须重签的终态
+
+- `canceled`（用户在手机上取消）
+- `expired`（`401 + AUTH_QRCODE_INVALID`，二维码过期/被消耗）
+
+⚠️ `expired` **不是服务端下发的状态值** —— 服务端只有
+`pending / logging / canceled / success`。它由我们在拿到 `AUTH_QRCODE_INVALID`
+时**合成**（官方前端同款映射：`"AUTH_QRCODE_EXPIRED"===e.code?"expired":"failed"`）。
+
+⚠️ **不能把 `AUTH_QRCODE_INVALID` 也降级成 `pending`**（那样最省事、也最像「网络抖动」）：
+降级 = 页面永远转圈 = 本 issue 的症状原样保留。
+
+### 待解阻塞：`/login/mp` 当前 404
+
+二维码落地页 `/login/mp` 在 2026-11-14 实测**全部 404**（带/不带 `code`、
+`appname`、`source=platform`、微信 UA、桌面 UA、`www.` 前缀、`/login/mp.html`、
+`/login/mp/index`、`/Login/mp` 都是 `__next_error__`；只有 `/login/mp/` 回 308 再 404；
+`/login` 对照 200）。`scan_path` 名为 `/login/mp`，**疑似小程序页面路径被误用于 web 端**。
+
+⇒ 我们仍按官方拼法生成（页面恢复后自然可用），但登录页**必须同时**给出
+「用手机 App 扫码」的兜底提示，不能只给一个打不开的二维码。
+
+### 守卫清单（8 条变异全部有牙）
+
+| # | 变异 | 红在 |
+|---|---|---|
+| M1 | IAM 失效不再映射 `expired`（降级 `pending`） | `expected 'pending' to be 'expired'` |
+| M2 | 只认 `code` 不认 HTTP 401（网关换皮逃逸） | 同上 |
+| M3 | 登录页只重签 `canceled`（`expired` 不重签） | `expected 1 to be 2`（只签发一次） |
+| M4 | 签发票据打**业务 API** 前缀（不是 IAM） | `expected '…/api/web/aut…' to be '…/api/iam/v1/…'` |
+| M5 | 二维码 URL 丢掉 `source=platform` | `expected null to be 'platform'` |
+| M6 | 拿不到票据时渲染空框（不报原因） | `to contain '二维码获取失败'` |
+| M7 | `escapeHtmlText` 恒等（错误原因未转义） | `to contain '&lt;script&gt;'` |
+| M8 | 轮询间隔写死 2000（无视服务端 `poll_interval`） | `to contain 'var POLL_INTERVAL_MS = 5000;'` |
+
+### 两条过程教训
+
+1. **判据没打中，先怀疑判据**：M7/M8 首版**无牙** —— M7 的夹具错误消息里
+   没有 HTML 特殊字符（`escapeHtmlText` 恒等也全绿）；M8 的夹具
+   `poll_interval = 2` 恰好等于常量 `RACCOON_QR_POLL_INTERVAL_MS = 2000`，
+   于是「写死 2000」与「用服务端值」**逐字节相同**（本仓记过的恒真形态）。
+   修法是 **夹具故意用非默认值**（`poll_interval: 5`）+ 塞真的 `<script>`。
+2. **模板字符串里的反引号会提前终止字符串**：我在页面脚本的注释里写了
+   `` `poll_interval` ``，`tsc` 立刻报 `TS1005: ';' expected`。
+   这是本仓第 N 次踩（同 `jet-hub-styles.js` 的铁律）—— **HTML/CSS/JS 模板里的
+   注释一律不许出现反引号**。
+
 ## ⚠️ MiniMax Code（中国版 + 国际版）provider：不能凭直觉改的点
 
 `minimax` 是**第 10 个、也是首个 `Anthropic Messages` 协议族**的 provider

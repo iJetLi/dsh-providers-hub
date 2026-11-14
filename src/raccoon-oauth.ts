@@ -23,8 +23,13 @@
  * 也不做凭据持久化（那是 `raccoon-auth.ts` 的职责）。全部函数可离线单测。
  */
 
-import { randomBytes } from 'node:crypto'
 import {
+  RACCOON_IAM_OK_CODE,
+  RACCOON_IAM_PREFIX,
+  RACCOON_IAM_QR_CREATE_PATH,
+  RACCOON_IAM_QR_INVALID_CODE,
+  RACCOON_IAM_QR_LOGIN_PATH,
+  RACCOON_QR_POLL_INTERVAL_MS,
   RACCOON_QR_STATUS,
   RACCOON_REQUEST_TIMEOUT_MS,
   decodeJwtExpMs,
@@ -34,8 +39,13 @@ import {
 } from './raccoon.js'
 import { type RaccoonProduct } from './raccoon-product.js'
 
-/** 扫码轮询的状态值。 */
-export type RaccoonQrStatus = 'pending' | 'logging' | 'canceled' | 'success'
+/**
+ * 扫码轮询的状态值。
+ *
+ * ⚠️ `expired` **不是服务端下发的状态值** —— 它由我们在 IAM 回
+ * `AUTH_QRCODE_INVALID`（HTTP 401）时合成（官方前端同款映射）。
+ */
+export type RaccoonQrStatus = 'pending' | 'logging' | 'canceled' | 'success' | 'expired'
 
 /** 一次扫码轮询的结果。 */
 export interface RaccoonQrPollResult {
@@ -109,51 +119,208 @@ async function postJson(
 }
 
 /**
- * 生成一个扫码用的 `qrcode_code`（32 位小写 hex = 16 字节随机）。
+ * 一次扫码会话的**服务端签发**票据。
  *
- * 依据客户端：`CryptoJS.lib.WordArray.random(16)`（渲染层模块 68284 的 `yl()`）。
+ * ⚠️⚠️ 2026-11-14 起，`qrcode_code` **不再由客户端生成** —— 必须由 IAM 的
+ * `POST /api/iam/v1/auth/mp/qrcode` 签发（形如 `qr-<uuidv7>`），二维码落地页
+ * 用服务端下发的 `scan_path` 拼。
+ *
+ * 旧的「本地随机 32 位 hex」在**新**轮询端点上恒回
+ * `401 {"code":"AUTH_QRCODE_INVALID"}`（见 Gitee IKVA90）；而**旧**轮询端点
+ * 对任意字符串恒回 `pending`（僵尸端点）⇒ 症状是「扫码后插件一直转圈、零报错」。
  */
-export function generateQrCode(): string {
-  return randomBytes(16).toString('hex')
+export interface RaccoonQrTicket {
+  /** 服务端签发的 `qrcode_code`。 */
+  code: string
+  /** 二维码落地页路径（服务端下发，形如 `/login/mp`）。 */
+  scanPath: string
+  /** 本张二维码的有效期（毫秒）。 */
+  expiresInMs: number
+  /** 服务端要求的轮询间隔（毫秒）。 */
+  pollIntervalMs: number
 }
 
 /**
- * 构造二维码承载的微信登录页 URL。
+ * IAM 响应信封。
  *
- * 依据客户端：`` `${base}/login/mp?code=${code}&appname=商汤小浣熊官网` ``。
- * 这是一个**公开页面**，扫码后在微信内完成授权，服务端据此把该 code 置为
- * `success`，我们轮询 `login_with_qrcode_code` 取回 token。
+ * ⚠️ `code` 是**字符串**（`'OK'` / `'AUTH_QRCODE_INVALID'` / …），与业务 API 的
+ * 数字 `code: 0` **不是同一类型**，且多一个 `request_id`。两套信封必须分开解析
+ * （`parseIamEnvelope` vs `parseEnvelope`），合在一起写会让任何一方静默失效。
  */
-export function buildQrImageUrl(product: RaccoonProduct, code: string): string {
-  const params = new URLSearchParams({ code, appname: '商汤小浣熊官网' })
-  return `${product.apiBase}/login/mp?${params.toString()}`
+interface RaccoonIamEnvelope {
+  code: string
+  message: string
+  requestId: string
+  data: Record<string, unknown> | undefined
+}
+
+/** 解析 IAM 信封（见 `RaccoonIamEnvelope` 的类型警告）。 */
+function parseIamEnvelope(parsed: unknown, httpStatus: number): RaccoonIamEnvelope {
+  const record = typeof parsed === 'object' && parsed !== null
+    ? parsed as Record<string, unknown>
+    : {}
+  const code = typeof record.code === 'string' ? record.code : ''
+  const message = typeof record.message === 'string' ? record.message : ''
+  const requestId = typeof record.request_id === 'string' ? record.request_id : ''
+  const data = typeof record.data === 'object' && record.data !== null
+    ? record.data as Record<string, unknown>
+    : undefined
+  // 网关直接回 HTML / 空体时 `code` 为空 —— 用状态码兜底成可读错误，
+  // 否则错误文案会变成「申请扫码二维码失败（）」这种没法排查的样子。
+  if (code.length === 0 && httpStatus >= 400) {
+    return { code: `HTTP_${httpStatus}`, message, requestId, data }
+  }
+  return { code, message, requestId, data }
+}
+
+/** 发一次 IAM 请求并解析信封。 */
+async function postIamJson(
+  url: string,
+  body: Record<string, unknown>,
+  fetcher: typeof fetch,
+): Promise<{ envelope: RaccoonIamEnvelope; status: number }> {
+  let response: Response
+  try {
+    response = await fetcher(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(RACCOON_REQUEST_TIMEOUT_MS),
+    })
+  } catch (error) {
+    throw new Error(
+      `raccoon: IAM 请求失败：${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  let parsed: unknown
+  try {
+    parsed = await response.json()
+  } catch {
+    throw new Error(`raccoon: IAM 响应不是 JSON（HTTP ${response.status}）`)
+  }
+  return { envelope: parseIamEnvelope(parsed, response.status), status: response.status }
 }
 
 /**
- * 轮询一次扫码登录状态。
+ * 向 IAM 申请一张扫码票据。
+ *
+ * 依据官网登录组件的 `createQr()`：`POST /auth/mp/qrcode`（其 `t()` 的
+ * `baseUrl = '/api/iam/v1'`），并校验 `qrcode_code` / `scan_path` 为字符串、
+ * `expires_in ∈ (0, 3600]`、`poll_interval > 0`。
+ * 实测返回 `{ qrcode_code: 'qr-…', scan_path: '/login/mp', expires_in: 300, poll_interval: 2 }`
+ * （`expires_in` 与 `poll_interval` 的单位都是**秒**）。
+ *
+ * ⚠️ 签发失败必须**抛出**（而不是退回本地随机 code）—— 本地随机 code 在新端点上
+ * 100% 被拒，静默退回只会把「明确失败」变成「一直转圈」。
+ */
+export async function createRaccoonQrTicket(
+  product: RaccoonProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<RaccoonQrTicket> {
+  const { envelope, status: httpStatus } = await postIamJson(
+    `${product.apiBase}${RACCOON_IAM_PREFIX}${RACCOON_IAM_QR_CREATE_PATH}`,
+    {},
+    fetcher,
+  )
+  if (envelope.code !== RACCOON_IAM_OK_CODE || envelope.data === undefined) {
+    // 报错必须同时带**码**（`INTERNAL` / `HTTP_502` …）与**服务端原文**：
+    // 只留其一，用户报障时我们没法区分「签名错」「限流」「网关挂」。
+    const code = envelope.code.length > 0 ? envelope.code : `HTTP ${httpStatus}`
+    const detail = envelope.message.length > 0 ? `：${envelope.message}` : ''
+    throw new Error(`raccoon: 申请扫码二维码失败（${code}）${detail}`)
+  }
+  const rawCode = envelope.data.qrcode_code
+  const rawScanPath = envelope.data.scan_path
+  if (typeof rawCode !== 'string' || rawCode.length === 0) {
+    throw new Error('raccoon: 申请扫码二维码失败（响应里没有 qrcode_code）')
+  }
+  if (typeof rawScanPath !== 'string' || !rawScanPath.startsWith('/')) {
+    throw new Error('raccoon: 申请扫码二维码失败（响应里没有可用的 scan_path）')
+  }
+  const rawExpiresIn = envelope.data.expires_in
+  const rawPollInterval = envelope.data.poll_interval
+  const expiresInSec = typeof rawExpiresIn === 'number'
+    && Number.isFinite(rawExpiresIn) && rawExpiresIn > 0
+    ? Math.min(rawExpiresIn, 3600)
+    : 300
+  const pollIntervalSec = typeof rawPollInterval === 'number'
+    && Number.isFinite(rawPollInterval) && rawPollInterval > 0
+    ? Math.min(rawPollInterval, 60)
+    : RACCOON_QR_POLL_INTERVAL_MS / 1000
+  return {
+    code: rawCode,
+    scanPath: rawScanPath,
+    expiresInMs: Math.round(expiresInSec * 1000),
+    // 官方前端把下界夹到 1 秒（`Math.max(1e3, …)`），照抄以免服务端给 0 时页面空转
+    pollIntervalMs: Math.max(1_000, Math.round(pollIntervalSec * 1000)),
+  }
+}
+
+/**
+ * 构造二维码承载的登录页 URL。
+ *
+ * 依据官网 `5348-…js`：`new URL(scan_path, qrOrigin)` 后 `search = ''`，再
+ * `set('code', qrcode_code)` / `set('appname', brand)` / `set('source', 'platform')`。
+ * `qrOrigin` 取自服务端渲染数据（实测 `https://xiaohuanxiong.com/`），与
+ * `product.apiBase` 同源，故直接以它作 base。
+ *
+ * ⚠️ 该页面在 2026-11-14 实测**全部 404**（`/login/mp` 及其变体都是
+ * `__next_error__`，只有 `/login/mp/` 回 308 再 404）——`scan_path` 名为
+ * `/login/mp`，疑似**小程序页面路径**被误用于 web 端。我们仍按官方拼法生成
+ * （页面恢复后自然可用），但 `raccoon-login-page.ts` 必须同时给出
+ * 「用手机 App 扫码」的兜底提示，不能只给一个打不开的二维码。
+ */
+export function buildQrImageUrl(product: RaccoonProduct, ticket: RaccoonQrTicket): string {
+  const url = new URL(ticket.scanPath, product.apiBase)
+  url.search = ''
+  url.searchParams.set('code', ticket.code)
+  url.searchParams.set('appname', '商汤小浣熊官网')
+  url.searchParams.set('source', 'platform')
+  return url.href
+}
+
+/**
+ * 轮询一次扫码登录状态（走 IAM 新端点）。
  *
  * ⚠️ **任何异常都降级为 `pending`**（网络抖动、响应畸形、未知 status）：
  * 轮询是 2 秒一次的循环，偶发失败不应中断整个登录流程；而把未知状态
  * 误判成 `success` 会让流程拿到空 token 后卡死，误判成 `canceled` 则会让
  * 用户正在扫码的二维码被无故刷新。
+ *
+ * ⚠️⚠️ 唯一的**终态**是 IAM 的 `AUTH_QRCODE_INVALID`（HTTP 401）—— 它表示这张
+ * 二维码已过期/被消耗，必须让页面重新签发（我们把它合成为 `expired`）。
+ * **不能也降级成 `pending`**：那样页面会永远转圈，而这正是 2026-11-14 之前
+ * 「扫码后插件一直转圈、零报错」的症状（Gitee IKVA90）。
+ *
+ * ⚠️ 旧端点 `/api/web/auth/v1/login_with_qrcode_code` 已是**僵尸端点**：对任意
+ * 字符串恒回 `{"code":0,…,"status":"pending"}`（实测），不再推进任何状态。
+ * 保留它只会让「二维码早就失效」看起来像「一直在等」。
  */
 export async function pollRaccoonQrLogin(
   product: RaccoonProduct,
   code: string,
   fetcher: typeof fetch = fetch,
 ): Promise<RaccoonQrPollResult> {
-  let envelope: RaccoonEnvelope
+  let envelope: RaccoonIamEnvelope
+  let httpStatus: number
   try {
-    const result = await postJson(
-      `${product.apiBase}${product.authApiPrefix}/login_with_qrcode_code`,
+    const result = await postIamJson(
+      `${product.apiBase}${RACCOON_IAM_PREFIX}${RACCOON_IAM_QR_LOGIN_PATH}`,
       { qrcode_code: code },
       fetcher,
     )
     envelope = result.envelope
+    httpStatus = result.status
   } catch {
     return { status: 'pending' }
   }
-  if (envelope.code !== 0 || envelope.data === undefined) return { status: 'pending' }
+  // 二维码失效：IAM 回 401 + `AUTH_QRCODE_INVALID`（官方前端同样映射成 expired）
+  if (envelope.code === RACCOON_IAM_QR_INVALID_CODE || httpStatus === 401) {
+    return { status: 'expired' }
+  }
+  if (envelope.code !== RACCOON_IAM_OK_CODE || envelope.data === undefined) {
+    return { status: 'pending' }
+  }
 
   const raw = envelope.data.status
   const status = typeof raw === 'string' ? raw : ''

@@ -54,18 +54,61 @@ export const RACCOON_TOKEN_REFRESH_WINDOW_SECONDS = 300
 /** 请求超时（毫秒）。 */
 export const RACCOON_REQUEST_TIMEOUT_MS = 60_000
 
-/** 扫码轮询间隔（毫秒）。与客户端一致。 */
+/**
+ * 扫码轮询间隔（毫秒）—— **仅当服务端未下发 `poll_interval` 时的兜底**。
+ *
+ * 2026-11-14 起服务端在签发二维码时一并下发 `poll_interval`（实测 2 秒），
+ * 页面按它设轮询周期；这个常量只是防御（老版本服务端 / 字段缺失）。
+ */
 export const RACCOON_QR_POLL_INTERVAL_MS = 2_000
+
+/**
+ * IAM 服务前缀。
+ *
+ * ⚠️⚠️ **与业务 API 前缀（`product.authApiPrefix = /api/web/auth/v1`）是两个不同的
+ * 东西**，别混用：扫码登录在 2026-11-14 前后整体迁到了 IAM。
+ *
+ * 依据：官网 `/login` 的渲染数据里 `qrOrigin: "https://xiaohuanxiong.com/"`，
+ * 而登录组件的 `t()` 请求函数 `baseUrl: "/api/iam/v1"`（chunk `1919-…`）。
+ * 实测 `POST https://xiaohuanxiong.com/api/iam/v1/auth/mp/qrcode` ⇒ 200。
+ */
+export const RACCOON_IAM_PREFIX = '/api/iam/v1'
+
+/** IAM 签发扫码二维码的路径（`POST`，服务端生成 `qrcode_code`）。 */
+export const RACCOON_IAM_QR_CREATE_PATH = '/auth/mp/qrcode'
+
+/** IAM 轮询扫码状态的路径（`POST`）。 */
+export const RACCOON_IAM_QR_LOGIN_PATH = '/auth/mp/qrcode/login'
+
+/**
+ * IAM 信封的成功码。
+ *
+ * ⚠️⚠️ 与业务 API 的成功码**不是同一个类型**：业务 API 是 `{ code: 0 }`（数字），
+ * IAM 是 `{ code: 'OK' }`（字符串），且多一个 `request_id`。两套信封必须分开解析
+ * （`parseIamEnvelope` 与 `parseEnvelope`），混用会让文案与分类双双错位。
+ */
+export const RACCOON_IAM_OK_CODE = 'OK'
+
+/** IAM 的二维码失效码（轮询时下发，HTTP 401）。 */
+export const RACCOON_IAM_QR_INVALID_CODE = 'AUTH_QRCODE_INVALID'
 
 /** 扫码登录整体超时（毫秒）。 */
 export const RACCOON_LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 
-/** 扫码状态机的状态值。 */
+/**
+ * 扫码状态机的状态值。
+ *
+ * ⚠️ `expired` **不是服务端下发的状态值**（服务端只有 pending / logging /
+ * canceled / success）—— 它由**我们**在 IAM 回 `AUTH_QRCODE_INVALID`（HTTP 401）
+ * 时合成：官方前端把该码映射成 `expired` 分支（chunk `5348` 的
+ * `"AUTH_QRCODE_EXPIRED"===e.code?"expired":"failed"`），体验上等价。
+ */
 export const RACCOON_QR_STATUS = {
   pending: 'pending',
   logging: 'logging',
   canceled: 'canceled',
   success: 'success',
+  expired: 'expired',
 } as const
 
 /**

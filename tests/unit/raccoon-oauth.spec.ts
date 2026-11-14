@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { RACCOON } from '../../src/raccoon-product.js'
 import {
   buildQrImageUrl,
+  createRaccoonQrTicket,
   exchangeRaccoonAuthorizationCode,
   fetchRaccoonUserInfo,
-  generateQrCode,
   loginRaccoonWithSmsCode,
   pollRaccoonQrLogin,
   refreshRaccoonCredential,
@@ -25,43 +25,121 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
-describe('generateQrCode', () => {
-  it('生成 32 位 hex（16 字节随机）', () => {
-    const code = generateQrCode()
-    expect(code).toMatch(/^[0-9a-f]{32}$/)
+describe('createRaccoonQrTicket', () => {
+  it('向 IAM 申请票据，解析出 code / scanPath / 两个毫秒间隔', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 'OK',
+      message: 'success',
+      request_id: 'reqiam-1',
+      data: {
+        qrcode_code: 'qr-01a1db13-77bc-7239-beae-3953ada73ea7',
+        scan_path: '/login/mp',
+        expires_in: 300,
+        poll_interval: 2,
+        status: 'pending',
+      },
+    }))
+    const ticket = await createRaccoonQrTicket(RACCOON, fetcher as unknown as typeof fetch)
+
+    expect(ticket).toEqual({
+      code: 'qr-01a1db13-77bc-7239-beae-3953ada73ea7',
+      scanPath: '/login/mp',
+      expiresInMs: 300_000,
+      pollIntervalMs: 2_000,
+    })
+    /**
+     * ⚠️⚠️ 必须打 **IAM** 前缀（`/api/iam/v1`），不是业务 API 前缀
+     * （`/api/web/auth/v1`）—— 2026-11-14 扫码链路整体迁到 IAM，
+     * 打错前缀会 404 且症状是「二维码一直拿不到」。
+     */
+    expect(fetcher.mock.calls[0]![0]).toBe(`${RACCOON.apiBase}/api/iam/v1/auth/mp/qrcode`)
+    expect(fetcher.mock.calls[0]![1]).toMatchObject({ method: 'POST' })
   })
 
-  it('每次不同', () => {
-    expect(generateQrCode()).not.toBe(generateQrCode())
+  it('非 OK 码时抛出可读错误（不能静默退回本地随机 code）', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ code: 'INTERNAL', message: 'boom' }))
+    await expect(createRaccoonQrTicket(RACCOON, fetcher as unknown as typeof fetch))
+      .rejects.toThrow('boom')
+  })
+
+  it('缺 qrcode_code 时抛错', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 'OK', data: { scan_path: '/login/mp', expires_in: 300, poll_interval: 2 },
+    }))
+    await expect(createRaccoonQrTicket(RACCOON, fetcher as unknown as typeof fetch))
+      .rejects.toThrow('qrcode_code')
+  })
+
+  it('缺 scan_path（或非绝对路径）时抛错', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 'OK', data: { qrcode_code: 'qr-x', expires_in: 300, poll_interval: 2 },
+    }))
+    await expect(createRaccoonQrTicket(RACCOON, fetcher as unknown as typeof fetch))
+      .rejects.toThrow('scan_path')
+  })
+
+  it('★ 服务端给退化值时走兜底（不能把 0 秒轮询打给页面）', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 'OK', data: { qrcode_code: 'qr-x', scan_path: '/login/mp', expires_in: 0, poll_interval: 0 },
+    }))
+    const ticket = await createRaccoonQrTicket(RACCOON, fetcher as unknown as typeof fetch)
+    expect(ticket.expiresInMs).toBe(300_000)
+    expect(ticket.pollIntervalMs).toBe(2_000)
+  })
+
+  it('★★ 上界夹取（expires_in 60 分钟 / poll_interval 10 分钟都不许原样下发）', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 'OK', data: { qrcode_code: 'qr-x', scan_path: '/login/mp', expires_in: 3_600, poll_interval: 600 },
+    }))
+    const ticket = await createRaccoonQrTicket(RACCOON, fetcher as unknown as typeof fetch)
+    expect(ticket.expiresInMs).toBe(3_600_000)
+    expect(ticket.pollIntervalMs).toBe(60_000)
   })
 })
 
 describe('buildQrImageUrl', () => {
-  it('指向公开的微信登录页，带 code 与 appname', () => {
-    const url = buildQrImageUrl(RACCOON, 'abc123')
-    expect(url).toContain('https://xiaohuanxiong.com/login/mp?code=abc123')
-    expect(url).toContain('appname=')
+  const ticket = {
+    code: 'qr-01a1db13',
+    scanPath: '/login/mp',
+    expiresInMs: 300_000,
+    pollIntervalMs: 2_000,
+  }
+
+  it('★ 用服务端下发的 scan_path 拼，带 code / appname / source=platform', () => {
+    const url = new URL(buildQrImageUrl(RACCOON, ticket))
+
+    expect(url.origin).toBe('https://xiaohuanxiong.com')
+    expect(url.pathname).toBe('/login/mp')
+    expect(url.searchParams.get('code')).toBe('qr-01a1db13')
+    expect(url.searchParams.get('appname')).toBe('商汤小浣熊官网')
+    // 官网 `5348-…js` 明确 set('source','platform')；漏了会影响扫码后的归因
+    expect(url.searchParams.get('source')).toBe('platform')
+  })
+
+  it('scan_path 换成别的路径时也跟着变（不是硬编码 /login/mp）', () => {
+    const url = new URL(buildQrImageUrl(RACCOON, { ...ticket, scanPath: '/login/qr' }))
+    expect(url.pathname).toBe('/login/qr')
   })
 })
 
 describe('pollRaccoonQrLogin', () => {
-  it('pending 状态原样返回', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'pending' } }))
-    const result = await pollRaccoonQrLogin(RACCOON, 'c', fetcher as unknown as typeof fetch)
+  it('pending 状态原样返回，且打 IAM 的登录端点', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-c', fetcher as unknown as typeof fetch)
+
     expect(result.status).toBe('pending')
-    expect(fetcher).toHaveBeenCalledWith(
-      `${RACCOON.apiBase}${RACCOON.authApiPrefix}/login_with_qrcode_code`,
-      expect.objectContaining({ method: 'POST' }),
-    )
+    expect(fetcher.mock.calls[0]![0]).toBe(`${RACCOON.apiBase}/api/iam/v1/auth/mp/qrcode/login`)
+    expect(fetcher.mock.calls[0]![1]).toMatchObject({ method: 'POST' })
   })
 
   it('success 时取出 token 并推算 expires_at（毫秒字符串）', async () => {
     const exp = Math.floor(Date.now() / 1000) + 3600
     const fetcher = vi.fn(async () => jsonResponse({
-      code: 0,
+      code: 'OK',
       data: { status: 'success', access_token: jwtWithExp(exp), refresh_token: 'r1' },
     }))
-    const result = await pollRaccoonQrLogin(RACCOON, 'c', fetcher as unknown as typeof fetch)
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-c', fetcher as unknown as typeof fetch)
+
     expect(result.status).toBe('success')
     expect(result.accessToken).toBe(jwtWithExp(exp))
     expect(result.refreshToken).toBe('r1')
@@ -70,35 +148,57 @@ describe('pollRaccoonQrLogin', () => {
 
   it('logging 时带出 expired_at（供页面续期计时）', async () => {
     const fetcher = vi.fn(async () => jsonResponse({
-      code: 0, data: { status: 'logging', expired_at: '2030-01-01T00:00:00Z' },
+      code: 'OK', data: { status: 'logging', expired_at: '2030-01-01T00:00:00Z' },
     }))
-    const result = await pollRaccoonQrLogin(RACCOON, 'c', fetcher as unknown as typeof fetch)
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-c', fetcher as unknown as typeof fetch)
+
     expect(result.status).toBe('logging')
     expect(result.expiredAt).toBe('2030-01-01T00:00:00Z')
   })
 
   it('网络异常时降级为 pending（不打断轮询）', async () => {
     const fetcher = vi.fn(async () => { throw new Error('network down') })
-    const result = await pollRaccoonQrLogin(RACCOON, 'c', fetcher as unknown as typeof fetch)
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-c', fetcher as unknown as typeof fetch)
     expect(result.status).toBe('pending')
   })
 
   it('未知 status 也降级为 pending（不误判成成功）', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'weird' } }))
-    const result = await pollRaccoonQrLogin(RACCOON, 'c', fetcher as unknown as typeof fetch)
+    const fetcher = vi.fn(async () => jsonResponse({ code: 'OK', data: { status: 'weird' } }))
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-c', fetcher as unknown as typeof fetch)
     expect(result.status).toBe('pending')
   })
 
   it('success 但缺 access_token 时不当作成功', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'success' } }))
-    const result = await pollRaccoonQrLogin(RACCOON, 'c', fetcher as unknown as typeof fetch)
+    const fetcher = vi.fn(async () => jsonResponse({ code: 'OK', data: { status: 'success' } }))
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-c', fetcher as unknown as typeof fetch)
     expect(result.status).toBe('pending')
   })
 
   it('canceled 状态透传', async () => {
-    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { status: 'canceled' } }))
-    const result = await pollRaccoonQrLogin(RACCOON, 'c', fetcher as unknown as typeof fetch)
+    const fetcher = vi.fn(async () => jsonResponse({ code: 'OK', data: { status: 'canceled' } }))
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-c', fetcher as unknown as typeof fetch)
     expect(result.status).toBe('canceled')
+  })
+
+  /**
+   * ★★★ 这一格是 Gitee IKVA90 的核心回归守卫：
+   * 二维码过期时 IAM 回 `401 + AUTH_QRCODE_INVALID`，必须映射成 `expired`
+   * （终态、触发重签）。若也降级成 `pending`，页面会**永远转圈**。
+   */
+  it('★★★ AUTH_QRCODE_INVALID（HTTP 401）⇒ expired，不许降级成 pending', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 'AUTH_QRCODE_INVALID',
+      message: 'mini-program QR code invalid',
+      request_id: 'reqiam-2',
+    }, 401))
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-stale', fetcher as unknown as typeof fetch)
+    expect(result.status).toBe('expired')
+  })
+
+  it('★★ 只有 HTTP 401 而 code 缺失时也判 expired（网关换皮的兜底）', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ message: 'unauthorized' }, 401))
+    const result = await pollRaccoonQrLogin(RACCOON, 'qr-stale', fetcher as unknown as typeof fetch)
+    expect(result.status).toBe('expired')
   })
 })
 

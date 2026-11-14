@@ -35,14 +35,16 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import {
   RACCOON_LOGIN_TIMEOUT_MS,
+  RACCOON_QR_POLL_INTERVAL_MS,
   type RaccoonCredential,
 } from './raccoon.js'
 import {
   buildQrImageUrl,
-  generateQrCode,
+  createRaccoonQrTicket,
   loginRaccoonWithSmsCode,
   pollRaccoonQrLogin,
   sendRaccoonSmsCode,
+  type RaccoonQrTicket,
 } from './raccoon-oauth.js'
 import { RACCOON, type RaccoonProduct } from './raccoon-product.js'
 import { renderQrSvg } from './raccoon-qr.js'
@@ -67,12 +69,46 @@ export interface StartedRaccoonLoginFlow {
 
 /** 流程内部状态（**只存在于宿主侧**）。 */
 interface FlowState {
-  /** 扫码用的 code（宿主侧生成，页面不知道）。 */
-  qrCode: string
+  /**
+   * 扫码票据（**服务端签发**，见 `createRaccoonQrTicket`）。
+   *
+   * ⚠️ 懒签发：`startRaccoonLoginFlow` 必须**立即返回 `loginUrl`**（否则
+   * `window.open` 会跑出用户手势窗口），所以第一次签发发生在页面请求
+   * `/raccoon/login` 时。
+   */
+  ticket?: RaccoonQrTicket
+  /** 最近一次申请票据失败的原因（页面据此展示可读错误 + 短信兜底提示）。 */
+  ticketError?: string
   /** 当前展示的短信目标手机号（未发过短信时为空）。 */
   phone: string
   /** 最近一次轮询的二维码有效期（供页面展示倒计时）。 */
   lastExpiredAt: string | undefined
+}
+
+/**
+ * 确保当前流程有一张可用票据（没有就签一张）。
+ *
+ * ⚠️ 签发失败**不抛**：登录页必须仍能渲染出来（短信 Tab 是可用的兜底），
+ * 只在二维码区域显示原因。若这里抛，用户连短信登录都进不去。
+ *
+ * ⚠️ 失败后**不缓存**（`ticket` 保持 `undefined`）⇒ 下一次轮询会重试签发，
+ * 网络抖动恢复后自动可用。
+ */
+async function ensureTicket(
+  state: FlowState,
+  product: RaccoonProduct,
+  fetcher: typeof fetch,
+): Promise<RaccoonQrTicket | undefined> {
+  if (state.ticket !== undefined) return state.ticket
+  try {
+    const ticket = await createRaccoonQrTicket(product, fetcher)
+    state.ticket = ticket
+    state.ticketError = undefined
+    return ticket
+  } catch (error) {
+    state.ticketError = error instanceof Error ? error.message : String(error)
+    return undefined
+  }
 }
 
 /** `startRaccoonLoginFlow` 的选项。 */
@@ -96,7 +132,6 @@ export async function startRaccoonLoginFlow(
   const product = options.product ?? RACCOON
   const fetcher = options.fetcher ?? fetch
   const state: FlowState = {
-    qrCode: generateQrCode(),
     phone: '',
     lastExpiredAt: undefined,
   }
@@ -191,13 +226,24 @@ async function handleRequest(
   const { state, product } = deps
 
   if (url.pathname === RACCOON_LOGIN_PAGE_PATHS.login) {
+    const ticket = await ensureTicket(state, product, deps.fetcher)
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-    response.end(renderRaccoonLoginPage(product, state.qrCode))
+    response.end(renderRaccoonLoginPage(product, ticket, state.ticketError))
     return
   }
 
   if (url.pathname === RACCOON_LOGIN_PAGE_PATHS.poll) {
-    const polled = await pollRaccoonQrLogin(product, state.qrCode, deps.fetcher)
+    const ticket = await ensureTicket(state, product, deps.fetcher)
+    // 连票据都没有（签发失败）⇒ 报 `pending` 让页面继续轮询重试，
+    // 同时把原因带回去，避免用户只看一个空白二维码框。
+    if (ticket === undefined) {
+      writeJson(response, {
+        status: 'pending',
+        ...state.ticketError !== undefined ? { message: state.ticketError } : {},
+      })
+      return
+    }
+    const polled = await pollRaccoonQrLogin(product, ticket.code, deps.fetcher)
     if (polled.status === 'success' && polled.accessToken !== undefined) {
       const credential: RaccoonCredential = {
         access_token: polled.accessToken,
@@ -209,15 +255,20 @@ async function handleRequest(
       return
     }
     if (polled.expiredAt !== undefined) state.lastExpiredAt = polled.expiredAt
-    // `canceled` 时换一个新 code，让页面上的二维码重新可用（否则用户卡死）。
-    if (polled.status === 'canceled') {
-      state.qrCode = generateQrCode()
+    // `canceled`（用户取消）与 `expired`（二维码过期/被消耗）都必须**重签**，
+    // 否则页面上的二维码永久不可用 —— 这正是「扫码后一直转圈」的另一个入口。
+    const needsRenewal = polled.status === 'canceled' || polled.status === 'expired'
+    let renewed: RaccoonQrTicket | undefined
+    if (needsRenewal) {
+      state.ticket = undefined
+      renewed = await ensureTicket(state, product, deps.fetcher)
     }
     writeJson(response, {
       status: polled.status,
       ...polled.expiredAt !== undefined ? { expiredAt: polled.expiredAt } : {},
-      // code 变化时把新二维码给页面（页面据此换图）
-      ...polled.status === 'canceled' ? { qr: renderQrSvg(buildQrImageUrl(product, state.qrCode)) } : {},
+      ...state.ticketError !== undefined ? { message: state.ticketError } : {},
+      // 换图时把新二维码给页面（页面据此替换 `<svg>`）
+      ...renewed !== undefined ? { qr: renderQrSvg(buildQrImageUrl(product, renewed)) } : {},
     })
     return
   }
@@ -324,6 +375,15 @@ function listenOnRandomPort(server: Server): Promise<number> {
   })
 }
 
+/** 把任意文本安全地嵌进 HTML（错误原因来自网络，必须转义）。 */
+function escapeHtmlText(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 /**
  * 渲染登录页 HTML。
  *
@@ -336,14 +396,24 @@ function listenOnRandomPort(server: Server): Promise<number> {
  * - 每 2 秒轮询 `/raccoon/poll`（与官方客户端一致）
  * - 短信 Tab 加载阿里云滑块脚本，拿到 `captchaParam` 后提交
  *
- * @param qrCode 当前会话的扫码 code（宿主侧生成）。**注意**：本函数只是把它
- *   渲染成二维码 —— 页面拿不到 code 本身（它被编码进二维码图像里）。
+ * @param ticket 当前会话的**服务端签发**票据。**注意**：本函数只是把它渲染成
+ *   二维码 —— 页面拿不到 `qrcode_code` 本身（它被编码进二维码图像里）。
  *   这符合职责边界：页面不需要知道 code，只需要展示。
+ * @param error 申请票据失败的原因（有值时二维码区域改为可读错误 + 短信兜底提示）。
  */
-export function renderRaccoonLoginPage(product: RaccoonProduct, qrCode?: string): string {
-  // 未传 code 时生成一个仅供渲染的占位（单测直接调本函数时用）。
-  const code = qrCode ?? generateQrCode()
-  const qrSvg = renderQrSvg(buildQrImageUrl(product, code), { size: 200 })
+export function renderRaccoonLoginPage(
+  product: RaccoonProduct,
+  ticket?: RaccoonQrTicket,
+  error?: string,
+): string {
+  // ⚠️ 拿不到票据时**不能**退回本地随机 code（2026-11-14 起服务端只认自己签发的
+  // `qr-<uuidv7>`，本地随机码在新端点上恒回 401）—— 只能如实告诉用户「拿不到二维码」，
+  // 并引导到短信 Tab（那是可用兜底）。
+  const qrSvg = ticket !== undefined
+    ? renderQrSvg(buildQrImageUrl(product, ticket), { size: 200 })
+    : '<div class="qr-fallback">二维码获取失败'
+      + `<br><span>${escapeHtmlText(error ?? '未知原因')}</span>`
+      + '<br>可改用下方的「短信登录」</div>'
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -370,6 +440,10 @@ export function renderRaccoonLoginPage(product: RaccoonProduct, qrCode?: string)
   .qr { width: 200px; height: 200px; display: block; margin: 0 auto; border: 1px solid #eceef1;
         border-radius: 8px; padding: 6px; box-sizing: content-box; background: #fff; }
   .qr svg { display: block; width: 100%; height: 100%; }
+  /* 拿不到票据（IAM 签发失败）时的兜底：不能只留一个空框，必须说明原因 */
+  .qr-fallback { display: flex; flex-direction: column; justify-content: center; align-items: center;
+                 width: 100%; height: 100%; font-size: 13px; color: #4e5969; line-height: 1.6; }
+  .qr-fallback span { font-size: 11px; color: #8a9099; word-break: break-all; padding: 0 8px; }
   .sub { font-size: 12px; color: #8a9099; margin: 10px 0 0; }
   .status { margin-top: 12px; font-size: 13px; color: #4e5969; min-height: 20px; }
   .status[data-tone="ok"] { color: #0f9d58; font-weight: 600; }
@@ -418,7 +492,8 @@ export function renderRaccoonLoginPage(product: RaccoonProduct, qrCode?: string)
 <script>
 (function () {
   'use strict';
-  var POLL_INTERVAL_MS = 2000;
+  // 轮询间隔取服务端下发值（poll_interval，实测 2 秒）；签发失败时退回常量。
+  var POLL_INTERVAL_MS = ${String(ticket?.pollIntervalMs ?? RACCOON_QR_POLL_INTERVAL_MS)};
   var paths = ${JSON.stringify(RACCOON_LOGIN_PAGE_PATHS)};
 
   // ── Tab 切换 ──
