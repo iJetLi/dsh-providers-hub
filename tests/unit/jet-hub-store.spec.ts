@@ -221,6 +221,8 @@ describe('老契约后端（SettingsStore）', () => {
       // save 未携带面板入口 → 写出「仅侧栏」（缺省），读回同值。
       panelEntry: 'sidebar',
       // save 未携带顺序 → 写出空数组（未自定义），读回同值。
+      // 单账号限流的两个渠道开关缺省空表（= 回退到环境变量，默认开启）。
+      qoderTrafficGuard: {},
       providerOrder: [],
       // 关闭意图缺省空表（没有任何供应商被关闭）：读回同值（Gitee IKP8OF）。
       providerClosed: {},
@@ -392,6 +394,8 @@ describe('文件后端（FileStore）', () => {
       // 面板入口缺省「仅侧栏」—— 与升级前行为一致
       panelEntry: 'sidebar',
       // 顺序缺省空数组（未自定义）—— 与升级前行为一致
+      // 单账号限流的两个渠道开关缺省空表（= 回退到环境变量，默认开启）。
+      qoderTrafficGuard: {},
       providerOrder: [],
       // 关闭意图缺省空表（没有任何供应商被关闭）：读回同值（Gitee IKP8OF）。
       providerClosed: {},
@@ -916,6 +920,8 @@ describe('文件后端（FileStore）', () => {
       // 面板入口同理：写盘时缺省即「仅侧栏」，读回同值。
       panelEntry: 'sidebar',
       // 顺序缺省空数组（未自定义）：读回同值。
+      // 单账号限流的两个渠道开关缺省空表（= 回退到环境变量，默认开启）。
+      qoderTrafficGuard: {},
       providerOrder: [],
       // 关闭意图缺省空表（没有任何供应商被关闭）：读回同值（Gitee IKP8OF）。
       providerClosed: {},

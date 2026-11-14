@@ -1128,3 +1128,67 @@ hover 浮层拿各包之和当账号总额 ⇒ 卡片主行写 500、浮层三�
   粘贴的 Cookie 属于哪个账号 ⇒ 粘了别人账号的 Cookie 会把明细记到这个账号下。
   后果限于**展示错位**（不会串额度、不会串请求），且要拿到别人的会话凭据才能触发。
 - **补齐轮可能仍偏向一家**（`pickDiversified` 的姊妹问题，见 `misc.md`）。
+
+## ⚠️⚠️ 排队等待期间必须让出并发名额（PR #79 审计，2026-11-15）
+
+### 症状
+
+上游把请求放进模型级队列（`10605`）后，同账号的**第二个**请求立刻失败：
+
+```
+LlmError: qoder: 本地账号并发已满，请稍后重试   code = QUEUE
+```
+
+而第一个请求此时正安稳地等在 `waitForQueueFrames` 里（默认最长 30 分钟）。
+用户在最容易碰到「排队」的时刻，反而最容易被拒 —— 且这个拒绝：
+
+- **不在**宿主 `DEFAULT_RETRYABLE_CODES` 里 ⇒ **不重试**；
+- 在 `sendEncrypted` **之前**抛出 ⇒ **绕过**换号通路
+  （`switchAccountOnQuota` / `triedAccounts` 只在响应处理段可达）⇒ **多账号池也兜不住**。
+
+### 根因
+
+`using slot = await acquireQoderRequest(...)` 与 `waitForQueueFrames`
+（最长 `DSH_QODER_QUEUE_TIMEOUT_MS`）在**同一个 `for (;;)` 体内** ⇒ 整个等待期
+该账号的 `active` 都是 `true`。`using` 的作用域是「这一轮循环迭代」，而不是
+「这一次上游派发」—— 这两个生命周期**刻意不同**才是对的。
+
+### 修法（两处，缺一不可）
+
+在两个「进入 `waitForQueueFrames` 之前」各加一行 `slot?.[Symbol.dispose]()`：
+
+| 入口 | 位置 | 触发形态 |
+|---|---|---|
+| HTTP 层 | `if (queueInfo !== undefined) {` 之后 | 403/429 响应体带 `10605` |
+| SSE 层 | `if (error instanceof ModelQueuedError) {` 之后 | 流内嵌一条 `{code:'10605'}` 帧 |
+
+⚠️ **两个入口是同一条不变式**：只修一处会让另一半静默失效，而无牙的守卫
+根本发现不了 —— 变异「只删 SSE 那一行」在 SSE 用例出现前是**全绿**的。
+
+⚠️ 让出后 `using` 在作用域结束还会再 dispose 一次，`release` 必须**幂等**
+（`active = false` 重复赋值），否则会抛「already disposed」类问题。
+
+### 守卫
+
+`tests/unit/qoder-adapter.spec.ts` 的 `describe('Qoder 单账号并发限制')` 里 4 条
+（`it.each` 两个渠道 × HTTP/SSE 两个入口）。判据的关键是把 `sleep` 换成
+**可控挂起**：第一条走完「回 10605 → 进 sleep」停在那里，此时再发第二条 ——
+修复前后唯一的行为差异就在这一格。
+
+⚠️ **不要**用假等待（`sleep: async () => {}`）：那样第一条会立刻进入下一轮重试，
+名额一早就释放了，**测不到**「等待期占用」这个窗口（我第一版就这么写，用例绿得
+毫无意义）。
+
+### 未修（已登记）
+
+- **名额没有 TTL / 看护**：消费者丢弃迭代器且**不调** `return()` 时，该账号会
+  **永久**处于 `active`（无日志、无自愈）。宿主的 `adapterStream` 与聚合的
+  `for await` 都会正常调 `return()`，所以正常路径不会踩到；但外部消费者直接
+  拿 `[Symbol.asyncIterator]()` 又不 `return` 就会。同仓 `officeace-inflight-guard`
+  有 TTL，这里**刻意不加** —— 推理流可能持续 20 分钟以上，TTL 一短就会「误抢」
+  正在进行的请求，反而破坏并发保护。要加就必须先定「最长合理单请求时长」，
+  那是个产品决策，不是补丁。
+- **`credential.uid!` 非空断言**：uid 缺失时 key 退化成 `qoder:undefined` ⇒
+  所有无 uid 账号**共用**一个名额。
+- **探测与推理抢同一名额**：`createProbeAdapter` 也接了限流 ⇒ 探测期间
+  该账号的推理请求会被拒（语义上探测也是请求，暂不改）。

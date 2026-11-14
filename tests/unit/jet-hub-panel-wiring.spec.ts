@@ -411,6 +411,57 @@ describe('负载均衡开关的 zcode 门控（仅 zcode 渲染）', () => {
 })
 
 /**
+ * 「单账号限流」开关的**装配层**守卫（PR #79 审计）。
+ *
+ * ## 为什么需要这一条
+ *
+ * 新组件 `QoderTrafficGuardToggle` 只在 `jet-hub.js` 里出现两次（定义 + 一行挂载）。
+ * 而全仓**没有任何**针对它的测试 —— 把它挂载的那三行整段删掉，
+ * 既有 `qoder` 面板用例、`jet-hub-structure-ast` 的计数、RPC 用例**全部照旧绿**，
+ * 而用户在面板上再也看不到这个开关（与 PR #74 的 P1-①「接线层整层零守卫」同型）。
+ *
+ * ## 判据为什么打在「元素类型」上
+ *
+ * `renderPanel` 是**直接调用** `ProviderPanel(...)` 拿元素树（不是 React 渲染），
+ * 所以 `React.createElement(QoderTrafficGuardToggle, …)` 只记录**函数引用**、
+ * 不会执行组件体。这正好是我们要的：判据是「装配关系存不存在」，
+ * 与组件内部的实现细节解耦（内部改名/改结构不会假红）。
+ *
+ * ⚠️ 不数 `className`：`QoderTrafficGuardToggle` 的 label 与「负载均衡」开关
+ * **共用** `dim-jh-nativeSearch`，数 className 会把两者混起来。
+ */
+describe('单账号限流开关的装配（PR #79）', () => {
+  /** 从渲染产出的元素树里找指定名字的函数组件元素。 */
+  function findComponent(name: string): { type: unknown; props: unknown } | undefined {
+    return elements.find(
+      (element) => typeof element.type === 'function' && (element.type as { name?: string }).name === name,
+    )
+  }
+
+  it.each(['qoder', 'qodercn'] as const)('★★★ %s 面板必须挂上单账号限流开关', async (provider) => {
+    const r = await renderPanel(async (method: string) => {
+      if (method === 'qoderTrafficGuard.getEnabled') return { ok: true, value: { enabled: true } }
+      return { ok: true, order: [], statuses: {} }
+    }, provider)
+    expect(r.ok, r.ok ? '' : `渲染抛错：${String((r as { error: unknown }).error)}`).toBe(true)
+    expect(findComponent('QoderTrafficGuardToggle'), `${provider} 面板没有挂单账号限流开关（= 功能从产品消失）`)
+      .toBeDefined()
+    // 装配时必须把 provider 透传下去（否则两个渠道的开关会共用一个）。
+    expect((findComponent('QoderTrafficGuardToggle')!.props as { provider?: unknown }).provider).toBe(provider)
+  })
+
+  it('★★ 其它 provider 面板一个都不许挂（摆设开关）', async () => {
+    const offenders: string[] = []
+    for (const provider of ['codearts', 'buddy', 'zcode', 'opencode', 'aggregate', 'gemini'] as const) {
+      const r = await renderPanel(async () => ({ ok: true, order: [], statuses: {} }), provider)
+      expect(r.ok, `${provider} 渲染抛错：${r.ok ? '' : String((r as { error: unknown }).error)}`).toBe(true)
+      if (findComponent('QoderTrafficGuardToggle') !== undefined) offenders.push(provider)
+    }
+    expect(offenders, `非 Qoder 面板渲染了摆设开关：${JSON.stringify(offenders)}`).toEqual([])
+  })
+})
+
+/**
  * 「锁定永久积分」按钮的**端到端接线**（2026-11-01 二审收尾）。
  *
  * ## 为什么必须补这一条

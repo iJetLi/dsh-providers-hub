@@ -987,6 +987,108 @@ describe('Qoder 单账号并发限制', () => {
       vi.unstubAllEnvs()
     }
   })
+  /**
+   * ★★★ **排队等待期间必须先让出并发名额**（2026-11-15 审计 P1）。
+   *
+   * ## 缺陷形态
+   *
+   * `using slot` 与 `waitForQueueFrames`（最长 `DSH_QODER_QUEUE_TIMEOUT_MS`，
+   * 默认 **30 分钟**）在**同一个 `for (;;)` 体内** ⇒ 整个等待期该账号的
+   * `active` 都是 `true` ⇒ 同账号的下一个请求在 `acquireQoderRequest` 处
+   * **直接被拒**（`QUEUE`）。
+   *
+   * 而 `QUEUE` **不在**宿主的 `DEFAULT_RETRYABLE_CODES` 里 ⇒ 不重试；
+   * 且该错误在 `sendEncrypted` 之前抛出 ⇒ **绕过**下面的换号通路
+   * （`switchAccountOnQuota` / `triedAccounts` 只在响应处理段可达）
+   * ⇒ 多账号池也兜不住。用户在最容易碰到「排队」的时刻，反而最容易被拒。
+   *
+   * ## 判据为什么这么写
+   *
+   * 把 `sleep` 换成**可控挂起**：第一条走完「上游回 10605 → 进 sleep」之后
+   * 停在那里，此时再发第二条 —— 修复前后唯一的行为差异就在这一格。
+   * 不用假等待（`sleep: async () => {}`）是因为那样第一条会立刻进入下一轮重试，
+   * 名字一早就释放了，**测不到**「等待期占用」这个窗口。
+   */
+  it.each([QODER, QODER_CN])('★★★ $id：排队等待期间同账号的第二个请求不得被本地拒绝', async (product) => {
+    vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', '')
+    try {
+      let releaseSleep: (() => void) | undefined
+      const sleep = vi.fn(() => new Promise<void>((resolve) => { releaseSleep = resolve }))
+      // 排队响应的真实形态：**HTTP 403** + `{ code: '10605', message: <JSON 字符串> }`
+      // （与 `queueResponse(REAL_QUEUED)` 同形；`message` 必须是字符串，不是对象）。
+      const queuedBody = JSON.stringify({
+        code: '10605',
+        message: JSON.stringify({ isQueued: true, retry_after_ms: 5_000 }),
+      })
+      const fetchImpl = vi.fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response(queuedBody, {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        }))
+        .mockImplementation(async () => envelopeResponse([textFrame('第二条成功'), finishFrame]))
+      const adapter = makeAdapter({ product, fetchImpl, sleep, trafficGuardEnabled: undefined })
+
+      // ① 第一条：发出后停在 `waitForQueueFrames` 的 `await sleep(...)` 里。
+      const first = adapter.stream({
+        model: 'auto',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as Parameters<QoderAdapter['stream']>[0])[Symbol.asyncIterator]()
+      const firstNext = first.next()
+      // 等到真的进 sleep（`sleep` 被调用 = 已拿到 10605 并进入排队分支）。
+      await vi.waitFor(() => { expect(sleep).toHaveBeenCalled() }, { timeout: 3_000 })
+
+      // ② 关键格：此刻同账号的第二个请求**不得**被本地并发闸门拒绝。
+      await expect(collect(adapter), '排队等待期仍占着名额 ⇒ 第二个请求被 QUEUE 拒了')
+        .resolves.toContainEqual(expect.objectContaining({ text: '第二条成功' }))
+
+      // 收尾：放开第一条的 sleep，并让它的迭代器结束（避免悬挂）。
+      releaseSleep?.()
+      await Promise.race([firstNext.catch(() => undefined), new Promise((r) => setTimeout(r, 2_000))])
+      await first.return?.()
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  /**
+   * ★★★ 同上，但走 **SSE 内嵌排队**那条入口。
+   *
+   * HTTP 层与 SSE 层是**两个入口、同一条不变式** —— 只修一处会让另一半静默失效，
+   * 而无牙的守卫根本发现不了（变异「删掉 SSE 那一行」在这条用例出现前是**全绿**的）。
+   */
+  it.each([QODER, QODER_CN])('★★★ $id：SSE 内嵌排队等待期间，同账号的第二个请求也不得被本地拒绝', async (product) => {
+    vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', '')
+    try {
+      let releaseSleep: (() => void) | undefined
+      const sleep = vi.fn(() => new Promise<void>((resolve) => { releaseSleep = resolve }))
+      // 注意：**不带 `textFrame`** —— 一旦有可见输出就会走「流已输出则不重放」那条
+      // 分支（直接抛 QUEUE），到不了 `waitForQueueFrames`，也就测不到名额占用。
+      const queuedFrame = JSON.stringify({
+        code: '10605',
+        message: JSON.stringify({ isQueued: true, retry_after_ms: 5_000 }),
+      })
+      const fetchImpl = vi.fn<typeof fetch>()
+        .mockResolvedValueOnce(envelopeResponse([queuedFrame]))
+        .mockImplementation(async () => envelopeResponse([textFrame('第二条成功'), finishFrame]))
+      const adapter = makeAdapter({ product, fetchImpl, sleep, trafficGuardEnabled: undefined })
+
+      const first = adapter.stream({
+        model: 'auto',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as Parameters<QoderAdapter['stream']>[0])[Symbol.asyncIterator]()
+      const firstNext = first.next()
+      await vi.waitFor(() => { expect(sleep).toHaveBeenCalled() }, { timeout: 3_000 })
+
+      await expect(collect(adapter), 'SSE 排队等待期仍占着名额 ⇒ 第二个请求被 QUEUE 拒了')
+        .resolves.toContainEqual(expect.objectContaining({ text: '第二条成功' }))
+
+      releaseSleep?.()
+      await Promise.race([firstNext.catch(() => undefined), new Promise((r) => setTimeout(r, 2_000))])
+      await first.return?.()
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
 })
 
 describe('QoderAdapter 排队错误（10605 model_queued）', () => {

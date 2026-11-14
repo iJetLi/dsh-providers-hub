@@ -2049,6 +2049,19 @@ export class QoderAdapter extends LlmAdapter {
         const queueInfo = parseQoderQueueError(errorText)
 
         if (queueInfo !== undefined) {
+          // ⚠️⚠️ **排队等待期间必须先让出并发名额**（2026-11-15 审计 P1）。
+          //
+          // `using slot` 与 `waitForQueueFrames`（最长 `DSH_QODER_QUEUE_TIMEOUT_MS`，
+          // 默认 30 分钟）在**同一个 `for (;;)` 体内** ⇒ 整个等待期该账号的
+          // `active` 都是 true ⇒ 同账号的下一个请求在 `acquireQoderRequest`
+          // 处**直接被拒**（`QUEUE`），而 `QUEUE` **不在**宿主的
+          // `DEFAULT_RETRYABLE_CODES` 里 ⇒ 不重试；且这里在 `sendEncrypted`
+          // 之前抛出，**绕过**下面的换号通路 ⇒ 多账号池也兜不住。
+          //
+          // 让出后 `active` 归 false，第二条请求可以正常去上游排队（或由换号
+          // 通路接管）；`using` 在作用域结束时还会再 dispose 一次，而 `release`
+          // 是幂等的（`active = false` 重复赋值）。
+          slot?.[Symbol.dispose]()
           // ⚠️ 必须 `for await … yield`：`waitForQueueFrames` 是异步生成器，
           // `visible` 档的心跳帧要靠这里转交给上层（见该方法的注释）。
           for await (const frame of this.waitForQueueFrames(
@@ -2162,6 +2175,9 @@ export class QoderAdapter extends LlmAdapter {
             await decoded.body?.cancel().catch(() => {})
             if (emitted && error instanceof ModelQueuedError) throw error
             if (error instanceof ModelQueuedError) {
+              // ⚠️⚠️ 同上：SSE 内嵌排队也要先让出名额 —— HTTP 层与 SSE 层是
+              // **两个入口、同一条不变式**，只修一处会让另一半静默失效。
+              slot?.[Symbol.dispose]()
               for await (const frame of this.waitForQueueFrames(
                 queueInfoOf(error),
                 ++queueAttempts,
