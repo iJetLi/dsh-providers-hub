@@ -887,6 +887,14 @@ LISTEN  172.21.0.8:8326     # 绑上桥接 IP 后，端口映射才可达
 设置页里的开关状态存在 `$DSH_HOME/jet-hub/state.json` 的 `gatewayEnabled` 字段
 （缺省为启用）。它**不进**账号备份/恢复。
 
+### Qoder 和 Qoder CN 的并发与排队
+
+`DSH_QODER_TRAFFIC_GUARD=on` 为聊天请求启用单账号限流。同一个进程内，每个渠道的同一账号最多保留一个在途请求，两次发出请求至少间隔 400 毫秒。账号已忙时立即返回本地排队错误。默认关闭。
+
+上游返回 `10605` 时，网关识别 HTTP 和 SSE 两种响应。响应体未提供等待时间时，使用 HTTP `Retry-After`，每次等待仍以 10 秒为上限。可用 `DSH_QODER_QUEUE_MAX_ATTEMPTS` 设置重试次数（默认 180，`0` 表示立即返回排队错误），用 `DSH_QODER_QUEUE_TIMEOUT_MS` 设置整次排队预算（默认 30 分钟）。
+
+直连可通过 `DSH_QODER_QUEUE_WAIT_MODE=visible` 在流式 Chat Completions 响应中查看 `qoder_queue` 排队信息，或设为 `fast` 立即返回错误。日志会记录上游提供的模型、队列类型、人数和可用状态，供排查使用。账号级调用限制由上游平台处理。
+
 ### 关闭网关
 
 网关是**旁路功能**：它启动失败或被关闭，都不影响插件其余功能（登录、积分、模型

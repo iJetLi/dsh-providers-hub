@@ -43,6 +43,8 @@ import { classifyNativeAbort, NativeSearchCodes, WebNativeError, type NativeSour
 import { errorMessage } from './openai-compat.js'
 import { maskProxyPassword } from './proxy-mask.js'
 import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
+import { acquireQoderRequest, qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
+import { retryAfterMsFromResponse } from './retry-after.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import {
@@ -1840,6 +1842,12 @@ export class QoderAdapter extends LlmAdapter {
     // 4000/8000 ≈ 共 15.5 秒）—— 而服务端明确要求等 30 秒，于是**永远等不到**；
     // 中国版那条「等 2 秒就能成功」的瞬时排队也因走错路径而反复失败。
     const queueDeadline = Date.now() + resolveQueueTimeoutMs()
+    const configuredAttempts = process.env.DSH_QODER_QUEUE_MAX_ATTEMPTS?.trim()
+    const parsedAttempts = configuredAttempts ? Number(configuredAttempts) : QUEUE_MAX_ATTEMPTS
+    const maxQueueAttempts = Number.isSafeInteger(parsedAttempts) && parsedAttempts >= 0
+      ? parsedAttempts
+      : QUEUE_MAX_ATTEMPTS
+    const guardTraffic = qoderTrafficGuardEnabled()
     let queueAttempts = 0
     let authRefreshed = false
     let duplicateRetried = false
@@ -1933,6 +1941,13 @@ export class QoderAdapter extends LlmAdapter {
      */
     let transportRetries = 0
     for (;;) {
+      const request = await buildRequest(credential)
+      using slot = guardTraffic
+        ? await acquireQoderRequest(this.product.id, credential.uid!, options.signal)
+        : undefined
+      if (queueAttempts > 0 && Date.now() >= queueDeadline) {
+        throw new LlmError('qoder: 排队等待超时', 'QUEUE')
+      }
       /**
        * ⚠️⚠️ **传输级失败必须能换号**（issue IKR5ZD，2026-10-28 现场取证）。
        *
@@ -1962,7 +1977,7 @@ export class QoderAdapter extends LlmAdapter {
        * ③ **耗尽后抛原错误**，保住 `cause`（上层要能程序化取真因）。
        */
       try {
-        response = await this.sendEncrypted(await buildRequest(credential), options, fetcherForCurrentAccount())
+        response = await this.sendEncrypted(request, options, fetcherForCurrentAccount())
       } catch (error) {
         if (!(error instanceof LlmError) || error.code !== 'TRANSPORT') throw error
         /**
@@ -2027,10 +2042,9 @@ export class QoderAdapter extends LlmAdapter {
         continue
       }
 
-      if (!response.ok && (response.status === 401 || response.status === 403)) {
-        // ⚠️ 必须**先读体再判断**，且 body 只能读一次 —— 排队信息就藏在
-        // `message` 那个 JSON 字符串里（见 `parseQoderQueueError`）。
-        const errorText = await response.text().catch(() => '')
+      const errorText = response.ok ? '' : await response.text().catch(() => '')
+      if (!response.ok) {
+        // 排队业务码可能出现在不同 HTTP 状态中，先识别再处理认证、额度和限流。
         const queueInfo = parseQoderQueueError(errorText)
 
         if (queueInfo !== undefined) {
@@ -2041,10 +2055,15 @@ export class QoderAdapter extends LlmAdapter {
             ++queueAttempts,
             queueDeadline,
             options,
+            activeAccountId,
+            maxQueueAttempts,
+            retryAfterMsFromResponse(response.headers),
           )) yield frame
           continue
         }
+      }
 
+      if (!response.ok && (response.status === 401 || response.status === 403)) {
         // ⚠️ **额度受限也要切账号**（用户要求，2026-09-27）。
         //
         // ⚠️ 本分支**只认额度**（不并入 `classifyQoderFailure` 的 `auth`）：401/403
@@ -2087,7 +2106,6 @@ export class QoderAdapter extends LlmAdapter {
       }
 
       if (!response.ok) {
-        const errorText = await response.text().catch(() => '')
         // ⚠️ 2026-10-21：本分支也要走**统一类别判定**（{@link classifyQoderFailure}）。
         //
         // 修前这里直接抛，于是 **429**（`RATE_LIMIT`）与 **5xx + provider_error**
@@ -2120,8 +2138,9 @@ export class QoderAdapter extends LlmAdapter {
       // ⚠️ 消费 SSE 时**捕获流内排队错误**，走与 HTTP 层**完全相同**的等待逻辑。
       // `consumeOpenAiSse` 是生成器：无法「try 一次再重试」，故这里手动迭代，
       // 捕获到排队就等待后重发整条请求（排队期间未产出任何 chunk，可安全重放）。
+      const decoded = unwrapQoderEnvelopeStream(response, label)
       const inner = consumeOpenAiSse(
-        unwrapQoderEnvelopeStream(response, label),
+        decoded,
         { signal: options.signal },
         {
           label,
@@ -2132,56 +2151,71 @@ export class QoderAdapter extends LlmAdapter {
       )
       const iterator = inner[Symbol.asyncIterator]()
       let queued = false
-      for (;;) {
-        let step: IteratorResult<StreamChunk>
-        try {
-          step = await iterator.next()
-        } catch (error) {
-          if (error instanceof ModelQueuedError) {
-            for await (const frame of this.waitForQueueFrames(
-              queueInfoOf(error),
-              ++queueAttempts,
-              queueDeadline,
-              options,
-            )) yield frame
-            queued = true
-            break
-          }
-          // ⚠️ **额度受限（110）要标记 + 切账号**（用户要求，2026-09-27）。
-          //
-          // ⚠️ 必须**在这里**捕获（SSE 层）而不只在 HTTP 层：Qoder 的额度错误
-          // 实测以 **HTTP 200 + SSE 内嵌帧** 下发（与排队同通道），
-          // 只在 HTTP 层处理会漏掉真实链路。
-          //
-          // ⚠️ 2026-10-21 扩展：判据从「只认额度」改为**统一类别判定**
-          // （{@link classifyQoderFailure}）。真实报障：上游回
-          // `Error in upstream response (provider_error/model_error) code=SERVER`
-          // 时，池里的第二个账号**从未被尝试** —— 那是「登录 N 个账号 ≠ N 倍
-          // 可用性」的经典形态（`accio-adapter.ts:1598` 点名过同一个缺陷）。
-          //
-          // 传 `{ code, text }` 供文案腿使用（`provider_error` 是结构字段值，
-          // 已随 `errorDetail` 拼进 message，故文案腿能命中）。
-          const failureCall = failureCallOf(error)
-          const streamCls = classifyQoderFailure(failureCall.code, failureCall.text)
-          if (shouldRotateQoderAccount(streamCls)) {
-            const switched = await this.switchAccountOnQuota(
-              options,
-              triedAccounts,
-              activeAccountId,
-              streamCls,
-            )
-            if (switched !== undefined) {
-              credential = switched.credential
-              activeAccountId = switched.accountId
-              queued = true // 复用「回到循环顶部重发」的语义
+      let emitted = false
+      try {
+        for (;;) {
+          let step: IteratorResult<StreamChunk>
+          try {
+            step = await iterator.next()
+          } catch (error) {
+            await decoded.body?.cancel().catch(() => {})
+            if (emitted && error instanceof ModelQueuedError) throw error
+            if (error instanceof ModelQueuedError) {
+              for await (const frame of this.waitForQueueFrames(
+                queueInfoOf(error),
+                ++queueAttempts,
+                queueDeadline,
+                options,
+                activeAccountId,
+                maxQueueAttempts,
+                retryAfterMsFromResponse(response.headers),
+              )) yield frame
+              queued = true
               break
             }
-            throw error // 无可用账号 → 如实抛出（已含原始语义）
+            // ⚠️ **额度受限（110）要标记 + 切账号**（用户要求，2026-09-27）。
+            //
+            // ⚠️ 必须**在这里**捕获（SSE 层）而不只在 HTTP 层：Qoder 的额度错误
+            // 实测以 **HTTP 200 + SSE 内嵌帧** 下发（与排队同通道），
+            // 只在 HTTP 层处理会漏掉真实链路。
+            //
+            // ⚠️ 2026-10-21 扩展：判据从「只认额度」改为**统一类别判定**
+            // （{@link classifyQoderFailure}）。真实报障：上游回
+            // `Error in upstream response (provider_error/model_error) code=SERVER`
+            // 时，池里的第二个账号**从未被尝试** —— 那是「登录 N 个账号 ≠ N 倍
+            // 可用性」的经典形态（`accio-adapter.ts:1598` 点名过同一个缺陷）。
+            //
+            // 传 `{ code, text }` 供文案腿使用（`provider_error` 是结构字段值，
+            // 已随 `errorDetail` 拼进 message，故文案腿能命中）。
+            const failureCall = failureCallOf(error)
+            const streamCls = classifyQoderFailure(failureCall.code, failureCall.text)
+            if (shouldRotateQoderAccount(streamCls)) {
+              const switched = await this.switchAccountOnQuota(
+                options,
+                triedAccounts,
+                activeAccountId,
+                streamCls,
+              )
+              if (switched !== undefined) {
+                credential = switched.credential
+                activeAccountId = switched.accountId
+                queued = true // 复用「回到循环顶部重发」的语义
+                break
+              }
+              throw error // 无可用账号 → 如实抛出（已含原始语义）
+            }
+            throw error
           }
-          throw error
+          if (step.done === true) break
+          emitted = true
+          yield step.value
         }
-        if (step.done === true) break
-        yield step.value
+      } finally {
+        try {
+          await iterator.return?.()
+        } finally {
+          await decoded.body?.cancel().catch(() => {})
+        }
       }
       if (queued) continue
       return
@@ -2302,6 +2336,9 @@ export class QoderAdapter extends LlmAdapter {
     attempts: number,
     deadline: number,
     options: GenerateOptions,
+    accountId: string | undefined,
+    maxAttempts: number,
+    retryAfterHeaderMs: number | undefined,
   ): AsyncGenerator<StreamChunk, void, undefined> {
     /**
      * ⚠️ 模式只解析**一次**：同一次等待里读两遍 `process.env` 是 TOCTOU —— 两次
@@ -2310,14 +2347,12 @@ export class QoderAdapter extends LlmAdapter {
      */
     const { mode, viaAggregate } = resolveEffectiveQueueWaitMode()
     const waitMs = qoderQueueDelayMs(queueInfo)
+      ?? (retryAfterHeaderMs === undefined ? undefined : Math.min(retryAfterHeaderMs, QUEUE_MAX_DELAY_MS))
     // ⚠️ 拿不到服务端延迟时**不忙等**：用保守的短退避，避免瞬间烧掉机会
     // （客户端 W7c() 此时会退回 ltA() 指数退避）。
     const totalMs = waitMs ?? 1_000
-    const modelKeyRaw = (queueInfo as { modelKey?: unknown } | undefined)?.modelKey
-    const modelKey = typeof modelKeyRaw === 'string' ? modelKeyRaw : undefined
-    const retryAfterRaw = (queueInfo as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds
-    const retryAfterSeconds = typeof retryAfterRaw === 'number' ? retryAfterRaw : undefined
-    const accountId = this.options.currentAccountId?.()
+    const { queueType, queueCount, serviceAvailable, retryAfterSeconds } = queueInfo ?? {}
+    const modelKey = queueInfo?.modelKey ?? options.model
     /**
      * 排队必须有**外部可观测痕迹**，否则「上游排队」与「进程挂死」完全同形。
      *
@@ -2337,7 +2372,10 @@ export class QoderAdapter extends LlmAdapter {
         `[qoder] ${this.product.id} 上游排队（10605）：`
         + `${mode === 'fast' ? '未等待' : `等待 ${waitMsForLog}ms`}`
         + `（模式 ${mode}${viaAggregate ? '（聚合调用，交由聚合切换下一个候选）' : ''}，第 ${attempts} 次`
-        + `${modelKey === undefined ? '' : `，modelKey=${modelKey}`}`
+        + `，modelKey=${JSON.stringify(modelKey)}`
+        + `${queueType === undefined ? '' : `，queueType=${JSON.stringify(queueType)}`}`
+        + `${queueCount === undefined ? '' : `，queueCount=${queueCount}`}`
+        + `${serviceAvailable === undefined ? '' : `，serviceAvailable=${serviceAvailable}`}`
         + `${accountId === undefined ? '' : `，account=${accountId}`}`
         + `${retryAfterSeconds === undefined ? '' : `，retryAfterSeconds=${retryAfterSeconds}`}）`,
       )
@@ -2360,12 +2398,12 @@ export class QoderAdapter extends LlmAdapter {
     // ⚠️ 用 `>=` 而不是 `>`：上限为 **0** 是合法配置（「不等，立即判超时」），
     // 而同一毫秒内 `Date.now() > now + 0` 为 **false**，会让它**先等一次**才
     // 超时 —— 那与「0 = 不等待」的语义不符（单测专门守这一点）。
-    if (Date.now() >= deadline) {
+    if (Date.now() + totalMs >= deadline) {
       throw new LlmError('qoder: 排队等待超时', 'QUEUE')
     }
-    if (attempts > QUEUE_MAX_ATTEMPTS) {
+    if (attempts > maxAttempts) {
       throw new LlmError(
-        `qoder: 排队重试超过上限（${QUEUE_MAX_ATTEMPTS} 次）`,
+        `qoder: 排队重试超过上限（${maxAttempts} 次）`,
         'QUEUE',
       )
     }
@@ -2400,7 +2438,10 @@ export class QoderAdapter extends LlmAdapter {
           provider: this.product.id,
           attempt: attempts,
           waitMs: totalMs,
-          ...modelKey === undefined ? {} : { modelKey },
+          modelKey,
+          ...queueType === undefined ? {} : { queueType },
+          ...queueCount === undefined ? {} : { queueCount },
+          ...serviceAvailable === undefined ? {} : { serviceAvailable },
           ...retryAfterSeconds === undefined ? {} : { retryAfterSeconds },
           ...accountId === undefined ? {} : { account: accountId },
         },

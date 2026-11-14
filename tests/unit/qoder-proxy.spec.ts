@@ -195,7 +195,7 @@ describe('③ 注入点：四个消费点都必须拿到按账号的 fetcher', (
     expect(adapterSource).toMatch(/return this\.fetchFor\(activeAccountId \?\? ''\)/)
     // ⚠️ 判据锚在**发送那一行**：函数定义了却没用它发请求，等于没接。
     expect(adapterSource).toMatch(
-      /await this\.sendEncrypted\(await buildRequest\(credential\), options, fetcherForCurrentAccount\(\)\)/,
+      /await this\.sendEncrypted\(request, options, fetcherForCurrentAccount\(\)\)/,
     )
   })
 

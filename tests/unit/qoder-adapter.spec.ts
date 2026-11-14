@@ -945,7 +945,100 @@ describe('QoderAdapter 图片输入', () => {
  *   → `queue.retryAfterSeconds×1000` → 兜底 `Retry-After` 响应头；
  * - 决策（`W7c()`）：**有 `retryAfterMs` 就精确等它**，没有才退避。
  */
+describe('Qoder 单账号并发限制', () => {
+  it.each([QODER, QODER_CN])('$id：流未结束时拒绝同账号请求，取消后释放名额', async (product) => {
+    vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', 'on')
+    try {
+      let upstreamCancelled = false
+      const first = envelopeResponse([textFrame('开始')])
+      const body = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(new Uint8Array(await first.arrayBuffer()))
+        },
+        cancel() { upstreamCancelled = true },
+      })
+      const dispatchTimes: number[] = []
+      const fetchImpl = vi.fn<typeof fetch>()
+        .mockImplementationOnce(async () => {
+          dispatchTimes.push(performance.now())
+          return new Response(body)
+        })
+        .mockImplementationOnce(async () => {
+          dispatchTimes.push(performance.now())
+          return envelopeResponse([textFrame('下一个'), finishFrame])
+        })
+      const adapter = makeAdapter({ product, fetchImpl })
+      const iterator = adapter.stream({
+        model: 'auto',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as Parameters<QoderAdapter['stream']>[0])[Symbol.asyncIterator]()
+      try {
+        expect((await iterator.next()).done).toBe(false)
+        await expect(collect(adapter)).rejects.toMatchObject({ code: 'QUEUE', message: expect.stringContaining('本地') })
+        expect(fetchImpl).toHaveBeenCalledTimes(1)
+      } finally {
+        await iterator.return?.()
+      }
+      expect(upstreamCancelled).toBe(true)
+      expect(await collect(adapter)).toContainEqual(expect.objectContaining({ type: 'text-delta', text: '下一个' }))
+      expect(dispatchTimes[1]! - dispatchTimes[0]!).toBeGreaterThanOrEqual(390)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+})
+
 describe('QoderAdapter 排队错误（10605 model_queued）', () => {
+  it.each([QODER, QODER_CN])('$id：HTTP 429 中的排队码按 Retry-After 等待', async (product) => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: '10605', message: { isQueued: true } }), {
+        status: 429,
+        headers: { 'Retry-After': '3' },
+      }))
+      .mockResolvedValueOnce(envelopeResponse([textFrame('排到了'), finishFrame]))
+    const sleep = vi.fn(async () => {})
+    const getAvailableAccount = vi.fn(async () => null)
+    const updateModelRateLimit = vi.fn(async () => {})
+    const refresh = vi.fn(async () => {})
+    const chunks = await collect(makeAdapter({
+      product, fetchImpl, sleep, refresh,
+      currentAccountId: () => 'account-a',
+      accountPool: { getAvailableAccount, updateModelRateLimit } as never,
+    }))
+    expect(sleep).toHaveBeenCalledWith(3000, undefined)
+    expect(refresh).not.toHaveBeenCalled()
+    expect(getAvailableAccount).not.toHaveBeenCalled()
+    expect(updateModelRateLimit).not.toHaveBeenCalled()
+    expect(chunks).toContainEqual(expect.objectContaining({ type: 'text-delta', text: '排到了' }))
+  })
+
+  it.each([
+    ['DSH_QODER_QUEUE_MAX_ATTEMPTS', '0', /重试超过上限/],
+    ['DSH_QODER_QUEUE_TIMEOUT_MS', '250', /排队等待超时/],
+  ])('%s 的预算不足时只发送首次请求', async (name, value, message) => {
+    vi.stubEnv(name, value)
+    try {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => queueResponse(REAL_QUEUED))
+      const sleep = vi.fn(async () => {})
+      await expect(collect(makeAdapter({ fetchImpl, sleep }))).rejects.toThrow(message)
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      expect(sleep).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('SSE 已有输出时收到排队错误，保留错误且不重发', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => envelopeResponse([
+      textFrame('部分回答'),
+      JSON.stringify({ code: '10605', message: JSON.stringify(REAL_QUEUED) }),
+    ]))
+    const sleep = vi.fn(async () => {})
+    await expect(collect(makeAdapter({ fetchImpl, sleep }))).rejects.toMatchObject({ code: 'QUEUE' })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(sleep).not.toHaveBeenCalled()
+  })
+
   /** 构造一条真实的 403 排队响应（`message` 是 JSON 字符串）。 */
   function queueResponse(info: Record<string, unknown>): Response {
     return new Response(
@@ -1173,6 +1266,9 @@ describe('QoderAdapter 排队错误（10605 model_queued）', () => {
           attempt: 1,
           waitMs: 10_000,
           modelKey: 'qfmodel',
+          queueType: 'p3',
+          queueCount: 0,
+          serviceAvailable: false,
         })
       } finally {
         if (previousMode === undefined) delete process.env.DSH_QODER_QUEUE_WAIT_MODE
