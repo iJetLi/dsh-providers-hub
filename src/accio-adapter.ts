@@ -1994,12 +1994,21 @@ export class AccioAdapter extends LlmAdapter {
       ...credential.sgcookie === undefined ? {} : { sgcookie: credential.sgcookie },
     })
     try {
-      return await this.fetchImpl(url, {
+      const response = await this.fetchImpl(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
         signal: options.signal ?? AbortSignal.timeout(ACCIO_REQUEST_TIMEOUT_MS),
       })
+      // 网关返回 HTML 拒绝页时，停止本次请求，避免触发凭据续期或换号。
+      const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+      if (response.status === 403 && mediaType === 'text/html') {
+        void response.body?.cancel().catch(() => {})
+        throw new LlmError('accio: 推理请求被网关拒绝（HTTP 403 HTML）', 'PERMISSION_DENIED', {
+          status: response.status,
+        })
+      }
+      return response
     } catch (error) {
       if (options.signal?.aborted) throw error
       if (isTransportError(error)) {

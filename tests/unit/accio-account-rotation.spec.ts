@@ -200,6 +200,49 @@ describe('accio 失败类别判据', () => {
 // ---------------------------------------------------------------------------
 
 describe('accio 请求级换号 · HTTP 层', () => {
+  it('HTTP 403 HTML：直接报告网关拒绝，不续期、不换号', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher, pool } = makeAdapter(
+      [
+        { id: 'acc-1', credential: cred('TOK-A') },
+        { id: 'acc-2', credential: cred('TOK-B') },
+      ],
+      [
+        new Response('<html>Forbidden</html>', {
+          status: 403,
+          headers: { 'content-type': 'text/html; charset=UTF-8' },
+        }),
+        sse(okFrame('不应再次请求')),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toMatchObject({ code: 'PERMISSION_DENIED' })
+    expect(refresh).not.toHaveBeenCalled()
+    expect(sentTokens(fetcher)).toEqual(['TOK-A'])
+    expect(pool.marks).toHaveLength(0)
+  })
+
+  it('HTTP 403 JSON：仍按认证失败先续期、再换号', async () => {
+    const refresh = vi.fn(async () => {})
+    const { adapter, fetcher } = makeAdapter(
+      [
+        { id: 'acc-1', credential: cred('TOK-A') },
+        { id: 'acc-2', credential: cred('TOK-B') },
+      ],
+      [
+        Response.json({ message: 'Forbidden' }, { status: 403 }),
+        Response.json({ message: 'Forbidden' }, { status: 403 }),
+        sse(okFrame('换号后成功')),
+      ],
+      { refresh },
+    )
+    const { error } = await run(adapter)
+    expect(error).toBeNull()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(sentTokens(fetcher)).toEqual(['TOK-A', 'TOK-A', 'TOK-B'])
+  })
+
   it('★★ issue 主复现：#1 额度耗尽（HTTP 402）⇒ 换到 #2 并成功', async () => {
     const { adapter, fetcher, pool } = makeAdapter(
       [
