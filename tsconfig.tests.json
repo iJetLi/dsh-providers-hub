@@ -33,6 +33,7 @@
     "tests/unit/astudio-stream.spec.ts",
     "tests/unit/astudio-login-credits.spec.ts",
     "tests/unit/client-registration-id.spec.ts",
+    "tests/unit/qoder-traffic-guard.spec.ts",
     "tests/unit/dsh-host-client.ts",
     "tests/unit/openai-gateway-lifecycle.spec.ts",
     // ⚠️ 2026-10-31 审计补：本文件此前**不在任何 tsconfig 的 include 里**，

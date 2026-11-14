@@ -2,14 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { acquireQoderRequest, qoderTrafficGuardEnabled } from '../../src/qoder-traffic-guard.js'
 
 /**
- * `src/qoder-traffic-guard.ts` 的纯函数单测（PR #79 审计补）。
+ * `src/qoder-traffic-guard.ts` 的纯函数单测（PR #79 审计补；PR #80 补「至多生效一次」）。
  *
  * ## 为什么这个文件必须存在
  *
  * PR #79 只给了**接线**用例（`tests/unit/qoder-adapter.spec.ts` 的
  * `describe('Qoder 单账号并发限制')` 两条：流未结束时第二个请求被拒 + 间隔 ≥390ms）。
  * 那两条守的是「装配对没对」，守不住**模块本身**的这几条：
- * 清理循环、`-Infinity` 初值、`Symbol.dispose` 幂等、已 abort 的 signal、
+ * 清理循环、`-Infinity` 初值、`Symbol.dispose` **至多生效一次**（不是「幂等」——
+ * 重复调用会清掉**新持有者**的占用，PR #80 修的就是这个）、已 abort 的 signal、
  * `DSH_QODER_TRAFFIC_GUARD` 的四种关闭写法、两个渠道的键隔离。
  *
  * ## 测试隔离：必须用**唯一 uid**
@@ -143,6 +144,60 @@ describe('acquireQoderRequest：abort 与 dispose', () => {
     const slot = await acquireQoderRequest('qoder', uid)
     expect(slot, '等待期间被 abort 后名额没释放 ⇒ 该账号此后永远取不到').toBeDefined()
     ;(slot as Disposable)[Symbol.dispose]()
+  })
+
+  it('★★★ 释放标志必须是「每次获取一份」（模块级 / 共享会让别的账号永久占住名额）', async () => {
+    const uidA = nextUid()
+    const uidB = nextUid()
+    const a = await acquireQoderRequest('qoder', uidA)
+    const b = await acquireQoderRequest('qoder', uidB)
+    // 若 `released` 是模块级或挂在共享对象上，A 这一次会「用掉」唯一的释放额度，
+    // 于是 B 的 dispose 变成 no-op ⇒ B 的名额**永不释放** ⇒ 后面整条渠道恒 QUEUE。
+    a[Symbol.dispose]()
+    b[Symbol.dispose]()
+    const again = await acquireQoderRequest('qoder', uidB)
+    again[Symbol.dispose]()
+  })
+
+  it('★★★ 让出三次后新持有者仍独占（重复 dispose 不得累计「释放额度」）', async () => {
+    const uid = nextUid()
+    const first = await acquireQoderRequest('qoder', uid)
+    first[Symbol.dispose]()
+    first[Symbol.dispose]()
+    first[Symbol.dispose]()
+    const second = await acquireQoderRequest('qoder', uid)
+    first[Symbol.dispose]()
+    // 第二个正持有名额 ⇒ 第三个必须被拒（重复 dispose 不能把「释放」攒成可用的额度）。
+    await expect(acquireQoderRequest('qoder', uid)).rejects.toMatchObject({ code: 'QUEUE' })
+    second[Symbol.dispose]()
+  })
+
+  it('★★ 新持有者释放后，旧请求的迟到 dispose 不得把名额「提前」放出去', async () => {
+    const uid = nextUid()
+    const first = await acquireQoderRequest('qoder', uid)
+    first[Symbol.dispose]()
+    const second = await acquireQoderRequest('qoder', uid)
+    // 旧请求在第二个**之后**再 dispose 一次（using 作用域结束的时序可能晚于第二轮的释放）。
+    first[Symbol.dispose]()
+    second[Symbol.dispose]()
+    // 两个都释放干净 ⇒ 第三个能拿到（证明上一步没有把 active 卡成 true）。
+    const third = await acquireQoderRequest('qoder', uid)
+    third[Symbol.dispose]()
+  })
+
+  it('★★ 旧请求的迟到 dispose 不得跨账号（不同 uid 的名额互不影响）', async () => {
+    const uidA = nextUid()
+    const uidB = nextUid()
+    const a = await acquireQoderRequest('qoder', uidA)
+    a[Symbol.dispose]()
+    const a2 = await acquireQoderRequest('qoder', uidA)
+    const b = await acquireQoderRequest('qoder', uidB)
+    a[Symbol.dispose]()
+    // A 的名额仍被 a2 持有；B 的名额仍被 b 持有。
+    await expect(acquireQoderRequest('qoder', uidA)).rejects.toMatchObject({ code: 'QUEUE' })
+    await expect(acquireQoderRequest('qoder', uidB)).rejects.toMatchObject({ code: 'QUEUE' })
+    a2[Symbol.dispose]()
+    b[Symbol.dispose]()
   })
 
   it('旧名额重复释放时，新请求仍独占账号名额', async () => {
