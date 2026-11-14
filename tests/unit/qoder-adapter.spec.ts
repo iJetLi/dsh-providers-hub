@@ -988,6 +988,73 @@ describe('Qoder 单账号并发限制', () => {
     }
   })
   /**
+   * ★★★ **已输出内容后不得换号重放**（2026-11-15 对抗审计 P0）。
+   *
+   * ## 缺陷形态
+   *
+   * `emitted` 原本声明在内层 `for (;;)`（消费一条响应 SSE 的那个循环）之前、
+   * **但仍在**外层 `for (;;)` 的每次迭代内 ⇒ 换号分支（`queued = true; break`）
+   * 回到外层重发时它**重新变成 false**，于是「已经 yield 过内容」这条事实丢失 ⇒
+   * 下一次的错误全部当成「还没输出」处理 ⇒ **整条流被重放**。
+   *
+   * 实测（审计 H2）：`fetch = 3`，用户先看到「已输出片段」，再看到重放后的完整回答。
+   *
+   * ## 判据为什么必须是 `fetchImpl` 的调用次数
+   *
+   * 修复前后都会「抛错」（换不到号时也会抛），所以只看 `rejects` 区分不了；
+   * 唯一的行为差异就是**有没有重发过请求**。
+   */
+  it('★★★ 已输出内容后遇到可换号错误：必须抛错，不得换号重放', async () => {
+    // 形态取自对抗审计 H2 的实测复现（三次 fetch 才会暴露出重放）：
+    //   ①本次响应先 yield 一段正文，再收到 **110 额度**（可换号类）
+    //   ②换到新账号后上游回 **10605 排队**
+    //   ③排队后重发，拿到「重放后的完整回答」← 用户看到同一段回答两遍
+    // 修复后应当停在 ①：`emitted === true` ⇒ 不换号 ⇒ 如实抛错 ⇒ fetch 只有 1 次。
+    const billingInner = JSON.stringify({ code: 110, message: 'Billing daily count exceeded', type: 'model_error' })
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(envelopeResponse([textFrame('已输出片段'), billingInner]))
+      .mockResolvedValueOnce(envelopeResponse([
+        JSON.stringify({ code: '10605', message: JSON.stringify({ isQueued: true, retryAfterSeconds: 2 }) }),
+      ]))
+      .mockResolvedValueOnce(envelopeResponse([textFrame('重放后的完整回答'), finishFrame]))
+    const getAvailableAccount = vi.fn(async () => ({ entry: { id: 'acct-B' }, credential: specCredB }))
+    const adapter = makeAdapter({
+      product: QODER,
+      fetchImpl,
+      sleep: vi.fn(async () => {}),
+      currentAccountId: () => 'acct-A',
+      accountPool: { getAvailableAccount, updateModelRateLimit: vi.fn(async () => {}) } as never,
+    })
+
+    await expect(collect(adapter)).rejects.toBeDefined()
+    // ← 唯一判据：不得重发（重发 = 用户看到同一段回答两遍）
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    // 换号在这条路径上等于「重放」的同义词 ⇒ 一个号都不许换。
+    expect(getAvailableAccount).not.toHaveBeenCalled()
+  })
+
+  /**
+   * ★★ `Retry-After: 0` 不得忙重试（对抗审计 P1）。
+   *
+   * 上游高峰期会持续回 `10605`，而 `Retry-After: 0`（或一个**已经过去**的 HTTP 日期）
+   * 会解析成 0ms ⇒ `sleep(0)` 连打 **181 次 / 0.4 秒**，既不给服务端喘息，
+   * 也把 CPU 烧在空转上。修法是把单次等待抬到 `QUEUE_MIN_DELAY_MS`（1 秒）。
+   */
+  it('★★ Retry-After: 0 必须抬到最小等待，不得忙重试', async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ code: '10605', message: JSON.stringify({ isQueued: true }) }),
+        { status: 429, headers: { 'Retry-After': '0' } },
+      ))
+      .mockResolvedValueOnce(envelopeResponse([textFrame('排到了'), finishFrame]))
+    const sleep = vi.fn(async () => {})
+
+    await collect(makeAdapter({ product: QODER, fetchImpl, sleep }))
+
+    expect(sleep).toHaveBeenCalledWith(1_000, undefined)
+  })
+
+  /**
    * ★★★ **排队等待期间必须先让出并发名额**（2026-11-15 审计 P1）。
    *
    * ## 缺陷形态

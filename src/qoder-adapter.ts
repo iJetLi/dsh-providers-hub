@@ -84,6 +84,16 @@ const parseQoderQueueError = parseQueueError
 const qoderQueueDelayMs = queueDelayMs
 
 /**
+ * 排队等待的**最小**单次等待。
+ *
+ * ⚠️⚠️ `Retry-After: 0` 与「已经过去的 HTTP 日期」都会解析成 **0ms**，而上游在
+ * 高峰期会持续回 `10605` ⇒ 照做就是**忙重试风暴**：实测 `sleep(0)` 连打
+ * **181 次 / 0.4 秒**（`QUEUE_MAX_ATTEMPTS` 是 180），既没给服务端任何喘息，
+ * 也把本机 CPU 烧在空转上。抬到 1 秒仍尊重「服务端说很快」这条语义。
+ */
+const QUEUE_MIN_DELAY_MS = 1_000
+
+/**
  * ⚠️ **向后兼容的再导出**：排队解析的实现已移到 `src/model-queue.ts`
  * （因为 SSE 消费器也要用，而它不能被本模块反向 import —— 会成环）。
  * 这里保留同名导出，避免既有调用方与测试失效。
@@ -1941,6 +1951,20 @@ export class QoderAdapter extends LlmAdapter {
      * 传输失败是「这条出口不通」，两者的上限语义与代价完全不同。
      */
     let transportRetries = 0
+    /**
+     * ⚠️⚠️ **必须是流级，不是「本次响应级」**（PR #79 对抗审计 P0，2026-11-15）。
+     *
+     * 修前这个变量声明在内层 `for (;;)`（消费一条响应 SSE 的那个循环）**之前、
+     * 但仍在**外层 `for (;;)` 的每次迭代内** ⇒ `queued = true; break` 回到外层
+     * 重发时它会**重新变成 false**，于是「已经向消费者 yield 过内容」这条事实
+     * 丢失：下一次内部再看到的排队/换号错误全部当成「还没输出」处理 ⇒
+     * **整条流被重放**（实测 fetch=3：先收到「已输出片段」，再收到重放后的
+     * 完整回答）。用户看到的是同一段回答出现两遍。
+     *
+     * 提到外层循环外 = 「本次 `stream()` 调用是否已经产出过可见内容」，
+     * 这才是换号/重发判据真正需要问的问题。
+     */
+    let emitted = false
     for (;;) {
       const request = await buildRequest(credential)
       using slot = guardTraffic
@@ -2165,7 +2189,6 @@ export class QoderAdapter extends LlmAdapter {
       )
       const iterator = inner[Symbol.asyncIterator]()
       let queued = false
-      let emitted = false
       try {
         for (;;) {
           let step: IteratorResult<StreamChunk>
@@ -2207,6 +2230,12 @@ export class QoderAdapter extends LlmAdapter {
             const failureCall = failureCallOf(error)
             const streamCls = classifyQoderFailure(failureCall.code, failureCall.text)
             if (shouldRotateQoderAccount(streamCls)) {
+              // ⚠️⚠️ **已经向消费者 yield 过内容就不能换号**（对抗审计 P0）：
+              // 换号 = 回到外层重发整条请求 ⇒ 已输出的部分会被**再输出一遍**。
+              // 这与上面那条 `if (emitted && error instanceof ModelQueuedError)`
+              // 是**同一条不变式的两个入口** —— 排队与可换号错误都会重发，
+              // 只守一处会让另一处静默重放（PR 自身的用例只覆盖了同一次迭代）。
+              if (emitted) throw error
               const switched = await this.switchAccountOnQuota(
                 options,
                 triedAccounts,
@@ -2367,7 +2396,7 @@ export class QoderAdapter extends LlmAdapter {
       ?? (retryAfterHeaderMs === undefined ? undefined : Math.min(retryAfterHeaderMs, QUEUE_MAX_DELAY_MS))
     // ⚠️ 拿不到服务端延迟时**不忙等**：用保守的短退避，避免瞬间烧掉机会
     // （客户端 W7c() 此时会退回 ltA() 指数退避）。
-    const totalMs = waitMs ?? 1_000
+    const totalMs = waitMs !== undefined && waitMs > 0 ? waitMs : QUEUE_MIN_DELAY_MS
     const { queueType, queueCount, serviceAvailable, retryAfterSeconds } = queueInfo ?? {}
     const modelKey = queueInfo?.modelKey ?? options.model
     /**
