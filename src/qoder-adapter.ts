@@ -2083,8 +2083,8 @@ export class QoderAdapter extends LlmAdapter {
           // 之前抛出，**绕过**下面的换号通路 ⇒ 多账号池也兜不住。
           //
           // 让出后 `active` 归 false，第二条请求可以正常去上游排队（或由换号
-          // 通路接管）；`using` 在作用域结束时还会再 dispose 一次，而 `release`
-          // 是幂等的（`active = false` 重复赋值）。
+          // 通路接管）；`using` 在作用域结束时还会再 dispose 一次。
+          // 每个名额只释放一次，避免旧请求清掉新请求的占用。
           slot?.[Symbol.dispose]()
           // ⚠️ 必须 `for await … yield`：`waitForQueueFrames` 是异步生成器，
           // `visible` 档的心跳帧要靠这里转交给上层（见该方法的注释）。

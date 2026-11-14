@@ -30,7 +30,12 @@ export async function acquireQoderRequest(
 
   account.active = true
   accounts.set(key, account)
-  const release = (): void => { account.active = false }
+  let released = false
+  const release = (): void => {
+    if (released) return
+    released = true
+    account.active = false
+  }
   try {
     const delay = account.lastDispatch + MIN_REQUEST_GAP_MS - performance.now()
     if (delay > 0) await sleep(Math.ceil(delay), undefined, { signal })

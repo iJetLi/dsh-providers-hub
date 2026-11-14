@@ -145,13 +145,21 @@ describe('acquireQoderRequest：abort 与 dispose', () => {
     ;(slot as Disposable)[Symbol.dispose]()
   })
 
-  it('★★ dispose 两次必须幂等（不抛、也不重复释放出第二个名额）', async () => {
+  it('旧名额重复释放时，新请求仍独占账号名额', async () => {
     const uid = nextUid()
-    const slot = await acquireQoderRequest('qoder', uid) as Disposable
-    slot[Symbol.dispose]()
-    expect(() => slot[Symbol.dispose]()).not.toThrow()
-    // 幂等 ≠ 释放两次：名额仍只有 1 个，所以第二条要被拒。
-    const again = await acquireQoderRequest('qoder', uid)
-    ;(again as Disposable)[Symbol.dispose]()
+    const first = await acquireQoderRequest('qoder', uid)
+    first[Symbol.dispose]()
+    using second = await acquireQoderRequest('qoder', uid)
+    first[Symbol.dispose]()
+
+    // 首个请求退出时，第二个请求已持有名额，第三个请求仍须被拒。
+    const result = await acquireQoderRequest('qoder', uid).then(
+      (slot) => {
+        slot[Symbol.dispose]()
+        return undefined
+      },
+      (error: unknown) => error,
+    )
+    expect(result).toMatchObject({ code: 'QUEUE' })
   })
 })
