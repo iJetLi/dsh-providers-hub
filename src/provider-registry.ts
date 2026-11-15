@@ -235,8 +235,16 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     label: 'WorkBuddy (国际版)',
     displayName: 'WorkBuddy (国际版)',
     logoClass: 'workbuddy',
-    // ⚠️ 国际版后端**没有**签到接口（内核里只有 `get-dosage-notify` 用量通知）。
-    credits: { balance: true, dailyCheckin: false },
+    /**
+     * ⚠️ 2026-11-15 更正为 `dailyCheckin: true`。
+     *
+     * 原先写 `false` 的依据是「内核里没有 `checkin-*` 字面量」—— 但签到端点是
+     * **前端**直接调的，内核里从来不会有。国际版与国内版端点逐字同形，只是
+     * baseURL 不同（实证见 `docs/workbuddy-intl-checkin.md`）。
+     * ⚠️ 这一格是**客户端「一键签到」按钮的开关**（客户端能力表从本表派生）：
+     * 置 `true` 才会渲染按钮，置 `false` 时后端能力再全也点不到。
+     */
+    credits: { balance: true, dailyCheckin: true },
     creditPackages: true,
     permanentLock: true,
     usesExpiryWindow: true,

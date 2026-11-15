@@ -78,10 +78,13 @@ describe('积分能力矩阵', () => {
     expect(supportsDailyCheckin('astudio')).toBe(true)
   })
 
-  it('WorkBuddy 国际版支持余额但不支持签到（余额与签到是彼此独立的能力）', () => {
-    // 这条断言专治「因为国际版没有签到，就推断也查不到余额」的错误推断。
+  it('WorkBuddy 国际版余额与签到都支持（2026-11-15 更正：国际版有签到端点）', () => {
+    // 旧的「国际版不支持签到」结论来自「只搜 CLI 内核字面量」—— 签到端点是
+    // 前端直接调的（见 docs/workbuddy-intl-checkin.md）。
+    // ⚠️ 余额与签到仍是**彼此独立**的能力，这条不许被当成「既然能签到就一定
+    // 查得到余额」的推导。
     expect(supportsCreditBalance('workbuddy')).toBe(true)
-    expect(supportsDailyCheckin('workbuddy')).toBe(false)
+    expect(supportsDailyCheckin('workbuddy')).toBe(true)
   })
 
   /**
@@ -101,39 +104,30 @@ describe('积分能力矩阵', () => {
    * 的桩重复 —— 与本仓库 `raccoon-rpc-dispatch.spec.ts` 对同类守卫的做法一致。
    * （2026-10-08 改措辞：此处原写「是 12 个**位置参数**」，那是 Task 9 之前的形态。）
    */
-  it('宿主端 credits.claimAll 对 workbuddy 有显式守卫（与能力表成对）', () => {
-    // ⚠️ 2026-10-08 改（Task 4）：原先这条扫 `src/jet-hub-rpc.ts` 的源码文本，
-    //    断言里面含 `if (req.provider === 'workbuddy') {` 与那句文案，并检查
-    //    守卫**早于** `productById` 兜底。Task 4 把守卫搬进
-    //    `src/provider-credits.ts` 的 `claimUnavailableReason` ⇒ 那两串文本
-    //    **搬了家**，而它守的意图（workbuddy 调 claimAll **不发上游请求**、
-    //    拿到的是**指明能力**的拒绝）**与文本位置无关**。
+  it('宿主端 workbuddy 已接领取原语（与能力表成对，2026-11-15 更正）', () => {
+    // 历史：这里原先断言「workbuddy **没有** claim、且必须有
+    // `claimUnavailableReason: WorkBuddy 国际版不支持每日签到…`」。
+    // 那条守卫的依据是「只搜 CLI 内核字面量找不到签到端点」—— 而签到端点是
+    // **IDE / 网页前端**直接调的，内核里本来就不会有，静态搜索必然搜不到。
+    // 国际版与国内版端点逐字同形（实证见 `docs/workbuddy-intl-checkin.md`）。
     //
-    //    ⇒ 改为**行为**断言：直接断言表里的声明值 + 真跑端点核对响应。
-    //    这比原文本断言强 —— 文本断言只能证明源码里有那串字符，它能证明
-    //    端到端真的返回了那条原因（且 `ok:false`，即**没有**发上游请求）。
+    // ⇒ 现在这两条断言**反向**：claim 必须在，旧的拒绝文案必须不在。
     const workbuddy = createProviderCredits().workbuddy
-    expect(workbuddy?.claim, 'workbuddy 不该有 claim（国际版后端没有签到接口）').toBeUndefined()
+    expect(workbuddy?.claim, 'workbuddy 缺 claim：国际版有签到端点，不该再走拒绝分支')
+      .toBeTypeOf('function')
     expect(
       workbuddy?.claimUnavailableReason,
-      'workbuddy 缺少「不支持每日签到」的可读原因 —— 它会落到通用分支，'
-      + '用国际版凭据去发国内版的签到请求（必然失败的真实上游请求）',
-    ).toContain('WorkBuddy 国际版不支持每日签到')
-    // 反向：确认这条**不是**泛化的 `unsupported provider`（那会让排查者以为
-    // 「provider 没注册」，而真相是「该产品没有这个接口」）。
-    expect(workbuddy?.claimUnavailableReason).not.toContain('unsupported provider')
-    // ⚠️ 「端点真的读了这条声明、且**零上游请求**」由**行为**用例守，
-    //    且**只在唯一一处**（避免同一套 RPC 夹具在两个文件里各写一份）：
+      '旧的「国际版不支持每日签到」守卫还在 —— 它会让客户端的签到按钮永远点不到',
+    ).toBeUndefined()
+    // 收尾钩子（活跃上报）必须挂上：国际版的活动积分由「当日活跃」异步发放，
+    // 活动没开时这一发才是真正驱动到账的那一步。
+    expect(
+      workbuddy?.afterClaimNote,
+      'workbuddy 缺 afterClaimNote（活跃上报），活动未开放的日子会一分不得',
+    ).toBeTypeOf('function')
+    // ⚠️ 端到端行为（真打到 www.workbuddy.ai）由
     //    `tests/unit/claim-runtime-parity.spec.ts` 的
-    //    「cline / workbuddy / raccoon 各回**逐字保留**的可读原因」——
-    //    它真跑 `credits.claimAll` 并逐字核对文案。
-    //    ⚠️ **2026-10-08 更正（Task 4 复审 Finding Minor 1）**：本注释原先写
-    //    「把 `fetch` 桩成会抛错（任何真实请求都会让那条用例失败）」，那是**错的**
-    //    —— 那条用例用 `makeRpc()`（无 `fetch` 桩），**没有**任何会抛错的桩。
-    //    它的「零上游请求」由**代码位置**保证，不是由桩保证：端点在**任何上游
-    //    调用之前**读该声明并直接返回（见 `src/jet-hub-rpc.ts` 的
-    //    `impl?.claimUnavailableReason !== undefined` 分支，位于
-    //    `collectClaimResults` 之前）。故断言依然成立，只是理由换了。
+    //    「★ workbuddy 真发领取请求」守。
   })
 
   it('Qoder 两项能力都有（余额 + 每日领取）', () => {

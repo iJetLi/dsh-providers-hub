@@ -264,7 +264,7 @@ export function providerLabel(id) {
  * - **lobsterai（有道龙虾）**：签到接口是 `client-activities` 三步流程
  *   （实现见 `src/lobsterai-credits.ts`），经 `sigin.py` 实测确认。
  *
- * **workbuddy 无签到**：国际版（www.workbuddy.ai）后端没有签到接口
+ * **workbuddy 有签到**（2026-11-15 更正）：国际版（www.workbuddy.ai）与国内版端点同形
  * （内核中只有 `/v2/billing/meter/get-dosage-notify` 用量通知）。
  * CodeArts 是华为云账号体系，同样不参与。
  */

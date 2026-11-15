@@ -565,10 +565,12 @@ describe('credits.claimAll 的按需自愈（与余额查询同一层）', () =>
     expect(calls).toEqual([])
   })
 
-  it('不签到的渠道（cline / workbuddy / raccoon）**不因自愈而改变拒绝行为**', async () => {
-    // ⚠️ 这三家即使账号已过期也必须仍然返回「不支持签到」的可读错误 ——
+  it('不签到的渠道（cline / raccoon）**不因自愈而改变拒绝行为**', async () => {
+    // ⚠️ 这两家即使账号已过期也必须仍然返回「不支持签到」的可读错误 ——
     // 自愈不能把守卫的既有语义带偏（也不能因为续期失败就吞掉这条错误）。
-    for (const provider of ['cline', 'workbuddy', 'raccoon']) {
+    // ⚠️ workbuddy 已移出本用例（2026-11-15）：国际版有签到端点，它现在会真发
+    // 领取请求，不再有「不支持」这条拒绝路径。
+    for (const provider of ['cline', 'raccoon']) {
       const h = setup({
         accounts: [expiredEntry({ id: `id-${provider}`, provider })],
         // 故意让续期失败：守卫必须在自愈失败后仍然生效。

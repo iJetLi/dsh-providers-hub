@@ -2059,7 +2059,8 @@ function UsageBadgeActive(props) {
    *
    * - `签到（仅 <渠道>）`：只在能力表允许的渠道渲染（`supportsDailyCheckin`）；
    * - `全部渠道签到`：与设置页页头同款语义，串行遍历 `checkinProviders()`
-   *   （WorkBuddy 国际版 / Cline / Raccoon 没有签到接口，不在列表里）。
+   *   （Cline / Raccoon 没有签到接口，不在列表里；WorkBuddy 国际版 2026-11-15 起
+   *   已能签到，故在列表内）。
    *   它**不依赖本渠道的读数**，故首屏/失败态也渲染。
    */
   function renderClaim() {
@@ -2094,7 +2095,7 @@ function UsageBadgeActive(props) {
           // —— 硬编码必然腐坏，改成 `checkinProviders().length` 现算（该函数本文件已 import）。
           // 2026-11-01 三审（本分支）：自动签到的语义已从「每天首次启动」改成「每天两个时段」，
           // 文案必须跟着改，否则与面板「下次执行：21:00」自相矛盾。
-          title: `串行签到全部支持签到的渠道（${checkinProviders().length} 个；WorkBuddy 国际版 / Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻自动执行' : ''}`,
+          title: `串行签到全部支持签到的渠道（${checkinProviders().length} 个；Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻自动执行' : ''}`,
           onClick: () => { void onClaimAll(); },
         }, allBusy
           ? (claimProgress === null ? '签到中…' : `签到中 ${claimProgress.done}/${claimProgress.total}…`)
@@ -2105,8 +2106,10 @@ function UsageBadgeActive(props) {
        *
        * ⚠️ 用户 2026-10-02 报障：「单渠道签到哪里去了」—— 他在 Cline 上打开弹窗只看到
        * 「全部渠道签到」，以为按钮丢了。真相是能力表里 `dailyCheckin: false`
-       * （WorkBuddy 国际版 / Cline / Raccoon 后端没有签到接口，Raccoon 的每日积分由
-       * 服务端自动发放）。少了这一句，用户只能靠猜。
+       * （Cline / Raccoon 后端没有签到接口，Raccoon 的每日积分由服务端自动发放）。
+       * 少了这一句，用户只能靠猜。
+       * ⚠️ WorkBuddy 国际版 2026-11-15 起已加入可签到名单（见
+       * `docs/workbuddy-intl-checkin.md`）。
        */
       canClaimCurrent
         ? null

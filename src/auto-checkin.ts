@@ -45,13 +45,13 @@
  *
  * 「哪些渠道能签到」的权威是客户端的 `credits-capabilities.js`（12 个渠道逐项
  * 登记）。在本模块再抄一份必然漂移（本仓库已有「两份名单漂移」的真实缺陷）。
- * 故判据交给 `credits.claimAll` 自己：cline / raccoon / **workbuddy** 三条分支
+ * 故判据交给 `credits.claimAll` 自己：cline / raccoon 两条分支
  * **不发任何上游请求**就返回「不支持每日签到」，本模块把这类错误计为**跳过**，
  * 既不算失败也不重试。
  *
- * ⚠️ 其中 **workbuddy 的那条守卫是本功能先补上的**：此前它会落到 buddy 产品
- * 分支、真去发必然失败的签到请求（客户端从不调用它，是因为能力表写着 false，
- * 所以这个洞一直没被触发）。补上之后，「调用即判定」这条规则才真正安全。
+ * ⚠️ **workbuddy 已于 2026-11-15 退出这一组**：国际版其实**有**签到端点（与国内版
+ * 逐字同形），此前那条「不支持」的守卫是误判，现已改为真发领取 + 活跃上报
+ * （见 `workbuddy-intl-activity.ts` 与 `docs/workbuddy-intl-checkin.md`）。
  *
  * ## ⚠️「调用即判定」管不到的一类：签到**有代价**的渠道
  *
@@ -702,7 +702,7 @@ function emptyTotals(): RunTotals {
 }
 
 /**
- * 「不支持每日签到」的判据：`credits.claimAll` 对 cline / raccoon / workbuddy
+ * 「不支持每日签到」的判据：`credits.claimAll` 对 cline / raccoon
  * 返回的**显式**错误文案（这三条分支都不发上游请求）。
  *
  * ⚠️ 兜底认 `unsupported provider`：那是 `productById` 找不到产品时的文案，

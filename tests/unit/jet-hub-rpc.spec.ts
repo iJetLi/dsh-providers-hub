@@ -3731,6 +3731,11 @@ describe('积分端点的 provider 能力边界', () => {
    * 不维护第二份能力名单，只按 `claimAll` 返回的信封判跳过，所以宿主端必须
    * 对不支持的渠道**显式表态**。⇒ 拆成下面两条，**禁止一刀切**的意图完整保留：
    * `credits.status` / `credits.balances` 仍要求两者都被接受。
+   *
+   * ⚠️ **2026-11-15 再次更正**：上面那段「claimAll 对 workbuddy 不成立」的依据
+   * （README / AGENTS.md / 客户端能力表三处「国际版无签到」）**同源于一次误判**
+   * —— 三处都是「只搜 CLI 内核字面量」得出的。国际版与国内版签到端点逐字同形，
+   * 现已一并更正（见 `docs/workbuddy-intl-checkin.md`），claimAll 对两者都成立。
    */
   it.each(['credits.status', 'credits.balances'])('%s 不会把 CodeBuddy 系一并误拒', async (method) => {
     const call = registerCreditsEndpoints()
@@ -3741,16 +3746,17 @@ describe('积分端点的 provider 能力边界', () => {
     }
   })
 
-  it('credits.claimAll 接受 buddy，但对 workbuddy 给出**明确**的「不支持每日签到」', async () => {
+  it('credits.claimAll 同时接受 buddy 与 workbuddy（国际版也有签到端点，2026-11-15 更正）', async () => {
     const call = registerCreditsEndpoints()
-    // CodeBuddy 中国版照旧被接受（它有签到端点）
-    const buddyResult = await call('credits.claimAll', { provider: 'buddy' })
-    expect(buddyResult.ok, 'claimAll/buddy').toBe(true)
-    // 国际版：拒绝，但**必须是可读的能力原因**，不是泛化的「provider 没注册」
-    const result = await call('credits.claimAll', { provider: 'workbuddy' })
-    expect(result.ok).toBe(false)
-    expect(result.error?.message).toContain('WorkBuddy 国际版不支持每日签到')
-    expect(result.error?.message, '不能退化成 unsupported provider').not.toContain('unsupported provider')
+    // ⚠️ 本用例 2026-11-15 由「对 workbuddy 断言拒绝」改为「两者都接受」：
+    //    国际版**有**签到端点（与国内版逐字同形，只有 baseURL 不同），原先那句
+    //    「国际版没有签到接口」来自只搜 CLI 内核字面量 —— 而签到端点是前端直接
+    //    调的，内核里从来不会有。实证见 `docs/workbuddy-intl-checkin.md`。
+    //    ⚠️ 空账号池 ⇒ 仍不会发任何真实请求，这条只验证 provider 校验。
+    for (const provider of ['buddy', 'workbuddy']) {
+      const result = await call('credits.claimAll', { provider })
+      expect(result.ok, `claimAll/${provider}`).toBe(true)
+    }
   })
 
   /**

@@ -97,6 +97,7 @@ import { fetchAutoclawBalanceDetailed, claimAutoclawDailyQuota } from './autocla
 import { AUTOCLAW_INTL } from './autoclaw-product.js'
 import { fetchTraeCreditBalance, claimTraeDailyCheckin, fetchTraeCheckinStatus } from './trae-credits.js'
 import { collectBuddyGrowth } from './buddy-growth.js'
+import { keepWorkBuddyIntlActivity } from './workbuddy-intl-activity.js'
 import { fetchZcodeBalance, type ZcodeBalanceResult } from './zcode-upstream.js'
 import {
   claimDailyCheckin,
@@ -1038,23 +1039,38 @@ export function createProviderCredits(
         ),
     },
 
+    /**
+     * WorkBuddy 国际版：**有**签到（2026-11-15 更正）。
+     *
+     * ## 为什么此前写的是「没有签到接口」
+     *
+     * 那条结论来自**只搜 CLI 内核字面量**：内核里确实只有 `get-dosage-notify`
+     * （用量通知）。但签到端点是 **IDE 前端 / 网页前端**直接调的，不在内核里，
+     * 静态搜索必然搜不到 —— 这正是 `credits.ts` 对余额端点记过的同一个坑。
+     * 社区实现（L0NE-6/WorkBuddy-Daily 的 `workbuddy_intl_daily.py`）用真实凭据
+     * 跑通了国际版全链路，端点与国内版**逐字同形**，只有 baseURL 随
+     * `product.endpoint` 切到 `www.workbuddy.ai`。实证与迁移说明见
+     * `docs/workbuddy-intl-checkin.md`。
+     *
+     * ## 国际版与国内版的两处差异（`claim` 之外的部分）
+     *
+     * 1. 国际版的每日奖励**挂在活动上**：活动没开时 `/daily-checkin` 回 `41000`
+     *    （活动未开始或已结束），属正常状态而非失败（`credits.ts` 已归入
+     *    `inactive`）；
+     * 2. 活动没开时积分改由**活跃**异步发放 ⇒ `afterClaimNote` 补一发活跃上报
+     *    （见 `workbuddy-intl-activity.ts`）。这一发对「已签到」的账号同样要跑，
+     *    而 `afterClaimNote` 的契约恰好是 `claimed` / `already-claimed` 都执行。
+     */
     workbuddy: {
       fetchBalance: (credential) =>
         fetchCreditBalance(credential as BuddyCredential, WORKBUDDY),
-      // ⚠️ 国际版**没有签到接口**，但**状态端点**与余额一样存在（两个产品通用），
-      // 故这里注册 fetchStatus。真正禁止的是 `claimAll`（那由能力表与
-      // `credits.claimAll` 的显式守卫成对拦住）。
+      // 状态端点两个产品通用，与余额一样只有 baseURL 之差。
       fetchStatus: (credential) =>
         fetchCheckinStatus(credential as BuddyCredential, WORKBUDDY),
-      /**
-       * ⚠️ **这条守卫是载荷性的，必须有**：没有它时 `workbuddy` 会落到
-       * `credits.claimAll` 的通用分支，用**国际版**凭据去发**国内版**的签到
-       * 请求 —— 必然失败，而且是一次**真实的上游请求**。而「每日首次启动自动
-       * 签到」（`src/auto-checkin.ts`）正是靠「调 `claimAll`、按返回的信封判
-       * 跳过」来决定遍历范围的，它**不维护第二份能力名单** ⇒ 这里漏一个守卫，
-       * 它就会真去发一轮必然失败的请求。
-       */
-      claimUnavailableReason: 'WorkBuddy 国际版不支持每日签到（其后端没有签到接口）',
+      claim: (credential) =>
+        claimDailyCheckin(credential as BuddyCredential, WORKBUDDY),
+      afterClaimNote: (credential) =>
+        keepWorkBuddyIntlActivity(credential as BuddyCredential, WORKBUDDY),
     },
 
     /**

@@ -268,7 +268,8 @@ describe('签到能力：registry 声明与 runtime 实现必须一致', () => {
     //    `provider-credits.ts` 的 baizhi 条目里（challenge → 本地 PoW → redeem →
     //    daily-temporary-credit）⇒ 15 → 16。
     // 魔搭接入签到后成为第 17 个由通用领取流程覆盖的渠道。
-    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(17)
+    // ⚠️ 2026-11-15 加 workbuddy（国际版签到端点与国内版同形）⇒ 17 → 18。
+    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(18)
 
     /**
      * ⚠️⚠️ **只数数量挡不住「删一家 + 加一家」** —— 数量不变就静默通过，
@@ -879,16 +880,16 @@ describe('★ credits.claimAll 真的查表（注入哨兵，硬编码分支不�
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('★ 不支持签到的渠道：文案必须指明「该产品无此能力」', () => {
-  it('cline / workbuddy / raccoon 各回**逐字保留**的可读原因', async () => {
+  it('cline / raccoon 各回**逐字保留**的可读原因', async () => {
     const { call } = makeRpc()
     const expected: Record<string, string> = {
       // cline：对整个 sidecar 做字符串扫描，无任何 checkin/campaign 端点。
       cline: 'Cline 不支持每日签到（其后端没有签到接口）',
-      // ⚠️ workbuddy 这条守卫**必须有**：没有它时会落到通用分支，用**国际版**
-      //    凭据去发**国内版**的签到请求 —— 必然失败，且是一次真实上游请求。
-      workbuddy: 'WorkBuddy 国际版不支持每日签到（其后端没有签到接口）',
       // raccoon：每日 300 积分由服务端自动发放；提示必须指向「新手任务」。
       raccoon: 'Raccoon Work 不支持每日签到（每日积分由服务端自动发放；登录奖励请在「新手任务」中领取）',
+      // ⚠️ workbuddy **已从本用例移除**（2026-11-15）：国际版**有**签到端点，
+      //    原先那条「不支持」的守卫是基于「内核里没有 checkin 字面量」的误判。
+      //    现在它由下面的「workbuddy 走通用分支」用例守。
     }
     for (const [provider, message] of Object.entries(expected)) {
       const result = await call('credits.claimAll', { provider })
@@ -896,6 +897,46 @@ describe('★ 不支持签到的渠道：文案必须指明「该产品无此能
       expect(result.error?.message, `${provider} 的文案退化了`).toBe(message)
       expect(result.error?.message, `${provider} 不能退化成 unsupported provider`).not.toContain('unsupported provider')
     }
+  })
+
+  /**
+   * ★ workbuddy 走**通用分支**（2026-11-15 更正）。
+   *
+   * 国际版与国内版的签到端点**逐字同形**，只有 baseURL 不同 —— 原先「国际版
+   * 没有签到接口」的结论来自「只搜 CLI 内核字面量」，而签到端点是前端直接调的。
+   * 这条用例钉住两件事：端点真的打到 `www.workbuddy.ai`，且收尾的活跃上报也跑了。
+   */
+  it('★ workbuddy 真发领取请求（国际版有签到端点）', async () => {
+    const { call, pool, credentials } = makeRpc(undefined, { ...emptyAuths() })
+    await seed(pool, 'workbuddy', 'w-1', 'WORKBUDDY_ACCOUNT_SPEC')
+    await credentials.set('WORKBUDDY_ACCOUNT_SPEC', JSON.stringify({
+      access_token: 'AT-W', user_id: 'uid-w',
+    }))
+    const urls: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = String(input)
+      urls.push(url)
+      // ⚠️ 三个端点要**分别**应答：workbuddy 的 precheckStatus 是缺省 true，先查状态，
+      //    状态说「活动没开」就**不会**发领取请求（那正是骨架的正常短路，不是缺陷）。
+      const body = url.includes('/activity/growth/streak')
+        ? '{"code":0,"data":{"streak":{"days":3}}}'
+        : url.includes('/v2/report')
+          ? '{"code":0}'
+          : url.includes('/checkin-activity-status')
+            ? '{"code":0,"data":{"active":true,"today_checked_in":false}}'
+            : '{"code":0,"data":{"credit":100,"streak_days":3,"is_streak_day":false}}'
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    const result = await call('credits.claimAll', { provider: 'workbuddy' })
+    expect(result.ok, `workbuddy 应被接受，实际 error=${result.error?.message}`).toBe(true)
+    expect(
+      urls.some((url) => url.startsWith('https://www.workbuddy.ai/v2/billing/meter/daily-checkin')),
+      'workbuddy 没有打到国际版的领取端点',
+    ).toBe(true)
+    expect(
+      urls.some((url) => url.endsWith('/v2/report')),
+      'workbuddy 的活跃上报（afterClaimNote）没有跑',
+    ).toBe(true)
   })
 
   it('★ 未登记的 provider 仍回 unsupported provider（兜底契约不变）', async () => {

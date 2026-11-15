@@ -1161,7 +1161,7 @@ export async function collectCreditsStatus<TCredential = BuddyCredential, TProdu
    *   ⚠️ 上游 86e3591 这里写的是「**两家** `minimax` / `minimaxintl`」—— 那是
    *   **他们**那份仓库的事实（其 `provider-credits.ts` 里没有 buddy / workbuddy 条目）。
    *   **本仓库不适用**：`buddy` 有签到状态端点，`workbuddy` 那条是**刻意注册**的
-   *   （国际版没有签到接口、但状态端点存在，见 `provider-credits.ts` 里
+   *   （国际版**有**签到端点，2026-11-15 更正，见 `provider-credits.ts` 里
    *   `workbuddy.fetchStatus` 的注释）⇒ 四家都是**只读状态查询、一次/账号**。
    * - **429 不会被放大**：`minimax` 的 `minimaxFetchWithRetry` 只重试**传输错误**，
    *   而 `buddy` 系走的 `credits.ts` `postJson` **同样不重试 HTTP 状态**
@@ -9223,7 +9223,7 @@ function registerJetHubEndpoints(
           //    指引「登录奖励请在『新手任务』中领取」），压成一句泛化模板会丢掉它。
           //    两个真实例子（各自的历史注释都记录了这一点）：
           //      - cline：对整个 sidecar 做字符串扫描，无任何 checkin/campaign 端点；
-          //      - workbuddy：国际版内核里只有 get-dosage-notify，没有签到接口。
+          //      - workbuddy：2026-11-15 起有签到（端点同形，只是 baseURL 不同）。
           //    ⚠️ workbuddy 这条守卫**必须有**：没有它时会落到下面的通用分支，
           //       用**国际版**凭据去发**国内版**的签到请求 —— 必然失败，而且是一次
           //       真实的上游请求。而「每日首次启动自动签到」正是靠「调 claimAll、

@@ -208,7 +208,9 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     const caps = creditCapabilitiesOf()
     expect(caps.codearts).toEqual({ balance: true, dailyCheckin: true })
     expect(caps.buddy).toEqual({ balance: true, dailyCheckin: true })
-    expect(caps.workbuddy).toEqual({ balance: true, dailyCheckin: false })
+    // ⚠️ 2026-11-15：workbuddy 由 `dailyCheckin: false` 改为 `true` —— 国际版
+    // 的签到端点是前端直接调的（不在 CLI 内核里），原先的「不支持」是误判。
+    expect(caps.workbuddy).toEqual({ balance: true, dailyCheckin: true })
     expect(caps.qoder).toEqual({ balance: true, dailyCheckin: true })
     expect(caps.qodercn).toEqual({ balance: true, dailyCheckin: true })
     expect(caps.loomy).toEqual({ balance: true, dailyCheckin: true, onboardingTasks: true })

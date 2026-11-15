@@ -59,6 +59,26 @@ const CODE_ALREADY_CLAIMED = 10001
 const CODE_ALREADY_CLAIMED_ALT = 1001
 const CODE_NO_QUALIFICATION = 1002
 const CODE_ACTIVITY_ENDED = 1003
+/**
+ * 国际版（www.workbuddy.ai）的业务码：`41000` = 活动未开始或已结束，
+ * `40901` = 任务暂不可领取。
+ *
+ * ⚠️ 两个产品的码表**不是同一套**：国内版用 1001/1002/1003，国际版这两条是
+ * 社区实现 `workbuddy_intl_daily.py` 用真实凭据跑出来的（见
+ * `docs/workbuddy-intl-checkin.md`）。把它们归到 `inactive` 而不是 `failed` ——
+ * 「活动没开」是**当天不会到账**的正常状态，报到 `failed` 会让自动签到把它
+ * 当成可重试的故障，一天里反复打上游。
+ */
+const CODE_INTL_ACTIVITY_NOT_STARTED = 41000
+const CODE_INTL_TASK_UNAVAILABLE = 40901
+/**
+ * 「今天已经领过了」的**文案**判据（兜底）。
+ *
+ * 国内版用业务码（10001/1001）表达幂等，而国际版的重复领取只保证 HTTP
+ * 400/409 + 一句 `已签到` 文案 —— 业务码未必落在上面那张表里。只在**未知码**上
+ * 才用文案兜底，故不会改变任何既有渠道的行为。
+ */
+const ALREADY_CLAIMED_TEXT = /已签|已领|already/i
 
 /** 签到活动状态（字段名已转为 camelCase）。 */
 export interface CheckinStatus {
@@ -667,8 +687,13 @@ export async function claimDailyCheckin(
   if (code === CODE_ALREADY_CLAIMED || code === CODE_ALREADY_CLAIMED_ALT) {
     return { kind: 'already-claimed', message: message.length > 0 ? message : '今天已签到' }
   }
-  if (code === CODE_NO_QUALIFICATION || code === CODE_ACTIVITY_ENDED) {
+  if (code === CODE_NO_QUALIFICATION || code === CODE_ACTIVITY_ENDED
+    || code === CODE_INTL_ACTIVITY_NOT_STARTED || code === CODE_INTL_TASK_UNAVAILABLE) {
     return { kind: 'inactive', message: message.length > 0 ? message : '当前无领取资格' }
+  }
+  if (code !== 0 && ALREADY_CLAIMED_TEXT.test(message)) {
+    // ⚠️ 只在**未知码**上兜底（国际版重复领取的业务码不在上表里）。
+    return { kind: 'already-claimed', message }
   }
   if (code !== 0) {
     return { kind: 'failed', code, message: message.length > 0 ? message : '领取失败' }
