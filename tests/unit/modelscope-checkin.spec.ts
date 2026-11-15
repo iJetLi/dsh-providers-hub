@@ -141,4 +141,80 @@ describe('魔搭魔粒签到与到期', () => {
     expect(result.balance?.dailyGrantExpiresAt).toBeUndefined()
     expect(await modelscopeDailyGrantExpiry(credential.access_token)).toBeUndefined()
   })
+
+  // ── 第二轮（PR #83 对抗审计 P1/P2） ──
+
+  it('★★★ 未来的流水不得冒充「今天已领取」（否则当天彻底不再领）', async () => {
+    const tomorrow = { ...reward, gmt_created: '2026-11-16 08:00:00' }
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(ledger([tomorrow]))
+      .mockResolvedValueOnce(Response.json({ Code: 200 }))
+      .mockResolvedValueOnce(ledger([reward]))
+    vi.stubGlobal('fetch', fetch)
+    // 原判据是 `>= 今天零点` ⇒ 明天那条被当成今天 ⇒ already-claimed ⇒ 只发 1 次请求。
+    expect(await claimModelscopeDaily(credential)).toMatchObject({ kind: 'claimed', credit: 200 })
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('★★★ 两个认证头必须同时给（只发 cookie 会让 API Key 族静默失败）', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(ledger([]))
+      .mockResolvedValueOnce(Response.json({ Code: 200 }))
+      .mockResolvedValueOnce(ledger([reward]))
+    vi.stubGlobal('fetch', fetch)
+    await claimModelscopeDaily(credential)
+    const headers = fetch.mock.calls[1][1]?.headers as Record<string, string>
+    expect(headers.authorization).toBe('Bearer ' + credential.access_token)
+    // 同时保留 cookie 以兼容网页会话形态。
+    expect(String(headers.cookie ?? '')).toContain(credential.access_token)
+    expect(fetch.mock.calls[1][1]).toMatchObject({ redirect: 'error' })
+  })
+
+  it('★★★ 上游返回 HTML 登录页时必须说「登录态失效」，而不是「不是 JSON」', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(ledger([]))
+      .mockResolvedValueOnce(new Response('<html><body>login</body></html>', {
+        status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
+      })))
+    const result = await claimModelscopeDaily(credential)
+    expect(result).toMatchObject({ kind: 'failed' })
+    expect(result.kind === 'failed' ? result.message : '').toContain('登录态')
+    expect(result.kind === 'failed' ? result.message : '').not.toContain('不是 JSON')
+  })
+
+  it('★★★ 上游重定向到登录页时也要指向「登录态失效」，不能说「网络异常」', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(ledger([]))
+      .mockRejectedValueOnce(new TypeError('unexpected redirect')))
+    const result = await claimModelscopeDaily(credential)
+    expect(result).toMatchObject({ kind: 'failed' })
+    const message = result.kind === 'failed' ? result.message : ''
+    expect(message).toContain('登录态')
+    expect(message).not.toContain('网络异常')
+  })
+
+  it('★★★ 负金额不得让当天领取额虚报（before 里一条 -500 会把 200 抬成 700）', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(ledger([{ ...reward, total_amount: -500 }]))
+      .mockResolvedValueOnce(Response.json({ Code: 200 }))
+      .mockResolvedValueOnce(ledger([{ ...reward, total_amount: -500 }, reward])))
+    const result = await claimModelscopeDaily(credential)
+    expect(result).toMatchObject({ kind: 'failed' })
+    expect(result.kind === 'failed' ? result.message : '').toContain('有效金额')
+  })
+
+  it('★★★ 未登记规则名必须过字符集白名单（否则上游能把 API Key 回显到用户面前）', async () => {
+    const key = credential.access_token
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(ledger([]))
+      .mockResolvedValueOnce(Response.json({ Code: 200 }))
+      .mockResolvedValueOnce(ledger([
+        { ...reward, rule_key: key, total_amount: 1 },
+        { ...reward, rule_key: 'daily_login_v2', total_amount: 1 },
+      ])))
+    const result = await claimModelscopeDaily(credential)
+    const message = result.kind === 'inactive' ? result.message : ''
+    expect(message).toContain('daily_login_v2')
+    expect(message).not.toContain(key)
+  })
 })

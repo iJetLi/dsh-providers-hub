@@ -4,8 +4,21 @@ import type { ModelscopeCredential } from './modelscope.js'
 
 const MODELSCOPE_SITE = 'https://www.modelscope.cn'
 const PAGE_SIZE = 50
-const MAX_PAGES = 4
+const MAX_PAGES = 20
 const DAILY_RULES = new Set(['daily_active', 'aliyun_bindlogin'])
+
+/**
+ * ⚠⚠ **`rule_key` 是上游数据，拼进用户可见文案前必须过白名单（PR #83 对抗审计 P1-1）。**
+ *
+ * 上一版直接把 `rule_key` 拼进 `inactive.message`，实测五格全部成立：
+ * - 把 **API Key** 当 `rule_key` ⇒ **Key 完整回显**（用户截图发 issue 就泄露了）；
+ * - 换行 ⇒ 日志伪造；ANSI / HTML ⇒ 终端与页面注入；
+ * - 5000 字符 ⇒ 整屏滞涨。
+ *
+ * 同一处注释原来自称「不会把上游原文糊给用户」—— 它只管了
+ * `catch` 那条路，而 `return` 这条根本不经过它。字符集 + 长度双上限。
+ */
+const RULE_KEY_PATTERN = /^[a-z][a-z0-9_]{0,39}$/
 
 interface MagicubeTransaction {
   type?: unknown
@@ -60,6 +73,21 @@ async function readModelscopeWeb(path: string, apiKey: string, signal: AbortSign
     },
     signal,
   })
+  /**
+   * ⚠⚠ **HTML 必须单独判，且要排在 401/403 之前（PR #83 对抗审计 P2-2）。**
+   *
+   * SPA 的 catch-all 路由会对**任意**尚未定义的路径回 `200 + text/html`。
+   * 当登录态失效时，页面路由层可能把接口请求接成一个**登录页**
+   * —— 那时状态码是 200、响应体是 HTML，并不会走到 401/403 分支。
+   *
+   * 原实现让它落到下面的 `!response.ok`（不成立）或
+   * `未确认请求成功，请到官网检查账号状态`（把用户引向「去看账号」），
+   * 从而推不出真正的动作：**重新粘贴令牌**。
+   */
+  const mediaType = response.headers.get('content-type') ?? ''
+  if (mediaType.includes('text/html')) {
+    throw new Error('魔搭返回了网页而不是接口数据 —— 登录态可能已失效，请重新粘贴访问令牌')
+  }
   if (response.status === 401) throw new Error('魔搭登录态无效，请检查访问令牌')
   if (response.status === 403) throw new Error('魔搭拒绝了请求，请到官网检查账号状态')
   if (!response.ok) throw new Error('魔搭请求失败（HTTP ' + response.status + '）')
@@ -82,6 +110,20 @@ function timestamp(value: unknown): number {
 
 /** 按北京日读取近期流水，只在越过日期边界或读完账单时确认完整。 */
 async function readGrants(apiKey: string, since: string, signal: AbortSignal) {
+  /**
+   * ⚠️⚠️ **日期必须双边界（PR #83 对抗审计 P2-1，2026-11-15）。**
+   *
+   * 原判据只有下界 `>= since`，而 `claim()` 传的 `since` 是「今天零点」⇒
+   * **明天的流水会被当成今天的**（上游脏数据、时区错乱都能造出来）：
+   * `before.some(row => row.rule_key === 'daily_active')` 命中 ⇒ 返回
+   * `{ kind: 'already-claimed', message: '今日登录赠送的魔粒已到账' }`
+   * ⇒ **只发 1 次请求、当天彻底不再领取**；而且 `alreadyClaimed` 会计入
+   * `coversToday` ⇒ 推进水位线、面板显示「今日已到账」。
+   *
+   * 补上界 `<= until`（今天）后未来日期一律丢弃。少领一天 vs 谎报「已到账」，
+   * 后者更糟：用户以为领到了，实际没有，且当天不再重试。
+   */
+  const until = utc8DateString()
   const grants: MagicubeTransaction[] = []
   let failure = '达到分页上限'
   const seenPages = new Set<string>()
@@ -115,7 +157,7 @@ async function readGrants(apiKey: string, since: string, signal: AbortSignal) {
       break
     }
     for (let index = 0; index < rows.length; index++) {
-      if (days[index] >= since && rows[index].type === 'EARN') grants.push(rows[index])
+      if (days[index] >= since && days[index] <= until && rows[index].type === 'EARN') grants.push(rows[index])
     }
     readCount += rows.length
     if (days.some((day) => day < since)) return grants
@@ -146,7 +188,15 @@ function dailyAmount(grants: readonly MagicubeTransaction[]): number {
     if (typeof grant.rule_key !== 'string' || !DAILY_RULES.has(grant.rule_key)) continue
     const raw = grant.total_amount
     const amount = typeof raw === 'number' || (typeof raw === 'string' && raw.trim() !== '') ? Number(raw) : NaN
-    if (!Number.isFinite(amount) || Math.abs(amount) > Number.MAX_SAFE_INTEGER) {
+    /**
+     * ⚠⚠ **负数必须当错误（PR #83 对抗审计 P2-1）。**
+     *
+     * 原判据只挡「非有限」与「绝对值超界」，没挡负数：
+     * `claim()` 用 `after - before` 算当天领取额 ⇒ before 里一条
+     * `total_amount: -500` 会让领取额**虚报成 700**（实测 C21/P8）。
+     * 发放额不可能为负，看到负数只能是上游异常 ⇒ 直接报错。
+     */
+    if (!Number.isFinite(amount) || amount < 0 || Math.abs(amount) > Number.MAX_SAFE_INTEGER) {
       throw new Error('魔粒发放记录缺少有效金额')
     }
     sum += amount
@@ -187,7 +237,7 @@ async function claim(apiKey: string): Promise<ClaimOutcome> {
       after
         .filter((row) => row.type === 'EARN' && typeof row.rule_key === 'string' && !DAILY_RULES.has(row.rule_key))
         .map((row) => row.rule_key as string),
-    )]
+    )].filter((key) => RULE_KEY_PATTERN.test(key))
     return {
       kind: 'inactive',
       coversToday: false,
@@ -200,7 +250,18 @@ async function claim(apiKey: string): Promise<ClaimOutcome> {
   } catch (error) {
     const reason = error instanceof Error ? error.message : ''
     // 网络错误或响应体可能带上游请求细节，只展示本模块定义的提示。
-    const message = /^(没有可用的魔搭访问令牌|魔搭|魔粒)/.test(reason) ? reason : '魔搭请求超时或网络异常'
+    /**
+     * ⚠⚠ **`redirect: 'error'` 会把 302 登录跳转变成一个本地 `TypeError`（PR #83 对抗审计 P2-2）。**
+     *
+     * 它的 `message` 是 `unexpected redirect`（undici），原来落进兜底分支 ⇒
+     * 「魔搭请求超时或网络异常」—— 用户会去查网络，
+     * 而真因是**上游把接口重定向到了登录页**（登录态失效）。
+     */
+    const message = /^(没有可用的魔搭访问令牌|魔搭|魔粒)/.test(reason)
+      ? reason
+      : /redirect|Failed to fetch|fetch failed|network|TypeError/i.test(reason)
+        ? '魔搭把请求重定向到了登录页 —— 登录态已失效，请重新粘贴访问令牌'
+        : '魔搭请求超时或网络异常'
     return { kind: 'failed', code: -1, message }
   }
 }
