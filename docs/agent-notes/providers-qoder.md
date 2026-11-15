@@ -1224,22 +1224,31 @@ LlmError: qoder: 本地账号并发已满，请稍后重试   code = QUEUE
 
 ## ⚠️ 形态头：WASM 头表缺 `Cosy-MachineOS` / `Cosy-MachineHostname`（2026-11-16）
 
-### 实测 dump（不是推断）
+### 头表清单（⚠️ **近似**，不是逐字 dump —— 2026-11-16 复核更正）
 
-直接 dump 签名 WASM 生成的两套头表（`prepareInfer` 与 `prepareRequest`），**两条通道
-完全一致地**自带这些：
+签名 WASM 生成的两套头表（`prepareInfer` 与 `prepareRequest`）**两条通道完全一致**，
+共约 20 项：
 
 ```
 Accept / Accept-Encoding / Authorization / Content-Type / Cache-Control / Connection
 Cosy-Business-Product / Cosy-Business-Type / Cosy-ClientIp / Cosy-ClientType
-Cosy-Data-Policy / Cosy-Date / Cosy-Key / Cosy-MachineId / Cosy-MachineToken
-Cosy-MachineType / Cosy-Scene / Cosy-User / Cosy-Version / Login-Version
-X-Model-Key / X-Model-Source
+Cosy-Data-Policy / Cosy-Date / Cosy-MachineId / Cosy-MachineToken / Cosy-MachineType
+Cosy-Organization-Id / Cosy-Organization-Tags / Cosy-Scene / Cosy-User / Cosy-Version
+Login-Version / X-Model-Key / X-Model-Source
 ```
 
-⇒ **只缺 `Cosy-MachineOS` 与 `Cosy-MachineHostname`**。这一格很重要：`Login-Version`
-（`v2`）与 `Cosy-ClientIp` 都是 **WASM 自带**，不要再「补」一遍 —— 那行代码永远命中
-不了「缺失」分支，是死代码（同一形态的教训见 `misc.md` 的「恒真断言」）。
+⚠️⚠️ **这份清单首版声称「直接 dump」，复核后不成立**（正向审计 PR #91 P2-1）：
+二进制里 **`Cosy-Key` 任何编码都不存在**（首版多列了一项），而
+**`Cosy-Organization-Id` / `Cosy-Organization-Tags` 存在却没列**（首版漏了两项）
+⇒ 清单是**近似**，所以 `Cosy-MachineOS` / `Cosy-MachineHostname` 那一格的证据强度
+只能标「中」，不能标「高（直接 dump）」。
+
+✅ **但结论本身不受影响**：这两个头名在**任何编码 / 任何大小写**下都 **ABSENT**，
+这一点已独立确认 ⇒ 「只缺这两个」成立。
+
+这一格很重要：`Login-Version`（`v2`）与 `Cosy-ClientIp` 都是 **WASM 自带**，不要再
+「补」一遍 —— 那行代码永远命中不了「缺失」分支，是死代码（同一形态的教训见
+`misc.md` 的「恒真断言」）。
 
 ### 为什么要补（先说清楚：**功能上不必需**）
 

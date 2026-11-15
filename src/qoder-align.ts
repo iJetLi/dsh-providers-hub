@@ -3,21 +3,26 @@
  *
  * ## 缺口是怎么确认的（实测 dump，不是推断）
  *
- * 2026-11-16 直接 dump 了签名 WASM 生成的两套头表（`prepareInfer` 与
- * `prepareRequest`，两条通道**都**已自带这些）：
+ * 签名 WASM 生成的两套头表（`prepareInfer` 与 `prepareRequest`，两条通道**都**
+ * 已自带这些），共约 20 项：
  *
  * ```
  * Accept / Accept-Encoding / Authorization / Content-Type / Cache-Control / Connection
  * Cosy-Business-Product / Cosy-Business-Type / Cosy-ClientIp / Cosy-ClientType
- * Cosy-Data-Policy / Cosy-Date / Cosy-Key / Cosy-MachineId / Cosy-MachineToken
- * Cosy-MachineType / Cosy-Scene / Cosy-User / Cosy-Version / Login-Version
- * X-Model-Key / X-Model-Source
+ * Cosy-Data-Policy / Cosy-Date / Cosy-MachineId / Cosy-MachineToken / Cosy-MachineType
+ * Cosy-Organization-Id / Cosy-Organization-Tags / Cosy-Scene / Cosy-User / Cosy-Version
+ * Login-Version / X-Model-Key / X-Model-Source
  * ```
  *
- * ⇒ **`Cosy-MachineOS` 与 `Cosy-MachineHostname` 不在其中**，其余（含
- * `Login-Version: v2`、`Cosy-ClientIp`、`Cosy-MachineId/Token/Type`）都已自带。
- * 所以本模块**只补这两个**，不去重复生成 WASM 已有的头 —— 那是「恒真断言」
- * （补了也永远命中不了「缺失」分支，等于死代码）。
+ * ⚠️⚠️ **首版把这称作「直接 dump」，复核后不成立**（正向审计 PR #91 P2-1）：
+ * 二进制里 **`Cosy-Key` 任何编码都不存在**（首版多列），而
+ * **`Cosy-Organization-Id` / `Cosy-Organization-Tags` 存在却没列**（首版漏两项）
+ * ⇒ 清单是**近似**，所以「只缺这两个」的证据强度只能标「中」，不能标「高」。
+ *
+ * ✅ **但结论本身不受影响**：`Cosy-MachineOS` / `Cosy-MachineHostname` 在**任何
+ * 编码 / 任何大小写**下都 **ABSENT**（已独立确认）⇒ 本模块**只补这两个**。
+ * 其余（含 `Login-Version: v2`、`Cosy-ClientIp`、`Cosy-MachineId/Token/Type`）
+ * 都已自带 ⇒ 再去补是「恒真断言」（永远命中不了「缺失」分支，等于死代码）。
  *
  * ## ⚠️⚠️ 功能上**不是必需**（先说清楚，别当成缺陷修复）
  *
@@ -88,11 +93,40 @@ let cachedMachineOs: string | undefined
  * 本仓库此前从不发这个头 ⇒ 没有历史值要保，如实反映运行环境才是对的
  * （容器里跑 Linux 就发 `x86_64_linux`，与官方客户端在那台机器上的行为一致）。
  *
- * `DSH_QODER_MACHINE_OS` 可覆盖（排查 / 迁移用）。
+ * `DSH_QODER_MACHINE_OS` 可覆盖（排查 / 迁移用），但**必须**是
+ * `{arch}_{platform}` 形态，否则回落到按当前系统计算的值。
+ *
+ * ⚠️⚠️ **为什么非要校验**：这个值最终进 `Headers.set()`，而 `Headers` 对
+ * **非 ByteString**（含换行、任意码点 > 255）会抛**裸 `TypeError`** ——
+ * 那是插件自己抛的运行时错误，不是 `LlmError`：既不落 `TRANSPORT`、也不被
+ * 换号 / 退避接管，而且抛出点在 `sendEncrypted` 的 `try` **之外** ⇒
+ * 每一次推理都会直接炸给调用方（对抗审计 PR #91 P2-1 实测：
+ * `DSH_QODER_MACHINE_OS='a\nb'` ⇒ `TypeError: Headers.set: "a\nb" is an
+ * invalid header value.`；全角 `'Ｂ'`（U+FF22）⇒
+ * `Cannot convert argument to a ByteString ... greater than 255`）。
+ *
+ * 回落到「按当前系统计算」而不是「原样返回」是刻意的 fail-safe：环境变量
+ * 写错时宁可发出一个**合法但可能不准**的机器形态，也不要让整条渠道每请求
+ * 都抛错。首次回落会经 `process.emitWarning` 留痕一次（否则用户以为覆盖
+ * 生效了 —— 本仓纪律「诊断信息必须显式留痕」）。
  */
+const MACHINE_OS_PATTERN = /^(x86_64|aarch64)_(win32|darwin|linux)$/
+
+/** 非法覆盖值只告警一次（每请求都打会把日志刷爆）。 */
+let warnedInvalidMachineOs = false
+
 function computeMachineOs(): string {
   const override = process.env.DSH_QODER_MACHINE_OS?.trim()
-  if (override !== undefined && override.length > 0) return override
+  if (override !== undefined && override.length > 0) {
+    if (MACHINE_OS_PATTERN.test(override)) return override
+    if (!warnedInvalidMachineOs) {
+      warnedInvalidMachineOs = true
+      process.emitWarning(
+        `DSH_QODER_MACHINE_OS=${JSON.stringify(override)} 不是 {arch}_{platform} 形态，`
+        + '已回落到按当前系统计算的值（原样发出会让 Headers.set 每请求抛裸 TypeError）',
+      )
+    }
+  }
   const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64'
   if (process.platform === 'win32') return `${arch}_win32`
   if (process.platform === 'darwin') return `${arch}_darwin`
@@ -123,7 +157,10 @@ export function resetQoderAlignCache(): void {
 function alignmentEntries(): Array<[string, string]> {
   const entries: Array<[string, string]> = [['Cosy-MachineOS', qoderMachineOs()]]
   if (qoderAlignHostnameEnabled()) {
-    const machine = hostname()
+    // ⚠️ 必须 `trim()` 后再判空：`hostname()` 返回空白（测试替身 / 极简容器里的
+    //    `' '`）时，`length > 0` 为真 ⇒ 会把一个**只有空格**的头发出去。
+    //    空白主机名对上游毫无信息量，只是白多一条可聚类特征。
+    const machine = hostname().trim()
     if (machine.length > 0) entries.push(['Cosy-MachineHostname', machine])
   }
   return entries
@@ -174,6 +211,13 @@ export function applyQoderAlignmentHeaders(headers: Headers): Headers {
  *
  * ⚠️ 对象键大小写不敏感比较：`req.headers` 来自 WASM 头表，键名形态由 Rust 侧决定
  * （`Cosy-MachineOS` / `cosy-machineos` 都可能），大小写敏感比较会重复补一个头。
+ *
+ * ⚠️⚠️ 归一化必须**两侧都做**（`existing` 的键 `toLowerCase()` + 比较时
+ * `name.toLowerCase()`）：只做一侧就挡不住**全大写**键 —— 实测
+ * `{'COSY-MACHINEOS': 'x'}` 在「只归 name 不归键」的那一版里仍会补一个
+ * `Cosy-MachineOS`（`'cosy-machineos' !== 'COSY-MACHINEOS'`），
+ * `Headers` 随后把两个同名头合并成逗号串，值是脏的。
+ * 对抗审计 PR #91 的 M10 只喂了小写键 ⇒ 那一侧看着像冗余，**不是**。
  */
 export function withQoderAlignmentHeaders(headers: Record<string, string>): Record<string, string> {
   const existing = new Set(Object.keys(headers).map((key) => key.toLowerCase()))

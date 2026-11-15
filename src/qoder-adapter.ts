@@ -43,8 +43,10 @@ import { classifyNativeAbort, NativeSearchCodes, WebNativeError, type NativeSour
 import { errorMessage } from './openai-compat.js'
 import { maskProxyPassword } from './proxy-mask.js'
 import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
-// ⚠️ 形态对齐（`Cosy-MachineOS` / `Login-Version` …）：**只补缺失**、可一键关，
+// ⚠️ 形态对齐（`Cosy-MachineOS`，可选 `Cosy-MachineHostname`）：**只补缺失**、可一键关，
 //    功能上非必需 —— 依据与证据强度见该模块头。
+//    ⚠️ `Login-Version` / `Cosy-ClientIp` / `Cosy-MachineId` 是 **WASM 头表自带的**，
+//    不在补的清单里（补了永远命中不了「缺失」分支 = 死代码），见 `alignmentEntries()`。
 import { applyQoderAlignmentHeaders, withQoderAlignmentHeaders } from './qoder-align.js'
 import { acquireQoderRequest, qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
 import { retryAfterMsFromResponse } from './retry-after.js'
@@ -1197,7 +1199,7 @@ export class QoderAdapter extends LlmAdapter {
       try {
         response = await searchFetcher(req.url, {
           method: 'POST',
-          // ⚠️ 形态对齐：补 `Cosy-MachineOS` / `Login-Version`（默认；hostname 需显式开）。
+          // ⚠️ 形态对齐：补 `Cosy-MachineOS`（默认；`Cosy-MachineHostname` 需显式开）。
           //    只补缺失 —— WASM 若已生成同名头就原样保留（签名相关头不在补的清单里）。
           headers: withQoderAlignmentHeaders({ ...req.headers, 'X-Session-ID': randomUUID() }),
           body: req.body,
@@ -1929,7 +1931,10 @@ export class QoderAdapter extends LlmAdapter {
      * ⚠️ 判「是否注入」必须靠 {@link hasInjectedFetchImpl}，**不能**在这里另写一份
      * 引用比较：`fetchImpl` 与「**构造期**的全局 `fetch`」（`baselineFetch`）不同
      * 才算注入。若拿**调用点**的全局 `fetch` 当基准，宿主在构造之后包装
-     * `globalThis.fetch` 就会被误判成已注入 ⇒ 生产出口被单测替身顶掉。
+     * `globalThis.fetch`（出站层 / OTel 埋点 / mock server / 代理库）就会被
+     * 误判成已注入 ⇒ **per-账号出口代理（`fetchFor`）被静默跳过**，请求回落到
+     * 构造期捕获的那个**原始**全局 `fetch`（不是「被单测替身顶掉」——那条路径
+     * 上根本没有替身，见正向审计 PR #91 P3-2 的更正）。
      * ⚠️ 也不能只把两个分支调序了事 —— `fetchImpl` 在构造期已被 `?? fetch`
      * 填满，调序后 `fetchFor` 反而**永远**轮不到（生产代理全失效）。
      *
@@ -2595,7 +2600,7 @@ export class QoderAdapter extends LlmAdapter {
   ): Promise<Response> {
     const headers = new Headers(request.headers)
     headers.set('Accept', 'text/event-stream')
-    // 形态对齐：补 `Cosy-MachineOS` / `Login-Version`（默认；hostname 需显式开）。
+    // 形态对齐：补 `Cosy-MachineOS`（默认；`Cosy-MachineHostname` 需显式开）。
     // ⚠️ 放在**签名之后**（`request.headers` 已是 WASM 的输出）—— 补的头不在签名
     //    载荷里（签名覆盖 payload + key + date + body + path），且只补缺失，
     //    所以不会碰 `Authorization` 里的 `Bearer COSY.<载荷>.<签名>`。

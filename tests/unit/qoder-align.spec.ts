@@ -11,6 +11,17 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hostname } from 'node:os'
+
+/**
+ * `hostname` 必须可被替身覆盖 —— 它是 ESM 命名导入，`vi.spyOn(os, 'hostname')`
+ * 对已解构的绑定**无效**（会静默改不到被调用的那个引用）。这里用 `vi.mock`
+ * 包一层：默认透传真实实现，用例里 `vi.mocked(hostname).mockReturnValue(...)`
+ * 才真的生效。
+ */
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, hostname: vi.fn(actual.hostname) }
+})
 import {
   applyQoderAlignmentHeaders,
   qoderAlignHeadersEnabled,
@@ -64,6 +75,16 @@ describe('形态对齐：普通对象头表', () => {
     const headers = withQoderAlignmentHeaders({ 'cosy-machineos': 'x86_64_darwin' })
     expect(headers['cosy-machineos']).toBe('x86_64_darwin')
     expect(headers['Cosy-MachineOS']).toBeUndefined()
+  })
+
+  it('⚠️ 大小写**混合**也算已存在（归一化只在一处做，删掉它必红）', () => {
+    // `existing` 存原样键、比较时 `toLowerCase()` —— 这是**唯一**的归一化点。
+    // 若把它放宽成大小写敏感比较，下面每一种写法都会**重复补**一个头
+    // （`Headers` 会把两个同名头合并成逗号串，值是脏的）。
+    for (const key of ['Cosy-MachineOS', 'cosy-machineos', 'COSY-MACHINEOS', 'CoSy-MaChInEoS']) {
+      const headers = withQoderAlignmentHeaders({ [key]: 'x86_64_darwin' })
+      expect(Object.keys(headers), `键 ${key} 已被占用时不得再补一个`).toEqual([key])
+    }
   })
 
   it('`DSH_QODER_ALIGN_HEADERS=0` ⇒ 原样返回（一个头都不补）', () => {
@@ -133,6 +154,52 @@ describe('`Cosy-MachineOS` 取值', () => {
     vi.stubEnv('DSH_QODER_MACHINE_OS', 'x86_64_win32')
     resetQoderAlignCache()
     expect(qoderMachineOs()).toBe('x86_64_win32')
+  })
+
+  it('⚠️⚠️ 非法覆盖值必须回落（否则 `Headers.set` 每请求抛裸 `TypeError`）', () => {
+    // 对抗审计 PR #91 P2-1 实测：这两个值原样进 `Headers.set()` 会抛
+    // `TypeError: Headers.set: "a\nb" is an invalid header value.` /
+    // `Cannot convert argument to a ByteString ... greater than 255`。
+    // 抛出点在 `sendEncrypted` 的 `try` 之外 ⇒ 不是 `LlmError`、不落 `TRANSPORT`
+    // ⇒ 每一条推理都直接炸给调用方。
+    const warn = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined)
+    const fallback = (() => {
+      vi.stubEnv('DSH_QODER_MACHINE_OS', '')
+      resetQoderAlignCache()
+      return qoderMachineOs()
+    })()
+    for (const bad of ['a\nb', 'Ｂ', '0', 'x86_64', 'win32', 'x86_64_win32 ', '']) {
+      vi.stubEnv('DSH_QODER_MACHINE_OS', bad)
+      resetQoderAlignCache()
+      // 空白串（含纯空格 trim 成 ''）应当「没有覆盖」⇒ 走计算值
+      expect(qoderMachineOs(), `非法覆盖值 ${JSON.stringify(bad)} 必须回落`).toBe(fallback)
+    }
+    // 回落必须**留痕**（本仓纪律：诊断信息显式留痕，否则用户以为覆盖生效了）
+    expect(warn).toHaveBeenCalled()
+    expect(String(warn.mock.calls[0]?.[0])).toContain('DSH_QODER_MACHINE_OS')
+    warn.mockRestore()
+  })
+
+  it('⚠️ 合法覆盖值原样生效（校验不能把合法值也挡掉）', () => {
+    for (const good of ['x86_64_win32', 'x86_64_darwin', 'x86_64_linux', 'aarch64_win32', 'aarch64_darwin', 'aarch64_linux']) {
+      vi.stubEnv('DSH_QODER_MACHINE_OS', good)
+      resetQoderAlignCache()
+      expect(qoderMachineOs()).toBe(good)
+    }
+  })
+
+  it('⚠️ hostname 是空白时不发（纯空格对上游毫无信息量，只是白多一条特征）', () => {
+    vi.stubEnv('DSH_QODER_ALIGN_HOSTNAME', '1')
+    // 空白（含纯空格）必须**不补**：`length > 0` 对单空格为真 ⇒ 会把一个空头发出去。
+    for (const blank of ['   ', '\t', '']) {
+      vi.mocked(hostname).mockReturnValue(blank)
+      expect(withQoderAlignmentHeaders({})['Cosy-MachineHostname'], `空白 ${JSON.stringify(blank)} 不得发出`)
+        .toBeUndefined()
+    }
+    // 合法主机名照常发（校验不能把正常值也挡掉）
+    vi.mocked(hostname).mockReturnValue('  DESKTOP-ABC  ')
+    expect(withQoderAlignmentHeaders({})['Cosy-MachineHostname']).toBe('DESKTOP-ABC')
+    vi.mocked(hostname).mockReset()
   })
 
   it('缓存：同一进程内只算一次（平台不会中途变）', () => {

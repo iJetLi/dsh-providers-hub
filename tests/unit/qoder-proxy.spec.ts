@@ -246,7 +246,11 @@ describe('③ 注入点：四个消费点都必须拿到按账号的 fetcher', (
     expect(baselineAt, '`baselineFetch` 必须在构造期取全局 `fetch` 的快照').toBeGreaterThan(-1)
     expect(
       adapterSource.slice(baselineAt, baselineAt + 200),
-      '`baselineFetch` 必须与 `fetchImpl` 的默认值在同一处赋值（否则基准会是 undefined）',
+      // ⚠️ 这条只锁「两行挨在一起」这个**形态**，不是因果：两行同 tick 两次同步读
+      //    `globalThis.fetch`，交换顺序是**等价变异**（正向审计 PR #91 P3-3 实测：
+      //    5 条行为用例全绿，唯一红的是这条文本断言）。保留是为了让「挪走
+      //    baselineFetch 赋值」这种改造显式过一遍 review，别把它当成缺陷守卫。
+      '`baselineFetch` 必须紧挨着 `fetchImpl` 的默认值赋值（形态锁，不是因果锁）',
     ).toMatch(/this\.fetchImpl = options\.fetchImpl \?\? fetch/)
     // 推理主路径
     const inferenceAt = adapterSource.indexOf('const fetcherForCurrentAccount =')
