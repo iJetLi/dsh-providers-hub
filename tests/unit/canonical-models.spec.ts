@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { buildVirtualModels } from '../../src/aggregate-catalog.js'
 import {
   EXCLUDED_ALIASES,
   canonicalDisplayName,
@@ -393,5 +394,257 @@ describe('magicrew（超级麦吉国内站，2026-10-29）：qwen 归一化补�
     // 且它的键与既有渠道逐字一致（否则「不登记」这句话就是空话）
     expect(canonicalKeyFor('magicrew', 'deepseek-v4.1-flash', 'DeepSeek V4.1 Flash')?.key)
       .toBe(canonicalKeyFor('buddy', 'deepseek-v4.1-flash', 'Deepseek-V4.1-Flash')?.key)
+  })
+})
+
+describe('autoclaw（智谱 AutoClaw，2026-11-16）：带渠道前缀的 id 必须指回既有键', () => {
+  /**
+   * 实测来源：用户实例 `/v1/models` 全量目录（337 条）里 autoclaw 只有 4 条，
+   * 其中 2 条是**带 `zai_` / `zaicoding_` 前缀的 GLM**，展示名分别是
+   * `GLM-5.3 Flash (AutoClaw)` 与 `GLM-5.3 (AutoClaw)`；而 buddy / codearts /
+   * opencode / trae / workbuddy / zcode 六家的同模型键是 `glm-5-3-flash` /
+   * `glm-5-3` ⇒ 不登记补丁就会在聚合里各成一条（同模型两条），且 autoclaw
+   * 不在那六家的轮换候选里（静默：只是看不到）。
+   */
+  it('★ `zai_glm-5.3-flash` 归到既有键 `glm-5-3-flash`', () => {
+    const got = canonicalKeyFor('autoclaw', 'zai_glm-5.3-flash', 'GLM-5.3 Flash (AutoClaw)')
+    expect(got?.key).toBe('glm-5-3-flash')
+    // 归属必须来自 patch（实测结论），不是 id 通道撞出来的
+    expect(got?.via).toBe('patch')
+    // 判据是「跨渠道同键」：与 buddy 的同模型逐字相同
+    expect(got?.key).toBe(canonicalKeyFor('buddy', 'glm-5.3-flash', 'GLM-5.3-Flash')?.key)
+  })
+
+  it('★ `zaicoding_glm-5.3` 归到既有键 `glm-5-3`', () => {
+    const got = canonicalKeyFor('autoclaw', 'zaicoding_glm-5.3', 'GLM-5.3 (AutoClaw)')
+    expect(got?.key).toBe('glm-5-3')
+    expect(got?.via).toBe('patch')
+    expect(got?.key).toBe(canonicalKeyFor('buddy', 'glm-5.3', 'GLM-5.3')?.key)
+  })
+
+  it('★★★ 两个 Auto 不许被排除：聚合里必须各自成一条，且显示名是人类可读的', () => {
+    // ⚠️ PR #89 初版把 `zai_auto` / `zai_auto-fast` 加进了 EXCLUDED_ALIASES，
+    //    理由是「服务端抽象路由、语义为空」。三条实测证据推翻了它：
+    //    ① 它们在远端目录里**真实存在**（`src/autoclaw-product.ts` 的对照表：
+    //       远端 ✅ / 本表 ✅ / 数值逐格一致；反倒是 `zai_glm-5.3-flash` 才是
+    //       「远端目录里没有」的那条）；
+    //    ② 它们有**独立的能力声明 + 实测依据**：`zai_auto` 是
+    //       `contextWindow 1048576 / maxOutputTokens 393216 / supportsImage true`，
+    //       `zai_auto-fast` 是 `… / 131072 / true`（且是远端唯一明确声明
+    //       `input: ["text","image"]` 的模型）；
+    //    ③ 适配器把它们当**真实可调用模型**（`src/autoclaw-adapter.ts` 的
+    //       `supportsImage` 实测、`maxTokens` 夹取）。
+    //    而 `auto`（`AGGREGATE_AUTO_MODEL`）是**我们自己造**的聚合入口 id，
+    //    显示名由 `autoModelInfo()` 单独给 ⇒ 两者不是同类。
+    //
+    //    排除的实际后果**不是合并、而是消失**：`canonicalKeyFor` 返回 undefined
+    //    ⇒ `buildVirtualModels` 直接 `continue` ⇒ 该模型不进任何虚拟模型 ⇒
+    //    用户在聚合选择器里再也选不到 autoclaw 的 Auto / Auto-Fast
+    //    （直连不受影响，故症状静默）。端到端见下方 PR #89 的第二组用例。
+    expect(canonicalKeyFor('autoclaw', 'zai_auto', 'Auto (AutoClaw)')?.key).toBe('zai_auto')
+    expect(canonicalKeyFor('autoclaw', 'zai_auto-fast', 'Auto-Fast (AutoClaw)')?.key)
+      .toBe('zai_auto-fast')
+    // 直接钉死「不许进排除集」—— 上面两条断言在「恰好被别的通道救回来」时也会绿，
+    // 这条不会。
+    expect(EXCLUDED_ALIASES.has('zai_auto')).toBe(false)
+    expect(EXCLUDED_ALIASES.has('zai_auto-fast')).toBe(false)
+  })
+
+  it('★★ `zai_auto` / `zai_auto-fast` 的聚合显示名必须人类可读（这才是真正要修的那个现象）', () => {
+    // PR 初版真正想解决的是「聚合列表里出现 `zai_auto` 这种机器名」——
+    // 那是**显示名**问题，正解在 CANONICAL_NAMES，不是删模型。
+    // 名字取自 autoclaw 自己的 `name`（`AUTOCLAW_FALLBACK_MODELS`），如实转写。
+    expect(canonicalDisplayName('zai_auto')).toBe('Auto (AutoClaw)')
+    expect(canonicalDisplayName('zai_auto-fast')).toBe('Auto-Fast (AutoClaw)')
+    // 反例守卫：不登记的话会退回 key 本身（即机器名），那正是被投诉的现象
+    expect(canonicalDisplayName('zai_some_future_model')).toBe('zai_some_future_model')
+  })
+
+  it('⚠️ 不做「通用剥前缀」：带下划线的真实模型名不受影响', () => {
+    // modelscope 的 `OpenGVLab/InternVL3_5-241B-A28B` 里下划线是**模型名的一部分**。
+    // 若哪天有人把 autoclaw 这条补丁改写成「剥掉第一个下划线之前」的通用规则，
+    // 这条会立刻变红。
+    expect(canonicalKeyFor('modelscope', 'OpenGVLab/InternVL3_5-241B-A28B', 'InternVL3.5-241B-A28B (魔搭)')?.key)
+      .toBe('internvl3_5-241b-a28b')
+  })
+})
+
+describe('PR #89 端到端：autoclaw + autoclawintl 两站进聚合后，同模型必须合并、一条都不能丢', () => {
+  /**
+   * 这条用例是 PR #89 初版**完全没有的层次** —— 它 4 条用例全在 `canonicalKeyFor`
+   * 层面，「改动能一直穿透到 `listModels` 而无人守」。而那次改动恰恰在
+   * `buildVirtualModels` 的 `if (mapped === undefined) continue` 上把人删掉了。
+   *
+   * ⚠️ **必须两站一起测**：`AUTOCLAW` 与 `AUTOCLAW_INTL` 的 `fallbackModels` 是
+   * 同一个 `AUTOCLAW_FALLBACK_MODELS`（`src/autoclaw-product.ts:399` / `:430`），
+   * 两站都在 `AGGREGATE_CHANNELS` 里（`src/aggregate-adapter.ts:1410` / `:1418`）。
+   * 只登记国内站的补丁会让国际站每条模型都退化成「带 `zai_` 前缀的孤儿虚拟模型」
+   * —— 那正是本 PR 标题说要消除的症状，只是换了个位置。
+   * 正向审计 P1-1 用同一份探针实测过：只登记国内 ⇒ 6 条里 2 条是孤儿。
+   */
+  const CAT = [
+    { id: 'zai_glm-5.3-flash', name: 'GLM-5.3 Flash (AutoClaw)' },
+    { id: 'zaicoding_glm-5.3', name: 'GLM-5.3 (AutoClaw)' },
+    { id: 'zai_auto', name: 'Auto (AutoClaw)' },
+    { id: 'zai_auto-fast', name: 'Auto-Fast (AutoClaw)' },
+  ] as const
+  const catalogs = {
+    autoclaw: CAT,
+    autoclawintl: CAT,
+    buddy: [
+      { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash' },
+      { id: 'glm-5.3', name: 'GLM-5.3' },
+    ],
+  } as const
+
+  it('★★★ 两个 GLM 三渠道合并、两个 Auto 两站合并，总 4 条且没有孤儿', () => {
+    const models = buildVirtualModels(catalogs)
+    const byKey = new Map(models.map((m) => [m.key, m]))
+
+    // ① 两个 GLM：autoclaw + autoclawintl + buddy 三渠道
+    expect(byKey.get('glm-5-3-flash')?.candidates.map((c) => c.provider))
+      .toEqual(['autoclaw', 'autoclawintl', 'buddy'])
+    expect(byKey.get('glm-5-3')?.candidates.map((c) => c.provider))
+      .toEqual(['autoclaw', 'autoclawintl', 'buddy'])
+
+    // ② 两个 Auto：两站合并（**不是**消失、也**不是**两条）
+    expect(byKey.get('zai_auto')?.candidates.map((c) => `${c.provider}/${c.realId}`))
+      .toEqual(['autoclaw/zai_auto', 'autoclawintl/zai_auto'])
+    expect(byKey.get('zai_auto-fast')?.candidates.map((c) => `${c.provider}/${c.realId}`))
+      .toEqual(['autoclaw/zai_auto-fast', 'autoclawintl/zai_auto-fast'])
+
+    // ③ 总数 4：初版塌成 2（两个 Auto 消失）；只登记国内站是 6（两个孤儿）
+    expect(models.map((m) => m.key).sort())
+      .toEqual(['glm-5-3', 'glm-5-3-flash', 'zai_auto', 'zai_auto-fast'])
+
+    // ④ 没有孤儿（唯一入口 `src/aggregate-catalog.ts:72` 的 `continue` 不会咬到谁）
+    expect(models.filter((m) => m.candidates.length === 1)).toEqual([])
+
+    // ⑤ 显示名人类可读（伪机器名不许出现在聚合列表里）
+    expect(byKey.get('zai_auto')?.name).toBe('Auto (AutoClaw)')
+    expect(byKey.get('zai_auto-fast')?.name).toBe('Auto-Fast (AutoClaw)')
+  })
+
+  it('★★★ 国际站的 GLM 也必须归到既有键（正向审计 P1-1：漏登记会制造新的「同模型两条」）', () => {
+    // 只登记 `autoclaw` 时，`autoclawintl` 走 `via: id` 得到带前缀的键 ⇒
+    // 自成一个单候选孤立虚拟模型，且 `glm-5-3-flash` 轮换列表里永远没有国际站。
+    const intlFlash = canonicalKeyFor('autoclawintl', 'zai_glm-5.3-flash', 'GLM-5.3 Flash (AutoClaw)')
+    const intlPro = canonicalKeyFor('autoclawintl', 'zaicoding_glm-5.3', 'GLM-5.3 (AutoClaw)')
+    expect(intlFlash?.key).toBe('glm-5-3-flash')
+    expect(intlFlash?.via).toBe('patch')
+    expect(intlPro?.key).toBe('glm-5-3')
+    expect(intlPro?.via).toBe('patch')
+    // 反向腿：两站必须**逐字同键**（复制两份必然漂移，与 magicrewintl 那条同因）
+    expect(intlFlash?.key).toBe(canonicalKeyFor('autoclaw', 'zai_glm-5.3-flash', 'GLM-5.3 Flash (AutoClaw)')?.key)
+    expect(intlPro?.key).toBe(canonicalKeyFor('autoclaw', 'zaicoding_glm-5.3', 'GLM-5.3 (AutoClaw)')?.key)
+  })
+
+  it('★★ 「不做通用剥前缀」必须同时挡住「按渠道局部剥」（正向审计 P3-2 实测的无牙面）', () => {
+    // 原第 4 条用例只钉住「改 `normalizeModelKey`」这条路线（M7 红）；
+    // 如果有人在 `canonicalKeyFor` 里**按 provider** 剥首个 `_`，
+    // 原用例全绿（M8 实测 42 passed）。这里把局部路线也钉死：
+    // `normalizeModelKey` 把 `.` 转 `-`、但**下划线原样保留** ⇒ 未登记的带下划线 id
+    // 得到的是「保留下划线」的键。若有人按 provider 剥掉首个 `_` 之前，这两条都会红。
+    expect(canonicalKeyFor('autoclaw', 'foo_bar', 'Foo Bar')?.key).toBe('foo_bar')
+    expect(canonicalKeyFor('autoclaw', 'zai_unknown_future', 'X')?.key).toBe('zai_unknown_future')
+    // 真·带下划线的模型名不许被削（modelscope 的 `InternVL3_5-…` 就是这种）
+    expect(canonicalKeyFor('modelscope', 'OpenGVLab/InternVL3_5-241B-A28B', 'InternVL3.5-241B-A28B (魔搭)')?.key)
+      .toBe('internvl3_5-241b-a28b')
+  })
+})
+
+describe('PR #89 对抗审计 D 域：补丁查找必须与排除集同口径（漏并 5 格 + 绕过 3 格）', () => {
+  /**
+   * 对抗审计实测的「同一函数两套口径」：排除集查 `realId` **和** `idKey`
+   * （归一化后），而补丁查找原先**只查 raw `realId`**。上游只要换个书写形态，
+   * 补丁就静默不命中 ⇒ 退回带 `zai_` 前缀的孤立键。
+   *
+   * ⚠️ 症状与「漏登记国际站」完全同型且静默：自成一个只有一个候选的虚拟模型，
+   * 聚合轮换列表里永远看不到它。升级前后都零报错零日志。
+   */
+  it.each([
+    ['ZAI_GLM-5.3-FLASH', 'glm-5-3-flash', '全大写'],
+    ['zai_glm-5.3-flash:free', 'glm-5-3-flash', '带 :free 后缀'],
+    ['zai_glm-5.3-flash ', 'glm-5-3-flash', '尾随空格'],
+    ['ZAICODING_GLM-5.3', 'glm-5-3', '全大写'],
+    ['zaicoding_glm-5.3:free', 'glm-5-3', '带 :free 后缀'],
+    ['zaicoding_glm-5.3 ', 'glm-5-3', '尾随空格'],
+  ])('★★★ 书写形态变体 %s 必须照样归到 %s（%s）', (realId, want) => {
+    expect(canonicalKeyFor('autoclaw', realId, 'whatever')?.key).toBe(want)
+    expect(canonicalKeyFor('autoclaw', realId, 'whatever')?.via).toBe('patch')
+    // 国际站同形（两站共用同一个常量，漏一边就是静默缺陷）
+    expect(canonicalKeyFor('autoclawintl', realId, 'whatever')?.key).toBe(want)
+  })
+
+  it('★★ 排除集必须是**精确匹配**，不许退化成前缀或子串（对抗审计 M24/M25 实测 42 全绿）', () => {
+    // 若有人把 `EXCLUDED_ALIASES.has(x)` 改成 `[...EXCLUDED_ALIASES].some(e => x.startsWith(e))`
+    // 或 `.includes(e)`，下面这几条会立刻红。
+    const mustSurvive = ['zai_autox', 'zis_auto', 'zai_autofast', 'zai_auto_x', 'xauto', 'autox']
+    for (const id of mustSurvive) {
+      expect(canonicalKeyFor('autoclaw', id, id)?.key, `「${id}」被误排除了`).toBe(id)
+    }
+    // 对照：真别名仍然被排除（否则上面那组是恒真的）
+    expect(canonicalKeyFor('workbuddy', 'auto', 'Auto')).toBeUndefined()
+    expect(canonicalKeyFor('workbuddy', 'default-model', 'Auto')).toBeUndefined()
+  })
+
+  it('★★ 大小写不敏感是**排除集**的能力，不是补丁的（`:free` / 大写不得漏并）', () => {
+    // 这条把「归一化腿」与「raw 腿」分开锁：上游给 `ZAI_AUTO`（大写）时，
+    // 排除集靠 `idKey` 命中 ⇒ 必须仍被排除（不能因为大小写就放行成孤立模型）。
+    expect(canonicalKeyFor('autoclaw', 'ZAI_AUTO', 'Auto (AutoClaw)')?.key).toBe('zai_auto')
+    expect(canonicalKeyFor('workbuddy', 'AUTO', 'Auto')).toBeUndefined()
+    expect(canonicalKeyFor('workbuddy', 'auto:free', 'Auto')).toBeUndefined()
+  })
+})
+
+describe('deepseek V4.1 Flash 的 -1017 版本号变体（2026-11-16）：与无后缀版本同键', () => {
+  /**
+   * 实测来源：用户实例 `/v1/models` 全量目录（337 条）。
+   *
+   * - modelscope 同时给了 `…/DeepSeek-V4.1-Flash` 与 `…/DeepSeek-V4.1-Flash-1017`，
+   *   两者展示名**逐字相同**（`DeepSeek-V4.1-Flash (魔搭)`）；
+   * - opencode 的**无后缀** id 展示名就是 `DeepSeek V4.1 Flash 1017`；
+   * - 只有 codearts 把 `-1017` 当独立模型（x0.12 vs x0.09）。
+   *
+   * ⇒ `-1017` 是 V4.1-Flash 的**当前版本号**，不是另一个模型。
+   */
+  it('★ codearts 的 `…-1017` 归到 `deepseek-v4-1-flash`', () => {
+    const got = canonicalKeyFor('codearts', 'deepseek-v4.1-flash-1017', 'DeepSeek-V4.1-Flash-1017 · x0.12')
+    expect(got?.key).toBe('deepseek-v4-1-flash')
+    // 归属必须来自补丁（人工实测结论），不是 id 通道撞出来的
+    expect(got?.via).toBe('patch')
+    // 判据是「与同渠道无后缀版本同键」
+    expect(got?.key).toBe(canonicalKeyFor('codearts', 'deepseek-v4.1-flash', 'DeepSeek-V4.1-Flash · x0.09')?.key)
+  })
+
+  it('★ modelscope 的带命名空间 id 也归到 `deepseek-v4-1-flash`', () => {
+    // ⚠️ 补丁表按 realId **原文**精确匹配 —— 这条用例就是钉住「别名必须写全命名空间」，
+    //    若有人把键简化成 `DeepSeek-V4.1-Flash-1017`，这里会变红。
+    const got = canonicalKeyFor('modelscope', 'deepseek-ai/DeepSeek-V4.1-Flash-1017', 'DeepSeek-V4.1-Flash (魔搭)')
+    expect(got?.key).toBe('deepseek-v4-1-flash')
+    expect(got?.via).toBe('patch')
+    expect(got?.key).toBe(canonicalKeyFor('modelscope', 'deepseek-ai/DeepSeek-V4.1-Flash', 'DeepSeek-V4.1-Flash (魔搭)')?.key)
+  })
+
+  it('⚠️ 不许写成「剥 -NNNN 后缀」的通用规则：0731 / 0813 是独立模型', () => {
+    // `deepseek-v4-flash-0731` 是 **V4-Flash（上一代）** 的快照，
+    // `deepseek-v4-pro-0813` 是 V4 Pro 的快照 —— 都与无后缀版本是不同模型。
+    // 若哪天有人把上面的补丁改成通用剥离，这两条会立刻变红。
+    expect(canonicalKeyFor('modelscope', 'deepseek-ai/DeepSeek-V4-Flash-0731', 'DeepSeek-V4-Flash-0731 (魔搭)')?.key)
+      .toBe('deepseek-v4-flash-0731')
+    expect(canonicalKeyFor('modelscope', 'deepseek-ai/DeepSeek-V4-Pro-0813', 'DeepSeek-V4-Pro-0813 (魔搭)')?.key)
+      .toBe('deepseek-v4-pro-0813')
+    // 反过来：V4-Flash 无后缀那条仍然是它自己的键，没被 0731 拖走
+    expect(canonicalKeyFor('buddy', 'deepseek-v4-flash', 'Deepseek-V4-Flash · x0.17')?.key)
+      .toBe('deepseek-v4-flash')
+  })
+
+  it('⚠️ 新加坡区 `-sg` 仍是独立键（不许因为「都是 V4.1 Flash」而合并）', () => {
+    // workbuddy 的 `-sg` 展示名逐字也是 `Deepseek-V4.1-Flash`（只多了 ` · x0.11 SG`），
+    // 但它是**另一条区域通道** —— 模块头的反例就是它。
+    expect(canonicalKeyFor('workbuddy', 'deepseek-v4.1-flash-sg', 'Deepseek-V4.1-Flash · x0.11 SG')?.key)
+      .toBe('deepseek-v4-1-flash-sg')
+    expect(canonicalKeyFor('workbuddy', 'deepseek-v4.1-flash', 'Deepseek-V4.1-Flash')?.key)
+      .toBe('deepseek-v4-1-flash')
   })
 })
