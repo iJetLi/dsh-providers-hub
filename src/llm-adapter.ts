@@ -1008,6 +1008,48 @@ const CODEARTS_CONCURRENCY_LIMIT_CODE = 'TM.00001041'
 const CODEARTS_TENANT_NOT_ENABLED_CODE = 'TM.000010051'
 
 /**
+ * 「**账号积分已耗尽**」的业务码（真实报障 2026-11-15）。
+ *
+ * ```text
+ * HTTP 400  {"error_code":"TM.00001050","error_msg":"您的积分已耗尽，请关注活动积分领取活动…"}
+ * ```
+ *
+ * ## ⚠️⚠️ 这个码此前**无人认识** ⇒ 「积分用完不换号」整块静默失效
+ *
+ * 既有的 `4291`（`InferHub.4291.200`）与 `insufficient quota` 是 2026-10-02 从
+ * **benefit 免费额度**那条通道取的证；而**账号积分**耗尽走的是**另一条通道、
+ * 另一个码族**（`TM.*`，与 {@link CODEARTS_CONCURRENCY_LIMIT_CODE} 同族）。
+ *
+ * 2026-11-15 用真实凭据直连实测（2 账号 × 6 模型，逐格见
+ * `tests/unit/codearts-credit-exhausted-rotation.spec.ts`）：积分耗尽的账号
+ * 请求 `glm-5.3` / `glm-5.3-flash` / `kimi-k3` / `kimi-k3.1-pro` /
+ * `deepseek-v4.1-flash` **全部**回该码，而旧判据对它**零命中** ⇒ 请求落进
+ * 通用 4xx 分支 ⇒ **既不写 `modelRateLimits`、也不调 `getAvailableAccount`**
+ * ⇒ 用户看到的就是「一个账号积分用完后竟然不会切换账号」。
+ *
+ * ## ⚠️ 必须走 {@link hasBusinessCode} 的数字边界，绝不能用「按词干匹配」
+ *
+ * 它和 {@link CODEARTS_TENANT_NOT_ENABLED_CODE}（`TM.000010051`，「您当前无权
+ * 调用该模型」）**共享 9 字符词干 `TM.000010`** 后分叉（`50` vs `051`），
+ * 而且两个码**实测在同一批请求里同时出现**（同一个积分耗尽的账号：请求
+ * `glm-5.2` 回 `TM.000010051`，请求 `glm-5.3` 回 `TM.00001050`）。
+ *
+ * 所以「图省事匹配 `TM.000010` 前缀」这条捷径**真实可达**：它会把
+ * 「无权限」误判成「没钱」⇒ 对着一个**永远不会有积分**的模型把整池账号
+ * 轮一遍并全部沉底（比不换号更糟）。独立用例锁住了这条词干
+ * （`codearts-credit-exhausted-rotation.spec.ts`：按词干匹配的变异实测变红 2 处）。
+ *
+ * ⚠️ 如实标注一个我**先写错、后被变异测试纠正**的细节：两者**不是**严格前缀
+ * 关系（`'TM.000010051'.includes('TM.00001050')` 实测为 `false` —— 第 10 位
+ * `0` vs `5` 已分叉）。真正的风险面是**词干**，不是前缀；结论（必须走数字
+ * 边界）不变，但按前缀叙述会把变异锚点指错。
+ *
+ * 这条与 {@link isSseQueueErrorCode} 的 `429`/`4291`、{@link hasBusinessCode}
+ * 注释里 `TM.00000001`/`TM.000000011` 是**同一族**陷阱，本仓库第 4 次复发。
+ */
+const CODEARTS_CREDIT_EXHAUSTED_CODE = 'TM.00001050'
+
+/**
  * 错误体里是否带某个**精确**业务码（数字后缀必须断开）。
  *
  * ## ⚠️ 为什么不能用裸 `body.includes(code)`
@@ -1196,9 +1238,39 @@ export function isSseQueueErrorCode(code: string): boolean {
  *
  * 文案兜底（`insufficient quota`）不可省：万一上游换了码值，序列化后的
  * detail 文本仍能命中 —— 与 `zcode` / `qoder` 的既有做法一致。
+ *
+ * ## ⚠️⚠️ 2026-11-15：`4291` 只覆盖 benefit 通道，**账号积分耗尽走 `TM.00001050`**
+ *
+ * 真实报障「一个账号的积分用完后竟然不会切换账号」的**根因就是这里**：
+ * 积分耗尽回的是 `HTTP 400 {"error_code":"TM.00001050","error_msg":"您的积分已耗尽…"}`，
+ * 而旧的这两条腿对它**零命中** ⇒ 报文落进通用 4xx 分支 ⇒ 既不写
+ * `modelRateLimits`、也不调 `getAvailableAccount` ⇒ 换号整块静默失效
+ * （实测 `state.json` 里 codearts 两个账号**连 `modelRateLimits` 键都没有**）。
+ *
+ * 补的三条腿各有分工，缺一不可：
+ *
+ * | 通道 | `code` 入参 | `message` 入参 | 由哪条腿命中 |
+ * |---|---|---|---|
+ * | SSE（200 首帧） | `data.error_code`（`TM.00001050`） | `data.error_msg` | `hasBusinessCode(code)` |
+ * | HTTP 4xx | `errorDetailForClassify(body)`（**可能为空串**） | 报文全文 | `hasBusinessCode(message)` |
+ * | 上游改码值 | 任意 | 中文文案 | `CREDIT_EXHAUSTED_PATTERN` |
+ *
+ * ⚠️ 码值腿**必须**走 {@link hasBusinessCode} 的数字边界：`TM.00001050` 与
+ * `TM.000010051`（「无权调用该模型」）**共享 9 字符词干 `TM.000010`** 后分叉，
+ * 两者实测在同一批请求里同时出现（同一账号 `glm-5.2` 回 `1051`、`glm-5.3`
+ * 回 `1050`）。按词干匹配会把「无权限」判成「没钱」⇒ 对一个**永远不会有积分**
+ * 的模型把整池账号轮一遍并全部沉底 ⇒ 比不换号更糟。
+ *
+ * ⚠️ 文案腿刻意复用共享常量 {@link CREDIT_EXHAUSTED_PATTERN}（它已认识
+ * 「积分已耗尽 / 额度用尽 / 余额不足」，2026-11-15 node 实测确认），
+ * **不在这里另写第二份中文正则** —— 两份同义判据必然漂移。
  */
 export function isSseQuotaExhaustedErrorCode(code: string, message: string): boolean {
-  return code.includes('4291') || /insufficient[\s_-]+quota/i.test(message)
+  return code.includes('4291')
+    || /insufficient[\s_-]+quota/i.test(message)
+    || hasBusinessCode(code, CODEARTS_CREDIT_EXHAUSTED_CODE)
+    || hasBusinessCode(message, CODEARTS_CREDIT_EXHAUSTED_CODE)
+    || CREDIT_EXHAUSTED_PATTERN.test(message)
 }
 
 /**
