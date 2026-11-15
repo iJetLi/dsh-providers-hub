@@ -78,6 +78,12 @@
 
 ⇒ **对外行为无变更。**
 
+⚠️ **2026-11-15 更新**：上表第二句（`WorkBuddy 国际版不支持每日签到…`）**已删除** ——
+国际版其实**有**签到端点（见 `providers-workbuddy-intl-checkin.md`），那条守卫是误判。
+故本节的「三句」现为**两句**；`claim-runtime-parity.spec.ts` 的逐字断言同步收窄到
+`cline` / `raccoon`，另加一条端到端用例钉住 workbuddy 真的打到
+`www.workbuddy.ai/v2/billing/meter/daily-checkin`。
+
 **旁证（量级参考，非判据）**：`credits.claimAll` 段长 11973 → 7902 字符；
 段内 `message:` 字面量 9 → 4。⚠️ **段长是必然腐坏的快照**，只用来让人感知「确实搬走了」。
 

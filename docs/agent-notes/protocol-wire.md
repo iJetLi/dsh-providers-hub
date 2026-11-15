@@ -670,7 +670,7 @@ const claim = deps.claim ?? (claimDailyCheckin as unknown as NonNullable<…>)
 - 只领 `actionType === 'CLAIM_BENEFIT' && claimStatus === 'CLAIMABLE'`
 - 活动每日 10:00（UTC+8）刷新，领取后 30 天有效
 
-**CodeBuddy** —— `src/credits.ts`（国际版 WorkBuddy 后端无签到接口）：
+**CodeBuddy** —— `src/credits.ts`（两个产品同形，只有 baseURL 不同；国际版另有活跃链，见 `providers-workbuddy-intl-checkin.md`）：
 
 - 状态查询：`POST /v2/billing/meter/checkin-activity-status`（**不是** `checkin-status`，后者返回全空占位数据）
 - 领取：`POST /v2/billing/meter/daily-checkin`
@@ -799,7 +799,7 @@ if (resolved === undefined && (product as { id?: string }).id === ASTUDIO.id) { 
 |---|---|---|
 | `codearts` | ✓ | ✓（华为云签名四步流程） |
 | `buddy` | ✓ | ✓ |
-| `workbuddy` | ✓ | ✗（国际版后端无签到接口） |
+| `workbuddy` | ✓ | ✓（与国内版同形；活动未开时回 `41000`，改由活跃上报到账。⚠️ 此前「无签到接口」是**只搜 CLI 内核字面量**得出的误判 —— 签到端点是前端直接调的） |
 | `lobsterai` | ✓ | ✓（`client-activities` 三步流程） |
 | `qoder` | ✓（`sash/api/v2/me/usage`，只需 Bearer） | ✓（`sash/api/v1/me/campaigns` → `POST …/{campaignId}/claim`） |
 | `trae` | ✓ | ✓（`checkin_credits` 两步流程） |

@@ -937,7 +937,12 @@ export interface CreditsEndpointDeps<
    * - **永不抛**：抽奖是不可逆写操作且会因「今日已参与 / 窗口外 / 无资格」失败，
    *   那些都**不是**签到失败（本仓库有两轮「登录成功却因记账失败被报成失败」事故史）。
    *
-   * ⚠️ 只有 trae 注入；其余 provider 不传 ⇒ 行为逐字不变。
+   * ⚠️ 目前有两家注入：`trae`（抽奖）与 `workbuddy` 国际版（活跃上报）。
+   * ⚠️ **第四参 `outcome` 是必需的**（PR #87 审计 P1-1/P1-2）：接线层要是只映射
+   * 前三个参数，实现里两种结局（`inactive` / `failed`）与两种执行
+   * （`claimed` / `already-claimed`）行为会**逐字相同** —— 领取失败照样产生
+   * 用户可见副作用（在人家账号里建会话），而且日志零字，结构上查不出来。
+   * 其余 provider 不传 ⇒ 行为逐字不变。
    */
   afterClaimNote?: (
     credential: TCredential,
@@ -1161,7 +1166,7 @@ export async function collectCreditsStatus<TCredential = BuddyCredential, TProdu
    *   ⚠️ 上游 86e3591 这里写的是「**两家** `minimax` / `minimaxintl`」—— 那是
    *   **他们**那份仓库的事实（其 `provider-credits.ts` 里没有 buddy / workbuddy 条目）。
    *   **本仓库不适用**：`buddy` 有签到状态端点，`workbuddy` 那条是**刻意注册**的
-   *   （国际版没有签到接口、但状态端点存在，见 `provider-credits.ts` 里
+   *   （国际版**有**签到端点，2026-11-15 更正，见 `provider-credits.ts` 里
    *   `workbuddy.fetchStatus` 的注释）⇒ 四家都是**只读状态查询、一次/账号**。
    * - **429 不会被放大**：`minimax` 的 `minimaxFetchWithRetry` 只重试**传输错误**，
    *   而 `buddy` 系走的 `credits.ts` `postJson` **同样不重试 HTTP 状态**
@@ -9223,7 +9228,7 @@ function registerJetHubEndpoints(
           //    指引「登录奖励请在『新手任务』中领取」），压成一句泛化模板会丢掉它。
           //    两个真实例子（各自的历史注释都记录了这一点）：
           //      - cline：对整个 sidecar 做字符串扫描，无任何 checkin/campaign 端点；
-          //      - workbuddy：国际版内核里只有 get-dosage-notify，没有签到接口。
+          //      - workbuddy：2026-11-15 起有签到（端点同形，只是 baseURL 不同）。
           //    ⚠️ workbuddy 这条守卫**必须有**：没有它时会落到下面的通用分支，
           //       用**国际版**凭据去发**国内版**的签到请求 —— 必然失败，而且是一次
           //       真实的上游请求。而「每日首次启动自动签到」正是靠「调 claimAll、
@@ -9267,11 +9272,21 @@ function registerJetHubEndpoints(
           ...impl.afterClaimNote === undefined
             ? {}
             : {
-                afterClaimNote: (credential: unknown, _product: unknown, entry: unknown) =>
+                // ⚠️⚠️ 第 4 参 `outcome` **必须透传**（PR #87 对抗审计 P1-1/P1-2）：
+                //  workbuddy 国际版靠它区分「本次真领到 / 已领过」与
+                //  「活动未开 / 领取失败」—— 后者绝不能再发活跃上报（那会在用户
+                //  账号里造会话）；漏传的症状是「四种结局行为逐字相同」且零日志。
+                afterClaimNote: (
+                  credential: unknown,
+                  _product: unknown,
+                  entry: unknown,
+                  outcome: unknown,
+                ) =>
                   impl.afterClaimNote!(
                     credential,
                     entry as never,
                     undefined as never,
+                    outcome as never,
                   ),
               },
           // ⚠️ 预检优先用 `claimStatus`，缺席时回落到 `fetchStatus`

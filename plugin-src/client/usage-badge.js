@@ -1071,10 +1071,11 @@ function UsageBadgeActive(props) {
    * - **必须串行** `await`，不能 `Promise.all`：这是**真实领积分**的写操作，
    *   跨渠道并发会同时发出多路领取请求，触发风控的代价是用户当天领不到
    *  （单渠道内部本就是「逐账号顺序执行」，见 `src/jet-hub-rpc.ts`）。
-   * - 渠道集合由能力表推导（`checkinProviders()`）：WorkBuddy 国际版 / Cline
-   *   后端没有签到接口，**绝不能**出现在请求列表里。
-   *   ⚠️ Raccoon 曾在这句里 —— 2026-11-15 接通签到后**已移出**（见
-   *   `provider-registry.ts` 的 `dailyCheckin` 注释与 `raccoon-credits.ts`）。
+   * - 渠道集合由能力表推导（`checkinProviders()`）：**如今只剩 Cline** 后端没有
+   *   签到接口，**绝不能**出现在请求列表里。
+   *   ⚠️ 另外两家都在 2026-11-15 被实测推翻并移出：**Raccoon**（触发器在办公端
+   *   `setting_info`，见 `raccoon-credits.ts`）与 **WorkBuddy 国际版**（与国内版
+   *   同形的签到端点 + 活跃上报，见 `workbuddy-intl-activity.ts`）。
    * - 单渠道失败只计入失败数，**不中断后续渠道**。
    * - 每个**非零**计数都要出现在结果里（否则「暂无活动」的渠道会整条消失，
    *   用户以为它没执行）；一个渠道可能同时有成功与失败，不用 else-if 短路。
@@ -2061,7 +2062,8 @@ function UsageBadgeActive(props) {
    *
    * - `签到（仅 <渠道>）`：只在能力表允许的渠道渲染（`supportsDailyCheckin`）；
    * - `全部渠道签到`：与设置页页头同款语义，串行遍历 `checkinProviders()`
-   *   （WorkBuddy 国际版 / Cline 没有签到接口，不在列表里）。
+   *   （**如今只剩 Cline** 没有签到接口，不在列表里；Raccoon 与 WorkBuddy 国际版
+   *   都在 2026-11-15 接通了签到，故在列表内）。
    *   它**不依赖本渠道的读数**，故首屏/失败态也渲染。
    */
   function renderClaim() {
@@ -2096,7 +2098,7 @@ function UsageBadgeActive(props) {
           // —— 硬编码必然腐坏，改成 `checkinProviders().length` 现算（该函数本文件已 import）。
           // 2026-11-01 三审（本分支）：自动签到的语义已从「每天首次启动」改成「每天两个时段」，
           // 文案必须跟着改，否则与面板「下次执行：21:00」自相矛盾。
-          title: `串行签到全部支持签到的渠道（${checkinProviders().length} 个；WorkBuddy 国际版 / Cline 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻自动执行' : ''}`,
+          title: `串行签到全部支持签到的渠道（${checkinProviders().length} 个；Cline 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻自动执行' : ''}`,
           onClick: () => { void onClaimAll(); },
         }, allBusy
           ? (claimProgress === null ? '签到中…' : `签到中 ${claimProgress.done}/${claimProgress.total}…`)
@@ -2107,8 +2109,9 @@ function UsageBadgeActive(props) {
        *
        * ⚠️ 用户 2026-10-02 报障：「单渠道签到哪里去了」—— 他在 Cline 上打开弹窗只看到
        * 「全部渠道签到」，以为按钮丢了。真相是能力表里 `dailyCheckin: false`
-       * （WorkBuddy 国际版 / Cline 后端没有签到接口）。少了这一句，用户只能靠猜。
-       * ⚠️ Raccoon 已移出这份名单（2026-11-15 接通签到），别按旧注释去猜。
+       * （**如今只剩 Cline** 后端没有签到接口）。少了这一句，用户只能靠猜。
+       * ⚠️ Raccoon 与 WorkBuddy 国际版都在 2026-11-15 接通了签到、已移出这份
+       * 名单，别按旧注释去猜。
        */
       canClaimCurrent
         ? null

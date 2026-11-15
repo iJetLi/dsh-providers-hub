@@ -92,7 +92,12 @@ function ok(partial: Partial<RpcCreditsClaimAllResponse['summary']> = {}): Badge
   return { ok: true, value: { results: [], summary } }
 }
 
-/** 构造一个「不支持每日签到」的错误信封（`claimAll` 的 cline / raccoon / workbuddy 分支）。 */
+/**
+ * 构造一个「不支持每日签到」的错误信封（`claimAll` 的 cline / raccoon 分支）。
+ *
+ * ⚠️ workbuddy 已从这类渠道里移除（2026-11-15）：国际版**有**签到端点，
+ * 见 `docs/agent-notes/providers-workbuddy-intl-checkin.md`。
+ */
 function unsupported(message = 'Cline 不支持每日签到（其后端没有签到接口）'): BadgeRpcResult<RpcCreditsClaimAllResponse> {
   return { ok: false, error: { code: 'bad-request', message } }
 }
@@ -282,15 +287,15 @@ describe('自动签到：执行判据', () => {
       claim: async (provider) => {
         calls.push(provider)
         if (provider === 'cline' || provider === 'raccoon') return unsupported()
-        if (provider === 'workbuddy') return unsupported('WorkBuddy 国际版不支持每日签到（其后端没有签到接口）')
         return ok({ alreadyClaimed: 1 })
       },
     })
     await runner.runIfDue()
     const state = runner.state()
     expect(calls).toHaveLength(5)
-    // 跳过 3 个、正常 2 个；摘要里明说跳过的数量，且不出现「失败」
-    expect(state.lastResult).toContain('3 个渠道不支持签到')
+    // 跳过 2 个（cline / raccoon）、正常 3 个（含 workbuddy，2026-11-15 起它可签）；
+    // 摘要里明说跳过的数量，且不出现「失败」
+    expect(state.lastResult).toContain('2 个渠道不支持签到')
     expect(state.lastResult).not.toContain('失败')
     expect(warnings.some((w) => w.includes('不支持每日签到'))).toBe(false)
   })

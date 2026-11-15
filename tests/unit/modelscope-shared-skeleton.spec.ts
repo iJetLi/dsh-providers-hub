@@ -18,6 +18,7 @@
 import { describe, expect, it } from 'vitest'
 import { ModelscopeAdapter } from '../../src/modelscope-adapter.js'
 import { MODELSCOPE, MODELSCOPE_FALLBACK_MODELS } from '../../src/modelscope-product.js'
+import { MODELSCOPE_RETIRED_MODEL_IDS } from '../../src/modelscope-adapter.js'
 import type { AccountPool } from '../../src/account-pool.js'
 
 /** 一个「有已登录账号」的账号池替身（只实现门控与黑名单两个消费点）。 */
@@ -62,7 +63,11 @@ describe('★★ modelscope 迁移到共享骨架：用户可见后果不变', (
       '★★ 用户关掉的模型仍出现在选择器里 ⇒ 黑名单对 modelscope 静默失效',
     ).not.toContain('deepseek-ai/DeepSeek-V4.1-Flash-1017')
     // 且其余模型**仍在**（防「一关就整份清空」的假绿）。
-    expect(ids.length).toBe(MODELSCOPE_FALLBACK_MODELS.length - 1)
+    // ⚠️ 期望值必须是「兜底表 − 已下线名单 − 被关掉的那 1 个」：2026-11-16 起
+    //    已下线 id 不再进目录（见 `MODELSCOPE_RETIRED_MODEL_IDS`），直接拿
+    //    `FALLBACK.length - 1` 会把「过滤生效」误判成「黑名单失效」。
+    const exposed = MODELSCOPE_FALLBACK_MODELS.filter((m) => !MODELSCOPE_RETIRED_MODEL_IDS.has(m.id))
+    expect(ids.length).toBe(exposed.length - 1)
   })
 
   it('★★ 关闭整个供应商 ⇒ listModels 恒空', async () => {
@@ -102,5 +107,18 @@ describe('★★ modelscope 迁移到共享骨架：用户可见后果不变', (
       all,
       '★ 全量视图被黑名单过滤 ⇒ 用户再也打不开那个模型（设置页没有入口）',
     ).toContain('deepseek-ai/DeepSeek-V4.1-Flash-1017')
+  })
+
+  /**
+   * ⚠️ 2026-11-16（PR #92 双审计 P3-5 的另一半）：`listModels` 在**冷缓存**下
+   * 走 `syncCatalogEntries()` → `fallbackEntries()`，这条路径之前零用例 ——
+   * 变异「syncCatalogEntries 直用 MODELSCOPE_FALLBACK_MODELS.map」全绿，
+   * 而已下线模型会重新出现在选择器里（用户选中即必得 400）。
+   */
+  it('★★ listModels 的冷缓存兜底腿也不吐已下线 id（syncCatalogEntries 接线）', async () => {
+    const adapter = makeAdapter(makePool({ disabled: [] }))
+    const ids = (await adapter.listModels(MODELSCOPE.id)).map((m) => m.id)
+    expect(ids.length, '对照失败：兜底表被剔空了 ⇒ 本用例会假绿').toBeGreaterThan(0)
+    for (const dead of MODELSCOPE_RETIRED_MODEL_IDS) expect(ids).not.toContain(dead)
   })
 })

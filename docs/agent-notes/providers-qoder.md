@@ -1221,3 +1221,97 @@ LlmError: qoder: 本地账号并发已满，请稍后重试   code = QUEUE
   所有无 uid 账号**共用**一个名额。
 - **探测与推理抢同一名额**：`createProbeAdapter` 也接了限流 ⇒ 探测期间
   该账号的推理请求会被拒（语义上探测也是请求，暂不改）。
+
+## ⚠️ 形态头：WASM 头表缺 `Cosy-MachineOS` / `Cosy-MachineHostname`（2026-11-16）
+
+### 头表清单（⚠️ **近似**，不是逐字 dump —— 2026-11-16 复核更正）
+
+签名 WASM 生成的两套头表（`prepareInfer` 与 `prepareRequest`）**两条通道完全一致**，
+共约 20 项：
+
+```
+Accept / Accept-Encoding / Authorization / Content-Type / Cache-Control / Connection
+Cosy-Business-Product / Cosy-Business-Type / Cosy-ClientIp / Cosy-ClientType
+Cosy-Data-Policy / Cosy-Date / Cosy-MachineId / Cosy-MachineToken / Cosy-MachineType
+Cosy-Organization-Id / Cosy-Organization-Tags / Cosy-Scene / Cosy-User / Cosy-Version
+Login-Version / X-Model-Key / X-Model-Source
+```
+
+⚠️⚠️ **这份清单首版声称「直接 dump」，复核后不成立**（正向审计 PR #91 P2-1）：
+二进制里 **`Cosy-Key` 任何编码都不存在**（首版多列了一项），而
+**`Cosy-Organization-Id` / `Cosy-Organization-Tags` 存在却没列**（首版漏了两项）
+⇒ 清单是**近似**，所以 `Cosy-MachineOS` / `Cosy-MachineHostname` 那一格的证据强度
+只能标「中」，不能标「高（直接 dump）」。
+
+✅ **但结论本身不受影响**：这两个头名在**任何编码 / 任何大小写**下都 **ABSENT**，
+这一点已独立确认 ⇒ 「只缺这两个」成立。
+
+这一格很重要：`Login-Version`（`v2`）与 `Cosy-ClientIp` 都是 **WASM 自带**，不要再
+「补」一遍 —— 那行代码永远命中不了「缺失」分支，是死代码（同一形态的教训见
+`misc.md` 的「恒真断言」）。
+
+### 为什么要补（先说清楚：**功能上不必需**）
+
+`qoder-machine.ts` 的消融表已证明：`/sash/api/v1/me/campaigns` 拿「可领取」活动
+**只需要** `Cosy-MachineToken` + `Cosy-MachineType`（成对），`MachineOS` /
+`MachineHostname` / `MachineId` / `MachineCode` 去掉后**仍然能拿到**。
+
+所以补的**不是功能项**，而是**形态一致性**：官方请求层（不是签名 WASM）会给所有请求
+注入 `cosy-machineos`，infer-sse 还带 `cosy-machinehostname`。我们不带，就等于在请求
+集合里留了一条稳定可聚类的特征。补上不加分、不补不减分 ⇒ 默认开 + 一键关。
+
+### 证据强度（别当成客户端产物实证）
+
+| 结论 | 强度 |
+|---|---|
+| 头表**缺**这两个头 | **高**：本仓库 WASM 实测 dump |
+| 官方请求层会带 | **中**：抓包头表 + 同类实现逆向（`qoder2api-hub` issue #64） |
+| 不影响签到活动下发 | **高**：本仓库消融表 |
+| 追加**不会**破坏 COSY 签名 | **中高**：签名覆盖 `payload + key + date + body + path`，不含头表；且 WASM 自己在签名后还会追加 `Login-Version` / `Accept` / `Cache-Control` ⇒ 头表不在签名内。**未做真机复测** |
+
+### 实现口径（`src/qoder-align.ts`）
+
+- **只补缺失**：`Headers.has` / 对象键大小写不敏感比较（WASM 头表的键名形态由 Rust 侧
+  决定，`cosy-machineos` 与 `Cosy-MachineOS` 都可能；敏感比较会重复补一个头，
+  而 `Headers` 会把两份合并成逗号串）。
+- **`Cosy-MachineOS` 跟随当前系统**（`{arch}_{platform}`，6 种组合之一）。同类实现把
+  非 Windows 一律写 `x86_64_linux` 是为了保护**已经发过该头**的存量号池；本仓库此前
+  从不发 ⇒ 没有历史值要保，如实反映运行环境才对。`DSH_QODER_MACHINE_OS` 可覆盖。
+- **`Cosy-MachineHostname` 默认不发**：官方发的是运行客户端那台机器的主机名；网关在
+  容器里发出去的是宿主机名 / 容器 id ⇒ 那是把本机标识透给上游的信息披露面
+  （与「代理口令的泄漏面：去向决定定级」同一取舍）。`DSH_QODER_ALIGN_HOSTNAME=1` 才发。
+- **只用于 COSY 签名请求**（推理 + 原生搜索）：`/sash/` 是桌面 app 身份
+  （`Cosy-ClientType: 10`），头表另有消融结论，不掺和。
+
+### 未做（已登记）
+
+- **真机复测**：本仓库无可用账号，追加头对服务端行为的影响只到「签名不受影响」这一层。
+  若线上出现异常，先 `DSH_QODER_ALIGN_HEADERS=0` 关掉再排查。
+- **`/sash/` 腿的 `Cosy-MachineOS`**：同为官方行为，但那条腿的判据是「有没有可领活动」，
+  加头的收益/风险都没测，故不动。
+
+## ⚠️⚠️ `hasInjectedFetchImpl` 拿**调用点**的全局 `fetch` 当基准 ⇒ 宿主事后包装 fetch 会静默跳过出口代理（2026-11-16）
+
+`hasInjectedFetchImpl` 原先是 `this.fetchImpl !== fetch`：左边是**构造期**捕获的引用，
+右边是**调用点**的全局 `fetch`。于是：
+
+| 场景 | 旧判据 | 结果 |
+|---|---|---|
+| 构造期注入替身 | 判为已注入 | ✅ 正确 |
+| 构造后 `adapter.fetchImpl = 替身` | 判为已注入 | ✅ 正确 |
+| **构造后全局 `fetch` 被包装**（宿主对齐层 / OTel 埋点 / mock server / 代理库） | **判为已注入** | ❌ **静默跳过 `fetchFor`（per-账号出口代理）**，并回落到构造期捕获的原始全局 `fetch` |
+
+最后一行是真实失效形态：**换号只换了凭据、出口没换**。症状与 `2026-10-21` 那次报障
+同族（墙外环境恒 connect 超时、无任何报错、该渠道从聚合轮换里静默消失）。
+
+修法：构造期存一份 `baselineFetch = fetch`，判据改成 `this.fetchImpl !== this.baselineFetch`。
+三行表里的前两格语义不变，第三格由「误判」变「正确」。
+
+⚠️ **不能**改成「构造期记一个 `options.fetchImpl !== undefined` 布尔」—— 那样
+`ratelimit-misreport-behavior.spec.ts` 这类**构造后赋值**的用例会恒为 false（见
+`qoder-adapter.ts` 里那段注释的实测记录）。
+
+守卫用例：`tests/unit/qoder-adapter.spec.ts` 的「全局 fetch 在**构造之后**被包装 ⇒
+仍走 fetchFor」。⚠️ 断言必须用**有界等待 + 带解释的失败**：缺陷态的表现是「落回原始
+全局 fetch ⇒ 真发 HTTPS ⇒ 卡到超时」，直接 `await` 只会得到一句 `Test timed out in
+5000ms`，看不出真因（我第一版就是这么写的，红得毫无信息量）。

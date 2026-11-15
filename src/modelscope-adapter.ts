@@ -68,6 +68,7 @@ import {
   type ModelscopeProduct,
 } from './modelscope-product.js'
 import { modelscopeChatUrl, modelscopeHeaders, modelscopeModelsUrl, normalizeModelscopeModelId } from './modelscope.js'
+import { normalizeModelKey } from './canonical-models.js'
 import { buildModelscopePayload } from './modelscope-messages.js'
 import { collectImages, consumeOpenAiSse, httpErrorCode, serializeMessages } from './openai-compat.js'
 // ⚠️ 复用**共享** abort 判据，不自写第二份（该函数自己的注释记载：仓库此前已有
@@ -181,6 +182,153 @@ export function parseModelscopeCatalog(body: unknown): ModelscopeCatalogEntry[] 
 }
 
 /**
+ * **已下线但仍留在远端目录里的模型 id** —— 一律不进目录。
+ *
+ * ## 为什么需要这份名单
+ *
+ * 魔搭的 `/v1/models` 会**继续列出已经没人服务的模型**：调用它们时上游回
+ * `HTTP 400 {"message":"Model id : <id> , has no provider supported"}`。
+ * 这类 id 若照原样进目录，后果有三层：
+ *
+ * 1. 用户在选择器里看得到、选中后必然失败（400，且与本程序无关）；
+ * 2. 它们会进 `aggregate` 的候选表（每个渠道的 `listModels` 都会被拿去归组）
+ *    ⇒ 聚合把请求轮换到死链上；
+ * 3. 面板「模型黑名单」里也列着它们，用户只能逐条手动关。
+ *
+ * ## 收录口径（严格，宁缺勿滥）
+ *
+ * **只收上游明确回 `has no provider supported` 的 id** —— 那一条是「该模型没有任何
+ * 可用服务方」，属于**模型已下线**，与账号权限无关。
+ *
+ * ⚠️⚠️ **这条阳性信号是以 HTTP 502 到达的**（不是 400、更不是 404）：本仓的网关
+ * 把上游那条 400 包成了 `502 + JSON body`。见 `canonical-models.ts` 的实测表里
+ * `modelscope/…/DeepSeek-V4.1-Flash  ❌502 ← 上游 400 Model id : …, has no provider supported`。
+ * 于是**不能**按「排除 5xx」的直觉办事 —— `502 + JSON body` 是**唯一阳性证据**，
+ * 而 `502 + HTML 网关超时` 才是不可用信号，两者必须区分。
+ * ⚠️ 下列形态**一律不收**（都不是"下线"的证据）：
+ * - `401 / 403`（授权令牌无效、无权访问）⇒ 换账号或申请权限即可，模型还活着；
+ * - `404 invalid_model ... or you do not have access` ⇒ 存在性/权限不可区分；
+ * - 超时、429、`invalid_parameter`（例如要求 `tools` 参数）⇒ 临时或用法问题。
+ *
+ * ## 实测记录（2026-11-16）
+ *
+ * 逐个 id 真发 `POST /v1/chat/completions`（`max_tokens: 4`）扫了远端目录的
+ * **全部 38 条**：存活 15、本名单 8、403/401 授权类 7、404 4、用法错误 3、超时 1。
+ *
+ * 复核方法（换成自己的网关地址与 key）：
+ *
+ * ```bash
+ * curl -s -H "Authorization: Bearer $KEY" http://127.0.0.1:8080/v1/models \
+ *   | jq -r '.data[].id' | grep '^modelscope/' \
+ *   | while read -r id; do
+ *       code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" \
+ *         -H 'Content-Type: application/json' \
+ *         -d "{\"model\":\"$id\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}" \
+ *         http://127.0.0.1:8080/v1/chat/completions)
+ *       [ "$code" = 200 ] || echo "$code $id"
+ *     done
+ * ```
+ *
+ * ## 官方口径（2026-11-16 检索确认）
+ *
+ * 魔搭**没有**「模型下线」的全局公告页，说明分散在两处：
+ *
+ * 1. **每个模型页的「反馈」区** —— 官方会就具体模型回「已下架对该模型的推理服务」
+ *    （例：`Qwen/Qwen3-Coder-480B-A35B-Instruct` 的反馈 issue，报障者据此关闭工单）；
+ * 2. **API-Inference 的定位** —— 它**只覆盖一部分模型**的在线推理，不是「魔搭上托管
+ *    的模型都能调」，且「可用模型列表会变」（社区踩坑记录与官方文档同义）。
+ *    报错文案 `has no provider supported` 的含义就是「该 model id 在平台上没有供给方」。
+ *
+ * ⚠️⚠️ 但该文案**不区分**「永久下架」与「provider 暂未就绪」：`MiniMax/MiniMax-M2.7`
+ * 的反馈区里，社区总结的是「provider 未开通（虽然模型列表里有）」—— 同一条文案。
+ *    故本名单是**带日期的快照**，不是「永久黑名单」：某条重新上线后删掉对应行即可，
+ *    不要据此推断「这个模型从此不存在」。
+ *
+ * ⚠️ 本名单是**静态**的：魔搭把某个 id 重新上线后，这里不会自动放行。
+ *    上游如果哪天恢复某个模型（例如又有服务方接单），把它从本名单删掉即可 ——
+ *    `tests/unit/modelscope-fallback.spec.ts` 的「已下线名单」用例会提示改这里。
+ *
+ * ⚠️⚠️ **恢复需要发版**：本名单是编译期常量，`dropRetired` 同时作用于**远端**与
+ *    **兜底表**两条路径 ⇒ 某模型重新上线后它不仅不出现在兜底表里，**连远端目录也会
+ *    被滤掉**。没有任何运行时开关、环境变量或 UI 入口能恢复它 —— 只能改代码 + 发版。
+ *    （另一条恢复途径是 dead-model 的 30 天 TTL，但那条只管**运行时阳性证据**，
+ *    管不到本名单；见 `dead-model-store.ts`。）
+ *
+ * ## 匹配语义
+ *
+ * 这里的每一条会**同时**以两种形态参与比较（见 `MODELSCOPE_RETIRED_MODEL_KEYS`）：
+ * ① 逐字 id；② `normalizeModelKey(id)` 归一化后的键。所以上游下发
+ * `DEEPSEEK-AI/DEEPSEEK-V4-PRO` / `…:free` / `deepseek-ai//…` 这些变体也会被剔。
+ */
+export const MODELSCOPE_RETIRED_MODEL_IDS: ReadonlySet<string> = new Set([
+  // DeepSeek 系：三个无后缀/旧快照 id 都已下线，只剩带新日期快照的两条在服务
+  'deepseek-ai/DeepSeek-V4-Flash-0731',
+  'deepseek-ai/DeepSeek-V4-Pro',
+  'deepseek-ai/DeepSeek-V4.1-Flash',
+  // 其余 5 条同批实测确认（各自都有 provider 侧下线）
+  'MiniMax/MiniMax-M3',
+  'moonshotai/Kimi-K3.1-Pro',
+  'stepfun-ai/Step-3.5-Flash',
+  'stepfun-ai/Step-3.7-Flash',
+  'stepfun-ai/Step-5-Preview',
+])
+
+/**
+ * 名单的**归一化键**形态（与 {@link MODELSCOPE_RETIRED_MODEL_IDS} 一一对应）。
+ *
+ * ⚠️⚠️ 必须两套口径都查（PR #92 对抗审计 P2-2）：名单存的是**逐字 id**
+ * （`deepseek-ai/DeepSeek-V4-Pro`），而**归一化键**是 `deepseek-v4-pro`。
+ * 只查逐字那一套时，上游只要发一个书写变体就绕过闸门 —— 实测 4 格 LEAK：
+ * `DEEPSEEK-AI/DEEPSEEK-V4-PRO` / `deepseek-ai/deepseek-v4-pro` /
+ * `deepseek-ai/DeepSeek-V4-Pro:free` / `deepseek-ai//DeepSeek-V4-Pro`。
+ *
+ * 危害比「那条还在列表里」重得多：这 4 个变体的**规范键都是 `deepseek-v4-pro`**
+ * （`canonicalKeyFor(...)` 全部 `via: 'id'`）⇒ 死链会**并进那个存活的虚拟模型**
+ * 成为可轮换候选 ⇒ 聚合挑中即请求期 404，而虚模型名是活的，用户不会怀疑到魔搭。
+ *
+ * 误伤面已实测为零：兜底表 36 条里归一化后命中的只有本轮就会剔的那 5 条，
+ * 存活模型（`Qwen/Qwen3.5-27B` vs `Qwen/Qwen3.8-27B` 之类）无一撞车。
+ */
+const MODELSCOPE_RETIRED_MODEL_KEYS: ReadonlySet<string> = new Set(
+  [...MODELSCOPE_RETIRED_MODEL_IDS].map((id) => normalizeModelKey(id)),
+)
+
+/**
+ * 剔除已下线 id（远端与兜底表都要过这道闸）。
+ *
+ * 判据是**两条口径的并集**：逐字 id（覆盖上游原样下发的情况）+
+ * 归一化键（覆盖一切书写变体）。见 {@link MODELSCOPE_RETIRED_MODEL_KEYS}。
+ */
+function dropRetired<T extends { id: string }>(entries: readonly T[]): T[] {
+  return entries.filter((entry) => {
+    if (MODELSCOPE_RETIRED_MODEL_IDS.has(entry.id)) return false
+    return !MODELSCOPE_RETIRED_MODEL_KEYS.has(normalizeModelKey(entry.id))
+  })
+}
+
+/**
+ * 兜底表 → 目录条目的**唯一**转换点。
+ *
+ * ⚠️⚠️ 为什么必须只有一份（PR #92 对抗审计 P2-4）：本函数原先被**抄了两遍**
+ * —— `loadModelscopeCatalog` 的 `catch` 分支里一份（`entries = …map(…)`）、
+ * 类方法 `fallbackEntries()` 里一份（`return …map(…)`），**逐字节相同**。
+ * 两份同义实现是本仓明令禁止的形态：改一份不改另一份会静默分叉，
+ * 而变异实测（删掉 `dropRetired` 只留内联 map）**全绿** —— 也就是说
+ * 「兜底路径也剔除已下线」这条承诺当时没有任何守卫。
+ *
+ * 现在两条路径都调这里，`dropRetired` 只在这一个地方出现。
+ */
+function fallbackCatalogEntries(): readonly ModelscopeCatalogEntry[] {
+  return dropRetired(MODELSCOPE_FALLBACK_MODELS).map((m) => ({
+    id: m.id,
+    name: m.name,
+    contextWindow: m.contextWindow,
+    supportsImage: m.supportsImage,
+    ...m.efforts === undefined ? {} : { efforts: m.efforts },
+  }))
+}
+
+/**
  * 拉取远端目录，失败回退静态兜底。
  *
  * @param ttlMs 命中内存缓存的窗口；测试传 0 强制每次都拉。
@@ -203,15 +351,16 @@ export async function loadModelscopeCatalog(
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const parsed = parseModelscopeCatalog(await response.json())
     if (parsed.length === 0) throw new Error('空目录')
-    entries = parsed
+    // ⚠️ 剔除已下线 id（见 `MODELSCOPE_RETIRED_MODEL_IDS`）。若剔完一条不剩，
+    //    按「空目录」处理走兜底 —— 宁可给兜底表，也不要让 UI 空白。
+    //
+    // ⚠️ 这个 `throw` 是**本函数内部的控制流**（用异常跳到下面的 `catch`），
+    //    **不是**用户可见错误：`catch` 就在同一个函数里，会改用兜底表返回 31 条。
+    //    真正的空白只在「名单把兜底表 36 条全收掉」时才会出现（当前 8/36，不可达）。
+    entries = dropRetired(parsed)
+    if (entries.length === 0) throw new Error('空目录（剔除已下线后）')
   } catch {
-    entries = MODELSCOPE_FALLBACK_MODELS.map((m) => ({
-      id: m.id,
-      name: m.name,
-      contextWindow: m.contextWindow,
-      supportsImage: m.supportsImage,
-      ...m.efforts === undefined ? {} : { efforts: m.efforts },
-    }))
+    entries = fallbackCatalogEntries()
   }
   catalogCache.set(apiKey, { at: Date.now(), entries })
   return entries
@@ -370,13 +519,7 @@ export class ModelscopeAdapter extends LlmAdapter {
     const remote = this.snapshotCatalog()
     if (remote !== undefined) return remote.map((m) => this.toCatalogEntry(m))
     void this.warmCatalog()
-    return MODELSCOPE_FALLBACK_MODELS.map((m) => this.toCatalogEntry({
-      id: m.id,
-      name: m.name,
-      contextWindow: m.contextWindow,
-      supportsImage: m.supportsImage,
-      ...m.efforts === undefined ? {} : { efforts: m.efforts },
-    }))
+    return this.fallbackEntries().map((m) => this.toCatalogEntry(m))
   }
 
   /** 本家私有形状 → 骨架的 `CatalogEntry`（**唯一**转换点）。 */
@@ -434,7 +577,19 @@ export class ModelscopeAdapter extends LlmAdapter {
     const remote = this.snapshotCatalog()
     if (remote !== undefined) return remote.map((m) => ({ id: m.id, name: m.name }))
     void this.warmCatalog()
-    return MODELSCOPE_FALLBACK_MODELS.map((m) => ({ id: m.id, name: m.name }))
+    return this.fallbackEntries().map((m) => ({ id: m.id, name: m.name }))
+  }
+
+  /**
+   * 兜底表 → 目录条目（**已剔除已下线 id**）。
+   *
+   * ⚠️ 兜底表本身**保留**那些已下线的 id：它同时是「远端目录快照」的证据
+   * （`modelscope-fallback.spec.ts` 有一条用例逐 id 对齐远端清单），
+   * 也是 `findModelscopeFallback` 做能力前缀继承的依据 —— 删表会同时丢掉这两件事。
+   * 故「下线」只在这一层过滤，表不动。
+   */
+  private fallbackEntries(): readonly ModelscopeCatalogEntry[] {
+    return fallbackCatalogEntries()
   }
 
   /**
@@ -464,13 +619,7 @@ export class ModelscopeAdapter extends LlmAdapter {
     if (this.options.fetchRemoteCatalog === undefined || slot === undefined) {
       // ⚠️ 这里**不写** lastCatalog：没有远端能力时它永远是兜底表，
       // 记下来只会让 listAllModels 走一条与本分支结果相同的弯路。
-      return MODELSCOPE_FALLBACK_MODELS.map((m) => ({
-        id: m.id,
-        name: m.name,
-        contextWindow: m.contextWindow,
-        supportsImage: m.supportsImage,
-        ...m.efforts === undefined ? {} : { efforts: m.efforts },
-      }))
+      return this.fallbackEntries()
     }
     // ⚠️ **不要**在适配器上再 memoize 一份：那会让目录永不过期。
     // 刷新职责交给带 TTL 的 `loadModelscopeCatalog`。

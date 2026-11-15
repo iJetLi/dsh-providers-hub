@@ -267,9 +267,17 @@ describe('签到能力：registry 声明与 runtime 实现必须一致', () => {
     // ⚠️ 2026-11-03 加 baizhi（百智云，Cap 验证码补全后声明可签到）：`claim` 在
     //    `provider-credits.ts` 的 baizhi 条目里（challenge → 本地 PoW → redeem →
     //    daily-temporary-credit）⇒ 15 → 16。
-    // 魔搭接入签到后成为该编号的第 17 个；raccoon 于 2026-11-15 接入每日签到
-    // （办公端 `setting_info` 结算）后成为第 18 个由通用领取流程覆盖的渠道。
-    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(18)
+    // ⚠️ 2026-11-15 **两家各自独立接入**，合并时**都要算**（基数 17）：
+    //    - raccoon（本 PR）：办公端 `setting_info` 结算每日积分；
+    //    - workbuddy（PR #87）：国际版签到端点与国内版**逐字同形**，此前
+    //      「无签到接口」是误判（`docs/agent-notes/providers-workbuddy-intl-checkin.md`）。
+    //    ⇒ 17 + 2 = 19。
+    //
+    // ⚠️ 别把这里读成「17 → 18 → 19 的串联」：两条分支是**并行**基于 17 各加
+    //    一家的，合并不存在互相覆盖（`credits` 是不同 id 的两条记录）。
+    //    若只写 18，说明有人把「合并」误当成了「取其一」—— 那会让另一家的
+    //    `claim` 静默失去本用例的覆盖（数量对不上就会先红，这正是它的价值）。
+    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(19)
 
     /**
      * ⚠️⚠️ **只数数量挡不住「删一家 + 加一家」** —— 数量不变就静默通过，
@@ -881,22 +889,23 @@ describe('★ credits.claimAll 真的查表（注入哨兵，硬编码分支不�
 
 describe('★ 不支持签到的渠道：文案必须指明「该产品无此能力」', () => {
   /**
-   * ⚠️ **raccoon 已于 2026-11-15 移出本组**（真实账号实测推翻了「没有签到端点」
-   * 的旧结论：触发器在办公端 `GET /api/web/office/v3/setting_info`，按天幂等，
-   * 3 个真实账号各 +300）。它现在走**通用领取流程**，故行为断言在下面
-   * 「raccoon 的签到走办公端结算」那条。
+   * ⚠️ **本组如今只剩 cline 一家** —— 另外两家都在 2026-11-15 被真实实测推翻：
    *
-   * 留在本组的两家都是**实测确无端点**：cline 对整个 sidecar 做字符串扫描都
-   * 没有 checkin / campaign 端点；workbuddy 国际版内核里只有 `get-dosage-notify`。
+   * - `raccoon`：触发器在**办公端** `GET /api/web/office/v3/setting_info`
+   *   （按天幂等，3 个真实账号各 +300）⇒ 走通用领取流程，行为断言见下面
+   *   「raccoon 的签到打到办公端 setting_info」那条；
+   * - `workbuddy`：国际版签到端点与国内版**逐字同形**，此前「无签到接口」是
+   *   误判（`docs/agent-notes/providers-workbuddy-intl-checkin.md`）⇒ 同样走
+   *   通用领取流程。
+   *
+   * 留下 cline 是因为它**确实**没有端点：对整个 sidecar 做字符串扫描都没有
+   * checkin / campaign 相关字面量。
    */
-  it('cline / workbuddy 各回**逐字保留**的可读原因', async () => {
+  it('cline 回**逐字保留**的可读原因', async () => {
     const { call } = makeRpc()
     const expected: Record<string, string> = {
       // cline：对整个 sidecar 做字符串扫描，无任何 checkin/campaign 端点。
       cline: 'Cline 不支持每日签到（其后端没有签到接口）',
-      // ⚠️ workbuddy 这条守卫**必须有**：没有它时会落到通用分支，用**国际版**
-      //    凭据去发**国内版**的签到请求 —— 必然失败，且是一次真实上游请求。
-      workbuddy: 'WorkBuddy 国际版不支持每日签到（其后端没有签到接口）',
     }
     for (const [provider, message] of Object.entries(expected)) {
       const result = await call('credits.claimAll', { provider })
@@ -959,6 +968,49 @@ describe('★ 不支持签到的渠道：文案必须指明「该产品无此能
     const outcome = result.value?.results?.[0]?.outcome
     expect(outcome?.kind, `应判 claimed，实际 ${JSON.stringify(outcome)}`).toBe('claimed')
     if (outcome?.kind === 'claimed') expect(outcome.credit).toBe(300)
+  })
+
+  /**
+   * ★ workbuddy 走**通用分支**（2026-11-15 更正）。
+   *
+   * 国际版与国内版的签到端点**逐字同形**，只有 baseURL 不同 —— 原先「国际版
+   * 没有签到接口」的结论来自「只搜 CLI 内核字面量」，而签到端点是前端直接调的。
+   * 这条用例钉住两件事：端点真的打到 `www.workbuddy.ai`，且收尾的活跃上报也跑了。
+   */
+  it('★ workbuddy 真发领取请求（国际版有签到端点）', async () => {
+    const { call, pool, credentials } = makeRpc(undefined, { ...emptyAuths() })
+    await seed(pool, 'workbuddy', 'w-1', 'WORKBUDDY_ACCOUNT_SPEC')
+    await credentials.set('WORKBUDDY_ACCOUNT_SPEC', JSON.stringify({
+      access_token: 'AT-W', user_id: 'uid-w',
+    }))
+    const urls: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = String(input)
+      urls.push(url)
+      // ⚠️ 三个端点要**分别**应答：workbuddy 的 precheckStatus 是缺省 true，先查状态，
+      //    状态说「活动没开」就**不会**发领取请求（那正是骨架的正常短路，不是缺陷）。
+      const body = url.includes('/activity/growth/streak')
+        ? '{"code":0,"data":{"streak":{"days":3}}}'
+        : url.includes('/v2/report')
+          ? '{"code":0}'
+          : url.includes('/checkin-activity-status')
+            ? '{"code":0,"data":{"active":true,"today_checked_in":false}}'
+            : '{"code":0,"data":{"credit":100,"streak_days":3,"is_streak_day":false}}'
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    const result = await call('credits.claimAll', { provider: 'workbuddy' })
+    expect(result.ok, `workbuddy 应被接受，实际 error=${result.error?.message}`).toBe(true)
+    // ⚠️ 必须比**精确 pathname**，不能用 `startsWith` 前缀：原先的
+    // `startsWith('…/daily-checkin')` 在把路径改成 `daily-checkin-v2` 后
+    // 仍然全绿（正向审计 M03 实测 37 绿）—— 前缀判据把「路径改错」当成通过。
+    expect(
+      urls.some((url) => new URL(url).pathname === '/v2/billing/meter/daily-checkin'),
+      'workbuddy 没有打到国际版的领取端点',
+    ).toBe(true)
+    expect(
+      urls.some((url) => url.endsWith('/v2/report')),
+      'workbuddy 的活跃上报（afterClaimNote）没有跑',
+    ).toBe(true)
   })
 
   it('★ 未登记的 provider 仍回 unsupported provider（兜底契约不变）', async () => {

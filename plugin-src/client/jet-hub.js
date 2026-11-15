@@ -264,7 +264,7 @@ export function providerLabel(id) {
  * - **lobsterai（有道龙虾）**：签到接口是 `client-activities` 三步流程
  *   （实现见 `src/lobsterai-credits.ts`），经 `sigin.py` 实测确认。
  *
- * **workbuddy 无签到**：国际版（www.workbuddy.ai）后端没有签到接口
+ * **workbuddy 有签到**（2026-11-15 更正）：国际版（www.workbuddy.ai）与国内版端点同形
  * （内核中只有 `/v2/billing/meter/get-dosage-notify` 用量通知）。
  * CodeArts 是华为云账号体系，同样不参与。
  */
@@ -11598,9 +11598,12 @@ export function JetHubPage({ rpcCall }) {
    * （并发易触发风控）」（见 `src/jet-hub-rpc.ts`），而这是**真实领积分**的
    * 写操作，跨渠道并发会同时发出多路领取请求，触发风控的代价是用户当天领不到。
    *
-   * 渠道集合由能力表推导（`checkinProviders()`）—— workbuddy / cline 后端
+   * 渠道集合由能力表推导（`checkinProviders()`）—— cline / raccoon 后端
    * 没有签到接口，**绝不能**出现在请求列表里（那会产生必然失败的请求，
    * 正是 CodeArts 历史缺陷的形态）。
+   *
+   * ⚠️ 2026-11-15 更正：**workbuddy 国际版有签到端点**（与国内版同形，
+   * 见 `src/workbuddy-intl-activity.ts`），已从「不支持」名单移出（PR #87）。
    *
    * 单渠道失败只计入 failed，**不中断后续渠道**（与后端「单账号失败不中断
    * 整体」同型）。但后端对**无账号**的渠道本就是零请求，故不额外预查账号。

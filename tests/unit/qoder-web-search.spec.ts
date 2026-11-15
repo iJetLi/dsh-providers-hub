@@ -26,6 +26,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { QoderAdapter } from '../../src/qoder-adapter.js'
 import { NativeSearchCodes, WebNativeError, type NativeSource } from '../../src/native-search-contract.js'
 import { QODER, QODER_CN, type QoderProduct } from '../../src/qoder-product.js'
+import { qoderMachineOs } from '../../src/qoder-align.js'
 import type { QoderCredential } from '../../src/qoder.js'
 
 // ───────────────────────── 替身 ─────────────────────────
@@ -46,6 +47,8 @@ function makeAdapter(options: {
   credential?: QoderCredential | undefined
   product?: QoderProduct
   response?: ((init?: RequestInit) => Response | Promise<Response>) | undefined
+  /** 传入即同时挂上 `fetchFor`（per-账号出口代理），用来验证**优先级**。 */
+  fetchForCalls?: Array<{ accountId: string; url: string }>
 } = {}) {
   const fetchCalls: Array<{ url: string; init: RequestInit }> = []
   const credential = 'credential' in options ? options.credential : makeCredential()
@@ -54,6 +57,14 @@ function makeAdapter(options: {
     resolveCredential: async () => credential as never,
     refresh: async () => {},
     ...(options.product !== undefined ? { product: options.product } : {}),
+    ...(options.fetchForCalls === undefined
+      ? {}
+      : {
+          fetchFor: (accountId: string) => (async (url: string | URL, init?: RequestInit) => {
+            options.fetchForCalls!.push({ accountId, url: String(url) })
+            return new Response('{}', { status: 200 })
+          }) as unknown as typeof fetch,
+        }),
     fetchImpl: (async (url: string | URL, init?: RequestInit) => {
       fetchCalls.push({ url: String(url), init: init ?? {} })
       if (options.response === undefined) return new Response('{}', { status: 200 })
@@ -78,6 +89,41 @@ function firstCall(calls: Array<{ url: string; init: RequestInit }>) {
 }
 
 // ───────────────────────── ① 协议形状 ─────────────────────────
+
+describe('Qoder 搜索：出口 fetcher 优先级（与推理主路径**必须一致**）', () => {
+  it('★★★ 注入了 `fetchImpl` ⇒ 搜索**绝不**走 `fetchFor`（单测替身优先）', async () => {
+    // 对抗审计 PR #91 P2-2：原来只有**源码文本**断言（`expect(search).toMatch(...)`），
+    // 把判据改成语义反转（`this.hasInjectedFetchImpl && false`）246 条全绿。
+    // 这条是行为级：真调一次搜索，数两个出口各被调用几次。
+    const fetchForCalls: Array<{ accountId: string; url: string }> = []
+    const { adapter, fetchCalls } = makeAdapter({
+      fetchForCalls,
+      response: () => jsonResponse({ pageItems: [] }),
+    })
+    await adapter.searchOnce('hello', makeCredential(), new AbortController().signal)
+    expect(fetchCalls.length, '注入的 fetchImpl 必须被调用').toBeGreaterThan(0)
+    expect(fetchForCalls, '注入了替身就不得再走代理出口').toHaveLength(0)
+  })
+
+  it('★★ 没注入替身但有 `fetchFor` ⇒ 搜索**必须**走代理出口（否则墙外恒超时）', async () => {
+    // 真实报障 2026-10-21 的形态：搜索端点在墙外域，漏接代理的症状是
+    // 「聊天通了、联网搜索恒 10.7s 超时」。这条锁的是**反方向**：
+    // 只要没注入替身，就一定要走 `fetchFor`。
+    const fetchForCalls: Array<{ accountId: string; url: string }> = []
+    const adapter = new QoderAdapter({
+      credentialRef: 'QODER_ACCOUNT_TEST' as never,
+      resolveCredential: async () => makeCredential() as never,
+      refresh: async () => {},
+      fetchFor: (accountId: string) => (async (url: string | URL) => {
+        fetchForCalls.push({ accountId, url: String(url) })
+        return jsonResponse({ pageItems: [] })
+      }) as unknown as typeof fetch,
+    })
+    await adapter.searchOnce('hello', makeCredential(), new AbortController().signal)
+    expect(fetchForCalls, '没注入替身 ⇒ 必须走 fetchFor').toHaveLength(1)
+    expect(fetchForCalls[0]!.url).toContain('/api/v1/webSearch/oneSearch')
+  })
+})
 
 describe('Qoder 搜索：协议形状', () => {
   it('打 {encryptedInferBase}/api/v1/webSearch/oneSearch', async () => {
@@ -104,6 +150,9 @@ describe('Qoder 搜索：协议形状', () => {
     expect(headers['X-Session-ID']).toBeTruthy()
     // 全套 Cosy-* 头也应由 WASM 生成
     expect(Object.keys(headers).some((k) => k.startsWith('Cosy-'))).toBe(true)
+    // 形态对齐：`Cosy-MachineOS` 是**本仓库补的**（WASM 头表里没有这一项，
+    // 依据见 `qoder-align.ts` 模块头的实测 dump）；`X-Session-ID` 是官方的。
+    expect(headers['Cosy-MachineOS']).toBe(qoderMachineOs())
   })
 
   it('method 为 POST，body 非空（密文）', async () => {

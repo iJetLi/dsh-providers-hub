@@ -35,6 +35,13 @@ describe('isModelGoneError —— 应判为「模型已失效」', () => {
     ['中文：模型不存在', '模型 deepseek-x 不存在', 'HTTP_404'],
     ['中文：已下线', '该模型已下线', 'HTTP_400'],
     ['中文：长 id（窗口必须够宽）', '模型 deepseek-v4.1-flash-preview 不存在', 'HTTP_404'],
+    // ⚠️ 2026-11-16（PR #92 正向审计 P2-1）：魔搭「模型已下线」的**唯一**阳性信号
+    //    长这样 —— 主语与语义之间插着 `id : <id> ,`，`matchesGonePhrase` 的紧邻
+    //    锚定匹配不到 ⇒ 只能新增独立 `GONE_PATTERNS` 条目（塞进 `GONE_TAIL` 无效，
+    //    它被 `^` 锚定拼装）。三种真实形状逐字取自实测报文。
+    ['魔搭：has no provider supported（带前缀）', 'modelscope: HTTP 400 - {"message":"Model id : deepseek-ai/DeepSeek-V4-Pro , has no provider supported"}', 'HTTP_400'],
+    ['魔搭：has no provider supported（裸报文）', 'Model id : deepseek-ai/DeepSeek-V4-Pro , has no provider supported', undefined],
+    ['魔搭：has no provider supported（中文前缀）', 'modelscope 请求失败：HTTP 400 {"message":"Model id : Qwen/Qwen3.5-27B , has no provider supported"}', 'HTTP_400'],
     // ⚠️ 以下 6 条是 2026-10-06 复审 !66 补的回归：初版**全部漏判**。
     // 根因：英文正则的窗口字符类 `[^.!?]` 把**点号**当句子结束符，而本仓库
     // 几乎所有模型 id 都带小数点 ⇒ 英文路径对带点 id 全部失效。
@@ -78,6 +85,11 @@ describe('isModelGoneError —— 必须**不**判为模型失效（误判会藏
     ['凭据缺失', 'model x: no usable credential', 'MISSING_CREDENTIAL'],
     ['排队', '模型繁忙，请排队重试', 'QUEUE'],
     ['网络错误', 'transport error: socket hang up', 'TRANSPORT'],
+    // ⚠️ 2026-11-16：`has no provider supported` 足够专有，但同义的
+    //    「换套餐就能恢复」形态必须仍然 false —— 记成下架会 30 天内都不可用。
+    ['未开通（is not supported）', 'the model gpt-x is not supported', 'PERMISSION_DENIED'],
+    ['未开通（需更高套餐）', 'this model requires a higher plan, currently not supported', 'PERMISSION_DENIED'],
+    ['功能不支持', 'model x does not support tool calls', 'INVALID_REQUEST'],
     ['账号均不可用（含模型名）', 'cline: 模型 deepseek-x 的所有账号均不可用 —— 请稍后', 'QUOTA_EXCEEDED'],
     ['账号均不可用（无错误码兜底）', '模型 abc 的所有账号均不可用', undefined],
     // ⚠️ 「不可用」绝不能当下架：账号类报错全这么说。初版刻意不收它，

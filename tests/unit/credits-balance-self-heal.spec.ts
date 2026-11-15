@@ -566,17 +566,22 @@ describe('credits.claimAll 的按需自愈（与余额查询同一层）', () =>
   })
 
   /**
-   * ⚠️ **raccoon 于 2026-11-15 移出本组**：每日签到接通后它**不再**返回
-   * 「不支持每日签到」，而是走通用领取流程（办公端 `setting_info` 结算）。
-   * 留着它在这组里会让断言变成「必须报不支持」，与实现直接矛盾。
+   * ⚠️ **本组如今只剩 cline 一家** —— 另外两家都在 2026-11-15 被实测推翻并接通了
+   * 真签到，**不再**返回「不支持每日签到」：
    *
-   * 留下两家是**实测确无端点**的：cline（sidecar 全量扫描无 checkin 端点）、
-   * workbuddy 国际版（内核只有 `get-dosage-notify`）。
+   * - `raccoon`：每日积分由办公端 `setting_info` 结算（按天幂等）；
+   * - `workbuddy`：国际版签到端点与国内版逐字同形。
+   *
+   * 留着它们在这组里会让断言变成「必须报不支持」，与实现直接矛盾
+   * （自愈的失败文案会顶替掉能力拒绝文案，用例红在错误的原因上）。
+   *
+   * 下面另有**反向**用例钉住「raccoon / workbuddy 的自愈失败不得被报成
+   * 『不支持每日签到』」—— 不然把它们移出名单就等于放弃这条守卫。
    */
-  it('不签到的渠道（cline / workbuddy）**不因自愈而改变拒绝行为**', async () => {
-    // ⚠️ 这两家即使账号已过期也必须仍然返回「不支持签到」的可读错误 ——
+  it('不签到的渠道（cline）**不因自愈而改变拒绝行为**', async () => {
+    // ⚠️ 即使账号已过期也必须仍然返回「不支持签到」的可读错误 ——
     // 自愈不能把守卫的既有语义带偏（也不能因为续期失败就吞掉这条错误）。
-    for (const provider of ['cline', 'workbuddy']) {
+    for (const provider of ['cline']) {
       const h = setup({
         accounts: [expiredEntry({ id: `id-${provider}`, provider })],
         // 故意让续期失败：守卫必须在自愈失败后仍然生效。
@@ -589,23 +594,34 @@ describe('credits.claimAll 的按需自愈（与余额查询同一层）', () =>
   })
 
   /**
-   * ★ **反向**：raccoon 的自愈失败**不得**把它变成「不支持每日签到」。
+   * ★ **反向**：raccoon / workbuddy 的自愈失败**不得**被报成「不支持每日签到」。
    *
-   * ⚠️ 这是上面那条反转后必须补的守卫：把 raccoon 从「无端点」名单移出后，
+   * ⚠️ 这是上面那条反转后必须补的守卫：把两家从「无端点」名单移出后，
    * 若有人为了让它「绿」而把 `claimUnavailableReason` 加回去，上面的循环
-   * 已经不含它了 ⇒ 必须**单独**钉住「它的失败原因是自愈失败，不是能力缺失」。
+   * 已经不含它们了 ⇒ 必须**单独**钉住「失败原因是自愈失败，不是能力缺失」。
    *
-   * 判据只用「不得含『不支持每日签到』」：具体的失败文案取决于续期桩怎么抛，
-   * 钉死它会变成脆断言；而「是不是能力缺失」才是本条要守的语义。
+   * ⚠️ 用 `it.each` 两家都点名：它们在**同一个 PR 系列里**被两个不同的 PR 各自
+   * 移出（raccoon 走办公端结算、workbuddy 走国际版端点），只测一家会让另一家
+   * 的回退完全没人看着。
+   *
+   * 判据只用「ok 必须为 true」：具体失败文案取决于续期桩怎么抛，钉死它会变成
+   * 脆断言；而「是不是被能力拒绝挡成 false」才是本条要守的语义。
    */
-  it('★ raccoon 的自愈失败不得被报成「不支持每日签到」', async () => {
-    const h = setup({
-      accounts: [expiredEntry({ id: 'id-raccoon', provider: 'raccoon' })],
-      auths: { raccoon: async () => { throw new Error('boom') } },
-    })
-    const result = await h.call('credits.claimAll', { provider: 'raccoon' })
-    expect(result.ok, 'raccoon 的 claim 不该被自愈失败挡成拒绝').toBe(true)
-  })
+  it.each(['raccoon', 'workbuddy'])(
+    '★ %s 的自愈失败不得被报成「不支持每日签到」',
+    async (provider) => {
+      const h = setup({
+        accounts: [expiredEntry({ id: `id-${provider}`, provider })],
+        auths: { [provider]: async () => { throw new Error('boom') } },
+      })
+      const result = await h.call('credits.claimAll', { provider })
+      expect(
+        result.ok,
+        `${provider} 的 claim 被自愈失败挡成了拒绝 —— 它已经有真签到实现，不该回「不支持每日签到」`,
+      ).toBe(true)
+      expect(result.error?.message ?? '').not.toContain('不支持每日签到')
+    },
+  )
 })
 
 /**

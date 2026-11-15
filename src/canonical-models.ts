@@ -61,6 +61,26 @@ export const EXCLUDED_ALIASES: ReadonlySet<string> = new Set([
   'primary-model',
   'deep-model',
   'auto',
+  // ⚠️⚠️ **不要**把 AutoClaw 的 `zai_auto` / `zai_auto-fast` 加进本集合
+  //    （PR #89 初版这么做过，被审计打回）。
+  //
+  //    理由：本集合里的六条全是我们**自己造的聚合入口抽象名**（`auto` /
+  //    `default-model` / `fast-model` …），它们不对应任何上游模型。而
+  //    `zai_auto` / `zai_auto-fast` 是 autoclaw **上游真实存在、可直接调用**的
+  //    两个模型：远端目录里有、且有独立的能力声明与实测依据
+  //    （`contextWindow 1048576`、`maxOutputTokens 393216` / `131072`、
+  //    `supportsImage: true`，见 `src/autoclaw-product.ts` 的
+  //    `AUTOCLAW_FALLBACK_MODELS` 与 `src/autoclaw-adapter.ts`）。
+  //
+  //    加进本集合的实际后果**不是合并、而是消失**：`canonicalKeyFor` 返回
+  //    `undefined` ⇒ `buildVirtualModels` 直接 `continue` ⇒ 该模型不进任何
+  //    虚拟模型 ⇒ 用户在**聚合**选择器里再也选不到 autoclaw 的 Auto / Auto-Fast
+  //    （`autoclaw` 直连不受影响，故症状静默）。实测：模拟 autoclaw 4 条 + buddy
+  //    2 条走 `buildVirtualModels`，加进去之后虚拟模型从 6 条塌成 2 条。
+  //
+  //    PR 初版本想解决的是「聚合列表里出现 `zai_auto` 这种机器名」—— 那是个
+  //    **显示名**问题，正解是在 `CANONICAL_NAMES` 里给它们登记人类可读名
+  //    （见下方 `'zai_auto': 'Auto (AutoClaw)'`），不是删模型。
 ])
 
 /**
@@ -170,6 +190,35 @@ export function normalizeNameKey(name: string): string {
  */
 const MAGICREW_CANONICAL_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
   'qwen-3.8-flash': 'qwen3-8-flash',
+})
+
+/**
+ * AutoClaw **两站共用**的规范键补丁（国内 `autoclaw` / 国际 `autoclawintl`）。
+ *
+ * ⚠️ 抽成常量的理由与 `MAGICREW_CANONICAL_OVERRIDES` **同因同形**：
+ * `src/autoclaw-product.ts:399` 与 `:430` 两个产品定义的 `fallbackModels` 都是
+ * 同一个 `AUTOCLAW_FALLBACK_MODELS`（`:404-406` 的注释逐字写「模型表与国内
+ * **逐字节相同**」）⇒ 两站的 id 都是 `zai_glm-5.3-flash` / `zaicoding_glm-5.3`
+ * 这一批，补丁必须**逐个相同**。
+ *
+ * ⚠️⚠️ **漏登记国际站的症状是静默的，而且它会让本 PR 自己制造出「同模型两条」**：
+ * 只登记 `autoclaw` 的话 ——
+ *
+ * | 树 | 虚拟模型 | 候选 |
+ * | --- | --- | --- |
+ * | 修前 | `zai_glm-5-3-flash` | `autoclaw/…` + `autoclawintl/…`（**2 候选，合并**） |
+ * | 只登记国内 | `glm-5-3-flash` | `autoclaw/…` + `buddy/…`（**intl 不在轮换里**） |
+ * | 只登记国内 | `zai_glm-5-3-flash` | `autoclawintl/…`（**孤儿，1 候选，展示名就是键本身**） |
+ *
+ * ⇒ 同一模型仍是两条，只是「合并的那条」从「两站」变成了「国内 + buddy」。
+ * 本 PR 的标题是「同一模型被拆成两条虚拟模型」，**只修一半等于把症状挪了个位置**。
+ *
+ * ⚠️ 两站都在聚合渠道里：`src/aggregate-adapter.ts:1410` 与 `:1418` 的
+ * `AGGREGATE_CHANNELS` 同时含 `'autoclaw'` 与 `'autoclawintl'`。
+ */
+const AUTOCLAW_CANONICAL_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
+  'zai_glm-5.3-flash': 'glm-5-3-flash',
+  'zaicoding_glm-5.3': 'glm-5-3',
 })
 
 /**
@@ -283,6 +332,98 @@ export const CANONICAL_OVERRIDES: Readonly<Record<string, Readonly<Record<string
      *   这样「加一条补丁只改一处」—— 复制两份必然漂移。
      */
     magicrewintl: MAGICREW_CANONICAL_OVERRIDES,
+    /**
+     * **AutoClaw（智谱）** —— 它的模型 id **带渠道前缀**，于是同一模型被拆成两条。
+     *
+     * ## 实测（2026-11-16，用户实例的 `/v1/models` 全量目录）
+     *
+     * | autoclaw 的 id | 展示名 | 其他渠道的键 |
+     * | --- | --- | --- |
+     * | `zai_glm-5.3-flash` | `GLM-5.3 Flash (AutoClaw)` | `glm-5-3-flash`（buddy / codearts / workbuddy / zcode **4 家静态可证**） |
+     * | `zaicoding_glm-5.3` | `GLM-5.3 (AutoClaw)` | `glm-5-3`（同上 4 家） |
+     *
+     * ⚠️ 别写「6 家」：`opencode` 的**静态** id 是 `glm-5.3-flash-free`
+     * （`src/opencode-product.ts:156`），`normalizeModelKey` 只剥 `/:free$/`、
+     * `-free` 后缀**不剥** ⇒ 它的键是 `glm-5-3-flash-free`（**不同键**）；
+     * `trae` 的静态兜底表只有 `glm-5.2` / `glm-5-turbo` / `glm-5`
+     * （`src/trae-product.ts:235-237`），`glm-5.3` 只能来自远端目录。
+     * ⇒ 「4 家静态可证 + trae / opencode 依赖远端目录」才是可复核的表述
+     * （2026-11-16 正向审计 P3-1 实测）。
+     *
+     * `normalizeModelKey` 只剥命名空间前缀（最后一个 `/` 之前）与 `sn-`，
+     * **不剥 `zai_` / `zaicoding_`** ⇒ 键里留着前缀 ⇒ 聚合里出现
+     * `aggregate/zai_glm-5-3-flash` 与 `aggregate/glm-5-3-flash` 两条**同模型**
+     * 虚拟模型，autoclaw 也不在那 6 家的轮换候选里（症状静默：只是不在列表里）。
+     *
+     * ⚠️ **不做「通用剥前缀」**：`zai_` 只是这一家的写法，把它写成通用规则
+     * （例如「剥掉第一个 `_` 之前」）会误伤真实带下划线的 id —— 实测目录里就有
+     * `modelscope:OpenGVLab/InternVL3_5-241B-A28B`（下划线是模型名的一部分）。
+     * 与 qoder / accio / magicrew 同一条规矩：**逐条登记、每条有实测依据**。
+     */
+    autoclaw: AUTOCLAW_CANONICAL_OVERRIDES,
+    /**
+     * **AutoClaw 国际站**（`autoclawintl`）。
+     *
+     * ⚠️⚠️ 必须**与国内站逐个相同**，且必须**单独登记**（不能指望某种继承）：
+     * 两站的 `fallbackModels` 是同一个 `AUTOCLAW_FALLBACK_MODELS`
+     * （`src/autoclaw-product.ts:399` / `:430`，`:404-406` 注释明写「逐字节相同」），
+     * 漏登记的症状 = 国际站每条模型都退化成 `via: 'id'` 的带前缀键 ⇒ 自成一个
+     * **只有一个候选**的孤立虚拟模型 ⇒ 聚合的「GLM-5.3-Flash 轮换列表」里
+     * **永远没有国际站**，同时候选表里同一模型出现两条。零报错、零日志。
+     * 与 `magicrewintl` 那次（`MAGICREW_CANONICAL_OVERRIDES`）同因同形。
+     *
+     * ⇒ 两站共用同一个常量对象，这样「加一条补丁只改一处」—— 复制两份必然漂移。
+     */
+    autoclawintl: AUTOCLAW_CANONICAL_OVERRIDES,
+    /**
+     * **DeepSeek 的日期快照后缀**（`-1017` / `-0813`）—— 归到对应的无后缀键。
+     *
+     * ## 实测（2026-11-16，直接打真实上游，不是看名字猜的）
+     *
+     * | id | 结果 |
+     * | --- | --- |
+     * | `modelscope/deepseek-ai/DeepSeek-V4.1-Flash` | ❌ 502 ← 上游 400 `Model id : …, has no provider supported`（**已下线**，两次复测一致） |
+     * | `modelscope/deepseek-ai/DeepSeek-V4.1-Flash-1017` | ✅ 200 |
+     * | `modelscope/deepseek-ai/DeepSeek-V4-Pro` | ❌ 502 ← 同上（**已下线**） |
+     * | `modelscope/deepseek-ai/DeepSeek-V4-Pro-0813` | ✅ 200 |
+     * | `codearts/deepseek-v4.1-flash` / `…-1017` | ✅ 两个都 200（是两个独立条目，倍率 x0.09 / x0.12） |
+     *
+     * ⇒ 两件不同的事，别混：
+     *
+     * 1. **「无后缀 vs 后缀」不是等价关系** —— modelscope 上无后缀已下线、后缀在服务；
+     *    codearts 上两者并存（`models.ts` 记的是「上游并存的旧版与新版」，曾因去重把
+     *    `-1017` 静默吞掉）；`llm-adapter.ts` 另有实测：codearts 的 `-0731` / `-0813`
+     *    属 **benefit 组**（需 `maas_type: benefit`），与无后缀「不能互相替代」。
+     *    ⚠️ 所以**不要**在注释/PR 里写「两者是同一个 id」—— 它们是两个 id、两段生命周期。
+     * 2. **后缀那条才是该渠道当前在服务的那个模型** —— modelscope 上根本没有可用的
+     *    无后缀 V4-Pro / V4.1-Flash。不并的后果很具体：主行
+     *    `aggregate/deepseek-v4-pro` 里挂着一个**必然 400** 的 modelscope 无后缀 id，
+     *    而真正能用的 `-0813` 孤零零单独成列（只有 1 个候选）⇒ 用户选「DeepSeek V4 Pro」
+     *    时反而轮换不到魔搭。这正是用户报障「同一个模型被拆成不同模型」的成因。
+     *
+     * ## ⚠️ 合并的代价（写在这里，别以后再当 bug 查一遍）
+     *
+     * - 轮换可能选中**旧 build**（codearts 上 `-1017` 与无后缀并存）；
+     * - codearts 的 `-0813` 走 benefit 计费桶。**不会发错 header** —— `benefitIds` 按
+     *   原始 realId 记账（`models.ts` 的 `benefitIds` 收集处），合并只改虚拟模型归组；
+     * - 上游若把无后缀 id 重新上线并换成更新的 build，这条补丁要重看。
+     *
+     * ⚠️ 也**不要**推广成「剥 `-NNNN`」的通用规则：同目录里
+     * `trae:Doubao-Seed-2.1-Pro`（展示名 `Seed-2.1-Pro-0915`）、
+     * `mistral-large-instruct-2407`、`xiyansql-qwencoder-32b-2412/2504` 的数字都是
+     * **模型名本体或独立型号**，剥了就错并。逐条登记是刻意的。
+     */
+    codearts: Object.freeze({
+      'deepseek-v4.1-flash-1017': 'deepseek-v4-1-flash',
+    }),
+    // ⚠️ modelscope 的 id **带命名空间**（`deepseek-ai/…`）。补丁查找**先**按 `realId`
+    //    原文精确匹配（`Object.hasOwn(providerPatch, realId)`），**再**按归一化后的
+    //    `idKey` 兜底（PR #89 D 域：两条口径同源，否则上游换个书写形态就静默退回孤立键）
+    //    ⇒ 写全命名空间是**正确做法**（原文即命中），但不再是唯一能命中的写法。
+    modelscope: Object.freeze({
+      'deepseek-ai/DeepSeek-V4.1-Flash-1017': 'deepseek-v4-1-flash',
+      'deepseek-ai/DeepSeek-V4-Pro-0813': 'deepseek-v4-pro',
+    }),
   })
 
 /**
@@ -333,9 +474,25 @@ export function canonicalKeyFor(
   const providerPatch = Object.hasOwn(CANONICAL_OVERRIDES, provider)
     ? CANONICAL_OVERRIDES[provider]
     : undefined
-  const patched = providerPatch !== undefined && Object.hasOwn(providerPatch, realId)
-    ? providerPatch[realId]
-    : undefined
+  // ⚠️⚠️ 补丁查找必须**两条口径都查**（2026-11-16 对抗审计 D 域实测的「漏并 5 格」）：
+  // 排除集查的是 `realId` **和** `idKey`（归一化后），而这里原先**只查 raw `realId`**
+  // ⇒ 同一函数两套口径。上游只要换个书写形态就静默退回带前缀的孤立键：
+  //
+  // | 上游给的 realId | 只查 raw `realId` | 期望 |
+  // | --- | --- | --- |
+  // | `ZAI_GLM-5.3-FLASH`（全大写） | 查不到 ⇒ 孤立键 | `glm-5-3-flash` |
+  // | `zai_glm-5.3-flash:free`（带 `:free`） | 查不到 ⇒ 孤立键 | `glm-5-3-flash` |
+  // | `zai_glm-5.3-flash `（尾空格） | 查不到 ⇒ 孤立键 | `glm-5-3-flash` |
+  // | `ZAICODING_GLM-5.3` | 查不到 ⇒ 孤立键 | `glm-5-3` |
+  //
+  // 症状与「漏登记国际站」**完全同型且静默**（自成一个只有一个候选的虚拟模型、
+  // 轮换列表里永远看不到它）。`normalizeModelKey` 已经处理了大写/空格/`:free`，
+  // 所以只要把两侧都归一化再比一次即可 —— 补丁表很短（个位数），线性扫描无成本。
+  const patched = providerPatch === undefined
+    ? undefined
+    : Object.hasOwn(providerPatch, realId)
+      ? providerPatch[realId]
+      : Object.entries(providerPatch).find(([patchId]) => normalizeModelKey(patchId) === idKey)?.[1]
   if (patched !== undefined) {
     return EXCLUDED_ALIASES.has(patched) ? undefined : { key: patched, via: 'patch' }
   }
@@ -366,6 +523,17 @@ const CANONICAL_NAMES: Readonly<Record<string, string>> = Object.freeze({
   'deepseek-flash': 'DeepSeek Flash',
   'glm-5-3': 'GLM-5.3',
   'glm-5-3-flash': 'GLM-5.3-Flash',
+  // ⚠️ AutoClaw 的 `zai_auto` / `zai_auto-fast` 走 **id 通道**（`autoclaw` 不在
+  //    `PRIMARY_CHANNEL` 里），它们的 id 带 `zai_` 渠道前缀 ⇒ 不加本条目的话，
+  //    聚合列表里显示的就是 `zai_auto` 这种机器名（与 `GLM-5.3` 并排很突兀，
+  //    那正是 PR #89 初版想解决的现象）。
+  //    这两个名字**取自 autoclaw 自己的 `name`**（`src/autoclaw-product.ts` 的
+  //    `AUTOCLAW_FALLBACK_MODELS`：`Auto (AutoClaw)` / `Auto-Fast (AutoClaw)`），
+  //    是如实转写，不是我们编的；括号后缀是为跨渠道区分（与 qoder / accio 同一惯例）。
+  //    ⚠️ 与聚合自己的 `aggregate/auto` 不会混淆：后者的 key 是 `auto`，显示名由
+  //    `autoModelInfo()` 单独给（`Auto（聚合 · 跨渠道）`），不走本表。
+  'zai_auto': 'Auto (AutoClaw)',
+  'zai_auto-fast': 'Auto-Fast (AutoClaw)',
   'glm-5-2': 'GLM-5.2',
   'glm-5-1': 'GLM-5.1',
   'glm-5': 'GLM-5',

@@ -23,7 +23,7 @@
  * |-------------|---------------------|------------------------------|
  * | `codearts`  | ✓ 华为签名          | ✓ 华为签名                   |
  * | `buddy`     | ✓                   | ✓                            |
- * | `workbuddy` | ✓                   | ✗ 国际版后端无签到接口        |
+ * | `workbuddy` | ✓                   | ✓（2026-11-15 更正：端点同形） |
  * | `lobsterai` | ✓                   | ✓ `client-activities` 三步流程 |
  * | `qoder`     | ✓ `sash/api/v2/me/usage` | ✗ 未见签到接口            |
  * | `trae`      | ✓                   | ✓ `checkin_credits/*`        |
@@ -381,7 +381,7 @@ export function supportsCreditBalance(provider) {
 /**
  * 该 provider 是否能执行每日签到领取（一键领取积分）。
  *
- * 为 false 时面板不渲染该按钮（WorkBuddy 国际版后端无接口）。
+ * 为 false 时面板不渲染该按钮（Cline / Raccoon 就是这种）。
  */
 export function supportsDailyCheckin(provider) {
   return CREDITS_CAPABILITIES[provider]?.dailyCheckin === true;
