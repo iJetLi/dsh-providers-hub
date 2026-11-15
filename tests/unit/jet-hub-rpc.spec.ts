@@ -4879,7 +4879,6 @@ describe('provider.status / provider.setEnabled 端点', () => {
         accounts: [{ id: 'b1', provider: 'buddy', enabled: true }],
       })
       const result = await call('provider.setEnabled', { provider: 'buddy', enabled: false })
-      expect(result.value === undefined || true).toBe(true)
       expect(result.ok, '空目录不得再拒绝关闭（那正是「豆包无法关闭」）').toBe(true)
       expect((result.value as { models?: number }).models).toBe(0)
       // 账号确实被停用 + 必须广播（否则界面开关不刷新）。

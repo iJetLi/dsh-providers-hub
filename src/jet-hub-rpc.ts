@@ -10978,8 +10978,10 @@ function registerJetHubEndpoints(
          * ⚠️ 判据必须**两个条件同时成立**，缺一不可：
          *   ① `descriptorOf(provider).channel === false`（自报不是模型渠道）；
          *   ② `modelAdapters[provider] === undefined`（本仓库没有它的目录来源）。
-         * 单独用 ① 不安全：`codely` 也是 `channel: false`，但它有 `codely-adapter.ts`
-         * 目录来源 —— 跳过模型腿会让「关闭 provider 后模型仍可选」的旧缺陷复活。
+         * 单独用 ① 不安全：`codely` **曾**是 `channel: false`（2026-10-22 已翻成 `true`），
+         * 而当时它有 `codely-adapter.ts` 目录来源 —— 其它「自报不是模型渠道、但有目录来源」
+         * 的形态（外部适配器 / 旧版装机 / 将来新增）同样存在 ⇒ 跳过模型腿会让
+         * 「关闭 provider 后模型仍可选」的旧缺陷（IKJW33）复活。
          * 单独用 ② 也不安全：外部适配器缺失（旧版装机）时 channel 仍为 true，
          * 那种形态要继续走远端核实（`remoteError` / `notReady` 两条拒绝原样保留）。
          */
