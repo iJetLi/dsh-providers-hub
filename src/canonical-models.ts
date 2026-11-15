@@ -61,6 +61,14 @@ export const EXCLUDED_ALIASES: ReadonlySet<string> = new Set([
   'primary-model',
   'deep-model',
   'auto',
+  // ⚠️ AutoClaw（智谱）把同一组抽象路由**带上了渠道前缀**：id 是 `zai_auto` /
+  //    `zai_auto-fast`，展示名 `Auto (AutoClaw)` / `Auto-Fast (AutoClaw)`。
+  //    不带前缀的名字 `auto` 早已在上面排除，但这两种写法匹配不上 ⇒ 会各自成为
+  //    一个「只有一个渠道、语义是空的」虚拟模型（`aggregate/zai_auto`），
+  //    在聚合列表里与 `aggregate/auto` 并排出现（2026-11-16 实测：autoclaw 的
+  //    4 条模型里有 2 条是这类别名）。
+  'zai_auto',
+  'zai_auto-fast',
 ])
 
 /**
@@ -283,6 +291,30 @@ export const CANONICAL_OVERRIDES: Readonly<Record<string, Readonly<Record<string
      *   这样「加一条补丁只改一处」—— 复制两份必然漂移。
      */
     magicrewintl: MAGICREW_CANONICAL_OVERRIDES,
+    /**
+     * **AutoClaw（智谱）** —— 它的模型 id **带渠道前缀**，于是同一模型被拆成两条。
+     *
+     * ## 实测（2026-11-16，用户实例的 `/v1/models` 全量目录）
+     *
+     * | autoclaw 的 id | 展示名 | 其他渠道的键 |
+     * | --- | --- | --- |
+     * | `zai_glm-5.3-flash` | `GLM-5.3 Flash (AutoClaw)` | `glm-5-3-flash`（buddy / codearts / opencode / trae / workbuddy / zcode 共 6 家） |
+     * | `zaicoding_glm-5.3` | `GLM-5.3 (AutoClaw)` | `glm-5-3`（同上 6 家） |
+     *
+     * `normalizeModelKey` 只剥命名空间前缀（最后一个 `/` 之前）与 `sn-`，
+     * **不剥 `zai_` / `zaicoding_`** ⇒ 键里留着前缀 ⇒ 聚合里出现
+     * `aggregate/zai_glm-5-3-flash` 与 `aggregate/glm-5-3-flash` 两条**同模型**
+     * 虚拟模型，autoclaw 也不在那 6 家的轮换候选里（症状静默：只是不在列表里）。
+     *
+     * ⚠️ **不做「通用剥前缀」**：`zai_` 只是这一家的写法，把它写成通用规则
+     * （例如「剥掉第一个 `_` 之前」）会误伤真实带下划线的 id —— 实测目录里就有
+     * `modelscope:OpenGVLab/InternVL3_5-241B-A28B`（下划线是模型名的一部分）。
+     * 与 qoder / accio / magicrew 同一条规矩：**逐条登记、每条有实测依据**。
+     */
+    autoclaw: Object.freeze({
+      'zai_glm-5.3-flash': 'glm-5-3-flash',
+      'zaicoding_glm-5.3': 'glm-5-3',
+    }),
   })
 
 /**

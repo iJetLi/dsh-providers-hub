@@ -395,3 +395,48 @@ describe('magicrew（超级麦吉国内站，2026-10-29）：qwen 归一化补�
       .toBe(canonicalKeyFor('buddy', 'deepseek-v4.1-flash', 'Deepseek-V4.1-Flash')?.key)
   })
 })
+
+describe('autoclaw（智谱 AutoClaw，2026-11-16）：带渠道前缀的 id 必须指回既有键', () => {
+  /**
+   * 实测来源：用户实例 `/v1/models` 全量目录（337 条）里 autoclaw 只有 4 条，
+   * 其中 2 条是**带 `zai_` / `zaicoding_` 前缀的 GLM**，展示名分别是
+   * `GLM-5.3 Flash (AutoClaw)` 与 `GLM-5.3 (AutoClaw)`；而 buddy / codearts /
+   * opencode / trae / workbuddy / zcode 六家的同模型键是 `glm-5-3-flash` /
+   * `glm-5-3` ⇒ 不登记补丁就会在聚合里各成一条（同模型两条），且 autoclaw
+   * 不在那六家的轮换候选里（静默：只是看不到）。
+   */
+  it('★ `zai_glm-5.3-flash` 归到既有键 `glm-5-3-flash`', () => {
+    const got = canonicalKeyFor('autoclaw', 'zai_glm-5.3-flash', 'GLM-5.3 Flash (AutoClaw)')
+    expect(got?.key).toBe('glm-5-3-flash')
+    // 归属必须来自 patch（实测结论），不是 id 通道撞出来的
+    expect(got?.via).toBe('patch')
+    // 判据是「跨渠道同键」：与 buddy 的同模型逐字相同
+    expect(got?.key).toBe(canonicalKeyFor('buddy', 'glm-5.3-flash', 'GLM-5.3-Flash')?.key)
+  })
+
+  it('★ `zaicoding_glm-5.3` 归到既有键 `glm-5-3`', () => {
+    const got = canonicalKeyFor('autoclaw', 'zaicoding_glm-5.3', 'GLM-5.3 (AutoClaw)')
+    expect(got?.key).toBe('glm-5-3')
+    expect(got?.via).toBe('patch')
+    expect(got?.key).toBe(canonicalKeyFor('buddy', 'glm-5.3', 'GLM-5.3')?.key)
+  })
+
+  it('★ 两个抽象路由（`zai_auto` / `zai_auto-fast`）被排除，不生成空虚拟模型', () => {
+    // 展示名分别是 `Auto (AutoClaw)` / `Auto-Fast (AutoClaw)` —— 服务端抽象路由，
+    // 不是可指定调用的真实模型（与 `auto` / `default-model` 同类）。
+    expect(canonicalKeyFor('autoclaw', 'zai_auto', 'Auto (AutoClaw)')).toBeUndefined()
+    expect(canonicalKeyFor('autoclaw', 'zai_auto-fast', 'Auto-Fast (AutoClaw)')).toBeUndefined()
+    // 反向：排除的是**这两条 id**，不是「autoclaw 这条路全部」——
+    // 已登记的 GLM 仍然正常归键（否则上面两条用例会因为「整家被跳过」而假绿）
+    expect(canonicalKeyFor('autoclaw', 'zaicoding_glm-5.3', 'GLM-5.3 (AutoClaw)')?.key)
+      .toBe('glm-5-3')
+  })
+
+  it('⚠️ 不做「通用剥前缀」：带下划线的真实模型名不受影响', () => {
+    // modelscope 的 `OpenGVLab/InternVL3_5-241B-A28B` 里下划线是**模型名的一部分**。
+    // 若哪天有人把 autoclaw 这条补丁改写成「剥掉第一个下划线之前」的通用规则，
+    // 这条会立刻变红。
+    expect(canonicalKeyFor('modelscope', 'OpenGVLab/InternVL3_5-241B-A28B', 'InternVL3.5-241B-A28B (魔搭)')?.key)
+      .toBe('internvl3_5-241b-a28b')
+  })
+})
