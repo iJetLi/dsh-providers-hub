@@ -596,3 +596,55 @@ describe('PR #89 对抗审计 D 域：补丁查找必须与排除集同口径（
     expect(canonicalKeyFor('workbuddy', 'auto:free', 'Auto')).toBeUndefined()
   })
 })
+
+describe('deepseek V4.1 Flash 的 -1017 版本号变体（2026-11-16）：与无后缀版本同键', () => {
+  /**
+   * 实测来源：用户实例 `/v1/models` 全量目录（337 条）。
+   *
+   * - modelscope 同时给了 `…/DeepSeek-V4.1-Flash` 与 `…/DeepSeek-V4.1-Flash-1017`，
+   *   两者展示名**逐字相同**（`DeepSeek-V4.1-Flash (魔搭)`）；
+   * - opencode 的**无后缀** id 展示名就是 `DeepSeek V4.1 Flash 1017`；
+   * - 只有 codearts 把 `-1017` 当独立模型（x0.12 vs x0.09）。
+   *
+   * ⇒ `-1017` 是 V4.1-Flash 的**当前版本号**，不是另一个模型。
+   */
+  it('★ codearts 的 `…-1017` 归到 `deepseek-v4-1-flash`', () => {
+    const got = canonicalKeyFor('codearts', 'deepseek-v4.1-flash-1017', 'DeepSeek-V4.1-Flash-1017 · x0.12')
+    expect(got?.key).toBe('deepseek-v4-1-flash')
+    // 归属必须来自补丁（人工实测结论），不是 id 通道撞出来的
+    expect(got?.via).toBe('patch')
+    // 判据是「与同渠道无后缀版本同键」
+    expect(got?.key).toBe(canonicalKeyFor('codearts', 'deepseek-v4.1-flash', 'DeepSeek-V4.1-Flash · x0.09')?.key)
+  })
+
+  it('★ modelscope 的带命名空间 id 也归到 `deepseek-v4-1-flash`', () => {
+    // ⚠️ 补丁表按 realId **原文**精确匹配 —— 这条用例就是钉住「别名必须写全命名空间」，
+    //    若有人把键简化成 `DeepSeek-V4.1-Flash-1017`，这里会变红。
+    const got = canonicalKeyFor('modelscope', 'deepseek-ai/DeepSeek-V4.1-Flash-1017', 'DeepSeek-V4.1-Flash (魔搭)')
+    expect(got?.key).toBe('deepseek-v4-1-flash')
+    expect(got?.via).toBe('patch')
+    expect(got?.key).toBe(canonicalKeyFor('modelscope', 'deepseek-ai/DeepSeek-V4.1-Flash', 'DeepSeek-V4.1-Flash (魔搭)')?.key)
+  })
+
+  it('⚠️ 不许写成「剥 -NNNN 后缀」的通用规则：0731 / 0813 是独立模型', () => {
+    // `deepseek-v4-flash-0731` 是 **V4-Flash（上一代）** 的快照，
+    // `deepseek-v4-pro-0813` 是 V4 Pro 的快照 —— 都与无后缀版本是不同模型。
+    // 若哪天有人把上面的补丁改成通用剥离，这两条会立刻变红。
+    expect(canonicalKeyFor('modelscope', 'deepseek-ai/DeepSeek-V4-Flash-0731', 'DeepSeek-V4-Flash-0731 (魔搭)')?.key)
+      .toBe('deepseek-v4-flash-0731')
+    expect(canonicalKeyFor('modelscope', 'deepseek-ai/DeepSeek-V4-Pro-0813', 'DeepSeek-V4-Pro-0813 (魔搭)')?.key)
+      .toBe('deepseek-v4-pro-0813')
+    // 反过来：V4-Flash 无后缀那条仍然是它自己的键，没被 0731 拖走
+    expect(canonicalKeyFor('buddy', 'deepseek-v4-flash', 'Deepseek-V4-Flash · x0.17')?.key)
+      .toBe('deepseek-v4-flash')
+  })
+
+  it('⚠️ 新加坡区 `-sg` 仍是独立键（不许因为「都是 V4.1 Flash」而合并）', () => {
+    // workbuddy 的 `-sg` 展示名逐字也是 `Deepseek-V4.1-Flash`（只多了 ` · x0.11 SG`），
+    // 但它是**另一条区域通道** —— 模块头的反例就是它。
+    expect(canonicalKeyFor('workbuddy', 'deepseek-v4.1-flash-sg', 'Deepseek-V4.1-Flash · x0.11 SG')?.key)
+      .toBe('deepseek-v4-1-flash-sg')
+    expect(canonicalKeyFor('workbuddy', 'deepseek-v4.1-flash', 'Deepseek-V4.1-Flash')?.key)
+      .toBe('deepseek-v4-1-flash')
+  })
+})
