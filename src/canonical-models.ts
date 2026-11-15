@@ -315,6 +315,48 @@ export const CANONICAL_OVERRIDES: Readonly<Record<string, Readonly<Record<string
       'zai_glm-5.3-flash': 'glm-5-3-flash',
       'zaicoding_glm-5.3': 'glm-5-3',
     }),
+    /**
+     * **DeepSeek V4.1 Flash 的 `-1017` 版本号变体** —— 与无后缀版本是**同一个模型**。
+     *
+     * ## 实测（2026-11-16，用户实例的 `/v1/models` 全量目录 337 条）
+     *
+     * 模块头那句「日期快照（`-0731`）不剥离」在这里**不适用**：`-0731` 是
+     * **V4-Flash**（上一代）的快照，确实是另一个模型；而 `-1017` 是
+     * **V4.1-Flash 当前版本号**，不带后缀的 id 本身就是它。三条渠道自己的元数据
+     * 都能对上：
+     *
+     * | 渠道 | id | 该渠道给的展示名 |
+     * | --- | --- | --- |
+     * | modelscope | `deepseek-ai/DeepSeek-V4.1-Flash` | `DeepSeek-V4.1-Flash (魔搭)` |
+     * | modelscope | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | `DeepSeek-V4.1-Flash (魔搭)` ← **逐字相同** |
+     * | opencode | `deepseek-v4.1-flash` | `DeepSeek V4.1 Flash **1017**` ← 名字里就写着版本号 |
+     *
+     * 唯一把二者当独立模型的是 **codearts**（`DeepSeek-V4.1-Flash-1017 · x0.12`
+     * 与 `DeepSeek-V4.1-Flash · x0.09` 并存）⇒ 聚合里多出一条
+     * `aggregate/deepseek-v4-1-flash-1017`（只有 2 个渠道），而主条
+     * `aggregate/deepseek-v4-1-flash` 少了这两条候选。
+     *
+     * ## ⚠️ 这是「当前等价」，不是结构等价
+     *
+     * 不带后缀的 id 语义是**最新版**：上游一旦把 V4.1-Flash 推到 1020，两者就会
+     * 真正分叉。届时本补丁必须删掉（否则 `-1017` 会把旧版塞进轮换候选，请求可能
+     * 打到旧快照而零提示）。判据：`credits`/模型目录里出现 `-1020` 之类的新后缀，
+     * 或 modelscope 两条的展示名不再逐字相同。
+     *
+     * ⚠️ 也**不要**把这条写成「剥 `-NNNN` 后缀」的通用规则 —— 同目录里
+     * `deepseek-v4-flash-0731`（V4）、`deepseek-v4-pro-0813`（V4 Pro）、
+     * `trae:Doubao-Seed-2.1-Pro`（展示名 `Seed-2.1-Pro-0915`）都是**独立模型**，
+     * 通用剥离会把它们并进完全不同的模型里。
+     */
+    codearts: Object.freeze({
+      'deepseek-v4.1-flash-1017': 'deepseek-v4-1-flash',
+    }),
+    // ⚠️ modelscope 的 id **带命名空间**（`deepseek-ai/…`），补丁表按 `realId`
+    //    原文精确匹配（`canonicalKeyFor` 用 `Object.hasOwn(providerPatch, realId)`），
+    //    所以这里必须写全，不能只写 `DeepSeek-V4.1-Flash-1017`。
+    modelscope: Object.freeze({
+      'deepseek-ai/DeepSeek-V4.1-Flash-1017': 'deepseek-v4-1-flash',
+    }),
   })
 
 /**
