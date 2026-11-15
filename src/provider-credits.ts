@@ -1058,8 +1058,13 @@ export function createProviderCredits(
      *    （活动未开始或已结束），属正常状态而非失败（`credits.ts` 已归入
      *    `inactive`）；
      * 2. 活动没开时积分改由**活跃**异步发放 ⇒ `afterClaimNote` 补一发活跃上报
-     *    （见 `workbuddy-intl-activity.ts`）。这一发对「已签到」的账号同样要跑，
-     *    而 `afterClaimNote` 的契约恰好是 `claimed` / `already-claimed` 都执行。
+     *    （见 `workbuddy-intl-activity.ts`）。这一发对「已签到」的账号同样要跑。
+     *
+     * ⚠️ 精确说法（PR #87 审计 P1-1）：**接线层对四种 `outcome.kind` 都会调用**
+     * `afterClaimNote`（它拿不到种类闸门），真正的闸门在实现内部首行 ——
+     * `keepWorkBuddyIntlActivity` 只对 `claimed` / `already-claimed` 发请求，
+     * `inactive` / `failed` 回 `undefined` 且**零上游请求**。
+     * 悬空不动的话，「领取失败却建了会话」这条副作用链没有任何守卫钉住。
      */
     workbuddy: {
       fetchBalance: (credential) =>
@@ -1069,8 +1074,13 @@ export function createProviderCredits(
         fetchCheckinStatus(credential as BuddyCredential, WORKBUDDY),
       claim: (credential) =>
         claimDailyCheckin(credential as BuddyCredential, WORKBUDDY),
-      afterClaimNote: (credential) =>
-        keepWorkBuddyIntlActivity(credential as BuddyCredential, WORKBUDDY),
+      // ⚠️ **必须**把 `outcome` 传下去并据此短路（PR #87 对抗审计 P1-1/P1-2）：
+      //    - `claimed` / `already-claimed` ⇒ 本次确实「今天已有痕迹」，才发活跃；
+      //    - `inactive`（41000 活动未开）/ `failed` ⇒ **不发**。
+      //      `inactive` 不计 `coversToday`（`auto-checkin.ts`），会自动重试；
+      //      若无条件发，中招日两个时段各发一次 ⇒ 用户账号里 **2 个 `Hi` 会话/天**。
+      afterClaimNote: (credential, _entry, _call, outcome) =>
+        keepWorkBuddyIntlActivity(credential as BuddyCredential, WORKBUDDY, outcome),
     },
 
     /**

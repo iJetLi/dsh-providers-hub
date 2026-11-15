@@ -72,13 +72,42 @@ const CODE_ACTIVITY_ENDED = 1003
 const CODE_INTL_ACTIVITY_NOT_STARTED = 41000
 const CODE_INTL_TASK_UNAVAILABLE = 40901
 /**
- * 「今天已经领过了」的**文案**判据（兜底）。
+ * 「今天已经领过了」的**精确文案**判据（兜底）。
  *
  * 国内版用业务码（10001/1001）表达幂等，而国际版的重复领取只保证 HTTP
  * 400/409 + 一句 `已签到` 文案 —— 业务码未必落在上面那张表里。只在**未知码**上
- * 才用文案兜底，故不会改变任何既有渠道的行为。
+ * 才用文案兜底。
+ *
+ * ⚠️⚠️ **这条兜底是「把真实失败翻成假成功」的高危面**（PR #87 对抗审计 P0-1，
+ * 实测 13 条真实失败报文里 9 条被吃掉）。上游的**失败**报文里大量出现
+ * 「已签」两个字，但语义完全不是「今天领过了」：
+ *
+ * | 上游失败报文 | 真实语义 | 宽口径 `/已签|已领|already/i` 的判定 | 应为 |
+ * |---|---|---|---|
+ * | `今日已签到记录写入失败` | **写入失败** | already-claimed（假成功） | `failed` |
+ * | `账号已被限制，今日已签到次数异常` | 风控 | already-claimed | `failed` |
+ * | `请求非法，已签名校验不通过` | 签名校验 | already-claimed | `failed` |
+ * | `当前账号已签出，请重新登录` | **认证失效** | already-claimed | `failed` |
+ * | `already expired` / `already ended` | 活动结束 | already-claimed | `failed` |
+ * | `领取名额已签满，请稍后再试` | 名额满 | already-claimed | `failed` |
+ * | `已签署的用户协议有更新` | 协议 | already-claimed | `failed` |
+ *
+ * **后果链**：`already-claimed` ⇒ `computeClaimSummary` 的
+ * `alreadyClaimed += 1` **且 `coversToday += 1`** ⇒ `auto-checkin.ts` 的
+ * `proven.add(provider)` ⇒ 该渠道当天被记为「已处理」、下个时段不再重试 ⇒
+ * **当天静默漏领 + 反向告诉用户「已领到」**。
+ * ⚠️ 误判成 `already-claimed` 比误判成 `inactive` **严格更糟**：`inactive`
+ * 不计 `coversToday`，只丢一个时段；`already-claimed` 丢**一整天**。
+ *
+ * **因此判据必须是整句锚定**（`^…$`），不能是子串。收窄后漏判的形态会回落到
+ * `failed` —— 那是**安全方向**（`failed` 会重试，且如实告知用户）。
+ * 新增形态时**必须同时**加一条「失败报文 ⇒ failed」的对立面用例。
  */
-const ALREADY_CLAIMED_TEXT = /已签|已领|already/i
+const ALREADY_CLAIMED_TEXT: readonly RegExp[] = [
+  /^(今天|今日)?已(经)?签到(过|了|过了|过的)?[。.!！]?$/i,
+  /^(今天|今日)?已(经)?领取(过|了|过了|过的)?[。.!！]?$/i,
+  /^already (checked in|claimed)( today)?[.!]?$/i,
+]
 
 /** 签到活动状态（字段名已转为 camelCase）。 */
 export interface CheckinStatus {
@@ -681,7 +710,15 @@ export async function claimDailyCheckin(
     return { kind: 'failed', code: -1, message: result.message }
   }
   const body = result.body
-  const code = typeof body.code === 'number' ? body.code : -1
+  // ⚠️ 上游有时把业务码下发成**字符串**（`"41000"` / `"0"`）。只认 number 会把
+  //    新登记的 41000/40901 全部失效（落到 -1 ⇒ failed ⇒ 一天里反复重试），
+  //    也会把成功的 `"0"` 判成失败。两处都接受，非数值仍是 -1。
+  const rawCode = body.code
+  const code = typeof rawCode === 'number'
+    ? rawCode
+    : typeof rawCode === 'string' && /^-?\d+$/.test(rawCode.trim())
+      ? Number.parseInt(rawCode.trim(), 10)
+      : -1
   const message = readString(body, 'msg')
 
   if (code === CODE_ALREADY_CLAIMED || code === CODE_ALREADY_CLAIMED_ALT) {
@@ -691,8 +728,9 @@ export async function claimDailyCheckin(
     || code === CODE_INTL_ACTIVITY_NOT_STARTED || code === CODE_INTL_TASK_UNAVAILABLE) {
     return { kind: 'inactive', message: message.length > 0 ? message : '当前无领取资格' }
   }
-  if (code !== 0 && ALREADY_CLAIMED_TEXT.test(message)) {
-    // ⚠️ 只在**未知码**上兜底（国际版重复领取的业务码不在上表里）。
+  if (code !== 0 && ALREADY_CLAIMED_TEXT.some((pattern) => pattern.test(message.trim()))) {
+    // ⚠️ 只在**未知码**上兜底，且必须**整句**匹配 —— 子串匹配会把
+    //    「今日已签到记录写入失败」这类失败报文翻成假成功（见常量处的长注释）。
     return { kind: 'already-claimed', message }
   }
   if (code !== 0) {

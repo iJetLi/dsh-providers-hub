@@ -799,7 +799,7 @@ if (resolved === undefined && (product as { id?: string }).id === ASTUDIO.id) { 
 |---|---|---|
 | `codearts` | ✓ | ✓（华为云签名四步流程） |
 | `buddy` | ✓ | ✓ |
-| `workbuddy` | ✓ | ✗（国际版后端无签到接口） |
+| `workbuddy` | ✓ | ✓（2026-11-15 更正：`/v2/billing/meter/daily-checkin` 与国内版同形；此前「无签到接口」是**只搜 CLI 内核字面量**得出的误判） |
 | `lobsterai` | ✓ | ✓（`client-activities` 三步流程） |
 | `qoder` | ✓（`sash/api/v2/me/usage`，只需 Bearer） | ✓（`sash/api/v1/me/campaigns` → `POST …/{campaignId}/claim`） |
 | `trae` | ✓ | ✓（`checkin_credits` 两步流程） |

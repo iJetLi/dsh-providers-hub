@@ -519,20 +519,25 @@ const WORKBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
  * - `authentication.attributes.platform` = "workbuddy-ai"
  * - `prefixPath` = "/plugin"（与中国版相同）
  *
- * 该产品**没有**每日签到积分接口（内核中只有 `/v2/billing/meter/get-dosage-notify`），
- * 因此 Jet Hub 不为其渲染「一键领取积分」按钮；积分领取在 CodeBuddy 侧完成。
+ * ## ⚠️ 2026-11-15 更正：签到**有**，成长任务**没有**
+ *
+ * 原文写「该产品**没有**每日签到积分接口（内核中只有 `/v2/billing/meter/get-dosage-notify`）」
+ * —— **这句话是错的**，它把「CLI 内核里没硬编码这个路径」当成了「后端没有这个端点」。
+ * 实测（GitHub issue #86）：国际版的签到端点与国内版**逐字同形**
+ * （`POST /v2/billing/meter/checkin-activity-status` 查状态、
+ * `POST /v2/billing/meter/daily-checkin` 领取），只有 baseURL 不同；同一个坑
+ * `src/credits.ts` 对余额端点 `get-user-resource` 已经记过一次。
+ * 能力表已据此改成 `dailyCheckin: true`（PR #87），
+ * 活跃上报/连登回读在 `src/workbuddy-intl-activity.ts`。
+ *
+ * **但「成长任务/成长中心」确实没有**（这一半仍然成立）：contributor 在 !62 复审中
+ * 实测确认 `www.workbuddy.ai` 后端无任务列表、无 claim 端点。故宿主侧
+ * `src/provider-credits.ts` 里**只有 buddy** 挂 `credits.afterClaim`，
+ * 客户端 `GROWTH_TASK_PROVIDERS` 也据此排除 `workbuddy`。
  *
  * ⚠️ 下面的 `claimBase` / `webBase` 是**占位值**（为满足 `BuddyProduct` 的必填形状），
- * 本产品**没有任何代码路径会读取它们** —— 原因有两层：
- *
- * 1. 成长任务的唯一入口是「一键领取积分」按钮，而该按钮由
- *    `supportsCredits = supportsDailyCheckin(provider)` 门控，`workbuddy` 在能力表里
- *    登记为 `dailyCheckin: false` ⇒ 按钮不渲染 ⇒ `runTasks: true` 传不进来；
- * 2. **更根本的是**：contributor 在 !62 复审中实测确认 `www.workbuddy.ai` 后端
- *    **根本没有成长中心**（无任务列表、无 claim 端点）。故这不是「等将来开放」，
- *    而是「该产品没有这个功能」。客户端 `GROWTH_TASK_PROVIDERS` 与宿主能力表
- *    （`src/provider-credits.ts` 里**只有 buddy** 挂 `credits.afterClaim`）
- *    都已据此**排除** `workbuddy`。
+ * 本产品**没有任何代码路径会读取它们**：成长任务的唯一入口是 `afterClaim`，
+ * 而 `workbuddy` 没挂它 ⇒ `runTasks: true` 传不进来。
  *
  *    ⚠️ 2026-10-08（Task 4）：宿主侧原先另有一张手抄的 `GROWTH_CAPABLE_PROVIDERS`
  *    集合，**已删除** —— 「哪家有成长中心」现在由「该家是否提供 `credits.afterClaim`」

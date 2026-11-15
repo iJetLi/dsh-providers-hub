@@ -929,8 +929,11 @@ describe('★ 不支持签到的渠道：文案必须指明「该产品无此能
     })
     const result = await call('credits.claimAll', { provider: 'workbuddy' })
     expect(result.ok, `workbuddy 应被接受，实际 error=${result.error?.message}`).toBe(true)
+    // ⚠️ 必须比**精确 pathname**，不能用 `startsWith` 前缀：原先的
+    // `startsWith('…/daily-checkin')` 在把路径改成 `daily-checkin-v2` 后
+    // 仍然全绿（正向审计 M03 实测 37 绿）—— 前缀判据把「路径改错」当成通过。
     expect(
-      urls.some((url) => url.startsWith('https://www.workbuddy.ai/v2/billing/meter/daily-checkin')),
+      urls.some((url) => new URL(url).pathname === '/v2/billing/meter/daily-checkin'),
       'workbuddy 没有打到国际版的领取端点',
     ).toBe(true)
     expect(

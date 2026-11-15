@@ -937,7 +937,12 @@ export interface CreditsEndpointDeps<
    * - **永不抛**：抽奖是不可逆写操作且会因「今日已参与 / 窗口外 / 无资格」失败，
    *   那些都**不是**签到失败（本仓库有两轮「登录成功却因记账失败被报成失败」事故史）。
    *
-   * ⚠️ 只有 trae 注入；其余 provider 不传 ⇒ 行为逐字不变。
+   * ⚠️ 目前有两家注入：`trae`（抽奖）与 `workbuddy` 国际版（活跃上报）。
+   * ⚠️ **第四参 `outcome` 是必需的**（PR #87 审计 P1-1/P1-2）：接线层要是只映射
+   * 前三个参数，实现里两种结局（`inactive` / `failed`）与两种执行
+   * （`claimed` / `already-claimed`）行为会**逐字相同** —— 领取失败照样产生
+   * 用户可见副作用（在人家账号里建会话），而且日志零字，结构上查不出来。
+   * 其余 provider 不传 ⇒ 行为逐字不变。
    */
   afterClaimNote?: (
     credential: TCredential,
@@ -9267,11 +9272,21 @@ function registerJetHubEndpoints(
           ...impl.afterClaimNote === undefined
             ? {}
             : {
-                afterClaimNote: (credential: unknown, _product: unknown, entry: unknown) =>
+                // ⚠️⚠️ 第 4 参 `outcome` **必须透传**（PR #87 对抗审计 P1-1/P1-2）：
+                //  workbuddy 国际版靠它区分「本次真领到 / 已领过」与
+                //  「活动未开 / 领取失败」—— 后者绝不能再发活跃上报（那会在用户
+                //  账号里造会话）；漏传的症状是「四种结局行为逐字相同」且零日志。
+                afterClaimNote: (
+                  credential: unknown,
+                  _product: unknown,
+                  entry: unknown,
+                  outcome: unknown,
+                ) =>
                   impl.afterClaimNote!(
                     credential,
                     entry as never,
                     undefined as never,
+                    outcome as never,
                   ),
               },
           // ⚠️ 预检优先用 `claimStatus`，缺席时回落到 `fetchStatus`
