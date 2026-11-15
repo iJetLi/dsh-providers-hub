@@ -482,15 +482,59 @@ mode  = CFB, padding = NoPadding
 `tests/unit/raccoon-product.spec.ts` 的兜底表断言、
 `tests/e2e/raccoon-probe.e2e.spec.ts` 的远端实测断言。
 
-### 3. ⚠️ 每日 300 积分**没有端点**，不要实现签到按钮
+### 3. ⚠️⚠️ 每日 300 积分的触发器在**办公端**（2026-11-15 更正旧结论）
 
-实测「每日积分发放」是**服务端按日自动发放**的（账单
-`biz_type: 'daily_grant'`；该账号 13:30 注册、13:31 即到账）。
-**不存在可调用的签到接口**。
+> **旧结论（已作废）**：本节的标题原本是「每日 300 积分**没有端点**，不要实现
+> 签到按钮」，依据是「`/points/v1|v2` 下 `sign_in` / `check_in` / `daily` /
+> `claim` 全 404」。**那条 404 本身仍然成立**（本次逐个复验，仍是 Go mux 的
+> 纯文本 `404 page not found`）—— 结论下早了：触发器**不在 points 前缀下**。
 
-故能力矩阵是 `{ balance: true, onboardingTasks: true }`，
-**不登记 `dailyCheckin`** —— 登记了会让「一键签到」按钮每次点击都必然失败
-（与 CodeArts 早期「对不支持的 provider 无条件发请求」同类）。
+真正的触发器是**办公端**的只读 GET：
+
+```
+GET /api/web/office/v3/setting_info
+  Authorization: Bearer <access_token>
+  X-Client-Platform: desktop-windows
+  X-Client-Version: v1.0.35
+  X-Raccoon-Language: zh
+```
+
+它的本职是「拉办公端设置」（空间用量、每日提问次数…），但服务端在处理它时
+**顺带结算当日每日积分**。
+
+#### 实测取证（2026-11-16 00:14 UTC+8，刚跨日的第一次调用）
+
+| 账号 | `available_points` 前 → 后 | `daily_points` 前 → 后 | popups |
+|---|---|---|---|
+| RaccoonEmma | 7676 → **7976** | 1730 → 2030 | `{source:'daily', points:300, expire_at:'2026-11-22T23:59:59+08:00'}` |
+| RaccoonJames | 7054 → **7354** | 1800 → 2100 | 同上 |
+| RaccoonWilliam | 5565 → **5865** | 1209 → 1509 | 同上 |
+
+- 三个账号**全部 +300**，且 `daily_points` 同步 +300（不只是总数）；
+- 紧接着**再调一次** ⇒ `popups: []` + 余额不变 ⇒ **按天幂等**，重复调用不会多发；
+- 账单（`/points/v2/bills?type=income`）在触发后**立刻**就能看到当天那笔
+  `daily_grant`（本次三个账号都是），但**不要依赖它**——官方文档写了
+  「积分记录同步可能存在一定延迟」，故成功判据以**余额前后差**为准（见下）。
+
+#### 能力矩阵与实现
+
+现在是 `{ balance: true, dailyCheckin: true, onboardingTasks: true }`：
+
+| 能力 | 含义 | 实现 |
+|---|---|---|
+| `balance` | `GET /points/v1/balance` | `fetchRaccoonCreditBalance` |
+| `dailyCheckin` | **每天一次**的每日积分结算 | `claimRaccoonDailyCheckin` → `GET /office/v3/setting_info` |
+| `onboardingTasks` | **每号一次**的桌面端登录奖励 | `claimRaccoonLoginReward` |
+
+⚠️ **成功判据必须是「余额前后差」**，不能只看触发请求 200：
+`before → 触发 → after`，差额 > 0 才是 `claimed`；差额为 0 才回落到账单判据
+区分「今天早些时候已到账」与「确实没发」。触发请求 200 只证明请求到了，
+**不等于发了积分**（本项目在别的渠道踩过这个假成功）。
+
+⚠️ **`precheckStatus` 必须是 `false`**：raccoon **没有**与 `CheckinStatus`
+同构的状态端点（状态判据在余额差 / 账单里），而骨架的默认值是 `true` ⇒
+不传 false 时会拿 **buddy 式**的 `fetchCheckinStatus` 去打 Raccoon 端点，
+那是一次**必然失败的真实上游请求**（与 loomy 同型，本仓已记录过一次）。
 
 ⚠️ 同时**不要**把 `login/points/grant` 当作每日签到：它是**幂等一次性**的
 （已领过返回 `granted:false`，账单里能看到上一次记录），
@@ -501,13 +545,35 @@ mode  = CFB, padding = NoPadding
 | 来源 | 金额 | 触发 |
 |---|---|---|
 | 新人注册礼包 | 3000 | 注册时服务端自动发放（`biz_type: reward_grant`） |
-| **桌面端登录奖励** | 3000 | `POST /api/web/desktop/v1/login/points/grant` |
-| 每日积分发放 | 300 | **服务端按日自动发放** |
+| **桌面端登录奖励** | 3000 | `POST /api/web/desktop/v1/login/points/grant`（每号一次） |
+| 每日积分发放 | 300/日 | **`GET /api/web/office/v3/setting_info`**（按天幂等结算） |
+
+#### ⚠️⚠️ 「登录奖励是否已领」必须走 v2 + `type=income`
+
+旧实现查的是 `GET /points/v1/bills?paging.limit=50&paging.offset=0`。
+2026-11-15 用 3 个真实账号实测该窗口：
+
+```
+GET /points/v1/bills?paging.limit=50&paging.offset=0
+  → 50 条，biz_type ∈ {daily_grant, desktop}，reward_grant **0 条**
+GET /points/v2/bills?paging.limit=100&type=income
+  → 21 条，reward_grant 4 条（桌面端登录奖励 3000 + 移动端登录奖励 3000 +
+    新人注册礼包 3000 + 使用体验补偿积分 1500）
+```
+
+v1 那个接口按时间倒序返回**全部**记录（对话消耗 `desktop` 也在里面），
+正常使用的账号几十条消耗就把发放记录挤出了窗口 ⇒ 明明领过的账号永远显示
+「未领取」，点下去又永远 `granted:false`。
+
+⇒ 现在只走 `GET /api/web/points/v2/bills?paging.limit=100&type=income`
+（`type` 合法值实测 `all` / `income` / `expense`，其余返回 400）。
 
 ⚠️ 判定「登录奖励是否已领」**不能只按 `biz_type === 'reward_grant'`**
 （注册礼包也是它），必须同时匹配 `event_name === '桌面端登录奖励'`。
-服务端**没有单独的奖励状态端点**，只能查 `GET /points/v1/bills` 明细
-（`fetchRaccoonOnboardingStatus`）。
+服务端**没有单独的奖励状态端点**，只能查账单明细（`fetchRaccoonOnboardingStatus`）。
+
+⚠️ 反过来，**每日签到**的账单判据只用 `biz_type === 'daily_grant'`，
+**不看 `event_name`**（那是展示文案，上游随时可能改字）。
 
 ### 4. 零客户端依赖（硬约束，有测试守住）
 

@@ -267,8 +267,9 @@ describe('签到能力：registry 声明与 runtime 实现必须一致', () => {
     // ⚠️ 2026-11-03 加 baizhi（百智云，Cap 验证码补全后声明可签到）：`claim` 在
     //    `provider-credits.ts` 的 baizhi 条目里（challenge → 本地 PoW → redeem →
     //    daily-temporary-credit）⇒ 15 → 16。
-    // 魔搭接入签到后成为第 17 个由通用领取流程覆盖的渠道。
-    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(17)
+    // 魔搭接入签到后成为该编号的第 17 个；raccoon 于 2026-11-15 接入每日签到
+    // （办公端 `setting_info` 结算）后成为第 18 个由通用领取流程覆盖的渠道。
+    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(18)
 
     /**
      * ⚠️⚠️ **只数数量挡不住「删一家 + 加一家」** —— 数量不变就静默通过，
@@ -879,7 +880,16 @@ describe('★ credits.claimAll 真的查表（注入哨兵，硬编码分支不�
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('★ 不支持签到的渠道：文案必须指明「该产品无此能力」', () => {
-  it('cline / workbuddy / raccoon 各回**逐字保留**的可读原因', async () => {
+  /**
+   * ⚠️ **raccoon 已于 2026-11-15 移出本组**（真实账号实测推翻了「没有签到端点」
+   * 的旧结论：触发器在办公端 `GET /api/web/office/v3/setting_info`，按天幂等，
+   * 3 个真实账号各 +300）。它现在走**通用领取流程**，故行为断言在下面
+   * 「raccoon 的签到走办公端结算」那条。
+   *
+   * 留在本组的两家都是**实测确无端点**：cline 对整个 sidecar 做字符串扫描都
+   * 没有 checkin / campaign 端点；workbuddy 国际版内核里只有 `get-dosage-notify`。
+   */
+  it('cline / workbuddy 各回**逐字保留**的可读原因', async () => {
     const { call } = makeRpc()
     const expected: Record<string, string> = {
       // cline：对整个 sidecar 做字符串扫描，无任何 checkin/campaign 端点。
@@ -887,8 +897,6 @@ describe('★ 不支持签到的渠道：文案必须指明「该产品无此能
       // ⚠️ workbuddy 这条守卫**必须有**：没有它时会落到通用分支，用**国际版**
       //    凭据去发**国内版**的签到请求 —— 必然失败，且是一次真实上游请求。
       workbuddy: 'WorkBuddy 国际版不支持每日签到（其后端没有签到接口）',
-      // raccoon：每日 300 积分由服务端自动发放；提示必须指向「新手任务」。
-      raccoon: 'Raccoon Work 不支持每日签到（每日积分由服务端自动发放；登录奖励请在「新手任务」中领取）',
     }
     for (const [provider, message] of Object.entries(expected)) {
       const result = await call('credits.claimAll', { provider })
@@ -896,6 +904,61 @@ describe('★ 不支持签到的渠道：文案必须指明「该产品无此能
       expect(result.error?.message, `${provider} 的文案退化了`).toBe(message)
       expect(result.error?.message, `${provider} 不能退化成 unsupported provider`).not.toContain('unsupported provider')
     }
+  })
+
+  /**
+   * ★ **raccoon 必须**走真实领取（不是「可读原因」）—— 真跑端点，断言它打到
+   * **办公端的 `setting_info`**，且余额 +300 时回 `claimed`。
+   *
+   * ⚠️ 这条同时是「raccoon 不能退化成 unsupported provider」的守卫：
+   * 只要 `claim` 从表里掉了，`claimAll` 会回 `unsupported provider: raccoon`，
+   * 本用例立刻变红（旧的那条文案断言已随结论反转而删除）。
+   */
+  it('★ raccoon 的签到打到办公端 setting_info，并按余额差判 claimed', async () => {
+    const { call, pool, credentials } = makeRpc(undefined, { ...emptyAuths(), raccoon: {} })
+    await seed(pool, 'raccoon', 'rc-1', 'RACCOON_ACCOUNT_CLAIM')
+    await credentials.set('RACCOON_ACCOUNT_CLAIM', JSON.stringify({ access_token: 'AT-R' }))
+
+    const seen: string[] = []
+    let balanceCalls = 0
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      const url = String(input)
+      seen.push(url)
+      const json = (body: unknown) => new Response(JSON.stringify(body), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+      if (url.includes('/points/v1/balance')) {
+        balanceCalls += 1
+        return json({ code: 0, data: { available_points: balanceCalls === 1 ? 7676 : 7976, daily_points: 0 } })
+      }
+      if (url.includes('/office/v3/setting_info')) {
+        return json({
+          code: 0,
+          data: {
+            point_grant_popups: [{
+              source: 'daily', display_name: '每日积分发放', points: 300,
+              expire_at: '2026-11-22T23:59:59+08:00',
+            }],
+          },
+        })
+      }
+      return json({ code: 0, data: { items: [] } })
+    })
+
+    const result = await call('credits.claimAll', { provider: 'raccoon' })
+    expect(result.ok, `raccoon 应被接受，实际 error=${result.error?.message}`).toBe(true)
+    expect(
+      seen.some((url) => url.includes('/api/web/office/v3/setting_info')),
+      'raccoon 的签到没有打办公端 setting_info —— 触发器退化了',
+    ).toBe(true)
+    // ⚠️ 反向：不得发 buddy 式的状态预检（`precheckStatus: false` 必须生效）。
+    expect(
+      seen.some((url) => url.includes('checkin-activity-status')),
+      'raccoon 发了 buddy 式状态预检 —— precheckStatus:false 没生效（一次必然失败的上游请求）',
+    ).toBe(false)
+    const outcome = result.value?.results?.[0]?.outcome
+    expect(outcome?.kind, `应判 claimed，实际 ${JSON.stringify(outcome)}`).toBe('claimed')
+    if (outcome?.kind === 'claimed') expect(outcome.credit).toBe(300)
   })
 
   it('★ 未登记的 provider 仍回 unsupported provider（兜底契约不变）', async () => {

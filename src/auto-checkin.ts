@@ -45,7 +45,7 @@
  *
  * 「哪些渠道能签到」的权威是客户端的 `credits-capabilities.js`（12 个渠道逐项
  * 登记）。在本模块再抄一份必然漂移（本仓库已有「两份名单漂移」的真实缺陷）。
- * 故判据交给 `credits.claimAll` 自己：cline / raccoon / **workbuddy** 三条分支
+ * 故判据交给 `credits.claimAll` 自己：cline / **workbuddy** 两条分支
  * **不发任何上游请求**就返回「不支持每日签到」，本模块把这类错误计为**跳过**，
  * 既不算失败也不重试。
  *
@@ -702,8 +702,12 @@ function emptyTotals(): RunTotals {
 }
 
 /**
- * 「不支持每日签到」的判据：`credits.claimAll` 对 cline / raccoon / workbuddy
- * 返回的**显式**错误文案（这三条分支都不发上游请求）。
+ * 「不支持每日签到」的判据：`credits.claimAll` 对 cline / workbuddy
+ * 返回的**显式**错误文案（这两条分支都不发上游请求）。
+ *
+ * ⚠️ raccoon 曾在这张名单里（当时判据是「每日积分无端点」），2026-11-15 被
+ * 真实账号推翻并接通了签到（办公端 `setting_info` 结算）⇒ **已移出**。
+ * 本条注释留作提醒：**名单会随实测变化，别把历史结论当成契约**。
  *
  * ⚠️ 兜底认 `unsupported provider`：那是 `productById` 找不到产品时的文案，
  * 语义同样是「这个渠道没有可用的签到实现」，计成失败只会制造假警报。

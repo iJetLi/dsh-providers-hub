@@ -48,15 +48,18 @@ export interface CreditsCapability {
    * 能否每日签到领取（决定是否渲染「一键领取积分」）。
    *
    * ⚠️ **省略 = false**，且「省略」是有语义的、不是偷懒 —— 它表示
-   * 「该渠道**没有可调用的签到端点**」。目前只有 `raccoon` 这样登记：
-   * 实测「每日 300 积分」是**服务端按日自动发放**的（账单
-   * `biz_type: 'daily_grant'`），根本没有签到接口可调；
+   * 「该渠道**没有可调用的签到端点**」。`cline` / `workbuddy`（国际版）这样登记：
+   * cline 的后端对整个 sidecar 做字符串扫描都没有 checkin / campaign 端点，
+   * workbuddy 国际版内核里只有 `get-dosage-notify`。
    * 若强行写成 `dailyCheckin: false` 也能跑，但那样就**看不出作者是否想过**
-   *（「忘了登记」与「确认没有端点」会长得一模一样）。故这里**刻意允许省略**，
-   * 让 raccoon 那条的 `credits` 保持「缺失即缺失」。
+   *（「忘了登记」与「确认没有端点」会长得一模一样）。故这里**刻意允许省略**。
    *
    * ⚠️ 判据一律是 `=== true`（见客户端 `supportsDailyCheckin`），
    * 故 `undefined` 与 `false` 行为**完全一致**，省略不会引入任何功能差异。
+   *
+   * ⚠️⚠️ **不要照抄「某渠道没有签到端点」的历史结论**：raccoon 那条曾在
+   * 2026-11-15 被真实账号推翻（触发器在**办公端** `setting_info`，不在 points
+   * 前缀下）。判「有没有端点」必须按**协议面**逐个探，别只翻一个前缀就下结论。
    */
   readonly dailyCheckin?: boolean
   /** 是否有**一次性**新手/登录奖励（Loomy 新手任务 / raccoon 登录奖励）。 */
@@ -71,7 +74,7 @@ export interface CreditsCapability {
  * ⚠️ **可选项的默认语义不统一，这是刻意的**（照搬既有各表的约定，见各字段注释）：
  * - `credits.balance` **必填**（无默认，强制想清楚）；
  * - `credits.dailyCheckin` **可省略，省略 = false** —— 但省略承载语义
- *   「该渠道没有可调用的签到端点」（目前只有 raccoon 如此，见该字段注释）；
+ *   「该渠道没有可调用的签到端点」（`cline` / `workbuddy` 如此，见该字段注释）；
  * - `rateLimit` 省略 = **true**（限流按钮是既有 UI，默认关闭会让新 provider
  *   凭空少按钮 —— 可见的功能回退）；
  * - `accountTest` / `permanentLock` / `creditPackages` / `autoCheckinExcluded`
@@ -389,11 +392,14 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     label: 'Raccoon (商汤)',
     displayName: 'Raccoon (商汤)',
     logoClass: 'raccoon',
-    // ⚠️ 不登记 `dailyCheckin`，且**这不是遗漏**：实测「每日 300 积分」是服务端
-    //    按日自动发放的（账单 `biz_type: 'daily_grant'`），**没有可调用的签到端点**。
-    //    登记它会让用户每次点击都必然失败。
+    // ⚠️ `dailyCheckin: true`（2026-11-15 真实账号复验后登记）。
+    //    旧注释「每日 300 由服务端自动发放、没有可调用的签到端点」是**误判** ——
+    //    那次只翻了 `/points/v1|v2`（`sign_in` / `check_in` / `daily` 确实全 404），
+    //    漏了**办公端**的 `GET /api/web/office/v3/setting_info`：带桌面端身份头
+    //    访问一次即按天幂等结算当日每日积分（3 个真实账号实测各 +300）。
+    //    实现在 `raccoon-credits.ts` 的 `claimRaccoonDailyCheckin`。
     //    `onboardingTasks` 是 3000 分的**幂等一次性**桌面端登录奖励。
-    credits: { balance: true, onboardingTasks: true },
+    credits: { balance: true, dailyCheckin: true, onboardingTasks: true },
     settingsNamespace: 'llm-raccoon',
     channel: true,
   },
@@ -1388,8 +1394,8 @@ export function creditCapabilitiesOf(): Record<string, CreditsCapability> {
     out[d.id] = Object.freeze({
       balance: d.credits.balance,
       // ⚠️ `dailyCheckin` 也是**可省略**字段（见 `CreditsCapability` 的注释：
-      //    raccoon 刻意不登记它），故按本函数「缺失即缺失」的规则一并条件拷贝
-      //    —— 这样「raccoon 没有签到端点」这件事在派生表里也是**可见的缺失**，
+      //    cline / workbuddy 刻意不登记它），故按本函数「缺失即缺失」的规则一并
+      //    条件拷贝 —— 这样「该渠道没有签到端点」这件事在派生表里也是**可见的缺失**，
       //    而不是一个与 `false` 无法区分的 `undefined`。
       //    判据侧一律 `=== true`（`supportsDailyCheckin`），故行为不变。
       ...d.credits.dailyCheckin === undefined ? {} : { dailyCheckin: d.credits.dailyCheckin },

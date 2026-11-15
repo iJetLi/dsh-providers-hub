@@ -69,22 +69,27 @@ describe('Raccoon 的 RPC 分派', () => {
     expect(balanceEnd, '找不到 cline.quota 分支（右边界）').toBeGreaterThan(balanceStart)
     expect(rpcSource.slice(balanceStart, balanceEnd))
       .toMatch(/creditsOf\(credits, req\.provider\)/)
-    // credits.claimAll（显式拒绝）
+    // credits.claimAll
     //
     // ⚠️ 2026-10-08 改（Task 4）：原先这里断言 `rpcSource` 里含
     //    「Raccoon Work 不支持每日签到」那串**源码文本**。Task 4 把文案搬到
     //    `src/provider-credits.ts` 的 `claimUnavailableReason`（那是它该在的地方
-    //    —— 知道该产品形态的那一层），字面量于是**搬了家**，而它守的意图
-    //    （raccoon 调 claimAll 会拿到**指明原因**的拒绝、不退化成
-    //    `unsupported provider`）**与文本位置无关**。
-    //    ⇒ 改为**行为**断言，搬到唯一一处（避免同一套 RPC 夹具在多文件重复）：
-    //    `tests/unit/claim-runtime-parity.spec.ts` 的
-    //    「cline / workbuddy / raccoon 各回**逐字保留**的可读原因」——
-    //    它真跑端点、逐字核对文案，**比原断言更强**（文本断言只能证明源码里有
-    //    那串字符，它能证明端到端响应里就是那句话）。
-    //    本文件保留**声明值**断言（廉价的语义锚点，且能发现文案被整段删掉）。
-    expect(createProviderCredits().raccoon?.claimUnavailableReason)
-      .toContain('每日积分由服务端自动发放')
+    //    —— 知道该产品形态的那一层），字面量于是**搬了家**。
+    // ⚠️⚠️ **2026-11-15 该结论被真实账号推翻**：每日积分的触发器在**办公端**
+    //    `GET /api/web/office/v3/setting_info`（3 个真实账号实测各 +300），
+    //    故 `claimUnavailableReason` **已被 `claim` 取代** —— 这条断言随之作废。
+    //    现在守的是「表里真的有 claim」，且 `claimUnavailableReason` **不再存在**
+    //    （留着它会与 `claim` 并存，成为一条永远不生效的死文案）。
+    //    行为断言（真跑端点、看 outcome）在 `claim-runtime-parity.spec.ts` 的
+    //    「raccoon 的签到走办公端结算」。
+    expect(createProviderCredits().raccoon?.claim, 'raccoon 缺少 claim（每日签到接不上）')
+      .toBeTypeOf('function')
+    expect(
+      createProviderCredits().raccoon?.claimUnavailableReason,
+      'claim 已存在时 claimUnavailableReason 是死文案，必须删掉',
+    ).toBeUndefined()
+    expect(createProviderCredits().raccoon?.precheckStatus, 'raccoon 没有同构状态端点，必须显式 false')
+      .toBe(false)
     // onboarding.status / onboarding.claim
     //
     // ⚠️ 同上（Task 4）：原先断言源码里含 `raccoon.fetchOnboardingStatus` /
@@ -189,21 +194,32 @@ describe('Raccoon 的 RPC 分派', () => {
     expect(result.earned, '已领时的金额必须取自账单（哨兵 4242）').toBe(4242)
   })
 
-  it('credits.claimAll 的拒绝文案含「每日积分由服务端自动发放」', () => {
-    // 该文案是可操作提示的来源；写成泛化的 unsupported provider
-    // 会让排查者误以为「provider 没注册」。
-    //
-    // ⚠️ 2026-10-08 改（Task 4）：原先扫 `jet-hub-rpc.ts` 的源码文本。Task 4
-    //    把文案搬到 `src/provider-credits.ts` 的 `claimUnavailableReason`
-    //    （那是它该在的地方 —— 知道该产品形态的那一层），字面量**搬了家**。
-    //    ⇒ 改为读**表里的声明值**；「端到端响应里就是这句话」由
-    //    `claim-runtime-parity.spec.ts` 的「cline / workbuddy / raccoon 各回
-    //    逐字保留的可读原因」守（真跑端点、逐字核对）。
-    expect(createProviderCredits().raccoon?.claimUnavailableReason)
-      .toContain('每日积分由服务端自动发放')
-    // 反向：确认它**不是**泛化文案（否则上面那条可能被一句套话满足）。
-    expect(createProviderCredits().raccoon?.claimUnavailableReason)
-      .not.toContain('unsupported provider')
+  /**
+   * ⚠️⚠️ **本用例 2026-11-15 反转了语义**（真实账号实测推翻了旧结论）。
+   *
+   * 旧形态：`raccoon` 的 `claimUnavailableReason` 必须含「每日积分由服务端自动发放」
+   * —— 那是「本渠道没有签到端点」的可操作提示。
+   *
+   * 现在：每日积分的触发器在**办公端** `GET /api/web/office/v3/setting_info`
+   * （2026-11-16 00:14 UTC+8 对 3 个真实账号各调一次，`available_points`
+   * 全部 +300，`popups` 带 `{source:'daily', points:300}`；紧接着再调一次
+   * ⇒ `popups: []` + 余额不变，即**按天幂等**）。
+   *
+   * ⇒ 断言随之反转：表里**必须有 `claim`**，且**不得**遗留
+   * `claimUnavailableReason`（两者并存时后者永远不生效，是一条死文案，
+   * 而它会让下一个人以为「这个渠道还是不支持签到」）。
+   */
+  it('★ credits 表里 raccoon 有 claim（每日签到），且不再遗留「不支持签到」的死文案', () => {
+    const raccoon = createProviderCredits().raccoon
+    expect(raccoon?.claim, 'raccoon 缺少 claim —— 每日签到接不上，一键签到会回落成 unsupported provider')
+      .toBeTypeOf('function')
+    expect(
+      raccoon?.claimUnavailableReason,
+      'claim 已存在时 claimUnavailableReason 永远不生效，必须删掉（它会误导下一个读者）',
+    ).toBeUndefined()
+    // ⚠️ 反向：确认不是「有 claim 但文案还留着」的半改状态 —— 上面两条已覆盖，
+    //    这里再钉一次「文案里不再出现旧结论」，防止有人换个字段名复活它。
+    expect(JSON.stringify(raccoon)).not.toContain('不支持每日签到')
   })
 
   it('account.create 的失败路径都删除占位条目（不留幽灵账号）', () => {
