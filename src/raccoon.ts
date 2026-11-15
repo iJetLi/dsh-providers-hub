@@ -15,8 +15,8 @@
  *    故改为「客户端本地生成 code + 自行轮询」—— 实测任意自造 code 都被接受。
  * 2. **手机号必须 AES-128-CFB 加密**（密钥见 `RACCOON_PHONE_CIPHER_SECRET`），
  *    否则 `send_sms` 回 `100003 params_encryted_error`。
- * 3. **每日 300 积分没有端点**：服务端按日自动发放（`daily_grant`）。
- *    不要把它实现成签到按钮 —— 见 `raccoon-credits.ts`。
+ * 3. **每日 300 积分的触发器在「办公端」**，不在 points 前缀 —— 见
+ *    {@link RACCOON_OFFICE_PREFIX}（那里有 2026-11-15 的完整实测记录）。
  */
 
 import { createCipheriv, randomBytes } from 'node:crypto'
@@ -32,6 +32,51 @@ export const RACCOON_LLM_PREFIX = '/api/web/llm/v2'
 export const RACCOON_POINTS_PREFIX = '/api/web/points/v1'
 /** 桌面端端点前缀（含一次性登录奖励）。 */
 export const RACCOON_DESKTOP_PREFIX = '/api/web/desktop/v1'
+/**
+ * 积分**账单**前缀（v2）。
+ *
+ * ## ⚠️ 为什么账单必须走 v2
+ *
+ * v1（{@link RACCOON_POINTS_PREFIX}）的 `/bills` 按时间倒序返回**全部**记录
+ * （对话消耗 `desktop` 与发放 `daily_grant` / `reward_grant` 混在一起）。
+ * 2026-11-15 用 3 个真实账号实测：`paging.limit=50` 的 50 条**全是**
+ * `daily_grant` + `desktop`，`reward_grant` **一条都没有** ⇒ 用 v1 判
+ * 「登录奖励是否已领」时，明明领过的账号也会被判成「未领取」。
+ *
+ * v2 支持 `type=income|expense|all` 只取发放记录（实测 `income` 下 3~4 条
+ * `reward_grant` 一条不少），故账单判据一律走这里。
+ */
+export const RACCOON_POINTS_V2_PREFIX = '/api/web/points/v2'
+/**
+ * 办公端前缀 —— **每日积分的真正触发器**。
+ *
+ * ## ⚠️⚠️ 「Raccoon 没有签到端点」是**漏查**得出的旧结论
+ *
+ * `/points/v1` 与 `/points/v2` 下的 `sign_in` / `check_in` / `daily` /
+ * `claim` / `attendance` 确实全是 Go mux 的 `404 page not found`
+ * （2026-11-15 用真实 token 逐个复验，HTTP 404 + 纯文本 `404 page not found`）。
+ * 但每日积分的触发器根本不在 points 前缀下，而在**办公端**：
+ *
+ * ```
+ * GET /api/web/office/v3/setting_info     （只读 GET，按天幂等）
+ *   Authorization: Bearer <access_token>
+ *   X-Client-Platform: desktop-windows
+ *   X-Client-Version: v1.0.35
+ *   X-Raccoon-Language: zh
+ * ```
+ *
+ * 该端点的本职是「拉办公端设置」（空间用量、每日提问次数…），但服务端在处理它时
+ * **顺带结算当日每日积分**：2026-11-16 00:14（UTC+8，刚跨日）对 3 个真实账号
+ * 各调一次，三个账号的 `available_points` 全部 **+300**，`daily_points` 同步 +300，
+ * 响应里带 `point_grant_popups: [{source:"daily", display_name:"每日积分发放",
+ * points:300, expire_at:"2026-11-22T23:59:59+08:00"}]`；紧接着再调一次 ⇒
+ * `popups: []`、余额不变（**按天幂等**，重复调用不会多发）。
+ *
+ * ⇒ 这与「服务端按日自动发放、无需客户端」**并不矛盾**：自动发放是服务端的
+ * 权利，而这条 GET 是**客户端每天帮它结算一次**的入口；两者叠加的效果是
+ * 「用官方客户端就是每天到账，纯 API 用户不调它就可能漏发」。
+ */
+export const RACCOON_OFFICE_PREFIX = '/api/web/office/v3'
 
 /**
  * 手机号传输层加密密钥。

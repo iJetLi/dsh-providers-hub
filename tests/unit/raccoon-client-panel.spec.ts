@@ -104,21 +104,36 @@ describe('Raccoon 的能力登记', () => {
   it('**登记了 onboardingTasks（登录奖励）**，故面板会渲染领取按钮', () => {
     // ⚠️ 2026-10-08 改：能力表由 registry 派生，故改为**行为断言**
     //（原先正则扫 `credits-capabilities.js` 的 `raccoon: Object.freeze({...})` 文本）。
-    expect(CREDITS_CAPABILITIES.raccoon).toEqual({ balance: true, onboardingTasks: true })
+    // ⚠️ 2026-11-15：raccoon **新登记了 `dailyCheckin`**（每日签到接通），
+    //    故这条三元组从 `{balance, onboardingTasks}` 变成三项俱全。
+    expect(CREDITS_CAPABILITIES.raccoon).toEqual({
+      balance: true,
+      dailyCheckin: true,
+      onboardingTasks: true,
+    })
   })
 
-  it('**没有登记 dailyCheckin**（每日 300 无端点，登记了会让按钮必然失败）', () => {
-    // ⚠️ 2026-10-08 改：原先找 `credits-capabilities.js` 里
-    // `raccoon: Object.freeze(...)` 那一行、断言它不含 `dailyCheckin` 字样。
-    // 能力表已改为派生，故把这条意图**落在真相源上**：
-    // ① registry 里 raccoon 的 `credits` **确实没有** `dailyCheckin` 这个键
-    //   （「缺失即缺失」——这正是原断言的语义）；
-    // ② 派生出的行为上它也不支持签到（`=== true` 判据恒假）。
-    expect(descriptorOf('raccoon')?.credits).not.toHaveProperty('dailyCheckin')
-    expect(supportsDailyCheckin('raccoon')).toBe(false)
-    // ⚠️ 派生表同样保持「缺失即缺失」（见 `creditCapabilitiesOf`）：raccoon 那条
-    // 连键都没有，而不是一个 `dailyCheckin: undefined` 占位 —— 后者看不出
-    // 「确认没有端点」与「忘了登记」的区别。
-    expect(CREDITS_CAPABILITIES.raccoon).not.toHaveProperty('dailyCheckin')
+  /**
+   * ⚠️⚠️ **本用例 2026-11-15 反转了语义**（旧断言是「没有登记 dailyCheckin」）。
+   *
+   * 旧依据：「每日 300 无端点，登记了会让按钮必然失败」。那条依据**只翻了
+   * `/points/v1|v2`** —— 那里的 `sign_in` / `check_in` / `daily` 确实全 404，
+   * 但触发器在**办公端** `GET /api/web/office/v3/setting_info`：
+   * 2026-11-16 00:14（UTC+8）对 3 个真实账号各调一次，`available_points`
+   * **全部 +300**，响应带 `point_grant_popups:[{source:'daily', points:300}]`；
+   * 紧接着再调一次 ⇒ `popups: []` + 余额不变（按天幂等）。
+   *
+   * ⇒ 现在必须**登记** `dailyCheckin`，且派生表里真的 `=== true`
+   *   （漏登记的表现是「面板压根不渲染签到按钮」，静默无报错）。
+   */
+  it('★ 登记了 dailyCheckin（每日签到走办公端结算，不登记会让按钮凭空消失）', () => {
+    expect(descriptorOf('raccoon')?.credits.dailyCheckin).toBe(true)
+    expect(supportsDailyCheckin('raccoon')).toBe(true)
+    // 派生表必须与真相源一致（`creditCapabilitiesOf` 是条件拷贝，
+    // 漏一个字段就是「registry 说支持、客户端说没有」的静默分叉）。
+    expect(CREDITS_CAPABILITIES.raccoon?.dailyCheckin).toBe(true)
+    // ⚠️ `onboardingTasks` 与 `dailyCheckin` 语义**独立**，不能互相推断
+    //（前者每号一次，后者每天一次）—— 两者必须同时在。
+    expect(CREDITS_CAPABILITIES.raccoon?.onboardingTasks).toBe(true)
   })
 })

@@ -68,7 +68,7 @@ import {
   fetchMinimaxCreditBalanceDetailed,
   fetchMinimaxSigninStatus,
 } from './minimax-credits.js'
-import { fetchRaccoonCreditBalance } from './raccoon-credits.js'
+import { claimRaccoonDailyCheckin, fetchRaccoonCreditBalance } from './raccoon-credits.js'
 // ⚠️ **本 fork 独有**（魔搭，2026-10-17）：魔粒余额原语。
 import { claimModelscopeDaily } from './modelscope-checkin.js'
 import { fetchModelscopeBalanceDetailed } from './modelscope-credits.js'
@@ -157,6 +157,13 @@ export interface ProviderCreditsDeps {
   /** Raccoon auth 实例（省略时回退到自由函数 + 全局 fetch）。 */
   readonly raccoon?: {
     fetchCreditBalance(credential: RaccoonCredential): Promise<CreditBalance | null>
+    /**
+     * 每日签到（办公端结算）。
+     *
+     * ⚠️ 与余额同一条口径：走实例方法才能保住注入的 `fetchImpl`
+     * （测试替身 / 代理）。省略时回退到自由函数。
+     */
+    claimDailyCheckin(credential: RaccoonCredential): Promise<ClaimOutcome>
   }
   /** ZCode auth 实例（省略时回退到自由函数 + 全局 fetch）。 */
   readonly zcode?: { fetchBalanceFor(credential: ZcodeCredential): Promise<ZcodeBalanceResult | undefined> }
@@ -664,16 +671,32 @@ export function createProviderCredits(
         return balance === null ? fail('积分查询失败（凭据失效或响应异常）') : ok(balance)
       },
       /**
-       * ⚠️ **raccoon 没有签到端点**：每日 300 积分由服务端按日自动发放
-       *（账单里的 `daily_grant`，实测注册后 1 分钟即到账）⇒ **刻意不提供 `claim`**。
-       * 客户端按能力矩阵（`raccoon: { balance: true, onboardingTasks: true }`，
-       * **无** `dailyCheckin`）根本不会渲染「一键领取积分」按钮。
+       * 每日签到 = **办公端 `setting_info` 结算触发器** + 余额差核对。
        *
-       * ⚠️ 文案**逐字保留**，含那句可操作指引「登录奖励请在『新手任务』中领取」
-       * —— 用户看完才知道下一步该点哪里（压成泛化模板会丢掉它）。
+       * ## ⚠️⚠️ 旧注释「raccoon 没有签到端点」已作废（2026-11-15 真实账号复验）
+       *
+       * 原依据「`/points/v1|v2` 下 `sign_in` / `check_in` / `daily` 全 404」
+       * **仍然成立**，但结论下早了 —— 每日积分的触发器在**办公端**：
+       * `GET /api/web/office/v3/setting_info` 带桌面端身份头访问一次，服务端就
+       * **按天幂等**结算当日每日积分。实测（2026-11-16 00:14 UTC+8，3 个真实
+       * 账号）三个账号的 `available_points` 各 **+300**，响应带
+       * `point_grant_popups: [{source:'daily', points:300}]`；紧接着再调一次
+       * ⇒ `popups: []` + 余额不变。
+       *
+       * ⚠️ 走实例方法（`deps.raccoon.claimDailyCheckin`）以保留注入的
+       * `fetchImpl`；未传实例时回退到自由函数，与余额查询同一条口径。
+       * ⚠️ 必须 `precheckStatus: false`：本渠道**没有**与 `CheckinStatus` 同构的
+       * 状态端点（签到状态判据在余额差 / 账单里），而骨架默认值 `true` 会拿
+       * **buddy 式**的 `fetchCheckinStatus` 去打 Raccoon 端点 —— 一次**必然失败的
+       * 真实上游请求**（与 loomy 同型）。幂等由服务端按天保证，不需要外部预检。
        */
-      claimUnavailableReason: 'Raccoon Work 不支持每日签到（每日积分由服务端自动发放；'
-        + '登录奖励请在「新手任务」中领取）',
+      claim: async (credential) => {
+        const viaInstance = deps.raccoon?.claimDailyCheckin
+        return typeof viaInstance === 'function'
+          ? await viaInstance.call(deps.raccoon, credential as RaccoonCredential)
+          : await claimRaccoonDailyCheckin(RACCOON, credential as RaccoonCredential)
+      },
+      precheckStatus: false,
     },
 
     /**

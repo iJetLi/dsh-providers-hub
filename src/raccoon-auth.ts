@@ -33,6 +33,7 @@ import {
   type RaccoonModelMeta,
 } from './raccoon.js'
 import {
+  claimRaccoonDailyCheckin,
   claimRaccoonLoginReward,
   fetchRaccoonCreditBalance,
   fetchRaccoonOnboardingStatus,
@@ -519,6 +520,16 @@ export class RaccoonAuth extends Service {
   /** 领取一次性登录奖励。 */
   async claimLoginReward(credential: RaccoonCredential): Promise<ClaimOutcome> {
     return claimRaccoonLoginReward(this.product, credential, this.fetchImpl)
+  }
+
+  /**
+   * 每日签到（办公端 `setting_info` 结算触发器 + 余额差核对）。
+   *
+   * ⚠️ 走实例方法而不是让 `provider-credits` 直接调自由函数：这样注入的
+   * `fetchImpl`（测试替身 / 代理）不会被绕过，与余额查询同一条口径。
+   */
+  async claimDailyCheckin(credential: RaccoonCredential): Promise<ClaimOutcome> {
+    return claimRaccoonDailyCheckin(this.product, credential, this.fetchImpl)
   }
 
   /** 查询一次性登录奖励是否已领。 */

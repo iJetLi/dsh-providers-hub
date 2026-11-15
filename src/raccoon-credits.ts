@@ -1,44 +1,81 @@
 /**
- * Raccoon Work 积分（余额 + 一次性登录奖励）。
+ * Raccoon Work 积分（余额 + 每日签到 + 一次性登录奖励）。
  *
- * ## ⚠️ 三个来源的语义（关键）
+ * ## 三个来源的语义（2026-11-15 修正）
  *
  * | 来源 | 金额 | 触发方式 | 本模块 |
  * |---|---|---|---|
- * | 新人注册礼包 | 3000 | 注册时服务端自动发放 | 不涉及（用户注册即有） |
- * | 桌面端登录奖励 | 3000 | `POST …/login/points/grant` | ✅ `claimRaccoonLoginReward` |
- * | 每日积分发放 | 300 | **服务端按日自动发放，无端点** | ❌ 不实现 |
+ * | 新人注册礼包 | 3000 | 注册时服务端自动发放（`reward_grant`） | 不涉及（用户注册即有） |
+ * | 桌面端登录奖励 | 3000 | `POST …/desktop/v1/login/points/grant`（幂等一次性） | ✅ `claimRaccoonLoginReward` |
+ * | 每日赠送积分 | 300/日 | **`GET …/office/v3/setting_info`**（按天幂等） | ✅ `claimRaccoonDailyCheckin` |
  *
- * ⚠️ **每日 300 没有签到端点** —— 实测该账号 13:30 注册、13:31 就收到
- * `daily_grant` 账单（`biz_type: 'daily_grant'`）。故**不能**把它实现成
- * 签到按钮：不存在可调用的端点，按钮必然失败。
+ * ## ⚠️⚠️ 旧结论「每日 300 没有签到端点」已作废（2026-11-15 真实账号复验）
  *
- * ⚠️ **登录奖励是幂等一次性的**（已领过返回 `granted:false`），
- * 语义与 Loomy 的新手任务同构，故登记为 `onboardingTasks` 而**不是**
- * `dailyCheckin` —— 后者会让用户以为每天都真的加了额度。
+ * 原注释的依据是「`/points/v1|v2` 下 `sign_in` / `check_in` / `daily` / `claim`
+ * 全 404」，那条**仍然成立**（本次逐个复验，仍是 HTML 无关的纯文本
+ * `404 page not found`）—— 但结论下早了：每日积分的触发器不在 points 前缀下，
+ * 而在**办公端**的 `GET /api/web/office/v3/setting_info`。
+ *
+ * 实测（2026-11-16 00:14 UTC+8，跨日后第一次调用，3 个真实账号各一次）：
+ * - `available_points` 三个账号**全部 +300**，`daily_points` 同步 +300；
+ * - 响应带 `point_grant_popups: [{source:'daily', points:300,
+ *   expire_at:'2026-11-22T23:59:59+08:00'}]`；
+ * - 紧接着再调一次 ⇒ `popups: []` + 余额不变 ⇒ **按天幂等**，重复调用不会多发。
+ *
+ * ## 成功判据：以**余额前后差**为准，账单只作兜底
+ *
+ * ⚠️ 触发成功后**立刻**拉账单有时看不到当天那笔（积分记录同步有延迟，官方文档
+ * 也写了这一点）。只用账单会把「刚发放成功」误报成「今天早就发过了」——
+ * 用户看到「已领」而实际未记账，逐日累计就差一整笔。故顺序是：
+ * 余额(before) → 触发 → 余额(after) → 差额 > 0 判 `claimed`；差额为 0 才查账单
+ * 区分「今天早些时候已到账」与「确实没发」。
+ *
+ * ## 账单必须走 v2 + `type=income`
+ *
+ * v1 的 `/bills` 按时间倒序返回全部记录（消耗也在内）。2026-11-15 实测三个
+ * 账号的 `paging.limit=50` 全被 `daily_grant` + `desktop` 占满，
+ * `reward_grant` **零命中** ⇒ 登录奖励状态恒报「未领取」。见
+ * {@link RACCOON_POINTS_V2_PREFIX}。
+ *
+ * ## ⚠️ 登录奖励仍是「一次性」，不登记为每日签到
+ *
+ * 它幂等一次性（已领过返回 `granted:false`），语义与 Loomy 的新手任务同构，
+ * 故登记为 `onboardingTasks`；`dailyCheckin` 归的是每天的 `setting_info` 那条。
  *
  * ## 只读优先
  *
  * 余额查询用 `GET /points/v1/balance`（**只读**）。在「打开面板」这类
- * 高频路径上**绝不**触碰写端点（Loomy 的 `first-login` 就踩过这个坑：
+ * 高频路径上**绝不**触碰触发端点（Loomy 的 `first-login` 就踩过这个坑：
  * 打开面板即意外触发签到）。
  */
 
 import {
   RACCOON_POINTS_PREFIX,
+  RACCOON_POINTS_V2_PREFIX,
   RACCOON_DESKTOP_PREFIX,
+  RACCOON_OFFICE_PREFIX,
   RACCOON_REQUEST_TIMEOUT_MS,
   raccoonHeaders,
   type RaccoonCredential,
 } from './raccoon.js'
 import { RACCOON, type RaccoonProduct } from './raccoon-product.js'
-import type { ClaimOutcome, CreditBalance, CreditPackage } from './credits.js'
+import { roundCredits, type ClaimOutcome, type CreditBalance, type CreditPackage } from './credits.js'
 
 /** 登录奖励的默认额度（服务端未在 popup 里给出时兜底）。 */
 export const RACCOON_LOGIN_REWARD_POINTS = 3000
 
 /** 登录奖励在账单里的 `event_name`（用于判定是否已领）。 */
 export const RACCOON_LOGIN_REWARD_EVENT_NAME = '桌面端登录奖励'
+
+/**
+ * 每日积分在账单里的 `event_name` 与 `biz_type`。
+ *
+ * 实测三个账号逐条一致（`biz_type: 'daily_grant'`、`event_name: '每日积分发放'`）。
+ * ⚠️ 判据**只用 `biz_type`**：`event_name` 是展示文案、上游随时可能改字，
+ * 而 `biz_type` 是机器码。`event_name` 留在这里只为 README/排查时对得上。
+ */
+export const RACCOON_DAILY_GRANT_BIZ_TYPE = 'daily_grant'
+export const RACCOON_DAILY_GRANT_EVENT_NAME = '每日积分发放'
 
 /** 业务响应信封。 */
 interface Envelope {
@@ -211,11 +248,58 @@ export async function claimRaccoonLoginReward(
   return { kind: 'claimed', credit: points, streakDays: 0, isStreakDay: false }
 }
 
+/** 账单里的一条入账记录（只取本模块用到的字段）。 */
+interface RaccoonBillItem {
+  readonly bizType: string
+  readonly eventName: string
+  readonly points: number
+  readonly createdAt: string
+}
+
+/**
+ * 拉「收入」账单（只含发放记录，不含消耗）。
+ *
+ * ⚠️ **必须走 v2 + `type=income`**，理由见 {@link RACCOON_POINTS_V2_PREFIX}：
+ * v1 的前 50 条实测已被 `daily_grant` + `desktop` 占满，
+ * `reward_grant` 零命中 ⇒ 领过的账号也会被判成「未领取」。
+ *
+ * @returns `null` 表示查不到（调用方不得编造 0）。
+ */
+async function fetchRaccoonIncomeBills(
+  product: RaccoonProduct,
+  credential: RaccoonCredential,
+  fetcher: typeof fetch,
+): Promise<RaccoonBillItem[] | null> {
+  const envelope = await requestJson(
+    `${product.apiBase}${RACCOON_POINTS_V2_PREFIX}/bills?paging.limit=100&type=income`,
+    credential,
+    product,
+    { method: 'GET' },
+    fetcher,
+  )
+  if (!envelope.ok || envelope.data === undefined) return null
+  const raw = Array.isArray(envelope.data.items) ? envelope.data.items : []
+  const items: RaccoonBillItem[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+    const record = entry as Record<string, unknown>
+    const points = readNumber(record.points)
+    if (points === undefined) continue
+    items.push({
+      bizType: typeof record.biz_type === 'string' ? record.biz_type : '',
+      eventName: typeof record.event_name === 'string' ? record.event_name : '',
+      points,
+      createdAt: typeof record.created_at === 'string' ? record.created_at : '',
+    })
+  }
+  return items
+}
+
 /**
  * 查询「桌面端登录奖励」是否已领（供 `onboarding.status` 用）。
  *
- * 判据：`GET /points/v1/bills` 里是否已有
- * `biz_type === 'reward_grant'` 且 `event_name === '桌面端登录奖励'` 的记录。
+ * 判据：收入账单里存在 `biz_type === 'reward_grant'` 且
+ * `event_name === '桌面端登录奖励'` 的记录。
  *
  * ⚠️ **不能靠 `balance` 推断** —— 余额是多个来源（注册礼包/每日/充值）的
  * 合计，无法区分某一项是否已领。
@@ -230,31 +314,175 @@ export async function fetchRaccoonOnboardingStatus(
   credential: RaccoonCredential,
   fetcher: typeof fetch = fetch,
 ): Promise<{ claimed: boolean; points: number }> {
+  const items = await fetchRaccoonIncomeBills(product, credential, fetcher)
+  if (items === null) {
+    return { claimed: false, points: RACCOON_LOGIN_REWARD_POINTS }
+  }
+
+  let claimed = false
+  let points = RACCOON_LOGIN_REWARD_POINTS
+  for (const item of items) {
+    if (item.bizType !== 'reward_grant') continue
+    if (item.eventName !== RACCOON_LOGIN_REWARD_EVENT_NAME) continue
+    claimed = true
+    if (item.points > 0) points = item.points
+    break
+  }
+  return { claimed, points }
+}
+
+/* ────────────────────── 每日签到（办公端结算触发器） ──────────────────────
+ *
+ * 「签到」在本渠道 = **打一次只读的 `GET /office/v3/setting_info`** + 用余额差
+ * 核对。触发请求本身没有请求体、没有写语义（它本职是拉设置），重复调用只会
+ * 返回「今天已经结算过了」—— 故它天然幂等，可以每天无脑调。
+ *
+ * ⚠️ 与 Loomy 的 `POST /points/first-login` 形态不同，**不要照抄那个**：
+ * 那边是显式写端点，这边是「读端点顺带结算」。
+ */
+
+/**
+ * UTC+8 的当天日期（`YYYY-MM-DD`）—— 上游每日积分按北京零点切日。
+ *
+ * ⚠️ 必须用**算术平移**而不是本机时区：日界归服务端（UTC+8），用本机时区
+ * 会在用户出差 / 改系统时区时得到错的「今天」。
+ */
+export function raccoonUtc8Date(nowMs: number = Date.now()): string {
+  return new Date(nowMs + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
+/** 触发结果：成功时带上游自带的发放提示（已结算过则为空）。 */
+export interface RaccoonDailyGrantResult {
+  readonly ok: boolean
+  readonly message: string
+  readonly toast: string
+  readonly popups: ReadonlyArray<{ displayName: string; points: number; expireAt: string }>
+}
+
+/**
+ * 触发一次「每日积分结算」（按天幂等）。
+ *
+ * @returns `ok: false` 表示上游拒绝 / 网络失败（`message` 带原因）；
+ *          `ok: true` 时 `toast` / `popups` 是上游自带的发放提示，**可能为空**
+ *          （为空只说明「今天此前已经结算过」，不代表失败）。
+ */
+export async function triggerRaccoonDailyGrant(
+  product: RaccoonProduct,
+  credential: RaccoonCredential,
+  fetcher: typeof fetch = fetch,
+): Promise<RaccoonDailyGrantResult> {
   const envelope = await requestJson(
-    `${product.apiBase}${RACCOON_POINTS_PREFIX}/bills?paging.limit=50&paging.offset=0`,
+    `${product.apiBase}${RACCOON_OFFICE_PREFIX}/setting_info`,
     credential,
     product,
     { method: 'GET' },
     fetcher,
   )
-  if (!envelope.ok || envelope.data === undefined) {
-    return { claimed: false, points: RACCOON_LOGIN_REWARD_POINTS }
+  if (!envelope.ok) {
+    const reason = envelope.message.length > 0 ? envelope.message : `HTTP ${envelope.code}`
+    return { ok: false, message: `每日积分结算失败：${reason}`, toast: '', popups: [] }
   }
-
-  const items = Array.isArray(envelope.data.items) ? envelope.data.items : []
-  let claimed = false
-  let points = RACCOON_LOGIN_REWARD_POINTS
-  for (const raw of items) {
+  const data = envelope.data ?? {}
+  const toast = typeof data.point_grant_toast === 'string' ? data.point_grant_toast : ''
+  const popups: Array<{ displayName: string; points: number; expireAt: string }> = []
+  for (const raw of Array.isArray(data.point_grant_popups) ? data.point_grant_popups : []) {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue
-    const item = raw as Record<string, unknown>
-    if (item.biz_type !== 'reward_grant') continue
-    if (item.event_name !== RACCOON_LOGIN_REWARD_EVENT_NAME) continue
-    claimed = true
-    const billPoints = readNumber(item.points)
-    if (billPoints !== undefined && billPoints > 0) points = billPoints
-    break
+    const record = raw as Record<string, unknown>
+    popups.push({
+      displayName: typeof record.display_name === 'string' ? record.display_name : '积分发放',
+      points: readNumber(record.points) ?? 0,
+      expireAt: typeof record.expire_at === 'string' ? record.expire_at : '',
+    })
   }
-  return { claimed, points }
+  return { ok: true, message: '', toast, popups }
+}
+
+/**
+ * 读账单，汇总「今天（UTC+8）到账的每日积分」。
+ *
+ * @returns `null` 表示账单查不到（调用方必须当成失败，不能编造 0）。
+ */
+export async function fetchRaccoonTodayDailyGrants(
+  product: RaccoonProduct,
+  credential: RaccoonCredential,
+  fetcher: typeof fetch = fetch,
+  nowMs: number = Date.now(),
+): Promise<{ total: number; entries: ReadonlyArray<{ name: string; points: number }> } | null> {
+  const items = await fetchRaccoonIncomeBills(product, credential, fetcher)
+  if (items === null) return null
+  const today = raccoonUtc8Date(nowMs)
+  const entries: Array<{ name: string; points: number }> = []
+  for (const item of items) {
+    if (item.bizType !== RACCOON_DAILY_GRANT_BIZ_TYPE) continue
+    if (item.points <= 0) continue
+    // ⚠️ 上游 `created_at` 带 `+08:00` 偏移（实测 `2026-11-16T00:14:0x+08:00`），
+    //    直接截前 10 位就是北京日期。带 `Z` 的话这行会判错 —— 届时改用
+    //    `raccoonUtc8Date(Date.parse(createdAt))` 归一化。
+    if (item.createdAt.slice(0, 10) !== today) continue
+    entries.push({ name: item.eventName.length > 0 ? item.eventName : RACCOON_DAILY_GRANT_EVENT_NAME, points: item.points })
+  }
+  return { total: roundCredits(entries.reduce((sum, entry) => sum + entry.points, 0)), entries }
+}
+
+/**
+ * 每日签到：触发办公端结算，再用**余额前后差**核对。
+ *
+ * 三条返回分支：
+ * - 余额差额 > 0 ⇒ `claimed`（`credit` = 差额，含上游顺带补发的历史缺额）；
+ * - 差额为 0 且今日账单已有 `daily_grant` ⇒ `already-claimed`（今天早些时候到过账）；
+ * - 触发或两次余额查询都失败 ⇒ `failed`（带原因，**不虚报成功**）。
+ *
+ * ⚠️ `coversToday` 恒为 `true`：本渠道的结果**就是**按今天的余额差/账单算出来的。
+ *
+ * ⚠️ 余额查询失败（`null`）**不直接判失败**：差额判据要求两次都读得到，
+ * 读不到就退到账单判据 —— 账单也说没有时才算「今天没发」。这条短路顺序
+ * 是刻意的：余额端点偶尔 5xx 时不该让用户看到「签到失败」。
+ */
+export async function claimRaccoonDailyCheckin(
+  product: RaccoonProduct,
+  credential: RaccoonCredential,
+  fetcher: typeof fetch = fetch,
+): Promise<ClaimOutcome> {
+  const before = await fetchRaccoonCreditBalance(product, credential, fetcher)
+  const triggered = await triggerRaccoonDailyGrant(product, credential, fetcher)
+  if (!triggered.ok) {
+    return { kind: 'failed', code: -1, message: triggered.message, coversToday: true }
+  }
+  const after = await fetchRaccoonCreditBalance(product, credential, fetcher)
+  if (before !== null && after !== null) {
+    const gained = roundCredits(after.total - before.total)
+    if (gained > 0) {
+      return {
+        kind: 'claimed',
+        credit: gained,
+        streakDays: 0,
+        isStreakDay: false,
+        coversToday: true,
+      }
+    }
+  }
+  // 余额差为 0（或余额读不到）时再问账单：今天早些时候真的到过账吗？
+  const today = await fetchRaccoonTodayDailyGrants(product, credential, fetcher)
+  if (today !== null && today.total > 0) {
+    const detail = today.entries.slice(0, 3).map((entry) => `${entry.name}+${entry.points}`).join('，')
+    return {
+      kind: 'already-claimed',
+      message: `今日每日积分已到账 ${today.total}（${detail}）`,
+      coversToday: true,
+    }
+  }
+  // 触发成功、余额没变、账单也没有 ⇒ 上游认为今天已经结算过，但没有可展示的凭证。
+  // 如实报「已处理」而不是 `claimed`：编一个金额就是报假账。
+  const popupPoints = triggered.popups.reduce((sum, popup) => sum + popup.points, 0)
+  return {
+    kind: 'already-claimed',
+    message: triggered.toast.length > 0
+      ? triggered.toast
+      : popupPoints > 0
+        ? `今日每日积分已发放 ${popupPoints}（账单同步有延迟，稍后可在余额看到）`
+        : '今日每日积分此前已结算（办公端按天幂等，不会重复发放）',
+    coversToday: true,
+  }
 }
 
 /** 默认产品配置下的便捷包装（供 `RaccoonAuth` 调用）。 */
@@ -265,4 +493,8 @@ export const raccoonCreditsForDefaultProduct = {
     claimRaccoonLoginReward(RACCOON, credential, fetcher),
   fetchOnboardingStatus: (credential: RaccoonCredential, fetcher?: typeof fetch) =>
     fetchRaccoonOnboardingStatus(RACCOON, credential, fetcher),
+  claimDailyCheckin: (credential: RaccoonCredential, fetcher?: typeof fetch) =>
+    claimRaccoonDailyCheckin(RACCOON, credential, fetcher),
+  triggerDailyGrant: (credential: RaccoonCredential, fetcher?: typeof fetch) =>
+    triggerRaccoonDailyGrant(RACCOON, credential, fetcher),
 }

@@ -1071,10 +1071,11 @@ function UsageBadgeActive(props) {
    * - **必须串行** `await`，不能 `Promise.all`：这是**真实领积分**的写操作，
    *   跨渠道并发会同时发出多路领取请求，触发风控的代价是用户当天领不到
    *  （单渠道内部本就是「逐账号顺序执行」，见 `src/jet-hub-rpc.ts`）。
-   * - 渠道集合由能力表推导（`checkinProviders()`）：Cline / Raccoon 后端没有
-   *   签到接口，**绝不能**出现在请求列表里。
-   *   ⚠️ 2026-11-15 更正：**WorkBuddy 国际版有签到端点**（与国内版同形），
-   *   已从「不支持」名单移出（PR #87）。
+   * - 渠道集合由能力表推导（`checkinProviders()`）：当前只有 **Cline** 后端
+   *   没有签到接口，**绝不能**出现在请求列表里。
+   *   ⚠️ 2026-11-15 两家先后移出：WorkBuddy 国际版（签到端点与国内版逐字同形，
+   *   PR #87）与 Raccoon（办公端 `setting_info` 结算，PR #88）。名单会随实测
+   *   变化，别把历史结论当成契约。
    * - 单渠道失败只计入失败数，**不中断后续渠道**。
    * - 每个**非零**计数都要出现在结果里（否则「暂无活动」的渠道会整条消失，
    *   用户以为它没执行）；一个渠道可能同时有成功与失败，不用 else-if 短路。
@@ -2061,8 +2062,7 @@ function UsageBadgeActive(props) {
    *
    * - `签到（仅 <渠道>）`：只在能力表允许的渠道渲染（`supportsDailyCheckin`）；
    * - `全部渠道签到`：与设置页页头同款语义，串行遍历 `checkinProviders()`
-   *   （Cline / Raccoon 没有签到接口，不在列表里；WorkBuddy 国际版 2026-11-15 起
-   *   已能签到，故在列表内）。
+   *   （Cline 没有签到接口，不在列表里）。
    *   它**不依赖本渠道的读数**，故首屏/失败态也渲染。
    */
   function renderClaim() {
@@ -2097,7 +2097,7 @@ function UsageBadgeActive(props) {
           // —— 硬编码必然腐坏，改成 `checkinProviders().length` 现算（该函数本文件已 import）。
           // 2026-11-01 三审（本分支）：自动签到的语义已从「每天首次启动」改成「每天两个时段」，
           // 文案必须跟着改，否则与面板「下次执行：21:00」自相矛盾。
-          title: `串行签到全部支持签到的渠道（${checkinProviders().length} 个；Cline / Raccoon 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻自动执行' : ''}`,
+          title: `串行签到全部支持签到的渠道（${checkinProviders().length} 个；Cline 后端没有签到接口）${auto?.enabled === true ? '；自动签到已开启，每天按设定时刻自动执行' : ''}`,
           onClick: () => { void onClaimAll(); },
         }, allBusy
           ? (claimProgress === null ? '签到中…' : `签到中 ${claimProgress.done}/${claimProgress.total}…`)
@@ -2108,10 +2108,9 @@ function UsageBadgeActive(props) {
        *
        * ⚠️ 用户 2026-10-02 报障：「单渠道签到哪里去了」—— 他在 Cline 上打开弹窗只看到
        * 「全部渠道签到」，以为按钮丢了。真相是能力表里 `dailyCheckin: false`
-       * （Cline / Raccoon 后端没有签到接口，Raccoon 的每日积分由服务端自动发放）。
-       * 少了这一句，用户只能靠猜。
-       * ⚠️ WorkBuddy 国际版 2026-11-15 起已加入可签到名单（见
-       * `docs/agent-notes/providers-workbuddy-intl-checkin.md`）。
+       * （Cline 后端没有签到接口）。少了这一句，用户只能靠猜。
+       * ⚠️ WorkBuddy 国际版（PR #87，签到端点与国内版逐字同形）与 Raccoon
+       * （PR #88，办公端 `setting_info` 结算）均已加入可签到名单 —— 别按旧注释去猜。
        */
       canClaimCurrent
         ? null

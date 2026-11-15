@@ -565,12 +565,20 @@ describe('credits.claimAll 的按需自愈（与余额查询同一层）', () =>
     expect(calls).toEqual([])
   })
 
-  it('不签到的渠道（cline / raccoon）**不因自愈而改变拒绝行为**', async () => {
-    // ⚠️ 这两家即使账号已过期也必须仍然返回「不支持签到」的可读错误 ——
+  /**
+   * ⚠️ **workbuddy 与 raccoon 都在 2026-11-15 移出本组**：签到接通后它们**不再**
+   * 返回「不支持每日签到」，而是走通用领取流程（workbuddy 国际版有真端点、
+   * raccoon 走办公端 `setting_info` 结算）。留着它们在这组里会让断言变成
+   * 「必须报不支持」，与实现直接矛盾。
+   *
+   * 只剩 `cline` 是**实测确无端点**的（sidecar 全量扫描无 checkin 端点）。
+   */
+  it('不签到的渠道（cline）**不因自愈而改变拒绝行为**', async () => {
+    // ⚠️ 即使账号已过期也必须仍然返回「不支持签到」的可读错误 ——
     // 自愈不能把守卫的既有语义带偏（也不能因为续期失败就吞掉这条错误）。
-    // ⚠️ workbuddy 已移出本用例（2026-11-15）：国际版有签到端点，它现在会真发
-    // 领取请求，不再有「不支持」这条拒绝路径。
-    for (const provider of ['cline', 'raccoon']) {
+    // ⚠️ workbuddy 与 raccoon 都已移出本用例（2026-11-15）：两家都会真发领取
+    // 请求，不再有「不支持」这条拒绝路径。
+    for (const provider of ['cline']) {
       const h = setup({
         accounts: [expiredEntry({ id: `id-${provider}`, provider })],
         // 故意让续期失败：守卫必须在自愈失败后仍然生效。
@@ -580,6 +588,25 @@ describe('credits.claimAll 的按需自愈（与余额查询同一层）', () =>
       expect(result.ok, `${provider} 应仍返回可读错误`).toBe(false)
       expect(result.error?.message).toContain('不支持每日签到')
     }
+  })
+
+  /**
+   * ★ **反向**：raccoon 的自愈失败**不得**把它变成「不支持每日签到」。
+   *
+   * ⚠️ 这是上面那条反转后必须补的守卫：把 raccoon 从「无端点」名单移出后，
+   * 若有人为了让它「绿」而把 `claimUnavailableReason` 加回去，上面的循环
+   * 已经不含它了 ⇒ 必须**单独**钉住「它的失败原因是自愈失败，不是能力缺失」。
+   *
+   * 判据只用「不得含『不支持每日签到』」：具体的失败文案取决于续期桩怎么抛，
+   * 钉死它会变成脆断言；而「是不是能力缺失」才是本条要守的语义。
+   */
+  it('★ raccoon 的自愈失败不得被报成「不支持每日签到」', async () => {
+    const h = setup({
+      accounts: [expiredEntry({ id: 'id-raccoon', provider: 'raccoon' })],
+      auths: { raccoon: async () => { throw new Error('boom') } },
+    })
+    const result = await h.call('credits.claimAll', { provider: 'raccoon' })
+    expect(result.ok, 'raccoon 的 claim 不该被自愈失败挡成拒绝').toBe(true)
   })
 })
 

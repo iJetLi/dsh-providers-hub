@@ -403,7 +403,7 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 | `cline` | Cline | WorkOS 设备码轮询 | 余额 |
 | `loomy` | Loomy（讯飞） | 短信验证码 | 余额（两个池）+ 每日额度 + 新手任务 |
 | `astudio` | AStudio（讯飞） | 本机导入 / 认证页扫码 | 余额 + 每日签到（含积分包 / 永久锁定） |
-| `raccoon` | Raccoon Work（商汤） | 微信扫码 / 短信 | 余额 + 一次性登录奖励 |
+| `raccoon` | Raccoon Work（商汤） | 微信扫码 / 短信 | 余额 + 每日签到 + 一次性登录奖励 |
 | `magicrew` | 超级麦吉 | 本机浏览器导入 / 网页版登录 / 手机号+密码 | 余额 + 每日签到 + 新手任务 |
 | `magicrewintl` | MagiCrew（国际版） | 同上（共用实现） | 余额 + 每日签到 + 新手任务 |
 | `minimax` | MiniMax Code (中国版) | OAuth 设备码 + PKCE | 余额 + 每日签到 |
