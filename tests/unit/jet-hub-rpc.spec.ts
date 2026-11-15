@@ -3735,7 +3735,7 @@ describe('积分端点的 provider 能力边界', () => {
    * ⚠️ **2026-11-15 再次更正**：上面那段「claimAll 对 workbuddy 不成立」的依据
    * （README / AGENTS.md / 客户端能力表三处「国际版无签到」）**同源于一次误判**
    * —— 三处都是「只搜 CLI 内核字面量」得出的。国际版与国内版签到端点逐字同形，
-   * 现已一并更正（见 `docs/workbuddy-intl-checkin.md`），claimAll 对两者都成立。
+   * 现已一并更正（见 `docs/agent-notes/providers-workbuddy-intl-checkin.md`），claimAll 对两者都成立。
    */
   it.each(['credits.status', 'credits.balances'])('%s 不会把 CodeBuddy 系一并误拒', async (method) => {
     const call = registerCreditsEndpoints()
@@ -3751,7 +3751,7 @@ describe('积分端点的 provider 能力边界', () => {
     // ⚠️ 本用例 2026-11-15 由「对 workbuddy 断言拒绝」改为「两者都接受」：
     //    国际版**有**签到端点（与国内版逐字同形，只有 baseURL 不同），原先那句
     //    「国际版没有签到接口」来自只搜 CLI 内核字面量 —— 而签到端点是前端直接
-    //    调的，内核里从来不会有。实证见 `docs/workbuddy-intl-checkin.md`。
+    //    调的，内核里从来不会有。实证见 `docs/agent-notes/providers-workbuddy-intl-checkin.md`。
     //    ⚠️ 空账号池 ⇒ 仍不会发任何真实请求，这条只验证 provider 校验。
     for (const provider of ['buddy', 'workbuddy']) {
       const result = await call('credits.claimAll', { provider })

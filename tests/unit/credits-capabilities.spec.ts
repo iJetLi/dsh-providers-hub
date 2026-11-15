@@ -80,7 +80,7 @@ describe('积分能力矩阵', () => {
 
   it('WorkBuddy 国际版余额与签到都支持（2026-11-15 更正：国际版有签到端点）', () => {
     // 旧的「国际版不支持签到」结论来自「只搜 CLI 内核字面量」—— 签到端点是
-    // 前端直接调的（见 docs/workbuddy-intl-checkin.md）。
+    // 前端直接调的（见 docs/agent-notes/providers-workbuddy-intl-checkin.md）。
     // ⚠️ 余额与签到仍是**彼此独立**的能力，这条不许被当成「既然能签到就一定
     // 查得到余额」的推导。
     expect(supportsCreditBalance('workbuddy')).toBe(true)
@@ -109,7 +109,7 @@ describe('积分能力矩阵', () => {
     // `claimUnavailableReason: WorkBuddy 国际版不支持每日签到…`」。
     // 那条守卫的依据是「只搜 CLI 内核字面量找不到签到端点」—— 而签到端点是
     // **IDE / 网页前端**直接调的，内核里本来就不会有，静态搜索必然搜不到。
-    // 国际版与国内版端点逐字同形（实证见 `docs/workbuddy-intl-checkin.md`）。
+    // 国际版与国内版端点逐字同形（实证见 `docs/agent-notes/providers-workbuddy-intl-checkin.md`）。
     //
     // ⇒ 现在这两条断言**反向**：claim 必须在，旧的拒绝文案必须不在。
     const workbuddy = createProviderCredits().workbuddy

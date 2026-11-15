@@ -96,7 +96,7 @@ function ok(partial: Partial<RpcCreditsClaimAllResponse['summary']> = {}): Badge
  * 构造一个「不支持每日签到」的错误信封（`claimAll` 的 cline / raccoon 分支）。
  *
  * ⚠️ workbuddy 已从这类渠道里移除（2026-11-15）：国际版**有**签到端点，
- * 见 `docs/workbuddy-intl-checkin.md`。
+ * 见 `docs/agent-notes/providers-workbuddy-intl-checkin.md`。
  */
 function unsupported(message = 'Cline 不支持每日签到（其后端没有签到接口）'): BadgeRpcResult<RpcCreditsClaimAllResponse> {
   return { ok: false, error: { code: 'bad-request', message } }
