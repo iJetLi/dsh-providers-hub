@@ -9297,6 +9297,9 @@ function registerJetHubEndpoints(
               },
           warn: (msg) => ctx.logger?.warn?.(msg),
         })
+        if (req.provider === MODELSCOPE.id && value.summary.claimed + value.summary.alreadyClaimed > 0) {
+          balanceCacheOf()?.clear(MODELSCOPE.id)
+        }
         return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
       }
 
@@ -12164,6 +12167,17 @@ function registerJetHubEndpoints(
         await badgePreferences.save(req.preference)
         const value: RpcUsageBadgePreferenceResponse = { preference: badgePreferences.load() }
         return { ok: true, value }
+      }
+
+      case 'modelscope.autoCheckin': {
+        const enabled = (payload as { enabled?: unknown } | undefined)?.enabled
+        if (enabled !== undefined) {
+          if (typeof enabled !== 'boolean') {
+            return { ok: false, error: { code: 'bad-request', message: '魔搭自动签到开关必须为布尔值' } }
+          }
+          await autoCheckin.setModelscopeEnabled(enabled)
+        }
+        return { ok: true, value: { enabled: autoCheckin.modelscopeEnabled() } }
       }
 
       /**

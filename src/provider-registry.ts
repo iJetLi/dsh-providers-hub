@@ -839,11 +839,8 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     // ⚠️ **与 opencode 的关键差异**（别把两者当同一格）：opencode 的「余额」是
     // 本地派生的**通道可用性**（零网络）；魔搭是**云侧真读数**，走 `credits` 域的
     // `fetchBalanceDetailed`（三种失败的用户动作不同，故不用笼统的 `fetchBalance`）。
-    credits: { balance: true, dailyCheckin: false },
-    // ⚠️ 无签到：额度是**每日自动刷新**（每账号 250 魔粒、UTC+8 零点重置，
-    //    旗舰档每次扣 2），**没有「领取」动作、也没有签到 API**。
-    //    宿主侧 credits.claimAll 仍要显式回一句可读错误（见 jet-hub-rpc.ts），
-    //    否则自动签到会把它记成 **failed** 而不是 **inactive**。
+    // 魔粒由网页登录触发发放，渠道可单独退出全局自动签到。
+    credits: { balance: true, dailyCheckin: true },
     //
     // ⚠️⚠️ **登记 `rateLimit: false`（用户要求，2026-10-17）** —— 这**不是**能力缺失，
     //    是**产品取舍**，两者的区别必须留在注释里：

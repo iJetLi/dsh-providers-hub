@@ -631,7 +631,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
   const all = balance?.packages || [];
   // ⚠ 单位从**包**上取（ZCode 是 token，其余是积分），标签与格式化都按它走。
   const unit = all.find(p => p && p.unit)?.unit;
-  const label = unitLabel(unit);
+  const label = provider === 'modelscope' ? '魔粒' : unitLabel(unit);
   if (loading) {
     return React.createElement('div', rowProps,
       React.createElement('dt', null, label),
@@ -856,8 +856,15 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    * 结构：第一段 = 行内那一整行（保证「被截掉的内容一定能看到」），
    *       之后是名词解释，最后才是资源包逐项明细。
    */
+  const dailyGrantExpiry = provider === 'modelscope' && balance.dailyGrantExpiresAt > Date.now()
+    ? '日奖励批次 ' + new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      }).format(balance.dailyGrantExpiresAt) + ' 到期'
+    : null;
   const lineText = [
     mainText,
+    dailyGrantExpiry,
     crossUnitText,
     poolSplitText,
     namedPoolText,
@@ -935,6 +942,9 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
     // ⚠️ 配额窗口显示**逐窗口百分比**而不是均值：均值（94.5）既不是上游给的数，
     // 在「额度」这个标签下更会被读成 94.5 个积分。见 quotaText 的注释。
     React.createElement('strong', { className: 'dim-jh-creditTotal' }, mainText),
+    dailyGrantExpiry
+      ? React.createElement('span', { className: 'dim-jh-creditPools' }, dailyGrantExpiry)
+      : null,
     // 跨量纲附注（MonkeyCode 的每日额度）：与 loomy 的 `每日 5000` 同位置、同样式，
     // 只是**不参与**上面的合计 —— 单位不同，不能相加（用户 2026-11-02 定调）。
     crossUnitText === null
@@ -1499,12 +1509,12 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
               + '额度按出口 IP 计算 —— 给它单独配置代理，才会获得独立额度。',
           }, '匿名')
         : null),
-    React.createElement('dl', { className: 'dim-jh-accountMeta' },
+    React.createElement('dl', { className: provider === 'modelscope' ? 'dim-jh-accountMeta dim-jh-accountMeta--modelscope' : 'dim-jh-accountMeta' },
       React.createElement('div', { className: 'dim-jh-metaRow' },
         React.createElement('dt', null, '凭据'),
         React.createElement('dd', null, React.createElement('code', null, account.credentialRef))),
       React.createElement('div', { className: 'dim-jh-metaRow' },
-        React.createElement('dt', null, '有效期'),
+        React.createElement('dt', null, provider === 'modelscope' ? '令牌有效期' : '有效期'),
         React.createElement('dd', { 'data-tone': expired ? 'warn' : undefined },
           account.expiresAt
             ? `${formatTime(account.expiresAt) || '未知'}${account.refreshable ? ' · 自动续期' : ''}`
@@ -3920,6 +3930,57 @@ function QoderTrafficGuardToggle({ provider, rpcCall }) {
       : null);
 }
 
+function ModelscopeAutoCheckinToggle({ rpcCall }) {
+  const [enabled, setEnabled] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const saveInFlight = React.useRef(false);
+
+  React.useEffect(() => {
+    let active = true;
+    rpcCall('modelscope.autoCheckin', {}).then((value) => {
+      if (typeof value?.enabled !== 'boolean') throw new Error('服务端未返回开关状态');
+      if (active) setEnabled(value.enabled);
+    }).catch((cause) => {
+      if (active) setError(cause?.message || '读取魔搭自动签到设置失败');
+    });
+    return () => { active = false; };
+  }, [rpcCall]);
+
+  const save = async (nextEnabled) => {
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      const value = await rpcCall('modelscope.autoCheckin', { enabled: nextEnabled });
+      if (typeof value?.enabled !== 'boolean') throw new Error('服务端未返回开关状态');
+      setEnabled(value.enabled);
+    } catch (cause) {
+      setError(cause?.message || '保存魔搭自动签到设置失败');
+    } finally {
+      saveInFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  return React.createElement(React.Fragment, null,
+    React.createElement('label', {
+      className: 'dim-jh-nativeSearch',
+      title: '跟随全局签到时间。关闭后仍可手动领取魔粒。',
+    },
+    React.createElement('input', {
+      type: 'checkbox',
+      role: 'switch',
+      checked: enabled === true,
+      disabled: enabled === null || busy,
+      onChange: (event) => void save(event.target.checked),
+    }),
+    '魔搭自动签到'),
+    error ? React.createElement('span', { role: 'alert' }, error) : null);
+}
+
+
 function ProviderPanel({
   provider,
   rpcCall,
@@ -4019,6 +4080,7 @@ function ProviderPanel({
   // 积分余额：accountId → { balance, error }。与账号列表分开加载——余额要逐
   // 账号发网络请求，不能拖慢账号列表本身的渲染。
   const [credits, setCredits] = React.useState({});
+  const creditLoadRef = React.useRef(null);
   const [creditsLoading, setCreditsLoading] = React.useState(false);
   /**
    * 后端回传的「临时积分」窗口（天）—— 仅 CodeBuddy / WorkBuddy 有值。
@@ -4464,8 +4526,11 @@ function ProviderPanel({
    * 这是刻意放在函数内部而不是只靠调用点判断——`claimCredits` / 「刷新积分」
    * 按钮等多个入口都调它，门控收在这里才不会被将来新增的调用点绕过。
    */
-  const loadCredits = React.useCallback(async (force = false) => {
+  const loadCredits = React.useCallback(async (force = false, quiet = false) => {
     if (!canLoadCredits) return;
+    if (quiet && creditLoadRef.current !== null) return;
+    const request = {};
+    creditLoadRef.current = request;
     // ⚠️ **自愈后要补一次账号重读**（issue IKKHL5 的客户端残留）。
     //
     // `credits.balances` 在宿主侧会**对已过期账号先续期再查余额**（见
@@ -4488,7 +4553,7 @@ function ProviderPanel({
     // 代价：每次余额查询多一次 `account.list`。这是**刻意的取舍** ——
     // 卡片的正确性优先于一次本地端点往返（`account.list` 读的是内存副本，
     // 不是上游请求，见 `pool.listAccounts` 的实现）。
-    setCreditsLoading(true);
+    if (!quiet) setCreditsLoading(true);
     try {
       // ⚠️⚠️ `force` 必须透传（2026-10-16 审计 P1-1 实测确认的回归）。
       //
@@ -4501,7 +4566,7 @@ function ProviderPanel({
       //「本次查询失败」。用户诉求是「给我新数据」，实现给「再读一次旧数据」，
       // **比报错更糟**（它看起来成功了）。
       const res = await rpcCall('credits.balances', force ? { provider, force: true } : { provider });
-      if (!mounted.current) return;
+      if (!mounted.current || creditLoadRef.current !== request) return;
       const next = {};
       for (const item of res.accounts || []) {
         // `extra` 是逐账号的**附加读数**（目前只有 Gemini 的账号规格 Pro/Free/
@@ -4516,10 +4581,10 @@ function ProviderPanel({
       // `setPhase('loading')`，那会把整块列表切成「正在读取账号列表…」，
       // 自愈成功那一刻用户会看到列表闪一下（本函数只是顺带同步有效期，
       // 不该改变列表的加载态）。
-      await reloadAccountsQuietly();
+      if (!quiet) await reloadAccountsQuietly();
     } catch (caught) {
       console.error('[jet-hub] load credits failed:', caught);
-      if (!mounted.current) return;
+      if (!mounted.current || creditLoadRef.current !== request) return;
       // 整批失败（如 provider 不支持、RPC 未注册）：给当前每个账号都留下失败
       // 原因，避免卡片永远停在"读取中"。
       //
@@ -4535,7 +4600,10 @@ function ProviderPanel({
         return next;
       });
     } finally {
-      if (mounted.current) setCreditsLoading(false);
+      if (creditLoadRef.current === request) {
+        creditLoadRef.current = null;
+        if (mounted.current) setCreditsLoading(false);
+      }
     }
     // ⚠️ `reloadAccountsQuietly` 必须进 deps：本函数现在会调它（余额成功后
     // 补读账号列表），而它的依赖是 `[provider, rpcCall]` —— 不进 deps 会让
@@ -4626,6 +4694,7 @@ function ProviderPanel({
     if (canLoadCredits) void loadCredits();
     return () => {
       mounted.current = false;
+      creditLoadRef.current = null;
       // 卸载时必须掐掉未结束的登录轮询（否则它会在 5 分钟里持续打 RPC）
       if (pollRef.current !== 0) { clearInterval(pollRef.current); pollRef.current = 0; }
       // ⚠️ 领取闸门也要清：本 effect 依赖 `provider`，切 provider 会重跑
@@ -4641,6 +4710,32 @@ function ProviderPanel({
     // 账号刷新后由操作方显式再调 loadCredits（见 claimCredits）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
+
+  React.useEffect(() => {
+    if (provider !== 'modelscope' || typeof document === 'undefined') return;
+    const refresh = (force = false) => {
+      if (!document.hidden) void loadCredits(force, true);
+    };
+    const interval = setInterval(() => refresh(), 60_000);
+    const onVisibility = () => refresh();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [provider, loadCredits]);
+
+  const nextModelscopeExpiry = provider === 'modelscope'
+    ? Math.min(...Object.values(credits).map((item) => item.balance?.dailyGrantExpiresAt ?? Infinity))
+    : Infinity;
+  React.useEffect(() => {
+    const delay = nextModelscopeExpiry - Date.now();
+    if (!Number.isFinite(delay) || delay <= 0 || delay > 86_400_000) return;
+    const timeout = setTimeout(() => {
+      if (typeof document === 'undefined' || !document.hidden) void loadCredits(true, true);
+    }, delay + 1000);
+    return () => clearTimeout(timeout);
+  }, [nextModelscopeExpiry, loadCredits]);
 
   // 积分领取状态：claiming 用于禁用按钮，claimNotice 展示上一次领取的结果摘要。
   const [claiming, setClaiming] = React.useState(false);
@@ -6741,6 +6836,7 @@ function ProviderPanel({
               onClick: () => setShowQuota(true),
             }, '订阅额度')
           : null,
+        provider === 'modelscope' ? React.createElement(ModelscopeAutoCheckinToggle, { rpcCall }) : null,
         supportsCredits
           ? React.createElement('button', {
               className: 'dim-jh-btn',

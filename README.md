@@ -415,7 +415,7 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 | `gemini` | Gemini Code Assist | 浏览器回调 | 余额 |
 | `officeace` | OfficeAce（华为 MaaS / 果办） | 华为云 OAuth PKCE | 余额 + 自动领取（**无手动签到入口**） |
 | `accio` | Accio（阿里） | 浏览器回调 | 余额（三类桶；**无签到**） |
-| `modelscope` | ModelScope（魔搭） | 粘贴 API Key（长期静态 Key） | 余额（**无签到**） |
+| `modelscope` | ModelScope（魔搭） | 粘贴 API Key（长期静态 Key） | 魔粒余额 + 每日登录奖励（可关闭自动签到） |
 | `qiniu` | Qiniu（七牛云） | 粘贴 API Key | **无**（用量只在控制台可见） |
 | `codely` | Codely（Unity 团结引擎） | 设备码轮询 | 余额 + 每日签到 |
 | `monkeycode` | MonkeyCode | 浏览器登录（备用：粘贴 Key + Signing Secret） | 余额 + 每日签到 |
@@ -573,6 +573,13 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 
 ⚠️ 汇总**按单位分列**，不跨量纲求和 —— `ZCode` 的额度单位是 **token**、其余渠道是
 **积分**，两者不可折算，因此显示成 `+100.00MToken, +100积分` 而不是加成一个数。
+
+魔搭默认参与全局自动签到。可在「渠道管理 → ModelScope（魔搭）」单独关闭魔搭自动签到，
+保存后从下一轮调度起生效，手动领取仍可用。该功能通过网页登录触发发放，
+使用前请查看[魔搭社区用户协议](https://modelscope.cn/protocol/用户协议)。
+面板展示可用魔粒余额及日奖励批次的实际到期时间。根据[魔粒体系说明](https://modelscope.cn/docs/magicube/intro)，
+短期魔粒有效 24 小时，长期魔粒有效 90 天，均按发放时间起算。
+
 
 ### 模型列表开关
 

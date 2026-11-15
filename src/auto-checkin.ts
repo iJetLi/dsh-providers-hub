@@ -91,6 +91,7 @@ export interface AutoCheckinDoc {
    * `enabled !== false` 惯例一致。
    */
   enabled: boolean
+  modelscopeEnabled?: false
   /**
    * 每天**两个**执行时刻（`HH:MM`，UTC+8，升序、去重、恰好两个）。
    *
@@ -269,6 +270,7 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
     // 「默认保持打开状态」相反。`'false'` / `0` 这些非布尔值一律按打开处理 ——
     // 它们不是用户点出来的值。
     enabled: record.enabled !== false,
+    ...(record.modelscopeEnabled === false ? { modelscopeEnabled: false } : {}),
     times: sanitizeTimes(record.times),
     jitterMinutes: sanitizeJitter(record.jitterMinutes),
     lastDate: typeof record.lastDate === 'string' && DATE_RE.test(record.lastDate) ? record.lastDate : '',
@@ -637,6 +639,7 @@ class FileAutoCheckinStore implements AutoCheckinStore {
     writeFileSync(tmp, JSON.stringify({
       schema: SCHEMA,
       enabled: doc.enabled,
+      modelscopeEnabled: doc.modelscopeEnabled,
       times: doc.times,
       jitterMinutes: doc.jitterMinutes,
       lastDate: doc.lastDate,
@@ -935,6 +938,8 @@ export interface AutoCheckinDeps {
 export interface AutoCheckin {
   /** 实时状态（供 RPC 与状态灯；`enabled` 等取自内存，不重新读盘）。 */
   state(): RpcUsageAutoCheckinState
+  modelscopeEnabled(): boolean
+  setModelscopeEnabled(enabled: boolean): Promise<void>
   /** 写开关；**打开时若有时段没跑，立刻跑一轮**（否则用户会以为开关没生效）。 */
   setEnabled(enabled: boolean): Promise<RpcUsageAutoCheckinState>
   /**
@@ -1062,6 +1067,12 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       // ⚠️ 排除表先于**任何**上游请求生效（见 isAutoCheckinExcluded 的说明）：
       // zcode 的代价发生在**调用期间**（拉起浏览器产 captcha），事后再判断已经
       // 太晚 —— 必须在调 `claim` 之前就把它摘掉。
+      if (provider === 'modelscope' && doc.modelscopeEnabled === false) {
+        totals.skipped += 1
+        channels.push({ provider, text: '自动签到已关闭' })
+        unretryable.add(provider)
+        continue
+      }
       if (isAutoCheckinExcluded(provider)) {
         totals.skipped += 1
         channels.push({ provider, text: '需手动签到' })
@@ -1359,6 +1370,14 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
 
   return {
     state,
+    modelscopeEnabled: () => doc.modelscopeEnabled !== false,
+    async setModelscopeEnabled(enabled) {
+      const next = { ...doc }
+      if (enabled) delete next.modelscopeEnabled
+      else next.modelscopeEnabled = false
+      await deps.store.save(next)
+      doc = next
+    },
     async setEnabled(enabled) {
       doc = { ...doc, enabled }
       await deps.store.save(doc)

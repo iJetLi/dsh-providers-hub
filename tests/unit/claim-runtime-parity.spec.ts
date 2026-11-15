@@ -267,7 +267,8 @@ describe('签到能力：registry 声明与 runtime 实现必须一致', () => {
     // ⚠️ 2026-11-03 加 baizhi（百智云，Cap 验证码补全后声明可签到）：`claim` 在
     //    `provider-credits.ts` 的 baizhi 条目里（challenge → 本地 PoW → redeem →
     //    daily-temporary-credit）⇒ 15 → 16。
-    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(16)
+    // 魔搭接入签到后成为第 17 个由通用领取流程覆盖的渠道。
+    expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(17)
   })
 
   /**

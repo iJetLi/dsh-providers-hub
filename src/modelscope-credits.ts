@@ -52,7 +52,8 @@
 
 import { modelscopeHeaders } from './modelscope.js'
 import type { ModelscopeCredential } from './modelscope.js'
-import type { CreditBalance, CreditPackage } from './credits.js'
+import { modelscopeDailyGrantExpiry } from './modelscope-checkin.js'
+import { roundCredits, type CreditBalance, type CreditPackage } from './credits.js'
 import { MODELSCOPE, type ModelscopeProduct } from './modelscope-product.js'
 
 /**
@@ -68,14 +69,12 @@ interface RawMagicubeBalance {
     available_balance?: unknown
     frozen_amount?: unknown
   }
-  code?: unknown
-  message?: unknown
 }
 
-/** 把魔粒数收敛成安全整数；不是有限非负整数时返回 `undefined`（表示「读不到」）。 */
+/** 保留魔粒的小数部分；不是有限非负数时返回 `undefined`（表示「读不到」）。 */
 function readAmount(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined
-  return Math.floor(value)
+  return roundCredits(value)
 }
 
 /**
@@ -111,6 +110,7 @@ export async function fetchModelscopeBalanceDetailed(
         referer: 'https://www.modelscope.cn/my/overview',
       },
       signal: AbortSignal.timeout(product.balanceTimeoutMs),
+      redirect: 'error',
     })
   } catch (error) {
     // ⚠️ 只报可读原因，不把整段 fetch 错误糊给用户。
@@ -132,19 +132,16 @@ export async function fetchModelscopeBalanceDetailed(
   } catch {
     return {
       balance: null,
-      error: `魔粒余额响应不是 JSON（HTTP ${response.status}）：${text.slice(0, 120)}`,
+      error: `魔粒余额响应不是 JSON（HTTP ${response.status}）`,
     }
   }
 
-  if (body.success !== true) {
+  if (!response.ok || body?.success !== true) {
     // ⚠️ `success:false` 与「Key 无效」是**两回事**：这里 Key 大概率是有效的，
     //    是端点侧拒绝（常见于账号未完善个人信息/未实名）。
-    const message = typeof body.message === 'string' ? body.message : ''
-    const code = typeof body.code === 'string' ? body.code : ''
-    const suffix = message === '' && code === '' ? '' : `（${code} ${message}）`.trim()
     return {
       balance: null,
-      error: `魔搭未返回魔粒余额${suffix}。若该账号刚注册，可能需要先在 modelscope.cn 完善个人信息并实名认证（平台规则：魔粒需个人信息完善后方可使用）`,
+      error: `魔搭未返回魔粒余额。若该账号刚注册，可能需要先在 modelscope.cn 完善个人信息并实名认证（平台规则：魔粒需个人信息完善后方可使用）`,
     }
   }
 
@@ -154,7 +151,7 @@ export async function fetchModelscopeBalanceDetailed(
     return { balance: null, error: '魔搭响应里没有 total_balance 字段（上游可能改版），无法显示余额' }
   }
 
-  const available = readAmount(body.data?.available_balance)
+  const available = readAmount(body.data?.available_balance) ?? total
   // ⚠️ `frozen_amount`（冻结中，实测恒为 0）**刻意不呈现**：`CreditBalance`
   //    只有 total/packages/expiredTotal 三个字段，**没有**放冻结额的位置。
   //    而 `expiredTotal` 的语义是「已失效包的剩余」—— 塞进冻结额会让 UI 标成
@@ -169,8 +166,8 @@ export async function fetchModelscopeBalanceDetailed(
   const packages: CreditPackage[] = [{
     name: '魔粒',
     total,
-    used: total - (available ?? total),
-    remaining: available ?? total,
+    used: roundCredits(Math.max(0, total - available)),
+    remaining: available,
     unit: 'credit',
     active: true,
     // ⚠️ 三个时间字段对魔搭**没有意义**（上游不下发任何时间），填空串 = 「不适用」，
@@ -183,9 +180,15 @@ export async function fetchModelscopeBalanceDetailed(
     expiredTime: '',
   }]
 
+  // 余额是聚合标量，发放记录不能证明某笔还有多少剩余。
+  const dailyGrantExpiresAt = available > 0
+    ? await modelscopeDailyGrantExpiry(apiKey).catch(() => undefined)
+    : undefined
+
   return {
     balance: {
-      total,
+      total: available,
+      ...(dailyGrantExpiresAt === undefined ? {} : { dailyGrantExpiresAt }),
       packages,
       expiredTotal: 0,
     },

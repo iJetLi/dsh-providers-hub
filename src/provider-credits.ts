@@ -70,6 +70,7 @@ import {
 } from './minimax-credits.js'
 import { fetchRaccoonCreditBalance } from './raccoon-credits.js'
 // ⚠️ **本 fork 独有**（魔搭，2026-10-17）：魔粒余额原语。
+import { claimModelscopeDaily } from './modelscope-checkin.js'
 import { fetchModelscopeBalanceDetailed } from './modelscope-credits.js'
 import type { ModelscopeCredential } from './modelscope.js'
 import { MODELSCOPE } from './modelscope-product.js'
@@ -516,6 +517,8 @@ export function createProviderCredits(
     modelscope: {
       fetchBalanceDetailed: async (credential) =>
         fetchModelscopeBalanceDetailed(credential as ModelscopeCredential, MODELSCOPE),
+      precheckStatus: false,
+      claim: (credential) => claimModelscopeDaily(credential as ModelscopeCredential),
     },
 
     /**

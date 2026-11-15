@@ -129,6 +129,30 @@ function makeRunner(options: {
   return { runner: createAutoCheckin(deps), store, calls, warnings, scheduled, time }
 }
 
+describe('魔搭自动签到开关', () => {
+  it('默认参加全局调度', async () => {
+    const { runner, calls } = makeRunner({ providers: ['modelscope'] })
+    expect(runner.modelscopeEnabled()).toBe(true)
+    await runner.runIfDue()
+    expect(calls).toEqual(['modelscope'])
+  })
+
+  it('独立关闭后仍执行其他渠道，重开后从下个时段恢复', async () => {
+    const { runner, store, calls, time } = makeRunner({ providers: ['buddy', 'modelscope'] })
+    await runner.setModelscopeEnabled(false)
+    expect(sanitizeAutoCheckin(store.current()).modelscopeEnabled).toBe(false)
+    await runner.runIfDue()
+    expect(calls).toEqual(['buddy'])
+    expect(runner.state().enabled).toBe(true)
+
+    await runner.setModelscopeEnabled(true)
+    expect(store.current().modelscopeEnabled).toBeUndefined()
+    time.set(utc8MomentMs('2026-10-02', '21:01'))
+    await runner.runIfDue()
+    expect(calls).toEqual(['buddy', 'buddy', 'modelscope'])
+  })
+})
+
 describe('自动签到：日界与配置', () => {
   it('日界按 UTC+8 算（跨 16:00Z 才换日）', () => {
     // 2026-10-02 15:59Z = UTC+8 的 10-02 23:59

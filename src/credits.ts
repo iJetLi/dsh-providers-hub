@@ -400,6 +400,8 @@ export interface CreditBalance {
    * UI 可以据此提示「另有 N 已失效」，既不误导也不丢信息。
    */
   expiredTotal: number
+  /** 日奖励发放记录中最近的到期时刻（毫秒），仅用于展示，不表示该批魔粒仍有余额。 */
+  dailyGrantExpiresAt?: number
   /**
    * `total` 中**即将到期**的额度（可选；`undefined` = 上游未下发该口径）。
    *

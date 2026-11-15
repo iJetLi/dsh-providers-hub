@@ -345,6 +345,8 @@ const STYLES = `
    别单独占一行」）。⚠️ 只有传了 actions 的调用方才带这个类名 —— 其余
    provider 的 .dim-jh-metaRow 仍是两列，逐字不变。 */
 .dim-jh-metaRow--actions { grid-template-columns: 52px minmax(0, 1fr) auto; }
+.dim-jh-accountMeta--modelscope > .dim-jh-metaRow { grid-template-columns: 64px minmax(0, 1fr); }
+.dim-jh-accountMeta--modelscope > .dim-jh-metaRow--actions { grid-template-columns: 64px minmax(0, 1fr) auto; }
 /* 挂进积分行后就不再需要「独立成行」的那些装饰（上边距 / 分隔线），
    否则会在按钮上方多出一条线并撑高行距。
    align-self: center 覆盖 metaRow 的 baseline —— 按钮是 flex 容器，
@@ -376,6 +378,7 @@ const STYLES = `
      ⚠️ grid-template-areas 比数格子稳：三列变两行时不用重算列宽。
      ⚠️ align-items: start 覆盖基础规则的 baseline —— 窄容器下 dt / dd /
      按钮组各自独占一格，baseline 会让空标签把行高撑歪。 */
+  .dim-jh-accountMeta--modelscope > .dim-jh-metaRow--actions,
   .dim-jh-metaRow--actions {
     grid-template-columns: 52px minmax(0, 1fr);
     grid-template-areas:
