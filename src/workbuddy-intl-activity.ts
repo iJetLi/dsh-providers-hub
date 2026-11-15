@@ -9,7 +9,7 @@
  * **活跃**：上游按「当日是否活跃」异步发放。
  *
  * 活跃这件事由三个互补的端点构成（实测依据见
- * `docs/workbuddy-intl-checkin.md`，移植自社区实现 L0NE-6/WorkBuddy-Daily
+ * `docs/agent-notes/providers-workbuddy-intl-checkin.md`，移植自社区实现 L0NE-6/WorkBuddy-Daily
  * 的 `workbuddy_intl_daily.py`）：
  *
  * | 动作 | 端点 | 作用 |
