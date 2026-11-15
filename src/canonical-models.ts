@@ -375,6 +375,54 @@ export const CANONICAL_OVERRIDES: Readonly<Record<string, Readonly<Record<string
      * ⇒ 两站共用同一个常量对象，这样「加一条补丁只改一处」—— 复制两份必然漂移。
      */
     autoclawintl: AUTOCLAW_CANONICAL_OVERRIDES,
+    /**
+     * **DeepSeek 的日期快照后缀**（`-1017` / `-0813`）—— 归到对应的无后缀键。
+     *
+     * ## 实测（2026-11-16，直接打真实上游，不是看名字猜的）
+     *
+     * | id | 结果 |
+     * | --- | --- |
+     * | `modelscope/deepseek-ai/DeepSeek-V4.1-Flash` | ❌ 502 ← 上游 400 `Model id : …, has no provider supported`（**已下线**，两次复测一致） |
+     * | `modelscope/deepseek-ai/DeepSeek-V4.1-Flash-1017` | ✅ 200 |
+     * | `modelscope/deepseek-ai/DeepSeek-V4-Pro` | ❌ 502 ← 同上（**已下线**） |
+     * | `modelscope/deepseek-ai/DeepSeek-V4-Pro-0813` | ✅ 200 |
+     * | `codearts/deepseek-v4.1-flash` / `…-1017` | ✅ 两个都 200（是两个独立条目，倍率 x0.09 / x0.12） |
+     *
+     * ⇒ 两件不同的事，别混：
+     *
+     * 1. **「无后缀 vs 后缀」不是等价关系** —— modelscope 上无后缀已下线、后缀在服务；
+     *    codearts 上两者并存（`models.ts` 记的是「上游并存的旧版与新版」，曾因去重把
+     *    `-1017` 静默吞掉）；`llm-adapter.ts` 另有实测：codearts 的 `-0731` / `-0813`
+     *    属 **benefit 组**（需 `maas_type: benefit`），与无后缀「不能互相替代」。
+     *    ⚠️ 所以**不要**在注释/PR 里写「两者是同一个 id」—— 它们是两个 id、两段生命周期。
+     * 2. **后缀那条才是该渠道当前在服务的那个模型** —— modelscope 上根本没有可用的
+     *    无后缀 V4-Pro / V4.1-Flash。不并的后果很具体：主行
+     *    `aggregate/deepseek-v4-pro` 里挂着一个**必然 400** 的 modelscope 无后缀 id，
+     *    而真正能用的 `-0813` 孤零零单独成列（只有 1 个候选）⇒ 用户选「DeepSeek V4 Pro」
+     *    时反而轮换不到魔搭。这正是用户报障「同一个模型被拆成不同模型」的成因。
+     *
+     * ## ⚠️ 合并的代价（写在这里，别以后再当 bug 查一遍）
+     *
+     * - 轮换可能选中**旧 build**（codearts 上 `-1017` 与无后缀并存）；
+     * - codearts 的 `-0813` 走 benefit 计费桶。**不会发错 header** —— `benefitIds` 按
+     *   原始 realId 记账（`models.ts` 的 `benefitIds` 收集处），合并只改虚拟模型归组；
+     * - 上游若把无后缀 id 重新上线并换成更新的 build，这条补丁要重看。
+     *
+     * ⚠️ 也**不要**推广成「剥 `-NNNN`」的通用规则：同目录里
+     * `trae:Doubao-Seed-2.1-Pro`（展示名 `Seed-2.1-Pro-0915`）、
+     * `mistral-large-instruct-2407`、`xiyansql-qwencoder-32b-2412/2504` 的数字都是
+     * **模型名本体或独立型号**，剥了就错并。逐条登记是刻意的。
+     */
+    codearts: Object.freeze({
+      'deepseek-v4.1-flash-1017': 'deepseek-v4-1-flash',
+    }),
+    // ⚠️ modelscope 的 id **带命名空间**（`deepseek-ai/…`），补丁表按 `realId`
+    //    原文精确匹配（`canonicalKeyFor` 用 `Object.hasOwn(providerPatch, realId)`），
+    //    所以这里必须写全，不能只写 `DeepSeek-V4.1-Flash-1017`。
+    modelscope: Object.freeze({
+      'deepseek-ai/DeepSeek-V4.1-Flash-1017': 'deepseek-v4-1-flash',
+      'deepseek-ai/DeepSeek-V4-Pro-0813': 'deepseek-v4-pro',
+    }),
   })
 
 /**
