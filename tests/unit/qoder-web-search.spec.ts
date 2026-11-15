@@ -26,6 +26,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { QoderAdapter } from '../../src/qoder-adapter.js'
 import { NativeSearchCodes, WebNativeError, type NativeSource } from '../../src/native-search-contract.js'
 import { QODER, QODER_CN, type QoderProduct } from '../../src/qoder-product.js'
+import { qoderMachineOs } from '../../src/qoder-align.js'
 import type { QoderCredential } from '../../src/qoder.js'
 
 // ───────────────────────── 替身 ─────────────────────────
@@ -104,6 +105,9 @@ describe('Qoder 搜索：协议形状', () => {
     expect(headers['X-Session-ID']).toBeTruthy()
     // 全套 Cosy-* 头也应由 WASM 生成
     expect(Object.keys(headers).some((k) => k.startsWith('Cosy-'))).toBe(true)
+    // 形态对齐：`Cosy-MachineOS` 是**本仓库补的**（WASM 头表里没有这一项，
+    // 依据见 `qoder-align.ts` 模块头的实测 dump）；`X-Session-ID` 是官方的。
+    expect(headers['Cosy-MachineOS']).toBe(qoderMachineOs())
   })
 
   it('method 为 POST，body 非空（密文）', async () => {

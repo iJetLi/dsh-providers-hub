@@ -43,6 +43,9 @@ import { classifyNativeAbort, NativeSearchCodes, WebNativeError, type NativeSour
 import { errorMessage } from './openai-compat.js'
 import { maskProxyPassword } from './proxy-mask.js'
 import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
+// ⚠️ 形态对齐（`Cosy-MachineOS` / `Login-Version` …）：**只补缺失**、可一键关，
+//    功能上非必需 —— 依据与证据强度见该模块头。
+import { applyQoderAlignmentHeaders, withQoderAlignmentHeaders } from './qoder-align.js'
 import { acquireQoderRequest, qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
 import { retryAfterMsFromResponse } from './retry-after.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
@@ -1194,7 +1197,9 @@ export class QoderAdapter extends LlmAdapter {
       try {
         response = await searchFetcher(req.url, {
           method: 'POST',
-          headers: { ...req.headers, 'X-Session-ID': randomUUID() },
+          // ⚠️ 形态对齐：补 `Cosy-MachineOS` / `Login-Version`（默认；hostname 需显式开）。
+          //    只补缺失 —— WASM 若已生成同名头就原样保留（签名相关头不在补的清单里）。
+          headers: withQoderAlignmentHeaders({ ...req.headers, 'X-Session-ID': randomUUID() }),
           body: req.body,
           signal: composed,
         })
@@ -2590,6 +2595,11 @@ export class QoderAdapter extends LlmAdapter {
   ): Promise<Response> {
     const headers = new Headers(request.headers)
     headers.set('Accept', 'text/event-stream')
+    // 形态对齐：补 `Cosy-MachineOS` / `Login-Version`（默认；hostname 需显式开）。
+    // ⚠️ 放在**签名之后**（`request.headers` 已是 WASM 的输出）—— 补的头不在签名
+    //    载荷里（签名覆盖 payload + key + date + body + path），且只补缺失，
+    //    所以不会碰 `Authorization` 里的 `Bearer COSY.<载荷>.<签名>`。
+    applyQoderAlignmentHeaders(headers)
     try {
       return await fetcher(request.url, {
         method: 'POST',

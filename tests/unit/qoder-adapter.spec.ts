@@ -18,6 +18,7 @@ import {
 } from '../../src/qoder-adapter.js'
 import { QODER, QODER_CN } from '../../src/qoder-product.js'
 import type { QoderFallbackModel } from '../../src/qoder-product.js'
+import { qoderMachineOs } from '../../src/qoder-align.js'
 import { buildQoderCredential, parseQoderTokenPayload, type QoderCredential } from '../../src/qoder.js'
 
 /** 源码级断言的路径基准（与 `jet-hub-rpc.spec.ts` 同款）。 */
@@ -649,6 +650,39 @@ describe('QoderAdapter 请求构造（加密端点）', () => {
     expect(auth).toContain('Bearer COSY.')
     expect(auth).not.toBe('Bearer tok')
     expect(get('accept')).toBe('text/event-stream')
+  })
+
+  it('形态对齐：补 `Cosy-MachineOS`（默认开、`=0` 可关）', async () => {
+    // ⚠️ 这个头**功能上非必需**（`qoder-machine.ts` 的消融表已证明），补的是
+    //    形态一致性：官方请求层会带，我们不带就多一条稳定可聚类的特征。
+    //    故这里既守「默认补上」，也守「关掉之后真的不补」——
+    //    只守前者的话，开关写坏了（永远开）也测不出来。
+    //
+    // ⚠️ `Login-Version` 不在这里断言「有没有被补」：它是**WASM 头表自带的**
+    //    （实测 dump，见 `qoder-align.ts` 模块头），补头开关不该影响它。
+    const fetchImpl = vi.fn(async () => envelopeResponse([textFrame('hi'), finishFrame])) as unknown as typeof fetch
+    await collect(makeAdapter({ fetchImpl }))
+    const call = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]!
+    const headers = (call[1] as { headers: Headers }).headers
+    expect(headers.get('cosy-machineos')).toBe(qoderMachineOs())
+    // WASM 自带，与补头开关无关
+    expect(headers.get('login-version')).toBe('v2')
+    // 补头不得碰签名（`Authorization` 是 WASM 生成的 COSY 签名）
+    expect(headers.get('authorization')).toContain('Bearer COSY.')
+
+    vi.stubEnv('DSH_QODER_ALIGN_HEADERS', '0')
+    try {
+      const off = vi.fn(async () => envelopeResponse([textFrame('hi'), finishFrame])) as unknown as typeof fetch
+      await collect(makeAdapter({ fetchImpl: off }))
+      const offCall = (off as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]!
+      const offHeaders = (offCall[1] as { headers: Headers }).headers
+      expect(offHeaders.get('cosy-machineos')).toBeNull()
+      // 关掉的只是补头，签名与 WASM 自带的头照旧
+      expect(offHeaders.get('authorization')).toContain('Bearer COSY.')
+      expect(offHeaders.get('login-version')).toBe('v2')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it('请求体必须含 `business`（缺了服务端路由到坏节点）', async () => {

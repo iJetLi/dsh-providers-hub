@@ -1222,6 +1222,65 @@ LlmError: qoder: 本地账号并发已满，请稍后重试   code = QUEUE
 - **探测与推理抢同一名额**：`createProbeAdapter` 也接了限流 ⇒ 探测期间
   该账号的推理请求会被拒（语义上探测也是请求，暂不改）。
 
+## ⚠️ 形态头：WASM 头表缺 `Cosy-MachineOS` / `Cosy-MachineHostname`（2026-11-16）
+
+### 实测 dump（不是推断）
+
+直接 dump 签名 WASM 生成的两套头表（`prepareInfer` 与 `prepareRequest`），**两条通道
+完全一致地**自带这些：
+
+```
+Accept / Accept-Encoding / Authorization / Content-Type / Cache-Control / Connection
+Cosy-Business-Product / Cosy-Business-Type / Cosy-ClientIp / Cosy-ClientType
+Cosy-Data-Policy / Cosy-Date / Cosy-Key / Cosy-MachineId / Cosy-MachineToken
+Cosy-MachineType / Cosy-Scene / Cosy-User / Cosy-Version / Login-Version
+X-Model-Key / X-Model-Source
+```
+
+⇒ **只缺 `Cosy-MachineOS` 与 `Cosy-MachineHostname`**。这一格很重要：`Login-Version`
+（`v2`）与 `Cosy-ClientIp` 都是 **WASM 自带**，不要再「补」一遍 —— 那行代码永远命中
+不了「缺失」分支，是死代码（同一形态的教训见 `misc.md` 的「恒真断言」）。
+
+### 为什么要补（先说清楚：**功能上不必需**）
+
+`qoder-machine.ts` 的消融表已证明：`/sash/api/v1/me/campaigns` 拿「可领取」活动
+**只需要** `Cosy-MachineToken` + `Cosy-MachineType`（成对），`MachineOS` /
+`MachineHostname` / `MachineId` / `MachineCode` 去掉后**仍然能拿到**。
+
+所以补的**不是功能项**，而是**形态一致性**：官方请求层（不是签名 WASM）会给所有请求
+注入 `cosy-machineos`，infer-sse 还带 `cosy-machinehostname`。我们不带，就等于在请求
+集合里留了一条稳定可聚类的特征。补上不加分、不补不减分 ⇒ 默认开 + 一键关。
+
+### 证据强度（别当成客户端产物实证）
+
+| 结论 | 强度 |
+|---|---|
+| 头表**缺**这两个头 | **高**：本仓库 WASM 实测 dump |
+| 官方请求层会带 | **中**：抓包头表 + 同类实现逆向（`qoder2api-hub` issue #64） |
+| 不影响签到活动下发 | **高**：本仓库消融表 |
+| 追加**不会**破坏 COSY 签名 | **中高**：签名覆盖 `payload + key + date + body + path`，不含头表；且 WASM 自己在签名后还会追加 `Login-Version` / `Accept` / `Cache-Control` ⇒ 头表不在签名内。**未做真机复测** |
+
+### 实现口径（`src/qoder-align.ts`）
+
+- **只补缺失**：`Headers.has` / 对象键大小写不敏感比较（WASM 头表的键名形态由 Rust 侧
+  决定，`cosy-machineos` 与 `Cosy-MachineOS` 都可能；敏感比较会重复补一个头，
+  而 `Headers` 会把两份合并成逗号串）。
+- **`Cosy-MachineOS` 跟随当前系统**（`{arch}_{platform}`，6 种组合之一）。同类实现把
+  非 Windows 一律写 `x86_64_linux` 是为了保护**已经发过该头**的存量号池；本仓库此前
+  从不发 ⇒ 没有历史值要保，如实反映运行环境才对。`DSH_QODER_MACHINE_OS` 可覆盖。
+- **`Cosy-MachineHostname` 默认不发**：官方发的是运行客户端那台机器的主机名；网关在
+  容器里发出去的是宿主机名 / 容器 id ⇒ 那是把本机标识透给上游的信息披露面
+  （与「代理口令的泄漏面：去向决定定级」同一取舍）。`DSH_QODER_ALIGN_HOSTNAME=1` 才发。
+- **只用于 COSY 签名请求**（推理 + 原生搜索）：`/sash/` 是桌面 app 身份
+  （`Cosy-ClientType: 10`），头表另有消融结论，不掺和。
+
+### 未做（已登记）
+
+- **真机复测**：本仓库无可用账号，追加头对服务端行为的影响只到「签名不受影响」这一层。
+  若线上出现异常，先 `DSH_QODER_ALIGN_HEADERS=0` 关掉再排查。
+- **`/sash/` 腿的 `Cosy-MachineOS`**：同为官方行为，但那条腿的判据是「有没有可领活动」，
+  加头的收益/风险都没测，故不动。
+
 ## ⚠️⚠️ `hasInjectedFetchImpl` 拿**调用点**的全局 `fetch` 当基准 ⇒ 宿主事后包装 fetch 会静默跳过出口代理（2026-11-16）
 
 `hasInjectedFetchImpl` 原先是 `this.fetchImpl !== fetch`：左边是**构造期**捕获的引用，
