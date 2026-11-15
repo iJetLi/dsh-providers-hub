@@ -27,6 +27,10 @@
   // IKLUME 的**唯一行为守卫**，值得列。
   "include": [
     "src",
+    // ⚠️ 2026-11-15 补：PR #185 的三条行为级守卫（messages[] 里的 system 必须改写 /
+    //    大小写与空白变体 / 多条 system）都在这份 spec 里，而它原先**不在** include 白名单
+    //    ⇒ `typecheck:tests` 从没检查过它（正向审计 P3）。加进来守住「改写只作用于 system」。
+    "tests/unit/marvis-adapter.spec.ts",
     "tests/unit/jet-hub-rpc-signature.spec.ts",
     "tests/unit/astudio-errors.spec.ts",
     "tests/unit/astudio-auth.spec.ts",

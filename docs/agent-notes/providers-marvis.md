@@ -300,9 +300,15 @@ pnpm test:e2e:marvis
 
 ### ⚠️⚠️ 补记（2026-11-15 晚，Issue IKVF8Z）：判定发生在 `messages[]` 的 system 那条，**不在**顶层 `system`
 
-上面那节的矩阵里 B3 档（身份句）是 **200**，但那是把身份句**只放顶层 `system`** 测的。
-真实会话里 DSH 的 system 会**同时**作为 `messages[]` 的一条下发
-（`serializeMessages` 见 `role:'system'` 就 `wire.push`），而这一条此前**没有**过指纹表。
+上面那节的矩阵里 B3 档（身份句）是 **200**，但那是把身份句**只放顶层 `system`** 测的 ——
+而**真实 agent 推理根本不走那个位置**（正向审计实测：loop 请求的 `options.system` 恒
+`undefined`，见 `@deepseek-ai/dsh-llm/lib/types/types.d.ts` 的「Loop-built requests leave it
+undefined」；`dsh-agent-loop` 的 `buildRequest` 返回体里没有 `system` 键）。顶层 `system`
+只用于 session-title / auto-review 这类**一次性**调用，其文本不含身份句。
+
+**真实推理的身份句唯一载体是 `messages[]` 的 system 消息**（`serializeMessages` 见
+`role:'system'` 就 `wire.push` —— 而 `skipSystem` 等参数只在少数路径上传 `true`），
+而这一条此前**没有**过指纹表。
 
 真机现象（用户报障，1 个账号、槽位 `deepseek-v4-pro-external`）：
 界面上任何一次 marvis 请求都报 `HTTP 403 {"code":4100406,"msg":"非法请求"}`，
@@ -318,6 +324,12 @@ pnpm test:e2e:marvis
 | `messages[]` 的 system 消息 | 该中文句清洗成 `DSH` 之后 | **200** |
 | 完全不带 system | — | **200** |
 | `user` 正文含同一句 | — | **200**（⇒ 只有 system 这条被拦） |
+
+⚠️ **两个 system 位置必须走同一个函数**（`rewriteMarvisSystemText`）：登记表只覆盖英文句式，
+中文身份句（`你是一个由 DeepSeek Harness 驱动的 AI 智能体。`）过登记表**原样返回**，
+完全靠兜底正则 `/DeepSeek\s+Harness/gi`。此前顶层那条只过登记表、没有兜底 ——
+一旦哪天 loop 请求真的开始带 `options.system`，中文句就会从顶层漏出去。
+（正向审计 P2-1，2026-11-15 已修。）
 
 **修复**（`src/marvis-adapter.ts`）：`streamVia` 里对 `serializeMessages(…)` 的产物
 `.map(rewriteMarvisSystemMessage)`，与 `buddy-adapter.ts` 的

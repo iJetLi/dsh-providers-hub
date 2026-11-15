@@ -9,6 +9,7 @@ import { MarvisAdapter, marvisRetryAfterMs } from '../../src/marvis-adapter.js'
 import { MARVIS, MARVIS_FALLBACK_MODELS } from '../../src/marvis-product.js'
 import type { AccountPool } from '../../src/account-pool.js'
 import type { MarvisCredential } from '../../src/marvis.js'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 
 const CREDENTIAL: MarvisCredential = {
   access_token: 'mv-test-access-token',
@@ -75,7 +76,7 @@ describe('★ 目录：只有 deepseek-v4-pro-external，且由共享骨架门�
   it('★ 有账号 ⇒ 一条 deepseek-v4-pro-external，名字是美化名，声明 1M 上下文与图片能力', async () => {
     const listed = await makeAdapter().listModels(MARVIS.id)
     expect(listed).toHaveLength(1)
-    const [entry] = listed as Array<{
+    const [entry] = listed as unknown as Array<{
       id: string
       name: string
       inputModalities?: readonly string[]
@@ -293,6 +294,97 @@ describe('★ 推理：正常流与 content-type 闸门', () => {
     expect(payload.messages[0]?.content).toBe(sentence)
   })
 
+  it('★★★ 兜底正则必须大小写不敏感 + 吞空白（否则小写/跨行变体仍 403）', async () => {
+    // 对抗审计 P2-1（真发实测）：这三格**上游都 403** `4100406`，而当前实现靠
+    // `/DeepSeek\s+Harness/gi` 的 `gi` 与 `\s+` 才挡住 —— 两个都零用例。
+    // 把 `gi` 改 `g`、`\s+` 改空格，27 条全绿（无牙），所以这三格必须单独钉住。
+    const variants = [
+      'you are an ai agent powered by deepseek  harness.', // 全小写 + 双空格
+      'You are an AI agent powered by DeepSeek\nHarness.', // 跨行
+      'You are an AI agent powered by DeepSeek\t\tHarness.', // 制表符
+    ]
+    for (const sentence of variants) {
+      const fetchMock = vi.fn(
+        async (_url: string, _init: RequestInit) =>
+          new Response(sseBody('ok'), {
+            status: 200,
+            headers: { 'content-type': 'text/plain; charset=utf-8' },
+          }),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      for await (const _chunk of makeAdapter().stream({
+        model: 'deepseek-v4-pro-external',
+        messages: [
+          { role: 'system', content: sentence },
+          { role: 'user', content: 'hi' },
+        ],
+      } as never)) {
+        // drain
+      }
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+      const payload = JSON.parse(init.body as string) as {
+        messages: readonly { role: string; content: unknown }[]
+      }
+      const wire = String(payload.messages.find((message) => message.role === 'system')?.content ?? '')
+      expect(wire, `变体未被清洗：${JSON.stringify(sentence)}`).not.toMatch(/deepseek\s+harness/i)
+    }
+  })
+
+  it('★★ 顶层 system 与 messages[] 的 system 必须走同一个函数（中文句在顶层也要被兜底清掉）', async () => {
+    // 正向审计 P2-1：顶层此前只过登记表、没有兜底正则；而登记表对中文句**原样返回**
+    // ⇒ 中文身份句放在顶层时不会被清洗（与「两个位置都要改」自相矛盾）。
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(sseBody('ok'), {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    for await (const _chunk of makeAdapter().stream({
+      model: 'deepseek-v4-pro-external',
+      messages: [{ role: 'user', content: 'hi' }],
+      system: '你是一个由 DeepSeek Harness 驱动的 AI 智能体。',
+    } as never)) {
+      // drain
+    }
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const payload = JSON.parse(init.body as string) as { system?: string }
+    expect(payload.system).toBe('你是一个由 DSH 驱动的 AI 智能体。')
+  })
+
+  it('★★ 多条 system / system 在 user 之后，每一条都要改（不是只改第 0 条）', async () => {
+    // 对抗审计 P2-3：把改写限定成 `index === 0` 时 27 条全绿（无牙）。
+    const first = 'You are an AI agent powered by DeepSeek Harness.'
+    const second = '你是一个由 DeepSeek Harness 驱动的 AI 智能体。'
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(sseBody('ok'), {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    for await (const _chunk of makeAdapter().stream({
+      model: 'deepseek-v4-pro-external',
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'system', content: first },
+        { role: 'system', content: second },
+      ],
+    } as never)) {
+      // drain
+    }
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const payload = JSON.parse(init.body as string) as {
+      messages: readonly { role: string; content: unknown }[]
+    }
+    const systems = payload.messages.filter((message) => message.role === 'system').map((m) => String(m.content))
+    expect(systems).toHaveLength(2)
+    for (const text of systems) expect(text).not.toMatch(/deepseek\s+harness/i)
+    expect(systems[1]).toBe('你是一个由 DSH 驱动的 AI 智能体。')
+  })
+
   it('★ 请求头只带 Ual-Access-*（绝无签名头），body 带 include_usage', async () => {
     const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response(sseBody('ok'), {
       status: 200,
@@ -485,9 +577,9 @@ describe('★ 错误分类与槽轮换', () => {
     //    用例会变成测 SSE 解析器而不是测轮换循环的 `delivered` 闸门。
     const calls: string[] = []
     class ThrowingAdapter extends MarvisAdapter {
-      protected override async *streamVia(): AsyncIterable<never> {
+      protected override async *streamVia(): AsyncIterable<StreamChunk> {
         calls.push('a1')
-        yield { type: 'text-delta', text: '前半段' }
+        yield { type: 'text-delta', index: 0, text: '前半段' }
         throw Object.assign(new Error('socket hang up'), { code: 'TRANSPORT' })
       }
     }
