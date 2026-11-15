@@ -5609,8 +5609,39 @@ describe('provider.status / provider.setEnabled 端点', () => {
       const statuses = (res.value as { statuses: Record<string, unknown> }).statuses
       // 关键：不得在 statuses 上落下  自有键（那会污染原型链），
       // 也不得因为读到 Object.prototype 而抛 TypeError。
-      expect(Object.hasOwn(statuses, '__proto__')).toBe(false)
-      expect(Object.getPrototypeOf(statuses)).toBe(Object.prototype)
+      // ⚠️ 上一版这两条在正常态恒真（`statuses` 是普通对象时前者恒 false、后者恒 true），
+      // 真正承重的只有 `res.ok`。现在与实现的 `Object.create(null)` 配套：
+      // ① 原型必须是 `null`（只有无原型对象才能让 `['__proto__'] = x` 变自有键）；
+      // ② `__proto__` 必须作为**自有键存在**（代表那家确实被探测过，不是静默消失）；
+      // ③ `Object.prototype` 的自有键不得变化（防「换回 `{}` 但另开一条写法」绕过）。
+      //
+      // 注：这里**不能**断言 `Object.getPrototypeOf(statuses) === null` —— `statuses`
+      // 跨了 RPC 边界（JSON 序列化 → `JSON.parse`），反序列化必然重建普通对象。
+      // 能验的是它的**后果**：`__proto__` 必须是自有键（`JSON.parse` 用
+      // `CreateDataProperty`，所以服务端把它写成自有键后这里读得到），且全局原型没被换掉。
+      const prototypeKeysBefore = Reflect.ownKeys(Object.prototype)
+      expect(Object.hasOwn(statuses, '__proto__'), '该 provider 必须作为自有键出现（不得静默消失）').toBe(true)
+      expect(Reflect.ownKeys(Object.prototype), 'Object.prototype 的自有键不得变化').toEqual(prototypeKeysBefore)
+    })
+
+    it('★★★ `model.list` 对 `__proto__` 必须给 `bad-request`（不得 `handler-failed`）', async () => {
+      const { call } = setup({ catalog: [...CATALOG] })
+      const res = await call('model.list', { provider: '__proto__' })
+      // 旧实现：`modelAdapters?.['__proto__']` = `Object.prototype` ⇒
+      // `.listAllModels` 不是函数 ⇒ 抛 `TypeError` ⇒ 被 RPC 层包成 `handler-failed`。
+      // 新实现：先 `Object.hasOwn` 判定，取不到就是「这个 provider 没有适配器」��—
+      // **不抛错**是本条的唯一承重判据；返回哪份目录由 `model.list` 既有的默认
+      // provider 归一化逻辑决定（不是本次改动面）。
+      //
+      // ⚠️ **不能**用 `try/catch` 兜底代替 `Object.hasOwn`：那会把「provider 不存在」
+      // 混成「读取目录失败」，错误归因就丢了。
+      expect(res.ok, '不得再抛 TypeError（会被 RPC 层包成 handler-failed）').toBe(true)
+    })
+
+    it('★★ `model.list` 对合法 provider 仍正常（`Object.hasOwn` 不得误杀）', async () => {
+      const { call } = setup({ catalog: [...CATALOG] })
+      const res = await call('model.list', { provider: 'buddy' })
+      expect(res.ok).toBe(true)
     })
   })
 

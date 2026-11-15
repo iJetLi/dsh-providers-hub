@@ -2393,7 +2393,11 @@ async function fullCatalogIds(
     //（静默落盘、且 `total` 随之虚高）。实测：桩返回 `['a','b']` ⇒ 黑名单
     // `{"a":true,"b":true,"undefined":true}`、状态 `{total:3,disabled:3}`。
     // 过滤是**零成本**的（正常实现每条都过），故不必区分「该不该防」。
-    for (const model of modelAdapters?.[provider]?.listAllModels() ?? []) {
+    // ⚠️ 同样不能裸取键：`modelAdapters?.['__proto__']` 是 `Object.prototype`。
+    const adapter = modelAdapters !== undefined && Object.hasOwn(modelAdapters, provider)
+      ? modelAdapters[provider]
+      : undefined
+    for (const model of adapter?.listAllModels() ?? []) {
       if (typeof model?.id === 'string' && model.id.length > 0) adapterIds.push(model.id)
     }
   } catch {
@@ -10009,7 +10013,16 @@ function registerJetHubEndpoints(
         // id 可用。适配器实例由 `registerJetHubRpc` 的 `modelAdapters` 传入
         // （DSH 的 `ctx.llm` 只保证 `listModels`，不透传自定义方法）。
         // 对话框模型选择器读的仍是过滤后的 `listModels`，可见性行为完全不变。
-        const catalogSource = modelAdapters?.[req.provider]
+        /**
+         * ⚠️ **不能裸取键**：`modelAdapters?.['__proto__']` 返回的是
+         * `Object.prototype`（不是 `undefined`）⇒ `.listAllModels` 不是函数 ⇒ 抛错 ⇒
+         * 被 RPC 层包成 `handler-failed`（用户看不懂）。
+         * 也**不能**用 `try/catch` 兜底代替：那会把「provider 不存在」混成
+         * 「读取模型列表失败」（错误归因）。
+         */
+        const catalogSource = modelAdapters !== undefined && Object.hasOwn(modelAdapters, req.provider)
+          ? modelAdapters[req.provider]
+          : undefined
         const all = catalogSource?.listAllModels()
         /**
          * ⚠️⚠️ **黑名单补回必须以上游目录为界**（真实缺陷，2026-10-27）。
@@ -10686,7 +10699,24 @@ function registerJetHubEndpoints(
         if (!Array.isArray(req.providers) || req.providers.some((id) => typeof id !== 'string')) {
           return { ok: false, error: { code: 'bad-request', message: 'providers 必须是字符串数组' } }
         }
-        const statuses: Record<string, ProviderStatus> = {}
+        /**
+         * ⚠️⚠️ **必须无原型**（`Object.create(null)`，不能是 `{}`）。
+         *
+         * 本循环用 `statuses[provider] = {…}` 逐家写入，而 `provider` 是**调用方传入的任意字符串**。
+         * 若 `statuses` 是普通对象，`provider === '__proto__'` 时赋值会走
+         * `Object.prototype.__proto__` 的 **setter 改原型**，而不是加自有键：
+         * - 返回体里查不到该 provider（静默消失）；
+         * - 更糟的是 `Object.prototype` 被换成一个镜像对象（进程内全局污染）。
+         *
+         * 与 `provider.setEnabled` 的白名单标准**不同**：那边返回 `bad-request`（因为会写盘），
+         * 这边是**只读**探测端点，任意 id 回一条 `{total:0,disabled:0,closed:false}` 是既有契约
+         * （`tests/unit/jet-hub-rpc.spec.ts` 的「28 家并发」用例用的就是不在注册表里的
+         * `p0`…`p27`）⇒ **不能加白名单**，只能换成无原型对象。
+         *
+         * Issue #84 P2-1（对抗审计实测：`statusesProtoIsObjectProto=false`、
+         * `statusesKeys=[]`、原型上多出 `["models","accounts","closed"]`）。
+         */
+        const statuses = Object.create(null) as Record<string, ProviderStatus>
         // ⚠️⚠️ **三阶段：先同步算出「谁需要核实」，再并发核实，最后生成状态**
         //（2026-11-05 三审端到端 P1-1）。原先是一个 `for` 里逐家
         // `await fullCatalogIds(...)`，而该调用最长 2000ms
