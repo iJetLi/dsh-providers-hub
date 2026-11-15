@@ -189,6 +189,85 @@ export function parseModelscopeCatalog(body: unknown): ModelscopeCatalogEntry[] 
  * （opencode 的真机事故 2026-10-02：没有超时 → `listModels` 永不返回 →
  * **模型列表与徽标同时空白**）。有超时则超时后回退兜底表，UI 立刻可用。
  */
+/**
+ * **已下线但仍留在远端目录里的模型 id** —— 一律不进目录。
+ *
+ * ## 为什么需要这份名单
+ *
+ * 魔搭的 `/v1/models` 会**继续列出已经没人服务的模型**：调用它们时上游回
+ * `HTTP 400 {"message":"Model id : <id> , has no provider supported"}`。
+ * 这类 id 若照原样进目录，后果有三层：
+ *
+ * 1. 用户在选择器里看得到、选中后必然失败（400，且与本程序无关）；
+ * 2. 它们会进 `aggregate` 的候选表（每个渠道的 `listModels` 都会被拿去归组）
+ *    ⇒ 聚合把请求轮换到死链上；
+ * 3. 面板「模型黑名单」里也列着它们，用户只能逐条手动关。
+ *
+ * ## 收录口径（严格，宁缺勿滥）
+ *
+ * **只收上游明确回 `has no provider supported` 的 id** —— 那一条是「该模型没有任何
+ * 可用服务方」，属于**模型已下线**，与账号权限无关。
+ * ⚠️ 下列形态**一律不收**（都不是"下线"的证据）：
+ * - `401 / 403`（授权令牌无效、无权访问）⇒ 换账号或申请权限即可，模型还活着；
+ * - `404 invalid_model ... or you do not have access` ⇒ 存在性/权限不可区分；
+ * - 超时、429、`invalid_parameter`（例如要求 `tools` 参数）⇒ 临时或用法问题。
+ *
+ * ## 实测记录（2026-11-16）
+ *
+ * 逐个 id 真发 `POST /v1/chat/completions`（`max_tokens: 4`）扫了远端目录的
+ * **全部 38 条**：存活 15、本名单 8、403/401 授权类 7、404 4、用法错误 3、超时 1。
+ *
+ * 复核方法（换成自己的网关地址与 key）：
+ *
+ * ```bash
+ * curl -s -H "Authorization: Bearer $KEY" http://127.0.0.1:8080/v1/models \
+ *   | jq -r '.data[].id' | grep '^modelscope/' \
+ *   | while read -r id; do
+ *       code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" \
+ *         -H 'Content-Type: application/json' \
+ *         -d "{\"model\":\"$id\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}" \
+ *         http://127.0.0.1:8080/v1/chat/completions)
+ *       [ "$code" = 200 ] || echo "$code $id"
+ *     done
+ * ```
+ *
+ * ## 官方口径（2026-11-16 检索确认）
+ *
+ * 魔搭**没有**「模型下线」的全局公告页，说明分散在两处：
+ *
+ * 1. **每个模型页的「反馈」区** —— 官方会就具体模型回「已下架对该模型的推理服务」
+ *    （例：`Qwen/Qwen3-Coder-480B-A35B-Instruct` 的反馈 issue，报障者据此关闭工单）；
+ * 2. **API-Inference 的定位** —— 它**只覆盖一部分模型**的在线推理，不是「魔搭上托管
+ *    的模型都能调」，且「可用模型列表会变」（社区踩坑记录与官方文档同义）。
+ *    报错文案 `has no provider supported` 的含义就是「该 model id 在平台上没有供给方」。
+ *
+ * ⚠️⚠️ 但该文案**不区分**「永久下架」与「provider 暂未就绪」：`MiniMax/MiniMax-M2.7`
+ * 的反馈区里，社区总结的是「provider 未开通（虽然模型列表里有）」—— 同一条文案。
+ *    故本名单是**带日期的快照**，不是「永久黑名单」：某条重新上线后删掉对应行即可，
+ *    不要据此推断「这个模型从此不存在」。
+ *
+ * ⚠️ 本名单是**静态**的：魔搭把某个 id 重新上线后，这里不会自动放行。
+ *    上游如果哪天恢复某个模型（例如又有服务方接单），把它从本名单删掉即可 ——
+ *    `tests/unit/modelscope-fallback.spec.ts` 的「已下线名单」用例会提示改这里。
+ */
+export const MODELSCOPE_RETIRED_MODEL_IDS: ReadonlySet<string> = new Set([
+  // DeepSeek 系：三个无后缀/旧快照 id 都已下线，只剩带新日期快照的两条在服务
+  'deepseek-ai/DeepSeek-V4-Flash-0731',
+  'deepseek-ai/DeepSeek-V4-Pro',
+  'deepseek-ai/DeepSeek-V4.1-Flash',
+  // 其余 5 条同批实测确认（各自都有 provider 侧下线）
+  'MiniMax/MiniMax-M3',
+  'moonshotai/Kimi-K3.1-Pro',
+  'stepfun-ai/Step-3.5-Flash',
+  'stepfun-ai/Step-3.7-Flash',
+  'stepfun-ai/Step-5-Preview',
+])
+
+/** 剔除已下线 id（远端与兜底表都要过这道闸）。 */
+function dropRetired<T extends { id: string }>(entries: readonly T[]): T[] {
+  return entries.filter((entry) => !MODELSCOPE_RETIRED_MODEL_IDS.has(entry.id))
+}
+
 export async function loadModelscopeCatalog(
   fetchCatalog: ModelscopeCatalogFetcher,
   apiKey: string,
@@ -203,9 +282,12 @@ export async function loadModelscopeCatalog(
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const parsed = parseModelscopeCatalog(await response.json())
     if (parsed.length === 0) throw new Error('空目录')
-    entries = parsed
+    // ⚠️ 剔除已下线 id（见 `MODELSCOPE_RETIRED_MODEL_IDS`）。若剔完一条不剩，
+    //    按「空目录」处理走兜底 —— 宁可给兜底表，也不要让 UI 空白。
+    entries = dropRetired(parsed)
+    if (entries.length === 0) throw new Error('空目录（剔除已下线后）')
   } catch {
-    entries = MODELSCOPE_FALLBACK_MODELS.map((m) => ({
+    entries = dropRetired(MODELSCOPE_FALLBACK_MODELS).map((m) => ({
       id: m.id,
       name: m.name,
       contextWindow: m.contextWindow,
@@ -370,13 +452,7 @@ export class ModelscopeAdapter extends LlmAdapter {
     const remote = this.snapshotCatalog()
     if (remote !== undefined) return remote.map((m) => this.toCatalogEntry(m))
     void this.warmCatalog()
-    return MODELSCOPE_FALLBACK_MODELS.map((m) => this.toCatalogEntry({
-      id: m.id,
-      name: m.name,
-      contextWindow: m.contextWindow,
-      supportsImage: m.supportsImage,
-      ...m.efforts === undefined ? {} : { efforts: m.efforts },
-    }))
+    return this.fallbackEntries().map((m) => this.toCatalogEntry(m))
   }
 
   /** 本家私有形状 → 骨架的 `CatalogEntry`（**唯一**转换点）。 */
@@ -434,7 +510,25 @@ export class ModelscopeAdapter extends LlmAdapter {
     const remote = this.snapshotCatalog()
     if (remote !== undefined) return remote.map((m) => ({ id: m.id, name: m.name }))
     void this.warmCatalog()
-    return MODELSCOPE_FALLBACK_MODELS.map((m) => ({ id: m.id, name: m.name }))
+    return this.fallbackEntries().map((m) => ({ id: m.id, name: m.name }))
+  }
+
+  /**
+   * 兜底表 → 目录条目（**已剔除已下线 id**）。
+   *
+   * ⚠️ 兜底表本身**保留**那些已下线的 id：它同时是「远端目录快照」的证据
+   * （`modelscope-fallback.spec.ts` 有一条用例逐 id 对齐远端清单），
+   * 也是 `findModelscopeFallback` 做能力前缀继承的依据 —— 删表会同时丢掉这两件事。
+   * 故「下线」只在这一层过滤，表不动。
+   */
+  private fallbackEntries(): readonly ModelscopeCatalogEntry[] {
+    return dropRetired(MODELSCOPE_FALLBACK_MODELS).map((m) => ({
+      id: m.id,
+      name: m.name,
+      contextWindow: m.contextWindow,
+      supportsImage: m.supportsImage,
+      ...m.efforts === undefined ? {} : { efforts: m.efforts },
+    }))
   }
 
   /**
@@ -464,13 +558,7 @@ export class ModelscopeAdapter extends LlmAdapter {
     if (this.options.fetchRemoteCatalog === undefined || slot === undefined) {
       // ⚠️ 这里**不写** lastCatalog：没有远端能力时它永远是兜底表，
       // 记下来只会让 listAllModels 走一条与本分支结果相同的弯路。
-      return MODELSCOPE_FALLBACK_MODELS.map((m) => ({
-        id: m.id,
-        name: m.name,
-        contextWindow: m.contextWindow,
-        supportsImage: m.supportsImage,
-        ...m.efforts === undefined ? {} : { efforts: m.efforts },
-      }))
+      return this.fallbackEntries()
     }
     // ⚠️ **不要**在适配器上再 memoize 一份：那会让目录永不过期。
     // 刷新职责交给带 TTL 的 `loadModelscopeCatalog`。

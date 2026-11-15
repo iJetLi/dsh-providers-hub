@@ -39,6 +39,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { ModelscopeAdapter } from '../../src/modelscope-adapter.js'
 import { MODELSCOPE, MODELSCOPE_FALLBACK_MODELS } from '../../src/modelscope-product.js'
+import { MODELSCOPE_RETIRED_MODEL_IDS } from '../../src/modelscope-adapter.js'
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
 
@@ -57,9 +58,12 @@ describe('★ ModelScope 接线完整性（迁移后：黑名单走账号池）'
    * ⚠️ 判据是「**真跑**并断言返回值为空/不含该 id」，不是源码文本。
    */
   it('★ 池里的黑名单模型不得出现在 listModels（真实过滤，非恒真）', async () => {
-    const fallback = MODELSCOPE_FALLBACK_MODELS[0]
-    const second = MODELSCOPE_FALLBACK_MODELS[1]
-    expect(second, '兜底表至少要两个模型，本用例才有「过滤掉一个、留下一个」可断言')
+    // ⚠️ 不能按下标硬取：表里前两条（`-Flash-0731` / `-V4-Pro`）2026-11-16 已实测下线，
+    //    不再进目录 ⇒ 拿它们当样本会假红。取「仍在服务」的前两条。
+    const live = MODELSCOPE_FALLBACK_MODELS.filter((m) => !MODELSCOPE_RETIRED_MODEL_IDS.has(m.id))
+    const fallback = live[0]
+    const second = live[1]
+    expect(second, '兜底表至少要两个在服务的模型，本用例才有「过滤掉一个、留下一个」可断言')
       .toBeDefined()
 
     const adapter = new ModelscopeAdapter({
@@ -115,7 +119,10 @@ describe('★ ModelScope 接线完整性（迁移后：黑名单走账号池）'
    * ⚠️ 这一条防「① 的红来自别的原因」（例如目录本来就空）。
    */
   it('★ 判据自检：不给池时不过滤（第 ① 条的红因此有来源）', async () => {
-    const second = MODELSCOPE_FALLBACK_MODELS[1]
+    // ⚠️ 不能写 `MODELSCOPE_FALLBACK_MODELS[1]`：2026-11-16 起已下线的 id 不再进目录，
+    //    而表里第 2 条正好是 `deepseek-ai/DeepSeek-V4-Pro`（已下线）⇒ 断言会假红。
+    //    取「第一条仍然在服务的」当样本。
+    const second = MODELSCOPE_FALLBACK_MODELS.find((m) => !MODELSCOPE_RETIRED_MODEL_IDS.has(m.id))
     const adapter = new ModelscopeAdapter({
       slots: async () => [{ id: 'a1', apiKey: 'ms-0123456789abcdefghij' }],
       product: MODELSCOPE,

@@ -21,7 +21,11 @@
 
 import { describe, expect, it } from 'vitest'
 import { MODELSCOPE_FALLBACK_MODELS, findModelscopeFallback } from '../../src/modelscope-product.js'
-import { parseModelscopeCatalog } from '../../src/modelscope-adapter.js'
+import {
+  MODELSCOPE_RETIRED_MODEL_IDS,
+  loadModelscopeCatalog,
+  parseModelscopeCatalog,
+} from '../../src/modelscope-adapter.js'
 
 describe('ModelScope 兜底表：上下文窗口（2026-10-17 扩表）', () => {
   it('★ 没有任何条目把 contextWindow 留成 0（0 = 「不知道」，DSH 算不出压缩阈值）', () => {
@@ -267,5 +271,123 @@ describe('ModelScope 快照匹配判据（直接验证，不依赖兜底 id 形�
     // 反向：**不存在的**含数字段 id 不得因为剥数字而命中任何条目
     expect(findModelscopeFallback('Qwen/Qwen3.8-99B')).toBeUndefined()
     expect(findModelscopeFallback('nobody/Unknown-Model-72B')).toBeUndefined()
+  })
+})
+
+
+describe('modelscope 已下线 id（MODELSCOPE_RETIRED_MODEL_IDS，2026-11-16 实测）', () => {
+  /**
+   * 实测来源：用真实网关把远端目录的 **全部 38 条**逐个 `POST /v1/chat/completions`
+   * （`max_tokens: 4`）打了一遍，抓上游明确回 `has no provider supported` 的 8 条。
+   *
+   * 为什么这层过滤必须存在：这些 id 仍在 `/v1/models` 里，用户能选中但必得 400，
+   * 且会被 `aggregate` 拿去当归组候选 ⇒ 轮换到死链。
+   */
+  const fakeCatalog = (ids: readonly string[]) =>
+    (async () => ({ ok: true, json: async () => ({ data: ids.map((id) => ({ id })) }) })) as never
+
+  it('★ 远端目录里的已下线 id 不进目录（存活的照常保留）', async () => {
+    const entries = await loadModelscopeCatalog(
+      fakeCatalog([
+        'deepseek-ai/DeepSeek-V4-Pro',        // 已下线
+        'deepseek-ai/DeepSeek-V4-Pro-0813',   // 存活
+        'MiniMax/MiniMax-M3',                 // 已下线
+        'Qwen/Qwen3.8-27B',                   // 存活
+      ]),
+      'retired-filter-remote',
+      0,
+    )
+    expect(entries.map((e) => e.id)).toEqual([
+      'deepseek-ai/DeepSeek-V4-Pro-0813',
+      'Qwen/Qwen3.8-27B',
+    ])
+  })
+
+  it('★ 远端全部为已下线 id 时按「空目录」处理，回退兜底表（且兜底表里也已剔除）', async () => {
+    const entries = await loadModelscopeCatalog(
+      fakeCatalog(['deepseek-ai/DeepSeek-V4-Pro', 'deepseek-ai/DeepSeek-V4.1-Flash']),
+      'retired-filter-all',
+      0,
+    )
+    // 走的是兜底分支：既不该为空（否则整组从 UI 消失），也不该含那两条
+    expect(entries.length).toBeGreaterThan(0)
+    expect(entries.map((e) => e.id)).not.toContain('deepseek-ai/DeepSeek-V4-Pro')
+    expect(entries.map((e) => e.id)).not.toContain('deepseek-ai/DeepSeek-V4.1-Flash')
+  })
+
+  it('★ 远端失败时兜底表也不吐已下线 id', async () => {
+    const boom = (async () => { throw new Error('HTTP 500') }) as never
+    const entries = await loadModelscopeCatalog(boom, 'retired-filter-boom', 0)
+    const ids = entries.map((e) => e.id)
+    for (const dead of MODELSCOPE_RETIRED_MODEL_IDS) expect(ids).not.toContain(dead)
+    expect(ids).toContain('Qwen/Qwen3.8-27B') // 兜底表本身仍有内容
+  })
+
+  it('⚠️ 名单 ⊆ 实测远端清单（拼错的 id 会让过滤静默失效）', () => {
+    // ⚠️ 不能拿「兜底表」当对照：兜底表只登记**有实测窗口值**的模型（37 条里缺
+    //    `DeepSeek-V4.1-Flash` / `Kimi-K3.1-Pro` / `Step-5-Preview` 等），而本名单
+    //    收的是「远端列了但已没人服务」的 id —— 两者本来就不是一个集合。
+    //    真源是下面这份 2026-11-16 实测的远端清单。
+    const REMOTE_2026_11_16 = [
+      'MedAIBase/AntAngelMed',
+      'MiniMax/MiniMax-M1-80k',
+      'MiniMax/MiniMax-M3',
+      'MusePublic/Qwen-Image-Edit',
+      'OpenGVLab/InternVL3_5-241B-A28B',
+      'PaddlePaddle/ERNIE-4.5-0.3B-PT',
+      'PaddlePaddle/ERNIE-4.5-21B-A3B-PT',
+      'PaddlePaddle/ERNIE-4.5-300B-A47B-PT',
+      'PaddlePaddle/ERNIE-4.5-VL-28B-A3B-PT',
+      'Qwen/Qwen-Image-Edit',
+      'Qwen/Qwen3.5-122B-A10B',
+      'Qwen/Qwen3.5-27B',
+      'Qwen/Qwen3.5-35B-A3B',
+      'Qwen/Qwen3.5-397B-A17B',
+      'Qwen/Qwen3.8-27B',
+      'Qwen/Qwen3.8-Flash-Next',
+      'Shanghai_AI_Laboratory/Intern-S1',
+      'Shanghai_AI_Laboratory/Intern-S1-mini',
+      'Shanghai_AI_Laboratory/Intern-S2-Preview',
+      'XGenerationLab/XiYanSQL-QwenCoder-32B-2412',
+      'XGenerationLab/XiYanSQL-QwenCoder-32B-2504',
+      'ZhipuAI/GLM-4.7-Flash',
+      'ZhipuAI/GLM-5.2',
+      'deepseek-ai/DeepSeek-V4-Flash-0731',
+      'deepseek-ai/DeepSeek-V4-Pro',
+      'deepseek-ai/DeepSeek-V4-Pro-0813',
+      'deepseek-ai/DeepSeek-V4.1-Flash',
+      'deepseek-ai/DeepSeek-V4.1-Flash-1017',
+      'early-access/EA-29B-A4B',
+      'meituan-longcat/LongCat-Flash-Lite',
+      'mistralai/Mistral-Large-Instruct-2407',
+      'moonshotai/Kimi-K3.1-Pro',
+      'nex-agi/Nex-N2.5-Pro',
+      'nex-agi/Nex-N2.5-mini',
+      'opencompass/CompassJudger-1-32B-Instruct',
+      'stepfun-ai/Step-3.5-Flash',
+      'stepfun-ai/Step-3.7-Flash',
+      'stepfun-ai/Step-5-Preview',
+    ]
+    const remote = new Set(REMOTE_2026_11_16)
+    const bogus = [...MODELSCOPE_RETIRED_MODEL_IDS].filter((id) => !remote.has(id))
+    expect(bogus, '拼错的 id ⇒ 过滤静默失效，症状只是「那条还在列表里」').toEqual([])
+    // 反向：这份清单确实覆盖了远端全部条目（否则上面那条形同虚设）
+    expect(REMOTE_2026_11_16.length).toBe(38)
+  })
+
+  it('⚠️ 只收「has no provider supported」：授权类 / 404 / 超时一律不进名单', () => {
+    // 这三类实测都存在，但都不是「模型下线」的证据：
+    //   401/403（授权令牌无效、无权访问）、404 invalid_model（存在性/权限不可区分）、
+    //   超时与 `invalid_parameter`（临时或用法问题）。
+    for (const id of [
+      'MedAIBase/AntAngelMed',                  // 401 授权令牌无效
+      'Qwen/Qwen-Image-Edit',                   // 403
+      'OpenGVLab/InternVL3_5-241B-A28B',        // 401
+      'PaddlePaddle/ERNIE-4.5-0.3B-PT',         // 404 invalid_model
+      'XGenerationLab/XiYanSQL-QwenCoder-32B-2412', // 400 要求 tools 参数
+      'ZhipuAI/GLM-4.7-Flash',                  // 超时（推理慢）
+    ]) {
+      expect(MODELSCOPE_RETIRED_MODEL_IDS.has(id), id + ' 不该进已下线名单').toBe(false)
+    }
   })
 })
