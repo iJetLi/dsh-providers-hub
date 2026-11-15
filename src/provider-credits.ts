@@ -1050,7 +1050,7 @@ export function createProviderCredits(
      * 社区实现（L0NE-6/WorkBuddy-Daily 的 `workbuddy_intl_daily.py`）用真实凭据
      * 跑通了国际版全链路，端点与国内版**逐字同形**，只有 baseURL 随
      * `product.endpoint` 切到 `www.workbuddy.ai`。实证与迁移说明见
-     * `docs/workbuddy-intl-checkin.md`。
+     * `docs/agent-notes/providers-workbuddy-intl-checkin.md`。
      *
      * ## 国际版与国内版的两处差异（`claim` 之外的部分）
      *

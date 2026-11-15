@@ -394,7 +394,7 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 |---|---|---|---|
 | `codearts` | CodeArts（华为云） | 浏览器回调 | 余额 + 每日签到 |
 | `buddy` | CodeBuddy（腾讯） | 浏览器授权 + 轮询 | 余额 + 每日签到 + 成长任务 + 锁定永久积分 |
-| `workbuddy` | WorkBuddy（国际版） | 同上 | 余额 + 锁定永久积分（**无签到**） |
+| `workbuddy` | WorkBuddy（国际版） | 同上 | 余额 + 每日签到（含活跃上报）+ 锁定永久积分 |
 | `marvis` | 腾讯 Marvis（应用宝 AI 助手） | QQ / 微信 OAuth（隔离窗口 + 回调拦截） | 余额（钱包额度；**无签到**） |
 | `lobsterai` | LobsterAI（有道） | 浏览器回调 | 余额 + 每日签到 |
 | `qoder` | Qoder（阿里系） | 设备码轮询 | 余额 + 每日领取 + **个人资源包逐笔到期**（可选：粘贴网页会话 Cookie 后读官网明细） |

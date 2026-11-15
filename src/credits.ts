@@ -65,7 +65,7 @@ const CODE_ACTIVITY_ENDED = 1003
  *
  * ⚠️ 两个产品的码表**不是同一套**：国内版用 1001/1002/1003，国际版这两条是
  * 社区实现 `workbuddy_intl_daily.py` 用真实凭据跑出来的（见
- * `docs/workbuddy-intl-checkin.md`）。把它们归到 `inactive` 而不是 `failed` ——
+ * `docs/agent-notes/providers-workbuddy-intl-checkin.md`）。把它们归到 `inactive` 而不是 `failed` ——
  * 「活动没开」是**当天不会到账**的正常状态，报到 `failed` 会让自动签到把它
  * 当成可重试的故障，一天里反复打上游。
  */

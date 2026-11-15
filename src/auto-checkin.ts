@@ -51,7 +51,7 @@
  *
  * ⚠️ **workbuddy 已于 2026-11-15 退出这一组**：国际版其实**有**签到端点（与国内版
  * 逐字同形），此前那条「不支持」的守卫是误判，现已改为真发领取 + 活跃上报
- * （见 `workbuddy-intl-activity.ts` 与 `docs/workbuddy-intl-checkin.md`）。
+ * （见 `workbuddy-intl-activity.ts` 与 `docs/agent-notes/providers-workbuddy-intl-checkin.md`）。
  *
  * ## ⚠️「调用即判定」管不到的一类：签到**有代价**的渠道
  *

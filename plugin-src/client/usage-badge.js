@@ -2109,7 +2109,7 @@ function UsageBadgeActive(props) {
        * （Cline / Raccoon 后端没有签到接口，Raccoon 的每日积分由服务端自动发放）。
        * 少了这一句，用户只能靠猜。
        * ⚠️ WorkBuddy 国际版 2026-11-15 起已加入可签到名单（见
-       * `docs/workbuddy-intl-checkin.md`）。
+       * `docs/agent-notes/providers-workbuddy-intl-checkin.md`）。
        */
       canClaimCurrent
         ? null

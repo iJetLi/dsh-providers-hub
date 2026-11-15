@@ -248,7 +248,7 @@ GET {apiBase}/api/v1/users/{accountId}/balance
 **签到不存在**：对整个 sidecar 做字符串扫描，`checkin` / `check-in` / `daily` /
 `campaign` 均无任何 Cline 业务端点命中（`campaign` 的命中是 PostHog 的 UTM 参数与
 feature-flag 事件属性；`daily` 是 YAML cron 别名与 Blob 导出频率枚举）。故能力矩阵
-登记为 `{balance:true, dailyCheckin:false}`（与 WorkBuddy 国际版同例）。
+登记为 `{balance:true, dailyCheckin:false}`。（WorkBuddy 国际版此前同例，2026-11-15 已更正为 `true` —— 端点同形，只是当年只搜了 CLI 内核。）
 ⚠️ 这比「某次调用没看到」强，但仍不等于「永远不存在」—— 若将来增加签到，需按
 Qoder 那次教训重新采集。
 
