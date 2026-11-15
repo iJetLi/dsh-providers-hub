@@ -184,6 +184,30 @@ describe('★ 推理：正常流与 content-type 闸门', () => {
     expect(message).toContain('text/html')
   })
 
+  it('★★★ system 里的腾讯系风控指纹必须被改写（IKJNA1 同一份表，2026-11-15 起 marvis 也登记）', async () => {
+    // ⚠️ 这是**行为级**守卫：纯函数用例只证明 `rewriteTencentContentFingerprints` 对
+    //    `'marvis'` 生效，不证明 adapter 真的调了它 —— 把这一行摘掉，纯函数用例仍全绿。
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(sseBody('ok'), {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    // 直接吃 stream：`collect` 不带 system，这里要的就是带 system 的那条路径。
+    for await (const _chunk of makeAdapter().stream({
+      model: 'deepseek-v4-pro-external',
+      messages: [{ role: 'user', content: 'hi' }],
+      system: 'Main branch (you will usually use this for PRs)',
+    } as never)) {
+      // drain
+    }
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const payload = JSON.parse(init.body as string) as { system?: string }
+    expect(payload.system).toBe('Main branch (PRs usually go here)')
+  })
+
   it('★ 请求头只带 Ual-Access-*（绝无签名头），body 带 include_usage', async () => {
     const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response(sseBody('ok'), {
       status: 200,

@@ -40,6 +40,7 @@ import {
 import type { AccountPool } from './account-pool.js'
 import { createModelCatalog, type CatalogEntry } from './model-catalog.js'
 import { collectImages, consumeOpenAiSse, serializeMessages } from './openai-compat.js'
+import { rewriteTencentContentFingerprints } from './openai-gateway/tencent-fingerprint.js'
 import { isAbortLike } from './aggregate-adapter.js'
 import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
@@ -366,7 +367,14 @@ export class MarvisAdapter extends LlmAdapter {
     const payload = buildMarvisPayload({
       model: normalizeMarvisModelId(options.model),
       messages,
-      ...options.system !== undefined && options.system.length > 0 ? { system: options.system } : {},
+      // ⚠️ `system` 要过腾讯系内容级风控指纹改写（IKJNA1 同一份表、同一判据）。
+      //    2026-11-15 真机实测 marvis **当前不拦**这些指纹（13 档全 200），
+      //    这里登记是**预防性**的：marvis 属腾讯域，与 buddy/workbuddy 同一套风控，
+      //    服务端随时可能下发新指纹。代价是 DSH 自己的身份句会被改写，故**只改 system**
+      //    （assistant 正文实测不拦 —— 改它既换不来放行，又破坏历史回读证据）。
+      ...options.system !== undefined && options.system.length > 0
+        ? { system: rewriteTencentContentFingerprints(options.system, this.product.id) }
+        : {},
       ...options.tools !== undefined ? { tools: options.tools } : {},
       ...options.temperature !== undefined ? { temperature: options.temperature } : {},
       ...options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {},

@@ -265,3 +265,35 @@ pnpm test:e2e:marvis
   `config_defaults`（Fernet 解密产物）；上游若换 key 需要重新挖。
 - 上游若把「预注册回调 + 域名白名单」改成动态校验，整条截停登录链会失效 ——
   届时症状会是兑换回 `-109`（而不是 `-107`）。
+
+## ⚠️ 内容级风控指纹改写：2026-11-15 起 `marvis` 也登记在 `TENCENT_PROVIDERS` 里
+
+**结论**：`marvis` 的 `system` 正文现在会过 `rewriteTencentContentFingerprints`（与 `buddy` / `workbuddy` 同一份表、同一判据）。
+
+**这不是因为它现在会拦** —— 2026-11-15 真机实测（`D:/tmp/marvis_probe2.mjs`，直连 `https://yybadaccess.3g.qq.com/v1/chat/completions`，真实凭据，13 档）：
+
+| 档位 | system 内容 | 长度 | 结果 |
+|---|---|---|---|
+| A | 无 system | 0 | **200** |
+| B1 | `Main branch (you will usually use this for PRs)` | 47 | **200** |
+| B2 | `You are Claude Code, Anthropic's official CLI for Claude` | 56 | **200** |
+| B3 | `You are an AI agent powered by DeepSeek Harness` | 47 | **200** |
+| B4 | `You are an AI coding assistant, powered by DeepSeek Harness model.` | 66 | **200** |
+| E5390 / E30000 / E65000 / E88828 | 项目 `AGENTS.md` 切片 | 5390 ～ 88828 | **全部 200** |
+
+**连腾讯系实测会被拦的 5 条指纹，在 marvis 上全部 200**，体积档也没触发任何长度/体积类风控。
+
+**登记它的理由**（`src/openai-gateway/tencent-fingerprint.ts` 的 `TENCENT_PROVIDERS` 注释里逐字写了）：
+`yybadaccess.3g.qq.com` 属腾讯域，与 `buddy` / `workbuddy` 是同一套内容风控体系，服务端随时可能下发新指纹；
+统一走一份表比将来被拦了再补更省事。
+
+**代价（必须如实记）**：脱敏会改写 DSH 自己的身份句 —— 模型读到的自我描述变了。
+对 `buddy` / `workbuddy` 是「不脱敏就 403」的**必要之恶**，对 `marvis` 是**纯付出**。
+要回退只需把 `'marvis'` 从 `TENCENT_PROVIDERS` 那一行删掉（**那一个元素就是唯一开关**）。
+
+**只改 `system`，不改 `assistant` 正文**：`assistant` 正文实测不拦，改它既换不来放行，
+又破坏历史回读证据（`src/marvis-adapter.ts` 的 `streamVia` 里那行注释记了这条）。
+
+**守卫**：
+- 纯函数：`tests/unit/openai-gateway-tencent-fingerprint.spec.ts` 的 `isTencentContentFingerprintProvider('marvis')` + `rewriteTencentContentFingerprints(…, 'marvis')`；
+- **行为级**（这条才是承重的）：`tests/unit/marvis-adapter.spec.ts` 的「system 里的腾讯系风控指纹必须被改写」—— 摘掉 `streamVia` 里那次调用 ⇒ 该用例红，而纯函数用例**仍全绿**（变异实测 `TestFiles_failed=1 Tests_failed=1`）。

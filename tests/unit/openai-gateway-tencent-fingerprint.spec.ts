@@ -131,6 +131,9 @@ describe('腾讯系内容级风控指纹改写（IKJNA1）：纯函数', () => {
     // 改写用户原话，而收益为零。
     expect(isTencentContentFingerprintProvider('buddy')).toBe(true)
     expect(isTencentContentFingerprintProvider('workbuddy')).toBe(true)
+    // marvis 属腾讯域（`yybadaccess.3g.qq.com`），与 buddy/workbuddy 同一套内容风控：
+    // ⚠️ 这是**预防性**登记 —— 2026-11-15 真机实测它当前不拦（13 档全 200）。
+    expect(isTencentContentFingerprintProvider('marvis')).toBe(true)
     for (const other of ['qoder', 'qodercn', 'trae', 'codearts', 'lobsterai', 'zcode', 'BUDDY', '']) {
       expect(isTencentContentFingerprintProvider(other)).toBe(false)
     }
@@ -142,6 +145,9 @@ describe('腾讯系内容级风控指纹改写（IKJNA1）：纯函数', () => {
     // CodeBuddy 中国版同一套（实测两端点表现一致）
     expect(rewriteTencentContentFingerprints(`${TRIGGER}: dev`, 'buddy'))
       .toBe(`${REWRITE}: dev`)
+    // marvis 走同一份表 ⇒ 同一句同样被改写
+    expect(rewriteTencentContentFingerprints(`${TRIGGER}: marvis`, 'marvis'))
+      .toBe(`${REWRITE}: marvis`)
   })
 
   it('★ 非腾讯系：逐字节不变', () => {

@@ -145,8 +145,20 @@
  * 故这里是**表**：新增一条 = 往 {@link CONTENT_FINGERPRINTS} 里加一行 + 一条用例。
  */
 
-/** 受影响的 provider：腾讯系两个后端（`buddy` = CodeBuddy 中国版，`workbuddy` = WorkBuddy 国际版）。 */
-const TENCENT_PROVIDERS: readonly string[] = ['buddy', 'workbuddy']
+/**
+ * 受影响的 provider：腾讯系三个后端
+ * （`buddy` = CodeBuddy 中国版，`workbuddy` = WorkBuddy 国际版，`marvis` = Marvis 腾讯版）。
+ *
+ * ⚠️ **`marvis` 是预防性登记，不是因为它现在会拦**：2026-11-15 真机实测（`D:/tmp/marvis_probe2.mjs`）
+ * 连下面表里的 5 条指纹（含 `Main branch` / Claude Code 身份句 / DSH 身份首句 / DSH Web 面句）
+ * 在 marvis 上**全部 200**，5390～88828 字符的体积档也全部 200。
+ * 登记它的理由是：`yybadaccess.3g.qq.com` 属腾讯域，与 `buddy` / `workbuddy` 同一套内容风控体系，
+ * 服务端随时可能下发新指纹；统一走一份表，比将来被拦了再补更省事。
+ * **代价**：脱敏会改写 DSH 自己的身份句（模型读到的自我描述变了）——
+ * 对 `buddy` / `workbuddy` 是「不脱敏就 403」的必要之恶，对 `marvis` 是**纯付出**。
+ * 要回退只需把 `'marvis'` 从下面这行删掉（那一个元素就是唯一开关）。
+ */
+const TENCENT_PROVIDERS: readonly string[] = ['buddy', 'workbuddy', 'marvis']
 
 interface ContentFingerprint {
   /** 被拦的**字面量**（匹配时**大小写不敏感**，但不做任何模式泛化）。 */
