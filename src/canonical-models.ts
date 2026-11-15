@@ -416,9 +416,10 @@ export const CANONICAL_OVERRIDES: Readonly<Record<string, Readonly<Record<string
     codearts: Object.freeze({
       'deepseek-v4.1-flash-1017': 'deepseek-v4-1-flash',
     }),
-    // ⚠️ modelscope 的 id **带命名空间**（`deepseek-ai/…`），补丁表按 `realId`
-    //    原文精确匹配（`canonicalKeyFor` 用 `Object.hasOwn(providerPatch, realId)`），
-    //    所以这里必须写全，不能只写 `DeepSeek-V4.1-Flash-1017`。
+    // ⚠️ modelscope 的 id **带命名空间**（`deepseek-ai/…`）。补丁查找**先**按 `realId`
+    //    原文精确匹配（`Object.hasOwn(providerPatch, realId)`），**再**按归一化后的
+    //    `idKey` 兜底（PR #89 D 域：两条口径同源，否则上游换个书写形态就静默退回孤立键）
+    //    ⇒ 写全命名空间是**正确做法**（原文即命中），但不再是唯一能命中的写法。
     modelscope: Object.freeze({
       'deepseek-ai/DeepSeek-V4.1-Flash-1017': 'deepseek-v4-1-flash',
       'deepseek-ai/DeepSeek-V4-Pro-0813': 'deepseek-v4-pro',

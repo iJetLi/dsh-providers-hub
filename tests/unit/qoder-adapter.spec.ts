@@ -18,6 +18,7 @@ import {
 } from '../../src/qoder-adapter.js'
 import { QODER, QODER_CN } from '../../src/qoder-product.js'
 import type { QoderFallbackModel } from '../../src/qoder-product.js'
+import { qoderMachineOs } from '../../src/qoder-align.js'
 import { buildQoderCredential, parseQoderTokenPayload, type QoderCredential } from '../../src/qoder.js'
 
 /** 源码级断言的路径基准（与 `jet-hub-rpc.spec.ts` 同款）。 */
@@ -651,6 +652,39 @@ describe('QoderAdapter 请求构造（加密端点）', () => {
     expect(get('accept')).toBe('text/event-stream')
   })
 
+  it('形态对齐：补 `Cosy-MachineOS`（默认开、`=0` 可关）', async () => {
+    // ⚠️ 这个头**功能上非必需**（`qoder-machine.ts` 的消融表已证明），补的是
+    //    形态一致性：官方请求层会带，我们不带就多一条稳定可聚类的特征。
+    //    故这里既守「默认补上」，也守「关掉之后真的不补」——
+    //    只守前者的话，开关写坏了（永远开）也测不出来。
+    //
+    // ⚠️ `Login-Version` 不在这里断言「有没有被补」：它是**WASM 头表自带的**
+    //    （实测 dump，见 `qoder-align.ts` 模块头），补头开关不该影响它。
+    const fetchImpl = vi.fn(async () => envelopeResponse([textFrame('hi'), finishFrame])) as unknown as typeof fetch
+    await collect(makeAdapter({ fetchImpl }))
+    const call = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]!
+    const headers = (call[1] as { headers: Headers }).headers
+    expect(headers.get('cosy-machineos')).toBe(qoderMachineOs())
+    // WASM 自带，与补头开关无关
+    expect(headers.get('login-version')).toBe('v2')
+    // 补头不得碰签名（`Authorization` 是 WASM 生成的 COSY 签名）
+    expect(headers.get('authorization')).toContain('Bearer COSY.')
+
+    vi.stubEnv('DSH_QODER_ALIGN_HEADERS', '0')
+    try {
+      const off = vi.fn(async () => envelopeResponse([textFrame('hi'), finishFrame])) as unknown as typeof fetch
+      await collect(makeAdapter({ fetchImpl: off }))
+      const offCall = (off as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]!
+      const offHeaders = (offCall[1] as { headers: Headers }).headers
+      expect(offHeaders.get('cosy-machineos')).toBeNull()
+      // 关掉的只是补头，签名与 WASM 自带的头照旧
+      expect(offHeaders.get('authorization')).toContain('Bearer COSY.')
+      expect(offHeaders.get('login-version')).toBe('v2')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('请求体必须含 `business`（缺了服务端路由到坏节点）', async () => {
     // ⚠️ 真实缺陷（2026-09-20 定位）：
     //   `qfmodel`（Qwen3.8-Flash）在**不带 `business`** 时恒落到故障节点
@@ -754,6 +788,42 @@ describe('出口 fetcher 的优先级（`fetchImpl` 注入 > `fetchFor` > 全局
       })
       await collect(adapter)
       expect(globalSpy, '末档必须仍是全局 fetch').toHaveBeenCalled()
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it('⚠️ 全局 fetch 在**构造之后**被包装 ⇒ 仍走 fetchFor（不得被误判成「注入替身」）', async () => {
+    // 真实失效形态（2026-11-16 定位）：`hasInjectedFetchImpl` 原先用
+    // `this.fetchImpl !== fetch` —— 左边是**构造期**捕获的引用，右边是**调用点**的
+    // 全局 `fetch`。只要有人在适配器构造**之后**替换 `globalThis.fetch`（宿主装
+    // 出站对齐层 / OTel 自动埋点 / 本地 mock server / 代理库），两边引用必然不同
+    // ⇒ 判成「已注入单测替身」⇒ **静默跳过 `fetchFor`（per-账号出口代理）**。
+    //
+    // 症状与 `2026-10-21` 那次真实报障同族（「换了号还是超时、且无任何报错」）：
+    // 换号只换了凭据，出口没换 ⇒ 墙外环境里该渠道从聚合轮换里静默消失。
+    const proxy = vi.fn(async () => envelopeResponse([textFrame('hi'), finishFrame])) as unknown as typeof fetch
+    const adapter = makeAdapter({ fetchFor: () => proxy })
+    const original = globalThis.fetch
+    const lateWrapper = vi.fn(async () => envelopeResponse([textFrame('hi'), finishFrame])) as unknown as typeof fetch
+    // @ts-expect-error —— 故意在**构造之后**替换全局 fetch，模拟宿主/埋点层。
+    globalThis.fetch = lateWrapper
+    try {
+      // ⚠️ 不能直接 `await collect(adapter)`：缺陷态的失败表现是「落回构造期捕获的
+      //    原始全局 fetch ⇒ 真发 HTTPS ⇒ 卡到超时」，只会得到一句
+      //    `Test timed out in 5000ms`，看不出真因。故用有界等待 + 带解释的断言
+      //    （与上方「未注入 fetchImpl ⇒ 走 fetchFor」同款）。
+      const started = Date.now()
+      const settled = await Promise.race([
+        collect(adapter).then(() => 'done' as const),
+        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 2000)),
+      ])
+      expect(
+        settled,
+        `请求在 ${Date.now() - started}ms 内没走 fetchFor（大概率落回了构造期捕获的原始全局 fetch ⇒ 真发网络）`,
+      ).toBe('done')
+      expect(proxy, '生产代理必须仍被调用：全局 fetch 事后被包装不算「注入了替身」').toHaveBeenCalled()
+      expect(lateWrapper, '不得把请求交给事后包装的全局 fetch').not.toHaveBeenCalled()
     } finally {
       globalThis.fetch = original
     }

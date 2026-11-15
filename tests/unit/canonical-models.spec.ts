@@ -613,6 +613,14 @@ describe('deepseek 的日期快照后缀（-1017 / -0813）：归到对应无后
    *    codearts 上两者并存（旧版/新版），且 `-0813` 属 benefit 组
    *    （`llm-adapter.ts` 实测「不能互相替代」）。
    *    结论只是：**后缀那条是该渠道当前在服务的同一个模型** ⇒ 归到同一虚拟模型。
+   *
+   * 另一条独立依据（用户实例 `/v1/models` 全量目录，337 条）：
+   * - modelscope 同时给了 `…/DeepSeek-V4.1-Flash` 与 `…/DeepSeek-V4.1-Flash-1017`，
+   *   两者展示名**逐字相同**（`DeepSeek-V4.1-Flash (魔搭)`）；
+   * - opencode 的**无后缀** id 展示名就是 `DeepSeek V4.1 Flash 1017`；
+   * - 只有 codearts 把 `-1017` 当独立模型（x0.12 vs x0.09）。
+   *
+   * ⇒ `-1017` 是 V4.1-Flash 的**当前版本号**，不是另一个模型。
    */
   it('★ codearts 的 `…-1017` 归到 `deepseek-v4-1-flash`', () => {
     const got = canonicalKeyFor('codearts', 'deepseek-v4.1-flash-1017', 'DeepSeek-V4.1-Flash-1017 · x0.12')
