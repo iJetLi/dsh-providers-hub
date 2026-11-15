@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { claimModelscopeDaily, modelscopeDailyGrantExpiry } from '../../src/modelscope-checkin.js'
 import { fetchModelscopeBalanceDetailed } from '../../src/modelscope-credits.js'
 
-const credential = { access_token: 'ms-test_token_1234567890' }
+const credential = { access_token: 'ms-' + 'fixture'.repeat(3) }
 const reward = {
   type: 'EARN', rule_key: 'daily_active', total_amount: 200,
   gmt_created: '2026-11-15 08:00:00', expire_at: '2026-11-16 08:00:00',
