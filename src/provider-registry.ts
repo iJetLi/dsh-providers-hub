@@ -945,7 +945,11 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
      *
      * 原注释写的是「推理已通但 `channel: true` 会点燃 9 个 spec / 11 条派生登记，先补齐再翻」。
      * ⚠️⚠️ 但那是**流程理由，不是产品理由** —— 2026-10-22 对抗审计指出：
-     * `channel` 在**生产代码里零个读取点**（全仓普查，唯一消费者是 tests/），
+     * `channel` 在**生产代码里零个读取点**（全仓普查，唯一消费者是 tests/）——
+     * ⚠️ **2026-11-15 起不再成立**：`src/jet-hub-rpc.ts` 的 `noModelLeg`
+     * （`provider.setEnabled` 关闭方向）读 `descriptorOf(provider)?.channel === false`，
+     * 这是**第一个生产读取点**。新增「自报非模型渠道」的 provider 时，那一腿会决定
+     * 它能否在目录为空时被关闭 ⇒ 别再按「没人读 channel」来推断影响面。
      * 而 `false` 造成两个**用户可见**缺口：
      * - 它的模型**永不进聚合目录与轮换候选**（`AGGREGATE_CHANNELS` 缺它）；
      * - `credits-balance-self-heal.spec.ts` 用 `d.channel && d.credits.balance` 派生期望集合

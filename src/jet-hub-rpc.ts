@@ -10966,7 +10966,36 @@ function registerJetHubEndpoints(
           }
         }
         let modelCount = 0
-        if (req.enabled) {
+        /**
+         * ⚠️⚠️ **非模型渠道不读模型目录**（2026-11-15 真机第二轮报障）。
+         *
+         * 用户点「关闭豆包」后弹的是：
+         * `没有可关闭的模型：读取模型列表失败：no adapter registered for provider "doubao"`
+         * —— 即命中了下面关闭分支里的 **`remoteError` 拒绝**（不是 `ids.length === 0`）。
+         *
+         * 原因：`fullCatalogIds` 会走 `ctx.llm.listModels('doubao')`，而豆包是**纯签到渠道**
+         *（`provider-registry` 的 `channel: false`，`modelAdapters` 里也没有它）⇒
+         * dsh 的 llm 根本没有它的 adapter，读一次抛一次。**这不是「读失败」，
+         *  是「没有可读的东西」** —— 模型这条腿对这类渠道根本不存在。
+         *
+         * ⚠️ 判据必须**两个条件同时成立**，缺一不可：
+         *   ① `descriptorOf(provider).channel === false`（自报不是模型渠道）；
+         *   ② `modelAdapters[provider] === undefined`（本仓库没有它的目录来源）。
+         * 单独用 ① 不安全：`codely` **曾**是 `channel: false`（2026-10-22 已翻成 `true`），
+         * 而当时它有 `codely-adapter.ts` 目录来源 —— 其它「自报不是模型渠道、但有目录来源」
+         * 的形态（外部适配器 / 旧版装机 / 将来新增）同样存在 ⇒ 跳过模型腿会让
+         * 「关闭 provider 后模型仍可选」的旧缺陷（IKJW33）复活。
+         * 单独用 ② 也不安全：外部适配器缺失（旧版装机）时 channel 仍为 true，
+         * 那种形态要继续走远端核实（`remoteError` / `notReady` 两条拒绝原样保留）。
+         */
+        const noModelLeg = !req.enabled
+          && descriptorOf(req.provider)?.channel === false
+          && modelAdapters?.[req.provider] === undefined
+        if (noModelLeg) {
+          // 模型腿是空操作：黑名单不动、**只落关闭意图**（与黑名单同一次落盘）。
+          await pool.writeModelsWithProviderClosed(req.provider, [], true)
+          modelCount = 0
+        } else if (req.enabled) {
           // 打开：清空黑名单（返回被清掉的条目数，供提示）。null 表示本就无关闭项。
           const cleared = pool.listDisabledModels(req.provider)
           // ⚠️⚠️ **清黑名单 + 清「关闭意图」必须同一次落盘**（Gitee issue IKP8OF，
@@ -11035,18 +11064,28 @@ function registerJetHubEndpoints(
               },
             }
           }
-          // 远端读到（含为空）但并集为空 ⇒ 适配器目录里都没有该 provider 的
-          // 模型，真没东西可关，拒绝且不落盘。文案与 `model.setAllDisabled`
-          // 的「目录为空」形态逐字同构。
-          if (catalog.ids.length === 0) {
-            return {
-              ok: false,
-              error: {
-                code: 'bad-request',
-                message: '该供应商没有可关闭的模型，未做任何变更',
-              },
-            }
-          }
+          // ⚠️⚠️ **并集为空 ⇒ 这里不再拒绝**（2026-11-15 用户报障「豆包无法关闭」）。
+          //
+          // 空目录是**真实且正常**的形态，不是故障：`doubao` 是「纯签到渠道」
+          //（`src/provider-registry.ts` 里 `channel: false`，没有模型目录 / 适配器 /
+          //  auth 服务），因此 `provider.status` 对它**恒报** `models.total === 0`。
+          //
+          // 旧实现回 `bad-request: 该供应商没有可关闭的模型，未做任何变更`，而客户端
+          // `providerSwitchState()` 又按 `models.total === 0` 把开关**置灰**（`reason`
+          // 就是这句话）⇒ 用户既点不动、点了也不会成功 —— 「关闭供应商」在这个渠道上
+          // **永远不可能完成**：账号停不掉，分组永远留在「已打开」。
+          //
+          // 「关闭供应商」的语义是三件事：停用账号 + 关掉目录里的全部模型 + 落
+          // **关闭意图**。目录为空时中间那条腿是**空操作**（0 个 id 要写），账号与意图
+          // 两件照样成立 —— 与打开方向对称（`provider.setEnabled(true)` 根本不读目录，
+          // 纯本地清黑名单 + 清意图）。
+          //
+          // ⇒ 继续走下面那条 `writeModelsWithProviderClosed(provider, ids, true)`：
+          //   `modelIds` 为空时不深拷贝 `modelCache`、**只落意图**，仍与黑名单同一次落盘
+          //   （IKP8OF 的原子性约定不破）。
+          //
+          // ⚠️ 上面 `remoteError` / `notReady` 两条拒绝**必须原样留着**：那两种是
+          //   「目录还没读准」，此时落意图会重新打开「关闭后仍可选」的窗口。
           // ⚠️⚠️ 计数必须报「**本次真正改变的**条数」，不是「本次写入的条数」
           //（真实缺陷，2026-08 审计实测）：
           // `setModelsDisabled` 是**合并**语义（`perProvider[id] = true`），传入的

@@ -176,3 +176,6 @@ docs/audit/
 .rea-web/
 
 
+
+# watcher 的隔离工作区（每个只能存在一份，是独立 git worktree，绝不能进版本库）
+.dsh-zhuli/
