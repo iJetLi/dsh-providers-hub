@@ -23,9 +23,12 @@ import { describe, expect, it } from 'vitest'
 import { MODELSCOPE_FALLBACK_MODELS, findModelscopeFallback } from '../../src/modelscope-product.js'
 import {
   MODELSCOPE_RETIRED_MODEL_IDS,
+  ModelscopeAdapter,
   loadModelscopeCatalog,
   parseModelscopeCatalog,
 } from '../../src/modelscope-adapter.js'
+import { MODELSCOPE } from '../../src/modelscope-product.js'
+import { normalizeModelscopeModelId } from '../../src/modelscope.js'
 
 describe('ModelScope 兜底表：上下文窗口（2026-10-17 扩表）', () => {
   it('★ 没有任何条目把 contextWindow 留成 0（0 = 「不知道」，DSH 算不出压缩阈值）', () => {
@@ -324,7 +327,7 @@ describe('modelscope 已下线 id（MODELSCOPE_RETIRED_MODEL_IDS，2026-11-16 �
   })
 
   it('⚠️ 名单 ⊆ 实测远端清单（拼错的 id 会让过滤静默失效）', () => {
-    // ⚠️ 不能拿「兜底表」当对照：兜底表只登记**有实测窗口值**的模型（37 条里缺
+    // ⚠️ 不能拿「兜底表」当对照：兜底表只登记**有实测窗口值**的模型（36 条里缺
     //    `DeepSeek-V4.1-Flash` / `Kimi-K3.1-Pro` / `Step-5-Preview` 等），而本名单
     //    收的是「远端列了但已没人服务」的 id —— 两者本来就不是一个集合。
     //    真源是下面这份 2026-11-16 实测的远端清单。
@@ -389,5 +392,81 @@ describe('modelscope 已下线 id（MODELSCOPE_RETIRED_MODEL_IDS，2026-11-16 �
     ]) {
       expect(MODELSCOPE_RETIRED_MODEL_IDS.has(id), id + ' 不该进已下线名单').toBe(false)
     }
+  })
+
+  /**
+   * ⚠️⚠️ 2026-11-16（PR #92 双审计）：名单是**逐字**比较的，而远端的 id 会以
+   * 各种书写形态出现。对抗审计实测：`DEEPSEEK-AI/DEEPSEEK-V4-PRO` /
+   * `deepseek-ai/deepseek-v4-pro` / `deepseek-ai/DeepSeek-V4-Pro:free` /
+   * `deepseek-ai//DeepSeek-V4-Pro` 四条**全部绕过逐字闸门**，而它们的
+   * `normalizeModelKey` 都是 `deepseek-v4-pro` ⇒ 会并进那个**存活**的虚拟模型
+   * 成为可轮换候选 ⇒ 聚合挑中即请求期 404，而虚模型名是活的，用户不会怀疑到魔搭。
+   *
+   * 危害比「那条还在列表里」重得多，所以过滤必须同时按**归一化键**查。
+   */
+  it('★★★ 书写变体（大小写 / -free / 双斜杠）也必须被剔除（逐字闸门会漏）', async () => {
+    const entries = await loadModelscopeCatalog(
+      fakeCatalog([
+        'deepseek-ai/DeepSeek-V4-Pro',
+        'DEEPSEEK-AI/DEEPSEEK-V4-PRO',
+        'deepseek-ai/deepseek-v4-pro',
+        'deepseek-ai/DeepSeek-V4-Pro:free',
+        'deepseek-ai//DeepSeek-V4-Pro',
+        'Qwen/Qwen3.8-27B', // 存活，必须保留 —— 否则过滤宽过头
+      ]),
+      'retired-filter-variants',
+      0,
+    )
+    expect(entries.map((e) => e.id)).toEqual(['Qwen/Qwen3.8-27B'])
+  })
+
+  /**
+   * ⚠️ P3-5（正向审计）：`listAllModels` 的**兜底**分支原先零用例 ——
+   * 变异「直用 `MODELSCOPE_FALLBACK_MODELS.map`」（本 PR 之前就长这样）全绿，
+   * 而已下线模型会重新出现在 Jet Hub 设置页且进 aggregate 候选表。
+   * 这条断言必须走**真实 class 路径**（`syncCatalogEntries` → `fallbackEntries`），
+   * 不能直接调模块级函数，否则测不到接线。
+   */
+  it('★★ listAllModels 的兜底分支（无远端缓存）也不吐已下线 id', () => {
+    const adapter = new ModelscopeAdapter({
+      product: MODELSCOPE,
+      slots: async () => [{ id: 's1', apiKey: 'ms-0123456789abcdefghij' }],
+    })
+    const ids = adapter.listAllModels().map((m) => m.id)
+    // 对照：兜底表本身非空（否则下面的断言恒真）
+    expect(ids.length, '对照失败：兜底表被剔空了 ⇒ 本用例会假绿').toBeGreaterThan(0)
+    for (const dead of MODELSCOPE_RETIRED_MODEL_IDS) expect(ids).not.toContain(dead)
+    expect(ids).toContain('Qwen/Qwen3.8-27B')
+  })
+
+  /**
+   * ⚠️ P3-6（正向审计）：`normalizeModelscopeModelId` 的 `trim()` 零用例 ——
+   * 变异「去掉 trim」全绿。上游 id 带尾空格/制表符时，名单会漏剔。
+   */
+  it('★ 尾空格 / 制表符不得影响剔除（normalizeModelscopeModelId 的 trim 是承重的）', async () => {
+    const entries = await loadModelscopeCatalog(
+      fakeCatalog([
+        'deepseek-ai/DeepSeek-V4-Pro ',
+        '\tdeepseek-ai/DeepSeek-V4-Pro',
+        'Qwen/Qwen3.8-27B',
+      ]),
+      'retired-filter-trim',
+      0,
+    )
+    const ids = entries.map((e) => e.id)
+    expect(ids.some((id) => id.trim() === 'deepseek-ai/DeepSeek-V4-Pro')).toBe(false)
+    expect(ids).toContain('Qwen/Qwen3.8-27B')
+  })
+
+  /**
+   * ⚠️ 上一条用例测不到 `trim()` 本身（归一化口径会给尾空格兜底），所以 `trim()`
+   * 必须**直测纯函数** —— 变异「去掉 `raw.trim()`」在上一条用例下全绿。
+   */
+  it('★ normalizeModelscopeModelId 必须 trim（纯函数直测）', () => {
+    expect(normalizeModelscopeModelId('  x  ')).toBe('x')
+    expect(normalizeModelscopeModelId('\tx\t')).toBe('x')
+    expect(normalizeModelscopeModelId('deepseek-ai/DeepSeek-V4-Pro ')).toBe('deepseek-ai/DeepSeek-V4-Pro')
+    // 反向：不得顺手改大小写 / 剥命名空间（那会回流到发请求的 model 字段）
+    expect(normalizeModelscopeModelId('DEEPSEEK-AI/DeepSeek-V4-Pro')).toBe('DEEPSEEK-AI/DeepSeek-V4-Pro')
   })
 })

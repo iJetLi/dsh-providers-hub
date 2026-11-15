@@ -151,6 +151,24 @@ const GONE_PATTERNS: readonly RegExp[] = [
   // ⇒ 后面**只允许**：① 结束；② 句末标点（`.` `!` `?` `;`）；③ 收尾括号/引号；
   // **不含逗号**（`…not_found, retry allowed` 里逗号后仍是另一个字段 ⇒ 不算阳性）。
   /\bmodel[_\-]not[_\-]found\b(?=\s*(?:[.!;?)}\]'"]|$))/i,
+  // ⚠️⚠️ 魔搭（modelscope）的「已下线」形态（2026-11-16 实测，PR #92 正向审计 P2-1）：
+  //   上游回 `HTTP 400 {"message":"Model id : <id> , has no provider supported"}`
+  //   （经本仓网关包成 502 后文案不变）。
+  //
+  // ⚠️ 三种真实形状用上面的判据**全判 false**：
+  //   modelscope: HTTP 400 - {"message":"Model id : deepseek-ai/DeepSeek-V4-Pro , has no provider supported"}
+  //   Model id : deepseek-ai/DeepSeek-V4-Pro , has no provider supported
+  //   modelscope 请求失败：HTTP 400 {"message":"Model id : Qwen/Qwen3.5-27B , has no provider supported"}
+  //   原因：{@link matchesGonePhrase} 要求「主语 + **紧邻**不存在语义」，而这里
+  //   主语与语义之间插着 `id : <id> ,`；{@link GONE_TAIL} 也没有 `no … supported` 这一支。
+  //
+  // ⚠️ 为什么**不能**只往 `GONE_TAIL` 里加：那个片段是被**锚定**拼进
+  //   `^(?:…GONE_TAIL…)$` 形式的，锚点前面要求「主语后紧邻」，本形态的结构进不去。
+  //   必须作为**独立条目**加在这里（整句里任意位置出现即可）。
+  //
+  // ⚠️ 这个短语足够专有（`has no provider supported` 是上游的固定枚举文案），
+  //   不会像 `not available` / `not supported` 那样把「换套餐就能恢复」误判成下架。
+  /\bhas\s+no\s+provider\s+supported\b/i,
 ]
 
 /**

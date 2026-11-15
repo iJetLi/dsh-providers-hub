@@ -108,4 +108,17 @@ describe('★★ modelscope 迁移到共享骨架：用户可见后果不变', (
       '★ 全量视图被黑名单过滤 ⇒ 用户再也打不开那个模型（设置页没有入口）',
     ).toContain('deepseek-ai/DeepSeek-V4.1-Flash-1017')
   })
+
+  /**
+   * ⚠️ 2026-11-16（PR #92 双审计 P3-5 的另一半）：`listModels` 在**冷缓存**下
+   * 走 `syncCatalogEntries()` → `fallbackEntries()`，这条路径之前零用例 ——
+   * 变异「syncCatalogEntries 直用 MODELSCOPE_FALLBACK_MODELS.map」全绿，
+   * 而已下线模型会重新出现在选择器里（用户选中即必得 400）。
+   */
+  it('★★ listModels 的冷缓存兜底腿也不吐已下线 id（syncCatalogEntries 接线）', async () => {
+    const adapter = makeAdapter(makePool({ disabled: [] }))
+    const ids = (await adapter.listModels(MODELSCOPE.id)).map((m) => m.id)
+    expect(ids.length, '对照失败：兜底表被剔空了 ⇒ 本用例会假绿').toBeGreaterThan(0)
+    for (const dead of MODELSCOPE_RETIRED_MODEL_IDS) expect(ids).not.toContain(dead)
+  })
 })
