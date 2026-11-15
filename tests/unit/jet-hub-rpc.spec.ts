@@ -5164,11 +5164,23 @@ describe('provider.status / provider.setEnabled 端点', () => {
         after.statuses.buddy.closed,
         '★★ 目录变长后 closed 翻回 false ⇒ 供应商静默回到「已打开」（本 issue 的原症状）',
       ).toBe(true)
-      // ★ 计数也必须自洽：否则设置页「分组说已关闭、每条开关都说已打开」。
+      /**
+       * ⚠️⚠️ **`disabled` 必须是真实黑名单计数，不得跟着意图报满**（Issue #84 的 P0）。
+       *
+       * 上一版这里断言 `{ total: 4, disabled: 4 }`，理由是「否则设置页自相矛盾」。
+       * 动机合理，**但那是谎报**：目录里新长出来的 `late-model`
+       * **不在黑名单里**，它仍可选；把它报成已关闭只会让后人据此写错逻辑。
+       *
+       * 「已关闭」这件事由独立字段 `closed` / `closedByIntent` 表达
+       * —— 它们已经在返回值里，前端用 `closed` 开关、用 `closedByIntent` 说「意图」。
+       *
+       * ⚠️ 实测：`provider.status` 的 `models.disabled` 在客户端**零消费者**（界面上的
+       * 「已关闭 N 个模型」走的是 `setEnabled` 的返回值）。
+       */
       expect(
         after.statuses.buddy.models,
-        '★ disabled 必须跟着意图报满（否则设置页自相矛盾）',
-      ).toEqual({ total: 4, disabled: 4 })
+        '★ disabled 只数真实黑名单（late-model 不在里面⇒ 3）',
+      ).toEqual({ total: 4, disabled: 3 })
     })
 
     /**
@@ -5557,6 +5569,48 @@ describe('provider.status / provider.setEnabled 端点', () => {
       const s = (await call('provider.status', { providers: ['buddy'] }))
         .value as { statuses: Record<string, { closed: boolean }> }
       expect(s.statuses.buddy.closed, '逐条关光必须仍算已关闭（派生判据不得被挤掉）').toBe(true)
+    })
+  })
+
+  /**
+   * ★★★ **Issue #84：`provider` 必须在注册表里**。
+   *
+   * 旧实现只校验「非空字符串」⇒ 任意顶层键都能落盘、且 `__proto__` 会假成功。
+   */
+  describe('★★★ Issue #84：provider 白名单与安全取值', () => {
+    it('★★★ `__proto__` 不得假成功（黑名单一个字没写却报 ok）', async () => {
+      const { call } = setup({ catalog: [...CATALOG] })
+      const res = await call('provider.setEnabled', { provider: '__proto__', enabled: false })
+      expect(res).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    })
+
+    it('★★★ `constructor` / `toString` 不得把任意顶层键写进 state.json', async () => {
+      const { call } = setup({ catalog: [...CATALOG] })
+      for (const provider of ['constructor', 'toString', 'hasOwnProperty']) {
+        expect(await call('provider.setEnabled', { provider, enabled: false }))
+          .toMatchObject({ ok: false, error: { code: 'bad-request' } })
+      }
+    })
+
+    it('★★ 大小写 / 尾部空白 / 纯空白 都是 bad-request（不得走到远端核实才报 no adapter registered）', async () => {
+      const { call } = setup({ catalog: [...CATALOG] })
+      for (const provider of ['DOUBAO', 'buddy\n', '   ']) {
+        expect(await call('provider.setEnabled', { provider, enabled: false }))
+          .toMatchObject({ ok: false, error: { code: 'bad-request' } })
+      }
+    })
+
+    it('★★★ `provider.status([\'__proto__\'])` 不得抛裸 TypeError', async () => {
+      const { call } = setup({ catalog: [...CATALOG] })
+      const res = await call('provider.status', { providers: ['__proto__'] })
+      // 旧实现：`modelAdapters?.['__proto__']` 返回 Object.prototype ⇒ 取 .listAllModels 得 undefined
+      // ⇒ 抛 `TypeError: ... is not a function`，且原样直出给用户。
+      expect(res.ok).toBe(true)
+      const statuses = (res.value as { statuses: Record<string, unknown> }).statuses
+      // 关键：不得在 statuses 上落下  自有键（那会污染原型链），
+      // 也不得因为读到 Object.prototype 而抛 TypeError。
+      expect(Object.hasOwn(statuses, '__proto__')).toBe(false)
+      expect(Object.getPrototypeOf(statuses)).toBe(Object.prototype)
     })
   })
 

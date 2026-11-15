@@ -10705,7 +10705,20 @@ function registerJetHubEndpoints(
         // ⚠️ 判据只写一份（`computePlan`）：循环与预取共用它，避免两处漂移
         //    （本仓库「一文件两套同义判据」是红线）。
         const computePlan = (provider: string) => {
-          const catalog = modelAdapters?.[provider]?.listAllModels()
+          /**
+           * ⚠⚠ **必须用 `Object.hasOwn` 取遭（Issue #84 的 P1-3）。**
+           *
+           * `modelAdapters?.['__proto__']` 返回的是 **`Object.prototype`**（不是
+           * `undefined`）⇒ 取 `.listAllModels` 得 `undefined` ⇒ 调用抛
+           * `TypeError: modelAdapters?.[provider]?.listAllModels is not a function`，
+           * 而 `provider.status` 把它**原样直出给用户**（应该是 `bad-request`）。
+           *
+           * 与 `src/jet-hub-rpc.ts` 里其它处「`Object.hasOwn` 先问、再取值」同口径。
+           */
+          const adapter = modelAdapters !== undefined && Object.hasOwn(modelAdapters, provider)
+            ? modelAdapters[provider]
+            : undefined
+          const catalog = adapter?.listAllModels()
           let total = catalog?.length ?? 0
           // ⚠️ `listAllModels()` **不带 disabled 字段**，故必须另取黑名单再按 id 计数。
           const disabledMap = pool.listDisabledModels(provider)
@@ -10739,7 +10752,11 @@ function registerJetHubEndpoints(
           //    —— 正是 IKJW33 修过的矛盾态。故打开方向必须清除意图
           //（见 `AccountPool` 的三个打开入口，它们在类内收口）。
           const closedByIntent = pool.providerClosedFor(provider)
-          // ⚠️⚠️ **意图为真 ⇒ 计数也必须按「全部已关闭」报**（不只是 `closed`）。
+          /**
+           * ⚠️ **旧注释声称「意图为真 ⇒ 计数也按全部已关闭报」已被 Issue #84 推翻**：
+           * 那个做法会让「目录变长后新出现的模型」被算进「已关闭」，而它实际仍可选。
+           * 下面这段保留为历史记录，结论以 `closedByIntent` 那段为准。
+           */
           //
           // 否则设置页会出现自相矛盾的一屏：分组说「已关闭」，而模型列表里
           // 每一条的开关都显示「已打开」（`disabled` 计数只数了黑名单，
@@ -10748,10 +10765,34 @@ function registerJetHubEndpoints(
           //
           // ⚠️ 但 `total` **不变**：它是目录条数（契约：不套黑名单的全量），
           //    前端 `providerSwitchState` 的「`total === 0` ⇒ 禁用」判据依赖它。
-          if (closedByIntent) {
-            closed = true
-            disabled = total
-          }
+          /**
+           * ⚠⚠ **意图为真 ⇒ `closed = true`，但 `disabled` 必须保持**真实黑名单计数**
+           * （Issue #84 的 P0，2026-11-15）。
+           *
+           * 旧实现在这里另外写了一句 `disabled = total`，理由是「否则分组说「已关闭」
+           * 而模型列表里每条开关都是「已打开」」。动机合理，**但数值是假的**：
+           *
+           * ```
+           * 关闭时         目录 [m1,m2] ⇒ {total:2, disabled:2, closed:true}   ← 诚实
+           * 目录变长出现 m3 ⇒ {total:3, disabled:3, closed:true}   ← 谎报
+           * 真实黑名单 = {"m1":true,"m2":true}，m3 仍可选
+           * ```
+           *
+           * 且 `disabled === total` 被覆盖后**永远不再报「部分关闭」**，而 `provider.status`
+           * 是只读端点 ⇒ 无自愈路径。
+           *
+           * ⚠️ **刚复核了消费面**：截至 2026-11-15，`provider.status` 的 `models.disabled`
+           * 在客户端**零消费者**（`grep -rn "providerStatuses\[" plugin-src/client/*.js` 零命中；
+           * 界面上的「已关闭 N 个模型」文案走的是 `provider.setEnabled` 的返回值，
+           * 逐条模型开关走的是 `listModels` 的 `model.disabled`）。
+           * 所以这条**今天在 UI 上不可见** —— 但 API 契约上它是谎言，且任何将来的
+           * 消费者都会被它骗，所以仍需修。前端要知道「意图已关」用现有的
+           * `closedByIntent` 独立字段（本函数已经在返回）。
+           *
+           * ⚠️ **不要**为了「一屏自洽」再把 `disabled` 报成 `total` ——
+           * 那正是本 issue 的成因。
+           */
+          if (closedByIntent) closed = true
           return { total, disabled, closed, closedByIntent }
         }
 
@@ -10963,6 +11004,27 @@ function registerJetHubEndpoints(
           return {
             ok: false,
             error: { code: 'bad-request', message: 'provider 与非空布尔 enabled 必填' },
+          }
+        }
+        /**
+         * ⚠⚠ **provider 必须在注册表里（Issue #84 的 P1-1 / P1-2，2026-11-15）。**
+         *
+         * 旧实现只校验「非空字符串」⇒ 任意键都能落盘，实测三种形态：
+         * - `__proto__` ⇒ `{ok:true, models:2}` 但 `stored={}`（**假成功**）——
+         *   原型上的赋值被静默丢弃，用户以为关了；
+         * - `constructor` / `toString` ⇒ `state.json` 的 `disabledModels` **真被写入**
+         *   任意顶层键（`{"constructor":{"m1":true,"m2":true}}`）⇒ 脏数据落盘、且找不到下一个能删它的入口；
+         * - `DOUBAO` / `doubao\n` / `   ` ⇒ 走到远端核实才报
+         *   `no adapter registered`，**文案误导**（正确结论是「没这个供应商」）。
+         *
+         * 判据用 `descriptorOf`（与下方 `noModelLeg` 同源）：它就是
+         * `PROVIDER_REGISTRY` 的查表。⚠️ **不能**用 `modelAdapters[provider]` 代替 ——
+         * 它只覆盖「有模型目录」的家，纯签到渠道（如 `doubao`）不在里面。
+         */
+        if (descriptorOf(req.provider) === undefined) {
+          return {
+            ok: false,
+            error: { code: 'bad-request', message: `未知供应商：${req.provider}` },
           }
         }
         let modelCount = 0
