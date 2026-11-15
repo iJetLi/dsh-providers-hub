@@ -297,3 +297,43 @@ pnpm test:e2e:marvis
 **守卫**：
 - 纯函数：`tests/unit/openai-gateway-tencent-fingerprint.spec.ts` 的 `isTencentContentFingerprintProvider('marvis')` + `rewriteTencentContentFingerprints(…, 'marvis')`；
 - **行为级**（这条才是承重的）：`tests/unit/marvis-adapter.spec.ts` 的「system 里的腾讯系风控指纹必须被改写」—— 摘掉 `streamVia` 里那次调用 ⇒ 该用例红，而纯函数用例**仍全绿**（变异实测 `TestFiles_failed=1 Tests_failed=1`）。
+
+### ⚠️⚠️ 补记（2026-11-15 晚，Issue IKVF8Z）：判定发生在 `messages[]` 的 system 那条，**不在**顶层 `system`
+
+上面那节的矩阵里 B3 档（身份句）是 **200**，但那是把身份句**只放顶层 `system`** 测的。
+真实会话里 DSH 的 system 会**同时**作为 `messages[]` 的一条下发
+（`serializeMessages` 见 `role:'system'` 就 `wire.push`），而这一条此前**没有**过指纹表。
+
+真机现象（用户报障，1 个账号、槽位 `deepseek-v4-pro-external`）：
+界面上任何一次 marvis 请求都报 `HTTP 403 {"code":4100406,"msg":"非法请求"}`，
+同一账号直连同一端点、同一 body 却是 200。逐格收敛后矩阵如下
+（`tests/unit/marvis-adapter.spec.ts` 的三条新用例就是按这张表写的）：
+
+| 位置 | system 内容 | 结果 |
+|---|---|---|
+| 顶层 `system` | `You are an AI agent powered by DeepSeek Harness.` | **200**（无害，且已被改写） |
+| `messages[]` 的 system 消息 | 同上（英文原句） | **403 / 4100406** |
+| `messages[]` 的 system 消息 | 清洗成 `DSH` 之后 | **200** |
+| `messages[]` 的 system 消息 | `你是一个由 DeepSeek Harness 驱动的 AI 智能体。` | **403 / 4100406** |
+| `messages[]` 的 system 消息 | 该中文句清洗成 `DSH` 之后 | **200** |
+| 完全不带 system | — | **200** |
+| `user` 正文含同一句 | — | **200**（⇒ 只有 system 这条被拦） |
+
+**修复**（`src/marvis-adapter.ts`）：`streamVia` 里对 `serializeMessages(…)` 的产物
+`.map(rewriteMarvisSystemMessage)`，与 `buddy-adapter.ts` 的
+`wire.push({ role:'system', content: rewrite(…) })` 同口径 ——
+**两个位置都要改，只改一处等于没改**。
+
+**兜底正则不是冗余**：登记表只有英文句式，中文句式实测同样 403 ⇒
+`DeepSeek\s+Harness → DSH`（`DSH` 是实测放行的替换值）保留，用来吃表未覆盖的形态与措辞漂移。
+与上面那节一致，**只改 system 消息**，`assistant` / `user` 正文一律不动（历史回读证据）。
+
+**守卫**（`tests/unit/marvis-adapter.spec.ts`，全部行为级）：
+1. `★★★ messages 里的 system 那条也必须改写` —— 摘掉 `.map(…)` 即红；只断言顶层 `system` 的原有用例**拦不住**这个缺陷；
+2. `★★ 表未登记的中文句式也被兜底清掉`；
+3. `★★ user 正文里的同一句不得被改`（防将来把清洗面扩大到正文）。
+
+**仍未解（留给分类层）**：`4100406` 现在被 `classifyMarvisError` 的 `status === 403`
+分支判成 `risk`，UI 与日志上只剩「HTTP 403」，看不出上游给的是「非法请求」还是「风控」；
+单账号时 `risk` 分支换无可换、直接上抛给用户。本提交只修放行面，不动分类，避免把
+「内容级拦截」与「账号级风控」混成同一条码。

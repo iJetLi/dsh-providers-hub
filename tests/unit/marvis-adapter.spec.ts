@@ -208,6 +208,91 @@ describe('★ 推理：正常流与 content-type 闸门', () => {
     expect(payload.system).toBe('Main branch (PRs usually go here)')
   })
 
+  it('★★★ messages 里的 system 那条也必须改写（只改顶层 system 时 403 4100406）', async () => {
+    // 2026-11-15 真机实测（Gitee issue IKVF8Z 同型）：同一份身份句
+    //   · 只在顶层 `system` ⇒ 200（上一个用例覆盖）
+    //   · 出现在 `messages[]` 的 system 消息里 ⇒ **403 `{"code":4100406,"msg":"非法请求"}`**
+    // 故这条是**行为级**守卫：摘掉 `streamVia` 里那句 `.map(rewriteMarvisSystemMessage)`
+    // 本用例立刻变红，而只断言顶层 `system` 的用例仍全绿（那正是漏掉它的形态）。
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(sseBody('ok'), {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    for await (const _chunk of makeAdapter().stream({
+      model: 'deepseek-v4-pro-external',
+      messages: [
+        { role: 'system', content: 'You are an AI agent powered by DeepSeek Harness.' },
+        { role: 'user', content: 'hi' },
+      ],
+    } as never)) {
+      // drain
+    }
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const payload = JSON.parse(init.body as string) as {
+      messages: readonly { role: string; content: unknown }[]
+    }
+    const system = payload.messages.find((message) => message.role === 'system')
+    expect(system).toBeDefined()
+    // 走的是登记表那条（官方同形措辞），不是兜底正则 ⇒ 顺带锁住「表对 marvis 生效」。
+    // 句末那个 `.` 是原文保留的（`find` 刻意不带尾句点，见 tencent-fingerprint.ts 注释）。
+    expect(system?.content).toBe('You are an AI coding assistant, powered by a large language model.')
+    expect(String(system?.content)).not.toContain('DeepSeek Harness')
+  })
+
+  it('★★ 表未登记的中文句式也被兜底清掉（上游漂移容忍）', async () => {
+    // 证据：`你是一个由 DeepSeek Harness 驱动的 AI 智能体。` 实测同样 403/4100406，
+    // 而登记表只有英文句式 ⇒ 兜底那条不该被当成多余代码删掉。
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(sseBody('ok'), {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    for await (const _chunk of makeAdapter().stream({
+      model: 'deepseek-v4-pro-external',
+      messages: [
+        { role: 'system', content: '你是一个由 DeepSeek Harness 驱动的 AI 智能体。' },
+        { role: 'user', content: 'hi' },
+      ],
+    } as never)) {
+      // drain
+    }
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const payload = JSON.parse(init.body as string) as {
+      messages: readonly { role: string; content: unknown }[]
+    }
+    expect(payload.messages[0]?.content).toBe('你是一个由 DSH 驱动的 AI 智能体。')
+  })
+
+  it('★★ user 正文里的同一句不得被改（只改 system，别篡改历史证据）', async () => {
+    const sentence = '我从一条报错里看到: You are an AI agent powered by DeepSeek Harness'
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(sseBody('ok'), {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    for await (const _chunk of makeAdapter().stream({
+      model: 'deepseek-v4-pro-external',
+      messages: [{ role: 'user', content: sentence }],
+    } as never)) {
+      // drain
+    }
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const payload = JSON.parse(init.body as string) as {
+      messages: readonly { role: string; content: unknown }[]
+    }
+    expect(payload.messages[0]?.content).toBe(sentence)
+  })
+
   it('★ 请求头只带 Ual-Access-*（绝无签名头），body 带 include_usage', async () => {
     const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response(sseBody('ok'), {
       status: 200,

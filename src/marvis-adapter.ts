@@ -123,6 +123,36 @@ export function marvisRetryAfterMs(
   return Math.min(backoff, 30 * 60_000)
 }
 
+/**
+ * `messages[]` 里那条 `role:'system'` 的腾讯系内容级风控指纹改写。
+ *
+ * ⚠️ **位置判据**（2026-11-15 真机实测，同型报障见 Gitee issue IKVF8Z）：
+ * 同一份身份句
+ * - 只出现在**顶层 `system`** ⇒ 200（那份此前已由本文件的
+ *   `rewriteTencentContentFingerprints` 改写）；
+ * - 出现在 **`messages[]` 的 system 消息**里 ⇒ 403
+ *   `{"code":4100406,"msg":"非法请求"}`，把该句清洗掉即恢复 200
+ *   ⇒ 判定发生在 messages 这条，**不在**顶层。
+ *
+ * ⇒ 与 `buddy-adapter.ts` 的 `wire.push({ role:'system', content: rewrite(…) })`
+ * 同口径：两个位置都要改，只改一处等于没改。
+ *
+ * ⚠️ 兜底替换只作用于 **system 消息**：assistant 正文实测不拦，改它既换不来放行、
+ * 又破坏历史回读证据（同 buddy 那条注释）。
+ */
+function rewriteMarvisSystemMessage<T extends Record<string, unknown>>(
+  message: T,
+  provider: string,
+): T {
+  const { role, content } = message
+  if (role !== 'system' || typeof content !== 'string') return message
+  // 先过登记表（IKJNA1 同一份表），再兜底清掉表未覆盖的形态（中文句式、上游措辞漂移）。
+  // `DSH` 是 2026-11-15 对 marvis 网关实测放行的替换值（清洗后中英文均 200）。
+  const rewritten = rewriteTencentContentFingerprints(content, provider)
+    .replace(/DeepSeek\s+Harness/gi, 'DSH')
+  return rewritten === content ? message : { ...message, content: rewritten } as T
+}
+
 /** Marvis 适配器。 */
 export class MarvisAdapter extends LlmAdapter {
   private readonly product: MarvisProduct
@@ -360,10 +390,13 @@ export class MarvisAdapter extends LlmAdapter {
     options: GenerateOptions,
   ): AsyncIterable<StreamChunk> {
     const imageUrls = await this.resolveImageUrls(options.model, options.messages)
+    // ⚠️ `messages[]` 里的 system 那条**也要**过腾讯系内容级风控指纹改写
+    //    （位置判据见 `rewriteMarvisSystemMessage`）：此前只改顶层 `system`，
+    //    身份句仍随 messages 出站 ⇒ 403 `4100406 非法请求`（2026-11-15 实测）。
     const messages = serializeMessages(
       options.messages as readonly { role: string; content: unknown }[],
       imageUrls,
-    )
+    ).map((message) => rewriteMarvisSystemMessage(message, this.product.id))
     const payload = buildMarvisPayload({
       model: normalizeMarvisModelId(options.model),
       messages,
