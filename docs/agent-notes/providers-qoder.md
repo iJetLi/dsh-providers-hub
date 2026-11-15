@@ -1221,3 +1221,29 @@ LlmError: qoder: 本地账号并发已满，请稍后重试   code = QUEUE
   所有无 uid 账号**共用**一个名额。
 - **探测与推理抢同一名额**：`createProbeAdapter` 也接了限流 ⇒ 探测期间
   该账号的推理请求会被拒（语义上探测也是请求，暂不改）。
+
+## ⚠️⚠️ `hasInjectedFetchImpl` 拿**调用点**的全局 `fetch` 当基准 ⇒ 宿主事后包装 fetch 会静默跳过出口代理（2026-11-16）
+
+`hasInjectedFetchImpl` 原先是 `this.fetchImpl !== fetch`：左边是**构造期**捕获的引用，
+右边是**调用点**的全局 `fetch`。于是：
+
+| 场景 | 旧判据 | 结果 |
+|---|---|---|
+| 构造期注入替身 | 判为已注入 | ✅ 正确 |
+| 构造后 `adapter.fetchImpl = 替身` | 判为已注入 | ✅ 正确 |
+| **构造后全局 `fetch` 被包装**（宿主对齐层 / OTel 埋点 / mock server / 代理库） | **判为已注入** | ❌ **静默跳过 `fetchFor`（per-账号出口代理）**，并回落到构造期捕获的原始全局 `fetch` |
+
+最后一行是真实失效形态：**换号只换了凭据、出口没换**。症状与 `2026-10-21` 那次报障
+同族（墙外环境恒 connect 超时、无任何报错、该渠道从聚合轮换里静默消失）。
+
+修法：构造期存一份 `baselineFetch = fetch`，判据改成 `this.fetchImpl !== this.baselineFetch`。
+三行表里的前两格语义不变，第三格由「误判」变「正确」。
+
+⚠️ **不能**改成「构造期记一个 `options.fetchImpl !== undefined` 布尔」—— 那样
+`ratelimit-misreport-behavior.spec.ts` 这类**构造后赋值**的用例会恒为 false（见
+`qoder-adapter.ts` 里那段注释的实测记录）。
+
+守卫用例：`tests/unit/qoder-adapter.spec.ts` 的「全局 fetch 在**构造之后**被包装 ⇒
+仍走 fetchFor」。⚠️ 断言必须用**有界等待 + 带解释的失败**：缺陷态的表现是「落回原始
+全局 fetch ⇒ 真发 HTTPS ⇒ 卡到超时」，直接 `await` 只会得到一句 `Test timed out in
+5000ms`，看不出真因（我第一版就是这么写的，红得毫无信息量）。

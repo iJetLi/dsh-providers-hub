@@ -225,15 +225,29 @@ describe('③ 注入点：四个消费点都必须拿到按账号的 fetcher', (
     //    `this.fetchImpl !== undefined` 恒真（构造期已被 `?? fetch` 填满），
     //    而构造期布尔 `options.fetchImpl !== undefined` 会漏掉「构造后直接赋值」
     //    的既有用例（`ratelimit-misreport-behavior.spec.ts` 就是这么塞替身的）。
-    //    唯一同时覆盖两种注入形态的判据是「`fetchImpl` 是否偏离全局 `fetch`」。
+    //    唯一同时覆盖两种注入形态的判据是「`fetchImpl` 是否偏离**基准**」。
     // ⚠️ 判「是否注入」必须靠独立判据：`this.fetchImpl !== undefined` 恒真
     //    （构造期已被 `?? fetch` 填满）⇒ 那是「调序不加标志」的等价错误形态。
     //    ⚠️ 也**不能**用构造期布尔 `options.fetchImpl !== undefined`：
     //    `ratelimit-misreport-behavior.spec.ts` 这类既有用例是**构造后直接
     //    `adapter.fetchImpl = 替身`** 的，构造期布尔对它恒 false ⇒ 会真发网络。
-    //    故只认「`fetchImpl` 是否偏离全局 `fetch`」这一判据。
+    //    故只认「`fetchImpl` 是否偏离**基准**」这一判据。
+    // ⚠️ 而基准**必须是构造期的快照**（`baselineFetch`），不能是调用点的全局
+    //    `fetch`（2026-11-16 修，issue #90）：宿主在适配器构造**之后**包装
+    //    `globalThis.fetch`（出站对齐层 / OTel 埋点 / mock server / 代理库）时，
+    //    拿调用点全局当基准会把它判成「注入了替身」⇒ 静默跳过 `fetchFor`
+    //    （per-账号出口代理）⇒ 换号只换了凭据、出口没换。
+    //    故这里守三件事：判据是引用比较、基准是构造期快照、快照确实在构造期取。
     expect(adapterSource).toMatch(/private get hasInjectedFetchImpl\(\): boolean \{/)
-    expect(adapterSource).toMatch(/return this\.fetchImpl !== fetch/)
+    expect(adapterSource).toMatch(/return this\.fetchImpl !== this\.baselineFetch/)
+    expect(adapterSource, '`baselineFetch` 必须是 readonly 字段')
+      .toMatch(/private readonly baselineFetch: typeof fetch/)
+    const baselineAt = adapterSource.indexOf('this.baselineFetch = fetch')
+    expect(baselineAt, '`baselineFetch` 必须在构造期取全局 `fetch` 的快照').toBeGreaterThan(-1)
+    expect(
+      adapterSource.slice(baselineAt, baselineAt + 200),
+      '`baselineFetch` 必须与 `fetchImpl` 的默认值在同一处赋值（否则基准会是 undefined）',
+    ).toMatch(/this\.fetchImpl = options\.fetchImpl \?\? fetch/)
     // 推理主路径
     const inferenceAt = adapterSource.indexOf('const fetcherForCurrentAccount =')
     expect(inferenceAt, '未找到 fetcherForCurrentAccount').toBeGreaterThan(-1)

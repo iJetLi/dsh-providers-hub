@@ -905,6 +905,13 @@ export class QoderAdapter extends LlmAdapter {
   private readonly product: QoderProduct
   private readonly fetchImpl: typeof fetch
   /**
+   * **构造期**的全局 `fetch` 引用：判「是否注入了单测替身」的比较基准。
+   *
+   * ⚠️ 必须单独存一份，**不能**拿调用点的全局 `fetch` 当基准 —— 见
+   * {@link hasInjectedFetchImpl} 的失效形态。
+   */
+  private readonly baselineFetch: typeof fetch
+  /**
    * 按账号取出口 fetcher（`undefined` = 恒直连）。
    *
    * ⚠️ 与 `fetchImpl` **并存不是替代**：`fetchImpl` 是单测替身（优先级最高），
@@ -912,23 +919,37 @@ export class QoderAdapter extends LlmAdapter {
    */
   private readonly fetchFor: ((accountId: string) => typeof fetch) | undefined
   /**
-   * 出口 fetcher 是否被**单测替身**顶掉了（= 注入的 `fetchImpl` 不等于全局 `fetch`）。
+   * 出口 fetcher 是否被**单测替身**顶掉了（= 注入的 `fetchImpl` 不等于**构造期**的全局 `fetch`）。
    *
-   * ⚠️ 为什么用「`!==` 全局 `fetch`」而**不是**在构造期记一个
+   * ⚠️ 为什么用「引用不等于基准」而**不是**在构造期记一个
    * `options.fetchImpl !== undefined` 布尔：`ratelimit-misreport-behavior.spec.ts`
    * 这类既有用例是**构造后直接 `adapter.fetchImpl = 替身`** 的（拿不到构造参数），
    * 构造期布尔对它恒为 false ⇒ 实现落到 `fetchFor` / 全局 `fetch` ⇒ 真发网络，
    * 全量跑起来表现为 `expected 'TRANSPORT' to be 'QUOTA_EXCEEDED'`（本轮实测）。
-   * 而「引用不等于全局 `fetch`」这一判据**同时覆盖**「构造期注入」与「事后赋值」。
+   * 而「引用不等于基准」这一判据**同时覆盖**「构造期注入」与「事后赋值」。
+   *
+   * ⚠️⚠️ **基准必须是构造期快照，不能是调用点的全局 `fetch`**（真实缺陷，
+   * 2026-11-16 由宿主侧接入出站对齐层时暴露）：
+   *
+   * | 场景 | 拿全局 `fetch` 当基准（旧） | 拿构造期快照当基准（新） |
+   * |---|---|---|
+   * | 构造期注入替身 | 判为已注入 ✅ | 判为已注入 ✅ |
+   * | 构造后 `adapter.fetchImpl = 替身` | 判为已注入 ✅ | 判为已注入 ✅ |
+   * | **构造后全局 `fetch` 被包装**（宿主对齐层 / OTel 埋点 / mock server / 代理库） | **判为已注入 ❌** | 判为未注入 ✅ |
+   *
+   * 旧判据在最后一行会**静默跳过 `fetchFor`（per-账号出口代理）**，并回落到
+   * **构造期捕获的原始全局 `fetch`** ⇒ 换号只换了凭据、出口没换。症状与
+   * `2026-10-21` 那次真实报障同族：墙外环境下恒 connect 超时、且**无任何报错**，
+   * 该渠道从聚合轮换里静默消失。
    *
    * ⚠️ 也不能只把两个分支调序了事 —— `fetchImpl` 在构造期已被 `?? fetch` 填满，
    * 靠判空无法区分「注入」与「默认」。
    *
-   * ⚠️ 残余弱点（如实登记）：调用方注入一份**恰好等于全局 `fetch` 的引用**时会被
-   * 判成「未注入」—— 但那时两种语义**没有可观察差异**，不构成缺陷。
+   * ⚠️ 残余弱点（如实登记）：调用方注入一份**恰好等于构造期全局 `fetch` 的引用**时
+   * 会被判成「未注入」—— 但那时两种语义**没有可观察差异**，不构成缺陷。
    */
   private get hasInjectedFetchImpl(): boolean {
-    return this.fetchImpl !== fetch
+    return this.fetchImpl !== this.baselineFetch
   }
   /**
    * ⚠️ **2026-10-08 Task 7b：三个方法收敛到共享骨架** `createModelCatalog`。
@@ -968,6 +989,11 @@ export class QoderAdapter extends LlmAdapter {
   constructor(private readonly options: QoderAdapterOptions) {
     super()
     this.product = options.product ?? QODER
+    // ⚠️ 顺序与语义都是刻意的：先取**构造期**的全局 `fetch` 作基准，再让
+    //    `fetchImpl` 落到 `options.fetchImpl ?? fetch`。两者在这一刻相等是
+    //    「未注入」的正常形态；之后全局 `fetch` 被别人替换**不影响**基准，
+    //    这正是修掉「宿主事后包装 fetch ⇒ 静默跳过出口代理」的关键。
+    this.baselineFetch = fetch
     this.fetchImpl = options.fetchImpl ?? fetch
     this.fetchFor = options.fetchFor
     this.catalogGate = new RemoteCatalogGate(
@@ -1895,9 +1921,10 @@ export class QoderAdapter extends LlmAdapter {
      * ⚠️ 优先级：`fetchImpl`（单测替身，**且必须是显式注入**）> `fetchFor`（生产代理）
      * > 全局 `fetch`。单测只要传了 `fetchImpl` 就完全绕过代理，不必关心池子。
      *
-     * ⚠️ 判「是否注入」必须靠 {@link hasInjectedFetchImpl}，**不能**写成
-     * `this.fetchImpl !== fetch`：调用方注入一份**包着全局 fetch 的包装器**时
-     * 两者引用不同，该判据会误判成已注入 ⇒ 生产出口被单测替身顶掉。
+     * ⚠️ 判「是否注入」必须靠 {@link hasInjectedFetchImpl}，**不能**在这里另写一份
+     * 引用比较：`fetchImpl` 与「**构造期**的全局 `fetch`」（`baselineFetch`）不同
+     * 才算注入。若拿**调用点**的全局 `fetch` 当基准，宿主在构造之后包装
+     * `globalThis.fetch` 就会被误判成已注入 ⇒ 生产出口被单测替身顶掉。
      * ⚠️ 也不能只把两个分支调序了事 —— `fetchImpl` 在构造期已被 `?? fetch`
      * 填满，调序后 `fetchFor` 反而**永远**轮不到（生产代理全失效）。
      *

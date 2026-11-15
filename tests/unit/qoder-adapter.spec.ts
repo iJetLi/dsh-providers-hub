@@ -758,6 +758,42 @@ describe('出口 fetcher 的优先级（`fetchImpl` 注入 > `fetchFor` > 全局
       globalThis.fetch = original
     }
   })
+
+  it('⚠️ 全局 fetch 在**构造之后**被包装 ⇒ 仍走 fetchFor（不得被误判成「注入替身」）', async () => {
+    // 真实失效形态（2026-11-16 定位）：`hasInjectedFetchImpl` 原先用
+    // `this.fetchImpl !== fetch` —— 左边是**构造期**捕获的引用，右边是**调用点**的
+    // 全局 `fetch`。只要有人在适配器构造**之后**替换 `globalThis.fetch`（宿主装
+    // 出站对齐层 / OTel 自动埋点 / 本地 mock server / 代理库），两边引用必然不同
+    // ⇒ 判成「已注入单测替身」⇒ **静默跳过 `fetchFor`（per-账号出口代理）**。
+    //
+    // 症状与 `2026-10-21` 那次真实报障同族（「换了号还是超时、且无任何报错」）：
+    // 换号只换了凭据，出口没换 ⇒ 墙外环境里该渠道从聚合轮换里静默消失。
+    const proxy = vi.fn(async () => envelopeResponse([textFrame('hi'), finishFrame])) as unknown as typeof fetch
+    const adapter = makeAdapter({ fetchFor: () => proxy })
+    const original = globalThis.fetch
+    const lateWrapper = vi.fn(async () => envelopeResponse([textFrame('hi'), finishFrame])) as unknown as typeof fetch
+    // @ts-expect-error —— 故意在**构造之后**替换全局 fetch，模拟宿主/埋点层。
+    globalThis.fetch = lateWrapper
+    try {
+      // ⚠️ 不能直接 `await collect(adapter)`：缺陷态的失败表现是「落回构造期捕获的
+      //    原始全局 fetch ⇒ 真发 HTTPS ⇒ 卡到超时」，只会得到一句
+      //    `Test timed out in 5000ms`，看不出真因。故用有界等待 + 带解释的断言
+      //    （与上方「未注入 fetchImpl ⇒ 走 fetchFor」同款）。
+      const started = Date.now()
+      const settled = await Promise.race([
+        collect(adapter).then(() => 'done' as const),
+        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 2000)),
+      ])
+      expect(
+        settled,
+        `请求在 ${Date.now() - started}ms 内没走 fetchFor（大概率落回了构造期捕获的原始全局 fetch ⇒ 真发网络）`,
+      ).toBe('done')
+      expect(proxy, '生产代理必须仍被调用：全局 fetch 事后被包装不算「注入了替身」').toHaveBeenCalled()
+      expect(lateWrapper, '不得把请求交给事后包装的全局 fetch').not.toHaveBeenCalled()
+    } finally {
+      globalThis.fetch = original
+    }
+  })
 })
 
 describe('QoderAdapter 鉴权与重试', () => {
