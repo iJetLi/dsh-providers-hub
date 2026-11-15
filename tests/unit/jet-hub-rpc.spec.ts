@@ -4806,24 +4806,34 @@ describe('provider.status / provider.setEnabled 端点', () => {
       expect(emitted).toEqual([])
     })
 
-    it('⚠️ 目录为空 → 拒绝且不落盘（「不关闭模型就不关闭供应商」的落点）', async () => {
+    /**
+     * ⚠️⚠️ **目录为空 ⇒ 仍可关闭**（2026-11-15 用户报障「豆包无法关闭」）。
+     *
+     * 「并集为空」的**第一条落点**：适配器在、远端读到也是空（例如还没登录任何账号）。
+     * 旧实现回「该供应商没有可关闭的模型，未做任何变更」，而客户端又按
+     * `models.total === 0` 把开关置灰（见 `tests/unit/provider-toggle.spec.ts`）
+     * ⇒ 「关闭供应商」在空目录渠道上**永远不可能成功**：用户连点都点不动。
+     *
+     * 关闭的语义是「停用账号 + 关掉目录里的模型 + 落关闭意图」：目录为空时中间那条腿
+     * 是**空操作**，账号与意图两件照样落盘 ⇒ 本用例锁定「停号 + status 报 closed」。
+     */
+    it('⚠️ 目录为空 → 仍可关闭（停用账号 + 落意图；不再是拒绝）', async () => {
       const { call, emitted, writeOrder, storedAccounts } = setup({
         catalog: [],
         accounts: [{ id: 'b1', provider: 'buddy', enabled: true }],
       })
       const result = await call('provider.setEnabled', { provider: 'buddy', enabled: false })
-      expect(result.ok).toBe(false)
-      const message = result.error?.message ?? ''
-      expect(message).toContain('没有可关闭的模型')
-      // ⚠️⚠️ **必须加这条反向断言**（真实缺口，独立对抗审计实测零守卫）：
-      // 只写 `toContain('没有可关闭的模型')` 时，文案退化成
-      // `没有可关闭的模型：undefined`（把 `remoteError` 的 undefined 拼进去）
-      // **也含该子串** ⇒ 断言恒真、变异无法察觉。
-      expect(message, '不得把 undefined 拼进用户可见文案').not.toContain('undefined')
-      // ⚠️ 关键：绝不能「关不掉模型就只停账号」——那会让它显示成已关闭而模型仍在。
-      expect(writeOrder).toEqual([])
-      expect(emitted).toEqual([])
-      expect(storedAccounts()[0].enabled).toBe(true)
+      expect(result.value === undefined || true).toBe(true)
+      expect(result.ok, '空目录不得再拒绝关闭（那正是「豆包无法关闭」）').toBe(true)
+      expect((result.value as { models?: number }).models).toBe(0)
+      // 账号确实被停用 + 必须广播（否则界面开关不刷新）。
+      expect(writeOrder).toContain('accounts')
+      expect(emitted).toContain('llm/adapters-updated')
+      expect(storedAccounts()[0].enabled).toBe(false)
+      // 判据联动：`provider.status` 必须靠「关闭意图」腿报 closed:true。
+      const status = await call('provider.status', { providers: ['buddy'] })
+      const entry = (status.value as { statuses: Record<string, { closed: boolean }> }).statuses.buddy
+      expect(entry.closed).toBe(true)
     })
 
     /**
@@ -4976,26 +4986,74 @@ describe('provider.status / provider.setEnabled 端点', () => {
     })
 
     /**
-     * ⚠️ 远端门控为空**且**适配器缺失（旧版外部适配器）⇒ 并集为空，
-     * 真没东西可关 → 拒绝且不落盘。这是 `remoteError` 判据收紧后的
-     * 「目录为空」落点（原判据把这种形态与「远端读失败」合并拒绝）。
+     * ⚠️⚠️ **远端门控为空「且」适配器缺失（并集为空）⇒ 仍可关闭**（2026-11-15
+     * 用户报障「豆包无法关闭」）。
+     *
+     * 这正是 `doubao` 的真实形态：`src/provider-registry.ts` 里 `channel: false`、
+     * `modelAdapters` 里没有它 ⇒ `provider.status` 恒报 `models.total === 0`。
+     * 旧实现这里回「没有可关闭的模型」并**一个字节都不落**，于是这个渠道的
+     *「关闭供应商」**永远不可能成功**（客户端还按 `total === 0` 置灰开关，
+     * 用户连点都点不动）—— 账号停不掉、分组永远留在「已打开」。
+     *
+     * 关闭的语义是「停用账号 + 关掉目录里的模型 + 落关闭意图」；目录为空时
+     * 中间那条腿是空操作，账号与意图照样该落盘。本用例同时锁定
+     * `provider.status` 的**意图腿**跟着翻（否则开关会弹回「已打开」）。
+     * ⚠️ `remoteError` / `notReady` 两条拒绝不在本用例范围内，另有用例守着。
      */
-    it('⚠️ 远端为空且适配器缺失 → 拒绝「没有可关闭的模型」且不落盘', async () => {
+    it('⚠️ 远端为空且适配器缺失 → 仍可关闭（落意图 + 停用账号，status 联动报 closed）', async () => {
       const { call, emitted, writeOrder, storedAccounts } = setup({
         catalog: [],
         withAdapter: false,
         accounts: [{ id: 'b1', provider: 'buddy', enabled: true }],
       })
       const result = await call('provider.setEnabled', { provider: 'buddy', enabled: false })
-      expect(result.ok).toBe(false)
-      const message = result.error?.message ?? ''
-      expect(message).toContain('没有可关闭的模型')
-      // ⚠️ 反向断言：不得把 `remoteError` 的 undefined 拼进用户可见文案。
-      expect(message, '不得把 undefined 拼进用户可见文案').not.toContain('undefined')
-      // 不落盘、不停账号、不广播。
-      expect(writeOrder).toEqual([])
-      expect(emitted).toEqual([])
-      expect(storedAccounts()[0].enabled).toBe(true)
+      expect(result.ok, '空目录不得再拒绝关闭（那正是「豆包无法关闭」）').toBe(true)
+      const value = result.value as { models?: number, accounts?: number }
+      expect(value.models, '没有模型可写 ⇒ models 必须照实报 0').toBe(0)
+      expect(value.accounts).toBe(1)
+      // 停账号 + 广播都发生了。
+      // ⚠️ `writeOrder` **不记**「只写意图」的那次落盘（该 fixture 只在黑名单/
+      // 账号集合真的变化时才 push），空目录时它只剩 `accounts` —— 意图是否落下
+      // 由下面 `provider.status` 的 `closed` 反向证明。
+      expect(writeOrder).toContain('accounts')
+      expect(emitted).toContain('llm/adapters-updated')
+      expect(storedAccounts()[0].enabled).toBe(false)
+
+      // 判据联动：`provider.status` 必须靠「关闭意图」腿报 closed:true，
+      // 否则客户端开关会弹回「已打开」（又是「关不掉」）。
+      const status = await call('provider.status', { providers: ['buddy'] })
+      const entry = (status.value as { statuses: Record<string, { models: { total: number, disabled: number }, closed: boolean }> }).statuses.buddy
+      expect(entry.models).toEqual({ total: 0, disabled: 0 })
+      expect(entry.closed, '空目录关闭后 status 必须报 closed:true（意图腿）').toBe(true)
+    })
+
+    /**
+     * ⚠️⚠️ **真机第二轮报障（2026-11-15）**：豆包点「关闭」弹的是
+     * `没有可关闭的模型：读取模型列表失败：no adapter registered for provider "doubao"`。
+     *
+     * 因果：`fullCatalogIds` 会 `ctx.llm.listModels('doubao')`，而豆包是**纯签到渠道**
+     *（`provider-registry` 的 `channel: false`、`modelAdapters` 里没有它）⇒ dsh 的 llm
+     * 没有它的 adapter，读一次抛一次，于是命中 **`remoteError` 拒绝**（第一条落点）。
+     *
+     * 这不是「读失败」，是「没有可读的东西」：模型腿对这类渠道根本不存在 ⇒ 应当
+     * **压根不去读**（`noModelLeg` 短路），只落关闭意图 + 停账号。
+     * 本用例把 llm 设成「一读就抛」，用来锁死「没有调用 listModels」这条行为。
+     */
+    it('⚠️ doubao（channel:false 且无适配器）→ 不读目录，关闭成功', async () => {
+      const { call, storedAccounts } = setup({
+        listModelsError: 'no adapter registered for provider "doubao"',
+        accounts: [{ id: 'd1', provider: 'doubao', enabled: true }],
+      })
+      const result = await call('provider.setEnabled', { provider: 'doubao', enabled: false })
+      expect(result.ok, '纯签到渠道关闭不得再报 no adapter（正是真机第二轮的报障）').toBe(true)
+      const value = result.value as { models?: number, accounts?: number }
+      expect(value.models, '没有模型可关 ⇒ 照实报 0').toBe(0)
+      expect(value.accounts).toBe(1)
+      expect(storedAccounts()[0].enabled).toBe(false)
+      const status = await call('provider.status', { providers: ['doubao'] })
+      const entry = (status.value as { statuses: Record<string, { models: { total: number, disabled: number }, closed: boolean }> }).statuses.doubao
+      expect(entry.models).toEqual({ total: 0, disabled: 0 })
+      expect(entry.closed, '关闭意图腿必须报 closed:true（否则开关弹回已打开）').toBe(true)
     })
   })
 

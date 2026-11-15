@@ -379,3 +379,78 @@ function runSyntheticScript(expression: string): string[] {
 记成 GREEN。变异脚本必须**同读** `Tests … failed` 与 `Test Files … failed`
 （本次脚本用 `Test Files (\d+) failed` + `Tests (\d+) failed` 双判据，
 并对 `no tests` 单独判 `INVALID-SYNTAX`）。
+
+## 3. 供应商开关：豆包**曾经关不掉**（2026-11-15 修复）
+
+### 3.1 症状
+
+设置页标题行最右的「供应商开关」（`role="switch"`）对豆包**点不动**：
+灰显、hover 提示「该供应商没有可关闭的模型」。用户报障原文：「豆包无法关闭」。
+
+### 3.2 因果链（两侧判据同时错）
+
+| 层 | 判据 | 对豆包的结果 |
+|---|---|---|
+| 宿主 `provider.status` | `closed = total > 0 && disabled === total`（派生腿）＋ `closedByIntent`（意图腿） | 豆包 `channel: false`、**没有 `modelAdapters` 条目** ⇒ `total === 0` ⇒ 派生腿恒 `false`；意图腿还没写过 ⇒ `closed: false` |
+| 客户端 `providerSwitchState()` | `models.total === 0` ⇒ `{checked:true, disabled:true, reason:'该供应商没有可关闭的模型'}` | 开关置灰，`onClick` 里 `aria-disabled` 早退 ⇒ **点不动** |
+| 宿主 `provider.setEnabled(false)` | `catalog.ids.length === 0` ⇒ `bad-request: 该供应商没有可关闭的模型，未做任何变更` | 即使强行调用，**一个字节都不落**（账号不停、意图不写） |
+
+⇒ 三处叠加成「**永远关不掉**」：分组永远留在「已打开」、豆包账号永远 `enabled: true`
+（签到链路照常跑），而 UI 给的理由指向一个**根本不存在**的模型列表。
+
+### 3.3 修法（两侧必须一起翻，缺一侧仍是死锁）
+
+- **宿主** `src/jet-hub-rpc.ts` 的 `provider.setEnabled` 关闭分支：`ids.length === 0`
+  **不再拒绝**，继续走 `pool.writeModelsWithProviderClosed(provider, [], true)` ——
+  空数组分支不深拷贝 `modelCache`，**只落关闭意图**，仍与黑名单同一次落盘
+  （IKP8OF 的原子性约定不破）。`remoteError` / `notReady` 两条拒绝**保持原样**
+  （那两种是「目录还没读准」，落意图会打开「关闭后仍可选」的窗口）。
+- **客户端** `plugin-src/client/provider-toggle.js` 的 `providerSwitchState()`：
+  删掉 `total <= 0 ⇒ disabled` 那条分支（`total` 局部变量随之删除）。
+  判据顺序不变：`closed === true` 仍在最前（IKP8OF：已关闭必须永远可点开）。
+
+关闭的语义始终是三件事：**停用账号 + 关掉目录里的全部模型 + 落关闭意图**。
+目录为空时中间那条腿是**空操作**（0 个 id 要写），账号与意图两件照样成立 ——
+与打开方向对称（`provider.setEnabled(true)` 根本不读目录，纯本地清黑名单 + 清意图）。
+
+### 3.4 回归锚点
+
+- `tests/unit/provider-toggle.spec.ts`：「没有任何模型 ⇒ 仍可点关闭」+
+  `providerSwitchRows` 的空目录行不再禁用。
+- `tests/unit/jet-hub-rpc.spec.ts`：「远端为空且适配器缺失 ⇒ 仍可关闭」，
+  同一用例里再查 `provider.status` 必须靠**意图腿**报 `closed: true`
+  （否则开关会弹回「已打开」，又是「关不掉」）。
+
+## 4. ⚠️⚠️ 真机第二轮：`no adapter registered for provider "doubao"`（2026-11-15）
+
+第一轮修完（§3）真机点「关闭豆包」，开关**可点**了，但弹的是：
+
+```
+豆包 (字节) 操作失败：没有可关闭的模型：读取模型列表失败：
+  no adapter registered for provider "doubao"
+```
+
+即命中关闭分支的**第一条拒绝**（`remoteError`），不是 §3 修掉的 `ids.length === 0`。
+
+**因果**：`fullCatalogIds(id)` 会 `ctx.llm.listModels(id)`；豆包是纯签到渠道
+（`channel: false`、`modelAdapters` 里没有它）⇒ dsh 的 llm 没有它的 adapter，
+**读一次抛一次**。这不是「读失败」，是「**没有可读的东西**」：模型腿不存在。
+
+**修法**（`src/jet-hub-rpc.ts` 的 `provider.setEnabled`）：在 `req.enabled` 分支**之前**
+先算 `noModelLeg`，成立就直接落意图（`writeModelsWithProviderClosed(id, [], true)`）+ 停账号，
+**完全不读目录**。
+
+```ts
+const noModelLeg = !req.enabled
+  && descriptorOf(req.provider)?.channel === false
+  && modelAdapters?.[req.provider] === undefined
+if (noModelLeg) { …只落意图… } else if (req.enabled) { …打开… } else { …原有远端核实… }
+```
+
+⚠️ 判据必须**两条同时成立**：单看 `channel: false` 会误伤 `codely`（同为 false
+但有 `codely-adapter.ts` 目录来源，跳过模型腿 ⇒「关闭后模型仍可选」复活）；
+单看「无适配器」会误伤外部旧适配器的装机形态（channel 仍 true，必须继续远端核实）。
+
+**回归锚点**：`tests/unit/jet-hub-rpc.spec.ts` 的
+「⚠️ doubao（channel:false 且无适配器）→ 不读目录，关闭成功」——
+把 llm 设成「一读就抛」，锁死「压根没调用 `listModels`」。

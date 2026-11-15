@@ -18,8 +18,14 @@
  *
  * ⚠️ 宿主侧 `closed` 与 `account-model-link.js` 的 `allModelsDisabled(models)`
  * 是**语义同源、形态不同**的一对（一个看计数、一个看条目数组），它们的边界条件
- * 必须一起改：都要求「至少有一个模型」才算全部关闭 —— 没有任何模型时不算已关闭
- * （没有模型可关，就不该说它被关闭了）。
+ * 必须一起改：都要求「至少有一个模型」才算**派生**的「全部关闭」。
+ *
+ * ⚠️⚠️ **但「没有模型」不等于「关不掉」**（2026-11-15 报障「豆包无法关闭」）：
+ * 宿主 `provider.status` 的 `closed` 是**双腿取或** —— 派生腿（目录里每条都在
+ * 黑名单）+ **关闭意图**腿（`providerClosedFor`，与目录快照无关）。后者正是
+ * 「目录里一个模型都没有」的渠道拿到真值的那条腿（`doubao` 是纯签到渠道，
+ * `models.total` 恒为 0）⇒ 本模块**不得**再以 `total === 0` 禁止点击，
+ * 否则意图腿永远没机会被点亮。
  */
 
 import { orderAfterDrop } from './account-order.js';
@@ -122,7 +128,6 @@ export function providerSwitchState(status) {
   if (status === undefined || status === null || typeof status !== 'object') {
     return { checked: true, disabled: true, reason: '状态尚未读取' };
   }
-  const total = typeof status.models?.total === 'number' ? status.models.total : 0;
   // ⚠️⚠️ **「已关闭」优先于「没有模型可关」**（Gitee issue IKP8OF，真实死锁）。
   //
   // 顺序不能反。`closed === true` 的供应商**必须永远可点开**，即使 `total === 0`：
@@ -159,13 +164,18 @@ export function providerSwitchState(status) {
       reason: `暂时无法核实：${status.verifyFailed}`,
     };
   }
-  if (total <= 0) {
-    return {
-      checked: true,
-      disabled: true,
-      reason: '该供应商没有可关闭的模型',
-    };
-  }
+  // ⚠️⚠️ **`models.total === 0` 仍然可点关闭**（2026-11-15 报障「豆包无法关闭」）。
+  //
+  // 旧判据「没有模型可关 ⇒ 禁用并提示『该供应商没有可关闭的模型』」的前提是
+  // 「服务端会拒绝这个动作」，而宿主侧 `provider.setEnabled(false)` **已经不再拒绝**
+  // 空目录（关闭 = 停用账号 + 落关闭意图，模型那条腿是空操作）。
+  //
+  // 这类渠道真实存在：`doubao` 是纯签到渠道（`channel: false`，无模型目录 /
+  // 适配器）⇒ `provider.status` 恒报 `models.total === 0`。若这里仍置灰，
+  // 用户**永远点不动**「关闭豆包」：账号停不掉、分组留在「已打开」，而 `reason`
+  // 还把他引向「模型」这个根本不存在的东西上。
+  //
+  // ⚠️ 判据顺序不变：`closed === true` 仍排在最前（IKP8OF：已关闭必须永远可点开）。
   return { checked: true, disabled: false, reason: null };
 }
 
@@ -479,9 +489,9 @@ export function nextProviderOrderAfterGroupDrop(
  *   组按 {@link sortOpenProvidersByOrder} 重排，**已关闭**组仍按声明顺序
  *   沉底 —— 这是 2026-10-06 用户明确的需求口径：「关闭的供应商仍按默认排序
  *   显示在最下面，这个逻辑不变」。
- * - **勾选态与禁用态直接复用 {@link providerSwitchState}**：包括那条容易漏的
- *   「`models.total === 0` ⇒ 禁用并给出原因」—— 没有模型可关时服务端会拒绝
- *   关闭动作，让用户点得动只会得到一句错误提示。
+ * - **勾选态与禁用态直接复用 {@link providerSwitchState}**：包括「`closed === true`
+ *   ⇒ 永远可点开」与「`models.total === 0` ⇒ 仍可点关闭」（2026-11-15
+ *   「豆包无法关闭」：空目录渠道靠**关闭意图**腿成立，宿主不再拒绝）。
  * - **计数原样带出，不在这里格式化**：文案属于渲染层，判据属于本模块。
  *   拿不到状态时给 `null` 而不是 `{total:0}` —— 二者含义不同：
  *   「不知道」与「确实是 0 个」在界面上必须区别对待（前者显示 `—`）。

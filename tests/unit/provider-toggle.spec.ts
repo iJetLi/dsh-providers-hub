@@ -161,11 +161,20 @@ describe('providerSwitchState（开关三形态）', () => {
     expect(s.disabled).toBe(false)
   })
 
-  it('① 没有任何模型 → 禁用并给出原因（「不关闭模型就不关闭供应商」）', () => {
+  /**
+   * ⚠️⚠️ **没有任何模型 ⇒ 仍然可点关闭**（2026-11-15 用户报障「豆包无法关闭」）。
+   *
+   * `doubao` 是纯签到渠道（无模型目录 / 适配器）⇒ `provider.status` 恒报
+   * `models.total === 0`。旧判据在这里置灰 + 提示「该供应商没有可关闭的模型」，
+   * 实际效果是**用户永远关不掉它**：账号停不掉、分组永远留在「已打开」。
+   * 宿主 `provider.setEnabled(false)` 已同步改成对空目录**不再拒绝**
+   *（关闭 = 停用账号 + 落关闭意图），两条判据必须一起翻。
+   */
+  it('① 没有任何模型 → 仍可点关闭（关闭 = 停用账号 + 落关闭意图）', () => {
     const s = providerSwitchState({ models: { total: 0, disabled: 0 }, closed: false })
-    expect(s.disabled).toBe(true)
+    expect(s.disabled).toBe(false)
     expect(s.checked).toBe(true)
-    expect(s.reason).toContain('没有可关闭的模型')
+    expect(s.reason).toBeNull()
   })
 
   /**
@@ -257,12 +266,20 @@ describe('providerSwitchState（开关三形态）', () => {
     expect(providerSwitchState('bogus').disabled).toBe(true)
   })
 
-  it('models 字段缺失时视为 0 → 禁用（不误判为可操作）', () => {
-    expect(providerSwitchState({ accounts: { total: 1 } }).disabled).toBe(true)
+  /**
+   * ⚠️ 计数缺失 / 非法**不再**影响可点性（2026-11-15「豆包无法关闭」）：
+   * 关闭动作的正确性由宿主侧重算（`fullCatalogIds` + 关闭意图），不依赖前端读到的
+   * `models.total`；而 `doubao` 这类无目录渠道的合法计数**就是** 0。
+   * 计数只用于展示（`providerSwitchRows` 里如实带出 `{total:0}`），不参与判据。
+   */
+  it('models 字段缺失 → 仍可点关闭（计数只用于展示，不参与判据）', () => {
+    const s = providerSwitchState({ accounts: { total: 1 } })
+    expect(s.disabled).toBe(false)
+    expect(s.checked).toBe(true)
   })
 
-  it('total 为负数等非法值 → 禁用（不给用户一个无效的操作入口）', () => {
-    expect(providerSwitchState({ models: { total: -5 } }).disabled).toBe(true)
+  it('total 为负数等非法值 → 仍可点关闭（非法计数不参与判据）', () => {
+    expect(providerSwitchState({ models: { total: -5 } }).disabled).toBe(false)
   })
 })
 
@@ -331,11 +348,11 @@ describe('providerSwitchRows（弹窗行数据）', () => {
     expect(rows[0].reason).toBe('状态尚未读取')
   })
 
-  it('没有可关闭模型的供应商被禁用并给出原因（服务端也会拒绝这个动作）', () => {
+  it('没有可关闭模型的供应商不再被禁用（宿主也不再拒绝这个动作）', () => {
     const rows = providerSwitchRows([P('a')], { a: { models: { total: 0, disabled: 0 } } })
-    expect(rows[0].disabled).toBe(true)
-    expect(rows[0].reason).toBe('该供应商没有可关闭的模型')
-    // 仍然显示为「打开」：未知/无事可做的东西不该被画成被关闭。
+    expect(rows[0].disabled).toBe(false)
+    expect(rows[0].reason).toBeNull()
+    // 仍显示为「打开」：空目录不等于「已关闭」（关闭意图还没写）。
     expect(rows[0].checked).toBe(true)
   })
 
