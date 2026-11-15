@@ -3967,7 +3967,9 @@ function ModelscopeAutoCheckinToggle({ rpcCall }) {
   return React.createElement(React.Fragment, null,
     React.createElement('label', {
       className: 'dim-jh-nativeSearch',
-      title: '跟随全局签到时间。关闭后仍可手动领取魔粒。',
+      title: "跟随全局签到时间。"
+              + "⚠️ 开启后本插件会代替你登录魔搭网页来触发每日发放（账号风险由平台判定）。"
+              + "关闭后仍可手动领取魔粒。",
     },
     React.createElement('input', {
       type: 'checkbox',

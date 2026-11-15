@@ -29,6 +29,30 @@ async function readModelscopeWeb(path: string, apiKey: string, signal: AbortSign
   const response = await fetch(new URL(path, MODELSCOPE_SITE), {
     redirect: 'error',
     headers: {
+      /**
+       * ⚠️⚠️ **两个认证头必须同时给（PR #83 正向审计 P1-1，2026-11-15）。**
+       *
+       * 这个函数要打**两族**端点，而它们的认证方式**不同源**：
+       * - `/openapi/v1/magicubes/transactions`（API Key 族）—— 本仓既有实测用
+       *   `Authorization: Bearer ms-…` 直接 200（见 `src/modelscope-credits.ts`
+       *   的 `GET /openapi/v1/magicubes/balance`）；
+       * - `/api/v1/users/login/info`（**网页登录**族）—— 本仓 2026-09 的实测记录是
+       *   「用 API Key 打 `/api/v1/users/info` ⇒ **400 获取用户信息失败**」，
+       *   当时只有网页会话 cookie 能过。
+       *
+       * PR 原实现**只发 `cookie`、完全不带 `Authorization`** —— 若上游从未接受
+       * 「API Key 当 cookie」，这条腿就是**结构性失效**：`records` 拿不到 ⇒ 与
+       * 「今天没发放」**不可区分** ⇒ 每天静默返回 `inactive` + 假成功文案
+       * 「登录请求成功，发放记录暂未新增魔粒」（本仓「静默失效」红线）。
+       *
+       * ⇒ **双头并给**：Bearer 让 API Key 族成立，cookie 兼容网页会话形态。
+       * 多一个头对上游无害（两者都是凭据，且同一个 Key），但少一个就可能整条腿
+       * 静默失效 —— 这类「只差一个头」的缺陷本仓已记录过多次。
+       *
+       * ⚠️ 仍**未真机验证**（无凭据）：见 README 与 `docs/agent-notes/` 的
+       * 「需要上游确认」段。谁有真机报文请回填。
+       */
+      authorization: 'Bearer ' + apiKey,
       accept: 'application/json',
       cookie: 'm_session_id=' + apiKey,
       referer: MODELSCOPE_SITE + '/',
@@ -146,7 +170,33 @@ async function claim(apiKey: string): Promise<ClaimOutcome> {
     if (utc8DateString() !== day) throw new Error('魔搭已跨日，稍后重查发放记录')
     const credit = roundCredits(dailyAmount(after) - beforeAmount)
     if (credit > 0) return { kind: 'claimed', credit, streakDays: 0, isStreakDay: false }
-    return { kind: 'inactive', coversToday: false, message: '登录请求成功，发放记录暂未新增魔粒' }
+    /**
+     * ⚠️⚠️ **未识别的规则必须点名**：`DAILY_RULES` 是写死的 `rule_key` 白名单，
+     * 上游一旦改名（或新增一档真实日奖励），`dailyAmount()` 就**一点都算不进去**，
+     * 用户会看到「发放记录暂未新增魔粒」而**实际已经到账** —— 这是本仓库记录过的
+     * 「静态表必然腐坏」形态，且**静默**（既没有日志也没有报错）。
+     *
+     * 这里把「新增的、不在白名单里的 EARN 规则名」点名出来。运维看到规则名就能
+     * 立刻判断要不要补 `DAILY_RULES`，而不是对着「暂未新增魔粒」猜。
+     *
+     * ⚠️ 只取前 3 个（上游可能一次塞很多条），且 `rule_key` 是**上游数据** ——
+     * 这条 message 在 `try` 内直接 `return`，**不经过** `catch` 的白名单过滤，
+     * 所以以「魔搭」开头既符合白名单惯例、也不会把上游原文糊给用户。
+     */
+    const unrecognized = [...new Set(
+      after
+        .filter((row) => row.type === 'EARN' && typeof row.rule_key === 'string' && !DAILY_RULES.has(row.rule_key))
+        .map((row) => row.rule_key as string),
+    )]
+    return {
+      kind: 'inactive',
+      coversToday: false,
+      message: unrecognized.length === 0
+        ? '登录请求成功，发放记录暂未新增魔粒'
+        : `魔搭发放记录里出现了未登记的规则（${unrecognized.slice(0, 3).join('、')}`
+          + `${unrecognized.length > 3 ? ` 等 ${unrecognized.length} 条` : ''}），`
+          + '魔粒可能已到账但本插件不识别；请把这段规则名反馈给维护者',
+    }
   } catch (error) {
     const reason = error instanceof Error ? error.message : ''
     // 网络错误或响应体可能带上游请求细节，只展示本模块定义的提示。

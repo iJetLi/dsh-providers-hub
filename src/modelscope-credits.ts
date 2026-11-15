@@ -170,6 +170,20 @@ export async function fetchModelscopeBalanceDetailed(
     remaining: available,
     unit: 'credit',
     active: true,
+    /**
+     * ⚠️⚠️ **必须显式 `false`（PR #83 正向审计 P2-6，2026-11-15）。**
+     *
+     * 上游只给「当前可用余额」（`available_balance`），**没有**初始总额 ——
+     * `total` 与 `remaining` 在这里是同一个数。若标 `true`（缺省），面板会把
+     * 两者并列显示成 `277 / 277`，而每消耗一点就变成 `275 / 275` ——
+     * 正是用户 2026-11-05 报障的「**分母跟着余额跑**」的假读数
+     * （见 `src/credits.ts` 的 `CreditPackage.totalKnown` 契约原文与
+     * `plugin-src/client/jet-hub.js` 的红线：`totalKnown:false` 的包必须让
+     * 「总积分」退化成 `—`）。
+     *
+     * 命中同款的另两家：`baizhi` / `monkeycode`。
+     */
+    totalKnown: false,
     // ⚠️ 三个时间字段对魔搭**没有意义**（上游不下发任何时间），填空串 = 「不适用」，
     //    与 trae / raccoon / qoder / lobsterai / gemini / codearts / loomy /
     //    accio / cline **十家逐一相同**的写法一致。

@@ -513,6 +513,16 @@ export function createProviderCredits(
      * ⚠️ 用 {@link ProviderCredits.fetchBalanceDetailed}：三种失败的**用户动作**
      * 完全不同（Key 失效 → 重生成；端点侧拒绝 → 多半是账号未实名，换 Key 无用；
      * 缺字段 → 上游改版该报「读数格式变了」），压成笼统的「查询失败」会误导。
+     *
+     * ⚠️⚠️ **`precheckStatus: false` 的理由（2026-11-15，PR #83）：本家必须在账本上
+     * 预检，不是查状态端点。** `claimModelscopeDaily` 自己先读一遍发放记录，
+     * 只要今天已经有 `daily_active`（且金额 > 0）就直接返回 `already-claimed`，
+     * **一次登录请求都不发**。外部再走一遍 `CheckinStatus` 只会多打一次上游
+     * —— 而本家唯一的状态来源就是同一份发放记录，等于把同一个请求发两遍。
+     *
+     * ⚠️ 反过来也成立：**「不发登录请求」这条约束只有 claim 内部守得住**
+     * （外部预检看不见「今天已到账但 `CheckinStatus` 未就绪」这个中间态）。
+     * 所以这一格**不要**照抄 `codearts`/`autoclaw` 那几家的 `true`。
      */
     modelscope: {
       fetchBalanceDetailed: async (credential) =>

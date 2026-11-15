@@ -78,6 +78,31 @@ describe('魔搭魔粒签到与到期', () => {
     expect(await claimModelscopeDaily(credential)).toMatchObject({ kind: 'inactive', coversToday: false })
   })
 
+  /**
+   * ⚠️⚠️ **`DAILY_RULES` 是写死的白名单，上游改名就会静默漏算** —— 这条用例锁住
+   * 「漏算时必须点名」：否则用户看到的是「发放记录暂未新增魔粒」（**假话**，
+   * 魔粒其实已经到账），而运维没有任何线索知道该补哪个规则名。
+   *
+   * 反例形态：上游把 `daily_active` 改名成 `daily_login_v2` ⇒ `dailyAmount()`
+   * 一点都算不进去 ⇒ `credit === 0` ⇒ 走 `inactive`。点名的价值全在这个分支。
+   */
+  it('★★★ 发放记录里出现未登记的规则时要点名（否则「暂未新增魔粒」是假话）', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(ledger([]))
+      .mockResolvedValueOnce(Response.json({ success: true }))
+      .mockResolvedValueOnce(ledger([
+        { ...reward, rule_key: 'daily_login_v2', total_amount: 250 },
+        { ...reward, rule_key: 'profile_completed', total_amount: 100 },
+      ])))
+    const outcome = await claimModelscopeDaily(credential)
+    expect(outcome).toMatchObject({
+      kind: 'inactive',
+      message: expect.stringContaining('daily_login_v2'),
+    })
+    // 两条都要点到；`profile_completed` 本来就不在白名单里，也必须一起报出来。
+    expect(outcome).toMatchObject({ message: expect.stringContaining('profile_completed') })
+  })
+
   it('账单分页未读全时暂不发起登录', async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(ledger([], 5))

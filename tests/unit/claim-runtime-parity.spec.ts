@@ -269,6 +269,17 @@ describe('签到能力：registry 声明与 runtime 实现必须一致', () => {
     //    daily-temporary-credit）⇒ 15 → 16。
     // 魔搭接入签到后成为第 17 个由通用领取流程覆盖的渠道。
     expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBe(17)
+
+    /**
+     * ⚠️⚠️ **只数数量挡不住「删一家 + 加一家」** —— 数量不变就静默通过，
+     * 而被删的那家从此失去这条守卫的全部覆盖（这正是本仓「计数不能当判据」的老坑）。
+     *
+     * 这里点名 PR #83 新接入的魔搭：它的接入形态**最容易无声退回** ——
+     * `dailyCheckin` 若被改回 `false`、或 `claim` 漏了接线，上面循环里那句
+     * `if (runtimeOf(d.id) === undefined) continue` 会把它**静默跳掉**，
+     * 计数变成 16 时才会红，而那时已经分不清是哪家掉的。
+     */
+    expect(checked, '魔搭必须真的走到通用领取流程（PR #83）').toContain('modelscope')
   })
 
   /**

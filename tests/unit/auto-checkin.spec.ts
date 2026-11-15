@@ -1471,3 +1471,35 @@ describe('★★ 自动签到：时段记账与逐渠道补领', () => {
     expect(store.current().lastResult).toContain('放弃补领')
   })
 })
+
+/**
+ * ⚠️⚠️ **魔搭独立开关（PR #83）的存储语义。**
+ *
+ * 本仓的红线是「缺席 = 开」（`enabled !== false` 惯例），而魔搭这一格**必须**
+ * 用同一个惯例 —— 否则升级后所有既有用户会被静默关掉（而 PR 的卖点正是
+ * 「默认参加全局调度」）。
+ *
+ * 反过来，只有**用户真的点过「关」**才允许落盘 `modelscopeEnabled: false`；
+ * `'false'`（字符串）/ `0` / `null` 这些「不是用户点出来的值」必须当**开**处理
+ * —— 与 `enabled` 那格的注释逐字同源。
+ *
+ * ⚠️ 未覆盖（已在 `reports/pr83-audit.md` 如实登记）：调度器的 skip 分支
+ * （`doc.modelscopeEnabled === false ⇒ continue`）与 RPC `modelscope.autoCheckin`
+ * 的 get/set 接线 —— 前者需要完整 runner 夹具、后者需要 RPC 栈，本轮未补。
+ */
+describe('魔搭独立开关（PR #83）的 sanitize 语义', () => {
+  it('★ 缺席 ⇒ 不落键（= 走「默认开」）', () => {
+    expect(Object.hasOwn(sanitizeAutoCheckin({}), 'modelscopeEnabled')).toBe(false)
+  })
+
+  it('★★★ 用户点了「关」⇒ 必须落 false', () => {
+    expect(sanitizeAutoCheckin({ modelscopeEnabled: false }).modelscopeEnabled).toBe(false)
+  })
+
+  it('★★ 非 false 的一切值都当「开」（不落键）—— 与 `enabled` 那格同源', () => {
+    for (const raw of [true, 'false', 0, null, undefined, 1, '']) {
+      const doc = sanitizeAutoCheckin({ modelscopeEnabled: raw })
+      expect(Object.hasOwn(doc, 'modelscopeEnabled'), `raw=${String(raw)} 不该落键`).toBe(false)
+    }
+  })
+})
