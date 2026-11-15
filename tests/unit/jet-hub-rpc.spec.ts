@@ -4689,6 +4689,62 @@ describe('provider.status / provider.setEnabled 端点', () => {
   })
 
   describe('provider.setEnabled（关闭方向）', () => {
+  describe('空目录渠道的关闭（PR #81：没有模型 ≠ 不能关闭）', () => {
+    it('★★★ doubao 关闭成功：只落关闭意图，不动黑名单', async () => {
+      const { call, storedDisabled, storedAccounts } = setup({
+        withAdapter: false,
+        catalog: [{ id: 'unused', name: 'Unused' }],
+        accounts: [{ id: 'a1', provider: 'doubao', enabled: true }],
+      })
+      const result = await call('provider.setEnabled', { provider: 'doubao', enabled: false })
+      // `models: 0` 是必须的（没有任何模型被写进黑名单），不能报成「关掉了 1 个」。
+      expect(result).toMatchObject({ ok: true, value: { provider: 'doubao', enabled: false, models: 0 } })
+      // 黑名单必须**原样不动** —— 目录快照里根本没有它的模型，写进去就是凭空造数据。
+      expect(storedDisabled().doubao ?? null).toBeNull()
+      // 渠道关掉的可见后果是「账号停用」，这一腿必须有。
+      expect(storedAccounts().every((account) => account.enabled === false)).toBe(true)
+      const status = await call('provider.status', { providers: ['doubao'] })
+      expect(status.value.statuses.doubao.closed).toBe(true)
+    })
+
+    it('★★ 打开方向：清掉意图后渠道恢复可点', async () => {
+      const { call } = setup({
+        withAdapter: false,
+        catalog: [{ id: 'unused', name: 'Unused' }],
+        accounts: [{ id: 'a1', provider: 'doubao', enabled: false }],
+      })
+      await call('provider.setEnabled', { provider: 'doubao', enabled: false })
+      expect((await call('provider.status', { providers: ['doubao'] })).value.statuses.doubao.closed).toBe(true)
+      const reopened = await call('provider.setEnabled', { provider: 'doubao', enabled: true })
+      expect(reopened).toMatchObject({ ok: true, value: { provider: 'doubao', enabled: true } })
+      expect((await call('provider.status', { providers: ['doubao'] })).value.statuses.doubao.closed).toBe(false)
+    })
+
+    it('★★★ 有适配器的 channel:false 渠道（codely）必须仍走远端核实，不许跳到短路腿', async () => {
+      const { call, storedDisabled } = setup({
+        providerId: 'codely',
+        catalog: [{ id: 'codely-m1', name: 'Codely M1' }],
+        listModelsError: 'no adapter registered for provider "codely"',
+        accounts: [{ id: 'a1', provider: 'codely', enabled: true }],
+      })
+      const result = await call('provider.setEnabled', { provider: 'codely', enabled: false })
+      // 目录读不到 ⇒ 保留原有的「读不到就拒绝」拒绝语义（IKJW33 的修法）。
+      expect(result.ok).toBe(false)
+      expect(storedDisabled().codely ?? null).toBeNull()
+    })
+
+    it('★★ channel:true 且无适配器（外部装机形态）也必须走远端核实', async () => {
+      const { call } = setup({
+        withAdapter: false,
+        catalog: [{ id: 'buddy-m1', name: 'Buddy M1' }],
+        listModelsError: 'no adapter registered for provider "buddy"',
+        accounts: [{ id: 'a1', provider: 'buddy', enabled: true }],
+      })
+      const result = await call('provider.setEnabled', { provider: 'buddy', enabled: false })
+      expect(result.ok).toBe(false)
+    })
+  })
+
     it('关闭：把全部模型写入黑名单，并停用全部账号', async () => {
       const { call, storedDisabled, storedAccounts } = setup({
         catalog: CATALOG,
