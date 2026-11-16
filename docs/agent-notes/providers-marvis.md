@@ -377,23 +377,56 @@ Unexpected token '<', "...is not valid JSON"
    ⇒ `src/openai-compat.ts` 的 `DsmlContentExtractor` 不装 ⇒ 正文里的 DSML 标记
    **原样流到上层**。
 
-**决定性证据：全仓 9 个 openai-compat 系适配器只有本家恒带空数组，其余 8 家全门控**：
+**全仓口径普查（2026-11-16，别再凭印象数「8 家」）**。把 `tools` 放进 chat 请求体的
+构造点一共 12 个，分两类：
+
+**门控（`if (tools !== undefined && tools.length > 0)`）—— 11 家里的 8 家**：
 
 ```
 src/autoclaw-adapter.ts:637   if (tools !== undefined && tools.length > 0) bodyObj.tools = tools
 src/buddy-adapter.ts:2863     同上
 src/cline-adapter.ts:916      同上
-src/codely-adapter.ts:613     同上
+src/codely-adapter.ts:707     同上
 src/lobsterai-adapter.ts:1198 同上
 src/magicrew-adapter.ts:456   同上
 src/trae-adapter.ts:1277      同上
-src/zcode-adapter.ts:957      同上
-src/marvis-messages.ts:93     tools: buildMarvisTools(input.tools)   ← 唯一的偏离
+src/zcode-adapter.ts:963      同上
 ```
 
-而那行原先的契约注释只写了结论「`tools` **恒带**（哪怕空数组）」、**没写理由**
-（模块头解释的是「为什么要包装成 `{type:'function'}`」，不是「为什么空数组也要带」）
-⇒ **无理由的偏离**，正撞本仓红线「同一判据只留一份实现 / 同义判据必须同口径」。
+**无条件带（`tools: buildXxxTools(input.tools)`）—— 4 家，全是同一个模板的产物**：
+
+```
+src/marvis-messages.ts:93     ← 本提交改成门控
+src/modelscope-messages.ts:123
+src/opencode-messages.ts:181
+src/qiniu-messages.ts:116
+```
+
+**⚠️ 关键：那三家的「恒带」理由是错的。** `modelscope-messages.ts:112-114` 与
+`qiniu-messages.ts:106-108` 逐字写着：
+
+> `tools` **恒带**（哪怕是空数组）：带工具的请求必须让上游看到 `tools`
+> 字段的存在，这是 `invalid_parameter_error` 那条事故的修法的一半。
+
+而那条事故（`modelscope-messages.ts:13-16` 原文）是：
+
+```
+upstream: modelscope  status: 400
+{"error":{"code":"invalid_parameter_error",
+          "message":"'type' is a required property - 'tools.0'"}}
+```
+
+讲的是 **「带工具但包装形状不对 ⇒ 400」**，与「空数组」**毫无关系**。所以
+「恒带空数组」是从那条事故里**错误推论**出来的，然后被复制到了四家。
+
+⇒ 对本家来说，这是**继承了别处的错误推论**，而不是「无理由的偏离」——
+两种说法都指向同一个结论（该改成门控），但归因必须写准，否则下一个人会
+拿「modelscope 这么写的」当理由再改回去。
+
+**⚠️ 未修已登记**：`modelscope` / `opencode` / `qiniu` 三家**仍是无条件带**
+（本次用户只要求为 marvis 单独开一个 PR）。它们是否有同样的臆造症状
+**未经真机验证** —— 尤其 `modelscope` 的 qoder 事故记录里提到「省略 tools 会让
+模型 XML 泄露」，方向看着相反，**在真机复测前不要跟着改**。
 
 **修法**：`buildMarvisPayload` 改成非空才带
 

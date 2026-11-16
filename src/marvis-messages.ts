@@ -44,13 +44,29 @@ export interface MarvisWireTool {
  * ⚠️ 这是 `options.tools` 的**唯一出口**。不下发它，模型在 wire 上看不到任何
  * 函数定义，只能用正文里的 XML 臆造工具调用。
  *
- * ⚠️⚠️ 但**空数组不许下发**（返回 `[]` 时调用方必须把整个键省略）：
- * `tools: []` 会让服务端认为「本轮有函数调用能力」却一个定义都没有，
- * 模型只能改在正文里臆造 —— 实测症状是 `dsh-experimental-auto-review`
- * 对评审输出做严格 `JSON.parse` 时崩在 `Unexpected token '<'`（2026-11-16
- * 用户报障，正文里出现了 `<｜｜DSML｜｜tool_calls>` 标记）。
- * 其余 8 家 openai-compat 系适配器都是
- * `if (tools !== undefined && tools.length > 0) bodyObj.tools = tools` 门控。
+ * ⚠️⚠️ 但**空数组不许下发**（返回 `[]` 时调用方必须把整个键省略）。
+ * 上面那句说的是「**有工具却不下发**」⇒ 模型看不到定义 ⇒ 只能臆造；
+ * 它**推不出**「没有工具时也要发一个空数组」。两种状态在上游的语义不同：
+ * 省略 = 「本轮纯聊天，没有函数调用能力」，`[]` = 「有函数调用能力，但一个
+ * 定义都没给」⇒ 后者才是臆造的温床。
+ *
+ * 实测症状（Gitee IKVL6C，2026-11-16）：`dsh-experimental-auto-review` 的评审
+ * 那一轮没有工具 ⇒ wire 上是 `"tools": []` ⇒ 模型在正文里吐
+ * `<｜｜DSML｜｜tool_calls>` ⇒ 上层 `parseDecision` 严格 `JSON.parse` 崩在
+ * `Unexpected token '<'`，12 次工具调用全失败。
+ *
+ * ⚠️ 本仓的分歧面（已全量核对，别再凭印象数「8 家」）：
+ * - **门控**（`if (tools !== undefined && tools.length > 0)`）共 **8 家**：
+ *   `autoclaw-adapter.ts:637` / `buddy-adapter.ts:2863` / `cline-adapter.ts:916` /
+ *   `codely-adapter.ts:707` / `lobsterai-adapter.ts:1198` / `magicrew-adapter.ts:456` /
+ *   `trae-adapter.ts:1277` / `zcode-adapter.ts:963`；
+ * - **无条件带**（`tools: buildXxxTools(input.tools)`，与本次改动前的本文件同形态）
+ *   共 **3 家**：`modelscope-messages.ts:123` / `opencode-messages.ts:181` /
+ *   `qiniu-messages.ts:116`。**它们三家的注释写着「`tools` 恒带（哪怕是空数组）」，
+ *   并把理由挂在 `invalid_parameter_error` 那条事故上 —— 但那条事故讲的是
+ *   「带工具但形状不对 ⇒ 400 `'type' is a required property - 'tools.0'`」，
+ *   与空数组毫无关系 ⇒ 那是一个错误推论，然后被复制到了三家。**
+ *   本次只改 marvis（用户要求单独修这一条），那三家**登记未修**。
  */
 export function buildMarvisTools(
   tools: readonly MarvisHarnessTool[] | undefined,
@@ -89,8 +105,9 @@ export interface MarvisPayloadInput {
  * - `system` 只有非空才带；
  * - `max_tokens` 只放行安全正整数 —— 0 / 负数 / NaN 会让 DSH 侧抛
  *   `INVALID_MODEL_MAX_TOKENS`，整轮崩；
- * - `tools` 只在**非空**时下发（与其余 8 家 openai-compat 系适配器同口径 ——
- *   `tools: []` 会让模型在正文臆造工具调用，见 `buildMarvisTools` 的注释）；
+ * - `tools` 只在**非空**时下发（与 `autoclaw` / `buddy` / `cline` / `codely` /
+ *   `lobsterai` / `magicrew` / `trae` / `zcode` 这 8 家同口径；`tools: []` 会让
+ *   模型在正文臆造工具调用，见 `buildMarvisTools` 的注释）；
  * - `reasoning_effort` 只有非空字符串才带（非法值上游 400 `3000101`）。
  */
 export function buildMarvisPayload(input: MarvisPayloadInput): Record<string, unknown> {
