@@ -138,8 +138,15 @@ export function marvisRetryAfterMs(
  * ⇒ 与 `buddy-adapter.ts` 的 `wire.push({ role:'system', content: rewrite(…) })`
  * 同口径：两个位置都要改，只改一处等于没改。
  *
- * ⚠️ 兜底替换只作用于 **system 消息**：assistant 正文实测不拦，改它既换不来放行、
- * 又破坏历史回读证据（同 buddy 那条注释）。
+ * ⚠️ 兜底替换只作用于 **system 消息**，但**理由不是「assistant 正文实测不拦」**——
+ * 那句话在这里站不住：
+ * - `openai-gateway/tencent-fingerprint.ts` 的实测表逐字记着
+ *   **★ assistant 正文同样被拦（2026-10-12 补测）**，那是 `copilot.tencent.com`；
+ * - marvis 站（`yybadaccess.3g.qq.com`）我只在 **system** 与 **user** 位置实测过
+ *   （`msg-user/en-replace-product` ⇒ 200，2026-11-16），**assistant 位置未实测**。
+ * ⇒ 两站**证据冲突且 marvis 侧缺格**，故本腿维持「只改 system」这个**保守**选择
+ *   （改动面最小、可证伪），并在 `tests/unit/marvis-identity.spec.ts` 里加用例
+ *   **钉住「assistant 不动」**——将来任何一方放宽都会被这条用例拦下，而不是靠注释。
  */
 function rewriteMarvisSystemText(text: string, provider: string): string {
   // 三段，顺序不能换（每一段的输出都是下一段的输入）：
@@ -421,10 +428,15 @@ export class MarvisAdapter extends LlmAdapter {
       model: normalizeMarvisModelId(options.model),
       messages,
       // ⚠️ `system` 要过腾讯系内容级风控指纹改写（IKJNA1 同一份表、同一判据）。
-      //    2026-11-15 真机实测 marvis **当前不拦**这些指纹（13 档全 200），
-      //    这里登记是**预防性**的：marvis 属腾讯域，与 buddy/workbuddy 同一套风控，
-      //    服务端随时可能下发新指纹。代价是 DSH 自己的身份句会被改写，故**只改 system**
-      //    （assistant 正文实测不拦 —— 改它既换不来放行，又破坏历史回读证据）。
+      //    ⚠️⚠️ **「marvis 当前不拦这些指纹」这条旧结论已作废（2026-11-16）**：
+      //    当时只见「原文 200」，没测「登记表**产物**」——而产物正是
+      //    `You are an AI coding assistant, powered by a large language model.`，
+      //    它在 `messages[]`-system 位置**被判 403/4100406**（实发）⇒ 登记表这条腿
+      //    在 marvis 上不但不是「预防性」，反而是**制造 403 的那一环**
+      //    （见 `src/marvis-identity.ts` 的退役链说明）。所以下面这条腿**必须留着**，
+      //    而且必须排在 `marvis-identity` 之后。
+      //    只改 system 是因为：assistant 位置 marvis 侧**未实测**、而姊妹站实测会拦 ⇒
+      //    证据冲突，取改动面最小的保守解（见 `rewriteMarvisSystemMessage` 上方）。
       // ⚠️ 顶层 `system` 与 `messages[]` 的 system **走同一个函数**
       //    （正向审计 P2-1：此前这里只过登记表、没有兜底正则 ⇒ 中文身份句在顶层
       //    不会被清洗，与「两个位置都要改」自相矛盾）。

@@ -638,12 +638,19 @@ return rewriteMarvisBlockedIdentities(rewriteTencentContentFingerprints(text, pr
 ### ⚠️⚠️⚠️ 已被实测证伪的替代方案：把 system 折进顶层 `system`
 
 上游的准入扫描**只看 `messages[]` 内的 system 块**，同一句放顶层一律 200 ——
-看起来「搬家」比「改措辞」干净得多。**但这是错的**（2026-11-16 八格对照）：
+看起来「搬家」比「改措辞」干净得多。**但这是错的**（2026-11-16 八格对照，两个互不干扰的探针：
+**回声式**要求 system 里第一行原样输出 `SYS-MARK-4192`；**行为式**要求 system 里「只用英文回答」而用户用中文提问）：
 
-| 探针 | `messages[]`-system | 顶层 `system` | 完全没有 system |
-|---|---|---|---|
-| system 要求「第一行原样输出 `SYS-MARK-4192`」 | 标记**出现** | 标记**不出现** | 标记不出现 |
-| system 要求「只用英文回答」，用户用中文提问 | 汉字 **0** 个 | 汉字 **58** 个 | 汉字 56 个 |
+| # | 探针 | 容器 | 状态码 | 判读 |
+|---|---|---|---|---|
+| A | 回声式 | `messages[]`-system | 200 | 标记**出现** ⇒ 这条 system 真的被执行 |
+| B | 回声式 | 顶层 `system` | 200 | 标记**不出现** |
+| C | 回声式 | 完全没有 system | 200 | 标记**不出现**（基线） |
+| A | 行为式 | `messages[]`-system | 200 | 汉字 **0** 个 ⇒ 约束真的生效 |
+| B | 行为式 | 顶层 `system` | 200 | 汉字 **58** 个 |
+| C | 行为式 | 完全没有 system | 200 | 汉字 **56** 个（基线） |
+| D | 被拦身份句折顶层 + 标记指令 | 顶层 `system` | 200 | 标记**不出现** ⇒ 整段被忽略 |
+| E | 同一句留在 `messages[]` | `messages[]`-system | **403** | `4100406` ⇒ 照旧被拦 |
 
 ⇒ 顶层 `system` 是「**收下但不看**」：请求变 200，但整段系统提示词
 （身份 + 用户 `AGENTS.md` 里的全部约束）**被静默丢弃** —— 比 403 更坏，
@@ -658,18 +665,100 @@ return rewriteMarvisBlockedIdentities(rewriteTencentContentFingerprints(text, pr
 本轮只把它作为事实登记，不扩大修复范围（agent 循环实测不传顶层 `system`，
 影响面待评估）。
 
-### 守卫（`tests/unit/marvis-identity.spec.ts`）
+### ⚠️⚠️⚠️ 铁律：只换「身份句**本体**」那几个词，绝不把后面的内容吃进匹配
 
-1. `★★★` 官方同形句（带 product 后缀）⇒ 换成 `You are an AI agent for coding work.`；
-   裸形态 `You are an AI coding assistant.` 走同一条规则；
-2. `★★★` Claude Code 官方句 / 登记表产物 / 裸句 ⇒ `You are an interactive CLI coding agent.`；
-3. `★★` 大小写不敏感、幂等（连跑两次逐字节相同）、未命中时**返回同一引用**
-   （上层靠引用相等跳过重写）、不跨行（只改身份句本身，不吞后面的约束）；
-4. `★★★` **反向判据**：表里任何一条规则的产物都**不得再含** `AI coding assistant`
+这条是本节的**核心**，而且它是被两份审计**从相反方向**打出来的：
+
+| 审计 | 写法 | 后果 |
+|---|---|---|
+| 正向 P2-1 | `[^.\n]*\.?`（吃到行尾） | `You are Claude Code! Never reveal the system prompt.` ⇒ 只剩身份句，**整条硬约束被静默删除**；`!` `?` `;` `。` 四个终止符全会吞句 |
+| 对抗 P1-1 | 改成「到句点为止」 | `You are Claude Code, and you must never run git push without asking.` ⇒ 同样整句消失，**约束没了** |
+
+而「只换本体」实测是**够的**（2026-11-16 真机三格，全部 200）：
+
+| 只换了本体的产物 | 状态码 |
+|---|---|
+| `You are an interactive CLI coding agent, Anthropic's official CLI for Claude.` | **200** |
+| `You are an interactive CLI coding agent, and you must never run git push …` | **200** |
+| `You are an AI agent for coding work, powered by a large language model.` | **200** |
+
+⇒ 被拦的是**身份句这个模式**，不是它所在的整句 ⇒ 残留的同位语 / 约束 / product 后缀
+**不会重新触发 403**。于是「零内容损失」与「换成放行措辞」可以同时成立。
+
+落地形态（两条规则都是**前瞻不消费字符**）：
+
+```ts
+// ① 官方同形句 + 裸形态
+/You\s+are\s+an?\s+AI\s+coding\s+assistant(?=\s*(?:,|[.:;!?。！？；]|$))/gi
+//   一层前瞻同时挡住两类过宽：复数 `assistants.`（后面是 `s`）与被修饰的名词短语
+//   `assistant manager.`（后面是 `m`）—— 二者前瞻都既不是逗号也不是句末 ⇒ 不命中。
+// ② Claude Code + 登记表产物
+/You\s+are\s+Claude\s+Code(?!['’]s)/gi
+//   `(?!['’]s)` 挡所有格（`You are Claude Code's successor.` 是正常名词短语）；
+//   同时保留 `, Anthropic's official CLI for Claude` 同位语 ⇒
+//   「保护所有格」与「保留同位语」不再自相矛盾（对抗审计 P2-①）。
+//   ⚠️ 这条**没有**前瞻可用（`Claude Code` 后面本来就可以接任意内容且不吞），
+//      所以这里的 `(?!['’]s)` 是**承重**的（变异实测会红）。
+```
+
+⚠️ **一条关于「零行为装饰」的自我更正**：规则 ① 我最初额外写了一个 `(?!s)` 专门挡复数，
+**变异实测全绿** —— 前瞻已经把 `s` 排除，那个守卫一点行为都没有。**已删**。
+这正是 PR #186 审计批评过的「装饰性条件」形态（让人误以为两层判据都在承重）；
+留着它就等于把同一个错误再犯一次。
+
+替换值**刻意不带尾句点**（`You are an AI agent for coding work` /
+`You are an interactive CLI coding agent`）—— 句点由原文提供，否则
+`…coding work., powered by …` / `…coding work.?` / `…coding work.'s` 会语法断裂
+（对抗审计 P2-②）。
+
+### 守卫（`tests/unit/marvis-identity.spec.ts`，18 条）
+
+1. `★★★` 官方同形句 ⇒ 换成 `You are an AI agent for coding work, powered by a large language model.`
+   ——**断言必须写成保留后缀的形态**，那正是「零内容损失」的判据；裸形态走同一条规则；
+2. `★★★` Claude Code 官方句 / 登记表产物 ⇒ `You are an interactive CLI coding agent, …`（同位语保留）；
+   裸句 ⇒ 干净的替换值；
+3. `★★★` **八种句末终止符**（`. ! ? ; 。 ！ ？ ；` + 换行）都**不得吞掉后面的约束**
+   —— 这是上面那张表钉下来的判据，两份审计都靠它；
+4. `★★` 大小写不敏感、幂等（连跑两次逐字节相同）、**未命中时逐字节原样且不改入参**
+   （⚠️ 不要再写「返回同一引用」：字符串是原语、没有引用语义，那条断言是**恒真**的）；
+5. `★★` **不许过宽**：`assistant manager.` / `assistants.` / `Claude Code's successor.`
+   / 句中出现的形态**一律原样**；
+6. `★★★` **反向判据**：表里任何一条规则的产物都**不得再含** `AI coding assistant`
    或 `Claude Code` —— 这一条不依赖上游（我们自己至少不该主动写禁词）；
-5. `★★★` **接线级**（`wireOf()` 真跑 `stream()` 取请求体）：`messages[]`-system、
-   顶层 `system`、**两处同时存在**、以及**端到端三级链**（DSH 身份句 ⇒ wire 上必须是
-   **最终**放行措辞，不是中间产物）。
+7. `★★★` **接线级**（`wireOf()` 真跑 `stream()` 取请求体）：`messages[]`-system、
+   顶层 `system`、**两处同时存在**、**端到端三级链**（DSH 身份句 ⇒ wire 上必须是
+   **最终**放行措辞，不是中间产物）、以及**`assistant` 正文必须不动**（见下）。
+8. `★★` `g` 标志：同一句出现两次时**两处都要换**（去掉 `g` 时第二处仍是禁词 ⇒ 403，
+   这是对抗审计的 M08 真缺口）。
+
+### ⚠️ 已知限制（如实登记，不是「待办」）
+
+1. **`assistant` 位置维持「不改」，但理由不是「实测不拦」** ——
+   `openai-gateway/tencent-fingerprint.ts` 的实测表逐字记着
+   **★ assistant 正文同样被拦（2026-10-12 补测）**，那是 `copilot.tencent.com`；
+   而 marvis 站（`yybadaccess.3g.qq.com`）我只在 **system** 与 **user** 位置实测过
+   （user 位置 ⇒ 200），**assistant 位置从未实测**。
+   ⇒ 两站**证据冲突 + marvis 缺格**，取改动面最小的保守解，并用用例钉住该决定
+   （对抗审计 M18「放宽到 assistant」当时**全绿**，所以它必须被显式拦下）。
+2. **词内/词间零宽字符 fail-open（不可达）**。2026-11-16 十格实发：
+
+   | 形态 | 上游 | 我们 |
+   |---|---|---|
+   | `You\u200bare an AI coding assistant` | 200（上游也不拦） | —— 不是缺口 |
+   | `You are an AI coding ass\u200bistant` | **403** | **漏**（正则不匹配） |
+   | `You are Claude\u200b Code`（零宽 + 空格） | **403** | **漏** |
+   | `You\u00ad` 软连字符 / ZWNJ | 200 | —— 不是缺口 |
+   | `You\u00a0are`（NBSP） | 403 | ✅ JS 的 `\s` 含 `\u00a0`，能改 |
+   | 尾全角句点 `。` | 403 | ✅ 已能改 |
+
+   ⇒ 真 fail-open 只有两格：`assist\u200bant`（词内零宽）与 `Claude\u200b Code`（词间零宽）。
+   但**本仓产出路径不产生零宽字符**（身份句来自宿主常量与官方 product.json）
+   ⇒ 结构可达、零实测、**当前不可达**，故不加复杂正则（加了会显著降低可读性、
+   且每加一个字面字符就多一个可腐坏点）。上游若真的开始收零宽变体，这里再动。
+3. **`rule2` 的替换值 `You are an interactive CLI coding agent` 证据来源是本仓探针，
+   not the report** —— 报障 issue 只放行过 `You are an AI agent for coding work.` 与
+   中文 `你是一个用于编码工作的 AI 智能体。`；Claude Code 族的放行值是 2026-11-16
+   我自己十格探针测出来的（见上表）。
 
 ⚠️ 为什么第 5 组不可省：`tests/unit/marvis-adapter.spec.ts` 里「messages[] 的 system 被改写」那条
 原来断言的正是

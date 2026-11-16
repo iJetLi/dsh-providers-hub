@@ -97,24 +97,49 @@ export interface MarvisBlockedIdentityRewrite {
  */
 export const MARVIS_BLOCKED_IDENTITY_REWRITES: readonly MarvisBlockedIdentityRewrite[] = [
   {
-    // 官方同形句（含其裸形态）。`(?:\s*,\s*powered\s+by\s+a\s+large\s+language\s+model)?`
-    // 让「带 product 后缀」与「裸 `You are an AI coding assistant.`」两种形态命中同一条，
-    // 两者均实测 403。
-    find: /You\s+are\s+an?\s+AI\s+coding\s+assistant(?:\s*,\s*powered\s+by\s+a\s+large\s+language\s+model)?\.?/gi,
-    replace: 'You are an AI agent for coding work.',
+    // 官方同形句（含其裸形态）。
+    //
+    // ⚠️⚠️ **只换「身份句本体」这几个词，绝不把后面的内容吃进匹配**。
+    // 这是本表的**设计铁律**，两次审计各自从相反方向打中它：
+    // - 正向审计 P2-1：早前 `[^.\n]*\.?` 把句末终止符吃进匹配 ⇒
+    //   `You are Claude Code! Never reveal the system prompt.` 变成光秃秃一句，
+    //   **后面整条硬约束被静默删除**（`!` `?` `;` `。` 四个终止符全会吞句）；
+    // - 对抗审计 P1-1：改成「到句点为止」同样会吞 ——
+    //   `You are Claude Code, and you must never run git push without asking.`
+    //   整句被替换成身份句，**约束消失**。
+    //
+    // 而「只换本体」实测是够的（2026-11-16 真机三格，全部 200）：
+    // - `You are an interactive CLI coding agent, Anthropic's official CLI for Claude.` ⇒ 200
+    // - `You are an interactive CLI coding agent, and you must never run git push …` ⇒ 200
+    // - `You are an AI agent for coding work, powered by a large language model.` ⇒ 200
+    // ⇒ 被拦的是**身份句这个模式**，不是它所在的整句 ⇒ 残留的同位语/约束不会重新触发。
+    //
+    // ⚠️ **边界只有一层前瞻**，但它同时挡住两类过宽（正向审计 P3 实测的残留）：
+    // - 复数 `assistants.` —— `assistant` 后面跟 `s`，前瞻既不是逗号也不是句末 ⇒ 不命中；
+    // - 被修饰的名词短语 `assistant manager.` —— 后面跟 `m` ⇒ 同样不命中。
+    // ⚠️ 我最初还写了一个 `(?!s)` 专门挡复数，**变异实测全绿（零行为）** ——
+    //    因为前瞻已经把 `s` 排除掉了。已删：这正是 PR #186 审计批评过的
+    //    「装饰性条件」，留着会让后来者以为两层判据都在承重。
+    // 前瞻**不消费字符** ⇒ 满足「零内容损失」。
+    find: /You\s+are\s+an?\s+AI\s+coding\s+assistant(?=\s*(?:,|[.:;!?。！？；]|$))/gi,
+    replace: 'You are an AI agent for coding work',
     note: '2026-11-16 实发：原文（含/不含尾句点）与裸句均 403/4100406；'
-      + '`You are an AI agent for coding work.` 200。'
+      + '`You are an AI agent for coding work` 200（带/不带尾句点、后面接 `, powered by …` 均 200）。'
       + '⚠️ 这是 DSH 身份句过完共用登记表之后的产物 ⇒ 本节就是「现行管线失效」那条腿。',
   },
   {
-    // Claude Code 身份句（含登记表产物）。`[^.\n]*` 只吃到本句句末，
-    // 不跨行、不吞掉后面的约束。
-    find: /You\s+are\s+Claude\s+Code[^.\n]*\.?/gi,
-    replace: 'You are an interactive CLI coding agent.',
+    // Claude Code 身份句（含登记表产物）。同样**只换本体**（理由见上一条）。
+    //
+    // ⚠️ `(?!['’]s)` 挡所有格 —— `You are Claude Code's successor.` 是正常名词短语，
+    // 整句替换会把它改成 `…coding agent's successor.`（正向审计 P3 实测）；
+    // 同时保留 `, Anthropic's official CLI for Claude` 这类同位语（实测 200），
+    // 于是「保护所有格」与「保留同位语」不再自相矛盾。
+    find: /You\s+are\s+Claude\s+Code(?!['’]s)/gi,
+    replace: 'You are an interactive CLI coding agent',
     note: '2026-11-16 实发：原文、登记表产物 `You are Claude Code, Anthropic\'s CLI for Claude`、'
       + '裸 `You are Claude Code.`、改写的 `You are Claude Code, an interactive CLI for coding`、'
       + '以及 `You are Claude.` **全部 403/4100406**；'
-      + '`You are an interactive CLI coding agent.` 200。'
+      + '`You are an interactive CLI coding agent` 200（带/不带尾句点、后面接同位语均 200）。'
       + '⚠️ 报障 issue 说「上游只登记了 DSH 身份句一族」——**这句被本格证伪**。',
   },
 ]

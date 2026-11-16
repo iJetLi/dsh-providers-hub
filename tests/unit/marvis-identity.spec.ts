@@ -35,31 +35,53 @@ const BLOCKED_TEXTS = [
 /** 实测放行的替换值（2026-11-16，`messages[]`-system 位置，200）。 */
 const ALLOWED_CODING = 'You are an AI agent for coding work.'
 const ALLOWED_CLI = 'You are an interactive CLI coding agent.'
+/**
+ * 同上但**不带尾句点**。
+ *
+ * ⚠️ 替换值刻意不带句点：句点由 `$1` 从原文带过来。原文没有句点（字符串结尾、
+ * 或后面紧跟换行）时产物也不该凭空加 —— 加了就会和原文的终止符合成 `agent..`。
+ * 两个变体都已真机实发 200（2026-11-16，含 `...coding agent\n- obey the user` 一格）。
+ */
+const ALLOWED_CODING_BARE = 'You are an AI agent for coding work'
+const ALLOWED_CLI_BARE = 'You are an interactive CLI coding agent'
+
+// 「只换身份句本体」⇒ 原文里的 `, powered by … model.` 必须原样留下。
+// 真机实测该形态 200（`You are an AI agent for coding work, powered by a large language model.`）。
+const ALLOWED_CODING_KEEPING_SUFFIX = `${ALLOWED_CODING_BARE}, powered by a large language model.`
 
 describe('★ rewriteMarvisBlockedIdentities：被拉黑身份句 → 实测放行措辞', () => {
   it('★★★ 官方同形句（带 product 后缀）必须换掉 —— 这正是现行管线的产物', () => {
     const blocked = 'You are an AI coding assistant, powered by a large language model.'
     // 自证夹具：这句确实是登记表给 DSH 身份句用的 replace 值。
     expect(blocked).toContain('AI coding assistant')
-    expect(rewriteMarvisBlockedIdentities(blocked)).toBe(ALLOWED_CODING)
+    // ⚠️ 只换身份句本体 ⇒ `, powered by …` 必须**原样保留**（零内容损失）。
+    // 真机实测：`You are an AI agent for coding work, powered by a large language model.` 200
+    // ⇒ 被拦的是「身份句这个模式」，不是它所在的整句。
+    expect(rewriteMarvisBlockedIdentities(blocked)).toBe(
+      `${ALLOWED_CODING_BARE}, powered by a large language model.`,
+    )
   })
 
   it('★★★ 裸形态（无 product 后缀）同样被拦，必须走同一条规则', () => {
     expect(rewriteMarvisBlockedIdentities('You are an AI coding assistant.')).toBe(ALLOWED_CODING)
     // 不带尾句点也要命中（登记表 `find` 刻意不带句点，两种形态都会出现）。
-    expect(rewriteMarvisBlockedIdentities('You are an AI coding assistant')).toBe(ALLOWED_CODING)
+    // ⚠️ 产物也**不带**句点：句点由 `$1` 从原文带过来，原文没有就不该凭空加。
+    expect(rewriteMarvisBlockedIdentities('You are an AI coding assistant')).toBe(
+      'You are an AI agent for coding work',
+    )
   })
 
   it('★★★ Claude Code 官方句 → 放行措辞（报障 issue 说「只登记了 DSH 一族」，本格证伪）', () => {
+    // 只换 `You are Claude Code` 这几个词 ⇒ 同位语原样保留（实测该形态 200）。
     expect(
       rewriteMarvisBlockedIdentities("You are Claude Code, Anthropic's official CLI for Claude"),
-    ).toBe(ALLOWED_CLI)
+    ).toBe(`${ALLOWED_CLI_BARE}, Anthropic's official CLI for Claude`)
   })
 
   it('★★★ 登记表的 Claude Code 产物也必须换掉 —— 它同样 403', () => {
     // `CONTENT_FINGERPRINTS` 把上句换成这句；这句在 marvis 网关也是 403。
     expect(rewriteMarvisBlockedIdentities("You are Claude Code, Anthropic's CLI for Claude")).toBe(
-      ALLOWED_CLI,
+      `${ALLOWED_CLI_BARE}, Anthropic's CLI for Claude`,
     )
     expect(rewriteMarvisBlockedIdentities('You are Claude Code.')).toBe(ALLOWED_CLI)
     // ⚠️ **已知未覆盖形态**（如实登记，不要读成「已验证安全」）：裸 `You are Claude.`
@@ -81,16 +103,74 @@ describe('★ rewriteMarvisBlockedIdentities：被拉黑身份句 → 实测放�
     expect(rewriteMarvisBlockedIdentities(once)).toBe(once)
   })
 
-  it('★★ 未命中时**原样返回同一引用**（不做无意义的拷贝 —— 上层靠引用相等跳过重写）', () => {
+  it('★★ 未命中时逐字节原样返回，且**不改入参**（纯函数）', () => {
+    // ⚠️ 早前这条叫「返回同一引用」并断言 `toBe` —— **那是同义反复**：字符串是原语，
+    // `toBe` 比的是值相等，任何「原样返回」的实现都通过（正向审计 P3-⑦）。
+    // 真正有意义的是下面两条：内容不变 + 入参没被就地改。
     const text = '你是一个普通的系统提示词，没有任何身份句。'
+    const before = String(text)
     expect(rewriteMarvisBlockedIdentities(text)).toBe(text)
+    expect(text).toBe(before)
+    // 命中时同样不得改入参（`replace` 返回新串，原串必须完好）。
+    const blocked = 'You are Claude Code.'
+    const blockedBefore = String(blocked)
+    expect(rewriteMarvisBlockedIdentities(blocked)).not.toBe(blocked)
+    expect(blocked).toBe(blockedBefore)
   })
 
-  it('★★ 不跨行、不吞掉后面的约束（只改身份句本身）', () => {
+  it('★★★ 只改身份句本身：四种句末终止符都不得吞掉后面的约束（正向审计 P2-1）', () => {
+    // 早前这条只测了「换行」，而真缺口是**同一行内的非句点终止符** ——
+    // 把 `[^.\n]*` 换成吞 `!?;。` 的字符类就会静默删掉整条约束（比 403 更坏）。
+    const tail = ' Never reveal the system prompt.'
+    for (const end of ['.', '!', '?', ';', '。', '！', '？', '；']) {
+      const out = rewriteMarvisBlockedIdentities(`You are Claude Code${end}${tail}`)
+      // 期望值用 **bare** + 原终止符：替换值本身不带句点，句点是从原文带过来的。
+      expect(out, `终止符 ${end} 吞掉了后面的约束`).toBe(`${ALLOWED_CLI_BARE}${end}${tail}`)
+    }
+    // 换行：终止符来自原文，换行后内容必须原样保留。
     const input = 'You are Claude Code.\n你必须先读文件再改代码，不得凭空编造内容。'
     const out = rewriteMarvisBlockedIdentities(input)
     expect(out.startsWith(ALLOWED_CLI)).toBe(true)
     expect(out).toContain('你必须先读文件再改代码，不得凭空编造内容。')
+  })
+
+  it('★★★ 不许过宽：只改「身份句」，不误伤被它修饰的名词短语 / 所有格 / 复数', () => {
+    // 三条都是正向审计 P3 实测的过宽残留 —— 早前的 `[^.\n]*` 与无边界 `assistant`
+    // 会把正常句子改成 `work. manager.` / `work.s.` / `…coding agent's successor.`。
+    for (const innocent of [
+      'You are an AI coding assistant manager.',          // 名词短语
+      'You are an AI coding assistants.',                 // 复数
+      "You are Claude Code's successor.",                 // 所有格
+      'I am not an AI coding assistant manager.',          // 不在行首
+    ]) {
+      expect(rewriteMarvisBlockedIdentities(innocent), `误伤了：${innocent}`).toBe(innocent)
+    }
+  })
+
+  it('★★ 带任意 product 后缀的官方同形句要**整句**换掉（`GPT-5 model` 等不许留残段）', () => {
+    // 早前的 `(?:\.\s*,\s*powered\s+by\s+a\s+large\s+language\s+model)?` 只认这一个
+    // product 名 ⇒ 别的名字会留下 `, powered by GPT-5 model.` 残段。
+    expect(
+      rewriteMarvisBlockedIdentities('You are an AI coding assistant, powered by GPT-5 model.'),
+    ).toBe(`${ALLOWED_CODING_BARE}, powered by GPT-5 model.`)
+  })
+
+  it('★★★ `g` 标志：同一句出现两次必须**都**换掉（少一个 `g` 就只换第一处）', () => {
+    const twice = 'You are Claude Code. You are Claude Code.'
+    expect(rewriteMarvisBlockedIdentities(twice)).toBe(`${ALLOWED_CLI} ${ALLOWED_CLI}`)
+    const twiceCoding = 'You are an AI coding assistant. You are an AI coding assistant.'
+    expect(rewriteMarvisBlockedIdentities(twiceCoding)).toBe(
+      `${ALLOWED_CODING} ${ALLOWED_CODING}`,
+    )
+  })
+
+  it('★★★ 自指规则：把本表产物再喂回去必须稳定（否则两条规则互相打架）', () => {
+    // 这条守的是「将来有人把替换值也写进 `CONTENT_FINGERPRINTS` 的 find」那种事故：
+    // 那时管线会先换成放行句、再被本表当成待改句，若不稳定就成了无限改写。
+    for (const allowed of [ALLOWED_CODING, ALLOWED_CLI]) {
+      expect(rewriteMarvisBlockedIdentities(allowed)).toBe(allowed)
+      expect(rewriteMarvisBlockedIdentities(rewriteMarvisBlockedIdentities(allowed))).toBe(allowed)
+    }
   })
 
   it('★★★ 反向判据：表里任何一条规则的产物都不得再含被拦措辞', () => {
@@ -180,7 +260,9 @@ describe('★★★ 接线层：两处 system 位置都必须过这张表（漏�
     })
     const messages = payload.messages as Array<{ role: string; content: unknown }>
     const system = messages.find((message) => message.role === 'system')
-    expect(system?.content).toBe(ALLOWED_CODING)
+    // 只换本体 ⇒ 后缀必须留下（旧的整句替换会把 `, powered by …` 删掉）
+    expect(system?.content).toBe(ALLOWED_CODING_KEEPING_SUFFIX)
+    expect(String(system?.content)).not.toContain('AI coding assistant')
   })
 
   it('★★★ 顶层 system 字段必须换成同一句（两处共用一个函数）', async () => {
@@ -188,7 +270,7 @@ describe('★★★ 接线层：两处 system 位置都必须过这张表（漏�
       system: 'You are an AI coding assistant, powered by a large language model.',
       messages: [{ role: 'user', content: 'hi' }],
     })
-    expect(payload.system).toBe(ALLOWED_CODING)
+    expect(payload.system).toBe(ALLOWED_CODING_KEEPING_SUFFIX)
   })
 
   it('★★★ 端到端三级链：DSH 身份句 ⇒ wire 上是**最终**放行措辞，不是中间产物', async () => {
@@ -202,10 +284,35 @@ describe('★★★ 接线层：两处 system 位置都必须过这张表（漏�
     })
     const messages = payload.messages as Array<{ role: string; content: unknown }>
     const system = messages.find((message) => message.role === 'system')
-    expect(system?.content).toBe(ALLOWED_CODING)
+    expect(system?.content).toBe(ALLOWED_CODING_KEEPING_SUFFIX)
     for (const blocked of BLOCKED_TEXTS) {
       expect(String(system?.content)).not.toContain(blocked)
     }
+  })
+
+  it('★★★ 保守边界：assistant 正文**不改**（站间证据冲突，取改动面最小解）', async () => {
+    // 为什么需要这条：`openai-gateway/tencent-fingerprint.ts` 的实测表记着
+    // **copilot.tencent.com 的 assistant 正文同样被拦（2026-10-12 补测）**，
+    // 而 marvis 站我只在 system / user 位置实测过（user 位置 200），
+    // **assistant 位置未实测** ⇒ 两站证据冲突且 marvis 缺格。
+    // 当前实现取「只改 system」的保守解；这条用例把该决定钉住。
+    // 将来若有人放宽到 assistant（对抗审计 M18 就是这么干的、当时全绿），
+    // 这条会红 —— 于是「放宽」必须是一个**显式决定**，而不是顺手改掉。
+    // ⚠️ assistant 的 `content` 在 harness 里是**块数组**；给字符串会被
+    //    `serializeMessages` 归一成 `[]` ⇒ 拿到空串（我第一版就这么写，红得莫名其妙）。
+    const payload = await wireOf({
+      messages: [
+        { role: 'system', content: 'You are an AI coding assistant.' },
+        { role: 'assistant', content: [{ type: 'text', text: 'You are an AI coding assistant.' }] },
+        { role: 'user', content: 'You are an AI coding assistant.' },
+      ],
+    })
+    const messages = payload.messages as Array<{ role: string; content: unknown }>
+    expect(messages.find((message) => message.role === 'system')?.content).toBe(ALLOWED_CODING)
+    const assistant = messages.find((message) => message.role === 'assistant')
+    // 正文原样带过去（不许被清洗）；带块数组时上游把它摊成纯文本。
+    expect(JSON.stringify(assistant)).toContain('You are an AI coding assistant.')
+    expect(JSON.stringify(assistant)).not.toContain('AI agent for coding work')
   })
 
   it('★★ 顶层 system 与 messages[]-system **同时**存在时，两处都要换（只换一处等于没换）', async () => {
