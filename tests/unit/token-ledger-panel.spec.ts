@@ -629,11 +629,16 @@ describe('用量树三层视觉契约（provider / 账号 / 模型）', () => {
     expect(container).toMatch(/\.dim-jh-ledgerPaneBody \.dim-jh-ledgerStatGroup\s*\{[^}]*max-width:\s*100%/)
     const media = styles.slice(styles.indexOf('@media (max-width: 700px)'))
     expect(media).toMatch(/\.dim-jh-ledgerStatGroup\s*\{[^}]*max-width:\s*100%/)
-    // 反向对照：宽屏那条基础规则必须仍是定宽 460px（只有窄档收窄，
-    // 否则弹窗里 9 列 + 统计组的排布会跟着变形）。
-    const base = styles.match(/^\.dim-jh-ledgerStatGroup\s*\{([^}]*)\}/m)?.[1] ?? ''
+    // ⚠️⚠️ 基础规则**不再是定宽 460px**（PR #94 起改成内容自适应 + 可收缩）。
+    // ⚠️ 判据必须**先剥注释**再断言 —— 规则体里的注释写着「从 flex: none +
+    //    width: 460px 改成内容自适应」，不剥就会命中那句历史说明而**假绿**
+    //    （PR #94 本次审计实测：这条断言原来是 ，
+    //    而实现里那个 width 早就删了 —— 它一直靠注释里的字面量通过）。
+    const base = (styles.match(/^\.dim-jh-ledgerStatGroup\s*\{([^}]*)\}/m)?.[1] ?? '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
     expect(base, '缺少基础 .dim-jh-ledgerStatGroup 规则').not.toBe('')
-    expect(base).toMatch(/width:\s*460px/)
+    expect(base, '基础规则必须已改成内容自适应（不许再写死 460px）').not.toMatch(/width:\s*460px/)
+    expect(base).toMatch(/flex:\s*0\s+1\s+auto/)
     expect(base, '基础规则不该带 max-width（窄档才需要）').not.toMatch(/max-width/)
     // 反向对照：明细表自己的横向滚动容器必须还在（9 列定宽靠它，不是靠面板体）
     expect(container).toMatch(/\.dim-jh-ledgerPaneBody \.dim-jh-ledgerTableScroll\s*\{[^}]*overflow-x:\s*auto/)
@@ -983,15 +988,20 @@ describe('单模型合并 · 实现唯一性（历史日树必须复用，不许
     expect(client).not.toMatch(/className:\s*'dim-jh-ledgerModelTokens',\s*\n\s*title:\s*tokenSummaryTooltip\(statRow\)/)
   })
 
-  it('★★★ 统计信息必须包在固定宽的 StatGroup 里（否则「次数」列参差不齐）', () => {
+  it('★★★ 统计信息必须包在**内容自适应**的 StatGroup 里（否则「次数」列参差不齐）', () => {
     // ⚠️ 用户 2026-11-11 第三次修正：「统计信息（红框内）要放在行中间」。
     //    改前每个统计格各自 margin-left:auto ⇒ 被推成各自最右，而内容宽度不同
     //    ⇒ 「次数」起始位置 4 种（714/720/726/732），账号名后留一大片空白。
-    //    修法：整组固定 460px、组内左对齐 ⇒ 实测全部 510px。
+    //    修法：整组**内容自适应 + 可收缩**、组内左对齐。
+    //    ⚠️ PR #94 起不再写死 460px（实测白占 124px，那 124px 本可以给左边的
+    //    「账号 → 模型」信息区）；判据同样必须**先剥注释**（规则体注释里写着
+    //    「从 flex: none + width: 460px 改成…」，不剥就会命中历史说明而假绿）。
     const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
-    const group = styles.match(/\.dim-jh-ledgerStatGroup\s*\{([^}]*)\}/s)?.[1] ?? ''
+    const group = (styles.match(/\.dim-jh-ledgerStatGroup\s*\{([^}]*)\}/s)?.[1] ?? '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
     expect(group, '缺少 .dim-jh-ledgerStatGroup 规则').not.toBe('')
-    expect(group).toMatch(/width:\s*460px/)
+    expect(group, '统计组必须已改成内容自适应（不许再写死 460px）').not.toMatch(/width:\s*460px/)
+    expect(group).toMatch(/flex:\s*0\s+1\s+auto/)
     expect(group).toMatch(/margin-left:\s*auto/)
     // ⚠️ 组内的「次数」不许再各自 auto（那会退回参差不齐）
     const req = styles.match(/\.dim-jh-ledgerAccountReq\s*\{([^}]*)\}/s)?.[1] ?? ''

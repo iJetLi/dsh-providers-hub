@@ -1305,6 +1305,14 @@ const STYLES = `
    88px / 172px）是两回事：
    列宽由 colgroup 决定，这里只是**兜底不让它撑破**（colgroup 缺失或旧产物时）。 */
 .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 172px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ⚠️⚠️ 账号列的**基础宽度**必须在本文件里，不能挂在 col 元素的内联 style 上
+   （PR #94 正向审计 P1-1）：内联 style 的层叠权重恒压过下面的 @container /
+   @media 覆盖（它们没有 !important）⇒ 88px / 172px 的上下限会**全部失效**。
+   col 只负责挂类名；宽度这里给基础值、下面按容器分段覆盖。
+   ⚠️ 选择器**不要**加 .dim-jh-ledgerTable 前缀 —— 那会把特异性抬到 (0,2,1)，
+   反过来压过下面 (0,1,1) 的分段覆盖，上下限照样失效。
+   ⚠️ 本文件是 JS 模板字符串：注释里**禁止反引号**（会提前闭合模板）。 */
+col.dim-jh-ledgerColAccount { width: 12.68%; }
 /* ⚠️⚠️ **模型格必须单行 + 省略号**（用户 2026-11-16 报障：窄面板下模型名断成 4 行）。
    原先这一格**没有 white-space: nowrap** ⇒ 宽度不够时浏览器自由换行，
    trae/deepseek-v4.1-flash 被折成 trae/deep / seek-v4. / 1-flash 三行。

@@ -2898,7 +2898,14 @@ const LEDGER_ENTRY_COLUMNS = Object.freeze([
      *
      * 用户实际面板宽约 **690px**，要求账号列在此时 ≈ **88px**（账号名可读下限）：
      *   690 × 12.68% ≈ 87.5px ✓
-     * 此时模型列 = 690 − 366（其余 7 列）− 88 = **236px**（充足）。
+     * 此时模型列 = 690 − 474（其余 7 列实况：62+46+104+58+86+58+60）− 87.5 = **128.5px**
+     *
+     * ⚠️⚠️ **这里原来写的是「690 − 366 − 88 = 236px（充足）」，算错了 108px**
+     * （366 既不是 7 列也不是 8 列的实况和；真值 474）⇒ 在 690px 面板下模型列
+     * 只有 **128.5px < 实测所需 199.3px**，长模型名**仍然会被截断** ——
+     * 也就是说本 PR 的核心卖点（「模型名不再无谓截断」）在 690px 这个
+     * 最常出现的面板宽度上**不成立**。已知未修：要么继续缩右侧数字列
+     * （属产品取舍，会牵动弹窗 9 列排布），要么接受该宽度下截断（有 title 悬停）。
      *
      * ## 上下限怎么保证（百分比本身没有 clamp）
      *
@@ -3560,7 +3567,15 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
           React.createElement('col', {
             key: column.key,
             className: column.key === 'account' ? 'dim-jh-ledgerColAccount' : undefined,
-            style: { width: column.width },
+            /**
+             * ⚠️⚠️ 账号列**不许**走内联 `style`（PR #94 正向审计 P1-1）：
+             * 内联 style 的层叠权重恒压过样式表里 `@container` / `@media` 的
+             * 上下限规则（那 4 条没有 `!important`）⇒「窄锁 88px / 宽锁 172px」
+             * **全是死代码**，账号列在所有宽度下都恰好等于 12.68%
+             * （300px 面板里只有 ~35px，比改前的 172px 更不可读）。
+             * ⇒ 账号列的宽度整条交给 `jet-hub-styles.js`（基础 12.68% + 分段覆盖）。
+             */
+            style: column.key === 'account' ? undefined : { width: column.width },
           }))),
       React.createElement('thead', null,
         React.createElement('tr', null,
