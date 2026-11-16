@@ -51,6 +51,8 @@ import {
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { copyDetailDocs } from './lib/detail-docs.mjs'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..')
 
@@ -513,6 +515,11 @@ mkdirSync(profileModulesDir, { recursive: true })
 copyTree(join(REPO_ROOT, 'lib'), join(pluginDir, 'lib'))
 if (existsSync(join(REPO_ROOT, 'locale'))) copyTree(join(REPO_ROOT, 'locale'), join(pluginDir, 'locale'))
 copyFileSync(join(REPO_ROOT, 'cordis.patch.yml'), join(pluginDir, 'cordis.patch.yml'))
+
+// `meta.detail` 指向的文档必须一起走。漏了不是「回落 README」，而是
+// 宿主 `readPackageDocument()` 抛 `DetailFailure('invalid')` ⇒ 详情页报错。
+// 路径清单不在这里维护：`locale/*.json` 声明了什么就复制什么。
+copyDetailDocs(REPO_ROOT, pluginDir)
 writeFileSync(join(pluginDir, 'package.json'), `${JSON.stringify(slimPkg, null, 2)}\n`, 'utf8')
 
 // 插件依赖 -> 插件目录下的 node_modules

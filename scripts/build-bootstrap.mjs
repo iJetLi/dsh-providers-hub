@@ -45,6 +45,8 @@ import {
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { copyDetailDocs } from './lib/detail-docs.mjs'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = dirname(HERE)
 const CACHE_DIR = join(REPO_ROOT, 'node_modules', '.cache', 'standalone')
@@ -211,6 +213,11 @@ const pluginDir = join(productDir, 'plugin')
 copyTree(join(REPO_ROOT, 'lib'), join(pluginDir, 'lib'))
 if (existsSync(join(REPO_ROOT, 'locale'))) copyTree(join(REPO_ROOT, 'locale'), join(pluginDir, 'locale'))
 copyFileSync(join(REPO_ROOT, 'cordis.patch.yml'), join(pluginDir, 'cordis.patch.yml'))
+
+// `meta.detail` 指向的文档必须一起走。漏了不是「回落 README」，而是
+// 宿主 `readPackageDocument()` 抛 `DetailFailure('invalid')` ⇒ 详情页报错。
+// 路径清单不在这里维护：`locale/*.json` 声明了什么就复制什么。
+copyDetailDocs(REPO_ROOT, pluginDir)
 
 // 精简 package.json：剔除 scripts（含 prepare）与 devDependencies，
 // 否则目标机 npm install 会触发 prepare 构建而失败。

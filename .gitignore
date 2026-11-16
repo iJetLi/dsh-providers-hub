@@ -50,6 +50,10 @@ scripts/*
 #     所以要改成「目录内通配 + 显式例外」的形式）。
 !scripts/build-standalone.mjs
 !scripts/build-bootstrap.mjs
+# 打包脚本共享的构建助手（`import './lib/detail-docs.mjs'`）。
+# 目录本身也被 `scripts/*` 挡住了，所以要先把目录放出来、再放文件。
+!scripts/lib/
+!scripts/lib/detail-docs.mjs
 !scripts/local-agent.mjs
 # ⚠️ 由 package.json 的 build:all / prepare **直接调用**，属交付链的一环：
 #    不入库 ⇒ 别人 clone 后 `npm run build:all` 会因找不到该脚本直接失败

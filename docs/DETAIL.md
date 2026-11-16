@@ -9,32 +9,44 @@ settings page, with no slash commands.
 ## What it does
 
 - **Multi-account pools** — sign the same service in more than once and the plugin picks a
-  usable account for you; when one is temporarily unavailable it moves on by itself.
-- **Silent credential refresh** — credentials refresh before they expire, so you do not have to
-  reopen a browser to sign in again. A failed refresh surfaces a clear error instead of letting
-  requests time out quietly.
+  usable account for you. **Providers that support request-level account switching** move to
+  the next account when one is temporarily unavailable (rate limit, cooldown, exhausted
+  credits), so you do not switch by hand.
+- **Silent credential refresh** — **providers with a refresh endpoint** renew credentials
+  before they expire, so you do not have to reopen a browser. A few providers have no refresh
+  endpoint (it follows from how you sign in — browser cookies or a QR code, for example), and
+  there you sign in again once their credentials expire; the plugin says so in the error text
+  instead of letting requests time out quietly.
 - **Per-model list toggles** — decide, model by model (or provider by provider), what shows up
   in the model picker.
-- **Credits and daily check-in** — one credit panel for every account; providers that support
-  check-in can claim the day's allowance in one click.
+- **Credits and daily check-in** — one credit panel for the **providers that expose usable
+  credits** (providers without any are simply absent from the panel). Providers that support
+  check-in can claim the day's allowance in one click, and **automatic check-in is on by
+  default** — you can turn it off in settings.
 - **Local OpenAI-compatible gateway** — lets other clients reuse the signed-in accounts
-  (loopback only by default).
+  (loopback only by default; the "allow LAN access" switch in settings binds a non-loopback
+  address, so only enable it on a network you trust).
 
 ## Getting started
 
-1. Open **Sidebar → Plugins → Jet Hub**.
+1. Open **Jet Hub** from the main navigation — the row appears once the plugin is enabled. If
+   that row is hidden, the plugin's detail page has a settings card whose "panel entry" can be
+   pointed at the settings page.
 2. Click **New account**, choose a provider, and complete its sign-in (QR code, browser
    authorization or a pasted callback link — it differs per provider).
 3. Back in the model picker, select a model from that provider and start chatting.
 
 ## Security boundaries
 
-- **Credentials stay on this machine** — stored in `~/.dsh/.credentials.yaml`, never uploaded
-  and never sent anywhere else.
-- **Direct to the official endpoints** — no relay in between; the plugin does not proxy your
-  traffic.
-- **No way around quotas or risk controls** — rate limits, risk-control blocks and exhausted
-  credits are reported as they are.
+- **Credentials stay on this machine** — they are held by DSH's host credential store (on this
+  machine that is `~/.dsh/.credentials.yaml`); the plugin never uploads or forwards them.
+- **The plugin's own requests go straight to the official endpoints** — there is no third-party
+  relay between you and the upstream. The one exception is the **local gateway you turn on
+  yourself**: it forwards your own machine's clients to your signed-in accounts.
+- **No quota or billing deception** — it never fabricates credits, never farms allowance on your
+  behalf, and never sidesteps account-level limits (rate limits, cooldowns and order checks are
+  honoured as they come). When something is refused, it reports why rather than pretending to
+  succeed.
 
 ## What it is not
 
@@ -46,8 +58,9 @@ settings page, with no slash commands.
 | You want | Read |
 |---|---|
 | Install, configuration, the full provider list | `README.md` (shipped) |
-| Per-provider protocol details, measurements and incident history | `docs/implementation-notes.md` and `docs/agent-notes/` **in the source repository — not shipped** |
+| Per-provider protocol details, measurements and incident history | `docs/agent-notes/` **in the source repository — not shipped** |
 | The contract for a plugin page's settings section | `docs/plugin-detail-settings-spec.md` **in the source repository — not shipped** |
 
-> This file and `README.md` are the **only** two documents that ship in the npm package;
-> everything else under `docs/` lives in the source repository only.
+> The package ships only `README.md` plus `docs/DETAIL.md` and `docs/DETAIL.zh.md` — two
+> documents, one per language. Everything else under `docs/` lives in the source repository
+> only.
