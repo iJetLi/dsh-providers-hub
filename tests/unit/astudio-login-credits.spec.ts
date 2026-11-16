@@ -227,7 +227,7 @@ describe('AStudio 每日签到（Credits & Claim）', () => {
       expect(pendingCall[1].headers).toMatchObject({
         Accept: 'application/json',
         clientType: '21',
-        studioVersion: '3.5.2',
+        studioVersion: ASTUDIO.studioVersion,
       })
 
       const completeCall = mockFetch.mock.calls[1]
@@ -236,7 +236,7 @@ describe('AStudio 每日签到（Credits & Claim）', () => {
         'Content-Type': 'application/json',
         Accept: 'application/json',
         clientType: '21',
-        studioVersion: '3.5.2',
+        studioVersion: ASTUDIO.studioVersion,
       })
       expect(JSON.parse(completeCall[1].body)).toEqual({ popupId: 1234, instanceKey: 'inst-abc' })
     })
@@ -261,7 +261,7 @@ describe('AStudio 每日签到（Credits & Claim）', () => {
       const call = mockFetch.mock.calls[0]
       expect(call[1].headers).toMatchObject({
         clientType: '21',
-        studioVersion: '3.5.2',
+        studioVersion: ASTUDIO.studioVersion,
       })
     })
 

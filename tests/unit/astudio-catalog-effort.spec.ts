@@ -55,6 +55,22 @@ function emptySse(): Response {
 }
 
 /**
+ * 从**请求体**里取实际发出去的思考档位。
+ *
+ * ⚠️ 2026-11-16 起本家走的是 **Responses** 协议：档位在 `reasoning.effort`，
+ * 不再是 chat 的顶层 `reasoning_effort`。判据必须跟着 wire 形态走 ——
+ * 照旧读 `reasoning_effort` 会让本组用例**恒真**（字段永远不存在 ⇒ 永远
+ * `undefined`），把「门禁失效」整个漏掉。
+ */
+function reasoningEffortOf(body: unknown): string | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const reasoning = (body as { reasoning?: unknown }).reasoning
+  if (typeof reasoning !== 'object' || reasoning === null) return undefined
+  const effort = (reasoning as { effort?: unknown }).effort
+  return typeof effort === 'string' ? effort : undefined
+}
+
+/**
  * 造一个最小 adapter。
  *
  * ⚠️ **不注入 `fetchRemoteModels` 时目录退用内置兜底表**（零网络）——
@@ -203,7 +219,7 @@ describe('★★ AStudio 思考档位本地拦截（上游对非法档位回 200
       const { adapter, bodies } = makeAdapter()
       await streamOnce(adapter, 'xopglm52', effort)
       expect(
-        (bodies[0] as { reasoning_effort?: string }).reasoning_effort,
+        reasoningEffortOf(bodies[0]),
         `${effort} 应当原样上行`,
       ).toBe(effort)
     }
@@ -214,7 +230,7 @@ describe('★★ AStudio 思考档位本地拦截（上游对非法档位回 200
       const { adapter, bodies } = makeAdapter()
       await streamOnce(adapter, 'xopglm52', bogus)
       expect(
-        (bodies[0] as { reasoning_effort?: string }).reasoning_effort,
+        reasoningEffortOf(bodies[0]),
         `非法档位 ${JSON.stringify(bogus)} 绝不能上行`,
       ).toBeUndefined()
     }
@@ -238,7 +254,7 @@ describe('★★ AStudio 思考档位本地拦截（上游对非法档位回 200
   it('用户未指定档位时不发该字段（走上游默认）', async () => {
     const { adapter, bodies, warnings } = makeAdapter()
     await streamOnce(adapter, 'xopglm52')
-    expect((bodies[0] as { reasoning_effort?: string }).reasoning_effort).toBeUndefined()
+    expect(reasoningEffortOf(bodies[0])).toBeUndefined()
     expect(warnings).toEqual([])
   })
 
@@ -257,7 +273,7 @@ describe('★★ AStudio 思考档位本地拦截（上游对非法档位回 200
     expect(listed.map((m) => m.id)).toContain('single-effort')
     await streamOnce(adapter, 'single-effort', 'high')
     expect(
-      (bodies[0] as { reasoning_effort?: string }).reasoning_effort,
+      reasoningEffortOf(bodies[0]),
       '单档模型的唯一档位必须放行（修前被丢弃且打假告警）',
     ).toBe('high')
     expect(warnings, '不得为单档模型打「未声明任何档位」的假告警').toEqual([])

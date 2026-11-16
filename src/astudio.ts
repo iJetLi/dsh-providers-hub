@@ -1152,6 +1152,411 @@ export function buildAstudioChatRequest(input: AstudioChatRequestInput): Record<
   return body
 }
 
+// ── Responses 协议（本家**真实**推理通路，2026-11-16 实测） ──────────────
+//
+// Chat Completions 那条腿在本家基址上恒 404（见 `ASTUDIO_MAAS_BASE_URL`），
+// 真正在跑的是 `POST {base}/responses` + 会话 JWT。两套协议的**请求体与 SSE
+// 事件都不兼容**，不能只换 URL：
+//
+// | 维度 | Chat Completions | Responses |
+// |---|---|---|
+// | system | 一条 `role:'system'` 消息 | 顶层 `instructions` |
+// | 历史正文 | `content` 字符串 | `input[]` 的 `{type:'input_text'\|'output_text'}` 部件 |
+// | 工具定义 | `{type:'function',function:{name,…}}` | **扁平** `{type:'function',name,…}` |
+// | 工具调用 | `tool_calls[]` + `tool_call_id` | `function_call` / `function_call_output` 条目 |
+// | 思考档位 | `reasoning_effort` | `reasoning:{effort}` |
+// | 输出上限 | `max_tokens` | `max_output_tokens` |
+//
+// SSE 事件（2026-11-16 用真实账号逐帧抓取，顺序即实测顺序）：
+// `response.created` → `in_progress` → `output_item.added`（`reasoning` /
+// `message` / `function_call`）→ `reasoning_summary_text.delta` /
+// `output_text.delta` / `function_call_arguments.delta` → 各自的 `.done`
+// → `output_item.done` → `response.completed`（带 usage）。
+//
+// ⚠️ **`function_call_arguments.delta` 的 `item_id` 是空串**（实测），只能用
+// `output_index` 归并到对应的工具槽位；`.done` 才带 `item_id` 与完整
+// `arguments`。
+
+/** 构造 `POST {base}/responses` 的请求体。字段语义见上面的对照表。 */
+export interface AstudioResponsesRequestInput {
+  /** **裸 slug**（上游唯一认得的形态；`builtin/<base64>` 会 404 `model_not_found`）。 */
+  model: string
+  /** `serializeMessages()` 产出的 **chat 形状** 消息，由本模块转成 Responses 条目。 */
+  messages: readonly Record<string, unknown>[]
+  /** one-shot system（与 `messages` 里的 system 合并进 `instructions`）。 */
+  system?: string
+  /** **已是扁平形态**的工具定义（`{type:'function',name,description,parameters}`）。 */
+  tools?: readonly Record<string, unknown>[]
+  temperature?: number
+  maxTokens?: number
+  stop?: string[]
+  /** 已过 {@link astudioEffortForRequest} 校验的档位；`'none'` ⇒ 不发（= 关思考）。 */
+  reasoningEffort?: string
+  stream: boolean
+  /** 账号 id → 请求体 `user`（实测客户端会带；上游不强求）。 */
+  user?: string
+}
+
+/**
+ * 把 chat 形状的消息序列转成 Responses 的 `input[]` 条目。
+ *
+ * 覆盖四种（实测全部 200，见 `astudio-responses.spec.ts` 的对照）：
+ * - `user` → `{role:'user', content:[{type:'input_text'}…]}`
+ * - `assistant` 正文 → `{role:'assistant', content:[{type:'output_text'}]}`；
+ *   其 `tool_calls` → 紧随其后的 `{type:'function_call', call_id, name, arguments}`
+ * - `tool` 结果 → `{type:'function_call_output', call_id, output}`
+ * - `system` → 由调用方收进 `instructions`（**不**进 `input`）
+ *
+ * ⚠️ 历史里的 `reasoning_content` **不回传**：Responses 的 `input` 没有这一格，
+ * 硬塞会被上游当未知字段忽略/拒绝（实测只接受规定的条目类型）。
+ */
+export function astudioResponsesInputItems(
+  messages: readonly Record<string, unknown>[],
+): { items: Array<Record<string, unknown>>; instructions: string[] } {
+  const items: Array<Record<string, unknown>> = []
+  const instructions: string[] = []
+
+  for (const message of messages) {
+    if (typeof message !== 'object' || message === null) continue
+    const role = typeof message.role === 'string' ? message.role : ''
+
+    if (role === 'system') {
+      const text = astudioResponsesText(message.content)
+      if (text.length > 0) instructions.push(text)
+      continue
+    }
+
+    if (role === 'assistant') {
+      const text = astudioResponsesText(message.content)
+      if (text.length > 0) {
+        items.push({ role: 'assistant', content: [{ type: 'output_text', text }] })
+      }
+      const calls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+      for (const call of calls) {
+        if (typeof call !== 'object' || call === null) continue
+        const record = call as Record<string, unknown>
+        const fn = typeof record.function === 'object' && record.function !== null
+          ? record.function as Record<string, unknown>
+          : undefined
+        const name = typeof fn?.name === 'string' ? fn.name : ''
+        if (name.length === 0) continue // 空名字调用必须剔除（下游会执行成 unknown tool ""）
+        items.push({
+          type: 'function_call',
+          call_id: typeof record.id === 'string' ? record.id : '',
+          name,
+          arguments: typeof fn?.arguments === 'string' ? fn.arguments : '',
+        })
+      }
+      continue
+    }
+
+    if (role === 'tool') {
+      items.push({
+        type: 'function_call_output',
+        call_id: typeof message.tool_call_id === 'string' ? message.tool_call_id : '',
+        output: astudioResponsesText(message.content),
+      })
+      continue
+    }
+
+    // 其余（user 及未知角色）按 user 处理：harness 只会有 user。
+    const parts = astudioResponsesUserParts(message.content)
+    if (parts.length > 0) items.push({ role: 'user', content: parts })
+  }
+
+  return { items, instructions }
+}
+
+/** 从 chat `content`（字符串或部件数组）取纯文本。 */
+function astudioResponsesText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((part): part is Record<string, unknown> => typeof part === 'object' && part !== null)
+    .filter((part) => part.type === 'text')
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .join('')
+}
+
+/**
+ * user 消息的部件 → Responses 部件。
+ *
+ * ⚠️ 图片按 `input_image` 映射（Responses 的形态），但**未真机验证**：本家目录
+ * 7 个模型的 `input_modalities` 全是 `['text']`，harness 对声明 text-only 的模型
+ * 本来就会把图替换成占位文字，这条路径实际到不了上游。**不要据此声称支持识图。**
+ */
+function astudioResponsesUserParts(content: unknown): Array<Record<string, unknown>> {
+  if (typeof content === 'string') {
+    return content.length > 0 ? [{ type: 'input_text', text: content }] : []
+  }
+  if (!Array.isArray(content)) return []
+  const parts: Array<Record<string, unknown>> = []
+  for (const part of content) {
+    if (typeof part !== 'object' || part === null) continue
+    const record = part as Record<string, unknown>
+    if (record.type === 'text' && typeof record.text === 'string' && record.text.length > 0) {
+      parts.push({ type: 'input_text', text: record.text })
+      continue
+    }
+    if (record.type === 'image_url') {
+      const image = record.image_url
+      const url = typeof image === 'string'
+        ? image
+        : (typeof image === 'object' && image !== null && typeof (image as Record<string, unknown>).url === 'string'
+          ? String((image as Record<string, unknown>).url)
+          : '')
+      if (url.length > 0) parts.push({ type: 'input_image', image_url: url })
+    }
+  }
+  return parts
+}
+
+/**
+ * 构造 `POST {base}/responses` 的请求体。
+ *
+ * ⚠️ 三条与 chat 版**刻意不同**的取舍：
+ * 1. **`model` 再兜一次裸 slug**：`builtin/<base64>` 实测 404 `model_not_found`；
+ * 2. **不发就省键**（`temperature` / `max_output_tokens` / `stop` / `reasoning`）：
+ *    上游对 `null` 的容忍度未验证，省略才是「用默认」；
+ * 3. ⚠️⚠️ **`none` 必须显式发出去，不能改写成「省略该键」**（2026-11-16 实测）：
+ *    对 `spark-x2.6`，**省略 `reasoning` ⇒ 思考照开**（`reasoning_tokens=49`），
+ *    而 `{effort:'none'}` ⇒ `reasoning_tokens=0`、只出一个 `message` 条目。
+ *    ⇒ 「省略」与「关闭」**不等价**：把 `none` 省掉，等于用户选了「关闭思考」
+ *    却照付思考的 token（本仓库明令禁止的静默失效）。
+ */
+export function buildAstudioResponsesRequest(
+  input: AstudioResponsesRequestInput,
+): Record<string, unknown> {
+  const source: Array<Record<string, unknown>> = []
+  if (typeof input.system === 'string' && input.system.length > 0) {
+    source.push({ role: 'system', content: input.system })
+  }
+  for (const message of input.messages) source.push(message)
+
+  const { items, instructions } = astudioResponsesInputItems(source)
+  const body: Record<string, unknown> = {
+    model: astudioBareSlugOf(input.model),
+    input: items,
+    stream: input.stream,
+  }
+  if (typeof input.user === 'string' && input.user.length > 0) body.user = input.user
+  if (instructions.length > 0) body.instructions = instructions.join('\n\n')
+  if (input.tools !== undefined && input.tools.length > 0) body.tools = input.tools
+  if (input.temperature !== undefined) body.temperature = input.temperature
+  if (input.maxTokens !== undefined) body.max_output_tokens = input.maxTokens
+  if (input.stop !== undefined && input.stop.length > 0) body.stop = input.stop
+  if (typeof input.reasoningEffort === 'string' && input.reasoningEffort.length > 0) {
+    body.reasoning = { effort: input.reasoningEffort }
+  }
+  return body
+}
+
+/**
+ * 把 Responses 的 SSE **翻译**成 Chat Completions 的 SSE，复用既有消费器。
+ *
+ * ## 为什么是「翻译」而不是另写一个消费器
+ *
+ * `consumeOpenAiSse` 里已累积了 1000 行实测驱动的守卫（思考/正文死循环检测、
+ * 空白思考抑制、空名字工具调用剔除、usage 口径、finish 归类）。为新协议再写
+ * 一份等价实现 ⇒ 两套判据必然分叉（本仓库明令禁止的失效形态）。
+ * 故这里只做**形状翻译**，语义全部留给那一个消费器。
+ *
+ * ## 逐条映射（左 = 实测上游事件，右 = 产出的 chat 帧）
+ *
+ * - `reasoning_summary_text.delta` → `delta.reasoning_content`
+ * - `output_text.delta` → `delta.content`
+ * - `output_item.added`(`type:'function_call'`) → `delta.tool_calls[{index,id,name,arguments:''}]`
+ * - `function_call_arguments.delta` → `delta.tool_calls[{index, function:{arguments}}]`
+ * - `completed` / `incomplete` → 末帧（带 usage）+ `finish_reason` + `[DONE]`
+ * - `error` 事件 / `type:'error'` 数据 → `data: {"error":{…}}`（由消费器归类）
+ *
+ * ⚠️ `finish_reason` 取值：有工具调用 ⇒ `tool_calls`；`status==='incomplete'`
+ * （实测 = 撞输出上限，`reasoning_tokens` 也吃预算）⇒ `length`；其余 `stop`。
+ */
+export function astudioResponsesToChatSse(response: Response): Response {
+  if (response.body === null || response.body === undefined) return response
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+  /** `output_index` → 工具槽位（0..n）。⚠️ delta 事件的 `item_id` 是空串，只能用 output_index。 */
+  const toolSlots = new Map<number, number>()
+  /** 已为该槽位发过多少参数字节，用于 `.done` 只补差量。 */
+  const argsSent = new Map<number, number>()
+  let toolCount = 0
+  let sawToolCall = false
+  let finished = false
+  let usage: Record<string, unknown> | undefined
+  let buffer = ''
+  let currentEvent = ''
+
+  const frame = (payload: Record<string, unknown>): string => `data: ${JSON.stringify(payload)}\n\n`
+  const chunk = (delta: Record<string, unknown>, finishReason: string | null = null): Record<string, unknown> => ({
+    object: 'chat.completion.chunk',
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  })
+
+  const handleEvent = (event: string, data: string, controller: TransformStreamDefaultController<Uint8Array>): void => {
+    if (finished) return
+    if (data.trim().length === 0) return
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>
+    } catch {
+      return
+    }
+    const type = typeof parsed.type === 'string' ? parsed.type : event
+
+    if (type === 'error' || event === 'error' || type === 'response.failed') {
+      finished = true
+      const raw = (typeof parsed.error === 'object' && parsed.error !== null
+        ? parsed.error
+        : (parsed.response as Record<string, unknown> | undefined)?.error) ?? parsed
+      controller.enqueue(encoder.encode(frame({ error: raw })))
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+      return
+    }
+
+    if (type === 'response.reasoning_summary_text.delta') {
+      const delta = typeof parsed.delta === 'string' ? parsed.delta : ''
+      if (delta.length > 0) controller.enqueue(encoder.encode(frame(chunk({ reasoning_content: delta }))))
+      return
+    }
+
+    if (type === 'response.output_text.delta') {
+      const delta = typeof parsed.delta === 'string' ? parsed.delta : ''
+      if (delta.length > 0) controller.enqueue(encoder.encode(frame(chunk({ content: delta }))))
+      return
+    }
+
+    if (type === 'response.output_item.added') {
+      const item = typeof parsed.item === 'object' && parsed.item !== null
+        ? parsed.item as Record<string, unknown>
+        : undefined
+      if (item?.type === 'function_call') {
+        const outputIndex = typeof parsed.output_index === 'number' ? parsed.output_index : 0
+        const slot = toolCount++
+        toolSlots.set(outputIndex, slot)
+        argsSent.set(slot, 0)
+        sawToolCall = true
+        controller.enqueue(encoder.encode(frame(chunk({
+          tool_calls: [{
+            index: slot,
+            // `call_id` 才是可回传的 id（`item.id` 也一致，但语义上以 call_id 为准）。
+            id: typeof item.call_id === 'string' && item.call_id.length > 0
+              ? item.call_id
+              : (typeof item.id === 'string' ? item.id : ''),
+            type: 'function',
+            function: {
+              name: typeof item.name === 'string' ? item.name : '',
+              arguments: '',
+            },
+          }],
+        }))))
+      }
+      return
+    }
+
+    if (type === 'response.function_call_arguments.delta') {
+      const outputIndex = typeof parsed.output_index === 'number' ? parsed.output_index : 0
+      const slot = toolSlots.get(outputIndex) ?? 0
+      const delta = typeof parsed.delta === 'string' ? parsed.delta : ''
+      if (delta.length === 0) return
+      argsSent.set(slot, (argsSent.get(slot) ?? 0) + delta.length)
+      controller.enqueue(encoder.encode(frame(chunk({
+        tool_calls: [{ index: slot, function: { arguments: delta } }],
+      }))))
+      return
+    }
+
+    if (type === 'response.function_call_arguments.done') {
+      // 实测 `.done` 带完整 `arguments`；若上游没发 delta（只发 done），这里补全量。
+      const outputIndex = typeof parsed.output_index === 'number' ? parsed.output_index : 0
+      const slot = toolSlots.get(outputIndex) ?? 0
+      const full = typeof parsed.arguments === 'string' ? parsed.arguments : ''
+      const sent = argsSent.get(slot) ?? 0
+      if (full.length > sent) {
+        const rest = full.slice(sent)
+        argsSent.set(slot, full.length)
+        controller.enqueue(encoder.encode(frame(chunk({
+          tool_calls: [{ index: slot, function: { arguments: rest } }],
+        }))))
+      }
+      return
+    }
+
+    if (type === 'response.completed' || type === 'response.incomplete') {
+      finished = true
+      const payload = typeof parsed.response === 'object' && parsed.response !== null
+        ? parsed.response as Record<string, unknown>
+        : {}
+      const rawUsage = typeof payload.usage === 'object' && payload.usage !== null
+        ? payload.usage as Record<string, unknown>
+        : undefined
+      if (rawUsage !== undefined) {
+        const inputTokens = typeof rawUsage.input_tokens === 'number' ? rawUsage.input_tokens : 0
+        const outputTokens = typeof rawUsage.output_tokens === 'number' ? rawUsage.output_tokens : 0
+        const details = typeof rawUsage.input_tokens_details === 'object' && rawUsage.input_tokens_details !== null
+          ? rawUsage.input_tokens_details as Record<string, unknown>
+          : undefined
+        const outputDetails = typeof rawUsage.output_tokens_details === 'object' && rawUsage.output_tokens_details !== null
+          ? rawUsage.output_tokens_details as Record<string, unknown>
+          : undefined
+        const cachedTokens = typeof details?.cached_tokens === 'number' ? details.cached_tokens : 0
+        const reasoningTokens = typeof outputDetails?.reasoning_tokens === 'number'
+          ? outputDetails.reasoning_tokens
+          : 0
+        usage = {
+          prompt_tokens: inputTokens,
+          completion_tokens: outputTokens,
+          total_tokens: typeof rawUsage.total_tokens === 'number'
+            ? rawUsage.total_tokens
+            : inputTokens + outputTokens,
+          ...cachedTokens > 0 ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {},
+          ...reasoningTokens > 0 ? { completion_tokens_details: { reasoning_tokens: reasoningTokens } } : {},
+        }
+      }
+      const status = typeof payload.status === 'string' ? payload.status : ''
+      const finishReason = sawToolCall ? 'tool_calls' : (type === 'response.incomplete' || status === 'incomplete' ? 'length' : 'stop')
+      const last = chunk({}, finishReason)
+      if (usage !== undefined) last.usage = usage
+      controller.enqueue(encoder.encode(frame(last)))
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+    }
+  }
+
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(bytes, controller) {
+      buffer += decoder.decode(bytes, { stream: true })
+      let newline = buffer.indexOf('\n')
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).replace(/\r$/, '')
+        buffer = buffer.slice(newline + 1)
+        newline = buffer.indexOf('\n')
+        if (line.length === 0) { currentEvent = ''; continue }
+        if (line.startsWith('event:')) { currentEvent = line.slice('event:'.length).trim(); continue }
+        if (line.startsWith('data:')) handleEvent(currentEvent, line.slice('data:'.length).trim(), controller)
+      }
+    },
+    flush(controller) {
+      const rest = buffer.replace(/\r$/, '').trim()
+      if (rest.startsWith('data:')) handleEvent(currentEvent, rest.slice('data:'.length).trim(), controller)
+      if (!finished) {
+        // 上游断流且没有终态事件：补一个 finish 帧，别让消费器等到超时才报错。
+        controller.enqueue(encoder.encode(frame(chunk({}, sawToolCall ? 'tool_calls' : 'stop'))))
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+        finished = true
+      }
+    },
+  })
+
+  const headers = new Headers(response.headers)
+  if (!headers.has('content-type')) headers.set('Content-Type', 'text/event-stream')
+  return new Response(response.body.pipeThrough(transform), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  })
+}
+
 // ── 目录合并（远端 ?? 兜底） ──
 
 /**

@@ -11,7 +11,7 @@ AStudio 后端采用**推理网关**与**账号控制面**严格分离的双域�
 
 | 域 | 基础地址 | 鉴权方式 | 承载能力 |
 |---|---|---|---|
-| **推理网关** | `https://maas-api.cn-huabei-1.xf-yun.com/v1`（2026-11-07 起；旧 `astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1` 已下线） | `Authorization: Bearer <modelBearerToken>` + `X-Account-Id` | `/chat/completions`、`/responses` 模型推理对话 |
+| **推理网关** | `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1`（**Responses 协议**：`POST /responses`） | `Authorization: Bearer <modelBearerToken>` + `X-Account-Id` | 模型推理（**只走 `/responses`**；`/chat/completions` 恒 404）。⚠️ MaaS 域 `maas-api.cn-huabei-1.xf-yun.com/v1` 只认 `api_key`，本机账号在那套账本里无生效订单 ⇒ 403 `11200` |
 | **账号控制面** | `https://agent.xfyun.cn/xingchen-studio` | `Cookie: ssoSessionId=<sid>` | 额度查询（`points/balance`、`points/summary`）、每日签到（`client-popups`）、凭据轮换 |
 | **SSO 认证** | `https://sso.xfyun.cn/SSOService/wx/scanlogin` | 随机 Session `fd` 参数 | 微信扫码授权、UID/会话轮询 |
 
@@ -19,28 +19,102 @@ AStudio 后端采用**推理网关**与**账号控制面**严格分离的双域�
 1. **凭据双轨制**：推理端点不消费 Cookie；账号面端点不消费 Bearer Token。
 2. **凭据自愈链**：当推理返回 `401 / no_valid_authorization` 时，使用存活的 `ssoSessionId` 请求控制面 `/bot/models/configs` 即可无感刷新换取最新 `modelBearerToken`。
 
-### 0.1 推理网关迁移（2026-11-07 真机复测）
+### 0.1 推理网关：**「前缀下线」是错判，它只提供 `/responses`**（2026-11-16 订正 2026-11-07 的结论）
 
-症状：会话内所有 AStudio 请求立即失败 `HTTP 404 API endpoint not found`（`INVALID_REQUEST`），
-客户端看起来「模型不回复」。**不是** token 过期、**不是**模型下架。
+症状（2026-11-07 首次报障）：会话内所有 AStudio 请求立即失败
+`HTTP 404 API endpoint not found`（`INVALID_REQUEST`），客户端看起来「模型不回复」。
+**不是** token 过期、**不是**模型下架。
 
-| 探测 | 结果 |
+2026-11-07 的处置是「把基址搬到 MaaS 域」，理由是「旧前缀对任何路径都回 404」。
+⚠️⚠️ **那条推断只验了 `/chat/completions` 一条路径**，结论过宽。2026-11-16 用同一
+真实账号做了完整对照：
+
+| 探测（同一会话 JWT / 同一账号） | 结果 |
 |---|---|
-| `POST https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1/chat/completions`（真 token） | **404** `{"error":{"message":"API endpoint not found","type":"not_found_error"}}` |
-| 同上但**假 token** | **401** `{"message":"HMAC signature cannot be verified: apikey not found"}` ⇒ 网关先验鉴权，404 发生在路由阶段 |
-| `GET https://astronstudio-api-volces-prod.xf-yun.com/api/v1/model-manager/models`（同一 token） | **200** `code:0`，7 个模型，含 `xopdsv4flash0731in` ⇒ 凭据有效 |
-| `POST https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions`（同一 token） | **200**，普通与 SSE 流均正常出字，`reasoning_effort:high` 也被接受 |
-| `POST https://maas-api.cn-huabei-1.xf-yun.com/v1/models` | **405** `method not allowed` ⇒ 目录仍走旧域的 `/api/v1/model-manager/models` |
-| 新基址 + 不存在的模型 | **400** `{"error":{"code":10404,"message":"no category route found","type":"invalid_request_error"}}` |
+| `POST …/model-gateway/v1/responses`（7 个目录模型逐个发） | **200**，`response.created → output_text.delta → completed`，usage 正常；tools / `reasoning.effort` 均被接受 |
+| `POST …/model-gateway/v1/chat/completions` | **404** `API endpoint not found`（**只有这一条路是死的**） |
+| `POST maas-api…/v1/chat/completions`（同一 JWT） | **401** `HMAC signature cannot be verified: apikey not found` ⇒ MaaS 不认 JWT |
+| `POST maas-api…/v1/chat/completions`（`api_key`，来自 `bot/models/configs`） | **403** `{"error":{"code":11200,"message":"no valid authorization: the account lacks an active order, has insufficient quota, or the order is invalid"}}` |
+| `GET …/api/v1/model-manager/models`（同一 JWT） | **200** `code:0`，7 个模型（`slug` / `visibility` / `input_modalities` / `context_window` 齐全） |
 
-结论：推理基址搬到 `https://maas-api.cn-huabei-1.xf-yun.com/v1`，**目录基址未变**。
-该值来自 AStudio 客户端 bundle（与 `AStudio2API` 从客户端提取的 `DefaultUpstreamBase` 一致），
-并经上表真机 200 验证。旧前缀不会恢复 —— 它现在对任何路径都返回同一句 404。
+⇒ **正确结论**：推理基址仍是 `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1`，
+但**只有 `/responses`（OpenAI Responses 协议）**；目录基址未变。
+AStudio 客户端 3.6.4 的 `maasBaseUrl` 也仍指这个值、调的也是 `/responses`。
+
+⚠️ **两个账本不要混**：积分 / 签到走 `agent.xfyun.cn/xingchen-studio`（Cookie），
+它一直是 200 ⇒ **面板有积分 ≠ 有 MaaS 订单权限**；MaaS 是另一套商品目录。
+「403 / 11200」是**订单缺失**，不是 token 过期，也不是积分用尽。
+
+⚠️ 方法论教训（可推广）：**「一个路径 404」不能推出「整个前缀下线」**。
+迁移/下线这类结论必须**分路径**验证（本仓库同型教训：qoder 的 `dfmodel` 与
+`qmodel` 分别属于两套端点）。
+
+### 0.2 Responses 与 Chat Completions 的字段差异（照抄会 400/静默丢字段）
+
+| 维度 | Chat Completions | Responses（本家真实通路） |
+|---|---|---|
+| system | 一条 `role:'system'` 消息 | 顶层 `instructions`（字符串） |
+| 历史正文 | `content` 字符串 | `input[]` 条目：`{role:'user',content:[{type:'input_text'}]}` / `{role:'assistant',content:[{type:'output_text'}]}` |
+| 工具定义 | `{type:'function',function:{name,…}}` | **扁平** `{type:'function',name,description,parameters}` |
+| 工具调用回传 | `tool_calls[]` + `role:'tool'` | `{type:'function_call',call_id,name,arguments}` + `{type:'function_call_output',call_id,output}` |
+| 思考档位 | `reasoning_effort` | `reasoning:{effort}` |
+| 输出上限 | `max_tokens` | `max_output_tokens` |
+| 正文位置（非流式） | `choices[0].message.content` | `output[]` 里 `type:'message'` 条目的 `content[0].text`（**没有**顶层 `output_text` 便捷字段） |
+
+⚠️⚠️ **`reasoning.effort:'none'` 必须显式发出去、不能省键**（实测 `spark-x2.6`）：
+省略 `reasoning` ⇒ `reasoning_tokens=49`（照开思考）；`{effort:'none'}` ⇒
+`reasoning_tokens=0`、只出一个 `message` 条目。把 `none` 改成「不发」= 用户选了
+「关闭思考」却照付思考 token（静默失效）。
+
+SSE 事件（逐帧实测顺序）：
+`response.created` → `in_progress` → `output_item.added`（`reasoning` / `message` /
+`function_call`）→ `reasoning_summary_text.delta` / `output_text.delta` /
+`function_call_arguments.delta` → 各自 `.done` → `output_item.done` →
+`response.completed`（带 `usage`）。
+⚠️ `function_call_arguments.delta` 的 **`item_id` 是空串**，只能用 `output_index`
+归并到工具槽位（`.done` 才带 `item_id` 与完整 `arguments`）。
+⚠️ 撞输出上限时终态是 **`response.incomplete`**（不是 `completed`）：实测
+`max_output_tokens:40` 时 reasoning 就吃掉 41 token、正文 0 字 ⇒ 必须映射成
+`finish: length`，否则 harness 把「被截断」当正常结束。
+
+---
+
+## 0.3 目录**按客户端版本下发**：`studioVersion` 是模型闸门（2026-11-16 实测）
+
+同一 token、同一目录端点 `GET /api/v1/model-manager/models`，只改请求头：
+
+| 请求头 | 目录条数 | 多出来的是谁 |
+|---|---|---|
+| 不带 `clientType` / `studioVersion` | **7** | — |
+| `clientType:21` + `studioVersion:3.5.2`（本插件**旧值**） | **7** | — |
+| `clientType:21` + `studioVersion:3.6.4`（本机 `AStudio.exe` 真实 `FileVersion`） | **8** | **`xdeepseek-flash-in` = `DeepSeek-V4.1-Flash`** |
+
+⇒⚠️⚠️ 把 `studioVersion` 当「随便填的可选头」是**错的**：它决定服务端下发哪些模型。
+旧值 `3.5.2` 下 `DeepSeek-V4.1-Flash` **永远不会出现在面板里**，而且**零报错** ——
+症状与「上游没这个模型」逐字同形。这与 qoder 的 `COSY_VERSION`、
+zcode 的「版本 × 身份块同代」是同族问题：**版本串是服务端下发内容的判据**。
+
+⚠️ 版本闸门只作用于**目录**，不作用于鉴权/推理：三个变体的推理请求都 200，
+401/403 与它无关（本家 403 是 MaaS 订单，见 §0.1）。
+
+`xdeepseek-flash-in` 的目录声明（8 条那份）：
+
+| 字段 | 值 |
+|---|---|
+| `display_name` | DeepSeek-V4.1-Flash |
+| `context_window` | 1,048,576 |
+| `max_output_tokens` | 100,000 |
+| `supported_reasoning_levels` | `none`（关闭思考）/ `high`（高强度）/ `max`（最大强度） |
+| `default_reasoning_level` | `high` |
+| `input_modalities` | `['text']` |
+
+真机会话取证（本机 DSH 实跑，`~/.dsh/jet-hub/token-ledger.json`）：
+`direct|astudio|astudio-e5cc3cbc|xdeepseek-flash-in` ⇒ `req=1 / err=0 /
+in=309128 / out=1470 / reasoning=1072` —— 既证推理通路，也证 usage 三格都回传。
 
 ---
 
 ## 1. 模型上下文窗口与输出上限（真网压力探测定案）
-
 此前曾有误以为“各模型上下文只有 10 万”的疑问，经真实构造超长 Prompt（4k ~ 1100k tokens）向上游直接施压探测，结果坐实如下：
 
 ### 实测上限与行为一览

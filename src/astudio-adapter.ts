@@ -4,15 +4,19 @@
  * ## 本文件只干三件事（协议判据一律来自 `astudio.ts`，不在此重复）
  *
  * 1. **发请求**：`POST {maasBaseUrl}{chatPath}`
- *    （实测 = `https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions`）。
- *    请求体**一律**交给 {@link buildAstudioChatRequest}，本文件绝不自己拼 body ——
- *    那函数已把三条实测取舍固化在纯函数层（裸 slug、空值省键、`stream_options.include_usage`），
- *    在这里再拼一遍就是第二处实现，必然漂移。
- * 2. **解析流**：复用仓库共享件 {@link consumeOpenAiSse}（`reasoning_content` 独立成块、
- *    `tool_calls` 按 index 合并、`finish_reason` 映射、**HTTP 200 + SSE 内嵌错误帧**归为
- *    `LlmError`）。本家实测是**标准 OpenAI 增量**，故不需要「累积全文→增量 diff」；
- *    但仍套一层 {@link astudioWrapIncremental} 作**防御**（幂等透传，上游哪天改形态不至于把
- *    正文拼成三份）。
+ *    （实测 = `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1/responses`
+ *    —— **Responses 协议**，⚠️ **不是** Chat Completions；同一基址的
+ *    `/chat/completions` 恒 404，详见 `astudio-product.ts` 的基址注释）。
+ *    请求体**一律**交给 {@link buildAstudioResponsesRequest}，本文件绝不自己拼 body ——
+ *    那函数已把实测取舍固化在纯函数层（裸 slug、`instructions`、扁平 tools、
+ *    `max_output_tokens`、`reasoning.effort`、空值省键）。
+ * 2. **解析流**：先把上游 Responses 事件翻译成 chat 帧
+ *    （{@link astudioResponsesToChatSse}），再交给仓库共享件 {@link consumeOpenAiSse}
+ *    （`reasoning_content` 独立成块、`tool_calls` 按 index 合并、`finish_reason` 映射、
+ *    **HTTP 200 + SSE 内嵌错误帧**归为 `LlmError`）。⚠️ 翻译层只做**形状**，语义守卫
+ *    只有一份；为新协议另写一个消费器会让两套判据分叉。
+ *    仍套一层 {@link astudioWrapIncremental} 作**防御**（对真增量流是幂等透传，
+ *    上游哪天改回累积形态不至于把正文拼成三份）。
  * 3. **凭据**：全部经 `astudio-auth.ts` 注入（磁盘快路径 + 401 触发的权威重取）。
  *    本文件**不读磁盘、不拼 Cookie、不自己发凭据请求**。
  *
@@ -68,11 +72,12 @@ import {
   astudioAuthRetryPlan,
   astudioEffortForRequest,
   astudioReasoningOf,
+  astudioResponsesToChatSse,
   astudioStreamErrorCode,
   astudioStreamErrorMessage,
   astudioVisibleModels,
   astudioWrapIncremental,
-  buildAstudioChatRequest,
+  buildAstudioResponsesRequest,
   classifyAstudioError,
   type AstudioCatalogModel,
   type AstudioCredential,
@@ -497,18 +502,18 @@ export class AstudioAdapter extends LlmAdapter {
       this.warnImpl(`[astudio] 丢弃思考档位 ${decision.dropped}：${decision.reason ?? ''}`)
     }
 
-    const body = buildAstudioChatRequest({
+    const body = buildAstudioResponsesRequest({
       model: options.model,
       messages,
       ...options.system !== undefined ? { system: options.system } : {},
+      // ⚠️ Responses 的 tools 是**扁平**形态（`{type:'function',name,…}`）；
+      //    chat 的 `{type:'function',function:{…}}` 嵌套在这里会被上游当未知条目。
       ...options.tools !== undefined && options.tools.length > 0
         ? { tools: options.tools.map((tool) => ({
             type: 'function',
-            function: {
-              name: tool.name,
-              ...tool.description.length > 0 ? { description: tool.description } : {},
-              ...tool.parameters === undefined ? {} : { parameters: tool.parameters },
-            },
+            name: tool.name,
+            ...tool.description.length > 0 ? { description: tool.description } : {},
+            ...tool.parameters === undefined ? {} : { parameters: tool.parameters },
           })) }
         : {},
       ...options.temperature !== undefined ? { temperature: options.temperature } : {},
@@ -582,8 +587,10 @@ export class AstudioAdapter extends LlmAdapter {
     // `consumeOpenAiSse` 负责**（它把这种帧归成 `LlmError` 抛出）；这里的 `onFrame`
     // 只是**旁路观测**（回调抛错会被吞，绝不能把一次正常推理打死），用于把本家
     // 信封码记进告警，便于归因。
+    // ⚠️ 本家是 **Responses** 协议：先把上游事件流翻译成 chat 帧
+    // （{@link astudioResponsesToChatSse}），再交给共享消费器 —— 语义守卫只有一份。
     yield* consumeOpenAiSse(
-      astudioWrapIncremental(response),
+      astudioWrapIncremental(astudioResponsesToChatSse(response)),
       { ...options.signal !== undefined ? { signal: options.signal } : {} },
       {
         label: 'astudio',
