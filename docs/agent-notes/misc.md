@@ -1645,15 +1645,52 @@ HTTP 200、正文正常、上游零报错，只是模型完全不知道 system �
 
 ⚠️⚠️ **marvis 那条腿还叠了一层**：它的 system 必须先过 `rewriteMarvisSystemText`
 （腾讯系风控指纹 + 身份句改写），否则会在修静默失败的同时引入**显式 403 /
-`4100406`**（2026-11-16 刚修好，见 IKVRNK）。顺序是「先改写、再折进 messages[]」，
-**不能反**。
+`4100406`**（2026-11-16 刚修好，见 IKVRNK）。
 
-### 未修已登记（同类形态，本轮未验证、未改）
+⚠️ 真正的不变式**不是**「顺序不能反」，而是「**改写必须覆盖到折叠之后的那条**」。
+对抗审计实测（M16）：把折叠挪到改写**之前**，全量 0 files / 0 tests failed ——
+因为 `src/marvis-adapter.ts:426` 的 `.map(rewriteMarvisSystemMessage)` 会改写
+`messages[]` 里**所有** system 角色，折叠出来的那条同样被改写 ⇒ 两种顺序产出
+**逐字节相同**的 wire。所以「先改写再折」只是当前两条腿的**自然写法**，
+写成「先折再改写」也不破；会破的是「折叠之后**没有**改写覆盖」那一版。
 
-`src/astudio-adapter.ts` / `src/gemini-adapter.ts` / `src/opencode-adapter.ts` 仍在
-adapter 里内联写顶层 `system`。它们是否受影响**没有实测证据**（各自凭据/协议不同，
-其中 gemini 是原生 Gemini 信封、不是 OpenAI 兼容）⇒ 不猜、不顺手改。
-将来若要处理，判据同上：**看模型有没有收到字面量**，并先排除 Anthropic 形状的那几家。
+⚠️ **未验证（登记，不猜）**：折进去之后，每个需要 system 的辅助请求（auto-review /
+session-title）发出去的是 `[本次策略, harness 系统提示词, …历史]` —— **两条 system**。
+同仓有先例长期这么发（`src/llm-adapter.ts:2260` unshift 本次策略 + `:2285` splice
+DSML 提示词；`src/autoclaw.ts:808/819` 恒带两条），未见「多条 system 被拒」的报障
+⇒ **接受性：强（代码先例）/ 上游文档：未取证**。但**合并优先级零证据**：若上游按
+「后者优先」，排在后面的 harness 提示词会压过本次策略 —— 那正是 #97 的镜像形态
+（策略又被淹掉）。证据强度：结构**强**、语义**零**。
+
+### ⚠️⚠️ 核对方法：别把「adapter 传 option bag」当成「写 wire 字段」
+
+这条是本 PR 自己踩过的坑，留给下一次。我最初用
+`grep -rn "system: options.system" src/` 得出「还有 5 家没修」，**其中 3 家是错的** ——
+命中的是**把 `system` 作为参数传给 builder**，而不是往请求体里写 `system` 键：
+
+| 文件:行 | 实际是什么 |
+|---|---|
+| `src/astudio-adapter.ts:503` | `buildAstudioChatRequest({ … system: options.system … })` ← 传参 |
+| `src/gemini-adapter.ts:684` | `translateGeminiRequest({ … system: options.system … })` ← 传参 |
+| `src/opencode-adapter.ts:645` | `buildOpencodeRequest({ … system: options.system … })` ← 传参 |
+
+而这三个 builder **本来就已经折叠**（而且是本仓早有的正确实现）：
+
+- `src/astudio.ts` 的 `buildAstudioChatRequest`：`messages.push({ role: 'system', content: input.system })`，
+  注释逐字写「`system` 折成第一条 `role:'system'` 消息**而不是**顶层字段」；
+- `src/opencode-messages.ts` 的 `buildOpencodeRequest`：`messages: [{ role:'system', … }, ...input.messages]`，
+  注释写「chat 协议没有顶层 system；**恒发**一条 system，且第一条必须是它」；
+- `src/gemini-messages.ts` 的 `translateGeminiRequest`：`request.systemInstruction = { role:'system', parts:[{ text }] }`
+  —— Gemini 原生信封，`system` 本来就**不在** `messages[]` 里（这类「同族只共享信封骨架」的差异见
+  `providers-accio.md` 的同一条教训）。
+
+⇒ **全仓现在写顶层 `system` 的只剩三家 Anthropic Messages**：
+`src/baizhi-messages.ts` / `src/minimax-messages.ts` / `src/monkeycode-messages.ts`
+（`max_tokens` 恒带 + `stop_sequences` + `tools[].input_schema`），**那是对的位置，不许动**。
+
+**正确判据**：找「写 wire 字段」而不是「传参」——
+`grep -rn "payload\.system =\|body\.system =\|system: input\.system" src/`，
+再看命中处构造的是 OpenAI Chat 还是 Anthropic Messages / Gemini 信封。
 
 ### 守卫
 

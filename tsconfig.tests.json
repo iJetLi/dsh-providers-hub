@@ -37,6 +37,7 @@
     //    `payload.system` 是字符串）—— 这类形状错误在 esbuild 转译下完全看不见。
     "tests/unit/marvis-identity.spec.ts",
     "tests/unit/system-prompt-fold.spec.ts",
+    "tests/unit/provider-system-fold-wiring.spec.ts",
     "tests/unit/jet-hub-rpc-signature.spec.ts",
     "tests/unit/astudio-errors.spec.ts",
     "tests/unit/astudio-auth.spec.ts",

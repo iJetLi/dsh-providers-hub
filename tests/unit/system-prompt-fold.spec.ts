@@ -46,6 +46,46 @@ describe('foldSystemIntoMessages：纯函数', () => {
     expect(foldSystemIntoMessages(messages, '')).toBe(messages)
   })
 
+  it('★ 纯空白（空格 / 制表符换行 / 全角空格）同样视为「没给」', () => {
+    // 对抗审计 P3-1：原实现只判 `length === 0`，于是 `' '` 会被折成一条
+    // **没有任何信息**的 system 消息发出去（修前是静默忽略）。
+    // 变异「守卫改回 `length === 0`」必须红。
+    const messages = [{ role: 'user', content: 'hi' }]
+    for (const blank of [' ', '\t\n', '   \r\n  ', '\u3000']) {
+      expect(foldSystemIntoMessages(messages, blank), JSON.stringify(blank)).toBe(messages)
+    }
+  })
+
+  it('★ 非字符串 system ⇒ 响亮 TypeError（不许折成非法 wire content）', () => {
+    // 对抗审计 P3-2：函数是 `export` 的，TS 只是编译期契约。旧实现会把
+    // `0` / `false` / `{}` / `['a','b']` 折成 `content: 0` 之类的非法形状上行。
+    const messages = [{ role: 'user', content: 'hi' }]
+    // ⚠️ 只断言 `toThrow(TypeError)` **没有牙** —— 删掉守卫后 `system.trim()`
+    //    对非字符串同样会抛 TypeError（实测：变异「删 typeof 守卫」后该用例仍是绿的）。
+    //    所以必须断言**我们自己的报错文案**。
+    for (const bad of [0, false, Number.NaN, {}, ['a', 'b'], null] as unknown[]) {
+      expect(
+        () => foldSystemIntoMessages(messages, bad as never),
+        Object.prototype.toString.call(bad),
+      ).toThrow(/foldSystemIntoMessages: system 必须是 string 或 undefined/)
+    }
+    // 合法两态不受影响。
+    expect(() => foldSystemIntoMessages(messages, '你是助手')).not.toThrow()
+    expect(() => foldSystemIntoMessages(messages, undefined)).not.toThrow()
+  })
+
+  it('★ messages 不是数组 ⇒ 响亮 TypeError（而不是 `messages is not iterable`）', () => {
+    for (const bad of [undefined, null, 'hi', 0] as unknown[]) {
+      expect(
+        () => foldSystemIntoMessages(bad as never, '你是助手'),
+        Object.prototype.toString.call(bad),
+      ).toThrow(TypeError)
+    }
+    // 冻结数组 / 只读形态必须照常工作（实现只走 spread 读，不写）。
+    const frozen = Object.freeze([{ role: 'user', content: 'hi' }])
+    expect(foldSystemIntoMessages(frozen, '你是助手')).toHaveLength(2)
+  })
+
   it('非空 system 折成第一条 messages[] 成员，原对话顺序不变', () => {
     const messages = [
       { role: 'user', content: 'a' },
@@ -124,7 +164,14 @@ describe('刻意不改的渠道：Anthropic Messages 的 system 本来就是顶�
       system: '你是助手',
     })
     expect(payload.system, 'baizhi 是 Anthropic 协议，system 必须留在顶层').toBe('你是助手')
-    // 反向：不许被「统一」成 messages[] 里的 system 角色。
-    expect(JSON.stringify(payload.messages)).not.toContain('"role":"system"')
+    // ⚠️ 这里原本还有一条 `expect(JSON.stringify(payload.messages)).not.toContain('"role":"system"')`，
+    //    对抗审计 P3-4 实测它是**结构性恒真**，已删：
+    //    ① `src/minimax-messages.ts` 的序列化循环遇到 `role === 'system'` 直接 `continue`
+    //       ⇒ 就算真折进去，序列化层也会把它丢掉，序列化结果里永远不会有 system 角色；
+    //    ② 而且上一行 `payload.system` 的断言已经先红，那条根本执行不到。
+    //    钉住「baizhi 不许被统一」靠的是上面那条 `payload.system` + 下面这条「入参没被动过」。
+    expect(payload.messages, 'baizhi 不许把 system 折进 messages[]').toEqual([
+      { role: 'user', content: [{ type: 'text', text: '你好' }] },
+    ])
   })
 })

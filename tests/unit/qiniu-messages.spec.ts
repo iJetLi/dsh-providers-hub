@@ -53,7 +53,10 @@ describe('buildQiniuPayload：字段门禁', () => {
 
   it('★ system 折进 messages[]（不放顶层，GitHub #97）；reasoning_effort 只在非空时下发', () => {
     // 顶层 `system` 被上游静默忽略 ⇒ 必须作为第一条 `messages[]` 成员下发。
+    // ⚠️ 下面**空串那条单独是恒真的**（修前 `input.system.length > 0` 同样不带顶层键），
+    //    所以必须再钉「`messages` 原样」—— 那才是「空串不折」的判据。
     expect('system' in buildQiniuPayload({ ...base, system: '' })).toBe(false)
+    expect(buildQiniuPayload({ ...base, system: '' }).messages).toEqual(base.messages)
     const folded = buildQiniuPayload({ ...base, system: '你是助手' })
     expect('system' in folded, '顶层不许再有 system').toBe(false)
     expect(folded.messages).toEqual([{ role: 'system', content: '你是助手' }, ...base.messages])

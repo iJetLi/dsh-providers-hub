@@ -55,6 +55,23 @@ export function foldSystemIntoMessages<T extends Record<string, unknown>>(
   messages: ReadonlyArray<T>,
   system: string | undefined,
 ): ReadonlyArray<T | SystemMessageLike> {
-  if (system === undefined || system.length === 0) return messages
+  // ⚠️ 运行时守卫：TS 只是**编译期**契约，而这是 `export` 的纯函数（仓内三个
+  //    builder 之外的调用方不受 tsc 约束）。对抗审计实测：把 `0` / `false` /
+  //    `{}` / `['a','b']` 塞进 `system`，旧实现会把它们折成 `content: 0` 之类的
+  //    **非法 wire 内容**上行（修前是静默丢弃）⇒ 宁可响亮失败。
+  if (!Array.isArray(messages)) {
+    throw new TypeError(
+      `foldSystemIntoMessages: messages 必须是数组，收到 ${Object.prototype.toString.call(messages)}`,
+    )
+  }
+  if (system === undefined) return messages
+  if (typeof system !== 'string') {
+    throw new TypeError(
+      `foldSystemIntoMessages: system 必须是 string 或 undefined，收到 ${Object.prototype.toString.call(system)}`,
+    )
+  }
+  // 纯空白等价于「没给」：折进去只会多一条**没有任何信息**的 system 消息。
+  // （对抗审计 M11 实测：改成 trim 后无任何用例变红 ⇒ 这一格原本零覆盖。）
+  if (system.trim().length === 0) return messages
   return [{ role: 'system', content: system }, ...messages]
 }

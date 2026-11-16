@@ -25,9 +25,9 @@
  * @module src/marvis-messages.ts
  */
 
-/** DSH 的工具 schema（`GenerateOptions.tools` 的形状）。 */
 import { foldSystemIntoMessages } from './system-prompt-fold.js'
 
+/** DSH 的工具 schema（`GenerateOptions.tools` 的形状）。 */
 export interface MarvisHarnessTool {
   name: string
   description: string

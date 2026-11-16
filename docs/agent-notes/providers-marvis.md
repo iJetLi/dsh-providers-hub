@@ -660,10 +660,16 @@ return rewriteMarvisBlockedIdentities(rewriteTencentContentFingerprints(text, pr
 「判定发生在 `messages[]` 的 system 那条，**不在**顶层 `system`」一节）
 只能换来「不被拦」，**换不来「被执行」**。
 
-**未修已登记**：若宿主/调用方真的依赖 marvis 的顶层 `system`（例如非 agent
-循环的会话标题、auto-review 一类请求），那一段提示词**当前是无效的**。
-本轮只把它作为事实登记，不扩大修复范围（agent 循环实测不传顶层 `system`，
-影响面待评估）。
+✅ **已修（GitHub #97，2026-11-17）**：`buildMarvisPayload` 不再写顶层 `system`，
+改由 `src/system-prompt-fold.ts` 的 `foldSystemIntoMessages` 折成**第一条**
+`messages[]` 成员 —— 正是上面那张八格表推出的唯一出路（顶层收下但不看，折进
+`messages[]` 才被执行）。同类渠道（modelscope / qiniu）一并改；
+`baizhi` / `minimax` / `monkeycode` 是 Anthropic Messages，`system` 本来就是顶层
+参数，**刻意不改**（见 `misc.md` 的同名一节）。
+
+⚠️ 顺序：marvis 的 system 必须**先**过 `rewriteMarvisSystemText`（本节的身份句改写
++ 腾讯系指纹），**再**折进 `messages[]`。反了就等于把被拉黑的原文发出去 ⇒
+显式 403 / `4100406`。
 
 ### ⚠️⚠️⚠️ 铁律：只换「身份句**本体**」那几个词，绝不把后面的内容吃进匹配
 

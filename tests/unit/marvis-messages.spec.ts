@@ -120,6 +120,8 @@ describe('buildMarvisPayload', () => {
     // 上游只从 `messages[]` 读系统提示词，请求体顶层的 `system` 被**静默忽略**
     // （2026-11-17 真机：带了却收不到指令、HTTP 仍是 200）。这条用例修前把
     // **错误行为钉成了期望**（`payload.system`），所以回归能活下来。
+    // ⚠️ 空串那行**单独是恒真的**（修前 `input.system.length > 0` 同样不带顶层键），
+    //    承重的是紧邻的「`messages` 原样」—— 空串不折才不会被塞一条空系统提示词。
     expect(Object.hasOwn(buildMarvisPayload({ ...base, system: '' }), 'system')).toBe(false)
     expect(buildMarvisPayload({ ...base, system: '' }).messages).toEqual(base.messages)
     const folded = buildMarvisPayload({ ...base, system: '你是助手' })
