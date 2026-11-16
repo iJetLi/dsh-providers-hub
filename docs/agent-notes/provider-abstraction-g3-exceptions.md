@@ -74,15 +74,25 @@
 |---|---|
 | `Cline 不支持每日签到（其后端没有签到接口）` | ✅ **逐字节相同** |
 | `WorkBuddy 国际版不支持每日签到（其后端没有签到接口）` | ✅ **逐字节相同** |
-| `Raccoon Work 不支持每日签到（每日积分由服务端自动发放；登录奖励请在「新手任务」中领取）` | ✅ **逐字节相同**（现行是**多行 `+` 拼接**，拼起来与基线单行一致） |
+| `Raccoon Work 不支持每日签到（每日积分由服务端自动发放；登录奖励请在「新手任务」中领取）` | ✅ **逐字节相同**（现行是**多行 `+` 拼接**，拼起来与基线单行一致）<br>⚠️ **2026-11-16 起该句已整条删除**（PR #88 接通了办公端结算，见下） |
 
 ⇒ **对外行为无变更。**
 
-⚠️ **2026-11-15 更新**：上表第二句（`WorkBuddy 国际版不支持每日签到…`）**已删除** ——
+⚠️ **2026-11-15 更新（PR #87）**：上表第二句（`WorkBuddy 国际版不支持每日签到…`）**已删除** ——
 国际版其实**有**签到端点（见 `providers-workbuddy-intl-checkin.md`），那条守卫是误判。
-故本节的「三句」现为**两句**；`claim-runtime-parity.spec.ts` 的逐字断言同步收窄到
-`cline` / `raccoon`，另加一条端到端用例钉住 workbuddy 真的打到
+`claim-runtime-parity.spec.ts` 的逐字断言同步收窄，另加一条端到端用例钉住 workbuddy 真的打到
 `www.workbuddy.ai/v2/billing/meter/daily-checkin`。
+
+⚠️ **2026-11-16 更新（PR #88）**：上表第三句（`Raccoon Work 不支持每日签到…`）**也已删除** ——
+`Raccoon Work` 的每日积分由**办公端** `GET /api/web/office/v3/setting_info` 结算（见
+`providers-loomy-raccoon-minimax.md` 的「每日赠送 300」一节），那条 `claimUnavailableReason`
+同样是误判。
+
+⇒ **本节的历史结论已被两次实测推翻，原始三句现在只剩 `Cline` 一句。**
+`claim-runtime-parity.spec.ts` 的逐字断言相应收窄到**只剩 `cline`**，覆盖渠道数
+`checked.length` 由 17 抬到 **19**（workbuddy 与 raccoon 各加 1）。
+⚠️ 这里**不要**再按「三句 / 两句」去数 —— 数出来的数会随实测变动，
+真正承重的是 `isUnsupportedCheckin()` 的**文案判据**与那张 `claimUnavailableReason` 表的**当前内容**。
 
 **旁证（量级参考，非判据）**：`credits.claimAll` 段长 11973 → 7902 字符；
 段内 `message:` 字面量 9 → 4。⚠️ **段长是必然腐坏的快照**，只用来让人感知「确实搬走了」。

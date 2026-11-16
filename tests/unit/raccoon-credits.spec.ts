@@ -429,6 +429,9 @@ describe('★ claimRaccoonDailyCheckin（每日签到）', () => {
     ])
     const outcome = await claimRaccoonDailyCheckin(RACCOON, CRED, fetcher)
     expect(outcome.kind).toBe('already-claimed')
+    // ⚠️ 这个字段是自动签到「当天是否已证明」的唯一输入（对抗审计 M18 指出原先零断言）。
+    // 账单里**真的**有今天的 daily_grant ⇒ 就是有证据 ⇒ 必须 true（不能让 21:00 白重试）。
+    expect(outcome.coversToday, '账单里今天有 daily_grant 就是证据').toBe(true)
     if (outcome.kind === 'already-claimed') {
       expect(outcome.message).toContain('300')
     }
@@ -502,3 +505,178 @@ describe('★ claimRaccoonDailyCheckin（每日签到）', () => {
     for (const platform of platforms) expect(platform).toBe(RACCOON.clientPlatform)
   })
 })
+
+/* ────────────────── PR #88 双审计返工的守卫（主理鱼补） ──────────────────
+ *
+ * 下面这组用例全部是「改前会绿、改后才会红」的形态：它们钉的是**行为**，
+ * 不是源码文本。每一条都对应审计报告里一个具体的 P1/P2 编号。
+ */
+describe('★★★ PR #88 双审计返工：金额来源、零证据不锁死、形状异常、时区', () => {
+  function balanceSeq(values: Array<number | string | null>): (url: string) => Response {
+    let call = 0
+    return () => {
+      const value = values[Math.min(call, values.length - 1)]
+      call += 1
+      if (value === null) return jsonResponse({ code: 1, message: 'x' }, 500)
+      return jsonResponse({ code: 0, data: { available_points: value, daily_points: 0, reward_points: 0, topup_points: 0, monthly_points: 0 } })
+    }
+  }
+  const setting = (popups: unknown[] = [], toast = ''): (url: string) => Response =>
+    () => jsonResponse({ code: 0, data: { point_grant_toast: toast, point_grant_popups: popups } })
+
+  it('★★★ 余额多了 3000 但账单里今天的 daily_grant 只有 300 ⇒ credit 必须是 300（§F1/A1）', async () => {
+    // 场景：用户在 before/after 之间领了「桌面端登录奖励 3000」，余额差 3300。
+    // 若直接拿余额差当 credit，UI 会显示「今天签到领了 3300」而日额是 300。
+    const today = raccoonUtc8Date()
+    const { fetcher } = routedFetch([
+      { match: '/points/v1/balance', reply: balanceSeq([1000, 4300]) },
+      { match: '/office/v3/setting_info', reply: setting() },
+      {
+        match: '/points/v2/bills',
+        reply: () => jsonResponse({
+          code: 0,
+          data: {
+            items: [
+              { biz_type: 'reward_grant', event_name: '桌面端登录奖励', points: 3000, created_at: `${today}T00:20:00+08:00` },
+              { biz_type: 'daily_grant', event_name: '每日积分发放', points: 300, created_at: `${today}T00:14:00+08:00` },
+            ],
+          },
+        }),
+      },
+    ])
+    const outcome = await claimRaccoonDailyCheckin(RACCOON, CRED, fetcher)
+    expect(outcome.kind).toBe('claimed')
+    if (outcome.kind === 'claimed') {
+      expect(outcome.credit, '金额必须取账单里 daily_grant 的合计，不能取余额差（含同期其它入账）').toBe(300)
+    }
+  })
+
+  it('★★ 差额 > 0 但账单空 ⇒ 仍算 claimed，但 message 必须说明金额可能含其它入账', async () => {
+    const { fetcher } = routedFetch([
+      { match: '/points/v1/balance', reply: balanceSeq([1000, 1300]) },
+      { match: '/office/v3/setting_info', reply: setting() },
+      { match: '/points/v2/bills', reply: () => jsonResponse({ code: 0, data: { items: [] } }) },
+    ])
+    const outcome = await claimRaccoonDailyCheckin(RACCOON, CRED, fetcher)
+    expect(outcome.kind).toBe('claimed')
+    if (outcome.kind === 'claimed') {
+      expect(outcome.credit).toBe(300)
+      expect(String(outcome.message ?? ''), '必须提示这个金额的来源不确定').toContain('其它入账')
+    }
+  })
+
+  it('★★★ 零证据（余额读不到 + 账单查不到 + 无弹窗）⇒ coversToday 必须是 false（§F2/B1）', async () => {
+    // 这是最危险的一格：原实现回 already-claimed + coversToday:true ⇒
+    // computeClaimSummary 计进 coversToday ⇒ auto-checkin 当天不再重试 ⇒
+    // 真失败被永久伪装成「已结算」。
+    const { fetcher } = routedFetch([
+      { match: '/points/v1/balance', reply: balanceSeq([null]) },
+      { match: '/office/v3/setting_info', reply: setting() },
+      { match: '/points/v2/bills', reply: () => jsonResponse({ code: 1, message: 'x' }, 500) },
+    ])
+    const outcome = await claimRaccoonDailyCheckin(RACCOON, CRED, fetcher)
+    expect(outcome.kind).toBe('already-claimed')
+    expect(outcome.coversToday, '三者都拿不到证据时必须让自动签到下一轮重试，不能锁死当天').toBe(false)
+    if (outcome.kind === 'already-claimed') {
+      expect(outcome.message).toContain('无法确认')
+    }
+  })
+
+  it('★★ 余额不变但账单空、弹窗说有 300 ⇒ coversToday 必须是 true（有证据）', async () => {
+    const { fetcher } = routedFetch([
+      { match: '/points/v1/balance', reply: balanceSeq([1000, 1000]) },
+      { match: '/office/v3/setting_info', reply: setting([{ source: 'daily', display_name: '每日积分发放', points: 300 }]) },
+      { match: '/points/v2/bills', reply: () => jsonResponse({ code: 0, data: { items: [] } }) },
+    ])
+    const outcome = await claimRaccoonDailyCheckin(RACCOON, CRED, fetcher)
+    expect(outcome.coversToday, '弹窗是上游给出的「今天发了」证据').toBe(true)
+    if (outcome.kind === 'already-claimed') {
+      expect(outcome.message).toContain('300')
+    }
+  })
+
+  it('★★★ 账单缺 items 字段 ⇒ 必须当成「查不到」而不是「今天没发」（§C1）', async () => {
+    const fetcher = async (url: string): Promise<Response> => {
+      if (String(url).includes('/points/v1/balance')) return jsonResponse(balanceBody(1000))
+      if (String(url).includes('setting_info')) return jsonResponse({ code: 0, data: { point_grant_popups: [] } })
+      // 业务成功但形状漂移（上游把 items 改名 / 少给）
+      return jsonResponse({ code: 0, data: { page: 1 } })
+    }
+    const result = await fetchRaccoonTodayDailyGrants(RACCOON, CRED, fetcher as unknown as typeof fetch)
+    expect(result, '形状异常必须回 null（查不到），不能回 {total:0}（没有）').toBeNull()
+  })
+
+  it('★★★ 账单行的 points 不是数字 ⇒ 该行必须保留（登录奖励「已领」不得翻成「未领」，§C4）', async () => {
+    // 本 PR 引入的回归：改成共享账单函数后 `points` 读不出就丢整行，
+    // 于是「已领取」变成「未领取」—— 用户被提示可以再领（白跑三轮请求）。
+    const fetcher = async (url: string): Promise<Response> => {
+      if (String(url).includes('/points/v2/bills')) {
+        return jsonResponse({
+          code: 0,
+          data: { items: [{ biz_type: 'reward_grant', event_name: '桌面端登录奖励', points: '3000', created_at: '2026-11-16T00:20:00+08:00' }] },
+        })
+      }
+      return jsonResponse({ code: 0, data: {} })
+    }
+    const status = await fetchRaccoonOnboardingStatus(RACCOON, CRED, fetcher as unknown as typeof fetch)
+    expect(status.claimed, 'points 是字符串（纯展示问题）不得让「已领」翻成「未领」').toBe(true)
+  })
+
+  it('★★★ created_at 带 Z 时也必须按北京日归（§F4/C3）', async () => {
+    // 同一时刻的两种写法必须归到同一天：2026-11-15T20:00:00Z = 北京 2026-11-16 04:00
+    const run = async (createdAt: string) => {
+      const fetcher = async (url: string): Promise<Response> => {
+        if (String(url).includes('/points/v2/bills')) {
+          return jsonResponse({
+            code: 0,
+            data: { items: [{ biz_type: 'daily_grant', event_name: '每日积分发放', points: 300, created_at: createdAt }] },
+          })
+        }
+        return jsonResponse({ code: 0, data: {} })
+      }
+      const fixed = Date.parse('2026-11-16T04:00:00+08:00')
+      return fetchRaccoonTodayDailyGrants(RACCOON, CRED, fetcher as unknown as typeof fetch, fixed)
+    }
+    const z = await run('2026-11-15T20:00:00Z')
+    const plus = await run('2026-11-16T04:00:00+08:00')
+    expect(z?.total, 'Z 形态（= 北京 16 日 04:00）必须计入').toBe(300)
+    expect(plus?.total).toBe(300)
+  })
+
+  it('★★ created_at 无法解析 ⇒ 该行跳过（不崩、不误计）', async () => {
+    const fetcher = async (url: string): Promise<Response> => {
+      if (String(url).includes('/points/v2/bills')) {
+        return jsonResponse({
+          code: 0,
+          data: {
+            items: [
+              { biz_type: 'daily_grant', event_name: '每日积分发放', points: 300, created_at: '' },
+              { biz_type: 'daily_grant', event_name: '每日积分发放', points: 300, created_at: 'not-a-date' },
+            ],
+          },
+        })
+      }
+      return jsonResponse({ code: 0, data: {} })
+    }
+    const result = await fetchRaccoonTodayDailyGrants(RACCOON, CRED, fetcher as unknown as typeof fetch, Date.now())
+    expect(result?.total).toBe(0)
+  })
+
+  it('★★ 差额带浮点误差时 roundCredits 必须收成两位小数（§M11 无牙）', async () => {
+    // ⚠️ 夹具有讲究：用 `1000 → 1000.4` 这种**恰好精确**的差值，去掉
+    // `roundCredits` 也还是 `0.4` ⇒ 用例恒真。必须让裸减法产生误差：
+    // `1000.4 - 1000.1 === 0.30000000000000004`，`roundCredits` 才会把它收成 `0.3`。
+    expect(1000.4 - 1000.1, '夹具前提：这个减法必须真的产生浮点误差').not.toBe(0.3)
+    const { fetcher } = routedFetch([
+      { match: '/points/v1/balance', reply: balanceSeq([1000.1, 1000.4]) },
+      { match: '/office/v3/setting_info', reply: setting() },
+      { match: '/points/v2/bills', reply: () => jsonResponse({ code: 0, data: { items: [] } }) },
+    ])
+    const outcome = await claimRaccoonDailyCheckin(RACCOON, CRED, fetcher)
+    expect(outcome.kind).toBe('claimed')
+    if (outcome.kind === 'claimed') {
+      expect(outcome.credit, 'UI 上出现 0.30000000000000004 就是这层没生效').toBe(0.3)
+    }
+  })
+})
+

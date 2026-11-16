@@ -464,3 +464,56 @@ describe('claimLoginReward / fetchCreditBalance（委托到积分模块）', () 
     expect(status.claimed).toBe(true)
   })
 })
+
+/* ───────── PR #88 双审计返工：实例方法必须走注入的 fetcher（§M15 无牙） ─────────
+ *
+ * `RaccoonAuth.claimDailyCheckin` 是 `provider-credits` 的**唯一**调用路径
+ * （`deps.raccoon.claimDailyCheckin` 存在时优先走它）。此前它零测试覆盖，
+ * 把 `this.fetchImpl` 换成全局 `fetch` 是**全绿**的 —— 而那意味着：
+ * 单测失去替身（会真发网络）、生产环境的代理 / 超时配置全部失效。
+ */
+describe('★★★ claimDailyCheckin 必须走注入的 fetcher（不得回落到全局 fetch）', () => {
+  it('★★★ 注入替身时，签到全程只打替身（四类端点都不得漏到全局 fetch）', async () => {
+    const seen: string[] = []
+    const fetcher = async (url: string): Promise<Response> => {
+      seen.push(String(url))
+      const body = String(url).includes('setting_info')
+        ? { code: 0, data: { point_grant_toast: '', point_grant_popups: [] } }
+        : String(url).includes('/points/v2/bills')
+          ? { code: 0, data: { items: [] } }
+          : { code: 0, data: { available_points: 1000, daily_points: 0, reward_points: 0, topup_points: 0, monthly_points: 0 } }
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    // 若实现回落到全局 fetch，这里会立刻抛错（Node 环境真发网络 ⇒ 网络层拒绝）
+    const globalSpy = vi.fn<typeof fetch>(() => { throw new Error('不得触碰全局 fetch') })
+    vi.stubGlobal('fetch', globalSpy)
+    try {
+      const { ctx } = makeCtx()
+      const auth = newService(ctx, { fetcher: fetcher as unknown as typeof fetch })
+      const outcome = await auth.claimDailyCheckin(VALID_CRED)
+      expect(outcome.kind).toBe('already-claimed')
+      expect(seen.length, '注入的替身必须被调用').toBeGreaterThan(0)
+      expect(globalSpy, '全局 fetch 一次都不许被调用').not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('★★ 不注入 fetcher 时才回落到全局 fetch', async () => {
+    const globalSpy = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      code: 0,
+      data: { point_grant_toast: '', point_grant_popups: [] },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', globalSpy)
+    try {
+      const { ctx } = makeCtx()
+      const auth = newService(ctx)
+      const outcome = await auth.claimDailyCheckin(VALID_CRED)
+      expect(outcome.kind).toBe('already-claimed')
+      expect(globalSpy, '没有注入时必须回落到全局 fetch').toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+

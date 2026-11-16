@@ -278,13 +278,26 @@ async function fetchRaccoonIncomeBills(
     fetcher,
   )
   if (!envelope.ok || envelope.data === undefined) return null
-  const raw = Array.isArray(envelope.data.items) ? envelope.data.items : []
+  // ⚠️⚠️ 形状不对必须回 `null`（= 查不到），**不能**回空数组。
+  //
+  // 两种「没有」在语义上是两件事：`items: []` 是「上游明确说这段时间没记录」，
+  // `items` 缺失/不是数组是「上游改了响应形状（协议漂移）」—— 后者是最该报
+  // 异常的时刻，读成「今天没发」会让调用方（`fetchRaccoonTodayDailyGrants` /
+  // `fetchRaccoonOnboardingStatus`）静默得出错误结论。同文件
+  // `fetchRaccoonCreditBalance` 对形状异常就是 `return null`，两条路径必须同口径。
+  if (!Array.isArray(envelope.data.items)) return null
+  const raw: readonly unknown[] = envelope.data.items
   const items: RaccoonBillItem[] = []
   for (const entry of raw) {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
     const record = entry as Record<string, unknown>
-    const points = readNumber(record.points)
-    if (points === undefined) continue
+    // ⚠️⚠️ `points` 读不出来 **不得丢整行**（PR #88 对抗审计 C4 的回归）：
+    // 旧实现把 `points` 只用于**金额**，行的存在本身就等于「这条发放发生过」；
+    // 改成丢行后，「上游把 points 写成字符串」或「上游不返回 points」这两种
+    // 纯展示性问题，会让 `onboarding` 的 `claimed` 由 true 翻成 false ——
+    // 用户被告知「登录奖励还能领」，点一次又白跑三轮请求。
+    // ⇒ 金额读不出时记 0，行照样保留；需要金额的地方自己按 `> 0` 过滤。
+    const points = readNumber(record.points) ?? 0
     items.push({
       bizType: typeof record.biz_type === 'string' ? record.biz_type : '',
       eventName: typeof record.event_name === 'string' ? record.event_name : '',
@@ -300,6 +313,13 @@ async function fetchRaccoonIncomeBills(
  *
  * 判据：收入账单里存在 `biz_type === 'reward_grant'` 且
  * `event_name === '桌面端登录奖励'` 的记录。
+ *
+ * ⚠️⚠️ **这里是「判据只用 `biz_type`」那条纪律的唯一例外，且是刻意的**：
+ * 「新人注册礼包」也是 `reward_grant`（实测），只按 `biz_type` 判会让新用户
+ * 一打开面板就显示「登录奖励已领取」。⇒ 必须再叠一层 `event_name` 才能区分。
+ * 代价是**上游改文案就会翻成未领**（对抗审计 F7/C6 实测：把「桌面端登录奖励」
+ * 改成「…发放」⇒ `claimed` 由 true 变 false），这是一个**已知的取舍**：
+ * 宁可让老用户偶尔多点一次（服务端幂等，无害），也不要让新用户一开始就错过。
  *
  * ⚠️ **不能靠 `balance` 推断** —— 余额是多个来源（注册礼包/每日/充值）的
  * 合计，无法区分某一项是否已领。
@@ -415,10 +435,17 @@ export async function fetchRaccoonTodayDailyGrants(
   for (const item of items) {
     if (item.bizType !== RACCOON_DAILY_GRANT_BIZ_TYPE) continue
     if (item.points <= 0) continue
-    // ⚠️ 上游 `created_at` 带 `+08:00` 偏移（实测 `2026-11-16T00:14:0x+08:00`），
-    //    直接截前 10 位就是北京日期。带 `Z` 的话这行会判错 —— 届时改用
-    //    `raccoonUtc8Date(Date.parse(createdAt))` 归一化。
-    if (item.createdAt.slice(0, 10) !== today) continue
+    // ⚠️⚠️ 必须按**绝对时刻**归到北京日，不能截 `created_at` 的前 10 个字符。
+    //
+    // 上游当前发的是 `2026-11-16T00:14:0x+08:00` 形态，截前 10 位恰好等于北京日；
+    // 但这个等式**只在偏移为 `+08:00` 时成立**。若上游改成 `Z`（UTC），
+    // `2026-11-15T20:00:00Z` = 北京 `2026-11-16 04:00`，截出来却是 `2026-11-15`
+    // ⇒ 北京 00:00~08:00 这八小时的记录**全部跨日判错**（约 1/3），
+    // 而这条账单正是「差额为 0 时」唯一能救回正确结论的兜底腿。
+    // `Date.parse` 对 `+08:00` 与 `Z` 都返回正确的毫秒数，两种形态一起覆盖。
+    const stamp = Date.parse(item.createdAt)
+    if (!Number.isFinite(stamp)) continue
+    if (raccoonUtc8Date(stamp) !== today) continue
     entries.push({ name: item.eventName.length > 0 ? item.eventName : RACCOON_DAILY_GRANT_EVENT_NAME, points: item.points })
   }
   return { total: roundCredits(entries.reduce((sum, entry) => sum + entry.points, 0)), entries }
@@ -432,7 +459,9 @@ export async function fetchRaccoonTodayDailyGrants(
  * - 差额为 0 且今日账单已有 `daily_grant` ⇒ `already-claimed`（今天早些时候到过账）；
  * - 触发或两次余额查询都失败 ⇒ `failed`（带原因，**不虚报成功**）。
  *
- * ⚠️ `coversToday` 恒为 `true`：本渠道的结果**就是**按今天的余额差/账单算出来的。
+ * ⚠️ `coversToday` **不再恒为 `true`**：只有在「差额 > 0」或「账单/弹窗给出了
+ * 今天的凭证」时才声明今天已处理；**三者都拿不到证据时回 `false`**
+ * （让自动签到下一轮重试，而不是把真失败锁成当天不再尝试）。
  *
  * ⚠️ 余额查询失败（`null`）**不直接判失败**：差额判据要求两次都读得到，
  * 读不到就退到账单判据 —— 账单也说没有时才算「今天没发」。这条短路顺序
@@ -449,20 +478,38 @@ export async function claimRaccoonDailyCheckin(
     return { kind: 'failed', code: -1, message: triggered.message, coversToday: true }
   }
   const after = await fetchRaccoonCreditBalance(product, credential, fetcher)
+  // 账单无论走哪条分支都要用（差额分支拿它对账，兜底分支拿它判「今天到过没」），
+  // 故只查一次。注意它可能为 `null`（= 查不到，与「没有记录」是两件事）。
+  const today = await fetchRaccoonTodayDailyGrants(product, credential, fetcher)
+  const todayDaily = today !== null && today.total > 0 ? today.total : 0
   if (before !== null && after !== null) {
     const gained = roundCredits(after.total - before.total)
     if (gained > 0) {
+      // ⚠️⚠️ 余额差**不能直接当成签到金额**（PR #88 对抗审计 F1 / 正向 P1-1）。
+      //
+      // `total` 是 `available_points` —— 全部来源的合计（注册礼包 / 每日 /
+      // 登录奖励 / 充值）。用户在「before 与 after 之间」领了桌面端登录奖励
+      // （3000，按钮就渲染在同一个面板上）或充值，差额就是 3300，而这里原本
+      // 会回「今天签到领了 3300」—— 日额只有 300。
+      //
+      // ⇒ 金额以**账单里今天的 `daily_grant` 合计**为准；账单查不到/为空时
+      // 退回余额差，但必须在 message 里讲清「可能含同期其它入账」。
+      const credit = todayDaily > 0 ? todayDaily : gained
       return {
         kind: 'claimed',
-        credit: gained,
+        credit,
         streakDays: 0,
         isStreakDay: false,
         coversToday: true,
+        ...todayDaily > 0
+          ? {}
+          : {
+              message: `余额增加 ${gained}，但账单里今天的每日积分合计为 0 —— 该金额可能包含同期其它入账（登录奖励 / 充值），签到日额以余额实际到账为准`,
+            },
       }
     }
   }
   // 余额差为 0（或余额读不到）时再问账单：今天早些时候真的到过账吗？
-  const today = await fetchRaccoonTodayDailyGrants(product, credential, fetcher)
   if (today !== null && today.total > 0) {
     const detail = today.entries.slice(0, 3).map((entry) => `${entry.name}+${entry.points}`).join('，')
     return {
@@ -474,14 +521,28 @@ export async function claimRaccoonDailyCheckin(
   // 触发成功、余额没变、账单也没有 ⇒ 上游认为今天已经结算过，但没有可展示的凭证。
   // 如实报「已处理」而不是 `claimed`：编一个金额就是报假账。
   const popupPoints = triggered.popups.reduce((sum, popup) => sum + popup.points, 0)
+  // ⚠️⚠️ **零证据时不得声明「今天已处理」**（PR #88 双向审计的 P1）。
+  //
+  // 走到这里意味着三件事都没给出答案：两次余额读不到 / 没变化，账单也查不到，
+  // popup 与 toast 都是空的。此时原来的写法回 `already-claimed` +
+  // `coversToday: true` —— 而 `computeClaimSummary` 会把它计进 `coversToday`、
+  // `auto-checkin` 据此 `proven.add(provider)` ⇒ **当天第二个时段（21:00）
+  // 不再重试**，真失败（网关抖动 / 上游结算延迟）被永久伪装成「已结算」。
+  //
+  // 修法：`coversToday: false` ⇒ 自动签到下一轮会再问一次。
+  // **不改判 `failed`**：上游很可能真的发了、只是我们看不到（余额端点 5xx），
+  // 报 `failed` 会让这类用户每天看到「签到失败」而无处可修。
+  //
+  // popup 里**有**积分时反而是有证据的（上游明确说「今天发了 N」）⇒ 保持 true。
+  const hasPopupEvidence = popupPoints > 0 || triggered.toast.length > 0
   return {
     kind: 'already-claimed',
     message: triggered.toast.length > 0
       ? triggered.toast
       : popupPoints > 0
         ? `今日每日积分已发放 ${popupPoints}（账单同步有延迟，稍后可在余额看到）`
-        : '今日每日积分此前已结算（办公端按天幂等，不会重复发放）',
-    coversToday: true,
+        : '每日积分结算已触发，但余额与账单都读不到，无法确认是否到账（稍后自动重试）',
+    coversToday: hasPopupEvidence,
   }
 }
 
