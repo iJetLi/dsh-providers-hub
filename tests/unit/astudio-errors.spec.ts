@@ -139,13 +139,25 @@ describe('classifyAstudioError —— HTTP 状态 / 上游错误码 → {kind,ll
     expect(info.message).toMatch(/does not exist/) // 上游 detail 必须透出，便于定位
   })
 
-  it('上游 HTTP 502 + error.code=no_valid_authorization（账号无额度的实测形态）→ 线表无此码，落 SERVER', () => {
-    // ⚠️ 这里是**如实钉住现状**：ASTUDIO_WIRE_CODES 没有 no_valid_authorization，
-    // 所以它按「status>=500 → server」处理（llmCode=SERVER）。
-    // 若后续要把它归 quota，改动应同时更新本用例与线表。
-    const info = classifyAstudioError(502, UPSTREAM_NO_VALID_AUTHORIZATION)
-    expect(info.llmCode).toBe('SERVER')
-    expect(info.kind).toBe('server')
+  it('⚠️ error.code=no_valid_authorization（账号订单缺失）→ PERMISSION_DENIED，**不能**落到 auth/SERVER', () => {
+    // 2026-11-17 真机：`xdeepseek-flash-in` 非流式回 **HTTP 403**
+    // `{"code":"no_valid_authorization","message":"no valid authorization: the account lacks
+    // an active order, has insufficient quota, or the order is invalid","type":"permission_error"}`。
+    //
+    // ⚠️ 这条用例曾经**如实钉住旧现状**（「线表无此码 ⇒ 落 SERVER」），现在钉的是新裁决：
+    // 归 `PERMISSION_DENIED` 是因为 ①`AUTH` 会让客户端把 message 换成「API 密钥无效」
+    // （唯一能指路的「订单缺失」原文消失 ⇒ 用户去反复重登）②`SERVER` 会被白重试 5 次。
+    // 同一份报文在流式侧（HTTP 200 + 单帧 `response.failed`）原本归 `SERVER` ⇒
+    // **一条报文两条裁决**本身是缺陷，两侧现在一致。
+    const info = classifyAstudioError(403, UPSTREAM_NO_VALID_AUTHORIZATION)
+    expect(info.kind).toBe('permission-denied')
+    expect(info.llmCode).toBe('PERMISSION_DENIED')
+    expect(info.message).toMatch(/no valid authorization/) // 上游原文必须透出
+    // 状态码不再是判据的主导（线级码优先）：502 也归同一类，不因 5xx 就退成可重试的 SERVER。
+    expect(classifyAstudioError(502, UPSTREAM_NO_VALID_AUTHORIZATION).llmCode).toBe('PERMISSION_DENIED')
+    // `type: 'permission_error'` 单独出现时也认得（同一问题的另一种信封）。
+    const byType = classifyAstudioError(403, '{"error":{"type":"permission_error","message":"no order"}}')
+    expect(byType.llmCode).toBe('PERMISSION_DENIED')
   })
 
   it('HTTP 401 → AUTH（并给出「需重新登录 AStudio」语义，绝不能是可重试码）', () => {

@@ -15,10 +15,16 @@
  * 输入全部是本地构造的 SSE 字面量（形态逐字取自 2026-11-16 真机抓包）。
  *
  * ── 关键格里为什么这么写（都由实测驱动，别凭直觉改）────────────────
- * ① `function_call_arguments.delta` 的 **`item_id` 是空串** ⇒ 只能用 `output_index`
- *    归并到工具槽位。若改成按 `item_id` 归并，参数会被拆进多个槽位 ⇒ 工具调用参数不完整。
+ * ① `function_call_arguments.*` 必须按 **`output_index`** 归并到工具槽位（不是按 `item_id`：
+ *    槽位语义是「第几个并行调用」，与 id 无关）。⚠️ 早期文档写「`item_id` 是空串」是错的
+ *    （2026-11-17 复核真机抓包 4 帧全带 `item_id:"call_7e08…"`）—— 代码用 `output_index`
+ *    本身是对的，只是理由要正过来。**未知 `output_index` 必须丢弃**（不能兜到 0 号槽，
+ *    否则并行工具参数串台且上游零报错）。
  * ② `response.incomplete`（撞输出上限，reasoning 也吃预算）必须映射成 `length`，
  *    否则 harness 会把「被截断」当成正常结束，长回答静默丢失尾部。
+ * ③ **断流（一个终态事件都没有）时必须什么都不补**，让共享消费器的
+ *    `truncatedStream` 判据兜成 `max-tokens`。补 `finish_reason:'stop'` + `[DONE]`
+ *    会让该判据永不触发 ⇒ 半截正文当完整回答上报（真机实测 60%~67% 丢失）。
  * ③ usage 是 **Responses 口径**（`input_tokens` / `output_tokens` /
  *    `*_details.cached_tokens|reasoning_tokens`），与 chat 的 `prompt_tokens` 不同名；
  *    直接透传会让消费器算成 0 token（计费与统计双缺）。
@@ -114,9 +120,50 @@ describe('buildAstudioResponsesRequest —— 请求体构造', () => {
 
   it('tool 结果 → function_call_output（call_id 原样）', () => {
     const { items } = astudioResponsesInputItems([
+      // ⚠️ 必须先有配对的 `function_call`：孤儿的 `function_call_output` 现在会被剔除
+      // （见下一条用例）。这里顺带钉住「配对齐全时逐字透传」。
+      { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'get_weather', arguments: '{}' } }] },
       { role: 'tool', tool_call_id: 'call_1', content: '晴，28 度' },
     ])
-    expect(items).toEqual([{ type: 'function_call_output', call_id: 'call_1', output: '晴，28 度' }])
+    expect(items).toEqual([
+      { type: 'function_call', call_id: 'call_1', name: 'get_weather', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_1', output: '晴，28 度' },
+    ])
+  })
+
+  it('⚠️⚠️ 孤儿 function_call_output 必须剔除（调用被剔掉时不留孤儿，与网关 resolveToolPairing 同口径）', () => {
+    // 本仓 Issue IKLRIK 逐字记过的形态。真机实测孤儿**不会 400**（2026-11-17），
+    // 后果是历史与调用链**静默不一致** —— 比 400 更难查。
+    const { items } = astudioResponsesInputItems([
+      // 空名字调用被剔掉 ⇒ 它的结果也不能发
+      { role: 'assistant', content: null, tool_calls: [{ id: 'call_bad', type: 'function', function: { name: '', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'call_bad', content: '不该出现' },
+      // 完全没有 call_id 的结果同样剔除（旧代码会发 `call_id: ''`）
+      { role: 'tool', content: '也不该出现' },
+    ])
+    expect(items).toEqual([])
+    expect(JSON.stringify(items)).not.toContain('不该出现')
+    expect(JSON.stringify(items)).not.toContain('也不该出现')
+  })
+
+  it('⚠️ 纯空白的 system 不下发成 instructions（实测会原样变成 "   "）', () => {
+    const body = buildAstudioResponsesRequest({
+      model: 'xopglm52',
+      system: '   ',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    })
+    expect(Object.hasOwn(body, 'instructions')).toBe(false)
+  })
+
+  it('⚠️ maxTokens=0 必须省略（实测 0 ⇒ 上游 response.failed 归 SERVER ⇒ 白重试 5 次）', () => {
+    const body = buildAstudioResponsesRequest({
+      model: 'xopglm52',
+      messages: [{ role: 'user', content: 'hi' }],
+      maxTokens: 0,
+      stream: true,
+    })
+    expect(Object.hasOwn(body, 'max_output_tokens')).toBe(false)
   })
 
   it('tools 是**扁平**形态（没有 chat 的 function 嵌套）', () => {
@@ -178,7 +225,7 @@ describe('astudioResponsesToChatSse —— 事件翻译', () => {
     expect(chunks.find((c) => c.type === 'finish')?.reason).toEqual({ kind: 'stop' })
   })
 
-  it('工具调用：added 带 name，参数 delta 的 item_id 为空串时按 output_index 归并', async () => {
+  it('工具调用：added 带 name，参数 delta 按 output_index 归并到槽位', async () => {
     const chunks = await collect(sseResponse([
       ['response.output_item.added', {
         type: 'response.output_item.added',
@@ -211,6 +258,28 @@ describe('astudioResponsesToChatSse —— 事件翻译', () => {
     expect(args).toBe('{"city":"上海"}')
   })
 
+  it('⚠️⚠️ 分片 delta + `.done` 带全量时**只补差量**（argsSent 不累加 ⇒ 参数翻倍损坏）', async () => {
+    // 真机形态（2026-11-17 抓包）：先若干 `function_call_arguments.delta` 分片，
+    // 最后 `function_call_arguments.done` 带**完整** arguments。
+    // 若 `argsSent` 不累加（或 `.done` 无条件补全量），参数会被拼成
+    // `{"city":"北京"}{"city":"北京"}` ⇒ 非法 JSON。
+    // 变异 M02（`argsSent.set(slot, ...)` 改成不累加）在改前**全绿** ⇒ 这条是补的真缺口。
+    const chunks = await collect(sseResponse([
+      ['response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { type: 'function_call', id: 'call_z', call_id: 'call_z', name: 'get_weather' },
+      }],
+      ['response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', delta: '{"city"', output_index: 0, item_id: 'call_z' }],
+      ['response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', delta: ':"北京"}', output_index: 0, item_id: 'call_z' }],
+      ['response.function_call_arguments.done', { type: 'response.function_call_arguments.done', arguments: '{"city":"北京"}', output_index: 0, item_id: 'call_z' }],
+      ['response.completed', { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 5, output_tokens: 5 } } }],
+    ]))
+    const args = chunks.filter((c) => c.type === 'tool-call-delta').map((d) => String(d.argumentsDelta ?? '')).join('')
+    expect(args).toBe('{"city":"北京"}')
+    expect(() => JSON.parse(args) as unknown).not.toThrow()
+  })
+
   it('response.incomplete ⇒ finish 报 max-tokens（被截断不能当正常结束）', async () => {
     const chunks = await collect(sseResponse([
       ['response.output_text.delta', { type: 'response.output_text.delta', delta: '截', output_index: 0, item_id: 'm' }],
@@ -238,6 +307,46 @@ describe('astudioResponsesToChatSse —— 事件翻译', () => {
     await expect(collect(sseResponse([
       ['error', { type: 'error', error: { message: 'boom', type: 'server_error' } }],
     ]))).rejects.toThrow(/boom/)
+  })
+
+  it('⚠️⚠️ 上游断流（一个终态事件都没有）必须报 max-tokens，**不能**补成正常 stop', async () => {
+    // 真缺陷（2026-11-17 真机）：翻译器的 `flush` 曾**无条件**补
+    // `finish_reason:'stop'` + `data: [DONE]`。共享消费器的截断判据是
+    // `truncatedStream = finishReason === undefined && !streamEnded`，
+    // 而 `[DONE]` 会把 `streamEnded` 置真 ⇒ 该判据**永不触发**，
+    // 半截正文被当成完整回答上报（实测 `fixtures/long.sse` 截前 50% ⇒
+    // 输出 120 字 + `{kind:'stop'}` + 零错误；PR 之前 chat 直传同场景判 max-tokens）。
+    //
+    // 现在 `flush` 什么都不补 ⇒ 消费器按截断处理。
+    const chunks = await collect(sseResponse([
+      ['response.output_text.delta', { type: 'response.output_text.delta', delta: '半截正文', output_index: 0, item_id: 'm' }],
+      // ← 没有 response.completed / response.incomplete / error，流就断了
+    ]), 200)
+    expect(chunks.find((c) => c.type === 'finish')?.reason).toEqual({ kind: 'max-tokens' })
+  })
+
+  it('⚠️ 未知 output_index 的参数字节必须丢弃，**不能**并到 0 号工具（并行工具串台）', async () => {
+    // 旧代码是 `toolSlots.get(outputIndex) ?? 0` ⇒ 缺 `output_index`（或值非法）时
+    // 两个并行工具的参数会被拼进同一个槽位 ⇒ arguments 变成非法 JSON 或把 B 的参数发给 A，
+    // 且**上游零报错**（最难查的一种）。协议里该字段必带 ⇒ 纯防御、结构可达、零实测。
+    const chunks = await collect(sseResponse([
+      ['response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { type: 'function_call', id: 'call_a', call_id: 'call_a', name: 'tool_a' },
+      }],
+      ['response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', delta: '{"a":1}', output_index: 0, item_id: 'call_a' }],
+      // 第二个调用**没带** output_index，参数是给 tool_b 的
+      ['response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', delta: '{"b":2}' }],
+      // 第三个调用**带**了 output_index，但那个 index 从没 `output_item.added` 过
+      // ⇒ 两条守卫必须分开覆盖：① `typeof !== 'number'` ② `toolSlots.get(...) === undefined`
+      ['response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', delta: '{"c":3}', output_index: 7 }],
+      ['response.completed', { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 5, output_tokens: 5 } } }],
+    ]))
+    const args = chunks.filter((c) => c.type === 'tool-call-delta').map((d) => String(d.argumentsDelta ?? '')).join('')
+    expect(args).toBe('{"a":1}') // 只有 A 的参数；B 的 `{"b":2}` 与 C 的 `{"c":3}` 都必须被丢弃
+    expect(args).not.toContain('"b"')
+    expect(args).not.toContain('"c"')
   })
 })
 

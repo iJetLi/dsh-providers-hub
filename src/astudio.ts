@@ -449,6 +449,7 @@ export type AstudioErrorKind =
   | 'auth'            // 凭据失效（需要重取/重新登录）
   | 'model-not-found' // 上游没有该模型的路由
   | 'quota'           // 积分/额度耗尽
+  | 'permission-denied' // 账号级授权缺失（**不是**凭据失效）
   | 'rate-limit'      // 限流
   | 'context-window'  // 上下文超限
   | 'timeout'         // 空闲超时
@@ -478,6 +479,15 @@ const ASTUDIO_WIRE_CODES: ReadonlyMap<string, AstudioErrorKind> = new Map([
   ['model_not_found', 'model-not-found'],
   ['invalid_api_key', 'auth'],
   ['apikey_not_found', 'auth'],
+  // ⚠️ **账号级授权缺失，不是凭据失效**（2026-11-17 真机）：
+  // `no_valid_authorization` 的原文是 "the account lacks an active order, has insufficient
+  // quota, or the order is invalid" —— 凭据本身完全有效，是**订单**没了。
+  // 不登记它们会被下面的 `status === 401 || status === 403` 兜成 `auth`，后果是两条：
+  // ① 客户端把 message 换成「API 密钥无效」（唯一能指路的原文消失，用户会去反复重登）；
+  // ② 流式同一条件走 `openai-compat` 的 `data.error` 分支归 `SERVER` ⇒ 白重试 5 次。
+  // 同一份报文两条裁决这件事本身就是缺陷 —— 两家都归 `permission-denied`。
+  ['no_valid_authorization', 'permission-denied'],
+  ['permission_error', 'permission-denied'],
   ['insufficient_quota', 'quota'],
   ['quota_exceeded', 'quota'],
   ['rate_limit_exceeded', 'rate-limit'],
@@ -570,6 +580,12 @@ function describeAstudioError(kind: AstudioErrorKind, status: number, detail: st
       return { kind, llmCode: 'PERMISSION_DENIED', message: `astudio: 上游没有该模型的推理路由。常见原因是把 acode 内核的内部别名（builtin/<base64>）当成 model 发了上来 —— 上游只认裸 slug${suffix}` }
     case 'quota':
       return { kind, llmCode: 'QUOTA_EXCEEDED', message: `astudio: 账号额度不足${suffix}` }
+    case 'permission-denied':
+      // `403 no_valid_authorization` = **账号级**订单/额度问题，凭据是有效的。
+      // 归 `PERMISSION_DENIED` 的三个理由与 `model-not-found` 同款：
+      // ① 客户端不替换它（保住「订单缺失」这句原文）② `dead-model-store` 的
+      // IGNORED_CODES 收它 ③ 不在 DEFAULT_RETRYABLE_CODES ⇒ 不白退避。
+      return { kind, llmCode: 'PERMISSION_DENIED', message: `astudio: 账号无权使用该模型（订单缺失 / 额度不足 / 订单失效，需在 AStudio 侧开通后再试）${suffix}` }
     case 'rate-limit':
       return { kind, llmCode: 'RATE_LIMITED', message: `astudio: 上游限流${suffix}` }
     case 'context-window':
@@ -1160,6 +1176,18 @@ export function astudioResponsesInputItems(
 ): { items: Array<Record<string, unknown>>; instructions: string[] } {
   const items: Array<Record<string, unknown>> = []
   const instructions: string[] = []
+  /**
+   * 已产出的 `function_call` 的 `call_id` 集合 —— `function_call_output` **只在这些 id
+   * 上产出**。
+   *
+   * ⚠️ 这是本仓 Issue IKLRIK 逐字记过的形态：剔掉调用（空名字）却照发配对的工具结果，
+   * 会留下**无对应 `function_call` 的孤儿 `function_call_output`**。真机实测孤儿**不会
+   * 400**（2026-11-17：孤儿 id 与空 `call_id` 都回 200）⇒ 后果不是报错，而是**历史与
+   * 调用链静默不一致**（重放时模型看到一个从未发生过的工具结果）—— 比 400 更难查。
+   * 网关侧（`src/openai-compat.ts`）的 `resolveToolPairing` 对同一份数据是「剔除并继续」，
+   * 这里必须同口径。
+   */
+  const keepCallIds = new Set<string>()
 
   for (const message of messages) {
     if (typeof message !== 'object' || message === null) continue
@@ -1167,7 +1195,8 @@ export function astudioResponsesInputItems(
 
     if (role === 'system') {
       const text = astudioResponsesText(message.content)
-      if (text.length > 0) instructions.push(text)
+      // 纯空白（`'   '`）不算系统提示词：真机实测它会原样下发成 `instructions: "   "`。
+      if (text.trim().length > 0) instructions.push(text)
       continue
     }
 
@@ -1185,9 +1214,11 @@ export function astudioResponsesInputItems(
           : undefined
         const name = typeof fn?.name === 'string' ? fn.name : ''
         if (name.length === 0) continue // 空名字调用必须剔除（下游会执行成 unknown tool ""）
+        const callId = typeof record.id === 'string' ? record.id : ''
+        keepCallIds.add(callId)
         items.push({
           type: 'function_call',
-          call_id: typeof record.id === 'string' ? record.id : '',
+          call_id: callId,
           name,
           arguments: typeof fn?.arguments === 'string' ? fn.arguments : '',
         })
@@ -1196,9 +1227,12 @@ export function astudioResponsesInputItems(
     }
 
     if (role === 'tool') {
+      const callId = typeof message.tool_call_id === 'string' ? message.tool_call_id : ''
+      // 配对剔除：调用被剔掉（或 id 缺失）时**不留孤儿**，与网关侧 `resolveToolPairing` 同口径。
+      if (!keepCallIds.has(callId)) continue
       items.push({
         type: 'function_call_output',
-        call_id: typeof message.tool_call_id === 'string' ? message.tool_call_id : '',
+        call_id: callId,
         output: astudioResponsesText(message.content),
       })
       continue
@@ -1288,7 +1322,9 @@ export function buildAstudioResponsesRequest(
   if (instructions.length > 0) body.instructions = instructions.join('\n\n')
   if (input.tools !== undefined && input.tools.length > 0) body.tools = input.tools
   if (input.temperature !== undefined) body.temperature = input.temperature
-  if (input.maxTokens !== undefined) body.max_output_tokens = input.maxTokens
+  // ⚠️ 只有**正数**才下发：`max_output_tokens: 0` 实测 ⇒ 上游 200 + `response.failed`
+  // /`invalid_prompt` ⇒ 下游归 `SERVER` ⇒ 白重试 5 次（确定性失败）。
+  if (input.maxTokens !== undefined && input.maxTokens > 0) body.max_output_tokens = input.maxTokens
   if (input.stop !== undefined && input.stop.length > 0) body.stop = input.stop
   if (typeof input.reasoningEffort === 'string' && input.reasoningEffort.length > 0) {
     body.reasoning = { effort: input.reasoningEffort }
@@ -1329,6 +1365,8 @@ export function astudioResponsesToChatSse(response: Response): Response {
   let toolCount = 0
   let sawToolCall = false
   let finished = false
+  /** 未知 `output_index` 的告警只打一次（否则每个 delta 刷一行）。 */
+  let warnedUnknownSlot = false
   let usage: Record<string, unknown> | undefined
   let buffer = ''
   let currentEvent = ''
@@ -1377,9 +1415,11 @@ export function astudioResponsesToChatSse(response: Response): Response {
         ? parsed.item as Record<string, unknown>
         : undefined
       if (item?.type === 'function_call') {
-        const outputIndex = typeof parsed.output_index === 'number' ? parsed.output_index : 0
+        const outputIndex = typeof parsed.output_index === 'number' ? parsed.output_index : undefined
         const slot = toolCount++
-        toolSlots.set(outputIndex, slot)
+        // 只在 `output_index` 真的给到时登记映射 —— 缺失就不登记，让后续 delta
+        // 走「未知槽位 ⇒ 丢弃」那条路，而不是统统并到 0 号槽。
+        if (outputIndex !== undefined) toolSlots.set(outputIndex, slot)
         argsSent.set(slot, 0)
         sawToolCall = true
         controller.enqueue(encoder.encode(frame(chunk({
@@ -1401,8 +1441,21 @@ export function astudioResponsesToChatSse(response: Response): Response {
     }
 
     if (type === 'response.function_call_arguments.delta') {
-      const outputIndex = typeof parsed.output_index === 'number' ? parsed.output_index : 0
-      const slot = toolSlots.get(outputIndex) ?? 0
+      // ⚠️ **未知 `output_index` 必须丢弃，不能 `?? 0`**（fail-closed）。
+      // 落 0 号槽的后果：两个并行工具的参数会被拼进同一个槽位 ⇒ arguments 变成
+      // 非法 JSON 或把 B 的参数发给 A，**且上游零报错**（最难查的一种）。
+      // 协议里该字段必带（实测 4 帧 `function_call_arguments.*` 全部带
+      // `output_index` 与 `item_id`）⇒ 这里是纯防御，结构可达、零实测。
+      if (typeof parsed.output_index !== 'number') {
+        if (!warnedUnknownSlot) {
+          warnedUnknownSlot = true
+          // 只告警一次，且**不含工具参数内容**（那才是敏感数据）。
+          console.warn('[astudio] function_call_arguments 缺少 output_index，已丢弃该帧（防止并行工具参数串台）')
+        }
+        return
+      }
+      const slot = toolSlots.get(parsed.output_index)
+      if (slot === undefined) return
       const delta = typeof parsed.delta === 'string' ? parsed.delta : ''
       if (delta.length === 0) return
       argsSent.set(slot, (argsSent.get(slot) ?? 0) + delta.length)
@@ -1414,8 +1467,11 @@ export function astudioResponsesToChatSse(response: Response): Response {
 
     if (type === 'response.function_call_arguments.done') {
       // 实测 `.done` 带完整 `arguments`；若上游没发 delta（只发 done），这里补全量。
-      const outputIndex = typeof parsed.output_index === 'number' ? parsed.output_index : 0
-      const slot = toolSlots.get(outputIndex) ?? 0
+      // 与 delta 同款 fail-closed：未知 `output_index`（或还没见过对应的
+      // `output_item.added`）一律丢弃 —— 尤其**不能**落 0 号槽。
+      if (typeof parsed.output_index !== 'number') return
+      const slot = toolSlots.get(parsed.output_index)
+      if (slot === undefined) return
       const full = typeof parsed.arguments === 'string' ? parsed.arguments : ''
       const sent = argsSent.get(slot) ?? 0
       if (full.length > sent) {
@@ -1484,12 +1540,19 @@ export function astudioResponsesToChatSse(response: Response): Response {
     flush(controller) {
       const rest = buffer.replace(/\r$/, '').trim()
       if (rest.startsWith('data:')) handleEvent(currentEvent, rest.slice('data:'.length).trim(), controller)
-      if (!finished) {
-        // 上游断流且没有终态事件：补一个 finish 帧，别让消费器等到超时才报错。
-        controller.enqueue(encoder.encode(frame(chunk({}, sawToolCall ? 'tool_calls' : 'stop'))))
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'))
-        finished = true
-      }
+      // ⚠️⚠️ 上游断流（一整个终态事件都没收到）时**什么都不要补**。
+      //
+      // 共享消费器 `consumeOpenAiSse` 的截断判据是
+      // `truncatedStream = finishReason === undefined && !streamEnded`，
+      // 而 `data: [DONE]` 本身就会把 `streamEnded` 置真 ⇒ 这里补帧会让该判据
+      // **永不触发**，半截正文被当成完整回答上报（静默截断）。
+      // 实测：`fixtures/long.sse`（真实抓包，正文 234 字）只喂前 50% 字节 ⇒
+      // 旧代码输出 120 字 + `{kind:'stop'}` + 零错误；不补 ⇒ 消费器判 `max-tokens`，
+      // 与 PR 之前（chat 直传）同款。
+      //
+      // 注意 `if (!finished)` 这个分支**曾经存在**且被用例全绿掩盖（把它改成
+      // `if (false)` 时 15/15 全绿）—— 现在由 `tests/unit/astudio-responses.spec.ts`
+      // 的「断流」用例钉住。
     },
   })
 

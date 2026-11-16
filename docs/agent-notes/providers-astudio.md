@@ -162,6 +162,56 @@ Responses 协议里 `output_text.delta` 的 `delta` 按定义就是本帧新增�
 且**抬到上游不认识的版本会让签到直接 11001001**（本仓 `astudio.ts` 模块头原写
 「三个可选头实测都不带也能 200」是**只对推理面**成立的结论，已加限定）。
 
+⚠️ **「目录可见 ≠ 账号可用」**：抬到 3.6.4 后多出的 `xdeepseek-flash-in` 在本机审计账号上
+**不可推理**（非流式 `403 no_valid_authorization` = 账号级订单缺失，**不是**凭据问题）。
+⇒ 用户会在选择器里看到一个**必然失败**的模型。这不是本 PR 的缺陷，但文案必须指路：
+403 `no_valid_authorization` / `permission_error` 已归 `PERMISSION_DENIED`（不是 `AUTH`，
+否则客户端会把原文换成「API 密钥无效」；也不是 `SERVER`，那是可重试码、会白重试 5 次）。
+
+---
+
+## 0.6 断流：一个终态事件都没收到时，**什么都不要补**
+
+Responses 的翻译器 `astudioResponsesToChatSse` 的 `flush` 曾经**无条件**补
+`finish_reason:'stop'` + `data: [DONE]`（注释写「别让消费器等到超时才报错」—— 与事实相反）。
+
+共享消费器 `consumeOpenAiSse` 的截断判据是
+`truncatedStream = finishReason === undefined && !streamEnded`，
+而 **`data: [DONE]` 本身就会把 `streamEnded` 置真** ⇒ 补帧让该判据**永不触发**：
+
+| 场景 | 旧行为 | 正确行为 |
+|---|---|---|
+| 正文流到一半断掉 | 半截正文 + `{kind:'stop'}` + **零错误**（静默截断） | `{kind:'max-tokens'}` ⇒ 可重试 |
+| `output_item.added` 后断掉 | 合成 `tool-calls` + args `{}` ⇒ **用空参数执行工具** | 同上 |
+
+实测：`fixtures/long.sse`（真实抓包，正文 234 字）只喂前 50% 字节 ⇒ 旧代码输出 120 字 + `stop`；
+PR 之前（chat 直传）同场景判 `max-tokens`。**变异 M5（该块改 `if (false)`）当时 15/15 全绿**
+—— 零用例盯这条腿，这就是它活下来的原因。
+
+⇒ 铁律：翻译器的 `flush` **只在真的收到终态事件（`response.completed` / `response.incomplete`
+/ `error`）之后**才有权补帧；断流时什么都别补，让消费器判截断。
+
+---
+
+## 0.7 三条边角（都是「下游/上游不报错但语义错」的形态）
+
+1. **孤儿 `function_call_output`**：剔掉空名字 `function_call` 后，配对的工具结果
+   **必须一起剔**（`astudioResponsesInputItems` 现在用 `keepCallIds` 做单遍配对）。
+   真机实测孤儿**不会 400** ⇒ 后果是「历史与调用链静默不一致」（重放时模型看到一次
+   不曾发生的工具结果），比 400 更难查。这与网关侧 `resolveToolPairing` 是同一口径，
+   也与 Issue IKLRIK 的教训一致。
+2. **`max_output_tokens: 0` 必须省略**：实测 0 ⇒ 上游 `200` + `response.failed`/`invalid_prompt`
+   ⇒ 下游归 `SERVER` ⇒ 确定性失败被白重试 5 次。
+3. **纯空白 `system` 不下发**：`'   '` 会原样变成 `instructions: "   "`。
+
+⚠️ 另修正两处旧文档的口径错误：
+- 「`function_call_arguments.*` 的 `item_id` 是空串」**与实测相反**（2026-11-17 复核抓包
+  4 帧全带 `item_id:"call_7e08…"`）。代码按 `output_index` 归并本身是对的，但理由要正过来
+  （槽位语义是「第几个并行调用」，与 id 无关），且**未知 `output_index` 必须丢弃**、
+  不能兜到 0 号槽（否则并行工具参数串台且上游零报错）。
+- 「既有 astudio 测试合计 94 条」不实（实测 10 个 spec 249 条）；「请求体构造 10 条」
+  实为 8 条（15 = 8 请求体 + 7 SSE）。
+
 ---
 
 ## 1. 模型上下文窗口与输出上限（真网压力探测定案）
