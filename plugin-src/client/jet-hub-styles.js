@@ -1472,11 +1472,23 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 @container (min-width: 1360px) {
   .dim-jh-ledgerPaneBody .dim-jh-ledgerTable col.dim-jh-ledgerColAccount { width: 172px; }
 }
-/* 弹窗（非 pane 外壳）没有 @container 上下文，用媒体查询给同一个上限。
-   ⚠️ 弹窗宽 960px 时 12.68% ≈ 122px，本来就不到 172px ⇒ 这条只在超宽屏生效。 */
-@media (min-width: 1400px) {
-  .dim-jh-ledgerTable col.dim-jh-ledgerColAccount { width: 172px; }
-}
+/* ⚠️⚠️ 这里**刻意没有** 那条「@media (min-width: 1400px) 锁 172px」的规则
+   （PR #94 对抗审计 P2-2。旧版长成两行：媒体查询 + col 选择器。）两个问题都必须
+   记下来，否则将来有人会「顺手加回来」：
+
+   1. **弹窗根本用不到这个上限**：弹窗外壳是 .dim-jh-modal--ledger，
+      宽度是 min(960px, 100%) ⇒ 12.68% 最多 121.7px，**永远够不到 172px**。
+      那条媒体查询按**视口**宽（≥1400）触发，与弹窗宽度无关 ⇒
+      在 1600px 视口的机器上会把 960px 弹窗里的账号列从 122px 顶到 172px，
+      **比按比例还宽 41%**，白吃模型列的空间。
+   2. **视口宽不是面板宽的代理**：右侧栏是视口的 45%，1600px 视口下
+      栏宽约 720px ⇒ 12.68% ≈ 91px，而那条媒体查询会把它顶到 172px
+      （占栏宽 24%）。面板的真实宽度只有容器自己知道 ⇒
+      上限只能由 @container 表达。
+
+   ⇒ 结论：**pane 外壳靠上面那条 @container（min-width: 1360px），
+   弹窗靠 min(960px, 100%) 这个上限本身**，两条路径都不需要按视口的
+   媒体查询。⚠️ 本文件是 JS 模板字符串：注释里**禁止反引号**。 */
 
 /* ── 模型列表的「计费/来源」分组（订阅 / 免费 / Cline Cloud / 按量计费）──
    分组由 model-groups.js 的纯函数决定（判据见其模块注释）；这里只管观感。
