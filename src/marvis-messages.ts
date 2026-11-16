@@ -43,6 +43,14 @@ export interface MarvisWireTool {
  *
  * ⚠️ 这是 `options.tools` 的**唯一出口**。不下发它，模型在 wire 上看不到任何
  * 函数定义，只能用正文里的 XML 臆造工具调用。
+ *
+ * ⚠️⚠️ 但**空数组不许下发**（返回 `[]` 时调用方必须把整个键省略）：
+ * `tools: []` 会让服务端认为「本轮有函数调用能力」却一个定义都没有，
+ * 模型只能改在正文里臆造 —— 实测症状是 `dsh-experimental-auto-review`
+ * 对评审输出做严格 `JSON.parse` 时崩在 `Unexpected token '<'`（2026-11-16
+ * 用户报障，正文里出现了 `<｜｜DSML｜｜tool_calls>` 标记）。
+ * 其余 8 家 openai-compat 系适配器都是
+ * `if (tools !== undefined && tools.length > 0) bodyObj.tools = tools` 门控。
  */
 export function buildMarvisTools(
   tools: readonly MarvisHarnessTool[] | undefined,
@@ -81,7 +89,8 @@ export interface MarvisPayloadInput {
  * - `system` 只有非空才带；
  * - `max_tokens` 只放行安全正整数 —— 0 / 负数 / NaN 会让 DSH 侧抛
  *   `INVALID_MODEL_MAX_TOKENS`，整轮崩；
- * - `tools` **恒带**（哪怕空数组）；
+ * - `tools` 只在**非空**时下发（与其余 8 家 openai-compat 系适配器同口径 ——
+ *   `tools: []` 会让模型在正文臆造工具调用，见 `buildMarvisTools` 的注释）；
  * - `reasoning_effort` 只有非空字符串才带（非法值上游 400 `3000101`）。
  */
 export function buildMarvisPayload(input: MarvisPayloadInput): Record<string, unknown> {
@@ -90,7 +99,9 @@ export function buildMarvisPayload(input: MarvisPayloadInput): Record<string, un
     messages: input.messages,
     stream: true,
     stream_options: { include_usage: true },
-    tools: buildMarvisTools(input.tools),
+    ...(input.tools !== undefined && input.tools.length > 0
+      ? { tools: buildMarvisTools(input.tools) }
+      : {}),
     ...(input.system !== undefined && input.system.length > 0 ? { system: input.system } : {}),
     ...(typeof input.temperature === 'number' && Number.isFinite(input.temperature)
       ? { temperature: input.temperature }

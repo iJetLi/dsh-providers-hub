@@ -349,3 +349,75 @@ undefined」；`dsh-agent-loop` 的 `buildRequest` 返回体里没有 `system` �
 分支判成 `risk`，UI 与日志上只剩「HTTP 403」，看不出上游给的是「非法请求」还是「风控」；
 单账号时 `risk` 分支换无可换、直接上抛给用户。本提交只修放行面，不动分类，避免把
 「内容级拦截」与「账号级风控」混成同一条码。
+
+## ⚠️⚠️ 工具为空时下发 `tools: []` 会让模型在正文输出 DSML 标记（Gitee IKVL6C，2026-11-16）
+
+**症状**（用户真机报障，官方 `@deepseek-ai/dsh-experimental-auto-review` + 权限预设「自动审查」）：
+单个会话 12 次工具调用全部失败，报
+
+```
+Error: Auto review of tool "glob" failed; its body was not executed:
+Unexpected token '<', "...is not valid JSON"
+```
+
+（另有 `Unexpected token 'I'` / `Unexpected non-whitespace character after JSON at position 82`）。
+`parseDecision` 对评审输出做**严格 `JSON.parse`**，而模型在**正文**里吐了
+`<｜｜DSML｜｜tool_calls>` 之类的标记。同一 provider 里**不走自动审查**的相邻会话 0 次失败
+⇒ 与凭据、网络、上游风控都无关。
+
+**根因链（四条，全部实测可验）**：
+
+1. `src/marvis-messages.ts` 的 `buildMarvisPayload` **恒带** `tools` 键（哪怕 `[]`）；
+2. 自动审查那一轮**没有任何工具**（`options.tools` 为 `undefined`）⇒ `buildMarvisTools`
+   返回 `[]` ⇒ wire 上是 `"tools": []`；
+3. 服务端看到「本轮有函数调用能力」却一个定义都没有 ⇒ 模型只能在正文里**臆造**
+   （这与 `:44-45` 注释自陈的「不下发它，模型在 wire 上看不到任何函数定义，
+   只能用正文里的 XML 臆造工具调用」是同一件事，只是**空数组同样触发**）；
+4. `src/marvis-adapter.ts` 调 `consumeOpenAiSse(...)` 时**没有** `dsmlToolMode: true`
+   ⇒ `src/openai-compat.ts` 的 `DsmlContentExtractor` 不装 ⇒ 正文里的 DSML 标记
+   **原样流到上层**。
+
+**决定性证据：全仓 9 个 openai-compat 系适配器只有本家恒带空数组，其余 8 家全门控**：
+
+```
+src/autoclaw-adapter.ts:637   if (tools !== undefined && tools.length > 0) bodyObj.tools = tools
+src/buddy-adapter.ts:2863     同上
+src/cline-adapter.ts:916      同上
+src/codely-adapter.ts:613     同上
+src/lobsterai-adapter.ts:1198 同上
+src/magicrew-adapter.ts:456   同上
+src/trae-adapter.ts:1277      同上
+src/zcode-adapter.ts:957      同上
+src/marvis-messages.ts:93     tools: buildMarvisTools(input.tools)   ← 唯一的偏离
+```
+
+而那行原先的契约注释只写了结论「`tools` **恒带**（哪怕空数组）」、**没写理由**
+（模块头解释的是「为什么要包装成 `{type:'function'}`」，不是「为什么空数组也要带」）
+⇒ **无理由的偏离**，正撞本仓红线「同一判据只留一份实现 / 同义判据必须同口径」。
+
+**修法**：`buildMarvisPayload` 改成非空才带
+
+```ts
+...(input.tools !== undefined && input.tools.length > 0
+  ? { tools: buildMarvisTools(input.tools) }
+  : {}),
+```
+
+**为什么不选另外两条建议**（报障人提过，已在 issue 里逐条回复）：
+
+- **在正文加协议闸门（发现 DSML 就抛 `LlmError`）** —— 不采纳这个「抛」。抛错会把
+  **局部失败**（评审那一步）放大成**整轮失败**，而当前症状恰好只是 review 那步挂、
+  对话本身还能继续。真正的修法是上面那条，闸门只该 `warn` + 留痕让上层自己降级。
+- **发现 DSML 就重试** —— 不采纳。臆造是**概率性**行为，重试很可能再臆造一次（白烧额度），
+  还会把「模型不听话」掩盖成偶发故障。
+
+**守卫**（`tests/unit/marvis-messages.spec.ts`，`★★★` 那条是本缺陷的直接回归）：
+
+1. `★★★ tools 为空时必须整个省略`（`[]` 与 `undefined` 两格都必须 `Object.hasOwn(…) === false`）——
+   原有用例 `it('tools 恒带（哪怕是空数组）')` **把错误行为钉成了期望**，本提交已改写；
+2. `★ 有工具时必须带，且与 buildMarvisTools 逐字一致`（防「为了省略把有工具也省了」的过度修正）。
+
+**通用教训可推广**：凡「协议允许省略、而本家拼命带上」的字段，都要问一句
+**「带上它的语义和省略它是否等价」**。`tools: []` 不是「没有这个键」——
+它明确声明了「有函数调用能力」；同理 `system: ""` / `temperature: 0` 也是
+（前两个本家已经正确地门控了，只有 `tools` 漏了）。

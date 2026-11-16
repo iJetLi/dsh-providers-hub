@@ -49,10 +49,29 @@ describe('buildMarvisPayload', () => {
     expect(payload.stream_options).toEqual({ include_usage: true })
   })
 
-  it('tools 恒带（哪怕是空数组）', () => {
-    const payload = buildMarvisPayload(base)
-    expect(payload.tools).toEqual([])
-    expect(Object.hasOwn(payload, 'tools')).toBe(true)
+  it('★★★ tools 为空时必须整个省略（发 [] 会让模型在正文臆造工具调用）', () => {
+    // 空数组与 undefined 都必须等价地「不带这个键」—— 上游据此判断本轮能否走
+    // 结构化 function calling。带上 `[]` 时模型会改在正文里输出 DSML 标记，
+    // 上层严格 JSON.parse 直接崩（Gitee IKVL6C）。
+    const empty = buildMarvisPayload({ ...base, tools: [] })
+    expect(Object.hasOwn(empty, 'tools')).toBe(false)
+    expect(empty.tools).toBeUndefined()
+    const missing = buildMarvisPayload(base)
+    expect(Object.hasOwn(missing, 'tools')).toBe(false)
+  })
+
+  it('★ 有工具时必须带，且与 buildMarvisTools 逐字一致', () => {
+    const tools = [
+      { name: 'read_file', description: '读一个文件', parameters: { type: 'object' } },
+    ]
+    const payload = buildMarvisPayload({ ...base, tools })
+    expect(payload.tools).toEqual(buildMarvisTools(tools))
+    expect(payload.tools).toEqual([
+      {
+        type: 'function',
+        function: { name: 'read_file', description: '读一个文件', parameters: { type: 'object' } },
+      },
+    ])
   })
 
   it('system 只有非空才带', () => {
