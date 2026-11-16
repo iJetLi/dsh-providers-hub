@@ -2871,14 +2871,58 @@ const LEDGER_ENTRY_COLUMNS = Object.freeze([
     label: '账号',
     title: '服务本笔请求的账号：优先显示备注名（nickname），其次上游用户名（accountName）；'
       + '两者都取不到时显示内部 id（悬停可看完整 id）。账本不存名字，名字由各账号的凭据现读。',
-    width: '172px',
+    /**
+     * ⚠️⚠️ **账号列 = 纯百分比 12.68%**（用户 2026-11-16 两次报障后的定案）。
+     *
+     * ## 为什么不能用 clamp / calc（实测推翻了我的前两版）
+     *
+     * ⚠️⚠️ **`<col>` 的 width 只接受「单一长度或百分比」，clamp() 与 calc() 都失效。**
+     * 真机实测（Chromium，同一张表、同一宽度 690px）：
+     *
+     *   `clamp(88px, 12.68%, 172px)` → 账号列 **162px**
+     *   `clamp(88px, 22%,    172px)` → 账号列 **162px**   ← 两个不同值结果完全相同
+     *   `calc(88px + (100% - 694px) * 0.35)` → **162px**  ← 同上
+     *   `12.68%`（纯百分比）        → 账号列 **87px**    ✅ 生效
+     *   `22%`（纯百分比）           → 账号列 **152px**   ✅ 生效
+     *
+     * 两个不同的 clamp 值给出**逐字节相同**的结果 ⇒ 浏览器把整个声明当无效值丢弃，
+     * 该列退回 `auto`，而 `table-layout: fixed` 下 `auto` 列**平分剩余宽度**
+     * （162 = 剩余宽度的一半）—— 这正好解释了用户看到的
+     * 「账号列 265px、模型列被挤到省略」。
+     *
+     * ⚠️ 这个坑极难发现：clamp 语法完全合法、esbuild 不报错、tsc 不报错、
+     * 单测里的字符串断言照样绿（源码里确实有那串字符）—— **只有真机量宽度才露馅**。
+     * 这与本仓库反复记录的「判据看着在做实事」同型。
+     *
+     * ## 12.68% 怎么来的
+     *
+     * 用户实际面板宽约 **690px**，要求账号列在此时 ≈ **88px**（账号名可读下限）：
+     *   690 × 12.68% ≈ 87.5px ✓
+     * 此时模型列 = 690 − 366（其余 7 列）− 88 = **236px**（充足）。
+     *
+     * ## 上下限怎么保证（百分比本身没有 clamp）
+     *
+     * 用 `@container` 分段覆盖，见 `jet-hub-styles.js` 的
+     * `.dim-jh-ledgerPaneBody` 区块：
+     *   - 容器 < 560px：账号列锁 88px（百分比在窄容器会掉到 50px，不可读）
+     *   - 容器 > 780px：账号列锁 172px（宽屏下与改前的固定值一致）
+     *
+     * ⚠️ **只给账号列设上下限；模型列刻意不设**（用户 2026-11-16 明确要求：
+     * 「要给帐号增加最大宽度限制呀，模型列就不需要了」）—— 模型列必须能吃掉
+     * 全部剩余宽度，否则长模型名会被无谓截断。
+     */
+    width: '12.68%',
   }),
   Object.freeze({
     key: 'model',
     label: '模型',
     title: 'provider/模型（与上游其它处的写法一致）。完整 id 一行显示；窄屏可横向滚动。',
     /**
-     * ⚠️ 模型列**吃掉剩余宽度**（`auto`），不给固定像素。
+     * ⚠️⚠️ **弹性宽度 `clamp(132px, auto, 1fr)` 的等价写法：`auto`**（用户 2026-11-16 报障）。
+     *
+     * 模型列**吃掉剩余宽度**。配合上面账号列改成弹性后，窄面板下两列**一起收缩**：
+     * 账号列从 172px 收到 88px（让出 84px），剩下的才由模型列承担
+     * —— 这正是原缺陷缺的那一半（原先只有模型列在让步）。
      *
      * 实测（960px 弹窗、11.5px 字体）：最长组合
      *   workbuddy/deepseek-v4.1-flash-free = 187.3px（+12 内边距 = 199.3px）
@@ -3506,7 +3550,18 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
       //（8 列时勉强够，加一列就崩）。列宽与表头同源（`LEDGER_ENTRY_COLUMNS`）。
       React.createElement('colgroup', null,
         LEDGER_ENTRY_COLUMNS.map((column) =>
-          React.createElement('col', { key: column.key, style: { width: column.width } }))),
+          /**
+           * ⚠️ 账号列额外挂一个类名 `dim-jh-ledgerColAccount`：
+           * 它的宽度是纯百分比（12.68%，见 `LEDGER_ENTRY_COLUMNS` 里的长注释），
+           * 而百分比在窄容器里会掉到不可读的宽度 ⇒ 由 `jet-hub-styles.js` 的
+           * `@container` 块按容器宽度给它锁上下限（88px / 172px）。
+           * ⚠️ 只给账号列加；模型列**刻意不加**（它必须吃掉全部剩余宽度）。
+           */
+          React.createElement('col', {
+            key: column.key,
+            className: column.key === 'account' ? 'dim-jh-ledgerColAccount' : undefined,
+            style: { width: column.width },
+          }))),
       React.createElement('thead', null,
         React.createElement('tr', null,
           // ⚠️ 列头与下面的 `<td>` 由同一个列定义表驱动（`LEDGER_ENTRY_COLUMNS`）：

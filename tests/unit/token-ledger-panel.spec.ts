@@ -706,8 +706,31 @@ describe('明细表 · 模型列格式与列宽排布', () => {
     // 时间/渠道压到贴紧内容：42.2 / 23px 的内容给 62 / 46px（含内边距）。
     expect(client).toMatch(/key: 'time'[^}]*width: '62px'/)
     expect(client).toMatch(/key: 'channel'[^}]*width: '46px'/)
-    // 账号 172px：实测最长账号名 154.5px + 内边距 12px = 166.5px ⇒ 160px 会截断。
-    expect(client).toMatch(/key: 'account'[^}]*width: '172px'/)
+    /**
+     * ⚠️⚠️ 账号列宽度经过三次迭代（2026-11-16）：
+     *
+     * ① 原缺陷：写死 `172px` ⇒ `table-layout: fixed` 下**完全不参与收缩**。
+     * ② 第二次：`clamp(88px, 22%, 172px)` —— 以为能弹性，**但实测无效**。
+     * ③ 第三次（现在）：**纯百分比 12.68%** + `@container` 锁上下限。
+     *
+     * ## ⚠️⚠️ 为什么是纯百分比（这条必须记住）
+     *
+     * `<col>` 的 width **只接受单一长度或百分比**，`clamp()` / `calc()` 会被
+     * **静默忽略**、退回 `auto` ⇒ `table-layout: fixed` 下 auto 列**平分剩余宽度**。
+     * 真机实测（同一张表、690px 容器）：
+     *   `clamp(88px, 12.68%, 172px)` → 162px
+     *   `clamp(88px, 22%,    172px)` → 162px   ← 两个不同值结果完全相同
+     *   `12.68%`（纯百分比）        →  87px   ✅ 只有它生效
+     * ⚠️ 这个坑**语法合法、esbuild/tsc 都不报错、字符串断言照样绿**
+     * （源码里确实有那串字符）—— 只有真机量宽度才露馅。
+     *
+     * 12.68% 的来历：用户面板约 690px，要求账号列此时 ≈ 88px
+     * ⇒ 88 / 690 ≈ 12.75%，取 12.68%（对应 87.5px）。
+     */
+    expect(client).toMatch(/key: 'account'[^}]*width: '12\.68%'/)
+    // ⚠️ 反向：不许退回 clamp/calc（它们在 col 上无效，会静默平分宽度）
+    expect(client).not.toMatch(/key: 'account'[^}]*width: 'clamp/)
+    expect(client).not.toMatch(/key: 'account'[^}]*width: 'calc/)
     // 模型列吃剩余宽度（auto），不是固定 200px（差 7.5px 会截断）。
     expect(client).toMatch(/key: 'model'[^}]*width: 'auto'/)
     // 右侧数字列按实测分配。
@@ -716,17 +739,28 @@ describe('明细表 · 模型列格式与列宽排布', () => {
     expect(client).toMatch(/key: 'tps'[^}]*width: '86px'/)
     expect(client).toMatch(/key: 'duration'[^}]*width: '58px'/)
     expect(client).toMatch(/key: 'status'[^}]*width: '60px'/)
-    // ⚠️ 反向：整个列定义表里一个百分比都不许留（会退回「等分/浪费」的老形态）。
+    // ⚠️ 反向：整个列定义表里一个**裸百分比**都不许留（会退回「等分/浪费」的老形态）。
+    //    `clamp(...)` 内部含 `%` 是合法的，故这里只拦「width 直接就是百分比」。
     const colBlock = client.slice(client.indexOf('const LEDGER_ENTRY_COLUMNS'), client.indexOf('const LEDGER_ENTRY_CSV_COLUMNS'))
     expect(colBlock).not.toMatch(/width:\s*'\d+%'/)
   })
 
   it('★★ 列宽总计必须 ≈ 912px（960 弹窗 − 左右内边距），给模型列留足余量', () => {
     const colBlock = client.slice(client.indexOf('const LEDGER_ENTRY_COLUMNS'), client.indexOf('const LEDGER_ENTRY_CSV_COLUMNS'))
+    /**
+     * 账号列现在是**纯百分比 12.68%**（clamp/calc 在 col 上被静默忽略，见上一条），
+     * 故纯像素列从 8 个变成 7 个。宽屏下账号列上限由 @container 锁 172px
+     * （见下一条断言），总宽按 172 计入。
+     */
     const fixed = [...colBlock.matchAll(/width:\s*'(\d+)px'/g)].map((m) => Number(m[1]))
-    // 8 列固定（model 是 auto）+ 列数校验：少一列说明有人删了列。
-    expect(fixed).toHaveLength(8)
-    const sum = fixed.reduce((a, b) => a + b, 0)
+    expect(fixed, '除账号列外应有 7 个纯像素列').toHaveLength(7)
+
+    // 账号列必须仍是百分比形态（不是纯像素 —— 那样就不随容器收缩了）
+    expect(colBlock, '账号列必须是百分比宽度').toMatch(/key: 'account'[^}]*width: '12\.68%'/)
+    const accountMax = 172
+    expect(accountMax, '账号列上限必须仍是 172px').toBe(172)
+
+    const sum = fixed.reduce((a, b) => a + b, 0) + accountMax
     // 固定列合计必须 < 912，余量是模型列的（实测需要 199.3px）。
     expect(sum).toBeLessThan(912)
     expect(912 - sum, '模型列剩余宽度必须大于实测最长串 199.3px').toBeGreaterThan(199.3)
@@ -740,6 +774,138 @@ describe('明细表 · 模型列格式与列宽排布', () => {
 
   it('★ 模型格的 title 挂完整串（窄屏省略号截断时靠悬停看全）', () => {
     expect(client).toMatch(/title:\s*ledgerEntryModelText\(entry\)/)
+  })
+
+  it('★★★ 统计组不再写死宽度（460px 白占 124px，用户 2026-11-16 报障）', () => {
+    /**
+     * 原写法 `flex: none; width: 460px`：三格内容实测只需约 336px，
+     * 白占 124px —— 那 124px 本可以给左边的「账号 → 模型」信息区。
+     * 现在改成内容自适应（`flex: 0 1 auto`）+ 允许收缩。
+     *
+     * ⚠️⚠️ **必须先剥掉 CSS 注释再断言**：那段规则的注释里为了讲清历史，
+     * 明确写着「从 flex: none + width: 460px 改成…」—— 不剥注释时
+     * `not.toMatch(/width:\s*460px/)` 会**命中注释里的历史说明**而假红
+     * （本轮实测踩到）。这与仓库既有教训同型：判据必须打在**生效的代码**上，
+     * 注释里的字面量不算数（`if (false)` 那条的镜像形态）。
+     *
+     * ⚠️ 判据锁三件事：
+     *   ① 生效规则里不再有 width: 460px（原缺陷本体）
+     *   ② 是 flex: 0 1 auto（可收缩，不是 flex: none）
+     *   ③ 仍有 margin-left: auto（整组仍靠右，保持原设计的右缘对齐）
+     */
+    const statGroupRule = /\.dim-jh-ledgerStatGroup\s*\{([^}]*)\}/.exec(styles)
+    expect(statGroupRule, '找不到 .dim-jh-ledgerStatGroup 规则').not.toBeNull()
+    /** 剥掉 /* … *\/ 注释后再断言（见上方说明）。 */
+    const body = statGroupRule![1].replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(body, '统计组不许再写死 460px 宽度').not.toMatch(/width:\s*460px/)
+    expect(body, '统计组必须可收缩（flex: 0 1 auto）').toMatch(/flex:\s*0\s+1\s+auto/)
+    expect(body, '统计组必须仍靠右（margin-left: auto）').toMatch(/margin-left:\s*auto/)
+  })
+
+  it('★★★ 「总处理」与左边统计格之间必须有最小间距（用户 2026-11-16 报障）', () => {
+    /**
+     * 根因：`.dim-jh-ledgerModelTokens { margin-left: auto }` 会把剩余空间
+     * **全部吸到左侧**，于是 `gap: 8px` 在视觉上等于「贴着」——
+     * 用户截图里「首字 5.74s · P50 196.1 tok/s」与「总处理 36.87M」挤在一起。
+     * ⇒ 给一个**最小**左间距（padding-left），同时保留 auto（组够宽时仍顶到组尾）。
+     */
+    const totalRule = /\.dim-jh-ledgerStatGroup > \.dim-jh-ledgerModelTokens[^{]*\{([^}]*)\}/.exec(styles)
+    expect(totalRule, '找不到「总处理」格的规则').not.toBeNull()
+    // ⚠️ 同样先剥注释：那段注释里也写了 `gap: 8px` 等字面量做说明。
+    const body = totalRule![1].replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(body, '「总处理」必须保留 margin-left: auto（右缘对齐）').toMatch(/margin-left:\s*auto/)
+    expect(body, '「总处理」必须有最小左间距（padding-left）').toMatch(/padding-left:\s*\d+px/)
+  })
+
+  it('★★★ 统计优先级：总处理 > 次数 > 首字·速率（只有 perf 可收缩）', () => {
+    /**
+     * 用户 2026-11-16 三次报障后的定案：
+     *   ① 「次数跟总处理永远完整」
+     *   ② 「怎么就省略不显示完整了」（perf 不该被无谓省略）
+     *   ③ 「总处理怎么会被顶走了」（perf 不让位 ⇒ 整组溢出 ⇒ 总处理被裁）
+     *
+     * ⇒ 正确的优先级组合：
+     *   - **总处理**（`AccountSum`/`ModelTokens`）：`flex: none` —— 永远不被挤出；
+     *   - **次数**（`AccountReq`/`ModelReq`）：`flex: none` —— 永远完整；
+     *   - **首字·速率**（`Perf`）：`flex: 0 1 auto` + `min-width: 0` —— **唯一让位者**；
+     *     上限 200px（实测最长 175px ⇒ 空间够时完整显示）。
+     *
+     * ⚠️⚠️ 这里踩过两次**方向相反**的坑，判据必须同时锁住两端：
+     *   - perf 改成 `flex: none` ⇒ 整组无法收缩 ⇒ **总处理被裁**（用户报障③）；
+     *   - perf 上限改小到 132px ⇒ 有空间也省略（用户报障②）。
+     */
+    const perfRule = /\.dim-jh-ledgerPerf\s*\{([^}]*)\}/.exec(styles)
+    expect(perfRule, '找不到 .dim-jh-ledgerPerf 规则').not.toBeNull()
+    const perfBody = perfRule![1].replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(perfBody, '「首字·速率」必须是唯一可收缩的（flex: 0 1 auto）').toMatch(/flex:\s*0\s+1\s+auto/)
+    expect(perfBody, '「首字·速率」必须有 min-width: 0（否则收缩不生效）').toMatch(/min-width:\s*0/)
+    expect(perfBody, '「首字·速率」需单行省略兜底').toMatch(/text-overflow:\s*ellipsis/)
+    // 上限必须够放下实测最长串（175px），不能退回过小的 132px
+    const maxW = /max-width:\s*(\d+)px/.exec(perfBody)
+    expect(maxW, '「首字·速率」必须有 max-width').not.toBeNull()
+    expect(Number(maxW![1]), '上限必须 ≥ 200px（实测最长 175px，太小会无谓省略）').toBeGreaterThanOrEqual(200)
+
+    // 反向：次数与总处理必须 flex: none（永远完整、不被挤出）
+    for (const [label, re] of [
+      ['次数（账号行）', /\.dim-jh-ledgerAccountReq\s*\{([^}]*)\}/],
+      ['次数（模型行）', /\.dim-jh-ledgerModelReq\s*\{([^}]*)\}/],
+      ['总处理（账号行）', /\.dim-jh-ledgerAccountSum\s*\{([^}]*)\}/],
+      ['总处理（模型行）', /\.dim-jh-ledgerModelTokens\s*\{([^}]*)\}/],
+    ] as const) {
+      const hit = re.exec(styles)
+      expect(hit, `找不到 ${label} 的规则`).not.toBeNull()
+      expect(
+        hit![1].replace(/\/\*[\s\S]*?\*\//g, ''),
+        `${label} 必须是 flex: none（永远完整，不许被压缩或被挤出）`,
+      ).toMatch(/flex:\s*none/)
+    }
+  })
+
+  it('★★★ 账号列必须有上下限，模型列必须没有（用户 2026-11-16 明确要求）', () => {
+    /**
+     * 账号列是纯百分比 12.68% ⇒ 会随容器无限增长（1400px 屏时 177px 是浪费）
+     * 也会在窄容器掉到不可读（400px 时 51px）。
+     * ⇒ 用 @container 锁 88px（窄）/ 172px（宽）。
+     *
+     * ⚠️ **模型列刻意不设上限** —— 用户原话：「要给帐号增加最大宽度限制呀，
+     * 模型列就不需要了」。它必须吃满全部剩余宽度，否则长模型名会被无谓截断。
+     */
+    // 账号列：col 必须挂类名（否则 @container 选择不到）
+    expect(client, '账号列的 col 必须挂 dim-jh-ledgerColAccount 类名').toMatch(
+      /className:\s*column\.key === 'account' \? 'dim-jh-ledgerColAccount'/,
+    )
+    // 窄容器锁 88px
+    // ⚠️ 同样**截到块内**再断言，避免跨块误匹配（与上面 @container 172px 同因）。
+    const narrowBlock = /@container \(max-width: 720px\) \{([\s\S]*?)\n\}/.exec(styles)
+    expect(narrowBlock, '找不到 @container (max-width: 720px) 块').not.toBeNull()
+    expect(narrowBlock![1], '窄容器必须把账号列锁 88px').toMatch(
+      /col\.dim-jh-ledgerColAccount\s*\{\s*width:\s*88px/,
+    )
+    // 宽容器锁 172px
+    // ⚠️ 窗口必须**止于该 @container 块的右花括号**，不能写成宽松的
+    //    `[\s\S]{0,600}` —— 后面紧跟着 `@media (min-width:1400px)` 里也有
+    //    一条同样的 `width: 172px`，窗口跨过去就会在变异（删掉 @container 里那条）
+    //    之后**仍然匹配到 @media 那条** ⇒ 断言变无牙（本轮变异实测 M7 假绿）。
+    const wideBlock = /@container \(min-width: 1360px\) \{([\s\S]*?)\n\}/.exec(styles)
+    expect(wideBlock, '找不到 @container (min-width: 1360px) 块').not.toBeNull()
+    expect(wideBlock![1], '宽容器必须把账号列锁 172px').toMatch(
+      /col\.dim-jh-ledgerColAccount\s*\{\s*width:\s*172px/,
+    )
+    // ⚠️ 反向：模型列**不许**有任何 max-width / 宽度上限规则
+    expect(styles, '模型列不许设 max-width（必须吃满剩余宽度）').not.toMatch(
+      /col\.dim-jh-ledgerColModel|ledgerEntryModel\s*\{[^}]*max-width/,
+    )
+  })
+
+  it('★★★ 「总处理」与左边统计格之间必须有足够间距（用户两次要求加宽）', () => {
+    const totalRule = /\.dim-jh-ledgerStatGroup > \.dim-jh-ledgerModelTokens[^{]*\{([^}]*)\}/.exec(styles)
+    expect(totalRule, '找不到「总处理」格的规则').not.toBeNull()
+    const body = totalRule![1].replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(body, '「总处理」必须保留 margin-left: auto（右缘对齐）').toMatch(/margin-left:\s*auto/)
+    // 用户第二次说「再左移一点，间隔多一些」⇒ 由 20px 提到 32px
+    const pad = /padding-left:\s*(\d+)px/.exec(body)
+    expect(pad, '「总处理」必须有左间距').not.toBeNull()
+    expect(Number(pad![1]), '左间距至少 32px（用户两次要求加宽）').toBeGreaterThanOrEqual(32)
   })
 })
 

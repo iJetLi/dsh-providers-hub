@@ -7844,6 +7844,37 @@ function registerJetHubEndpoints(
          * （与 `buddyBalanceTier(..., {allowPermanent:false})` 返回 `none` 等价）。
          */
         const locked = pool.permanentLocked(req.provider) === true
+        /**
+         * ⚠️⚠️ **账号显示名必须补全**（用户 2026-11-16 报障：
+         * 「华为云帐号显示问题，之前已经修复过在 jet hub 的设置页面显示问题了，
+         *  但是忘记在积分选择界面也同步修复了」）。
+         *
+         * ## 原缺陷
+         *
+         * 本端点此前直接 `nickname: a.nickname` 下发账号池里的原始昵称，
+         * 而 codearts 账号池里存的 `nickname` **就是池 id**（本机实测 9 个账号
+         * 全是 `codearts-b3076aa8` 这种形态）⇒ 下拉框显示「位次 4 · codearts-679b1dfe」。
+         *
+         * ## 修法：与 `account.list`（设置页）走**同一条**补全链路
+         *
+         * `enrichAccountIdentity()` 是设置页用的那个函数，codearts 分支
+         * （`enrichCodeartsIdentity`）从 refresh_token 内嵌的 `user_profile`
+         * base64 里解出真实 IAM 用户名（`src/codearts-identity.ts`，**纯本地解析、
+         * 不发网络**）。
+         *
+         * ⚠️ **两处必须共用同一个函数**：本仓反复记录过「同一语义两处实现必然漂移」。
+         * 设置页已经用它，这里若自己写一份解名字逻辑，将来 codearts 凭据形态一变
+         * 就会只有一边坏。
+         *
+         * ⚠️ 性能：与 `account.list` 完全同量级（每个账号一次
+         * `credentials.resolve` + 一次 base64 解析），且本端点本来就是
+         * 「打开面板读一次」的轻量查询 —— 设置页能接受，这里也能。
+         *
+         * ⚠️ 补全只改 `nickname` / `accountName`，**不动 `id`**：
+         * 下拉框的 `value` 是位次（见客户端 `accountOptionLabel`），
+         * 而 `selected` 仍按 `id` 比对，故补全不影响选中态。
+         */
+        const enriched = await enrichAccountIdentity(mine, req.provider)
         return {
           ok: true,
           value: {
@@ -7852,7 +7883,7 @@ function registerJetHubEndpoints(
             locked,
             /** 选中的账号已不在**启用**列表里（被删/被停用）⇒ 客户端显示「已失效」。 */
             stale: selectedId !== null && selectedPosition === null,
-            accounts: mine.map((a, i) => {
+            accounts: enriched.map((a, i) => {
               // ⚠️ 逐模型限流：与 `AccountPool.candidateAccounts` 第四个 filter 同判据
               //（`resetAt` 为 0 或已过期都算不受限）。`modelId` 缺省时不判。
               const resetAt = modelId === undefined ? undefined : a.modelRateLimits?.[modelId]

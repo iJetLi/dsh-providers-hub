@@ -1187,31 +1187,54 @@ const STYLES = `
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   统计组（2026-11-11 用户第三次修正：「统计信息放在行中间」）
+   统计组（2026-11-11 用户第三次修正：「统计信息放在行中间」；
+            2026-11-16 第四次修正：「统计信息往右移，给左边腾空间」）
 
    账号行与模型行**共用同一个组**，保证「次数 / 首字 / 总处理」三列在整棵树里
    纵向对齐。
 
+   ## 2026-11-11 那版的取舍（已废）
+
    改前：每个统计格各自 margin-left: auto ⇒ 被推成「各自最右」，
         而每组内容宽度不同 ⇒ 「次数」起始位置参差不齐（实测 4 种位置：
         714 / 720 / 726 / 732），账号名后面留一大片空白。
+    ⇒ 改成「整组固定 460px + margin-left: auto 推右 + 组内左对齐」。
 
-   改后：整组固定 460px、margin-left: auto 推到右边、**组内左对齐**
-        ⇒ 所有行的「次数」从同一条竖线开始（实测全部 510px）。
-        组内的「总处理」再用 margin-left: auto 顶到组尾，保持右缘也齐。
+   ## ⚠️⚠️ 为什么现在去掉固定 460px（用户 2026-11-16 报障）
 
-   ⚠️ 460px 是实测出来的：最长的「首字 10.76s · P50 233.2 tok/s」约 175px +
-      「338 次」约 45px + 「总处理 106.35M」约 100px + 两个 8px 间隙 ≈ 336px，
-      给到 460px 是为了**长文本不折行**且组不贴边。
-   ⚠️ 窄屏（<700px）会把组宽收窄，见媒体查询。
+   460px 是**写死**的，而实测三格内容只需约 336px
+   （最长的「首字 10.76s · P50 233.2 tok/s」约 175px + 「338 次」约 45px
+    + 「总处理 106.35M」约 100px + 两个 8px 间隙）⇒ **白占 124px**。
+   这 124px 本可以给左边的「账号 → 模型」信息区。
+   面板越窄，这 124px 的浪费越致命（右侧栏 400px 时占了 31% 宽度）。
+
+   ## 现在怎么做
+
+   - flex: 0 1 auto：宽度由**内容**决定，且**允许收缩**（原来 flex: none 不让步）；
+   - margin-left: auto：整组仍然推到右侧（保持原设计的「组整体靠右」）；
+   - **三格的完整性分优先级**（用户 2026-11-16 明确要求）：
+     「次数」与「总处理」**永远完整**，「首字·速率」在空间不足时才省略
+     —— 前两个是扫一眼要的，第三个是细节。
+
+   ⚠️ 窄屏（<700px）与右侧栏（@container）另有收窄规则，见下方媒体查询。
    ══════════════════════════════════════════════════════════════════════════ */
 .dim-jh-ledgerStatGroup {
   display: flex; align-items: baseline; gap: 8px;
-  flex: none; margin-left: auto; width: 460px;
+  /* ⚠️ 从 flex: none + width: 460px 改成内容自适应 + 可收缩。 */
+  flex: 0 1 auto; margin-left: auto; min-width: 0;
 }
-/* 组内最后一格（总处理）顶到组尾 ⇒ 各行的「总处理」右缘仍然对齐。 */
+/* ⚠️⚠️ 「总处理」与它左边那格之间**必须留出视觉间距**（用户 2026-11-16 两次报障：
+   「统计信息太靠近总处理」「再左移一点，让它跟总处理间隔多一些」）。
+   根因：margin-left: auto 会把剩余空间全吸到左侧，于是 gap: 8px 在视觉上等于
+   「贴着」—— auto margin 吸走了本该是 gap 的空间。
+   ⇒ 给一个**最小**左间距，同时保留 auto（组够宽时仍顶到组尾、右缘对齐）。
+   ⚠️ 用户第二次要求「再左移一点」⇒ 由 20px 加到 32px。 */
 .dim-jh-ledgerStatGroup > .dim-jh-ledgerModelTokens,
-.dim-jh-ledgerStatGroup > .dim-jh-ledgerAccountSum { margin-left: auto; }
+.dim-jh-ledgerStatGroup > .dim-jh-ledgerAccountSum {
+  margin-left: auto;
+  /* 左侧至少留 32px：视觉上「首字·速率」与「总处理」明确分开。 */
+  padding-left: 32px;
+}
 
 /* ── 第三层：模型（内容）—— 缩进 54px，最暗最小，带 ↳ 前导 ──
    ⚠️ ↳ 用 ::before 而不是塞进文本节点：它是纯装饰，不该被复制/导出/读屏念出来
@@ -1231,8 +1254,27 @@ const STYLES = `
 .dim-jh-ledgerModelName { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #8f959e); overflow-wrap: anywhere; }
 .dim-jh-ledgerModelReq { flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
 .dim-jh-ledgerModelTokens { flex: none; font-size: 11.5px; line-height: 17px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-primary, #1f2329); white-space: nowrap; }
-/* 均值格（首字 · 速率）：三级汇总行（渠道/账号/模型）共用，等宽数字对齐。 */
-.dim-jh-ledgerPerf { flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
+/* 均值格（首字 · 速率）：三级汇总行（渠道/账号/模型）共用，等宽数字对齐。
+   ⚠️⚠️ **它是统计组里唯一可收缩的一格**（用户 2026-11-16 定案）。
+   优先级从高到低：**总处理 > 次数 > 首字·速率**。
+   - 空间够时：按内容自然宽度完整显示（上限 200px，实测最长 175px ⇒ 放得下）；
+   - 空间不够时：**只有它收缩**（flex-shrink: 1 + min-width: 0），
+     「总处理」与「次数」都是 flex: none ⇒ **永远不会被挤出容器**。
+
+   ⚠️⚠️ 这里踩过两次**方向相反**的坑，都记下来：
+   ① 最初 flex: none + max-width: 132px：132px 小于内容所需（175px）
+      ⇒ 明明有空间也被省略（用户报障「怎么就省略不显示完整了」）。
+   ② 我一度改成 flex: none + max-width: 200px：perf 不再省略了，
+      但**统计组整体无法收缩** ⇒ 整组溢出容器 ⇒ **最右边的「总处理」被裁掉**
+      （用户报障「总处理怎么会被顶走了」）。
+   ⇒ 正确组合是「perf 可收缩（0 1 auto）+ 200px 上限」：
+      空间够就完整、不够就它让位，总处理始终保住。 */
+.dim-jh-ledgerPerf {
+  flex: 0 1 auto; min-width: 0; max-width: 200px;
+  font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary, #8f959e);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 /* ── 历史视图（第 4 期）：GitHub 风格每日用量格 + 展开的日聚合树 ── */
 .dim-jh-ledgerSection { margin-bottom: 14px; }
 .dim-jh-ledgerSectionTitle { font-size: 13px; line-height: 19px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); margin-bottom: 6px; }
@@ -1262,6 +1304,14 @@ const STYLES = `
    ⚠️ max-width 与列宽（LEDGER_ENTRY_COLUMNS 里 account 的 172px）是两回事：
    列宽由 colgroup 决定，这里只是**兜底不让它撑破**（colgroup 缺失或旧产物时）。 */
 .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 172px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ⚠️⚠️ **模型格必须单行 + 省略号**（用户 2026-11-16 报障：窄面板下模型名断成 4 行）。
+   原先这一格**没有 white-space: nowrap** ⇒ 宽度不够时浏览器自由换行，
+   trae/deepseek-v4.1-flash 被折成 trae/deep / seek-v4. / 1-flash 三行。
+   配合 LEDGER_ENTRY_COLUMNS 里账号列改 clamp(88px, 22%, 172px)（两列一起让步），
+   到下限后不再缩、改由省略号截尾部 —— 悬停 title 看完整值。
+   ⚠️ 本文件是 JS 模板字符串：注释里**禁止反引号**（会提前闭合模板，
+   esbuild 报 Expected ";" but found ... 并把指针指到注释那一行）。本轮又踩了一次。 */
+.dim-jh-ledgerTable .dim-jh-ledgerEntryModel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dim-jh-ledgerEntryTools { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 12px 0 5px; }
 .dim-jh-ledgerEntryTools strong { margin-right: 2px; font-size: 13px; color: var(--dsw-alias-label-primary, #1f2329); }
 .dim-jh-ledgerEntryCount { margin-right: auto; color: var(--dsw-alias-label-tertiary, #8f959e); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -1322,6 +1372,16 @@ const STYLES = `
   .dim-jh-ledgerPaneBody .dim-jh-ledgerSearch { flex-basis: 100%; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerSelect { flex: 1 1 30%; max-width: none; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerHeatmapWrap { overflow-x: auto; }
+  /* ⚠️⚠️ 账号列的**下限**（用户 2026-11-16 明确要求：
+     「要给帐号增加最大宽度限制呀，模型列就不需要了」）。
+     colgroup 里写的是纯百分比 12.68%（clamp/calc 在 col 上会被静默忽略，
+     详见 jet-hub.js 的 LEDGER_ENTRY_COLUMNS 注释），百分比本身没有上下限，
+     故在这里按容器宽度分段锁死：
+       - 窄容器（<720px）：12.68% 会掉到 90px 以下，账号名开始不可读 ⇒ 锁 88px
+       - 宽容器：交给 12.68% 自然计算，上限 172px 由下面的 @container 覆盖
+     ⚠️ **只约束账号列**：模型列必须继续吃掉全部剩余宽度（不设 max-width），
+        否则长模型名会被无谓截断。 */
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable col.dim-jh-ledgerColAccount { width: 88px; }
   /* ══════════════════════════════════════════════════════════════════════════
      以下四条是给**本 PR 新增的「账号」列**配套的窄屏规则。
 
@@ -1342,11 +1402,20 @@ const STYLES = `
      tests/unit/ledger-pane-chrome.spec.ts:405 的既有契约（8 列定宽明细表靠它裁），
      改成 auto 会让那条契约红 —— 而且明细表本来就有自己的
      .dim-jh-ledgerTableScroll 横向滚动容器。 */
-  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup { width: 300px; max-width: 100%; gap: 6px; }
-  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
+   * ⚠️ 2026-11-16：统计组已从「写死 460px」改成**内容自适应 + 可收缩**
+   * （见上方 .dim-jh-ledgerStatGroup 的注释），故这里**不再需要** width: 300px
+   * 的覆盖 —— 组宽天然跟着内容走、且不会再超出容器。
+   * 只保留 gap 收窄（窄面板里 8px 间隙相对更显眼）。
+   * ⚠️ 但要显式 max-width: 100% 兜底：三格内容在极窄时仍可能超宽。 */
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup { max-width: 100%; gap: 6px; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 200px; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerAccount { margin-left: 14px; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
-  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 72px; }
+  /* ⚠️ 账号列宽度由 colgroup 的**纯百分比 12.68%** 决定（+ @container 上下限，
+     见下方 col.dim-jh-ledgerColAccount），这里**不再压到 72px**：
+     72px 低于 88px 下限 ⇒ 账号名会被截成 abc***…。
+     与列宽方案的「两列一起收缩、到下限就停」保持一致。 */
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 172px; }
   /* 9 列定宽必然超宽 ⇒ 横向滚动，而不是压缩各列（压缩会让数字列对不齐）。 */
   .dim-jh-ledgerPaneBody .dim-jh-ledgerTableScroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
@@ -1359,21 +1428,44 @@ const STYLES = `
   .dim-jh-ledgerSelect { flex: 1 1 30%; max-width: none; }
   .dim-jh-ledgerTable { font-size: 10px; }
   .dim-jh-ledgerTable th, .dim-jh-ledgerTable td { padding: 3px 2px; overflow-wrap: anywhere; }
-  /* 窄屏 9 列：账号列再收窄，其余列让位（模型列本来就允许换行）。 */
-  .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 72px; }
+  /* 窄屏 9 列：账号列宽度由 colgroup 的**纯百分比 12.68%** 决定
+     （clamp/calc 在 col 上会被浏览器静默忽略，详见 jet-hub.js 的列定义注释）。
+     ⚠️ 这里**不能**再写 max-width: 72px —— 72px 低于 88px 下限，
+     会把账号名截成 abc***…，与「到下限就停」的方案冲突。 */
+  .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 172px; }
   /* ⚠️ 窄屏必须收窄三层缩进：宽屏的 30/54px 在 <700px 时会把模型名
      （deepseek-v4.1-flash 这类长名）挤成三行、把行高撑乱。
      缩进减半后层级仍然看得出来（14/26px 相对 0 仍然错开），只是不再浪费宽度。 */
   .dim-jh-ledgerAccount { margin-left: 14px; }
   .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
-  /* ⚠️ 窄屏统计组必须收窄：460px 在 <700px 会把账号名挤没（甚至撑出横向滚动）。
-     收窄到 300px 并允许组内「首字」格省略 —— 数字仍对齐，长文本靠 title 悬停看全。 */
-  .dim-jh-ledgerStatGroup { width: 300px; max-width: 100%; gap: 6px; }
-  .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
+  /* ⚠️ 2026-11-16：统计组改成内容自适应后，这里**不再需要** width: 300px
+     （那会把组强行拉到 300px、与「按内容收缩」冲突）。只收窄 gap 并兜底 max-width。 */
+  .dim-jh-ledgerStatGroup { max-width: 100%; gap: 6px; }
+  /* 窄屏下「首字·速率」格最多 200px（用户 2026-11-16：「怎么就省略不显示完整了」
+     ⇒ 由 132px 放宽到 200px，实测最长的「首字 10.76s · P50 233.2 tok/s」约 175px，
+     200px 足够完整显示）。
+     ⚠️ 「次数」「总处理」两格**不加 max-width** —— 用户要求它们永远完整。 */
+  .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 200px; }
   /* ⚠️ 窄屏 9 列 + 固定像素列宽必然超宽：**横向滚动**而不是压缩各列。
      压缩会把 9 列一起挤变形（数字列对不齐、模型名断成三行），比横向滚动更糟。
      只给明细表加滚动容器，不影响上面的汇总卡。 */
   .dim-jh-ledgerTableScroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
+
+/* ⚠️⚠️ 账号列的**上限 172px**（用户 2026-11-16 要求「给帐号增加最大宽度限制」）。
+   账号列宽度是纯百分比 12.68%（clamp/calc 在 col 上会被静默忽略，
+   详见 jet-hub.js 的 LEDGER_ENTRY_COLUMNS 注释），百分比会随容器无限增长：
+   820px 弹窗时 12.68% ≈ 104px（还算合理），但 1400px 宽屏时会到 177px、
+   1600px 时到 203px —— 账号名最多 25 字符，再宽就是浪费。
+   ⇒ 用 @container 在容器够宽时锁死 172px（与改前的固定值一致）。
+   ⚠️ 只锁账号列：模型列**刻意不设上限**（它要吃满剩余宽度）。 */
+@container (min-width: 1360px) {
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable col.dim-jh-ledgerColAccount { width: 172px; }
+}
+/* 弹窗（非 pane 外壳）没有 @container 上下文，用媒体查询给同一个上限。
+   ⚠️ 弹窗宽 960px 时 12.68% ≈ 122px，本来就不到 172px ⇒ 这条只在超宽屏生效。 */
+@media (min-width: 1400px) {
+  .dim-jh-ledgerTable col.dim-jh-ledgerColAccount { width: 172px; }
 }
 
 /* ── 模型列表的「计费/来源」分组（订阅 / 免费 / Cline Cloud / 按量计费）──
