@@ -676,3 +676,55 @@ describe('★ 额度冷却到次日 UTC+8 零点（不是 +24h）', () => {
     expect(marvisRetryAfterMs('rate_limit', 5_000, 3)).toBe(5_000)
   })
 })
+
+/**
+ * ★★★ IKVL6C 的**接线层**守卫：判据必须打在 wire 上，不能只打在纯函数上。
+ *
+ * 背景：`tests/unit/marvis-messages.spec.ts` 那 12 条只证明 `buildMarvisPayload`
+ * 的形状正确；而 2026-11-16 的双审计实测（变异 M15）证明 —— **把
+ * `src/marvis-adapter.ts` 里 `streamVia` 传给 `buildMarvisPayload` 的 `tools`
+ * 那一行摘掉，42 条全绿**。也就是说纯函数那一层守不住「adapter 到底有没有把
+ * `options.tools` 交下去」。
+ *
+ * 这两条把判据搬到 `fetch` 的请求体上：读真实发出的 body，断言 `tools` 键
+ * 在/不在。摘掉 adapter 的传参 ⇒ 第一条红；把门控改回「恒带空数组」⇒ 第一条红。
+ */
+describe('★★★ 工具键的接线层守卫（IKVL6C：判据必须打在 wire 上）', () => {
+  async function bodyOf(options: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(sseBody('ok'), {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    for await (const _chunk of makeAdapter().stream({
+      model: 'deepseek-v4-pro-external',
+      messages: [{ role: 'user', content: 'hi' }],
+      ...options,
+    } as never)) {
+      // drain
+    }
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    return JSON.parse(init.body as string) as Record<string, unknown>
+  }
+
+  it('★★★ 没有工具的那一轮，wire 上必须**没有** `tools` 键（发 `[]` 会让模型在正文臆造）', async () => {
+    const body = await bodyOf({})
+    expect(Object.hasOwn(body, 'tools')).toBe(false)
+    // 再核一遍「空数组」那一格：显式传 [] 也必须等价于「不带」。
+    const bodyEmpty = await bodyOf({ tools: [] })
+    expect(Object.hasOwn(bodyEmpty, 'tools')).toBe(false)
+  })
+
+  it('★★★ 有工具的那一轮，wire 上必须带 `tools`，且外层是 `type/function` 包装', async () => {
+    const body = await bodyOf({
+      tools: [{ name: 'read_file', description: '读一个文件', parameters: { type: 'object' } }],
+    })
+    expect(Array.isArray(body.tools)).toBe(true)
+    const first = (body.tools as unknown[])[0] as { type?: unknown; function?: { name?: unknown } }
+    expect(first.type).toBe('function')
+    expect(first.function?.name).toBe('read_file')
+  })
+})
