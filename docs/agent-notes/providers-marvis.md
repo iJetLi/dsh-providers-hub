@@ -349,3 +349,160 @@ undefined」；`dsh-agent-loop` 的 `buildRequest` 返回体里没有 `system` �
 分支判成 `risk`，UI 与日志上只剩「HTTP 403」，看不出上游给的是「非法请求」还是「风控」；
 单账号时 `risk` 分支换无可换、直接上抛给用户。本提交只修放行面，不动分类，避免把
 「内容级拦截」与「账号级风控」混成同一条码。
+
+## ⚠️⚠️ 工具为空时下发 `tools: []` 会让模型在正文输出 DSML 标记（Gitee IKVL6C，2026-11-16）
+
+**症状**（用户真机报障，官方 `@deepseek-ai/dsh-experimental-auto-review` + 权限预设「自动审查」）：
+单个会话 12 次工具调用全部失败，报
+
+```
+Error: Auto review of tool "glob" failed; its body was not executed:
+Unexpected token '<', "...is not valid JSON"
+```
+
+（另有 `Unexpected token 'I'` / `Unexpected non-whitespace character after JSON at position 82`）。
+`parseDecision` 对评审输出做**严格 `JSON.parse`**，而模型在**正文**里吐了
+`<｜｜DSML｜｜tool_calls>` 之类的标记。
+
+**⚠️ 归因强度（必读）**：同一 provider 里**不走自动审查**的相邻会话 0 次失败 ⇒ 只能
+推出「**自动审查这条路径独有**」。但两臂同时差**两件**事 —— `options.tools` 的有无
+**以及 prompt 本身**（评审提示词 vs 对话提示词）⇒ **单一差分分离不出 tools 这一项**。
+所以「与凭据、网络、上游风控无关」这句成立（它们对两臂是同一个值），但
+**「就是 `tools: []` 的错」是推断，不是实测**。
+
+**根因链（四条；**证据强度必须分级读** —— 第 1/2/4 条是**代码事实**，第 3 条是**推断**）**：
+
+1. `src/marvis-messages.ts` 的 `buildMarvisPayload` **恒带** `tools` 键（哪怕 `[]`）；
+2. 自动审查那一轮**没有任何工具**（`options.tools` 为 `undefined`）⇒ `buildMarvisTools`
+   返回 `[]` ⇒ wire 上是 `"tools": []`；
+3. **【推断，零实测】** 服务端看到「本轮有函数调用能力」却一个定义都没有 ⇒ 模型
+   只能在正文里**臆造**。—— ⚠️⚠️ 这一环**没有任何受控对照**：本机无 marvis 凭据
+   （不能发请求）、`@deepseek-ai/dsh-experimental-auto-review` **不在依赖里**
+   （`parseDecision` 的源码读不到）。而本仓**唯一**一次「只差 tools 一个变量」的
+   受控记录（`src/codely-adapter.ts:698-703`，2026-10-20）结论**正好相反** ——
+   **不带 tools** 时模型才把调用写进正文（详见下节 P1-3）；
+4. `src/marvis-adapter.ts` 调 `consumeOpenAiSse(...)` 时**没有** `dsmlToolMode: true`
+   ⇒ `src/openai-compat.ts` 的 `DsmlContentExtractor` 不装 ⇒ 正文里的 DSML 标记
+   **原样流到上层**。
+
+**⚠️⚠️ P1-3：本仓有一份「只差 tools 一个变量」的受控实测，结论与本修法相反**
+
+`src/codely-adapter.ts:698-703`（2026-10-20，本仓唯一一份这样的记录）：
+
+```
+带 tools  ⇒ 200，13 帧标准 delta.tool_calls，零 DSML 文本
+不带 tools ⇒ 200，模型把调用写进正文：<|DSML|invoke name="bash"|>
+结论行：DSML 文本不是协议差异，而是「没给它工具」时模型按训练习惯的自由发挥
+```
+
+外加 `src/codely-adapter.ts:572-580`：DSML 文本一旦进了会话历史，模型**在有工具时也会模仿**。
+
+⇒ **本修法把 marvis 从「恒带空数组（未测）」搬到了「不带这个键」—— 而后者恰恰是
+codely 实测判定为「DSML 温床」的那一侧。** 这不是笔误，是**方向性反证**。
+
+**为什么仍然提交**（诚实说明，不是自我辩护）：两种状态在**语义上**确实不同 ——
+`[]` 声明「有函数调用能力但零定义」，省略声明「纯聊天」。codely 那次的场景是
+**用户真的要工具**（对话轮），省略必然臆造；marvis 这次是**评审轮本来不需要工具**。
+但**这个区分没有实测支撑**，只是推理。
+
+⇒ **本提交的诚实定位是「预防性对齐（未验证）」，不是「根因修复」。**
+**复发预案**：若 IKVL6C 再现（同一 `Unexpected token '<'`），说明本修法不足 ——
+下一步应在该通道做**非 JSON 正文 `warn` 留痕**（让用户与日志都看得见），
+**不要**再改第 5 个 provider 的 tools 门控。
+
+**全仓口径普查（2026-11-16，别再凭印象数「8 家」）**。`tools` 出现在 chat 请求体
+构造点的形态**远不止两类**（审计实测：`grep -rln consumeOpenAiSse src/*.ts` 命中
+**24 个文件**），按门控强度分三类：
+
+**门控（`if (tools !== undefined && tools.length > 0)`）—— 11 家里的 8 家**：
+
+```
+src/autoclaw-adapter.ts:637   if (tools !== undefined && tools.length > 0) bodyObj.tools = tools
+src/buddy-adapter.ts:2863     同上
+src/cline-adapter.ts:916      同上
+src/codely-adapter.ts:707     同上
+src/lobsterai-adapter.ts:1198 同上
+src/magicrew-adapter.ts:456   同上
+src/trae-adapter.ts:1277      同上
+src/zcode-adapter.ts:963      同上
+```
+
+**无条件带（`tools: buildXxxTools(input.tools)` 或等价）—— 5 家，全是同一个模板的产物**：
+
+```
+src/marvis-messages.ts:93      ← 本提交改成门控
+src/modelscope-messages.ts:123
+src/opencode-messages.ts:181
+src/qiniu-messages.ts:116
+src/qoder-adapter.ts:1765/1814 （+ buildQoderTools:599-603 对 undefined 返 []）
+```
+
+**只按 `undefined` 门控（`...options.tools !== undefined ? { tools } : {}`）—— 7 家**：
+`modelscope-adapter.ts:862` / `opencode-adapter.ts:646` / `qiniu-adapter.ts:723` /
+`baizhi-adapter.ts:337` / `gemini-adapter.ts:685` / `monkeycode-adapter.ts:306` /
+`minimax-adapter.ts:853` —— 它们对 `[]` **照样**发 `"tools": []`，与修前的 marvis 同病。
+
+⇒ 所以准确的说法是「**8 家严格门控 / 5 家无条件 / 7 家只判 undefined**」，
+**不是**「9 家里只有本家」。
+
+**⚠️ 关键：那三家的「恒带」理由是错的。** `modelscope-messages.ts:112-114` 与
+`qiniu-messages.ts:106-108` 逐字写着：
+
+> `tools` **恒带**（哪怕是空数组）：带工具的请求必须让上游看到 `tools`
+> 字段的存在，这是 `invalid_parameter_error` 那条事故的修法的一半。
+
+而那条事故（`modelscope-messages.ts:13-16` 原文）是：
+
+```
+upstream: modelscope  status: 400
+{"error":{"code":"invalid_parameter_error",
+          "message":"'type' is a required property - 'tools.0'"}}
+```
+
+讲的是 **「带工具但包装形状不对 ⇒ 400」**，与「空数组」**毫无关系**。所以
+「恒带空数组」是从那条事故里**错误推论**出来的，然后被复制到了四家。
+
+⇒ 对本家来说，这是**继承了别处的错误推论**，而不是「无理由的偏离」——
+两种说法都指向同一个结论（该改成门控），但归因必须写准，否则下一个人会
+拿「modelscope 这么写的」当理由再改回去。
+
+**⚠️ 未修已登记**：`modelscope` / `opencode` / `qiniu` 三家**仍是无条件带**
+（本次用户只要求为 marvis 单独开一个 PR）。它们是否有同样的臆造症状
+**未经真机验证** —— 尤其 `modelscope` 的 qoder 事故记录里提到「省略 tools 会让
+模型 XML 泄露」，方向看着相反，**在真机复测前不要跟着改**。
+
+**修法**：`buildMarvisPayload` 改成非空才带
+
+```ts
+...(input.tools !== undefined && input.tools.length > 0
+  ? { tools: buildMarvisTools(input.tools) }
+  : {}),
+```
+
+**为什么不选另外两条建议**（报障人提过，已在 issue 里逐条回复）：
+
+- **在正文加协议闸门（发现 DSML 就抛 `LlmError`）** —— 不采纳这个「抛」。抛错会把
+  **局部失败**（评审那一步）放大成**整轮失败**，而当前症状恰好只是 review 那步挂、
+  对话本身还能继续。真正的修法是上面那条，闸门只该 `warn` + 留痕让上层自己降级。
+- **发现 DSML 就重试** —— 不采纳。臆造是**概率性**行为，重试很可能再臆造一次（白烧额度），
+  还会把「模型不听话」掩盖成偶发故障。
+
+**守卫**（`tests/unit/marvis-messages.spec.ts`，`★★★` 那条是本缺陷的直接回归）：
+
+1. `★★★ tools 为空时必须整个省略`（`[]` 与 `undefined` 两格都必须 `Object.hasOwn(…) === false`）——
+   原有用例 `it('tools 恒带（哪怕是空数组）')` **把错误行为钉成了期望**，本提交已改写；
+2. `★ 有工具时必须带，且与 buildMarvisTools 逐字一致`（防「为了省略把有工具也省了」的过度修正）。
+
+**通用教训可推广**：凡「协议允许省略、而本家拼命带上」的字段，都要问一句
+**「带上它的语义和省略它是否等价」**。
+
+两个**正确**的类比与一个**错误**的类比（别混）：
+
+- ✅ `system: ""` ⇒ 省略（空串会被上游当成一条空 system 消息，语义不同）；
+- ✅ `max_tokens: 0` ⇒ 省略（0 会让 DSH 侧抛 `INVALID_MODEL_MAX_TOKENS`）；
+- ❌ **`temperature: 0` 不能当类比** —— 它是**有意义的值**（温度 0 = 确定性），
+  **必须发**；`Number.isFinite(0) === true` ⇒ 本家实现是正确的。
+  ⚠️ 若有人照「省略等价」的思路把 `temperature: 0` 也门控掉，
+  会**静默改变请求语义**（退回上游默认温度）。
+
+⇒ 判据是「**空值 vs 缺省值在上游是否可区分**」，不是「字段看起来像空的就省略」。

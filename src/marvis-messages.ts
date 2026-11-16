@@ -43,6 +43,43 @@ export interface MarvisWireTool {
  *
  * ⚠️ 这是 `options.tools` 的**唯一出口**。不下发它，模型在 wire 上看不到任何
  * 函数定义，只能用正文里的 XML 臆造工具调用。
+ *
+ * ⚠️⚠️ 但**空数组不许下发**（返回 `[]` 时调用方必须把整个键省略）。
+ * 上面那句说的是「**有工具却不下发**」⇒ 模型看不到定义 ⇒ 只能臆造；
+ * 它**推不出**「没有工具时也要发一个空数组」。两种状态在上游的语义不同：
+ * 省略 = 「本轮纯聊天，没有函数调用能力」，`[]` = 「有函数调用能力，但一个
+ * 定义都没给」⇒ 后者才是臆造的温床。
+ *
+ * **用户报障症状**（Gitee IKVL6C，2026-11-16）：`dsh-experimental-auto-review` 的
+ * 评审那一轮没有工具 ⇒ wire 上是 `"tools": []` ⇒ 模型在正文里吐
+ * `<｜｜DSML｜｜tool_calls>` ⇒ 上层严格 `JSON.parse` 崩在 `Unexpected token '<'`，
+ * 12 次工具调用全失败。⚠️ **「`[]` 导致臆造」这一步是推断，未经受控对照**：
+ * 本机无 marvis 凭据、auto-review 包不在依赖里（`parseDecision` 读不到），
+ * 而本仓唯一一份「只差 tools 一个变量」的实测（`codely-adapter.ts:698-703`）
+ * 结论**相反**（不带 tools 时模型才臆造）⇒ 本修法的诚实定位是
+ * **「预防性对齐（未验证）」**，不是根因修复。详见
+ * `docs/agent-notes/providers-marvis.md`。
+ *
+ * ⚠️ 本仓的分歧面（已全量核对，别再凭印象数「8 家」）：
+ * - **门控**（`if (tools !== undefined && tools.length > 0)`）共 **8 家**：
+ *   `autoclaw-adapter.ts:637` / `buddy-adapter.ts:2863` / `cline-adapter.ts:916` /
+ *   `codely-adapter.ts:707` / `lobsterai-adapter.ts:1198` / `magicrew-adapter.ts:456` /
+ *   `trae-adapter.ts:1277` / `zcode-adapter.ts:963`；
+ * - **只判 `undefined`**（`...options.tools !== undefined ? { tools } : {}`）共 **7 家**：
+ *   `modelscope-adapter.ts:862` / `opencode-adapter.ts:646` / `qiniu-adapter.ts:723` /
+ *   `baizhi-adapter.ts:337` / `gemini-adapter.ts:685` / `monkeycode-adapter.ts:306` /
+ *   `minimax-adapter.ts:853` —— 它们对 `[]` **照样**发 `"tools": []`，与修前的本文件同病；
+ * - **无条件带**（`tools: buildXxxTools(input.tools)`）共 **5 家**，全是同一个模板的
+ *   产物：`modelscope-messages.ts:123` / `opencode-messages.ts:181` /
+ *   `qiniu-messages.ts:116` / `qoder-adapter.ts:1765,1814`（+ `buildQoderTools:599-603`
+ *   对 undefined 返 `[]`）。**其中 modelscope / qiniu 的注释写着「`tools` 恒带
+ *   （哪怕是空数组）」，并把理由挂在 `invalid_parameter_error` 那条事故上 —— 但那条
+ *   事故讲的是「带工具但形状不对 ⇒ 400 `'type' is a required property - 'tools.0'`」，
+ *   与空数组毫无关系 ⇒ 那是一个错误推论，然后被复制到了五家。**
+ *   本次只改 marvis（用户要求单独修这一条），其余**登记未修**。
+ *
+ * ⚠️ 另：`codely-adapter.ts:698-703` 那份受控实测的方向与本修法**相反**，
+ * 引用它当「门控先例」是错的 —— 它是**反证**，不是支持。
  */
 export function buildMarvisTools(
   tools: readonly MarvisHarnessTool[] | undefined,
@@ -81,7 +118,9 @@ export interface MarvisPayloadInput {
  * - `system` 只有非空才带；
  * - `max_tokens` 只放行安全正整数 —— 0 / 负数 / NaN 会让 DSH 侧抛
  *   `INVALID_MODEL_MAX_TOKENS`，整轮崩；
- * - `tools` **恒带**（哪怕空数组）；
+ * - `tools` 只在**非空**时下发（与 `autoclaw` / `buddy` / `cline` / `codely` /
+ *   `lobsterai` / `magicrew` / `trae` / `zcode` 这 8 家同口径；`tools: []` 会让
+ *   模型在正文臆造工具调用，见 `buildMarvisTools` 的注释）；
  * - `reasoning_effort` 只有非空字符串才带（非法值上游 400 `3000101`）。
  */
 export function buildMarvisPayload(input: MarvisPayloadInput): Record<string, unknown> {
@@ -90,7 +129,9 @@ export function buildMarvisPayload(input: MarvisPayloadInput): Record<string, un
     messages: input.messages,
     stream: true,
     stream_options: { include_usage: true },
-    tools: buildMarvisTools(input.tools),
+    ...(input.tools !== undefined && input.tools.length > 0
+      ? { tools: buildMarvisTools(input.tools) }
+      : {}),
     ...(input.system !== undefined && input.system.length > 0 ? { system: input.system } : {}),
     ...(typeof input.temperature === 'number' && Number.isFinite(input.temperature)
       ? { temperature: input.temperature }
