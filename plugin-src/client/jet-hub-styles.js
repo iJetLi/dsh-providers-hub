@@ -1301,13 +1301,15 @@ const STYLES = `
 /* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。
    账号列（9 列版新增）**截断而不是换行**：账号名是给人认人的标签，
    换行会把整张表的行高撑乱；完整值靠 title 悬停（用户决策 Q2-A）。
-   ⚠️ max-width 与列宽（LEDGER_ENTRY_COLUMNS 里 account 的 172px）是两回事：
+   ⚠️ max-width 与列宽（LEDGER_ENTRY_COLUMNS 里 account 的 12.68% + @container 上下限
+   88px / 172px）是两回事：
    列宽由 colgroup 决定，这里只是**兜底不让它撑破**（colgroup 缺失或旧产物时）。 */
 .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 172px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* ⚠️⚠️ **模型格必须单行 + 省略号**（用户 2026-11-16 报障：窄面板下模型名断成 4 行）。
    原先这一格**没有 white-space: nowrap** ⇒ 宽度不够时浏览器自由换行，
    trae/deepseek-v4.1-flash 被折成 trae/deep / seek-v4. / 1-flash 三行。
-   配合 LEDGER_ENTRY_COLUMNS 里账号列改 clamp(88px, 22%, 172px)（两列一起让步），
+   配合 LEDGER_ENTRY_COLUMNS 里账号列的**纯百分比 12.68%** + @container 上下限
+   （88px / 172px；⚠️ clamp/calc 在 col 上会被静默忽略，别改回去），
    到下限后不再缩、改由省略号截尾部 —— 悬停 title 看完整值。
    ⚠️ 本文件是 JS 模板字符串：注释里**禁止反引号**（会提前闭合模板，
    esbuild 报 Expected ";" but found ... 并把指针指到注释那一行）。本轮又踩了一次。 */
@@ -1402,7 +1404,7 @@ const STYLES = `
      tests/unit/ledger-pane-chrome.spec.ts:405 的既有契约（8 列定宽明细表靠它裁），
      改成 auto 会让那条契约红 —— 而且明细表本来就有自己的
      .dim-jh-ledgerTableScroll 横向滚动容器。 */
-   * ⚠️ 2026-11-16：统计组已从「写死 460px」改成**内容自适应 + 可收缩**
+  /* ⚠️ 2026-11-16：统计组已从「写死 460px」改成**内容自适应 + 可收缩**
    * （见上方 .dim-jh-ledgerStatGroup 的注释），故这里**不再需要** width: 300px
    * 的覆盖 —— 组宽天然跟着内容走、且不会再超出容器。
    * 只保留 gap 收窄（窄面板里 8px 间隙相对更显眼）。
