@@ -64,67 +64,14 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { PROVIDER_REGISTRY } from '../../src/provider-registry.js'
+import { BRAND_WORDS, PROVIDERS, channelNameHits } from '../helpers/provider-brand-words.js'
+
+// ⚠️ 2026-11-17（GitHub #98）：渠道词表的推导已抽到 `tests/helpers/provider-brand-words.ts` ——
+//    `meta.detail` 的详情文档要打**同一条**「不得枚举渠道名」判据，两处各抄一份推导必然漂移。
+//    本文件现在只消费词表，不再自己推导（行为不变，见文件头「判据：什么算在枚举渠道名」）。
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const read = (path: string): string => readFileSync(resolve(HERE, '../..', path), 'utf8')
-
-/** 一条渠道的 `id` 与展示名。 */
-interface ProviderEntry {
-  readonly id: string
-  readonly label: string
-}
-
-/**
- * 从 registry **真读**渠道表。
- *
- * ⚠️ 2026-10-08 改：原先解析 `plugin-src/client/jet-hub.js` 的 `PROVIDERS`
- * **源码文本**（正则 `/\{\s*id:\s*'([^']+)',\s*label:\s*'([^']+)'/g`）。
- * 客户端 `PROVIDERS` 现由 `src/provider-registry.ts` 派生，故这里直接读 registry
- * —— 既是行为断言，也不再随 `PROVIDERS` 的结构变化而失效。
- *
- * ⚠️ 这里只需要 `label`（`id` 不参与品牌词表），但保留成对返回以维持
- * `ProviderEntry` 的形状与下游判据不变。
- */
-function readProviders (): ProviderEntry[] {
-  const entries = PROVIDER_REGISTRY.map((d) => ({ id: d.id, label: d.label }))
-  // ⚠️ 见文件头「下限护栏存在的原因」：空词表 ⇒ 断言恒真 ⇒ 假绿。
-  if (entries.length < 10) {
-    throw new Error(`PROVIDER_REGISTRY 只取到 ${entries.length} 条（应 ≥10）—— 真源疑似失配`)
-  }
-  return entries
-}
-
-/** label 的主名（去掉中/英文括号及其内容），空白折叠。 */
-function mainName (label: string): string {
-  return label.replace(/[（(][^）)]*[）)]/g, ' ').replace(/\s+/g, ' ').trim()
-}
-
-/** label 里所有括号（中/英）内的内容。 */
-function parenContents (label: string): string[] {
-  return [...label.matchAll(/[（(]([^）)]*)[）)]/g)].map((match) => (match[1] ?? '').trim())
-}
-
-const PROVIDERS = readProviders()
-
-/**
- * 渠道词表：label 主名 ＋ 括号内的**中文公司名**。
- * ⚠️ 以「版」结尾的括注（`国际版` / `中国版`）是版本形容词，不是渠道标识，排除。
- */
-const BRAND_WORDS: readonly string[] = [
-  ...new Set(
-    PROVIDERS.flatMap((entry) => [
-      mainName(entry.label),
-      ...parenContents(entry.label).filter((inner) => /[\u4e00-\u9fff]/.test(inner) && !/版$/.test(inner)),
-    ]),
-  ),
-].filter((word) => word.length > 0)
-
-/** 描述里命中的渠道词（空数组 = 没有枚举渠道名）。 */
-function channelNameHits (description: string): string[] {
-  const haystack = description.toLocaleLowerCase()
-  return BRAND_WORDS.filter((word) => haystack.includes(word.toLocaleLowerCase()))
-}
 
 /** 被锁的三个描述来源。 */
 const DESCRIPTION_SOURCES = ['locale/zh.json', 'locale/en.json', 'package.json'] as const
