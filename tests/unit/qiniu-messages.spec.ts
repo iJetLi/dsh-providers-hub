@@ -51,9 +51,12 @@ describe('buildQiniuPayload：字段门禁', () => {
     expect(payload.tools, '缺 tools 字段是 invalid_parameter_error 事故的另一半').toEqual([])
   })
 
-  it('system 与 reasoning_effort 只在非空时下发', () => {
+  it('★ system 折进 messages[]（不放顶层，GitHub #97）；reasoning_effort 只在非空时下发', () => {
+    // 顶层 `system` 被上游静默忽略 ⇒ 必须作为第一条 `messages[]` 成员下发。
     expect('system' in buildQiniuPayload({ ...base, system: '' })).toBe(false)
-    expect(buildQiniuPayload({ ...base, system: '你是助手' }).system).toBe('你是助手')
+    const folded = buildQiniuPayload({ ...base, system: '你是助手' })
+    expect('system' in folded, '顶层不许再有 system').toBe(false)
+    expect(folded.messages).toEqual([{ role: 'system', content: '你是助手' }, ...base.messages])
     expect('reasoning_effort' in buildQiniuPayload({ ...base, reasoningEffort: '' })).toBe(false)
     // 声明了档位就必须真的发出去，否则选择器只是 UI 装饰。
     expect(buildQiniuPayload({ ...base, reasoningEffort: 'high' }).reasoning_effort).toBe('high')

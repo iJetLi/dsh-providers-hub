@@ -265,12 +265,16 @@ describe('★★★ 接线层：两处 system 位置都必须过这张表（漏�
     expect(String(system?.content)).not.toContain('AI coding assistant')
   })
 
-  it('★★★ 顶层 system 字段必须换成同一句（两处共用一个函数）', async () => {
+  it('★★★ system 入参必须换成同一句，并且折进 messages[]（GitHub #97）', async () => {
+    // 修前这条断言的是 `payload.system`（顶层）—— 而顶层那个位置上游**静默忽略**
+    // （2026-11-17 真机，GitHub #97）⇒ 改成断言 fold 之后的**第一条** `messages[]`。
     const payload = await wireOf({
       system: 'You are an AI coding assistant, powered by a large language model.',
       messages: [{ role: 'user', content: 'hi' }],
     })
-    expect(payload.system).toBe(ALLOWED_CODING_KEEPING_SUFFIX)
+    expect(Object.hasOwn(payload, 'system'), '顶层不许再有 system').toBe(false)
+    const messages = payload.messages as Array<{ role: string; content: unknown }>
+    expect(messages[0]).toEqual({ role: 'system', content: ALLOWED_CODING_KEEPING_SUFFIX })
   })
 
   it('★★★ 端到端三级链：DSH 身份句 ⇒ wire 上是**最终**放行措辞，不是中间产物', async () => {
@@ -315,7 +319,9 @@ describe('★★★ 接线层：两处 system 位置都必须过这张表（漏�
     expect(JSON.stringify(assistant)).not.toContain('AI agent for coding work')
   })
 
-  it('★★ 顶层 system 与 messages[]-system **同时**存在时，两处都要换（只换一处等于没换）', async () => {
+  it('★★★ `system` 入参与 messages[]-system **同时**存在时，两处都要换（只换一处等于没换）', async () => {
+    // GitHub #97 之后 `system` 入参会被折到 `messages[]` **最前面**，所以这条从
+    // 「两个位置」变成「两条 system 成员，都要换」—— 判据强度不变。
     const payload = await wireOf({
       system: 'You are an AI coding assistant.',
       messages: [
@@ -323,8 +329,11 @@ describe('★★★ 接线层：两处 system 位置都必须过这张表（漏�
         { role: 'user', content: 'hi' },
       ],
     })
+    expect(Object.hasOwn(payload, 'system'), '顶层不许再有 system').toBe(false)
     const messages = payload.messages as Array<{ role: string; content: unknown }>
-    expect(messages.find((message) => message.role === 'system')?.content).toBe(ALLOWED_CODING)
-    expect(payload.system).toBe(ALLOWED_CODING)
+    expect(messages).toHaveLength(3)
+    expect(messages[0], '折进来的那一份也要换').toEqual({ role: 'system', content: ALLOWED_CODING })
+    expect(messages[1], '历史里的那份同样要换').toEqual({ role: 'system', content: ALLOWED_CODING })
+    expect(messages[2]).toEqual({ role: 'user', content: 'hi' })
   })
 })

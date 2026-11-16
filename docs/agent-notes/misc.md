@@ -1599,3 +1599,66 @@ model not available in your region         ← 换区就好
   写在前面会让它误取到新块、跳过基础规则（表现为「可收缩」断言假失败）。
 
 ---
+
+## ⚠️⚠️ OpenAI 兼容渠道的 `system` **不能放请求体顶层**（GitHub #97，2026-11-17）
+
+这批渠道的网关**只从 `messages[]` 读系统提示词**，顶层的 `system` 字段被**静默忽略**：
+HTTP 200、正文正常、上游零报错，只是模型完全不知道 system 存在。
+
+### 判据必须是「模型有没有收到」，不是 HTTP 码
+
+真机探针：system 里写 `Reply with exactly SYS-MARK-4192 and nothing else.`，
+然后看回复里**有没有这个字面量**。只看状态码会得到完全相反的结论（两种形态都是 200）。
+
+| 渠道 | 顶层 `system` | `messages[]`-system | 判定 |
+|---|---|---|---|
+| marvis | 200 但**没收到指令** | 200 且收到 | **受影响** |
+| modelscope | 200 但**没收到指令**（回复「Hi! How can I help you today?」） | 200 且收到 | **受影响** |
+| baizhi | 200 **且收到** | 200 且收到 | **不受影响 = 报告误报** |
+| qiniu | 无凭据，未实测 | 未实测 | 按同源协议风险一并处理 |
+
+⚠️⚠️ **`baizhi` 必须排除，别「统一」进来**：它构造的是 **Anthropic Messages**
+（`max_tokens` 必填、`stop_sequences`、`tools[].input_schema`），Anthropic 协议里
+`system` **本来就是顶层参数** —— 挪进 `messages[]` 反而造出**非法角色**。
+`minimax-messages.ts` / `monkeycode-messages.ts` 同属这一类（同样是 Anthropic 形状）。
+
+⚠️ **一个假阴性陷阱**：baizhi 顶层 system 用 `max_tokens: 32` 时回 `200 + 空串`，
+看起来像「没收到」，实际是预算被思考/格式吃掉 —— 加到 200 才拿到标记。
+**空串既可能没收到、也可能被预算吃掉 ⇒ 判据只能是「输出里出现我要求的字面量」。**
+
+### 影响面（为什么这是 P1 不是 cosmetic）
+
+需要 system 的**辅助请求**（auto-review 风险评审、session-title）拿不到策略 ⇒
+模型收不到「按要求输出 JSON」这类指令 ⇒ 输出散文 ⇒ 上层 `JSON.parse` 失败 ⇒
+评审 fail-closed 拒绝 ⇒ Auto 预设下**所有工具调用无法执行**；而且想关掉 auto-review
+也要过同一条评审（**死锁**）。
+
+### 修法：一个共享函数，改在 **builder** 而不是 adapter
+
+`src/system-prompt-fold.ts` 的 `foldSystemIntoMessages(messages, system)`：
+`system` 非空时作为**第一条** `messages[]` 成员返回，否则原样返回入参（纯函数，
+不改入参、不去重、不合并 —— `options.system` 与历史里的 system 是两件事）。
+
+⚠️ 必须写在 `build*Payload` 里：builder 才是把 `system` 写成 wire 字段的那一处。
+三个 builder 各自内联一份就是这次缺陷的成因（加一处忘两处），仓库红线也是
+「同一判据只留一份实现」。
+
+⚠️⚠️ **marvis 那条腿还叠了一层**：它的 system 必须先过 `rewriteMarvisSystemText`
+（腾讯系风控指纹 + 身份句改写），否则会在修静默失败的同时引入**显式 403 /
+`4100406`**（2026-11-16 刚修好，见 IKVRNK）。顺序是「先改写、再折进 messages[]」，
+**不能反**。
+
+### 未修已登记（同类形态，本轮未验证、未改）
+
+`src/astudio-adapter.ts` / `src/gemini-adapter.ts` / `src/opencode-adapter.ts` 仍在
+adapter 里内联写顶层 `system`。它们是否受影响**没有实测证据**（各自凭据/协议不同，
+其中 gemini 是原生 Gemini 信封、不是 OpenAI 兼容）⇒ 不猜、不顺手改。
+将来若要处理，判据同上：**看模型有没有收到字面量**，并先排除 Anthropic 形状的那几家。
+
+### 守卫
+
+`tests/unit/system-prompt-fold.spec.ts`（15 条）：纯函数 5 条 + 三个 builder 的
+wire 形状 9 条（顶层不许有 system 键 / 必须折成第一条 / 空值原样）+ baizhi
+「顶层必须保留」的反向守卫 1 条。变异 8/8 全红。
+⚠️ `tests/unit/baizhi.spec.ts` 那类「替身宽松字面量」文件**不在** typecheck 白名单里，
+新 spec 里 `RequestMessage.content` 必须写**块数组**（写字符串只有它编译不过时才暴露）。

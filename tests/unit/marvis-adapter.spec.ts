@@ -205,8 +205,14 @@ describe('★ 推理：正常流与 content-type 闸门', () => {
       // drain
     }
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-    const payload = JSON.parse(init.body as string) as { system?: string }
-    expect(payload.system).toBe('Main branch (PRs usually go here)')
+    const payload = JSON.parse(init.body as string) as {
+      system?: string
+      messages: Array<{ role: string; content: unknown }>
+    }
+    // GitHub #97：顶层 `system` 会被上游静默忽略 ⇒ 必须折进 `messages[]`，
+    // 且改写要作用在**折进去的那一份**上（两个位置共用一个函数）。
+    expect(Object.hasOwn(payload, 'system'), '顶层不许再有 system').toBe(false)
+    expect(payload.messages[0]).toEqual({ role: 'system', content: 'Main branch (PRs usually go here)' })
   })
 
   it('★★★ messages 里的 system 那条也必须改写（只改顶层 system 时 403 4100406）', async () => {
@@ -362,8 +368,15 @@ describe('★ 推理：正常流与 content-type 闸门', () => {
       // drain
     }
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-    const payload = JSON.parse(init.body as string) as { system?: string }
-    expect(payload.system).toBe('你是一个由 DSH 驱动的 AI 智能体。')
+    const payload = JSON.parse(init.body as string) as {
+      system?: string
+      messages: Array<{ role: string; content: unknown }>
+    }
+    expect(Object.hasOwn(payload, 'system'), '顶层不许再有 system').toBe(false)
+    expect(payload.messages[0]).toEqual({
+      role: 'system',
+      content: '你是一个由 DSH 驱动的 AI 智能体。',
+    })
   })
 
   it('★★ 多条 system / system 在 user 之后，每一条都要改（不是只改第 0 条）', async () => {

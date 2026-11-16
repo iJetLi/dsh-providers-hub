@@ -26,6 +26,8 @@
  */
 
 /** DSH 的工具 schema（`GenerateOptions.tools` 的形状）。 */
+import { foldSystemIntoMessages } from './system-prompt-fold.js'
+
 export interface MarvisHarnessTool {
   name: string
   description: string
@@ -144,7 +146,9 @@ export interface MarvisPayloadInput {
  * 契约细节（每条都对齐仓库既有适配器）：
  * - `stream` **恒 true**：本适配器只走 SSE 路径；
  * - `stream_options` **恒带** `include_usage`（见模块头）；
- * - `system` 只有非空才带；
+ * - `system` **不放顶层**：上游只从 `messages[]` 读系统提示词，顶层的 `system`
+ *   被静默忽略（2026-11-17 真机，GitHub #97）⇒ 由 `foldSystemIntoMessages`
+ *   折成**第一条** `messages[]` 成员；空串/undefined 时原样不动；
  * - `max_tokens` 只放行安全正整数 —— 0 / 负数 / NaN 会让 DSH 侧抛
  *   `INVALID_MODEL_MAX_TOKENS`，整轮崩；
  * - `tools` 只在**非空**时下发（本仓主流口径；⚠️ 还有一批 provider 是「无条件带」，
@@ -165,13 +169,12 @@ export function buildMarvisPayload(input: MarvisPayloadInput): Record<string, un
   }
   return {
     model: input.model,
-    messages: input.messages,
+    messages: foldSystemIntoMessages(input.messages, input.system),
     stream: true,
     stream_options: { include_usage: true },
     ...(input.tools !== undefined && input.tools.length > 0
       ? { tools: buildMarvisTools(input.tools) }
       : {}),
-    ...(input.system !== undefined && input.system.length > 0 ? { system: input.system } : {}),
     ...(typeof input.temperature === 'number' && Number.isFinite(input.temperature)
       ? { temperature: input.temperature }
       : {}),

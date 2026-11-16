@@ -116,9 +116,21 @@ describe('buildMarvisPayload', () => {
     expect(() => buildMarvisPayload(base)).not.toThrow()
   })
 
-  it('system 只有非空才带', () => {
+  it('★ system 折进 messages[]，不放顶层（GitHub #97）', () => {
+    // 上游只从 `messages[]` 读系统提示词，请求体顶层的 `system` 被**静默忽略**
+    // （2026-11-17 真机：带了却收不到指令、HTTP 仍是 200）。这条用例修前把
+    // **错误行为钉成了期望**（`payload.system`），所以回归能活下来。
     expect(Object.hasOwn(buildMarvisPayload({ ...base, system: '' }), 'system')).toBe(false)
-    expect(buildMarvisPayload({ ...base, system: '你是助手' }).system).toBe('你是助手')
+    expect(buildMarvisPayload({ ...base, system: '' }).messages).toEqual(base.messages)
+    const folded = buildMarvisPayload({ ...base, system: '你是助手' })
+    expect(Object.hasOwn(folded, 'system'), '顶层不许再有 system').toBe(false)
+    expect(folded.messages).toEqual([{ role: 'system', content: '你是助手' }, ...base.messages])
+  })
+
+  it('★ system 折进去时不得改动原 messages 数组（纯函数）', () => {
+    const messages = [{ role: 'user', content: 'hi' }]
+    buildMarvisPayload({ ...base, messages, system: '你是助手' })
+    expect(messages).toEqual([{ role: 'user', content: 'hi' }])
   })
 
   it('temperature 只放行有限数', () => {
