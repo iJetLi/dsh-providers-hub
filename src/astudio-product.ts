@@ -5,19 +5,17 @@
  *
  * | 用途 | 方法 | 地址 | 认证 |
  * |---|---|---|---|
- * | 对话 | POST | `https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions` | `Authorization: Bearer <modelBearerToken>` |
+ * | 对话 | POST | `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1/responses` | `Authorization: Bearer <modelBearerToken>` |
  * | 模型目录 | GET | `https://astronstudio-api-volces-prod.xf-yun.com/api/v1/model-manager/models` | 同上 |
  * | 活体凭据（权威源） | GET | `https://agent.xfyun.cn/xingchen-studio/bot/models/configs` | `Cookie` 四字段串 |
  *
  * 三条与其余 provider 不同的**结构性事实**（都不是从代码推出来的，必须实测才知道）：
  *
- * 1. **两个基址不同域**：推理在 `maas-api.cn-huabei-1.xf-yun.com/v1`，目录在
- *    `astronstudio-api-volces-prod.xf-yun.com/api/v1/model-manager`。
- *    ⚠️ 2026-11-07 起旧的推理前缀 `astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1`
- *    整段下线：任何路径（含 `/chat/completions`）都回
- *    **HTTP 404 `{"error":{"message":"API endpoint not found","type":"not_found_error"}}`**；
- *    同一 token 打目录仍 200（证明不是鉴权失效），打新基址 200 且正常出流。
- *    网关迁移时不会发公告，故该常量必须能随实测更新（`ASTUDIO_MAAS_BASE_URL`）。
+ * 1. **推理是 Responses 协议，不是 Chat Completions**：同一基址下
+ *    `/chat/completions` 恒 **404** `API endpoint not found`（2026-11-07 只验了
+ *    这一条就误判「整个前缀下线」，2026-11-16 实测 `/responses` 全通 —— 详见
+ *    {@link ASTUDIO_MAAS_BASE_URL} 的对照表）。目录在同一个域的
+ *    `/api/v1/model-manager` 前缀下。
  *    ⚠️ 目录基址**没有** `/v1/models`（新推理基址的 `/v1/models` 是 405 `method not allowed`）——
  *    按「OpenAI 兼容网关必有 `/v1/models`」的直觉去拼会一路 404/405。
  * 2. **推理端点的 `model` 只认裸 slug**：本地回环网关（`127.0.0.1:4605/v1/models`）
@@ -32,7 +30,7 @@
  *
  * ## 客户端形态（决定了本 provider 的「登录」与众不同）
  *
- * AStudio 是 Electron 桌面端（AUMID `cn.xfyun.acode`，产品版本 3.5.2），登录方式是
+ * AStudio 是 Electron 桌面端（AUMID `cn.xfyun.acode`，产品版本 3.6.4），登录方式是
  * **微信扫码**，会话以**明文**落在 `<安装数据目录>\userdata\astron-session.json`。
  * 授权页与回调都在**客户端自己**手里（我们无从走完），所以 `astudio-oauth.ts` 做的是
  * **导入本机既有会话**，而不是再造一套 PKCE —— 造了也没有能走完它的授权端点。
@@ -82,8 +80,15 @@ export interface AstudioProduct {
   id: 'astudio'
   displayName: string
   /** 推理网关基址（OpenAI 兼容）。 */
+  /**
+   * 推理网关基址（见 {@link ASTUDIO_MAAS_BASE_URL}）。
+   *
+   * ⚠️ 字段名沿用历史名（`maas`）：AStudio 客户端自己的键也叫这个，**改名会
+   * 让四处读它的调用点（推理/目录/凭据/积分）一起漂**，而它现在指向的不是
+   * MaaS 而是 model-gateway。语义以注释为准，不要按名字推断协议。
+   */
   maasBaseUrl: string
-  /** 对话端点路径（接在 `maasBaseUrl` 之后）。 */
+  /** 对话端点路径（接在 `maasBaseUrl` 之后；本家是 `/responses`）。 */
   chatPath: string
   /** 模型目录基址（与推理网关**同域不同前缀**，见模块头第 1 条）。 */
   catalogBaseUrl: string
@@ -116,7 +121,23 @@ export interface AstudioProduct {
    * 换成 `22` 属于伪造客户端形态，收益为零、风险未知 ⇒ 固定 21。
    */
   clientType: string
-  /** 客户端自报产品版本（同上，可选头）。 */
+  /**
+   * 客户端自报产品版本（可选头）。
+   *
+   * ⚠️⚠️ **对推理/鉴权是可选的，对「模型目录」是版本闸门**（2026-11-16 实测）：
+   * 同一个 token、同一个目录端点，只改这两个头结果不同 ——
+   *
+   * | 请求头 | 目录条数 |
+   * |---|---|
+   * | 不带 `clientType` / `studioVersion` | **7** |
+   * | `clientType:21` + `studioVersion:3.5.2` | **7** |
+   * | `clientType:21` + `studioVersion:3.6.4` | **8**（多出 `xdeepseek-flash-in` = DeepSeek-V4.1-Flash） |
+   *
+   * ⇒ 旧值 `3.5.2` 会让**新模型永远不出现在面板里**（症状与「上游没这个模型」同形，
+   * 零报错）。这与 qoder 的 `COSY_VERSION` / zcode 的版本×身份块同族：**版本串会
+   * 决定服务端下发什么**。故本常量必须随本机客户端真实版本更新
+   * （`AStudio.exe` 的 `FileVersion`）。
+   */
   studioVersion: string
   /** 控制面（目录 / 凭据）请求超时（毫秒）；对话流不适用。 */
   requestTimeoutMs: number
@@ -128,20 +149,40 @@ export interface AstudioProduct {
 }
 
 // ── 端点路径 ────────────────────────────────────────────────────────────
-export const ASTUDIO_CHAT_PATH = '/chat/completions'
+/**
+ * 推理端点路径（接在 {@link ASTUDIO_MAAS_BASE_URL} 之后）。
+ *
+ * ⚠️⚠️ 本家用的是 **OpenAI Responses 协议**（`/responses`），**不是**
+ * Chat Completions。同一基址下的 `/chat/completions` 恒 404，见基址注释。
+ */
+export const ASTUDIO_CHAT_PATH = '/responses'
 export const ASTUDIO_CATALOG_PATH = '/api/v1/model-manager/models'
 export const ASTUDIO_API_KEY_CONFIG_PATH = '/bot/models/configs'
 
 /**
- * 推理网关基址（OpenAI 兼容）。
+ * 推理网关基址（**OpenAI Responses**，与会话 JWT 配套）。
  *
- * ⚠️ **2026-11-07 真机复测：旧基址已整段下线。**
- * `https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1` 下任何路径
- * （含 `/chat/completions`）都回 HTTP 404 `API endpoint not found`；同一 token
- * 打模型目录仍 200，说明不是鉴权失效而是网关搬迁。AStudio 客户端 3.4.4+ 的
- * 推理基址即本值（与 AStudio2API 从客户端 bundle 提取的默认值一致）。
+ * ## ⚠️⚠️ 2026-11-16 真机实测订正：上一版「整段下线」的结论是过宽的推断
+ *
+ * 旧注释（2026-11-07）写「`…/model-gateway/v1` 下任何路径（含
+ * `/chat/completions`）都回 404 ⇒ 整段下线」，据此把基址改成了 MaaS
+ * `maas-api.cn-huabei-1.xf-yun.com/v1`。**那条推断只验了一个路径**，实测结论是：
+ *
+ * | 路径（同一基址） | 凭据 | 结果 |
+ * |---|---|---|
+ * | `POST /model-gateway/v1/responses` | 会话 JWT | **200**（7 个目录模型全通，含 tools） |
+ * | `POST /model-gateway/v1/chat/completions` | 会话 JWT | **404** `API endpoint not found` |
+ * | `POST maas-api…/v1/chat/completions` | 会话 JWT | **401** `HMAC signature cannot be verified: apikey not found` |
+ * | `POST maas-api…/v1/chat/completions` | `api_key`（configs 拉到的） | **403** `11200 no valid authorization: … lacks an active order` |
+ *
+ * ⇒ 真实形态是「**前缀活着，只是只提供 `/responses`**」，而 MaaS 那条腿只认
+ * `api_key`、且本机账号在那套账本里**没有生效订单**（403 `11200`）。
+ * 客户端 3.6.4 的 `maasBaseUrl` 仍指本值，调的也是 `/responses`。
+ *
+ * ⚠️ 两个账本不要混：积分/签到走 `agent.xfyun.cn/xingchen-studio`（Cookie），
+ * 推理走本基址（**会话 JWT**）。「面板有积分」**不等于**「MaaS 有订单权限」。
  */
-export const ASTUDIO_MAAS_BASE_URL = 'https://maas-api.cn-huabei-1.xf-yun.com/v1'
+export const ASTUDIO_MAAS_BASE_URL = 'https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1'
 
 /** 凭据文件路径的环境变量覆盖（单测/非默认安装位置用）。 */
 export const ASTUDIO_SESSION_FILE_ENV = 'DSH_ASTUDIO_SESSION_FILE'
@@ -277,7 +318,7 @@ export const ASTUDIO: AstudioProduct = {
   apiKeyConfigPath: ASTUDIO_API_KEY_CONFIG_PATH,
   defaultCredentialRef: 'ASTUDIO_ACCESS_TOKEN',
   clientType: '21',
-  studioVersion: '3.5.2',
+  studioVersion: '3.6.4',
   requestTimeoutMs: 30_000,
   chatHeaderTimeoutMs: 60_000,
   // ⚠️ **必须 ≥300s**：长上下文模型的两次 SSE 字节之间实测可静默 >45s，

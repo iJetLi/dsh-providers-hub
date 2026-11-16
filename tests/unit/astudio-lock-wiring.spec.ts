@@ -364,10 +364,23 @@ describe('★★ AStudio：分档行为（驱动生产判据，不是复述实�
     //    「非 buddy 系必须注入 `fetchBalance`」（否则会用 product.endpoint 拼出
     //    错误的余额 URL）。本家已注入，故这条只钉住 product 常量本身。
     expect(ASTUDIO.id).toBe('astudio')
-    // ⚠️ 2026-11-07 实测：旧基址 `astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1`
-    //    对任何路径都回 404 `API endpoint not found`（同一 token 打目录仍 200），
-    //    推理已迁到 maas 域。钉死新值，防止有人「按记忆」改回旧域。
-    expect(ASTUDIO.maasBaseUrl).toBe('https://maas-api.cn-huabei-1.xf-yun.com/v1')
+    // ⚠️⚠️ 2026-11-16 真机订正（此前这条钉的是**错的值**）：
+    //    2026-11-07 只验了 `/chat/completions` 一条路径拿到 404 就判「整个前缀
+    //    下线」，于是把基址改成了 MaaS。实测真相是「前缀活着，但只提供 `/responses`」：
+    //      · `POST …/model-gateway/v1/responses` + 会话 JWT ⇒ **200**（7 个模型全通）
+    //      · `POST …/model-gateway/v1/chat/completions`   ⇒ 404 `API endpoint not found`
+    //      · `POST maas-api…/v1/chat/completions` + JWT   ⇒ 401 `apikey not found`
+    //      · `POST maas-api…/v1/chat/completions` + api_key ⇒ 403 `11200 no active order`
+    //    ⇒ 钉死**当前**真值 + 路径，防止有人「按记忆」再搬回 MaaS。
+    expect(ASTUDIO.maasBaseUrl).toBe('https://astronstudio-api-volces-prod.xf-yun.com/model-gateway/v1')
+    expect(ASTUDIO.chatPath).toBe('/responses')
+    // 客户端版本：按本机安装的 AStudio.exe 的 `FileVersion 3.6.4.172` 取主次版本。
+    // ⚠️⚠️ 它**不是**纯装饰（2026-11-16 实测）：目录端点按这两个头**下发不同的模型集** ——
+    //    不带头 / `3.5.2` ⇒ 7 条；`3.6.4` ⇒ **8 条**（多出 `xdeepseek-flash-in`
+    //    = DeepSeek-V4.1-Flash）。退回去 ⇒ 新模型在面板里**永久消失且零报错**。
+    //    详见 `docs/agent-notes/providers-astudio.md` §0.3。
+    // 改这里必须同步 `astudio-login-credits.spec.ts` 的期望（那边已改成引用本常量）。
+    expect(ASTUDIO.studioVersion).toBe('3.6.4')
   })
 
   /**
