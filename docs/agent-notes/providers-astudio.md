@@ -114,6 +114,56 @@ in=309128 / out=1470 / reasoning=1072` —— 既证推理通路，也证 usage 
 
 ---
 
+## 0.4 ⚠️⚠️⚠️ 铁律：翻译器产出的是**真增量**，绝不套「累积差量」包装器
+
+本家旧 chat 通路曾套 `astudioWrapIncremental` 作防御（上游可能给「同一 Id 的累积全文」，
+包装器只发差量）。它的 `astudioIncrementalDelta` 有一条
+`previous.startsWith(incoming) ⇒ ''` —— 对**真增量**流，这就是「本帧恰好是已发全文的
+前缀 ⇒ 当成重复**静默丢弃**」。
+
+Responses 协议里 `output_text.delta` 的 `delta` 按定义就是本帧新增文本，**没有**累积形态
+⇒ 包装器纯属负债。实测（本地跑 `lib/astudio.js`，对比「只过翻译器」与「翻译器 + 包装器」）：
+
+| # | 上游 delta 序列 | 应得 | 套包装器后 | 结论 |
+|---|---|---|---|---|
+| A | `["Hello"," world","!"]` | `Hello world!` | 同 | 正常 |
+| B | `["The","The"," weather"]` | `TheThe weather` | `The weather` | **丢一个 The** |
+| C | `["abcdef","abc","def"]` | `abcdefabcdef` | `abcdefdef` | **丢 abc** |
+| D | `["a","a","a","b"]` | `aaab` | `ab` | **丢两个 a** |
+| E | `["Qoder"," is"," a"," model"]` | 完整 | 同 | 正常 |
+| F | `["Same text","Same text"]` | 重复两遍 | 只一遍 | **丢一整段** |
+
+⚠️ 同一条 `astudioIncrementalDelta` 也管 `reasoning_content` 与 `tool_calls[].function.arguments`
+⇒ 思考内容与**工具参数**同样会被静默吞掉（参数少一截 ⇒ 工具调用 400 或参数错，
+比正文缺失更难查）。
+
+⚠️ 重复词、重复代码行（`});` 连写）在模型输出里**很常见**，而症状是「正文少一截、
+零报错」。旧 chat 通路同样套过它，但那条通路因 `/chat/completions` 恒 404
+**从未跑过流量** ⇒ 缺陷一直没暴露（本 PR 第一次让它吃到真流量）。
+
+⇒ **判据（行为级，已落 `astudio-responses.spec.ts` 的「生产链路」组）**：拿重复 delta
+喂 `AstudioAdapter.stream()`，拼出来的正文必须**逐字**等于 delta 的拼接。
+⚠️ 只测「两个不同字符」（旧用例是 `你`+`好`）对该缺陷**零牙**。
+
+## 0.5 `studioVersion` 的爆炸半径（2026-11-16 实测：只对签到面必需）
+
+§0.3 说它是目录闸门。它还会发往 8 处（`astudio-auth.ts` 1 处、
+`astudio-credits.ts` 4 处、`astudio.ts` 2 处），所以「把 3.5.2 抬到 3.6.4」
+必须确认另外两个面不受影响。实跑三档对照（同一账号、同一 Cookie）：
+
+| 端点 | 3.5.2 | 3.6.4 | 不带版本 |
+|---|---|---|---|
+| `GET …/points/balance` | 200 | 200 | **200**（三档响应逐字节相同） |
+| `GET …/client-popups/pending` | 200 | 200 | **200 但 `code 11001001` 客户端平台、版本或构建号无效** |
+| `GET /api/v1/model-manager/models` | 7 条 | **8 条** | 7 条 |
+
+⇒ ① **余额面对版本完全不敏感** ⇒ 3.5.2→3.6.4 对积分无影响；
+② **签到面必须有「被上游认得」的版本对** ⇒ 版本头只能从签到面删、不能从推理面「统一」掉，
+且**抬到上游不认识的版本会让签到直接 11001001**（本仓 `astudio.ts` 模块头原写
+「三个可选头实测都不带也能 200」是**只对推理面**成立的结论，已加限定）。
+
+---
+
 ## 1. 模型上下文窗口与输出上限（真网压力探测定案）
 此前曾有误以为“各模型上下文只有 10 万”的疑问，经真实构造超长 Prompt（4k ~ 1100k tokens）向上游直接施压探测，结果坐实如下：
 

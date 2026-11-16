@@ -7,8 +7,13 @@
  * 1. **信封**：控制面（模型目录、`bot/models/configs`）是 `{code, message, data}`，
  *    ⚠️ **HTTP 200 但 `code !== 0` 也是失败**（本仓库反复踩过的「成功但没内容」格）；
  *    推理面是 OpenAI 裸体，错误形态是 `{"error":{code,message,type}}`。
- * 2. **鉴权头**：`Authorization: Bearer <modelBearerToken>`，可选
- *    `X-Account-Id` / `clientType` / `studioVersion`（实测三者**都不带也能 200**）。
+ * 2. **鉴权头**：推理面 `Authorization: Bearer <modelBearerToken>`、控制面 `Cookie`；
+ *    `X-Account-Id` / `clientType` / `studioVersion` 三者对**推理**是可选的
+ *    （实测都不带也 200），但 ⚠️⚠️ **对签到面不是**：`GET …/client-popups/pending`
+ *    不带 `clientType`+`studioVersion` 会回 `code 11001001`
+ *    `客户端平台、版本或构建号无效`（2026-11-16 实测）；`points/balance` 则对版本
+ *    完全不敏感（3.5.2 / 3.6.4 / 不带三档响应逐字节相同）。⇒ **版本头只能从签到面
+ *    删，不能从推理面「统一」掉**。
  *    ⚠️ **没有** bkn / DJB2 之类的现算签名（`astudioCookieHeader` 是纯字符串拼接）。
  * 3. **凭据失效的唯一触发点是上游 HTTP 401**：磁盘上**没有任何 TTL / expiresAt**，
  *    所以本地**无法**预判到期 —— 见 {@link astudioCredentialExpiresAtMs}。
@@ -1090,66 +1095,6 @@ export function astudioEffortForRequest(
       ? '上游目录未对该模型声明任何思考档位'
       : `该模型只声明 ${set.join('/')}`,
   }
-}
-
-// ── 请求体构造（纯函数，供单测逐字段断言） ──
-
-/** {@link buildAstudioChatRequest} 的入参（对齐 DSH 的 `GenerateOptions` 子集）。 */
-export interface AstudioChatRequestInput {
-  /** **裸 slug**（上游唯一认得的形态，见模块头第 4 条与 {@link astudioBareSlugOf}）。 */
-  model: string
-  messages: readonly Record<string, unknown>[]
-  system?: string
-  tools?: readonly unknown[]
-  temperature?: number
-  maxTokens?: number
-  stop?: string[]
-  /** 已经过 {@link astudioEffortForRequest} 校验的档位；`undefined` = 不发。 */
-  reasoningEffort?: string
-  stream: boolean
-  /** 账号 id → 请求体 `user`（实测客户端会带；上游不强求）。 */
-  user?: string
-}
-
-/**
- * 构造 `POST {maasBaseUrl}/chat/completions` 的请求体。
- *
- * 三条实测驱动的取舍：
- * 1. **`model` 用裸 slug**：`builtin/<base64>` 形态会 502 `model_not_found`（fact 380），
- *    这里再兜一次 {@link astudioBareSlugOf} —— 目录将来若下发别名形态也不会翻车。
- * 2. **不发就省键**（`temperature` / `max_tokens` / `stop` / `reasoning_effort`）：
- *    写 `null` 会被火山网关当成显式空值（部分字段直接 400），省略才是「用服务端默认」。
- * 3. `stream` **恒带**，且流式时带 `stream_options.include_usage`（实测末 chunk
- *    只有这样才能拿到 usage；不带时流里没有 usage 帧，计费与统计双缺）。
- *
- * ⚠️ `system` 折成第一条 `role:'system'` 消息而不是顶层字段：OpenAI Chat
- * Completions 没有顶层 `system`，而本仓库的 `serializeMessages` 已经会把 harness
- * 消息里的 system 排好序，这里只补适配器**额外**拿到的 one-shot system。
- */
-export function buildAstudioChatRequest(input: AstudioChatRequestInput): Record<string, unknown> {
-  const messages: Array<Record<string, unknown>> = []
-  if (typeof input.system === 'string' && input.system.length > 0) {
-    messages.push({ role: 'system', content: input.system })
-  }
-  for (const message of input.messages) {
-    if (typeof message !== 'object' || message === null) continue
-    messages.push(message)
-  }
-  const body: Record<string, unknown> = {
-    model: astudioBareSlugOf(input.model),
-    messages,
-    stream: input.stream,
-  }
-  if (input.stream === true) body.stream_options = { include_usage: true }
-  if (typeof input.user === 'string' && input.user.length > 0) body.user = input.user
-  if (input.tools !== undefined && input.tools.length > 0) body.tools = input.tools
-  if (input.temperature !== undefined) body.temperature = input.temperature
-  if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens
-  if (input.stop !== undefined && input.stop.length > 0) body.stop = input.stop
-  if (typeof input.reasoningEffort === 'string' && input.reasoningEffort.length > 0) {
-    body.reasoning_effort = input.reasoningEffort
-  }
-  return body
 }
 
 // ── Responses 协议（本家**真实**推理通路，2026-11-16 实测） ──────────────

@@ -15,8 +15,12 @@
  *    （`reasoning_content` 独立成块、`tool_calls` 按 index 合并、`finish_reason` 映射、
  *    **HTTP 200 + SSE 内嵌错误帧**归为 `LlmError`）。⚠️ 翻译层只做**形状**，语义守卫
  *    只有一份；为新协议另写一个消费器会让两套判据分叉。
- *    仍套一层 {@link astudioWrapIncremental} 作**防御**（对真增量流是幂等透传，
- *    上游哪天改回累积形态不至于把正文拼成三份）。
+ *    ⚠️⚠️ **绝不套** {@link astudioWrapIncremental}：它的语义是「同一 Id 累积全文 ⇒
+ *    只发差量」，而翻译器产出的是**真增量**（协议里每个 delta 就是本帧新增文本）。
+ *    套上去会把「本帧恰好是已发全文的前缀」当成重复**静默丢弃** —— 实测
+ *    `["a","a","a","b"] ⇒ "ab"`、`["The","The"," weather"] ⇒ "The weather"`
+ *    （重复词/重复代码行在模型输出里很常见）。旧 chat 通路同样套过它，但那条
+ *    通路因 404 从未跑过流量，所以缺陷一直没暴露。
  * 3. **凭据**：全部经 `astudio-auth.ts` 注入（磁盘快路径 + 401 触发的权威重取）。
  *    本文件**不读磁盘、不拼 Cookie、不自己发凭据请求**。
  *
@@ -76,7 +80,6 @@ import {
   astudioStreamErrorCode,
   astudioStreamErrorMessage,
   astudioVisibleModels,
-  astudioWrapIncremental,
   buildAstudioResponsesRequest,
   classifyAstudioError,
   type AstudioCatalogModel,
@@ -173,7 +176,7 @@ export interface AstudioAdapterOptions {
   accountPool?: import('./account-pool.js').AccountPool
 }
 
-/** AStudio 适配器：Chat Completions 通道（实测上游原生兼容 OpenAI）。 */
+/** AStudio 适配器：**Responses** 协议通道（2026-11-16 真机实测；同基址的 `/chat/completions` 恒 404）。 */
 export class AstudioAdapter extends LlmAdapter {
   private readonly product: AstudioProduct
   private readonly fetchImpl: typeof fetch
@@ -458,9 +461,16 @@ export class AstudioAdapter extends LlmAdapter {
   // ── 推理 ──
 
   /**
-   * 一次推理（**只发 `stream:true`**：harness 要的是 `StreamChunk`，而本家流式是标准
-   * OpenAI 增量 + `[DONE]`，末 chunk 带 usage —— 实测 `stream_options.include_usage`
-   * 不带时流里没有 usage 帧，计费与统计双缺，故该键由 `buildAstudioChatRequest` 恒补）。
+   * 一次推理（**只发 `stream:true`**：harness 要的是 `StreamChunk`）。
+   *
+   * 本家是 **Responses** 协议（`POST {base}/responses`），不是 Chat Completions：
+   * 上游吐的是 `response.output_text.delta` 这类事件，由 {@link astudioResponsesToChatSse}
+   * 翻译成 chat 帧后再交给共享消费器。
+   *
+   * ⚠️ 这里**没有** `stream_options.include_usage`（Responses 协议没这个字段）：
+   * usage 由翻译器从 `response.completed` / `response.incomplete` 的
+   * `response.usage` 转成 chat 口径的 `usage` 帧（`input_tokens_details.cached_tokens`
+   * 要从 `prompt_tokens` 里扣出来单列），见 `astudio-responses.spec.ts`。
    */
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const credential = await this.resolveCredentialImpl(options.model, options.sessionId)
@@ -590,7 +600,8 @@ export class AstudioAdapter extends LlmAdapter {
     // ⚠️ 本家是 **Responses** 协议：先把上游事件流翻译成 chat 帧
     // （{@link astudioResponsesToChatSse}），再交给共享消费器 —— 语义守卫只有一份。
     yield* consumeOpenAiSse(
-      astudioWrapIncremental(astudioResponsesToChatSse(response)),
+      // 翻译器已保证真增量 ⇒ 不能再套累积差量包装器（见文件头第 2 条）。
+      astudioResponsesToChatSse(response),
       { ...options.signal !== undefined ? { signal: options.signal } : {} },
       {
         label: 'astudio',

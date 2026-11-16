@@ -23,7 +23,11 @@
  *    `*_details.cached_tokens|reasoning_tokens`），与 chat 的 `prompt_tokens` 不同名；
  *    直接透传会让消费器算成 0 token（计费与统计双缺）。
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { AstudioAdapter } from '../../src/astudio-adapter.js'
+import { ASTUDIO } from '../../src/astudio-product.js'
 import {
   astudioResponsesInputItems,
   astudioResponsesToChatSse,
@@ -234,5 +238,75 @@ describe('astudioResponsesToChatSse —— 事件翻译', () => {
     await expect(collect(sseResponse([
       ['error', { type: 'error', error: { message: 'boom', type: 'server_error' } }],
     ]))).rejects.toThrow(/boom/)
+  })
+})
+
+
+// ════════════════════════════════════════════════════════════════════════
+describe('★★★ 生产链路（翻译器 → 消费器）必须逐字还原「重复正文」', () => {
+  /**
+   * 真缺陷（2026-11-17 实跑复现）：生产链路曾经是
+   * `consumeOpenAiSse(astudioWrapIncremental(astudioResponsesToChatSse(response)))`。
+   *
+   * `astudioWrapIncremental` 的语义是「同一 Id 累积全文 ⇒ 只发差量」，它的
+   * `astudioIncrementalDelta` 有一条 `previous.startsWith(incoming) ⇒ ''` ——
+   * 而翻译器产出的是**真增量**（协议里每个 `output_text.delta` 就是本帧新增文本）。
+   * 于是「本帧恰好是已发全文的前缀」时被当成重复**静默丢弃**：
+   *
+   * | 上游 delta 序列 | 应得 | 套包装器后 |
+   * |---|---|---|
+   * | `["a","a","a","b"]` | `aaab` | `ab`（丢两个 a） |
+   * | `["The","The"," weather"]` | `TheThe weather` | `The weather` |
+   * | `["Same text","Same text"]` | 重复两遍 | 只一遍 |
+   *
+   * ⚠️ 重复词、重复代码行（`});` 连写）在模型输出里**很常见**，且症状是
+   * 「正文少一截、零报错」。旧 chat 通路同样套过它，但那条通路因 `/chat/completions`
+   * 恒 404 从未跑过流量 ⇒ 缺陷一直没暴露（本 PR 第一次让它吃到真流量）。
+   *
+   * 既有 `astudio-stream.spec.ts` 的「标准增量必须逐字透传」只喂 `你`+`好`
+   * （两字符不同）⇒ 对该缺陷**零牙**。本组必须走**适配器真实链路**。
+   */
+  function adapterWith(deltas: readonly string[]): AstudioAdapter {
+    const events: Array<[string, unknown]> = [
+      ['response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg_0' } }],
+      ...deltas.map((delta): [string, unknown] => ['response.output_text.delta', { type: 'response.output_text.delta', output_index: 0, delta }]),
+      ['response.completed', { type: 'response.completed', response: { status: 'completed' } }],
+    ]
+    const fetcher = vi.fn(async () => sseResponse(events)) as unknown as typeof fetch
+    return new AstudioAdapter({
+      product: ASTUDIO,
+      fetchImpl: fetcher,
+      resolveCredential: async () => ({ access_token: 'at' } as never),
+      warn: () => { /* 静音 */ },
+    })
+  }
+
+  async function textThroughAdapter(deltas: readonly string[]): Promise<string> {
+    const options = {
+      provider: 'astudio',
+      model: 'xdeepseek-flash-in',
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } })],
+    } as unknown as GenerateOptions
+    let text = ''
+    for await (const chunk of adapterWith(deltas).stream(options)) {
+      if (chunk.type === 'text-delta') text += String((chunk as { text?: unknown }).text ?? '')
+    }
+    return text
+  }
+
+  it('单字符重复：["a","a","a","b"] 必须还原成 aaab', async () => {
+    expect(await textThroughAdapter(['a', 'a', 'a', 'b'])).toBe('aaab')
+  })
+
+  it('重复词：["The","The"," weather"] 必须还原成 TheThe weather', async () => {
+    expect(await textThroughAdapter(['The', 'The', ' weather'])).toBe('TheThe weather')
+  })
+
+  it('整段重复：["Same text","Same text"] 必须发两遍', async () => {
+    expect(await textThroughAdapter(['Same text', 'Same text'])).toBe('Same textSame text')
+  })
+
+  it('前缀重复：["abcdef","abc","def"] 必须还原成 abcdefabcdef', async () => {
+    expect(await textThroughAdapter(['abcdef', 'abc', 'def'])).toBe('abcdefabcdef')
   })
 })
