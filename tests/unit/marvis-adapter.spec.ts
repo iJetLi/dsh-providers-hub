@@ -686,10 +686,25 @@ describe('★ 额度冷却到次日 UTC+8 零点（不是 +24h）', () => {
  * 那一行摘掉，42 条全绿**。也就是说纯函数那一层守不住「adapter 到底有没有把
  * `options.tools` 交下去」。
  *
- * 这两条把判据搬到 `fetch` 的请求体上：读真实发出的 body，断言 `tools` 键
- * 在/不在。摘掉 adapter 的传参 ⇒ 第一条红；把门控改回「恒带空数组」⇒ 第一条红。
+ * 这两条把判据搬到 `fetch` 的请求体上：读真实发出的 body，断言 `tools` 键在/不在。
+ *
+ * ⚠️ **更正（2026-11-16 对抗审计 A4，我原先把这里有写错）**：原文写「摘掉 adapter 的
+ * 传参 ⇒ **第一条**红」是**假的**。实测摘掉 `src/marvis-adapter.ts` 的
+ * `tools: options.tools,` 只让**第二条**（有工具那一轮）红 —— 第一条
+ * （`bodyOf({})` / `bodyOf({tools: []})`）**全绿**，因为「不传」与「传了但为空」
+ * 在 wire 上都等于「没有 `tools` 键」。
+ * ⇒ **第一条对这个 adapter 缺陷零判别力**，它守的是 payload 层的门控；
+ * 第二条才是 adapter 传参的守卫。两条各守一层，别指望任一条单独够用。
  */
 describe('★★★ 工具键的接线层守卫（IKVL6C：判据必须打在 wire 上）', () => {
+  // ⚠️ 必须自己收 stub（对抗审计 A7）：`vitest.config.ts` 没开
+  // `unstubGlobals: true`、`tests/setup-isolation.ts` 也没做，而本 describe 用
+  // `vi.stubGlobal('fetch', …)` ⇒ 不清理就会把 stub 漏给后续 describe
+  // （当前它是文件最后一个，暂不咬人；追加用例即污染）。
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   async function bodyOf(options: Record<string, unknown>): Promise<Record<string, unknown>> {
     const fetchMock = vi.fn(
       async (_url: string, _init: RequestInit) =>
@@ -710,7 +725,12 @@ describe('★★★ 工具键的接线层守卫（IKVL6C：判据必须打在 wi
     return JSON.parse(init.body as string) as Record<string, unknown>
   }
 
-  it('★★★ 没有工具的那一轮，wire 上必须**没有** `tools` 键（发 `[]` 会让模型在正文臆造）', async () => {
+  // ⚠️ 这一条是**整链**守卫（options → adapter → buildMarvisPayload → wire），
+  //    不是 adapter 层守卫：`tools` 的空值门控只在 `buildMarvisPayload` 一处，
+  //    adapter 只做原样透传 ⇒ 本用例对 adapter 层零判别力（正向审计 P2-2）。
+  //    它仍然承重：adapter 那条 `tools: options.tools` 若被删掉，
+  //    「有工具时必须带」那条会红。
+  it('★★★ 没有工具的那一轮，wire 上必须**没有** `tools` 键（整链守卫）', async () => {
     const body = await bodyOf({})
     expect(Object.hasOwn(body, 'tools')).toBe(false)
     // 再核一遍「空数组」那一格：显式传 [] 也必须等价于「不带」。

@@ -418,7 +418,12 @@ export class MarvisAdapter extends LlmAdapter {
       ...options.system !== undefined && options.system.length > 0
         ? { system: rewriteMarvisSystemText(options.system, this.product.id) }
         : {},
-      ...options.tools !== undefined ? { tools: options.tools } : {},
+      // ⚠️ `tools` 的空值门控**只在** `buildMarvisPayload` 一处（PR #186 正向审计 P1-3：
+      //    这里原先的 `!== undefined` 是**零行为的装饰性条件** —— 变异成 `!== null` 或
+      //    恒传 `?? []` 全绿，只有整行在不在才影响 wire ⇒ 两层都"看起来"在判会让
+      //    后来者以为有兜底，而真会漏的是 `buildMarvisPayload` 那条「有工具必须带」的腿。
+      //    故此处**原样透传**（含 `undefined` 与 `[]`），由 payload 层统一归一。
+      tools: options.tools,
       ...options.temperature !== undefined ? { temperature: options.temperature } : {},
       ...options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {},
       ...options.reasoningEffort !== undefined
