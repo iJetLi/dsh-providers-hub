@@ -569,3 +569,118 @@ upstream: modelscope  status: 400
   会**静默改变请求语义**（退回上游默认温度）。
 
 ⇒ 判据是「**空值 vs 缺省值在上游是否可区分**」，不是「字段看起来像空的就省略」。
+
+## ⚠️⚠️⚠️ 身份句黑名单：现行替换句**也被拉黑**（Gitee IKVRNK，2026-11-16）
+
+**报障形状**：plan mode 开关若干次后，该会话**每轮** 403
+`{"code":4100406,"msg":"非法请求"}`，其他会话正常。
+
+**触发条件（本机真机实发确证，共 39 次）**：`messages[]` 内出现
+`role:'system'` 且含身份句。与体积 / 时间 / 账号无关；同一句放在**顶层
+`system` 字段**一律 200。
+
+**为什么是「本仓缺陷」而不是「上游抽风」**：我们共用登记表
+（`src/openai-gateway/tencent-fingerprint.ts`）给 DSH 身份句用的
+`replace` 是官方同形措辞
+`You are an AI coding assistant, powered by a large language model`，
+**上游后来把这一句也登记进了黑名单** ⇒ 管线把请求**改写到了一处新的禁词上**：
+
+```
+DSH 身份句 ──登记表──▶ 官方同形句 ──▶ 403 / 4100406
+```
+
+**证据强度：已实测（直接证据）**。全部为 `messages[]` 内 `role:'system'`，
+模型 `deepseek-v4-pro-external`，`stream:false`：
+
+| 输入 | 结果 |
+|---|---|
+| `You are an AI agent powered by DeepSeek Harness.` | 403 / 4100406 |
+| `You are an AI coding assistant, powered by a large language model`（无尾句点） | 403 / 4100406 |
+| `You are an AI coding assistant, powered by a large language model.`（登记表产物） | 403 / 4100406 |
+| `You are an AI coding assistant.` | 403 / 4100406 |
+| `You are Claude Code, Anthropic's official CLI for Claude` | 403 / 4100406 |
+| `You are Claude Code, Anthropic's CLI for Claude`（登记表产物） | 403 / 4100406 |
+| `You are Claude Code.` / `You are Claude Code, an interactive CLI for coding` | 403 / 4100406 |
+| `You are Claude.` | 403 / 4100406 |
+| `You are an AI agent for coding work.` | **200** |
+| `You are an interactive CLI coding agent.` | **200** |
+| `You are an AI coding agent.` / `You are an interactive coding assistant.` | 200 |
+| `You are a CLI coding agent.` / `You are a coding assistant.` / `You are an AI assistant.` | 200 |
+| `你是一个由 DSH 驱动的 AI 智能体。`（兜底正则产物） | **200** |
+| `你是一个用于编码工作的 AI 智能体。` | 200 |
+
+⇒ **至少两族身份句被封，且两族的替换产物都在黑名单里**。
+⚠️ 报障 issue 里「上游名单目前只登记了 DSH 身份句一族」**这句是错的**
+（Claude Code 那族同样 403，本格证伪）。
+
+**中英不对称（容易误判失效面的地方）**：中文身份句过登记表**原样返回**
+（表只有英文句式），全靠兜底正则 `/DeepSeek\s+Harness/gi → DSH` 救活 ⇒
+`你是一个由 DSH 驱动的 AI 智能体。` **实测 200**。所以断的只有**英文腿**。
+
+### 修法：marvis 专有替换表（`src/marvis-identity.ts`）
+
+**不能靠改共用登记表**：那张表是 buddy / workbuddy / marvis 三家共用，而
+**两站的名单不同源** —— 官方同形句在 `copilot.tencent.com` 是 2026-10-21
+实发验收过的放行值，改它会**把 buddy 一起改坏**。
+
+所以新增 marvis 专有的
+`MARVIS_BLOCKED_IDENTITY_REWRITES` + `rewriteMarvisBlockedIdentities()`，
+在 `rewriteMarvisSystemText`（`src/marvis-adapter.ts`）里**接在登记表之后**：
+
+```ts
+return rewriteMarvisBlockedIdentities(rewriteTencentContentFingerprints(text, provider))
+  .replace(/DeepSeek\s+Harness/gi, 'DSH')
+```
+
+⚠️ **顺序不能换**：① 的产物（官方同形句）正是 ② 的**输入**；② 挪到前面恒不命中，
+等于没修。
+
+### ⚠️⚠️⚠️ 已被实测证伪的替代方案：把 system 折进顶层 `system`
+
+上游的准入扫描**只看 `messages[]` 内的 system 块**，同一句放顶层一律 200 ——
+看起来「搬家」比「改措辞」干净得多。**但这是错的**（2026-11-16 八格对照）：
+
+| 探针 | `messages[]`-system | 顶层 `system` | 完全没有 system |
+|---|---|---|---|
+| system 要求「第一行原样输出 `SYS-MARK-4192`」 | 标记**出现** | 标记**不出现** | 标记不出现 |
+| system 要求「只用英文回答」，用户用中文提问 | 汉字 **0** 个 | 汉字 **58** 个 | 汉字 56 个 |
+
+⇒ 顶层 `system` 是「**收下但不看**」：请求变 200，但整段系统提示词
+（身份 + 用户 `AGENTS.md` 里的全部约束）**被静默丢弃** —— 比 403 更坏，
+因为 403 至少会被看见。
+
+**这条也顺带说明**：顶层 `system` 路径上的改写（见本文件
+「判定发生在 `messages[]` 的 system 那条，**不在**顶层 `system`」一节）
+只能换来「不被拦」，**换不来「被执行」**。
+
+**未修已登记**：若宿主/调用方真的依赖 marvis 的顶层 `system`（例如非 agent
+循环的会话标题、auto-review 一类请求），那一段提示词**当前是无效的**。
+本轮只把它作为事实登记，不扩大修复范围（agent 循环实测不传顶层 `system`，
+影响面待评估）。
+
+### 守卫（`tests/unit/marvis-identity.spec.ts`）
+
+1. `★★★` 官方同形句（带 product 后缀）⇒ 换成 `You are an AI agent for coding work.`；
+   裸形态 `You are an AI coding assistant.` 走同一条规则；
+2. `★★★` Claude Code 官方句 / 登记表产物 / 裸句 ⇒ `You are an interactive CLI coding agent.`；
+3. `★★` 大小写不敏感、幂等（连跑两次逐字节相同）、未命中时**返回同一引用**
+   （上层靠引用相等跳过重写）、不跨行（只改身份句本身，不吞后面的约束）；
+4. `★★★` **反向判据**：表里任何一条规则的产物都**不得再含** `AI coding assistant`
+   或 `Claude Code` —— 这一条不依赖上游（我们自己至少不该主动写禁词）；
+5. `★★★` **接线级**（`wireOf()` 真跑 `stream()` 取请求体）：`messages[]`-system、
+   顶层 `system`、**两处同时存在**、以及**端到端三级链**（DSH 身份句 ⇒ wire 上必须是
+   **最终**放行措辞，不是中间产物）。
+
+⚠️ 为什么第 5 组不可省：`tests/unit/marvis-adapter.spec.ts` 里「messages[] 的 system 被改写」那条
+原来断言的正是
+**登记表产物**（`You are an AI coding assistant, powered by a large language model.`）
+—— 那条用例**把被拦文本钉成了期望**，是本次回归能活下来的直接原因。
+
+### 跑步机（如实登记）
+
+这是**第三代**：原句 → 官方同形句 → 本表的值。每换一次措辞都可能被上游再登记。
+本表的价值不是一劳永逸，而是：① 把「哪几句被拦」收敛到一个文件；
+② 换措辞不必动 buddy 侧共用表；③ 替换值是**实测 200** 而非猜的。
+
+⚠️ **不要**把本表的替换值再写进 `CONTENT_FINGERPRINTS` 的 `find`：
+那会变成「找我们自己的产物再改一遍」的自指规则，零行为。

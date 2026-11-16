@@ -238,10 +238,19 @@ describe('★ 推理：正常流与 content-type 闸门', () => {
     }
     const system = payload.messages.find((message) => message.role === 'system')
     expect(system).toBeDefined()
-    // 走的是登记表那条（官方同形措辞），不是兜底正则 ⇒ 顺带锁住「表对 marvis 生效」。
-    // 句末那个 `.` 是原文保留的（`find` 刻意不带尾句点，见 tencent-fingerprint.ts 注释）。
-    expect(system?.content).toBe('You are an AI coding assistant, powered by a large language model.')
+    // ⚠️ **三级链**，断言必须写成最终产物（Gitee IKVRNK）：
+    //   ① 共用登记表把 DSH 身份句换成「官方同形措辞」
+    //      `You are an AI coding assistant, powered by a large language model.`；
+    //   ② 那句在 marvis 网关**也被拉黑了**（403/4100406，2026-11-16 实发）
+    //      ⇒ 过 `rewriteMarvisBlockedIdentities` 换成实测放行的措辞；
+    //   ③ 兜底正则此时已是 no-op。
+    // ⇒ 只断言 ① 的产物就是**把被拦文本钉成了期望**（本文件此前正是如此）。
+    expect(system?.content).toBe('You are an AI agent for coding work.')
     expect(String(system?.content)).not.toContain('DeepSeek Harness')
+    // ★★★ 反向判据：产物里**不得**再出现被拦的两种措辞 —— 上游随时可能再登记，
+    // 但「自己别主动写禁词」这一条不依赖上游。
+    expect(String(system?.content)).not.toContain('AI coding assistant')
+    expect(String(system?.content)).not.toContain('Claude Code')
   })
 
   it('★★ 表未登记的中文句式也被兜底清掉（上游漂移容忍）', async () => {

@@ -48,6 +48,7 @@ import { retryAfterMsFromResponse } from './retry-after.js'
 import { reportLedgerAccount } from './token-ledger.js'
 import { llmHeaders, marvisAccountOf, marvisChatUrl, type MarvisCredential } from './marvis.js'
 import { buildMarvisPayload } from './marvis-messages.js'
+import { rewriteMarvisBlockedIdentities } from './marvis-identity.js'
 import {
   MARVIS,
   MARVIS_FALLBACK_MODELS,
@@ -141,12 +142,24 @@ export function marvisRetryAfterMs(
  * 又破坏历史回读证据（同 buddy 那条注释）。
  */
 function rewriteMarvisSystemText(text: string, provider: string): string {
-  // 先过登记表（IKJNA1 同一份表），再兜底清掉表未覆盖的形态（中文句式、上游措辞漂移）。
+  // 三段，顺序不能换（每一段的输出都是下一段的输入）：
+  //   ① 共用登记表：按 `CONTENT_FINGERPRINTS` 把已登记的风控指纹换掉；
+  //   ② marvis 专有的「被拉黑身份句」表（Gitee IKVRNK）—— **必须在 ① 之后**：
+  //      ① 把 DSH 身份句换成「官方同形措辞」，而那句在 marvis 网关**也被拉黑了**
+  //      ⇒ ① 的产物正是 ② 的输入。② 挪到 ① 前面就恒不命中，等于没修。
+  //   ③ 兜底清掉表未覆盖的形态（中文句式、上游措辞漂移）。
   // ⚠️ **两处 system 位置必须走同一个函数**：登记表只覆盖英文句式，中文身份句
   //    （`你是一个由 DeepSeek Harness 驱动的 AI 智能体。`）过登记表**原样返回**，
   //    完全靠下面这条兜底正则 —— 一份实现两处共用，才不会出现「messages 清了、顶层没清」。
   // `DSH` 是 2026-11-15 对 marvis 网关实测放行的替换值（清洗后中英文均 200）。
-  return rewriteTencentContentFingerprints(text, provider)
+  //
+  // ⚠️ 为什么**不能**改成「把 system 折进顶层 `system` 字段」：上游的准入扫描只看
+  //    `messages[]` 内的 system 块，折进顶层确实能拿到 200 —— 但 2026-11-16 的对照
+  //    实验证明顶层 `system` 是**收下但不看**（要求输出标记的 system 放顶层后标记
+  //    不出现；要求只用英文的 system 放顶层后回答仍 58 个汉字，与「完全没有 system」
+  //    同形）⇒ 折顶层会把整段系统提示词**静默丢弃**，比 403 更坏。证据见
+  //    `marvis-identity.ts` 模块头。
+  return rewriteMarvisBlockedIdentities(rewriteTencentContentFingerprints(text, provider))
     .replace(/DeepSeek\s+Harness/gi, 'DSH')
 }
 

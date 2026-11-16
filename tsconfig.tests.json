@@ -31,6 +31,11 @@
     //    大小写与空白变体 / 多条 system）都在这份 spec 里，而它原先**不在** include 白名单
     //    ⇒ `typecheck:tests` 从没检查过它（正向审计 P3）。加进来守住「改写只作用于 system」。
     "tests/unit/marvis-adapter.spec.ts",
+    // ⚠️ 2026-11-16 补（Gitee IKVRNK）：`rewriteMarvisBlockedIdentities` 的替换表与
+    //    接线级守卫（两处 system 位置都过表）都在这里。纳入类型检查是因为它断言
+    //    `wireOf()` 交出的**请求体形状**（`payload.messages` 是 `{role, content}[]`、
+    //    `payload.system` 是字符串）—— 这类形状错误在 esbuild 转译下完全看不见。
+    "tests/unit/marvis-identity.spec.ts",
     "tests/unit/jet-hub-rpc-signature.spec.ts",
     "tests/unit/astudio-errors.spec.ts",
     "tests/unit/astudio-auth.spec.ts",
