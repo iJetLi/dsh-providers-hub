@@ -575,7 +575,7 @@ function summarizeTest(res) {
  * @param windowDays - 后端回传的窗口天数（决定这一行标成「N 天内到期」还是「还有 N 天」）。
  * @param now - **渲染时**的当前时刻（分类是时间的函数，不能传缓存值）。
  */
-function formatPackageLine(pkg, windowDays, now) {
+function formatPackageLine(pkg, windowDays, now, imminentDays) {
   const remaining = formatUnits(pkg.remaining, pkg.unit) ?? '?';
   const total = formatUnits(pkg.total, pkg.unit) ?? '?';
   const amount = pkg.totalKnown === false ? remaining : `${remaining} / ${total}`;
@@ -590,7 +590,7 @@ function formatPackageLine(pkg, windowDays, now) {
      * —— 修了一半。改成复用同一个函数：文案逐字节不变（已核对：`days` 同为
      * `Math.ceil(left)`、label 为空时同样省略括号），且自动继承那边的修复。
      */
-    parts.push(formatExpiryHint(pkg, windowDays, now));
+    parts.push(formatExpiryHint(pkg, windowDays, now, imminentDays));
   } else if (pkg.cycleEndTime) parts.push(`本周期至 ${pkg.cycleEndTime}`);
   else if (typeof pkg.expiryNote === 'string' && pkg.expiryNote !== '') parts.push(pkg.expiryNote);
   return parts.join(' · ');
@@ -617,7 +617,7 @@ function formatPackageLine(pkg, windowDays, now) {
  * @param windowDays - 后端 `credits.balances` 回传的「临时积分」窗口（天）。
  *   有它才显示**临时 / 长期**两桶（CodeBuddy / WorkBuddy / TRAE / LobsterAI 带）。
  */
-function CreditBalanceRow({ balance, error, loading, windowDays, provider, actions }) {
+function CreditBalanceRow({ balance, error, loading, windowDays, imminentDays, provider, actions }) {
   /**
    * 有 `actions`（重测 / 重置 / 停用 / 删除）时，这一行是**三列**网格：
    * `标签 | 余额 | 按钮`，按钮贴最右 —— 用户报障「底部那排按钮别单独占一行」。
@@ -725,7 +725,21 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    * 数字本身也正是这些时刻才重拉，无需额外的常驻定时器。
    */
   const now = Date.now();
-  const split = splitCreditsByExpiry(all, windowDays, now);
+  const split = splitCreditsByExpiry(all, windowDays, now, imminentDays);
+  /**
+   * 「临期 / 短期」是否真的分了档。
+   *
+   * ⚠️ 三种情况都为 `false`（都退化成引入三档前的形态）：
+   * 1. 旧后端不产出 `imminent` / `shortTerm`；
+   * 2. 用户把 `DSH_BUDDY_IMMINENT_WINDOW_DAYS` 设成 0；
+   * 3. 该渠道本来就没有 5 天内到期的额度。
+   *
+   * 第 3 种下 hover 解释里那行「短期 = N~M 天」仍应显示（它是**词条定义**，
+   * 与当前是否有该档额度无关）—— 故这里额外看 `imminentDays` 是否有值。
+   */
+  const hasTierSplit = imminentDays !== null && imminentDays !== undefined
+    && windowDays !== null && windowDays !== undefined
+    && Number(imminentDays) < Number(windowDays);
   // ⚠ 数字按**单位**格式化（remote 引入的单位支持）：ZCode 的包是 token，
   // 用 `formatCredits` 会把 94539275 显示成「9453.93万」而非「94.54M」。
   const formatForUnit = (value) => formatUnits(value, unit);
@@ -736,7 +750,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    * ⚠️ 与 `expiryText` 同源（都走 `credit-expiry.js`），这里额外要结构化分段
    * 是为了让 React 逐段设 `data-tone` —— 单个字符串只能整体一个颜色。
    */
-  const expiryParts = expirySplitParts(split, formatForUnit, now, expiryDateHints(all, windowDays, now));
+  const expiryParts = expirySplitParts(split, formatForUnit, now, expiryDateHints(all, windowDays, now, imminentDays));
   /**
    * **独立池**（如 AStudio 的星火积分）：服务端给的是两个互不相通的池，
    * 那笔钱**不能**当通用积分用。分桶按金额聚合、天然丢池名 ⇒ 单独摘出来标注，
@@ -756,7 +770,7 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
   // 明细放进 title，不占版面；账号卡片本身已经信息密集了
   const detail = [
     all.length > 1 ? `共 ${all.length} 个资源包，${activeCount} 个有效` : null,
-    ...all.map(pkg => formatPackageLine(pkg, windowDays, now)),
+    ...all.map(pkg => formatPackageLine(pkg, windowDays, now, imminentDays)),
   ].filter(Boolean).join('\n');
   /**
    * 配额窗口的明细与主行**都换成百分比口径**。
@@ -910,15 +924,21 @@ function CreditBalanceRow({ balance, error, loading, windowDays, provider, actio
    *    不是教程，补充说明越短越好；真要展开解释，正文里已有完整版。
    */
   const hoverGlossary = [
-    // 三档分桶：**逐条一行**，一行只说一个词条的定义。
+    // 分桶：**逐条一行**，一行只说一个词条的定义。
+    // ⚠️ 2026-11-17 起是**四档**（永久 / 长期 / 短期 / 临期）。`imminentDays`
+    //    缺席（旧后端）时「短期」那行说成「N~N 天」没有意义，故整条不渲染
+    //    —— 与 `expiryParts` 退化成三段保持自洽。
     !poolSplitText && expiryParts.length > 0
       ? '永久 = 服务端未给到期时间，不会作废'
       : null,
     !poolSplitText && expiryParts.length > 0
       ? `长期 = 有到期时间，距扣费截止还有 ${windowDays} 天以上`
       : null,
+    !poolSplitText && expiryParts.length > 0 && hasTierSplit && imminentDays !== null
+      ? `短期 = 距扣费截止 ${imminentDays}~${windowDays} 天`
+      : null,
     !poolSplitText && expiryParts.length > 0
-      ? `临期 = 距扣费截止不足 ${windowDays} 天，优先消耗`
+      ? `临期 = 距扣费截止不足 ${hasTierSplit && imminentDays !== null ? imminentDays : windowDays} 天，优先消耗`
       : null,
     exclusiveRemaining > 0
       // ⚠️ 池名本身常已含「独立池」字样（如「星火积分（独立池）」），
@@ -1091,7 +1111,7 @@ function proxyModalComponent(provider) {
   return provider === 'opencode' ? OpencodeProxyModal : null;
 }
 
-function AccountCard({ account, index, order, provider, onToggle, onDelete, onRetest, onReset, onTest, onClaimOnboarding, onboardingBusy, busy, credits, creditsLoading, showCredits, showPackageList, windowDays, showRateLimitActions, drag,
+function AccountCard({ account, index, order, provider, onToggle, onDelete, onRetest, onReset, onTest, onClaimOnboarding, onboardingBusy, busy, credits, creditsLoading, showCredits, showPackageList, windowDays, imminentDays, showRateLimitActions, drag,
   // ⚠️ opencode 专属：传了才渲染「代理」「指纹」两个按钮（见按钮区注释）。
   // 前者额外需要 current 代理串，故签名与 onRetest 略有不同。
   // ⚠️ **本 fork 独有**：modelscope 的「令牌」按钮同理（传了才渲染），
@@ -1541,6 +1561,8 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
             loading: creditsLoading,
             // 「临时 / 长期」分桶的窗口天数（buddy 系 + TRAE + LobsterAI 有值）。
             windowDays,
+            // 「临期」子窗口天数 —— 与 `windowDays` 成对到达；缺席则面板退化成三段。
+            imminentDays,
             // 池名分桶（loomy / raccoon）要按 provider 决定另一个池的标签。
             provider,
             // 操作按钮（重测 / 重置 / 停用 / 删除）挂在积分这一行的最右侧，
@@ -4240,6 +4262,8 @@ function ProviderPanel({
    * `CreditBalanceRow`），因为它是时间的函数。
    */
   const [expiryWindowDays, setExpiryWindowDays] = React.useState(null);
+  /** 「临期」子窗口天数（后端 `imminentDays`）—— 与 `expiryWindowDays` 成对到达。 */
+  const [imminentWindowDays, setImminentWindowDays] = React.useState(null);
   /**
    * 弹窗被拦截时展示给用户手动打开的登录链接。
    *
@@ -4728,6 +4752,9 @@ function ProviderPanel({
       setCredits(next);
       // 窗口天数随余额一起回来（buddy 系 + TRAE 带）——积分行据此分「临时 / 长期」。
       setExpiryWindowDays(res?.windowDays ?? null);
+        // ⚠️ 与 windowDays **成对**写入：漏这一行会让面板退化成三段（临期段消失），
+          //    且**不会有任何报错** —— 与当年漏传 `windowDays` 的症状同型。
+          setImminentWindowDays(res?.imminentDays ?? null);
       // ⚠️ 补读必须走 `quiet` 变体：普通 `loadAccounts` 首行是
       // `setPhase('loading')`，那会把整块列表切成「正在读取账号列表…」，
       // 自愈成功那一刻用户会看到列表闪一下（本函数只是顺带同步有效期，
@@ -4927,6 +4954,9 @@ function ProviderPanel({
         if (!alive) return;
         setPermanentLocked(res?.locked === true);
         setExpiryWindowDays(res?.windowDays ?? null);
+        // ⚠️ 与 windowDays **成对**写入：漏这一行会让面板退化成三段（临期段消失），
+          //    且**不会有任何报错** —— 与当年漏传 `windowDays` 的症状同型。
+          setImminentWindowDays(res?.imminentDays ?? null);
       } catch (caught) {
         // 读失败不阻塞面板：保持「解锁」这一保守默认值（与后端缺省一致）。
         console.error('[jet-hub] load permanent lock failed:', caught);
@@ -4968,6 +4998,9 @@ function ProviderPanel({
       if (!mounted.current) return;
       setPermanentLocked(res?.locked === true);
       setExpiryWindowDays(res?.windowDays ?? null);
+        // ⚠️ 与 windowDays **成对**写入：漏这一行会让面板退化成三段（临期段消失），
+          //    且**不会有任何报错** —— 与当年漏传 `windowDays` 的症状同型。
+          setImminentWindowDays(res?.imminentDays ?? null);
       setLockNotice({
         tone: 'ok',
         text: next ? lockCopy.lockedNotice : lockCopy.unlockedNotice,
@@ -7678,6 +7711,7 @@ function ProviderPanel({
                 showPackageList: supportsCreditPackageList(provider),
                 // 「临时 / 长期」分桶的窗口天数（buddy 系 + TRAE + LobsterAI 才有值）。
                 windowDays: expiryWindowDays,
+                imminentDays: imminentWindowDays,
                 // 卡片级「重测 / 重置」：只对会返回限流错误的 provider 渲染。
                 showRateLimitActions: supportsRateLimit(provider),
                 onToggle: toggleAccount,

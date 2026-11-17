@@ -305,6 +305,11 @@ const STYLES = `
    ⚠️ 与 .dim-jh-badgeNotePart 同一套 tone 变量（深浅主题各自有定义）。 */
 .dim-jh-creditPoolPart { font-size: 11px; font-variant-numeric: tabular-nums; }
 .dim-jh-creditPoolPart[data-tone="ok"] { color: var(--dsw-alias-state-success-primary, #15803d); }
+/* ↑ 深绿 = 「永久」（服务端未给到期时间，永不按时间作废）。
+   ↓ 浅绿 = 「长期」（有到期日但 ≥15 天，还早）。两者**刻意不同深浅**：
+     本仓库 2026-10-12 的硬要求是「永久与长期必须能分辨」，否则用户分不出
+     哪些积分是永远不会作废的。⚠️ 与 .dim-jh-badgeNotePart 那份必须同改。 */
+.dim-jh-creditPoolPart[data-tone="okSoft"] { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #15803d) 55%, var(--dsw-alias-label-tertiary, #8f959e)); }
 .dim-jh-creditPoolPart[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary, #b45309); }
 .dim-jh-creditPoolPart[data-tone="error"] { color: var(--dsw-alias-state-error-primary, #d93025); }
 .dim-jh-creditPoolPart[data-tone="muted"] { color: var(--dsw-alias-label-tertiary, #8f959e); }
@@ -1933,6 +1938,9 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    ⚠️ 用 tone 变量而不是硬编码色值：深浅色主题各自有定义（与 .dim-jh-badgeDot 同源）。 */
 .dim-jh-badgeNotePart { font-variant-numeric: tabular-nums; }
 .dim-jh-badgeNotePart[data-tone="ok"] { color: var(--dsw-alias-state-success-primary, #15803d); }
+/* 浅绿 = 「长期」。与卡片那份（.dim-jh-creditPoolPart）**必须同值**：两处是同一套
+   五档配色，改一处不改另一处会出现「设置页浅绿、徽标黄」的自相矛盾。 */
+.dim-jh-badgeNotePart[data-tone="okSoft"] { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #15803d) 55%, var(--dsw-alias-label-tertiary, #8f959e)); }
 .dim-jh-badgeNotePart[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary, #b45309); }
 .dim-jh-badgeNotePart[data-tone="error"] { color: var(--dsw-alias-state-error-primary, #d93025); }
 .dim-jh-badgeNotePart[data-tone="muted"] { color: var(--dsw-alias-label-tertiary); }

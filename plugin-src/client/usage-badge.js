@@ -1588,7 +1588,7 @@ function UsageBadgeActive(props) {
      *
      * ⇒ 现在：传对参数 + 带上 `windowDays` + 用 `== null` 兜底。
      */
-    const split = splitCreditsByExpiry(packages, value?.windowDays);
+    const split = splitCreditsByExpiry(packages, value?.windowDays, undefined, value?.imminentDays);
     if (split == null) return undefined;
     return split.expiring;
   }
@@ -1920,6 +1920,8 @@ function UsageBadgeActive(props) {
   function renderCredits() {
     const accounts = value?.accounts ?? [];
     const windowDays = value?.windowDays;
+      /** 「临期」子窗口天数 —— 与 `windowDays` 成对（缺席 ⇒ 退化成三段）。 */
+      const imminentDays = value?.imminentDays;
     /**
      * ⚠️ 配额单位（Gemini）**不求和、也不算均值**：窗口是并行的百分比，
      * 累加没有语义（两个账号各 50% 加起来是 100%？），而宿主侧的 `total`
@@ -1998,7 +2000,7 @@ function UsageBadgeActive(props) {
           // 存在时才占一行。用户 2026-10-12 明确要求三档分色。
           row.balance === null
             ? null
-            : renderSplitNote(splitParts(row.balance, windowDays, provider)),
+            : renderSplitNote(splitParts(row.balance, windowDays, provider, imminentDays)),
         ]))),
       hidden === 0
         ? null
@@ -2221,7 +2223,7 @@ function balanceLine(balance) {
  *   `formatPoolSplitLine` 的单串口径（那两家的池没有到期维度），统一包成
  *   **无色的 `muted` 段**；到期分桶走 `expirySplitParts` 的**三档带色**分段。
  */
-function splitParts(balance, windowDays, provider) {
+function splitParts(balance, windowDays, provider, imminentDays) {
   const packages = balance.packages || [];
   const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
   /**
@@ -2254,10 +2256,10 @@ function splitParts(balance, windowDays, provider) {
    * 「最早 X月X日到期」、弹窗没有），而两处都是用户能同时看到的。
    */
   const parts = expirySplitParts(
-    splitCreditsByExpiry(packages, windowDays, now),
+    splitCreditsByExpiry(packages, windowDays, now, imminentDays),
     format,
     now,
-    expiryDateHints(packages, windowDays, now),
+    expiryDateHints(packages, windowDays, now, imminentDays),
   );
   /**
    * **独立池**（AStudio 星火积分等）追加一段无色说明。
@@ -2282,8 +2284,8 @@ function splitParts(balance, windowDays, provider) {
  *
  * ⚠️ 与 `splitParts` **同源**：把分段重新拼成一行，避免两处各写一套判据。
  */
-function splitLine(balance, windowDays, provider) {
-  return splitParts(balance, windowDays, provider)
+function splitLine(balance, windowDays, provider, imminentDays) {
+  return splitParts(balance, windowDays, provider, imminentDays)
     .map((part) => (part.countdown === undefined ? part.text : `${part.text}（${part.countdown}）`))
     .join(' · ');
 }

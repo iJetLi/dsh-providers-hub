@@ -48,6 +48,33 @@ function normalizeWindowDays(windowDays) {
 }
 
 /**
+ * 归一化「临期」子窗口天数。
+ *
+ * ⚠️ **缺席时返回总窗口天数**（不是 `null`）—— 这是本功能**向后兼容的唯一实现点**：
+ *
+ * | 后端 | `imminentDays` | 结果 |
+ * |---|---|---|
+ * | 新 | 5 | `imminent` = 5 天内、`shortTerm` = 5~15 天（四段展示） |
+ * | **旧**（未升级） | `undefined` | 临期窗口 = 总窗口 ⇒ `imminent` 恒 0、全部落 `shortTerm` |
+ * | 设成 0 | 0 | 同上（用户显式关掉临期档） |
+ *
+ * 后两种都退化成**引入三档之前的展示形态**，故「旧后端 + 新前端」不会崩、
+ * 也不会显示错——只是看不到新增的那一段。
+ *
+ * ⚠️ 钳制到 `<= windowDays`：两个窗口是嵌套关系（临期 ⊂ 总窗口），
+ * 倒挂会让「短期」段变成负区间。后端已钳制过一次，这里是第二道防线
+ * （前端拿到的可能是别的版本后端、或手工编辑的 state）。
+ */
+function normalizeImminentDays(imminentDays, windowDays) {
+  if (windowDays === null) return null;
+  // ⚠️ 缺席 / 空串 / 非法 ⇒ 退化成「临期窗口 = 总窗口」（= 今天的两档形态）
+  if (imminentDays === undefined || imminentDays === null || imminentDays === '') return windowDays;
+  const parsed = Number(imminentDays);
+  if (!Number.isFinite(parsed) || parsed < 0) return windowDays;
+  return Math.min(parsed, windowDays);
+}
+
+/**
  * 该包距扣费截止还剩多少天；`null` = 服务端没给到期时间。
  *
  * ⚠️ 优先 `deductionEndTime`；**缺失时才回落到 `expiredTime`**（见 {@link packageExpiryMs}）。
@@ -110,13 +137,40 @@ export function daysUntilExpiry(pkg, now) {
  * @param packages - `credits.balances` 带回来的 `balance.packages`。
  * @param windowDays - 后端回传的窗口天数。
  * @param now - **当前时刻**（渲染时传 `Date.now()`，不要传缓存值）。
+ * @param imminentDays - 后端回传的「临期」子窗口天数（2026-11-17 三档分档）。
+ *   ⚠️ **省略 = 退化成两档**（临期窗口 = 总窗口），见 `normalizeImminentDays`。
  * @returns 窗口不可用时返回 `null`（调用方退化成不显示分类）。
  */
-export function splitCreditsByExpiry(packages, windowDays, now) {
+export function splitCreditsByExpiry(packages, windowDays, now, imminentDays) {
   const days = normalizeWindowDays(windowDays);
   if (days === null || !Array.isArray(packages)) return null;
   const windowMs = days * DAY_MS;
+  /**
+   * 「临期」子窗口（天）。缺席时 `=== days` ⇒ 下面 `imminent` 恒 0、全部落 `shortTerm`。
+   */
+  const imminentDaysValue = normalizeImminentDays(imminentDays, days);
+  const imminentMs = imminentDaysValue * DAY_MS;
   const at = typeof now === 'number' && Number.isFinite(now) ? now : Date.now();
+  /**
+   * **临期**：距到期不足 `imminentDays` 的部分（原「临期」桶里最急的那批）。
+   *
+   * ⚠️ `imminent` 是 `expiring` 的**子量**（`0 <= imminent <= expiring`），
+   * 与后端 `splitBuddyCreditsByExpiry` 的 `imminent` **逐格同构**。
+   * 保留 `expiring` 的「窗口内全部」语义是刻意的：`usage-badge.js` 的
+   * `expiringOf()` 用它判「锁定永久积分时该号还能不能用」，改含义会让锁定态误判。
+   */
+  let imminent = 0;
+  /** **短期**：距到期在 `imminentDays ~ windowDays` 之间的部分。 */
+  let shortTerm = 0;
+  /**
+   * 临期桶里**最早**的作废时刻 / 对应量（临期段倒计时用）。
+   * ⚠️ 与 `earliestExpiringAt` **并列而非替代**：后者覆盖整个窗口（15 天内），
+   *    前者只覆盖临期子窗口（5 天内）。两段的倒计时要各指各的批次。
+   */
+  let earliestImminentAt = null;
+  let earliestImminentAmount = 0;
+  /** 短期桶里**最早**的作废时刻（只用于「最早 X 月 X 日到期」提示，不做小时级倒计时）。 */
+  let earliestShortTermAt = null;
   let expiring = 0;
   /**
    * **已经作废**的额度（`deductionEndTime <= now` 但 `active` 仍为 true）。
@@ -244,6 +298,18 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
       if (hasExpiring) {
         const capped = Math.min(expiringPart, remaining);
         expiring += capped;
+        /**
+         * ★ 2026-11-17：这一份**必须计入 `shortTerm`（短期）**，否则守恒式会破。
+         *
+         * 为什么是短期而不是临期：这类包**没有逐笔时刻**，无法证明它落在
+         * 临期子窗口（5 天）内 ⇒ 按仓库红线「绝不编造日期」，只能归到短期。
+         * 方向是正确的保守端：它仍会被优先于长期积分烧掉，只是不冒充「最急」。
+         *
+         * ⚠️ 漏掉这一行会让 `permanent + longTerm + imminent + shortTerm` 比
+         *    `total` 少一截（实测：CodeArts 卡片 22000 + 500 = 22500 ≠ 25500，
+         *    差的 3000 在任何地方都没出现）—— 正是 2026-10-21 那个报障的复发形态。
+         */
+        shortTerm += capped;
         toPermanent = remaining - capped;
       }
       permanent += toPermanent;
@@ -264,6 +330,28 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
     }
     if (end - at < windowMs) {
       expiring += remaining;
+      /**
+       * ★ **临期 / 短期二分**（2026-11-17 三档分档）。
+       *
+       * ⚠️ 与后端 `splitBuddyCreditsByExpiry` **逐格同构**：`<` 才是窗口内
+       * ⇒ 正好 `imminentDaysValue` 天算**短期**，不算临期。
+       * ⚠️ 两段之和恒等于 `expiring`（母量），这是守恒式的保证。
+       */
+      if (end - at < imminentMs) {
+        imminent += remaining;
+        if (end > at && (earliestImminentAt === null || end < earliestImminentAt)) {
+          earliestImminentAt = end;
+          earliestImminentAmount = remaining;
+        } else if (end > at && end === earliestImminentAt) {
+          earliestImminentAmount += remaining;
+        }
+        // 临期也属于「短期区间」的组成部分，但不计入 shortTerm（避免重复计数）。
+      } else {
+        shortTerm += remaining;
+        if (end > at && (earliestShortTermAt === null || end < earliestShortTermAt)) {
+          earliestShortTermAt = end;
+        }
+      }
       // ⚠️⚠️ **必须排除已过期的包**（2026-10-13 审计修正）：这里取的是临期桶里
       //    **最早**的作废时刻用于倒计时，而 `end` 若不约束 `> at`，那么
       //    「一个已过期但 `active` 仍为 true 的包」会**恒定当选**（它比任何
@@ -286,11 +374,33 @@ export function splitCreditsByExpiry(packages, windowDays, now) {
   }
   // ⚠️ `expired` 只在**有已作废额度时**才出现（与 `modelRateLimits` 那类「无值即不写键」
   //    同款式）：否则每个调用方都要为「多一个恒 0 的键」改断言，而它对 0 值毫无信息量。
-  return { expiring, ...(expired > 0 ? { expired } : {}), longTerm, permanent, ...(unknownExpiry > 0 ? { unknownExpiry } : {}), earliestExpiringAt, earliestExpiringAmount, exclusivePoolRemaining };
+  /**
+   * ⚠️⚠️ **`expiring` 是派生键**（= `imminent + shortTerm`），**不许有人往里累加**。
+   *
+   * 保留它的理由：`usage-badge.js` 的 `expiringOf()` 读它做
+   * 「锁定永久积分且无临时积分」的判定。给派生和 ⇒ **那个文件一行不用改**，
+   * 也避免出现「两个桶各加一遍」的第二处实现（本仓最恨的形态）。
+   * 它同时是守恒式的第三段：`permanent + longTerm + imminent + shortTerm + expired === total`。
+   */
+  return {
+    expiring,
+    imminent,
+    shortTerm,
+    ...(expired > 0 ? { expired } : {}),
+    longTerm,
+    permanent,
+    ...(unknownExpiry > 0 ? { unknownExpiry } : {}),
+    earliestImminentAt,
+    earliestImminentAmount,
+    earliestShortTermAt,
+    earliestExpiringAt,
+    earliestExpiringAmount,
+    exclusivePoolRemaining,
+  };
 }
 
 /** 这个包属于哪一桶的中文标签（tooltip 前缀用）。 */
-export function expiryBucketLabel(pkg, windowDays, now) {
+export function expiryBucketLabel(pkg, windowDays, now, imminentDays) {
   const days = normalizeWindowDays(windowDays);
   const left = daysUntilExpiry(pkg, now);
   if (left === null) return '到期时间未知';
@@ -304,7 +414,21 @@ export function expiryBucketLabel(pkg, windowDays, now) {
    */
   if (left <= 0) return '已过期';
   if (days === null) return null;
-  return left < days ? `${Math.ceil(left)} 天内到期` : `还有 ${Math.ceil(left)} 天`;
+  /**
+   * ★ 三档标签（2026-11-17）：
+   * - 临期子窗口内 ⇒ `N 天内到期`
+   * - 总窗口内但超出临期 ⇒ `N~M 天内到期`（点名两个窗口，用户才知道「短期」的含义）
+   * - 总窗口外 ⇒ `还有 N 天`
+   *
+   * ⚠️ 兼容：`imminentDays` 缺席（或 ≥ 总窗口）⇒ 退化成原来的两档标签。
+   */
+  const imminentDaysValue = normalizeImminentDays(imminentDays, days);
+  const tiered = imminentDaysValue < days;
+  if (left < days) {
+    if (tiered && left >= imminentDaysValue) return `${imminentDaysValue}~${days} 天内到期`;
+    return `${Math.ceil(left)} 天内到期`;
+  }
+  return `还有 ${Math.ceil(left)} 天`;
 }
 
 /**
@@ -313,7 +437,7 @@ export function expiryBucketLabel(pkg, windowDays, now) {
  * ⚠️ 拿不到窗口天数时也要给出「距到期 N 天」—— 它本身就解释了分类依据，
  * 比只显示一个 `CycleEndTime` 更可读（套餐的周期结束时间与积分有效期不是一回事）。
  */
-export function formatExpiryHint(pkg, windowDays, now) {
+export function formatExpiryHint(pkg, windowDays, now, imminentDays) {
   const left = daysUntilExpiry(pkg, now);
   if (left === null) return '';
   /**
@@ -325,7 +449,7 @@ export function formatExpiryHint(pkg, windowDays, now) {
    */
   if (left <= 0) return '已过期';
   const days = Math.ceil(left);
-  const label = expiryBucketLabel(pkg, windowDays, now);
+  const label = expiryBucketLabel(pkg, windowDays, now, imminentDays);
   return label ? `距到期 ${days} 天（${label}）` : `距到期 ${days} 天`;
 }
 
@@ -364,14 +488,26 @@ export function formatExpirySplitLine(split, format) {
   const permanent = knownPermanent > 0 ? format(knownPermanent) : null;
   const unknownExpiry = unknownAmount > 0 ? format(unknownAmount) : null;
   const longTerm = split.longTerm > 0 ? format(split.longTerm) : null;
+  /**
+   * ★ 临期 / 短期（2026-11-17 三档分档）。
+   * ⚠️ 兼容旧后端：两键都缺席 ⇒ 两者皆 0 ⇒ 退回用 `expiring` 母量当「临期」。
+   */
+  const imminentAmount = Number.isFinite(split.imminent) && split.imminent > 0 ? split.imminent : 0;
+  const shortTermAmount = Number.isFinite(split.shortTerm) && split.shortTerm > 0 ? split.shortTerm : 0;
+  const hasTierSplit = imminentAmount > 0 || shortTermAmount > 0;
+  const imminent = imminentAmount > 0 ? format(imminentAmount) : null;
+  const shortTerm = shortTermAmount > 0 ? format(shortTermAmount) : null;
   // ⚠️ `expiring` 已由 `splitCreditsByExpiry` 排除掉已作废部分（2026-11-02），
-  //    这里直接用；「已过期」是独立的第 4 段。
+  //    这里直接用；「已过期」是独立的最后一段。
   const expiredAmount = Number.isFinite(split.expired) && split.expired > 0 ? split.expired : 0;
-  const expiring = split.expiring > 0 ? format(split.expiring) : null;
+  // 新后端：`expiring` 是派生和（临期+短期）⇒ 不再单独成段；旧后端：仍用它当临期段。
+  const expiring = !hasTierSplit && split.expiring > 0 ? format(split.expiring) : null;
   const expired = expiredAmount > 0 ? format(expiredAmount) : null;
   if (permanent !== null) parts.push(`永久 ${permanent}`);
   if (unknownExpiry !== null) parts.push(`到期未知 ${unknownExpiry}`);
   if (longTerm !== null) parts.push(`长期 ${longTerm}`);
+  if (shortTerm !== null) parts.push(`短期 ${shortTerm}`);
+  if (imminent !== null) parts.push(`临期 ${imminent}`);
   if (expiring !== null) parts.push(`临期 ${expiring}`);
   if (expired !== null) parts.push(`已过期 ${expired}`);
   return parts.length === 0 ? null : parts.join(' · ');
@@ -391,12 +527,23 @@ export function formatExpirySplitLine(split, format) {
  * 单独成函数而不是塞进 `splitCreditsByExpiry` 的返回值：后者的形状被大量用例逐键比对，
  * 也被后端同口径实现对照，加键会牵连全部调用方。
  */
-export function expiryDateHints(packages, windowDays, now) {
+export function expiryDateHints(packages, windowDays, now, imminentDays) {
   const days = normalizeWindowDays(windowDays);
   if (days === null || !Array.isArray(packages)) return null;
   const windowMs = days * DAY_MS;
+  /**
+   * ⚠️ 临期子窗口：缺席时退化成「= 总窗口」（与 `splitCreditsByExpiry` 同款兼容），
+   * 此时 `earliestShortTermAt` 恒为 `null`、`earliestImminentAt === earliestExpiringAt`
+   * ⇒ 调用方行为与改动前逐字节相同。
+   */
+  const imminentDaysValue = normalizeImminentDays(imminentDays, days);
+  const imminentMs = imminentDaysValue * DAY_MS;
+  /** 总窗口内、且落在临期子窗口内 ⇒ 这两者都更新；否则只更新 shortTerm。 */
+  const tiered = imminentMs < windowMs;
   const at = typeof now === 'number' && Number.isFinite(now) ? now : Date.now();
   let earliestLongTermAt = null;
+  let earliestImminentAt = null;
+  let earliestShortTermAt = null;
   let earliestExpiringAt = null;
   let earliestExpiringNames = new Set();
   for (const pkg of packages) {
@@ -405,7 +552,18 @@ export function expiryDateHints(packages, windowDays, now) {
     if (!Number.isFinite(remaining) || remaining <= 0) continue;
     const end = packageExpiryMs(pkg);
     if (end === null || end <= at) continue;
-    if (end - at < windowMs) {
+    const left = end - at;
+    if (left < windowMs) {
+      /**
+       * ★ 临期 / 短期各记各的「最早时刻」（2026-11-17）。
+       * ⚠️ `earliestImminentAt` 只在真分了档（`tiered`）时才产出，
+       *    否则旧后端语义下会与 `earliestExpiringAt` 重复（虚增一处同义数据）。
+       */
+      if (tiered && left < imminentMs) {
+        if (earliestImminentAt === null || end < earliestImminentAt) earliestImminentAt = end;
+      } else if (tiered && (earliestShortTermAt === null || end < earliestShortTermAt)) {
+        earliestShortTermAt = end;
+      }
       if (earliestExpiringAt === null || end < earliestExpiringAt) {
         earliestExpiringAt = end;
         earliestExpiringNames = new Set([pkg.name]);
@@ -418,6 +576,9 @@ export function expiryDateHints(packages, windowDays, now) {
   }
   return {
     earliestLongTermAt,
+    earliestImminentAt,
+    earliestShortTermAt,
+    earliestExpiringAt,
     expiringIsPlanRefresh: earliestExpiringNames.size === 1 && earliestExpiringNames.has(PLAN_PACKAGE_NAME),
   };
 }
@@ -471,8 +632,19 @@ export function expirySplitParts(split, format, now, hints) {
   const permanent = knownPermanent > 0 ? format(knownPermanent) : null;
   const unknownExpiryText = unknownAmount > 0 ? format(unknownAmount) : null;
   const longTerm = split.longTerm > 0 ? format(split.longTerm) : null;
-  // ⚠️ 数值与格式化文本分成两个变量：临期段要用**数值**做比较
-  //    （`earliestAmount < expiringAmount`）。拿格式化后的字符串做 `<`
+  /**
+   * ★ 临期 / 短期（2026-11-17 三档分档）。
+   *
+   * ⚠️ **向后兼容**：旧后端不产出 `imminent` / `shortTerm`（`undefined`）⇒
+   * 两者都算 0 ⇒ 只剩原来的「临期」段（用 `expiring`），展示与今天逐字节相同。
+   * 新后端下 `imminent + shortTerm === expiring` ⇒ 两段加平等于原临期段。
+   */
+  const imminentAmount = Number.isFinite(split.imminent) && split.imminent > 0 ? split.imminent : 0;
+  const shortTermAmount = Number.isFinite(split.shortTerm) && split.shortTerm > 0 ? split.shortTerm : 0;
+  const imminentText = imminentAmount > 0 ? format(imminentAmount) : null;
+  const shortTermText = shortTermAmount > 0 ? format(shortTermAmount) : null;
+  // ⚠️ 数值与格式化文本分成两个变量：倒计时段要用**数值**做比较
+  //    （`tierEarliestAmount < tierAmount`）。拿格式化后的字符串做 `<`
   //    依赖隐式转换 —— 一旦 `format` 带上千分位（`"3,500"` → `NaN`）就静默出错。
   // 已作废额度单独成段（`splitCreditsByExpiry` 已把它从 `expiring` 里摘出）。
   const expiredAmount = Number.isFinite(split.expired) && split.expired > 0 ? split.expired : 0;
@@ -489,76 +661,110 @@ export function expirySplitParts(split, format, now, hints) {
     parts.push({
       key: 'longTerm',
       text: `长期 ${longTerm}`,
-      tone: 'warn',
+      // ★ 2026-11-17 改：长期从 `warn`（黄）改 `okSoft`（浅绿）。
+      //   理由：三档并存时「长期」与「短期」都用黄 ⇒ 用户分不出哪个更急。
+      //   语义上长期就是「不用管」，与深绿的「永久」同族但更浅 ——
+      //   两者必须能分辨（代码里 2026-10-12 的既有要求：永久与长期不得同色）。
+      tone: 'okSoft',
       ...(earliestLong !== null ? { countdown: `最早 ${formatMonthDay(earliestLong, now)}到期` } : {}),
     });
   }
-  if (expiring !== null) {
-    const at = split.earliestExpiringAt;
-    const countdown = typeof at === 'number' && Number.isFinite(at) && at > 0
-      ? expiryCountdown(at, now)
-      : '';
-    /**
-     * ★ **临期段的数字必须是 `expiring` 总额，不能只取「最早那批」**
-     *   （2026-10-21 用户报障：CodeArts 卡片显示
-     *   `积分 25500 / 永久 22000 · 临期 500（5 天 20 小时）`，
-     *   22000 + 500 = 22500 ≠ 25500，**差的 3000 在任何地方都没出现**）。
-     *
-     * ## 那个 3000 是什么
-     *
-     * 真实数据（`CODEARTS_ACCOUNT_A3294816`，`GET /snap-manager/v1/statistics/plugin`）：
-     *
-     * | 包 | remaining | `deductionEndTime` | `expiringRemaining` |
-     * |---|---|---|---|
-     * | 基础积分包 | 500 | 1793059200000（10-27） | — |
-     * | 赠送积分包 | 25000 | **无** | **3000** |
-     *
-     * ⇒ `expiring` = 500 + 3000 = **3500**，`permanent` = 25000 - 3000 = 22000，
-     *   合计 25500 = `total`（这是 `0dd86f8` 立的硬不变量）。
-     *
-     * 但 `earliestExpiringAmount` 只统计**带 `deductionEndTime`** 的那批
-     * （设计使然：它要与倒计时 `earliestExpiringAt` 配对），而赠送包那 3000
-     * **没有日期**、不参与倒计时 ⇒ 它没被算进去。
-     *
-     * ## 修复方向：数字用总额，倒计时降级成「其中」限定语
-     *
-     * 上一版为了修「临期 20856（4 天 20 小时）让用户以为全部同时到期」
-     * （2026-10-20 报障），直接把数字换成「最早那批」—— 这修了误读，
-     * 却**引入了数字丢失**：三档不再等于 `total`，用户一算就发现少了。
-     *
-     * ⇒ 两个约束同时满足的唯一形态：数字 = 总额（合计守恒），
-     *   倒计时明确限定它只覆盖其中一部分：
-     *
-     * ```
-     * 临期 3500（其中 500 于 5 天 20 小时后到期）   ← 混合批次
-     * 临期 3500（5 天 20 小时）                    ← 倒计时覆盖全部临期时
-     * 临期 3000                                    ← 全无日期（不编造倒计时）
-     * ```
-     *
-     * ⚠️ 「其中」只在**倒计时那批量 < 临期总额**时出现 —— 否则
-     *    「其中 3500 于…」里的「其中」是废话（它本来就是全部）。
-     */
-    const earliestAmount = Number.isFinite(split.earliestExpiringAmount) && split.earliestExpiringAmount > 0
-      ? split.earliestExpiringAmount
-      : 0;
-    // 倒计时那批没覆盖全部临期（含「完全无日期的批次」）⇒ 必须限定。
-    const partial = earliestAmount > 0 && earliestAmount < expiringAmount;
-    let countdownText = countdown.length === 0
-      ? ''
-      : partial ? `其中 ${format(earliestAmount)} 于 ${countdown}后到期` : countdown;
-    // 最早那批是套餐额度 ⇒ 点名「套餐 X 日刷新」，免得倒计时被当成资源包的到期。
-    if (hints && hints.expiringIsPlanRefresh === true && typeof at === 'number' && at > 0 && countdown.length > 0) {
-      const refresh = `套餐 ${formatMonthDay(at, now)}刷新`;
-      countdownText = partial
-        ? `其中套餐 ${format(earliestAmount)} 于 ${formatMonthDay(at, now)}刷新，${countdown}后`
-        : `${refresh}，${countdown}后`;
-    }
+  /**
+   * ★ 短期段（2026-11-17）。只在本后端产出 `shortTerm` 时出现。
+   * 携带「最早 X 月 X 日到期」提示（与长期段同款粗粒度，不做小时级倒计时）。
+   */
+  if (shortTermText !== null) {
+    const earliestShort = typeof split.earliestShortTermAt === 'number' && split.earliestShortTermAt > 0
+      ? split.earliestShortTermAt
+      : null;
     parts.push({
-      key: 'expiring',
-      text: `临期 ${expiring}`,
-      tone: 'error',
-      ...(countdownText.length > 0 ? { countdown: countdownText } : {}),
+      key: 'shortTerm',
+      text: `短期 ${shortTermText}`,
+      tone: 'warn',
+      ...(earliestShort !== null ? { countdown: `最早 ${formatMonthDay(earliestShort, now)}到期` } : {}),
     });
+  }
+  /**
+   * ★ 临期段（2026-11-17 起只表示「5 天内」那批）。
+   *
+   * ⚠️ **兼容旧后端**：旧后端不产出 `imminent` ⇒ `imminentAmount === 0` 而
+   * `shortTermAmount === 0` 也是 0（都没有该键）⇒ 这里退回用 `expiring` 母量，
+   * 段名仍叫「临期」（= 今天的行为）。
+   */
+  {
+    // 新后端：临期用 `imminent` 子量；旧后端：退回 `expiring` 母量。
+    const hasTierSplit = imminentAmount > 0 || shortTermAmount > 0;
+    const tierAmount = hasTierSplit ? imminentAmount : expiringAmount;
+    const tierText = hasTierSplit ? imminentText : expiring;
+    const at = hasTierSplit ? split.earliestImminentAt : split.earliestExpiringAt;
+    const tierEarliestAmount = hasTierSplit
+      ? (Number.isFinite(split.earliestImminentAmount) ? split.earliestImminentAmount : 0)
+      : (Number.isFinite(split.earliestExpiringAmount) ? split.earliestExpiringAmount : 0);
+    if (tierText !== null) {
+      const countdown = typeof at === 'number' && Number.isFinite(at) && at > 0
+        ? expiryCountdown(at, now)
+        : '';
+      /**
+       * ★ **临期段的数字必须是该段总额，不能只取「最早那批」**
+       *   （2026-10-21 用户报障：CodeArts 卡片显示
+       *   `积分 25500 / 永久 22000 · 临期 500（5 天 20 小时）`，
+       *   22000 + 500 = 22500 ≠ 25500，**差的 3000 在任何地方都没出现**）。
+       *
+       * ## 那个 3000 是什么
+       *
+       * 真实数据（`CODEARTS_ACCOUNT_A3294816`，`GET /snap-manager/v1/statistics/plugin`）：
+       *
+       * | 包 | remaining | `deductionEndTime` | `expiringRemaining` |
+       * |---|---|---|---|
+       * | 基础积分包 | 500 | 1793059200000（10-27） | — |
+       * | 赠送积分包 | 25000 | **无** | **3000** |
+       *
+       * ⇒ `expiring` = 500 + 3000 = **3500**，`permanent` = 25000 - 3000 = 22000，
+       *   合计 25500 = `total`（这是 `0dd86f8` 立的硬不变量）。
+       *
+       * 但 `earliestExpiringAmount` 只统计**带 `deductionEndTime`** 的那批
+       * （设计使然：它要与倒计时 `earliestExpiringAt` 配对），而赠送包那 3000
+       * **没有日期**、不参与倒计时 ⇒ 它没被算进去。
+       *
+       * ## 修复方向：数字用总额，倒计时降级成「其中」限定语
+       *
+       * 上一版为了修「临期 20856（4 天 20 小时）让用户以为全部同时到期」
+       * （2026-10-20 报障），直接把数字换成「最早那批」—— 这修了误读，
+       * 却**引入了数字丢失**：三档不再等于 `total`，用户一算就发现少了。
+       *
+       * ⇒ 两个约束同时满足的唯一形态：数字 = 总额（合计守恒），
+       *   倒计时明确限定它只覆盖其中一部分：
+       *
+       * ```
+       * 临期 3500（其中 500 于 5 天 20 小时后到期）   ← 混合批次
+       * 临期 3500（5 天 20 小时）                    ← 倒计时覆盖全部临期时
+       * 临期 3000                                    ← 全无日期（不编造倒计时）
+       * ```
+       *
+       * ⚠️ 「其中」只在**倒计时那批量 < 临期总额**时出现 —— 否则
+       *    「其中 3500 于…」里的「其中」是废话（它本来就是全部）。
+       */
+      const partial = tierEarliestAmount > 0 && tierEarliestAmount < tierAmount;
+      let countdownText = countdown.length === 0
+        ? ''
+        : partial ? `其中 ${format(tierEarliestAmount)} 于 ${countdown}后到期` : countdown;
+      // 最早那批是套餐额度 ⇒ 点名「套餐 X 日刷新」，免得倒计时被当成资源包的到期。
+      // ⚠️ 该提示只在**旧后端**（合并的临期段）才有据可依：新后端下 `imminent`
+      //    段不含套餐包（套餐是月度刷新、远未到期）⇒ 不渲染它。
+      if (!hasTierSplit && hints && hints.expiringIsPlanRefresh === true
+        && typeof at === 'number' && at > 0 && countdown.length > 0) {
+        const refresh = `套餐 ${formatMonthDay(at, now)}刷新`;
+        countdownText = partial
+          ? `其中套餐 ${format(tierEarliestAmount)} 于 ${formatMonthDay(at, now)}刷新，${countdown}后`
+          : `${refresh}，${countdown}后`;
+      }
+      parts.push({
+        key: 'expiring',
+        text: `临期 ${tierText}`,
+        tone: 'error',
+        ...(countdownText.length > 0 ? { countdown: countdownText } : {}),
+      });
+    }
   }
   /**
    * ★ 「已过期」单列一段（2026-11-02）。
