@@ -1641,8 +1641,14 @@ function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
    * ⚠️ 判据是「非空字符串」而不是 `!== undefined`：服务端已保证不写空串，
    * 但客户端是**公开契约的另一端**（备份导入/第三方调用/将来换实现），
    * 一条 `description: ''` 就会在这一行画出 0 高度的空白块 ⇒ 行距莫名变松。
+   *
+   * ⚠️ 零宽字符必须一并剥掉再判：`trim()` **不认** `\u200b`（`Cf`，不是空白），
+   * 于是 `'\u200b'.trim().length` 是 **1** ⇒ 上游只发一个零宽字符时会画出
+   * 一格**看不见的第二行**（行高 +24px）。与服务端 `hasVisibleText` 同一口径；
+   * 客户端**不信任**服务端（见上一条理由），两边都判。
    */
-  const description = typeof model.description === 'string' && model.description.trim().length > 0
+  const description = typeof model.description === 'string'
+    && model.description.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').trim().length > 0
     ? model.description
     : undefined;
   return React.createElement('label', {
@@ -1660,7 +1666,18 @@ function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
     // ⚠️ 它在 `<label>` 内、但**不是可标记控件**，故不影响「点整行切开关」
     //    那条既有交互。真正的坑是插入第二个 checkbox，见上面的类注释。
     React.createElement(ProviderLogo, { provider }),
-    React.createElement('span', { className: 'dim-jh-modelInfo' },
+    React.createElement('span', {
+      className: 'dim-jh-modelInfo',
+      /**
+       * ⚠️ 换行**只在这一行**开启（CSS 选择器是 `.dim-jh-modelInfo[data-desc="true"]`）。
+       *
+       * `.dim-jh-modelInfo` 是**共享类名**：网关弹窗（「启用本机网关」/「允许局域网访问」）
+       * 与供应商开关弹窗的每一行都用它，而它们**没有**第二行子元素。
+       * 若把 `flex-wrap: wrap` 写在无条件规则上，那些行就多了「某天某个子元素变宽
+       * ⇒ 整行折成两行」的可能 —— 一次纯本家需求的改动不该有这种远场风险。
+       */
+      'data-desc': description !== undefined ? 'true' : 'false',
+    },
       React.createElement('strong', { className: 'dim-jh-modelName' }, model.name || model.id),
       dead ? React.createElement('span', { className: 'dim-jh-modelDead' }, '已下架') : null,
       // ⚠️ 角标放在 id **之前**：`dim-jh-modelId` 有 `max-width: 46%` 与 ellipsis，

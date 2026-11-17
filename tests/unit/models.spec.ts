@@ -118,6 +118,9 @@ describe('fetchCodeArtsRemoteModels', () => {
             { model_id: 'kimi-k3', model_name: 'Kimi-K3', model_desc: '   ' },
             // 上游偶尔给非字符串（历史上出现过数字/对象共存），绝不能 `String()` 后落键。
             { model_id: 'speed', model_name: '智速模式', model_desc: 42 },
+            // ⚠️ **零宽字符**不是空白：`trim()` 不会去掉 `\u200b`（`Cf`），
+            //    只判 `trim().length > 0` 会让它通过 ⇒ 客户端画一格看不见的第二行。
+            { model_id: 'zwsp-only', model_name: 'ZWSP', model_desc: '\u200b\u200b\u2060\ufeff' },
             { model_id: 'no-desc', model_name: 'NoDesc' },
           ],
         }),
@@ -130,10 +133,42 @@ describe('fetchCodeArtsRemoteModels', () => {
     expect(byId.get('glm-5.3')?.description).toBe('【限时体验】面向复杂编程与长程任务')
     // ⚠️ 三态硬要求：空串 / 全空白 / 非字符串 / 缺失 ⇒ **键根本不出现**
     //    （写 `''` 会让宿主/客户端把「上游没给」渲染成一格空的行，与「有介绍」同形）。
-    for (const id of ['GLM-5.2', 'kimi-k3', 'speed', 'no-desc']) {
+    for (const id of ['GLM-5.2', 'kimi-k3', 'speed', 'zwsp-only', 'no-desc']) {
       expect(byId.get(id), `前置：${id} 必须在目录里，否则这一格是空跑`).toBeDefined()
       expect(Object.hasOwn(byId.get(id)!, 'description'), `${id} 不该带 description 键`).toBe(false)
     }
+  })
+
+  it('★ 同一 id 被两个端点各下发一次（gateway 在前、无介绍）⇒ 介绍必须被补齐，不能先到先得丢掉', async () => {
+    // 真实顺序：`gateway/config`（benefit 组，**没有 `model_desc`**）先跑，
+    // `/v1/model/builtin`（带介绍）后跑。两边都下发同一个 id 时（实测
+    // `deepseek-v4.1-flash` 就同时出现在这两处），旧实现「先到先得」⇒ gateway
+    // 那份赢 ⇒ 介绍在**合并阶段**就没了，表现为「界面上一格空白，而上游明明给了」。
+    const DESC = '【限时体验】能力更高, 速度更快'
+    const { fetcher } = makeFetcher({
+      [OPENGW_GATEWAY_CONFIG_URL]: {
+        body: JSON.stringify({
+          result: {
+            models: [{ model_id: 'deepseek-v4.1-flash', model_name: 'deepseek-v4.1-flash' }],
+          },
+        }),
+      },
+      [SNAP_MODEL_BUILTIN_URL]: {
+        body: JSON.stringify({
+          builtinModels: [
+            { model_id: 'deepseek-v4.1-flash', model_name: 'DeepSeek-V4.1-Flash', model_desc: DESC },
+          ],
+        }),
+      },
+    })
+    const models = await fetchCodeArtsRemoteModels(makeCredential(), fetcher)
+
+    // 前置：去重仍生效（一条，不是两条）；否则本条用例证明不了「补齐」这件事。
+    expect(models.filter((m) => m.id === 'deepseek-v4.1-flash')).toHaveLength(1)
+    expect(models.find((m) => m.id === 'deepseek-v4.1-flash')?.description, '后到的 builtin 必须把介绍补到先到的条目上').toBe(DESC)
+    // ⚠️ 只补**缺**的字段：先到的 name/倍率不能被后到的顶掉（现在两边 name 不同，
+    //    取先到的那个 —— 这是既有语义，本条只锁定「不被静默改写」）。
+    expect(models.find((m) => m.id === 'deepseek-v4.1-flash')?.name).toBe('deepseek-v4.1-flash')
   })
 
   it('merges opengw gateway/config benefit models with builtin models, deduped', async () => {

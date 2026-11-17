@@ -120,13 +120,26 @@ describe('模型行 · 模型介绍（第二行 + 完整描述进 title）', () 
       { ...BASE },
       { ...BASE, description: '' },
       { ...BASE, description: '   ' },
+      // ⚠️ 零宽字符不是空白：`'\u200b'.trim()` 仍是 `'\u200b'` ⇒ 只判 trim 会画出
+      //    一格看不见的第二行（行高 +24px）。
+      { ...BASE, description: '\u200b\u200b\u2060\ufeff' },
       { ...BASE, description: 42 },
     ]) {
       const row = await renderRow(model)
       expect(byClass(row, 'dim-jh-modelDesc'), `description=${JSON.stringify(model.description)} 不许画第二行`)
         .toHaveLength(0)
       expect(row.props.title, '没有介绍时 title 必须仍是 id').toBe(BASE.id)
+      // 换行的开关也必须保持关闭（否则别的行会继承到 wrap）。
+      expect(byClass(row, 'dim-jh-modelInfo')[0]!.props['data-desc']).toBe('false')
     }
+  })
+
+  it('★★ 有介绍时 `data-desc` 必须是 "true"（CSS 只在它上面开 flex-wrap）', async () => {
+    // ⚠️ `.dim-jh-modelInfo` 是**共享类名**（网关弹窗 / 供应商弹窗也用）。
+    //    wrap 若写在无条件规则上，那些行会跟着获得折行能力 —— 这一格防的是
+    //    「顺手把属性去掉、只靠 CSS 无条件规则生效」的改法。
+    const row = await renderRow({ ...BASE, description: '【限时体验】许愿式编程一键成真' })
+    expect(byClass(row, 'dim-jh-modelInfo')[0]!.props['data-desc']).toBe('true')
   })
 
   it('★★ 已下架 + 有介绍 ⇒ title 仍是「已下架」提示（自救路径不能被顶掉）', async () => {
@@ -151,8 +164,15 @@ describe('模型行 · 第二行的布局判据（CSS 是这套布局的全部�
     return match![1]!
   }
 
-  it('★★ `.dim-jh-modelInfo` 必须允许换行（否则第二行落不下来）', () => {
-    expect(ruleOf('.dim-jh-modelInfo')).toMatch(/flex-wrap:\s*wrap/)
+  it('★★ `.dim-jh-modelInfo` 的**无条件**规则不得带 `flex-wrap`（共享类名，远场风险）', () => {
+    // 网关弹窗（「启用本机网关」/「允许局域网访问」）与供应商开关弹窗的每一行
+    // 都用这个类，但它们没有第二行子元素。这条改动是纯 CodeArts 需求，
+    // 不该顺带改变那些行的换行行为。
+    expect(ruleOf('.dim-jh-modelInfo')).not.toMatch(/flex-wrap/)
+  })
+
+  it('★★ `.dim-jh-modelInfo[data-desc="true"]` 必须允许换行（否则第二行落不下来）', () => {
+    expect(ruleOf('.dim-jh-modelInfo[data-desc="true"]')).toMatch(/flex-wrap:\s*wrap/)
   })
 
   it('★★ `.dim-jh-modelDesc` 必须独占一行且能省略（`flex: 0 0 100%` 是承重判据）', () => {

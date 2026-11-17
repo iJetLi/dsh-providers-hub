@@ -805,16 +805,20 @@ const STYLES = `
 /* 拖拽柄在弹窗行里略收窄：行高比账号卡片矮（padding 7px vs 14px），
    16px 宽的柄会顶着模型名，缩到 14px 并把 gap 让出来。 */
 .dim-jh-modal .dim-jh-modelRow .dim-jh-dragHandle { width: 14px; }
-.dim-jh-modelInfo { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.dim-jh-modelInfo { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
 /* 模型介绍（2026-11-17）：独占第二行。
-   ⚠️ flex: 0 0 100% 是**承重**的 —— 父容器 flex-wrap: wrap + 本元素占满
-   一行 ⇒ 自然换行。这样不需要给 .dim-jh-modelInfo 改成列方向、也不需要包一层
-   容器（包裹会把 name/id 从**直接子元素**变成孙元素，而
-   model-benefit-hint.spec.ts 的「角标在 id 之前」读的正是直接子元素顺序）。
+   ⚠️ flex-wrap **只在有介绍的行上开**（.dim-jh-modelInfo[data-desc="true"]）：
+   这个类是共享的，网关弹窗与供应商开关弹窗的每一行也用，它们没有第二行子元素，
+   不该被本家需求顺带改变换行行为（远场风险为零才是零）。
+   ⚠️ flex: 0 0 100% 是**承重**的 —— 父容器允许换行 + 本元素占满一行 ⇒ 自然换行。
+   这样不需要给 .dim-jh-modelInfo 改成列方向、也不需要包一层容器（包裹会把
+   name/id 从**直接子元素**变成孙元素，而 model-benefit-hint.spec.ts 的
+   「角标在 id 之前」读的正是直接子元素顺序）。
    ⚠️ 没有介绍的模型这一格根本不存在（客户端判 undefined 不渲染）⇒ 行高与旧版一致。
    颜色/字号用行尾灰字口径，与 .dim-jh-modelId 拉开层级。
    ⚠️ 注释里**不许**出现反引号：本文件是内联在 JS 模板字符串里的，一个反引号
    就会终止字符串，esbuild 会报 "Expected \";\" but found ..."（已踩过一次）。 */
+.dim-jh-modelInfo[data-desc="true"] { flex-wrap: wrap; }
 .dim-jh-modelDesc { flex: 0 0 100%; min-width: 0; overflow: hidden; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #8f959e); text-overflow: ellipsis; white-space: nowrap; }
 /* 名称与 id 都必须能收缩（min-width: 0 + 可收缩的 flex-basis），否则长内容会
    顶宽整行。展示名优先保留，故 id 另加 max-width 上限。
