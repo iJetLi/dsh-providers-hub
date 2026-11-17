@@ -51,6 +51,11 @@ import { applyQoderAlignmentHeaders, withQoderAlignmentHeaders } from './qoder-a
 import { acquireQoderRequest, qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
 import { retryAfterMsFromResponse } from './retry-after.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
+import {
+  nextPromotionEdgeMs,
+  promotionBadgeFor,
+  qoderPromotionCandidate,
+} from './model-promotions.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import {
   registerAdapterIdempotent,
@@ -1397,6 +1402,28 @@ export class QoderAdapter extends LlmAdapter {
   }
 
   /**
+   * 徽标解析的日志出口（与 `options.warn` 同一个通道），**按消息去重**。
+   *
+   * ⚠️ 为什么必须去重：本回调挂在 toCatalogEntry 上，而它对**目录里每一条**、
+   * 每次 listModels 都跑。上游若真的发出读不懂的窗口，不去重就是
+   * 「每次打开选择器 × 每个坏条目」一行 —— 参考实现把日志留在解析路径正是
+   * 为了躲开这一格（docs/PROMO_BADGE.md 与 src/promo.ts 的 parseDaily）。
+   * 这里没有独立的解析点（Qoder 的活动就在目录行里），所以改为**每条消息只播一次**。
+   *
+   * ⚠️ 上限：去重表按消息文本存，条目数量级 = 目录大小，仍要封顶，
+   * 免得长期运行的进程攒出一张没人读的字典。封顶后**不再播**也不清空 ——
+   * 宁可少一条日志，也不要一个会自己长大的内存。
+   */
+  private readonly promotionWarned = new Set<string>()
+
+  private readonly promotionWarn = (message: string): void => {
+    if (this.promotionWarned.has(message)) return
+    if (this.promotionWarned.size >= 64) return
+    this.promotionWarned.add(message)
+    this.options.warn?.(message)
+  }
+
+  /**
    * 把本家目录条目（**远端优先**，回退兜底表）转成共享骨架的中间结构。
    *
    * ⚠️ 远端条目经 `src/qoder-catalog.ts` 归一成与兜底表**同形**的结构后才到这里
@@ -1405,6 +1432,17 @@ export class QoderAdapter extends LlmAdapter {
    */
   private toCatalogEntry(model: QoderFallbackModel): CatalogEntry {
     const reasoning = this.reasoningForEntry(model)
+    // ★ 徽标（issue #101）：Qoder 目录每行自带一个 promotion，文案也是上游给的。
+    // ⚠️ 时钟必须在**装配时刻**读（nowImpl，与目录新鲜度同一个注入时钟）：上游给的
+    // 是墙钟窗口，而目录是进程启动时取的一份快照 —— 在解析时挑定会让白天启动的进程
+    // 永远不画（active 恒 false），那正是 issue #101 的成因。
+    // ⚠️ 窗口外**什么都不画**（standingEligible: false）：宿主徽标契约只有 text + tone、
+    // 没有悬停位，把「错峰 4 折」画在没打折的时刻就是在说一件没发生的事。参考实现的
+    // 卡片可以画成降饱和胶囊（有悬停可写「几点生效」），这里不能 —— 刻意分叉，非漏接。
+    // 兜底表与远端**同源**（qoder-catalog.ts 归一成同一形状），故离线路径也画得出，
+    // 与 qoderDisplayName 的倍率后缀同判据，不是新增一份静态猜测。
+    const promotion = qoderPromotionCandidate(model.promotion, model.id, 'Asia/Shanghai', this.promotionWarn)
+    const badge = promotionBadgeFor(promotion === undefined ? undefined : [promotion], this.nowImpl())
     return {
       id: model.id,
       name: qoderDisplayName(model),
@@ -1428,6 +1466,7 @@ export class QoderAdapter extends LlmAdapter {
        * 于是端到端仍只到「展示名里带 `· 免费`」为止。
        */
       ...model.isFree === true ? { isFree: true } : {},
+      ...badge === undefined ? {} : { badge },
     }
   }
 
@@ -1566,6 +1605,28 @@ export class QoderAdapter extends LlmAdapter {
     //    故这里用并集是「远端优先、静态表兜底」——**不会**把收费模型判成免费
     //    （兜底表的 `isFree` 是策展过的显式标记，不是推断）。
     return this.catalogModel(modelId)?.isFree === true
+  }
+
+  /**
+   * 下一个会**改变徽标**的时刻（epoch 毫秒）；没有排定边界 ⇒ undefined。
+   *
+   * 供接线层的活动边界播报器排程（src/promotion-edge-broadcast.ts）。
+   *
+   * ⚠️ 同步、**不打网络**：只读已落地的目录（远端 ?? 兜底表 —— 本家兜底表
+   * **带** promotion 字段，与倍率后缀同源，故离线路径也有真实边界）。
+   * ⚠️ 时钟用注入的 nowImpl：单测里要让边界随假时钟走。
+   */
+  nextPromotionEdgeAt(nowMs: number = this.nowImpl()): number | undefined {
+    const all = this.catalogSource()
+    let best: number | undefined
+    for (const entry of all) {
+      const candidate = qoderPromotionCandidate(entry.promotion, entry.id, 'Asia/Shanghai')
+      if (candidate === undefined) continue
+      const edge = nextPromotionEdgeMs([candidate], nowMs)
+      if (edge === undefined) continue
+      if (best === undefined || edge < best) best = edge
+    }
+    return best
   }
 
   /**

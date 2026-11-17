@@ -279,6 +279,7 @@ import { createBalanceCache, createBalanceRefresher, REFRESH_PERIOD_FALLBACK_MS,
 //    与余额刷新器**共用同一套骨架**（武装 + 单飞 + 幂等），但**不复用实例** ——
 //    余额缓存 key 是 `(provider, accountId)`、目录的 key 是 provider，语义不同。
 import { createCatalogRefresher } from './model-catalog.js'
+import { createPromotionEdgeBroadcaster } from './promotion-edge-broadcast.js'
 // ⚠️ 中止判据复用适配器的**共享实现**（`aggregate-adapter.ts` 的 `isAbortLike`）：
 //    本仓库已有 4 份同义实现，装配层不该再添第五份。
 import { isAbortLike as isAbortLikeError } from './aggregate-adapter.js'
@@ -6324,6 +6325,52 @@ async function fetchBalanceReading(
   ctx.effect(() => {
     catalogRefresher.start()
     return () => { catalogRefresher.stop() }
+  })
+
+  // ★ **活动徽标的窗口边界播报**（issue #101）。
+  //
+  // 徽标按「此刻」求值，但宿主缓存一次目录读取的结果 ⇒ 没有这条，窗口关闭后
+  // 徽标最长挂满一个后台刷新周期（20 分钟），而那正是 issue 点名的「活动过期
+  // 而用户仍按优惠期选择模型」。**播报是零网络的**（理由与三条判据见
+  // src/promotion-edge-broadcast.ts 的头注）。
+  //
+  // ⚠️ 四家共用一个播报器、各自只交一个边界 getter：一条渠道算错不会让其余
+  // 三家失去保鲜（nearestPromotionEdge 逐源 try/catch）。
+  // ⚠️ 生命周期挂 ctx.effect（AGENTS.md：自建定时器必须回收，unref 不算回收）。
+  const promotionEdgeBroadcaster = createPromotionEdgeBroadcaster({
+    edgeSources: () => [
+      () => buddyAdapter.nextPromotionEdgeAt(),
+      () => workbuddyAdapter.nextPromotionEdgeAt(),
+      () => qoderAdapter.nextPromotionEdgeAt(),
+      () => qoderCnAdapter.nextPromotionEdgeAt(),
+    ],
+    fire: () => { broadcastCatalogChanged(ctx) },
+    warn: (message) => ctx.logger?.warn?.(message),
+  })
+  ctx.effect(() => {
+    promotionEdgeBroadcaster.schedule()
+    // ⚠️ **为什么要再监听 llm/adapters-updated（而不只靠 fire 后自排）**：
+    //
+    // 首轮 schedule() 跑在 apply() 里，那一刻 buddy / workbuddy 的远端目录**还没落地**
+    // （remoteModels 是 undefined ⇒ 边界 undefined），只有 Qoder / Qoder CN 的兜底表
+    // 当场就能给出边界。⇒ 两家的**远端**活动要等到下一次重算才被看见。播报器自己
+    // 只在「fire 过一次之后」重新求边界，而那可能已经是 10 小时以后。
+    // 目录落地时插件本来就会 emit 同一个事件（RemoteCatalogGate 的 onLoaded ⇒
+    // catalog-broadcast），所以监听它 = 「目录真的变了才重算边界」，零额外定时器。
+    //
+    // ⚠️ 另一条**边界情况**（不是本监听存在的主要理由，但它顺带兜住了）：
+    // 若首轮四家**都**没有边界（自定义产品表里没有 promotion 之类），按判据 3
+    // 播报器就停表，而停表后没有任何东西会再叫它 —— 直到下一次目录落地为止。
+    //
+    // 重入是安全的：fire ⇒ emit ⇒ 本监听 ⇒ schedule() 撤旧表重新求边界；
+    // 已过去的边界被 nearestPromotionEdge 剔掉，MIN_EDGE_FIRE_GAP_MS 挡住同毫秒自旋。
+    const stop = ctx.on('llm/adapters-updated', () => { promotionEdgeBroadcaster.schedule() })
+    return () => {
+      try {
+        stop()
+      } catch { /* 监听器本身抛错不该让停表半途而废 */ }
+      promotionEdgeBroadcaster.stop()
+    }
   })
 
   // 插件卸载前把签名缓存落盘：`stream()` 每次结束都 flush，但用户可能
