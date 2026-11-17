@@ -1790,7 +1790,17 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    border-box（实测 offsetWidth 与 max-width 相等）。写上它只为在元素类型被改
    （span/div 默认是 content-box）时语义不悄悄漂移 —— 那种情况下 max-width 会从
    「占位宽度」变成「内容宽度」，胶囊会突然变宽 19px 而这行代码看着毫无变化。 */
-.dim-jh-badgeBtn { box-sizing: border-box; display: flex; align-items: center; gap: 5px; max-width: 216px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 1.5; cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; transition: background .15s ease, color .15s ease, border-color .15s ease; }
+/* ⚠️ max-width **保持 216 → 240px**，不跟着新增补语一起放宽。
+ *
+ * 2026-11-18 曾在胶囊上加「默认」+「· 共 7 帐号」两段补语，一度想把上限放到 310px
+ * ⇒ **不可行**：usage-badge-client.spec.ts 有实测约束（130 组渠道名×读数最宽
+ * 需求 209.34px；上限放到「无上限」时极窄 composer 220px 下胶囊**溢出 8.3px**，
+ * 正是 2026-10-02「模型选择器图标被挤没」的形态）。上界取 240 是量出来的。
+ *
+ * ⇒ 补语改为**可牺牲**：.dim-jh-badgeCount { flex: 0 1 auto; min-width: 0;
+ * overflow: hidden; text-overflow: ellipsis } —— 空间不够时先被省略号吃掉，
+ * 而不是把整个胶囊撑出容器。用户在弹窗里仍能看到完整账号数（脚注/明细）。 */
+.dim-jh-badgeBtn { box-sizing: border-box; display: flex; align-items: center; gap: 5px; max-width: 240px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 1.5; cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; transition: background .15s ease, color .15s ease, border-color .15s ease; }
 .dim-jh-badgeBtn:hover { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); }
 .dim-jh-badgeBtn[aria-expanded="true"] { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 45%, var(--dsw-alias-border-l2)); }
 /* 聚合「待首次请求」占位胶囊（用户报障 2026-10-08：「也没胶囊了？」）。
@@ -1799,7 +1809,7 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    给一个点了没反应的按钮比没有按钮更糟。
    ⚠️ 宽度口径与 .dim-jh-badgeBtn 同步（gap 5px / padding 2px 9px / 字号 11px）：
    两者会在同一位置交替出现（首次请求成功后换成真胶囊），尺寸不一致会看到跳动。 */
-.dim-jh-badgePending { display: inline-flex; align-items: center; gap: 5px; max-width: 216px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 1.5; white-space: nowrap; }
+.dim-jh-badgePending { display: inline-flex; align-items: center; gap: 5px; max-width: 240px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 1.5; white-space: nowrap; }
 .dim-jh-badgePending > span:last-child { overflow: hidden; text-overflow: ellipsis; }
 /* 三段式文本容器：渠道名 + 分隔符 + 读数。
    ⚠️ 必须是 flex 容器，两个文本子项才能各自独立收缩（这正是「数字不被截」的前提）。 */
@@ -1986,6 +1996,223 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  *    hover 有全文。
  */
 .dim-jh-badgeRowNote { font-size: 10px; line-height: 14px; color: var(--dsw-alias-label-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/**
+ * ★★ **单行账号行**（2026-11-18 用户要求「两行合并成一行」）。
+ *
+ * ## 高度账（用户明确「不能再让积分界面高度增加」）
+ *
+ * | 形态 | 每号高度 |
+ * |---|---|
+ * | 原：'RowHead'（名字+读数）一行 + 'RowNote'（分档）一行 | **29px** |
+ * | 新：一行内 flex 排 '名字 读数 · 长… · 短… · 临…（…）' | **14px** |
+ *
+ * ⇒ 每号省 15px；15 个号省 225px。「默认显示 15 个」全靠这一条 + 工具行合并。
+ *
+ * ## 结构
+ *
+ * 'html
+ * <div class="dim-jh-badgeRow dim-jh-badgeRowInline">   ← flex 行
+ *   <span class="dim-jh-badgeRowName">…</span>
+ *   <span class="dim-jh-badgeValue">…</span>
+ *   <span class="dim-jh-badgeNoteInlineWrap">           ← display: contents！
+ *     <div class="dim-jh-badgeRowNote dim-jh-badgeRowNoteInline">…</div>
+ *   </span>
+ * </div>
+ * '
+ *
+ * ⚠️⚠️ **'.dim-jh-badgeNoteInlineWrap' 必须是 'display: contents'**：
+ *    分档说明在 DOM 里是 'renderSplitNote()' 返回的 '<div>'（块级），
+ *    若不用 'contents' 把它自身盒模型抹平，它会自成一块 ⇒ 行高立刻回到两行，
+ *    等于**白改了**（这个坑在实测里出现过：改完还是 29px）。
+ *    'display: contents' 让它的**子元素**（那些带色 span）直接参与父级 flex 流。
+ *    ⚠️ 副作用：该 wrapper 自身不能设背景/边框/内边距（它没有盒子）。
+ */
+/* ⚠️⚠️ 必须写成「双类」.dim-jh-badgeRow.dim-jh-badgeRowInline：
+   .dim-jh-badgeRow 的规则（display:flex; flex-direction:column; gap:1px）
+   特异性与本规则相同，而它写在**后面** ⇒ 后写的赢，单类写法会被它覆盖
+   （实测症状：账号行仍是 flex column、高度 50px，且每段各占一行）。
+   双类把特异性提到 0,2,0 才能稳定压过它。 */
+.dim-jh-badgeRow.dim-jh-badgeRowInline {
+  /* ⚠️ 不能用 flex（2026-11-18 三次实测后定论）：flex item 会被 blockify，
+     内部各段会各占一行（122px → 改 inline 后仍 50px）。纯行内流 ⇒ 实测 14px。 */
+  display: block;
+  /* ⚠️ 单行不折：折行就是「高度增加」，用户明确不许。装不下由省略号收尾。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 10px;
+  line-height: 14px;
+}
+.dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeRowName {
+  /* ⚠️ 用 inline-block + 省略号：纯 inline 时名字与后续段黏在一起，
+     overflow 只能整体截断，读起来像「名字被吃掉一半」。
+     inline-block 让它能独立省略，且仍参与同一行内流。 */
+  display: inline-block;
+  /* ⚠️ 实测 42% 会把「位次 1 · 134****59」压成「134****5」（账号尾号丢失）
+     ⇒ 放宽到 52%：正好容下最长形态（位次两位数 + 8 位账号），且仍给
+     后面的读数/三档留够空间。 */
+  max-width: 52%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-primary);
+}
+.dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeValue {
+  display: inline;
+  /* 与名字之间留一点空，避免「134****59 7492.73」黏成一串数字 */
+  margin-left: 5px;
+  font-size: 10px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+/**
+ * ★★ **积分区的账号行间距收紧**（2026-11-18）。
+ *
+ * .dim-jh-badgeSection 原有 gap: 5px —— 15 个账号就是 **15 × 5 = 75px 纯间距**
+ * （实测：rows 合计 210px，但 section 高 334px，多出的 124px 里 75px 是 gap）。
+ * 用户要求「默认显示 15 个」，这 75px 是纯浪费 ⇒ 账号行之间改为接近 0。
+ *
+ * ⚠️ 只作用于**单行账号行**之间的间隔：节标题 / 展开按钮 / 签到区的间距
+ *    仍由 .dim-jh-badgeSection 的 gap 控制 —— flex 的 gap 没法「只针对某一类
+ *    子元素」，故改用「相邻单行行」选择器把账号行之间的视觉间隔压掉。
+ *
+ * 实测效果：15 个号的弹窗 504px → 约 430px。
+ */
+.dim-jh-badgeRow.dim-jh-badgeRowInline { margin-top: 0; }
+.dim-jh-badgeRow.dim-jh-badgeRowInline + .dim-jh-badgeRow.dim-jh-badgeRowInline { margin-top: -4px; }
+
+/**
+ * ⚠️⚠️ **'display: contents' 在这里是错的 —— 必须用 'display: inline'**
+ *（2026-11-18 实测踩到，行高从 14px 暴涨到 **122px**）。
+ *
+ * ## 为什么 contents 会失败
+ *
+ * 'display: contents' 把 wrapper 与 note 自身的盒子抹平后，它们的**子元素**
+ * 直接成为父级 '.dim-jh-badgeRowInline' 这个 **flex 容器**的 flex item。
+ * 而 flex item 会被 **blockify**（'<span>' 的 'inline' 强制变成 'block'）
+ * ⇒ **每个带色段各占一整行** ⇒ 一个账号 122px，15 个号 2124px。
+ *
+ * 实测证据（改造过程中）：
+ * '''
+ * row: 122px   ← 期望 14px
+ * notePart: display: block   ← inline 被 blockify 了
+ * '''
+ *
+ * ## 修法：不用 flex，用**行内流**
+ *
+ * - 父级 '.dim-jh-badgeRowInline' 保留 'flex'（名字/读数/说明三段横向排列）
+ * - 说明这一段整体作为一个 **inline 盒子**参与父级 flex
+ *   （'display: inline' → flex item 会被 blockify，但**它是单个盒子**，
+ *     内部再走普通行内流 ⇒ 内部的 span 保持 inline，不各占一行）
+ * - 内部段用 'inline' + 'white-space: nowrap'，靠父级的 'overflow: hidden'
+ *   统一截断
+ *
+ * ⚠️ 不要试图给内部段写 'display: inline' 去对抗 blockify ——
+ *    blockify 发生在**成为 flex item 那一刻**，子规则赢不了。
+ */
+.dim-jh-badgeNoteInlineWrap {
+  /* ⚠️ 不能是 contents（见上）；inline 让它成为单个 flex item，内部走行内流 */
+  display: inline;
+  /* 空间不足时先牺牲说明（名字/读数更重要） */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 行内的分档说明：整体作为一个行内盒子，内部段保持 inline 串联。 */
+.dim-jh-badgeRowNoteInline {
+  /* ⚠️ 不能是 contents；inline 让它内部恢复普通行内流 */
+  display: inline;
+  white-space: nowrap;
+}
+.dim-jh-badgeRowNoteInline > .dim-jh-badgeNotePart,
+.dim-jh-badgeRowNoteInline > .dim-jh-badgeNoteSep {
+  /* ⚠️ 这里必须 inline（不是 flex item，故不会被 blockify） */
+  display: inline;
+  font-size: 10px;
+  line-height: 14px;
+}
+
+/**
+ * ★★ **合并后的工具行**（2026-11-18 用户要求）：轮换起点 + 三个页签在同一行。
+ *
+ * 原：页签一行（27px）+ 轮换一行（38px + 7px 边距）= **72px**
+ * 新：一行 **33px** ⇒ 省 39px
+ *
+ * ⚠️ **只合并布局，不合并样式**（用户原话「不要被包进去轮换起点的样式里面，分开」）：
+ * - '.dim-jh-badgeToolbarRot' 是布局容器，'flex: 1 1 auto' 吃满中间；
+ *   里面仍是原来的 '.dim-jh-badgeRotation' 黄框（左边框 + 淡黄底）
+ * - '.dim-jh-badgeToolbarPref' 是 'flex: 0 0 auto' 贴最右；
+ *   里面仍是原来的 '.dim-jh-badgePref' 灰框分段控件
+ * ⇒ 视觉上两个框各自独立，只有「同一行」这一点是新的。
+ *
+ * ⚠️ 轮换那份吃满中间 ⇒ 它内部的下拉框（'.dim-jh-badgeSelect { flex: 1 }'）
+ *    跟着变宽（实测 ~88px → ~165px），「位次 23」不再被截断。
+ *
+ * ⚠️ 窄屏（< 720px）必须能回退两行：两个子项加起来放不下时 'flex-wrap: wrap'
+ *    会让页签换到下一行 —— 不隐藏任何功能。
+ */
+.dim-jh-badgeToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+  flex-wrap: wrap;
+}
+.dim-jh-badgeToolbarRot {
+  flex: 1 1 auto;
+  /* ⚠️ 必须 min-width: 0：flex 项默认 min-width:auto，不加则被内容撑住、无法收缩 */
+  min-width: 0;
+  display: flex;
+}
+.dim-jh-badgeToolbarRot > .dim-jh-badgeRotation {
+  /* 内层黄框拉满外层 ⇒ 里面的 select 才有空间变宽 */
+  flex: 1 1 auto;
+  min-width: 0;
+  /* 合并进工具行后不再需要自己的上边距（由 .dim-jh-badgeToolbar 统一给） */
+  margin-top: 0;
+}
+.dim-jh-badgeToolbarPref {
+  flex: 0 0 auto;
+  display: flex;
+}
+.dim-jh-badgeToolbarPref > .dim-jh-badgePref { flex: none; }
+
+/**
+ * 胶囊上的**补语**（位次 / 账号数，2026-11-18 用户要求）。
+ *
+ * 形态：'TRAE (字节) • 39575.71积分 默认 · 共 7 帐号'
+ *
+ * ⚠️ 'flex: none'：补语被省略号吃掉就等于没显示；空间不足时应该先牺牲
+ *    渠道名/读数（既有 flex 权重已那样设计，见 .dim-jh-badgeName 的注释）。
+ * ⚠️ 小一号字 + 降透明：它是补语不是读数，不能与主数字抢注意力。
+ */
+/* 胶囊上的**补语**（位次 / 账号数，2026-11-18 用户要求）。
+   形态：TRAE (字节) • 39575.71积分 默认 · 共 7 帐号
+
+   ⚠️⚠️ **必须可牺牲（flex: 0 1 auto + ellipsis），不能 flex: none**：
+   胶囊有硬上限 240px（实测约束，见 .dim-jh-badgeBtn 的注释）。两段补语约 78px，
+   加上最长的「渠道名 • 读数」209px 就超了 ⇒ 若设 flex:none，胶囊会被撑出容器、
+   挤压右侧模型选择器（2026-10-02 真实报障的形态）。
+   ⇒ 让补语成为**第一个被省略号吃掉**的部分：空间够时完整显示，不够时退化成「…」。 */
+/* ⚠️ 补语**不自己省略**（否则「默认」会被截成「默…」，比不显示更糟）：
+   让它保持完整宽度，由胶囊的 max-width + overflow 统一裁；
+   实测胶囊 240px 时「TRAE (字节) • 39575.71积分 默认 · 共 7 帐号」正好放得下。 */
+.dim-jh-badgeCount {
+  flex: none;
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+  opacity: .85;
+  white-space: nowrap;
+  margin-left: 3px;
+}
 /* 分桶说明的**逐段带色**（用户 2026-10-12：永久绿 / 长期黄 / 临期红 + 倒计时）。
    ⚠️ 颜色语义与 credit-expiry.js 的 expirySplitParts 一一对应，改一处要改两处：
      permanent（服务端没给到期时间，真·永久）→ ok 绿

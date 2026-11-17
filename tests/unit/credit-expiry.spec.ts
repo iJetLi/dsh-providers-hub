@@ -1104,7 +1104,18 @@ describe('expirySplitParts（三档带色分段）', () => {
         NOW_MS,
       )
       expect(parts).toEqual([
-        { key: 'expiring', text: '临期 500', tone: 'error', countdown: '3 天 0 小时' },
+        {
+          key: 'expiring',
+          text: '临期 500',
+          tone: 'error',
+          countdown: '3 天 0 小时',
+          /**
+           * ⚠️ 2026-11-18 新增：结构化字段（弹窗要把「最早那批金额 + 剩余时长」渲染成
+           * `临500（500 3d）`，且两者共用同一个 tooltip）。只在**有确切时刻**时产出。
+           */
+          earliestAmount: 500,
+          earliestIn: 3 * DAY,
+        },
       ])
     })
 

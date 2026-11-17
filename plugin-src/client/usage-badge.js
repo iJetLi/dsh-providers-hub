@@ -52,6 +52,7 @@ import { formatUnits, formatQuotaLine, formatClaimGains, unitLabel, QUOTA_UNIT }
 import {
   expiryDateHints,
   expirySplitParts,
+  formatCompactLeft,
   formatExpirySplitLine,
   formatPoolSplitLine,
   splitCreditsByExpiry,
@@ -246,15 +247,30 @@ export const CLAIM_NOTICE_MS = 8_000;
 export const CLAIM_NOTICE_WARN_MS = 20_000;
 
 /**
- * 弹窗里积分列表**折叠前**显示的账号数（用户 2026-10-03 要求）。
+ * 弹窗里积分列表**折叠前**显示的账号数。
  *
- * 取 5 而不是 3：普通用户手里多是 2–3 个号，5 行以内不折；而 6 个号原本是
- * **十二行**（每个号两行：数值 + 分桶说明），足够把弹窗撑得比窗口还高。
+ * ## 为什么从 5 改成 15（用户 2026-11-18）
+ *
+ * 账号行从**两行压成一行**（14px/号，原 29px/号），工具行也从两行并成一行
+ * （省 34px）⇒ 同样的 58vh 高度预算里能放的号**翻了一倍多**。
+ * 用户要求「先写 15，之后按效果再调」，故按 15 落地。
+ *
+ * 高度核算（实测）：固定开销 201px + 15 × 14px = **411px**。
+ *
+ * | 窗口高度 | 58vh | 结果 |
+ * |---|---|---|
+ * | 700px  | 406px | 差 5px ⇒ **出现滚动条**（内容不丢，可滚） |
+ * | 800px  | 464px | 不滚 |
+ * | 900px  | 522px | 不滚 |
+ * | 1080px | 626px | 不滚 |
+ *
+ * ⚠️ 700px 小窗口差 5px 是**已知且已接受**的取舍（用户明确「先写 15」）。
+ *    若将来要小窗口也不滚，把它改成 14（397px）即可 —— 只改这一个常量。
  *
  * ⚠️ 折叠**不隐藏任何结论**：合计在节标题、读取失败数在脚注，两者都在折叠之外。
  * 收起来的只是逐账号明细 —— 那份明细本来就是「要核对时才看」的东西。
  */
-export const CREDITS_COLLAPSED_LIMIT = 5;
+export const CREDITS_COLLAPSED_LIMIT = 15;
 
 /**
  * 「轮换起点」下拉框的**支持范围**（用户 2026-11-10 需求）。
@@ -1255,6 +1271,43 @@ function UsageBadgeActive(props) {
         title: view.incompleteNote,
         'aria-hidden': 'true',
       }, '⚠'),
+    /**
+     * ★ **位次**与**账号数**（2026-11-18 用户要求）。
+     *
+     * 形态：`TRAE (字节) • 39575.71积分 默认 · 共 7 帐号`
+     *
+     * - **位次段**：`rotationState.selectedPosition` 为 `null` ⇒ 显示「默认」；
+     *   是数字 ⇒ 显示「位次 N」。
+     * - **账号数段**：`view.accountCount`（= okCount + failedCount）
+     *   ⇒ **读取失败不会让这个数变小**（否则用户会以为账号被删了）。
+     *
+     * ⚠️ 两段都 `flex: none` + 小一号字 + 降透明：它们是**补语**，
+     *    空间不足时**先**牺牲中间的渠道名/读数（既有 flex 权重已经那样设计），
+     *    不能让补语把读数挤掉。
+     * ⚠️ 账号数为 0 时不渲染（「共 0 帐号」是噪音，弹窗里已有更明确的空态文案）。
+     * ⚠️ `aria-hidden`：同样的信息已在 `title` 里，读屏念两遍是噪音。
+     */
+    rotationState === null || rotationState.selectedPosition === null
+      ? React.createElement('span', {
+        key: 'pos',
+        className: 'dim-jh-badgeCount',
+        title: '当前轮换起点：默认（不指定）',
+        'aria-hidden': 'true',
+      }, '默认')
+      : React.createElement('span', {
+        key: 'pos',
+        className: 'dim-jh-badgeCount',
+        title: `当前轮换起点：位次 ${rotationState.selectedPosition}`,
+        'aria-hidden': 'true',
+      }, `位次 ${rotationState.selectedPosition}`),
+    view.accountCount > 0
+      ? React.createElement('span', {
+        key: 'cnt',
+        className: 'dim-jh-badgeCount',
+        title: `该渠道账号池共 ${view.accountCount} 个账号`,
+        'aria-hidden': 'true',
+      }, `· 共 ${view.accountCount} 帐号`)
+      : null,
   ]);
 
   return React.createElement('div', { className: 'dim-jh-badge', ref: root }, [
@@ -1326,10 +1379,33 @@ function UsageBadgeActive(props) {
       autoError === ''
         ? null
         : React.createElement('div', { key: 'autoErr', className: 'dim-jh-badgeFail', role: 'alert' }, autoError),
-      renderPreference(),
-      // 「轮换起点」独占下一行 —— 与上面的「显示偏好」语义完全不同
-      //（一个改显示什么数字，一个改从哪个号开始轮换），共用一行会让人以为切了显示就换了号。
-      renderRotation(),
+      /**
+       * ★ **工具行：轮换起点 + 三个显示偏好页签，同一行**（2026-11-18 用户要求）。
+       *
+       * 原形态是两行：页签一行（27px）+ 轮换一行（38px + 7px 边距）= **72px**。
+       * 合并后 **33px**，省 39px —— 这是「默认显示 15 个账号」能落地的另一半前提。
+       *
+       * ## 布局（用户 2026-11-18 明确）
+       *
+       * ```
+       * ┌──────────────────────────────────┐  ┌────────────────┐
+       * │ 轮换起点 ⓘ [ ▼ 默认__________ ] │  │自动│优先订阅│只看积分│
+       * └──────────────────────────────────┘  └────────────────┘
+       *        flex: 1 1 auto（吃满中间）            flex: 0 0 auto（贴最右）
+       * ```
+       *
+       * - 轮换的黄框 `flex: 1 1 auto` ⇒ 吃掉中间所有空间，**下拉框跟着变宽**
+       *   （实测约 165px，原 ~88px ⇒ 「位次 23」不再被截断）
+       * - 三个页签 `flex: 0 0 auto` ⇒ **贴最右**
+       * - ⚠️ **样式仍然完全分开**：黄框只包轮换起点，页签是独立的灰框分段控件
+       *   （用户原话：「不要被包进去轮换起点的样式里面，分开」）
+       *
+       * ⚠️ 为什么轮换在左、页签在右：轮换起点是**每次会话都可能改**的选项，
+       *    且带黄色警示条；页签是一次性偏好。更常动的放左侧符合扫视习惯。
+       *
+       * ⚠️ 窄屏（< 720px）由 CSS 的 `flex-wrap: wrap` 回退两行 —— 不隐藏任何功能。
+       */
+      renderToolbar(),
     ];
 
     // 首屏：读数未到 / 首次就失败 —— 说明白，但**不**渲染会说出
@@ -1823,6 +1899,36 @@ function UsageBadgeActive(props) {
     ]);
   }
 
+  /**
+   * ★ **合并后的工具行**（2026-11-18 用户要求）：轮换起点 + 三个显示偏好页签，同一行。
+   *
+   * 这不改写两个既有渲染函数的行为 —— 只给它们各包一层 `flex` 盒子，
+   * 让 CSS 决定左右分配（轮换 `flex:1 1 auto` 吃满中间、页签 `flex:0 0 auto` 贴右）。
+   *
+   * ⚠️ **为什么用一个新函数而不是把两个旧函数改掉**：
+   * 两者各有 4~5 条早退分支（`return null` / 错误态 / 不支持态），
+   * 逐条改成 inline 形态要动很多处，且每一处都能漏。包一层是最小改动面。
+   *
+   * ⚠️ **样式必须分开**（用户原话「不要被包进去轮换起点的样式里面，分开」）：
+   * 黄框 `.dim-jh-badgeRotation` 只包轮换那一段；页签 `.dim-jh-badgePref`
+   * 是独立的灰框。合并只发生在**布局层**（同一 flex 行），不共享边框/底色。
+   *
+   * ⚠️ 返回的可能是 `null`（渠道不支持轮换且页签也出错时）—— 调用方用
+   * `filter(Boolean)` 兜住，不能假定非空。
+   */
+  function renderToolbar() {
+    const rotation = renderRotation();
+    const pref = renderPreference();
+    // 两者都缺席 ⇒ 整行不渲染（不留空白）。
+    if (rotation === null && pref === null) return null;
+    return React.createElement('div', { key: 'toolbar', className: 'dim-jh-badgeToolbar' }, [
+      // 轮换：外层这层 span 负责「吃掉中间空间」，内层仍是原来的黄框
+      React.createElement('span', { key: 'rot', className: 'dim-jh-badgeToolbarRot' }, rotation),
+      // 页签：贴最右，不参与 flex 增长
+      React.createElement('span', { key: 'pref', className: 'dim-jh-badgeToolbarPref' }, pref),
+    ]);
+  }
+
   /** 订阅区：窗口（Cline）或套餐包（Qoder / ZCode / 两个 buddy）。 */
   function renderSubscription() {
     const subscription = value?.subscription;
@@ -1982,8 +2088,26 @@ function UsageBadgeActive(props) {
       ...(accounts.length === 0
         ? [React.createElement('div', { key: 'empty', className: 'dim-jh-badgeNote' },
           value?.disabledCount > 0 ? '该渠道的账号全部已停用' : '该渠道还没有账号（可在 Jet Hub 设置页添加）')]
-        : shown.map((row) => React.createElement('div', { key: row.accountId, className: 'dim-jh-badgeRow' }, [
-          React.createElement('div', { key: 'head', className: 'dim-jh-badgeRowHead' }, [
+        : shown.map((row) => {
+          /**
+           * ★ **每个账号只占一行**（2026-11-18 用户要求「两行合并成一行」）。
+           *
+           * 原形态：`RowHead`（名字 + 读数）独占一行 + 分档说明一行 = **29px/号**。
+           * 现在：`RowInline` 一行内 flex 排列 `名字 读数 · 长… · 短… · 临…（…）`
+           * = **14px/号**。30 个号才 420px，是「默认显示 15 个」能落地的前提。
+           *
+           * ⚠️ **顺序不能反**：名字必须在前（用户按名字找号），读数紧随
+           * （一眼看余额），三档说明在后（细节）。窄屏截断时**先牺牲末尾的档位文字**
+           * —— 故档位段都带 `flex: none` + 整行 `nowrap`，由省略号收尾，
+           * 悬停看全文（整行有兜底 title，各档另有自己的）。
+           */
+          const splitNote = row.balance === null
+            ? null
+            : renderSplitNote(splitParts(row.balance, windowDays, provider, imminentDays));
+          return React.createElement('div', {
+            key: row.accountId,
+            className: 'dim-jh-badgeRow dim-jh-badgeRowInline',
+          }, [
             React.createElement('span', {
               key: 'l',
               className: 'dim-jh-badgeRowName',
@@ -1995,13 +2119,14 @@ function UsageBadgeActive(props) {
               'data-tone': row.balance === null ? 'warn' : 'ok',
               title: row.error || undefined,
             }, row.balance === null ? (row.error || '查询失败') : balanceLine(row.balance)),
-          ]),
-          // 分桶/资源包说明：小字**逐段带色**（永久绿 / 长期黄 / 临期红 + 倒计时），
-          // 存在时才占一行。用户 2026-10-12 明确要求三档分色。
-          row.balance === null
-            ? null
-            : renderSplitNote(splitParts(row.balance, windowDays, provider, imminentDays)),
-        ]))),
+            // ⚠️ 分档说明现在是**行内兄弟**（不再是下一行的块）⇒ 传 `inline` 让
+            //    CSS 用 `display: contents` 把它摊平进父级 flex 流。
+            //    不这样做的话它会自成一块，又把行高撑回两行（等于没合并）。
+            splitNote === null
+              ? null
+              : React.createElement('span', { key: 'note-inline', className: 'dim-jh-badgeNoteInlineWrap' }, splitNote),
+          ]);
+        })),
       hidden === 0
         ? null
         : React.createElement('button', {
@@ -2021,42 +2146,97 @@ function UsageBadgeActive(props) {
   }
 
   /**
-   * 一行**逐段带色**的小字（分桶说明）；无内容返回 `null`（不占位）。
+   * **单行**、逐段带色的分档说明；无内容返回 `null`（不占位）。
    *
-   * ⚠️ 颜色语义（用户 2026-10-12 定）：
-   * - `permanent`（**服务端没给到期时间**，真·永久）→ `ok` 绿
-   * - `longTerm`（有到期时间但还早）→ `warn` 黄
-   * - `expiring`（窗口内，再不用就作废）→ `error` 红，且带**倒计时**
+   * ## 2026-11-18 改：两行压成一行（用户明确「不能再让高度增加」）
    *
-   * 段间用 ` · ` 分隔（与全局其它分桶行的分隔符一致）。倒计时放在括号里
-   * （`临期 100（2 天 4 小时）`）—— 用户要的「临期 100（倒计时）」正是这个形状。
+   * 原形态是「名字+读数」一行 + 本函数一行 = **29px/号**；现在整行 14px。
+   * 代价是窄屏会截断 ⇒ 靠 `title` 兜底（本函数返回的整行有全文 tooltip，
+   * 且各段另有自己的 tooltip）。
+   *
+   * ## 颜色语义（用户 2026-10-12 定，2026-11-17 加短期）
+   *
+   * - `permanent`（服务端没给到期时间，真·永久）→ `ok` 深绿
+   * - `longTerm`（≥15 天，还早）→ `okSoft` 浅绿
+   * - `shortTerm`（5~15 天）→ `warn` 黄
+   * - `expiring`（<5 天，再不用就作废）→ `error` 红 + **括号时间**
+   *
+   * ## ⚠️ 临期段与括号是**同一个 tooltip 区域**（用户 2026-11-18 要求）
+   *
+   * 形态：`临4392.73（399 2h16m）`
+   *
+   * - 括号里前面是**最早那批的金额**（399），后面是紧凑时长（2h16m）
+   * - 「临4392.73」与「（399 2h16m）」**共用同一个 title 字符串**
+   *   ⇒ 悬停任一处都得到同一份说明，不会出现「两个说法」
+   *
+   * ⚠️ 共用的是**同一个变量**（`imminentTip`），不是各写一份字面量 ——
+   *    否则以后改文案必然漏一处（本仓头号缺陷形态）。
+   *
+   * ⚠️ 括号只在 `earliestAmount` / `earliestIn` **都有**时渲染：
+   *    「无日期」的批次（CodeArts 赠送包）不产这两个键 ⇒ 不编造时间。
    */
   function renderSplitNote(parts) {
     if (!Array.isArray(parts) || parts.length === 0) return null;
     const children = [];
     parts.forEach((part, index) => {
-      if (index > 0) children.push(React.createElement('span', { key: `sep-${part.key}`, className: 'dim-jh-badgeNoteSep' }, ' · '));
+      if (index > 0) children.push(React.createElement('span', { key: `sep-${part.key}`, className: 'dim-jh-badgeNoteSep' }, '·'));
+
+      const isImminent = part.key === 'expiring';
+      const compactLeft = isImminent ? formatCompactLeft(part.earliestIn) : '';
+      const hasBracket = isImminent && compactLeft.length > 0
+        && Number.isFinite(part.earliestAmount) && part.earliestAmount > 0;
+      /**
+       * ⚠️ 临期段的 tooltip 文案（**临期段与括号共用这一份**）：
+       *   有括号时给出「其中 N 最早 X 后到期」，没有则退回通用说明。
+       *   两段都挂它 ⇒ 悬停任一处看到的是同一句话。
+       *
+       * ⚠️ 金额直接用 `part.earliestAmount`（**数值**），不要走 `format`：
+       *    本函数没有 `format` 参数（那是 `splitParts` 作用域里的），
+       *    误用会变成未声明变量 ⇒ 整页 ReferenceError（本仓已有守卫抓到过）。
+       *    数值原样打印即可 —— 它在 `临4392.73` 里已经是同口径的原始值。
+       */
+      const imminentTip = isImminent
+        ? (hasBracket
+          ? `临期 ${part.earliestAmount} 积分最早 ${compactLeft} 后到期`
+          : '临期积分：再不用就作废，最优先消耗')
+        : undefined;
+      // 非临期段沿用「最早作废」的既有说法（`countdown` 已是完整短语）。
+      const otherTip = !isImminent && part.countdown !== undefined
+        ? `最早作废：${part.countdown}`
+        : undefined;
+
+      if (hasBracket) {
+        /**
+         * 临期 + 括号**包进同一个 span**：这样它们的 `title` 天然是一个区域，
+         * 不必依赖两个相邻元素恰好同文案（后者在缩放/换行时会出现「热区断裂」）。
+         */
+        const text = `${part.text}（${part.earliestAmount} ${compactLeft}）`;
+        children.push(React.createElement('span', {
+          key: part.key,
+          className: 'dim-jh-badgeNotePart',
+          'data-tone': part.tone,
+          title: imminentTip,
+        }, text));
+        return;
+      }
+
       children.push(React.createElement('span', {
         key: part.key,
         className: 'dim-jh-badgeNotePart',
         'data-tone': part.tone,
-        // ⚠️⚠️ **不得无条件追加「后」**（2026-10-21 合并审计发现，!135 引入的回归）。
-        //
-        // `expirySplitParts` 的 `countdown` 已从「裸时长」改为「**可能是完整短语**」：
-        // 倒计时只覆盖其中一批时它是 `其中 500 于 6 天 0 小时后到期`。旧代码在这里
-        // 无条件拼 `后` ⇒ 实测得到残句：
-        //   `最早作废：其中 500 于 6 天 0 小时后到期后`
-        // （!135 只改了生产者、没同步这个消费者；本处此前**零用例**，变异实测全绿。）
-        //
-        // ⇒ 直接用它，两种形态都自洽：
-        //   `最早作废：6 天 0 小时`                    ← 倒计时覆盖全部临期时
-        //   `最早作废：其中 500 于 6 天 0 小时后到期`  ← 只覆盖其中一批时
-        // ⚠️ **不要**在这里按「短语/时长」分支 —— 那是在消费方复制生产者才知道的
-        //   形态知识，必然再次漂移（本仓头号缺陷形态）。
-        ...(part.countdown === undefined ? {} : { title: `最早作废：${part.countdown}` }),
+        // ⚠️⚠️ **不得无条件追加「后」**（2026-10-21 合并审计发现，!135 引入的回归）：
+        //  `countdown` 可能是完整短语 `其中 500 于 6 天 0 小时后到期`，
+        //  再拼一个「后」就成残句（`…到期后`）。故直接给它，不再加工。
+        ...(isImminent ? { title: imminentTip } : {}),
+        ...(otherTip === undefined ? {} : { title: otherTip }),
       }, part.countdown === undefined ? part.text : `${part.text}（${part.countdown}）`));
     });
-    return React.createElement('div', { key: 'note', className: 'dim-jh-badgeRowNote' }, children);
+    return React.createElement('div', {
+      key: 'note',
+      className: 'dim-jh-badgeRowNote dim-jh-badgeRowNoteInline',
+      // 整行兜底：窄屏截断后仍能悬停读到全文（各段自己的 tooltip 优先）。
+      title: parts.map((p) => p.text).join(' · '),
+    }, children);
   }
 
   /**

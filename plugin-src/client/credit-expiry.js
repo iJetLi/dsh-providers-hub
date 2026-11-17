@@ -758,11 +758,29 @@ export function expirySplitParts(split, format, now, hints) {
           ? `其中套餐 ${format(tierEarliestAmount)} 于 ${formatMonthDay(at, now)}刷新，${countdown}后`
           : `${refresh}，${countdown}后`;
       }
+      /**
+       * ⚠️ 除文案外还要给出**结构化数据**（2026-11-18 用户要求「临4392.73（399 2h16m）」）：
+       *
+       * 弹窗要把「最早那批的金额」与「剩余时长」渲染成两个**独立的、可单行并列的**
+       * 子元素（且两者共用一个 tooltip）。只在 `countdown` 里拼中文串做不到
+       * —— 那是给人读的一句话，不是可拆分的数据。
+       *
+       * | 字段 | 含义 | 用途 |
+       * |---|---|---|
+       * | `earliestAmount` | 最早那批的**数值**（不是格式化串） | 括号里的 399 |
+       * | `earliestIn` | 剩余毫秒数（`at - now`） | 括号里的 2h16m |
+       *
+       * ⚠️ 两者都只在**有效**（有确切时刻且 > 0）时出现；
+       *    「无日期」的批次（CodeArts 赠送包）不产这两个键 ⇒ 括号不渲染（不编造时间）。
+       */
+      const hasEarliest = typeof at === 'number' && Number.isFinite(at) && at > 0
+        && tierEarliestAmount > 0;
       parts.push({
         key: 'expiring',
         text: `临期 ${tierText}`,
         tone: 'error',
         ...(countdownText.length > 0 ? { countdown: countdownText } : {}),
+        ...(hasEarliest ? { earliestAmount: tierEarliestAmount, earliestIn: at - now } : {}),
       });
     }
   }
@@ -805,6 +823,40 @@ export function expiryCountdown(expiresAtMs, now) {
   if (days > 0) return `${days} 天 ${hours} 小时`;
   if (hours > 0) return `${hours} 小时 ${mins} 分钟`;
   return `${mins} 分钟`;
+}
+
+/**
+ * 剩余时长的**紧凑写法**（用户 2026-11-18 要求「用 2h16m 即可」）。
+ *
+ * ## 与 {@link expiryCountdown} 的分工
+ *
+ * | 函数 | 形态 | 用在哪 |
+ * |---|---|---|
+ * | `expiryCountdown` | `2 小时 16 分钟` | 卡片/徽标的倒计时（有空间） |
+ * | `formatCompactLeft`（本函数） | `2h16m` | **弹窗单行括号里**（宽度紧张） |
+ *
+ * ## 边界
+ *
+ * | 剩余 | 输出 |
+ * |---|---|
+ * | ≥ 1 天 | `2d5h` |
+ * | 1~24 小时 | `2h16m` |
+ * | < 1 小时 | `26m` |
+ * | 已过期 / 无法解析 | `''`（调用方不渲染括号） |
+ *
+ * ⚠️ 与 `expiryCountdown` 一样**用向上取整到分钟**：剩余 30 秒要显示 `1m`
+ * 而不是 `0m` —— 「马上就作废」恰恰是最该看到的信号。
+ */
+export function formatCompactLeft(ms) {
+  const left = Number(ms);
+  if (!Number.isFinite(left) || left <= 0) return '';
+  const minutes = Math.ceil(left / 60_000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  if (days > 0) return hours > 0 ? `${days}d${hours}h` : `${days}d`;
+  if (hours > 0) return mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
+  return `${mins}m`;
 }
 
 /**

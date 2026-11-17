@@ -1156,8 +1156,19 @@ describe('用量徽标：号多了以后的两条整理（2026-10-03 用户要�
   const badge = read('plugin-src/client/usage-badge.js')
   const styles = read('plugin-src/client/jet-hub-styles.js')
 
-  it('折叠阈值是 5，且「展开其余 N 个」由可见文案如实报数', () => {
-    expect(badge).toMatch(/export const CREDITS_COLLAPSED_LIMIT = 5;/)
+  /**
+   * ★ 折叠阈值 5 → **15**（2026-11-18 用户要求）。
+   *
+   * 依据：账号行从两行压成一行（29px → 14px）、工具行从两行并成一行（72px → 33px）
+   * ⇒ 同样的 58vh 预算能放的号翻倍。用户明确「先写 15，之后按效果再调，不要环境变量」。
+   *
+   * ⚠️ 这里锁的是**常量字面量**（不是「读起来像 15」）：改成别的值必须有人复核
+   * 高度预算（固定开销 201px + 15×14px = 411px；700px 窗口 58vh=406px 会差 5px）。
+   */
+  it('折叠阈值是 15（常量，不是环境变量），且「展开其余 N 个」由可见文案如实报数', () => {
+    expect(badge).toMatch(/export const CREDITS_COLLAPSED_LIMIT = 15;/)
+    // ⚠️ 反向：不得改成读环境变量（用户 2026-11-18 明确「不需要环境变量，写常量就行」）
+    expect(badge, '不得把折叠阈值做成环境变量').not.toMatch(/process\.env\.[A-Z_]*COLLAPSED/)
     expect(badge).toMatch(/展开其余 \$\{hidden\} 个账号/)
     expect(badge).toMatch(/creditsExpanded \? '收起' : /)
   })

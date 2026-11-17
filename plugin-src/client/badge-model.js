@@ -530,6 +530,16 @@ export function badgeView(input) {
     windows,
     failedCount,
     okCount,
+    /**
+     * 该渠道的**账号总数**（= 读到的 + 读取失败的）。
+     *
+     * ⚠️ 与 `okCount` 分开给：胶囊上要显示的是「这个渠道有几个号」，
+     * 那个数**不该因为某次读取失败就变小** —— 否则用户会以为账号被删了。
+     * 失败数另有 `failedCount`，由弹窗脚注单独说明，两者不混。
+     *
+     * ⚠️ 用户 2026-11-18 要求胶囊显示「共 7 帐号」，即这个值。
+     */
+    accountCount: okCount + failedCount,
     failureReason,
     incompleteNote,
   };
