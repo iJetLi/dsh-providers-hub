@@ -210,9 +210,18 @@ describe('Qoder 错峰时段判定（本地推算）', () => {
     expect(promotionActiveNow({ ...noWindow, active: false }, at('2026-09-21T00:00:00+08:00'))).toBe(false)
   })
 
-  it('非法窗口值也回退到 active（不抛错）', () => {
+  it('★★ 非法窗口值 ⇒ **不生效**（不抛错，也**不**回退 active 快照）', () => {
+    // ⚠️ 本条原断言 `toBe(true)`（= 回退目录快照），那是 PR #104 之前的契约。
+    // 对抗审计（P1-3）实测它与徽标腿**反向**：徽标腿把读不懂的窗口判死
+    // （`dailyUnusable` ⇒ 永不成立），价格腿却退回一个**冻结在目录下发时刻**的
+    // 布尔 ⇒ 上游把 `22:30–07:50` 写成 `'xx'` 时会出现「徽标灭 / 价格亮」。
+    //
+    // 契约改为：**「字段缺席」才回退快照**（上游没给窗口就信它），
+    // **「字段读不懂」一律 fail-closed**（两条腿同判）。
     const bad = { active: true, windowStart: 'xx', windowEnd: 'yy' }
-    expect(promotionActiveNow(bad, at('2026-09-21T12:00:00+08:00'))).toBe(true)
+    expect(promotionActiveNow(bad, at('2026-09-21T12:00:00+08:00'))).toBe(false)
+    // 字段缺席仍然回退快照（不能被本条修法误伤）。
+    expect(promotionActiveNow({ active: true }, at('2026-09-21T12:00:00+08:00'))).toBe(true)
   })
 
   it('id 联合类型可容纳同族的中国版（类型回归）', () => {

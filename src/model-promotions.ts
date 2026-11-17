@@ -388,8 +388,16 @@ function withinDailyWindows(windows: readonly ModelPromotionWindow[], nowMinutes
     const start = clockMinute(window.start, 'start')
     const end = clockMinute(window.end, 'end')
     if (start === undefined || end === undefined) return false
-    // 同钟点 = 全天（起点含 + 终点不含 ⇒ 同一时刻即覆盖整日）。
-    if (start === end) return true
+    // ⚠️ 同钟点 = **空区间**（半开区间 `[x, x)` 没有成员），**不是**「全天」。
+    // 原先这里写 `return true`（注释还声称「同一时刻即覆盖整日」），而价格腿
+    // `src/qoder-adapter.ts` 的 `promotionActiveNow` 对同一输入给
+    // `minutes >= start && minutes < end` ⇒ 恒 false ⇒ **两条腿反向**：
+    // 上游发「零长度窗口」时徽标全天挂「限时免费」而价格按原价，
+    // 正是 issue #101 要修的形态。
+    // 真正的「全天」有专门表示：`daily` 缺省 / 空数组（见 `promotionWithinDailyWindow`），
+    // 或 `00:00–24:00`。零长度窗口是**上游数据异常**，按本仓纪律
+    // 「读不懂的时段不能替上游背书」取**不成立**（与价格腿一致）。
+    if (start === end) return false
     if (end > start) return nowMinutes >= start && nowMinutes < end
     return nowMinutes >= start || nowMinutes < end
   })
@@ -550,8 +558,15 @@ export function promotionBadgeColor(promotion: ModelPromotion): string | undefin
 export function promotionTone(promotion: ModelPromotion): ModelPromotionTone {
   const color = promotionBadgeColor(promotion)
   if (color === undefined) return 'neutral'
-  const hex = color.slice(1)
-  if (hex.length !== 6) return 'neutral'
+  const raw = color.slice(1)
+  // ⚠️ `promotionBadgeColor` 的契约是「`#RGB` 或 `#RRGGBB` 都放行」，而这里
+  // 原先写 `if (hex.length !== 6) return 'neutral'` ⇒ **3 位 hex 永远落 neutral**
+  // （上游的绿 `#0f0` 被画成灰，与上面「绿色 → success」的规则自相矛盾）。
+  // 把 3 位按 CSS 语义展开成 6 位（`#abc` ≡ `#aabbcc`）再算。
+  const hex = raw.length === 3
+    ? raw[0]! + raw[0]! + raw[1]! + raw[1]! + raw[2]! + raw[2]!
+    : raw
+  if (!/^[0-9a-f]{6}$/iu.test(hex)) return 'neutral'
   const r = Number.parseInt(hex.slice(0, 2), 16)
   const g = Number.parseInt(hex.slice(2, 4), 16)
   const b = Number.parseInt(hex.slice(4, 6), 16)
@@ -625,15 +640,39 @@ function parseTencentSchedule(
   const validFrom = instantMs(raw.validFrom)
   const validUntil = instantMs(raw.validUntil)
   const daily = parseDailyWindows(raw.daily)
-  // 下发了 daily（数组且非空）却一条都没活下来 ⇒ **解析失败**，不是「没有时段」。
-  const dailyUnusable = daily === undefined
-    && Array.isArray(raw.daily)
-    && (raw.daily as unknown[]).length > 0
+  // ⚠️⚠️ **「声明过」按「键存在」判定，不按类型判定**（PR #104 正向审计 P1-1）。
+  //
+  // 原判据是 `daily === undefined && Array.isArray(raw.daily) && length > 0` ——
+  // 只认「数组但全读不懂」这一种。于是上游**类型漂移**时会静默 fail-open：
+  //
+  //   - `daily: '23:00-07:50'`（字符串而非数组）⇒ `Array.isArray` 为假 ⇒
+  //     `dailyUnusable` 为假、`daily` 为 undefined ⇒ 整条 schedule 只剩
+  //     `{ timezone }` ⇒ `timeDeclared: false` ⇒ **徽标天天挂**；
+  //   - `validUntil: 1794931200`（epoch 数字）/ `{}` / `'soon'` ⇒ `instantMs`
+  //     返回 undefined ⇒ **绝对窗口被静默丢弃** ⇒ 到 2030 年还在挂 badge。
+  //
+  // 两者都是 issue #101 的原始症状（「活动过期而用户仍按优惠期选择」），
+  // 也正是本模块自述最该防的方向（「dailyUnusable 是唯一会夸大上游声明的方向」）。
+  // ⇒ 统一收敛到 **fail-closed**：只要**声明过**任何时间字段却读不懂，
+  //   就标 `dailyUnusable`（= 永不成立），并留一条日志。
+  // ⚠️ `daily: []`（空数组）在既有契约里是「**没声明**时段」= 全天活动，
+  // 不能算「声明了却读不懂」（否则会把一条全天活动判死）。只有**非空**声明
+  // 才算声明过。
+  const declaredDaily = raw.daily !== undefined
+    && !(Array.isArray(raw.daily) && raw.daily.length === 0)
+  const declaredFrom = raw.validFrom !== undefined
+  const declaredUntil = raw.validUntil !== undefined
+  const dailyUnusable = (declaredDaily && daily === undefined)
+    || (declaredFrom && validFrom === undefined)
+    || (declaredUntil && validUntil === undefined)
   if (dailyUnusable) {
     // 日志留在**宿主侧、解析路径**上：每次上游文档只跑一遍，而判定路径每次渲染都跑。
     // 缺了这条，徽标只是消失、全仓零日志（dsh-connect-workbuddy issue #139 的症状）。
-    safeWarn(warn, 'promotion "' + id + '": dropped every daily window, badge stays hidden '
-      + '(the upstream may have changed the time format)')
+    safeWarn(warn, 'promotion "' + id + '": declared time is unreadable '
+      + '(daily: ' + (declaredDaily ? 'present' : 'absent')
+      + ', validFrom: ' + (declaredFrom ? 'present' : 'absent')
+      + ', validUntil: ' + (declaredUntil ? 'present' : 'absent')
+      + '), badge stays hidden — the upstream may have changed the time format')
   }
   if (timezone === undefined && validFrom === undefined && validUntil === undefined
     && daily === undefined && !dailyUnusable) return undefined
@@ -786,7 +825,16 @@ export function qoderPromotionCandidate(
       + '), badge stays hidden')
   }
   const schedule: ModelPromotionSchedule = {
-    timezone: promotion.timezone ?? fallbackTimeZone,
+    // ⚠️⚠️ **刻意忽略 `promotion.timezone`，一律用 `fallbackTimeZone`**（两个调用点
+    // 都传 `'Asia/Shanghai'`，= UTC+8 且无夏令时 = 价格腿的硬编码 +8）。
+    // 原因：qoder 价格腿 `promotionActiveNow`（`src/qoder-adapter.ts`）**根本不读**
+    // `promotion.timezone`，它用 `now.getTime() + 8h` 手算 UTC+8。若徽标腿听
+    // `promotion.timezone`，上游一旦下发 `Asia/Tokyo` 这类非 UTC+8 的合法时区，
+    // 两条腿就会**方向相反**（PR #104 正向审计 P2-3，实测 `Asia/Tokyo` +
+    // 窗口 `22:30–07:50` + `23:10Z` ⇒ price=true / badge=false）。
+    // 本仓纪律：新腿对齐老腿，不改老腿的既有行为（改价格腿要连 `nowImpl` 与时区
+    // 语义一起审，属独立 PR）。文档 §5「时区兜底必须与价格腿同值」由此真的成立。
+    timezone: fallbackTimeZone,
     ...usableWindow ? { daily: [{ start: windowStart as string, end: windowEnd as string }] } : {},
     ...(declaredWindow && !usableWindow ? { dailyUnusable: true as const } : {}),
     ...promotion.active === true ? { snapshotActive: true as const } : {},

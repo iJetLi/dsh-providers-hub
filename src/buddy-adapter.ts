@@ -2136,8 +2136,14 @@ export class BuddyAdapter extends LlmAdapter {
    * 字段（活动是运行时事实），因此离线路径返回 undefined —— 那意味着「没有
    * 已知的窗口边界」，而不是「一切都好」。
    */
-  nextPromotionEdgeAt(nowMs: number = Date.now()): number | undefined {
-    return nextBuddyPromotionEdgeMs(this.remoteModels ?? [], nowMs)
+  nextPromotionEdgeAt(nowMs?: number): number | undefined {
+    // ⚠️ 时钟源必须与 `toCatalogEntry` 同源：那边用的是
+    // `this.options.now?.() ?? Date.now()`（见本文件 `:2597` 的 `buddyModelBadge(...)`）。
+    // 原先这里写默认参数 `Date.now()` ⇒ **假时钟单测里两处不同源**：徽标按注入时钟算、
+    // 边界按真时钟算，测试要么测不到边界、要么 flaky。
+    // Qoder 侧 `nextPromotionEdgeAt` 用的是 `this.nowImpl()`，本来是**一致**的。
+    const at = nowMs ?? this.options.now?.() ?? Date.now()
+    return nextBuddyPromotionEdgeMs(this.remoteModels ?? [], at)
   }
 
   /**

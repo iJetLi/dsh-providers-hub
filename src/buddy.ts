@@ -561,14 +561,26 @@ interface PromotionSchedule {
   validUntil?: unknown
 }
 
-/** 解析 `HH:MM`（容忍不补零）为当日分钟数；非法返回 undefined。 */
-function parseHHMM(value: unknown): number | undefined {
+/**
+ * 解析 `HH:MM`（容忍不补零）为当日分钟数；非法返回 undefined。
+ *
+ * ⚠️ **`24:00` 只在「终点」位置合法**（= 当日末尾 1440）。原先这里一律要求
+ * `h < 24` ⇒ `{start:'23:00', end:'24:00'}` 的**终点**被拒 ⇒ 整个 slot 被丢
+ * ⇒ buddy 价格腿不出价，而徽标腿（`src/model-promotions.ts` 的 `clockMinute`
+ * 有 `role === 'end' && minute === 0` 的专门分支）亮着、qoder 价格腿退回
+ * `promotion.active` 快照 ⇒ **三处三种答案**（PR #104 正向审计 P2-2）。
+ * 现在三处统一为「`24:00` 是合法的当日终点」。
+ */
+function parseHHMM(value: unknown, allowEndOfDay = false): number | undefined {
   if (typeof value !== 'string') return undefined
   const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim())
   if (m === null) return undefined
   const h = Number(m[1])
   const min = Number(m[2])
-  return h < 24 && min < 60 ? h * 60 + min : undefined
+  if (min >= 60) return undefined
+  if (h > 24) return undefined
+  if (h === 24) return allowEndOfDay && min === 0 ? 24 * 60 : undefined
+  return h * 60 + min
 }
 
 /**
@@ -623,7 +635,8 @@ function promotionActiveNow(item: Record<string, unknown>, now: Date): boolean {
   return schedule.daily.some((slot) => {
     if (typeof slot !== 'object' || slot === null) return false
     const start = parseHHMM(slot.start)
-    const end = parseHHMM(slot.end)
+    // 终点位置允许 `24:00`（= 当日末尾），与徽标腿 / qoder 腿同判据。
+    const end = parseHHMM(slot.end, true)
     if (start === undefined || end === undefined) return false
     // 支持跨零点（如 23:00–7:50）。
     return start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end

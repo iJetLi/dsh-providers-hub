@@ -172,8 +172,18 @@ export function createPromotionEdgeBroadcaster(
       }
       lastFiredAt = fireAt
       nextAt = undefined
+      // ⚠️ `fire` 的签名是 `void | Promise<void>`：`void` **不接 rejection**。
+      // 只写 `void options.fire()` 时同步 throw 会被 catch 兜住，但**异步 reject
+      // 会变成 unhandled rejection**（Node 默认终止进程）。当前生产 fire 是
+      // `broadcastCatalogChanged`（同步 + queueMicrotask）⇒ 结构可达、零触发，
+      // 但只要有人把它改成 async，这里就是一条「一播报就崩」的暗雷。
       try {
-        void options.fire()
+        const fired: void | Promise<void> = options.fire()
+        if (fired !== undefined && typeof (fired as Promise<void>).then === 'function') {
+          void (fired as Promise<void>).catch((error: unknown) => {
+            warn('[jet-hub] 活动边界播报失败（异步，照常继续排下一次）：' + String(error))
+          })
+        }
       } catch (error) {
         warn('[jet-hub] 活动边界播报失败（照常继续排下一次）：' + String(error))
       }

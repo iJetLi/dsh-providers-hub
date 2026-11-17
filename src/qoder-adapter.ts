@@ -2706,15 +2706,27 @@ export class QoderAdapter extends LlmAdapter {
 export function promotionActiveNow(promotion: QoderModelPromotion, now: Date): boolean {
   const { windowStart, windowEnd } = promotion
   if (windowStart === undefined || windowEnd === undefined) return promotion.active
-  const toMinutes = (hhmm: string): number | undefined => {
+  // ⚠️ `24:00` 只在**终点**位置合法（= 当日末尾 1440）：徽标腿
+  // `src/model-promotions.ts` 的 `clockMinute` 有专门分支接受它，buddy 价格腿
+  // 也已放宽 —— 三处必须同判据（PR #104 正向审计 P2-2）。
+  const toMinutes = (hhmm: string, allowEndOfDay = false): number | undefined => {
     const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim())
     if (m === null) return undefined
     const h = Number(m[1]); const min = Number(m[2])
-    return h < 24 && min < 60 ? h * 60 + min : undefined
+    if (min >= 60) return undefined
+    if (h > 24) return undefined
+    if (h === 24) return allowEndOfDay && min === 0 ? 24 * 60 : undefined
+    return h * 60 + min
   }
   const start = toMinutes(windowStart)
-  const end = toMinutes(windowEnd)
-  if (start === undefined || end === undefined) return promotion.active
+  const end = toMinutes(windowEnd, true)
+  // ⚠️⚠️ **「字段缺席」与「字段读不懂」必须分开**（PR #104 对抗审计 P1-3）：
+  // 缺席 ⇒ 回退目录快照 `active`（既有契约，上游没给窗口就信它）；
+  // 声明了却读不懂（`'24:00'` 当起点、`'09:60'`、`'soon'`、任意换形）⇒ **fail-closed**，
+  // 不能回退快照 —— 否则上游把窗口换个写法，价格腿就退回一个**冻结在目录下发时刻**
+  // 的布尔，而徽标腿已把该窗口判死 ⇒ 两腿反向（腾讯「徽标灭/价格亮」、Qoder
+  // 「徽标亮/价格灭」，同语义两个渠道相反展示）。
+  if (start === undefined || end === undefined) return false
 
   // 取 UTC+8 的「墙上时间」（目录时区与用户一致，故无需真实时区换算）
   const utc8 = new Date(now.getTime() + 8 * 3_600_000)

@@ -43,6 +43,8 @@ import {
   selectPromotionAt,
   sortPromotions,
 } from '../../src/model-promotions.js'
+import { promotionActiveNow } from '../../src/qoder-adapter.js'
+import { parsePromotions } from '../../src/buddy.js'
 
 /** epoch 构造器：全部按 UTC 字面量写死，用例与本机时区无关。 */
 function at(iso: string): number {
@@ -208,10 +210,73 @@ describe('每日时段：窗口语义与退化', () => {
     expect(promotionActiveAt(parsed[0]!, at('2026-11-16T23:50:00Z'))).toBe(false)
   })
 
-  it('start === end 是**全天**，不是空区间', () => {
+  it('★★ start === end 是**空区间**（半开区间没有成员），与价格腿同判', () => {
+    // ⚠️ 这条用例此前断言 `true`（「同钟点 = 全天」）—— 那与价格腿
+    // `src/qoder-adapter.ts` 的 `promotionActiveNow`（`minutes >= start && minutes < end`）
+    // **反向**。两条腿对同一上游输入必须给出同一裁决，否则零长度窗口会让
+    // 徽标全天挂「限时免费」而价格按原价（issue #101 的形态）。
     const parsed = withDaily([{ start: '22:00', end: '22:00' }])
-    expect(promotionActiveAt(parsed[0]!, DAY_SH)).toBe(true)
-    expect(promotionActiveAt(parsed[0]!, NIGHT_SH)).toBe(true)
+    expect(promotionActiveAt(parsed[0]!, DAY_SH)).toBe(false)
+    expect(promotionActiveAt(parsed[0]!, NIGHT_SH)).toBe(false)
+  })
+
+  it('★★★ 与价格腿**同判**：同一份窗口两条腿必须给同一裁决', () => {
+    // 本模块（徽标腿）与 `src/qoder-adapter.ts` 的 `promotionActiveNow`（价格腿）
+    // 读的是**同一份上游活动窗口**。两条腿若反向，用户会看到
+    // 「徽标写限时免费、价格按原价」（issue #101 要修的形态）。
+    // 这条用例把两张判据钉在一起：以后任何一方单改都会红。
+    const windows: readonly [string, string][] = [
+      ['22:00', '22:00'],  // 零长度（半开区间 = 空集）
+      ['00:00', '00:00'],  // 零长度
+      ['09:00', '10:00'],  // 普通
+      ['23:00', '07:50'],  // 跨零点
+      ['00:00', '24:00'],  // 真·全天
+      ['23:00', '24:00'],  // 24:00 作为终点（P2-2：三处判据必须统一）
+      ['12:00', '24:00'],
+      // ⚠️ `24:00` 当**起点**是非法写法（当日末尾不是任何窗口的起点）。
+      // 两条腿都必须判「永不成立」：徽标腿靠「声明过但一条窗口都没活下来」
+      // ⇒ dailyUnusable；价格腿靠 `toMinutes(windowStart)` 无 allowEndOfDay。
+      ['24:00', '24:00'],
+      ['24:00', '07:50'],
+      ['09:60', '10:00'],  // 分钟越界
+      ['soon', 'later'],   // 换形
+    ]
+    for (const [start, end] of windows) {
+      const parsed = withDaily([{ start, end }])
+      for (const moment of [DAY_SH, NIGHT_SH]) {
+        const badgeLeg = promotionActiveAt(parsed[0]!, moment)
+        const priceLeg = promotionActiveNow(
+          { active: true, windowStart: start, windowEnd: end } as never,
+          new Date(moment),
+        )
+        expect(badgeLeg, `${start}-${end} @${new Date(moment).toISOString()}`).toBe(priceLeg)
+      }
+    }
+  })
+
+  it('★★ 24:00 只作为**终点**接受（三处判据统一，P2-2）', () => {
+    // 徽标腿早就接受 `24:00` 作终点（`clockMinute` 有专门分支），但价格腿
+    // （buddy 的 `parseHHMM` / qoder 的 `toMinutes`）此前一律要求 `h < 24`
+    // ⇒ buddy 丢掉整个 slot（不出价）、qoder 退回 `promotion.active` 快照
+    // ⇒ **三处三种答案**。现在三处统一：`24:00` = 当日末尾 1440。
+    for (const [start, end] of [['23:00', '24:00'], ['00:00', '24:00']] as const) {
+      const parsed = withDaily([{ start, end }])
+      expect(parsed[0]!.schedule?.daily, `${start}-${end}`).toEqual([{ start, end }])
+      expect(parsed[0]!.schedule?.dailyUnusable, `${start}-${end} 不该 unusable`).toBeUndefined()
+    }
+    // 23:30 在 [23:00, 24:00) 内；00:30 不在。
+    const late = withDaily([{ start: '23:00', end: '24:00' }])
+    expect(promotionActiveAt(late[0]!, at('2026-11-16T15:30:00Z'))).toBe(true)   // 23:30 SH
+    expect(promotionActiveAt(late[0]!, at('2026-11-16T16:30:00Z'))).toBe(false)  // 00:30 SH 次日
+  })
+
+  it('★★ 23:60 / 24:30 这类「格式漂移」必须被判死（P3-7）', () => {
+    // `minute > 59` 闸门此前零覆盖 —— 只留 `hour > 24` 时 `23:60` 会被当 1440
+    // 接受（= 次日 0 点），把上游的 `H:MM` 误写静默吞成合法值。
+    for (const bad of ['23:60', '24:30', '25:00', '12:99']) {
+      const parsed = withDaily([{ start: '08:00', end: bad }])
+      expect(parsed[0]!.schedule?.dailyUnusable, bad).toBe(true)
+    }
   })
 
   it('24:00 只作为**终点**接受；作为起点拒绝', () => {
@@ -491,8 +556,12 @@ describe('宿主徽标装配（promotionBadgeFor）', () => {
     expect(toneOf('#FFA500')).toBe('warning')
     expect(toneOf(undefined)).toBe('neutral')
     expect(toneOf('#777777')).toBe('neutral')
-    // 三位 hex 也必须能算出档位（不能因长度不是 6 就一律 neutral）
-    expect(toneOf('#0f0')).toBe('neutral')      // 非 6 位 ⇒ 拒绝（见下一条的形状判据）
+    // ⚠️ 三位 hex 按 CSS 语义展开成 6 位再算（`#abc` ≡ `#aabbcc`）。
+    // 原先这里断言 `neutral`，而同一行注释写的是「三位 hex 也必须能算出档位」——
+    // **自相矛盾**：绿色的 `#0f0` 被画成灰，与上面「绿色 → success」直接冲突。
+    expect(toneOf('#0f0')).toBe('success')      // #0f0 ≡ #00ff00
+    expect(toneOf('#00f')).toBe('info')         // #00f ≡ #0000ff
+    expect(toneOf('#f00')).toBe('warning')      // #f00 ≡ #ff0000
   })
 
   it('★ 颜色闸门：只有 hex 能进样式，其它写法一律拒绝', () => {
@@ -650,5 +719,104 @@ describe('nextPromotionEdgeMs：窗口边界（保鲜排程的依据）', () => 
     expect(nextPromotionEdgeMs([], DAY_SH)).toBeUndefined()
     expect(nextPromotionEdgeMs(parseTencentPromotions([{ badge: { label: 'A' }, modelIds: ['m'] }], []), DAY_SH))
       .toBeUndefined()
+  })
+
+  // ── PR #104 双审计（2026-11-17）补的判据 ──────────────────────────────
+
+  describe('上游时间字段「声明过却读不懂」必须 fail-closed（PR #104 正向审计 P1-1）', () => {
+    // 原先的判据只认「daily 是数组但全读不懂」这一种。上游**换形**时就会静默
+    // fail-open：`daily: '23:00-07:50'`（字符串）⇒ schedule 只剩 {timezone} ⇒
+    // `timeDeclared:false` ⇒ **徽标天天挂**；`validUntil` 是 epoch 数字 / 垃圾串
+    // ⇒ 绝对窗口被丢弃 ⇒ **过期活动到 2030 年还挂 badge**。
+    // 两者都是 issue #101 的原始症状，也正是本模块自称最该防的方向。
+    const parseOne = (schedule: Record<string, unknown>, warn = vi.fn()) =>
+      parseTencentPromotions(
+        [{ badge: { label: 'A' }, modelIds: ['m'], schedule }], [], 'Asia/Shanghai', warn,
+      )[0]!
+
+    it('★★ daily 被写成字符串（而非数组）⇒ dailyUnusable，徽标不得常驻', () => {
+      const warn = vi.fn()
+      const promotion = parseOne({ daily: '23:00-07:50', timezone: 'Asia/Shanghai' }, warn)
+      expect(promotion.schedule?.dailyUnusable).toBe(true)
+      expect(promotionStandingAt(promotion, DAY_SH)).toBe(false)
+      expect(promotionStandingAt(promotion, NIGHT_SH)).toBe(false)
+      expect(warn).toHaveBeenCalledTimes(1)
+    })
+
+    it('★★ validUntil 是 epoch 数字 ⇒ dailyUnusable（否则过期活动永挂）', () => {
+      const promotion = parseOne({ validUntil: 1_794_931_200_000, timezone: 'Asia/Shanghai' })
+      expect(promotion.schedule?.dailyUnusable).toBe(true)
+      expect(promotionStandingAt(promotion, DAY_SH)).toBe(false)
+    })
+
+    it('★★ validUntil 是垃圾串 / validFrom 是对象 ⇒ dailyUnusable', () => {
+      const garbage = parseOne({ validUntil: 'someday', timezone: 'Asia/Shanghai' })
+      const objectFrom = parseOne({ validFrom: {}, timezone: 'Asia/Shanghai' })
+      expect(garbage.schedule?.dailyUnusable).toBe(true)
+      expect(objectFrom.schedule?.dailyUnusable).toBe(true)
+      expect(promotionStandingAt(garbage, DAY_SH)).toBe(false)
+      expect(promotionStandingAt(objectFrom, DAY_SH)).toBe(false)
+    })
+
+    it('daily 缺省 / 空数组**不算**声明过（既有契约：无时段 = 全天活动）', () => {
+      const warn = vi.fn()
+      const missing = parseOne({ timezone: 'Asia/Shanghai' }, warn)
+      const empty = parseOne({ daily: [], timezone: 'Asia/Shanghai' }, warn)
+      expect(missing.schedule?.dailyUnusable).toBeUndefined()
+      expect(empty.schedule?.dailyUnusable).toBeUndefined()
+      expect(promotionStandingAt(missing, DAY_SH)).toBe(true)
+      expect(promotionStandingAt(empty, DAY_SH)).toBe(true)
+      expect(warn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Qoder 徽标腿必须听价格腿的时区（PR #104 正向审计 P2-3）', () => {
+    // 价格腿 `promotionActiveNow` 硬算 UTC+8（目录 timezone 与用户一致，故无需换算）；
+    // 徽标腿若去听上游 `promotion.timezone`，上游发 `Asia/Tokyo` 时两腿就会反向。
+    // 修法是**新腿对齐老腿**：一律用调用方给的 fallback（= UTC+8）。
+    it('★★ 上游发 Asia/Tokyo 时，候选的时区仍必须是调用方的 fallback', () => {
+      const candidate = qoderPromotionCandidate(
+        { active: true, windowStart: '22:30', windowEnd: '07:50', badgeZh: '夜间折扣', timezone: 'Asia/Tokyo' },
+        'm', 'Asia/Shanghai',
+      )
+      expect(candidate?.schedule?.timezone).toBe('Asia/Shanghai')
+    })
+  })
+
+  describe('buddy 价格腿必须接受 `24:00` 作终点（PR #104 对抗审计 P1-2）', () => {
+    // 上游「全天活动」最可能写成 `00:00–24:00`。原先 `parseHHMM` 硬要 `h < 24`
+    // ⇒ 该 slot 被丢 ⇒ `windowed` 为假 ⇒ `0x` 被当成「已结束占位」丢掉
+    // ⇒ **徽标全天挂「免费」而价格按原价**（正是 #101 要修的形态）。
+    it('★★ 00:00–24:00 的免费活动必须真的算出折后价', () => {
+      const promotions = parsePromotions({
+        modelPromotions: [{
+          enabled: true,
+          modelIds: ['m'],
+          badge: { label: 'Free now' },
+          discount: { factor: 0 },
+          schedule: { daily: [{ start: '00:00', end: '24:00' }], timezone: 'Asia/Shanghai' },
+        }],
+      }, new Date(DAY_SH))
+      expect(promotions.get('m')).toBeDefined()
+    })
+  })
+
+  describe('Qoder 窗口「声明了却读不懂」不得回退目录快照（PR #104 对抗审计 P1-3）', () => {
+    // `windowStart`/`windowEnd` **缺席** ⇒ 回退 `active`（既有契约，上游没给窗口就信快照）；
+    // **声明了却读不懂** ⇒ 必须 fail-closed，不能回退 —— 否则价格腿退回一个冻结在
+    // 目录下发时刻的布尔，而徽标腿已把该窗口判死 ⇒ 两腿反向（同语义两个渠道相反展示）。
+    const at = (iso: string) => new Date(iso)
+
+    it('★★ 字段缺席 ⇒ 回退快照（既有契约，不能被本条修法误伤）', () => {
+      expect(promotionActiveNow({ active: true } as never, at('2026-11-17T04:00:00Z'))).toBe(true)
+      expect(promotionActiveNow({ active: false } as never, at('2026-11-17T04:00:00Z'))).toBe(false)
+    })
+
+    it('★★ 读不懂的窗口 ⇒ false（不得回退快照）', () => {
+      for (const [start, end] of [['24:00', '24:00'], ['24:00', '07:50'], ['soon', 'later'], ['09:60', '10:00']]) {
+        const promotion = { active: true, windowStart: start, windowEnd: end } as never
+        expect(promotionActiveNow(promotion, at('2026-11-17T04:00:00Z')), `${start}-${end}`).toBe(false)
+      }
+    })
   })
 })

@@ -134,6 +134,34 @@ describe('createPromotionEdgeBroadcaster', () => {
     expect(fire).toHaveBeenCalledTimes(1)
   })
 
+  it('★★ fire 返回 Promise 且 reject ⇒ 必须 warn，不得变成 unhandled rejection（P3-2）', async () => {
+    // `fire` 的类型是 `void | Promise<void>`。只写 `void options.fire()` 时
+    // **同步 throw 会被 catch 兜住**，但**异步 reject 逃出 try/catch** ⇒
+    // unhandled rejection（Node 默认终止进程）。当前生产 fire 是同步的
+    // （`broadcastCatalogChanged` + queueMicrotask）⇒ 结构可达、零触发，
+    // 但只要有人把它改成 async，这里就是「一播报就崩」的暗雷。
+    const timers = fakeTimers()
+    timers.setNow(0)
+    const warn = vi.fn()
+    const broadcaster = createPromotionEdgeBroadcaster({
+      edgeSources: () => [() => 10_000],
+      fire: () => Promise.reject(new Error('boom-async')),
+      warn,
+      now: timers.now,
+      setTimeoutImpl: timers.setTimeoutImpl,
+      clearTimeoutImpl: timers.clearTimeoutImpl,
+    })
+    broadcaster.schedule()
+    timers.setNow(10_000)
+    timers.fireNext()
+    // 让 microtask 排干：若 rejection 没被接住，vitest 会把本文件标成失败。
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]![0])).toContain('活动边界播报失败')
+    expect(String(warn.mock.calls[0]![0])).toContain('boom-async')
+  })
+
   it('★★ 边界到了 ⇒ 播报一次，并且**用播报之后的新状态**重排', () => {
     // 复用旧边界值会让一条「窗口已关、徽标已消失」的活动按同一时刻反复空转。
     const timers = fakeTimers()

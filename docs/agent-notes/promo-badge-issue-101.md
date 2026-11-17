@@ -2,7 +2,8 @@
 
 > 落地日期 2026-11-17 · GitHub issue #101
 > 代码：src/model-promotions.ts + src/promotion-edge-broadcast.ts
-> 测试：tests/unit/model-promotions{,-wiring}.spec.ts、tests/unit/promotion-edge{,-broadcast,-wiring}.spec.ts
+> 测试：tests/unit/model-promotions.spec.ts、tests/unit/model-promotions-wiring.spec.ts、
+>       tests/unit/promotion-edge-broadcast.spec.ts、tests/unit/promotion-edge-wiring.spec.ts
 
 ### 1. 移植来源：两条腿各取一家，**判据不重写**
 
@@ -64,6 +65,16 @@ dsh-connect-qoder 在**自己的卡片**上会给未开的窗口画一枚降饱�
 兜底值不同会让同一份报文在「价格」与「徽标」上差 8 小时说话（一文件两套同义判据
 的复发形态）。有牙守卫：「上游没写时区时用调用方传入的兜底」—— 同一个 epoch
 时刻两种兜底给出两种答案。
+
+⚠️⚠️ **二次审计更正（2026-11-17）**：本节的「兜底必须与价格腿同值」在 PR head
+上**并不成立** —— Qoder 徽标腿当时写的是
+`timezone: promotion.timezone ?? fallbackTimeZone`，**听的是上游字段**，而价格腿
+`promotionActiveNow` 硬算 UTC+8。上游发 `Asia/Tokyo` + 窗口 `22:30–07:50` +
+`23:10Z` 时实测 **price=true / badge=false**（两腿反向）。修法已改为**新腿对齐
+老腿**：一律 `timezone: fallbackTimeZone`（调用方传 `'Asia/Shanghai'` = UTC+8
+无 DST = 价格腿硬编码的 +8）。改价格腿要连 `nowImpl` 与时区语义一起审，属独立 PR。
+守卫：`tests/unit/model-promotions.spec.ts` 的「上游发 Asia/Tokyo 时，候选的
+时区仍必须是调用方的 fallback」。
 
 **方向刻意不同的一处（已核实并保留）**：时区**非法**（Not/AZone）时，
 - 徽标腿：**不算在跑**（zonedMinute 返回 undefined ⇒ false）；
@@ -156,6 +167,8 @@ nextPromotionEdgeAt 钉成 undefined，再推进 26 小时，断言零播报」�
 同一条判据适用于任何「构造期就武装」的定时器：事后替身只能影响**下一次**求值。
 
 ### 11. 变异登记表（18 个条件全有牙；其中**四条初跑无牙**，已补守卫而不是删变异）
+
+> ⚠️ 二次审计（2026-11-17）又补了 10 条变异，其中 **9 条有牙**；**M3（buddy 边界播报的默认时钟）仍无牙** —— 见 §17 第 1 条。
 
 | 变异 | 变红处 |
 |---|---|
@@ -295,3 +308,31 @@ buildModelCatalog 反复调的那条路（src/catalog-prewarm.ts 的头注就记
 ⚠️ 两腿都**不能省**这条日志：省掉的后果不是「少一行输出」，而是
 「徽标只是不再出现、全仓一个字都没有」—— 参考实现 issue #139 的原话症状。
 用户无法自查、维护者无法归因的缺陷，判据就得自带一条出路。
+
+### 17. ⚠️ 未修已登记（二次审计，2026-11-17；**不是待办清单**）
+
+1. **M3 无牙**：`BuddyAdapter.nextPromotionEdgeAt()` 的默认时钟已改成
+   `this.options.now?.() ?? Date.now()`（与 `toCatalogEntry` 同源），但**没有用例
+   钉住**（要构造带假时钟的 `BuddyAdapter` 实例 + 一条带窗口的活动，成本高于
+   该判据的风险面：它只影响单测确定性，不影响生产）。改这个默认值不会变红。
+
+2. **`modelPromotions` 整体缺席 ⇒ 两腿一起消失且零日志**（对抗审计 P2-3）：
+   无法区分「上游确实没活动」与「这份文档被 UA 裁剪了」。§8 的 17/17/5 三行
+   表格**没有任何探针脚本留档**（`scripts/` 零命中），且三行 UA **都不是本仓
+   实际发的 UA**（`CodeBuddyIDE/4.12.2` 从未被测过）⇒「本仓 UA 落不落被裁剪档」
+   目前**无法独立回答**。补日志前要先有探针，否则只是把「不知道」写成一句断言。
+
+3. **徽标腿不按 id 去重**（对抗审计 P2-4）：同一 `modelId` 有多条活动时，
+   价格腿（`src/buddy.ts` 的 `parsePromotions`，用 `chosen` Map 按 id 取高
+   priority）会去重，徽标腿（`selectPromotionAt`）只挑一枚、不去重。
+   当前输入下两者给同一答案，但属又一处两腿分歧面，未修。
+
+4. **`sortPromotions` 的 source tie-break 是死代码**（正向审计 P2-3）：
+   `parseTencentPromotions` 恒先 promotion 后 tier ⇒ 该判据在生产输入不可达，
+   用例 `:408` 恒真。未删（删了要同时改 `selectPromotionAt` 的语义）。
+
+5. **§14 的性能换算**：两处数字与实测差 30–60%（`119µs/次` 与 460 次 65.2ms
+   是两次独立测量，量级一致但比例不精确）⇒ 本节数字只作量级参考，不要当基准。
+
+6. **`clockMinute` 的 `minute > 59` 分支**（正向审计 P3-6）零覆盖 —— 已由
+   §16 的「读不懂」告警通道兜住（`09:60` 会落 dailyUnusable），故未单独补格。
