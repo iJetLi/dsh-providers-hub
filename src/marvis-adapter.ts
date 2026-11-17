@@ -53,6 +53,7 @@ import {
   MARVIS,
   MARVIS_FALLBACK_MODELS,
   classifyMarvisError,
+  isTransientMarvisInvalidParameter,
   marvisErrorKindCode,
   normalizeMarvisModelId,
   type MarvisErrorInfo,
@@ -339,10 +340,15 @@ export class MarvisAdapter extends LlmAdapter {
 
     const tried = new Set<string>()
     const limited: string[] = []
+    // 瞬时参数抖动（`3000101`）把全池都试过之后，要抛**原文 BAD_REQUEST**，
+    // 不能落进下面的「所有账号均受限 / QUOTA_EXCEEDED」—— 那会让用户
+    // 以为额度没了（2026-11-17 的真实误报就是这么来的）。
+    let transientRejection: LlmError | undefined
 
     for (;;) {
       const slot = slots.find((s) => !tried.has(s.id))
       if (slot === undefined) {
+        if (transientRejection !== undefined) throw transientRejection
         throw new LlmError(
           `marvis: 所有账号对该模型均受限${limited.length > 0 ? `（${limited.join('、')}）` : ''}`,
           'QUOTA_EXCEEDED',
@@ -379,11 +385,30 @@ export class MarvisAdapter extends LlmAdapter {
         const info = classifyMarvisFailure(error)
         // 400/422：**换号无益**（每个槽发的是同一个体），直接上抛原文。
         // 4130001「无效模型id」同组：同一 model id 换号一样 400。
+        //
+        // ⚠️ 例外：`3000101 invalid parameter` **不是**报文问题，是上游随机抖动
+        //    （2026-11-17 实证：同一 body 重放 11 个账号 11/11 全 200，同号连发
+        //    30 条 30/30 全 200）。此前一刀切「换号无益」⇒ 同一会话连续三次
+        //    被这一颗 400 打断，用户看到的是「额度是不是没了 / 十个号为什么不切」。
+        //    处理：换下一个号重发（不写限流标记，它不是账号态），全池试完再抛原文。
         if (info.kind === 'invalid_request' || info.kind === 'model_unavailable') {
-          throw new LlmError(
+          const rejection = new LlmError(
             `marvis: 请求被上游拒绝（${info.detail}）`,
             'BAD_REQUEST',
           )
+          const message = error instanceof Error ? error.message : String(error)
+          if (
+            info.kind === 'invalid_request'
+            && isTransientMarvisInvalidParameter(message)
+            && tried.size < slots.length
+          ) {
+            this.options.warn?.(
+              `marvis: 账号 ${slot.id} 返回上游瞬时参数错误（${info.detail}），换下一个号重发`,
+            )
+            transientRejection = rejection
+            continue
+          }
+          throw rejection
         }
         if (info.kind === 'auth') {
           // 认证失败：**换下一个账号，但不写限流标记**。

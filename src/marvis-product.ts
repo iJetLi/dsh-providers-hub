@@ -216,6 +216,36 @@ function businessCodeOf(body: string): number | undefined {
 }
 
 /**
+ * 把 `marvis: HTTP 400 — {…}` 这类**包装过**的错误消息还原成上游原始响应体。
+ *
+ * ⚠️ 存在的理由：`streamVia()` 抛 `LlmError` 时把原文拼进了 message，而
+ * `classifyMarvisFailure()` 只能拿到 message —— 直接 `JSON.parse(message)`
+ * 必然失败（前缀 `marvis: HTTP …— ` 不是 JSON），业务码就丢了。
+ */
+export function marvisErrorBodyOf(message: string): string {
+  const matched = /^marvis: HTTP \d{3} — ([\s\S]*)$/.exec(message)
+  return matched?.[1] ?? message
+}
+
+/**
+ * 上游「参数类 400」里**瞬时抖动**的业务码（换号 / 重发能翻盘的那种）。
+ *
+ * ⚠️ 真机实证（2026-11-17）：同一个会话三次被
+ * `HTTP 400 {"code":3000101,"msg":"invalid parameter"}` 打断
+ * （09:39:56 / 09:44:00 / 09:49:28，都在前一步刚成功之后、约 1 秒即被拒），
+ * 事后**同一 body** 重放：11 个账号 11/11 全 200；同号连发 30 条 30/30 全 200。
+ * 即报文本身合法，这是上游侧的随机校验失败 —— 与「真的非法参数」在报文上
+ * 不可区分，只能靠「换号 + 重发」自救，绝不能像 `4130001` 那样一口咬死。
+ */
+const TRANSIENT_INVALID_PARAMETER_CODES: readonly number[] = [3000101]
+
+/** 该错误是否属于「上游瞬时参数抖动」（值得换号重发）。 */
+export function isTransientMarvisInvalidParameter(message: string): boolean {
+  const code = businessCodeOf(marvisErrorBodyOf(message))
+  return code !== undefined && TRANSIENT_INVALID_PARAMETER_CODES.includes(code)
+}
+
+/**
  * 把一次失败的 HTTP 响应归类为语义化错误。
  *
  * ## ⚠️ 顺序即优先级（每一条都来自真机实测）

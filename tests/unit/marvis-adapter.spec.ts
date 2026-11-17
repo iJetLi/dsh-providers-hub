@@ -499,6 +499,87 @@ describe('★ 错误分类与槽轮换', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('★★ 3000101（上游瞬时参数抖动）⇒ 换下一个号重发，成功后不写限流标记', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ code: 3000101, msg: 'invalid parameter' }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      ))
+      .mockResolvedValueOnce(new Response(sseBody('第二个号救了这一轮'), {
+        status: 200,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+    const markLimited = vi.fn()
+    const warn = vi.fn()
+    const text = await collect(
+      makeAdapter({
+        slots: [
+          { id: 'marvis-a1', credential: CREDENTIAL },
+          { id: 'marvis-a2', credential: CREDENTIAL },
+        ],
+        markLimited,
+        warn,
+      }),
+    )
+    expect(text).toBe('第二个号救了这一轮')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // 它不是账号态：绝不能给账号写冷却标记（否则会殃及整个池）。
+    expect(markLimited).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('★★ 所有号都回 3000101 ⇒ BAD_REQUEST（不是「额度已用尽」）', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ code: 3000101, msg: 'invalid parameter' }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    let code: string | undefined
+    let message = ''
+    try {
+      await collect(
+        makeAdapter({
+          slots: [
+            { id: 'marvis-a1', credential: CREDENTIAL },
+            { id: 'marvis-a2', credential: CREDENTIAL },
+          ],
+        }),
+      )
+    } catch (error) {
+      code = (error as { code?: string }).code
+      message = (error as Error).message
+    }
+    // 全池都试过了才判死，且**保留原文**：用户要知道是上游参数错误，不是没额度。
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(code).toBe('BAD_REQUEST')
+    expect(message).toContain('invalid parameter')
+  })
+
+  it('★★ 无业务码的普通 400 ⇒ 仍然不换号（只打一次请求）', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ code: 1234567, msg: 'bad field' }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    let code: string | undefined
+    try {
+      await collect(
+        makeAdapter({
+          slots: [
+            { id: 'marvis-a1', credential: CREDENTIAL },
+            { id: 'marvis-a2', credential: CREDENTIAL },
+          ],
+        }),
+      )
+    } catch (error) {
+      code = (error as { code?: string }).code
+    }
+    expect(code).toBe('BAD_REQUEST')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('★★ 429 限流 ⇒ 换下一个账号，并给前一个写冷却标记', async () => {
     const fetchMock = vi
       .fn()
