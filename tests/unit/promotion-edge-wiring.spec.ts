@@ -14,8 +14,8 @@
  * | 例 | 断言 | 挡住什么 |
  * |---|---|---|
  * | ① 真实时间线 | 边界之前零播报；到点播报；之后按下一次边界继续排 | 接线被删 / 短路成 if (false) / 只排一次 |
- * | ② 接线形状 | 交给播报器的恰是**四家**边界源，且 fire 真的 emit 宿主事件 | 漏接一家（「四家变三家」全绿的形态）|
- * | ③ 空源 | 四家都说没有边界 ⇒ 最近边界 undefined | 「其实有别的东西在播」的假绿 |
+ * | ② 接线形状 | 交给播报器的恰是**五家**边界源，且 fire 真的 emit 宿主事件 | 漏接一家（「五家变四家」全绿的形态）|
+ * | ③ 空源 | 五家都说没有边界 ⇒ 最近边界 undefined | 「其实有别的东西在播」的假绿 |
  *
  * ⚠️ ① 跑的是**真实兜底表**的时间线：Qoder 的窗口 22:00–08:00（Asia/Shanghai），
  * 实测播报落在 14:00Z 与 00:00Z 交替 —— 所以它同时是「数据腿 + 排程腿」的合谋证据。
@@ -146,14 +146,15 @@ describe('★ apply() 的徽标保鲜接线', () => {
     expect(gaps.every((gap) => gap > 1), '播报间隔异常：' + gaps.join(', ') + ' 小时').toBe(true)
   }, 60_000)
 
-  it('② 交给播报器的恰是四家边界源，且它们真的通向各自的适配器', () => {
+  it('② 交给播报器的恰是五家边界源，且它们真的通向各自的适配器', () => {
     const ctx = boot()
     const options = construction.options as CapturedOptions | undefined
     expect(options, 'apply() 没有构造边界播报器（接线被删）').toBeDefined()
     const sources = options!.edgeSources()
-    expect(sources).toHaveLength(4)
+    // ⚠️ 计数守卫：新增一家就要 +1（TRAE 于 2026-11-17 接入闲时窗口）。
+    expect(sources).toHaveLength(5)
 
-    const probes = ['buddy', 'workbuddy', 'qoder', 'qodercn'] as const
+    const probes = ['buddy', 'workbuddy', 'qoder', 'qodercn', 'trae'] as const
     probes.forEach((provider, index) => {
       const adapter = ctx.llm.adapterByProvider.get(provider) as EdgeCapableAdapter | undefined
       expect(adapter, provider + ' 未注册').toBeDefined()
@@ -161,7 +162,7 @@ describe('★ apply() 的徽标保鲜接线', () => {
         provider + ' 没有 nextPromotionEdgeAt ⇒ 这家的边界永远进不了播报器').toBe('function')
     })
 
-    // 逐个钉住返回值再读：能点名「第 index 个源通向哪家」，而不只是「有四个源」。
+    // 逐个钉住返回值再读：能点名「第 index 个源通向哪家」，而不只是「有五个源」。
     const originals = probes.map((provider) => {
       const adapter = ctx.llm.adapterByProvider.get(provider) as EdgeCapableAdapter
       const original = adapter!.nextPromotionEdgeAt!
@@ -196,7 +197,7 @@ describe('★ apply() 的徽标保鲜接线', () => {
     // 变异：删掉 index.ts 里那条 ctx.on 监听 ⇒ 本条红（calls 不再增长）。
     const ctx = boot()
     let calls = 0
-    const probes = ['buddy', 'workbuddy', 'qoder', 'qodercn'] as const
+    const probes = ['buddy', 'workbuddy', 'qoder', 'qodercn', 'trae'] as const
     for (const provider of probes) {
       const adapter = ctx.llm.adapterByProvider.get(provider) as EdgeCapableAdapter
       adapter!.nextPromotionEdgeAt = () => { calls += 1; return provider === 'qoder' ? Date.now() + 60_000 : undefined }
@@ -205,11 +206,11 @@ describe('★ apply() 的徽标保鲜接线', () => {
     ctx.emit('llm/adapters-updated')
     expect(calls, '目录落地后没有重新求边界 ⇒ 远端活动要等到下一次 fire 才被看见')
       .toBeGreaterThan(before)
-    // 一轮监听 = 四家各问一次；不成倍增长才证明没有 emit ⇄ schedule 递归。
+    // 一轮监听 = 五家各问一次；不成倍增长才证明没有 emit ⇄ schedule 递归。
     const grew = calls - before
-    expect(grew, '一次事件应只重问一轮（四家）：' + grew).toBeLessThanOrEqual(4)
+    expect(grew, '一次事件应只重问一轮（五家）：' + grew).toBeLessThanOrEqual(5)
   })
-  it('③ 四家都说没有边界 ⇒ 最近边界 undefined（不许退化成轮询）', () => {
+  it('③ 五家都说没有边界 ⇒ 最近边界 undefined（不许退化成轮询）', () => {
     // ①的排除项。初版在这里改适配器方法后推进时间轴 —— 那条 14:00 的播报来自
     // apply() 里已武装的定时器，改 getter 追不上它。故本例**直接问播报器读到的源**。
     boot()

@@ -46,6 +46,7 @@ import {
   parseTraeSSELine,
   parseTraeUserInfoResponse,
   readActivityDiscount,
+  readTraeOffPeakDiscount,
   readBooleanField,
   readConsumptionRate,
   readNumberField,
@@ -1354,6 +1355,117 @@ describe('TRAE 计费字段解析（display_contact_config）', () => {
     })
   })
 
+  describe('readTraeOffPeakDiscount（闲时折扣：本仓此前从未读过的那一支）', () => {
+    /**
+     * 真机原样（2026-11-17，scripts/probe-trae-promo.mjs，DeepSeek-V4-Flash）：
+     * current 说的是「没有活动」，而折后价**只**写在 off_peak 里。
+     */
+    /** dc() 包的是**整份 config**，所以要再套一层 activity_discount。 */
+    const entry = (discount: unknown): Record<string, unknown> => dc({ activity_discount: discount })
+
+    const REAL = {
+      enable: true,
+      subKey: 'off_peak_discount',
+      data: {
+        current: { discount_type: 'none', before_consumption_rate: 0.2, consumption_rate: 0.2, discount: 100 },
+        off_peak: {
+          before_consumption_rate: 0.2,
+          after_consumption_rate: 0.1,
+          discount: 50,
+          time_windows: [
+            { weekdays: [1, 2, 3, 4, 5, 6, 7], start_minute: 0, end_minute: 480 },
+            { weekdays: [1, 2, 3, 4, 5, 6, 7], start_minute: 1320, end_minute: 1440 },
+          ],
+        },
+      },
+    }
+
+    it('真机形状：折后价与窗口全部读出，且**不**被 current.type=none 挡掉', () => {
+      // 这条是本 PR 的存在理由：readActivityDiscount 对同一份报文返回 undefined。
+      expect(readActivityDiscount(entry(REAL), 1_789_905_263)).toBeUndefined()
+      expect(readTraeOffPeakDiscount(entry(REAL))).toEqual({
+        beforeRate: 0.2,
+        rate: 0.1,
+        discountPercent: 50,
+        subKey: 'off_peak_discount',
+        windows: [
+          { startMinute: 0, endMinute: 480, weekdays: [1, 2, 3, 4, 5, 6, 7] },
+          { startMinute: 1320, endMinute: 1440, weekdays: [1, 2, 3, 4, 5, 6, 7] },
+        ],
+      })
+    })
+
+    it('⚠️ 上游没写 time_zone ⇒ 该键**缺席**（26/32 行如此），兜底由展示层按同值补', () => {
+      const parsed = readTraeOffPeakDiscount(entry(REAL))!
+      expect(parsed).not.toHaveProperty('timeZone')
+      const declared = {
+        ...REAL,
+        data: { ...REAL.data, off_peak: { ...REAL.data.off_peak, time_zone: 'Asia/Shanghai' } },
+      }
+      expect(readTraeOffPeakDiscount(entry(declared))!.timeZone).toBe('Asia/Shanghai')
+    })
+
+    it('end_minute 1440 原样带出（**不**换算成次日 0 分：归属哪一天由展示层判）', () => {
+      const parsed = readTraeOffPeakDiscount(entry(REAL))!
+      expect(parsed.windows[1]!.endMinute).toBe(1440)
+    })
+
+    it('缺 after_consumption_rate / before ⇒ undefined（不猜 0，也不当免费）', () => {
+      const noRate = {
+        ...REAL,
+        data: { ...REAL.data, off_peak: { before_consumption_rate: 0.2, time_windows: [] } },
+      }
+      expect(readTraeOffPeakDiscount(entry(noRate))).toBeUndefined()
+      const noBefore = {
+        ...REAL,
+        data: { ...REAL.data, off_peak: { after_consumption_rate: 0.1, time_windows: [] } },
+      }
+      expect(readTraeOffPeakDiscount(entry(noBefore))).toBeUndefined()
+    })
+
+    it('enable=false 不算；没有 off_peak 分支（subsidy / member / limited 型）一律 undefined', () => {
+      expect(readTraeOffPeakDiscount(entry({ ...REAL, enable: false }))).toBeUndefined()
+      expect(readTraeOffPeakDiscount(entry({ ...REAL, data: { current: REAL.data.current } }))).toBeUndefined()
+      // member / subsidy 是**另一条付费路径的对比价**，没有「此刻生效」的判据：
+      // 把它们当折扣画会凭空多打一折（两条路不叠加）。
+      expect(readTraeOffPeakDiscount(entry({
+        enable: true,
+        data: {
+          current: { discount_type: 'subsidy', before_consumption_rate: 0.4, consumption_rate: 0.2 },
+          member: { before_consumption_rate: 0.4, after_consumption_rate: 0.1, discount: 25 },
+          subsidy: { before_consumption_rate: 0.4, after_consumption_rate: 0.2 },
+        },
+      }))).toBeUndefined()
+    })
+
+    it('⚠️ display_contact_config 是**一个 JSON 字符串**：直接给对象不认（与倍率同陷阱）', () => {
+      expect(readTraeOffPeakDiscount({ activity_discount: REAL })).toBeUndefined()
+      expect(readTraeOffPeakDiscount({ display_contact_config: 'not json' })).toBeUndefined()
+      expect(readTraeOffPeakDiscount({ display_contact_config: '[1,2]' })).toBeUndefined()
+      expect(readTraeOffPeakDiscount({})).toBeUndefined()
+    })
+
+    it('窗口里的非法项**原样带出**，换算与丢弃只发生在展示层（两层各判一次必漂移）', () => {
+      const messy = {
+        ...REAL,
+        data: {
+          ...REAL.data,
+          off_peak: {
+            ...REAL.data.off_peak,
+            time_windows: [
+              { weekdays: [1], start_minute: 600, end_minute: 600 },
+              'not an object',
+              { start_minute: 0, end_minute: 480 },
+            ],
+          },
+        },
+      }
+      const parsed = readTraeOffPeakDiscount(entry(messy))!
+      expect(parsed.windows).toHaveLength(2) // 字符串那条连字段都读不出，其余两条照带
+      expect(parsed.windows[0]).toEqual({ startMinute: 600, endMinute: 600, weekdays: [1] })
+      expect(parsed.windows[1]).not.toHaveProperty('weekdays')
+    })
+  })
   describe('readActivityDiscount', () => {
     const NOW = 1_789_905_263
     const limited = {

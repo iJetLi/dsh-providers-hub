@@ -71,7 +71,11 @@ function makeAdapter(options: {
     multimodal?: boolean
     /** `display_config.tool_response_multimodal` —— 工具结果内嵌图能否回传。 */
     toolResponseMultimodal?: boolean
+    /** 闲时折扣（`activity_discount.data.off_peak` 的已解析形状）。 */
+    offPeakDiscount?: Record<string, unknown>
   }>
+  /** 注入时钟（徽标必须在**装配时刻**吃它）。 */
+  now?: () => number
   /** 桥接图片字节（`readImage`）；省略时适配器收到图片会报「需要附件服务」。 */
   readImage?: (attachment: unknown) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
   accountPool?: unknown
@@ -96,6 +100,7 @@ function makeAdapter(options: {
     ...options.remoteModels === undefined
       ? {}
       : { fetchRemoteModels: async () => options.remoteModels! },
+    ...options.now === undefined ? {} : { now: options.now },
     ...options.accountPool === undefined ? {} : { accountPool: options.accountPool as never },
     ...options.readImage === undefined ? {} : { readImage: options.readImage },
     product: options.product ?? TRAE,
@@ -2243,5 +2248,98 @@ describe('TRAE 适配器 · 无本地历史闸门（本地裁剪已删除）', (
 describe('TRAE 适配器 · OpenAI chunk 常量导出', () => {
   it('OPENAI_DONE 用于非流式聚合场景', () => {
     expect(OPENAI_DONE).toBe('data: [DONE]\n\n')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 闲时折扣徽标（issue #101 的 TRAE 腿）
+//
+// 真机 2026-11-17（scripts/probe-trae-promo.mjs）DeepSeek-V4-Flash：
+//   current = { type: 'none', 0.2 → 0.2 }   ← 既有价格腿在这里就短路了
+//   off_peak = { 0.2 → 0.1, discount 50, windows [0–480, 1320–1440] 每天 }
+// ─────────────────────────────────────────────────────────────────────────────
+describe('TRAE 适配器 · 闲时折扣徽标（装配时刻求值）', () => {
+  const OFF_PEAK = {
+    beforeRate: 0.2,
+    rate: 0.1,
+    discountPercent: 50,
+    subKey: 'off_peak_discount',
+    windows: [
+      { weekdays: [1, 2, 3, 4, 5, 6, 7], startMinute: 0, endMinute: 480 },
+      { weekdays: [1, 2, 3, 4, 5, 6, 7], startMinute: 1320, endMinute: 1440 },
+    ],
+  }
+  /** 周二 23:30 Asia/Shanghai —— 落在 22:00–24:00 那段里。 */
+  const INSIDE = Date.parse('2026-11-17T15:30:00Z')
+  /** 周二 10:00 Asia/Shanghai —— 两段都不在。 */
+  const OUTSIDE = Date.parse('2026-11-17T02:00:00Z')
+
+  function withBadge(now: () => number) {
+    return makeAdapter({
+      now,
+      remoteModels: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', creditsRate: 0.2, offPeakDiscount: OFF_PEAK }],
+    })
+  }
+
+  it('窗口内画一枚；窗口外**整个键缺席**', async () => {
+    const inside = withBadge(() => INSIDE)
+    await inside.adapter.listModels('trae')
+    const shown = (await inside.adapter.listModels('trae'))[0] as Record<string, unknown>
+    expect(shown.badge).toEqual({ text: { en: 'Off-peak 50% off', zh: '闲时 5 折' }, tone: 'neutral' })
+
+    const outside = withBadge(() => OUTSIDE)
+    await outside.adapter.listModels('trae')
+    const hidden = (await outside.adapter.listModels('trae'))[0] as Record<string, unknown>
+    // ⚠️ 宿主 LlmRuntime.listModels 判的是 badge === void 0，写显式 undefined 会
+    // 让「未知」与「明确没有」在 resolveModel 那条更严的白名单里混成同一个键。
+    expect(hidden).not.toHaveProperty('badge')
+  })
+
+  it('★ 同一个实例推进时钟就换答案 ⇒ 结论没有被冻进目录（issue #101 的原始事故形态）', async () => {
+    let clock = OUTSIDE
+    const { adapter } = withBadge(() => clock)
+    const first = await adapter.listModels('trae')
+    expect(first[0]).not.toHaveProperty('badge')
+    clock = INSIDE
+    const second = await adapter.listModels('trae')
+    expect((second[0] as Record<string, unknown>).badge).toBeDefined()
+    // 目录本身没重拉（两次 listModels 都落在 20 分钟新鲜度里）⇒ 变的只有时钟。
+    clock = OUTSIDE
+    const third = await adapter.listModels('trae')
+    expect(third[0]).not.toHaveProperty('badge')
+  })
+
+  it('兜底表路径不写 badge（离线上游没活动可画，如实与「上游没有活动」同形）', async () => {
+    const { adapter } = makeAdapter({ now: () => INSIDE, credential: null, remoteModels: [] })
+    // 无凭据 ⇒ 拿不到远端目录 ⇒ 走编译期兜底表；那些条目根本没有 offPeakDiscount。
+    const models = await adapter.listModels('trae')
+    for (const model of models) expect(model as Record<string, unknown>).not.toHaveProperty('badge')
+  })
+
+  it('nextPromotionEdgeAt 给出下一次边界，且**零网络**', async () => {
+    const { adapter, fetcher } = withBadge(() => INSIDE)
+    await adapter.listModels('trae')
+    const callsBefore = fetcher.mock.calls.length
+    // 23:30 之后最近的边界是当天 24:00 = 2026-11-17T16:00Z（Asia/Shanghai）。
+    expect(adapter.nextPromotionEdgeAt()).toBe(Date.parse('2026-11-17T16:00:00Z'))
+    expect(fetcher.mock.calls.length, '边界求解不许打上游').toBe(callsBefore)
+  })
+
+  it('没有闲时活动时 nextPromotionEdgeAt 返回 undefined（不许退化成轮询）', async () => {
+    const { adapter } = makeAdapter({
+      now: () => INSIDE,
+      remoteModels: [{ id: 'plain', name: 'Plain', creditsRate: 0.2 }],
+    })
+    await adapter.listModels('trae')
+    expect(adapter.nextPromotionEdgeAt()).toBeUndefined()
+  })
+
+  it('⚠️ 上游把 current 判成无活动**不影响**闲时徽标（两条腿读的是同一份文档的不同分支）', async () => {
+    // 反向对照：既有价格腿在这份报文上拿不到 originalCreditsRate（current.type=none
+    // 且 before === rate），而徽标必须照画 —— 否则本功能的入口就被老判据挡死了。
+    const { adapter } = withBadge(() => INSIDE)
+    const models = await adapter.listModels('trae')
+    expect(models[0]!.name).toBe('DeepSeek-V4-Flash · x0.2')
+    expect((models[0] as Record<string, unknown>).badge).toBeDefined()
   })
 })
