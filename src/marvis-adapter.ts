@@ -77,13 +77,23 @@ export interface MarvisAdapterOptions {
    */
   credentialRef?: unknown
   /**
-   * 取当前可用槽序列（按账号池的手动顺序）。
+   * 取当前可用槽序列。
+   *
+   * 返回值的**顺序即命中顺序**（适配器每轮取「第一个未试过的槽」）⇒ 排序语义
+   * 全部由接线层决定：负载均衡开关关 ⇒ 池的手动顺序；开 ⇒ 会话亲和 + 溢出
+   * 分散序（2026-11-17 用户要求「11 个号要真轮流分担」，见
+   * `AccountPool.orderAccountsForSession`）。
    *
    * @param modelId 目标模型。**推理路径必须传**，接线层据此过滤掉
    *   「该模型正处于限流窗口」的账号。
-   *   ⚠️ **目录路径刻意不传**：目录与「哪个账号此刻被限流」无关。
+   *   ⚠️ **目录路径刻意不传**：目录与「哪个账号此刻被限流」无关，也与排序无关。
+   * @param sessionId DSH 会话标识（`GenerateOptions.sessionId`）。**推理路径必须
+   *   原样透传** —— 接线层靠它做会话亲和（同一会话优先同一个号，不同会话分散）。
+   *   ⚠️ 这里是「签名窄于实现 ⇒ 面板选项不生效且零报错」的高发点：少写一个参数
+   *   `tsc` **不报错**（函数参数逆变），故由
+   *   `tests/unit/rotation-session-id-wiring.spec.ts` 的「槽制」段做源码断言。
    */
-  slots: (modelId?: string) => Promise<readonly MarvisSlot[]>
+  slots: (modelId?: string, sessionId?: string) => Promise<readonly MarvisSlot[]>
   /**
    * 账号池（**黑名单、关闭意图、目录门控的唯一数据源**）。
    *
@@ -309,7 +319,7 @@ export class MarvisAdapter extends LlmAdapter {
    * 3. **认证类不写限流标记**（写它会放大成「全池被封」）。
    */
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const slots = await this.options.slots(options.model)
+    const slots = await this.options.slots(options.model, options.sessionId)
     if (slots.length === 0) {
       throw new LlmError(
         'marvis: 没有可用账号。请在 Jet Hub 的腾讯 Marvis 面板点击「新建账号」登录 QQ 或微信。',

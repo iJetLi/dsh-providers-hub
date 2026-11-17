@@ -4180,7 +4180,7 @@ export function apply(ctx: Context): void {
   const marvisAdapter = registerMarvisLlm(ctx, {
     // 单凭据回退 ref：池里没有 marvis 账号时用它（与其余 provider 同约定）。
     credentialRef: credentialRef(MARVIS.defaultCredentialRef),
-    slots: async (modelId?: string): Promise<readonly MarvisSlot[]> => {
+    slots: async (modelId?: string, sessionId?: string): Promise<readonly MarvisSlot[]> => {
       const entries = await pool.listAccounts(MARVIS.id)
       const usable = await Promise.all(entries.map(async (entry) => {
         // 与其余 provider 同款：停用账号不参与自动选号。
@@ -4197,7 +4197,27 @@ export function apply(ctx: Context): void {
         if (credential === undefined) return undefined
         return { id: entry.id, credential }
       }))
-      return usable.filter((slot): slot is MarvisSlot => slot !== undefined)
+      const slots = usable.filter((slot): slot is MarvisSlot => slot !== undefined)
+      // 会话亲和 + 溢出分散（2026-11-17 用户报障「十个号不会自动切换」：
+      // 改前这 11 个号里**永远只有池序第一个**在干活，其余是纯备份）。
+      //
+      // 语义与 zcode 的 `accountSelection: 'session-balance'` 同源（同一份
+      // `rankAccountsBySessionWithOverflow`），但**接线方式不同**：marvis 是槽制，
+      // 适配器要「按序换号重发」⇒ 需要**完整有序序列**而不是「取第一个」，所以
+      // 走 `pool.orderAccountsForSession` 只重排、不取凭据。
+      //
+      // ⚠️ 不能改走 `createCredentialResolver({ accountSelection: 'session-balance' })`：
+      //    `tests/unit/session-balance-wiring.spec.ts` 有硬守卫「accountSelection
+      //    装配点全局唯一且在 ZCODE 配置块内」。
+      // ⚠️ 面板开关关 ⇒ **原样返回池序**（= 改造前逐字节同路径），这是开关文案
+      //    「关闭后回到「手动顺序优先」的选号方式」的实现依据。
+      // ⚠️ 无 sessionId（本地 OpenAI 网关进来的请求不设它，见
+      //    `src/openai-gateway/messages.ts` 的 `toGenerateOptions`）⇒ 同样原样返回，
+      //    不在这里洗牌：槽制的「第一个」会被当作稳定性保证，随机化留给调用方。
+      if (sessionId !== undefined && sessionId.length > 0 && pool.sessionBalanceEnabled()) {
+        return pool.orderAccountsForSession(MARVIS.id, slots, sessionId)
+      }
+      return slots
     },
     accountPool: pool,
     product: MARVIS,
