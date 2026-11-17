@@ -2070,13 +2070,26 @@ function UsageBadgeActive(props) {
     return React.createElement('div', { key: 'credits', className: 'dim-jh-badgeSection' }, [
       // 合计放进节标题右侧，省掉一整行
       React.createElement('div', { key: 'title', className: 'dim-jh-badgeSectionTitle' }, [
-        // ⚠️ 节标题的单位标签走**纯函数**（`creditSectionLabel`），不在这里写三元：
-        //   原写法是 `quotaGroup === undefined ? '积分' : unitLabel(...)` —— 那个
-        //   兜底分支把 **ZCode 的 token** 冒充成了积分（真实缺陷，2026-10-05 复审
-        //   PR !56 时发现），渲染成「积分 … 94.54MToken」自相矛盾的一屏。
-        //   判据收进 `badge-model.js` 是为了能被单测锁死（组件里没法测 —— 本仓库
-        //   node_modules 没有 react）。
-        React.createElement('span', { key: 'l' }, creditSectionLabel(view.groups)),
+        /**
+         * ★ 左侧改为**账号总数**（用户 2026-11-18 要求）：
+         *   「左侧为：帐号总数：7个，右侧为合计xx积分」
+         *
+         * 原左侧是单位标签（「积分」/「Token」）。现在：
+         * - **有账号** ⇒ 左「帐号总数：7 个」，右「合计 39575.71 积分」
+         * - **无账号** ⇒ 退回单位标签（此时「帐号总数：0 个」是噪音，
+         *   空态文案已经在下一行说清了）
+         *
+         * ⚠️ 计数用 `view.accountCount`（= 读到的 + 读取失败的）：
+         *    某次读取失败**不该**让「帐号总数」变小 —— 否则用户会以为账号被删了。
+         *    失败数由图例/脚注单独说明，两者不混。
+         * ⚠️ 合计仍用 `creditSectionLabel` 判单位（ZCode 是 token，不能冒充积分）：
+         *    原写法 `quotaGroup === undefined ? '积分' : ...` 曾把 token 渲染成
+         *    「积分 … 94.54MToken」自相矛盾的一屏（2026-10-05 真实缺陷）。
+         */
+        accounts.length === 0
+          ? React.createElement('span', { key: 'l' }, creditSectionLabel(view.groups))
+          : React.createElement('span', { key: 'l' },
+            `帐号总数：${view.accountCount} 个`),
         accounts.length === 0 || sum === ''
           ? null
           : React.createElement('span', { key: 'sum', className: 'dim-jh-badgeSectionSum' },
@@ -2113,6 +2126,16 @@ function UsageBadgeActive(props) {
               className: 'dim-jh-badgeRowName',
               title: row.accountId,
             }, accountLabelForCredits(row)),
+            /**
+             * ⚠️ 名字与读数之间**必须有一个分隔符**（2026-11-18 真机报障）：
+             * 两者都是 `display: inline`，仅靠 CSS 的 `margin-left: 8px` 在
+             * 中文字体下仍会读成「134****59 7464.50」黏成一串。
+             * ⇒ 补一个中点，与三档之间的分隔符同款（视觉一致）。
+             */
+            React.createElement('span', {
+              key: 'l-sep',
+              className: 'dim-jh-badgeNoteSep',
+            }, '·'),
             React.createElement('span', {
               key: 'v',
               className: 'dim-jh-badgeValue',
@@ -2175,48 +2198,86 @@ function UsageBadgeActive(props) {
    * ⚠️ 括号只在 `earliestAmount` / `earliestIn` **都有**时渲染：
    *    「无日期」的批次（CodeArts 赠送包）不产这两个键 ⇒ 不编造时间。
    */
+  /**
+   * **单行**、逐段带色的分档说明；无内容返回 `null`（不占位）。
+   *
+   * ## 2026-11-18 改：两行压成一行 + 段文字缩写
+   *
+   * 用户要求「积分文字缩短，争取一行显示完」，并给了明确形态：
+   *
+   * ```
+   * 位次 1 · 134****59  7492.73 · 长1600 · 短1500 · 临4392.73（399 2h16m）
+   * ```
+   *
+   * ⇒ 与卡片/其它地方（那里有空间）**刻意分叉**：
+   * | 位置 | 形态 |
+   * |---|---|
+   * | 本弹窗（窄，要单行） | `长1600` / `短1500` / `临4392.73（399 2h16m）` |
+   * | 设置页卡片（宽） | `长期 1600` / `短期 1500` / `临期 4392.73（其中 399 …）` |
+   *
+   * ⚠️ **只有临期段带括号**（用户原话「临500 (时间)，加上个括号」）：
+   *    长期/短期不显示小时级时间 —— 它们的精确日期在各自的 tooltip 里。
+   *    ⚠️ 旧的「长期 1600（最早 12月3日到期）」形态在窄弹窗里**太占宽度**，
+   *    实测一条就吃掉半行，导致后面几段全被省略号截掉（用户报障的截图形态）。
+   *
+   * ## 各段 tooltip（用户 2026-11-18：「对应的积分有不同的 tooltip」）
+   *
+   * | 悬停 | 内容 |
+   * |---|---|
+   * | `长1600` | 长期 1600 积分 / 最早 12月3日 到期（还有 15 天）/ 不着急，最后才用 |
+   * | `短1500` | 短期 1500 积分 / 最早 11月28日 到期（还有 10 天）/ 临期用完后优先消耗 |
+   * | `临4392.73` 与 `（399 2h16m）` | **同一份**（包在同一个 span 里） |
+   */
   function renderSplitNote(parts) {
     if (!Array.isArray(parts) || parts.length === 0) return null;
     const children = [];
     parts.forEach((part, index) => {
-      if (index > 0) children.push(React.createElement('span', { key: `sep-${part.key}`, className: 'dim-jh-badgeNoteSep' }, '·'));
+      if (index > 0) children.push(React.createElement('span', { key: `sep-${part.key}`, className: 'dim-jh-badgeNoteSep' }, ' · '));
 
       const isImminent = part.key === 'expiring';
       const compactLeft = isImminent ? formatCompactLeft(part.earliestIn) : '';
       const hasBracket = isImminent && compactLeft.length > 0
         && Number.isFinite(part.earliestAmount) && part.earliestAmount > 0;
       /**
-       * ⚠️ 临期段的 tooltip 文案（**临期段与括号共用这一份**）：
-       *   有括号时给出「其中 N 最早 X 后到期」，没有则退回通用说明。
-       *   两段都挂它 ⇒ 悬停任一处看到的是同一句话。
+       * 段文字**缩写**（弹窗专用，与卡片分叉 —— 见函数头注释的表）。
        *
-       * ⚠️ 金额直接用 `part.earliestAmount`（**数值**），不要走 `format`：
-       *    本函数没有 `format` 参数（那是 `splitParts` 作用域里的），
-       *    误用会变成未声明变量 ⇒ 整页 ReferenceError（本仓已有守卫抓到过）。
-       *    数值原样打印即可 —— 它在 `临4392.73` 里已经是同口径的原始值。
+       * ⚠️ 不能用 `part.text`（那是「长期 1600」的全称），本函数要给的是
+       *    `长1600`。前缀映射表放在这里、**只此一处**（别在 CSS/renderSplitNote
+       *    外再写一份，否则两处必然漂移）。
+       * ⚠️ `permanent` / `expired` / `unknownExpiry` 保持原样：它们本来就短
+       *    （「永久 100」「已过期 7」），缩写反而难懂。
        */
+      const SHORT_PREFIX = { longTerm: '长', shortTerm: '短', expiring: '临' };
+      const prefix = SHORT_PREFIX[part.key];
+      const text = prefix === undefined
+        ? part.text
+        // `part.text` 形如「长期 1600」⇒ 取出金额部分再拼缩写前缀
+        : `${prefix}${part.text.replace(/^[^\s]+\s*/, '')}`;
+
       const imminentTip = isImminent
         ? (hasBracket
           ? `临期 ${part.earliestAmount} 积分最早 ${compactLeft} 后到期`
           : '临期积分：再不用就作废，最优先消耗')
         : undefined;
-      // 非临期段沿用「最早作废」的既有说法（`countdown` 已是完整短语）。
-      const otherTip = !isImminent && part.countdown !== undefined
-        ? `最早作废：${part.countdown}`
+      /**
+       * 长期/短期：**日期进 tooltip**（不进正文）。`countdown` 就是那句
+       * 「最早 12月3日到期」，直接复用，不再加工。
+       */
+      const datedTip = !isImminent && part.countdown !== undefined
+        ? `${text} 积分 · ${part.countdown}`
         : undefined;
 
       if (hasBracket) {
         /**
-         * 临期 + 括号**包进同一个 span**：这样它们的 `title` 天然是一个区域，
-         * 不必依赖两个相邻元素恰好同文案（后者在缩放/换行时会出现「热区断裂」）。
+         * 临期 + 括号**包进同一个 span**：`title` 天然是一个区域，
+         * 悬停任一处都是同一句话（用户明确要求「跟临期的一起是一个 tooltip」）。
          */
-        const text = `${part.text}（${part.earliestAmount} ${compactLeft}）`;
         children.push(React.createElement('span', {
           key: part.key,
           className: 'dim-jh-badgeNotePart',
           'data-tone': part.tone,
           title: imminentTip,
-        }, text));
+        }, `${text}（${part.earliestAmount} ${compactLeft}）`));
         return;
       }
 
@@ -2224,12 +2285,9 @@ function UsageBadgeActive(props) {
         key: part.key,
         className: 'dim-jh-badgeNotePart',
         'data-tone': part.tone,
-        // ⚠️⚠️ **不得无条件追加「后」**（2026-10-21 合并审计发现，!135 引入的回归）：
-        //  `countdown` 可能是完整短语 `其中 500 于 6 天 0 小时后到期`，
-        //  再拼一个「后」就成残句（`…到期后`）。故直接给它，不再加工。
-        ...(isImminent ? { title: imminentTip } : {}),
-        ...(otherTip === undefined ? {} : { title: otherTip }),
-      }, part.countdown === undefined ? part.text : `${part.text}（${part.countdown}）`));
+        ...(imminentTip === undefined ? {} : { title: imminentTip }),
+        ...(datedTip === undefined ? {} : { title: datedTip }),
+      }, text));
     });
     return React.createElement('div', {
       key: 'note',

@@ -1941,8 +1941,19 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    ⚠️ 刻意不写死渠道数：原文写「9 个」，加 minimaxintl 后已是 10 个（2026-10-16 审计）。 */
 .dim-jh-badgeAutoChannel:not(:last-child)::after { content: " ·"; opacity: .6; }
 /* 偏好：分段控件（未选中透明、选中浮起），比三个独立胶囊更紧凑整齐 */
-.dim-jh-badgePref { display: flex; gap: 2px; padding: 2px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
-.dim-jh-badgePrefBtn { flex: 1; min-width: 0; padding: 2px; border: 0; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 10px; line-height: 1.5; white-space: nowrap; cursor: pointer; transition: background .15s ease, color .15s ease; }
+/* ⚠️ gap 2 → 3：选中态的背景块与相邻按钮之间需要能看出空隙（用户报障「看不出来是三个开关」）。 */
+.dim-jh-badgePref { display: flex; gap: 3px; padding: 2px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
+/* ⚠️ 三个页签必须**看得出是三个独立的开关**（用户 2026-11-18 报障「太挤」）：
+   原值是 flex: 1; padding: 2px，在贴右且宽度被轮换起点吃掉后，每个按钮
+   压缩到 ~30px、彼此只隔 2px 的 gap ⇒ 视觉上糊成一整条。
+   ⇒ 改法：flex: none + 明确的左右内边距（6px）+ 容器 gap 保持 2px。
+     三个按钮因此保持各自的最小可识别宽度，选中态的背景块也看得清。 */
+/* ⚠️ 三个页签必须**看得出是三个独立开关**（用户 2026-11-18 报障「太挤」）：
+   - flex: none（不被压缩；空间不足时先让轮换起点那份收缩）
+   - padding 2px 8px（左右各 8px，按钮之间才有明确的视觉边界）
+   - font-size 11px（与胶囊读数同号，10px 时「自动」只有 34px 宽，像一小截）
+   - min-width 46px（保证最短的「自动」也不塌陷） */
+.dim-jh-badgePrefBtn { flex: none; min-width: 46px; padding: 2px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 1.5; white-space: nowrap; cursor: pointer; transition: background .15s ease, color .15s ease; }
 .dim-jh-badgePrefBtn:hover { color: var(--dsw-alias-label-primary); }
 /* 选中项自带描边：浅色下只靠白色底与底色区分太弱 */
 .dim-jh-badgePrefBtn[aria-pressed="true"] { border: .5px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-brand-primary); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .06); }
@@ -2052,7 +2063,7 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   /* ⚠️ 实测 42% 会把「位次 1 · 134****59」压成「134****5」（账号尾号丢失）
      ⇒ 放宽到 52%：正好容下最长形态（位次两位数 + 8 位账号），且仍给
      后面的读数/三档留够空间。 */
-  max-width: 52%;
+  max-width: 46%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2061,12 +2072,15 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   line-height: 14px;
   color: var(--dsw-alias-label-primary);
 }
+/* ⚠️ 名字与读数之间**必须有明确间隔**（2026-11-18 实测 5px 太窄，
+   渲染出来是「134****59 7464.50」黏成一串，读不出哪是账号哪是余额）。
+   ⇒ 8px + 一个中点分隔符（由 JSX 侧的 · 提供，这里只给左边距）。 */
 .dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeValue {
   display: inline;
-  /* 与名字之间留一点空，避免「134****59 7492.73」黏成一串数字 */
-  margin-left: 5px;
+  margin-left: 8px;
   font-size: 10px;
   line-height: 14px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2139,6 +2153,32 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   line-height: 14px;
 }
 
+/* ⚠️⚠️ 中点分隔符**必须自带左右间距**（2026-11-18 真机报障）：
+   三档都是 inline，中点本身没有 margin ⇒ 渲染成「长1600短1400」黏成一串，
+   用户读不出是三个独立的档位。
+   ⇒ 给分隔符左右各 3px（比写空格可靠：行内流会折叠纯空白文本节点）。 */
+/* ⚠️ 分隔符字号要比正文**大一号**（10 → 11px）：10px 的正文字号下
+   中点只有 10px 宽、视觉上几乎看不见，三档会读成一串（2026-11-18 真机报障）。
+   放大一号后中点清晰可辨，且不影响行高（行高由父级 14px 锁死）。 */
+/* ⚠️ 字号 11px 但**行高锁 10px + vertical-align: middle**：
+   11px 字号的默认行盒会把整行从 14px 撑到 15px（实测），
+   而用户明确要求「高度不能增加」⇒ 用 line-height 压回并居中。 */
+.dim-jh-badgeRowNoteInline > .dim-jh-badgeNoteSep {
+  margin: 0 3px;
+  font-size: 11px;
+  line-height: 10px;
+  vertical-align: middle;
+  color: var(--dsw-alias-label-tertiary);
+}
+/* 名字与读数之间的中点（JSX 里 key=l-sep 的那个），间距略大以区分「账号 · 余额」 */
+.dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeNoteSep {
+  display: inline;
+  margin: 0 4px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 /**
  * ★★ **合并后的工具行**（2026-11-18 用户要求）：轮换起点 + 三个页签在同一行。
  *
@@ -2158,16 +2198,23 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  * ⚠️ 窄屏（< 720px）必须能回退两行：两个子项加起来放不下时 'flex-wrap: wrap'
  *    会让页签换到下一行 —— 不隐藏任何功能。
  */
+/* ⚠️⚠️ **必须 nowrap**（2026-11-18 实测）：加 flex-wrap: wrap 后，页签因为
+   有了 min-width 46px 而放不下 ⇒ 整组换到第二行，与用户要的「同一行」相反。
+   ⇒ 不换行，空间不足时由轮换起点那份（flex: 1 1 auto + min-width: 0）先收缩。
+   实测：弹窗 400px 时，轮换黄框 ~120px + 页签 148px 仍放得下。 */
 .dim-jh-badgeToolbar {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 7px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
+/* ⚠️ min-width: 0 必须保留：flex 项默认 min-width:auto，不加则被内容撑住、
+   无法收缩 ⇒ 页签被挤出容器（或被迫换行）。
+   ⚠️ 同时给 flex-basis: 0：让「收缩」从 0 开始算，而不是从内容宽度算，
+      否则它只会在内容宽度基础上按比例缩，页签仍可能放不下。 */
 .dim-jh-badgeToolbarRot {
-  flex: 1 1 auto;
-  /* ⚠️ 必须 min-width: 0：flex 项默认 min-width:auto，不加则被内容撑住、无法收缩 */
+  flex: 1 1 0;
   min-width: 0;
   display: flex;
 }
@@ -2182,7 +2229,13 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   flex: 0 0 auto;
   display: flex;
 }
+/* ⚠️ 页签组**不接受压缩**：它是三个可点开关，压扁后既看不出边界也难点。
+   空间不足时应该让轮换起点那份（可收缩）先让位，而不是把开关挤成一团。 */
 .dim-jh-badgeToolbarPref > .dim-jh-badgePref { flex: none; }
+
+/* ⚠️ 极窄容器下（< 约 360px）工具行放不下两组 ⇒ 让页签换到第二行，
+   而不是继续压扁它们。这是「不隐藏任何功能」的兜底。 */
+.dim-jh-badgeToolbar { row-gap: 5px; }
 
 /**
  * 胶囊上的**补语**（位次 / 账号数，2026-11-18 用户要求）。

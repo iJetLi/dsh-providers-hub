@@ -699,8 +699,17 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(styles).toMatch(/\.dim-jh-badgeRowHead \{[^}]*justify-content: space-between/)
   })
 
-  it('偏好做成三段等分控件（不再单占一行写「显示偏好」）', () => {
-    expect(styles).toMatch(/\.dim-jh-badgePrefBtn \{[^}]*flex: 1/)
+  /**
+   * ⚠️ 2026-11-18 改：`flex: 1`（三段等分）→ **`flex: none` + 最小宽度**。
+   *
+   * 原因（用户真机报障「太挤了，看不出来是三个切换开关了」）：改成 flex:1 后，
+   * 三按钮在贴右且宽度不足时会各自压缩到 ~30px、彼此只隔 2px ⇒ 视觉上糊成
+   * 一整条。⇒ 改为 `flex: none` + `min-width: 46px` + `padding: 2px 8px`，
+   * 保证每个按钮都有可辨识的边界。
+   */
+  it('偏好做成三段控件（不再单占一行写「显示偏好」）', () => {
+    expect(styles).toMatch(/\.dim-jh-badgePrefBtn \{[^}]*flex: none/)
+    expect(styles, '三按钮各自要有最小宽度，否则会被压成一团').toMatch(/\.dim-jh-badgePrefBtn \{[^}]*min-width: 46px/)
     // 解释性文案改到容器 title 上，信息不丢。
     // ⚠️ 断言三档的**语义差别**而不只是「有一句解释」：2026-10-03 语义反转后
     // 「自动」与「只看积分」都显示余额，差别在**是否回落**到订阅 —— title 里
@@ -1376,12 +1385,22 @@ describe('独立池（AStudio 星火积分）：设置页与徽标弹窗两处�
 describe('徽标 tooltip 标题：短语不得再拼后缀（!135 回归的守卫）', () => {
   const badge = codeOf(read('plugin-src/client/usage-badge.js'))
 
+  /**
+   * ⚠️ 2026-11-18 改：单行化后长期/短期**不再把 countdown 放进正文**
+   *（「长期 1600（最早 12月3日到期）」一条就吃掉半行，后面几段全被省略号截掉）。
+   * ⇒ 改为 `段文字 积分 · countdown` 进 tooltip。
+   *
+   * 本用例守的**不变式没变**：`countdown` 是完整短语，**绝不能再拼「后」**。
+   */
   it('title 直接用 countdown，不再拼「后」', () => {
-    // 正：title 由 countdown 直接构成
-    expect(badge, 'title 必须来自 part.countdown').toContain('最早作废：${part.countdown}')
+    // 正：长期/短期的 tooltip 由 countdown 直接构成
+    expect(badge, '长期/短期 tooltip 必须来自 part.countdown')
+      .toContain('${text} 积分 · ${part.countdown}')
     // 反：不得出现「拼了后缀」的形态
     expect(badge, '不得对 countdown 再拼「后」（混合批次时它是完整短语）')
       .not.toContain('${part.countdown}后')
+    // 反：临期段的 tooltip 也不得出现双「后」
+    expect(badge, '临期 tooltip 不得出现「…后到期后」').not.toContain('后到期后')
   })
 })
 
