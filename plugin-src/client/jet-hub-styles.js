@@ -2323,6 +2323,33 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    .dim-jh-zcSelect 一致。官方设置页的选择器**没有** outline 规则，故这里也不加，
    否则同一张插件页上本卡片会比其他控件多一圈描边。 */
 .dim-jh-cardSelector:focus-visible { outline: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 30%, transparent); }
+
+/* ── 模型选择器每行的名字与徽标（conversation.input.model.label，方案 A）──
+
+   ⚠️ 对齐模型必须与宿主自己的回落分支逐字同源：宿主把名字与徽标包在
+   .badgedName 里（display:inline-flex; align-items:center; gap:4px），而徽标
+   本身 flex:none。若这里写成「裸 span 加一个空格」，chip 会按**文本基线**
+   对齐 —— 而 chip 自己是 inline-flex，它的基线来自内部文字 ⇒ 同一份菜单里
+   我们的行比宿主的行**明显偏高**（参考实现踩过同一格，见其注释）。
+
+   ⚠️ 名字那格必须 min-width:0 + 省略号：本槽位接管了**所有** provider 的行,
+   宿主 CSS 里徽标是 flex:none（不收缩），名字没有这层保护就会被徽标挤没,
+   而不是自己截断。
+
+   ⚠️ 本文件是 JS 模板字符串，注释里不能出现反引号。 */
+.dim-jh-modelLabel { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; vertical-align: baseline; white-space: nowrap; }
+.dim-jh-modelLabelName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dim-jh-modelPromoChip { flex: none; display: inline-flex; align-items: center; padding: 0 6px; border: 1px solid transparent; border-radius: 999px; font-size: 11px; line-height: 16px; white-space: nowrap; }
+/* 宿主四档语义色：与宿主 Tag 的 tone 同名同数，取宿主自己的 alias token,
+   从而在每个主题下都可读。外来渠道的徽标走这一组（数据来自宿主目录,
+   我们只照画，不替上游发明含义）。 */
+.dim-jh-modelPromoChip[data-tone='neutral'] { color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-label-secondary) 24%, transparent); }
+.dim-jh-modelPromoChip[data-tone='info'] { color: var(--dsw-alias-status-info); background: color-mix(in srgb, var(--dsw-alias-status-info) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-status-info) 24%, transparent); }
+.dim-jh-modelPromoChip[data-tone='success'] { color: var(--dsw-alias-status-success); background: color-mix(in srgb, var(--dsw-alias-status-success) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-status-success) 24%, transparent); }
+.dim-jh-modelPromoChip[data-tone='warning'] { color: var(--dsw-alias-status-warning); background: color-mix(in srgb, var(--dsw-alias-status-warning) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-status-warning) 24%, transparent); }
+/* 自家渠道：颜色是**上游 hex 原话**（内联 style 覆盖上面这组），缺色时
+   落 neutral。上游发什么色就画什么色，插件不做二次创作。 */
+.dim-jh-modelPromoChip[data-tone='upstream'] { color: var(--dsw-alias-status-success); background: color-mix(in srgb, var(--dsw-alias-status-success) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-status-success) 24%, transparent); }
 `
 
 

@@ -37,10 +37,14 @@ import {
   HTTP_HEADER_PRODUCT,
   HTTP_HEADER_PRODUCT_CODE,
   buddyModelBadge,
+  buddyPromotionCandidateRows,
   credentialExpiresAtMs,
   formatCreditsRate,
   nextBuddyPromotionEdgeMs,
 } from './buddy.js'
+// ⚠️ 悬停候选行的类型与展示层**共用一份**（`promotion-tooltip.ts` 零 DOM、零网络）,
+//    服务端一套、客户端一套必然漂移。
+import type { PromotionCandidateRow } from './promotion-tooltip.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
 import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
 import { normalizeHarnessMessages } from './message-shape.js'
@@ -2572,6 +2576,23 @@ export class BuddyAdapter extends LlmAdapter {
 
   listAllModels(): readonly { id: string; name: string }[] {
     return this.catalog.listAllModels()
+  }
+
+  /**
+   * ★ 本家目录里的**未决**活动候选（方案 A：选择器悬停的数据来源）。
+   *
+   * ⚠️ 读的是 `remoteModels`，**不是** `listAllModels()` 那份骨架目录：骨架条目
+   * 只带**挑定的徽标**（`badge`），候选表在装配后就丢了；而悬停要的是「按此刻
+   * 重算」的原料。同一份 `promos` 也是 `nextBuddyPromotionEdgeMs` 的输入 ——
+   * 两条腿读同一个数组，不另开取数点。
+   *
+   * ⚠️ 兜底表没有 promos（编译期快照，红线「静态表必然腐坏」）⇒ 离线路径返回**空**,
+   * 与「上游没有活动」同形；客户端因此回落到宿主自己的徽标数据面。
+   *
+   * ⚠️ **同步、零网络**：`remoteModels` 是已落缓存的那份。
+   */
+  promotionCandidates(): readonly PromotionCandidateRow[] {
+    return buddyPromotionCandidateRows(this.remoteModels ?? [])
   }
 
   /**

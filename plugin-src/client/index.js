@@ -92,6 +92,10 @@ import { JetHubPanelEntryCard } from './settings-card.js'
 // 而 `plugins.bundle.config` 与 `conversation.input.right` 注册的是**裸组件**
 // —— 任一处渲染期异常仍会整块消失（插件详情卡片 / 用量徽标）。
 import { withErrorBoundary } from './error-boundary.js'
+// ★ 模型选择器每行的名字与徽标（`conversation.input.model.label`，方案 A）。
+//   该槽是 single：注册成功即成为**所有** provider 行的渲染方，故组件内部必须
+//   同时保住兄弟插件的徽标（读宿主给的 model.badge）。判据与代价见该文件头。
+import { registerModelLabelSlot } from './model-label.js'
 
 /**
  * ⚠️ **模块级常量，不要在 `apply()` 或 `inject` 回调里新建**（2026-10-25 审计 A3-3）。
@@ -160,6 +164,29 @@ export function apply(ctx) {
    * 老宿主没有这个服务时整段跳过，插件其余部分照常工作。
    */
   registerJetHubLedgerTab(ctx, rpcCall)
+
+  /**
+   * 模型选择器每行的名字与徽标（`conversation.input.model.label`，方案 A）。
+   *
+   * ## 为什么必须由本插件占这个格子
+   *
+   * 上游活动那句长说明（`hover`）+ 有效期 + 每日时段在宿主徽标契约里**没有格子
+   * 可放**（0.2.2 的 badge 只有 text + tone；宿主回落渲染不带 title）。用户只看
+   * 到一枚「限时免费」却不知道它哪天过期。宿主给的唯一出口就是这个槽位。
+   *
+   * ## ⚠️ 这是 single 槽 ⇒ 注册即接管所有行
+   *
+   * 组件因此两条腿都在：自家渠道画候选 + 长悬停；其余每一行画名字 + 宿主目录
+   * 里那枚 `model.badge`（兄弟插件发布的徽标因此继续可见，不会因为我们占了格子
+   * 而消失）。代价如实登记：兄弟插件**自己**那套行内装饰（负载图标、「新」标记、
+   * 折扣价后缀）不再由它们自己渲染 —— 那是 single 槽的固有形状，不是缺陷。
+   *
+   * ## 与上面两处注册器**刻意分开**
+   *
+   * `panel-entry.js` 的守卫按 `'main'` / `'settings.section'` 精确切片，塞进去
+   * 会让那些判据切错窗口（`ledger-tab.js` 同理）。
+   */
+  registerModelLabelSlot(ctx, rpcCall)
 
   /**
    * **插件详情页**上的自有设置卡片（`plugins.bundle.config`）。
