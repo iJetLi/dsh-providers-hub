@@ -1058,3 +1058,32 @@ export function nextBuddyPromotionEdgeMs(
   }
   return nextPromotionEdgeMs(all, nowMs)
 }
+
+/**
+ * 本家目录里**全部**未决活动候选，按模型行展开（方案 A 的服务端出口）。
+ *
+ * ## 为什么必须有它
+ *
+ * 徽标的短标签走宿主数据面（`LlmModelInfo.badge`）已经够用，但上游那句活动说明
+ * （`hover`）与有效期**在宿主契约里没有格子可放**（0.2.2 的 badge 只有 text + tone）。
+ * 于是 `conversation.input.model.label` 的占位者要自己画悬停 ⇒ 它必须拿到候选表。
+ *
+ * ⚠️ 交出去的是**未决候选**，不是挑好的徽标：在解析/装配时刻把徽标定死并缓存,
+ * 正是 issue #101 要修的形态（取舍 1）。渲染侧每次读自己的时钟 ⇒ 跨过窗口边界
+ * 那一分钟行上的徽标会自己变，不需要重拉目录。
+ *
+ * ⚠️ 与 `nextBuddyPromotionEdgeMs` 同一条迭代（`model.promos`），**不另开一套取数**：
+ * 兜底表没有 promos（编译期快照，红线「静态表必然腐坏」）⇒ 离线路径这里同样是空,
+ * 与「上游没有活动」同形，如实。
+ *
+ * @returns 每行 `{ modelId, promotion }`；同一模型多条活动 ⇒ 多条。
+ */
+export function buddyPromotionCandidateRows(
+  models: readonly BuddyRemoteModel[],
+): { modelId: string; promotion: ModelPromotion }[] {
+  const rows: { modelId: string; promotion: ModelPromotion }[] = []
+  for (const model of models) {
+    for (const promotion of model.promos ?? []) rows.push({ modelId: model.id, promotion })
+  }
+  return rows
+}

@@ -1367,7 +1367,22 @@ describe('model.list / model.setDisabled 端点', () => {
        * 挂上这个钩子才能测。
        */
       catalogReadyForBulkWrite?(): { ready: boolean; reason?: string }
+      /**
+       * ★ 本家**未决**活动候选（`promotion.candidates` 端点的数据来源）。
+       *
+       * 真实链路里只有 buddy 系与 qoder 系实现它；其余家不实现 ⇒ 端点必须
+       * 把它们**整家跳过**（不报错、也不占一个空键）。
+       */
+      promotionCandidates?(): readonly unknown[]
     }>
+    /**
+     * 收集 `ctx.logger.warn`（`promotion.candidates` 用它点名「哪一家读不到候选」）。
+     *
+     * ⚠️ 默认必须是**空函数**而不是省略：替身缺 logger 会让生产代码里所有
+     * `ctx.logger?.warn?.()` 走静默分支，「坏掉的那家有没有被点名」这条判据
+     * 就永远测不到（本仓的静默失效复发形态）。
+     */
+    onWarn?: (message: string) => void
     /** 让 `ctx.emit` 抛错，验证「广播失败不反噬已落盘的开关」。 */
     emitThrows?: boolean
     /**
@@ -1465,7 +1480,7 @@ describe('model.list / model.setDisabled 端点', () => {
       // 语义对齐真实 cordis：回调以**同一 ctx** 立即调用（本替身里 connection
       // 始终可用），使端点注册行为与 Web profile 下完全一致。
       inject: (_deps: string[], callback: (ctx: unknown) => void) => { callback(ctx) },
-      logger: { warn: () => {}, info: () => {} },
+      logger: { warn: (message: string) => { options.onWarn?.(message) }, info: () => {} },
       // `model.setDisabled` / `model.setAllDisabled` 写完黑名单后必须广播
       // `llm/adapters-updated`，否则客户端那份 `status === 'ready'` 即短路的
       // 目录缓存永不失效 —— 表现为「关闭后选择器里仍看得到该模型，重启后才消失」。
@@ -3619,7 +3634,111 @@ describe('model.list / model.setDisabled 端点', () => {
       expect(warningsOf(result)).toEqual([])
     })
   })
+
+  /**
+   * ★ `promotion.candidates` 端点（方案 A：模型选择器那行悬停的数据来源）。
+   *
+   * ## 为什么必须有它
+   *
+   * 宿主徽标契约只有 `{ text, tone }`，装不下上游那句活动说明与有效期；
+   * `conversation.input.model.label` 是 single 槽，占位者要替所有 provider 画行,
+   * 所以必须**一次**拿到全部渠道的候选。
+   *
+   * ## 四条判据各自防的缺陷
+   *
+   * 1. 未实现该方法的适配器**整家跳过**（不占空键）—— 客户端据此区分
+   *    「这家不归我们管 ⇒ 照画宿主的 badge」与「我们查了但没有」。写成空数组
+   *    会让外来渠道的徽标被当成「我们的空结果」而消失。
+   * 2. 单家抛错**不许带走整批** —— 本调用跑在渲染路径上。
+   * 3. 交出去的是**未决候选**（原样 `ModelPromotion`），不是挑好的徽标 ——
+   *    在装配时刻挑定并缓存正是 issue #101 要修的形态。
+   * 4. 坏掉的那家必须**点名到 provider**，否则症状与「这家没活动」逐字同形。
+   */
+  describe('promotion.candidates 端点', () => {
+    it('★ 只收录实现了该方法的适配器；未实现的家不占键', async () => {
+      const rows = [
+        { modelId: 'hy4flash-free', promotion: { id: 'p1', badge: { label: '限时免费' } } },
+      ]
+      const { call } = registerEndpoints({
+        models: MODELS,
+        modelAdapters: {
+          buddy: { listAllModels: () => MODELS, promotionCandidates: () => rows },
+          // 只有 listAllModels、没有 promotionCandidates ⇒ 必须整家缺席。
+          cline: { listAllModels: () => MODELS },
+        },
+      })
+      const result = await call('promotion.candidates', {})
+      expect(result.ok).toBe(true)
+      expect(Object.keys((result.value as { providers: Record<string, unknown> }).providers))
+        .toEqual(['buddy'])
+    })
+
+    it('★★ 返回空数组的适配器也不占键（与「没实现」同形 ⇒ 客户端回落宿主）', async () => {
+      const { call } = registerEndpoints({
+        models: MODELS,
+        modelAdapters: {
+          buddy: { listAllModels: () => MODELS, promotionCandidates: () => [] },
+        },
+      })
+      const result = await call('promotion.candidates', {})
+      expect(Object.keys((result.value as { providers: Record<string, unknown> }).providers))
+        .toEqual([])
+    })
+
+    it('★★★ 一家抛错不许带走整批：其余家照常返回，并点名坏掉的那家', async () => {
+      const warns: string[] = []
+      const { call } = registerEndpoints({
+        models: MODELS,
+        modelAdapters: {
+          buddy: {
+            listAllModels: () => MODELS,
+            promotionCandidates: () => { throw new Error('目录还没落地') },
+          },
+          qodercn: {
+            listAllModels: () => MODELS,
+            promotionCandidates: () => [{ modelId: 'dfmodel', promotion: { id: 'q1' } }],
+          },
+        },
+        onWarn: (message: string) => { warns.push(message) },
+      })
+      const result = await call('promotion.candidates', {})
+      expect(result.ok).toBe(true)
+      const providers = (result.value as { providers: Record<string, unknown> }).providers
+      expect(Object.keys(providers)).toEqual(['qodercn'])
+      expect(warns.join('\n')).toContain('buddy')
+    })
+
+    it('★★★ 交出去的是未决候选原样，不是挑定的徽标（issue #101 的取舍 1）', async () => {
+      // 一条此刻**不成立**的活动（有效期已过）。若端点替客户端挑定,
+      // 这里就会得到空数组 ⇒ 客户端无法区分「没有活动」与「活动不在窗口内」,
+      // 而窗口是按渲染时刻算的（缓存目录里的徽标会过期）。
+      const stale = {
+        modelId: 'hy3',
+        promotion: {
+          id: 'hy3-free-trial-202608',
+          source: 'promotion',
+          modelIds: ['hy3'],
+          badge: { label: '限时免费', color: '#009273' },
+          hover: { zh: '7月6日–10月31日，每日赠送免费额度。' },
+          schedule: { timezone: 'Asia/Shanghai', validFrom: 1, validUntil: 2 },
+          timeDeclared: true,
+          standingEligible: true,
+          priority: 200,
+        },
+      }
+      const { call } = registerEndpoints({
+        models: MODELS,
+        modelAdapters: { buddy: { listAllModels: () => MODELS, promotionCandidates: () => [stale] } },
+      })
+      const result = await call('promotion.candidates', {})
+      const providers = (result.value as { providers: Record<string, unknown> }).providers
+      expect(providers.buddy).toEqual([stale])
+      // 长句必须**原样**在（那正是本端点存在的理由）。
+      expect(JSON.stringify(providers.buddy)).toContain('每日赠送免费额度')
+    })
+  })
 })
+
 
 /**
  * 三个积分端点的 provider 分派与能力边界（后端侧契约）。

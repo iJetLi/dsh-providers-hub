@@ -9,6 +9,8 @@
  *           account.test / account.reset / account.resetAll / login.poll /
  *           credits.status / credits.claimAll / credits.balances /
  *           model.list / model.setDisabled /
+ *           promotion.candidates（★ 全部渠道的未决活动候选，供模型选择器那行的
+ *           悬停；`single` 槽的占位者一次取全，见该 case 的三条判据）/
  *           captcha.demand / captcha.carrierUrl / captcha.contribute（内部载体，
  *           载体页见 src/zcode-carrier-page.ts 与 src/captcha-carrier-server.ts）/
  *           backup.export / backup.import / backup.status /
@@ -88,6 +90,10 @@ import { WIRED_EXPIRY_PROVIDERS } from './aggregate-expiry.js'
 //   接线清单与理由见 `src/model-catalog.ts` 的 `invalidateCatalogCache` 注释。
 import { AGGREGATE_PROVIDER } from './aggregate-adapter.js'
 import { invalidateCatalogCache } from './model-catalog.js'
+// ⚠️ 类型导入：`promotionCandidates()` 的返回形状住在 `promotion-tooltip.ts`（与展示层
+//    共用同一份类型，避免「服务端一套、客户端一套」的漂移）。该模块**零 DOM、
+//    零网络**，宿主侧与浏览器侧都 import 它。
+import type { PromotionCandidateRow } from './promotion-tooltip.js'
 import type { LoomyAuth } from './loomy-auth.js'
 import type { LoomyCredential } from './loomy.js'
 import { RACCOON } from './raccoon-product.js'
@@ -2064,6 +2070,27 @@ export function registerJetHubRpc(
  */
 export interface ModelCatalogSource {
   listAllModels(): readonly { id: string; name: string; isFree?: boolean }[]
+  /**
+   * ★ 本家目录里的**未决**活动候选（方案 A 的悬停出口）。
+   *
+   * ## 为什么必须有它
+   *
+   * 宿主徽标契约只有 `{ text, tone }`（实测 dsh-llm 0.2.2-rc.3：badge 的白名单只
+   * 写出这两格，`hover` / `tooltip` / `title` 在该文件里各 0 次命中），而上游那句
+   * 活动说明与有效期是**另一个字段**。于是 `conversation.input.model.label` 的
+   * 占位者要画悬停，只能自己拿到候选表。
+   *
+   * ⚠️ 交出去的是**未决候选**（`ModelPromotion` 原样），不是挑好的徽标：把徽标
+   * 在装配时刻定死并缓存正是 issue #101 要修的形态。渲染侧每次读自己的时钟。
+   *
+   * ⚠️ **同步、零网络**：读的是已落缓存的目录（与 `listAllModels()` 同一约束,
+   * 面板/选择器渲染路径会调它）。
+   *
+   * ⚠️ **可选成员**：只有目录里真的带活动数组的家实现（buddy 系 + qoder 系）。
+   * 其余家不实现 ⇒ 该 provider 不出现在结果里，客户端因此**回落到宿主自己的
+   * 徽标数据面**（`props.model.badge`），行为与加这条判据之前一致。
+   */
+  promotionCandidates?(): readonly PromotionCandidateRow[]
   /**
    * 「我这份 `listAllModels()` **确认**来自远端完整读取」的适配器自报钩子。
    *
@@ -10234,6 +10261,46 @@ function registerJetHubEndpoints(
           })),
         }
         return { ok: true, value }
+      }
+
+      // ★ 全部渠道的**未决**活动候选（方案 A：模型选择器那行悬停的数据来源）。
+      //
+      // ## 为什么必须有这条路由
+      //
+      // 宿主徽标契约只有 `{ text, tone }`（实测 dsh-llm 0.2.2-rc.3：badge 白名单只
+      // 写出这两格，`hover` / `tooltip` / `title` 在该文件里各 0 次命中），而上游那句
+      // 活动说明 + 有效期 + 每日时段是**另外的字段**。`conversation.input.model.label`
+      // 是 `single` 槽，占位者要替**所有** provider 画行 ⇒ 它必须一次拿到全部候选。
+      //
+      // ## 三条判据
+      //
+      // 1. **一次调用返回全部渠道**，不带 provider 参数：选择器一次渲染要覆盖
+      //    20+ 个分组，逐家发请求会打爆 RPC 通道。
+      // 2. **未实现该方法的适配器直接跳过**（不报错、不占键）：其余 12 家没有活动
+      //    数组，客户端因此对它们回落到宿主自己的徽标数据面 —— 与加这条路由之前
+      //    逐字节一致。
+      // 3. **单个适配器抛错不许带走整批**：本调用跑在渲染路径上，一家坏 = 全部
+      //    悬停消失是不可接受的；该家记一次 warn 后跳过（与 `credits.balances`
+      //    那处「任一账号异常会冒泡到外层 catch」的取向**刻意相反**，那里是批量
+      //    写操作必须整体失败，这里是只读展示）。
+      //
+      // ⚠️ 交出去的是**未决候选**（`ModelPromotion` 原样，字段全是 JSON 原生类型）,
+      //    不是挑好的徽标：把徽标在装配时刻定死并缓存正是 issue #101 要修的形态。
+      //    渲染侧每次读自己的时钟 ⇒ 跨过窗口边界那一分钟，行上的徽标自己会变。
+      case 'promotion.candidates': {
+        const providers: Record<string, PromotionCandidateRow[]> = {}
+        for (const [provider, adapter] of Object.entries(modelAdapters ?? {})) {
+          if (!Object.hasOwn(modelAdapters!, provider)) continue
+          const read = adapter.promotionCandidates
+          if (typeof read !== 'function') continue
+          try {
+            const rows = read.call(adapter)
+            if (rows.length > 0) providers[provider] = [...rows]
+          } catch (error: unknown) {
+            ctx.logger?.warn?.(`[jet-hub] ${provider} 的活动候选读取失败，该渠道本次无悬停: ${String(error)}`)
+          }
+        }
+        return { ok: true, value: { providers } }
       }
 
       // 打开/关闭某个模型。写入后**不重建适配器**：适配器的 listModels 每次
