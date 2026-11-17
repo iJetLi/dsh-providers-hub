@@ -407,6 +407,10 @@ export async function startRaccoonAuthorizeReceiver(options: {
         reason = 'host'
       } else if (req.socket.remoteAddress !== '127.0.0.1') {
         reason = 'source'
+      // ⚠️ 下面两条都是「**头存在才查**」（缺头一律放行），这是**必需的**，不要按
+      //   「安全加固」的直觉改成「必须存在」：官方页面在 desktop 形态用**顶层导航**
+      //   投递回调（官方 bundle 里就是 `r.navigate(t)`），而顶层导航**不发 `Origin`**
+      //   ⇒ 改成必须存在会让真浏览器里 100% 收不到回调。
       } else if (typeof req.headers.origin === 'string' && req.headers.origin !== authorizationOrigin) {
         reason = 'origin'
       } else if (typeof req.headers['sec-fetch-dest'] === 'string' && req.headers['sec-fetch-dest'] !== 'document') {
@@ -424,6 +428,10 @@ export async function startRaccoonAuthorizeReceiver(options: {
           } else {
             const receivedState = url.searchParams.get('state') ?? ''
             const receivedCode = (url.searchParams.get('code') ?? '').trim()
+            // ⚠️ `^[a-f0-9]{64}$` 这个预判是**承重**的，不是装饰：`timingSafeEqual`
+            //   对**不等长**的 Buffer 会抛 `RangeError`，被外层 catch 吞成
+            //   `rejected: url` ⇒ 拒绝原因词从 `state` 退化成 `url`（诊断信息丢失）。
+            //   所以先固定长度，长度不对就直接落 `state`。
             const stateOk = /^[a-f0-9]{64}$/.test(receivedState)
               && timingSafeEqual(Buffer.from(receivedState), Buffer.from(state))
             const codeOk = receivedCode !== '' && receivedCode.length <= 4096
@@ -504,8 +512,11 @@ export async function startRaccoonAuthorizeReceiver(options: {
         base: options.base,
       })
     } catch {
-      // 端口落在页面的正则之外（4~5 位端口的规则比 1024..65535 更窄）：
-      // 同样是个死路，落定 `failed`、不产出 URL。
+      // 防御性分支（理论上不可达）：`portUsable` 已经把端口夹在 1024..65535 内，
+      // 而官方页面那两条判据（回环 URL 正则 + `1024..65535` 端口范围）在这个区间上
+      // 恒真。⚠️ 别把这两条判据读成「一条更窄所以另一条冗余」——回环正则允许
+      // `1000..1023` 那类四位端口，是**端口范围判据**把它收窄的，官方 bundle 里
+      // 同样两条并存。
       finish({ ok: false, reason: 'failed' })
     }
   }
@@ -572,12 +583,21 @@ export interface RaccoonAuthorizeExchange {
  * 差一点就是**拒绝 + 具名原因**，**绝不**产出半截凭据（存下半个凭据 = 存下
  * 一个轮换之后什么都不剩的东西）。
  *
+ * ⚠️ 上面第一半（IAM 令牌）**不要求** refresh ⇒ 那种凭据落库后
+ * `isRaccoonRefreshable()`（`src/raccoon.ts`）为 **false**，账号**不可静默续期**：
+ * 续期调度器跳过它（`src/raccoon-auth.ts` 的 `if (!entry.refreshable) continue`），
+ * 而推理侧遇到 401/403 时 `refresh()` 会**在发任何网络请求之前**抛
+ * `RefreshTokenExpiredError('凭据缺少 refresh_token，请重新登录')`。
+ * 这是**有意的**（官方规则如此，且行为诚实、不白烧凭据），但后果用户可见：
+ * **到期后必须重新登录**。
+ *
  * @param code - 一次性授权码（最多换一次；上游会对重放回 400）。
  * @param options
  * @param options.product - 产品配置（默认 {@link RACCOON}）。
  * @param options.fetcher - 注入的 fetch（测试用）。
  * @param options.authApiBase - 换码端点前缀（默认取 `product`）。
  * @param options.iamIssuer - IAM 令牌必须带的 `iss`（默认 {@link RACCOON_IAM_ISSUER}）。
+ * @param options.signal - 调用方自带的取消信号（缺省时用请求超时）。
  * @returns 换码结果。
  */
 export async function exchangeRaccoonAuthorizationCode(
@@ -587,6 +607,8 @@ export async function exchangeRaccoonAuthorizationCode(
     fetcher?: typeof fetch
     authApiBase?: unknown
     iamIssuer?: unknown
+    /** 调用方自带的取消信号（缺省时挂 {@link RACCOON_REQUEST_TIMEOUT_MS} 的截止时间）。 */
+    signal?: AbortSignal
   } = {},
 ): Promise<RaccoonAuthorizeExchange> {
   const token = readString(code, '').trim()
@@ -605,11 +627,13 @@ export async function exchangeRaccoonAuthorizationCode(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ authorization_code: token }),
-      // 只给**默认** fetch 加截止时间：注入的 fetch 自己管 abort，
-      // 给一个会忽略它的桩传 signal 纯属仪式。
-      ...(options.fetcher === undefined
-        ? { signal: AbortSignal.timeout(RACCOON_REQUEST_TIMEOUT_MS) }
-        : {}),
+      // ⚠️ **无条件**挂截止时间，不要按「fetcher 是不是注入的」分支：生产的调用点
+      //   恒传 fetcher（`runAuthorizeRound(state, product, deps.fetcher, …)`，而
+      //   `deps.fetcher = options.fetcher ?? fetch`）⇒ 拿 `options.fetcher === undefined`
+      //   当判据会让**生产路径永远没有 signal**，上游把连接挂住时只能白等接收端的
+      //   5 分钟超时（实测：注入 fetcher 时 `signalPresent === false`）。
+      //   自己管 abort 的调用方用 `options.signal` 覆盖。
+      signal: options.signal ?? AbortSignal.timeout(RACCOON_REQUEST_TIMEOUT_MS),
     })
   } catch {
     return { ok: false, reason: 'network' }
@@ -632,16 +656,20 @@ export async function exchangeRaccoonAuthorizationCode(
   const data = envelope.data !== null && typeof envelope.data === 'object' && !Array.isArray(envelope.data)
     ? envelope.data as Record<string, unknown>
     : {}
+  // ⚠️ 判据用 `trim()` 后的值：「恰好是几个空格」不是一枚令牌，但它**穿过**了
+  //   `readString`（只判 typeof）与原来的 `=== ''`（精确空串）两道判据 ⇒ 一个只有
+  //   空白的 `access_token` 会产出「成功」凭据。对令牌而言空白 = 缺失。
   const accessToken = readString(data.access_token, '')
-  if (accessToken === '') return { ok: false, reason: 'invalid_response' }
+  if (accessToken.trim() === '') return { ok: false, reason: 'invalid_response' }
   const iam = isRaccoonIamToken(accessToken)
   if (iam && !raccoonIamTokenIsValid(accessToken, iamIssuer)) {
     return { ok: false, reason: 'token_invalid' }
   }
   const refreshToken = readString(data.refresh_token, '')
-  if (!iam && refreshToken === '') {
+  if (!iam && refreshToken.trim() === '') {
     // legacy 那一半**必须**带 refresh（官方规则）：否则这枚令牌续不了期，
-    // 落地就是一个「过期即死」的账号。
+    // 落地就是一个「过期即死」的账号。⚠️ 用 `trim()`：一枚只有空白的 refresh
+    // 同样续不了期（`isRaccoonRefreshable()` 判的虽是非空，但空白串进上游一样失败）。
     return { ok: false, reason: 'refresh_missing' }
   }
   const expMs = decodeJwtExpMs(accessToken)

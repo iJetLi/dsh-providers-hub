@@ -166,8 +166,12 @@ describe('startRaccoonAuthorizeReceiver：七条规则，跑在真 socket 上', 
       for (const [name, pending, expected] of cases) {
         const res = await pending
         bodies.push(res.body)
-        expect(`${name}: ${res.status} ${res.body}`).toContain(expected)
-        expect(res.status).toBe(400)
+        // ⚠️ 断言**只看响应体**：用例名里本身就含 `state` / `code` / `host`
+        //   这些词，把 `name` 拼进被断言的字符串等于让断言被自己的名字满足
+        //   （实测：删掉 state 的 64 位 hex 预判后，两条 `state` 用例与两条
+        //   `code` 用例照样全绿 —— 假绿）。
+        expect(res.body, name).toContain(expected)
+        expect(res.status, name).toBe(400)
       }
       // ⚠️ 拒绝**不**消耗接收端：一条合法回调仍然能落地。
       const accepted = await probe(
@@ -187,6 +191,38 @@ describe('startRaccoonAuthorizeReceiver：七条规则，跑在真 socket 上', 
       receiver.cancel()
     }
   })
+
+  it('★★ 「缺 Origin / 缺 Sec-Fetch-Dest」一律放行（官方投递是**顶层导航**，不发 Origin）', async () => {
+    // ⚠️ 这条是**必需的不变式**，不是漏判：官方页面在 desktop 形态用顶层导航投递
+    //   回调（官方 bundle 里就是 `r.navigate(t)`），而顶层导航**不发 `Origin`**
+    //   ⇒ 判据只能是「头存在才查」。反过来（改成必须存在）会让真浏览器里 100%
+    //   收不到回调 —— 而这条用例就是防那一天（当时它不存在，双审计都点了名）。
+    const shapes: Array<[string, Record<string, string>]> = [
+      ['两个头都不带', {}],
+      ['只带对的 Origin', { Origin: RACCOON_API_BASE }],
+      ['只带对的 Sec-Fetch-Dest', { 'Sec-Fetch-Dest': 'document' }],
+    ]
+    for (const [name, headers] of shapes) {
+      // 一次性 ⇒ 每格都必须用**新的**接收端（上一格成功后端口对一切回 409）。
+      const receiver = await startRaccoonAuthorizeReceiver({ state: STATE, timeoutMs: 60_000 })
+      try {
+        const res = await probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${STATE}`, headers)
+        expect(res.status, name).toBe(200)
+        const settled = await receiver.result
+        expect(settled.ok, name).toBe(true)
+        expect(settled.code, name).toBe(CODE)
+      } finally {
+        receiver.cancel()
+      }
+    }
+  })
+
+  // ⚠️ 这里原本有一条「state 形态不合法 ⇒ 不产出 authorizeUrl」的用例，**已删除**：
+  //    实测非法 state 会让 `startRaccoonAuthorizeReceiver` **提前抛错**
+  //    （`authorize: state 必须是 64 位小写 hex`，见 `src/raccoon-authorize.ts` 的
+  //    `if (!/^[a-f0-9]{64}$/.test(state)) throw`）⇒ 调用方拿到的是异常、不是空 URL
+  //    ⇒ 「空 authorizeUrl」那一支**结构上不可达**，写用例只会得到一个假契约。
+  //    同一件事已由上面「畸形 state ⇒ 提前抛」那条覆盖。
 
   it('有效回调是**一次性**的：第二次投递拿 409（或端口已消失）', async () => {
     const receiver = await startRaccoonAuthorizeReceiver({ state: STATE, timeoutMs: 60_000 })
@@ -311,6 +347,61 @@ describe('exchangeRaccoonAuthorizationCode：成功门与每一种拒绝', () =>
     const fetcher = async (): Promise<Response> => jsonResponse({ code: 500 }, 500)
     const result = await exchangeRaccoonAuthorizationCode('c', { fetcher: fetcher as unknown as typeof fetch })
     expect(result.reason).toBe('server_error')
+  })
+
+  it('★★ HTTP 200 但业务码非 0 ⇒ server_error（**即使**报文里带着 access_token）', async () => {
+    // ⚠️ 最难看的一种失败形态：HTTP 200 + 信封 `code !== 0`，而 `data.access_token`
+    //   恰好也在（上游出错时回显半截数据）。原来那条 `|| envelopeCode !== 0` 判据
+    //   删掉后**一条用例都不红** ⇒ 会静默产出一枚来路不明的凭据。
+    const fetcher = async (): Promise<Response> => jsonResponse({
+      code: 1,
+      data: { access_token: fakeJwt({ iss: RACCOON_IAM_ISSUER, sub: 'a', exp: nowSec() + 3600 }) },
+    })
+    const result = await exchangeRaccoonAuthorizationCode('the-code', {
+      fetcher: fetcher as unknown as typeof fetch,
+    })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('server_error')
+    expect(result.credential).toBeUndefined()
+  })
+
+  it('★★ 只有空白的 access_token ⇒ invalid_response（空白 = 缺失）', async () => {
+    // ⚠️ `readString` 只判 typeof，原来又用精确 `=== ''` ⇒ 一个全是空格的
+    //   `access_token` 会产出「成功」凭据（与成功门那句「绝不产出半截凭据」相悖）。
+    const fetcher = async (): Promise<Response> => jsonResponse({
+      code: 0,
+      data: { access_token: '   ', refresh_token: 'r' },
+    })
+    const result = await exchangeRaccoonAuthorizationCode('the-code', {
+      fetcher: fetcher as unknown as typeof fetch,
+    })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('invalid_response')
+  })
+
+  it('★★ 只有空白的 refresh_token（非 IAM 形态）⇒ refresh_missing', async () => {
+    const fetcher = async (): Promise<Response> => jsonResponse({
+      code: 0,
+      data: { access_token: 'not-a-jwt', refresh_token: '   ' },
+    })
+    const result = await exchangeRaccoonAuthorizationCode('the-code', {
+      fetcher: fetcher as unknown as typeof fetch,
+    })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('refresh_missing')
+  })
+
+  it('★★ 注入 fetcher 时 init **仍然**带 signal（生产调用点恒传 fetcher）', async () => {
+    // ⚠️ 原实现是「只给默认 fetch 挂 AbortSignal.timeout」，而生产的
+    //   `runAuthorizeRound` 恒传 `deps.fetcher`（= `options.fetcher ?? fetch`）
+    //   ⇒ 生产路径**永远没有** signal：上游挂住就只能白等接收端的 5 分钟超时。
+    let seen: RequestInit | undefined
+    const fetcher = async (_url: string, init: RequestInit): Promise<Response> => {
+      seen = init
+      return jsonResponse({ code: 0, data: { access_token: 'not-a-jwt', refresh_token: 'r' } })
+    }
+    await exchangeRaccoonAuthorizationCode('the-code', { fetcher: fetcher as unknown as typeof fetch })
+    expect(seen?.signal).toBeInstanceOf(AbortSignal)
   })
 
   it('网络失败 ⇒ network', async () => {

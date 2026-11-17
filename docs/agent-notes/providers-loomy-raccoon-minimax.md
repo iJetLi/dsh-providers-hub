@@ -494,15 +494,100 @@ bundle 里，改不成 localhost」）**已不成立**：现在的官方页面**
 
 #### 判据与证据
 
-- 单测：`tests/unit/raccoon-authorize.spec.ts`（36 条，回环接收端**真起
-  socket**、每条拒绝真发 HTTP 请求）；`tests/unit/raccoon-login-page.spec.ts`
-  的「浏览器登录（官方那条链）的整条流程」段（本地页 + 回环 + 换码**串起来**）。
-- 变异：`node scripts/mutate-raccoon-authorize.mjs` —— **14/14 有牙**
+- 单测：`tests/unit/raccoon-authorize.spec.ts`（**返工后 41 条**，回环接收端
+  **真起 socket**、每条拒绝真发 HTTP 请求）；`tests/unit/raccoon-login-page.spec.ts`
+  的「浏览器登录（官方那条链）的整条流程」段（本地页 + 回环 + 换码**串起来**，
+  **返工后该文件 45 条**）。
+- 变异：`node scripts/mutate-raccoon-authorize.mjs` —— 作者自述 **14/14 有牙**
   （⚠️ 该脚本**不入库**：本仓的 `scripts/*` 是 gitignore 的本地工具目录，
   惯例是「脚本本地留、结论入账」—— 与 `scripts/probe-raccoon-vision.mjs`
   同款）。它会**先跑基线**（基线不绿就直接停），每个变异**自证注入成功**
   （锚点未命中报 `PATCH-NOT-APPLIED`，**不**当成「无牙」），跑完**还原并复验**。
+- ⚠️⚠️ **但「14/14 有牙」这句在库里无法复核**（脚本不存在），而**独立复跑
+  后确实有假绿**：双审计各跑 28 / 44 条变异（有牙 16 / 27，其余是真绿、
+  红在超时上、或红因不是断言），Lead 又抽样 16 条 ⇒ 三处判据**对同批对象
+  是假绿**，已在本次返工修掉：
+  1. **默认 Tab 判据可被同名调用满足** —— 唯一判据是
+     `expect(html).toContain("selectTab('browser');")`，而**同一个字符串**在
+     上面那个点击处理器里也有一份（`tabBrowser.addEventListener(…)`）⇒ 把默认
+     调用改成 `selectTab('qr')`、甚至包进 `if (false)` 都**全绿**（用户点开看到
+     一个必然 404 的二维码而 CI 全绿）。已改成「取最后一次调用的实参 + 要求它
+     **独立成行**」。
+  2. **「宿主开浏览器」那一步零守卫** —— 删掉 `openAuthorizePage(url)` 调用行、
+     或把注入点默认值改成空函数，都全绿（用户点「浏览器登录」毫无反应）。
+     已补开窗 spy 断言（`opened.length === 1` 且就是那条 URL）。
+  3. **「缺 `Origin` / 缺 `Sec-Fetch-Dest` 必须被接受」零用例** —— 而官方页面
+     投递走的是**顶层导航**（`r.navigate(t)`），顶导**不发 `Origin`**：将来有人
+     按「安全加固」把 `typeof … === 'string' &&` 去掉，就会**测试全绿而生产
+     100% 收不到回调**。已补三条（都不带头 / 只带对 Origin / 只带对
+     Sec-Fetch-Dest，**每格新建接收端**，因为一次性回调会回 409）。
+  - 另修两处**行为**（不是判据）：换码成功门把 `=== ''` 改成 `.trim() === ''`
+    （`' '` 原先能穿过那道门、产出「空白凭据」），以及换码 POST **无条件**挂
+    `AbortSignal.timeout`（原先只在**没注入 fetcher** 时挂，而生产调用点恒传
+    fetcher ⇒ 生产路径**永远没有截止时间**、上游挂住要白等满 5 分钟）。
 - 上游形状：`pnpm test:e2e:raccoon-authorize`（**不登录、不换码、零消耗**）。
+
+#### 官方页 bundle 逐字对账（2026-11-17 抓取，**这是本节最硬的一条证据**）
+
+上述「官方页面自己的解析器规则」不是照抄参考实现，而是从**线上 bundle 原文**
+读出来的：`GET /authorize` 的 HTML 里挑出 15 个 `.js`（15 抓 15 成），其中
+`_next/static/chunks/app/(identity)/authorize/page-a9a490b1d3d34d0c.js`
+（18 191 B）就是那个页面自己的解析器。逐字对账结果：
+
+| 我们的判据 | 官方原文 | 结论 |
+| --- | --- | --- |
+| 参数白名单（8 个名字） | `let k=["login_source","appname","state","redirect","ide","org","lang","desktop_callback"]` | **逐字相同、同序** |
+| `redirect` 正则 + 1024..65535 | `if(!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}\/auth\/callback$/.test(e)\|\|!/^[a-f0-9]{64}$/.test(t))return!1; … return Number(t.port)>=1024&&65535>=Number(t.port)` | **正则逐字相同**，且官方**自己也写两条判据**（正则允许 `1000..1023` 那类四位端口，是**范围判据**收窄的 ⇒ 别把其中一条当冗余删掉） |
+| desktop 形态回调参数名 | `r.searchParams.set(e.desktop?"code":"authorization_code",t)` | **`code`**（**逐字证实**） |
+| 投递方式 | `r.navigate(t)`（`new URL(…).navigate`） | **顶层导航** ⇒ **不发 `Origin`** ⇒ 接收端「存在才查」是**必需**，不是宽松 |
+| `appname` ≤ 100 | `a.length>100` | 一致 |
+| `desktop_callback=loopback` 的四条约束 | `if(e.has("desktop_callback")&&("loopback"!==i\|\|!r\|\|o\|\|!E(n,s)))return null` | loopback + desktop + **`ide` 为空** + `E(redirect,state)`，**逐条对上** |
+
+⚠️ 官方另有「**删掉**非白名单键」的净化路径（`for(let e of [...t.keys()]) k.includes(e)||t.delete(e)`），
+与「**多一个键整条作废**」的严格路径**并存**；我们只生成 5 个白名单键 ⇒ 两条都不触发。
+⚠️ 官方**签发**授权码走的是另一个端点（`POST /api/web/auth/v1/authorization_code`，
+body `{captcha_param}`，**需要登录态 + 滑块**）⇒ 我们用的是它的**配对的另一半**
+（`login_with_authorization_code`，**不需要登录态**）；两个端点是「签发 / 消费」关系，
+别把前者当成「我们该调的端点」。
+⚠️ `iss` 的形态（`'xiaohuanxiong.com/iam'`，**裸 host 无 scheme**）在这两个 chunk 里
+**零命中**；它是靠 `~/.dsh/.credentials.yaml` 里**两个真实账号**的 access_token
+payload 实测确证的（`iss === 'xiaohuanxiong.com/iam'`、`aud === ['xiaohuanxiong.com']`），
+而 `raccoonIamTokenIsValid(tok, 'https://xiaohuanxiong.com/iam')` 对同一枚真令牌
+**判 false** ⇒ 带 scheme 的严格等值会**误拒每一枚真令牌**。
+
+#### 本地登录页端点的来源闸门（2026-11-17 补）
+
+`/raccoon/authorize/{start,status,cancel}` 三个端点由**本地页服务器**承载
+（只绑 `127.0.0.1`、端口随机、只在该次登录期间存在）。单绑回环**不够**：
+**同源策略挡不住 DNS rebinding** —— 把 `evil.example` 解析到 `127.0.0.1` 之后，
+浏览器就把它当同源，攻击者页面能读到 `state`，然后顶层导航投递一个**他自己**的
+`authorization_code` ⇒ **攻击者账号的凭据就进了用户池**。已加两条闸门：
+
+- `Host` 必须**恰好**等于 `127.0.0.1:<监听端口>`（判据用 `request.socket.localPort`）；
+- `Sec-Fetch-Site` 存在时必须 ∈ `{same-origin, none}`（`none` 是用户在地址栏直接
+  打开 `loginUrl`，必须放行，否则第一条链就断了）。
+
+两条都**只在信息可得时才判**：非浏览器客户端与测试替身都不带这些头，
+fail-closed 会把整条登录链锁死。已补三条用例（恶意 Host ⇒ 403 且正确 Host 仍
+200；`cross-site`/`same-site` ⇒ 403 而 `none`/`same-origin` ⇒ 200；**不带这些头
+⇒ 200**）。
+
+#### 已登记但**结构上不可达**的两处（别为它们编用例）
+
+1. `src/raccoon-login-page.ts` 里「拿到空 `authorizeUrl` ⇒ 落 failed + cancel」
+   那一支：`state` 与端口都在 `startRaccoonAuthorizeReceiver` 里**提前校验、非法
+   即抛错**，被上面的 `catch` 接走 ⇒ 永远不会带着空 URL 成功返回。（我曾写了一条
+   用例断言它，跑出来是 `Error: authorize: state 必须是 64 位小写 hex` ⇒ **红因是
+   我的假说错**，已删除并在此登记。）
+2. 接收端的「来源是回环」判据：本机**无法产生非回环来源**，结构上不可测。
+   实现用 `req.socket.remoteAddress`（**不看 `X-Forwarded-For`**）是正确的。
+
+⚠️ 另记一条**「IAM 形态凭据不可续期」**：官方那枚 IAM 令牌可以不配
+`refresh_token`，而我们的成功门**照收**（与既有 `credentialFromEnvelope` 一致，
+**不是**本次新引入）⇒ 落库的凭据 `refresh_token === ''` ⇒
+`isRaccoonRefreshable()` 为 false ⇒ 续期调度器**跳过**它；推理侧 401/403 时
+`refresh()` 会在**发任何网络请求之前**抛 `RefreshTokenExpiredError`（**诚实、不烧号**）
+⇒ **用户可见后果：这枚凭据到期后必须重新登录**。
 
 #### 作废的旧结论（保留供追溯，**别照着改代码**）
 

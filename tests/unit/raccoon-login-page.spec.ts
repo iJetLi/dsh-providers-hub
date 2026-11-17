@@ -1,3 +1,4 @@
+import http from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RACCOON } from '../../src/raccoon-product.js'
 import {
@@ -25,6 +26,27 @@ function jsonResponse(body: unknown, status = 200): Response {
 /** 从 loginUrl 取出 origin（路径常量自带 `/raccoon` 前缀，故只需 origin）。 */
 function originOf(loginUrl: string): string {
   return loginUrl.replace(/\/raccoon\/login$/, '')
+}
+
+/**
+ * 真发一个 HTTP 请求到本地页服务器，**可自定义 `Host` 与 `Sec-Fetch-*` 头**。
+ *
+ * `fetchLocal` 做不到这件事：`fetch` 不许改 `Host`，而来源闸门恰恰就是按
+ * `Host` 与 `Sec-Fetch-Site` 判的 ⇒ 只能退到裸 `http.request`。
+ */
+function probeLocalStatus(
+  port: number,
+  pathname: string,
+  headers: Record<string, string>,
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: pathname, method: 'GET', headers }, (res) => {
+      res.resume()
+      res.on('end', () => resolve(res.statusCode ?? 0))
+    })
+    req.on('error', reject)
+    req.end()
+  })
 }
 
 /**
@@ -144,7 +166,15 @@ describe('renderRaccoonLoginPage', () => {
     expect(html).toContain('<button id="tabQr" data-active="0" type="button">')
     expect(html).toContain('<div class="pane" id="paneQr" data-show="0">')
     // 页面脚本在加载时也把 Tab 切到 browser（否则初始态与脚本态不一致）。
-    expect(html).toContain("selectTab('browser');")
+    // ⚠️ 这一条**不能**写成 `toContain("selectTab('browser');")`：同一个字符串在
+    //   上面那个点击处理器里也有一份（`tabBrowser.addEventListener(…)`）⇒ 断言被
+    //   它满足，把默认调用改成 `selectTab('qr')`、甚至包进 `if (false)` 都**全绿**
+    //   （双审计各自实测）。判据必须是**最后一次**调用的实参，且要求它**独立成行**
+    //   （包进 `if (false) { … }` 会让它变成复合语句、缩进也变 ⇒ 不再成立）。
+    const tabCalls = [...html.matchAll(/selectTab\('(\w+)'\);/g)]
+    expect(tabCalls.length).toBe(4) // 三个点击处理器 + 一次默认切换
+    expect(tabCalls[tabCalls.length - 1]?.[1]).toBe('browser')
+    expect(html).toContain("\n  selectTab('browser');\n")
   })
 
   it('三个 Tab 都在（扫码 / 短信 / 浏览器）', () => {
@@ -685,11 +715,13 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
 
   it('申请 → 回调 → 换码 ⇒ result 解析出凭据', async () => {
     const exchanged: string[] = []
+    const opened: string[] = []
     started = await startRaccoonLoginFlow({
       fetcher: authorizeFetch(exchanged) as unknown as typeof fetch,
       // ⚠️ 单测里**绝不能真的开窗**（那是用户桌面上的真实浏览器，
-      //   而且它会真的投递回调、消费掉接收端）。
-      openAuthorizePage: () => {},
+      //   而且它会真的投递回调、消费掉接收端）—— 所以注入 spy 而不是真开；
+      //   这里要断言的正是「它被调用了一次，拿到的就是那条 authorize URL」。
+      openAuthorizePage: (url) => { opened.push(url) },
     })
     const base = originOf(started.loginUrl)
 
@@ -708,6 +740,12 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
     expect(parsed.searchParams.get('desktop_callback')).toBe('loopback')
     const redirect = parsed.searchParams.get('redirect') ?? ''
     expect(redirect).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/)
+
+    // ★★ 宿主开浏览器那一步必须**真的被调用**、且拿到的就是这条 URL：
+    //    删掉 `openAuthorizePage(receiver.authorizeUrl)` 那一行、或把注入点默认值
+    //    改成空函数，都曾让 78 条全绿（用户点「浏览器登录」毫无反应而 CI 全绿）。
+    expect(opened.length).toBe(1)
+    expect(opened[0]).toBe(start.url)
 
     // ② 模拟官方页面的投递：GET 回环地址，带 code 与 state。
     const state = parsed.searchParams.get('state') ?? ''
@@ -751,8 +789,13 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
     await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeCancel}`)
     const status = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStatus}`)).json() as {
       status: string
+      reason?: string
     }
     expect(status.status).toBe('idle')
+    // ⚠️ 取消**不该**留下失败原因词。把「先 cancel 再置 idle」的顺序换回来时，
+    //   终态仍是 idle（`handleRequest` 最后又置了一次），**只有**残留的 `reason`
+    //   能暴露那个坑 —— 当时这条判据不存在，变异全绿。
+    expect(status.reason).toBeUndefined()
   })
 
   it('★★ 换码失败时**不产出凭据**，且只报**原因词**（不泄报文）', async () => {
@@ -792,5 +835,52 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
     expect(status).toBe('failed')
     expect(reason).toBe('code_not_found')
     expect(String(reason)).not.toContain('the-auth-code')
+  })
+
+  it('★★ 本地页端点只接受本机回环 `Host`（挡 DNS rebinding 读走 state）', async () => {
+    // 同源策略挡不住 rebinding：把 evil.example 解析到 127.0.0.1 之后浏览器就把它
+    // 当同源 ⇒ 攻击者页面能读到 `state`（接收端只有这一道边界）。判据按 Host 收窄。
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch() as unknown as typeof fetch,
+      openAuthorizePage: () => {},
+    })
+    const base = originOf(started.loginUrl)
+    const port = Number(new URL(base).port)
+    const evil = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.authorizeStart, { Host: 'evil.example' })
+    expect(evil).toBe(403)
+    // 判据不是「一律拒绝」：本机回环 Host 照常放行。
+    const good = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as { ok: boolean }
+    expect(good.ok).toBe(true)
+  })
+
+  it('★★ 跨站的 `Sec-Fetch-Site` 被拒（恶意页面用 img/fetch 打本机端点）', async () => {
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch() as unknown as typeof fetch,
+      openAuthorizePage: () => {},
+    })
+    const base = originOf(started.loginUrl)
+    const port = Number(new URL(base).port)
+    for (const site of ['cross-site', 'same-site']) {
+      const rejected = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.authorizeStart, { 'Sec-Fetch-Site': site })
+      expect(rejected, site).toBe(403)
+    }
+    // 用户直接在地址栏打开 `loginUrl`（`none`）必须放行 —— 否则第一条链就断了。
+    const viaAddressBar = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.login, { 'Sec-Fetch-Site': 'none' })
+    expect(viaAddressBar).toBe(200)
+    // 页面自己发的 fetch（`same-origin`）也必须放行。
+    const viaPage = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.authorizeStatus, { 'Sec-Fetch-Site': 'same-origin' })
+    expect(viaPage).toBe(200)
+  })
+
+  it('★ 来源闸门**不**误伤不带 `Sec-Fetch-*` 的客户端（非浏览器与测试替身）', async () => {
+    // 闸门只能是「信息可得时才判」：fail-closed 会把整条登录链锁死在这类客户端上。
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch() as unknown as typeof fetch,
+      openAuthorizePage: () => {},
+    })
+    const base = originOf(started.loginUrl)
+    const port = Number(new URL(base).port)
+    const noHeaders = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.authorizeStatus, {})
+    expect(noHeaders).toBe(200)
   })
 })

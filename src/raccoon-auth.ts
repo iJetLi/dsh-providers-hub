@@ -186,7 +186,8 @@ function normalizeRemoteModel(entry: Record<string, unknown>): RaccoonRemoteMode
 /**
  * Raccoon Work 认证服务。
  *
- * 登录走**本地页承载**的扫码/短信双路径（见 `raccoon-login-page.ts`），
+ * 登录走**本地页承载**的三条路径（见 `raccoon-login-page.ts`）：**浏览器授权**
+ * （默认 Tab；扫码确认页 `/login/mp` 自 2026-11-04 起全 404）、扫码、短信。
  * 续期走 `refresh_token` 轮换（与 Loomy 不同）。
  */
 export class RaccoonAuth extends Service {

@@ -340,6 +340,11 @@ async function runAuthorizeRound(
   }
   if (receiver.authorizeUrl === '') {
     // 端口没绑上 / 落在页面会拒收的范围外 ⇒ 没有 URL 可给用户。
+    // ⚠️ 这一支当前**结构上不可达**（实测：`state` 与端口都在
+    //   `startRaccoonAuthorizeReceiver` 里提前校验，非法即抛错、被上面的 catch 接走
+    //   —— 所以它永远不会带着空 URL 成功返回）。保留是为了两件事：①
+    //   `buildRaccoonAuthorizeUrl` 将来加新判据时这里就是第一条防线；②
+    //   「拿到空 URL 也绝不把死链给用户」这条契约本身值得写在代码里。
     state.authorizeStatus = 'failed'
     state.authorizeReason = 'bind'
     receiver.cancel()
@@ -400,6 +405,30 @@ async function handleRequest(
 ): Promise<void> {
   const url = new URL(request.url ?? '/', `http://127.0.0.1:${request.socket.localPort ?? 0}`)
   const { state, product } = deps
+
+  // ⚠️ **本机回环来源闸门**。这些端点只服务于「我们自己刚打开的那个页面」，但
+  //   **同源策略挡不住 DNS rebinding**：把 `evil.example` 解析到 127.0.0.1 之后，
+  //   浏览器就把它当成同源，攻击者页面遂能读到 `state`（接收端只有这一道边界）并
+  //   用顶层导航投递自造 code。按两条独立判据收窄：
+  //   - `Host` 必须是本机回环 authority（`loginUrl` 恒为 `http://127.0.0.1:<port>/…`）；
+  //   - 浏览器带的 `Sec-Fetch-Site` 只允许 `same-origin`（页面自己发的 fetch）与
+  //     `none`（用户在地址栏直接打开 `loginUrl`）。
+  //   两条都**只在信息可得时才判**（拿不到本地端口、或客户端不发 Sec-Fetch-* 头
+  //   ⇒ 放行）：非浏览器客户端与测试替身都不带这些头，fail-closed 会把整条登录链锁死。
+  const localPort = request.socket.localPort
+  if (typeof localPort === 'number' && localPort > 0
+    && typeof request.headers.host === 'string'
+    && request.headers.host !== `127.0.0.1:${localPort}`) {
+    response.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' })
+    response.end(JSON.stringify({ ok: false, message: '请求来源不是本机登录页' }))
+    return
+  }
+  const fetchSite = request.headers['sec-fetch-site']
+  if (typeof fetchSite === 'string' && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+    response.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' })
+    response.end(JSON.stringify({ ok: false, message: '请求来源不是本机登录页' }))
+    return
+  }
 
   if (url.pathname === RACCOON_LOGIN_PAGE_PATHS.login) {
     const ticket = await ensureTicket(state, product, deps.fetcher)
