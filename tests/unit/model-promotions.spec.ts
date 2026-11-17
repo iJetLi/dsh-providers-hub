@@ -894,9 +894,13 @@ describe('带星期维度的每日时段（TRAE 闲时窗口的形状）', () =>
     }
   })
 
-  it('跨零点 + 星期：窗口属于**它开始的那一天**（周六 01:00 不算周五的夜窗）', () => {
+  it('跨零点 + 星期：判定按**当前日历日**（周六 01:00 不算周五的夜窗）', () => {
     const FRI_23 = at('2026-11-20T15:00:00Z') // 23:00 Asia/Shanghai，周五
-    const SAT_01 = at('2026-11-21T17:00:00Z') // 次日 01:00，周六
+    // ⚠️ 这个时刻**曾经写错**：`2026-11-21T17:00:00Z` 是北京时间**周日** 01:00，
+    // 而它的注释写「周六 01:00」。错在哪很关键 —— 周日 01:00 在「按当前日历日」
+    // 与「按窗口开始那天」两种实现下**都是 false**，于是那条用例看似锁住了语义、
+    // 实际两种实现都通过（PR #106 双审计独立发现，假绿）。
+    const SAT_01 = at('2026-11-20T17:00:00Z') // 2026-11-21 01:00 Asia/Shanghai，周六
     const promotion = offPeakFixture({
       timezone: 'Asia/Shanghai',
       daily: [{ start: '22:00', end: '02:00', weekdays: [5] }],
@@ -904,7 +908,22 @@ describe('带星期维度的每日时段（TRAE 闲时窗口的形状）', () =>
     expect(promotionActiveAt(promotion, FRI_23)).toBe(true)
     // 真机上游从不发这种组合（它把夜间拆成 0–480 与 1320–1440 两段），
     // 这里锁的是「万一发了，本仓取**保守侧**：不替上游把窗口延长到次日」。
+    // 判据是**当前日历日**（= 周六），不是窗口开始那天（周五）——
+    // 排程路径 `nextPromotionEdgeMs` 走的是「开始那天」，两条路径的措辞差异
+    // 已在 README 与 docs §18 里写明，不假装一致。
     expect(promotionActiveAt(promotion, SAT_01)).toBe(false)
+  })
+
+  it('★ 跨零点 + 星期：把窗口挂到**当前日历日**（周六）才成立 —— 与上一条互为正对照', () => {
+    // 这是那条假绿的补丁：只有「窗口星期 = 当前日历日」时两种实现才分叉
+    // （按当前日 ⇒ true；按开始那天 ⇒ 前一日周五 ⇒ false）。上一条锁 false，
+    // 这一条锁 true，两条一起才能固定「本仓按当前日历日」这个选择。
+    const SAT_01 = at('2026-11-20T17:00:00Z') // 2026-11-21 01:00 Asia/Shanghai，周六
+    const promotion = offPeakFixture({
+      timezone: 'Asia/Shanghai',
+      daily: [{ start: '22:00', end: '02:00', weekdays: [6] }],
+    })
+    expect(promotionActiveAt(promotion, SAT_01)).toBe(true)
   })
 })
 
@@ -998,6 +1017,10 @@ describe('traePromotionCandidate：TRAE 闲时折扣 → 候选', () => {
     // 兜底值不同会让同一份报文在「价格」与「徽标」上差 8 小时说话。
     const tokyoFallback = traePromotionCandidate(REAL, 'm', 'Asia/Tokyo')!
     expect(tokyoFallback.schedule?.timezone).toBe('Asia/Tokyo')
+    // ⚠️ **不传**第三个参数也要落在 `Asia/Shanghai`：这条默认值与价格腿同源，
+    // 而生产唯一调用点恰好显式传了它 ⇒ 上面三条都测不到默认值（正向审计 P3：
+    // 默认参数零覆盖，改坏了没人知道）。以前只有显式传的用例，删掉默认值也全绿。
+    expect(traePromotionCandidate(REAL, 'm')!.schedule?.timezone, '默认兜底必须与价格腿同值').toBe('Asia/Shanghai')
   })
 
   it('窗口声明了却全读不懂 ⇒ dailyUnusable + 恰一条日志 + 永不成立', () => {
@@ -1044,5 +1067,76 @@ describe('traePromotionCandidate：TRAE 闲时折扣 → 候选', () => {
     expect(text(undefined)).toBe('闲时折扣')
     expect(text(0)).toBe('闲时折扣')    // 0% = 全免，不是「0 折」
     expect(text(100)).toBe('闲时折扣')  // 100% = 原价，压根不是折扣
+  })
+
+  it('★★ 上游声明了 time_windows 却一条都读不懂 ⇒ dailyUnusable，绝不退化成全天（正审 P1-1）', () => {
+    // `readTraeOffPeakDiscount` 对非数组 / 元素读不出 `start_minute` 的行都产出
+    // `windows: []`。只看留下的条数时它与「上游没给时段」同形 ⇒ 徽标 24/7 常亮，
+    // 而「全天画折扣」正是本模块唯一禁止的夸大方向。`windowsDeclared` 就是那条分界。
+    const warn = vi.fn()
+    const promotion = traePromotionCandidate({
+      beforeRate: 0.2, rate: 0.1, discountPercent: 50,
+      windows: [],
+      windowsDeclared: true,
+    }, 'deepseek-v4-flash', 'Asia/Shanghai', warn)
+    expect(promotion).toBeDefined()
+    expect(promotion!.schedule?.daily).toBeUndefined()
+    expect(promotion!.schedule?.dailyUnusable).toBe(true)
+    expect(promotionRunningAt(promotion!, at('2026-11-17T02:00:00Z'))).toBe(false)
+    expect(promotionStandingAt(promotion!, at('2026-11-17T02:00:00Z'))).toBe(false)
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    // 对照：没有这一位时同一份输入会退化成「全天」——这就是修之前的行为。
+    const degenerate = traePromotionCandidate({
+      beforeRate: 0.2, rate: 0.1, discountPercent: 50, windows: [],
+    }, 'm')!
+    expect(degenerate.schedule?.dailyUnusable).toBeUndefined()
+    expect(promotionRunningAt(degenerate, at('2026-11-17T02:00:00Z')), '对照组：无标记 = 全天').toBe(true)
+  })
+
+  it('★ weekdays 声明了却一条都不合法 ⇒ 整条窗口丢掉（不许退化成「每天」）', () => {
+    // 省略键的语义是「每天」，绝不能拿它兜住解析失败：上游若改用 0-based 星期
+    // （`[0]` = 周日），会把「只在周日」静默放成「每天」。判定层
+    // `withinDailyWindows` 对同一输入本来就有 fail-closed 分支，两层必须同向。
+    const warn = vi.fn()
+    const promotion = traePromotionCandidate({
+      beforeRate: 0.2, rate: 0.1, discountPercent: 50,
+      windows: [
+        { startMinute: 1320, endMinute: 1440, weekdays: [0] },
+        { startMinute: 1320, endMinute: 1440, weekdays: [8] },
+        { startMinute: 1320, endMinute: 1440, weekdays: [1.5] },
+        { startMinute: 1320, endMinute: 1440, weekdays: [] },
+        { startMinute: 1320, endMinute: 1440, weekdays: ['6'] as unknown as number[] },
+        { startMinute: 1320, endMinute: 1440, weekdays: '6' as unknown as number[] },
+      ],
+    }, 'deepseek-v4-flash', 'Asia/Shanghai', warn)
+    expect(promotion!.schedule?.daily).toBeUndefined()
+    expect(promotion!.schedule?.dailyUnusable, '六条全非法 ⇒ 与「声明了但读不懂」同档').toBe(true)
+    // 周五 23:50 不许因为「退化成每天」而亮。
+    expect(promotionRunningAt(promotion!, at('2026-11-20T15:50:00Z'))).toBe(false)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('★★ discount 与 before/after 矛盾时退回不带数字的文案（只信 rate 那条腿）', () => {
+    // 三个键本该同源（真机 32 条逐条吻合），但上游只改一半完全做得到。
+    const text = (beforeRate: number, rate: number, discountPercent: number): string => {
+      const promotion = traePromotionCandidate(
+        { beforeRate, rate, discountPercent, windows: [{ startMinute: 0, endMinute: 1440 }] },
+        'm',
+      )!
+      const badge = promotionBadgeFor([promotion], at('2026-11-17T02:00:00Z'))!
+      return typeof badge.text === 'string' ? badge.text : badge.text.zh
+    }
+    // 真机三条：折数都能从 rate 复算出来 ⇒ 照上游给的数字画。
+    expect(text(0.2, 0.1, 50)).toBe('闲时 5 折')
+    expect(text(0.72, 0.36, 50)).toBe('闲时 5 折')
+    expect(text(0.12, 0.06, 50)).toBe('闲时 5 折')
+    // 矛盾：真实只降 25%，上游却说 50 ⇒ 不许画成 5 折。
+    expect(text(0.2, 0.15, 50)).toBe('闲时折扣')
+    // 矛盾：真实降 50%，上游说 90 ⇒ 同理。
+    expect(text(0.2, 0.1, 90)).toBe('闲时折扣')
+    // 四舍五入容差内照画（0.33→0.22 真实 33.3%，上游给 33）。
+    expect(text(0.33, 0.22, 33)).toBe('闲时折扣') // 33 不是整十 ⇒ 本来就不带数字
+    expect(text(0.33, 0.22, 10)).toBe('闲时折扣')
   })
 })

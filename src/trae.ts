@@ -1101,6 +1101,14 @@ export interface TraeOffPeakDiscount {
   timeZone?: string
   subKey?: string
   windows: TraeOffPeakWindow[]
+  /**
+   * 上游**是否声明过** `time_windows`（哪怕一条都读不出）。
+   *
+   * 区分「没声明时段」（= 全天，真机不存在这种行但要兼容）与「声明了却读不懂」
+   * （= 规则看不清，**不得**当成全天）。缺这一位时展示层只能拿到 `windows: []`，
+   * 两者同形 ⇒ 读不懂的行会被画成 24/7 常亮（PR #106 双审计 P1-1）。
+   */
+  windowsDeclared: boolean
 }
 
 /**
@@ -1140,6 +1148,17 @@ export function readTraeOffPeakDiscount(
   const discountRecord = asRecordObject(discount)
   if (discountRecord === undefined) return undefined
   if (readBooleanField(discountRecord, 'enable') === false) return undefined
+  // ⚠️ 不能写 `readStringField(...) ?? readStringField(...)`：`readStringField` 读不到时
+  // 返回的是**空串**而不是 undefined，`??` 只对 null/undefined 生效 ⇒ 第二个键
+  // **永远走不到**（本 PR 返工时被 `sub_key` 那条用例咬出来，两种写法都实测见过）。
+  const subKeyCamel = readStringField(discountRecord, 'subKey')
+  const subKey = subKeyCamel.length > 0 ? subKeyCamel : readStringField(discountRecord, 'sub_key')
+  // ⚠️ 会员 / 补贴子键是**另一条付费路径**，不是闲时折扣：真机
+  // `off_peak_member_discount_18_9` 的两条路**不叠加**（会员全天 0.06、免费闲时 0.06），
+  // 当折扣并排画会凭空多打一折。文档与模块注释一直这么写，而实现原先**只看
+  // `data.off_peak` 这一支存在与否**、从不看子键 ⇒ 真机 6/32 条会员行照样产候选
+  // （PR #106 对抗审计 P1）。未知子键放行：上游新增形态时宁可多画也不要静默丢。
+  if (subKey !== undefined && /member|subsidy/i.test(subKey)) return undefined
   const data = asRecordObject(discountRecord.data ?? discountRecord.Data)
   const offPeak = data === undefined ? undefined : asRecordObject(data.off_peak ?? data.OffPeak)
   if (offPeak === undefined) return undefined
@@ -1149,6 +1168,15 @@ export function readTraeOffPeakDiscount(
   if (before === undefined || rate === undefined) return undefined
   const windows: TraeOffPeakWindow[] = []
   const rawWindows = offPeak.time_windows
+  // 「声明过」的判据 = 该键存在**且不是空数组**：
+  //   - 缺键 / `null`    ⇒ 没声明时段（= 全天活动，不警告）；
+  //   - `[]`             ⇒ 上游主动表达「没有时段」，同样算没声明；
+  //   - 非空数组（含元素全读不懂）⇒ 声明了，但可能一条都活不下来；
+  //   - 非数组（字符串 / 对象 / 数字）⇒ 声明了，但编码完全看不懂。
+  // 后两种必须能让展示层判成「不可用」：`windows` 都是 `[]`，光看结果分不出来。
+  const windowsDeclared = Array.isArray(rawWindows)
+    ? rawWindows.length > 0
+    : rawWindows !== undefined && rawWindows !== null
   if (Array.isArray(rawWindows)) {
     for (const item of rawWindows) {
       const record = asRecordObject(item)
@@ -1168,7 +1196,6 @@ export function readTraeOffPeakDiscount(
   }
   const timeZone = readStringField(offPeak, 'time_zone')
   const discountPercent = readNumberField(offPeak, 'discount')
-  const subKey = readStringField(discountRecord, 'subKey') ?? readStringField(discountRecord, 'sub_key')
   return {
     beforeRate: before,
     rate,
@@ -1176,6 +1203,7 @@ export function readTraeOffPeakDiscount(
     ...timeZone.length > 0 ? { timeZone } : {},
     ...subKey === undefined || subKey.length === 0 ? {} : { subKey },
     windows,
+    windowsDeclared,
   }
 }
 

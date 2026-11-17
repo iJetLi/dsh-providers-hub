@@ -1392,6 +1392,9 @@ describe('TRAE 计费字段解析（display_contact_config）', () => {
           { startMinute: 0, endMinute: 480, weekdays: [1, 2, 3, 4, 5, 6, 7] },
           { startMinute: 1320, endMinute: 1440, weekdays: [1, 2, 3, 4, 5, 6, 7] },
         ],
+        // 「上游声明过 time_windows」这一位是**承重**的：没有它，展示层分不清
+        // 「没声明时段」（= 全天）与「声明了却一条都读不懂」（= 规则看不清，不许画）。
+        windowsDeclared: true,
       })
     })
 
@@ -1464,6 +1467,50 @@ describe('TRAE 计费字段解析（display_contact_config）', () => {
       expect(parsed.windows).toHaveLength(2) // 字符串那条连字段都读不出，其余两条照带
       expect(parsed.windows[0]).toEqual({ startMinute: 600, endMinute: 600, weekdays: [1] })
       expect(parsed.windows[1]).not.toHaveProperty('weekdays')
+    })
+
+    it('★ 会员 / 补贴子键一律不产规则（真机 6/32 条是会员行，当折扣画就多打一折）', () => {
+      // PR #106 对抗审计 P1：模块注释与文档都写「member / subsidy 不产候选」，
+      // 而实现原先只看 `data.off_peak` 存在与否、**从不看子键** ⇒ 真机那 6 条
+      // `off_peak_member_discount_18_9` 照样产候选。判据必须打在子键上。
+      for (const subKey of [
+        'off_peak_member_discount_18_9',
+        'subsidy_member_discount',
+        'OFF_PEAK_MEMBER_DISCOUNT_18_9',
+        'member',
+        'Subsidy',
+      ]) {
+        // ⚠️ 子键在 `activity_discount` 这一层（= REAL 自己），**不在** `off_peak` 下。
+        expect(readTraeOffPeakDiscount(entry({ ...REAL, subKey })), subKey + ' 必须不产规则').toBeUndefined()
+      }
+      // 上游也可能把子键写在 `sub_key` 下（两种写法都实测见过）。
+      // ⚠️ `REAL` 自带 camelCase 的 `subKey`，而实现是 `subKey ?? sub_key` ⇒ 先摘掉它，
+      // 否则命中的是那条已知子键，测不到 snake_case 那一支（我第一版就这么写错了）。
+      const { subKey: camelSubKey, ...withoutSubKey } = REAL
+      void camelSubKey
+      expect(readTraeOffPeakDiscount(entry({ ...withoutSubKey, sub_key: 'off_peak_member_discount_18_9' }))).toBeUndefined()
+    })
+
+    it('未知子键放行：上游新增形态时宁可多画，也不要静默吞掉', () => {
+      const parsed = readTraeOffPeakDiscount(entry({ ...REAL, subKey: 'off_peak_discount_v2' }))!
+      expect(parsed.subKey).toBe('off_peak_discount_v2')
+      expect(parsed.windows).toHaveLength(2)
+    })
+
+    it('★★ windowsDeclared：缺键 / null / 空数组 = 没声明；非空数组 / 非数组 = 声明了', () => {
+      // 这一位是 PR #106 正向审计 P1-1 的修法支点：只给 `windows: []` 时展示层
+      // 分不清「上游没给时段」（= 全天）与「给了但一条都读不懂」（= 不许画）。
+      const withWindows = (timeWindows: unknown) => {
+        const data = { ...REAL.data, off_peak: { ...REAL.data.off_peak, time_windows: timeWindows } }
+        return readTraeOffPeakDiscount(entry({ ...REAL, data } as never))
+      }
+      expect(withWindows(undefined)?.windowsDeclared, '缺键 ⇒ 没声明').toBe(false)
+      expect(withWindows(null)?.windowsDeclared, 'null ⇒ 没声明').toBe(false)
+      expect(withWindows([])?.windowsDeclared, '空数组 ⇒ 上游主动说没有时段').toBe(false)
+      expect(withWindows(REAL.data.off_peak.time_windows)?.windowsDeclared, '非空数组 ⇒ 声明了').toBe(true)
+      expect(withWindows('not-an-array')?.windowsDeclared, '非数组 ⇒ 声明了但看不懂').toBe(true)
+      expect(withWindows({ start_minute: 0 })?.windowsDeclared, '对象 ⇒ 同理').toBe(true)
+      expect(withWindows([{ bad: 1 }])?.windowsDeclared, '元素全读不懂 ⇒ 仍是声明了').toBe(true)
     })
   })
   describe('readActivityDiscount', () => {

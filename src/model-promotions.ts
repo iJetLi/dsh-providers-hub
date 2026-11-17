@@ -927,7 +927,14 @@ export interface TraeOffPeakInput {
   readonly timeZone?: string | undefined
   /** 当日分钟数窗口（0–1440，**起点含、终点不含**）。 */
   readonly windows?: readonly TraeOffPeakWindowInput[] | undefined
-  /** 上游机器名（`off_peak_discount` / `off_peak_member_discount_18_9`），仅用于日志点名。 */
+  /**
+   * 上游**是否声明过** `time_windows`（哪怕一条都读不出）。
+   *
+   * 只由 `readTraeOffPeakDiscount` 填。缺这一位时「没声明时段」与「声明了却读不懂」
+   * 在展示层同形（都是 `windows: []`）⇒ 后者会被静默画成 24/7 常亮。
+   */
+  readonly windowsDeclared?: boolean | undefined
+  /** 上游机器名（`off_peak_discount` / `off_peak_member_discount_18_9`），进候选 id，供日志点名。 */
   readonly subKey?: string | undefined
 }
 
@@ -956,6 +963,38 @@ function minutesToClock(value: number): string {
  * 边界：只把上游自己的**支付比例**换算成中文的「折」（50 ⇒ 5 折是单位换算，
  * 不是发明语义）；换算不出整十就退回不带数字的「闲时折扣」，**绝不四舍五入**
  * （「3.3 折」这种上游从未说过的话不编）。英文侧一律不给数字。
+ */
+/**
+ * 上游 `discount`（= **支付比例**百分数）与 `before / after` 的**一致性**校验。
+ *
+ * 三者本该同源（真机 32 条逐条吻合：`0.2→0.1` 配 `50`、`0.72→0.36` 配 `50`、
+ * `0.12→0.06` 配 `50`），但它们来自 `off_peak` 下**三个不同的键**，上游只改一半
+ * 完全做得到。矛盾时**退回不带数字的文案** —— 宁可说「闲时折扣」，也不能说错折数。
+ *
+ * 容差 1 个百分点：只吸收四舍五入（`0.33→0.22` 真实 33.3% ⇒ 上游给 33，差 0）。
+ * `before` 的 `> 0 && 有限` 由调用方保证，这里不做除零防御。
+ */
+function discountConsistentPercent(
+  before: number,
+  rate: number,
+  discountPercent: number | undefined,
+): number | undefined {
+  if (discountPercent === undefined) return undefined
+  const derived = Math.round((1 - rate / before) * 100)
+  return Math.abs(discountPercent - derived) <= 1 ? discountPercent : undefined
+}
+
+/**
+ * 闲时折扣的徽标文案。
+ *
+ * ⚠️ 这是本仓「**不替上游说话**」取舍的一处**刻意例外**：TRAE 的文档里没有任何
+ * `label` / `color` / `hover`，只给数字 ⇒ 措辞只能是插件自己的。边界：
+ *
+ * - 只用上游给的**支付比例**，且**只在整十时**换算成「N 折」（50 ⇒ 5 折）；
+ * - 25 / 33 / 50.5 这类一律退回「闲时折扣」，**绝不补小数、绝不四舍五入**；
+ * - 英文侧**整十时也带数字**（`Off-peak 50% off`），非整十不带 —— 两边语义同源，
+ *   不是「英文一律不给数字」（README 与 §18 原先把这句写反了）；
+ * - 无颜色可抄 ⇒ `tone` 恒 `neutral`（由 `promotionTone` 的无 color 分支保证）。
  */
 function traeOffPeakBadgeCopy(discountPercent: number | undefined): { label: string, labelEn: string } {
   const tenth = discountPercent !== undefined
@@ -986,8 +1025,11 @@ function traeOffPeakBadgeCopy(discountPercent: number | undefined): { label: str
  *
  * 1. 必须**真降价**：`before > 0` 且 `rate < before`（有限数）。上游对未生效的
  *    `limited_discount` 就是发 `before === rate`，照画等于说谎；
- * 2. 窗口换算不过的**丢弃**；一个都没留下而上游确实给了非空数组 ⇒ `dailyUnusable`
- *    （= 永不成立）并留一条日志 —— 与腾讯 / Qoder 同方向；
+ * 2. 窗口换算不过的**丢弃**；上游**声明过** `time_windows` 却一条都没留下
+ *    （非数组 / 元素读不出 `start_minute` / 星期读不懂 / 空区间）⇒ `dailyUnusable`
+ *    （= 永不成立）并留一条日志 —— 与腾讯 / Qoder 同向。注意「声明过」看的是
+ *    `windowsDeclared` / 原始条数，**不是**留下的条数：两者混为一谈会让
+ *    「声明了却读不懂」静默退化成「全天」（PR #106 正向审计 P1-1）；
  * 3. `standingEligible: false`：窗口外**什么都不画**（取舍 4，宿主徽标无悬停位）；
  * 4. `timeDeclared: true`：闲时窗口就是时间声明，判定永远走「此刻」这条路，
  *    绝不读任何快照布尔。
@@ -1017,23 +1059,38 @@ export function traePromotionCandidate(
     if (typeof start !== 'number' || typeof end !== 'number') continue
     if (!Number.isInteger(start) || !Number.isInteger(end)) continue
     if (start < 0 || end < 0 || end > 1440) continue
-    // 空区间（含 start === end）与倒挂都不认：与 withinDailyWindows 同判据。
+    // 空区间（含 start === end）与倒挂都不认。⚠️ 这比 `withinDailyWindows` **更严**：
+    // core 那条判据支持跨零点，这里刻意不支持（真机的 `time_windows` 一律同日，
+    // 1440 就是终点；上游若给倒挂窗口，说明我们对它的编码理解错了，画出来只会说谎）。
     if (start >= end) continue
-    const days = Array.isArray(window.weekdays)
-      ? window.weekdays.filter((day: number) => Number.isInteger(day) && day >= 1 && day <= 7)
-      : undefined
+    const rawWeekdays = window.weekdays
+    const days = rawWeekdays === undefined
+      ? undefined
+      : Array.isArray(rawWeekdays)
+        ? rawWeekdays.filter((day: number) => Number.isInteger(day) && day >= 1 && day <= 7)
+        : undefined
+    // ⚠️ 声明了 `weekdays` 却一条都读不懂（`[]` / `[0]` / `[8]` / `[1.5]` / 非数组 / 字符串）
+    // ⇒ **整条窗口丢掉**。省略键的语义是「每天」，绝不能拿它兜住解析失败：
+    // `withinDailyWindows` 对同一输入的判据是 fail-closed（`days.length === 0 ⇒ false`），
+    // 两层方向相反时，上游一旦改用 0-based 星期（`[0]` = 周日）就会把「只在周日」
+    // 静默放成「每天」（PR #106 双审计 P2-1）。
+    if (rawWeekdays !== undefined && (days === undefined || days.length === 0)) continue
     windows.push({
       start: minutesToClock(start),
       end: minutesToClock(end),
-      ...days === undefined || days.length === 0 ? {} : { weekdays: days },
+      ...days === undefined ? {} : { weekdays: days },
     })
   }
-  const unusable = declared.length > 0 && windows.length === 0
+  // 上游声明过时段却一条都没活下来 ⇒ 规则看不清，**不画**（`dailyUnusable`）。
+  // 曾只看 `declared.length > 0`，而非数组 / 元素读不出 `start_minute` 时 `windows` 是 `[]`
+  // 但 `declared` 也是 `[]` ⇒ 静默退化成「全天」并 24/7 常亮（PR #106 正向审计 P1-1）。
+  const windowsDeclared = offPeak.windowsDeclared === true || declared.length > 0
+  const unusable = windowsDeclared && windows.length === 0
   if (unusable) {
-    safeWarn(warn, 'trae off_peak on "' + modelId + '": ' + declared.length
-      + ' time_windows were sent but none is readable, badge stays hidden')
+    safeWarn(warn, 'trae off_peak on "' + modelId + '": time_windows were sent but none is readable'
+      + ', badge stays hidden')
   }
-  const copy = traeOffPeakBadgeCopy(offPeak.discountPercent)
+  const copy = traeOffPeakBadgeCopy(discountConsistentPercent(before, rate, offPeak.discountPercent))
   const schedule: ModelPromotionSchedule = {
     // ⚠️ 上游缺席时用**调用方传入的兜底**（= 价格腿同值），不听任何别的源。
     timezone: offPeak.timeZone ?? fallbackTimeZone,
