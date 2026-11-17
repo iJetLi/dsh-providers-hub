@@ -101,9 +101,20 @@ export interface ModelPromotionWindow {
   /**
    * 'HH:mm'，**终点不含**。
    *
-   * end ≤ start 表示**跨零点**（23:00→7:50 是实测的夜间窗口）；end === start 表示**全天**。
+   * end ≤ start 表示**跨零点**（23:00→7:50 是实测的夜间窗口）；end === start 表示**空区间**。
    */
   end: string
+  /**
+   * 这条时段**只在列出的星期几**生效（ISO 序：1=周一 … 7=周日）。
+   *
+   * ⚠️ 缺席 = 每天（腾讯与 Qoder 都不下发该字段，实测如此）。TRAE 的
+   * `activity_discount.data.off_peak.time_windows[]` 是**唯一**带星期维度的上游
+   * （2026-11-17 真机：工作周 00:00–09:00 / 12:00–14:00 / 18:00–24:00 +
+   * 周末 00:00–24:00 四条并列），且它用**当日分钟数**而非 HH:mm —— 那一层换算
+   * 在 src/trae.ts 完成，本模块只认 HH:mm，**不为第二种上游形态再开一套判定**
+   * （一文件两套同义判据是本仓的复发缺陷形态）。
+   */
+  weekdays?: readonly number[]
 }
 
 /** 活动什么时候跑。 */
@@ -357,12 +368,32 @@ function cachedFormatter(
  * 兜底时区算 —— 兜底值必须与价格腿一致，见模块头那条「时区兜底」警告。
  */
 function zonedMinute(nowMs: number, timeZone: string | undefined): number | undefined {
+  return zonedClock(nowMs, timeZone)?.minuteOfDay
+}
+
+/** Intl 的英文星期缩写 → ISO 序（1=周一 … 7=周日）。固定 'en-US'，不做本地化。 */
+const ISO_WEEKDAY_BY_ABBR: Record<string, number> = {
+  Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7,
+}
+
+/**
+ * 某时刻在指定时区里的**墙上读数**：当日分钟数 + ISO 星期。任一项读不懂 ⇒ undefined。
+ *
+ * ⚠️ 星期与分钟**必须出自同一次 formatToParts**：分两次读会在跨日界那一分钟拿到
+ * 「23:59 的分钟 + 次日的星期」这种不一致的两半（与 #104 修过的「时钟只读一次」
+ * 是同一条纪律）。
+ */
+function zonedClock(
+  nowMs: number,
+  timeZone: string | undefined,
+): { minuteOfDay: number, isoWeekday: number } | undefined {
   const zone = timeZone === undefined || timeZone === '' ? 'UTC' : timeZone
   try {
     // hourCycle 'h23' 是刻意的：部分引擎在 hour12 false 下把午夜报成 24，
     // 那会让 22:00–08:00 在 00:00 判定失败。
     const parts = cachedFormatter(minuteFormatters, zone, () => new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
+      weekday: 'short',
       hour: '2-digit',
       minute: '2-digit',
       hourCycle: 'h23',
@@ -375,16 +406,38 @@ function zonedMinute(nowMs: number, timeZone: string | undefined): number | unde
     }
     const hour = read('hour')
     const minute = read('minute')
-    if (hour === undefined || minute === undefined) return undefined
-    return (hour % 24) * 60 + minute
+    const weekdayAbbr = parts.find((part) => part.type === 'weekday')?.value
+    const isoWeekday = weekdayAbbr === undefined ? undefined : ISO_WEEKDAY_BY_ABBR[weekdayAbbr]
+    if (hour === undefined || minute === undefined || isoWeekday === undefined) return undefined
+    return { minuteOfDay: (hour % 24) * 60 + minute, isoWeekday }
   } catch {
     return undefined
   }
 }
 
-/** nowMinutes 是否落在时段集合里的某一段。 */
-function withinDailyWindows(windows: readonly ModelPromotionWindow[], nowMinutes: number): boolean {
+/**
+ * 此刻（指定时区的墙上读数）是否落在时段集合里的某一段。
+ *
+ * ⚠️ 入参是**一个对象**而不是分钟数：带星期维度的窗口必须用**同一时刻**读出的
+ * 分钟与星期，分两次取会在跨日界那一分钟拿到不一致的两半。
+ */
+function withinDailyWindows(
+  windows: readonly ModelPromotionWindow[],
+  clock: { minuteOfDay: number, isoWeekday: number },
+): boolean {
   return windows.some((window) => {
+    // 星期闸门：**声明了**weekdays 就必须命中今天。空数组 / 非数组 / 全是非法值
+    // 一律**不成立**（fail-closed，与 dailyUnusable 同方向 —— 宁可少画一枚徽标，
+    // 也不替上游编一个它没说过的日期）。缺席 = 每天（腾讯 / Qoder 的实际形态）。
+    if (window.weekdays !== undefined) {
+      if (!Array.isArray(window.weekdays)) return false
+      const days = window.weekdays.filter(
+        (day: number) => typeof day === 'number' && Number.isInteger(day) && day >= 1 && day <= 7,
+      )
+      if (days.length === 0) return false
+      if (!days.includes(clock.isoWeekday)) return false
+    }
+    const nowMinutes = clock.minuteOfDay
     const start = clockMinute(window.start, 'start')
     const end = clockMinute(window.end, 'end')
     if (start === undefined || end === undefined) return false
@@ -443,9 +496,9 @@ export function promotionWithinDailyWindow(
   // 说了有时段却读不懂 ⇒ 永不成立（不许退化成「全天」）。
   if (schedule.dailyUnusable === true) return false
   if (schedule.daily === undefined || schedule.daily.length === 0) return true
-  const minutes = zonedMinute(nowMs, schedule.timezone)
-  if (minutes === undefined) return false
-  return withinDailyWindows(schedule.daily, minutes)
+  const clock = zonedClock(nowMs, schedule.timezone)
+  if (clock === undefined) return false
+  return withinDailyWindows(schedule.daily, clock)
 }
 
 /** 绝对有效期 ∧ 每日时段。**不**含「上游是否声明了时间」这道闸。 */
@@ -852,6 +905,154 @@ export function qoderPromotionCandidate(
   }
 }
 
+/**
+ * TRAE `activity_discount.data.off_peak` 的**已解析**形状（由 src/trae.ts 产出）。
+ *
+ * ⚠️ 这里吃的不是上游的 snake_case 原文：与 Qoder 同一纪律 —— 本仓适配器已把
+ * 条目归一成 camelCase，若在这里再写一份原文解析，就是同一个 schema 两套判据。
+ */
+export interface TraeOffPeakInput {
+  /** 折前倍率（`before_consumption_rate`）。 */
+  readonly beforeRate?: number | undefined
+  /** 折后倍率（`after_consumption_rate`）。 */
+  readonly rate?: number | undefined
+  /** 上游 `discount` = **支付比例**百分数（实测 50 = 半价、100 = 原价）。 */
+  readonly discountPercent?: number | undefined
+  /**
+   * 上游 `time_zone`。
+   *
+   * ⚠️ **2026-11-17 真机：32 条带 off_peak 的行里只有 6 条下发该字段** ——
+   * 兜底时区因此是主路径而不是边角，必须与价格腿同值（Asia/Shanghai）。
+   */
+  readonly timeZone?: string | undefined
+  /** 当日分钟数窗口（0–1440，**起点含、终点不含**）。 */
+  readonly windows?: readonly TraeOffPeakWindowInput[] | undefined
+  /** 上游机器名（`off_peak_discount` / `off_peak_member_discount_18_9`），仅用于日志点名。 */
+  readonly subKey?: string | undefined
+}
+
+/** TRAE 的一个闲时窗口：当日分钟数 + 生效的星期（ISO 序 1=周一 … 7=周日）。 */
+export interface TraeOffPeakWindowInput {
+  readonly weekdays?: readonly number[] | undefined
+  readonly startMinute?: number | undefined
+  readonly endMinute?: number | undefined
+}
+
+/** 当日分钟数 → 'HH:mm'；1440 → '24:00'（合法的**当日终点**，见 #104 第 3 条）。 */
+function minutesToClock(value: number): string {
+  const hour = Math.floor(value / 60)
+  const minute = value % 60
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return pad(hour) + ':' + pad(minute)
+}
+
+/**
+ * 闲时折扣 → 徽标文案。
+ *
+ * ⚠️⚠️ **这是对「取舍 2：不替上游说话」的刻意例外，必须登记**：TRAE 的整份
+ * `activity_discount` 文档里**没有任何 label / color / hover 字段**（2026-11-17
+ * 真机留档于 scripts/probe-trae-promo.mjs 的输出）—— 上游只给数字。因此这一家
+ * 的措辞**只能是插件文案**，与腾讯 / Qoder「抄上游原话」不是一条路。
+ * 边界：只把上游自己的**支付比例**换算成中文的「折」（50 ⇒ 5 折是单位换算，
+ * 不是发明语义）；换算不出整十就退回不带数字的「闲时折扣」，**绝不四舍五入**
+ * （「3.3 折」这种上游从未说过的话不编）。英文侧一律不给数字。
+ */
+function traeOffPeakBadgeCopy(discountPercent: number | undefined): { label: string, labelEn: string } {
+  const tenth = discountPercent !== undefined
+    && Number.isInteger(discountPercent)
+    && discountPercent >= 10
+    && discountPercent <= 90
+    && discountPercent % 10 === 0
+    ? discountPercent / 10
+    : undefined
+  return tenth === undefined
+    ? { label: '闲时折扣', labelEn: 'Off-peak discount' }
+    : { label: '闲时 ' + tenth + ' 折', labelEn: 'Off-peak ' + (100 - discountPercent!) + '% off' }
+}
+
+/**
+ * 本仓 TRAE 目录条目的闲时折扣 → **一条**候选（只挂它自己那一行）。
+ *
+ * ## 为什么只有 off_peak 这一支
+ *
+ * 真机（2026-11-17）51 条带 `activity_discount` 的行里，`current.discount_type`
+ * 只有 `subsidy`(13) 与 `none`(38) 两种取值；`subsidy` 那批**已经**由既有的
+ * 价格腿在模型名上画出箭头（`Seed-Code · x0.12→x0.06`），再补一枚徽标是用两种
+ * 控件讲同一句话。而 32 条 `off_peak` 的行 `current` 恒为 `none` 且
+ * `before === rate` ⇒ **两条腿都不亮**（既无箭头也无徽标），而闲时价是真的 ——
+ * 这才是缺口。因此本函数**只**为闲时窗口产出候选。
+ *
+ * ## 判据
+ *
+ * 1. 必须**真降价**：`before > 0` 且 `rate < before`（有限数）。上游对未生效的
+ *    `limited_discount` 就是发 `before === rate`，照画等于说谎；
+ * 2. 窗口换算不过的**丢弃**；一个都没留下而上游确实给了非空数组 ⇒ `dailyUnusable`
+ *    （= 永不成立）并留一条日志 —— 与腾讯 / Qoder 同方向；
+ * 3. `standingEligible: false`：窗口外**什么都不画**（取舍 4，宿主徽标无悬停位）；
+ * 4. `timeDeclared: true`：闲时窗口就是时间声明，判定永远走「此刻」这条路，
+ *    绝不读任何快照布尔。
+ *
+ * ⚠️ 上游 `end_minute: 1440` 是「到当日结束」，**不是**次日 00:00 的另一天：
+ * 换算成 '24:00' 交给 `clockMinute` 的终点分支，与 #104 统一过的那条同判据。
+ */
+export function traePromotionCandidate(
+  offPeak: TraeOffPeakInput | undefined,
+  modelId: string,
+  fallbackTimeZone: string = 'Asia/Shanghai',
+  warn?: (message: string) => void,
+): ModelPromotion | undefined {
+  if (offPeak === undefined) return undefined
+  if (typeof modelId !== 'string' || modelId.length === 0) return undefined
+  const before = offPeak.beforeRate
+  const rate = offPeak.rate
+  if (typeof before !== 'number' || !Number.isFinite(before) || before <= 0) return undefined
+  if (typeof rate !== 'number' || !Number.isFinite(rate) || rate >= before) return undefined
+
+  const declared = Array.isArray(offPeak.windows) ? offPeak.windows : []
+  const windows: ModelPromotionWindow[] = []
+  for (const window of declared) {
+    if (window === undefined || window === null) continue
+    const start = window.startMinute
+    const end = window.endMinute
+    if (typeof start !== 'number' || typeof end !== 'number') continue
+    if (!Number.isInteger(start) || !Number.isInteger(end)) continue
+    if (start < 0 || end < 0 || end > 1440) continue
+    // 空区间（含 start === end）与倒挂都不认：与 withinDailyWindows 同判据。
+    if (start >= end) continue
+    const days = Array.isArray(window.weekdays)
+      ? window.weekdays.filter((day: number) => Number.isInteger(day) && day >= 1 && day <= 7)
+      : undefined
+    windows.push({
+      start: minutesToClock(start),
+      end: minutesToClock(end),
+      ...days === undefined || days.length === 0 ? {} : { weekdays: days },
+    })
+  }
+  const unusable = declared.length > 0 && windows.length === 0
+  if (unusable) {
+    safeWarn(warn, 'trae off_peak on "' + modelId + '": ' + declared.length
+      + ' time_windows were sent but none is readable, badge stays hidden')
+  }
+  const copy = traeOffPeakBadgeCopy(offPeak.discountPercent)
+  const schedule: ModelPromotionSchedule = {
+    // ⚠️ 上游缺席时用**调用方传入的兜底**（= 价格腿同值），不听任何别的源。
+    timezone: offPeak.timeZone ?? fallbackTimeZone,
+    ...windows.length === 0 ? {} : { daily: windows },
+    ...unusable ? { dailyUnusable: true as const } : {},
+  }
+  return {
+    id: 'off_peak:' + (offPeak.subKey === undefined ? modelId : offPeak.subKey) + ':' + modelId,
+    source: 'promotion',
+    modelIds: [modelId],
+    badge: { label: copy.label, labelEn: copy.labelEn },
+    schedule,
+    timeDeclared: true,
+    // 取舍 4：窗口外不画「还没到点」。
+    standingEligible: false,
+    priority: 100,
+  }
+}
+
 // ── 保鲜：下一个会改变徽标的时刻 ────────────────────────────────────────────────
 
 /** 边界查找的默认上界（一年）：超出即认为「没有排定的边界」，不排定时器。 */
@@ -900,8 +1101,8 @@ export function nextPromotionEdgeMs(
     consider(schedule.validUntil)
     if (schedule.daily === undefined) continue
     for (const window of schedule.daily) {
-      consider(nextClockInstantMs(window.start, schedule.timezone, nowMs))
-      consider(nextClockInstantMs(window.end, schedule.timezone, nowMs))
+      consider(nextClockInstantMs(window.start, schedule.timezone, nowMs, window.weekdays))
+      consider(nextClockInstantMs(window.end, schedule.timezone, nowMs, window.weekdays))
     }
   }
   return best
@@ -920,13 +1121,34 @@ function nextClockInstantMs(
   hhmm: string,
   timeZone: string | undefined,
   nowMs: number,
+  weekdays?: readonly number[],
 ): number | undefined {
   const minute = clockMinute(hhmm, 'end')
   if (minute === undefined) return undefined
-  for (let dayShift = 0; dayShift <= 3; dayShift += 1) {
+  // 星期闸门与判定路径**同判据**：非 1..7 的整数全部剔除，剔完为空 ⇒ 这条窗口
+  // 永不成立 ⇒ **没有边界**（return undefined = 不排定时器），与 withinDailyWindows
+  // 的 fail-closed 完全一致。反过来若这里放行、判定那边挡住，就会排出一个
+  // 「到点重算、结果什么都没变」的空播报。
+  const days = weekdays === undefined
+    ? undefined
+    : (Array.isArray(weekdays)
+      ? weekdays.filter((day: number) => Number.isInteger(day) && day >= 1 && day <= 7)
+      : [])
+  if (days !== undefined && days.length === 0) return undefined
+  // ⚠️ 上界是 **7** 而不是 3：单工作日窗口（TRAE 实测「仅周五 18:00–24:00」这类）
+  // 在周六看下一次边界要跨到**下周五**。四天不够 —— 跨过的那天会被漏掉，
+  // 于是「到点不播报」，正是本函数存在的理由失效。
+  for (let dayShift = 0; dayShift <= 7; dayShift += 1) {
     const reference = nowMs + dayShift * 24 * 3_600_000
     const day = zoneCalendarDay(reference, timeZone ?? 'UTC')
     if (day === undefined) return undefined
+    if (days !== undefined) {
+      // 命中的是**窗口所属的那一天**，不是换算后的时刻：'24:00' 的边界落在
+      // 次日 00:00，而它属于今天的窗口（周五窗口的关闭点 = 周六零点）。
+      const isoWeekday = zoneIsoWeekday(reference, timeZone ?? 'UTC')
+      if (isoWeekday === undefined) return undefined
+      if (!days.includes(isoWeekday)) continue
+    }
     // 24:00 = 「当天结束」= 次日 00:00：把日历日往前挪一天再落 0 分。
     const target = minute === 1440
       ? { day: { year: day.year, month: day.month, day: day.day }, minute: 0, nextDay: true }
@@ -942,6 +1164,22 @@ function nextClockInstantMs(
     if (instant !== undefined && instant > nowMs) return instant
   }
   return undefined
+}
+
+const weekdayFormatters = new Map<string, Intl.DateTimeFormat>()
+
+/** 该时区把 ms 读成 ISO 星期几（1=周一 … 7=周日）；读不懂返回 undefined。 */
+function zoneIsoWeekday(ms: number, timeZone: string): number | undefined {
+  try {
+    const parts = cachedFormatter(weekdayFormatters, timeZone, () => new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      weekday: 'short',
+    })).formatToParts(new Date(ms))
+    const abbr = parts.find((part) => part.type === 'weekday')?.value
+    return abbr === undefined ? undefined : ISO_WEEKDAY_BY_ABBR[abbr]
+  } catch {
+    return undefined
+  }
 }
 
 /** 该时区把 ms 读成哪个日历日（读不懂返回 undefined）。 */

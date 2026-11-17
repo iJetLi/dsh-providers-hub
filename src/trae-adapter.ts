@@ -42,6 +42,21 @@ import {
   type TraeRemoteModel,
 } from './trae.js'
 import { TRAE, type TraeFallbackModel, type TraeProduct } from './trae-product.js'
+import {
+  nextPromotionEdgeMs,
+  promotionBadgeFor,
+  traePromotionCandidate,
+  type ModelPromotion,
+} from './model-promotions.js'
+
+/**
+ * 上游**不给**时区时的兜底（真机 32 条带 off_peak 的行里 26 条无 `time_zone`）。
+ *
+ * ⚠️ 取 Asia/Shanghai 不是猜的：下发了该字段的 6 条**逐字**就是它
+ * （`off_peak_member_discount_18_9` 那批），且本仓所有墙钟判据（签到日界、
+ * 腾讯/Qoder 的活动窗口）同值。两处不一致会让「价格」与「徽标」差 8 小时说话。
+ */
+const TRAE_PROMOTION_TIME_ZONE = 'Asia/Shanghai'
 import { classifyTraeError, classifyTraeStreamCode, isRotatableTraeStreamCode, recordsTraeRateLimit, shouldRotateTraeAccount } from './trae-errors.js'
 import { traeCooldownFor } from './trae-cooldown-table.js'
 import { normalizeHarnessMessages } from './message-shape.js'
@@ -753,6 +768,18 @@ export class TraeAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalog
   /** 远端模型元数据索引。 */
   private remoteMeta: ReadonlyMap<string, TraeRemoteModel> = new Map()
+  /**
+   * 闲时折扣的**未决候选表**（模型 id → 规则），远端目录落地时重建一次。
+   *
+   * ⚠️ 存的是**规则**不是**结论**：「此刻画不画」由 `toCatalogEntry` 用当时的
+   * 时钟现算（issue #101 的核心取舍 1）。这里如果存成 badge，22:59 读到的
+   * 闲时折扣会一路挂到第二天早上 —— 而那正是本 issue 点名的事故。
+   *
+   * ⚠️ 也**不能**在 `toCatalogEntry` 里现解析：解析一次就要 warn 一次「窗口
+   * 读不懂」，而那是一条**文档形状**的事实、与时刻无关 —— 放在渲染路径上
+   * 会变成每次 listModels 刷屏（模块头「判定路径不打日志」那条纪律）。
+   */
+  private promotionIndex: ReadonlyMap<string, ModelPromotion> = new Map()
   /** 产品级兜底模型索引。 */
   private readonly fallbackIndex: ReadonlyMap<string, TraeFallbackModel>
   /**
@@ -827,6 +854,7 @@ export class TraeAdapter extends LlmAdapter {
       if (models.length === 0) return false
       this.remoteModels = models
       this.remoteMeta = new Map(models.map((model) => [model.id, model]))
+      this.rebuildPromotionIndex(models)
       // ⚠️ **只在成功赋值后**记时刻：失败/空结果不写，否则一次抖动会把上界
       //    刷新掉、下轮还要等满 20 分钟才发现上游没恢复。
       this.catalogAt = this.options.now?.() ?? Date.now()
@@ -855,6 +883,45 @@ export class TraeAdapter extends LlmAdapter {
    */
   private inputModalitiesFor(model: string): readonly ('text' | 'image')[] {
     return this.remoteMeta.get(model)?.multimodal === true ? ['text', 'image'] : ['text']
+  }
+
+  /**
+   * 远端目录落地时重建候选表（**每次读取一遍**，渲染路径零解析、零日志）。
+   *
+   * 兜底表没有 `offPeakDiscount` ⇒ 索引为空 ⇒ 离线路径不画徽标（与「上游没有
+   * 活动」同形，如实；不编）。
+   */
+  private rebuildPromotionIndex(models: readonly TraeRemoteModel[]): void {
+    const next = new Map<string, ModelPromotion>()
+    let warned = false
+    for (const model of models) {
+      if (model.offPeakDiscount === undefined) continue
+      const promotion = traePromotionCandidate(
+        model.offPeakDiscount,
+        model.id,
+        TRAE_PROMOTION_TIME_ZONE,
+        warned ? undefined : (message) => { warned = true; console.warn('[jet-hub] ' + message) },
+      )
+      if (promotion !== undefined) next.set(model.id, promotion)
+    }
+    this.promotionIndex = next
+  }
+
+  /**
+   * 候选表里下一个会改变徽标的时刻（epoch 毫秒），没有则 undefined。
+   *
+   * 供全局活动边界播报器排程（src/index.ts 的 edgeSources）。闲时窗口是**墙钟**
+   * 窗口（真机：工作日 00:00–09:00 / 12:00–14:00 / 18:00–24:00 + 周末全天），
+   * 而宿主缓存一次目录读取的结果 —— 没有这条，窗口关了徽标最长再挂一个后台
+   * 刷新周期（20 分钟），正是 issue #101 点名的形态。
+   *
+   * ⚠️ 时钟与 `toCatalogEntry` **同源**（同一个 `options.now`）：两处各读一次
+   * 真实时钟，单测里会给出两个「现在」。
+   * ⚠️ **零网络**：只读内存里的候选表。
+   */
+  nextPromotionEdgeAt(nowMs: number = this.options.now?.() ?? Date.now()): number | undefined {
+    if (this.promotionIndex.size === 0) return undefined
+    return nextPromotionEdgeMs([...this.promotionIndex.values()], nowMs)
   }
 
   /**
@@ -1036,6 +1103,12 @@ export class TraeAdapter extends LlmAdapter {
     const contextWindow = this.contextWindowFor(model.id)
     const maxTokens = this.maxOutputTokensFor(model.id)
     const reasoning = this.reasoningFor(model.id)
+    // ★ 徽标在**装配时刻**求值（issue #101 取舍 1）。⚠️ 时钟只读**一次**存进局部量：
+    // 「有没有」与「是哪一枚」各读一次，跨过窗口边界那一分钟会得到前 undefined、
+    // 后一枚徽标 ⇒ 写进字面量就成了 badge: undefined 键（三态被破坏）。
+    const nowMs = this.options.now?.() ?? Date.now()
+    const promotion = this.promotionIndex.get(model.id)
+    const badge = promotion === undefined ? undefined : promotionBadgeFor([promotion], nowMs)
     return {
       id: model.id,
       name: traeDisplayName(model),
@@ -1048,6 +1121,8 @@ export class TraeAdapter extends LlmAdapter {
       ...contextWindow !== undefined ? { contextWindow } : {},
       ...maxTokens !== undefined ? { maxTokens } : {},
       ...reasoning !== undefined ? { reasoning } : {},
+      // ⚠️ 缺席即**整个键不写**（宿主 listModels 判的是 badge === void 0）。
+      ...badge === undefined ? {} : { badge },
     }
   }
 

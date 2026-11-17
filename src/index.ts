@@ -6334,8 +6334,8 @@ async function fetchBalanceReading(
   // 而用户仍按优惠期选择模型」。**播报是零网络的**（理由与三条判据见
   // src/promotion-edge-broadcast.ts 的头注）。
   //
-  // ⚠️ 四家共用一个播报器、各自只交一个边界 getter：一条渠道算错不会让其余
-  // 三家失去保鲜（nearestPromotionEdge 逐源 try/catch）。
+  // ⚠️ 五家共用一个播报器、各自只交一个边界 getter：一条渠道算错不会让其余
+  // 四家失去保鲜（nearestPromotionEdge 逐源 try/catch）。
   // ⚠️ 生命周期挂 ctx.effect（AGENTS.md：自建定时器必须回收，unref 不算回收）。
   const promotionEdgeBroadcaster = createPromotionEdgeBroadcaster({
     edgeSources: () => [
@@ -6343,6 +6343,10 @@ async function fetchBalanceReading(
       () => workbuddyAdapter.nextPromotionEdgeAt(),
       () => qoderAdapter.nextPromotionEdgeAt(),
       () => qoderCnAdapter.nextPromotionEdgeAt(),
+      // TRAE 的闲时窗口（真机 2026-11-17：工作日 00:00–09:00 / 12:00–14:00 /
+      // 18:00–24:00 + 周末全天）。**带星期维度**，因此它的下一次边界可能要跨到
+      // 7 天后 —— nextClockInstantMs 的搜索上界因此从 4 天放宽到 8 天。
+      () => traeAdapter.nextPromotionEdgeAt(),
     ],
     fire: () => { broadcastCatalogChanged(ctx) },
     warn: (message) => ctx.logger?.warn?.(message),

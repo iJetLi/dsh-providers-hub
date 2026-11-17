@@ -42,6 +42,8 @@ import {
   qoderPromotionCandidate,
   selectPromotionAt,
   sortPromotions,
+  traePromotionCandidate,
+  type ModelPromotion,
 } from '../../src/model-promotions.js'
 import { promotionActiveNow } from '../../src/qoder-adapter.js'
 import { parsePromotions } from '../../src/buddy.js'
@@ -818,5 +820,229 @@ describe('nextPromotionEdgeMs：窗口边界（保鲜排程的依据）', () => 
         expect(promotionActiveNow(promotion, at('2026-11-17T04:00:00Z')), `${start}-${end}`).toBe(false)
       }
     })
+  })
+})
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 带星期维度的每日时段 + TRAE 闲时候选（2026-11-17 真机取证后新增）
+//
+// 真机（scripts/probe-trae-promo.mjs，账号 1905882027265802，HTTP 200）：
+//   activity_discount.data.off_peak = {
+//     before_consumption_rate: 0.2, after_consumption_rate: 0.1, discount: 50,
+//     time_zone: <26/32 行**缺席**>,
+//     time_windows: [ { weekdays: [1..7], start_minute: 0, end_minute: 480 },
+//                     { weekdays: [1..7], start_minute: 1320, end_minute: 1440 } ] }
+//   另一形态（off_peak_member_discount_18_9）给 time_zone: "Asia/Shanghai"，
+//   且窗口按「工作日三段 + 周末整日」下发。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一条最小候选：只关心 schedule 的判据，其余字段取 TRAE 实际用的那组。 */
+function offPeakFixture(schedule: Parameters<typeof promotionActiveAt>[0]['schedule']): ModelPromotion {
+  return {
+    id: 'fixture:off-peak',
+    source: 'promotion',
+    modelIds: ['deepseek-v4-flash'],
+    badge: { label: '闲时 5 折', labelEn: 'Off-peak 50% off' },
+    ...schedule === undefined ? {} : { schedule },
+    timeDeclared: true,
+    standingEligible: false,
+    priority: 100,
+  }
+}
+
+describe('带星期维度的每日时段（TRAE 闲时窗口的形状）', () => {
+  // 2026-11-17 = 周二；2026-11-21 = 周六（探针的时点表逐字确认过）。
+  const TUE_10 = at('2026-11-17T02:00:00Z')   // 10:00 Asia/Shanghai
+  const SAT_10 = at('2026-11-21T02:00:00Z')   // 10:00 Asia/Shanghai
+
+  it('同一分钟、不同星期：工作日窗口在周末不成立（反向对照=不带星期则成立）', () => {
+    const weekdayOnly = offPeakFixture({
+      timezone: 'Asia/Shanghai',
+      daily: [{ start: '00:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] }],
+    })
+    expect(promotionActiveAt(weekdayOnly, TUE_10), '周二 10:00 必须在窗口内').toBe(true)
+    expect(promotionActiveAt(weekdayOnly, SAT_10), '周六同一分钟必须不成立').toBe(false)
+    // 反向对照：不带 weekdays 的同一窗口两天都成立 —— 否则上一条是恒真。
+    const everyDay = offPeakFixture({ timezone: 'Asia/Shanghai', daily: [{ start: '00:00', end: '12:00' }] })
+    expect(promotionActiveAt(everyDay, TUE_10)).toBe(true)
+    expect(promotionActiveAt(everyDay, SAT_10)).toBe(true)
+  })
+
+  it('周末整日窗口（真机第四条 weekdays:[6,7] 0–1440）', () => {
+    const weekend = offPeakFixture({
+      timezone: 'Asia/Shanghai',
+      daily: [{ start: '00:00', end: '24:00', weekdays: [6, 7] }],
+    })
+    expect(promotionActiveAt(weekend, SAT_10)).toBe(true)
+    expect(promotionActiveAt(weekend, TUE_10)).toBe(false)
+  })
+
+  it('weekdays 非法一律 fail-closed：空数组 / 越界 / 非整数都不成立，且不许退化成常驻', () => {
+    const bad: Array<readonly unknown[]> = [[], [0], [8], [1.5], ['6'] as unknown as number[]]
+    for (const days of bad) {
+      const promotion = offPeakFixture({
+        timezone: 'Asia/Shanghai',
+        // 测试替身：直接塞非法值，走的是运行期闸门而不是解析期。
+        daily: [{ start: '00:00', end: '12:00', weekdays: days as never }],
+      })
+      expect(promotionActiveAt(promotion, TUE_10), JSON.stringify(days) + ' 必须不成立').toBe(false)
+      expect(promotionRunningAt(promotion, TUE_10)).toBe(false)
+      // ⚠️ 常驻那道闸**不看**每日时段（取舍 4 之外它只受有效期约束），
+      // 所以「读不懂的星期」绝不能靠 standing 漏出来：本家靠 standingEligible=false。
+      expect(promotionStandingAt(promotion, TUE_10), 'standingEligible=false 必须挡住常驻').toBe(false)
+    }
+  })
+
+  it('跨零点 + 星期：窗口属于**它开始的那一天**（周六 01:00 不算周五的夜窗）', () => {
+    const FRI_23 = at('2026-11-20T15:00:00Z') // 23:00 Asia/Shanghai，周五
+    const SAT_01 = at('2026-11-21T17:00:00Z') // 次日 01:00，周六
+    const promotion = offPeakFixture({
+      timezone: 'Asia/Shanghai',
+      daily: [{ start: '22:00', end: '02:00', weekdays: [5] }],
+    })
+    expect(promotionActiveAt(promotion, FRI_23)).toBe(true)
+    // 真机上游从不发这种组合（它把夜间拆成 0–480 与 1320–1440 两段），
+    // 这里锁的是「万一发了，本仓取**保守侧**：不替上游把窗口延长到次日」。
+    expect(promotionActiveAt(promotion, SAT_01)).toBe(false)
+  })
+})
+
+describe('nextPromotionEdgeMs：星期维度的排程', () => {
+  it('单工作日窗口从周六起算必须跨到**下周五**（旧实现只扫 4 天 ⇒ 静默没有边界）', () => {
+    const SAT_0030 = at('2026-11-21T16:30:00Z') // 周六 00:30 Asia/Shanghai
+    const promotion = offPeakFixture({
+      timezone: 'Asia/Shanghai',
+      daily: [{ start: '18:00', end: '24:00', weekdays: [5] }],
+    })
+    const edge = nextPromotionEdgeMs([promotion], SAT_0030)
+    expect(edge, '必须排出边界，否则「窗口关了徽标还在」只能等 20 分钟刷新').toBeDefined()
+    // 下一个周五 = 2026-11-27，18:00 Asia/Shanghai = 10:00Z。
+    expect(edge).toBe(at('2026-11-27T10:00:00Z'))
+    // 这条同时把「搜索上界」钉住：改回 dayShift <= 3 本例立刻 undefined。
+    expect((edge! - SAT_0030) / 86_400_000).toBeGreaterThan(4)
+  })
+
+  it('weekdays 全非法 ⇒ 没有边界（不许排一次「重算后什么都没变」的空播报）', () => {
+    const promotion = offPeakFixture({
+      timezone: 'Asia/Shanghai',
+      daily: [{ start: '18:00', end: '24:00', weekdays: [] }],
+    })
+    expect(nextPromotionEdgeMs([promotion], at('2026-11-21T16:30:00Z'))).toBeUndefined()
+  })
+
+  it('end=24:00 的边界落在次日零点，但**星期归属今天**（周五窗口关在周六零点）', () => {
+    const FRI_20 = at('2026-11-20T12:00:00Z') // 周五 20:00 Asia/Shanghai
+    const promotion = offPeakFixture({
+      timezone: 'Asia/Shanghai',
+      daily: [{ start: '18:00', end: '24:00', weekdays: [5] }],
+    })
+    // 18:00 已过 ⇒ 下一个边界是**周五的** 24:00 = 2026-11-20T16:00Z（= 周六零点，
+    // 但归属周五那条窗口）。若实现按「换算后时刻的星期」过滤，这里会跳到下周五，
+    // 于是周六零点那一刻没人播报，周五夜窗的徽标多挂一个刷新周期。
+    expect(nextPromotionEdgeMs([promotion], FRI_20)).toBe(at('2026-11-20T16:00:00Z'))
+  })
+})
+
+describe('traePromotionCandidate：TRAE 闲时折扣 → 候选', () => {
+  /** 真机原样（DeepSeek-V4-Flash）。 */
+  const REAL = {
+    beforeRate: 0.2,
+    rate: 0.1,
+    discountPercent: 50,
+    subKey: 'off_peak_discount',
+    windows: [
+      { weekdays: [1, 2, 3, 4, 5, 6, 7], startMinute: 0, endMinute: 480 },
+      { weekdays: [1, 2, 3, 4, 5, 6, 7], startMinute: 1320, endMinute: 1440 },
+    ],
+  }
+
+  it('当日分钟数换算成 HH:mm，1440 落成 24:00（合法的当日终点）', () => {
+    const promotion = traePromotionCandidate(REAL, 'deepseek-v4-flash')
+    expect(promotion).toBeDefined()
+    expect(promotion!.schedule?.daily).toEqual([
+      { start: '00:00', end: '08:00', weekdays: [1, 2, 3, 4, 5, 6, 7] },
+      { start: '22:00', end: '24:00', weekdays: [1, 2, 3, 4, 5, 6, 7] },
+    ])
+    expect(promotion!.timeDeclared).toBe(true)
+    // 取舍 4：窗口外什么都不画。
+    expect(promotion!.standingEligible).toBe(false)
+    expect(promotion!.modelIds).toEqual(['deepseek-v4-flash'])
+  })
+
+  it('此刻在窗口内才画；窗口外徽标整个消失（不是降饱和）', () => {
+    const promotion = traePromotionCandidate(REAL, 'deepseek-v4-flash')!
+    const INSIDE = at('2026-11-17T15:30:00Z')  // 周二 23:30 Asia/Shanghai
+    const OUTSIDE = at('2026-11-17T02:00:00Z') // 周二 10:00 Asia/Shanghai
+    expect(promotionBadgeFor([promotion], INSIDE)).toEqual({
+      text: { en: 'Off-peak 50% off', zh: '闲时 5 折' },
+      tone: 'neutral',
+    })
+    // ⚠️ 必须是 undefined 而不是 badge: undefined —— 宿主判的是 badge === void 0。
+    expect(promotionBadgeFor([promotion], OUTSIDE)).toBeUndefined()
+  })
+
+  it('不是真降价就不产候选（真机未生效的 limited 形态正是 before === rate）', () => {
+    expect(traePromotionCandidate({ ...REAL, rate: 0.2 }, 'm')).toBeUndefined()
+    expect(traePromotionCandidate({ ...REAL, rate: 0.3 }, 'm')).toBeUndefined()
+    expect(traePromotionCandidate({ ...REAL, beforeRate: 0 }, 'm')).toBeUndefined()
+    expect(traePromotionCandidate(undefined, 'm')).toBeUndefined()
+    expect(traePromotionCandidate(REAL, '')).toBeUndefined()
+  })
+
+  it('上游没给 time_zone ⇒ 用调用方兜底；给了就用上游的（两形态真机都有）', () => {
+    const fallback = traePromotionCandidate(REAL, 'm', 'Asia/Shanghai')!
+    expect(fallback.schedule?.timezone).toBe('Asia/Shanghai')
+    const declared = traePromotionCandidate({ ...REAL, timeZone: 'Asia/Tokyo' }, 'm', 'Asia/Shanghai')!
+    expect(declared.schedule?.timezone).toBe('Asia/Tokyo')
+    // 兜底值不同会让同一份报文在「价格」与「徽标」上差 8 小时说话。
+    const tokyoFallback = traePromotionCandidate(REAL, 'm', 'Asia/Tokyo')!
+    expect(tokyoFallback.schedule?.timezone).toBe('Asia/Tokyo')
+  })
+
+  it('窗口声明了却全读不懂 ⇒ dailyUnusable + 恰一条日志 + 永不成立', () => {
+    const warn = vi.fn()
+    const promotion = traePromotionCandidate({
+      beforeRate: 0.2, rate: 0.1, discountPercent: 50,
+      windows: [
+        { startMinute: 600, endMinute: 600 },   // 空区间
+        { startMinute: 900, endMinute: 300 },   // 倒挂
+        { startMinute: -1, endMinute: 300 },    // 越界
+        { startMinute: 10.5, endMinute: 300 },  // 非整数
+        { endMinute: 300 },                     // 缺起点
+      ],
+    }, 'deepseek-v4-flash', 'Asia/Shanghai', warn)
+    expect(promotion).toBeDefined()
+    expect(promotion!.schedule?.daily).toBeUndefined()
+    expect(promotion!.schedule?.dailyUnusable).toBe(true)
+    expect(promotion!.timeDeclared, '声明了时间就必须走「此刻」判定，不许退回任何快照').toBe(true)
+    expect(promotionRunningAt(promotion!, at('2026-11-17T15:30:00Z'))).toBe(false)
+    expect(promotionStandingAt(promotion!, at('2026-11-17T15:30:00Z'))).toBe(false)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('只有窗口内**留下**的时段才算声明；全部缺席 = 全天活动而非读不懂', () => {
+    const promotion = traePromotionCandidate({ beforeRate: 0.2, rate: 0.1, windows: [] }, 'm')!
+    expect(promotion.schedule?.dailyUnusable).toBeUndefined()
+    expect(promotion.schedule?.daily).toBeUndefined()
+    // 没有时段 = 只要在有效期内就全天跑。
+    expect(promotionRunningAt(promotion, at('2026-11-17T02:00:00Z'))).toBe(true)
+  })
+
+  it('文案：整十折算成「x 折」，换算不出就退回不带数字的那句（绝不四舍五入）', () => {
+    const text = (discountPercent: number | undefined): string => {
+      const promotion = traePromotionCandidate({ beforeRate: 0.2, rate: 0.1, ...discountPercent === undefined ? {} : { discountPercent } }, 'm')!
+      const badge = promotionBadgeFor([promotion], at('2026-11-17T02:00:00Z'))!
+      return typeof badge.text === 'string' ? badge.text : badge.text.zh
+    }
+    expect(text(50)).toBe('闲时 5 折')
+    // ⚠️ 25 换算成「2.5 折」在算术上没错，但那是**上游没写过小数的措辞**被我们
+    // 补成了小数 —— 本仓的红线方向是「宁可少说一个数字，不多说一个字」。
+    // 真机 off_peak 只出现过 50（member 那批的 25 不产候选），故此规则今天零代价。
+    expect(text(25)).toBe('闲时折扣')
+    expect(text(33)).toBe('闲时折扣')   // 3.3 折是上游没说过的话
+    expect(text(undefined)).toBe('闲时折扣')
+    expect(text(0)).toBe('闲时折扣')    // 0% = 全免，不是「0 折」
+    expect(text(100)).toBe('闲时折扣')  // 100% = 原价，压根不是折扣
   })
 })
