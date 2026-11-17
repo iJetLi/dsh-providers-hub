@@ -802,10 +802,21 @@ fallback 组（`raccoon-4eb26a` / `raccoon-0c119c` / `raccoon-ecc5fd`），
 上游新增 `sn-qwen4-max`（`ability_level 3`、`context_window 1_000_000`、
 `max_tokens 100_000`（网关硬限 65_536，见 IKS1L5）、`tags` 含 `vision/reasoning`），
 并把 `sn-deepseek-v4-1-flash` **换成了同族版本 `sn-deepseek-v4-1-flash-1017`**
-（旧基础 id 已不在目录里 —— 与 loomy #67 的 `1017` 改名同一种形态）。
+（旧基础 id 已不在目录里 —— 与本文 §11 记的 2026-10-21「远端上架 `-1017`」是
+同一种滚版本形态，只是这次旧 id 被**下架**了）。
 ⇒ 兜底表补一条、改一条 id/展示名（展示名跟着远端 `description` 带上 `-1017`，
 与客户端一致）。⚠️ 请求 id **必须**用完整版（剥版本号会 404，
 见 `RACCOON_MODEL_VERSION_SUFFIX`；`raccoonSupportsImageWith` 才剥）。
+
+**⚠️⚠️ 顺带抓到表里一条「已经腐坏」的旧条目**：`sn-glm-5-3-flash` 表里写
+`GLM-5-3-Flash · x0.2→x0.1`，而远端当天已是 `billing_multiplier =
+billing_effective_multiplier = 0.2`（那条活动**已结束**）。这不只是显示过期：
+`priceFactorFromName`（`aggregate-core.ts`）**取箭头右侧**，聚合路由会把一个
+实际 0.2 倍的模型当 0.1 倍来挑（「同档倍率升序」挑便宜就挑错了）⇒ 已改为基线
+`x0.2`。**未改但已登记**：两个 `sn-sensenova-*` 的 `· 免费` 同样是「限免」
+活动（`billing_status_note = 限免到 11月30日`、`billing_discounts` 带 `end_at`）——
+今天它**真**是 0 倍，现在改成 `x0.5` 反而当天就不准，且会连带改聚合价格因子
+⇒ **2026-11-30 到期后必须回来重测并清掉 `免费`**（这是本表唯一的已知过期风险）。
 
 **⚠️⚠️ 两条判据（这是本节的重点，别再退回去）**：
 
@@ -814,20 +825,22 @@ fallback 组（`raccoon-4eb26a` / `raccoon-0c119c` / `raccoon-ecc5fd`），
    `x0.75→x0.5` 写进编译期兜底表，活动结束/换档后会长期显示一个
    **不存在的折扣** —— 正是 qoder 那条「静态兜底表必然腐坏」的形状。
    故兜底表只写**基线** `x0.75`，折后价由远端目录在 `toCatalogEntry` 现算。
-   单测 `活动中的模型在兜底表里只写基线倍率` 锁死这条（断言 `name` 不含 `→`）。
+   单测 `兜底表一律只写基线倍率` 锁死这条（断言**全表** `name` 不含 `→`）。
 2. **e2e 判据用「双差集 + 表==远端」，不用数量/`>=`**。`EXPECTED_VISIBLE_IDS`
    是基线快照（**顺序也照抄远端**），`missing`（基线里已下架/换 id）与
    `extra`（上游新上架）**各点名报出**，再断言
    `RACCOON.fallbackModels` 的 id 与之**逐字同序**。放宽成 `toBeGreaterThan`
    或 `>= 兜底表条数` 会让漂移重新静默 —— 这次漂移就是这么静默过去的。
-   ⚠️ 带活动的模型（`sn-qwen4-max` / `-1017` / `glm-5-3-flash`）的 `name`
-   用正则 `^X · x0.75(→x…)?$`：活动期间与活动结束两种形态都吃得下，
-   而**基线倍率写错照样红**。
+   ⚠️ 带活动的模型（`sn-qwen4-max` / `-1017` / `glm-5-3-flash` / `sensenova`）
+   的 `name` 用正则 `^X · x基线(→x…)?$`（`sensenova` 再加 `免费` 一支）：
+   活动期间与活动结束两种形态都吃得下，而**基线倍率写错照样红**。
+   ⚠️ 名字层只能这么测 —— **静态表 vs 时间相关事实**的漂移本质上只能靠
+   重新测量发现（单测写的是同一个过期常量，永远对）。
 
-**\(\dagger\) 变异验证**：从 `EXPECTED_VISIBLE_IDS` 删掉 `sn-qwen4-max` ⇒
+**† 变异验证**：从 `EXPECTED_VISIBLE_IDS` 删掉 `sn-qwen4-max` ⇒
 该用例变红且报文为 `{ missing: [], extra: ['sn-qwen4-max', …] }`（有牙）。
 
-**\(\ddagger\) 顺手记下的一处名不副实**（本次未改）：`tests/unit/raccoon-auth.spec.ts`
+**‡ 顺手记下的一处名不副实**（本次未改）：`tests/unit/raccoon-auth.spec.ts`
 的「promotions 只由 `billing_discounts` 决定（不猜）」用例，断言体实际只测了
 `billing_status_note`，与用例名不符 —— 做活动徽标（issue #101 第二腿）时
 应当补成真断言，别让它继续挂着这个名字。

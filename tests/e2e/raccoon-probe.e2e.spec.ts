@@ -99,7 +99,10 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
     expect(byId.get('sn-glm-5-3')?.name).toBe('GLM-5-3 · x0.75')
     // ⚠️ 1 倍也要显示（用户报障「为什么 Kimi-K3 没有倍率，ide 是 1 倍」）
     expect(byId.get('sn-kimi-k3')?.name).toBe('Kimi-K3 · x1')
-    expect(byId.get('sn-sensenova-6-8-flash')?.name).toBe('SenseNova-6.8-Flash · 免费')
+    // ⚠️ 限免是**活动**（`billing_status_note` = 「限免到 11月30日」）⇒ 到期后
+    // 远端会变成有价，故这里允许两种形态（`免费` / `x0.5`）；基线倍率写错照样红。
+    expect(byId.get('sn-sensenova-6-8-flash')?.name)
+      .toMatch(/^SenseNova-6\.8-Flash · (免费|x0\.5(→x0?\.\d+)?)$/)
     // ⚠️ 带**限时活动**的条目不逐字锁死折后价：活动结束（或换档）后
     // `billing_effective_multiplier` 会变，届时 `x0.75→x0.5` 变成 `x0.75` ——
     // 那是上游的正常变化，不是本插件的回归。判据是「基线倍率必须正确，
@@ -107,7 +110,8 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
     expect(byId.get('sn-qwen4-max')?.name).toMatch(/^Qwen4-Max · x0\.75(→x[0-9.]+)?$/)
     expect(byId.get('sn-deepseek-v4-1-flash-1017')?.name)
       .toMatch(/^DeepSeek-V4\.1-Flash-1017 · x0\.25(→x[0-9.]+)?$/)
-    // 0.2→0.1 是这条存在已久的活动价，形态与上面同源（历史断言，保持不动）。
+    // `sn-glm-5-3-flash` 那条 `x0.2→x0.1` 的活动已于 2026-11-17 前结束（远端回 0.2/0.2），
+    // 但活动可能再来 ⇒ 同样是「基线 + 可选箭头」形态。
     expect(byId.get('sn-glm-5-3-flash')?.name).toMatch(/^GLM-5-3-Flash · x0\.2(→x[0-9.]+)?$/)
   })
 

@@ -231,7 +231,7 @@ export interface RaccoonProduct {
  * | `sn-qwen4-max` | 0.75 | 0.5 | x0.75（活动价由远端现算，见条目注释） |
  * | `sn-glm-5-3` | 0.75 | 0.75 | x0.75 |
  * | `sn-kimi-k3` | 1 | 1 | x1 |
- * | `sn-glm-5-3-flash` | 0.2 | 0.1 | x0.2→x0.1 |
+ * | `sn-glm-5-3-flash` | 0.2 | 0.2 | x0.2 |
  * | `sn-deepseek-v4-1-flash-1017` | 0.25 | 0.25 | x0.25 |
  *
  * ⚠️ 2026-11-17 上游把 `sn-deepseek-v4-1-flash` 换成了同族版本
@@ -294,7 +294,12 @@ const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
   },
   {
     id: 'sn-glm-5-3-flash',
-    name: 'GLM-5-3-Flash · x0.2→x0.1',
+    // ⚠️ 2026-11-17 远端已回 `billing_multiplier = billing_effective_multiplier = 0.2`
+    // （此前那条 `x0.2→x0.1` 的活动**已结束**）。表里继续写箭头不只是「显示过期」：
+    // `priceFactorFromName` 取箭头右侧，聚合路由会把一个实际 0.2 倍的模型当 0.1 倍
+    // 来挑（`aggregate-core.ts` 的「同档倍率升序」），挑便宜就挑错了。
+    // ⇒ 兜底表一律写**基线**，折扣/限免只由远端现算。
+    name: 'GLM-5-3-Flash · x0.2',
     contextWindow: 1_000_000,
     maxTokens: 65_536,
     // ⚠️ 远端 tags 不含 `vision`，但**实测能看图**（tags 不是能力契约，见

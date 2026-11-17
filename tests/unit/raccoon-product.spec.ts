@@ -62,24 +62,33 @@ describe('兜底模型表', () => {
     const byId = new Map(RACCOON.fallbackModels.map((m) => [m.id, m]))
     expect(byId.get('sn-glm-5-3')?.name).toBe('GLM-5-3 · x0.75')
     expect(byId.get('sn-kimi-k3')?.name).toBe('Kimi-K3 · x1')
-    expect(byId.get('sn-glm-5-3-flash')?.name).toBe('GLM-5-3-Flash · x0.2→x0.1')
+    expect(byId.get('sn-glm-5-3-flash')?.name).toBe('GLM-5-3-Flash · x0.2')
     expect(byId.get('sn-deepseek-v4-1-flash-1017')?.name).toBe('DeepSeek-V4.1-Flash-1017 · x0.25')
     expect(byId.get('sn-sensenova-6-8-flash')?.name).toBe('SenseNova-6.8-Flash · 免费')
     expect(byId.get('sn-sensenova-6-8-flash-lite')?.name).toBe('SenseNova-6.8-Flash-Lite · 免费')
   })
 
   /**
-   * ⚠️ **兜底表不得烘焙活动价**：`sn-qwen4-max` 当前带限时活动
-   * （`billing_status=discount`，2026-11-17 实测折后 0.5、至 2026-11-22），
-   * 而兜底表是编译期快照 —— 把 `x0.75→x0.5` 写进去，活动结束（或换档）后
-   * 会长期显示一个**不存在的折扣**。活动价只允许由远端目录现算。
-   * ⇒ 本条要求它保持基线形态 `x0.75`（**不含 `→`**）。
+   * ⚠️ **兜底表不得烘焙活动价**（`sn-qwen4-max` / `sn-glm-5-3-flash` 都是实测过的
+   * 活证据）：表是编译期快照，活动结束（或换档）后会长期显示一个**不存在的折扣**。
+   *
+   * ⚠️ `sn-glm-5-3-flash` 曾经就这么腐坏过：远端 2026-11-17 已是 `0.2 / 0.2`，
+   * 表里还写着 `x0.2→x0.1` —— 除了显示错，`priceFactorFromName` 取箭头右侧，
+   * 聚合路由会把实际 0.2 倍的模型当 0.1 倍去挑。故这条判据是**全表**的。
+   *
+   * ⚠️ 已知例外（登记，未改）：两个 `sn-sensenova-*` 的 `· 免费` 也是「限免」
+   * 活动（远端 `billing_status_note` = 「限免到 11月30日」、`billing_discounts`
+   * 带 `end_at`）。今天它是**真免费**，改成基线 `x0.5` 反而今天就不准
+   * （且会连带改 `priceFactorFromName` 的聚合价格）。⇒ 到期（2026-11-30）后
+   * 必须回来重测并清掉 `免费`。
    */
-  it('活动中的模型在兜底表里只写基线倍率（不固化会过期的折后价）', () => {
+  it('兜底表一律只写基线倍率（name 不含活动箭头 `→`）', () => {
     const byId = new Map(RACCOON.fallbackModels.map((m) => [m.id, m]))
-    const qwen = byId.get('sn-qwen4-max')
-    expect(qwen?.name).toBe('Qwen4-Max · x0.75')
-    expect(qwen?.name).not.toContain('→')
+    expect(byId.get('sn-qwen4-max')?.name).toBe('Qwen4-Max · x0.75')
+    expect(byId.get('sn-glm-5-3-flash')?.name).toBe('GLM-5-3-Flash · x0.2')
+    for (const model of RACCOON.fallbackModels) {
+      expect(model.name, `${model.id} 烘焙了活动价`).not.toContain('→')
+    }
   })
 
   it('上下文窗口与输出上限逐条对照远端实测值', () => {
