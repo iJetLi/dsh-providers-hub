@@ -1158,6 +1158,35 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
 - `inputModalities` 由远端 `supportsImage` 驱动（未声明时保守报 `text`）
 - 可选字段缺失一律留 `undefined`，**绝不填 0/false**：「远端说不支持」与「远端没说」是两回事
 
+### ⚠️ 限时免费四件套：判据全抄客户端 asar，且**声明 ≠ 生效**（2026-11-17）
+
+远端同批下发 `limitedFree` / `limitedFreeActive` / `limitedFreeStartAt` / `limitedFreeEndAt`，本仓此前**零引用**。同日实测（`GET /api/models/available`，21 条目）：**四件套全 false / false / null / null**，即「上游此刻没有活动」。
+
+判据**不是**从上字段名推的，而是逐字取自本机官方客户端 `C:\Users\zhujieling11\AppData\Local\Programs\LobsterAI\resources\app.asar`（185,419,586 字节）：
+
+| 事实 | 偏移 | 原文（节选） |
+|---|---|---|
+| 徽标何时画 | @32509033 | `!model.presetId && model.limitedFreeActive && <span className="…bg-red-500/10…text-red-600…" title={i18n("modelLimitedFreeBadge")}>`（带一个图标） |
+| 徽标文案 | @48491027 / @48724162 | `modelLimitedFreeBadge: "限时免费"` / `"Limited-time free"` |
+| **倍率归零** | @107483653 | `const costMultiplier = model.limitedFreeActive ? 0 : readPositiveNumber(model.costMultiplier)` |
+| 显示条件 | @32506862 | `showCostMultiplier = model.costMultiplier != null && (costMultiplier > 0 \|\| !!presetId \|\| limitedFreeActive === true)` ⇒ 客户端画 **`x0.00`** |
+| 起止是**字符串** | @32483752 | `model.limitedFree ? [startAt, endAt] : []).map(v => v ? Date.parse(v) : NaN)`，取最近边界 + `setTimeout(…, Math.min(delta + 100, 2147483647))` 重拉目录 |
+
+⇒ 本仓三条落地（`src/lobsterai-adapter.ts` + `src/model-promotions.ts` 的 `lobsteraiLimitedFreeCandidate`）：
+
+1. **`limitedFreeActive` 时展示倍率按 0**（`名称 · x0`）：客户端就是 `x0.00`；不改的话模型明明免费、界面还写 `x0.05`，用户按原价估成本 —— issue #101 的同一形态。
+2. **徽标走宿主 `badge`**（`{en:'Limited-time free', zh:'限时免费'}`, tone `neutral`, `display:'activeOnly'`）。**不给颜色**：上游目录里没有任何颜色字段，客户端那个红是 Tailwind 类、不是上游声明，写死 hex 就是编造数据 ⇒ 落 neutral（`promotionTone` 对无颜色输入本来就是这个语义）。
+3. **起止走 `Date.parse` 后进调度**：`limitedFreeStartAt/EndAt` 的**真实格式至今未取证**（21/21 全 null），所以解析层只接受 `Date.parse` 能吃的字符串、数字与读不懂的串一律按「没给」（fail-closed）；`nextPromotionEdgeAt` 接进 `src/index.ts` 的 `edgeSources`，活动到点自动重排、零网络。
+
+三条**踩过的坑**：
+
+- ⚠️ **`limitedFree` 与 `limitedFreeActive` 不是同义词**：前者「声明了活动」（客户端拿它算下一次刷新时刻），后者「此刻生效」（客户端拿它画徽标与归零倍率）。只认前者 ⇒ 活动还没开始就挂一年徽标；只认后者 ⇒ 丢掉边界排程。
+- ⚠️ **`timeDeclared` 必须按「起止解析到了数字」判，不能按「键存在」判**：上游对 21/21 条目都下发 `limitedFreeStartAt: null`，按键判 = 把「上游没办活动」读成「声明了时间且窗口为空 ⇒ 永远成立」⇒ 徽标天天挂（PR #104 正向审计 P1-1 的同一个坑）。
+- ⚠️ **数字形态刻意不接受**：`1794931200` 是秒还是毫秒没有依据，按毫秒读是把 1970 年当活动窗口；按秒读则要猜「上游为何改单位」——两种都比「没给」更糟。
+
+**守卫**：`tests/unit/lobsterai-adapter.spec.ts` 的「限时免费」11 条（x0 归零 / 无活动时 `badge` 键缺席 / 声明≠生效 / 窗口内照画 / 窗口结束消失（**同一适配器推进时钟**）/ 窗口未开始不画 / null 起止 / ISO 折毫秒 / 读不懂 fail-closed / 边界播报 / 无活动不排定时器）；`tests/e2e/lobsterai-probe.e2e.spec.ts` 的「限免四件套」**只锁契约**（上游发了布尔 ⇒ 解析层不得读丢），并把原始起止字符串打日志（**上游第一次真办活动时，那段日志就是格式证据**）。
+**变异自证（4/4 有牙）**：① 关掉 x0 分支 ⇒ `expected 'Free Now · x0.05' to be 'Free Now · x0'`；② 不写 `badge` 键 ⇒ 4 条红；③ `timeDeclared` 恒 false ⇒ 2 条红（窗口现算 + 窗口结束）；④ `readInstantField` 接受数字 ⇒ `expected 1794931200 to be undefined`。
+
 ### 思考档位的 wire 值是 `openclawLevel`，不是 `level`
 
 `thinkingConfig.options[]` 每项有 `level`（**产品侧档位名**，含 `max`）与 `openclawLevel`（**发给服务端的 `reasoning_effort` 取值**，无 `max`）。远端把 `level: 'max'` 映射到 `openclawLevel: 'xhigh'`。

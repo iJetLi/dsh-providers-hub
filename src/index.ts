@@ -6347,6 +6347,10 @@ async function fetchBalanceReading(
       // 18:00–24:00 + 周末全天）。**带星期维度**，因此它的下一次边界可能要跨到
       // 7 天后 —— nextClockInstantMs 的搜索上界因此从 4 天放宽到 8 天。
       () => traeAdapter.nextPromotionEdgeAt(),
+      // LobsterAI 的限时免费（官方客户端 asar 取证：`limitedFreeStartAt/EndAt` 是
+      // ISO 字符串，客户端自己算最近边界 + setTimeout 重拉）。**绝对时刻**，
+      // 无每日重复 —— 与 TRAE 的星期窗口不同，边界最多两天。
+      () => lobsteraiAdapter.nextPromotionEdgeAt(),
     ],
     fire: () => { broadcastCatalogChanged(ctx) },
     warn: (message) => ctx.logger?.warn?.(message),

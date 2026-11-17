@@ -1294,3 +1294,175 @@ describe('registerLobsteraiLlm', () => {
     expect(adapters).toEqual(['lobsterai'])
   })
 })
+
+describe('LobsterAI 限时免费（limitedFree 四件套）', () => {
+  /**
+   * 判据逐字来自官方客户端 asar（2026-11-17 考古）：
+   * - 红 chip 文案 = i18n `modelLimitedFreeBadge`「限时免费 / Limited-time free」；
+   * - 画不画 = `!presetId && model.limitedFreeActive`（@32509033）；
+   * - 倍率 = `model.limitedFreeActive ? 0 : readPositiveNumber(costMultiplier)`
+   *   且 `showCostMultiplier` 多一条 `|| limitedFreeActive === true`（@107483653 /
+   *   @32506862）⇒ 客户端画 `x0.00`，**不是**原倍率；
+   * - 起止是字符串（客户端直接 `Date.parse`，@32483752）。
+   *
+   * ⚠️ 实测 21/21 条目此刻都**没有**活动，所以这些用例全是 fixture ——
+   * 上游真正的窗口格式尚未取证（见 PR body 的边界登记）。
+   */
+  const T0 = Date.parse('2026-11-17T12:00:00+08:00')
+  const IN_WINDOW = { limitedFreeStartMs: T0 - 3_600_000, limitedFreeEndMs: T0 + 3_600_000 }
+  const OUT_OF_WINDOW = { limitedFreeStartMs: T0 + 3_600_000, limitedFreeEndMs: T0 + 7_200_000 }
+
+  it('此刻限免 ⇒ 倍率归零成 x0 + 一枚「限时免费」徽标', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [
+        { id: 'free-now', name: 'Free Now', costMultiplier: 0.05, limitedFree: true, limitedFreeActive: true },
+      ],
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    // ⚠️ 断言**字面量 `x0`**（不是 `x0.05`）：客户端展示的是免费价，按原价估成本
+    // 正是 issue #101「活动信息与请求实际不符」的同一形态。
+    expect(model!.name).toBe('Free Now · x0')
+    expect(model!.badge).toEqual({ text: { en: 'Limited-time free', zh: '限时免费' }, tone: 'neutral' })
+  })
+
+  it('没有活动时 badge 键**缺席**（不是 undefined 键）', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [{ id: 'plain', name: 'Plain', costMultiplier: 0.05 }],
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    expect(model!.name).toBe('Plain · x0.05')
+    expect('badge' in (model as object)).toBe(false)
+  })
+
+  it('倍率归零只认 limitedFreeActive，不认 limitedFree（声明≠生效）', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [
+        { id: 'declared-not-on', name: 'Declared', costMultiplier: 0.05, limitedFree: true, limitedFreeActive: false },
+      ],
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    expect(model!.name).toBe('Declared · x0.05')
+    // 没给窗口、快照说「没开」⇒ 不画（timeDeclared:false + snapshotActive:false）。
+    expect('badge' in (model as object)).toBe(false)
+  })
+
+  it('声明了起止就按窗口现算：快照说没开但此刻在窗口内 ⇒ 照画', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [
+        { id: 'windowed', name: 'Windowed', costMultiplier: 0.05, limitedFree: true, limitedFreeActive: false, ...IN_WINDOW },
+      ],
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    expect(model!.badge).toMatchObject({ text: { zh: '限时免费' } })
+  })
+
+  it('窗口结束后徽标消失（同一个候选、只推进时钟）', async () => {
+    // ⚠️ 必须**同一个适配器**推进时钟：换成两个适配器会变成「两次目录装配」，
+    // 测不到「装配时刻现算」这条判据本身。
+    let now = T0
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => now,
+      fetchRemoteModels: async () => [
+        { id: 'windowed', name: 'Windowed', costMultiplier: 0.05, limitedFree: true, limitedFreeActive: false, ...IN_WINDOW },
+      ],
+    })
+    const [inside] = await adapter.listModels('lobsterai')
+    expect(inside!.badge).toBeDefined()
+    now = T0 + 7_200_000
+    const [outside] = await adapter.listModels('lobsterai')
+    expect('badge' in (outside as object)).toBe(false)
+  })
+
+  it('窗口还没开始 ⇒ 不画（窗口外不许说「限时免费」）', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [
+        { id: 'future', name: 'Future', costMultiplier: 0.05, limitedFree: true, limitedFreeActive: true, ...OUT_OF_WINDOW },
+      ],
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    // 声明了窗口 ⇒ `promotionRunningAt` 第 1 支只看窗口，**不看**快照。
+    expect('badge' in (model as object)).toBe(false)
+  })
+
+  it('起止是 null 时按「没声明时间」处理（按键存在判定会把 21/21 全判成在跑）', async () => {
+    const body = {
+      code: 0,
+      data: [{
+        modelId: 'null-window',
+        modelName: 'Null Window',
+        limitedFree: true,
+        limitedFreeActive: true,
+        limitedFreeStartAt: null,
+        limitedFreeEndAt: null,
+      }],
+    }
+    const models = parseLobsteraiModels(body)
+    expect(models[0]!.limitedFreeStartMs).toBeUndefined()
+    expect(models[0]!.limitedFreeEndMs).toBeUndefined()
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => models,
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    // 两个键都在、值都是 null ⇒ 只有快照能为真，徽标照常画（不是「全天在跑」那种假成立）。
+    expect(model!.badge).toMatchObject({ text: { zh: '限时免费' } })
+  })
+
+  it('起止是字符串时按 Date.parse 折成毫秒（客户端就是 Date.parse 它）', () => {
+    const models = parseLobsteraiModels({
+      code: 0,
+      data: [{
+        modelId: 'iso',
+        modelName: 'ISO',
+        limitedFree: true,
+        limitedFreeStartAt: '2026-11-22T15:59:59Z',
+        limitedFreeEndAt: '2026-11-23T15:59:59+08:00',
+      }],
+    })
+    expect(models[0]!.limitedFreeStartMs).toBe(Date.parse('2026-11-22T15:59:59Z'))
+    expect(models[0]!.limitedFreeEndMs).toBe(Date.parse('2026-11-23T15:59:59+08:00'))
+  })
+
+  it('读不懂的起止按「没给」处理（fail-closed，不猜格式）', () => {
+    const models = parseLobsteraiModels({
+      code: 0,
+      data: [{
+        modelId: 'junk',
+        modelName: 'Junk',
+        limitedFree: true,
+        limitedFreeActive: true,
+        limitedFreeStartAt: 'soon',
+        limitedFreeEndAt: 1794931200,
+      }],
+    })
+    expect(models[0]!.limitedFreeStartMs).toBeUndefined()
+    expect(models[0]!.limitedFreeEndMs).toBeUndefined()
+  })
+
+  it('nextPromotionEdgeAt 给出最近的活动边界（供全局播报器排程）', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [
+        { id: 'far', name: 'Far', costMultiplier: 0.05, limitedFree: true, limitedFreeActive: false, ...OUT_OF_WINDOW },
+        { id: 'near', name: 'Near', costMultiplier: 0.05, limitedFree: true, limitedFreeActive: false, ...IN_WINDOW },
+      ],
+    })
+    await adapter.listModels('lobsterai')
+    // 近的是 `near` 的终点（此刻在窗口内，下一次变化是它结束）。
+    expect(adapter.nextPromotionEdgeAt()).toBe(T0 + 3_600_000)
+  })
+
+  it('没有任何活动时 nextPromotionEdgeAt 为 undefined（不排定时器）', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [{ id: 'plain', name: 'Plain', costMultiplier: 0.05 }],
+    })
+    await adapter.listModels('lobsterai')
+    expect(adapter.nextPromotionEdgeAt()).toBeUndefined()
+  })
+})

@@ -25,6 +25,7 @@ import {
   isLobsteraiRefreshable,
   lobsteraiCredentialExpiresAtMs,
 } from '../../src/lobsterai.js'
+import { buildLobsteraiModelsUrl, parseLobsteraiModels, readLobsteraiModelArray } from '../../src/lobsterai-adapter.js'
 import { readLobsteraiCredentialsFromDshStore } from './lobsterai-credential.js'
 
 const enabled = process.env.DSH_LOBSTERAI_E2E === '1'
@@ -95,6 +96,59 @@ describeGate('LobsterAI 认证与签到状态探针（不消耗模型积分）',
         `[lobsterai-e2e] ${uid}: claimedToday=${context.claimedToday} actions=[${context.actions.join(',')}]`,
       )
     }
+  })
+
+  /**
+   * 限免四件套（`limitedFree` / `limitedFreeActive` / `limitedFreeStartAt` /
+   * `limitedFreeEndAt`）的**线上**判据（只读：一次 GET，不消耗模型积分）。
+   *
+   * ⚠️ 断言只锁「上游发了布尔 ⇒ 解析层不得读丢」这个契约。**不锁**「此刻有几条限免」：
+   * 2026-11-17 实测 21/21 全为 false/null，锁数量等于把测试绑在「上游今天没活动」上。
+   *
+   * ★ 起止的真实格式**尚未取证**（至今全 null）。本用例因此把**原始字符串**打出来 ——
+   * 上游第一次真的办活动时，这段日志就是格式证据（客户端自己 `Date.parse` 它）。
+   */
+  it('模型目录下发限免四件套（解析层不得读丢；起止格式待取证）', async () => {
+    const first = credentials[0]
+    if (first === undefined) return
+    const { version } = await new LobsteraiClientVersionResolver().resolve(LOBSTERAI)
+    const response = await fetch(buildLobsteraiModelsUrl(LOBSTERAI, first.credential, version), {
+      headers: lobsteraiModelsHeaders(first.credential, LOBSTERAI, version),
+      signal: AbortSignal.timeout(30_000),
+    })
+    expect(response.status, `HTTP ${response.status}`).toBe(200)
+    const body: unknown = await response.json()
+    const models = parseLobsteraiModels(body)
+    const byId = new Map(models.map((m) => [m.id, m]))
+    const dropped: string[] = []
+    let active = 0
+    let windowed = 0
+    for (const item of readLobsteraiModelArray(body)) {
+      if (typeof item !== 'object' || item === null) continue
+      const record = item as Record<string, unknown>
+      const id = typeof record.modelId === 'string' ? record.modelId : ''
+      const model = byId.get(id)
+      if (model === undefined) continue
+      if (typeof record.limitedFree === 'boolean' && typeof model.limitedFree !== 'boolean') dropped.push(id)
+      if (typeof record.limitedFreeActive === 'boolean' && typeof model.limitedFreeActive !== 'boolean') {
+        dropped.push(id)
+      }
+      if (model.limitedFreeActive === true) active += 1
+      if (model.limitedFreeStartMs !== undefined || model.limitedFreeEndMs !== undefined) {
+        windowed += 1
+        // eslint-disable-next-line no-console
+        console.log(
+          `[lobsterai-e2e] 限免窗口: ${id} startAt=${JSON.stringify(record.limitedFreeStartAt)} `
+          + `endAt=${JSON.stringify(record.limitedFreeEndAt)} ⇒ `
+          + `${String(model.limitedFreeStartMs)} / ${String(model.limitedFreeEndMs)}`,
+        )
+      }
+    }
+    expect(dropped, '这些条目上游发了布尔、解析层却读丢').toEqual([])
+    // eslint-disable-next-line no-console
+    console.log(
+      `[lobsterai-e2e] 限免: 目录 ${models.length} 个，此刻生效 ${active} 个，带起止 ${windowed} 个`,
+    )
   })
 
   it('可查询积分余额（profile-summary）', async () => {
