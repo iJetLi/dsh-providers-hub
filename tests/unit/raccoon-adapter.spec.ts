@@ -220,7 +220,7 @@ describe('listAllModels', () => {
     expect(all[0]?.name).toBe('GLM-5-3 · x0.75')
   })
 
-  it('远端拉取失败时回退兜底表（7 个模型，不带倍率）', async () => {
+  it('远端拉取失败时回退兜底表（8 条 = 7 个可见 + 1 条旧 id 别名，不带倍率）', async () => {
     const adapter = new RaccoonAdapter({
       credentialRef: 'RACCOON_ACCESS_TOKEN' as never,
       resolveCredential: async () => CRED,
@@ -231,7 +231,7 @@ describe('listAllModels', () => {
     // 先触发一次加载
     await adapter.listModels('raccoon')
     const all = adapter.listAllModels()
-    expect(all.length).toBe(7)
+    expect(all.length).toBe(8)
     expect(all.map((m) => m.id)).toContain('sn-glm-5-3')
   })
 })
@@ -283,6 +283,11 @@ describe('resolveModel', () => {
    *
    * ⚠️ 后果链：`inputModalities` 报 `['text']` ⇒ DSH 在 `LlmRuntime` 里把图片
    * 换成文本占位符 ⇒ **图片根本发不出去**，用户看到「模型说读不到图」。
+   *
+   * ⚠️⚠️ 2026-11-17 升级回归的回归用例（对抗审计 P0）：上游把该 id 换成
+   * `-1017` 后，**旧 id 不在远端目录里** ⇒ 走兜底表。下表若已无旧 id，
+   * `inputModalitiesFor()` 拿到 `undefined` ⇒ `['text']` ⇒ 同一条后果链。
+   * 所以 `RACCOON_FALLBACK_MODELS` **必须**保留旧 id 别名条目。
    */
   it('⚠️ tags 不含 vision 但实测能看图的模型仍声明 image（修复前恒为 text）', async () => {
     const adapter = makeAdapter({

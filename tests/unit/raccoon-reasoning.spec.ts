@@ -274,12 +274,18 @@ describe('raccoon 档位写入请求体（端到端）', () => {
   /**
    * ⚠️ 上游 2026-11-17 已把 `sn-deepseek-v4-1-flash` 换成 `-1017`（旧 id 不在目录里），
    * 但**用户会话/黑名单里可能还存着旧 id**（DSH 会把历史里选过的 id 原样交回来）。
-   * 那种引用必须**优雅降级**（不抛错、保守报 text），而不是让整条会话报错 ——
-   * 报错与否不是上游的事，是我们适配器的契约。
+   * 那种引用必须**不抛错**，且 —— 关键 —— **图片能力不许回退**。
+   *
+   * ⚠⚠ 2026-11-17 对抗审计 P0：这一格原先断言的是 `['text']`，那是把
+   * **升级带来的能力回退**写成了契约。master 上该 id 声明 `['text','image']`
+   * （真机 5/5 读对随机数字、4 色实测）；上游改 id 后我们的兜底表若删掉旧 id，
+   * `inputModalitiesFor()` 就拿到 `undefined` ⇒ `['text']` ⇒ 用户发图被
+   * 静默换成占位符。故兜底表**保留旧 id 别名**（`supportsImage: true`），
+   * 这一格改断言 `['text','image']`，并把它当**回归用例**钉住。
    */
-  it('目录已下架的旧 id（`-1017` 的基础 id）仍可 resolve（不抛错、保守 text）', async () => {
+  it('★ 目录已下架的旧 id（`-1017` 的基础 id）仍可 resolve 且**仍能看图**（升级不许静默降级）', async () => {
     const adapter = makeAdapter({})
     const resolved = await adapter.resolveModel('raccoon', 'sn-deepseek-v4-1-flash')
-    expect(resolved.inputModalities).toEqual(['text'])
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
   })
 })

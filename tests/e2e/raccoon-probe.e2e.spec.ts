@@ -51,8 +51,56 @@ const EXPECTED_VISIBLE_IDS = [
   'sn-deepseek-v4-1-flash-1017',
 ] as const
 
+/**
+ * 兜底表里**刻意保留、但不在远端目录里**的旧 id 别名（2026-11-17 起）。
+ *
+ * 上游把 `sn-deepseek-v4-1-flash` 换成了同族版本 `-1017`，旧 id 已不在远端目录。
+ * 但旧会话里存的是旧 id，删掉它 = 升级后 `resolveModel` 拿不到能力声明 ⇒
+ * 静默退化成纯文本（丢图）。所以兜底表刻意让它与新 id **并存**。
+ *
+ * ⚠️ 这里**只允许**出现「确实是旧版同名 id」的别名，不许把别的模型塞进来 ——
+ * 它是差分判据的豁免名单，膨胀就等于把漂移判据关掉。
+ */
+const LEGACY_ALIAS_IDS = ['sn-deepseek-v4-1-flash'] as const
+
 suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
   const entries = readRaccoonCredentialsFromDshStore()
+
+  /**
+   * 挑一个**真能用**的账号：逐个只读 GET `/model_catalog`，取第一个 200 的。
+   *
+   * ⚠️ 为什么不能写死 `entries[0]`（2026-11-17 实测到的真实误判）：本机两条
+   * `RACCOON_ACCOUNT_*` 中 `entries[0]` 的 access_token 已过期 ⇒ 目录端点回
+   * **401 / `code: 200003`** ⇒ 解析层对非 0 业务码返回 `[]` ⇒ 双差集报
+   * `missing` = **全部 7 条**、`hidden` = **0**、余额 = `null`。
+   * 三条红讯息都在说「目录漂了 / 过滤失效 / 余额查不到」，而真因只有一条：
+   * **这个账号的凭据失效了**。两种故障**逐字同形**，排查时会先怀疑上游。
+   *
+   * 所以这里把「凭据失效」与「目录漂移」拆开：能用的账号挑不到时，
+   * 直接报一句点名的话（而不是让后面 6 条各报一个假原因）。
+   */
+  async function pickUsableEntry(): Promise<RaccoonCredentialEntry | undefined> {
+    const rejected: string[] = []
+    for (const entry of entries) {
+      const response = await fetch(
+        `${RACCOON.apiBase}${RACCOON.llmApiPrefix}/model_catalog`,
+        { headers: raccoonHeaders(entry.credential), signal: AbortSignal.timeout(30_000) },
+      )
+      if (response.status === 200) {
+        const payload = await response.json() as { code?: unknown }
+        // 业务码为 0（或缺失，按既有口径视为 0）才算真能读；401 + 200003 会走到这里。
+        if (payload?.code === 0 || payload?.code === undefined) return entry
+        rejected.push(`${entry.ref}(code=${String(payload?.code)})`)
+      } else {
+        rejected.push(`${entry.ref}(HTTP ${response.status})`)
+      }
+    }
+    expect.fail(
+      `所有 Raccoon 凭据均已失效，无法读取目录：${rejected.join('、')}。`
+      + '这不是目录漂移 —— 请在 Jet Hub 的 Raccoon 面板重新登录一个账号。',
+    )
+    return undefined
+  }
 
   it('至少有一个已登录的 Raccoon 账号', () => {
     expect(
@@ -63,9 +111,7 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
   })
 
   it('模型目录与基线快照逐条一致（漂移即红、并点名差集）', async () => {
-    const first = entries[0]
-    expect(first).toBeDefined()
-    if (first === undefined) return
+    const first = await pickUsableEntry()
 
     const response = await fetch(
       `${RACCOON.apiBase}${RACCOON.llmApiPrefix}/model_catalog`,
@@ -89,12 +135,25 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
       + ' 与 src/raccoon-product.ts 的 RACCOON_FALLBACK_MODELS（含顺序）。',
     ).toEqual({ missing: [], extra: [] })
 
-    // 兜底表就是离线时的真相源 ⇒ 它必须与远端**逐字同序**（顺序也是判据：
+    // 兜底表就是离线时的真相源 ⇒ 远端可见的那部分必须与远端**逐字同序**（顺序也是判据：
     // 表里的顺序是「照抄远端」，重排会让排查失去可比性）。
+    //
+    // ⚠️ 但兜底表**可以**比远端多出 `LEGACY_ALIAS_IDS`（2026-11-17 起）：
+    // 上游把 `sn-deepseek-v4-1-flash` 换成 `-1017` 后，旧会话里存的旧 id 必须仍能
+    // resolve 出**带图**能力（否则升级即静默丢图）。那些别名刻意不在远端目录里，
+    // 所以这里显式把已知别名集剥掉再比，不把「兜底表 ⊋ 远端」误判成漂移。
+    const fallbackIds = RACCOON.fallbackModels.map((m) => m.id)
+    const fallbackRemotePart = fallbackIds.filter(
+      (id) => !(LEGACY_ALIAS_IDS as readonly string[]).includes(id),
+    )
     expect(
-      RACCOON.fallbackModels.map((m) => m.id),
+      fallbackRemotePart,
       '兜底表已与远端漂移：请同步 RACCOON_FALLBACK_MODELS',
     ).toEqual([...EXPECTED_VISIBLE_IDS])
+    // 别名必须仍在表里（删掉 = 旧会话丢图，见 src/raccoon-product.ts 的注释）。
+    for (const alias of LEGACY_ALIAS_IDS) {
+      expect(fallbackIds, `兜底表必须保留旧 id 别名 ${alias}（旧会话存的是它）`).toContain(alias)
+    }
 
     // ⚠️ 三条**静默失效**的守卫（都不是「数量对不对」，而是「取值域对不对」）：
     const raw = payload.data?.categories?.find((c) => c.type === 'chat')?.models ?? []
@@ -110,9 +169,31 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
       expect(typeof m['billing_effective_multiplier'], `${String(m['name'])} 的倍率不是 number`)
         .toBe('number')
     }
-    // ③ 上游若发了重复 id，`parseRaccoonModelCatalog` 不去重 ⇒ 选择器出现两行同一模型，
-    //    而差集判据对此**完全无感**（`missing`/`extra` 都是空）。
-    expect(new Set(ids).size, '上游目录出现重复 id').toBe(ids.length)
+    // ③ 上游若发了重复 **name**（= 请求 id 的来源，见上面 ①），`parseRaccoonModelCatalog`
+    //    **会**按 id 去重（`src/raccoon-auth.ts` 的 `seen` 集合）⇒ 选择器不会出现两行，
+    //    但也意味着**漂移被静默吞掉**：解析层悄悄替你选了一条，没人知道上游发了两条。
+    //    ⚠️ 所以判据必须打在**原始层** `rawNames`：拿解析后的 `ids` 去测去重是**恒真**的
+    //    （2026-11-17 审计实测：M3 让上游真发重复 id，旧断言仍 PASS —— 因为它断言的那份
+    //    `ids` 已经被解析层去重过了）。这条守的是「上游目录本身不许有重复」，不是「解析层有没有去重」。
+    const rawNames = visibleRaw.map((m) => String(m['name'] ?? ''))
+    expect(
+      new Set(rawNames).size,
+      '上游目录出现重复 name（解析层会静默去重，用户看到的是它替你挑的那一条）',
+    ).toBe(rawNames.length)
+
+    // ④ 双差集必须**两个方向**都点名（2026-11-17 审计实测：把判据退化成
+    //    `missing-only` 时，上游**新增**模型仍然全绿 —— 一个只报「少了什么」
+    //    的判据会把「多出来什么」变成静默）。这里用两条**人造输入**把方向钉死，
+    //    不依赖远端今天到底有没有多/少（否则这条用例会随上游漂移而失去意义）。
+    const driftReport = (actual: readonly string[], expected: readonly string[]) => ({
+      missing: expected.filter((id) => !actual.includes(id)),
+      extra: actual.filter((id) => !expected.includes(id)),
+    })
+    expect(driftReport(['a', 'b'], ['a', 'b']), '同集必须报干净').toEqual({ missing: [], extra: [] })
+    expect(driftReport(['a', 'b', 'c'], ['a', 'b']), '上游**新增**一条必须进 extra')
+      .toEqual({ missing: [], extra: ['c'] })
+    expect(driftReport(['a'], ['a', 'b', 'c']), '上游**下架**两条必须进 missing')
+      .toEqual({ missing: ['b', 'c'], extra: [] })
 
     // 倍率必须真的来自 billing_effective_multiplier（逐条对照实测值）
     const byId = new Map(models.map((m) => [m.id, m]))
@@ -137,7 +218,7 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
   })
 
   it('⚠️ Raccoon-Auto 不在远端目录里（它是客户端 UI 合成条目）', async () => {
-    const first = entries[0]
+    const first = await pickUsableEntry()
     if (first === undefined) return
     const response = await fetch(
       `${RACCOON.apiBase}${RACCOON.llmApiPrefix}/model_catalog`,
@@ -151,7 +232,7 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
   })
 
   it('远端目录含 3 个 visible:false 的内部模型（证明过滤真的生效）', async () => {
-    const first = entries[0]
+    const first = await pickUsableEntry()
     if (first === undefined) return
     const response = await fetch(
       `${RACCOON.apiBase}${RACCOON.llmApiPrefix}/model_catalog`,
@@ -166,7 +247,7 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
   })
 
   it('积分余额可查（只读）', async () => {
-    const first = entries[0]
+    const first = await pickUsableEntry()
     if (first === undefined) return
     const balance = await fetchRaccoonCreditBalance(RACCOON, first.credential)
     expect(balance, '余额查询失败（凭据可能已失效）').not.toBeNull()
@@ -177,7 +258,7 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
   })
 
   it('登录奖励状态可查（只读，不发写请求）', async () => {
-    const first = entries[0]
+    const first = await pickUsableEntry()
     if (first === undefined) return
     const status = await fetchRaccoonOnboardingStatus(RACCOON, first.credential)
     expect(typeof status.claimed).toBe('boolean')

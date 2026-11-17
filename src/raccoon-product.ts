@@ -316,6 +316,28 @@ const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
     // ⚠️ 同上：远端 tags 不含 `vision`，实测 5/5 读对随机数字。
     supportsImage: true,
   },
+  {
+    // ⚠⚠ **旧版 id 的别名条目，刻意保留**（2026-11-17 对抗审计抓到的升级回归）。
+    //
+    // 上游已把 `sn-deepseek-v4-1-flash` 换成同族 `-1017`，旧 id **不在远端目录里**。
+    // 但**旧会话里存的是旧 id**：`resolveModel('sn-deepseek-v4-1-flash')` 在远端目录
+    // 命中不到时回落到**本兜底表**，表里没有旧 id ⇒ 落成 unknown ⇒
+    // `inputModalitiesFor()`（`src/raccoon-adapter.ts`）只认 `supportsImage === true`
+    // ⇒ **`['text']`**，用户发图会被静默替换成文本占位符。
+    //
+    // master 上旧 id 是 `['text','image']`（本表 `supportsImage: true`，且真机 5/5
+    // 读对随机数字、4 色实测）⇒ 删掉它就是**没有取舍说明的能力回退**。
+    //
+    // 所以：新 id 走 `-1017`，旧 id 留在这里只作**离线回落的别名**。远端目录一旦
+    // 命中旧 id（理论上不会），目录优先于兜底表，行为不变。
+    // ⚠️ 不要把这条当成「上游还有这个模型」—— `e2e` 的可见集判据只看远端，
+    // 本条不会被算进 `EXPECTED_VISIBLE_IDS`。
+    id: 'sn-deepseek-v4-1-flash',
+    name: 'DeepSeek-V4.1-Flash · x0.25',
+    contextWindow: 1_000_000,
+    maxTokens: 65_536,
+    supportsImage: true,
+  },
 ]
 
 /**

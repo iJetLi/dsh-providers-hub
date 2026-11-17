@@ -1035,7 +1035,7 @@ fallback 组（`raccoon-4eb26a` / `raccoon-0c119c` / `raccoon-ecc5fd`），
 **不点名**是哪个漂了，得自己再跑一遍探针才知道。
 
 **当期实测（`GET /api/web/llm/v2/model_catalog`，10 个 chat 条目 / 7 个 visible）**：
-上游新增 `sn-qwen4-max`（`ability_level 3`、`context_window 1_000_000`、
+上游新增 `sn-qwen4-max`（`ability_level 0`（**实测值**；2026-11-17 首版笔误写成 3，审计核对远端 payload 更正）、`context_window 1_000_000`、
 `max_tokens 100_000`（网关硬限 65_536，见 IKS1L5）、`tags` 含 `vision/reasoning`），
 并把 `sn-deepseek-v4-1-flash` **换成了同族版本 `sn-deepseek-v4-1-flash-1017`**
 （旧基础 id 已不在目录里 —— 与本文 §11 记的 2026-10-21「远端上架 `-1017`」是

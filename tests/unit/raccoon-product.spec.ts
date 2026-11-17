@@ -37,7 +37,11 @@ describe('RACCOON 产品配置', () => {
 })
 
 describe('兜底模型表', () => {
-  it('恰好 7 个可见模型，顺序照抄远端', () => {
+  it('7 个可见模型（顺序照抄远端）+ 1 条旧 id 别名，别名不计入远端可见集', () => {
+    // ⚠️ 别名条目（`sn-deepseek-v4-1-flash`）**刻意**留在表里：旧会话存的旧 id 在
+    // 远端目录命中不到时回落本表，删掉它会让 `inputModalities` 从 ['text','image']
+    // 静默退回 ['text']（2026-11-17 对抗审计抓到的升级回归）。
+    // 它**不是**上游的可见模型 ⇒ 单独断言，绝不混进 EXPECTED_VISIBLE_IDS。
     expect(RACCOON.fallbackModels.map((m) => m.id)).toEqual([
       'sn-sensenova-6-8-flash',
       'sn-sensenova-6-8-flash-lite',
@@ -46,7 +50,18 @@ describe('兜底模型表', () => {
       'sn-kimi-k3-1-pro',
       'sn-glm-5-3-flash',
       'sn-deepseek-v4-1-flash-1017',
+      'sn-deepseek-v4-1-flash',
     ])
+  })
+
+  it('★ 旧 id 别名必须保留且能看图（升级不许静默降级，2026-11-17 对抗审计 P0）', () => {
+    const legacy = RACCOON.fallbackModels.find((m) => m.id === 'sn-deepseek-v4-1-flash')
+    expect(legacy, '旧 id sn-deepseek-v4-1-flash 必须留在兜底表里 —— 旧会话存的是它').toBeDefined()
+    expect(legacy?.supportsImage, '旧 id 必须仍声明 supportsImage: true（master 上就是 true）').toBe(true)
+    // 新 id 同时在，且两条互不覆盖
+    const current = RACCOON.fallbackModels.find((m) => m.id === 'sn-deepseek-v4-1-flash-1017')
+    expect(current?.supportsImage).toBe(true)
+    expect(current?.id).not.toBe(legacy?.id)
   })
 
   it('不包含 Raccoon-Auto（它是客户端 UI 合成条目，不是远端模型）', () => {
