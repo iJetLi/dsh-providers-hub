@@ -1044,6 +1044,23 @@ trae（模型目录每行 `activity_discount.data.off_peak` 的**闲时窗口**�
 「限时免费 + 订阅优先」（两个数组都在），纯 CLI 身份**两个数组都不在**（data 只剩 5 个键）。
 所以「目录里读不到活动」可能是身份问题而不是上游问题 —— 排查时先对照官方客户端。
 
+> ⚠️⚠️ **占住 single 槽的三条代价（PR #110 对抗审计 P1-1，如实登记）**：因为本插件替**所有**
+> provider 画这一行（不只自家），凡是宿主自己会做、而我们在槽位里重画一遍的细节，都可能丢。
+> 1. **名字与徽标的先后必须跟宿主走**：宿主 `placement` 两处排法**相反** —— `trigger`
+>    （输入框上方那一行）**徽标在名字前**，`option`（下拉候选行）**徽标在名字后**。我们已按
+>    `placement` 分支（`orderBadgeParts`）；`placement` 缺省时按 `option` 排。
+> 2. **长名的省略行为由宿主自己做，重画会丢**：宿主对超长模型名有省略（`badgedName` 那套），
+>    我们自造的 `dim-jh-modelLabel*` 类没有再实现它 ⇒ 极长的名字在槽位里可能不被省略。
+> 3. **本地化是两套实现**：`resolveHostBadgeText` 与宿主的 `resolveText` 各写一遍（都按浏览器语言
+>    选 en/zh）。这是本仓「同一判据只留一份实现」红线的**已知例外** —— 宿主的实现不在公开
+>    导出里、本机 `node_modules` 也没有 `@deepseek-ai/dsh-client-ui-model-selection`（只有
+>    `cordis`/`cosmokit`/`dsh-agent`/`dsh-commands`/`dsh-credentials`/`dsh-llm`/`schemastery`），
+>    无法 import。将来若该包进入依赖，应改为复用宿主实现。
+>
+> 这三条的**净收益**仍是正的：不占槽位，兄弟插件的徽标在 single 槽上会被自己的 renderer
+> 挡掉（`entriesOfSlot()[0]` 命中即 return，不跑 fallback）⇒ 别人的徽标**根本画不出来**。
+> 「徽标排在名字前后 / 长名省略 / 本地化」这三处退让，换来的是「别人的徽标不被抹掉」。
+
 窗口开关的那一刻由插件**主动播报**一次目录变更（本地事件，零上游请求），
 因此徽标不必等 20 分钟的目录刷新周期。
 

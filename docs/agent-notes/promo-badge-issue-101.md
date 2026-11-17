@@ -565,6 +565,57 @@ A3 恒空（3 红）、A4 剔掉 dailyUnusable（1 红）。
 - 初版三条（失败清快照 / 不记时间 / 去单飞）全绿，根因是替身 React 把
   `useEffect` 写成空函数（见上面的方法论教训）。
 
+#### 19.1 PR #110 双审计返工（2026-11-17）：三条净损失 + 两处零覆盖
+
+**对抗审计 P1-1 —— 占 single 槽的「净损失 3 条」：**
+
+1. **名字/徽标先后必须跟 `placement` 走**（已修）。宿主 `placement` 两处排法**相反**：
+   `trigger`（composer 行）徽标在名字**前**、`option`（菜单候选行）徽标在名字**后**。
+   修前腿 2 恒 `name→chip` ⇒ 外来渠道在 trigger 行从「名前」漂到「名后」= 视觉回归。
+   修法是 `plugin-src/client/model-label.js` 的 `orderBadgeParts(placement, nameNode, chipNode)`，
+   `trigger` 返 `[chip, name]`、否则 `[name, chip]`；`placement` 缺省按 `option`。
+   **守卫**：`model-label-promo.spec.ts` 两条（`placement:'trigger'` 断言第一子节点是 chip、
+   `placement:'option'` 断言第一子节点是 name）。⚠️ 修前该分支**零用例**（全部 20 条都是 `'option'`）。
+2. **长名省略由宿主做，重画会丢**（如实登记，不修）。宿主对超长模型名有省略（`badgedName` 那套），
+   自造的 `dim-jh-modelLabel*` 没再实现 ⇒ 极长名字可能不被省略。
+3. **本地化是两套实现**（如实登记）。`resolveHostBadgeText` vs 宿主 `resolveText` 各写一遍。
+   这是「同一判据只留一份实现」红线的**已知例外**：宿主实现不在公开导出、本机也没有
+   `@deepseek-ai/dsh-client-ui-model-selection` 包（只有 cordis/cosmokit/dsh-agent/dsh-commands/
+   dsh-credentials/dsh-llm/schemastery）⇒ 无法 import。将来该包进入依赖应改为复用。
+
+**正向审计 P2 —— `src/promotion-tooltip.ts` 两腿零覆盖（已补）：**
+
+- `formatPromotionDay` 的**时区腿**（`:101-108`）：`validUntil` 是本机时区日历日。删掉 `timeZone`
+  （或改 UTC）会让 LM/CN 用户看到差一天的「截止日」。**无牙实测**：原 5 套 spec 对该变异全绿。
+- `promotionLifetimeText` 的 **`validUntil - 1` 端点腿**（`:127-129`）：上游给的是「这一天含在内」
+  ⇒ 减 1ms 落到前一日末尾。删掉 `- 1` 会把截止日**晚一天**。原同样零覆盖。
+- 修法：新建 `tests/unit/promotion-tooltip.spec.ts`（6 条），并在 `tsconfig.tests.json` 的 `include`
+  加这一份（它断言 `ModelPromotion['schedule']` 的形状与返回类型，esbuild 看不见）。
+- **变异**：T1 删 `- 1`（红 3 条）、T2 时区腿改 UTC（红 2 条）、T3 时区腿整段删（红 5 条）、
+  T4 `–` 改 `-`（红 1 条）⇒ 4/4 有牙。
+
+**对抗 P2-2 —— 选择器 5 条无牙变异（已补）：** M10 排序升序 / M11 同 priority tie /
+M14 `start===end` / M15 `weekdays:[]` / M6 1ms 窗口。补 3 条：两条活动同开+同 priority
+（稳定排序赢家=输入顺序第一个，两向锁住 ⇒ 比较方向反了会红）、priority 不同高的赢、
+空时段与空 weekdays 都不算在跑。
+
+⚠️ **我的假说错一次（如实记）**：第一版同 priority 用例断言两向都是 `'a'`，实测 `[b,a]` 得 `'b'`
+—— `sortPromotions` 是**稳定排序**，同优先级同来源返 0、不按 id 兜底。已改成「赢家=输入顺序第一个」。
+
+⚠️⚠️ **M15 追踪全过程（一条「无牙变异」的完整解剖，值得记住）**：
+1. 第一版用例经 `parseTencentPromotions` 造候选 ⇒ 无牙。根因：**`parseDailyWindows` 只回填
+   `{ start, end }`、根本不搬 `weekdays` 字段**（见它函数体），所以经解析器造的候选**永远没有
+   `weekdays`** ⇒ 打不到 `withinDailyWindows` 的星期闸门。
+2. 第二版改成**直接构造 `ModelPromotion`**（`weekdays: []`）+ 断言 `promotionWithinDailyWindow`，
+   仍无牙。根因：空数组时 `days.includes(today)` **本来就返回 false**，所以
+   `if (days.length === 0) return false` 那行只是「提前退出」、**行为上冗余**（等价变异）。
+3. 结论：真正**承重**的是 `if (!days.includes(clock.isoWeekday)) return false`。改成
+   **对照对**（`[2]`=今天 ⇒ true / `[3]` ⇒ false / `[]` ⇒ false / `[0,8,1.5]` 全非法 ⇒ false /
+   缺席 ⇒ true）后，变异承重行 ⇒ **RED（4 tests）**；变异那行冗余的 `days.length === 0` ⇒
+   **GREEN（等价）**，如实登记、**不为它编用例**。
+4. 教训（本仓反复踩）：**变异全绿先问「判据在断言什么」，其次问「被测那行是否承重」** ——
+   这不只是判据问题，也可能是**代码里有两行同义守卫、只有一行承重**。
+
 ### 20. 无头出图与布局闸门：tools/model-label-shot.ts + measure-model-label.mjs
 
 照 dsh-connect-workbuddy 的 `tools/section-shot.tsx` 那条路（jsdom 不做布局,

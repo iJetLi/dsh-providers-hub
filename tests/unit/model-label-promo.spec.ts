@@ -330,6 +330,39 @@ describe('ModelLabel：外来渠道的行必须保住宿主徽标（腿 2）', (
     expect(m.hostBadgeToneOf('warning')).toBe('warning')
   })
 
+  it('★★ placement=trigger ⇒ 徽标在名字**前面**（宿主 trigger 行的排法，PR #110 审计 P1-1）', async () => {
+    vi.stubGlobal('navigator', { language: 'en-US' })
+    const m = await registerWith({})
+    created.length = 0
+    const root = m.ModelLabel({
+      provider: { id: 'some-other-plugin', name: 'Other' },
+      model: { id: 'x1', name: 'Some Model', badge: { text: { en: 'Free now', zh: '限时免费' }, tone: 'success' } },
+      placement: 'trigger',
+      rpcCall: countingRpc(),
+    }) as unknown as Node
+    // 直接断言**子节点顺序**：第一枚是 chip、第二枚是名字。
+    const kids = (root.children ?? []) as Node[]
+    expect(kids).toHaveLength(2)
+    expect(kids[0]!.props?.className).toBe('dim-jh-modelPromoChip')
+    expect(kids[1]!.props?.className).toBe('dim-jh-modelLabelName')
+    expect(kids[1]!.children.join('')).toBe('Some Model')
+  })
+
+  it('★★ placement=option ⇒ 名字在徽标前面（下拉候选行的排法，与上一条成对）', async () => {
+    vi.stubGlobal('navigator', { language: 'en-US' })
+    const m = await registerWith({})
+    created.length = 0
+    const root = m.ModelLabel({
+      provider: { id: 'some-other-plugin', name: 'Other' },
+      model: { id: 'x1', name: 'Some Model', badge: { text: { en: 'Free now', zh: '限时免费' }, tone: 'success' } },
+      placement: 'option',
+      rpcCall: countingRpc(),
+    }) as unknown as Node
+    const kids = (root.children ?? []) as Node[]
+    expect(kids[0]!.props?.className).toBe('dim-jh-modelLabelName')
+    expect(kids[1]!.props?.className).toBe('dim-jh-modelPromoChip')
+  })
+
   it('★★ 无 badge 的行 = 裸名字，且不写 title', async () => {
     const m = await registerWith({})
     created.length = 0

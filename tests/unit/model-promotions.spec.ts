@@ -39,6 +39,7 @@ import {
   promotionRunningAt,
   promotionStandingAt,
   promotionTone,
+  promotionWithinDailyWindow,
   qoderPromotionCandidate,
   selectPromotionAt,
   sortPromotions,
@@ -511,6 +512,58 @@ describe('selectPromotionAt：running 与 standing 的顺序', () => {
     // 白天那条**没写 activeOnly** ⇒ 徽标全天可挂（上游用「一条带夜间折扣、
     // 一条只带角标」表达「全天挂着同一个徽标、折扣只在夜里生效」）。
     expect(promotionStandingAt(parsed[1]!, NIGHT_SH)).toBe(true)
+  })
+
+  it('★★★ 两条活动同时开 + priority 相同 ⇒ 选择器必须给出**确定且稳定**的赢家（不能随数组顺序抖）', () => {
+    // 对抗审计 P2-2：M11（同分 tie）无牙 —— 原来没有用例让两条**都 running** 的活动打到
+    // sortPromotions 的 tie 分支。这里两条都在窗口内、priority 都是 100。
+    const a = { id: 'a', badge: { label: 'A 活动' }, modelIds: ['m'], priority: 100,
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '00:00', end: '24:00' }] } }
+    const b = { id: 'b', badge: { label: 'B 活动' }, modelIds: ['m'], priority: 100,
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '00:00', end: '24:00' }] } }
+    // sortPromotions 是**稳定排序**、同优先级同来源时返回 0（不按 id 兜底）⇒
+    // 赢家 = 输入顺序里的第一个。断言这一点即可：若比较方向被写反（M10/M11），
+    // 结果会变；两向都锁住说明「确定性由输入顺序决定，不是随机」。
+    expect(selectPromotionAt(parseTencentPromotions([a, b], []), NIGHT_SH)?.id).toBe('a')
+    expect(selectPromotionAt(parseTencentPromotions([b, a], []), NIGHT_SH)?.id).toBe('b')
+  })
+
+  it('★★ 两条活动同时开、priority 不同 ⇒ 高的赢；同时把「running 优先于 standing」再钉一遍', () => {
+    // 覆盖 M10（sort 升序变异）：若比较方向反过来，priority 低的会先出。
+    const high = { id: 'high', badge: { label: '高优先' }, modelIds: ['m'], priority: 300,
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '00:00', end: '24:00' }] } }
+    const low = { id: 'low', badge: { label: '低优先' }, modelIds: ['m'], priority: 50,
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '00:00', end: '24:00' }] } }
+    expect(selectPromotionAt(parseTencentPromotions([low, high], []), NIGHT_SH)?.id).toBe('high')
+  })
+
+  it('★ 空时段（start === end）不算在跑（M14）', () => {
+    const empty = { id: 'e', badge: { label: '空时段' }, modelIds: ['m'], priority: 100,
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '09:00', end: '09:00' }] } }
+    expect(selectPromotionAt([empty as never], NIGHT_SH)).toBeUndefined()
+  })
+
+  it('★★ 星期闸门：weekdays 声明了就必须命中今天，空数组/全非法一律不成立（M15 对照组）', () => {
+    // parseDailyWindows 只回填 { start, end }、**不搬 weekdays 字段**（见它函数体），
+    // 所以经 parseTencentPromotions 造的候选根本没有 weekdays ⇒ 走那条路测不到
+    // withinDailyWindows 的星期闸门。这里直接构造。
+    // ⚠️ 断言必须打在 promotionWithinDailyWindow 上，**不能**打 selectPromotionAt：
+    // 后者对这条输入无论星期闸门开不开都返回 undefined（全天窗口即便「在跑」，
+    // promotionStandingAt 也会因 standingEligible=false 挡掉）⇒ 变异不可见。
+    // ⚠️ 必须用**对照对**（命中 vs 不命中），单靠「空数组 ⇒ false」抓不住
+    // `days.length === 0 ⇒ false` 那行：空数组时 `days.includes(today)` 本就 false，
+    // 那行只是提前退出、行为上冗余（本用例第一版就因此对 M15 变异无牙）。
+    const mk = (weekdays?: number[]) => ({
+      id: 'n', source: 'promotion' as const, modelIds: ['m'],
+      badge: { label: '星期' }, priority: 100, timeDeclared: true,
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '00:00', end: '24:00', ...weekdays === undefined ? {} : { weekdays } }] },
+    })
+    // 2026-11-17 是周二（isoWeekday=2）
+    expect(promotionWithinDailyWindow(mk([2]), NIGHT_SH)).toBe(true)      // 命中今天 → 成立
+    expect(promotionWithinDailyWindow(mk([3]), NIGHT_SH)).toBe(false)     // 只有周三 → 不成立
+    expect(promotionWithinDailyWindow(mk([]), NIGHT_SH)).toBe(false)      // 空数组 → 不成立（fail-closed）
+    expect(promotionWithinDailyWindow(mk([0, 8, 1.5]), NIGHT_SH)).toBe(false) // 全非法 → 不成立
+    expect(promotionWithinDailyWindow(mk(undefined), NIGHT_SH)).toBe(true)    // 缺席 = 每天 → 成立
   })
 
   it('空候选与 undefined 都不抛错（下游对「没有活动」必须拿到 undefined 而不是异常）', () => {

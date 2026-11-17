@@ -273,9 +273,25 @@ export function ModelLabel(props) {
     ? undefined
     : resolveHostBadgeText(badge.text);
   if (hostText === undefined) return React.createElement('span', null, String(model.name ?? ''));
-  return React.createElement('span', { className: 'dim-jh-modelLabel' },
+  return React.createElement('span', { className: 'dim-jh-modelLabel' }, ...orderBadgeParts(props.placement,
     React.createElement('span', { className: 'dim-jh-modelLabelName' }, String(model.name ?? '')),
-    React.createElement('span', { className: 'dim-jh-modelPromoChip', 'data-tone': hostBadgeToneOf(badge.tone), title: hostText }, hostText));
+    React.createElement('span', { className: 'dim-jh-modelPromoChip', 'data-tone': hostBadgeToneOf(badge.tone), title: hostText }, hostText)));
+}
+
+/**
+ * 名字与徽标的**先后顺序**必须跟宿主走（PR #110 对抗审计 P1-1）。
+ *
+ * ⚠️ 宿主 `@deepseek-ai/dsh-client-ui-model-selection` 在两处的排法**相反**：
+ * · `placement: 'trigger'`（输入框上方那一行）⇒ **徽标在名字前面**；
+ * · `placement: 'option'`（下拉菜单里的候选行）⇒ **徽标在名字后面**。
+ * 本插件占的是 single 槽、替**全部** provider 画这一行（不只自家），所以若一律
+ * 「名字→徽标」，外来渠道在 trigger 行就会从「名前」漂到「名后」= 视觉回归。
+ * `placement` 缺省（宿主老版本 / 替身）⇒ 按 `'option'` 排，与历史行为一致。
+ *
+ * @returns 顺序排好的 children 数组。
+ */
+export function orderBadgeParts(placement, nameNode, chipNode) {
+  return placement === 'trigger' ? [chipNode, nameNode] : [nameNode, chipNode];
 }
 
 /**
