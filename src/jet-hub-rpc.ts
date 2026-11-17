@@ -11844,13 +11844,18 @@ function registerJetHubEndpoints(
         return { ok: true, value }
       }
 
-      // ── 「ZCode 会话负载均衡」总开关（Jet Hub 页头的开关）──
+      // ── 「会话负载均衡」总开关（Jet Hub 面板页头的开关）──
       //
-      // 语义：**开** = ZCode 多账号按 DSH sessionId 做会话亲和（同一会话**优先**
+      // 语义：**开** = 多账号按 DSH sessionId 做会话亲和（同一会话**优先**
       // 落同一账号；账号今日负载达阈值后会被沉底、正在跑的会话会迁移一次），
       // 没有 sessionId 的请求随机分摊；**关** = 回到「手动顺序首个可用账号」的
-      // 既有语义。消费方是 `credential-resolver.ts` 与
-      // `zcode-adapter.ts` 的选号路径（每次现读 `pool.sessionBalanceEnabled()`）。
+      // 既有语义。
+      //
+      // ⚠️ 这一个布尔是**全渠道共用的总闸**，但读它的目前只有两家：
+      // `zcode`（经 `credential-resolver.ts` / `zcode-adapter.ts` 的选号路径）
+      // 与 `marvis`（经 `src/index.ts` 的 `slots()` 排序，槽制路径）。其余
+      // provider 不读 ⇒ 面板也不给它们渲染这个开关（见
+      // `plugin-src/client/jet-hub.js` 的 `supportsSessionBalance`）。
       case 'sessionBalance.getEnabled': {
         const value: RpcSessionBalanceGetEnabledResponse = { enabled: pool.sessionBalanceEnabled() }
         return { ok: true, value }
@@ -11867,8 +11872,8 @@ function registerJetHubEndpoints(
         // 不刷新任何缓存：选号路径**每次现读** `pool.sessionBalanceEnabled()`，
         // 写完即生效（没有需要失效的派生状态）。
         ctx.logger.info(
-          `[jet-hub] ${req.enabled ? '打开' : '关闭'}ZCode 会话负载均衡`
-          + `${req.enabled ? '' : '（ZCode 回到手动顺序优先选号）'}`,
+          `[jet-hub] ${req.enabled ? '打开' : '关闭'}会话负载均衡（ZCode / Marvis）`
+          + `${req.enabled ? '' : '（两家都回到手动顺序优先选号）'}`,
         )
         const value: RpcSessionBalanceSetEnabledResponse = { enabled: pool.sessionBalanceEnabled() }
         return { ok: true, value }

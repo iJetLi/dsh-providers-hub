@@ -36,12 +36,17 @@ function makeAdapter(options: {
   markLimited?: (slotId: string, modelId: string, resetAtMs: number) => void
   warn?: (message: string) => void
   readImage?: (ref: unknown) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
+  /** 记录 `slots()` 的入参（断言 sessionId 有没有透传下来）。 */
+  slotsCalls?: Array<{ modelId?: string; sessionId?: string }>
 } = {}): MarvisAdapter {
   const slots = options.slots ?? [{ id: 'marvis-a1', credential: CREDENTIAL }]
   return new MarvisAdapter({
     product: MARVIS,
     accountPool: options.pool ?? makePool(),
-    slots: async () => slots,
+    slots: async (modelId?: string, sessionId?: string) => {
+      options.slotsCalls?.push({ modelId, sessionId })
+      return slots
+    },
     ...(options.markLimited === undefined ? {} : { markLimited: options.markLimited }),
     ...(options.warn === undefined ? {} : { warn: options.warn }),
     ...(options.readImage === undefined ? {} : { readImage: options.readImage }),
@@ -452,6 +457,28 @@ describe('★ 错误分类与槽轮换', () => {
       code = (error as { code?: string }).code
     }
     expect(code).toBe('MISSING_CREDENTIAL')
+  })
+
+  it('★★ 推理路径必须把 options.sessionId 透传给 slots()（会话亲和的唯一输入）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseBody('ok'), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })))
+    const slotsCalls: Array<{ modelId?: string; sessionId?: string }> = []
+    const adapter = makeAdapter({ slotsCalls })
+    for await (const chunk of adapter.stream({
+      model: 'deepseek-v4-pro-external',
+      messages: [{ role: 'user', content: 'hi' }],
+      sessionId: 'session-abc',
+    } as never)) void chunk
+    // 目录路径刻意不传（slots 只该被推理路径调用一次）。
+    expect(slotsCalls).toEqual([{ modelId: 'deepseek-v4-pro-external', sessionId: 'session-abc' }])
+  })
+
+  it('★★ 目录路径不得传 sessionId（目录与排序无关，传了会让缓存键漂移）', async () => {
+    const slotsCalls: Array<{ modelId?: string; sessionId?: string }> = []
+    await makeAdapter({ slotsCalls }).listModels(MARVIS.id)
+    expect(slotsCalls).toEqual([{ modelId: undefined, sessionId: undefined }])
   })
 
   it('★★ 4100403（HTTP 401）⇒ AUTH，且不写限流标记', async () => {

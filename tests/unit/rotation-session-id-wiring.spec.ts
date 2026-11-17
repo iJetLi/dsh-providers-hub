@@ -93,3 +93,42 @@ describe('autoclaw（内部私有转发，形态不同）', () => {
     expect(source).toMatch(/this\.resolveCredential\(model,\s*options\.sessionId\)/)
   })
 })
+
+/**
+ * 槽制适配器（`options.slots()` 返回**完整有序序列**，不是单凭据）的同一类守卫。
+ *
+ * 为什么单列一段：上面那张 `ADAPTERS` 表守的是 `resolveCredential`，槽制渠道
+ * 压根没有那个选项 ⇒ **结构性看不见**。而槽制同样会踩「签名窄于实现」：
+ * `slots: (modelId?) => …` 时 `tsc` 不报错，接线层拿不到 sessionId，
+ * 「同一会话优先同一个号」**静默失效且零报错**。
+ *
+ * ⚠️ 只登记**真正消费 sessionId**的槽制渠道。modelscope 也是槽制但目前不做
+ * 会话亲和（`slots(modelId)` 一参），不在此表；它若要接均衡，必须连同签名一起进来。
+ */
+const SLOT_ADAPTERS = ['marvis-adapter.ts']
+
+describe('槽制适配器必须把 sessionId 透传给 slots()', () => {
+  for (const file of SLOT_ADAPTERS) {
+    describe(file, () => {
+      it('★ `slots` 的类型签名含第二参 `sessionId`', () => {
+        const source = read(file)
+        expect(source).toMatch(
+          /slots:\s*\(\s*modelId\?\s*:\s*string\s*,\s*sessionId\?\s*:\s*string\s*\)/,
+        )
+      })
+
+      it('★ 推理路径的调用点传了 `options.sessionId`', () => {
+        const source = read(file)
+        // 裸的 `slots(options.model)` 一律不许出现（少传第二参 = 亲和失效）。
+        expect(source.match(/slots\(\s*options\.model\s*\)/g) ?? []).toEqual([])
+        expect(source).toMatch(/slots\(options\.model,\s*options\.sessionId\)/)
+      })
+
+      it('★ 目录路径仍然不传（`this.options.slots()` 裸调用必须恰好一处）', () => {
+        const source = read(file)
+        // 只数真实调用（`this.options.slots()`），不数注释里的 `slots()` 写法。
+        expect(source.match(/this\.options\.slots\(\s*\)/g) ?? []).toHaveLength(1)
+      })
+    })
+  }
+})

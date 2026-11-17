@@ -4523,19 +4523,23 @@ function ProviderPanel({
   // 宿主侧那张手抄的平行清单已在 Task 4 删除，改由「是否提供 credits.afterClaim」判定），
   // 避免按钮渲染了却被服务端挡回 bad-request。
   const supportsGrowthTasks = GROWTH_TASK_PROVIDERS.has(provider);
-  // 「负载均衡」（会话亲和 + 随机分摊）开关：**只对 ZCode 渲染**（2026-10-31
-  // 用户要求）。会话亲和目前只有 zcode 一家接入（`accountSelection:
-  // 'session-balance'` 只装配在 zcode 上），其余渠道渲染了也是摆设 ——
-  // 与「订阅额度只对 Cline 渲染」同一门控取向。
-  const supportsSessionBalance = provider === 'zcode';
+  // 「负载均衡」（会话亲和 + 溢出分散）开关：**只对已接入会话分散的渠道渲染**
+  // （zcode 2026-10-31；marvis 2026-11-17 用户报障「十个号不会自动切换」）。
+  // 其余渠道渲染了也是摆设 —— 与「订阅额度只对 Cline 渲染」同一门控取向。
+  //
+  // ⚠️ marvis 的接法与 zcode **不同**（它是槽制，走池的
+  // `orderAccountsForSession` 而不是 `accountSelection: 'session-balance'`），
+  // 但开关语义与宿主读的仍是**同一个** `sessionBalanceEnabled()` 总闸 ⇒
+  // 面板上这两家共用一个开关，不要给 marvis 再开一个独立布尔。
+  const supportsSessionBalance = provider === 'zcode' || provider === 'marvis';
 
   /**
-   * 「负载均衡」开关（仅 ZCode 面板渲染）。
+   * 「负载均衡」开关（仅支持会话分散的渠道渲染）。
    *
-   * 开 = ZCode 多账号按 DSH sessionId 做会话亲和（同一会话**优先**落同一账号，
+   * 开 = 多账号按 DSH sessionId 做会话亲和（同一会话**优先**落同一账号，
    *      账号今日请求数达阈值后会被沉底、正在跑的会话会迁移一次 —— 见
    *      `src/session-balance.ts` 的 `rankAccountsBySessionWithOverflow`），
-   *      没有 sessionId 的请求随机分摊；
+   *      没有 sessionId 的请求随机分摊（zcode）/ 保持池序（marvis 槽制）；
    * 关 = 回到「手动顺序首个可用账号」的既有语义（会话不再固定账号）。
    *
    * ⚠️ 与页头那些开关同取向：**不做乐观更新**，以后端回传为准。
@@ -6998,9 +7002,9 @@ function ProviderPanel({
         provider === 'qoder' || provider === 'qodercn'
           ? React.createElement(QoderTrafficGuardToggle, { key: provider, provider, rpcCall })
           : null,
-        // 「负载均衡」开关：**只对 ZCode 面板渲染**（supportsSessionBalance）。
-        // 与页头开关同款 Switch 形态；挂在按钮行（面板页头最右），与
-        // 「一键领取积分 / 重测所有」同一排。
+        // 「负载均衡」开关：**只对支持会话分散的渠道渲染**（supportsSessionBalance：
+        // zcode / marvis）。与页头开关同款 Switch 形态；挂在按钮行（面板页头最右），
+        // 与「一键领取积分 / 重测所有」同一排。
         supportsSessionBalance
           ? React.createElement('label', {
               className: 'dim-jh-nativeSearch',

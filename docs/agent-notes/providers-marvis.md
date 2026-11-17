@@ -219,6 +219,44 @@ token 与 guid 绑定：共用本机 guid 会让第二个号**把第一个号顶
   `400 'type' is a required property - 'tools.0'`，而 DSH 每轮都带工具 ⇒「一次都没请求成功」，
   且反代把它当上游不可用**静默跳过**。这是本仓 2026-10-07 modelscope 的同款事故。
 
+### 6.1 账号池的会话分散（2026-11-17 用户报障「十个账号不会自动切换」）
+
+**症状**：池里 11 个 marvis 号，`~/.dsh/jet-hub/token-ledger.json` 当天**只有第 1 个号**有记录
+（75 req / 3 err），其余 10 个 `requests` 恒 0。用户看到的是「只有第一个号在干活，另十个纯备份」。
+
+**根因不是缺陷，是槽制语义**：适配器每一轮取的是
+`slots.find(s => !tried.has(s.id))`（`src/marvis-adapter.ts`），即「池序第一个没试过的号」
+—— 只有失败才轮到下一个。而 `slots()` 又恒按账号池手动顺序返回 ⇒ 第一个健康号永远赢。
+这在单号池里完全正确，在多号池里就等于「1 主 10 备」。
+
+**修法**（`slots` 签名 + 接线层排序，**不动适配器的换号逻辑**）：
+
+| 落点 | 改了什么 |
+|---|---|
+| `src/marvis-adapter.ts` | `slots: (modelId?, sessionId?) => …`；`stream()` 调用点传 `options.sessionId`；**目录路径仍然裸调 `slots()`**（目录与排序无关） |
+| `src/account-pool.ts` | 新增 `orderAccountsForSession(provider, accounts, sessionId)` —— **纯排序**，复用 `rankAccountsBySessionWithOverflow` + `sessionLoadIndex` 的既有兜底，不取凭据、不过滤 |
+| `src/index.ts` | marvis 装配块的 `slots()` 末尾：`sessionId` 非空 **且** `pool.sessionBalanceEnabled()` 为真时才 `orderAccountsForSession`，否则**原样返回池序** |
+| `plugin-src/client/jet-hub.js` | `supportsSessionBalance = provider === 'zcode' \|\| provider === 'marvis'`（面板开关放开到 marvis） |
+
+排序语义（与 zcode 的 `accountSelection: 'session-balance'` **同一个纯函数**）：
+
+- 有 `sessionId` ⇒ rendezvous 哈希把同一会话**稳定映射**到同一个号（会话亲和），不同会话分散；
+- 某号今日请求数达阈值（env `DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS`，缺省 300）⇒ 整组沉底，
+  **新会话**落到还有余量的号上；正在跑的会话越过阈值时会**迁移一次**（这正是把长会话摊开的手段，
+  不是 bug）；
+- 账本读取抛错 ⇒ 退化为纯哈希亲和（**绝不反噬推理**）；
+- 无 `sessionId`（本地 OpenAI 网关进来的请求，`toGenerateOptions` 不设它）⇒ **原样池序，不洗牌**
+  —— 槽制的「第一个」被当作稳定性保证，随机化留给调用方；
+- 面板开关关 ⇒ 原样池序（= 改造前逐字节同路径），这就是开关文案「关闭后回到「手动顺序优先」」的实现。
+
+⚠️ **不要**改走 `createCredentialResolver({ accountSelection: 'session-balance' })`：
+`tests/unit/session-balance-wiring.spec.ts` 有硬守卫「`accountSelection` 装配点全局唯一且在
+ZCODE 配置块内」，且槽制需要的是**完整有序序列**（换号重发用），不是「取第一个凭据」。
+
+⚠️ **签名窄于实现是静默失效**：`slots: (modelId?) => …` 时 `tsc` **不报错**（函数参数逆变），
+表现是「面板选了不生效且零报错」。守卫在 `tests/unit/rotation-session-id-wiring.spec.ts` 的
+「槽制适配器」段（`SLOT_ADAPTERS`），行为侧在 `tests/unit/marvis-session-balance.spec.ts`。
+
 ## 7. 缺陷登记
 
 | # | 缺陷 | 状态 |
@@ -236,6 +274,8 @@ token 与 guid 绑定：共用本机 guid 会让第二个号**把第一个号顶
 | 11 | 额度接口无日期字段 ⇒ 曾按「明天 0 点」编造到期 | 已修（`expiryUnknown: true`） |
 | 12 | 目录里声明 `maxTokens` / `reasoning.efforts` 的冲动 | 未采纳（评审 M4 + 产品裁定，见上） |
 | 13 | 该渠道在 README「支持的渠道」表里**长期缺席**（合并提交漏更新文档） | 已修（`1a647fe` 补齐 18→29） |
+| 14 | 11 个号里只有第 1 个在干活（另 10 个是纯备份，账本可证） | 已修（会话分散，见 §6.1） |
+| 15 | 上游偶发 `400 3000101 invalid parameter`（同一报文重发即成功）曾直接终止会话 | 已修（换号重发；确定性 400 仍直抛） |
 
 ## 8. 复现与验证
 
@@ -243,7 +283,13 @@ token 与 guid 绑定：共用本机 guid 会让第二个号**把第一个号顶
 # 单测（不需要真号）
 pnpm exec vitest run tests/unit/marvis-auth.spec.ts tests/unit/marvis-credits.spec.ts \
   tests/unit/marvis-browser-login.spec.ts tests/unit/marvis-rpc-branches.spec.ts \
-  tests/unit/marvis-client-panel.spec.ts
+  tests/unit/marvis-client-panel.spec.ts \
+  tests/unit/marvis-adapter.spec.ts tests/unit/marvis-session-balance.spec.ts
+
+# 槽序接线（改 `slots` 签名 / 面板开关门控时必跑）
+pnpm exec vitest run tests/unit/rotation-session-id-wiring.spec.ts \
+  tests/unit/session-balance.spec.ts tests/unit/session-balance-wiring.spec.ts \
+  tests/unit/jet-hub-panel-wiring.spec.ts
 
 # 真机 E2E（需要真号 + 弹真实浏览器窗口，人工确认）
 pnpm test:e2e:marvis

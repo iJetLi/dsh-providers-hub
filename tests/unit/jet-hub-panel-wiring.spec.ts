@@ -373,20 +373,26 @@ describe('登录开窗：宿主开过无痕窗时的用户裁决策略', () => {
 })
 
 /**
- * ★★ 「负载均衡」开关的 **zcode 门控**（2026-10-31 对抗审计 P2-2 补牙）。
+ * ★★ 「负载均衡」开关的**渠道门控**（2026-10-31 对抗审计 P2-2 补牙；
+ * 2026-11-17 扩到 marvis）。
  *
  * ## 为什么必须行为级
  *
- * `supportsSessionBalance = provider === 'zcode'`（jet-hub.js）被改成恒真时，
- * 既有 panel-wiring 全绿 ⇒ **所有 provider 面板**都会渲染一个摆设开关
- * （点击后 RPC 报 `unknown provider` 或对别家无效）。与「订阅额度只对 Cline
- * 渲染」同一门控取向，判据打在**渲染产物**上：真渲染各 provider 的面板，
- * 数「负载均衡」label 是否只在 zcode 出现。
+ * `supportsSessionBalance`（jet-hub.js）被改成恒真时，既有 panel-wiring 全绿
+ * ⇒ **所有 provider 面板**都会渲染一个摆设开关（点击后 RPC 报 `unknown provider`
+ * 或对别家无效）。与「订阅额度只对 Cline 渲染」同一门控取向，判据打在**渲染产物**
+ * 上：真渲染各 provider 的面板，数「负载均衡」label 是否只在已接入渠道出现。
+ *
+ * ⚠️ 2026-11-17 起 marvis 也接入了会话分散（槽制路径），故合法集合从 `['zcode']`
+ * 扩成 `['zcode','marvis']`。**不要**为了省事把断言改成「至少一个 provider 有」：
+ * 那样把门控改成恒真也全绿，正是本条要抓的变异。
  */
-describe('负载均衡开关的 zcode 门控（仅 zcode 渲染）', () => {
-  const PROVIDERS = ['codearts', 'buddy', 'qoder', 'zcode', 'opencode', 'aggregate'] as const
+describe('负载均衡开关的门控（仅 zcode / marvis 渲染）', () => {
+  const PROVIDERS = ['codearts', 'buddy', 'qoder', 'zcode', 'opencode', 'aggregate', 'marvis'] as const
+  /** 已接入会话分散的渠道（2026-11-17 起 marvis 是第二家）。 */
+  const SUPPORTED = ['zcode', 'marvis'] as const
 
-  it('真渲染：开关只在 zcode 面板出现（其余 provider 一个都不渲染）', async () => {
+  it('真渲染：开关只在 zcode / marvis 面板出现（其余 provider 一个都不渲染）', async () => {
     const perProvider = new Map<string, number>()
     for (const provider of PROVIDERS) {
       const r = await renderPanel(async (method: string) => {
@@ -401,11 +407,14 @@ describe('负载均衡开关的 zcode 门控（仅 zcode 渲染）', () => {
       }
       perProvider.set(provider, count)
     }
-    expect(perProvider.get('zcode'), 'zcode 面板必须有负载均衡开关').toBeGreaterThan(0)
-    const offenders = [...perProvider.entries()].filter(([p, n]) => p !== 'zcode' && n > 0)
+    for (const provider of SUPPORTED) {
+      expect(perProvider.get(provider), `${provider} 面板必须有负载均衡开关`).toBeGreaterThan(0)
+    }
+    const offenders = [...perProvider.entries()]
+      .filter(([p, n]) => !(SUPPORTED as readonly string[]).includes(p) && n > 0)
     expect(
       offenders,
-      `非 zcode 面板渲染了摆设开关（去 zcode 门控的变异形态）：${JSON.stringify(offenders)}`,
+      `未接入会话分散的面板渲染了摆设开关（去掉门控的变异形态）：${JSON.stringify(offenders)}`,
     ).toEqual([])
   })
 })

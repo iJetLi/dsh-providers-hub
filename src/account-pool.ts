@@ -2874,11 +2874,46 @@ export class AccountPool {
   }
 
   /**
+   * 把**外部已经选好的**候选序列按会话亲和 + 溢出均衡重排（纯排序，不取凭据）。
+   *
+   * 用途：槽制 provider（marvis，2026-11-17 用户要求「11 个号要真轮流分担」）
+   * 的候选是接线层自己拼的（凭据要解析成 `MarvisCredential` 并塞进请求头），
+   * 没法复用 {@link getAvailableAccountForSession} 的「取第一个」语义 —— 它需要
+   * 的是**完整有序序列**，因为适配器要在一轮里按序换号重发。
+   *
+   * 排序语义与 {@link getAvailableAccountForSession} **完全一致**（同一份
+   * `rankAccountsBySessionWithOverflow` + 同一份 {@link sessionLoadIndex} 兜底），
+   * 差别只在「返回全部」而不是「返回第一个」：
+   * - `sessionId` 非空 ⇒ rendezvous 哈希亲和 + 达阈值账号沉底；
+   * - `sessionId` 空/未传 ⇒ 按传入顺序原样返回（**不洗牌**：调用方若是槽制接线层，
+   *   原样返回才等于「手动顺序优先」的既有语义；要不要随机由调用方决定）。
+   *
+   * ⚠️ 与 {@link getAvailableAccountForSession} 的区别：本方法**不做**候选过滤
+   * （`enabled` / 封禁 / 模型限流）—— 那是调用方的事（marvis 接线层已经滤过
+   * 一遍，含 `modelRateLimits`）。这里只负责**顺序**。
+   */
+  orderAccountsForSession<T extends { readonly id: string }>(
+    provider: string,
+    accounts: readonly T[],
+    sessionId?: string,
+  ): T[] {
+    if (sessionId === undefined || sessionId.length === 0) return [...accounts]
+    if (accounts.length <= 1) return [...accounts]
+    return rankAccountsBySessionWithOverflow(
+      accounts,
+      sessionId,
+      provider,
+      this.sessionLoadIndex(provider),
+      overflowRequestsThreshold(),
+    )
+  }
+
+  /**
    * 今日账号负载索引（`provider` 维度）；任何读取异常都退化为**空表**。
    *
    * 抽成方法是为了让「失败兜底」只有一份实现（`getAvailableAccountForSession`
-   * 与将来的调用点共用），也让单测能单独验证兜底语义（见
-   * `tests/unit/session-balance.spec.ts` 的「账本读取抛错」用例）。
+   * / `orderAccountsForSession` 与将来的调用点共用），也让单测能单独验证兜底语义
+   * （见 `tests/unit/session-balance.spec.ts` 的「账本读取抛错」用例）。
    */
   private sessionLoadIndex(provider: string): ReturnType<typeof accountLoadIndex> {
     try {
