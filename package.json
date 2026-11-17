@@ -73,6 +73,7 @@
     "test:e2e:opencode-account-chat": "cross-env DSH_OPENCODE_ACCOUNT_E2E=1 DSH_OPENCODE_ACCOUNT_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/opencode-account-probe.e2e.spec.ts",
     "test:e2e:cline-chat": "cross-env DSH_CLINE_CHAT_E2E=1 DSH_CLINE_CHAT_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/cline-chat-probe.e2e.spec.ts",
     "test:e2e:raccoon": "cross-env DSH_RACCOON_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/raccoon-probe.e2e.spec.ts",
+    "test:e2e:raccoon-authorize": "cross-env DSH_RACCOON_AUTHORIZE_E2E=1 DSH_RACCOON_AUTHORIZE_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/raccoon-authorize-probe.e2e.spec.ts",
     "test:e2e:raccoon-chat": "cross-env DSH_RACCOON_CHAT_E2E=1 DSH_RACCOON_CHAT_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/raccoon-chat-probe.e2e.spec.ts",
     "test:e2e:raccoon-tools": "cross-env DSH_RACCOON_TOOLS_E2E=1 DSH_RACCOON_TOOLS_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/raccoon-tools-probe.e2e.spec.ts",
     "test:e2e:minimax": "cross-env DSH_MINIMAX_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/minimax-probe.e2e.spec.ts",

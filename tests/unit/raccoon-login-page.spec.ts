@@ -72,7 +72,7 @@ function jwtWithExp(expSeconds: number): string {
 }
 
 describe('RACCOON_LOGIN_PAGE_PATHS', () => {
-  it('四条路径都是 /raccoon 前缀', () => {
+  it('路径都是 /raccoon 前缀', () => {
     for (const p of Object.values(RACCOON_LOGIN_PAGE_PATHS)) {
       expect(p.startsWith('/raccoon/')).toBe(true)
     }
@@ -135,6 +135,30 @@ describe('renderRaccoonLoginPage', () => {
     expect(html).toContain('短信登录')
   })
 
+  it('★★ 浏览器登录是**默认那个 Tab**（扫码确认页 /login/mp 自 11-04 起全 404）', () => {
+    // ⚠️ 默认停在扫码 Tab 上 = 用户点开就看到一个**必然 404** 的二维码。
+    //   判据打在**初始状态**上（data-active / data-show 的取值），
+    //   不是「页面上有这三个 Tab」（那三个都在，判不出默认是谁）。
+    expect(html).toContain('<button id="tabBrowser" data-active="1" type="button">')
+    expect(html).toContain('<div class="pane" id="paneBrowser" data-show="1">')
+    expect(html).toContain('<button id="tabQr" data-active="0" type="button">')
+    expect(html).toContain('<div class="pane" id="paneQr" data-show="0">')
+    // 页面脚本在加载时也把 Tab 切到 browser（否则初始态与脚本态不一致）。
+    expect(html).toContain("selectTab('browser');")
+  })
+
+  it('三个 Tab 都在（扫码 / 短信 / 浏览器）', () => {
+    expect(html).toContain('浏览器登录')
+  })
+
+  it('页面脚本只在 Tab 切换时改一处（判据写成「哪个」而不是两个布尔）', () => {
+    // ⚠️ 加第三个 Tab 时，「两个布尔」写法必然漏改一处 ⇒ 判据钉住
+    //   三个 Tab 都由**同一个** selectTab 驱动。
+    expect(html).toContain("tabBrowser.addEventListener('click', function () { selectTab('browser'); });")
+    expect(html).toContain("tabQr.addEventListener('click', function () { selectTab('qr'); });")
+    expect(html).toContain("tabSms.addEventListener('click', function () { selectTab('sms'); });")
+  })
+
   it('有合法的内联二维码（**必须是可解析的 SVG**，不是被转义的字符串）', () => {
     // ⚠️ 真实缺陷回归（用户报障「弹出页面二维码没显示出来」）：
     // 早期实现把 SVG 的引号转义成 `&quot;` 再内联，
@@ -190,11 +214,13 @@ describe('renderRaccoonLoginPage', () => {
     expect(html).toContain('var POLL_INTERVAL_MS = 5000;')
   })
 
-  it('★★ 二维码下方必须常驻「改用短信登录」提示（不是只在签发失败时才有）', () => {
+  it('★★ 二维码下方必须常驻「改用别的入口」提示（不是只在签发失败时才有）', () => {
     // 2026-11-14/15 实测：官方二维码落地页 `/login/mp` 全部 404，而**签发是成功的**
     // ⇒ 页面走不到 `.qr-fallback` 那条「获取失败」分支。提示若不常驻，
-    // 用户扫进一个 404 页、界面上却没有任何一句告诉他可以改用短信。
-    expect(html).toContain('扫完打不开页面？可直接改用下方「短信登录」')
+    // 用户扫进一个 404 页、界面上却没有任何一句告诉他可以改用别的入口。
+    // ⚠️ 2026-11-17 起那条「别的入口」**首先**是「浏览器登录」（官方客户端
+    // 自己那条链，唯一还活着的），短信是第二个兜底 ⇒ 提示句同时点两个。
+    expect(html).toContain('扫完打不开页面？改用上方「浏览器登录」或下方「短信登录」')
     // 与兜底块是**两条不同的腿**：兜底块只在签发失败时替换二维码区域。
     // 本用例的 `html` 是**带 ticket** 渲染的 ⇒ 不应该出现兜底块
     // （写反了就是「有票据时也在报错」的假红）。
@@ -616,5 +642,155 @@ describe('startRaccoonLoginFlow', () => {
     // 「真签发了第二张」+「回给页面一个 SVG」。
     expect(issued).toBe(2)
     expect(payload.qr).toContain('<svg')
+  })
+})
+
+/**
+ * 浏览器授权的**整条链**（本地登录页 → 回环接收端 → 换码 → 凭据）。
+ *
+ * ## 为什么这条链要单测（而不是只测各段）
+ *
+ * 三个环节各自都对、串起来却不通，是这一族最常见的形态：
+ * 页面打的路径与路由注册的不一致、状态字段名对不上、换码那段拿到的
+ * 不是它以为的字段。⇒ 这里**真起**本地页 + **真起**回环接收端 +
+ * **真发**回调，只把「换码」那一步换成注入的 fetch（零网络）。
+ */
+describe('浏览器登录（官方那条链）的整条流程', () => {
+  const nowSec = Math.floor(Date.now() / 1000) + 3600
+  const iamToken = (): string => {
+    const b64 = (o: unknown): string => Buffer.from(JSON.stringify(o)).toString('base64url')
+    return `${b64({ alg: 'none' })}.${b64({ iss: 'xiaohuanxiong.com/iam', sub: 'acct-1', exp: nowSec })}.${b64({})}`
+  }
+
+  /** 造一个 fetch 桩：签发端点成功，换码端点回一对凭据。 */
+  function authorizeFetch(record: string[] = []): typeof fetch {
+    return vi.fn(async (url: string, init?: RequestInit) => {
+      const text = String(url)
+      if (text.endsWith('/auth/mp/qrcode')) {
+        return jsonResponse({ code: 'OK', message: 'success', data: TICKET })
+      }
+      if (text.endsWith('/login_with_authorization_code')) {
+        record.push(String(init?.body ?? ''))
+        return jsonResponse({
+          code: 0,
+          // ⚠️ 值刻意**短于 16 位**：仓库的 PII 守卫会拦「凭据字段名 + 高熵
+          //   字面量」这个组合（那正是真凭据的形状）。这里要的是一个**构造
+          //   样例**，不是一枚看起来像凭据的东西。
+          data: { access_token: iamToken(), refresh_token: 'r-from-gw' },
+        })
+      }
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+  }
+
+  it('申请 → 回调 → 换码 ⇒ result 解析出凭据', async () => {
+    const exchanged: string[] = []
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch(exchanged) as unknown as typeof fetch,
+      // ⚠️ 单测里**绝不能真的开窗**（那是用户桌面上的真实浏览器，
+      //   而且它会真的投递回调、消费掉接收端）。
+      openAuthorizePage: () => {},
+    })
+    const base = originOf(started.loginUrl)
+
+    // ① 申请一条 `/authorize` 链接（页面点「打开授权页」时走的那一步）。
+    const start = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as {
+      ok: boolean
+      url: string
+      status: string
+    }
+    expect(start.ok).toBe(true)
+    expect(start.status).toBe('waiting')
+    // URL 必须是官方页面认的那条形态。
+    const parsed = new URL(start.url)
+    expect(parsed.pathname).toBe('/authorize')
+    expect(parsed.searchParams.get('login_source')).toBe('desktop')
+    expect(parsed.searchParams.get('desktop_callback')).toBe('loopback')
+    const redirect = parsed.searchParams.get('redirect') ?? ''
+    expect(redirect).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/)
+
+    // ② 模拟官方页面的投递：GET 回环地址，带 code 与 state。
+    const state = parsed.searchParams.get('state') ?? ''
+    const callback = await fetchLocal(`${redirect}?code=the-auth-code&state=${state}`, {
+      headers: { Origin: 'https://xiaohuanxiong.com', 'Sec-Fetch-Dest': 'document' },
+    })
+    expect(callback.status).toBe(200)
+
+    // ③ 凭据落地（换码那条被注入的 fetch 收到的是那枚 code）。
+    const credential = await started.result
+    expect(credential.access_token).toBe(iamToken())
+    expect(credential.refresh_token).toBe('r-from-gw')
+    expect(exchanged.length).toBe(1)
+    expect(JSON.parse(exchanged[0] ?? '{}')).toEqual({ authorization_code: 'the-auth-code' })
+
+    // ④ 登录成功后**本地页服务器随即关闭**（既有契约：结果落定即关服务器）
+    //    —— 页面那句「登录成功」因此是**尽力而为**的（页面 2 秒一轮，
+    //    而换码 + 落定通常在它两拍之间就完成了）；真正的成功信号来自
+    //    Jet Hub 那边的 `login.poll`。
+    await expect(fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStatus}`)).rejects.toThrow()
+  })
+
+  it('★ 申请两次只起**一个**接收端（单飞；两个端口 = 两个「等着收凭据」的口子）', async () => {
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch() as unknown as typeof fetch,
+      openAuthorizePage: () => {},
+    })
+    const base = originOf(started.loginUrl)
+    const first = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as { url: string }
+    const second = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as { url: string }
+    expect(second.url).toBe(first.url)
+  })
+
+  it('取消后状态回到 idle，且那一轮的接收端被关掉', async () => {
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch() as unknown as typeof fetch,
+      openAuthorizePage: () => {},
+    })
+    const base = originOf(started.loginUrl)
+    await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)
+    await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeCancel}`)
+    const status = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStatus}`)).json() as {
+      status: string
+    }
+    expect(status.status).toBe('idle')
+  })
+
+  it('★★ 换码失败时**不产出凭据**，且只报**原因词**（不泄报文）', async () => {
+    const failing = vi.fn(async (url: string) => {
+      const text = String(url)
+      if (text.endsWith('/auth/mp/qrcode')) {
+        return jsonResponse({ code: 'OK', message: 'success', data: TICKET })
+      }
+      // 上游回 200035，并把那枚 code 原文回显在 message 里。
+      return jsonResponse({ code: 200035, message: 'authorization code the-auth-code not found' }, 400)
+    }) as unknown as typeof fetch
+    started = await startRaccoonLoginFlow({
+      fetcher: failing,
+      openAuthorizePage: () => {},
+    })
+    const base = originOf(started.loginUrl)
+    const start = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as {
+      url: string
+    }
+    const parsed = new URL(start.url)
+    const redirect = parsed.searchParams.get('redirect') ?? ''
+    const state = parsed.searchParams.get('state') ?? ''
+    await fetchLocal(`${redirect}?code=the-auth-code&state=${state}`, {
+      headers: { Origin: 'https://xiaohuanxiong.com', 'Sec-Fetch-Dest': 'document' },
+    })
+    // 轮询到终态：失败，且**只有**一个原因词（绝不带报文原文）。
+    let status: string = 'waiting'
+    let reason: string | undefined
+    for (let i = 0; i < 50 && status === 'waiting'; i++) {
+      const payload = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStatus}`)).json() as {
+        status: string
+        reason?: string
+      }
+      status = payload.status
+      reason = payload.reason
+    }
+    expect(status).toBe('failed')
+    expect(reason).toBe('code_not_found')
+    expect(String(reason)).not.toContain('the-auth-code')
   })
 })

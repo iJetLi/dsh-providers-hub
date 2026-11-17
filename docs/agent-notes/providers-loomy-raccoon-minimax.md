@@ -411,27 +411,111 @@ bug** —— 用户已明确接受（「设置关闭思考实际思考了可以�
 **真实依据**：2026-09-26 对生产端点逐项实测 + 客户端 `app.asar` 逆向
 （工具 `scripts/raccoon-asar.mjs`）。
 
-### 1. 官方登录链路**不可复用**，微信扫码才是可行路径
+### 1. ⚠️⚠️ 登录链路：**扫码确认页已死**，浏览器授权才是活的那条（2026-11-17 改）
 
-官方桌面端（`build/electron/main/desktopLogin.js`）走
-「网页授权 → `office-raccoon://auth/callback?code=` →
-`POST /login_with_authorization_code`」。
+> ⚠️⚠️ **本节整条被推翻并重写**。旧结论（「官方链路不可复用，微信扫码才是
+> 可行路径」）**作废**：它成立的前提是「扫码链还活着」，而那个前提**已经不
+> 成立**了。旧文字保留在下面的「作废的旧结论」里，**别再照着它改代码**。
 
-⚠️ **本插件收不到那个自定义协议回调**（宿主侧 Node 进程），
-且 `/code/authorize` 页面的回调地址**写死在 Web bundle 里**
-（`hl()` 直接 `new URL("office-raccoon://auth/callback")`），改不成 localhost。
+#### 现在的实测事实（2026-11-17 三条，逐条有探针）
 
-**可行路径**：二维码的 `code` 由**客户端本地随机生成**
-（`CryptoJS.lib.WordArray.random(16)` → 32 位 hex），服务端只做轮询查询。
-⚠️ **实测任意自造 code 都被接受**并进入 `pending`：
+| 事实 | 证据 | 探针 |
+|---|---|---|
+| **扫码确认页 `/login/mp` 自 2026-11-04 起全 404**（含微信 UA），而**签发本身是成功的** | 2026-11-14/15 实测 + 2026-11-17 复验 | `pnpm test:e2e:raccoon-authorize` ① |
+| **`/authorize` 授权页活着**（HTTP 200，且**原样回显** `login_source`/`appname`/`desktop_callback`/`redirect`/`state`） | 同上 | 同上 ② |
+| **换码端点还在**：`POST /api/web/auth/v1/login_with_authorization_code` 对一枚瞎编的 code 回 **HTTP 400 `{code:200035}`**（= 官方常量 `AUTHORIZATION_CODE_NOT_FOUND`） | 同上 | 同上 ③ |
+
+⇒ **症状形态**：用户点「扫码」，签发成功、二维码画得出来，扫进去**只看到一个
+404 页**，而界面上零报错。⇒ 插件侧必须**让位**给浏览器授权。
+
+#### 官方客户端现在走的那条链（我们采纳的那条）
 
 ```
-POST /api/web/auth/v1/login_with_qrcode_code  {"qrcode_code":"1790405291292abcdef123456"}
-→ 200 {"code":0,"message":"success","data":{"status":"pending"}}
+系统浏览器打开  {gateway}/authorize?login_source=desktop&appname=…&desktop_callback=loopback
+                      &redirect=http://127.0.0.1:<port>/auth/callback&state=<64 hex>
+   ↓ 用户在**网页里**登录（手机号 / 微信扫码 —— 那是页面自己的另一张**活的**二维码）
+   ↓ 用户点「确认授权」⇒ 页面申请一枚**一次性** authorization_code
+   ↓ 页面把 code 投递回 redirect（desktop 形态下参数名是 **`code`**，不是 `authorization_code`）
+   ↓ 我们 POST /api/web/auth/v1/login_with_authorization_code { authorization_code }
+   ↓ 拿到 access_token（+ 网关配发的 refresh_token）⇒ 落进 DSH 凭据服务
 ```
 
-状态机：`pending` → `logging`（带 `expired_at`）→ `success`（带
-`access_token`/`refresh_token`）/ `canceled`。轮询间隔 **2000ms**。
+⚠️ **`office-raccoon://` 自定义协议那条**（旧结论说「回调地址写死在 Web
+bundle 里，改不成 localhost」）**已不成立**：现在的官方页面**认** loopback
+形态（`desktop_callback=loopback`），页面自己的解析器就要求那条 redirect 的
+形状（`^http://127\.0\.0\.1:[1-9][0-9]{3,4}/auth/callback$`）。
+
+#### 落地：`src/raccoon-authorize.ts`（新文件）
+
+- `buildRaccoonAuthorizeUrl`：按**官方页面自己的解析器规则**前置校验
+  （端口 1024..65535 **且**页面正则的 4~5 位、`state` 64 位小写 hex、
+  `appname` ≤ 100、参数名全在白名单 `{login_source, appname, state,
+  redirect, ide, org, lang, desktop_callback}` 内 —— **多一个键整条链接作废**）。
+  一个页面会拒收的 URL **不该**拿给用户（那是没有下一步的死路）。
+- `startRaccoonAuthorizeReceiver`：回环接收端，**七条规则**逐条重述官方接收端
+  （GET-only / `Host` 等于自己的 authority / 来源是回环 / 存在的 `Origin` 必须
+  等于网关 origin / 存在的 `Sec-Fetch-Dest` 必须是 `document` / 路径与查询键
+  严格受限 / `state` 常量时间比对）。**一次性**：有效回调被取走后回 409。
+- `exchangeRaccoonAuthorizationCode`：成功门是官方那道门（`access_token`
+  **且**（一枚**有效**的 IAM 令牌 **或** 一枚 refresh token））；差一点就是
+  **拒绝 + 具名原因**，**绝不**产出半截凭据。
+
+#### 四条不能凭直觉改的点
+
+1. ⚠️ **`iss` 是「裸 host + `/iam`」**（`xiaohuanxiong.com/iam`，**无 scheme**）。
+   `iss` 是**等值**比较 ⇒ 按带 scheme 的严格等值去比，会**误拒每一枚真令牌**。
+   官方客户端算的是 `new URL(LOGIN_URL).host + "/iam"`。
+2. ⚠️ **IAM 形态的判定只看 `iss` 的后缀**（`endsWith('/iam')`）—— 所以一枚
+   **带 scheme** 的 `iss` **仍然**算 IAM 形态（它过不了上面那条严格等值检查，
+   但那是**另一条**判据）。两条判据分工不同，别把它们写成同一条。
+3. ⚠️ **页面投递时用的参数名在 desktop 形态下是 `code`**（非 desktop 才是
+   `authorization_code`）—— 见页面 chunk 的
+   `r.searchParams.set(e.desktop ? "code" : "authorization_code", t)`。
+   接收端只认 `code` + `state`，认错名字 = **永远收不到回调**。
+4. ⚠️ **本地页服务器在登录落定的那一刻就关了**（既有契约：结果落定即关服务器）
+   ⇒ 页面那句「登录成功」是**尽力而为**的（页面 2 秒一轮，换码往往在两拍之间
+   就完成了）；**真正的成功信号来自 Jet Hub 那边的 `login.poll`**。页面的
+   轮询失败分支必须说「登录已完成或页面已关闭」，不能停在「等待中」。
+
+#### ⚠️ 与「扫码链」的关系：不是替换，是**让位**
+
+- **扫码 Tab 与短信 Tab 都还在**（短信是可用兜底），但**默认 Tab 改成
+  「浏览器登录」** —— 默认停在扫码上 = 用户点开就看到一个**必然 404** 的二维码。
+- 扫码路径**一行未删**（上游哪天把 `/login/mp` 修回来，它就又能用了）。
+- 两条路**共用同一个本地登录页服务器**（`raccoon-login-page.ts`），浏览器授权
+  是**第三个 Tab**，另有三个端点：`/raccoon/authorize/{start,status,cancel}`。
+
+#### ⚠️ 单测里**绝不能真的开窗**
+
+`startRaccoonLoginFlow` 多了一个 `openAuthorizePage` 注入点，单测必须传
+`() => {}`。理由（与 officeace 那次同型）：那会在**用户桌面**上弹出真实浏览器
+窗口，而它会**真的**加载授权页并（若浏览器里已有会话）**真的**投递一个回调
+⇒ **消费掉接收端**，让用例测到的东西完全不是它想测的。
+
+#### 判据与证据
+
+- 单测：`tests/unit/raccoon-authorize.spec.ts`（36 条，回环接收端**真起
+  socket**、每条拒绝真发 HTTP 请求）；`tests/unit/raccoon-login-page.spec.ts`
+  的「浏览器登录（官方那条链）的整条流程」段（本地页 + 回环 + 换码**串起来**）。
+- 变异：`node scripts/mutate-raccoon-authorize.mjs` —— **14/14 有牙**
+  （⚠️ 该脚本**不入库**：本仓的 `scripts/*` 是 gitignore 的本地工具目录，
+  惯例是「脚本本地留、结论入账」—— 与 `scripts/probe-raccoon-vision.mjs`
+  同款）。它会**先跑基线**（基线不绿就直接停），每个变异**自证注入成功**
+  （锚点未命中报 `PATCH-NOT-APPLIED`，**不**当成「无牙」），跑完**还原并复验**。
+- 上游形状：`pnpm test:e2e:raccoon-authorize`（**不登录、不换码、零消耗**）。
+
+#### 作废的旧结论（保留供追溯，**别照着改代码**）
+
+> **旧 §1（已作废）**：官方桌面端走「网页授权 → `office-raccoon://auth/callback?code=`
+> → `POST /login_with_authorization_code`」；**本插件收不到那个自定义协议回调**，
+> 且 `/code/authorize` 页面的回调地址**写死在 Web bundle 里**，改不成 localhost
+> ⇒ 可行路径是「客户端本地随机生成 code + 服务端只做轮询查询」。
+>
+> **为什么作废**：① 那条链的**入口**现在也认 loopback 了（见上）；
+> ②「本地随机 code + 轮询」这条**服务端侧**也已经不接了（2026-11-14 起
+> 必须由 IAM 签发，见本节下一条）；③ 最要紧的是 **扫码确认页已死**，
+> 「可行路径」早已不可行。
+
 
 ### 2. 手机号必须 AES-128-CFB 加密；短信强制阿里云滑块
 
@@ -798,6 +882,7 @@ fallback 组（`raccoon-4eb26a` / `raccoon-0c119c` / `raccoon-ecc5fd`），
 pnpm test:e2e:raccoon        # 只读：凭据/模型目录/倍率/积分余额/账单，零消耗
 pnpm test:e2e:raccoon-chat   # ⚠️ 发推理：标准 OpenAI SSE + reasoning_content 形态
 pnpm test:e2e:raccoon-tools  # ⚠️ 发推理：**tools 是否被接受**（第 9 条的正式判据）
+pnpm test:e2e:raccoon-authorize # 只读：**上游形状**（/login/mp 已死、/authorize 活着、换码 400/200035），零消耗
 ```
 
 ### ⚠️ 报错文案：`400` 与 `401` 的语义
@@ -998,7 +1083,7 @@ raccoon 在 `51ded6a` 修了这处，**loomy 当时未同步**（同一次审计
 ⚠️ **不能把 `AUTH_QRCODE_INVALID` 也降级成 `pending`**（那样最省事、也最像「网络抖动」）：
 降级 = 页面永远转圈 = 本 issue 的症状原样保留。
 
-### 待解阻塞：`/login/mp` 当前 404
+### 待解阻塞：`/login/mp` 当前 404 ⇒ **已让位给浏览器授权**（2026-11-17）
 
 二维码落地页 `/login/mp` 在 **2026-11-14 与 2026-11-15 两次实测均全部 404**
 （带/不带 `code`、`appname`、`source=platform`、**微信 UA**、桌面 UA、`www.` 前缀、
@@ -1007,9 +1092,16 @@ raccoon 在 `51ded6a` 修了这处，**loomy 当时未同步**（同一次审计
 与桌面 Chrome 140 各测两档 query），两者都是 `404 + __next_error__`。
 `scan_path` 名为 `/login/mp`，**疑似小程序页面路径被误用于 web 端**。
 
-⇒ 我们仍按官方拼法生成（页面恢复后自然可用）。但**关键在于「签发是成功的」** ——
-所以页面走不到 `.qr-fallback`（那是签发失败时才替换二维码区域的分支）。
-⇒ 实现上改为在二维码**下方常驻**一行「扫完打不开页面？可直接改用下方「短信登录」」，
+⚠️ **2026-11-17 复验：仍然全 404**（探针
+`pnpm test:e2e:raccoon-authorize` ①，且已固化进那条探针）。
+
+⇒ **处置变了**：不再只是「常驻一句提示」，而是**让位**给官方客户端自己那条
+浏览器授权链（见本节 §1「现在的实测事实」）。二维码 Tab **保留**（上游哪天
+修回来就能用），但**默认 Tab 改成「浏览器登录」**。
+
+⚠️ 常驻提示的**文案也改了**：旧句是「扫完打不开页面？可直接改用下方「短信登录」」，
+新句是「扫完打不开页面？改用上方「浏览器登录」或下方「短信登录」」——
+因为**第一个**该指的路现在是浏览器授权（唯一还活着的那条），短信是第二个兜底。
 由 `tests/unit/raccoon-login-page.spec.ts` 的「二维码下方必须常驻」那条锁住。
 ⚠️ **不要**把它写成「只在签发失败时提示」—— 那样等于对当前这个上游死链**零提示**。
 
