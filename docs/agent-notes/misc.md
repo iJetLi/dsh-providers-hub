@@ -1212,7 +1212,7 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
 **变异自证（4/4 有牙）**：① 关掉 x0 分支 ⇒ `expected 'Free Now · x0.05' to be 'Free Now · x0'`；② 不写 `badge` 键 ⇒ 4 条红；③ `timeDeclared` 恒 false ⇒ 2 条红（窗口现算 + 窗口结束）；④ `readInstantField` 接受数字 ⇒ `expected 1794931200 to be undefined`。
 ### ⚠️ 订阅闸门三件套：`accessible` / `subscriptionPriority` / `restrictionHint`（2026-11-17）
 
-远端同批下发这三个键（实测 **21/21 条目都有**），而本仓此前**一个都没读** ⇒ 选择器里「订阅专享」的模型看起来和普通模型一模一样，选了才知道不能用。
+远端同批下发这三个键（**作者侧实测快照：21/21 条目都有**；本机没有 LobsterAI 账号 ⇒ 仓内**离线不可复核**，`tests/e2e/lobsterai-probe.e2e.spec.ts` 默认 `describe.skip`、只有 `DSH_LOBSTERAI_E2E=1` 才真打上游），而本仓此前**一个都没读** ⇒ 选择器里「订阅专享」的模型看起来和普通模型一模一样，选了才知道不能用。
 
 实测（未订阅账号，`GET /api/models/available`）：
 
@@ -1229,9 +1229,11 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
 3. **判据只认 `accessible === false` 这一格，不解析 `restrictionHint` 的中文文案**：营销文案改一个字判据就失效；`需订阅` / `不可用` 的挑选用布尔 `subscriptionPriority`。另：布尔走 `readBooleanTriState` **三态**读（`true` / `false` / `undefined`），只认 `true|false|1|0|"true"|"false"`，其余留空 —— `typeof === 'boolean'` 一票否决会让上游改发 `"false"` 时静默变成「未声明」（受限模型看起来完全可用），而 `!!'false'` 更糟（把不可用读成可用），两条错路都堵住了。
 
 **守卫**：`tests/unit/lobsterai-adapter.spec.ts` 的「订阅闸门」四条（不隐藏 / 短标签 / 已订阅不画标签 / description 追加），`tests/e2e/lobsterai-probe.e2e.spec.ts` 的「accessible 必须是布尔」（**只锁契约、不锁数量** —— 不可用条目数随账号订阅状态变，锁死等于把测试绑在某个账号上）。
-**变异自证**：① `displayNameFor` 不追加短标签 ⇒ 标签用例精确变红；② 解析层不读 `accessible` ⇒ e2e 用例变红并点名 21 个 id（正是本 PR 修的那个缺陷）。
+**变异自证**：① `displayNameFor` 不追加短标签 ⇒ 标签用例精确变红；② 解析层不读 `accessible` ⇒ **单测**（脏布尔三态 / 不隐藏两组）变红；e2e 那一组只在 `DSH_LOBSTERAI_E2E=1` 时才跑，不能当成常规 CI 守卫。
 
 ### ⚠️⚠️ 合并 PR #113 / PR #114 的四条硬约束（2026-11-17）
+
+本节的四条各自都有**行为级**用例钉在 `tests/unit/lobsterai-adapter.spec.ts` 的「跨 PR 契约」一组（3 条：聚合价格解析拿得到倍数 / 脏串净化 / hint 纯空白不追加空行），变异 **7/7 全红**（倍率顺序 / 三态布尔 / 控制符换空格 / 限长截断 / 空名回落 id / hint trim / `edgeSources` 第 6 家）。
 
 两个 PR 都改同一个 `displayNameFor`，合并时踩到四条**互相独立**的约束，逐条都有实测：
 

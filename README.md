@@ -1010,7 +1010,9 @@ ZCode (智谱) • 94.54MToken
 
 覆盖渠道：buddy / workbuddy（/v3/config 的 modelPromotions 与 modelTiers）、
 qoder / qodercn（模型目录每行自带的 promotion）、
-trae（模型目录每行 `activity_discount.data.off_peak` 的**闲时窗口**）。
+trae（模型目录每行 `activity_discount.data.off_peak` 的**闲时窗口**）、
+lobsterai（模型目录每行 `limitedFree` 四件套的**绝对时刻**窗口：`limitedFreeStartAt` /
+`limitedFreeEndAt` 是 ISO 字符串，官方客户端自己算最近边界再 `setTimeout` 重拉）。
 
 ⚠️ TRAE 是**唯一**上游不给文案的一家（那份文档里只有数字），所以它的徽标措辞
 是插件自己的（「闲时 5 折」）—— 换算只用上游给的支付比例，且**只在整十时换算**，
@@ -1020,6 +1022,31 @@ trae（模型目录每行 `activity_discount.data.off_peak` 的**闲时窗口**�
 ⚠️ **TRAE 的价格腿仍未接**（另案）：闲时时段里名字后面的倍率后缀还是**原价**
 （`DeepSeek-V4-Flash · x0.2`），而名字旁挂着「闲时 5 折」—— 两条腿暂时不同源。
 改它动的是「现在多少钱」的展示，且与 `traeDisplayName` 既有的占位判据纠缠。
+
+⚠️ **LobsterAI 的限时免费是「绝对时刻」窗口，不是每日重复**：上游在模型目录里下发
+`limitedFree` / `limitedFreeActive` / `limitedFreeStartAt` / `limitedFreeEndAt`
+四件套（判据逐字取自官方客户端 asar）。徽标只在 **`limitedFreeActive === true`** 时画 ——
+**声明 ≠ 生效**：`limitedFree:true` + `limitedFreeActive:false` 不画；而「此刻是否落在
+窗口里」决定名字里的倍率是否按 `x0` 展示（窗口优先于快照：快照会过期）。起止读不懂时
+**fail-closed**（不画徽标、倍率不归零、不排定时器），不把半条窗口当「无上界」。
+卡点如实标注：上游至今（2026-11-17 的真机目录）21/21 条目都是 `false/false/null/null`
+⇒ **起止的真实格式尚未取证**，仓库里全是 fixture。
+
+⚠️ **订阅闸门是另一回事：它不走徽标，走名字后缀。** LobsterAI 目录还下发
+`accessible` / `subscriptionPriority` / `restrictionHint`，本插件把它们读成 `name` 的
+短标签（`· 需订阅` / `· 不可用`），原因整句**追加**到 `description` 末行（不改写上游原文 ——
+那句原文是取证材料）。三条刻意的取舍：
+
+1. **不可用的模型仍在目录里**（`accessible:false` 只打标签、不隐藏）：隐藏等于让
+   「订阅后能多用什么」不可见，而官方客户端对**已订阅**账号也是照常显示、不画标记。
+   ⚠️ 已知缺口：聚合 `auto` 的候选池目前**没有** `accessible` 闸门，这类条目仍可能被选中
+   （范围外、既有行为，已登记）；
+2. **标签在倍率之前**（`Qwen4-Max · 需订阅 · x0.71`）：聚合的倍率解析
+   （`priceFactorFromName`）是**末尾锚定**的正则，标签跟在后头会返回 `Infinity`
+   ⇒ 带标签的模型被当成「最贵」排到最后，限免时连 `0` 倍率一起丢；
+3. **上游名字先消毒再拼**：控制符换空格（删掉会把 `Weird\nName` 拼成 `WeirdName`）、
+   剥零宽与双向控制符、折叠空白、限长 80 —— 上游名字是不可信字符串，而我们的标签
+   与它拼在同一行里。
 
 > **宿主版本影响的是哪一半（0.2.2 起才有 `LlmModelInfo.badge`）：**
 >
