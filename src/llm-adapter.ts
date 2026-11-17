@@ -1020,10 +1020,10 @@ const CODEARTS_TENANT_NOT_ENABLED_CODE = 'TM.000010051'
  * **benefit 免费额度**那条通道取的证；而**账号积分**耗尽走的是**另一条通道、
  * 另一个码族**（`TM.*`，与 {@link CODEARTS_CONCURRENCY_LIMIT_CODE} 同族）。
  *
- * 2026-11-15 用真实凭据直连实测（2 账号 × 6 模型，逐格见
- * `tests/unit/codearts-credit-exhausted-rotation.spec.ts`）：积分耗尽的账号
- * 请求 `glm-5.3` / `glm-5.3-flash` / `kimi-k3` / `kimi-k3.1-pro` /
- * `deepseek-v4.1-flash` **全部**回该码，而旧判据对它**零命中** ⇒ 请求落进
+ * 2026-11-15 用真实凭据直连实测（2 个账号逐个请求：积分耗尽的账号请求
+ * `glm-5.3` 回本码；`codearts-credit-exhausted-rotation.spec.ts` 只把
+ * `glm-5.3` 这一格做成了用例，其余模型是**人工观察**、仓内没有可复现的探针），
+ * 而旧判据对它**零命中** ⇒ 请求落进
  * 通用 4xx 分支 ⇒ **既不写 `modelRateLimits`、也不调 `getAvailableAccount`**
  * ⇒ 用户看到的就是「一个账号积分用完后竟然不会切换账号」。
  *
@@ -1036,8 +1036,15 @@ const CODEARTS_TENANT_NOT_ENABLED_CODE = 'TM.000010051'
  *
  * 所以「图省事匹配 `TM.000010` 前缀」这条捷径**真实可达**：它会把
  * 「无权限」误判成「没钱」⇒ 对着一个**永远不会有积分**的模型把整池账号
- * 轮一遍并全部沉底（比不换号更糟）。独立用例锁住了这条词干
- * （`codearts-credit-exhausted-rotation.spec.ts`：按词干匹配的变异实测变红 2 处）。
+ * 轮一遍并全部沉底（比不换号更糟）。
+ *
+ * ⚠️ **如实纠正一处我先写错的措辞**：原文写「独立用例锁住了这条词干
+ * （按词干匹配的变异实测变红 2 处）」—— 不实。审计实测：**单拆任一条腿**
+ *（把词干改成 `TM.000010`、或删掉 `(?![0-9])` 边界）都**全绿**；只有
+ * **两条一起改**（词干 + 去边界）才红 2 处。原因很直接：词干 `TM.000010`
+ * 本来就是 `TM.00001050` 的真前缀，配上数字边界后与全等**逐字节等价** ——
+ * 那是**等价变异**，不是「用例守住了它」。真正的守卫是
+ * `TM.000010051`（「无权调用」）那两条反例用例。
  *
  * ⚠️ 如实标注一个我**先写错、后被变异测试纠正**的细节：两者**不是**严格前缀
  * 关系（`'TM.000010051'.includes('TM.00001050')` 实测为 `false` —— 第 10 位
@@ -1247,7 +1254,9 @@ export function isSseQueueErrorCode(code: string): boolean {
  * `modelRateLimits`、也不调 `getAvailableAccount` ⇒ 换号整块静默失效
  * （实测 `state.json` 里 codearts 两个账号**连 `modelRateLimits` 键都没有**）。
  *
- * 补的三条腿各有分工，缺一不可：
+ * 补的三条腿各有分工，**每条都有独立用例**（`codearts-credit-exhausted-rotation.spec.ts`
+ * 用一个 `it.each` 分别只喂 `code`、只喂 `message`、只喂中文文案 —— 审计指出
+ * 原先只有「组合输入」的用例，两条码值腿各自删掉都 6/6 全绿）：
  *
  * | 通道 | `code` 入参 | `message` 入参 | 由哪条腿命中 |
  * |---|---|---|---|
@@ -1266,11 +1275,92 @@ export function isSseQueueErrorCode(code: string): boolean {
  * **不在这里另写第二份中文正则** —— 两份同义判据必然漂移。
  */
 export function isSseQuotaExhaustedErrorCode(code: string, message: string): boolean {
-  return code.includes('4291')
-    || /insufficient[\s_-]+quota/i.test(message)
-    || hasBusinessCode(code, CODEARTS_CREDIT_EXHAUSTED_CODE)
-    || hasBusinessCode(message, CODEARTS_CREDIT_EXHAUSTED_CODE)
-    || CREDIT_EXHAUSTED_PATTERN.test(message)
+  // 「账号积分」与「benefit 免费额度」是**同一个用户动作**（换号），
+  // 但**出路不同**（充值 vs 等重置）⇒ 两条腿并列，各自只留一份实现。
+  return isBenefitQuotaExhausted(code, message) || isCreditExhaustedQuota(code, message)
+}
+
+/**
+ * 错误体是否命中「benefit **免费额度**用尽」这条腿（2026-10-02 取证）。
+ *
+ * 单独成函数而不内联，是因为**文案分流要以它为先手**：上游可能发出一份
+ * 同时含 `InferHub.4291.200` 与英文 `quota exhausted` 的报文，而
+ * {@link CREDIT_EXHAUSTED_PATTERN} 认得 `quota exhausted` —— 那样两族会同时命中。
+ * 此时必须判成 benefit（码值比散文可信），否则用户会看到「去充值」而其实
+ * 等一天就恢复了。
+ */
+export function isBenefitQuotaExhausted(code: string, message: string): boolean {
+  return code.includes('4291') || /insufficient[\s_-]+quota/i.test(message)
+}
+
+/**
+ * 错误体是否命中「**账号积分**耗尽」这条腿（而不是 benefit 免费额度）。
+ *
+ * ## 为什么必须与 {@link isSseQuotaExhaustedErrorCode} 分开
+ *
+ * 两者都表示「额度没了、要换号」，但**给用户的话完全不同**：
+ *
+ * | 条件 | 真实出路 | 说错话的后果 |
+ * |---|---|---|
+ * | benefit 免费额度用尽 | 等 UTC+8 次日重置（或换号） | —— |
+ * | **账号积分**耗尽 | **去 CodeArts 充值 / 领积分**（不会自己回来） | 让用户干等一整天，而额度永远不回来 |
+ *
+ * 2026-11-01 那次修复把新码接进换号分支后，文案仍然走
+ * {@link codeartsQuotaExhaustedMessage}（正文逐字写「免费额度（benefit）已用尽，
+ * 预计…后重置」）—— 对积分耗尽**是错的**，违反本仓库「文案本身就是出路」红线。
+ *
+ * ## 判据
+ *
+ * 只有「积分族」的三条腿算：两个码值腿 + 中文/英文文案腿。
+ * benefit 的 `4291` 与 `insufficient quota` **刻意不算**。
+ *
+ * ⚠️ 纯文案腿**先排除 benefit 缺失报文**（`InferHub.4004.200`）：那种报文该走
+ * 「去头重试一次」，不是「换号」。若上游把 benefit 缺失也改成中文措辞
+ *（如「免费额度已用尽」），`CREDIT_EXHAUSTED_PATTERN` 会命中 —— 那时会把
+ * 一次本来能自愈的请求误判成「没钱」并轮完整池。这条豁免是审计点出来的
+ * **顺序风险**，今天不可达（benefit 报文实测只带英文/码值），但加到这里是零成本的。
+ */
+export function isCreditExhaustedQuota(code: string, message: string): boolean {
+  // ⚠️ benefit 码优先：它比散文可信（见 isBenefitQuotaExhausted 的说明）。
+  if (isBenefitQuotaExhausted(code, message)) return false
+  if (hasBusinessCode(code, CODEARTS_CREDIT_EXHAUSTED_CODE)) return true
+  if (hasBusinessCode(message, CODEARTS_CREDIT_EXHAUSTED_CODE)) return true
+  // ⚠️ 纯文案腿放最后，且先排除 benefit 缺失报文（见上）。
+  if (isBenefitNotFoundBody(message)) return false
+  // ⚠️⚠️ 再排除「**不是额度问题**」但撞上共享正则的文案（审计 P2-③）：
+  // `CREDIT_EXHAUSTED_PATTERN` 里有一条 `余额.{0,4}(?:不足|耗尽|用尽)`，而
+  // 「您的余额不足，请先**完成实名认证**后重试」会被它命中 ⇒ 判成积分耗尽 ⇒
+  // 换号 + 给失败账号写 `modelRateLimit`（UTC+8 次日 0 点）⇒ **一个与账号
+  // 无关的问题把账号在该模型上沉底一整天**，用户还只看到「积分已耗尽」。
+  //
+  // 那条正则原本只服务 buddy `14018` 的**展示**向判据（`isCreditExhausted`），
+  // 本 PR 把它带进了「换号 + 写冷却」这条**有副作用**的路径 —— 这是本次
+  // 修复引入的放大面，必须在这里挡掉。
+  if (NOT_QUOTA_RELATED_PATTERN.test(message)) return false
+  return CREDIT_EXHAUSTED_PATTERN.test(message)
+}
+
+/**
+ * 撞上额度正则、但语义上**与额度无关**的文案（实测把失败账号沉底一整天）。
+ *
+ * 只收「任何账号都救不了、充值也没用」的那类：实名/身份认证。刻意窄 ——
+ * 每加一条就多一个「本该死却不死」的漏判面。
+ */
+const NOT_QUOTA_RELATED_PATTERN = /实名认证|实名验证|身份认证/
+
+/**
+ * 「**账号积分**已耗尽」的用户可见文案。
+ *
+ * 与 {@link codeartsQuotaExhaustedMessage} 的**唯一区别**：**不承诺任何重置时刻**。
+ * 积分是充值 / 活动领来的，用完不会自己回来 —— 写「预计 N 后重置」等于告诉用户
+ * 在等一个永不到来的时刻。
+ */
+export function codeartsCreditExhaustedMessage(model: string): string {
+  return (
+    `codearts: 模型 ${model} 的**账号积分**已用尽（上游 error_code TM.00001050），`
+    + '积分需要充值或领取活动积分才会增加，不会按日自动恢复。'
+    + '可改用其它模型，或在 Jet Hub 的 CodeArts 面板切换/添加账号。'
+  )
 }
 
 /**
@@ -2807,7 +2897,16 @@ export class CodeArtsAdapter extends LlmAdapter {
         // ⚠️ **分类必须走 `errorDetailForClassify`**（不含 detail 腿）—— 理由同上，
         // 用展示出口会让 detail 里的额度措辞翻转这条判据。
         if (isSseQuotaExhaustedErrorCode(errorDetailForClassify(errorText), errorText)) {
-          const message = codeartsQuotaExhaustedMessage(options.model, nextUtc8DayStartMs())
+          // ⚠️ 文案必须按**哪条腿命中**分流（审计 P1-1）：
+          // 积分耗尽的用户需要去充值，而他看到的若是「免费额度已用尽，预计…后重置」
+          // 就会干等一整天 —— 那笔额度永远不会回来。判据复用同一个函数，
+          // 不在这里内联第二份（两份同义判据必然漂移）。
+          const creditExhausted = isCreditExhaustedQuota(
+            errorDetailForClassify(errorText), errorText,
+          )
+          const message = creditExhausted
+            ? codeartsCreditExhaustedMessage(options.model)
+            : codeartsQuotaExhaustedMessage(options.model, nextUtc8DayStartMs())
           if (this.options.accountPool) {
             if (currentAccountId) {
               await this.options.accountPool.updateModelRateLimit(

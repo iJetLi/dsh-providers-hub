@@ -4,6 +4,9 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   CHAT_API_BASE,
   CodeArtsAdapter,
+  codeartsCreditExhaustedMessage,
+  isBenefitQuotaExhausted,
+  isCreditExhaustedQuota,
   isSseQueueErrorCode,
   isSseQuotaExhaustedErrorCode,
 } from '../../src/llm-adapter.js'
@@ -132,6 +135,46 @@ describe('判据：TM.00001050（账号积分耗尽）', () => {
     expect(isSseQuotaExhaustedErrorCode('TM.00001041', '账号并发上限')).toBe(false)
   })
 
+  it.each([
+    ['① 只给 code（SSE 首帧的 data.error_code）', 'TM.00001050', ''],
+    // ⚠️⚠️ `error_msg` 必须**留空**：真实报文里自带「您的积分已耗尽」，
+    // 若照抄进来，文案腿会把它兜住 ⇒ 这条用例对「报文腿」零判别力
+    //（我第一版就这么写的，变异 M2 当场全绿）。每一格都必须让另外两条腿
+    // 拿不到任何证据。
+    ['② 只给 message（HTTP 4xx 的报文全文）', '', '{"error_code":"TM.00001050","error_msg":""}'],
+    ['③ 只给中文文案（上游改码值时的兜底）', 'TM.99999999', '您的积分已耗尽，请关注活动积分领取活动'],
+  ])('★★★ 三条腿各自独立承重：%s', (_label, code, message) => {
+    // ⚠️⚠️ 这条用例是**两份审计各自独立打中**的缺口：原先只用「码 + 文案」
+    // 的组合输入，于是**删掉任一码值腿都 6/6 全绿**（文案腿把两条都兜住了）。
+    // 后果：上游一改 `error_msg`（那是中文人类可读文本，随时会变），
+    // 码值腿静默失效、CI 不会红 —— 而换号正是靠它。
+    // 所以每一腿必须**只喂自己那一路**，让另外两腿都拿不到证据。
+    expect(isSseQuotaExhaustedErrorCode(code, message)).toBe(true)
+  })
+
+  it('★★★ 文案腿不许把「benefit 缺失」和「与额度无关」的报文吃进来', () => {
+    // ① benefit 缺失（InferHub.4004.200）该走「去头重试一次」，不是换号。
+    //    若上游把 benefit 缺失也改成中文措辞，共享正则会把一次**本可自愈**的
+    //    请求判成「没钱」并轮完整池（审计 P2-⑤ 的顺序风险）。
+    expect(isCreditExhaustedQuota('', 'InferHub.4004.200 免费额度已用尽')).toBe(false)
+    // ② 「余额不足，请先完成实名认证」：撞上共享正则，但任何账号都救不了 ——
+    //    判成积分耗尽就会给失败账号写一整天的冷却（审计 P2-③ 的放大面）。
+    expect(isCreditExhaustedQuota('', '您的余额不足，请先完成实名认证后重试。')).toBe(false)
+    // ③ 对照组：真积分文案仍命中（排不是把整条腿废掉）。
+    expect(isCreditExhaustedQuota('', '您的积分已耗尽')).toBe(true)
+  })
+
+  it('★ benefit 与积分两族文案必须分开（审计 P1-1：说错出路就是误导）', () => {
+    // benefit 通道：等 UTC+8 次日重置，等得到。
+    expect(isBenefitQuotaExhausted('InferHub.4291.200', '')).toBe(true)
+    expect(isBenefitQuotaExhausted('', 'insufficient quota')).toBe(true)
+    // 积分通道：不会自己回来，必须去充值 —— 所以文案**不许**承诺任何重置时刻。
+    expect(codeartsCreditExhaustedMessage('glm-5.3')).not.toMatch(/预计|重置/)
+    expect(codeartsCreditExhaustedMessage('glm-5.3')).toContain('不会按日自动恢复')
+    // ⚠️ 两族同时命中时以 **benefit 码** 为准（码值比散文可信）。
+    expect(isCreditExhaustedQuota('InferHub.4291.200', 'quota exhausted')).toBe(false)
+  })
+
   it('TM.00001050 不会被排队判据吃掉', () => {
     // 若它被 `isSseQueueErrorCode` 先接走，就会被当成「等一会儿就通」，
     // 而积分耗尽按自然日/套餐周期结算 —— 等多久都没用。
@@ -236,10 +279,17 @@ describe('行为：积分耗尽必须换到下一个账号', () => {
     // 现场正是这个形态（截图里 acb57fd3 积分 0、e6758a73 上游同样回耗尽），
     // 所以「换号失败后长什么样」必须锁住：不能死循环、不能静默无输出。
     const marked: string[] = []
+    const excluded: string[][] = []
     let nextCalled = 0
     const pool = {
       findAccountIdByCredential: async () => 'codearts-acb57fd3',
-      getAvailableAccount: async () => {
+      getAvailableAccount: async (
+        _provider: string, _model: string, tried: ReadonlySet<string>,
+      ) => {
+        // ⚠️ 必须断言**传进去的排除集**，不能只数调用次数（审计 P2-③）：
+        // 记账若没跟上（`rateLimitTried.add` 漏掉），同一个号会被反复取回，
+        // 而「调用了几次」这个判据分辨不出来。
+        excluded.push([...tried])
         // 池里第二个号：只返回一次，第二次没有可用的号了。
         if (nextCalled > 0) return null
         nextCalled += 1
@@ -276,6 +326,12 @@ describe('行为：积分耗尽必须换到下一个账号', () => {
     expect(chatCalls).toBe(2)
     // ② 两个号都被标记。
     expect(marked).toEqual(['codearts-acb57fd3', 'codearts-e6758a73'])
+    // ③ 每次取号时，**已经失败的那个号**都必须在排除集里（记账真的传下去了）。
+    //    （取号发生在「写标记」之后，所以第一轮就带上了刚失败的号。）
+    expect(excluded).toEqual([
+      ['codearts-acb57fd3'],
+      ['codearts-acb57fd3', 'codearts-e6758a73'],
+    ])
     // ③ 零内容块 + 如实抛额度错误。
     //    码必须是字面量 `'QUOTA_EXCEEDED'`（harness 常量 `QUOTA_EXCEEDED_CODE`
     //    的字面值是 `'QUOTA'`，会让客户端把 message 换成通用文案，
@@ -283,7 +339,11 @@ describe('行为：积分耗尽必须换到下一个账号', () => {
     expect(chunks).toEqual([])
     expect(thrown).toBeInstanceOf(LlmError)
     expect((thrown as LlmError).code).toBe('QUOTA_EXCEEDED')
-    expect((thrown as LlmError).message).toMatch(/预计 .*后重置/)
+    // ⚠️ 文案必须点破**积分**（而不是 benefit 免费额度）：积分是充值/领来的，
+    // 不会按日自动恢复。原先是 benefit 文案「预计…后重置」—— 用户会去干等
+    // 一个永不到来的时刻（审计 P1-1）。
+    expect((thrown as LlmError).message).toContain('账号积分')
+    expect((thrown as LlmError).message).not.toMatch(/预计 .*后重置/)
   })
 
   it('TM.000010051（无权调用该模型）不写标记、不换号 —— 直接如实报错', async () => {
