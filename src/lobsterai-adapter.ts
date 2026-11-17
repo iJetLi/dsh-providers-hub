@@ -48,6 +48,13 @@ import {
 import { LOBSTERAI, type LobsteraiFallbackModel, type LobsteraiProduct } from './lobsterai-product.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import {
+  lobsteraiLimitedFreeCandidate,
+  nextPromotionEdgeMs,
+  promotionBadgeFor,
+  promotionRunningAt,
+  type ModelPromotion,
+} from './model-promotions.js'
+import {
   classifyLobsteraiError,
   classifyLobsteraiStreamError,
   recordsLobsteraiRateLimit,
@@ -166,6 +173,36 @@ export interface LobsteraiRemoteModel {
    * 而 buddy 是字符串 `"x0.05"`。不要共用解析函数。
    */
   costMultiplier?: number
+  /**
+   * 限免活动**已声明**（`data.limitedFree`，不论此刻开不开）。
+   *
+   * ⚠️ 与 {@link limitedFreeActive} **不是同义词**（官方客户端 asar @32509033 /
+   * @32483752 分得很清）：本字段只决定「这条模型有活动」，客户端拿它配起止算
+   * 「下一次刷新时刻」；徽标画不画看的是 `limitedFreeActive`。
+   */
+  limitedFree?: boolean
+  /** 限免**此刻生效**（`data.limitedFreeActive`，取目录那一刻的快照）。 */
+  limitedFreeActive?: boolean
+  /**
+   * 限免起点（`data.limitedFreeStartAt` → epoch 毫秒）。
+   *
+   * ⚠️ 上游是**字符串**（客户端直接 `Date.parse` 它，@32483752）；本层折成毫秒，
+   * 下游不再二次解析。实测 2026-11-17 是 `null`（21/21 无活动），真实格式
+   * **尚未取证** ⇒ 只接受 `Date.parse` 能吃的字符串，数字/对象一律按「没给」。
+   */
+  limitedFreeStartMs?: number
+  /** 限免终点（`data.limitedFreeEndAt` → epoch 毫秒；同上，格式未取证）。 */
+  limitedFreeEndMs?: number
+  /**
+   * 上游**下发了**起止，但至少有一个读不懂（非空字符串以外的一切、或 `Date.parse`
+   * 出 NaN）。
+   *
+   * ⚠️ 必须与「没有起止」分开记：前者是「上游说了有窗口，我们不知道是几点」，
+   * 后者是「上游只说此刻免费」。合并的后果是**只解析到起点、终点读丢时窗口变成
+   * 无上界** —— 活动结束后徽标永远挂着，正是 issue #101 的红线方向
+   * （PR #104 的 fail-closed 判据也是为这一格立的）。
+   */
+  limitedFreeWindowUnreadable?: true
   /** 是否接受图片输入。 */
   supportsImage?: boolean
   /** 是否支持思考（无 `thinkingConfig` 时无可选档位，仅作展示参考）。 */
@@ -257,6 +294,39 @@ export function readLobsteraiModelArray(body: unknown): readonly unknown[] {
 }
 
 /**
+ * 读「时刻」字段（`limitedFreeStartAt` / `limitedFreeEndAt`）。
+ *
+ * 上游给的是**字符串**：官方客户端对同一份数据直接 `Date.parse(value22)`
+ * （asar @32483752），所以 ISO 形态是唯一有证据的形态。本层折成 epoch 毫秒，
+ * 下游（`model-promotions.ts`）只收数字 —— 两处各 `Date.parse` 一次就是
+ * 「一文件两套同义判据」的复发形态。
+ *
+ * ⚠️ 数字形态**刻意不接受**：`1794931200` 是秒还是毫秒在上游没有依据，
+ * 按毫秒读会把 1970 年当成活动窗口，比「没给」更糟（fail-closed）。
+ */
+function readInstantField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key]
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  const ms = Date.parse(value)
+  return Number.isFinite(ms) ? ms : undefined
+}
+
+/**
+ * 该字段是「上游给了值，但我们读不懂」吗（`null` / 缺失 / **空串** = 没给）。
+ *
+ * ⚠️ 与 {@link readInstantField} **必须同判据**（空串这一格最容易分叉：那边把 `''`
+ * 当「没给」返回 undefined，这边若把它当「读不懂」就会把一个空字符串升级成
+ * fail-closed，整条活动再也画不出来）。两个函数对「什么叫能解析」的答案一旦分叉，
+ * 就会出现「值被当没给、却又被标成读不懂」的缝（腾讯 `validUntil: 'soon'`
+ * 曾这么挂到 2030）。
+ */
+function isUnreadableInstant(value: unknown): boolean {
+  if (value === undefined || value === null || value === '') return false
+  if (typeof value !== 'string') return true
+  return !Number.isFinite(Date.parse(value))
+}
+
+/**
  * 解析 `GET /api/models/available` 的响应。
  *
  * 取 `modelId`/`modelName` 与模型参数（见 {@link LobsteraiRemoteModel}）。
@@ -295,6 +365,23 @@ export function parseLobsteraiModels(body: unknown): LobsteraiRemoteModel[] {
     // `"x0.05"` 形态不同，故各自解析。只在为正数时带上（0 在业务上无意义）。
     const costMultiplier = readNumberField(record, 'costMultiplier')
     if (costMultiplier !== undefined && costMultiplier > 0) model.costMultiplier = costMultiplier
+    // 限免四件套（2026-11-17 客户端 asar 取证；同日实测 21/21 条目**全未生效**）。
+    // ⚠️ 布尔仍按 `typeof === 'boolean'`：脏值（`'false'`）按「未声明」处理比 `!!` 更安全。
+    if (typeof record.limitedFree === 'boolean') model.limitedFree = record.limitedFree
+    if (typeof record.limitedFreeActive === 'boolean') {
+      model.limitedFreeActive = record.limitedFreeActive
+    }
+    const limitedFreeStartMs = readInstantField(record, 'limitedFreeStartAt')
+    if (limitedFreeStartMs !== undefined) model.limitedFreeStartMs = limitedFreeStartMs
+    const limitedFreeEndMs = readInstantField(record, 'limitedFreeEndAt')
+    if (limitedFreeEndMs !== undefined) model.limitedFreeEndMs = limitedFreeEndMs
+    // ⚠️ 「下发了但读不懂」必须单独记：只解析到起点而把终点读丢，会得到一条
+    // **无上界**的窗口 ⇒ 活动结束后徽标永不消失（`promotionWithinAbsoluteWindow`
+    // 对缺失的一端不做约束）。判断与 `readInstantField` 共用同一份判据，
+    // 不在这里另写一个「什么叫能解析」。
+    if (isUnreadableInstant(record.limitedFreeStartAt) || isUnreadableInstant(record.limitedFreeEndAt)) {
+      model.limitedFreeWindowUnreadable = true
+    }
 
     models.push(model)
   }
@@ -360,10 +447,13 @@ export interface LobsteraiAdapterOptions {
   /**
    * 时钟（注入以便单测推进目录 TTL；缺省 `Date.now`）。
    *
-   * ⚠️ 只用于**目录新鲜度**（`ensureRemoteModels` 的 `isCatalogFresh`），
-   *    不用于超时/退避计时 —— 那些仍走真实时钟。
-   *    ⚠️ **buddy 是例外**：它的 `catalogGate` 也吃这个时钟（冷却与
-   *    「距上次尝试 ≥10 秒」判定都走它），所以别把本行当成全仓库通用口径。
+   * 三个消费点（**同一个钟**，别只改一处）：① 目录新鲜度
+   * （`ensureRemoteModels` 的 `isCatalogFreshFor`）；② 限免徽标的「此刻」
+   * （`toCatalogEntry` 每条目读一次）；③ `nextPromotionEdgeAt` 的起算时刻。
+   *
+   * ⚠️ **不用于超时/退避计时** —— 那些仍走真实时钟（与 buddy 不同：它的
+   * `catalogGate` 也吃这个时钟，冷却与「距上次尝试 ≥10 秒」都算它）。
+   * ⚠️ ②③ 必须同源：两处各读真实时钟，单测里会给出两个「现在」。
    */
   now?: () => number
   /**
@@ -825,6 +915,14 @@ export class LobsteraiAdapter extends LlmAdapter {
   private remoteMeta: ReadonlyMap<string, LobsteraiRemoteModel> = new Map()
   /** 产品级兜底模型索引（`product.fallbackModels` 的 id → 条目）。 */
   private readonly fallbackIndex: ReadonlyMap<string, LobsteraiFallbackModel>
+  /**
+   * 限免活动候选表（id → 未决候选）。
+   *
+   * ⚠️ 存的是**未决候选**而不是「此刻的徽标」：徽标必须在 `toCatalogEntry`
+   * **现算**（issue #101 的装配时刻判据），否则宿主缓存一次目录读取之后，
+   * 活动结束的徽标会挂到进程退出为止。见 docs/agent-notes/promo-badge-issue-101.md。
+   */
+  private promotionIndex: ReadonlyMap<string, ModelPromotion> = new Map()
 
   constructor(private readonly options: LobsteraiAdapterOptions) {
     super()
@@ -898,8 +996,36 @@ export class LobsteraiAdapter extends LlmAdapter {
     await this.catalogGate.run(async () => {
       const models = await fetchRemote()
       if (models.length === 0) return false
+      // ★ 限免候选表与远端目录**同源同换**（**只收有活动的条目**，不制造空候选）。
+      // ⚠️ 先算完候选、再一次性落三个字段：中途抛错会让「目录换了、候选还是上
+      // 一份」——那时 `toCatalogEntry` 会用旧候选给新条目挂徽标（谁都不会报错）。
+      const promotions = new Map<string, ModelPromotion>()
+      for (const model of models) {
+        const promotion = lobsteraiLimitedFreeCandidate(
+          {
+            limitedFree: model.limitedFree,
+            limitedFreeActive: model.limitedFreeActive,
+            validFrom: model.limitedFreeStartMs,
+            validUntil: model.limitedFreeEndMs,
+            windowUnreadable: model.limitedFreeWindowUnreadable,
+          },
+          model.id,
+        )
+        if (promotion !== undefined) promotions.set(model.id, promotion)
+      }
       this.remoteModels = models
       this.remoteMeta = new Map(models.map((model) => [model.id, model]))
+      this.promotionIndex = promotions
+      // ⚠️ 读不懂的起止**必须留一条日志**：这条腿的症状与「上游没办活动」完全同形
+      // （都是没有徽标），不留痕就永远诊断不出来（与「目录未声明 maxTokens 时告警一次」
+      // 同一条理由）。每次成功拉取最多打一条，不按模型刷屏。
+      const unreadable = models.filter((model) => model.limitedFreeWindowUnreadable === true)
+      if (unreadable.length > 0) {
+        console.warn(
+          '[lobsterai] 限免起止无法解析的模型 ' + String(unreadable.length) + ' 个'
+          + '（按不动处理，不画徽标、倍率不归零）: ' + unreadable.map((model) => model.id).join(','),
+        )
+      }
       // ⚠️ **只在成功赋值后**记时刻：失败/空结果不写，否则一次抖动会把上界
       //    刷新掉、下轮还要等满 20 分钟才发现上游没恢复。
       this.catalogAt = this.options.now?.() ?? Date.now()
@@ -1028,11 +1154,26 @@ export class LobsteraiAdapter extends LlmAdapter {
     const contextWindow = this.contextWindowFor(model.id)
     const maxTokens = this.remoteMeta.get(model.id)?.maxTokens
     const reasoning = this.reasoningFor(model.id)
+    // ★ 徽标在**装配时刻**现算（issue #101）：候选表里存的是未决活动，
+    // 「此刻画不画」是 now 的纯函数。`undefined` ⇒ 整个 `badge` 键缺席
+    // （写 `badge: undefined` 会让「没有活动」与「有活动但此刻不在窗口」同形）。
+    //
+    // ⚠️⚠️ **倍率与徽标必须共用同一个判据、同一次时钟读数**（本 PR 的自审缺陷）：
+    // 原实现「徽标看 `promotionRunningAt`、倍率看 `limitedFreeActive` 快照」，
+    // 于是「声明了窗口、快照说没开、此刻在窗口内」会装配出一行自相矛盾的东西 ——
+    // chip 说「限时免费」，名字却写着 `x0.05`。这正是本仓反复复发的
+    // 「一文件两套同义判据」形态：同一个事实（此刻免不免费）有两个出口。
+    // 单次读时钟还挡掉边界那一毫秒的另一个分叉：两次 `Date.now()` 可能落在窗口
+    // 两侧，徽标按前一个「此刻」、名字按后一个。
+    const nowMs = this.options.now?.() ?? Date.now()
+    const promotion = this.promotionIndex.get(model.id)
+    const freeNow = promotion !== undefined && promotionRunningAt(promotion, nowMs)
+    const badge = promotion === undefined ? undefined : promotionBadgeFor([promotion], nowMs)
     return {
       id: model.id,
       // 倍率写进 name（**不是** description）：composer 的模型切换菜单只渲染
       // `name`，description 仅用于 /model 弹窗。见 displayNameFor 的说明。
-      name: displayNameFor(model),
+      name: displayNameFor(model, freeNow),
       // ⚠️ `resolveModel` 用**元数据里的 name**（不带倍率）⇒ 显式提供 `bareName`。
       bareName: this.remoteMeta.get(model.id)?.name
         ?? this.fallbackIndex.get(model.id)?.name
@@ -1044,7 +1185,24 @@ export class LobsteraiAdapter extends LlmAdapter {
       ...contextWindow !== undefined ? { contextWindow } : {},
       ...maxTokens !== undefined ? { maxTokens } : {},
       ...reasoning !== undefined ? { reasoning } : {},
+      ...badge !== undefined ? { badge } : {},
     }
+  }
+
+  /**
+   * 候选表里下一个会改变徽标的时刻（epoch 毫秒），没有则 undefined。
+   *
+   * 供全局活动边界播报器排程（`src/index.ts` 的 `edgeSources`）。限免的起止是
+   * **绝对时刻**（上游给 ISO 字符串），客户端的做法正是「算最近边界 + `setTimeout`
+   * 重拉一次」（asar @32483752）。没有这条，活动一结束徽标最多再挂一个后台刷新
+   * 周期（20 分钟）—— 那是 issue #101 点名的「活动过期而用户仍按优惠期选择」。
+   *
+   * ⚠️ 时钟与 `toCatalogEntry` **同源**（同一个 `options.now`），否则单测里会出现
+   * 两个「现在」。⚠️ **零网络**：只读内存里的候选表。
+   */
+  nextPromotionEdgeAt(nowMs: number = this.options.now?.() ?? Date.now()): number | undefined {
+    if (this.promotionIndex.size === 0) return undefined
+    return nextPromotionEdgeMs([...this.promotionIndex.values()], nowMs)
   }
 
   private async loadCatalogEntries(): Promise<readonly CatalogEntry[]> {
@@ -1946,7 +2104,21 @@ export class LobsteraiAdapter extends LlmAdapter {
  * 形态差异：本 provider 的 `costMultiplier` 是**裸数字**（`0.05`），
  * 展示时补 `x` 前缀（buddy 系远端给的字符串本身已带 `x`）。
  */
-function displayNameFor(model: LobsteraiRemoteModel): string {
+function displayNameFor(model: LobsteraiRemoteModel, freeNow: boolean): string {
+  // ⚠️ 限免生效时倍率**按 0 展示**，判据逐字来自官方客户端：
+  // `const costMultiplier = model.limitedFreeActive ? 0 : readPositiveNumber(...)`
+  // （asar @107483653），且 `showCostMultiplier` 多一条 `|| limitedFreeActive === true`
+  // ⇒ 客户端画的是 `x0.00`，不是原倍率（用户实测截图同样如此）。
+  // 若不覆盖：模型明明免费了，界面上还写着 `x0.05` —— 用户按原价估算成本，
+  // 正是 issue #101「活动信息与请求实际不符」的同一个形态。
+  //
+  // ⚠️⚠️ `freeNow` 由**调用方**按 `promotionRunningAt` 算好传进来，**不在这里**
+  // 再读一次 `limitedFreeActive`：那样徽标（窗口判据）与倍率（快照判据）会分叉，
+  // 窗口内、快照却仍为 false 时装配出「限时免费 + x0.05」的矛盾行。
+  // 窗口优先于快照的方向是**刻意**的：快照会过期，窗口是此刻的纯函数；
+  // 反过来（快照优先）会在活动结束后的一个刷新周期里继续画「免费」——
+  // 那是 issue #101 的红线方向（夸大上游的优惠声明）。
+  if (freeNow) return `${model.name} · x0`
   if (model.costMultiplier === undefined) return model.name
   return `${model.name} · x${model.costMultiplier}`
 }

@@ -1110,6 +1110,113 @@ export function traePromotionCandidate(
   }
 }
 
+// ── LobsterAI 限时免费（官方客户端 asar 取证）────────────────────────────────────
+
+/**
+ * ## 为什么判据全抄客户端 asar 而不是自己推
+ *
+ * 上游对这条活动的**语义**只体现在客户端怎么画：`limitedFree`（声明）与
+ * `limitedFreeActive`（此刻）分开用、`costMultiplier` 在生效时被**强制成 0**、
+ * 红 chip 的文案来自 i18n。这三件事各自都能从「上游字段名」误推成另一个样子
+ * （例如把 `limitedFree` 当徽标开关 ⇒ 活动还没开始就先挂一年）。
+ */
+
+/**
+ * LobsterAI 模型上的限免四件套（`GET /api/models/available`）。
+ *
+ * ⚠️ **两个布尔不是同义词，别合并**（官方客户端 @32509033 / @32483752）：
+ * - `limitedFree` = 上游**声明了**这条限免活动（不论此刻开不开），客户端拿它算
+ *   「下一次刷新时刻」（`Date.parse(startAt/endAt)` 取最近边界 + `setTimeout`）；
+ * - `limitedFreeActive` = **取目录那一刻**上游说「此刻限免中」，客户端拿它画红 chip。
+ *
+ * 两者可能同时为真（常驻活动），也可能只有前者的窗口而后者此刻为假。
+ */
+export interface LobsteraiLimitedFreeInput {
+  /** 上游 `limitedFree` 原值。 */
+  limitedFree?: boolean
+  /** 上游 `limitedFreeActive` 原值（快照）。 */
+  limitedFreeActive?: boolean
+  /** `limitedFreeStartAt` 解析后的 epoch 毫秒；缺失 = 上游没给（或 null）。 */
+  validFrom?: number
+  /** `limitedFreeEndAt` 解析后的 epoch 毫秒；缺失 = 上游没给（或 null）。 */
+  validUntil?: number
+  /**
+   * 上游**给了**起止，但至少一个读不懂（见 `LobsteraiRemoteModel` 同名字段的说明）。
+   *
+   * ⚠️ 它与「没给起止」是两件事：前者必须 fail-closed（永不成立），后者才落回快照。
+   * 合并会让「只解析到起点」变成一条**无上界**的窗口。
+   */
+  windowUnreadable?: true
+}
+
+/**
+ * LobsterAI 限免 → 一条活动候选（画红 chip「限时免费」）。
+ *
+ * ## 判据逐字来自官方客户端 asar
+ *
+ * - 文案：i18n `modelLimitedFreeBadge` = **「限时免费」/「Limited-time free」**
+ *   （@48491027 中文表、@48724162 英文表）—— 不是我们编的措辞。
+ * - 何时画：`!model.presetId && model.limitedFreeActive`（@32509033）⇒ 只在
+ *   **此刻生效**时出现，故 `display: 'activeOnly'` + `standingEligible: false`
+ *   （与 Qoder 那条同一取舍：宿主徽标没有悬停位，窗口外不许说「限时免费」）。
+ * - 起点/终点是**字符串**：客户端对它直接 `Date.parse(value22)`（@32483752）。
+ *   本仓在**解析层**（`lobsterai-adapter.ts`）就折成 epoch 毫秒，此处只收数字 ——
+ *   这里再 `Date.parse` 一次就是「一文件两套同义判据」的复发形态。
+ * - 颜色：上游**不下发**颜色（目录里没有任何颜色字段）⇒ 按本模块契约
+ *   **不替上游发明颜色**，落 neutral。客户端画的是红（`text-red-600`），但那是
+ *   Tailwind 类、不是上游声明，写死一个 hex 就成了编造数据。
+ *
+ * ## 窗口 vs 快照的取舍
+ *
+ * 与 `promotionRunningAt` 的两支完全一致：**声明了起止 ⇒ 按窗口现算**（目录是
+ * 缓存快照，active 会过期；窗口是此刻的纯函数）；**只有 active 快照 ⇒ 只能信快照**。
+ * 因此 `timeDeclared` 必须按「起止是否真的解析到了数字」定，**不按键是否存在**：
+ * 实测 21/21 条目的两个键都在、值全是 `null`，按键判会把「上游没办活动」判成
+ * 「活动全天在跑」（PR #104 正向审计 P1-1 的同一个坑）。
+ *
+ * @returns undefined = 上游没说这条有限免（不制造空候选）。
+ */
+export function lobsteraiLimitedFreeCandidate(
+  limitedFree: LobsteraiLimitedFreeInput | undefined,
+  modelId: string,
+): ModelPromotion | undefined {
+  if (limitedFree === undefined) return undefined
+  if (typeof modelId !== 'string' || modelId.length === 0) return undefined
+  if (limitedFree.limitedFree !== true && limitedFree.limitedFreeActive !== true) return undefined
+  const validFrom = Number.isFinite(limitedFree.validFrom) ? limitedFree.validFrom : undefined
+  const validUntil = Number.isFinite(limitedFree.validUntil) ? limitedFree.validUntil : undefined
+  const windowed = validFrom !== undefined || validUntil !== undefined
+  // ⚠️⚠️ 上游**给了**起止却读不懂 ⇒ `dailyUnusable`（本模块里「声明了时间、但永远
+  // 不算成立」的唯一档，`promotionWithinDailyWindow` 对它返回 false）。
+  // 不这么做的后果是**只解析到一头、另一头读丢**：`promotionWithinAbsoluteWindow`
+  // 对缺失的一端不设约束 ⇒ 得到一条无上界窗口 ⇒ 活动结束后徽标永远挂着
+  // （issue #101 的红线方向；腾讯 `validUntil: 'soon'` 曾真挂到 2030）。
+  const unusable = limitedFree.windowUnreadable === true
+  const schedule: ModelPromotionSchedule = unusable
+    ? { dailyUnusable: true }
+    : windowed
+      ? windowedSchedule(validFrom, validUntil)
+      : { snapshotActive: limitedFree.limitedFreeActive === true }
+  return {
+    id: 'lobsterai_limited_free:' + modelId,
+    source: 'promotion',
+    modelIds: [modelId],
+    badge: { label: '限时免费', labelEn: 'Limited-time free', display: 'activeOnly' },
+    schedule,
+    // 读不懂的窗口同样算「声明了时间」（否则会落回快照那一支，等于替上游背书）。
+    timeDeclared: windowed || unusable,
+    standingEligible: false,
+    priority: 0,
+  }
+}
+
+function windowedSchedule(validFrom: number | undefined, validUntil: number | undefined): ModelPromotionSchedule {
+  return {
+    ...validFrom === undefined ? {} : { validFrom },
+    ...validUntil === undefined ? {} : { validUntil },
+  }
+}
+
 // ── 保鲜：下一个会改变徽标的时刻 ────────────────────────────────────────────────
 
 /** 边界查找的默认上界（一年）：超出即认为「没有排定的边界」，不排定时器。 */
