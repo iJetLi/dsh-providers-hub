@@ -792,6 +792,46 @@ fallback 组（`raccoon-4eb26a` / `raccoon-0c119c` / `raccoon-ecc5fd`），
 ⚠️ 已做**反向验证**：短路「基础 id 命中黑名单」那两行 → 2 条变红；把默认
 `return true` 改成 `false` → 7 条变红。
 
+### ⚠️ 目录漂移：兜底表与 e2e 断言必须**有牙**（2026-11-17）
+
+**症状**：`pnpm test:e2e:raccoon` 红在 `visible 模型数量: expected 7 to be 6`
+—— 上游已加/删模型，而断言还写着旧的 6 条。更糟的是失败信息只说「7≠6」，
+**不点名**是哪个漂了，得自己再跑一遍探针才知道。
+
+**当期实测（`GET /api/web/llm/v2/model_catalog`，10 个 chat 条目 / 7 个 visible）**：
+上游新增 `sn-qwen4-max`（`ability_level 3`、`context_window 1_000_000`、
+`max_tokens 100_000`（网关硬限 65_536，见 IKS1L5）、`tags` 含 `vision/reasoning`），
+并把 `sn-deepseek-v4-1-flash` **换成了同族版本 `sn-deepseek-v4-1-flash-1017`**
+（旧基础 id 已不在目录里 —— 与 loomy #67 的 `1017` 改名同一种形态）。
+⇒ 兜底表补一条、改一条 id/展示名（展示名跟着远端 `description` 带上 `-1017`，
+与客户端一致）。⚠️ 请求 id **必须**用完整版（剥版本号会 404，
+见 `RACCOON_MODEL_VERSION_SUFFIX`；`raccoonSupportsImageWith` 才剥）。
+
+**⚠️⚠️ 两条判据（这是本节的重点，别再退回去）**：
+
+1. **兜底表不得烘焙「会过期」的活动价**。`sn-qwen4-max` 当期是
+   `billing_status=discount`（0.75 → 0.5，活动至 2026-11-22）。把
+   `x0.75→x0.5` 写进编译期兜底表，活动结束/换档后会长期显示一个
+   **不存在的折扣** —— 正是 qoder 那条「静态兜底表必然腐坏」的形状。
+   故兜底表只写**基线** `x0.75`，折后价由远端目录在 `toCatalogEntry` 现算。
+   单测 `活动中的模型在兜底表里只写基线倍率` 锁死这条（断言 `name` 不含 `→`）。
+2. **e2e 判据用「双差集 + 表==远端」，不用数量/`>=`**。`EXPECTED_VISIBLE_IDS`
+   是基线快照（**顺序也照抄远端**），`missing`（基线里已下架/换 id）与
+   `extra`（上游新上架）**各点名报出**，再断言
+   `RACCOON.fallbackModels` 的 id 与之**逐字同序**。放宽成 `toBeGreaterThan`
+   或 `>= 兜底表条数` 会让漂移重新静默 —— 这次漂移就是这么静默过去的。
+   ⚠️ 带活动的模型（`sn-qwen4-max` / `-1017` / `glm-5-3-flash`）的 `name`
+   用正则 `^X · x0.75(→x…)?$`：活动期间与活动结束两种形态都吃得下，
+   而**基线倍率写错照样红**。
+
+**\(\dagger\) 变异验证**：从 `EXPECTED_VISIBLE_IDS` 删掉 `sn-qwen4-max` ⇒
+该用例变红且报文为 `{ missing: [], extra: ['sn-qwen4-max', …] }`（有牙）。
+
+**\(\ddagger\) 顺手记下的一处名不副实**（本次未改）：`tests/unit/raccoon-auth.spec.ts`
+的「promotions 只由 `billing_discounts` 决定（不猜）」用例，断言体实际只测了
+`billing_status_note`，与用例名不符 —— 做活动徽标（issue #101 第二腿）时
+应当补成真断言，别让它继续挂着这个名字。
+
 ### e2e 探针
 
 ```

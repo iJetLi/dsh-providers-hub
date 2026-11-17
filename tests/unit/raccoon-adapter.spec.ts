@@ -220,7 +220,7 @@ describe('listAllModels', () => {
     expect(all[0]?.name).toBe('GLM-5-3 · x0.75')
   })
 
-  it('远端拉取失败时回退兜底表（6 个模型，不带倍率）', async () => {
+  it('远端拉取失败时回退兜底表（7 个模型，不带倍率）', async () => {
     const adapter = new RaccoonAdapter({
       credentialRef: 'RACCOON_ACCESS_TOKEN' as never,
       resolveCredential: async () => CRED,
@@ -231,7 +231,7 @@ describe('listAllModels', () => {
     // 先触发一次加载
     await adapter.listModels('raccoon')
     const all = adapter.listAllModels()
-    expect(all.length).toBe(6)
+    expect(all.length).toBe(7)
     expect(all.map((m) => m.id)).toContain('sn-glm-5-3')
   })
 })

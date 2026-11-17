@@ -259,7 +259,7 @@ describe('raccoon 档位写入请求体（端到端）', () => {
   it('声明与 wire 一致：resolveModel 的档位 id 能被 stream 消费', async () => {
     const captured: { body?: Record<string, unknown> } = {}
     const adapter = makeAdapter(captured)
-    const resolved = await adapter.resolveModel('raccoon', 'sn-deepseek-v4-1-flash')
+    const resolved = await adapter.resolveModel('raccoon', 'sn-deepseek-v4-1-flash-1017')
     const ids = (resolved.reasoning?.efforts ?? []).map((e) => String(e.id))
     expect(ids.length).toBeGreaterThan(0)
     // 用声明里的每个 id 各发一次，都应被接受（不抛错）
@@ -269,5 +269,17 @@ describe('raccoon 档位写入请求体（端到端）', () => {
       await expect(consume(a, id)).resolves.toBeUndefined()
       expect(c.body?.extra_body).toHaveProperty('thinking')
     }
+  })
+
+  /**
+   * ⚠️ 上游 2026-11-17 已把 `sn-deepseek-v4-1-flash` 换成 `-1017`（旧 id 不在目录里），
+   * 但**用户会话/黑名单里可能还存着旧 id**（DSH 会把历史里选过的 id 原样交回来）。
+   * 那种引用必须**优雅降级**（不抛错、保守报 text），而不是让整条会话报错 ——
+   * 报错与否不是上游的事，是我们适配器的契约。
+   */
+  it('目录已下架的旧 id（`-1017` 的基础 id）仍可 resolve（不抛错、保守 text）', async () => {
+    const adapter = makeAdapter({})
+    const resolved = await adapter.resolveModel('raccoon', 'sn-deepseek-v4-1-flash')
+    expect(resolved.inputModalities).toEqual(['text'])
   })
 })

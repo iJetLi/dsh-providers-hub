@@ -37,14 +37,15 @@ describe('RACCOON 产品配置', () => {
 })
 
 describe('兜底模型表', () => {
-  it('恰好 6 个可见模型，顺序照抄远端', () => {
+  it('恰好 7 个可见模型，顺序照抄远端', () => {
     expect(RACCOON.fallbackModels.map((m) => m.id)).toEqual([
       'sn-sensenova-6-8-flash',
       'sn-sensenova-6-8-flash-lite',
+      'sn-qwen4-max',
       'sn-glm-5-3',
       'sn-kimi-k3',
       'sn-glm-5-3-flash',
-      'sn-deepseek-v4-1-flash',
+      'sn-deepseek-v4-1-flash-1017',
     ])
   })
 
@@ -62,9 +63,23 @@ describe('兜底模型表', () => {
     expect(byId.get('sn-glm-5-3')?.name).toBe('GLM-5-3 · x0.75')
     expect(byId.get('sn-kimi-k3')?.name).toBe('Kimi-K3 · x1')
     expect(byId.get('sn-glm-5-3-flash')?.name).toBe('GLM-5-3-Flash · x0.2→x0.1')
-    expect(byId.get('sn-deepseek-v4-1-flash')?.name).toBe('DeepSeek-V4.1-Flash · x0.25')
+    expect(byId.get('sn-deepseek-v4-1-flash-1017')?.name).toBe('DeepSeek-V4.1-Flash-1017 · x0.25')
     expect(byId.get('sn-sensenova-6-8-flash')?.name).toBe('SenseNova-6.8-Flash · 免费')
     expect(byId.get('sn-sensenova-6-8-flash-lite')?.name).toBe('SenseNova-6.8-Flash-Lite · 免费')
+  })
+
+  /**
+   * ⚠️ **兜底表不得烘焙活动价**：`sn-qwen4-max` 当前带限时活动
+   * （`billing_status=discount`，2026-11-17 实测折后 0.5、至 2026-11-22），
+   * 而兜底表是编译期快照 —— 把 `x0.75→x0.5` 写进去，活动结束（或换档）后
+   * 会长期显示一个**不存在的折扣**。活动价只允许由远端目录现算。
+   * ⇒ 本条要求它保持基线形态 `x0.75`（**不含 `→`**）。
+   */
+  it('活动中的模型在兜底表里只写基线倍率（不固化会过期的折后价）', () => {
+    const byId = new Map(RACCOON.fallbackModels.map((m) => [m.id, m]))
+    const qwen = byId.get('sn-qwen4-max')
+    expect(qwen?.name).toBe('Qwen4-Max · x0.75')
+    expect(qwen?.name).not.toContain('→')
   })
 
   it('上下文窗口与输出上限逐条对照远端实测值', () => {
@@ -78,7 +93,8 @@ describe('兜底模型表', () => {
     for (const model of RACCOON.fallbackModels) {
       expect(model.maxTokens, model.id).toBeLessThanOrEqual(65_536)
     }
-    expect(byId.get('sn-deepseek-v4-1-flash')?.contextWindow).toBe(1_000_000)
+    expect(byId.get('sn-deepseek-v4-1-flash-1017')?.contextWindow).toBe(1_000_000)
+    expect(byId.get('sn-qwen4-max')?.contextWindow).toBe(1_000_000)
   })
 
   /**
@@ -89,15 +105,15 @@ describe('兜底模型表', () => {
    * 结论：远端 `tags` 里的 `vision` 是**客户端选模偏好**，不是能力契约。
    * 6 个可见模型实测**全部**能读图，含两个不带 `vision` 标签的。
    */
-  it('图片能力：6 个模型全部为 true（含 tags 不含 vision 的两个）', () => {
+  it('图片能力：7 个模型全部为 true（含 tags 不含 vision 的几个）', () => {
     const byId = new Map(RACCOON.fallbackModels.map((m) => [m.id, m]))
     expect(byId.get('sn-sensenova-6-8-flash')?.supportsImage).toBe(true)
     expect(byId.get('sn-glm-5-3')?.supportsImage).toBe(true)
     expect(byId.get('sn-kimi-k3')?.supportsImage).toBe(true)
     // ⚠️ 这两条远端 tags **不含** vision，但实测能看图 —— 曾经错判为 false。
-    expect(byId.get('sn-deepseek-v4-1-flash')?.supportsImage).toBe(true)
+    expect(byId.get('sn-deepseek-v4-1-flash-1017')?.supportsImage).toBe(true)
     expect(byId.get('sn-glm-5-3-flash')?.supportsImage).toBe(true)
-    // 逐条锁死：6 条里不允许出现任何 false
+    // 逐条锁死：7 条里不允许出现任何 false
     expect(RACCOON.fallbackModels.filter((m) => !m.supportsImage)).toEqual([])
   })
 

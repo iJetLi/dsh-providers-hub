@@ -16,7 +16,7 @@
  * - 手机号加密密钥：渲染层模块 68284 的 `yv(e, t = "senseraccoon2023")`
  * - 阿里云验证码：渲染层模块 37907 的 `q3`（SceneId）/ `$j`（prefix）
  * - 兜底模型表：2026-09-26 用本机登录态实测
- *   `GET /api/web/llm/v2/model_catalog` 取 `visible:true` 的 6 条
+ *   `GET /api/web/llm/v2/model_catalog` 取 `visible:true` 的 7 条
  */
 
 import { RACCOON_API_BASE, RACCOON_PHONE_CIPHER_SECRET } from './raccoon.js'
@@ -104,7 +104,7 @@ export const RACCOON_EFFORT_NAMES: Readonly<Record<string, string>> = Object.fre
 /**
  * 该模型可选的思考档位（**顺序 = 强度序：弱 → 强**，Issue IKLIDV）。
  *
- * ⚠️ **所有 6 个可见模型都返回这两档** —— 实测 `extra_body.thinking` 是
+ * ⚠️ **所有可见模型都返回这两档** —— 实测 `extra_body.thinking` 是
  * **provider 级方言**，与模型无关（`thinking.type` 的枚举在服务端全局一致）。
  * 故不做 per-model 分派（那会是凭空猜测）。
  *
@@ -210,14 +210,15 @@ export interface RaccoonProduct {
   phoneCipherSecret: string
   /** 阿里云滑块验证码配置（短信登录必需）。 */
   aliyunCaptcha: { sceneId: string; prefix: string }
-  /** 远端模型列表不可用时的兜底目录（6 个可见模型）。 */
+  /** 远端模型列表不可用时的兜底目录（7 个可见模型）。 */
   fallbackModels: readonly RaccoonFallbackModel[]
 }
 
 /**
- * 兜底模型目录（6 个 `visible:true` 模型）。
+ * 兜底模型目录（7 个 `visible:true` 模型）。
  *
- * 来源：2026-09-26 实测 `GET /api/web/llm/v2/model_catalog`。
+ * 来源：2026-11-17 实测 `GET /api/web/llm/v2/model_catalog`（10 个 chat 条目，
+ * 其中 3 个 `visible:false` 内部模型被过滤）。
  * 顺序**照抄远端返回顺序**，不重排 —— 重排会让「与远端对比」这类排查失去可比性。
  *
  * ⚠️ 展示名由 `raccoonDisplayName` 的输出形态固化（` · x倍率` / ` · 免费` /
@@ -227,10 +228,15 @@ export interface RaccoonProduct {
  * |---|---|---|---|
  * | `sn-sensenova-6-8-flash` | 0.5 | 0 | 免费 |
  * | `sn-sensenova-6-8-flash-lite` | 0.5 | 0 | 免费 |
+ * | `sn-qwen4-max` | 0.75 | 0.5 | x0.75（活动价由远端现算，见条目注释） |
  * | `sn-glm-5-3` | 0.75 | 0.75 | x0.75 |
  * | `sn-kimi-k3` | 1 | 1 | x1 |
  * | `sn-glm-5-3-flash` | 0.2 | 0.1 | x0.2→x0.1 |
- * | `sn-deepseek-v4-1-flash` | 0.25 | 0.25 | x0.25 |
+ * | `sn-deepseek-v4-1-flash-1017` | 0.25 | 0.25 | x0.25 |
+ *
+ * ⚠️ 2026-11-17 上游把 `sn-deepseek-v4-1-flash` 换成了同族版本
+ * `sn-deepseek-v4-1-flash-1017`（旧 id **已不在**目录里）。请求必须用远端下发的
+ * 完整 id（剥版本号会 404，见 `RACCOON_MODEL_VERSION_SUFFIX` 的注释）。
  *
  * ⚠️ **不含** `Raccoon-Auto`：它是客户端 i18n 条目（`modelPicker.auto`）渲染的
  * 「自动选模」入口，不是远端模型 —— 直接发给 `chat/completions` 会 404。
@@ -255,6 +261,19 @@ const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
     name: 'SenseNova-6.8-Flash-Lite · 免费',
     contextWindow: 256_000,
     maxTokens: 63_999,
+    supportsImage: true,
+  },
+  {
+    id: 'sn-qwen4-max',
+    // ⚠️ **只写基线倍率，不写折后价**：该模型当前带**限时活动**（2026-11-17 实测
+    // `billing_status=discount`、`billing_effective_multiplier=0.5`、活动至 2026-11-22），
+    // 而活动价是**时间窗口内**的事实 —— 固化进编译期兜底表，会在活动结束后继续
+    // 显示一个不存在的折扣（正是 docs 里「静态兜底表必然腐坏」那条的形状）。
+    // 活动价由远端目录在 `toCatalogEntry` 现算；离线时如实显示基线。
+    name: 'Qwen4-Max · x0.75',
+    contextWindow: 1_000_000,
+    maxTokens: 65_536,
+    // 远端 tags 含 `vision`，且默认策略本就是「默认 image」（见 RACCOON_TEXT_ONLY_MODELS）。
     supportsImage: true,
   },
   {
@@ -283,8 +302,8 @@ const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
     supportsImage: true,
   },
   {
-    id: 'sn-deepseek-v4-1-flash',
-    name: 'DeepSeek-V4.1-Flash · x0.25',
+    id: 'sn-deepseek-v4-1-flash-1017',
+    name: 'DeepSeek-V4.1-Flash-1017 · x0.25',
     contextWindow: 1_000_000,
     maxTokens: 65_536,
     // ⚠️ 同上：远端 tags 不含 `vision`，实测 5/5 读对随机数字。
