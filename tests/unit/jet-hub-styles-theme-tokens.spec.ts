@@ -153,3 +153,54 @@ describe('★ Jet Hub 语义色走主题变量', () => {
     expect(hub).not.toMatch(/color: '#d93025'/)
   })
 })
+
+/**
+ * ★★ 五档分档配色的**可分辨性**（2026-11-18 三档分档）。
+ *
+ * ## 为什么需要这条
+ *
+ * 用户要求「长期=绿、短期=黄、临期=红」，但**「永久」已经是绿色**
+ * （服务端未给到期时间 ⇒ 永不作废，绿）。因此长期必须用**另一种绿**
+ * 才能与永久分辨 —— 这是本仓 2026-10-12 立的硬要求
+ * （「永久与长期必须分开，否则用户分不出哪些积分永远不会作废」）。
+ *
+ * 实现是 `color-mix(绿 78%, 灰 22%)`。本用例锁住三件事：
+ *
+ * 1. 长期与永久**不是同一个声明**（否则就是同色，要求被违反）；
+ * 2. 混色比例**在窗口内**（低于 ~70% 浅色主题跌破正文级对比度；
+ *    高于 ~85% 与永久色距过小）；
+ * 3. 卡片那份与徽标那份**必须同值**（两处是同一套配色，改一处不改另一处
+ *    会出现「设置页浅绿、徽标黄」的自相矛盾）。
+ */
+describe('★★ 五档分档配色：永久/长期必须是两种可分辨的绿', () => {
+  const css = withoutComments(stylesText())
+
+  it('永久用 ok、长期用 okSoft（不同 tone ⇒ 才有不同色）', () => {
+    expect(css, '永久必须是 ok').toMatch(/\.dim-jh-creditPoolPart\[data-tone="ok"\]/)
+    expect(css, '长期必须是 okSoft（新增 tone）').toMatch(/\.dim-jh-creditPoolPart\[data-tone="okSoft"\]/)
+    expect(css, '短期用 warn').toMatch(/\.dim-jh-creditPoolPart\[data-tone="warn"\]/)
+    expect(css, '临期用 error').toMatch(/\.dim-jh-creditPoolPart\[data-tone="error"\]/)
+  })
+
+  it('★★ okSoft 的混色比例在窗口内（70%~85%）', () => {
+    const m = /\.dim-jh-creditPoolPart\[data-tone="okSoft"\] \{ color: color-mix\(in srgb, var\(--dsw-alias-state-success-primary[^)]*\) (\d+)%,/.exec(css)
+    expect(m, 'okSoft 必须是 color-mix(... 绿 N%, 灰 ...) 形态').not.toBeNull()
+    const pct = Number(m![1])
+    expect(pct, `混色比例 ${pct}% 太低 ⇒ 浅色主题下对比度不足 4.5`).toBeGreaterThanOrEqual(70)
+    expect(pct, `混色比例 ${pct}% 太高 ⇒ 与「永久」色距过小、分不清`).toBeLessThanOrEqual(85)
+  })
+
+  it('★★ 卡片与徽标两份 okSoft 必须逐字同值（否则两处配色自相矛盾）', () => {
+    const card = /\.dim-jh-creditPoolPart\[data-tone="okSoft"\] \{ color: ([^;]+); \}/.exec(css)?.[1]?.trim()
+    const badge = /\.dim-jh-badgeNotePart\[data-tone="okSoft"\] \{ color: ([^;]+); \}/.exec(css)?.[1]?.trim()
+    expect(card, '卡片侧的 okSoft 声明').toBeDefined()
+    expect(badge, '徽标侧的 okSoft 声明').toBeDefined()
+    expect(badge, '两处必须同值').toBe(card)
+  })
+
+  it('⚠️ 反向对照：ok 与 okSoft 不能是同一份声明（同色就等于回到「分不清」）', () => {
+    const ok = /\.dim-jh-creditPoolPart\[data-tone="ok"\] \{ color: ([^;]+); \}/.exec(css)?.[1]?.trim()
+    const okSoft = /\.dim-jh-creditPoolPart\[data-tone="okSoft"\] \{ color: ([^;]+); \}/.exec(css)?.[1]?.trim()
+    expect(ok).not.toBe(okSoft)
+  })
+})

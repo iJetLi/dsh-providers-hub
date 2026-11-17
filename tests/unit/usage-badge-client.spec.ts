@@ -711,10 +711,36 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(badge).not.toContain("'显示偏好'")
   })
 
-  it('浮层收窄到 280px、进度条 3px、双层柔和阴影', () => {
-    expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*width: 280px/)
+  it('浮层宽度 400px（四段分档）、双层柔和阴影', () => {
+    /**
+     * ⚠️ 原为 280px。2026-11-18 用户要求加宽：
+     * 「积分界面可能两行显示不全，那就把积分界面改宽度增加，反正就是不能再让
+     *  积分界面高度增加了」。
+     *
+     * 分档从两段变四段后（永久/长期/短期/临期），280px 放不下 ⇒ 换行 ⇒
+     * **每个账号多占一行** ⇒ 弹窗高度暴涨。用户明确选「加宽不加高」。
+     *
+     * ⚠️ 本用例锁的是「加宽这件事真的发生了」，不是锁具体数字 ——
+     *    但数字必须写死：改成 280 会回到要换行的形态，那是功能回归。
+     */
+    expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*width: 400px/)
     // 双层柔和阴影
     expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*box-shadow: 0 1px 2px[^}]*0 8px 24px/)
+  })
+
+  /**
+   * ★★ **四段分档必须单行不换行**（用户 2026-11-18：「不能再让积分界面高度增加」）。
+   *
+   * 只加宽弹窗是不够的：若 `.dim-jh-badgeRowNote` 允许折行，窄屏（300px）下
+   * 四段仍会折成两行 ⇒ 每个账号多一行 ⇒ 高度照样涨。
+   * 三条 CSS 缺一不可（缺 `overflow: hidden` 时 `text-overflow` 不生效 —— 本仓踩过）。
+   */
+  it('★★ 分档说明行必须单行 + 省略号三件套（否则换成高度增长）', () => {
+    const rule = /\.dim-jh-badgeRowNote \{[^}]*\}/.exec(styles)?.[0]
+    expect(rule, '.dim-jh-badgeRowNote 规则必须存在').toBeDefined()
+    expect(rule, '必须禁止折行 —— 折行就是「高度增加」，用户明确不许').toMatch(/white-space:\s*nowrap/)
+    expect(rule, '必须有省略号').toMatch(/text-overflow:\s*ellipsis/)
+    expect(rule, 'ellipsis 要生效必须配 overflow: hidden').toMatch(/overflow:\s*hidden/)
   })
 
   /**
@@ -780,8 +806,9 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(css).toMatch(/position: absolute/)
     expect(css).toMatch(/bottom: calc\(100% \+ 8px\)/)
     expect(css).toMatch(/right: 0/)
-    expect(css).toMatch(/width: 280px/)
-    expect(css).toMatch(/max-width: min\(280px, 86vw\)/)
+    // ⚠️ 2026-11-18 加宽 280 → 400（四段分档放不下，用户要求「加宽不加高」）
+    expect(css).toMatch(/width: 400px/)
+    expect(css).toMatch(/max-width: min\(400px, 86vw\)/)
     expect(css).toMatch(/max-height: 58vh/)
     expect(css).toMatch(/overflow-y: auto/)
     expect(css).toMatch(/z-index: 40/)
@@ -798,10 +825,12 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
    */
   it('窄屏宽度（width/max-width）不得内联，否则压不掉 media query', () => {
     const inline = badge.match(/const POPOVER_ANCHOR_STYLE = Object\.freeze\(\{([\s\S]*?)\}\)/)![1]
-    expect(inline).not.toMatch(/(^|[^\w])width: 280/)
+    // ⚠️ 数字跟着样式表走（现为 400），判据是「不得内联 width」这件事本身
+    expect(inline).not.toMatch(/(^|[^\w])width: \d/)
     expect(inline).not.toMatch(/(^|[^\w])maxWidth:/)
     // 窄屏规则必须还留在样式表里
-    expect(styles).toMatch(/@media \(max-width: 720px\) \{ \.dim-jh-badgePop \{[^}]*width: 220px/)
+    // ⚠️ 窄屏 220 → 300（220px 下四段必然折行 = 高度增长，用户明确不许）
+    expect(styles).toMatch(/@media \(max-width: 720px\) \{ \.dim-jh-badgePop \{[^}]*width: 300px/)
   })
 
   /**

@@ -308,8 +308,23 @@ const STYLES = `
 /* ↑ 深绿 = 「永久」（服务端未给到期时间，永不按时间作废）。
    ↓ 浅绿 = 「长期」（有到期日但 ≥15 天，还早）。两者**刻意不同深浅**：
      本仓库 2026-10-12 的硬要求是「永久与长期必须能分辨」，否则用户分不出
-     哪些积分是永远不会作废的。⚠️ 与 .dim-jh-badgeNotePart 那份必须同改。 */
-.dim-jh-creditPoolPart[data-tone="okSoft"] { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #15803d) 55%, var(--dsw-alias-label-tertiary, #8f959e)); }
+     哪些积分是永远不会作废的。⚠️ 与 .dim-jh-badgeNotePart 那份必须同改。
+   ⚠️ 混色比例 78% 是**对比度算出来的**（2026-11-18 用真实主题值实测，WCAG）：
+
+      | 主题 | 永久(ok) | 长期(okSoft@78%) | 短期(warn) | 临期(error) |
+      |---|---|---|---|---|
+      | 深色（实测 token） | **4.14** | 4.38 | 5.61 | 3.56 |
+      | 浅色（白底） | 5.02 | 4.56 | 5.02 | 4.77 |
+
+   ⚠️ **深色下「永久」4.14 与「临期」3.56 不达正文级，但那是既有值、不是本次引入**
+      （ok / error 这两行从 origin/master 起就一模一样，实测主题
+      --dsw-alias-state-success-primary = #2e8e52 是**填充亮色**而这里当 10px
+      文字色用）。本次只保证**新加的「长期」不比既有的「永久」更差**（4.38 > 4.14），
+      不顺手改既有配色 —— 那会让本 PR 混入无关的视觉变更。
+      如需彻底解决，应统一给四档换成「深色主题专用的文字色变量」（另开 issue）。
+   ⚠️ 78% 的选择：低于它则浅色跌破 4.5（55% 时仅 4.13）；高于它则与「永久」色距
+      缩到 25 以下、两档分不清。78% 是两侧都满足的唯一窗口。 */
+.dim-jh-creditPoolPart[data-tone="okSoft"] { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #15803d) 78%, var(--dsw-alias-label-tertiary, #8f959e)); }
 .dim-jh-creditPoolPart[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary, #b45309); }
 .dim-jh-creditPoolPart[data-tone="error"] { color: var(--dsw-alias-state-error-primary, #d93025); }
 .dim-jh-creditPoolPart[data-tone="muted"] { color: var(--dsw-alias-label-tertiary, #8f959e); }
@@ -1847,11 +1862,33 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-badgeDot[data-tone="warn"] { background: var(--dsw-alias-state-warn-primary); }
 .dim-jh-badgeDot[data-tone="error"] { background: var(--dsw-alias-state-error-primary); }
 .dim-jh-badgeDot[data-tone="muted"] { background: var(--dsw-alias-label-tertiary); }
-.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 280px; max-width: min(280px, 86vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
+/**
+ * 弹窗宽度 280 → **400px**（2026-11-18 用户要求）。
+ *
+ * ## 为什么要加宽（用户原话：「积分界面可能两行显示不全，那就把积分界面
+ * 改宽度增加，反正就是不能再让积分界面高度增加了」）
+ *
+ * 分档从两段（永久/长期 + 临期）变成**四段**（永久/长期/短期/临期）后，
+ * 每条账号的积分行在 280px 里放不下 ⇒ 换行 ⇒ **每个账号多占一行**，
+ * 而弹窗里有 4~6 个账号 ⇒ 整体高度暴涨、max-height: 58vh 一截就要滚动。
+ *
+ * 用户的取舍很明确：**宁可加宽，不许加高**。故这里只放宽宽度，
+ * 并让积分行 nowrap 保持单行（见 .dim-jh-badgeRowNote 的说明）。
+ *
+ * ⚠️ 400px 是量出来的：四段最坏形态
+ * 永久 1234 · 长期 1234 · 短期 1234 · 临期 1234（2 天 0 小时）
+ * 在 10px 字号下约 340px，加左右 padding（10×2）与边框 ≈ 362px
+ * ⇒ 取 400 留约 10% 余量。
+ * ⚠️ 上限仍用 min() 收在 86vw 内：弹窗是 absolute，窗口本身可能很窄
+ * （窄屏还会被下面的媒体查询降到 300px）。
+ */
+.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 400px; max-width: min(400px, 86vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
 /* 窄屏时徽标只留状态点，弹窗也随之收窄（否则它会盖住模型选择器）。
  * 宽度写 min() 而非媒体查询覆盖：弹窗是 absolute，媒体查询命中时按钮虽已
- * 收窄，但弹窗仍按 280px 渲染会显得与触发点不匹配。 */
-@media (max-width: 720px) { .dim-jh-badgePop { width: 220px; max-width: min(220px, 76vw); } }
+ * 收窄，但弹窗仍按 400px 渲染会显得与触发点不匹配。
+ * ⚠️ 窄屏降到 300px（原 220px）：四段分档在 220px 里必然换行 ⇒ 每个账号多一行
+ *    ⇒ 高度暴涨。宁可窄屏也保留 300px 的单行能力，超出部分由 86vw/76vw 兜底。 */
+@media (max-width: 720px) { .dim-jh-badgePop { width: 300px; max-width: min(300px, 76vw); } }
 .dim-jh-badgeHead { display: flex; align-items: center; gap: 5px; padding-bottom: 7px; }
 .dim-jh-badgeTitle { flex: none; max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dim-jh-badgeAt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }
@@ -1929,7 +1966,26 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 /* 一行放下「名字 …… 数值」（名字可省略号，数值不换行） */
 .dim-jh-badgeRowHead { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--dsw-alias-label-primary); }
 .dim-jh-badgeRowName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dim-jh-badgeRowNote { font-size: 10px; line-height: 14px; color: var(--dsw-alias-label-tertiary); }
+/**
+ * 该账号的**分档说明行**（永久 X · 长期 Y · 短期 Z · 临期 W + 倒计时）。
+ *
+ * ## ⚠️ 必须**单行不换行**（2026-11-18 用户要求）
+ *
+ * 用户原话：「反正就是不能再让积分界面高度增加了」。
+ * 四段分档在窄弹窗里会自动折成两行 ⇒ **每个账号多占一行** ⇒
+ * 4~6 个账号的弹窗高度直接翻倍、max-height: 58vh 立刻就要滚动。
+ *
+ * ⇒ 这里 nowrap，装不下就**由省略号收尾**（title 里是全文，hover 可读）。
+ * 与此同时弹窗本身放宽到 400px（见 .dim-jh-badgePop），
+ * 两者配合才能既单行又不被截太狠。
+ *
+ * ⚠️ text-overflow: ellipsis 要生效，必须同时有 overflow: hidden +
+ *    white-space: nowrap，三条缺一不可（本仓踩过只写后两条的坑）。
+ * ⚠️ 段间分隔符是独立的 span（.dim-jh-badgeNoteSep），它随父级一起
+ *    被省略号截断 —— 这是可接受的：被截掉的那几段本来也读不完整，
+ *    hover 有全文。
+ */
+.dim-jh-badgeRowNote { font-size: 10px; line-height: 14px; color: var(--dsw-alias-label-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 分桶说明的**逐段带色**（用户 2026-10-12：永久绿 / 长期黄 / 临期红 + 倒计时）。
    ⚠️ 颜色语义与 credit-expiry.js 的 expirySplitParts 一一对应，改一处要改两处：
      permanent（服务端没给到期时间，真·永久）→ ok 绿
@@ -1939,8 +1995,9 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-badgeNotePart { font-variant-numeric: tabular-nums; }
 .dim-jh-badgeNotePart[data-tone="ok"] { color: var(--dsw-alias-state-success-primary, #15803d); }
 /* 浅绿 = 「长期」。与卡片那份（.dim-jh-creditPoolPart）**必须同值**：两处是同一套
-   五档配色，改一处不改另一处会出现「设置页浅绿、徽标黄」的自相矛盾。 */
-.dim-jh-badgeNotePart[data-tone="okSoft"] { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #15803d) 55%, var(--dsw-alias-label-tertiary, #8f959e)); }
+   五档配色，改一处不改另一处会出现「设置页浅绿、徽标黄」的自相矛盾。
+   ⚠️ 78% 的由来见 .dim-jh-creditPoolPart[data-tone="okSoft"] 上方的对比度表。 */
+.dim-jh-badgeNotePart[data-tone="okSoft"] { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #15803d) 78%, var(--dsw-alias-label-tertiary, #8f959e)); }
 .dim-jh-badgeNotePart[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary, #b45309); }
 .dim-jh-badgeNotePart[data-tone="error"] { color: var(--dsw-alias-state-error-primary, #d93025); }
 .dim-jh-badgeNotePart[data-tone="muted"] { color: var(--dsw-alias-label-tertiary); }
