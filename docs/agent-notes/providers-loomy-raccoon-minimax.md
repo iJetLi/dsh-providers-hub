@@ -704,8 +704,9 @@ mode  = CFB, padding = NoPadding
 ⚠️ **`NaN` / 负数仍然不加后缀**（那才是真正「取不到」的情形）——
 不要把这两条合并成一条「1 倍或缺失都不显示」。
 
-⚠️ 同理适用于**兜底表**：`raccoon-product.ts` 里 `sn-kimi-k3` 的
-`name` 必须写 `'Kimi-K3 · x1'`，不能写 `'Kimi-K3'`
+⚠️ 同理适用于**兜底表**：`raccoon-product.ts` 里该模型的
+`name` 必须写 `'Kimi-K3.1-Pro · x1'`（2026-11-17 上游把 `sn-kimi-k3` 改名成
+`sn-kimi-k3-1-pro`；改名前是 `'Kimi-K3 · x1'`），不能只写 `'Kimi-K3.1-Pro'`
 （兜底表与 `raccoonDisplayName` 的输出形态必须一致，否则远端/回退两条路径
 显示不同）。
 
@@ -967,6 +968,10 @@ v1 那个接口按时间倒序返回**全部**记录（对话消耗 `desktop` �
 | `sn-sensenova-6-8-flash` | ✅ | ✅ 2/2 |
 | `sn-sensenova-6-8-flash-lite` | ✅ | ✅ 1/1 |
 | `sn-kimi-k3` | ✅ | ✅ 1/1 |
+
+> ⚠️ 上表是 **2026-10-21 的实测记录**（按当时的 id）。之后上游滚过两次版本：
+> `sn-deepseek-v4-1-flash` → `-1017`、`sn-kimi-k3` → `sn-kimi-k3-1-pro`（2026-11-17）——
+> **新 id 没有重新做过带图实测**，靠的是「默认支持识图」策略（见下）。
 | `sn-glm-5-3` | ✅ | ⚠️ **1/3**（provider 侧节点不一致，见下） |
 
 ⇒ **6 个兜底可见模型全部能读图**（2026-10-21 远端新增的
@@ -1022,6 +1027,78 @@ fallback 组（`raccoon-4eb26a` / `raccoon-0c119c` / `raccoon-ecc5fd`），
 （默认 image / 未知新模型 image / 纯文本集合 text，均含版本后缀形态）。
 ⚠️ 已做**反向验证**：短路「基础 id 命中黑名单」那两行 → 2 条变红；把默认
 `return true` 改成 `false` → 7 条变红。
+
+### ⚠️ 目录漂移：兜底表与 e2e 断言必须**有牙**（2026-11-17）
+
+**症状**：`pnpm test:e2e:raccoon` 红在 `visible 模型数量: expected 7 to be 6`
+—— 上游已加/删模型，而断言还写着旧的 6 条。更糟的是失败信息只说「7≠6」，
+**不点名**是哪个漂了，得自己再跑一遍探针才知道。
+
+**当期实测（`GET /api/web/llm/v2/model_catalog`，10 个 chat 条目 / 7 个 visible）**：
+上游新增 `sn-qwen4-max`（`ability_level 3`、`context_window 1_000_000`、
+`max_tokens 100_000`（网关硬限 65_536，见 IKS1L5）、`tags` 含 `vision/reasoning`），
+并把 `sn-deepseek-v4-1-flash` **换成了同族版本 `sn-deepseek-v4-1-flash-1017`**
+（旧基础 id 已不在目录里 —— 与本文 §11 记的 2026-10-21「远端上架 `-1017`」是
+同一种滚版本形态，只是这次旧 id 被**下架**了）。
+⇒ 兜底表补一条、改一条 id/展示名（展示名跟着远端 `description` 带上 `-1017`，
+与客户端一致）。⚠️ 请求 id **必须**用完整版（剥版本号会 404，
+见 `RACCOON_MODEL_VERSION_SUFFIX`；`raccoonSupportsImageWith` 才剥）。
+
+**⚠️⚠️ 同一天内又滚了一次（这就是本节判据存在的理由）**：本次会话里 19:4x
+还看到 `sn-kimi-k3`，21:4x 再打同一个端点，它已经变成 **`sn-kimi-k3-1-pro`**
+（`Kimi-K3.1-Pro`，仍 1 倍），旧 id 同样**不在**目录里 —— **漂移间隔约 1.5 小时**。
+⇒ 兜底表跟着改成 `sn-kimi-k3-1-pro` / `Kimi-K3.1-Pro · x1`。
+据此可以断定：**这张表天然是易腐的**，「一次对齐」不值钱，值钱的是**漂移当天就会红**
+（判据 2）。⚠️ 也**不要**因为「上游换 id」就推断「旧 id 还能用」：目录里没有的 id
+按 `normalizeRemoteModel` 之外无任何兜底，离线/请求期会 404；旧 id 的兼容只到
+`resolveModel` 优雅降级（保守 `['text']`）为止。
+
+**⚠️⚠️ 顺带抓到表里一条「已经腐坏」的旧条目**：`sn-glm-5-3-flash` 表里写
+`GLM-5-3-Flash · x0.2→x0.1`，而远端当天已是 `billing_multiplier =
+billing_effective_multiplier = 0.2`（那条活动**已结束**）。这不只是显示过期：
+`priceFactorFromName`（`aggregate-core.ts`）**取箭头右侧**，聚合路由会把一个
+实际 0.2 倍的模型当 0.1 倍来挑（「同档倍率升序」挑便宜就挑错了）⇒ 已改为基线
+`x0.2`。**未改但已登记**：两个 `sn-sensenova-*` 的 `· 免费` 同样是「限免」
+活动（`billing_status_note = 限免到 11月30日`、`billing_discounts` 带 `end_at`）——
+今天它**真**是 0 倍，现在改成 `x0.5` 反而当天就不准，且会连带改聚合价格因子
+⇒ **2026-11-30 到期后必须回来重测并清掉 `免费`**（这是本表唯一的已知过期风险）。
+
+**⚠️⚠️ 两条判据（这是本节的重点，别再退回去）**：
+
+1. **兜底表不得烘焙「会过期」的活动价**。`sn-qwen4-max` 当期是
+   `billing_status=discount`（0.75 → 0.5，活动至 2026-11-22）。把
+   `x0.75→x0.5` 写进编译期兜底表，活动结束/换档后会长期显示一个
+   **不存在的折扣** —— 正是 qoder 那条「静态兜底表必然腐坏」的形状。
+   故兜底表只写**基线** `x0.75`，折后价由远端目录在 `toCatalogEntry` 现算。
+   单测 `兜底表一律只写基线倍率` 锁死这条（断言**全表** `name` 不含 `→`）。
+2. **e2e 判据用「双差集 + 表==远端」，不用数量/`>=`**。`EXPECTED_VISIBLE_IDS`
+   是基线快照（**顺序也照抄远端**），`missing`（基线里已下架/换 id）与
+   `extra`（上游新上架）**各点名报出**，再断言
+   `RACCOON.fallbackModels` 的 id 与之**逐字同序**。放宽成 `toBeGreaterThan`
+   或 `>= 兜底表条数` 会让漂移重新静默 —— 这次漂移就是这么静默过去的。
+   ⚠️ 带活动的模型（`sn-qwen4-max` / `-1017` / `glm-5-3-flash` / `sensenova`）
+   的 `name` 用正则 `^X · x基线(→x…)?$`（`sensenova` 再加 `免费` 一支）：
+   活动期间与活动结束两种形态都吃得下，而**基线倍率写错照样红**。
+   ⚠️ 名字层只能这么测 —— **静态表 vs 时间相关事实**的漂移本质上只能靠
+   重新测量发现（单测写的是同一个过期常量，永远对）。
+3. **三条「取值域」守卫**（差集管的是「哪几条」，这三条管的是「字段还对不对」，
+   任一失真都是**静默**的）：
+   - `name === model_name`：请求 id 取自 `entry.name`（`normalizeRemoteModel`）；
+     上游若把真模型名放 `model_name`、`name` 变展示名，我们会用错 id 发请求
+     （全 404 且只在会话期暴露）。今天 10/10 两条字段逐字相同 ⇒ 断言「不许分叉」。
+   - `billing_effective_multiplier` 必须是 `number`：该字段非 number 时代码走
+     `NaN` ⇒ 展示名**静默丢** `· x…` 后缀（用户看到「没有计费信息」，而这是
+     当年报障过的形态）。
+   - id 不重复：`parseRaccoonModelCatalog` **不去重**，而差集判据对重复**完全无感**
+     （`missing`/`extra` 都空）⇒ 选择器会出两行同一模型。
+
+**† 变异验证**：从 `EXPECTED_VISIBLE_IDS` 删掉 `sn-qwen4-max` ⇒
+该用例变红且报文为 `{ missing: [], extra: ['sn-qwen4-max', …] }`（有牙）。
+
+**‡ 顺手记下的一处名不副实**（本次未改）：`tests/unit/raccoon-auth.spec.ts`
+的「promotions 只由 `billing_discounts` 决定（不猜）」用例，断言体实际只测了
+`billing_status_note`，与用例名不符 —— 做活动徽标（issue #101 第二腿）时
+应当补成真断言，别让它继续挂着这个名字。
 
 ### e2e 探针
 
