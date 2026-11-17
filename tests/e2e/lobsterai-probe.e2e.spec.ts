@@ -100,17 +100,20 @@ describeGate('LobsterAI 认证与签到状态探针（不消耗模型积分）',
   })
 
   /**
-   * 限免四件套（`limitedFree` / `limitedFreeActive` / `limitedFreeStartAt` /
-   * `limitedFreeEndAt`）的**线上**判据（只读：一次 GET，不消耗模型积分）。
+  /**
+   * 模型目录的**线上**契约（只读：一次 GET，不消耗模型积分）—— 限免四件套 +
+   * 订阅闸门三件套。
    *
-   * ⚠️ 断言只锁「上游发了布尔 ⇒ 解析层不得读丢」这个契约。**不锁**「此刻有几条限免」：
-   * 2026-11-17 实测 21/21 全为 false/null，锁数量等于把测试绑在「上游今天没活动」上。
+   * ⚠️ 断言只锁「上游发了真值 ⇒ 解析层不得读丢」这个契约。**不锁**「此刻有几条
+   * 限免 / 几条不可用」：2026-11-17 实测 21/21 限免全为 false/null，而不可用条目数
+   * 随**账号订阅状态**变（换一个已订阅账号就变成 0 个）⇒ 锁数量等于把测试绑在
+   * 「上游今天没活动」或某个具体账号上。
    *
-   * ★ 起止的真实格式**尚未取证**（至今全 null）。本用例因此把**原始字符串**打出来 ——
-   * 上游第一次真的办活动时，这段日志就是格式证据（客户端自己 `Date.parse` 它）。
+   * ★ 限免起止的真实格式**尚未取证**（至今全 null）。本用例因此把**原始字符串**
+   * 打出来 —— 上游第一次真的办活动时，这段日志就是格式证据（客户端自己
+   * `Date.parse` 它）。
    */
-  it('模型目录下发限免四件套（解析层不得读丢；起止格式待取证）', async () => {
-    const first = credentials[0]
+  it('模型目录下发限免四件套与订阅闸门三件套（解析层不得读丢；起止格式待取证）', async () => {    const first = credentials[0]
     if (first === undefined) return
     const { version } = await new LobsteraiClientVersionResolver().resolve(LOBSTERAI)
     const response = await fetch(buildLobsteraiModelsUrl(LOBSTERAI, first.credential, version), {
@@ -171,6 +174,26 @@ describeGate('LobsterAI 认证与签到状态探针（不消耗模型积分）',
       `[lobsterai-e2e] 限免: 目录 ${models.length} 个，此刻生效 ${active} 个，带起止 ${windowed} 个`
       + (unreadable.length > 0 ? `，读不懂 ${unreadable.length} 个` : ''),
     )
+
+    // ── 订阅闸门三件套（PR #113）──
+    // 复用同一份 `models`：两个 PR 都在同一个端点上判契约，发两次 GET 只会让
+    // 「一个用例红、另一个绿」时无法判断是上游变了还是解析层分叉。
+    expect(models.length, '远端模型数').toBeGreaterThan(0)
+    expect(
+      models.filter((m) => typeof m.accessible !== 'boolean').map((m) => m.id),
+      '这些条目没读到 accessible（解析层把它丢了）',
+    ).toEqual([])
+    const restricted = models.filter((m) => m.accessible === false)
+    for (const model of restricted) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[lobsterai-e2e] 订阅闸门: ${model.id} `
+        + `subscriptionPriority=${String(model.subscriptionPriority)} `
+        + `hint=${model.restrictionHint ?? '(无)'}`,
+      )
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[lobsterai-e2e] 目录: ${models.length} 个模型，其中当前不可用 ${restricted.length} 个`)
   })
 
   it('可查询积分余额（profile-summary）', async () => {

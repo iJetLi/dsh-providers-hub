@@ -203,6 +203,31 @@ export interface LobsteraiRemoteModel {
    * （PR #104 的 fail-closed 判据也是为这一格立的）。
    */
   limitedFreeWindowUnreadable?: true
+  /**
+   * **当前账号能否用这个模型**（`data.accessible`）。
+   *
+   * ⚠️ 这是**账号级**的事实，不是目录级：实测同一份目录里
+   * `qwen4-max` 对未订阅账号是 `false`，而官方客户端（已订阅账号）照常显示它、
+   * 也不画任何标记（用户截图 2026-11-17 佐证）⇒ **不得**据它把模型从目录里
+   * 隐藏（那会让「订阅后能多用什么」变成不可见，恰恰是促订阅的反面）。
+   */
+  accessible?: boolean
+  /**
+   * 订阅专属标记（`data.subscriptionPriority`）。
+   *
+   * 与 {@link accessible} 同批下发，实测两者在 `subscriptionPriority:true` 的
+   * 条目上同时为 `accessible:false`（`qwen4-max` / `kimi-k3.1-pro-highspeed`）。
+   * 单独用它**不足以**判定不可用（订阅账号拿到的可能是 `accessible:true`
+   * + `subscriptionPriority:true`），故只用于给 `accessible:false` 挑原因文案。
+   */
+  subscriptionPriority?: boolean
+  /**
+   * 不可用的原因原文（`data.restrictionHint`，如「该模型仅限有效订阅用户使用」）。
+   *
+   * ⚠️ 这是**整句营销文案**，直接塞进展示名会撑爆模型选择器 ⇒ 展示名只取
+   * 短标签（见 {@link restrictionLabelFor}），整句进 `description`。
+   */
+  restrictionHint?: string
   /** 是否接受图片输入。 */
   supportsImage?: boolean
   /** 是否支持思考（无 `thinkingConfig` 时无可选档位，仅作展示参考）。 */
@@ -312,6 +337,35 @@ function readInstantField(record: Record<string, unknown>, key: string): number 
 }
 
 /**
+ * 布尔字段的**三态**解析：`true` / `false` / `undefined`（未声明或读不懂）。
+ *
+ * 为什么不用 `typeof value === 'boolean'` 一票否决（PR #113 对抗审计 P2-1）：
+ * 远端哪天把布尔发成字符串 `"false"` 或数字 `0`，那种写法会一律落到「未声明」
+ * ⇒ `accessible` 变 `undefined` ⇒ {@link restrictionLabelFor} 返回 undefined
+ * ⇒ **受限模型在选择器里看起来完全可用**，用户点下去才失败、而失败原因在别处。
+ * 这是 fail-open 方向，而本字段的用途（标出「需订阅」）要求 fail-closed。
+ *
+ * 反向红线仍然是硬的：**读不懂的一律 `undefined`，绝不 `!!value`** ——
+ * `!!'false'` 是 `true`，那会把「不可用」读成「可用」，比 fail-open 更糟。
+ * 所以这里只认**确定**的六种写法，其余（`{}` / `[]` / `"no"` / `2` / `-1`）留空，
+ * 由 e2e 的 `drifted` 探针把「上游改了布尔形态」喊出来。
+ */
+function readBooleanTriState(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (value === 1) return true
+    if (value === 0) return false
+    return undefined
+  }
+  if (typeof value === 'string') {
+    const text = value.trim().toLowerCase()
+    if (text === 'true' || text === '1') return true
+    if (text === 'false' || text === '0') return false
+  }
+  return undefined
+}
+
+/**
  * 该字段是「上游给了值，但我们读不懂」吗（`null` / 缺失 / **空串** = 没给）。
  *
  * ⚠️ 与 {@link readInstantField} **必须同判据**（空串这一格最容易分叉：那边把 `''`
@@ -366,11 +420,13 @@ export function parseLobsteraiModels(body: unknown): LobsteraiRemoteModel[] {
     const costMultiplier = readNumberField(record, 'costMultiplier')
     if (costMultiplier !== undefined && costMultiplier > 0) model.costMultiplier = costMultiplier
     // 限免四件套（2026-11-17 客户端 asar 取证；同日实测 21/21 条目**全未生效**）。
-    // ⚠️ 布尔仍按 `typeof === 'boolean'`：脏值（`'false'`）按「未声明」处理比 `!!` 更安全。
-    if (typeof record.limitedFree === 'boolean') model.limitedFree = record.limitedFree
-    if (typeof record.limitedFreeActive === 'boolean') {
-      model.limitedFreeActive = record.limitedFreeActive
-    }
+    // ⚠️ 布尔走 {@link readBooleanTriState}（三态）：`typeof === 'boolean'` 一票否决
+    // 会把上游某天改发 `"false"` / `0` 的脏值当成「未声明」⇒ 徽标静默消失、
+    // 与「今天没活动」同形；e2e 的 `drifted` 探针负责把形态漂移喊出来。
+    const limitedFree = readBooleanTriState(record.limitedFree)
+    if (limitedFree !== undefined) model.limitedFree = limitedFree
+    const limitedFreeActive = readBooleanTriState(record.limitedFreeActive)
+    if (limitedFreeActive !== undefined) model.limitedFreeActive = limitedFreeActive
     const limitedFreeStartMs = readInstantField(record, 'limitedFreeStartAt')
     if (limitedFreeStartMs !== undefined) model.limitedFreeStartMs = limitedFreeStartMs
     const limitedFreeEndMs = readInstantField(record, 'limitedFreeEndAt')
@@ -382,6 +438,21 @@ export function parseLobsteraiModels(body: unknown): LobsteraiRemoteModel[] {
     if (isUnreadableInstant(record.limitedFreeStartAt) || isUnreadableInstant(record.limitedFreeEndAt)) {
       model.limitedFreeWindowUnreadable = true
     }
+    // 订阅闸门三件套（2026-11-17 实测下发，此前**全被读丢**）。
+    // ⚠️ 布尔走 {@link readBooleanTriState}（三态）。为什么不写成
+    // `typeof === 'boolean'`（PR #113 对抗审计 P2-1）：那样上游改发字符串
+    // `"false"` 时会落到「未声明」⇒ `restrictionLabelFor` 返回 undefined ⇒
+    // **受限模型在选择器里看起来完全可用**，用户点下去才失败、失败原因还在别处。
+    // 而 `!!record.accessible` 更糟（`!!'false' === true`，把不可用读成可用）——
+    // 两条错路都堵住了才用这个函数：只认 `true/false/1/0/"true"/"false"`。
+    const accessible = readBooleanTriState(record.accessible)
+    if (accessible !== undefined) model.accessible = accessible
+    const subscriptionPriority = readBooleanTriState(record.subscriptionPriority)
+    if (subscriptionPriority !== undefined) model.subscriptionPriority = subscriptionPriority
+    // ⚠️ 先 `trim()` 再判非空（PR #113 正向审计 P3-3）：纯空白的 hint 不是「有原因」，
+    // 否则展示名会多出一个空标签、`description` 会多一条空行。
+    const restrictionHint = readStringField(record, 'restrictionHint').trim()
+    if (restrictionHint.length > 0) model.restrictionHint = restrictionHint
 
     models.push(model)
   }
@@ -1154,6 +1225,7 @@ export class LobsteraiAdapter extends LlmAdapter {
     const contextWindow = this.contextWindowFor(model.id)
     const maxTokens = this.remoteMeta.get(model.id)?.maxTokens
     const reasoning = this.reasoningFor(model.id)
+    const description = descriptionWithHint(model)
     // ★ 徽标在**装配时刻**现算（issue #101）：候选表里存的是未决活动，
     // 「此刻画不画」是 now 的纯函数。`undefined` ⇒ 整个 `badge` 键缺席
     // （写 `badge: undefined` 会让「没有活动」与「有活动但此刻不在窗口」同形）。
@@ -1171,7 +1243,7 @@ export class LobsteraiAdapter extends LlmAdapter {
     const badge = promotion === undefined ? undefined : promotionBadgeFor([promotion], nowMs)
     return {
       id: model.id,
-      // 倍率写进 name（**不是** description）：composer 的模型切换菜单只渲染
+      // 倍率与限制标签写进 name（**不是** description）：composer 的模型切换菜单只渲染
       // `name`，description 仅用于 /model 弹窗。见 displayNameFor 的说明。
       name: displayNameFor(model, freeNow),
       // ⚠️ `resolveModel` 用**元数据里的 name**（不带倍率）⇒ 显式提供 `bareName`。
@@ -1181,7 +1253,7 @@ export class LobsteraiAdapter extends LlmAdapter {
       // ⚠️ 远端 `supportsImage` 权威；未声明时**保守报 `['text']`**（不是省略）
       // —— 见 `inputModalitiesFor`：宁可少报能力，也不要报一个服务端不认的模态。
       inputModalities: this.inputModalitiesFor(model.id),
-      ...model.description !== undefined ? { description: model.description } : {},
+      ...description !== undefined ? { description } : {},
       ...contextWindow !== undefined ? { contextWindow } : {},
       ...maxTokens !== undefined ? { maxTokens } : {},
       ...reasoning !== undefined ? { reasoning } : {},
@@ -2105,22 +2177,90 @@ export class LobsteraiAdapter extends LlmAdapter {
  * 展示时补 `x` 前缀（buddy 系远端给的字符串本身已带 `x`）。
  */
 function displayNameFor(model: LobsteraiRemoteModel, freeNow: boolean): string {
-  // ⚠️ 限免生效时倍率**按 0 展示**，判据逐字来自官方客户端：
+  // 空名字（上游整串都是控制符/空白）不许出现在展示串里 ⇒ 回落 id，否则会拼出
+  // `' · 需订阅 · x0.71'` 这种前导分隔符。
+  const base = sanitizeDisplayName(model.name)
+  const parts: string[] = [base.length > 0 ? base : model.id]
+  const restriction = restrictionLabelFor(model)
+  if (restriction !== undefined) parts.push(restriction)
+  // 限免生效时倍率**按 0 展示**，判据逐字来自官方客户端：
   // `const costMultiplier = model.limitedFreeActive ? 0 : readPositiveNumber(...)`
-  // （asar @107483653），且 `showCostMultiplier` 多一条 `|| limitedFreeActive === true`
-  // ⇒ 客户端画的是 `x0.00`，不是原倍率（用户实测截图同样如此）。
-  // 若不覆盖：模型明明免费了，界面上还写着 `x0.05` —— 用户按原价估算成本，
-  // 正是 issue #101「活动信息与请求实际不符」的同一个形态。
+  // （asar @107483653），客户端画的是 `x0.00`。不改的话模型明明免费、界面还写
+  // `x0.05` —— 用户按原价估算成本，正是 issue #101 的同一形态。
   //
   // ⚠️⚠️ `freeNow` 由**调用方**按 `promotionRunningAt` 算好传进来，**不在这里**
   // 再读一次 `limitedFreeActive`：那样徽标（窗口判据）与倍率（快照判据）会分叉，
-  // 窗口内、快照却仍为 false 时装配出「限时免费 + x0.05」的矛盾行。
-  // 窗口优先于快照的方向是**刻意**的：快照会过期，窗口是此刻的纯函数；
-  // 反过来（快照优先）会在活动结束后的一个刷新周期里继续画「免费」——
-  // 那是 issue #101 的红线方向（夸大上游的优惠声明）。
-  if (freeNow) return `${model.name} · x0`
-  if (model.costMultiplier === undefined) return model.name
-  return `${model.name} · x${model.costMultiplier}`
+  // 窗口内、快照却仍为 false 时装配出「限时免费 + x0.05」的矛盾行；反过来
+  // 「快照 true、窗口已过」会继续写 `x0`（夸大上游优惠 = issue #101 红线方向）。
+  // 方向刻意定为**窗口优先于快照**：快照会过期，窗口是此刻的纯函数。
+  if (freeNow) parts.push('x0')
+  else if (model.costMultiplier !== undefined) parts.push(`x${model.costMultiplier}`)
+  return parts.join(' · ')
+}
+
+/**
+ * 展示用名字的**消毒**：剥控制字符与双向控制符、折叠空白、限长 80。
+ *
+ * 为什么必须做（PR #113 对抗审计 P2-3）：`name` 是上游字符串，而我们把它与
+ * 「· x倍率」「· 需订阅」这些**自己拼的**标签放在同一行 ⇒ 上游名字里只要出现
+ * `· 需订阅`，用户就无法分辨那是模型名还是我们的标签（伪造面）；10 KB 的名字
+ * 会撑爆选择器；换行与 RTL override（`U+202E`）能把整行读反。
+ *
+ * ⚠️ 只动**展示**：`id` 与 `bareName` 仍走原值（DSH 的选择与持久化只用 `id`，
+ * `selectionOf` 返回 `model.id`）⇒ 消毒不会污染会话或路由。
+ */
+function sanitizeDisplayName(raw: string): string {
+  const collapsed = raw
+    // ① 控制字符（含换行 / 制表）**换成空格**而不是删掉：上游若给
+    //    `'Weird\nName'`，删掉会拼成 `'WeirdName'`（凭空造出一个词）。
+    //    换空格后由 ② 折叠，语义只会变宽松、不会粘连。
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ')
+    // ② 零宽 / 双向控制符直接删（它们本来就不占视觉位置，换成空格反而多一个空格）。
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  return collapsed.length <= 80 ? collapsed : `${collapsed.slice(0, 79)}\u2026`
+}
+
+/**
+ * 远端条目的「不可用」短标签（`undefined` = 当前账号可用）。
+ *
+ * 判据来源只有 `accessible === false` 这一格 —— **不解析 `restrictionHint` 的中文
+ * 文案**（那是营销文案，改一个字判据就失效）。原因文案的挑选才用
+ * `subscriptionPriority`：这样「订阅专享」与「其它不可用」不会混成一句话，
+ * 也不会对已订阅账号误报「需订阅」（那种账号拿到的是 `accessible:true`）。
+ *
+ * ⚠️ `subscriptionPriority === true ⇒ '需订阅'` 是**共现观察，不是独立取证**
+ * （PR #113 对抗审计 P1-1）：实测样本只有 21 条，其中 2 条受限模型恰好同时
+ * `subscriptionPriority:true`，而官方 asar 里没有这条映射。若上游该字段的真实
+ * 语义是「优先展示」而不是「订阅专享」，这句标签就整体错。当前保留，理由：
+ * ①只在 `accessible === false` 时才用到它（不会误标可用模型）；②`'不可用'`
+ * 兜底仍在。取证方式是把**已订阅**账号的同一份目录拿来对比这两个字段。
+ */
+export function restrictionLabelFor(model: LobsteraiRemoteModel): string | undefined {
+  if (model.accessible !== false) return undefined
+  return model.subscriptionPriority === true ? '需订阅' : '不可用'
+}
+
+/**
+ * `/model` 弹窗里的描述：远端原文 + （若有）不可用原因。
+ *
+ * ⚠️ 只**追加**，不改写远端原文 —— 那一句是上游营销文案（例如
+ * `qwen4-max` 的「限时四折，截至时间 2026-11-30 23:59:59」，前面还带一串
+ * `U+3164` 填充字符），改了就失去取证价值。
+ *
+ * ⚠️ 两侧都先 `trim()` 再判空（PR #113 正向审计 P3-2/P3-3）：上游 `description`
+ * 以换行结尾是常态，直接拼接会在弹窗里多出一条空行；`restrictionHint` 是纯空白
+ * 时也不该算「有原因」。
+ */
+function descriptionWithHint(model: LobsteraiRemoteModel): string | undefined {
+  const text = model.description?.trim()
+  const hint = model.restrictionHint?.trim()
+  const hasText = text !== undefined && text.length > 0
+  const hasHint = hint !== undefined && hint.length > 0
+  if (!hasHint) return hasText ? text : model.description
+  if (!hasText) return hint
+  return `${text}\n${hint}`
 }
 
 /**

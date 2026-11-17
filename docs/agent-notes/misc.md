@@ -1162,7 +1162,15 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
 
 远端同批下发 `limitedFree` / `limitedFreeActive` / `limitedFreeStartAt` / `limitedFreeEndAt`，本仓此前**零引用**。同日实测（`GET /api/models/available`，21 条目）：**四件套全 false / false / null / null**，即「上游此刻没有活动」。
 
-判据**不是**从上字段名推的，而是逐字取自本机官方客户端 `C:\Users\zhujieling11\AppData\Local\Programs\LobsterAI\resources\app.asar`（185,419,586 字节）：
+判据**不是**从上字段名推的，而是逐字取自**作者侧**的官方客户端 asar
+`C:\Users\zhujieling11\AppData\Local\Programs\LobsterAI\resources\app.asar`（185,419,586 字节）。
+
+> ⚠️ **这四条偏移量在本仓无法复核**（PR #114 正向审计 P2）：本机 `whoami` 是 `Jet`，
+> 那个 `zhujieling11` 路径不存在、也没有任何 LobsterAI 安装 ⇒ 下表是**作者侧自证**，
+> 不是「已核实」。它对结论的影响面仅限「上游字段语义是否为真」这一层 —— 而那一层
+> 已被 2026-11-17 的真机目录（21/21 条目四件套全 false/null）与官方页面的行为间接
+> 支撑；**若 asar 判据本身错了，则 `x0` 归零与「限时免费」徽标会一起错**，取证方式
+> 是等上游第一次真办活动时对一次客户端截图。：
 
 | 事实 | 偏移 | 原文（节选） |
 |---|---|---|
@@ -1202,6 +1210,61 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
 
 **守卫**：`tests/unit/lobsterai-adapter.spec.ts` 的「限时免费」11 条（x0 归零 / 无活动时 `badge` 键缺席 / 声明≠生效 / 窗口内照画 / 窗口结束消失（**同一适配器推进时钟**）/ 窗口未开始不画 / null 起止 / ISO 折毫秒 / 读不懂 fail-closed / 边界播报 / 无活动不排定时器）；`tests/e2e/lobsterai-probe.e2e.spec.ts` 的「限免四件套」**只锁契约**（上游发了布尔 ⇒ 解析层不得读丢），并把原始起止字符串打日志（**上游第一次真办活动时，那段日志就是格式证据**）。
 **变异自证（4/4 有牙）**：① 关掉 x0 分支 ⇒ `expected 'Free Now · x0.05' to be 'Free Now · x0'`；② 不写 `badge` 键 ⇒ 4 条红；③ `timeDeclared` 恒 false ⇒ 2 条红（窗口现算 + 窗口结束）；④ `readInstantField` 接受数字 ⇒ `expected 1794931200 to be undefined`。
+### ⚠️ 订阅闸门三件套：`accessible` / `subscriptionPriority` / `restrictionHint`（2026-11-17）
+
+远端同批下发这三个键（实测 **21/21 条目都有**），而本仓此前**一个都没读** ⇒ 选择器里「订阅专享」的模型看起来和普通模型一模一样，选了才知道不能用。
+
+实测（未订阅账号，`GET /api/models/available`）：
+
+| id | accessible | subscriptionPriority | restrictionHint |
+|---|---|---|---|
+| `qwen4-max` | `false` | `true` | 该模型仅限有效订阅用户使用 |
+| `kimi-k3.1-pro-highspeed` | `false` | `true` | 该模型仅限有效订阅用户使用 |
+| 其余 19 条 | `true` | `false` | `null` |
+
+三条判据（每条都对应一个已经踩得到的岔路）：
+
+1. **`accessible` 是账号级事实，不得据此隐藏模型**：官方客户端对**已订阅**账号照常显示 `Qwen4-Max`、也不画任何标记（用户 2026-11-17 截图佐证：同一模型、同一份目录、不同账号）⇒ 把不可用条目从目录里删掉，等于让「订阅后能多用什么」不可见，恰是促订阅的反面。
+2. **短标签进 `name`，原因整句进 `description`**：composer 的模型切换菜单**只渲染 `name`**（与倍率的既有约定同因）⇒ 不可用时 `name` 追加 `· 需订阅`（`subscriptionPriority:true`）或 `· 不可用`（其余），顺序固定 `名称 · 限制 · x倍率`（**倍率必须在末尾** —— 理由见下面「合并 #113/#114 的四条硬约束」第 1 条）；`restrictionHint` 则**追加**到 `description` 末行（**不改写上游原文** —— 那句原文是取证材料）。
+3. **判据只认 `accessible === false` 这一格，不解析 `restrictionHint` 的中文文案**：营销文案改一个字判据就失效；`需订阅` / `不可用` 的挑选用布尔 `subscriptionPriority`。另：布尔走 `readBooleanTriState` **三态**读（`true` / `false` / `undefined`），只认 `true|false|1|0|"true"|"false"`，其余留空 —— `typeof === 'boolean'` 一票否决会让上游改发 `"false"` 时静默变成「未声明」（受限模型看起来完全可用），而 `!!'false'` 更糟（把不可用读成可用），两条错路都堵住了。
+
+**守卫**：`tests/unit/lobsterai-adapter.spec.ts` 的「订阅闸门」四条（不隐藏 / 短标签 / 已订阅不画标签 / description 追加），`tests/e2e/lobsterai-probe.e2e.spec.ts` 的「accessible 必须是布尔」（**只锁契约、不锁数量** —— 不可用条目数随账号订阅状态变，锁死等于把测试绑在某个账号上）。
+**变异自证**：① `displayNameFor` 不追加短标签 ⇒ 标签用例精确变红；② 解析层不读 `accessible` ⇒ e2e 用例变红并点名 21 个 id（正是本 PR 修的那个缺陷）。
+
+### ⚠️⚠️ 合并 PR #113 / PR #114 的四条硬约束（2026-11-17）
+
+两个 PR 都改同一个 `displayNameFor`，合并时踩到四条**互相独立**的约束，逐条都有实测：
+
+1. **倍率必须留在展示名末尾**。`src/aggregate-core.ts` 的 `priceFactorFromName` 用**末尾锚定**
+   正则（`/·\s*[×x]?\s*(\d+(?:\.\d+)?)(?:\s*[→>]…)?\s*$/i`）取聚合排序用的价格。
+   按 #113 原来的 `名称 · x倍率 · 限制` 拼，实测 `'Qwen4-Max · x0.05 · 需订阅'` ⇒ **`Infinity`**
+   （= 最贵 ⇒ 聚合排序垫底）；更要命的是限免时 `'… · x0 · 需订阅'` 也变 `Infinity` ⇒
+   **限免模型的 0 倍率被丢掉、被当成最贵弃用**（#113 对抗审计 P1-2）。
+   ⇒ 顺序定为 `名称 · 限制 · x倍率`，并且**不去改共享函数** `priceFactorFromName`
+   （那会同时影响 buddy / loomy / trae 等家的解析口径）。
+2. **布尔三态**（见 §订阅闸门第 3 条）：`accessible` / `subscriptionPriority` /
+   `limitedFree` / `limitedFreeActive` 四处统一走 `readBooleanTriState`。
+3. **展示名前必须消毒**（`sanitizeDisplayName`，#113 对抗审计 P2-3）：剥 `Cc` 控制字符、
+   `U+200B–U+200F` 零宽、`U+202A–U+202E` 双向控制符、`U+2066–U+2069` 隔离符、BOM；
+   折叠空白；限长 80（超出截 79 + `…`）。理由：`name` 是我们**自己拼**的
+   （`名称 · 限制 · x倍率`），上游名字里只要出现 `· 需订阅` 用户就无法分辨那是模型名
+   还是我们的标签（伪造面）；10 KB 的名字会撑爆选择器；RTL override 能把整行读反。
+   **只动展示**：`id` / `bareName` 仍走原值。
+4. **`description` 与 `restrictionHint` 都要先 `trim()` 再判空**（#113 正向审计 P3-2/P3-3）：
+   上游 `description` 以换行结尾是常态，直接拼接会在弹窗里多一条空行；纯空白的
+   hint 不是「有原因」。
+
+另记两条**如实登记的残余**：
+
+- ⚠️ `subscriptionPriority === true ⇒ '需订阅'` 是**共现观察、不是独立取证**（#113 对抗审计
+  P1-1）：样本只有 21 条，2 条受限模型恰好同时 `subscriptionPriority:true`，而 asar 里
+  没有这条映射。若该字段真实语义是「优先展示」，这句标签整体错。取证方式：拿**已订阅**
+  账号的同一份目录对比同一模型的两个字段。
+- ⚠️ `accessible === false` 的条目**仍在聚合 `auto` 的候选池里**（`rankCandidates` 没有这道
+  闸门，属**范围外/既有**缺口，非本 PR 引入）。修好倍率后它不再被 `Infinity` 偶然压到
+  最后 ⇒ 这个缺口会**变得可见**（#113 对抗审计 P2-2 联动）。当前不做，理由：可见性是
+  产品决策（作者明确要求「不得据 `accessible` 隐藏模型」），而「进了候选池」需要跨模块
+  改动 `aggregate-catalog`，会同时影响另外 20 余家渠道。已登记。
 
 ### 思考档位的 wire 值是 `openclawLevel`，不是 `level`
 

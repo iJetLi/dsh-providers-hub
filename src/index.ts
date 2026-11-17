@@ -6334,8 +6334,8 @@ async function fetchBalanceReading(
   // 而用户仍按优惠期选择模型」。**播报是零网络的**（理由与三条判据见
   // src/promotion-edge-broadcast.ts 的头注）。
   //
-  // ⚠️ 五家共用一个播报器、各自只交一个边界 getter：一条渠道算错不会让其余
-  // 四家失去保鲜（nearestPromotionEdge 逐源 try/catch）。
+  // ⚠️ 六家共用一个播报器、各自只交一个边界 getter：一条渠道算错不会让其余
+  // 五家失去保鲜（nearestPromotionEdge 逐源 try/catch）。
   // ⚠️ 生命周期挂 ctx.effect（AGENTS.md：自建定时器必须回收，unref 不算回收）。
   const promotionEdgeBroadcaster = createPromotionEdgeBroadcaster({
     edgeSources: () => [
