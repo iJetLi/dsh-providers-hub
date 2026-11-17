@@ -24,6 +24,7 @@ import {
   LobsteraiClientVersionResolver,
   isLobsteraiRefreshable,
   lobsteraiCredentialExpiresAtMs,
+  lobsteraiModelsHeaders,
 } from '../../src/lobsterai.js'
 import { buildLobsteraiModelsUrl, parseLobsteraiModels, readLobsteraiModelArray } from '../../src/lobsterai-adapter.js'
 import { readLobsteraiCredentialsFromDshStore } from './lobsterai-credential.js'
@@ -121,6 +122,8 @@ describeGate('LobsterAI 认证与签到状态探针（不消耗模型积分）',
     const models = parseLobsteraiModels(body)
     const byId = new Map(models.map((m) => [m.id, m]))
     const dropped: string[] = []
+    const drifted: string[] = []
+    const unreadable: string[] = []
     let active = 0
     let windowed = 0
     for (const item of readLobsteraiModelArray(body)) {
@@ -132,6 +135,19 @@ describeGate('LobsterAI 认证与签到状态探针（不消耗模型积分）',
       if (typeof record.limitedFree === 'boolean' && typeof model.limitedFree !== 'boolean') dropped.push(id)
       if (typeof record.limitedFreeActive === 'boolean' && typeof model.limitedFreeActive !== 'boolean') {
         dropped.push(id)
+      }
+      // ★ 契约漂移探针：上游对这两个键的形态**只有「布尔」或「null/缺失」**两种（实测）。
+      // 换成字符串 `"false"` / 数字 / 对象时，解析层会按「未声明」丢掉 ⇒ 徽标静默消失。
+      // 这一格必须喊出来，否则症状与「上游今天没活动」完全同形。
+      for (const key of ['limitedFree', 'limitedFreeActive'] as const) {
+        const raw = record[key]
+        if (raw === undefined || raw === null) continue
+        if (typeof raw !== 'boolean') drifted.push(`${id}.${key}=${JSON.stringify(raw)}`)
+      }
+      if (model.limitedFreeWindowUnreadable === true) {
+        unreadable.push(
+          `${id} startAt=${JSON.stringify(record.limitedFreeStartAt)} endAt=${JSON.stringify(record.limitedFreeEndAt)}`,
+        )
       }
       if (model.limitedFreeActive === true) active += 1
       if (model.limitedFreeStartMs !== undefined || model.limitedFreeEndMs !== undefined) {
@@ -145,9 +161,15 @@ describeGate('LobsterAI 认证与签到状态探针（不消耗模型积分）',
       }
     }
     expect(dropped, '这些条目上游发了布尔、解析层却读丢').toEqual([])
+    expect(drifted, '上游把限免布尔的形态改了（解析层会按「未声明」丢掉，徽标静默消失）').toEqual([])
+    for (const entry of unreadable) {
+      // eslint-disable-next-line no-console
+      console.log(`[lobsterai-e2e] 限免起止读不懂（已按不动处理）: ${entry}`)
+    }
     // eslint-disable-next-line no-console
     console.log(
-      `[lobsterai-e2e] 限免: 目录 ${models.length} 个，此刻生效 ${active} 个，带起止 ${windowed} 个`,
+      `[lobsterai-e2e] 限免: 目录 ${models.length} 个，此刻生效 ${active} 个，带起止 ${windowed} 个`
+      + (unreadable.length > 0 ? `，读不懂 ${unreadable.length} 个` : ''),
     )
   })
 

@@ -1016,6 +1016,16 @@ export class LobsteraiAdapter extends LlmAdapter {
       this.remoteModels = models
       this.remoteMeta = new Map(models.map((model) => [model.id, model]))
       this.promotionIndex = promotions
+      // ⚠️ 读不懂的起止**必须留一条日志**：这条腿的症状与「上游没办活动」完全同形
+      // （都是没有徽标），不留痕就永远诊断不出来（与「目录未声明 maxTokens 时告警一次」
+      // 同一条理由）。每次成功拉取最多打一条，不按模型刷屏。
+      const unreadable = models.filter((model) => model.limitedFreeWindowUnreadable === true)
+      if (unreadable.length > 0) {
+        console.warn(
+          '[lobsterai] 限免起止无法解析的模型 ' + String(unreadable.length) + ' 个'
+          + '（按不动处理，不画徽标、倍率不归零）: ' + unreadable.map((model) => model.id).join(','),
+        )
+      }
       // ⚠️ **只在成功赋值后**记时刻：失败/空结果不写，否则一次抖动会把上界
       //    刷新掉、下轮还要等满 20 分钟才发现上游没恢复。
       this.catalogAt = this.options.now?.() ?? Date.now()

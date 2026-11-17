@@ -1515,8 +1515,33 @@ describe('LobsterAI 限时免费（limitedFree 四件套）', () => {
    * 「没有终点」，就得到一条无上界窗口：活动结束后徽标永远挂着（issue #101 的
    * 红线方向）。本仓在腾讯 `validUntil: 'soon'` 上真踩过（挂到 2030）。
    */
-  it('起止只读懂一半 ⇒ 徽标不画、倍率不归零（fail-closed，不当无上界窗口用）', async () => {
-    const models = parseLobsteraiModels({
+  /**
+   * ★ 可诊断性：读不懂的起止与「上游没办活动」**症状完全同形**（都没有徽标）。
+   * 不留一条日志就永远查不出来 —— 与「目录未声明 maxTokens 时告警一次」同一条理由。
+   * 每次成功拉取**最多一条**（不按模型刷屏）。
+   */
+  it('起止读不懂时打一条告警（每条目录一次，不按模型刷屏）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const models = parseLobsteraiModels({
+        code: 0,
+        data: [
+          { modelId: 'a', modelName: 'A', limitedFree: true, limitedFreeStartAt: 'soon', limitedFreeEndAt: 'later' },
+          { modelId: 'b', modelName: 'B', limitedFree: true, limitedFreeStartAt: 1794931200 },
+          { modelId: 'c', modelName: 'C', limitedFree: true, limitedFreeActive: true },
+        ],
+      })
+      const { adapter } = makeAdapter(() => textSse('x'), { now: () => T0, fetchRemoteModels: async () => models })
+      await adapter.listModels('lobsterai')
+      const matches = warn.mock.calls.filter((call) => String(call[0]).includes('限免起止无法解析'))
+      expect(matches).toHaveLength(1)
+      expect(String(matches[0]![0])).toContain('a,b')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('起止只读懂一半 ⇒ 徽标不画、倍率不归零（fail-closed，不当无上界窗口用）', async () => {    const models = parseLobsteraiModels({
       code: 0,
       data: [{
         modelId: 'half',

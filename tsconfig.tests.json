@@ -91,6 +91,17 @@
     "tests/unit/monkeycode-browser-login.spec.ts",
     "tests/unit/monkeycode-credits.spec.ts",
     "tests/unit/baizhi-rpc.spec.ts",
+    // ⚠️ 2026-11-17 补（PR #114 自审实测）：`tests/e2e/**` 此前**不在任何 tsconfig
+    // 的 include 里**，而 e2e spec 由 vitest/esbuild 转译 ⇒ 类型层完全看不见。
+    // 结果：本 PR 的限免探针里 `lobsteraiModelsHeaders` **忘了 import**，
+    // `typecheck` / `typecheck:tests` 双绿、`vitest run tests/unit/**` 也绿，
+    // 只有真跑 `DSH_LOBSTERAI_E2E=1` 时才 `ReferenceError: ... is not defined`。
+    // 而这份 spec 恰好是本 PR 的**契约漂移探针**（上游改布尔形态时唯一的报警器）
+    // ⇒ 它长期跑不起来等于探针不存在。纳入后立刻暴露该错误。
+    //
+    // 只纳入这一份（不把整个 `tests/e2e/**` 塞进来）：其余 e2e 未做类型检查，
+    // 一次性纳入会冒出与本文任务无关的诊断，属独立任务。
+    "tests/e2e/lobsterai-probe.e2e.spec.ts",
     // ⚠️ 2026-11-02 三审新增的两份**刻意不纳入**（同一条判据：不碰生产类型的细节）：
     //   · `monkeycode-client-wiring.spec.ts` 是**源码字符串断言** —— 读
     //     `plugin-src/client/jet-hub.js` 与两个弹窗文件后做 `indexOf` / `slice`，

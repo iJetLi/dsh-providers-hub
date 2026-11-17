@@ -1191,6 +1191,15 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
 - ⚠️⚠️ **「上游给了起止但读不懂」≠「上游没给起止」**：初版把读不懂的字符串当「没给」⇒ 只解析到起点、终点读丢时得到一条**无上界**窗口（`promotionWithinAbsoluteWindow` 对缺失的一端不设约束）⇒ 活动结束后徽标永远挂着（腾讯 `validUntil: 'soon'` 曾挂到 2030）。修法：解析层单独标 `limitedFreeWindowUnreadable`，候选构造据此走 `dailyUnusable: true`（本模块里「声明了时间但永远不算成立」的唯一档）⇒ 徽标不画、倍率不归零、也不排边界定时器。
 - ⚠️ **空串这一格两个函数必须同判据**：`readInstantField` 把 `''` 当「没给」（返回 undefined），而 `isUnreadableInstant` 初版把 `''` 当「读不懂」⇒ 一个空字符串就把整条活动升级成 fail-closed（永远画不出来），与解析层另一半的判断相反。现在两边都以 `undefined / null / ''` 为「没给」，且有单测钉住。
 
+**「读不懂」必须留痕**（第三轮补，同一类「症状与正常态同形」的问题）：
+
+- ⚠️ `ensureRemoteModels` 落状态时若存在 `limitedFreeWindowUnreadable`，打**一条** `console.warn`（含模型 id 列表，每次成功拉取最多一条，不按模型刷屏）。理由：该腿的症状与「上游今天没活动」**完全同形**（都是没有徽标），不留痕永远诊断不出来 —— 与 baizhi/monkeycode「目录未声明 `maxTokens` 时告警一次」同一条理由。有单测 + 变异（把 `filter` 短路 ⇒ 断言「恰好一条」当场变红）。
+- ⚠️⚠️ **`tests/e2e/**` 不在任何 tsconfig 的 include 里**（实测：`tsconfig.tests.json` 的白名单只有 `tests/unit/*`），而 e2e spec 由 vitest/esbuild 转译 ⇒ **类型层完全看不见**。本 PR 的自审就踩了：限免探针里 `lobsteraiModelsHeaders` **忘了 import**，`typecheck` / `typecheck:tests` 双绿、单测全绿，只有真跑 `DSH_LOBSTERAI_E2E=1` 才 `ReferenceError` —— 而这份 spec 正是「上游改布尔形态」的唯一报警器 ⇒ **探针长期跑不起来 = 探针不存在**。
+  修法：把 `tests/e2e/lobsterai-probe.e2e.spec.ts` 单独纳入 `tsconfig.tests.json` 的 include（不整目录纳入：其余 e2e 未做类型检查，一次性纳入会冒出无关诊断，属独立任务）。
+- ⚠️ **探针本身也要能报警**：e2e 里加了两条（都是零成本、只读）：
+  ① `drifted` —— `limitedFree` / `limitedFreeActive` 若存在且非 `null`、**非布尔**即记一条并断言为空（上游换成 `"false"` / 数字 / 对象时，解析层按「未声明」丢掉 ⇒ 徽标静默消失，与「今天没活动」同形）；
+  ② `unreadable` —— 打印 `startAt` / `endAt` 的**原文**（这是格式取证的第一手材料），并计入日志尾部「读不懂 N 个」。
+
 **守卫**：`tests/unit/lobsterai-adapter.spec.ts` 的「限时免费」11 条（x0 归零 / 无活动时 `badge` 键缺席 / 声明≠生效 / 窗口内照画 / 窗口结束消失（**同一适配器推进时钟**）/ 窗口未开始不画 / null 起止 / ISO 折毫秒 / 读不懂 fail-closed / 边界播报 / 无活动不排定时器）；`tests/e2e/lobsterai-probe.e2e.spec.ts` 的「限免四件套」**只锁契约**（上游发了布尔 ⇒ 解析层不得读丢），并把原始起止字符串打日志（**上游第一次真办活动时，那段日志就是格式证据**）。
 **变异自证（4/4 有牙）**：① 关掉 x0 分支 ⇒ `expected 'Free Now · x0.05' to be 'Free Now · x0'`；② 不写 `badge` 键 ⇒ 4 条红；③ `timeDeclared` 恒 false ⇒ 2 条红（窗口现算 + 窗口结束）；④ `readInstantField` 接受数字 ⇒ `expected 1794931200 to be undefined`。
 
