@@ -41,7 +41,7 @@ describe('TRAE（字节）—— 按到期时间分桶', () => {
       { name: '签到奖励', unit: 'credits', remaining: 150, total: 150, used: 0, active: true, cycleStartTime: '', cycleEndTime: '', expiredTime: '', deductionEndTime: NOW + 3 * DAY },
       { name: '每月登录赠送', unit: 'credits', remaining: 500, total: 500, used: 0, active: true, cycleStartTime: '', cycleEndTime: '', expiredTime: '', deductionEndTime: NOW + 25 * DAY },
     ]), NOW, WINDOW)
-    expect(split).toEqual({ expiring: 150, permanent: 500 })
+    expect(split).toEqual({ expiring: 150, permanent: 500, imminent: 150 })
   })
 
   it('★ 拿不到 expire_time（不设 deductionEndTime）归入**永久**桶（保守方向）', () => {
@@ -71,7 +71,7 @@ describe('LobsterAI（有道）—— 按到期时间分桶', () => {
       { name: '每日登录奖励', unit: 'credit', remaining: 100, total: 0, used: 0, active: true, cycleStartTime: '', cycleEndTime: '', expiredTime: '', deductionEndTime: NOW + 4 * DAY },
       { name: '新手礼包', unit: 'credit', remaining: 100, total: 0, used: 0, active: true, cycleStartTime: '', cycleEndTime: '', expiredTime: '', deductionEndTime: NOW + 45 * DAY },
     ]), NOW, WINDOW)
-    expect(split).toEqual({ expiring: 200, permanent: 100 })
+    expect(split).toEqual({ expiring: 200, permanent: 100, imminent: 200 })
   })
 
   it('★ 已过期包（active:false）不得计入任何一桶', () => {
@@ -263,7 +263,7 @@ describe('真实 fetchBalance 链路：各家响应形状 → 同一套分桶', 
     expect(balance, 'TRAE 余额应可解析').not.toBeNull()
     const split = splitBuddyCreditsByExpiry(balance!, Date.now(), 15 * DAY)
     // 3 天内到期 ⇒ 必须落「快到期」桶，否则锁定时永远选不中它
-    expect(split).toEqual({ expiring: 150, permanent: 0 })
+    expect(split).toEqual({ expiring: 150, permanent: 0, imminent: 150 })
   })
 
   it('★ LobsterAI：expiresAt（ISO 8601）归一化后可分桶', async () => {
@@ -279,7 +279,7 @@ describe('真实 fetchBalance 链路：各家响应形状 → 同一套分桶', 
     }))
     expect(balance, 'LobsterAI 余额应可解析').not.toBeNull()
     const split = splitBuddyCreditsByExpiry(balance!, Date.now(), 15 * DAY)
-    expect(split).toEqual({ expiring: 100, permanent: 0 })
+    expect(split).toEqual({ expiring: 100, permanent: 0, imminent: 100 })
   })
 
   it('★ 两家归一化后都带 deductionEndTime（分桶判据才拿得到到期时间）', () => {

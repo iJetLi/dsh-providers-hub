@@ -39,6 +39,8 @@ import type { OfficeAceCredential, OfficeAceSubscriptionSummary } from '../../sr
 
 const DAY = 24 * 60 * 60 * 1000
 const WINDOW = 15 * DAY
+/** 「临期」子窗口（与后端默认 5 天同值；本文件是判据同构用例，显式传入不依赖默认值）。 */
+const IMMINENT = 5 * DAY
 /** 固定「现在」，让窗口边界断言可复现。 */
 const NOW = Date.UTC(2026, 9, 15, 6, 0, 0)
 
@@ -77,8 +79,9 @@ describe('splitOfficeAceCreditsByExpiry（分桶判据，与 buddy 系逐格同�
     const split = splitOfficeAceCreditsByExpiry(summary([
       { remaining: 1000, expiresAt: SOON },
       { remaining: 500, expiresAt: FAR },
-    ]), NOW, WINDOW)
-    expect(split).toEqual({ expiring: 1000, permanent: 500 })
+    ]), NOW, WINDOW, IMMINENT)
+    // ⚠️ SOON = 3 天后 ⇒ 既是「15 天内」（expiring 母量）又是「5 天内」（imminent 子量）。
+    expect(split).toEqual({ expiring: 1000, permanent: 500, imminent: 1000 })
   })
 
   it('② 边界方向与 buddy 一致：**恰好 15 天**归永久，少 1ms 归临期', () => {
@@ -86,11 +89,11 @@ describe('splitOfficeAceCreditsByExpiry（分桶判据，与 buddy 系逐格同�
     //    长期积分被当临期烧掉（正是锁定功能要防的事）。
     const at = splitOfficeAceCreditsByExpiry(summary([
       { remaining: 100, expiresAt: new Date(NOW + WINDOW).toISOString() },
-    ]), NOW, WINDOW)
+    ]), NOW, WINDOW, IMMINENT)
     expect(at).toEqual({ expiring: 0, permanent: 100 })
     const just = splitOfficeAceCreditsByExpiry(summary([
       { remaining: 100, expiresAt: new Date(NOW + WINDOW - 1).toISOString() },
-    ]), NOW, WINDOW)
+    ]), NOW, WINDOW, IMMINENT)
     expect(just).toEqual({ expiring: 100, permanent: 0 })
   })
 
@@ -98,7 +101,7 @@ describe('splitOfficeAceCreditsByExpiry（分桶判据，与 buddy 系逐格同�
     const split = splitOfficeAceCreditsByExpiry(summary([
       { remaining: 4000 },
       { remaining: 500, expiresAt: '不是时间' },
-    ]), NOW, WINDOW)
+    ]), NOW, WINDOW, IMMINENT)
     expect(split).toEqual({ expiring: 0, permanent: 4500 })
   })
 
@@ -108,8 +111,8 @@ describe('splitOfficeAceCreditsByExpiry（分桶判据，与 buddy 系逐格同�
       { remaining: 999, expiresAt: SOON, expired: true },
       { remaining: 0, expiresAt: SOON },
       { remaining: 1000, expiresAt: SOON },
-    ]), NOW, WINDOW)
-    expect(split).toEqual({ expiring: 1000, permanent: 0 })
+    ]), NOW, WINDOW, IMMINENT)
+    expect(split).toEqual({ expiring: 1000, permanent: 0, imminent: 1000 })
   })
 
   it('★ ④b 脏 `remaining`（负数 / NaN）绝不计入任何一桶', () => {
@@ -127,13 +130,76 @@ describe('splitOfficeAceCreditsByExpiry（分桶判据，与 buddy 系逐格同�
       { remaining: -5, expiresAt: SOON },
       { remaining: Number.NaN, expiresAt: FAR },
       { remaining: 1000, expiresAt: SOON },
-    ]), NOW, WINDOW)
-    expect(split).toEqual({ expiring: 1000, permanent: 0 })
+    ]), NOW, WINDOW, IMMINENT)
+    expect(split).toEqual({ expiring: 1000, permanent: 0, imminent: 1000 })
   })
 
   it('⑤ 一个可用桶都没有 ⇒ 两桶皆 0（不是「永久有额度」）', () => {
-    expect(splitOfficeAceCreditsByExpiry(summary([{ remaining: 0 }]), NOW, WINDOW))
+    expect(splitOfficeAceCreditsByExpiry(summary([{ remaining: 0 }]), NOW, WINDOW, IMMINENT))
       .toEqual({ expiring: 0, permanent: 0 })
+  })
+
+  // ── 临期子量（与 buddy 那份逐格同构）─────────────────────────────
+
+  it('★★ ⑥ 临期是 expiring 的**子量**：5 天内到期的才进 imminent', () => {
+    const split = splitOfficeAceCreditsByExpiry(summary([
+      { remaining: 100, expiresAt: new Date(NOW + 2 * DAY).toISOString() },   // 临期
+      { remaining: 200, expiresAt: new Date(NOW + 10 * DAY).toISOString() },  // 短期
+      { remaining: 1000, expiresAt: FAR },                                     // 长期
+    ]), NOW, WINDOW, IMMINENT)
+    expect(split).toEqual({ expiring: 300, permanent: 1000, imminent: 100 })
+    // 不变量：0 <= imminent <= expiring
+    expect(split.imminent!).toBeLessThanOrEqual(split.expiring)
+    // 守恒：imminent 已含在 expiring 内，不得重复计
+    expect(split.imminent! + split.permanent).toBe(1100)
+  })
+
+  it('★★ ⑦ 边界方向与 buddy 一致：正好 5 天 ⇒ 短期（不是临期），少 1ms ⇒ 临期', () => {
+    const at = splitOfficeAceCreditsByExpiry(summary([
+      { remaining: 100, expiresAt: new Date(NOW + IMMINENT).toISOString() },
+    ]), NOW, WINDOW, IMMINENT)
+    expect(at, '正好 5 天必须算短期').toEqual({ expiring: 100, permanent: 0 })
+    expect(at).not.toHaveProperty('imminent')
+
+    const just = splitOfficeAceCreditsByExpiry(summary([
+      { remaining: 100, expiresAt: new Date(NOW + IMMINENT - 1).toISOString() },
+    ]), NOW, WINDOW, IMMINENT)
+    expect(just, '差 1ms 就是临期').toEqual({ expiring: 100, permanent: 0, imminent: 100 })
+  })
+
+  it('★ ⑧ 临期窗口 = 0 ⇒ 关掉临期档（退化两档），且不产出 imminent 键', () => {
+    const split = splitOfficeAceCreditsByExpiry(summary([
+      { remaining: 100, expiresAt: new Date(NOW + 1 * DAY).toISOString() },
+    ]), NOW, WINDOW, 0)
+    expect(split).toEqual({ expiring: 100, permanent: 0 })
+    expect(split).not.toHaveProperty('imminent')
+  })
+
+  /**
+   * ★★ **两份 splitter 必须逐格同构**（仓库红线：同一语义不得两套判据）。
+   * 同一组「距到期天数」喂给 buddy 与 officeace，`expiring` / `imminent` 必须完全一致。
+   */
+  it('★★★ ⑨ 与 buddy 的 splitBuddyCreditsByExpiry 逐格同构', async () => {
+    const { splitBuddyCreditsByExpiry } = await import('../../src/buddy-balance-rank.js')
+    for (const days of [1, 3, 4.999, 5, 5.001, 10, 14.999, 15, 100]) {
+      const at = new Date(NOW + days * DAY).toISOString()
+      const officeAce = splitOfficeAceCreditsByExpiry(
+        summary([{ remaining: 100, expiresAt: at }]), NOW, WINDOW, IMMINENT,
+      )
+      const buddy = splitBuddyCreditsByExpiry({
+        total: 100,
+        expiredTotal: 0,
+        packages: [{
+          name: 'p', unit: 'credits', remaining: 100, total: 100, used: 0,
+          active: true, cycleStartTime: '', cycleEndTime: '', expiredTime: '',
+          deductionEndTime: NOW + days * DAY,
+        }],
+      }, NOW, WINDOW, IMMINENT)
+      expect(
+        { expiring: officeAce.expiring, permanent: officeAce.permanent, imminent: officeAce.imminent },
+        `${days} 天后到期时两份 splitter 必须同判`,
+      ).toEqual({ expiring: buddy!.expiring, permanent: buddy!.permanent, imminent: buddy!.imminent })
+    }
   })
 })
 

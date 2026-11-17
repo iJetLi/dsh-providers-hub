@@ -19,12 +19,18 @@ import {
   BUDDY_BALANCE_TIER,
   BUDDY_EXPIRING_WINDOW_DAYS,
   BUDDY_EXPIRING_WINDOW_MS,
+  BUDDY_IMMINENT_WINDOW_DAYS,
+  BUDDY_IMMINENT_WINDOW_MS,
+  DSH_BUDDY_IMMINENT_WINDOW_DAYS,
   buddyBalanceTier,
   buddyExpiringWindowDays,
   buddyExpiringWindowMs,
+  buddyImminentWindowDays,
+  buddyImminentWindowMs,
   buddyTierUsable,
   describeBuddyCreditSplit,
   rankBuddyAccountsByBalance,
+  resolveImminentWindowMs,
   splitBuddyCreditsByExpiry,
 } from '../../src/buddy-balance-rank.js'
 import type { CreditBalance, CreditPackage } from '../../src/credits.js'
@@ -273,7 +279,9 @@ describe('splitBuddyCreditsByExpiry（按到期时间拆分两桶）', () => {
       balance(pkg({ deductionEndTime: String(NOW + 3 * DAY) as unknown as number })),
       NOW,
     )
-    expect(split, '字符串毫秒必须被认成「有确切到期时刻」⇒ 临期').toEqual({ expiring: 100, permanent: 0 })
+    // ⚠️ 3 天后到期 ⇒ 同时是「15 天内」与「5 天内」⇒ 两条都命中：expiring 母量 + imminent 子量。
+    expect(split, '字符串毫秒必须被认成「有确切到期时刻」⇒ 临期')
+      .toEqual({ expiring: 100, permanent: 0, imminent: 100 })
   })
 
   it('★ 反向对照：null / 空串 / 非数字串仍判「未知到期」（不得被 Number() 宽松成时刻 0）', () => {
@@ -475,5 +483,270 @@ describe('describeBuddyCreditSplit（展示文案）', () => {
 
   it('查询失败说清楚', () => {
     expect(describeBuddyCreditSplit(undefined)).toBe('余额查询失败')
+  })
+
+  /**
+   * ⚠️ 有临期额度时必须**单列** —— 若只说「15 天内到期 350」，
+   * 「其中 100 会在 5 天内烧掉」这个最关键的决策信息就丢了，
+   * 而那正是引入临期档的全部目的。
+   */
+  it('★ 有临期额度时单列「临期 X」', () => {
+    expect(describeBuddyCreditSplit({ expiring: 350, permanent: 1000, imminent: 100 }))
+      .toBe('临期 100 · 15 天内到期 350 · 永久 1000')
+  })
+
+  it('无临期额度时文案与改动前逐字节相同（向后兼容）', () => {
+    expect(describeBuddyCreditSplit({ expiring: 250, permanent: 100.5, imminent: 0 }))
+      .toBe('15 天内到期 250 · 永久 100.5')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+// 临期档（user 2026-11-17）：5 天内到期 = 临期，最优先烧掉
+// ═══════════════════════════════════════════════════════════════════
+
+describe('临期窗口常量与解析', () => {
+  it('默认 5 天', () => {
+    expect(BUDDY_IMMINENT_WINDOW_DAYS).toBe(5)
+    expect(BUDDY_IMMINENT_WINDOW_MS).toBe(5 * DAY)
+  })
+
+  /**
+   * ⚠️⚠️ **`0` 是合法值**（= 关掉临期档，退化成两档）。
+   *
+   * 若实现写成 `Number(raw) || 默认值`，`0` 会被 falsy 吞掉静默变成 5 ——
+   * 用户设了「关掉临期档」却完全没生效，且**不会有任何报错**。
+   * 15 天那条已踩过同一个坑（见 `buddyExpiringWindowDays` 的注释）。
+   */
+  it('★★ 环境变量 0 必须生效（不得被 || 吞成默认值）', () => {
+    expect(buddyImminentWindowDays({ [DSH_BUDDY_IMMINENT_WINDOW_DAYS]: '0' })).toBe(0)
+    expect(buddyImminentWindowMs({ [DSH_BUDDY_IMMINENT_WINDOW_DAYS]: '0' })).toBe(0)
+  })
+
+  it('环境变量正常值生效', () => {
+    expect(buddyImminentWindowDays({ [DSH_BUDDY_IMMINENT_WINDOW_DAYS]: '3' })).toBe(3)
+    expect(buddyImminentWindowMs({ [DSH_BUDDY_IMMINENT_WINDOW_DAYS]: '3' })).toBe(3 * DAY)
+    expect(buddyImminentWindowDays({ [DSH_BUDDY_IMMINENT_WINDOW_DAYS]: ' 7 ' })).toBe(7)
+    expect(buddyImminentWindowDays({ [DSH_BUDDY_IMMINENT_WINDOW_DAYS]: '1.5' })).toBe(1.5)
+  })
+
+  it('非法值回落到默认 5 天', () => {
+    for (const bad of ['', '   ', 'abc', '-1', 'NaN']) {
+      expect(
+        buddyImminentWindowDays({ [DSH_BUDDY_IMMINENT_WINDOW_DAYS]: bad }),
+        `${JSON.stringify(bad)} 应回落默认`,
+      ).toBe(BUDDY_IMMINENT_WINDOW_DAYS)
+    }
+    expect(buddyImminentWindowDays({})).toBe(BUDDY_IMMINENT_WINDOW_DAYS)
+  })
+})
+
+describe('resolveImminentWindowMs（全仓唯一的钳制点）', () => {
+  const W15 = 15 * DAY
+
+  it('正常情况：5 天 < 15 天，原样返回', () => {
+    expect(resolveImminentWindowMs(W15, 5 * DAY)).toBe(5 * DAY)
+  })
+
+  it('临期窗口超过总窗口 ⇒ 钳到总窗口', () => {
+    expect(resolveImminentWindowMs(W15, 20 * DAY)).toBe(W15)
+    expect(resolveImminentWindowMs(W15, 15 * DAY)).toBe(W15)
+  })
+
+  it('★ 总窗口比默认临期窗口还小 ⇒ 钳到总窗口（不得让临期 > 总窗口）', () => {
+    // 用户把 15 天调到 3 天，而临期仍是默认 5 天 ⇒ 生效值必须是 3 天。
+    expect(resolveImminentWindowMs(3 * DAY, 5 * DAY)).toBe(3 * DAY)
+  })
+
+  it('0 是合法值（关掉临期档）', () => {
+    expect(resolveImminentWindowMs(W15, 0)).toBe(0)
+  })
+
+  it('省略第二参时读环境变量', () => {
+    const prev = process.env[DSH_BUDDY_IMMINENT_WINDOW_DAYS]
+    try {
+      process.env[DSH_BUDDY_IMMINENT_WINDOW_DAYS] = '2'
+      expect(resolveImminentWindowMs(W15)).toBe(2 * DAY)
+    } finally {
+      if (prev === undefined) delete process.env[DSH_BUDDY_IMMINENT_WINDOW_DAYS]
+      else process.env[DSH_BUDDY_IMMINENT_WINDOW_DAYS] = prev
+    }
+  })
+
+  it('非法临期值回落默认（再钳制）', () => {
+    expect(resolveImminentWindowMs(W15, Number.NaN)).toBe(5 * DAY)
+    expect(resolveImminentWindowMs(W15, -1)).toBe(5 * DAY)
+  })
+
+  it('总窗口本身是脏值 ⇒ 退化成默认总窗口', () => {
+    expect(resolveImminentWindowMs(Number.NaN, 5 * DAY)).toBe(5 * DAY)
+    expect(resolveImminentWindowMs(-1, 5 * DAY)).toBe(5 * DAY)
+  })
+})
+
+describe('splitBuddyCreditsByExpiry 的临期子量', () => {
+  const W15 = BUDDY_EXPIRING_WINDOW_MS
+  const W5 = BUDDY_IMMINENT_WINDOW_MS
+
+  it('★★ 5 天内 ⇒ 同时进 expiring（母量）与 imminent（子量）', () => {
+    const split = splitBuddyCreditsByExpiry(balance(pkg({ deductionEndTime: NOW + 3 * DAY })), NOW, W15, W5)
+    expect(split).toEqual({ expiring: 100, permanent: 0, imminent: 100 })
+  })
+
+  it('★ 5~15 天 ⇒ 只进 expiring，不进 imminent（= 短期）', () => {
+    const split = splitBuddyCreditsByExpiry(balance(pkg({ deductionEndTime: NOW + 10 * DAY })), NOW, W15, W5)
+    expect(split).toEqual({ expiring: 100, permanent: 0 })
+    expect(split).not.toHaveProperty('imminent')
+  })
+
+  it('≥15 天 ⇒ 只进 permanent', () => {
+    const split = splitBuddyCreditsByExpiry(balance(pkg({ deductionEndTime: NOW + 100 * DAY })), NOW, W15, W5)
+    expect(split).toEqual({ expiring: 0, permanent: 100 })
+  })
+
+  /**
+   * ⚠️⚠️ **边界方向必须与 15 天那条严格一致**：`<` 才是窗口内。
+   * 正好 5.000 天算**短期**，4.999 天才算**临期**。
+   * 写成 `<=` 会让边界那一天的号被判成临期 —— 判断依据就漂了。
+   */
+  it('★★ 边界：正好 5 天 ⇒ 短期（不是临期）；差 1ms ⇒ 临期', () => {
+    const exactly5 = splitBuddyCreditsByExpiry(
+      balance(pkg({ deductionEndTime: NOW + W5 })), NOW, W15, W5,
+    )
+    expect(exactly5, '正好 5 天必须算短期').toEqual({ expiring: 100, permanent: 0 })
+    expect(exactly5).not.toHaveProperty('imminent')
+
+    const justUnder = splitBuddyCreditsByExpiry(
+      balance(pkg({ deductionEndTime: NOW + W5 - 1 })), NOW, W15, W5,
+    )
+    expect(justUnder, '差 1ms 就是临期').toEqual({ expiring: 100, permanent: 0, imminent: 100 })
+  })
+
+  it('★★ 边界：正好 15 天 ⇒ 长期', () => {
+    const exactly15 = splitBuddyCreditsByExpiry(
+      balance(pkg({ deductionEndTime: NOW + W15 })), NOW, W15, W5,
+    )
+    expect(exactly15).toEqual({ expiring: 0, permanent: 100 })
+  })
+
+  it('★ 不变量：0 <= imminent <= expiring（多批混合）', () => {
+    const split = splitBuddyCreditsByExpiry(
+      balance(
+        pkg({ remaining: 100, deductionEndTime: NOW + 2 * DAY }),
+        pkg({ remaining: 200, deductionEndTime: NOW + 10 * DAY }),
+        pkg({ remaining: 1000, deductionEndTime: NOW + 3008 * DAY }),
+      ),
+      NOW, W15, W5,
+    )
+    expect(split).toEqual({ expiring: 300, permanent: 1000, imminent: 100 })
+    expect(split!.imminent!).toBeLessThanOrEqual(split!.expiring)
+    // 守恒：imminent 已含在 expiring 里，不得重复计
+    expect(split!.imminent! + split!.permanent).toBe(1100)
+  })
+
+  it('★ 临期窗口 = 0 ⇒ 「关掉临期档」，全部落 expiring（退化两档）', () => {
+    const split = splitBuddyCreditsByExpiry(
+      balance(pkg({ deductionEndTime: NOW + 1 * DAY })), NOW, W15, 0,
+    )
+    expect(split).toEqual({ expiring: 100, permanent: 0 })
+    expect(split).not.toHaveProperty('imminent')
+  })
+
+  /**
+   * ⚠️⚠️ **向后兼容的硬闸门**：省略第 4 参时，输出必须与引入临期档**之前逐字节相同**
+   *（除 5 天内那批确实多了 imminent 子量 —— 那是本功能的本意）。
+   * 这里钉的是「10 天后到期」这种**不临期**的输入：键集合必须逐个相同。
+   */
+  it('★★ 向后兼容：10 天到期时，省略第 4 参与显式传 5 天输出逐字节相同', () => {
+    const b = balance(pkg({ deductionEndTime: NOW + 10 * DAY }))
+    expect(splitBuddyCreditsByExpiry(b, NOW, W15))
+      .toEqual(splitBuddyCreditsByExpiry(b, NOW, W15, W5))
+  })
+
+  it('★ 无到期时间 ⇒ 永久（不臆造临期）', () => {
+    const split = splitBuddyCreditsByExpiry(
+      balance(pkg({ deductionEndTime: undefined })), NOW, W15, W5,
+    )
+    expect(split).toEqual({ expiring: 0, permanent: 100 })
+  })
+
+  it('★ 已作废 ⇒ 只进 expired，不进 imminent（扣不到的额度不得排最前）', () => {
+    const split = splitBuddyCreditsByExpiry(
+      balance(pkg({ deductionEndTime: NOW - 1 * DAY })), NOW, W15, W5,
+    )
+    expect(split).toEqual({ expiring: 0, permanent: 0, expired: 100 })
+  })
+})
+
+describe('buddyBalanceTier 的临期档', () => {
+  it('★★ 三档优先级：imminent > expiring > permanent', () => {
+    expect(buddyBalanceTier({ imminentBalance: 1, expiringBalance: 999, permanentBalance: 999 }))
+      .toBe(BUDDY_BALANCE_TIER.imminent)
+    expect(buddyBalanceTier({ imminentBalance: 0, expiringBalance: 1, permanentBalance: 999 }))
+      .toBe(BUDDY_BALANCE_TIER.expiring)
+    expect(buddyBalanceTier({ imminentBalance: 0, expiringBalance: 0, permanentBalance: 1 }))
+      .toBe(BUDDY_BALANCE_TIER.permanent)
+    expect(buddyBalanceTier({}))
+      .toBe(BUDDY_BALANCE_TIER.none)
+  })
+
+  it('★ 档位数值顺序：imminent < expiring < permanent < none', () => {
+    expect(BUDDY_BALANCE_TIER.imminent).toBeLessThan(BUDDY_BALANCE_TIER.expiring)
+    expect(BUDDY_BALANCE_TIER.expiring).toBeLessThan(BUDDY_BALANCE_TIER.permanent)
+    expect(BUDDY_BALANCE_TIER.permanent).toBeLessThan(BUDDY_BALANCE_TIER.none)
+  })
+
+  /**
+   * ⚠️⚠️ **最不能回归的一格**：锁定永久积分时，临期与短期**都必须仍可用**。
+   * 两者都在 15 天内 ⇒ 锁定态照烧。若把它们判成 none，
+   * 「锁定后只烧 15 天内的积分」这条承诺就变成了「锁定后什么都不能烧」。
+   */
+  it('★★ 锁定时临期与短期都仍可用（永久锁语义不变）', () => {
+    expect(buddyBalanceTier({ imminentBalance: 100 }, { allowPermanent: false }))
+      .toBe(BUDDY_BALANCE_TIER.imminent)
+    expect(buddyBalanceTier({ expiringBalance: 100 }, { allowPermanent: false }))
+      .toBe(BUDDY_BALANCE_TIER.expiring)
+    expect(buddyTierUsable(buddyBalanceTier({ imminentBalance: 100 }, { allowPermanent: false })))
+      .toBe(true)
+    expect(buddyTierUsable(buddyBalanceTier({ expiringBalance: 100 }, { allowPermanent: false })))
+      .toBe(true)
+  })
+
+  it('★★ 锁定时只剩长期 ⇒ none（不可用）', () => {
+    expect(buddyBalanceTier({ permanentBalance: 100 }, { allowPermanent: false }))
+      .toBe(BUDDY_BALANCE_TIER.none)
+  })
+})
+
+describe('★★ 核心需求：临期号必须抢先被选中', () => {
+  /**
+   * 这是**唯一能证明需求被满足**的用例。
+   *
+   * 场景：A 只剩 14 天、B 只剩 3 天，手动顺序 A 在前。
+   * - 引入临期档之前：两者都是 `expiring(0)` ⇒ 按帐号顺序选 **A**
+   *   ⇒ B 的积分在 3 天后作废，**一分没用上**（真实缺陷）
+   * - 引入临期档之后：B 是 `imminent(0)`、A 是 `expiring(1)` ⇒ 选 **B**
+   */
+  it('★★★ 改前选 A（会白白过期）、改后选 B', () => {
+    const a = { id: 'A', expiringBalance: 500, imminentBalance: 0, permanentBalance: 0 }
+    const b = { id: 'B', expiringBalance: 500, imminentBalance: 500, permanentBalance: 0 }
+
+    // 手工顺序 A 在前
+    const ranked = rankBuddyAccountsByBalance([a, b])
+    expect(ranked.map((x) => x.id), 'B（临期）必须排在 A（短期）之前').toEqual(['B', 'A'])
+  })
+
+  it('★ 档内保持帐号顺序（临期档内不按「谁更急」二次排序）', () => {
+    // E 还剩 4 天、B 还剩 1 天，都是临期；E 在前 ⇒ 必须仍选 E
+    //（用户 2026-11-17 明确要求「原来是什么策略就使用什么策略」）
+    const e = { id: 'E', imminentBalance: 100, expiringBalance: 100, permanentBalance: 0 }
+    const b = { id: 'B', imminentBalance: 500, expiringBalance: 500, permanentBalance: 0 }
+    expect(rankBuddyAccountsByBalance([e, b]).map((x) => x.id)).toEqual(['E', 'B'])
+  })
+
+  it('★ 全池只有长期号时，顺序与改动前相同（按帐号顺序）', () => {
+    const c = { id: 'C', expiringBalance: 0, imminentBalance: 0, permanentBalance: 1000 }
+    const d = { id: 'D', expiringBalance: 0, imminentBalance: 0, permanentBalance: 200 }
+    expect(rankBuddyAccountsByBalance([c, d]).map((x) => x.id)).toEqual(['C', 'D'])
   })
 })

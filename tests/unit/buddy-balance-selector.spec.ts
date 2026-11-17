@@ -19,6 +19,7 @@ import {
   pickBuddyAccount,
   type BuddyCandidateAccount,
 } from '../../src/buddy-balance-selector.js'
+import { BUDDY_BALANCE_TIER } from '../../src/buddy-balance-rank.js'
 import { CODEBUDDY } from '../../src/product.js'
 import type { BuddyCredential } from '../../src/buddy.js'
 import type { CreditBalance, CreditPackage } from '../../src/credits.js'
@@ -60,6 +61,10 @@ function makeSelector(
     clock?: { value: number }
     ttlMs?: number
     errorTtlMs?: number
+    /** 「临时积分」窗口覆盖（毫秒）。省略 = 读环境变量（默认 15 天）。 */
+    windowMs?: number
+    /** 「临期」窗口覆盖（毫秒）。省略 = 读环境变量（默认 5 天，再经钳制）。 */
+    imminentWindowMs?: number
   } = {},
 ) {
   const calls: string[] = []
@@ -69,6 +74,8 @@ function makeSelector(
     now: () => clock.value,
     ...(options.ttlMs === undefined ? {} : { ttlMs: options.ttlMs }),
     ...(options.errorTtlMs === undefined ? {} : { errorTtlMs: options.errorTtlMs }),
+    ...(options.windowMs === undefined ? {} : { windowMs: options.windowMs }),
+    ...(options.imminentWindowMs === undefined ? {} : { imminentWindowMs: options.imminentWindowMs }),
     resolveCredential: async (ref) => {
       if (options.brokenRefs?.includes(ref)) return undefined
       return { access_token: `token-of-${ref}` } as BuddyCredential
@@ -196,8 +203,11 @@ describe('BuddyBalanceSelector.balanceOf（带 TTL 的余额查询）', () => {
     })
     const entry = await selector.balanceOf(account('a1'))
     expect(entry.ok).toBe(true)
+    // 9 天后到期 ⇒ 15 天内但超过 5 天 ⇒ 短期（无临期子量）
     expect(entry.split).toEqual({ expiring: 250, permanent: 100 })
-    expect(entry.tier).toBe(0) // expiring
+    // ⚠️ 用**符号**断言档位，不写裸数字：引入「临期」档后档位序号整体后移过，
+    //    裸数字会让每次调整档位顺序都假红，且看不出断言的真实意图。
+    expect(entry.tier).toBe(BUDDY_BALANCE_TIER.expiring)
   })
 
   /**
@@ -227,13 +237,13 @@ describe('BuddyBalanceSelector.balanceOf（带 TTL 的余额查询）', () => {
 
     const first = await selector.balanceOf(account('a1'))
     expect(first.split).toEqual({ expiring: 0, permanent: 100 })
-    expect(first.tier).toBe(1) // permanent
+    expect(first.tier).toBe(BUDDY_BALANCE_TIER.permanent)
 
     // 时间前进 40 秒（< 60 秒 TTL）⇒ 距到期 15 天 − 10 秒 ⇒ 改判临时
     clock.value += 40_000
     const second = await selector.balanceOf(account('a1'))
     expect(second.split).toEqual({ expiring: 100, permanent: 0 })
-    expect(second.tier).toBe(0) // expiring
+    expect(second.tier).toBe(BUDDY_BALANCE_TIER.expiring)
     // 分类变了，但一次网络都没多发 —— 缓存的是原料
     expect(calls).toEqual(['a1'])
   })
@@ -846,3 +856,127 @@ function makeDetailedSelector(
     }),
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// 临期档接线（用户 2026-11-17）：选号器必须把「5 天内到期」单独成档
+// ═══════════════════════════════════════════════════════════════════
+
+describe('临期档接线：classify 写入 imminentBalance', () => {
+  it('★★ 5 天内到期 ⇒ 写入 imminentBalance（子量）且档位是 imminent', async () => {
+    const { selector } = makeSelector({ a1: balance(pkg({ remaining: 300, deductionEndTime: NOW + 3 * DAY })) })
+    const entry = await selector.balanceOf(account('a1'))
+    expect(entry.ok).toBe(true)
+    expect(entry.imminentBalance).toBe(300)
+    expect(entry.expiringBalance).toBe(300)   // 母量同样包含它
+    expect(entry.split).toEqual({ expiring: 300, permanent: 0, imminent: 300 })
+    expect(entry.tier).toBe(BUDDY_BALANCE_TIER.imminent)
+  })
+
+  it('★ 5~15 天到期 ⇒ imminentBalance 为 0，档位 expiring（短期）', async () => {
+    const { selector } = makeSelector({ a1: balance(pkg({ remaining: 300, deductionEndTime: NOW + 9 * DAY })) })
+    const entry = await selector.balanceOf(account('a1'))
+    expect(entry.imminentBalance).toBe(0)
+    expect(entry.expiringBalance).toBe(300)
+    expect(entry.tier).toBe(BUDDY_BALANCE_TIER.expiring)
+  })
+
+  it('★ 不变量：imminentBalance <= expiringBalance（混合批次）', async () => {
+    const { selector } = makeSelector({
+      a1: balance(
+        pkg({ remaining: 100, deductionEndTime: NOW + 2 * DAY }),
+        pkg({ remaining: 200, deductionEndTime: NOW + 10 * DAY }),
+      ),
+    })
+    const entry = await selector.balanceOf(account('a1'))
+    expect(entry.imminentBalance).toBe(100)
+    expect(entry.expiringBalance).toBe(300)
+    expect(entry.imminentBalance!).toBeLessThanOrEqual(entry.expiringBalance!)
+  })
+
+  it('★★ 临期窗口可注入（imminentWindowMs）', async () => {
+    const { selector } = makeSelector(
+      { a1: balance(pkg({ remaining: 100, deductionEndTime: NOW + 3 * DAY })) },
+      { imminentWindowMs: 1 * DAY },
+    )
+    const entry = await selector.balanceOf(account('a1'))
+    expect(entry.imminentBalance, '窗口设 1 天 ⇒ 3 天后到期不算临期').toBe(0)
+    expect(entry.tier).toBe(BUDDY_BALANCE_TIER.expiring)
+  })
+
+  it('★★ 临期窗口被钳制到总窗口（3 天窗口 + 默认 5 天临期 ⇒ 生效 3 天）', async () => {
+    // 总窗口 3 天、临期窗口默认 5 天 ⇒ 钳制成 3 天 ⇒ 2 天后到期仍算临期，且 5~15 天档消失
+    const { selector } = makeSelector(
+      { a1: balance(pkg({ remaining: 100, deductionEndTime: NOW + 2 * DAY })) },
+      { windowMs: 3 * DAY },
+    )
+    const entry = await selector.balanceOf(account('a1'))
+    expect(entry.imminentBalance).toBe(100)
+    expect(entry.tier).toBe(BUDDY_BALANCE_TIER.imminent)
+  })
+
+  it('★ 没有临期额度时 imminentBalance 是 0 而不是 undefined（形状稳定）', async () => {
+    const { selector } = makeSelector({ a1: balance(pkg({ remaining: 100, deductionEndTime: NOW + 100 * DAY })) })
+    const entry = await selector.balanceOf(account('a1'))
+    expect(entry.imminentBalance).toBe(0)
+  })
+})
+
+describe('★★ 临期档端到端选号（select 必须挑临期的那个号）', () => {
+  /**
+   * ★★★ 这是本功能**唯一的价值证明**：两个号都在「15 天内」，
+   * 但一个 14 天后到期、一个 3 天后到期，手动顺序把 14 天的排在前面。
+   *
+   * - 引入临期档之前：两者同档 ⇒ 选前面的 A ⇒ B 的积分 3 天后作废（真实缺陷）
+   * - 之后：B 是临期 ⇒ 选 B
+   */
+  it('★★★ 手序 A(14天) → B(3天)：必须选中 B', async () => {
+    const { selector } = makeSelector({
+      A: balance(pkg({ remaining: 500, deductionEndTime: NOW + 14 * DAY })),
+      B: balance(pkg({ remaining: 500, deductionEndTime: NOW + 3 * DAY })),
+    })
+    const result = await selector.select([account('A'), account('B')], { allowPermanent: true })
+    expect(result.ok).toBe(true)
+    expect(result.ok ? result.account.id : undefined, 'B 的积分更急，必须先烧').toBe('B')
+    // 并且确实走了 tiert=imminent
+    expect(result.ok ? result.balance.tier : undefined).toBe(BUDDY_BALANCE_TIER.imminent)
+  })
+
+  it('★ 两个号都临期 ⇒ 按帐号顺序（不按「谁更急」二次排序）', async () => {
+    const { selector } = makeSelector({
+      E: balance(pkg({ remaining: 100, deductionEndTime: NOW + 4 * DAY })),
+      B: balance(pkg({ remaining: 500, deductionEndTime: NOW + 1 * DAY })),
+    })
+    const result = await selector.select([account('E'), account('B')], { allowPermanent: true })
+    expect(result.ok ? result.account.id : undefined, 'E 在前 ⇒ 选 E（沿用既有策略）').toBe('E')
+  })
+
+  it('★★ 锁定永久积分时，临期与短期号都仍可选（永久锁语义不变）', async () => {
+    const { selector } = makeSelector({
+      short: balance(pkg({ remaining: 500, deductionEndTime: NOW + 10 * DAY })),
+      long: balance(pkg({ remaining: 900, deductionEndTime: NOW + 300 * DAY })),
+    })
+    const result = await selector.select(
+      [account('long'), account('short')],
+      { allowPermanent: false },
+    )
+    expect(result.ok).toBe(true)
+    expect(result.ok ? result.account.id : undefined, '短期可烧，长期被锁 ⤦ 必须选短期').toBe('short')
+  })
+
+  it('★★ 锁定时只有长期号 ⇒ 报不可用（不得烧永久积分）', async () => {
+    const { selector } = makeSelector({
+      long: balance(pkg({ remaining: 900, deductionEndTime: NOW + 300 * DAY })),
+    })
+    const result = await selector.select([account('long')], { allowPermanent: false })
+    expect(result.ok).toBe(false)
+  })
+
+  it('★ 全池长期号 ⇒ 按帐号顺序（与改动前一致）', async () => {
+    const { selector } = makeSelector({
+      X: balance(pkg({ remaining: 100, deductionEndTime: NOW + 300 * DAY })),
+      Y: balance(pkg({ remaining: 100, deductionEndTime: NOW + 200 * DAY })),
+    })
+    const result = await selector.select([account('X'), account('Y')], { allowPermanent: true })
+    expect(result.ok ? result.account.id : undefined, '长期档内按帐号顺序，不按日期').toBe('X')
+  })
+})

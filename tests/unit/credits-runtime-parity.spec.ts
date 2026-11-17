@@ -413,6 +413,39 @@ describe('★ windowDays 由 registry 的 usesExpiryWindow 驱动（不是「是
     expect(checked.length, '没有任何渠道被检查 = 本用例什么都没守').toBeGreaterThanOrEqual(14)
   })
 
+  /**
+   * ★★ **`imminentDays` 必须与 `windowDays` 成对出现**（2026-11-17 三档分档）。
+   *
+   * 判据寓意：`imminentDays` 是「临期」子窗口，缺了它前端会把临期窗口退化成
+   * 总窗口 ⇒ 面板的「临期」段恒为 0、临时积分全落「短期」段。
+   * 那是**刻意的向后兼容**（旧后端 + 新前端），但**同一份响应里不能只给一半**：
+   * 只给 `windowDays` 会让用户看到「锁定文案说 15 天内」而分档段只有三段。
+   *
+   * ⚠️ 本用例的价值在于**逐个遍历 registry**：手写清单漏一家就会静默丢掉
+   * 那家的临期语义（本仓库 failure-class #1）。漏传**不会有任何报错**。
+   */
+  it('★★ imminentDays 与 windowDays 严格成对（遍历全部 balance 渠道）', async () => {
+    const { call } = makeRpc()
+    let withWindow = 0
+    for (const d of PROVIDER_REGISTRY) {
+      if (d.credits.balance !== true) continue
+      const result = await call('credits.balances', { provider: d.id })
+      expect(result.ok, `${d.id} 应被接受`).toBe(true)
+      const value = (result.value ?? {}) as Record<string, unknown>
+      const hasWindow = Object.prototype.hasOwnProperty.call(value, 'windowDays')
+      const hasImminent = Object.prototype.hasOwnProperty.call(value, 'imminentDays')
+      if (hasWindow) withWindow += 1
+      expect(
+        hasImminent,
+        hasWindow
+          ? `${d.id} 回传了 windowDays 就必须同时回传 imminentDays（否则临期段恒 0）`
+          : `${d.id} 没有窗口概念，同样不该回传 imminentDays`,
+      ).toBe(hasWindow)
+    }
+    // 反向对照：必须真的检查到「有窗口」的渠道，否则本用例恒真（空转）。
+    expect(withWindow, '必须至少有一个渠道带窗口，否则本用例是空转').toBeGreaterThanOrEqual(14)
+  })
+
   it('usesExpiryWindow 的登记值与「按到期时间分桶」的实测集合一致', () => {
     // 这些是余额里带逐包到期时间、走按到期分桶的渠道。
     // 写死它是**有意**的：若有人改 registry，这条会红并要求他复核，

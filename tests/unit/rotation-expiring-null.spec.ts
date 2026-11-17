@@ -82,7 +82,20 @@ describe('usage-badge 的 expiringOf 源码契约', () => {
 
   it('★ 必须把 windowDays 传进去', () => {
     // 变异：改回 splitCreditsByExpiry(packages) ⇒ 本条红（漏传窗口 ⇒ 恒 null）
-    expect(source).toMatch(/splitCreditsByExpiry\(\s*packages\s*,\s*value\?\.windowDays\s*\)/)
+    // ⚠️ 2026-11-17 三档后调用形态变成四参（第 4 参是临期子窗口），
+    //    故正则只锚定**前两参**，不写死右括号位置 —— 否则加参数会假红。
+    expect(source).toMatch(/splitCreditsByExpiry\(\s*packages\s*,\s*value\?\.windowDays\s*,/)
+  })
+
+  /**
+   * ★★ 第 4 参（临期子窗口）也必须传。
+   *
+   * ⚠️ 漏传不会崩、不会报错 —— `normalizeImminentDays(undefined, days)` 会
+   * 退化成「临期窗口 = 总窗口」，于是**临期段恒为 0、临时积分全落短期**。
+   * 症状是「徽标上永远看不到临期」，而设置页那张卡片却有 —— 两处不一致。
+   */
+  it('★★ 必须把 imminentDays 也传进去（漏传 ⇒ 临期段恒 0）', () => {
+    expect(source).toMatch(/splitCreditsByExpiry\(\s*packages\s*,\s*value\?\.windowDays\s*,[^)]*value\?\.imminentDays/)
   })
 
   it('★ 判据必须挡 null（`== null` 或等价写法）', () => {

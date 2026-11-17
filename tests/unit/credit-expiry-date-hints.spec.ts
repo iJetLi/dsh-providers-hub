@@ -14,6 +14,7 @@ import {
 } from '../../plugin-src/client/credit-expiry.js'
 
 const DAY = 86_400_000
+const IMMINENT_DAYS = 5
 const NOW = new Date(2026, 10, 14, 3, 40).getTime() // 本地时间 2026-11-14 03:40
 
 function pkg(name: string, remaining: number, end?: number, extra: Record<string, unknown> = {}) {
@@ -26,8 +27,13 @@ function pkg(name: string, remaining: number, end?: number, extra: Record<string
 }
 
 function line(packages: ReturnType<typeof pkg>[], withHints = true) {
-  const split = splitCreditsByExpiry(packages, 15, NOW)
-  const hints = withHints ? expiryDateHints(packages, 15, NOW) : undefined
+  /**
+   * ⚠️ 2026-11-17 三档：显式传临期窗口 5 天（与后端默认同值）。
+   * 不传的话 `imminentDays` 缺席 ⇒ 退化成「临期窗口 = 总窗口」⇒ 所有窗口内
+   * 额度都算临期，本文件的「长期 vs 临期」对照就失去意义。
+   */
+  const split = splitCreditsByExpiry(packages, 15, NOW, IMMINENT_DAYS)
+  const hints = withHints ? expiryDateHints(packages, 15, NOW, IMMINENT_DAYS) : undefined
   return expirySplitParts(split, String, NOW, hints)
     .map((p: { text: string; countdown?: string }) => (p.countdown ? `${p.text}（${p.countdown}）` : p.text))
     .join(' · ')
@@ -43,12 +49,20 @@ describe('卡片分段行的日期提示', () => {
     pkg('资源包', 100, new Date(2026, 11, 11, 12).getTime()),
   ]
 
-  it('报障原样：长期带最早到期日，临期点名是套餐刷新', () => {
-    expect(line(qoder)).toBe('长期 400（最早 12月7日到期） · 临期 192（套餐 11月21日刷新，7 天 7 小时后）')
+  /**
+   * ⚠️ 2026-11-17 三档：套餐包 7 天后刷新 ⇒ 落在 **5~15 天** ⇒ 归「短期」，
+   *    不再是「临期」。短期段只标最早日期（不做小时级倒计时），
+   *    故这里也不再有「套餐 X 日刷新」那半句（它是临期段专有的措辞）。
+   *    长期段的行为与改动前逐字一致（最早到期日仍在）。
+   */
+  it('报障原样：长期带最早到期日，短期标最早到期日', () => {
+    expect(line(qoder)).toBe('长期 400（最早 12月7日到期） · 短期 192（最早 11月21日到期）')
   })
 
-  it('不传提示 ⇒ 与改动前逐字一致（其余调用方不受影响）', () => {
-    expect(line(qoder, false)).toBe('长期 400 · 临期 192（7 天 7 小时）')
+  it('不传提示 ⇒ 只少日期提示，分段与数字不变', () => {
+    // 短期段的日期来自 split.earliestShortTermAt（不依赖 hints）⇒ 仍在；
+    // hints 只影响**长期段**的「最早 X 日到期」提示（那份要扫全量包）。
+    expect(line(qoder, false)).toBe('长期 400 · 短期 192（最早 11月21日到期）')
   })
 
   it('临期最早那批不是套餐 ⇒ 照旧只给倒计时；长期仍带日期', () => {
@@ -67,7 +81,13 @@ describe('卡片分段行的日期提示', () => {
       pkg('长包', 0, NOW + 30 * DAY),
       pkg('长包', 5, NOW + 20 * DAY, { active: false }),
     ]
-    expect(expiryDateHints(packages, 15, NOW)).toEqual({ earliestLongTermAt: null, expiringIsPlanRefresh: false })
+    expect(expiryDateHints(packages, 15, NOW, IMMINENT_DAYS)).toEqual({
+      earliestLongTermAt: null,
+      earliestImminentAt: null,
+      earliestShortTermAt: null,
+      earliestExpiringAt: null,
+      expiringIsPlanRefresh: false,
+    })
     expect(line(packages)).toBe('到期未知 400')
   })
 

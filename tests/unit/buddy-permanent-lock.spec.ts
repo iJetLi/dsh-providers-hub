@@ -38,6 +38,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BuddyBalanceSelector, pickBuddyAccount } from '../../src/buddy-balance-selector.js'
+import { BUDDY_BALANCE_TIER } from '../../src/buddy-balance-rank.js'
 import { BUDDY_EXPIRING_WINDOW_DAYS } from '../../src/buddy-balance-rank.js'
 import { CODEBUDDY, WORKBUDDY } from '../../src/product.js'
 import { apply } from '../../src/index.js'
@@ -466,10 +467,13 @@ describe('选号器按产品取 endpoint（两站不串味）', () => {
       `${CODEBUDDY.endpoint}/v2/billing/meter/get-user-resource`,
       `${WORKBUDDY.endpoint}/v2/billing/meter/get-user-resource`,
     ])
-    // 两站都有「15 天内到期」的包 ⇒ 都落在 expiring 档、都被选中
+    // 两站都有「15 天内到期」的包 ⇒ 都落在「会作废」的档、都被选中
     expect(pickedBuddy?.account.id).toBe('b1')
     expect(pickedWorkbuddy?.account.id).toBe('w1')
-    expect(pickedBuddy?.balance.tier).toBe(0)
+    // ⚠️ 用**符号**断言，不写裸数字：2026-11-17 引入「临期」档后序号整体后移过，
+    //    裸数字会让每次调整档位顺序都假红，且看不出断言的真实意图。
+    //    本夹具的包距到期 9 天 ⇒ 5~15 天 ⇒ 短期（expiring）。
+    expect(pickedBuddy?.balance.tier).toBe(BUDDY_BALANCE_TIER.expiring)
   })
 
   it('编排层拿到的凭据来自实际选中的那个账号', async () => {
