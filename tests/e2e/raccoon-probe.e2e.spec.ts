@@ -46,7 +46,7 @@ const EXPECTED_VISIBLE_IDS = [
   'sn-sensenova-6-8-flash-lite',
   'sn-qwen4-max',
   'sn-glm-5-3',
-  'sn-kimi-k3',
+  'sn-kimi-k3-1-pro',
   'sn-glm-5-3-flash',
   'sn-deepseek-v4-1-flash-1017',
 ] as const
@@ -73,7 +73,10 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
     )
     expect(response.status, `HTTP ${response.status}`).toBe(200)
 
-    const models = parseRaccoonModelCatalog(await response.json())
+    const payload = await response.json() as {
+      data?: { categories?: Array<{ type?: string; models?: Array<Record<string, unknown>> }> }
+    }
+    const models = parseRaccoonModelCatalog(payload)
     const ids = models.map((m) => m.id)
     // 双差集：`missing` = 基线里上游已下架 / 换了 id，`extra` = 上游新上架。
     // ⚠️ 用差集而不是「数量相等」，是为了让失败信息**点名**是哪个模型漂了
@@ -93,12 +96,30 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
       '兜底表已与远端漂移：请同步 RACCOON_FALLBACK_MODELS',
     ).toEqual([...EXPECTED_VISIBLE_IDS])
 
+    // ⚠️ 三条**静默失效**的守卫（都不是「数量对不对」，而是「取值域对不对」）：
+    const raw = payload.data?.categories?.find((c) => c.type === 'chat')?.models ?? []
+    const visibleRaw = raw.filter((m) => m['visible'] !== false)
+    for (const m of visibleRaw) {
+      // ① 请求 id 取自 `name`（`normalizeRemoteModel`）。上游若哪天把 `model_name`
+      //    （真模型名）与 `name` 分叉，我们会用错的 id 发请求 ⇒ 全 404 且只在会话期暴露。
+      //    今天 10/10 两条字段逐字相同，故这里断言「不许分叉」。
+      expect(m['name'], '上游 name 与 model_name 分叉了，请求 id 来源要改用 model_name')
+        .toBe(m['model_name'])
+      // ② 倍率必须是 **number**：`normalizeRemoteModel` 对非 number 一律 NaN ⇒
+      //    展示名会**静默丢掉** `· x…` 后缀（用户看到「没有计费信息」），故这里守类型。
+      expect(typeof m['billing_effective_multiplier'], `${String(m['name'])} 的倍率不是 number`)
+        .toBe('number')
+    }
+    // ③ 上游若发了重复 id，`parseRaccoonModelCatalog` 不去重 ⇒ 选择器出现两行同一模型，
+    //    而差集判据对此**完全无感**（`missing`/`extra` 都是空）。
+    expect(new Set(ids).size, '上游目录出现重复 id').toBe(ids.length)
+
     // 倍率必须真的来自 billing_effective_multiplier（逐条对照实测值）
     const byId = new Map(models.map((m) => [m.id, m]))
     // 稳定条目：价格没活动，逐字锁死
     expect(byId.get('sn-glm-5-3')?.name).toBe('GLM-5-3 · x0.75')
     // ⚠️ 1 倍也要显示（用户报障「为什么 Kimi-K3 没有倍率，ide 是 1 倍」）
-    expect(byId.get('sn-kimi-k3')?.name).toBe('Kimi-K3 · x1')
+    expect(byId.get('sn-kimi-k3-1-pro')?.name).toBe('Kimi-K3.1-Pro · x1')
     // ⚠️ 限免是**活动**（`billing_status_note` = 「限免到 11月30日」）⇒ 到期后
     // 远端会变成有价，故这里允许两种形态（`免费` / `x0.5`）；基线倍率写错照样红。
     expect(byId.get('sn-sensenova-6-8-flash')?.name)

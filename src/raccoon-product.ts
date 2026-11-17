@@ -230,7 +230,7 @@ export interface RaccoonProduct {
  * | `sn-sensenova-6-8-flash-lite` | 0.5 | 0 | 免费 |
  * | `sn-qwen4-max` | 0.75 | 0.5 | x0.75（活动价由远端现算，见条目注释） |
  * | `sn-glm-5-3` | 0.75 | 0.75 | x0.75 |
- * | `sn-kimi-k3` | 1 | 1 | x1 |
+ * | `sn-kimi-k3-1-pro` | 1 | 1 | x1 |
  * | `sn-glm-5-3-flash` | 0.2 | 0.2 | x0.2 |
  * | `sn-deepseek-v4-1-flash-1017` | 0.25 | 0.25 | x0.25 |
  *
@@ -284,10 +284,12 @@ const RACCOON_FALLBACK_MODELS: readonly RaccoonFallbackModel[] = [
     supportsImage: true,
   },
   {
-    id: 'sn-kimi-k3',
+    id: 'sn-kimi-k3-1-pro',
     // ⚠️ 1 倍也要显示（用户报障「为什么 Kimi-K3 没有倍率，ide 是 1 倍，
     // 1 倍也要显示倍率」）—— 见 `raccoonDisplayName` 的注释。
-    name: 'Kimi-K3 · x1',
+    // ⚠️ 2026-11-17 上游把 `sn-kimi-k3` 换成了 `sn-kimi-k3-1-pro`（Kimi-K3.1-Pro，仍 1 倍），
+    // 旧 id 已不在目录里 ⇒ 与 deepseek 那次同型，按远端 id/描述改写。
+    name: 'Kimi-K3.1-Pro · x1',
     contextWindow: 1_000_000,
     maxTokens: 65_536,
     supportsImage: true,

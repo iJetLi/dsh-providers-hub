@@ -473,8 +473,9 @@ mode  = CFB, padding = NoPadding
 ⚠️ **`NaN` / 负数仍然不加后缀**（那才是真正「取不到」的情形）——
 不要把这两条合并成一条「1 倍或缺失都不显示」。
 
-⚠️ 同理适用于**兜底表**：`raccoon-product.ts` 里 `sn-kimi-k3` 的
-`name` 必须写 `'Kimi-K3 · x1'`，不能写 `'Kimi-K3'`
+⚠️ 同理适用于**兜底表**：`raccoon-product.ts` 里该模型的
+`name` 必须写 `'Kimi-K3.1-Pro · x1'`（2026-11-17 上游把 `sn-kimi-k3` 改名成
+`sn-kimi-k3-1-pro`；改名前是 `'Kimi-K3 · x1'`），不能只写 `'Kimi-K3.1-Pro'`
 （兜底表与 `raccoonDisplayName` 的输出形态必须一致，否则远端/回退两条路径
 显示不同）。
 
@@ -736,6 +737,10 @@ v1 那个接口按时间倒序返回**全部**记录（对话消耗 `desktop` �
 | `sn-sensenova-6-8-flash` | ✅ | ✅ 2/2 |
 | `sn-sensenova-6-8-flash-lite` | ✅ | ✅ 1/1 |
 | `sn-kimi-k3` | ✅ | ✅ 1/1 |
+
+> ⚠️ 上表是 **2026-10-21 的实测记录**（按当时的 id）。之后上游滚过两次版本：
+> `sn-deepseek-v4-1-flash` → `-1017`、`sn-kimi-k3` → `sn-kimi-k3-1-pro`（2026-11-17）——
+> **新 id 没有重新做过带图实测**，靠的是「默认支持识图」策略（见下）。
 | `sn-glm-5-3` | ✅ | ⚠️ **1/3**（provider 侧节点不一致，见下） |
 
 ⇒ **6 个兜底可见模型全部能读图**（2026-10-21 远端新增的
@@ -808,6 +813,15 @@ fallback 组（`raccoon-4eb26a` / `raccoon-0c119c` / `raccoon-ecc5fd`），
 与客户端一致）。⚠️ 请求 id **必须**用完整版（剥版本号会 404，
 见 `RACCOON_MODEL_VERSION_SUFFIX`；`raccoonSupportsImageWith` 才剥）。
 
+**⚠️⚠️ 同一天内又滚了一次（这就是本节判据存在的理由）**：本次会话里 19:4x
+还看到 `sn-kimi-k3`，21:4x 再打同一个端点，它已经变成 **`sn-kimi-k3-1-pro`**
+（`Kimi-K3.1-Pro`，仍 1 倍），旧 id 同样**不在**目录里 —— **漂移间隔约 1.5 小时**。
+⇒ 兜底表跟着改成 `sn-kimi-k3-1-pro` / `Kimi-K3.1-Pro · x1`。
+据此可以断定：**这张表天然是易腐的**，「一次对齐」不值钱，值钱的是**漂移当天就会红**
+（判据 2）。⚠️ 也**不要**因为「上游换 id」就推断「旧 id 还能用」：目录里没有的 id
+按 `normalizeRemoteModel` 之外无任何兜底，离线/请求期会 404；旧 id 的兼容只到
+`resolveModel` 优雅降级（保守 `['text']`）为止。
+
 **⚠️⚠️ 顺带抓到表里一条「已经腐坏」的旧条目**：`sn-glm-5-3-flash` 表里写
 `GLM-5-3-Flash · x0.2→x0.1`，而远端当天已是 `billing_multiplier =
 billing_effective_multiplier = 0.2`（那条活动**已结束**）。这不只是显示过期：
@@ -836,6 +850,16 @@ billing_effective_multiplier = 0.2`（那条活动**已结束**）。这不只�
    活动期间与活动结束两种形态都吃得下，而**基线倍率写错照样红**。
    ⚠️ 名字层只能这么测 —— **静态表 vs 时间相关事实**的漂移本质上只能靠
    重新测量发现（单测写的是同一个过期常量，永远对）。
+3. **三条「取值域」守卫**（差集管的是「哪几条」，这三条管的是「字段还对不对」，
+   任一失真都是**静默**的）：
+   - `name === model_name`：请求 id 取自 `entry.name`（`normalizeRemoteModel`）；
+     上游若把真模型名放 `model_name`、`name` 变展示名，我们会用错 id 发请求
+     （全 404 且只在会话期暴露）。今天 10/10 两条字段逐字相同 ⇒ 断言「不许分叉」。
+   - `billing_effective_multiplier` 必须是 `number`：该字段非 number 时代码走
+     `NaN` ⇒ 展示名**静默丢** `· x…` 后缀（用户看到「没有计费信息」，而这是
+     当年报障过的形态）。
+   - id 不重复：`parseRaccoonModelCatalog` **不去重**，而差集判据对重复**完全无感**
+     （`missing`/`extra` 都空）⇒ 选择器会出两行同一模型。
 
 **† 变异验证**：从 `EXPECTED_VISIBLE_IDS` 删掉 `sn-qwen4-max` ⇒
 该用例变红且报文为 `{ missing: [], extra: ['sn-qwen4-max', …] }`（有牙）。

@@ -43,7 +43,7 @@ describe('兜底模型表', () => {
       'sn-sensenova-6-8-flash-lite',
       'sn-qwen4-max',
       'sn-glm-5-3',
-      'sn-kimi-k3',
+      'sn-kimi-k3-1-pro',
       'sn-glm-5-3-flash',
       'sn-deepseek-v4-1-flash-1017',
     ])
@@ -61,7 +61,7 @@ describe('兜底模型表', () => {
   it('展示名已含倍率（规范化形态，与 raccoonDisplayName 输出一致）', () => {
     const byId = new Map(RACCOON.fallbackModels.map((m) => [m.id, m]))
     expect(byId.get('sn-glm-5-3')?.name).toBe('GLM-5-3 · x0.75')
-    expect(byId.get('sn-kimi-k3')?.name).toBe('Kimi-K3 · x1')
+    expect(byId.get('sn-kimi-k3-1-pro')?.name).toBe('Kimi-K3.1-Pro · x1')
     expect(byId.get('sn-glm-5-3-flash')?.name).toBe('GLM-5-3-Flash · x0.2')
     expect(byId.get('sn-deepseek-v4-1-flash-1017')?.name).toBe('DeepSeek-V4.1-Flash-1017 · x0.25')
     expect(byId.get('sn-sensenova-6-8-flash')?.name).toBe('SenseNova-6.8-Flash · 免费')
@@ -118,7 +118,7 @@ describe('兜底模型表', () => {
     const byId = new Map(RACCOON.fallbackModels.map((m) => [m.id, m]))
     expect(byId.get('sn-sensenova-6-8-flash')?.supportsImage).toBe(true)
     expect(byId.get('sn-glm-5-3')?.supportsImage).toBe(true)
-    expect(byId.get('sn-kimi-k3')?.supportsImage).toBe(true)
+    expect(byId.get('sn-kimi-k3-1-pro')?.supportsImage).toBe(true)
     // ⚠️ 这两条远端 tags **不含** vision，但实测能看图 —— 曾经错判为 false。
     expect(byId.get('sn-deepseek-v4-1-flash-1017')?.supportsImage).toBe(true)
     expect(byId.get('sn-glm-5-3-flash')?.supportsImage).toBe(true)
