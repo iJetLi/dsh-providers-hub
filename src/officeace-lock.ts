@@ -65,7 +65,10 @@
  * 连 `resolveUnlocked()` 那条旧路径都不碰（那条路径里有池兜底）。
  */
 
-import { buddyExpiringWindowMs } from './buddy-balance-rank.js'
+import {
+  buddyExpiringWindowMs,
+  resolveImminentWindowMs,
+} from './buddy-balance-rank.js'
 import type { OfficeAceCredential, OfficeAceSubscriptionSummary } from './officeace-auth.js'
 
 /** 池内一个候选账号的最小形状（结构类型，便于单测注入替身）。 */
@@ -128,12 +131,26 @@ export interface OfficeAceLockDeps {
   readonly now?: () => number
   /** 临期窗口（毫秒），默认 `buddyExpiringWindowMs()`。 */
   readonly windowMs?: () => number
+  /**
+   * 「临期」子窗口（毫秒）。省略时经 `resolveImminentWindowMs` 从环境变量解析，
+   * 并**钳制到 `windowMs` 以内**（两个窗口是嵌套关系，见 `buddy-balance-rank.ts`）。
+   */
+  readonly imminentWindowMs?: () => number
 }
 
-/** 两个桶的合计。 */
+/**
+ * 三个桶的合计。
+ *
+ * ⚠️ `imminent` 是 `expiring` 的**子量**（`0 <= imminent <= expiring`），
+ * 与 `src/buddy-balance-rank.ts` 的 `BuddyCreditSplit` **逐格同构**。
+ * 保留 `expiring` 的 15 天语义是刻意的：它是「锁定永久积分」的可用性判据
+ *（`split.expiring > 0` ⇒ 该号可烧），改含义会让锁定态误判。
+ */
 export interface OfficeAceCreditSplit {
   /** 窗口内到期的积分合计（锁定期间唯一可消耗的额度）。 */
   readonly expiring: number
+  /** {@link expiring} 的子量：其中临期子窗口内到期的部分。只在 `> 0` 时出现。 */
+  readonly imminent?: number
   /** 其余积分合计（≥ 窗口，或到期时间未知）。 */
   readonly permanent: number
 }
@@ -159,8 +176,29 @@ export function splitOfficeAceCreditsByExpiry(
   summary: OfficeAceSubscriptionSummary,
   now: number,
   windowMs: number,
+  /**
+   * 「临期」子窗口（毫秒）。
+   *
+   * ⚠️ **必填，与 `windowMs` 同款**（该处 :151-170 的注释解释过为什么去掉默认值）。
+   *
+   * 关键区别在于「忘了传会怎样」：
+   * - `windowMs` 取错 ⇒ 直接误烧/漏烧长期积分（不可撤回）；
+   * - `imminentMs` 取错 ⇒ 临期与短期的**归属**偏了，但「能不能烧」不变
+   *   （那个判据是 `expiring > 0`）。
+   *
+   * 即便如此仍然必填：给默认值后任何 3 参调用会传 `undefined`
+   * ⇒ `left < undefined` **恒为 false** ⇒ 临期档**静默消失**、日志零字。
+   * 本 PR 实测发现 6 处既有测试全是 3 参调用（当时靠 `undefined` 侥幸通过），
+   * 正是这个形态 —— 改成必填能让「忘了传」变成编译错误或立即显形。
+   */
+  imminentMs: number,
 ): OfficeAceCreditSplit {
   let expiring = 0
+  /**
+   * `expiring` 的子量。⚠️ 与 `expiring` **在同一分支里成对累加** ——
+   * 这是 `imminent <= expiring` 的唯一保证方式（与 buddy 那份同款写法）。
+   */
+  let imminent = 0
   let permanent = 0
   for (const group of summary.creditGroups) {
     // ⚠️ `expired` 与 buddy 的 `active` 语义**相反**：这里是「已失效请跳过」。
@@ -171,10 +209,22 @@ export function splitOfficeAceCreditsByExpiry(
     //    不是数值时间戳 —— 别顺手加 `> 1e12` 归一化（那是兄弟渠道的坑）。
     const end = typeof group.expiresAt === 'string' ? Date.parse(group.expiresAt) : Number.NaN
     const known = Number.isFinite(end) && end > 0
-    if (known && end - now < windowMs) expiring += remaining
-    else permanent += remaining
+    if (!known) { permanent += remaining; continue }
+    /**
+     * ⚠️⚠️ **边界方向与 buddy 严格一致**：`<` 才是窗口内。
+     * ⇒ 正好 `imminentMs` 的那笔算「短期」，不算临期。
+     *
+     * ⚠️ **本函数刻意不按 `end <= now` 单独拆 `expired` 桶**（与 buddy 的一处
+     * 已知差异，已登记为独立 issue）：已过期的桶仍会被 `end - now < windowMs`
+     * 判成 `expiring`。本 PR **不修**，因为那是与本功能无关的行为变更；
+     * 混进来会让评审焦点模糊。此处只保证 `imminent` 的判据与 buddy 同构。
+     */
+    const left = end - now
+    if (left < imminentMs) { imminent += remaining; expiring += remaining; continue }
+    if (left < windowMs) { expiring += remaining; continue }
+    permanent += remaining
   }
-  return { expiring, permanent }
+  return { expiring, permanent, ...imminent > 0 ? { imminent } : {} }
 }
 
 /**
@@ -217,6 +267,11 @@ export function createOfficeAceCredentialProvider(
 ): () => Promise<OfficeAceCredential | undefined> {
   const now = (): number => deps.now?.() ?? Date.now()
   const windowMs = (): number => deps.windowMs?.() ?? buddyExpiringWindowMs()
+  /**
+   * 临期子窗口：先取注入值/环境变量，再**钳制到 `windowMs` 以内**。
+   * ⚠️ 必须用当次生效的 `windowMs()`（而不是默认 15 天）—— 用户可能两个都改了。
+   */
+  const imminentMs = (): number => resolveImminentWindowMs(windowMs(), deps.imminentWindowMs?.())
   /** 只存**不花额度**的结论（见 `OFFICEACE_LOCK_PERMANENT_TTL_MS` 的表）。 */
   const cache = new Map<string, LockCacheEntry>()
 
@@ -251,7 +306,7 @@ export function createOfficeAceCredentialProvider(
     if (!read.ok) {
       verdict = { kind: 'unknown', errors: [read.error] }
     } else {
-      const split = splitOfficeAceCreditsByExpiry(read.summary, at, windowMs())
+      const split = splitOfficeAceCreditsByExpiry(read.summary, at, windowMs(), imminentMs())
       if (split.expiring > 0) {
         // ★ 有临期额度 ⇒ **不缓存**（见 TTL 注释）：这个结论要立刻花掉那笔额度。
         cache.delete(key)

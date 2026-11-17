@@ -103,6 +103,13 @@ interface BadgeSnapshot {
   /** 被停用而未计入的账号数。 */
   disabledCount: number
   windowDays?: number
+  /**
+   * 「临期」子窗口天数。
+   *
+   * ⚠️ 与 `windowDays` **同生共死**：徽标弹窗的 `splitParts` 用它把「15 天内」
+   * 再切成「临期 / 短期」两段。缺席时前端退化成三段展示（= 引入三档前的形态）。
+   */
+  imminentDays?: number
   subscription?: RpcUsageBadgeSubscription
 }
 
@@ -221,6 +228,8 @@ export function createUsageBadge(deps: UsageBadgeDeps): UsageBadge {
       accounts,
       disabledCount: pool.length - enabledIds.length,
       ...balances.value.windowDays === undefined ? {} : { windowDays: balances.value.windowDays },
+      // ⚠️ 与 `windowDays` 成对透传：只带一半会让徽标的临期段恒 0（见字段注释）。
+      ...balances.value.imminentDays === undefined ? {} : { imminentDays: balances.value.imminentDays },
     }
     // ⚠️ `subscriptionOf` 的第二个参数是 `ReadonlySet`（它按 id 判「这条余额行
     //    属不属于启用账号」）—— 上面为了传 `accountIds` 用的是数组，这里再包一次。
@@ -297,6 +306,7 @@ export function createUsageBadge(deps: UsageBadgeDeps): UsageBadge {
           accounts: snapshot.accounts,
           disabledCount: snapshot.disabledCount,
           ...snapshot.windowDays === undefined ? {} : { windowDays: snapshot.windowDays },
+          ...snapshot.imminentDays === undefined ? {} : { imminentDays: snapshot.imminentDays },
           ...snapshot.subscription === undefined ? {} : { subscription: snapshot.subscription },
           // 偏好**不进缓存**：它是用户随时可改的展示设置，缓存住会让「刚改完
           // 没生效」看起来像 bug（快照本身可能还是两分钟前的）。

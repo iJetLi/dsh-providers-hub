@@ -1104,6 +1104,17 @@ export interface RpcPermanentLockResponse {
    * Loomy 没有窗口概念（它看服务端的当日池），故不带该字段。
    */
   windowDays?: number
+  /**
+   * 当前生效的「临期」窗口（天）—— 与 {@link windowDays} **同生共死**。
+   *
+   * 面板据此把「15 天内」再切成「临期（< N 天）」与「短期（N ~ 15 天）」两段。
+   *
+   * ⚠️ **必须与 `windowDays` 同时回传**：`imminentDays` 缺席时前端会退化成
+   * 「临期窗口 = 总窗口」（即 `imminent` 恒 0、全部落短期）= 引入三档之前的
+   * 展示形态。那是**有意的向后兼容**，不是缺陷 —— 但若只在部分出口漏传，
+   * 用户会看到「有的渠道四段、有的渠道三段」，且**不会有任何报错**。
+   */
+  imminentDays?: number
 }
 
 /**
@@ -1179,6 +1190,18 @@ export interface RpcCreditsBalancesResponse {
    * 的账号上才非 0**。这不是缺陷，是「上游不下发 ⇒ 不编造」的如实结果（本仓库红线）。
    */
   windowDays?: number
+  /**
+   * 当前生效的「临期」窗口（天）—— 与 {@link windowDays} **同生共死**。
+   *
+   * 判据是 registry 的 `usesExpiryWindow`（不是「是不是 buddy」）：
+   * TRAE / LobsterAI / Qoder / astudio / autoclaw / magicrew / minimax /
+   * officeace 都走同一套按到期时间分桶，故都必须回传。
+   *
+   * ⚠️ 缺席 ⇒ 前端 `normalizeImminentDays` 退化成「临期窗口 = 总窗口」
+   * ⇒ 面板只剩「永久 / 长期 / 短期」三段（临期段消失）。这是**刻意的向后兼容**，
+   * 但只在**所有** `usesExpiryWindow` 渠道都漏传时才自洽；漏一家就会不一致。
+   */
+  imminentDays?: number
 }
 
 /**
@@ -2680,6 +2703,8 @@ export interface RpcUsageBadgeResponse {
   disabledCount: number
   /** 临时 / 长期分桶的窗口天数（沿用 `credits.balances` 的口径）。 */
   windowDays?: number
+  /** 「临期」子窗口天数（与 {@link windowDays} 同生共死，缺省时前端退化成三段）。 */
+  imminentDays?: number
   /** 订阅读数；该渠道没有订阅数据、或订阅查询失败时**整个字段缺席**。 */
   subscription?: RpcUsageBadgeSubscription
   /** 当前生效的显示偏好（顺带回传，省一次往返）。 */

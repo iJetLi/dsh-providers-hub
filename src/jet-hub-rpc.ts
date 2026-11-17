@@ -51,7 +51,7 @@ import type { QoderAuth } from './qoder-auth.js'
 import type { TraeAuth } from './trae-auth.js'
 import type { ClineAuth } from './cline-auth.js'
 import { LOOMY } from './loomy-product.js'
-import { buddyExpiringWindowDays } from './buddy-balance-rank.js'
+import { buddyExpiringWindowDays, buddyImminentWindowDays } from './buddy-balance-rank.js'
 // ⚠️ **值导入**（不是类型）：一键「拒绝非临期」要把这份清单传给账号池。
 //    它是一份**冻结的静态数组**（`Object.freeze([...])`），模块级求值安全 ——
 //    与 `WIRED_EXPIRY_PROVIDERS` 自己那条注释里说的「不要读 runtime 注册表」不矛盾
@@ -8882,7 +8882,19 @@ function registerJetHubEndpoints(
         const lockResponse = (): RpcPermanentLockResponse => ({
           provider,
           locked: pool.permanentLocked(provider),
-          ...(usesExpiryWindow ? { windowDays: buddyExpiringWindowDays() } : {}),
+          /**
+           * ⚠️ 两个窗口**必须成对回传**：只给 `windowDays` 会让前端
+           * `normalizeImminentDays(undefined)` 退化成「临期窗口 = 总窗口」
+           * ⇒ 面板的「临期」段恒为 0、临时积分全落「短期」段。
+           * 那是刻意的向后兼容，但**不能一半一半**（否则同一面板上
+           * 「锁定文案写 15 天内」而分档段只有三段，用户会以为是缺陷）。
+           */
+          ...(usesExpiryWindow
+            ? {
+              windowDays: buddyExpiringWindowDays(),
+              imminentDays: buddyImminentWindowDays(),
+            }
+            : {}),
         })
         if (req.locked === undefined) {
           return { ok: true, value: lockResponse() }
@@ -9619,6 +9631,8 @@ function registerJetHubEndpoints(
             value: {
               accounts: values,
               windowDays: buddyExpiringWindowDays(),
+              // ⚠️ 与 `windowDays` 成对（见 `credits.permanentLock` 处的说明）。
+              imminentDays: buddyImminentWindowDays(),
             } satisfies RpcCreditsBalancesResponse,
           }
         }
@@ -9717,6 +9731,8 @@ function registerJetHubEndpoints(
               //    失败」时形状不一致 —— 守卫用例遍历 registry 时正会红
               //（实测症状：`officeace 必须回传 windowDays`）。
               windowDays: buddyExpiringWindowDays(),
+              // ⚠️ 与 `windowDays` 同款：成功/失败都带（形状一致）。
+              imminentDays: buddyImminentWindowDays(),
             } satisfies RpcCreditsBalancesResponse,
           }
         }
@@ -9837,8 +9853,17 @@ function registerJetHubEndpoints(
         //    buddy 系 + TRAE + LobsterAI（loomy 刻意不在内 —— 它由服务端直接
         //    给两个命名池，没有窗口概念）。
         const usesWindow = descriptorOf(req.provider)?.usesExpiryWindow === true
+        /**
+         * ⚠️ 两个窗口**成对回传**（与上面 `credits.permanentLock` 同款）：
+         * `imminentDays` 缺席会让前端把「临期窗口」退化成「总窗口」
+         * ⇒ 面板的临期段恒 0。这是刻意的向后兼容，但同一份响应里不能只给一半。
+         */
         const value: RpcCreditsBalancesResponse = usesWindow
-          ? { accounts: values, windowDays: buddyExpiringWindowDays() }
+          ? {
+            accounts: values,
+            windowDays: buddyExpiringWindowDays(),
+            imminentDays: buddyImminentWindowDays(),
+          }
           : { accounts: values }
         return { ok: true, value }
       }
