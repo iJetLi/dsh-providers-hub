@@ -46,6 +46,7 @@ import {
   buddyTierUsable,
   rankBuddyAccountsByBalance,
   rankBuddyAccountsByManualOrder,
+  resolveImminentWindowMs,
   rotateFromPreferred,
   splitBuddyCreditsByExpiry,
   type BuddyAccountBalance,
@@ -267,6 +268,14 @@ export type BuddySelectionDeps<
   /** 「临时积分」窗口覆盖（测试用）。 */
   windowMs?: number
   /**
+   * 「临期」窗口覆盖（测试用）。
+   *
+   * ⚠️ 与 `windowMs` **同款**：每次现算、绝不缓存。
+   * 生效值由 {@link resolveImminentWindowMs} 钳制（恒 ≤ `windowMs`），
+   * 故调用方无需自己保证两个窗口的嵌套关系。
+   */
+  imminentWindowMs?: number
+  /**
    * **带原因**的余额查询（可选，传了就优先用它）。
    *
    * 见 {@link BalanceQueryDetail} 的长注释：`fetchBalance` 的 `null` 把四种
@@ -344,6 +353,21 @@ export class BuddyBalanceSelector<
   }
 
   /**
+   * 当前生效的「临期」窗口（毫秒），**恒 ≤ {@link windowMs}**。
+   *
+   * ⚠️ 同样**每次调用都重新解析**（理由见 `windowMs()` 上方）：
+   * 一笔「5 天 + 30 秒」的余额，半分钟后就成了临期 ——
+   * 缓存这个值会让选号继续按「短期」处理一笔马上要作废的积分。
+   *
+   * ⚠️ 钳制走 {@link resolveImminentWindowMs}（全仓唯一钳制点）：
+   * 用户可能把 15 天调到 3 天而临期仍是默认 5 天，此处必须自动收敛，
+   * 否则「临期窗口 > 总窗口」会让分档表自相矛盾。
+   */
+  private imminentWindowMs(windowMs: number): number {
+    return resolveImminentWindowMs(windowMs, this.deps.imminentWindowMs)
+  }
+
+  /**
    * 查一个账号的余额分类（**缓存原料、每次现算**）。
    *
    * ⚠️ TTL 只用于抑制**网络请求**，绝不能拿来冻结分类：「临时 / 永久」是
@@ -404,12 +428,19 @@ export class BuddyBalanceSelector<
   ): BuddyAccountBalanceEntry {
     if (source.ok !== true) return failedEntry(id, source.error)
     const windowMs = this.windowMs()
-    const split = splitBuddyCreditsByExpiry(source.balance, now, windowMs)
+    const imminentMs = this.imminentWindowMs(windowMs)
+    const split = splitBuddyCreditsByExpiry(source.balance, now, windowMs, imminentMs)
     if (split === undefined) return failedEntry(id, '余额响应无法解析出积分池')
     const entry: BuddyAccountBalanceEntry = {
       id,
       ok: true,
       expiringBalance: split.expiring,
+      /**
+       * ⚠️ 子量缺席（= 没有临期额度）时写 `0` 而不是留 `undefined`：
+       * `buddyBalanceTier` 用 `positiveOrZero` 判，两者等价；但写 0 让
+       * `entry` 的形状稳定（下游日志/用例读它时不必再 `?? 0`）。
+       */
+      imminentBalance: split.imminent ?? 0,
       permanentBalance: split.permanent,
       split,
       // ⚠️ 透传「降级」：总额可信、明细不可达 ⇒ 下游不得据此断言 exhausted。

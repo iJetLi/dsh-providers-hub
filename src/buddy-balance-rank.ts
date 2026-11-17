@@ -34,12 +34,18 @@
  *
  * | 档位 | 判据 | 含义 |
  * |---|---|---|
- * | 1 | `expiring > 0` | 有 **15 天内到期**的积分 —— 再不用就作废，优先消耗 |
- * | 2 | `permanent > 0` | 只剩「永久」积分（≥ 15 天后才到期） |
- * | 3 | 其余（含**查询失败**） | 无可用余额 |
+ * | 1 | `imminent > 0` | 有 **5 天内到期**的积分（临期）—— 再不用立刻作废，最优先 |
+ * | 2 | `expiring > 0` | 只剩 **5~15 天内到期**的积分（短期） |
+ * | 3 | `permanent > 0` | 只剩「永久」积分（≥ 15 天后才到期） |
+ * | 4 | 其余（含**查询失败**） | 无可用余额 |
+ *
+ * ⚠️ 三档判据是**嵌套**的：`临期 ⊂ 15 天内`，故 `expiring` 桶同时包含临期与短期，
+ * `imminent` 是它的子量。这样「锁定永久积分」的可用性判据（`expiring > 0`）不变。
  *
  * ⚠️ **档内保持传入顺序**（= 用户在 Jet Hub 拖拽的手动顺序），**不重排** ——
- * 与 `AccountPool.getAvailableAccount` 的既有语义一致。
+ * 与 `AccountPool.getAvailableAccount` 的既有语义一致。**临期档内同样如此**：
+ * 两笔都临期时，顺序完全由帐号顺序决定，不按"谁更急"二次排序
+ *（用户 2026-11-17 明确要求「原来是什么策略就使用什么策略」）。
  *
  * ⚠️ **查询失败归入最后一档**：宁可把请求发给能确认余额的号（与 Loomy 同规）。
  *
@@ -60,6 +66,41 @@ export const BUDDY_EXPIRING_WINDOW_DAYS = 15
 
 /** 由天数换算的毫秒窗口（导出供单测按同一口径构造时间戳）。 */
 export const BUDDY_EXPIRING_WINDOW_MS = BUDDY_EXPIRING_WINDOW_DAYS * 24 * 60 * 60 * 1000
+
+/**
+ * 「临期积分」的时间窗口：距扣费截止不足 **5 天**的积分算临期（最优先烧掉）。
+ * 用户 2026-11-17 定的判据。
+ *
+ * ## 它与 15 天那条是**嵌套**关系，不是并列
+ *
+ * ```
+ * 临期（< 5 天） ⊂ 短期（5 ~ 15 天） ⊂ 原「临时」（< 15 天）
+ * ```
+ *
+ * 引入它的原因（用户 2026-11-17 需求）：原先**只有一条线**，于是「14 天后到期」
+ * 与「3 天后到期」都算同一档 `expiring` ⇒ 排序时**全靠帐号顺序**决定先烧谁
+ * ⇒ 一个还有 14 天的号会长期霸占轮换，而 3 天后作废的积分**一分没用上**。
+ *
+ * ## ⚠️ 它是 `expiring` 的**子量**，不是第 4 个平级桶
+ *
+ * `expiring` 的语义（15 天内）**逐字节不变** —— 这是刻意的，因为
+ * `split.expiring > 0` 是「锁定永久积分」的可用性判据
+ *（`src/officeace-lock.ts:255`、`plugin-src/client/usage-badge.js` 的 `expiringOf()`），
+ * 改它的含义会让锁定态把一个「只有 3 天积分」的可用号误判成不可用。
+ * 与 `permanent` 承载 `unknownExpiry` 子量是同一手法（见 `src/credits.ts:289-310`）。
+ */
+export const BUDDY_IMMINENT_WINDOW_DAYS = 5
+
+/** 由天数换算的毫秒窗口（导出供单测按同一口径构造时间戳）。 */
+export const BUDDY_IMMINENT_WINDOW_MS = BUDDY_IMMINENT_WINDOW_DAYS * 24 * 60 * 60 * 1000
+
+/**
+ * 覆盖「临期」窗口的环境变量名。
+ *
+ * ⚠️ 与 15 天那条同理：不同渠道的发卡节奏差别极大，5 天对某家合适、对另一家过紧。
+ * 设成 `0` 可**关掉临期档**（退化成原来的两档）。
+ */
+export const DSH_BUDDY_IMMINENT_WINDOW_DAYS = 'DSH_BUDDY_IMMINENT_WINDOW_DAYS'
 
 /**
  * 覆盖窗口的环境变量名。
@@ -104,22 +145,89 @@ export function buddyExpiringWindowMs(env: NodeJS.ProcessEnv = process.env): num
   return buddyExpiringWindowDays(env) * 24 * 60 * 60 * 1000
 }
 
+/**
+ * 当前生效的「临期」窗口（天）。
+ *
+ * ⚠️ **解析纪律与 {@link buddyExpiringWindowDays} 逐条相同**：`0` 是**合法值**
+ * （表示「关掉临期档，退化成两档」），故**绝不能**写 `Number(raw) || 默认值` ——
+ * 那会把 `0` 静默换成 5。非法值（空 / 非数字 / 负数）回落到默认。
+ */
+export function buddyImminentWindowDays(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[DSH_BUDDY_IMMINENT_WINDOW_DAYS]
+  if (typeof raw !== 'string' || raw.trim().length === 0) return BUDDY_IMMINENT_WINDOW_DAYS
+  const parsed = Number(raw.trim())
+  if (!Number.isFinite(parsed) || parsed < 0) return BUDDY_IMMINENT_WINDOW_DAYS
+  return parsed
+}
+
+/** 当前生效的临期窗口（毫秒）。 */
+export function buddyImminentWindowMs(env: NodeJS.ProcessEnv = process.env): number {
+  return buddyImminentWindowDays(env) * 24 * 60 * 60 * 1000
+}
+
+/**
+ * 生效的临期窗口（毫秒）—— **全仓唯一的钳制点**。
+ *
+ * ## 为什么要钳制
+ *
+ * 两个窗口是**嵌套**的（临期 ⊂ 15 天）。用户可分别用两个环境变量调它们，
+ * 于是出现「临期窗口比总窗口还大」时，分档表就自相矛盾了：
+ *
+ * | `DSH_BUDDY_EXPIRING_WINDOW_DAYS` | `DSH_BUDDY_IMMINENT_WINDOW_DAYS` | 不钳制的后果 |
+ * |---|---|---|
+ * | 15 | 20 | 「短期」档的判据 `5~15 天` 变成空区间 ⇒ 该档永远为 0（看着像缺陷） |
+ * | 3 | 5 | 「临期」判据 `>3 天 且 <5 天` 两处比较打架 ⇒ 必须钳到 3 |
+ *
+ * 钳制后语义始终自洽：**临期 ⊂ 总窗口**，最坏情况是「短期档消失」，
+ * 而那是用户显式把两个窗口调到相等/倒挂的**直接推论**，不是缺陷。
+ *
+ * ⚠️ 只在**这一处**钳制。调用方拿到的值已经是合法的 —— 别在别处再
+ * `Math.min` 一次，那会让「同一语义两套判据」重新出现（本仓首条红线）。
+ *
+ * @param windowMs - 总窗口（15 天，已按 env 解析）。
+ * @param imminentMs - 临期窗口候选值；省略时读环境变量。
+ * @returns 恒 `>= 0` 且 `<= windowMs`。
+ */
+export function resolveImminentWindowMs(windowMs: number, imminentMs?: number): number {
+  const raw = imminentMs ?? buddyImminentWindowMs()
+  // 总窗口本身若是脏值（NaN / 负），退化成默认，避免把临期窗口也污染成 NaN。
+  const total = Number.isFinite(windowMs) && windowMs >= 0 ? windowMs : BUDDY_EXPIRING_WINDOW_MS
+  if (!Number.isFinite(raw) || raw < 0) return Math.min(BUDDY_IMMINENT_WINDOW_MS, total)
+  return Math.min(raw, total)
+}
+
 /** 账号余额档位。数字越小越优先。 */
 export const BUDDY_BALANCE_TIER = Object.freeze({
-  /** 有 15 天内到期的积分 —— 优先消耗（再不用就作废）。 */
-  expiring: 0,
-  /** 只剩永久积分（≥ 15 天后到期）。 */
-  permanent: 1,
-  /** 无余额 / 查询失败。 */
-  none: 2,
+  /** 有 5 天内到期的积分（临期）—— 最优先消耗，否则直接作废。 */
+  imminent: 0,
+  /** 只剩 5~15 天内到期的积分（短期）—— 次优先。 */
+  expiring: 1,
+  /** 只剩永久积分（≥ 15 天后到期，或到期时间未知）—— 最后才用。 */
+  permanent: 2,
+  /** 无余额 / 查询失败 / 锁定态下只剩永久积分。 */
+  none: 3,
 } as const)
 
 export type BuddyBalanceTier = (typeof BUDDY_BALANCE_TIER)[keyof typeof BUDDY_BALANCE_TIER]
 
-/** 两类余额的拆分结果。 */
+/** 三类余额的拆分结果。 */
 export interface BuddyCreditSplit {
-  /** 15 天内到期、**且尚未作废**的积分合计（本计费周期口径）。 */
+  /**
+   * 15 天内到期、**且尚未作废**的积分合计（本计费周期口径）。
+   *
+   * ⚠️⚠️ **语义与引入「临期」档之前逐字节相同**（= 临期 + 短期）。
+   * 它是「锁定永久积分」的可用性判据（`split.expiring > 0` ⇒ 该号可烧），
+   * 故**绝不能**把它改成「只有 5~15 天」—— 那会让一个只剩 3 天积分的可用号
+   * 在锁定态被判成不可用。临期额度请读 {@link imminent}。
+   */
   expiring: number
+  /**
+   * {@link expiring} 的**子量**：其中 5 天内到期的部分（临期，最优先烧掉）。
+   *
+   * 不变量 `0 <= imminent <= expiring`；只在 `> 0` 时出现在返回值里
+   *（与 {@link expired} 同款约定，避免给每个调用方加一个恒 0 的键）。
+   */
+  imminent?: number
   /** 其余积分合计（≥ 15 天后到期，或到期时间未知）。 */
   permanent: number
   /**
@@ -146,6 +254,15 @@ export interface BuddyAccountBalance {
   id: string
   /** 15 天内到期的积分；`undefined` = 查询失败。 */
   expiringBalance?: number
+  /**
+   * 其中 5 天内到期的部分（{@link expiringBalance} 的子量）；`undefined` = 查询失败。
+   *
+   * ⚠️ 可选且**不校验**它是否真的 `<= expiringBalance` —— 分桶层
+   *（{@link splitBuddyCreditsByExpiry}）天然保证 `imminent += remaining` 与
+   * `expiring += remaining` 在同一分支里同时发生。外部手工构造的对象若倒挂，
+   * 最坏后果只是档位判「临期」而金额偏小，不会误烧长期积分。
+   */
+  imminentBalance?: number
   /** 永久积分；`undefined` = 查询失败。 */
   permanentBalance?: number
 }
@@ -168,15 +285,28 @@ export interface BuddyAccountBalance {
  * @param balance - `fetchCreditBalance` 的结果；`null`（查询失败）返回 `undefined`。
  * @param now - 当前时刻（毫秒），注入以便单测断言边界。
  * @param windowMs - 窗口，默认 {@link BUDDY_EXPIRING_WINDOW_MS}。
- * @returns 两桶合计；`balance` 为 null/undefined 时返回 `undefined`（= 查询失败）。
+ * @param imminentMs - 「临期」子窗口，默认 {@link BUDDY_IMMINENT_WINDOW_MS}。
+ *   ⚠️ 由调用方经 {@link resolveImminentWindowMs} 归一（保证 ≤ `windowMs`）
+ *   —— 这里给默认值只为既有调用点（含大量用例）不必改动。
+ * @returns 三桶合计（`expiring` 内含 `imminent` 子量）；`balance` 为 null/undefined
+ *   时返回 `undefined`（= 查询失败）。
  */
 export function splitBuddyCreditsByExpiry(
   balance: CreditBalance | null | undefined,
   now: number = Date.now(),
   windowMs: number = BUDDY_EXPIRING_WINDOW_MS,
+  imminentMs: number = BUDDY_IMMINENT_WINDOW_MS,
 ): BuddyCreditSplit | undefined {
   if (balance === null || balance === undefined) return undefined
   let expiring = 0
+  /**
+   * `expiring` 的**子量**：其中距到期不足 `imminentMs` 的部分。
+   *
+   * ⚠️ 累加点与 `expiring` **在同一分支里成对发生**（见下方窗口比较）——
+   * 这是 `0 <= imminent <= expiring` 这条不变量的**唯一**保证方式。
+   * 若把它们写在两个 if 里，任何一次改动都可能让子量脱离母量。
+   */
+  let imminent = 0
   let permanent = 0
   let expired = 0
   for (const pkg of balance.packages) {
@@ -321,10 +451,36 @@ export function splitBuddyCreditsByExpiry(
      * 否则它会同时骗过 `buddyBalanceTier`（判可用）与聚合排序（排第一先烧）。
      */
     if (endMs <= now) { expired += remaining; continue }
-    if (endMs - now < windowMs) expiring += remaining
+    /**
+     * ⚠️⚠️ **临期判定必须与 `expiring` 累加在同一分支里成对发生**。
+     *
+     * `imminent` 是 `expiring` 的**子量**（`0 <= imminent <= expiring`）——
+     * 这是本文件最重要的一条不变式，也是「锁定永久积分」不会误判的前提。
+     * 若拆成两个独立 `if`（先把 `expiring` 累加、再单独判临期），
+     * 将来任何一次边界调整都可能让子量脱离母量（子量 > 母量）。
+     *
+     * 边界方向与 15 天那条**严格一致**：`<` 才是窗口内。
+     * ⇒ 正好 `imminentMs` 的那笔算**短期**，不算临期。
+     */
+    const left = endMs - now
+    if (left < imminentMs) {
+      imminent += remaining
+      expiring += remaining
+      continue
+    }
+    if (left < windowMs) expiring += remaining
     else permanent += remaining
   }
-  return { expiring, permanent, ...expired > 0 ? { expired } : {} }
+  /**
+   * ⚠️ `imminent` / `expired` 都只在 `> 0` 时出现 —— 与前端 `unknownExpiry` 同款约定：
+   * 多一个恒 0 的键会让所有「逐键 `toEqual`」的既有用例全线变红，且对 0 值毫无信息量。
+   */
+  return {
+    expiring,
+    permanent,
+    ...imminent > 0 ? { imminent } : {},
+    ...expired > 0 ? { expired } : {},
+  }
 }
 
 /** 分档选项。 */
@@ -475,9 +631,15 @@ export function rotateFromPreferred<T extends BuddyAccountBalance>(
  * 只剩永久积分的账号直接落入 `none`（不可用），而不是降到 `permanent` 档。
  */
 export function buddyBalanceTier(
-  balance: { expiringBalance?: number; permanentBalance?: number },
+  balance: { expiringBalance?: number; imminentBalance?: number; permanentBalance?: number },
   options: BuddyTierOptions = {},
 ): BuddyBalanceTier {
+  /**
+   * ⚠️ 两个「会作废」的档**必须在 `allowPermanent === false` 之前判**：
+   * 临期与短期都在 15 天内 ⇒ 锁定时**仍可烧**。这保证「锁定永久积分」的
+   * 可用性判据与引入临期档**之前逐字节相同**（那是最不能回归的一格）。
+   */
+  if (positiveOrZero(balance.imminentBalance) > 0) return BUDDY_BALANCE_TIER.imminent
   if (positiveOrZero(balance.expiringBalance) > 0) return BUDDY_BALANCE_TIER.expiring
   if (options.allowPermanent === false) return BUDDY_BALANCE_TIER.none
   if (positiveOrZero(balance.permanentBalance) > 0) return BUDDY_BALANCE_TIER.permanent
@@ -570,16 +732,24 @@ export function rankBuddyAccountsByManualOrder<T extends BuddyAccountBalance>(
  *
  * ⚠️ 两个桶都为 0 时返回「无可用积分」而不是「临时 0 / 永久 0」——
  * 用户读后者需要自己推断，前者一眼可见。
+ *
+ * ⚠️ **有临期额度时必须把它单列**（`临期 X · 5 天内到期 Y · 永久 Z`）：
+ * 若只说「15 天内到期 Y」，「其中 X 会在 5 天内烧掉」这个最关键的决策信息
+ * 就丢了 —— 而这正是引入临期档的全部目的。
  */
 export function describeBuddyCreditSplit(
   split: BuddyCreditSplit | undefined,
   windowDays: number = BUDDY_EXPIRING_WINDOW_DAYS,
+  imminentDays: number = BUDDY_IMMINENT_WINDOW_DAYS,
 ): string {
   if (split === undefined) return '余额查询失败'
   const expiring = roundCreditsInline(split.expiring)
   const permanent = roundCreditsInline(split.permanent)
+  const imminent = roundCreditsInline(split.imminent ?? 0)
   if (expiring <= 0 && permanent <= 0) return '无可用积分'
-  return `${windowDays} 天内到期 ${expiring} · 永久 ${permanent}`
+  // ⚠️ `imminent` 是 `expiring` 的子量 ⇒ 明细行里要减掉它，否则两段相加会大于合计。
+  const imminentPart = imminent > 0 ? `临期 ${imminent} · ` : ''
+  return `${imminentPart}${windowDays} 天内到期 ${expiring} · 永久 ${permanent}`
 }
 
 /** 展示用规整：两位小数（服务端精确值带浮点尾数噪声）。 */
