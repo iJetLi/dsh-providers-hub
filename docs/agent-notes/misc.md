@@ -1184,6 +1184,13 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
 - ⚠️ **`timeDeclared` 必须按「起止解析到了数字」判，不能按「键存在」判**：上游对 21/21 条目都下发 `limitedFreeStartAt: null`，按键判 = 把「上游没办活动」读成「声明了时间且窗口为空 ⇒ 永远成立」⇒ 徽标天天挂（PR #104 正向审计 P1-1 的同一个坑）。
 - ⚠️ **数字形态刻意不接受**：`1794931200` 是秒还是毫秒没有依据，按毫秒读是把 1970 年当活动窗口；按秒读则要猜「上游为何改单位」——两种都比「没给」更糟。
 
+三条**自审边界**（本 PR 第二轮补的，全是「同一个事实两个出口」形态）：
+
+- ⚠️⚠️ **倍率与徽标必须共用同一个判据、同一次读钟**：初版「徽标看 `promotionRunningAt`（窗口）、倍率看 `limitedFreeActive`（快照）」⇒ 「声明了窗口、快照仍 false、此刻在窗口内」装配出**自相矛盾的同一行**：chip 说「限时免费」，名字却写 `x0.05`；反过来「快照 true、窗口已过」会写 `x0`（夸大优惠 = issue #101 红线方向）。修法：`toCatalogEntry` 里 `nowMs` **只读一次**、`freeNow = promotionRunningAt(...)` 一处算好，徽标与倍率都吃它；并加一条**不变量用例**（六种状态逐个断言「有徽标 ⟺ 名字以 `x0` 结尾」）。
+  方向刻意定为**窗口优先于快照**：快照会过期，窗口是此刻的纯函数；快照优先会在活动结束后的一个刷新周期里继续画「免费」。
+- ⚠️⚠️ **「上游给了起止但读不懂」≠「上游没给起止」**：初版把读不懂的字符串当「没给」⇒ 只解析到起点、终点读丢时得到一条**无上界**窗口（`promotionWithinAbsoluteWindow` 对缺失的一端不设约束）⇒ 活动结束后徽标永远挂着（腾讯 `validUntil: 'soon'` 曾挂到 2030）。修法：解析层单独标 `limitedFreeWindowUnreadable`，候选构造据此走 `dailyUnusable: true`（本模块里「声明了时间但永远不算成立」的唯一档）⇒ 徽标不画、倍率不归零、也不排边界定时器。
+- ⚠️ **空串这一格两个函数必须同判据**：`readInstantField` 把 `''` 当「没给」（返回 undefined），而 `isUnreadableInstant` 初版把 `''` 当「读不懂」⇒ 一个空字符串就把整条活动升级成 fail-closed（永远画不出来），与解析层另一半的判断相反。现在两边都以 `undefined / null / ''` 为「没给」，且有单测钉住。
+
 **守卫**：`tests/unit/lobsterai-adapter.spec.ts` 的「限时免费」11 条（x0 归零 / 无活动时 `badge` 键缺席 / 声明≠生效 / 窗口内照画 / 窗口结束消失（**同一适配器推进时钟**）/ 窗口未开始不画 / null 起止 / ISO 折毫秒 / 读不懂 fail-closed / 边界播报 / 无活动不排定时器）；`tests/e2e/lobsterai-probe.e2e.spec.ts` 的「限免四件套」**只锁契约**（上游发了布尔 ⇒ 解析层不得读丢），并把原始起止字符串打日志（**上游第一次真办活动时，那段日志就是格式证据**）。
 **变异自证（4/4 有牙）**：① 关掉 x0 分支 ⇒ `expected 'Free Now · x0.05' to be 'Free Now · x0'`；② 不写 `badge` 键 ⇒ 4 条红；③ `timeDeclared` 恒 false ⇒ 2 条红（窗口现算 + 窗口结束）；④ `readInstantField` 接受数字 ⇒ `expected 1794931200 to be undefined`。
 

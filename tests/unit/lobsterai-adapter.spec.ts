@@ -1358,6 +1358,9 @@ describe('LobsterAI 限时免费（limitedFree 四件套）', () => {
     })
     const [model] = await adapter.listModels('lobsterai')
     expect(model!.badge).toMatchObject({ text: { zh: '限时免费' } })
+    // ⚠️ 倍率必须**跟着徽标一起**归零：只让徽标按窗口现算、倍率仍读快照，就会装配出
+    // 「限时免费 chip + x0.05」的自相矛盾一行（本 PR 自审抓出的缺陷）。
+    expect(model!.name).toBe('Windowed · x0')
   })
 
   it('窗口结束后徽标消失（同一个候选、只推进时钟）', async () => {
@@ -1387,6 +1390,33 @@ describe('LobsterAI 限时免费（limitedFree 四件套）', () => {
     const [model] = await adapter.listModels('lobsterai')
     // 声明了窗口 ⇒ `promotionRunningAt` 第 1 支只看窗口，**不看**快照。
     expect('badge' in (model as object)).toBe(false)
+    // ★ 快照说「免费」但窗口说「还没开始」⇒ 倍率也**不许**归零。这一格方向是刻意的：
+    // 夸大优惠（已过期/未开始还写 x0）正是 issue #101 的红线方向；宁可少报。
+    expect(model!.name).toBe('Future · x0.05')
+  })
+
+  it('★ 行内自洽：徽标在 ⟺ 名字以 x0 结尾（同一个事实只有一个判据）', async () => {
+    // 六个状态一次过：只要徽标与倍率来自两个判据，就至少有一个状态会分叉。
+    const cases = [
+      { id: 'off', flags: {}, window: {}, badge: false },
+      { id: 'snapshot-on', flags: { limitedFree: true, limitedFreeActive: true }, window: {}, badge: true },
+      { id: 'declared-off', flags: { limitedFree: true, limitedFreeActive: false }, window: {}, badge: false },
+      { id: 'window-in', flags: { limitedFree: true, limitedFreeActive: false }, window: IN_WINDOW, badge: true },
+      { id: 'window-in-stale-on', flags: { limitedFree: true, limitedFreeActive: true }, window: IN_WINDOW, badge: true },
+      { id: 'window-future-snapshot-on', flags: { limitedFree: true, limitedFreeActive: true }, window: OUT_OF_WINDOW, badge: false },
+    ]
+    for (const item of cases) {
+      const { adapter } = makeAdapter(() => textSse('x'), {
+        now: () => T0,
+        fetchRemoteModels: async () => [
+          { id: item.id, name: item.id, costMultiplier: 0.05, ...item.flags, ...item.window },
+        ],
+      })
+      const [model] = await adapter.listModels('lobsterai')
+      const hasBadge = 'badge' in (model as object)
+      const showsFree = model!.name.endsWith(' · x0')
+      expect({ id: item.id, hasBadge, showsFree }).toEqual({ id: item.id, hasBadge: item.badge, showsFree: item.badge })
+    }
   })
 
   it('起止是 null 时按「没声明时间」处理（按键存在判定会把 21/21 全判成在跑）', async () => {
@@ -1442,6 +1472,75 @@ describe('LobsterAI 限时免费（limitedFree 四件套）', () => {
     })
     expect(models[0]!.limitedFreeStartMs).toBeUndefined()
     expect(models[0]!.limitedFreeEndMs).toBeUndefined()
+    // ⚠️ 两个都读不懂 ⇒ 必须标记（否则「没给起止」与「给了但读不懂」会被合并成
+    // 同一个形状，后者就退回快照那一支 = 替上游的烂数据背书）。
+    expect(models[0]!.limitedFreeWindowUnreadable).toBe(true)
+  })
+
+  it('null 起止**不算**读不懂（上游「没有活动」是正常形态）', () => {
+    const models = parseLobsteraiModels({
+      code: 0,
+      data: [{ modelId: 'nulls', modelName: 'Nulls', limitedFreeStartAt: null, limitedFreeEndAt: null }],
+    })
+    expect(models[0]!.limitedFreeWindowUnreadable).toBeUndefined()
+  })
+
+  /**
+   * ★ 空串这一格：`readInstantField` 把它当「没给」（返回 undefined），
+   * 于是 `isUnreadableInstant` **也必须**不把它算成「读不懂」—— 否则一个空字符串
+   * 会把整条活动升级成 fail-closed（永远画不出来），而解析层的另一半已经把它
+   * 当「上游没声明」。两个函数对「能解析」的定义必须逐格相同。
+   */
+  it('空串起止按「没给」处理（与解析层的另一半同判据）', () => {
+    const models = parseLobsteraiModels({
+      code: 0,
+      data: [{
+        modelId: 'blank',
+        modelName: 'Blank',
+        limitedFree: true,
+        limitedFreeActive: true,
+        limitedFreeStartAt: '',
+        limitedFreeEndAt: '',
+      }],
+    })
+    expect(models[0]!.limitedFreeStartMs).toBeUndefined()
+    expect(models[0]!.limitedFreeEndMs).toBeUndefined()
+    expect(models[0]!.limitedFreeWindowUnreadable).toBeUndefined()
+  })
+
+  /**
+   * ★ 边界：**只解析到一头**。
+   *
+   * `promotionWithinAbsoluteWindow` 对缺失的一端不设约束 ⇒ 若把「终点读丢」当成
+   * 「没有终点」，就得到一条无上界窗口：活动结束后徽标永远挂着（issue #101 的
+   * 红线方向）。本仓在腾讯 `validUntil: 'soon'` 上真踩过（挂到 2030）。
+   */
+  it('起止只读懂一半 ⇒ 徽标不画、倍率不归零（fail-closed，不当无上界窗口用）', async () => {
+    const models = parseLobsteraiModels({
+      code: 0,
+      data: [{
+        modelId: 'half',
+        modelName: 'Half',
+        costMultiplier: 0.05,
+        limitedFree: true,
+        limitedFreeActive: true,
+        // 起点好、终点坏 —— 上游「截至某时」那句话读不懂。
+        limitedFreeStartAt: '2026-11-17T00:00:00+08:00',
+        limitedFreeEndAt: 'until further notice',
+      }],
+    })
+    expect(models[0]!.limitedFreeStartMs).toBe(Date.parse('2026-11-17T00:00:00+08:00'))
+    expect(models[0]!.limitedFreeEndMs).toBeUndefined()
+    expect(models[0]!.limitedFreeWindowUnreadable).toBe(true)
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => models,
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    expect('badge' in (model as object)).toBe(false)
+    expect(model!.name).toBe('Half · x0.05')
+    // 没有可排的边界 —— 读不懂的条目本来就没有边界（不许据此排一个定时器）。
+    expect(adapter.nextPromotionEdgeAt()).toBeUndefined()
   })
 
   it('nextPromotionEdgeAt 给出最近的活动边界（供全局播报器排程）', async () => {

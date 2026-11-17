@@ -1140,6 +1140,13 @@ export interface LobsteraiLimitedFreeInput {
   validFrom?: number
   /** `limitedFreeEndAt` 解析后的 epoch 毫秒；缺失 = 上游没给（或 null）。 */
   validUntil?: number
+  /**
+   * 上游**给了**起止，但至少一个读不懂（见 `LobsteraiRemoteModel` 同名字段的说明）。
+   *
+   * ⚠️ 它与「没给起止」是两件事：前者必须 fail-closed（永不成立），后者才落回快照。
+   * 合并会让「只解析到起点」变成一条**无上界**的窗口。
+   */
+  windowUnreadable?: true
 }
 
 /**
@@ -1179,18 +1186,25 @@ export function lobsteraiLimitedFreeCandidate(
   const validFrom = Number.isFinite(limitedFree.validFrom) ? limitedFree.validFrom : undefined
   const validUntil = Number.isFinite(limitedFree.validUntil) ? limitedFree.validUntil : undefined
   const windowed = validFrom !== undefined || validUntil !== undefined
-  // 只有终点没有起点（或反之）也算「声明了时间」：`promotionWithinAbsoluteWindow`
-  // 对缺失的一端不做约束，所以半开窗口照样是此刻的纯函数。
-  const schedule: ModelPromotionSchedule = windowed
-    ? windowedSchedule(validFrom, validUntil)
-    : { snapshotActive: limitedFree.limitedFreeActive === true }
+  // ⚠️⚠️ 上游**给了**起止却读不懂 ⇒ `dailyUnusable`（本模块里「声明了时间、但永远
+  // 不算成立」的唯一档，`promotionWithinDailyWindow` 对它返回 false）。
+  // 不这么做的后果是**只解析到一头、另一头读丢**：`promotionWithinAbsoluteWindow`
+  // 对缺失的一端不设约束 ⇒ 得到一条无上界窗口 ⇒ 活动结束后徽标永远挂着
+  // （issue #101 的红线方向；腾讯 `validUntil: 'soon'` 曾真挂到 2030）。
+  const unusable = limitedFree.windowUnreadable === true
+  const schedule: ModelPromotionSchedule = unusable
+    ? { dailyUnusable: true }
+    : windowed
+      ? windowedSchedule(validFrom, validUntil)
+      : { snapshotActive: limitedFree.limitedFreeActive === true }
   return {
     id: 'lobsterai_limited_free:' + modelId,
     source: 'promotion',
     modelIds: [modelId],
     badge: { label: '限时免费', labelEn: 'Limited-time free', display: 'activeOnly' },
     schedule,
-    timeDeclared: windowed,
+    // 读不懂的窗口同样算「声明了时间」（否则会落回快照那一支，等于替上游背书）。
+    timeDeclared: windowed || unusable,
     standingEligible: false,
     priority: 0,
   }
