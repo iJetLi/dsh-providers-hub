@@ -1071,6 +1071,15 @@ export class LobsteraiAdapter extends LlmAdapter {
       // ⚠️ 先算完候选、再一次性落三个字段：中途抛错会让「目录换了、候选还是上
       // 一份」——那时 `toCatalogEntry` 会用旧候选给新条目挂徽标（谁都不会报错）。
       const promotions = new Map<string, ModelPromotion>()
+      // ⚠️ 单边窗口（只给起点、或只给终点）必须留一条日志：它的症状与「上游没办活动」
+      // 完全同形（都是没有徽标），不留痕就永远诊断不出来。每次成功拉取最多一条，
+      // 不按模型刷屏（与下面「起止读不懂」那条同一个闸门）。
+      let warnedOneSided = false
+      const warnOneSided = (message: string): void => {
+        if (warnedOneSided) return
+        warnedOneSided = true
+        console.warn('[lobsterai] ' + message)
+      }
       for (const model of models) {
         const promotion = lobsteraiLimitedFreeCandidate(
           {
@@ -1081,6 +1090,7 @@ export class LobsteraiAdapter extends LlmAdapter {
             windowUnreadable: model.limitedFreeWindowUnreadable,
           },
           model.id,
+          warnOneSided,
         )
         if (promotion !== undefined) promotions.set(model.id, promotion)
       }

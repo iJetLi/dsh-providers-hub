@@ -1156,9 +1156,14 @@ export interface LobsteraiLimitedFreeInput {
  *
  * - 文案：i18n `modelLimitedFreeBadge` = **「限时免费」/「Limited-time free」**
  *   （@48491027 中文表、@48724162 英文表）—— 不是我们编的措辞。
- * - 何时画：`!model.presetId && model.limitedFreeActive`（@32509033）⇒ 只在
- *   **此刻生效**时出现，故 `display: 'activeOnly'` + `standingEligible: false`
- *   （与 Qoder 那条同一取舍：宿主徽标没有悬停位，窗口外不许说「限时免费」）。
+ * - 何时画：客户端条件是 `!model.presetId && model.limitedFreeActive`（@32509033）。
+ *   本仓**只采纳后半个条件**：载荷里从未观测到 `presetId` 字段（`LobsteraiRemoteModel`
+ *   也没有它），凭空加一条「`presetId` 非空就不画」的闸门等于**替上游发明判据**
+ *   （本仓红线）⇒ 如实登记为**未采纳**，而非假装实现了。若将来在真实载荷里看到
+ *   该字段，闸门应加在 {@link lobsteraiLimitedFreeCandidate} 的入口。
+ *   另一层理由：本仓只在**此刻生效**时画，故 `display: 'activeOnly'` +
+ *   `standingEligible: false`（与 Qoder 那条同一取舍：宿主徽标没有悬停位，
+ *   窗口外不许说「限时免费」）。
  * - 起点/终点是**字符串**：客户端对它直接 `Date.parse(value22)`（@32483752）。
  *   本仓在**解析层**（`lobsterai-adapter.ts`）就折成 epoch 毫秒，此处只收数字 ——
  *   这里再 `Date.parse` 一次就是「一文件两套同义判据」的复发形态。
@@ -1179,18 +1184,38 @@ export interface LobsteraiLimitedFreeInput {
 export function lobsteraiLimitedFreeCandidate(
   limitedFree: LobsteraiLimitedFreeInput | undefined,
   modelId: string,
+  warn?: (message: string) => void,
 ): ModelPromotion | undefined {
   if (limitedFree === undefined) return undefined
   if (typeof modelId !== 'string' || modelId.length === 0) return undefined
   if (limitedFree.limitedFree !== true && limitedFree.limitedFreeActive !== true) return undefined
   const validFrom = Number.isFinite(limitedFree.validFrom) ? limitedFree.validFrom : undefined
   const validUntil = Number.isFinite(limitedFree.validUntil) ? limitedFree.validUntil : undefined
-  const windowed = validFrom !== undefined || validUntil !== undefined
-  // ⚠️⚠️ 上游**给了**起止却读不懂 ⇒ `dailyUnusable`（本模块里「声明了时间、但永远
+  const hasFrom = validFrom !== undefined
+  const hasUntil = validUntil !== undefined
+  // ⚠️⚠️ **两端齐才算窗口**（2026-11-18 对抗审计 P1-2，实测降级）。
+  // 改前是 `||`（一端即可），配上 `promotionWithinAbsoluteWindow`「缺失的一端不设约束」
+  // 就是一条**单边开区间**：只给起点 ⇒ 无上界 ⇒ 该模型永久 `x0` + 永久徽标（用户按
+  // 免费估成本，实际按原价计费）；只给终点 ⇒ 活动没开始就归零。这两条都朝
+  // 「夸大优惠」的方向错，正是 issue #101 的红线。
+  // 实测口径：上游 21/21 条目的起止此刻都是 `null`（常态形态）⇒「另一端漏发/被清空」
+  // 是可预期输入，不是假想。
+  const windowed = hasFrom && hasUntil
+  // 单边窗口（只给一端）：**不认窗口、退回快照**，并留一条痕。
+  // 为什么不并进下面的 `unusable`（那样会连快照一起屏蔽）：`limitedFreeActive` 是
+  // 上游对**此刻**的直接断言（服务端生成这份目录那一刻算出来的），比我们用半条窗口
+  // 推算更权威；单边窗口推不出「此刻」，只能信它。而并进 `unusable` 会把「上游说
+  // 现在免费」也一起吞掉 —— 那是**少报**，与既有「limitedFree 声明 ≠ limitedFreeActive
+  // 生效」的分层也冲突。红线方向是「不许夸大」，退回快照不会夸大（active 由服务端算）。
+  // ⚠️ 读不懂时下面那条 warn 已经说明「两端都在、格式变了」，不再重复打单边那条
+  // （否则同一个模型两条痕，反而看不出是哪一种）。
+  if (hasFrom !== hasUntil && limitedFree.windowUnreadable !== true) {
+    warn?.('限免起止只给了一端（' + modelId + '）：单边窗口推不出此刻，退回「此刻生效」快照；当窗口用会变成「永久免费」或「还没开始就免费」')
+  }
+  // ⚠️⚠️ 上游**给了**起止却读不懂 ⇒ 落 `dailyUnusable`（本模块里「声明了时间、但永远
   // 不算成立」的唯一档，`promotionWithinDailyWindow` 对它返回 false）。
-  // 不这么做的后果是**只解析到一头、另一头读丢**：`promotionWithinAbsoluteWindow`
-  // 对缺失的一端不设约束 ⇒ 得到一条无上界窗口 ⇒ 活动结束后徽标永远挂着
-  // （issue #101 的红线方向；腾讯 `validUntil: 'soon'` 曾真挂到 2030）。
+  // 与「单边」的差别是刻意的：读不懂时**连是哪一头都不知道**（可能两端都在、只是
+  // 格式变了），落回快照等于替上游的烂数据背书；而单边至少确定「另一端确实缺失」。
   const unusable = limitedFree.windowUnreadable === true
   const schedule: ModelPromotionSchedule = unusable
     ? { dailyUnusable: true }

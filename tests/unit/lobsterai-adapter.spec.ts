@@ -1478,7 +1478,9 @@ describe('LobsterAI 限时免费（limitedFree 四件套）', () => {
   /**
    * 判据逐字来自官方客户端 asar（2026-11-17 考古）：
    * - 红 chip 文案 = i18n `modelLimitedFreeBadge`「限时免费 / Limited-time free」；
-   * - 画不画 = `!presetId && model.limitedFreeActive`（@32509033）；
+   * - 画不画 = `!presetId && model.limitedFreeActive`（@32509033）—— 本仓**只采纳后半个
+   *   条件**：载荷里从未观测到 `presetId`，凭空加闸门等于替上游发明判据（2026-11-18
+   *   对抗审计 P1-3，已在 docs 与 README 如实登记）；
    * - 倍率 = `model.limitedFreeActive ? 0 : readPositiveNumber(costMultiplier)`
    *   且 `showCostMultiplier` 多一条 `|| limitedFreeActive === true`（@107483653 /
    *   @32506862）⇒ 客户端画 `x0.00`，**不是**原倍率；
@@ -1620,6 +1622,85 @@ describe('LobsterAI 限时免费（limitedFree 四件套）', () => {
     const [model] = await adapter.listModels('lobsterai')
     // 两个键都在、值都是 null ⇒ 只有快照能为真，徽标照常画（不是「全天在跑」那种假成立）。
     expect(model!.badge).toMatchObject({ text: { zh: '限时免费' } })
+  })
+
+  /**
+   * ★★★ 单边窗口（2026-11-18 对抗审计 P1-2 的回归用例）。
+   *
+   * 修前 `windowed` 用 `||`（一端即可），配上 `promotionWithinAbsoluteWindow`
+   * 「缺失的一端不设约束」⇒ 只给起点就是一条**无上界**窗口：实测在 `T0 + 400 天`
+   * 仍 `promotionRunningAt === true`、仍画「限时免费」、倍率仍 `x0` ——
+   * 用户按免费估成本、实际按原价计费（issue #101 的红线方向）。
+   * 只给终点则相反：活动还没开始就归零。
+   *
+   * 上游 21/21 条目的起止此刻都是 `null`（常态形态）⇒「另一端漏发/被清空」是
+   * 可预期输入，不是假想。
+   */
+  it('★★★ 只给起点、没给终点 ⇒ 不认窗口（否则是「永久免费」：无上界）', async () => {
+    let now = T0
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => now,
+      fetchRemoteModels: async () => [
+        {
+          id: 'only-start',
+          name: 'OnlyStart',
+          costMultiplier: 0.05,
+          limitedFree: true,
+          limitedFreeActive: false,
+          limitedFreeStartMs: T0 - 3_600_000,
+        },
+      ],
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    expect('badge' in (model as object), '单边窗口不许当窗口用 —— 宁可少报').toBe(false)
+    expect(model!.name, '倍率也不许归零').toBe('OnlyStart · x0.05')
+    // 关键一格：原形态在这里仍画（无上界），所以这条断言是「永久免费」的直接回归判据。
+    now = T0 + 400 * 24 * 3_600_000
+    const [later] = await adapter.listModels('lobsterai')
+    expect('badge' in (later as object), '400 天后仍不许画（原形态会一直挂着）').toBe(false)
+    expect(later!.name).toBe('OnlyStart · x0.05')
+  })
+
+  it('★★★ 只给终点、没给起点 ⇒ 不认窗口（否则「活动还没开始就免费」）', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [
+        {
+          id: 'only-end',
+          name: 'OnlyEnd',
+          costMultiplier: 0.05,
+          limitedFree: true,
+          limitedFreeActive: false,
+          limitedFreeEndMs: T0 + 3_600_000,
+        },
+      ],
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    // 修前：无下界 ⇒ 此刻就在「窗口内」⇒ 徽标 + x0（活动其实还没开始）。
+    expect('badge' in (model as object)).toBe(false)
+    expect(model!.name).toBe('OnlyEnd · x0.05')
+  })
+
+  it('★★ 单边窗口不并进 dailyUnusable：快照说此刻免费时照样画（少报也别吞真信息）', async () => {
+    // 为什么单边是「退回快照」而不是「与读不懂同档」：`limitedFreeActive` 是上游对
+    // **此刻**的直接断言，比用半条窗口推算更权威；把单边升级成 dailyUnusable 会把
+    // 「上游说现在免费」一起屏蔽，既少报又与「声明≠生效」的分层冲突。
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      now: () => T0,
+      fetchRemoteModels: async () => [
+        {
+          id: 'only-start-active',
+          name: 'OnlyStartActive',
+          costMultiplier: 0.05,
+          limitedFree: true,
+          limitedFreeActive: true,
+          limitedFreeStartMs: T0 - 3_600_000,
+        },
+      ],
+    })
+    const [model] = await adapter.listModels('lobsterai')
+    expect(model!.badge).toMatchObject({ text: { zh: '限时免费' } })
+    expect(model!.name, '徽标在就必须一起归零（行内自洽）').toBe('OnlyStartActive · x0')
   })
 
   it('起止是字符串时按 Date.parse 折成毫秒（客户端就是 Date.parse 它）', () => {
