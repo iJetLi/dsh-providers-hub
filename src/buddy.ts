@@ -14,6 +14,15 @@
  * 本模块只放常量与纯函数（无网络、无存储），网络流程见 buddy-oauth.ts。
  */
 
+import {
+  nextPromotionEdgeMs,
+  parseTencentPromotions,
+  promotionBadgeFor,
+  sortPromotions,
+  type ModelPromotion,
+  type ModelPromotionBadgeValue,
+} from './model-promotions.js'
+
 // ── API 端点常量（逆向自 genie 扩展 product.json + index.js） ──
 
 /** 主 API 端点（product.json endpoint）。 */
@@ -474,6 +483,15 @@ export interface BuddyRemoteModel {
   /** 默认思考等级（data.models[].reasoning.defaultEffort）。 */
   defaultReasoningEffort?: string
   /**
+   * 该模型命中的**上游活动**候选（issue #101 的徽标腿）。
+   *
+   * ⚠️ **未决**形态：同 id 的多条活动全保留、按 priority 降序，挑一枚发生在装配时
+   * —— 徽标是「此刻」的函数，见 src/model-promotions.ts 的取舍 1。
+   * ⚠️ **没命中任何活动时该键整个缺席**，于是下游能用「键在不在」区分
+   * 「上游说没有活动」与「没读到上游」—— 两者都是空表，含义完全不同。
+   */
+  promos?: readonly ModelPromotion[]
+  /**
    * 是否被**某个 agent 引用**（即服务端声明「该模型可在对话里选择」）。
    *
    * ⚠️ 用途：`reconcileWithFallback` 是**白名单式重建**，不在产品兜底表里的
@@ -751,6 +769,15 @@ export function parseModelsFromConfig(body: unknown): BuddyRemoteModel[] {
   // 促销折扣是**独立于 data.models 的全局活动表**，故先解析成 id → 促销价映射，
   // 再在 push 时按 id 关联（见 parsePromotions 的注释）。
   const promotions = parsePromotions(record)
+  // ★ **同一份 record** 的第二套判据（issue #101 的徽标腿）：活动候选表。
+  //
+  // ⚠️ 与上面的 `promotions` **不是重复实现**：那张表回答「此刻折到几倍」（价格腿，
+  // 判据在 parsePromotions，含 x 前后缀 / factor 0 = 免费 / 无窗口 0x 占位等实测规则），
+  // 本表回答「上游给了哪句活动文案、它在什么时间窗内成立」（徽标腿）。
+  // 两者读同一个 `data` ⇒ **零新增请求**；判据**各归各的**，谁也不许「顺手统一」。
+  const promotionCandidatesById = promotionsById(
+    parseTencentPromotions(record.modelPromotions, record.modelTiers, 'Asia/Shanghai', warnPromotion),
+  )
 
   // 收集**全部** agent 引用的 id（含 craft/ask/plan/cli）。
   // 用于给模型打 `agentReferenced` 标记 —— 适配器的 `reconcileWithFallback`
@@ -779,12 +806,14 @@ export function parseModelsFromConfig(body: unknown): BuddyRemoteModel[] {
     const remoteName = typeof meta?.name === 'string' && meta.name.length > 0 ? meta.name : undefined
     const rate = normalizeCreditsRate(meta?.credits)
     const discounted = promotions.get(id)
+    const promos = promotionCandidatesById.get(id)
     parsed.push({
       id,
       name: remoteName ?? displayNameForModel(id),
       ...parseModelMeta(meta),
       ...rate !== undefined ? { creditsRate: rate } : {},
       ...discounted !== undefined ? { discountedCreditsRate: discounted } : {},
+      ...promos !== undefined ? { promos } : {},
       ...agentReferencedIds.has(id) ? { agentReferenced: true } : {},
     })
   }
@@ -824,12 +853,14 @@ export function parseModelsFromConfig(body: unknown): BuddyRemoteModel[] {
     const meta = metaById.get(id)
     const rate = normalizeCreditsRate(meta?.credits)
     const discounted = promotions.get(id)
+    const promos = promotionCandidatesById.get(id)
     parsed.push({
       id,
       name: displayNameForModel(id),
       ...parseModelMeta(meta),
       ...rate !== undefined ? { creditsRate: rate } : {},
       ...discounted !== undefined ? { discountedCreditsRate: discounted } : {},
+      ...promos !== undefined ? { promos } : {},
       // 试用横幅本身就是「服务端推荐可用」的信号，与 agent 引用同义。
       agentReferenced: true,
     })
@@ -933,4 +964,84 @@ function parseModelMeta(record: Record<string, unknown> | undefined): Omit<Buddy
     }
   }
   return meta
+}
+
+/**
+ * 活动候选按模型 id 归组（**未决**：同 id 的多条活动全保留，按 priority 降序）。
+ *
+ * ⚠️ 为什么归到 id 而不是直接摊成徽标：徽标是「此刻」的函数，见
+ * src/model-promotions.ts 的取舍 1。这里冻的是**候选**，挑一枚发生在装配时。
+ */
+export function promotionsById(
+  promotions: readonly ModelPromotion[],
+): ReadonlyMap<string, readonly ModelPromotion[]> {
+  const byId = new Map<string, ModelPromotion[]>()
+  for (const promotion of promotions) {
+    for (const modelId of promotion.modelIds) {
+      const list = byId.get(modelId)
+      if (list === undefined) byId.set(modelId, [promotion])
+      else list.push(promotion)
+    }
+  }
+  const result = new Map<string, readonly ModelPromotion[]>()
+  for (const [modelId, list] of byId) result.set(modelId, sortPromotions(list))
+  return result
+}
+
+/**
+ * 活动时段读不懂时的告警。
+ *
+ * ⚠️ **不能省**：参考实现 issue #139 的实际症状就是「徽标只是不再出现,
+ * 而全仓一个字都没有」—— 那种缺陷用户无法自查、维护者也无法归因。
+ * 本函数只在**解析路径**上被调用（每次上游文档一遍），不在渲染路径上,
+ * 因此不会随轮询刷屏（同一条理由见 src/model-promotions.ts 的 parseDailyWindows）。
+ *
+ * 通道选 console.warn：本模块是「常量 + 纯函数」层（文件头就写着无网络无存储),
+ * 拿不到 ctx.logger；而 src/ 里既有告警同样走 console（buddy-adapter.ts 14 处)。
+ * 日志自身抛错**不得**让解析失败 ⇒ 包 try。
+ */
+function warnPromotion(message: string): void {
+  try {
+    console.warn('[jet-hub] ' + message)
+  } catch { /* 没有 console 的宿主照样解析 */ }
+}
+/**
+ * 该模型**此刻**该画的徽标（宿主目录契约的 badge 字段）。
+ *
+ * ⚠️ 时钟必须在**这里**读：装配点（toCatalogEntry）每一次 listModels 都跑，
+ * 而宿主的重读由后台刷新器 / 目录变更播报驱动。把结果存进目录条目 = 把
+ * 「此刻」冻进缓存，正是 issue #101 要修的形态。
+ *
+ * @returns undefined ⇒ **整个键缺席**（不写 `badge: undefined`）：
+ * 宿主 `LlmRuntime.listModels` 判的是 `badge === void 0`，写显式 undefined
+ * 与不写等价，但 `resolveModelInfo` 那条路的白名单更严 —— 少一个键永远是安全的。
+ */
+export function buddyModelBadge(
+  promos: readonly ModelPromotion[] | undefined,
+  nowMs: number = Date.now(),
+): ModelPromotionBadgeValue | undefined {
+  return promotionBadgeFor(promos, nowMs)
+}
+
+/**
+ * 候选表里下一个会改变徽标的时刻（epoch 毫秒），没有则 undefined。
+ *
+ * ## 为什么需要它
+ *
+ * 活动窗口是墙钟窗口（实测 23:00–7:50），而宿主缓存一次目录读取的结果。
+ * 没有这条，「窗口关了徽标还在」最长会持续一个后台刷新周期（20 分钟）——
+ * 那正是 issue #101 点名的「活动过期而用户仍按优惠期选择模型」。
+ *
+ * ⚠️ 播报**不会**多打一次上游：重读走 `loadCatalog`，而 `ensureRemoteModels`
+ * 的 20 分钟新鲜度判据会短路 ⇒ 边界时刻只是**用新时钟重算一遍候选表**。
+ */
+export function nextBuddyPromotionEdgeMs(
+  models: readonly BuddyRemoteModel[],
+  nowMs: number = Date.now(),
+): number | undefined {
+  const all: ModelPromotion[] = []
+  for (const model of models) {
+    if (model.promos !== undefined) all.push(...model.promos)
+  }
+  return nextPromotionEdgeMs(all, nowMs)
 }

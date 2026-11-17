@@ -38,6 +38,7 @@
  */
 
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
+import type { ModelPromotionBadgeValue } from './model-promotions.js'
 
 import { providerCatalogVisible, type AccountPool } from './account-pool.js'
 
@@ -110,6 +111,24 @@ export interface CatalogEntry {
   readonly reasoning?: LlmResolvedModelInfo['reasoning']
   /** 是否免费（供 Jet Hub 模型列表分组）。 */
   readonly isFree?: boolean
+  /**
+   * 模型选择器里名字旁边的那枚**徽标**（issue #101：上游活动信息）。
+   *
+   * ⚠️ 形状是宿主 `LlmModelInfo.badge`（`{ text, tone }`）。本仓**刻意不**从
+   * `@deepseek-ai/dsh-llm` 导入那个类型名：peer 下界 `^0.1.2-rc.1` 里它还不存在
+   * （0.2.2 才加），导入会让下界编译不过。类型见
+   * `src/model-promotions.ts` 的 `ModelPromotionBadgeValue`（逐字同形）。
+   *
+   * ⚠️ **省略即不声明**（与 inputModalities 同一个三态约定）：宿主
+   * `LlmRuntime.listModels` 判 `badge === void 0`，而 `buildModelCatalog` 的
+   * 白名单同样只在 `!== undefined` 时写出该键 —— 写 `badge: undefined` 不报错，
+   * 但会把「没有活动」与「有活动」在快照比对里混成两件事，故骨架**不写空值**。
+   *
+   * ⚠️ **只有 `listModels` 这条路**：宿主的 `resolveModelInfo`（exact-route）
+   * 契约上就**不带** badge（宿主类型注释原文「exact-route resolution omits it」），
+   * 所以骨架的 `resolveModel` 不搬这个字段，别「顺手补齐」。
+   */
+  readonly badge?: ModelPromotionBadgeValue
 }
 
 export interface ModelCatalogDeps {
@@ -593,11 +612,16 @@ export function createModelCatalog(
       description?: string
       inputModalities?: readonly ('text' | 'image')[]
       contextWindow?: number
+      badge?: ModelPromotionBadgeValue
     } = { provider: providerId, id: entry.id, name: entry.name }
     // ⚠️ 三态：只有 `!== undefined` 才写入 —— 写 `['text']` 会明确声明不支持图片。
     if (entry.inputModalities !== undefined) info.inputModalities = entry.inputModalities
     if (entry.description !== undefined) info.description = entry.description
     if (entry.contextWindow !== undefined) info.contextWindow = entry.contextWindow
+    // ⚠️ 同样「不写空值」：badge 缺席即「本家没有活动可画」，宿主因此走它自己的
+    // 回落分支（直接画 name）。写 `badge: undefined` 会让「未知」与「明确没有」
+    // 在宿主侧变成同一个键（见 CatalogEntry.badge 的说明）。
+    if (entry.badge !== undefined) info.badge = entry.badge
     return info
   }
 

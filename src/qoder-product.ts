@@ -227,12 +227,28 @@ export interface QoderModelPromotion {
   /**
    * 中文角标文案（远端 `badge.zh`，如「错峰 4 折」）。
    *
-   * ⚠️ **当前不参与展示**：Qoder 的折扣已统一为「原价→折后价」箭头形态
-   * （与 TRAE / buddy 一致），角标与箭头信息**冗余**（0.2/0.5 本就是 4 折）。
-   * 字段保留是因为它是目录下发的原始数据，重新采集时仍可对照；
-   * 若将来要恢复角标，改 `qoderDisplayName` 即可。
+   * ⚠️ **不参与展示名**：Qoder 的折扣在名字里统一为「原价→折后价」箭头形态
+   * （与 TRAE / buddy 一致），箭头与角标信息**冗余**（0.2/0.5 本就是 4 折）。
+   *
+   * ✅ 但它是**徽标**那条腿的文案来源（issue #101，见 `src/model-promotions.ts`
+   * 的 `qoderPromotionCandidate`）：箭头讲的是「现在多少钱」，徽标讲的是
+   * 「上游说这是一条活动」。两个表面各说一件事，都由**同一份目录数据**驱动，
+   * 因此谁也不许「顺手」把另一个删掉。
    */
   badgeZh?: string
+  /** 英文角标文案（远端 `badge.en`，如「Off-Peak 60% off」）。徽标腿用。 */
+  badgeEn?: string
+  /**
+   * 窗口所写的时区（远端 `timezone`，实测 `Asia/Shanghai` / `Asia/Singapore`）。
+   *
+   * ⚠️ 必须原样保留：`22:00–08:00` 离开时区就没有意义，而它是**上游声明**的
+   * 墙钟时间，不是用户本地的。既有 `promotionActiveNow` 按 UTC+8 硬算
+   * （目录时区与用户一致），徽标腿则按本字段算 —— 两个方向的差别见
+   * `src/model-promotions.ts` 里那条「时区兜底」警告。
+   */
+  timezone?: string
+  /** 上游规则 id（远端 `rule_id`，如 `idle_time_model_credit_discount`）。仅用于日志与对账。 */
+  ruleId?: string
 }
 
 /**

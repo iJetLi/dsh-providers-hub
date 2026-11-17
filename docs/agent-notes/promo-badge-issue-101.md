@@ -1,0 +1,297 @@
+## 上游活动徽标（issue #101 移植）：判据来源、刻意分叉、实测取证与性能边界
+
+> 落地日期 2026-11-17 · GitHub issue #101
+> 代码：src/model-promotions.ts + src/promotion-edge-broadcast.ts
+> 测试：tests/unit/model-promotions{,-wiring}.spec.ts、tests/unit/promotion-edge{,-broadcast,-wiring}.spec.ts
+
+### 1. 移植来源：两条腿各取一家，**判据不重写**
+
+- **腾讯腿** = dsh-connect-workbuddy 的 src/promo.ts + docs/PROMO_BADGE.md。
+  搬过来六条判据：running 优先于 standing、dailyUnusable 不许当成全天、
+  validUntil 端点**不含**、badge.display 的 activeOnly、同分时活动先于等级标记、
+  无颜色即 neutral。
+  **没搬的**：selectPromoMultiplier（折扣价）—— 本仓价格腿 src/buddy.ts 的
+  parsePromotions 已有实测判据（x 前缀 vs 后缀两套写法、factor 0 = 免费、
+  无窗口 0x 视为占位），两套并存是刻意的，**不许顺手统一**。
+- **Qoder 腿** = dsh-connect-qoder 的 src/promo.ts：「有窗口时窗口说了算、
+  active 只是无窗口时的回退」与「声明了窗口但读不懂 ⇒ 整条不画」。
+  它的 promoDisplayAt 三态里 **pending（降饱和胶囊）没搬**，见第 4 条。
+
+### 2. ⚠️⚠️ 数据必须在**装配时刻**求值，不能冻在解析时
+
+徽标是「此刻」的函数。目录条目里存的是**未决候选表**（BuddyRemoteModel.promos），
+挑一枚发生在 toCatalogEntry（每次 listModels 都跑）。在解析时挑定 =
+「22:59 读到的夜间折扣，第二天 08:00 还挂在行上」—— 那正是 issue #101 点名的事故
+（用户按优惠期选择、实际按原价计费）。
+
+守卫：model-promotions-wiring.spec.ts 的「徽标按装配时刻求值」——
+同一个适配器实例，改注入时钟就换答案。
+
+⚠️ 时钟必须**只读一次**并存进局部量。写成「判 !== undefined 一次、取值再一次」
+会在跨过窗口边界那一分钟拿到不一致的两半，产出 badge: undefined 键，破坏三态。
+
+### 3. ⚠️⚠️ promos 必须出现在 reconcileWithFallback 的白名单里
+
+reconcileWithFallback 是**白名单式重建**：不显式搬运的字段被**静默丢弃、零报错**
+（该函数自己的注释就写着「新增远端字段时必须同步加一行，否则 listModels 看不到它」）。
+漏这一行的症状：解析层全绿、model-promotions.spec.ts 全绿，界面上一个徽标都没有。
+有牙守卫：变异 M1 实测 5 条红。
+
+同源的第二处：buddy-oauth.ts 的 applyPromotionCandidates。scoped 端点**不下发**
+活动数组（实测响应里 discount / promo 零命中），而 mergeRemoteModels 对同 id
+**以 scoped 为准** ⇒ 只补价格不补候选，徽标永远挂不上（与用户报障
+「GLM-5.2 是 0.5，现在显示 0.79」同一个成因，只是这次丢的是徽标）。M8 一条红。
+
+### 4. ⚠️⚠️ 与参考实现**刻意分叉**的一处：窗口外不画「还没到点」
+
+dsh-connect-qoder 在**自己的卡片**上会给未开的窗口画一枚降饱和胶囊、悬停写
+「22:00 生效」（promoDisplayAt === pending）。本仓**不画**：宿主徽标契约只有
+{ text, tone }、**没有悬停位** ⇒ 在没打折的时刻画「错峰 4 折」就是在说一件
+没发生的事。行上的原价后缀已经把「现在按原价」讲明白。
+
+落地是 ModelPromotion.standingEligible：腾讯 true（它的「白天只带角标」条目靠它
+让徽标全天挂着，那是上游的语义），Qoder false。M5（改成 true）3 条红。
+
+**将来若要恢复这一支**，前提是宿主徽标加上悬停/description 字段，不是先画出来。
+
+### 5. ⚠️ 时区兜底必须与**价格腿**同值，两处都不是 UTC
+
+- 腾讯：parseTencentPromotions 第 3 参默认 Asia/Shanghai —— 与 src/buddy.ts 的
+  zonedMinutes（无 timezone 时兜底 Asia/Shanghai）同值。
+- Qoder：qoderPromotionCandidate 兜底 Asia/Shanghai —— 与 qoder-adapter.ts 的
+  promotionActiveNow（硬算 UTC+8）同方向。
+
+兜底值不同会让同一份报文在「价格」与「徽标」上差 8 小时说话（一文件两套同义判据
+的复发形态）。有牙守卫：「上游没写时区时用调用方传入的兜底」—— 同一个 epoch
+时刻两种兜底给出两种答案。
+
+**方向刻意不同的一处（已核实并保留）**：时区**非法**（Not/AZone）时，
+- 徽标腿：**不算在跑**（zonedMinute 返回 undefined ⇒ false）；
+- 价格腿：src/buddy.ts 的 promotionActiveNow 是「不误杀 ⇒ 视为生效」。
+
+这不是漂移，是两条腿的风险方向不同：价格腿误杀会让活动凭空消失（用户报障过），
+徽标腿放行会夸大一句优惠。⚠️ 若要统一，必须先重跑那两条用户报障的证据，
+不要按对称美学改。M10 有专门一格取样盯着：05:00 UTC 的墙上分钟数 300
+恰落在 23:00–7:50 内 ⇒ 退回本地就会翻转成 true。
+
+### 6. ⚠️ 宿主契约的三条实测边界（取证于本机 app.asar 与 dsh-llm 声明）
+
+| 事实 | 证据 | 后果 |
+|---|---|---|
+| LlmModelInfo.badge **能**到选择器 | dsh-llm/lib/index.js 的 listModels 白名单里**带** badge（表形态浅拷贝） | 徽标走数据面，不需要抢 conversation.input.model.label 槽位 |
+| resolveModel **不带** badge | 宿主类型注释原文 exact-route resolution omits it | 骨架的 resolveModel 不许顺手补齐（有守卫） |
+| 宿主渲染就是 Tag{tone} + 名字 | ModelSelect 的 renderModelLabel 回落分支；buildModelCatalog 逐字透传 badge | 只有**没有插件占该槽位**时回落才跑；本方案走数据面，与占位无关 |
+
+⚠️ 本仓**不注册** conversation.input.model.label 槽位（plugin-src/client/ 里该串
+零命中），所以不存在 issue #101 评论里担心的「单槽位抢占」冲突。
+dsh-connect-* 那两个插件抢了这个槽位 —— 如果将来本仓也去抢，两边的行会互相顶掉。
+
+badge 缺席 ⇒ **整个键不写**（不是 badge: undefined）。写 undefined 会把「未知」与
+「明确没有」在两处白名单重建里混成同一个键（本仓 toModelInfo 与宿主
+resolveModelInfoFor 的判据严格程度不同）。
+
+### 7. ⚠️ 类型名**不能**从 @deepseek-ai/dsh-llm 导入
+
+本包 peer 下界 ^0.1.2-rc.1 里 LlmModelInfo **没有** badge 字段（0.2.2 才加），
+LlmModelBadge / LlmModelBadgeTone 同样在下界不存在 ⇒ 导入会让下界编译不过。
+故 ModelPromotionBadgeValue / ModelPromotionTone 是本地声明（逐字同形）。
+
+⚠️ 但 text 的表形态**必须显式写出 en**：宿主 LocalizedText 里必需的 en 只存在于
+字面量类型（裸 Record 不可赋值）—— 少了它宿主的 resolveText 返回 undefined,
+**胶囊整个消失**。这是「把不变式写在编译器能检查的地方」，不是绕编译错误。
+
+### 8. ⚠️ 上游按**客户端身份**裁剪这份文档（真实探测 2026-11-17）
+
+同一个 URL、同一套凭据、同一天，GET /v3/config 的答案取决于 User-Agent：
+
+| UA | data 键数 | modelPromotions | modelTiers |
+|---|---|---|---|
+| WorkBuddy/5.9.4 WorkBuddy AI/5.9.4 CLI/5.9.4（本仓产品配置） | 17 | 1 | 1 |
+| WorkBuddy/5.9.4 WorkBuddy/5.9.4 CLI/5.9.4 | 17 | 1 | 1 |
+| CLI/2.63.2 CodeBuddy/2.63.2（纯 CLI 身份） | **5** | **ABSENT** | **ABSENT** |
+
+实测到的真实条目（取证当时仍在窗口内）：
+hy4-flash-free-trial-202611 ⇒ label Free now、color #FF0000、display activeOnly、
+modelIds [hy4flash-free]、validFrom 2026-11-16T00:00+08 → validUntil 2026-12-01T00:00+08；
+gpt-pro-only ⇒ label Pro Only、#009273、**无 schedule**（常驻等级标记）。
+
+⇒ 「目录里读不到活动」有两问，顺序不能反：
+① **UA 是不是 App 身份**（本仓两个产品都是）；② 上游**真的**没有活动。
+ok:false 与 promotions.size === 0 是两件事（issue IKJVTF 的完整性判据），
+不许用「快照是否为空」反推失败。
+
+⚠️ 本仓国际版 UA 含 WorkBuddy AI/… 段而参考实现是 WorkBuddy/… 重复两次：
+实测**两档都回 17 键** ⇒ 决定答案形状的是**头里声明了哪些通道**，不是版本字符串
+（版本号是惰性的）。别为了「对齐蓝本」去改 UA —— 那会牵动签名与既有实测结论。
+
+### 9. 边界播报器：promotion-edge-broadcast.ts 的三条判据
+
+为什么需要：宿主缓存一次目录读取的结果，后台刷新器 20 分钟一轮 ⇒ 窗口关了徽标
+最长挂 20 分钟。
+
+1. **只排最近一枚**，播报后**重新问一次**边界（不许复用旧值，否则「窗口已关」的
+   活动会让定时器按同一时刻反复空转）。
+2. **超过 2^31-1 毫秒必须分片**。Node 的 setTimeout 超出该上限会**立刻触发**并打
+   TimeoutOverflowWarning ⇒ 播报器误判「边界到了」，再拿同一个远期边界排一枚
+   ⇒ 广播风暴。活动可以排在几个月后，所以「超过就不排」等于关掉功能。
+3. **取不到边界就停表**，绝不退化成轮询：未登录 / 上游没活动 / 时区读不懂 ⇒
+   undefined。拿「每 N 分钟醒一次」兜底会让所有无活动用户空转
+   （catalog-prewarm.ts 刻意「有界、不轮询」同一条理由）。
+
+⚠️ **播报是零网络的**：重读走 loadCatalog，而 ensureRemoteModels 的 20 分钟新鲜度
+判据会短路 ⇒ 边界时刻只是用新时钟重算候选表。**若将来有人把徽标改成「必须重拉
+目录」，这条前提就破了**（代价变成每天最多两次真实上游请求），本注释必须跟着改。
+
+⚠️ 定时器必须挂 ctx.effect 回收（unref() 不算回收）。实测时间线（假定时器、
+起点 08:00 Asia/Shanghai）：播报落在 +14h（22:00 开）与 +24h（08:00 关）交替。
+
+### 10. ⚠️ 接线守卫的一个**假失败**教训（值得复述）
+
+promotion-edge-wiring.spec.ts 的反向对照第一版是「boot() 之后把四家的
+nextPromotionEdgeAt 钉成 undefined，再推进 26 小时，断言零播报」—— **红了**。
+原因不是功能有问题：apply() 是同步的，播报器在 ctx.effect 里**当场**武装了
+第一枚定时器；改 getter 追不上它，那条 14:00 的播报是真的。
+⇒ 反向对照必须**问播报器读到的源**（包一层 createPromotionEdgeBroadcaster 观察
+构造参数、实现仍是真的），而不是「改掉依赖之后会不会动」。
+同一条判据适用于任何「构造期就武装」的定时器：事后替身只能影响**下一次**求值。
+
+### 11. 变异登记表（18 个条件全有牙；其中**四条初跑无牙**，已补守卫而不是删变异）
+
+| 变异 | 变红处 |
+|---|---|
+| M1 reconcileWithFallback 漏搬 promos | wiring 5 条 |
+| M2 骨架 toModelInfo 不写 badge | wiring 7 条 |
+| M3a 播报器构造了但不武装 | edge-wiring 1 条 |
+| M3b 接线漏一家（qodercn 不交边界源） | edge-wiring 1 条 |
+| M3c fire 变空转 | edge-wiring 2 条 |
+| M4 clockMinute 类型闸门删除（issue #139） | promotions 1 条（not.toThrow） |
+| M5 Qoder standingEligible 改 true | promotions 3 条 |
+| M6 selectPromotionAt 第 1 步的门去掉 | promotions 9 条 |
+| M7 buddy toCatalogEntry 不装配 badge | wiring 5 条 |
+| M8 buddy-oauth 不补候选 | wiring 1 条 |
+| M9 分片分支删除 | broadcast 1 条 |
+| M10 时区读不懂退回本地 | promotions 1 条（05:00Z 取样格） |
+| M11 dailyUnusable 的闸删除 | promotions 3 条 |
+| M12 非有限界值不再判过期 | wiring 1 条 |
+| M13/M14 两家的边界访问器恒 undefined | 各 1 条（**补测前无牙**） |
+| M15 删掉「目录落地后重排」的监听 | edge-wiring ④ 1 条 |
+| M16 去掉告警去重（每条 listModels 刷屏） | wiring 1 条 |
+
+⚠️ **四条初跑无牙**，逐条登记根因与补法（本仓纪律：无牙要如实登记并补守卫,
+**不许**为了登记表好看去写恒真断言）：
+
+| 变异 | 第一次为什么全绿 | 补了什么 |
+|---|---|---|
+| M4（clockMinute 的类型闸门） | 用例只经过**解析路径**，而那里的 asText 已经先把数字挡住 ⇒ 闸门那一行根本没人走到 | 喂**第二个入口**：手构条目直接带 {start: 1380}，牙在 not.toThrow（危险方向是渲染路径抛 TypeError ⇒ 整条渠道消失） |
+| M10（时区读不懂退回本地） | 取样时刻的墙上分钟数本来就**不在**窗口内 ⇒ 退回本地也是 false，变异与修复态**观察上等价** | 换一格真正落在窗口内的取样（05:00 UTC = 分钟数 300，落在 23:00–7:50 里）⇒ 退回本地必翻转 |
+| M13 / M14（两家的边界访问器恒 undefined） | 接线守卫用**替身**换掉了 getter ⇒ 永远走不到真实实现 | 各补一条**直接问真实访问器**的行为用例 + 反向对照（同一实例换一个 nowMs 给不同答案；无活动 ⇒ undefined） |
+
+四条的共同形状值得记住：**「用例变绿」不等于「被测那行被走到」**。要么证明取数路径
+真的经过它（第二入口、真实实例），要么证明取样落在能区分两个状态的格子里;
+两者都没有时，变异与修复态在观察上就是同一条码。
+
+另有一条**刻意不写成 toBeUndefined** 的形态：手构条目里窗口端点是数字
+（start: 1380）且**没带** dailyUnusable 时，徽标仍会常驻出现。这是对的 ——
+隐藏靠**事实标记**，不靠「我读不懂所以猜一个最保守的」。守卫写成 not.toThrow
+（真正危险的方向是渲染路径抛 TypeError ⇒ 整条渠道消失），并在用例注释里讲明白，
+**不要**改成 toBeUndefined（那是给实现编一条它没有的判据）。
+
+### 12. 本 PR 没做的事（如实登记，别当成已完成）
+
+issue #101 一条里混了三件事，本 PR 只做「活动徽标」。另外两件：
+
+- **排队信息**：首轮回复里「`grep -rn "codebuddy" src/provider-registry.ts` 零命中
+  ⇒ 本仓没有 codebuddy provider」这句，**grep 的输出是对的、推论不成立** ——
+  那条 grep 大小写敏感，而本家在该文件里写作 id `buddy` + 展示名
+  「CodeBuddy (腾讯)」（大写 C，235-238 行）。⇒ **不需要**「另接一整家 provider」
+  的工作量。真正缺的是**判据**：
+  src/model-queue.ts 只认 Qoder 的 10605，而腾讯的排队是另一套业务码
+  （6020 waiting / 6021 full / 6022 user_limit，配 /v2/chat/queue/status）。
+  ⚠️ 参考实现自己也**只做了识别**：它明写「not hold the request open and resend,
+  那需要排队答案在 OpenAI 兼容端点上的形状，而没有任何测量给出过」。
+  ⇒ 这是独立的一条功能（含轮询循环 + 上限 + 会话内状态），**不在本 PR 范围内**，
+  也不该在下一轮里靠猜报文形状补上。
+- **qoder 的客户端优惠信息**：本 PR 已经把目录每行自带的 promotion 做成了徽标，
+  并且把上游的 timezone / rule_id / badge.en 三个字段**原样保留**进
+  QoderModelPromotion（此前只留 badgeZh）。更深一层的「客户端优惠券 / 活动页」
+  类信息仍未接：本仓没有任何实测端点，红线是不编造。
+- **上游 hex 颜色的原样透出**：宿主 badge 契约只有四档 tone，没有任意色通道。
+  本模块把颜色映射成 tone，hex 只作为 tone 的输入，不入库、不上屏。
+  hover 文案同理：读到了、也保留在 ModelPromotion.hover 里，但宿主契约没有
+  悬停位 ⇒ **当前不参与展示**（与 qoder 的 badgeZh 曾经同命）。将来宿主加字段时，
+  接上它的是 promotionBadgeFor，不需要改解析层。
+
+### 13. ⚠️ issue #101 首轮回复里那条「模型选择器是宿主渲染的，插件只能传文本」的判断**已过时**
+
+该回复把「宿主没有徽标 API」当成前提，据此建议「把倍率从 name 里拿掉、另起一列」。
+实测（本机 app.asar + dsh-llm 0.2.2-rc.1 的声明）：**0.2.2 起宿主有
+LlmModelInfo.badge = { text: LocalizedText, tone }**，且 ModelSelect 就是用它渲染
+名字旁边的 Tag。⇒ 徽标不需要抢槽位、也不需要退回文本方案。
+
+⚠️ 但那条回复的**另一句仍然成立**：「静态兜底表必然腐坏」。本 PR 因此刻意
+**不**给兜底表加任何活动字段（buddy 侧离线路径就是没有徽标），Qoder 侧的
+promotion 是既有兜底表里**已经采集**的上游数据（不是新编的常量）。
+
+另一条被回复列为「前置问题」的：「活动有效期的判据从哪来？」——
+答案是**上游目录文档里就有**（schedule / window_start / validUntil），
+不需要新增请求，也不需要静态表。第 8 条有真实报文。
+### 14. ⚠️⚠️ 判定路径**必须缓存 Intl.DateTimeFormat**（实测 119µs/次 ⇒ 一条渠道 50ms+）
+
+判定每跑一次就要问一次「这个时区现在几点」，而 new Intl.DateTimeFormat 的构造
+实测**约 119µs** —— 比它要算的东西贵两个量级。首版没缓存时本机实测：
+
+| 场景 | 缓存前 | 缓存后 |
+|---|---|---|
+| 单条 badge 求值 | 107µs | 3.7µs |
+| 一趟 17 条（一家渠道） | 1876µs | 48µs |
+| 一趟 460 条（cline 规模） | 52.7ms | 1.05ms |
+
+为什么这条值得单独记：本仓已经有一次**同一个形状**的事故
+（docs/agent-notes/providers-cline.md 的「模型目录构建的 O(N²)」：471 条实测
+312ms ⇒ 1.5ms，起因是每次 resolveModel 都整份重建目录）。而 listModels 是宿主
+buildModelCatalog 反复调的那条路（src/catalog-prewarm.ts 的头注就记着
+「未登录或离线时表现就是首屏加载模型巨长」）。给选择器每一行加一次
+「看起来只查了个时间」的调用，就是在给那条路加一个常数的两倍量级开销。
+
+⚠️ **缓存必须有上限**（MAX_ZONE_FORMATTERS = 16）：时区名是**上游字符串**，
+无上限等于让一个乱发的 feed 把我们的内存当它的字典。超出上限退回「现造一个
+但不入缓存」—— 行为不变、只是不省时间；**绝不**因为缓存满而让判定失败
+（那会把性能优化变成新的失效方向）。
+
+### 15. 冷启动的两点限制（如实登记，不是「已完成」）
+
+1. **首轮 schedule() 时 buddy / workbuddy 的远端目录还没落地**（remoteModels 是
+   undefined ⇒ 边界 undefined），只有 Qoder / Qoder CN 的兜底表当场能给出边界。
+   ⇒ 修法：index.ts 监听 `llm/adapters-updated` 重新求边界（目录落地时插件本来就会
+   emit 该事件）。守卫 = promotion-edge-wiring ④，变异 M15 有牙。
+   ⚠️ 这一条是**写守卫过程中**发现的：接线守卫①用 Qoder 兜底表的真实边界跑成绿色，
+   完全看不出来「buddy 的远端活动要等到下一次 fire 才被看见」—— 又一次
+   「取样偏差冒充覆盖」。
+2. **播报按设计不重打上游**（见第 9 条），所以到点时读到的是「缓存目录 + 新时钟」。
+   窗口**开启**与**关闭**两侧都在边界那一刻立刻改画。
+   「活动**过期**（validUntil 到点）」同样不需要等 20 分钟刷新：边界时刻重算后
+   该活动既不在跑也不能常驻 ⇒ 立刻不画。三段各有覆盖：装配
+   （model-promotions-wiring「活动过期 ⇒ activeOnly 徽标整条消失」）、边界取值
+   （model-promotions 的 nextPromotionEdgeMs 一组，validUntil 参与）、排程
+   （promotion-edge-broadcast）。
+3. **聚合路由（aggregate）这一代没有徽标**：它的 listModels 是手写的、不走共享骨架，
+   条目是「虚拟模型」（跨渠道取最低价），而上游活动是**按真实 id** 下发的 ⇒
+   「这条虚拟模型现在打折吗」取决于最后选中哪个账号，不是目录能预先回答的事实。
+   ⇒ 刻意不接，不是漏接。要接先解决「虚拟模型 ↔ 候选真实 id」的归属问题，
+   否则画出来的是**别人的**活动。
+### 16. 告警通道：两家的「读不懂」各挂在哪、为什么不会刷屏
+
+参考实现把日志留在**解析路径**（每次上游文档一遍），本仓两家的结构不同：
+
+- **腾讯腿**：有独立解析点（parseModelsFromConfig）⇒ warnPromotion 走
+  console.warn（src/buddy.ts 是「常量 + 纯函数」层，拿不到 ctx.logger；
+  与 src/ 里既有告警同一通道，buddy-adapter.ts 自己就有 14 处 console）。
+  每次文档一遍，天然不刷屏。
+- **Qoder 腿**：活动就在目录每一行里、没有独立解析点 ⇒ 只能在 toCatalogEntry
+  上报，而那里是「每条 × 每次 listModels」。所以加了**按消息去重 + 64 条封顶**
+  （promotionWarned）。封顶后不再播、也不清空：宁可少一条日志，
+  也不要一个会自己长大的内存。
+
+⚠️ 两腿都**不能省**这条日志：省掉的后果不是「少一行输出」，而是
+「徽标只是不再出现、全仓一个字都没有」—— 参考实现 issue #139 的原话症状。
+用户无法自查、维护者无法归因的缺陷，判据就得自带一条出路。

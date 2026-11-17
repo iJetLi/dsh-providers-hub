@@ -416,6 +416,10 @@ function parsePromotion(raw: unknown): QoderModelPromotion | undefined {
     return undefined
   }
   const badgeZh = readString(record.badge, 'zh')
+  const badgeEn = readString(record.badge, 'en')
+  // 徽标腿（issue #101）：时区与规则 id 都是**上游声明的原样事实**。
+  const timezone = readString(record, 'timezone')
+  const ruleId = readString(record, 'rule_id') ?? readString(record, 'ruleId')
   return {
     active: record.active === true,
     ...discountFactor === undefined ? {} : { discountFactor },
@@ -423,6 +427,9 @@ function parsePromotion(raw: unknown): QoderModelPromotion | undefined {
     ...windowStart === undefined ? {} : { windowStart },
     ...windowEnd === undefined ? {} : { windowEnd },
     ...badgeZh === undefined ? {} : { badgeZh },
+    ...badgeEn === undefined ? {} : { badgeEn },
+    ...timezone === undefined ? {} : { timezone },
+    ...ruleId === undefined ? {} : { ruleId },
   }
 }
 

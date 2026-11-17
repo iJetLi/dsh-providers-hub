@@ -36,8 +36,10 @@ import {
   HTTP_HEADER_DOMAIN,
   HTTP_HEADER_PRODUCT,
   HTTP_HEADER_PRODUCT_CODE,
+  buddyModelBadge,
   credentialExpiresAtMs,
   formatCreditsRate,
+  nextBuddyPromotionEdgeMs,
 } from './buddy.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
 import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
@@ -2126,6 +2128,19 @@ export class BuddyAdapter extends LlmAdapter {
   }
 
   /**
+   * 下一个会**改变徽标**的时刻（epoch 毫秒）；没有排定边界时 undefined。
+   *
+   * 供接线层的「徽标保鲜」定时器排程（见 src/promotion-edge-broadcast.ts）。
+   *
+   * ⚠️ **同步**且**不打网络**：只读已落地的远端目录。编译期兜底表**没有**活动
+   * 字段（活动是运行时事实），因此离线路径返回 undefined —— 那意味着「没有
+   * 已知的窗口边界」，而不是「一切都好」。
+   */
+  nextPromotionEdgeAt(nowMs: number = Date.now()): number | undefined {
+    return nextBuddyPromotionEdgeMs(this.remoteModels ?? [], nowMs)
+  }
+
+  /**
    * 描述本适配器拥有的 provider 路由。
    *
    * DSH 会强制校验 `info.id === provider` 且 `info.name` 为非空字符串；
@@ -2375,6 +2390,12 @@ export class BuddyAdapter extends LlmAdapter {
         ...remote?.discountedCreditsRate !== undefined
           ? { discountedCreditsRate: remote.discountedCreditsRate }
           : {},
+        // ★ 活动候选（issue #101）：**本函数是白名单式重建**，不显式搬运就会
+        // 静默丢弃 ⇒ 徽标整条失效而**零报错**（本文件上方那条注释讲的正是这件事：
+        // 「新增远端字段时必须同步加一行，否则 listModels 看不到它」）。
+        // ⚠️ 兜底表**没有** promos：它是编译期快照，活动是运行时事实（红线：
+        // 静态表必然腐坏）。远端缺席 ⇒ 该条不写徽标，而不是猜一枚。
+        ...remote?.promos !== undefined ? { promos: remote.promos } : {},
       }
     })
     // ⚠️ 追加「被 agent 引用但不在兜底表」的模型（见本方法注释的例外说明）。
@@ -2568,6 +2589,12 @@ export class BuddyAdapter extends LlmAdapter {
    * 「全都没查到」，后者返回 `undefined` ⇒ 这里**省略该字段**交给宿主判断。
    */
   private toCatalogEntry(model: BuddyRemoteModel, all: readonly BuddyRemoteModel[]): CatalogEntry {
+    // ★ 徽标在**装配时刻**求值（issue #101）：目录条目里的 promos 是**未决**候选表，
+    // 挑哪一枚由「此刻」决定。⚠️ 时钟必须**只读一次**并存进局部量 ——
+    // 「有没有」与「是哪一枚」各读一次的话，跨过窗口边界那一分钟会得到
+    // 前者 undefined、后者一枚徽标，写进对象字面量就是一个 badge: undefined 键
+    // （三态被破坏，宿主那条路的白名单更严）。
+    const badge = buddyModelBadge(model.promos, this.options.now?.() ?? Date.now())
     const contextWindow = this.remoteContextWindows.get(model.id)
       ?? this.productFallbackContextWindows.get(model.id)
       ?? CONTEXT_WINDOWS.get(model.id)
@@ -2591,6 +2618,9 @@ export class BuddyAdapter extends LlmAdapter {
       ...modalities !== undefined ? { inputModalities: modalities } : {},
       ...contextWindow !== undefined ? { contextWindow } : {},
       ...maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {},
+      // ⚠️ 兜底表**没有** promos ⇒ 离线路径不写徽标（与「上游没有活动」同形，如实；
+      // 红线「静态表必然腐坏」，不许在这里编一枚）。
+      ...badge === undefined ? {} : { badge },
       ...efforts.length > 0
         ? {
             reasoning: {
