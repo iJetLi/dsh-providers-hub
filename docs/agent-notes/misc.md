@@ -1158,6 +1158,27 @@ console.log('0.3.0-rc.1 must be false:', s.satisfies('0.3.0-rc.1', R, { includeP
 - `inputModalities` 由远端 `supportsImage` 驱动（未声明时保守报 `text`）
 - 可选字段缺失一律留 `undefined`，**绝不填 0/false**：「远端说不支持」与「远端没说」是两回事
 
+### ⚠️ 订阅闸门三件套：`accessible` / `subscriptionPriority` / `restrictionHint`（2026-11-17）
+
+远端同批下发这三个键（实测 **21/21 条目都有**），而本仓此前**一个都没读** ⇒ 选择器里「订阅专享」的模型看起来和普通模型一模一样，选了才知道不能用。
+
+实测（未订阅账号，`GET /api/models/available`）：
+
+| id | accessible | subscriptionPriority | restrictionHint |
+|---|---|---|---|
+| `qwen4-max` | `false` | `true` | 该模型仅限有效订阅用户使用 |
+| `kimi-k3.1-pro-highspeed` | `false` | `true` | 该模型仅限有效订阅用户使用 |
+| 其余 19 条 | `true` | `false` | `null` |
+
+三条判据（每条都对应一个已经踩得到的岔路）：
+
+1. **`accessible` 是账号级事实，不得据此隐藏模型**：官方客户端对**已订阅**账号照常显示 `Qwen4-Max`、也不画任何标记（用户 2026-11-17 截图佐证：同一模型、同一份目录、不同账号）⇒ 把不可用条目从目录里删掉，等于让「订阅后能多用什么」不可见，恰是促订阅的反面。
+2. **短标签进 `name`，原因整句进 `description`**：composer 的模型切换菜单**只渲染 `name`**（与倍率的既有约定同因）⇒ 不可用时 `name` 追加 `· 需订阅`（`subscriptionPriority:true`）或 `· 不可用`（其余），顺序固定 `名称 · x倍率 · 限制`；`restrictionHint` 则**追加**到 `description` 末行（**不改写上游原文** —— 那句原文是取证材料）。
+3. **判据只认 `accessible === false` 这一格，不解析 `restrictionHint` 的中文文案**：营销文案改一个字判据就失效；`需订阅` / `不可用` 的挑选用布尔 `subscriptionPriority`。另：布尔一律按 `typeof === 'boolean'` 读，`'false'`（字符串）按「未声明」处理 —— `!!'false'` 会把不可用读成可用。
+
+**守卫**：`tests/unit/lobsterai-adapter.spec.ts` 的「订阅闸门」四条（不隐藏 / 短标签 / 已订阅不画标签 / description 追加），`tests/e2e/lobsterai-probe.e2e.spec.ts` 的「accessible 必须是布尔」（**只锁契约、不锁数量** —— 不可用条目数随账号订阅状态变，锁死等于把测试绑在某个账号上）。
+**变异自证**：① `displayNameFor` 不追加短标签 ⇒ 标签用例精确变红；② 解析层不读 `accessible` ⇒ e2e 用例变红并点名 21 个 id（正是本 PR 修的那个缺陷）。
+
 ### 思考档位的 wire 值是 `openclawLevel`，不是 `level`
 
 `thinkingConfig.options[]` 每项有 `level`（**产品侧档位名**，含 `max`）与 `openclawLevel`（**发给服务端的 `reasoning_effort` 取值**，无 `max`）。远端把 `level: 'max'` 映射到 `openclawLevel: 'xhigh'`。

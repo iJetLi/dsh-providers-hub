@@ -24,7 +24,9 @@ import {
   LobsteraiClientVersionResolver,
   isLobsteraiRefreshable,
   lobsteraiCredentialExpiresAtMs,
+  lobsteraiModelsHeaders,
 } from '../../src/lobsterai.js'
+import { buildLobsteraiModelsUrl, parseLobsteraiModels } from '../../src/lobsterai-adapter.js'
 import { readLobsteraiCredentialsFromDshStore } from './lobsterai-credential.js'
 
 const enabled = process.env.DSH_LOBSTERAI_E2E === '1'
@@ -95,6 +97,43 @@ describeGate('LobsterAI 认证与签到状态探针（不消耗模型积分）',
         `[lobsterai-e2e] ${uid}: claimedToday=${context.claimedToday} actions=[${context.actions.join(',')}]`,
       )
     }
+  })
+
+  /**
+   * 订阅闸门三件套（`accessible` / `subscriptionPriority` / `restrictionHint`）
+   * 的**线上**判据（只读：一次 GET，不消耗模型积分）。
+   *
+   * ⚠️ 断言只锁「远端每个条目都带**布尔** `accessible`」—— 那是契约；本仓曾经
+   * 三个字段一个都没读（`undefined`）⇒ 这条会红，正是本 PR 修的那个缺陷。
+   * 「当前有几个不可用条目」**刻意不作断言**：那是账号订阅状态，
+   * 换一个已订阅账号就变成 0 个，锁死它等于把一条测试绑在某个账号上。
+   */
+  it('模型目录下发订阅闸门字段（accessible 必须是布尔）', async () => {
+    const first = credentials[0]
+    if (first === undefined) return
+    const { version } = await new LobsteraiClientVersionResolver().resolve(LOBSTERAI)
+    const response = await fetch(buildLobsteraiModelsUrl(LOBSTERAI, first.credential, version), {
+      headers: lobsteraiModelsHeaders(first.credential, LOBSTERAI, version),
+      signal: AbortSignal.timeout(30_000),
+    })
+    expect(response.status, `HTTP ${response.status}`).toBe(200)
+    const models = parseLobsteraiModels(await response.json())
+    expect(models.length, '远端模型数').toBeGreaterThan(0)
+    expect(
+      models.filter((m) => typeof m.accessible !== 'boolean').map((m) => m.id),
+      '这些条目没读到 accessible（解析层把它丢了）',
+    ).toEqual([])
+    const restricted = models.filter((m) => m.accessible === false)
+    for (const model of restricted) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[lobsterai-e2e] 订阅闸门: ${model.id} `
+        + `subscriptionPriority=${String(model.subscriptionPriority)} `
+        + `hint=${model.restrictionHint ?? '(无)'}`,
+      )
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[lobsterai-e2e] 目录: ${models.length} 个模型，其中当前不可用 ${restricted.length} 个`)
   })
 
   it('可查询积分余额（profile-summary）', async () => {

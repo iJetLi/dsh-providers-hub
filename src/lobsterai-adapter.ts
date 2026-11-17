@@ -166,6 +166,31 @@ export interface LobsteraiRemoteModel {
    * 而 buddy 是字符串 `"x0.05"`。不要共用解析函数。
    */
   costMultiplier?: number
+  /**
+   * **当前账号能否用这个模型**（`data.accessible`）。
+   *
+   * ⚠️ 这是**账号级**的事实，不是目录级：实测同一份目录里
+   * `qwen4-max` 对未订阅账号是 `false`，而官方客户端（已订阅账号）照常显示它、
+   * 也不画任何标记（用户截图 2026-11-17 佐证）⇒ **不得**据它把模型从目录里
+   * 隐藏（那会让「订阅后能多用什么」变成不可见，恰恰是促订阅的反面）。
+   */
+  accessible?: boolean
+  /**
+   * 订阅专属标记（`data.subscriptionPriority`）。
+   *
+   * 与 {@link accessible} 同批下发，实测两者在 `subscriptionPriority:true` 的
+   * 条目上同时为 `accessible:false`（`qwen4-max` / `kimi-k3.1-pro-highspeed`）。
+   * 单独用它**不足以**判定不可用（订阅账号拿到的可能是 `accessible:true`
+   * + `subscriptionPriority:true`），故只用于给 `accessible:false` 挑原因文案。
+   */
+  subscriptionPriority?: boolean
+  /**
+   * 不可用的原因原文（`data.restrictionHint`，如「该模型仅限有效订阅用户使用」）。
+   *
+   * ⚠️ 这是**整句营销文案**，直接塞进展示名会撑爆模型选择器 ⇒ 展示名只取
+   * 短标签（见 {@link restrictionLabelFor}），整句进 `description`。
+   */
+  restrictionHint?: string
   /** 是否接受图片输入。 */
   supportsImage?: boolean
   /** 是否支持思考（无 `thinkingConfig` 时无可选档位，仅作展示参考）。 */
@@ -295,6 +320,16 @@ export function parseLobsteraiModels(body: unknown): LobsteraiRemoteModel[] {
     // `"x0.05"` 形态不同，故各自解析。只在为正数时带上（0 在业务上无意义）。
     const costMultiplier = readNumberField(record, 'costMultiplier')
     if (costMultiplier !== undefined && costMultiplier > 0) model.costMultiplier = costMultiplier
+    // 订阅闸门三件套（2026-11-17 实测下发，此前**全被读丢**）。
+    // ⚠️ 布尔一律按 `typeof === 'boolean'` 读：远端把这几个键**恒定下发**
+    //（21/21 条目都有），但它也可能哪天只发字符串 `"false"`，那种脏值按「未声明」
+    // 处理比按 falsy 处理更安全（`!!'false'` 会把不可用读成可用）。
+    if (typeof record.accessible === 'boolean') model.accessible = record.accessible
+    if (typeof record.subscriptionPriority === 'boolean') {
+      model.subscriptionPriority = record.subscriptionPriority
+    }
+    const restrictionHint = readStringField(record, 'restrictionHint')
+    if (restrictionHint.length > 0) model.restrictionHint = restrictionHint
 
     models.push(model)
   }
@@ -1028,9 +1063,10 @@ export class LobsteraiAdapter extends LlmAdapter {
     const contextWindow = this.contextWindowFor(model.id)
     const maxTokens = this.remoteMeta.get(model.id)?.maxTokens
     const reasoning = this.reasoningFor(model.id)
+    const description = descriptionWithHint(model)
     return {
       id: model.id,
-      // 倍率写进 name（**不是** description）：composer 的模型切换菜单只渲染
+      // 倍率与限制标签写进 name（**不是** description）：composer 的模型切换菜单只渲染
       // `name`，description 仅用于 /model 弹窗。见 displayNameFor 的说明。
       name: displayNameFor(model),
       // ⚠️ `resolveModel` 用**元数据里的 name**（不带倍率）⇒ 显式提供 `bareName`。
@@ -1040,7 +1076,7 @@ export class LobsteraiAdapter extends LlmAdapter {
       // ⚠️ 远端 `supportsImage` 权威；未声明时**保守报 `['text']`**（不是省略）
       // —— 见 `inputModalitiesFor`：宁可少报能力，也不要报一个服务端不认的模态。
       inputModalities: this.inputModalitiesFor(model.id),
-      ...model.description !== undefined ? { description: model.description } : {},
+      ...description !== undefined ? { description } : {},
       ...contextWindow !== undefined ? { contextWindow } : {},
       ...maxTokens !== undefined ? { maxTokens } : {},
       ...reasoning !== undefined ? { reasoning } : {},
@@ -1946,9 +1982,46 @@ export class LobsteraiAdapter extends LlmAdapter {
  * 形态差异：本 provider 的 `costMultiplier` 是**裸数字**（`0.05`），
  * 展示时补 `x` 前缀（buddy 系远端给的字符串本身已带 `x`）。
  */
+/**
+ * 远端条目的「不可用」短标签（`undefined` = 当前账号可用）。
+ *
+ * 判据来源只有 `accessible === false` 这一格 —— **不解析 `restrictionHint` 的中文
+ * 文案**（那是营销文案，改一个字判据就失效）。原因文案的挑选才用
+ * `subscriptionPriority`：这样「订阅专享」与「其它不可用」不会混成一句话，
+ * 也不会对已订阅账号误报「需订阅」（那种账号拿到的是 `accessible:true`）。
+ */
+export function restrictionLabelFor(model: LobsteraiRemoteModel): string | undefined {
+  if (model.accessible !== false) return undefined
+  return model.subscriptionPriority === true ? '需订阅' : '不可用'
+}
+
+/**
+ * `/model` 弹窗里的描述：远端原文 + （若有）不可用原因。
+ *
+ * ⚠️ 只**追加**，不改写远端原文 —— 那一句是上游营销文案（例如
+ * `qwen4-max` 的「限时四折，截至时间 2026-11-30 23:59:59」，前面还带一串
+ * `U+3164` 填充字符），改了就失去取证价值。
+ */
+function descriptionWithHint(model: LobsteraiRemoteModel): string | undefined {
+  const text = model.description
+  const hint = model.restrictionHint
+  if (hint === undefined) return text
+  return text === undefined || text.length === 0 ? hint : `${text}\n${hint}`
+}
+
+/**
+ * 模型在**选择器**里的展示名。
+ *
+ * ⚠️ 倍率与限制标签都必须进 `name`（不是 `description`）：composer 的模型切换
+ * 菜单只渲染 `name`，`description` 仅用于 `/model` 弹窗。
+ * 顺序固定为 `名称 · x倍率 · 限制`，与 buddy 的「名称 · x倍率」前缀一致。
+ */
 function displayNameFor(model: LobsteraiRemoteModel): string {
-  if (model.costMultiplier === undefined) return model.name
-  return `${model.name} · x${model.costMultiplier}`
+  const parts: string[] = [model.name]
+  if (model.costMultiplier !== undefined) parts.push(`x${model.costMultiplier}`)
+  const restriction = restrictionLabelFor(model)
+  if (restriction !== undefined) parts.push(restriction)
+  return parts.join(' · ')
 }
 
 /**

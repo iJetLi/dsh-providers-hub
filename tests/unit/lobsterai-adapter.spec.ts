@@ -240,6 +240,43 @@ describe('LobsterAI 远端模型参数解析', () => {
     const [zero] = parseLobsteraiModels({ code: 0, data: [{ modelId: 'm2', costMultiplier: 0 }] })
     expect(zero).not.toHaveProperty('costMultiplier')
   })
+
+  // 订阅闸门三件套：`accessible` / `subscriptionPriority` / `restrictionHint`。
+  // ⚠️ 这三个键远端**恒定下发**（2026-11-17 实测 21/21 条目都有），
+  // 但本仓此前一个都没读 —— 于是「订阅专享」的模型在选择器里看起来完全可用。
+  it('解析 accessible / subscriptionPriority / restrictionHint', () => {
+    const [model] = parseLobsteraiModels({
+      code: 0,
+      data: [{
+        modelId: 'qwen4-max',
+        modelName: 'Qwen4-Max',
+        accessible: false,
+        subscriptionPriority: true,
+        restrictionHint: '该模型仅限有效订阅用户使用',
+      }],
+    })
+    expect(model).toMatchObject({
+      accessible: false,
+      subscriptionPriority: true,
+      restrictionHint: '该模型仅限有效订阅用户使用',
+    })
+  })
+
+  it('订阅三件套缺失时留 undefined（不填 false —— 「没声明」≠「不可用」）', () => {
+    const [model] = parseLobsteraiModels({ code: 0, data: [{ modelId: 'bare' }] })
+    expect(model).not.toHaveProperty('accessible')
+    expect(model).not.toHaveProperty('subscriptionPriority')
+    expect(model).not.toHaveProperty('restrictionHint')
+  })
+
+  it('装饰性脏值（字符串 "false"）按「未声明」处理，不读成可用', () => {
+    // `!!'false'` 会把不可用读成可用 —— 布尔一律按 `typeof === 'boolean'` 读。
+    const [model] = parseLobsteraiModels({
+      code: 0, data: [{ modelId: 'm', accessible: 'false', subscriptionPriority: 'false' }],
+    })
+    expect(model).not.toHaveProperty('accessible')
+    expect(model).not.toHaveProperty('subscriptionPriority')
+  })
 })
 
 describe('LobsterAI 模型列表 query', () => {
@@ -325,6 +362,68 @@ describe('LobsteraiAdapter 模型目录', () => {
     })
     const models = await adapter.listModels('lobsterai')
     expect(models).toEqual([{ provider: 'lobsterai', id: 'remote-only', name: 'Remote Only', inputModalities: ['text'] }])
+  })
+
+  /**
+   * 订阅闸门：`accessible:false` / `subscriptionPriority:true` / `restrictionHint`。
+   *
+   * 2026-11-17 实测（未订阅账号）：`qwen4-max` 与 `kimi-k3.1-pro-highspeed`
+   * 是 `accessible:false` + `subscriptionPriority:true` +
+   * 「该模型仅限有效订阅用户使用」，而本仓此前三个字段一个都没读 ⇒
+   * 选择器里它们看起来和别的模型一模一样，选了才知道不能用。
+   *
+   * 三条判据（每条都对应一个已经踩得到的分叉）：
+   * 1. **不得隐藏**（`accessible` 是账号级事实，官方客户端对订阅账号照常显示它）；
+   * 2. 选择器名必须带短标签（menu 只渲染 `name`，`description` 进不了 menu）；
+   * 3. 原因整句进 `description`（**追加**，不改写上游原文）。
+   */
+  describe('订阅闸门（accessible / subscriptionPriority / restrictionHint）', () => {
+    const remote = [
+      {
+        id: 'qwen4-max', name: 'Qwen4-Max', costMultiplier: 0.71,
+        accessible: false, subscriptionPriority: true,
+        restrictionHint: '该模型仅限有效订阅用户使用',
+        description: '新一代旗舰多模态模型。',
+      },
+      {
+        id: 'region-locked', name: 'Region', accessible: false,
+        restrictionHint: '该模型暂未在本地区开放',
+      },
+      // 已订阅账号：同一条目录也可能给 `accessible:true` + `subscriptionPriority:true`
+      { id: 'subscriber-ok', name: 'Sub OK', costMultiplier: 1, accessible: true, subscriptionPriority: true },
+      { id: 'plain', name: 'Plain', costMultiplier: 0.06, accessible: true },
+    ]
+    const adapterOf = () => makeAdapter(() => textSse('x'), { fetchRemoteModels: async () => remote }).adapter
+
+    it('不可用条目**仍在目录里**（隐藏会让「订阅后能多用什么」不可见）', async () => {
+      const models = await adapterOf().listModels('lobsterai')
+      expect(models.map((m) => m.id)).toEqual(['qwen4-max', 'region-locked', 'subscriber-ok', 'plain'])
+    })
+
+    it('选择器名带短标签：订阅专享 =「需订阅」，其它不可用 =「不可用」', async () => {
+      const models = await adapterOf().listModels('lobsterai')
+      const byId = new Map(models.map((m) => [m.id, m]))
+      expect(byId.get('qwen4-max')?.name).toBe('Qwen4-Max · x0.71 · 需订阅')
+      expect(byId.get('region-locked')?.name).toBe('Region · 不可用')
+    })
+
+    it('已订阅账号不画标签（`accessible:true` 时 `subscriptionPriority` 不参与判定）', async () => {
+      const models = await adapterOf().listModels('lobsterai')
+      const byId = new Map(models.map((m) => [m.id, m]))
+      expect(byId.get('subscriber-ok')?.name).toBe('Sub OK · x1')
+      expect(byId.get('plain')?.name).toBe('Plain · x0.06')
+    })
+
+    it('restrictionHint 追加到 description（原文逐字保留，只多一行）', async () => {
+      const models = await adapterOf().listModels('lobsterai')
+      const byId = new Map(models.map((m) => [m.id, m]))
+      expect(byId.get('qwen4-max')?.description)
+        .toBe('新一代旗舰多模态模型。\n该模型仅限有效订阅用户使用')
+      // 没有 description 的条目：hint 就是全部描述
+      expect(byId.get('region-locked')?.description).toBe('该模型暂未在本地区开放')
+      // 没有 hint 的条目：描述原样（不得被追加空行）
+      expect(byId.get('plain')?.description).toBeUndefined()
+    })
   })
 
   // ── 目录门控：没有已登录账号就不显示该 provider 的模型 ──
