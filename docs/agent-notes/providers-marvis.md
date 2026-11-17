@@ -235,7 +235,7 @@ token 与 guid 绑定：共用本机 guid 会让第二个号**把第一个号顶
 |---|---|
 | `src/marvis-adapter.ts` | `slots: (modelId?, sessionId?) => …`；`stream()` 调用点传 `options.sessionId`；**目录路径仍然裸调 `slots()`**（目录与排序无关） |
 | `src/account-pool.ts` | 新增 `orderAccountsForSession(provider, accounts, sessionId)` —— **纯排序**，复用 `rankAccountsBySessionWithOverflow` + `sessionLoadIndex` 的既有兜底，不取凭据、不过滤 |
-| `src/index.ts` | marvis 装配块的 `slots()` 末尾：`sessionId` 非空 **且** `pool.sessionBalanceEnabled()` 为真时才 `orderAccountsForSession`，否则**原样返回池序** |
+| `src/index.ts` + `src/marvis-slots.ts` | marvis 装配块的 `slots()` 末尾调纯函数 `orderMarvisSlots(pool, slots, sessionId)`：`sessionId` 非空 **且** `pool.sessionBalanceEnabled()` 为真时才 `orderAccountsForSession`，否则**原样返回池序**。**抽纯函数是为了能写行为级用例**（`tests/unit/marvis-slot-ordering.spec.ts`）—— 内联在装配块里只能做源码文本断言，而源码断言对「调了但丢弃返回值」无牙 |
 | `plugin-src/client/jet-hub.js` | `supportsSessionBalance = provider === 'zcode' \|\| provider === 'marvis'`（面板开关放开到 marvis） |
 
 排序语义（与 zcode 的 `accountSelection: 'session-balance'` **同一个纯函数**）：
@@ -243,19 +243,63 @@ token 与 guid 绑定：共用本机 guid 会让第二个号**把第一个号顶
 - 有 `sessionId` ⇒ rendezvous 哈希把同一会话**稳定映射**到同一个号（会话亲和），不同会话分散；
 - 某号今日请求数达阈值（env `DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS`，缺省 300）⇒ 整组沉底，
   **新会话**落到还有余量的号上；正在跑的会话越过阈值时会**迁移一次**（这正是把长会话摊开的手段，
-  不是 bug）；
-- 账本读取抛错 ⇒ 退化为纯哈希亲和（**绝不反噬推理**）；
+  不是 bug）。⚠️ 300 是**每个号的绝对量** —— 11 个号的池要累计到 **3300 请求/天**才轮完一圈，
+  所以「11 个号不再 1 主 10 备」**只在会话数足够多时才成立**（实测：单会话 75 / 299 / 300 请求
+  都只用 1 个号，400 才轮到第 2 个）；
+- 账本读取抛错 ⇒ 退化为**空账本**的纯哈希亲和（**绝不反噬推理**）。⚠️ 这**不等于**「与未装该功能
+  同语义」—— 未装该功能时是**原样池序**（`marvis-0..10`），两者不同：退化的代价是**丢掉
+  「手动顺序优先」**这条语义；
 - 无 `sessionId`（本地 OpenAI 网关进来的请求，`toGenerateOptions` 不设它）⇒ **原样池序，不洗牌**
-  —— 槽制的「第一个」被当作稳定性保证，随机化留给调用方；
+  —— 槽制的「第一个」被当作稳定性保证，随机化留给调用方。⚠️⚠️ 这一条**就是本改造最大的已知
+  限制**：报障人举证的账本桶是 `gateway|marvis|…`，**整个桶都没有 sessionId** ⇒ 网关那条路上
+  「1 主 10 备」**原样复现**。详见下面「已知限制」一节；
 - 面板开关关 ⇒ 原样池序（= 改造前逐字节同路径），这就是开关文案「关闭后回到「手动顺序优先」」的实现。
+  ⚠️ marvis 的开关**只**由面板开关（`sessionBalanceCache` / store 里的 `sessionBalanceEnabled`）
+  控制 —— 环境变量 `DSH_ZCODE_SESSION_BALANCE=0` 对它**完全无效**（那个 env 只被
+  `sessionBalanceEnabled(env)` 读，而 marvis 走 `pool.sessionBalanceEnabled()`，两者不是同一处）；
+  只有 `DSH_ZCODE_SESSION_BALANCE_OVERFLOW_REQUESTS` 经 `overflowRequestsThreshold()` 真正
+  驱动 marvis 的阈值。两个变量名都还叫 `ZCODE`，**别**按名字猜它们只管 zcode。
 
 ⚠️ **不要**改走 `createCredentialResolver({ accountSelection: 'session-balance' })`：
 `tests/unit/session-balance-wiring.spec.ts` 有硬守卫「`accountSelection` 装配点全局唯一且在
 ZCODE 配置块内」，且槽制需要的是**完整有序序列**（换号重发用），不是「取第一个凭据」。
 
-⚠️ **签名窄于实现是静默失效**：`slots: (modelId?) => …` 时 `tsc` **不报错**（函数参数逆变），
-表现是「面板选了不生效且零报错」。守卫在 `tests/unit/rotation-session-id-wiring.spec.ts` 的
-「槽制适配器」段（`SLOT_ADAPTERS`），行为侧在 `tests/unit/marvis-session-balance.spec.ts`。
+⚠️ **签名扩展要两头都改，且真静默形态只有一个方向**（PR #190 审计实测更正）：
+
+- **实现窄于声明**（类型是两参、实现里只写 `(modelId?)`）⇒ `tsc` **不报错**（函数参数逆变：
+  少收参数是合法的）⇒ 真静默失效，`sessionId` 永远到不了池。**这才是要防的方向**，
+  守卫是 `tests/unit/rotation-session-id-wiring.spec.ts` 的「槽制适配器」段
+  （`SLOT_ADAPTERS` 源码计数）。
+- **声明窄于实现**（类型写一参、调用点仍传两参）⇒ `tsc` **会报**
+  `TS2554: Expected 0-1 arguments, but got 2`（实测 `src/marvis-adapter.ts(343,59)`，exit=2）。
+
+⚠️ **三条源码断言挡不住「留着但失效」**（对抗审计两种真实失效实测全绿）：「调了
+`pool.orderAccountsForSession(...)` 但 `return slots` 丢弃结果」与「判据只写进注释」都能让源码
+正则命中 ⇒ 所以 `src/index.ts` 的 gate 已抽成纯函数
+`orderMarvisSlots(pool, slots, sessionId)`（`src/marvis-slots.ts`），**行为级**守卫在
+`tests/unit/marvis-slot-ordering.spec.ts`（6 条行为 + 3 条接线）。
+
+### ⚠️⚠️ 已知限制：本地 OpenAI 网关流量**没有**会话标识
+
+`src/openai-gateway/messages.ts` 的 `toGenerateOptions()` 返回的 `GenerateOptions` 里
+**没有 `sessionId`**（全文件 `grep -n sessionId` 零命中；`markGatewayChannel()` 只原地打
+`GATEWAY_CHANNEL_MARK`，不复制、不补字段），而网关**不读任何请求头**（整个目录只有一处
+`request.headers['content-type']`）。⇒ 网关进来的请求在 `src/index.ts` 的 gate 里
+`sessionId === undefined` ⇒ **原样池序** ⇒ 报障人看到的「1 主 10 备」在网关路径上**原样存在**。
+
+**为什么本 PR 不顺手把 `sessionId` 注入网关**（两份审计都建议过，实测不可行）：
+
+- `grep -rn "options\.sessionId" src/` ⇒ **48 处 / 18 个文件**，`sessionId` 在本仓是
+  **「调用方要复刻哪个会话」的语义**，不是「用来分散账号的随机串」；
+- `src/codely-sign.ts:154` 会把它**上行**成请求头 `x-litellm-session-id`；
+- `src/gemini-adapter.ts:787` 用它判「是否已显式钉住会话」来决定**要不要升代**，注释逐字写
+  「显式钉值意味着调用方要复刻特定会话，擅自换掉会让它失去意义」⇒ 注入会让网关流量**丢掉
+  gemini 的升代恢复**；
+- 其余 `resolveCredential(model, options.sessionId)` 遍布 18 个文件 ⇒ 注入会**同时改变所有
+  provider 在网关路径上的选号**。
+
+⇒ 把客户端可控的串塞进 `sessionId` 是**跨渠道行为变更**，必须单独 PR + 独立审计，不能夹在
+本 PR 里。所以本次的定位收窄为：**DSH 宿主对话按会话分散；网关路径如实登记为空洞**。
 
 ## 7. 缺陷登记
 
@@ -274,7 +318,7 @@ ZCODE 配置块内」，且槽制需要的是**完整有序序列**（换号重�
 | 11 | 额度接口无日期字段 ⇒ 曾按「明天 0 点」编造到期 | 已修（`expiryUnknown: true`） |
 | 12 | 目录里声明 `maxTokens` / `reasoning.efforts` 的冲动 | 未采纳（评审 M4 + 产品裁定，见上） |
 | 13 | 该渠道在 README「支持的渠道」表里**长期缺席**（合并提交漏更新文档） | 已修（`1a647fe` 补齐 18→29） |
-| 14 | 11 个号里只有第 1 个在干活（另 10 个是纯备份，账本可证） | 已修（会话分散，见 §6.1） |
+| 14 | 11 个号里只有第 1 个在干活（另 10 个是纯备份，账本可证） | **部分**修（会话分散，见 §6.1）—— **只对 DSH 宿主对话生效**；本地 OpenAI 网关流量没有会话标识 ⇒ 仍原样池序（见 §6.1「已知限制」） |
 | 15 | 上游偶发 `400 3000101 invalid parameter`（同一报文重发即成功）曾直接终止会话 | 已修（换号重发；确定性 400 仍直抛） |
 
 ## 8. 复现与验证

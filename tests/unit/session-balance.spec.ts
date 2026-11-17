@@ -42,6 +42,20 @@ describe('session-balance 纯函数', () => {
     expect(first).toHaveLength(ACCOUNTS.length)
   })
 
+  it('★★ 固定输入 ⇒ 逐字固定的顺序（golden，PR #190 审计补）', () => {
+    // 上面几条只断言**相对性质**（稳定 / 分散 / rendezvous 不变），挡不住两种真实变异：
+    //   ① 把比较方向改反（`? 1 : -1` → `? -1 : 1`）—— 仍然稳定、仍然均匀、仍然满足
+    //      rendezvous，但**同一个会话换了账号**、负载落到别的号上；
+    //   ② 分数换个入参（如 `account.id + 'x'`）—— 同样三种性质全成立。
+    // 实测两条在这条用例之前都是 GREEN。golden 顺序把「哪个会话落到哪个号」钉死。
+    // ⚠️ 改 `sessionAccountScore` 的盐 / 哈希口径必须同步更新这三行（这是**故意**的）。
+    const ids = (sessionId: string) =>
+      rankAccountsBySession(ACCOUNTS, sessionId, 'zcode').map((account) => account.id)
+    expect(ids('session-abc')).toEqual(['zcode-b', 'zcode-a', 'zcode-d', 'zcode-e', 'zcode-c'])
+    expect(ids('session-xyz')).toEqual(['zcode-d', 'zcode-e', 'zcode-a', 'zcode-c', 'zcode-b'])
+    expect(ids('session-000')).toEqual(['zcode-b', 'zcode-a', 'zcode-d', 'zcode-e', 'zcode-c'])
+  })
+
   it('不同 scope / sessionId / accountId 的分数不同（避免串味）', () => {
     expect(sessionAccountScore('zcode', 's1', 'a')).not.toBe(sessionAccountScore('zcode', 's1', 'b'))
     expect(sessionAccountScore('zcode', 's1', 'a')).not.toBe(sessionAccountScore('zcode', 's2', 'a'))

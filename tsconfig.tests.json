@@ -56,6 +56,11 @@
     // 初版 commit message 声称「fixture 型缺陷会被类型签名拦住」，但当时这道签名
     // 根本没被启用 —— 该错误在两条用例里活了下来。现在它真的会被拦住。
     "tests/unit/session-balance.spec.ts",
+    // ⚠️ 2026-11-17 补（PR #190 双审计返工）：`orderMarvisSlots` 是**行为级**门控，
+    //    它断言 `SlotOrderingPool` 的**接口形状**（`sessionBalanceEnabled()` /
+    //    泛型 `orderAccountsForSession`）—— 这类形状错误在 esbuild 转译下完全看不见，
+    //    而它是「把判定搬出 `src/index.ts`」的承重件。
+    "tests/unit/marvis-slot-ordering.spec.ts",
     // ⚠️ 2026-11-02 二审 C🟢 补、四审 H-4 **更正归因**：这里是 monkeycode /
     // monkeycodeintl / baizhi 三个 provider 新增 spec 中**需要类型层检查**的那部分。
     // 二审时本段写成「下面这批是**全部** spec」，实际 13 份只点名了 7 份 —— 措辞已更正。

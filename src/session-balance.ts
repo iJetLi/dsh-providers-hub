@@ -89,13 +89,21 @@ export function rankAccountsBySession<T extends { id: string }>(
   sessionId: string,
   scope: string,
 ): T[] {
-  return [...accounts].sort((a, b) => {
-    const sa = sessionAccountScore(scope, sessionId, a.id)
-    const sb = sessionAccountScore(scope, sessionId, b.id)
-    if (sa !== sb) return sa < sb ? 1 : -1
+  // ⚠️ 分数**必须预计算**：初版把这个纯函数直接写在比较器里 ⇒ 每次 `sort` 都是
+  //    O(n log n) 次 SHA-256。对抗审计实测 n=11 ⇒ 103.8 µs、n=100 ⇒ 2.07 ms、
+  //    n=1000 ⇒ 47.7 ms —— 而选号在**每次推理请求**的关键路径上（marvis 的
+  //    `slots()` 每请求都跑一次）。预计算后每个账号只算一次，
+  //    **语义逐字节不变**（同一批分数、同一比较规则）。
+  const scored = accounts.map((account) => ({
+    account,
+    score: sessionAccountScore(scope, sessionId, account.id),
+  }))
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return a.score < b.score ? 1 : -1
     // 哈希碰撞在 SHA-256 下实际不可达；保留确定性的 id 次序，避免引擎排序不稳定。
-    return a.id.localeCompare(b.id)
+    return a.account.id.localeCompare(b.account.id)
   })
+  return scored.map((entry) => entry.account)
 }
 
 /**

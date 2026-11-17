@@ -7010,9 +7010,18 @@ function ProviderPanel({
               className: 'dim-jh-nativeSearch',
               title: (sessionBalanceFailed
                 ? '⚠️ 开关状态读取失败，当前显示的是默认值（开启）。点击即可重新提交一次。'
+                // ⚠️「无会话标识的请求」两家行为**不同**，不能共用一句（PR #190 双审计 P2）：
+                //    zcode 走 `getAvailableAccountForSession` ⇒ 无 sessionId 时
+                //    `shuffleAccounts(candidates)`（**随机分摊**）；
+                //    marvis 走 `orderAccountsForSession` ⇒ 无 sessionId 时原样池序
+                //    （**不分散**，本地 OpenAI 网关流量就是这种）。
+                //    原本文案对 marvis 是**假话**，会让用户以为网关流量已经被摊开。
                 : '负载均衡：多账号按会话分散（同一会话优先同一账号；账号今日请求数达阈值后会沉底，'
-                  + '正在跑的会话可能迁移一次以摊平负载；无会话标识的请求随机分摊）。'
-                  + '关闭后回到「手动顺序优先」的选号方式。'),
+                  + '正在跑的会话可能迁移一次以摊平负载；'
+                  + (provider === 'marvis'
+                    ? '无会话标识的请求（本地网关进来的）保持池序、不分散）'
+                    : '无会话标识的请求随机分摊）')
+                  + '。关闭后回到「手动顺序优先」的选号方式。'),
             },
             React.createElement('input', {
               type: 'checkbox',

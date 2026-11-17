@@ -208,6 +208,7 @@ import { modelscopeModelsUrl, modelscopeHeaders, type ModelscopeCredential } fro
 import { MarvisAuth } from './marvis-auth.js'
 import { MarvisAdapter, registerMarvisLlm, type MarvisSlot } from './marvis-adapter.js'
 import { MARVIS } from './marvis-product.js'
+import { orderMarvisSlots } from './marvis-slots.js'
 import { parseMarvisCredential, type MarvisCredential } from './marvis.js'
 // ⚠️ **本 fork 独有**的 provider（上游 rc.11 仍无 qiniu）。七牛云 AI 与 modelscope
 // **同格**：OpenAI 兼容 + 长期有效的静态 API Key（无 refresh、无余额端点），
@@ -4214,10 +4215,12 @@ export function apply(ctx: Context): void {
       // ⚠️ 无 sessionId（本地 OpenAI 网关进来的请求不设它，见
       //    `src/openai-gateway/messages.ts` 的 `toGenerateOptions`）⇒ 同样原样返回，
       //    不在这里洗牌：槽制的「第一个」会被当作稳定性保证，随机化留给调用方。
-      if (sessionId !== undefined && sessionId.length > 0 && pool.sessionBalanceEnabled()) {
-        return pool.orderAccountsForSession(MARVIS.id, slots, sessionId)
-      }
-      return slots
+      // ⚠️ 判定已抽到 `src/marvis-slots.ts` 的 `orderMarvisSlots`（PR #190 双审计
+      //    返工）：原先是这里的内联 `if`，而它的守卫**全是源码文本断言** ——
+      //    审计实测 `if (false && …)` / 丢弃返回值 / 反向读三种真实失效全绿。
+      //    搬进纯函数后三种都会落到行为级用例上（`marvis-slot-ordering.spec.ts`）。
+      // ⚠️ **网关流量不会分散**：无 `sessionId` ⇒ 原样返回，见模块头的已知限制。
+      return orderMarvisSlots(pool, slots, sessionId)
     },
     accountPool: pool,
     product: MARVIS,

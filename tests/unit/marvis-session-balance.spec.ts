@@ -85,7 +85,9 @@ describe('★ AccountPool.orderAccountsForSession（槽制渠道的排序原语�
     for (let index = 0; index < 60; index += 1) {
       firsts.add(pool.orderAccountsForSession(MARVIS.id, ACCOUNTS, `session-${index}`)[0]!.id)
     }
-    expect(firsts.size).toBeGreaterThanOrEqual(5)
+    // ⚠️ 必须**覆盖全部**账号（原先写 `>= 5`）：11 个号里只用到 5 个时 `5 >= 5` 恒真，
+    //    等于这条用例对「排序只看前 5 个」这种退化完全无牙（对抗审计 m16 实测绿）。
+    expect(firsts.size).toBe(ACCOUNTS.length)
   })
 
   it('★★ 今日负载越阈的号整组沉底（溢出均衡真的读到账本）', () => {
@@ -127,31 +129,34 @@ describe('★ AccountPool.orderAccountsForSession（槽制渠道的排序原语�
   })
 })
 
-describe('★ src/index.ts 的 marvis 槽序接线（源码断言：静默失效只能这样抓）', () => {
-  const source = readFileSync(join(process.cwd(), 'src', 'index.ts'), 'utf8')
-  /** 只取 marvis 装配块，避免命中其它 provider 的同名调用。 */
-  const block = (() => {
-    const start = source.indexOf('const marvisAdapter = registerMarvisLlm(ctx')
-    expect(start, 'src/index.ts 里找不到 marvis 装配块').toBeGreaterThan(-1)
-    const end = source.indexOf('magicrewAuth', start)
-    return source.slice(start, end > start ? end : start + 4000)
-  })()
+// ⚠️ 原先这里还有三条 `src/index.ts` 的**源码文本断言**（gate 是否调用 / 是否判开关 /
+//    排序是否在凭据解析之后）。PR #190 双审计返工把判定抽成 `src/marvis-slots.ts` 的
+//    `orderMarvisSlots` 之后，这三条搬到 `tests/unit/marvis-slot-ordering.spec.ts` 并升级为
+//    **行为级**：源码断言挡不住「留着但失效」（`if (false)` / 丢弃返回值 /
+//    反向读开关，三种实测全绿），纯函数用例才咬得住。
 
-  it('★ 接线真的调用了顺序原语（删掉那一行 ⇒ 用户报障原样复现）', () => {
-    expect(block).toMatch(/pool\.orderAccountsForSession\(/)
+describe('★ 客户端开关门控（`supportsSessionBalance`）必须点名到今天这两家', () => {
+  const client = readFileSync(join(process.cwd(), 'plugin-src', 'client', 'jet-hub.js'), 'utf8')
+
+  it('★★ 门控表达式逐字锁住 zcode / marvis（扩面必须同时改这里，不许静默扩散）', () => {
+    // 为什么必须锁字面量：`tests/unit/jet-hub-panel-wiring.spec.ts:391` 的 `PROVIDERS`
+    // 是**手写 7 家**，而 provider registry 有 31 家 ⇒ 往门控里塞第三家（如 `gemini`）
+    // 时那个 panel-wiring 用例照样全绿（对抗审计 m19 实测）。这条是「扩面必须显式
+    // 改两处」的唯一闸门 —— 红在这里会逼人重新想「这一家真的支持会话分散吗」。
+    const match = /const supportsSessionBalance = ([^\n]+)/u.exec(client)
+    expect(match, 'plugin-src/client/jet-hub.js 里找不到 supportsSessionBalance 的定义').not.toBeNull()
+    expect(match![1]!.trim()).toBe("provider === 'zcode' || provider === 'marvis';")
   })
 
-  it('★★ 只在「开关开 + sessionId 非空」时才重排（否则必须保持手动顺序优先）', () => {
-    // 判据两半必须同时在：少了开关 ⇒ 面板上关不掉；少了 sessionId 判断 ⇒
-    // 无会话标识的网关请求会被洗牌，与「手动顺序优先」的文档语义冲突。
-    expect(block).toMatch(/sessionBalanceEnabled\(\)/)
-    expect(block).toMatch(/sessionId\s*!==\s*undefined/)
-  })
-
-  it('★ 排序发生在凭据解析之后（它排的是已解析的槽，不是账号条目）', () => {
-    const parseAt = block.indexOf('parseMarvisCredential(')
-    const orderAt = block.indexOf('pool.orderAccountsForSession(')
-    expect(parseAt).toBeGreaterThan(-1)
-    expect(orderAt).toBeGreaterThan(parseAt)
+  it('★★ 面板 tooltip 必须按 provider 分叉（marvis 不随机分摊）', () => {
+    // 原文案对 marvis 是**假话**：写「无会话标识的请求随机分摊」，而 marvis 走
+    // `orderAccountsForSession` ⇒ 无 sessionId 时**原样池序**（只有 zcode 走
+    // `shuffleAccounts`）。用户会据此以为网关流量已经被摊开（正是本 PR 的 P1）。
+    const at = client.indexOf('负载均衡：多账号按会话分散')
+    expect(at, '找不到「负载均衡」tooltip 文案').toBeGreaterThan(-1)
+    const window = client.slice(at - 500, at + 1000)
+    expect(window).toContain("provider === 'marvis'")
+    expect(window).toContain('保持池序、不分散')
+    expect(window).toContain('随机分摊')
   })
 })
