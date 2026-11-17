@@ -146,6 +146,39 @@ export const RACCOON_IAM_ISSUER = `${new URL(RACCOON_API_BASE).host}/iam`
 const RACCOON_LOOPBACK_REDIRECT_RE = /^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}\/auth\/callback$/
 
 /**
+ * 回调 URL 的**总长度上限**。
+ *
+ * ## 为什么是 4096 而不是官方的 8192
+ *
+ * 官方接收端写的是 `rawUrl.length > 8192`。但**在我们这儿那个上限是够不着的**：
+ * Node 的 `maxHeaderSize: 8192`（**含**请求行与方法/版本/Host 等头）在 URL
+ * 长到约 **8160** 时就会先回 **431 Request Header Fields Too Large**
+ * （实测：URL 长 8150 → 200、8160 → 431）⇒ **任何长于 8192 的 URL 根本到不了
+ * 我们的处理器** ⇒ 写 8192 等于**一条永远走不到的死代码**（本仓反复记过
+ * 「判据够不着 ⇒ 等于没有」）。
+ *
+ * ⇒ 取 **4096**：既**真的**在 Node 的 431 之前（⇒ 这条判据**有牙**、
+ * 能被单测打到），又远高于任何**正常**回调的长度
+ * （路径 13 + `code` ≤ 4096 + `state` 64 + 分隔符 ≈ 4200 —— 嗯，正好在
+ * 边界上，所以 code 那条 4096 的上限与它**同量级**，两条腿合起来把
+ * 「畸形超长」挡在门外）。
+ *
+ * ⚠️ 代价要说清：**一条 code 极长（接近 4096）的合法回调**可能被这条 URL
+ * 上限拒掉。但那种 code 上游自己也不会签发（官方对 code 的上限也是 4096，
+ * 而带 64 位 state 与路径后总量必然更小）⇒ 实际不可达。
+ */
+export const RACCOON_CALLBACK_URL_MAX_LENGTH = 4096
+
+/**
+ * 单个 socket 的空闲超时（毫秒）—— 官方接收端同款（20000）。
+ *
+ * ⚠️ **可注入**（`options.socketTimeoutMs`）：20 秒在单测里没法等 ⇒
+ *   没有注入点，那条判据就**够不着**（变异验证会如实报「无牙」——
+ *   那不是判据没用，是**够不着**）。
+ */
+export const RACCOON_SOCKET_TIMEOUT_MS = 20_000
+
+/**
  * 官方页面解析器接受**全部**的参数名。
  *
  * ⚠️ 多一个键 ⇒ 整条链接作废（页面判 `null`）。所以构造时**只**放这几个。
@@ -334,6 +367,8 @@ export async function startRaccoonAuthorizeReceiver(options: {
   authorizationOrigin?: unknown
   appname?: unknown
   base?: unknown
+  /** 单个 socket 的空闲超时（毫秒）；默认 {@link RACCOON_SOCKET_TIMEOUT_MS}。 */
+  socketTimeoutMs?: unknown
 } = {}): Promise<RaccoonAuthorizeReceiver> {
   const state = options.state !== undefined && options.state !== null
     ? readString(options.state, '')
@@ -386,6 +421,12 @@ export async function startRaccoonAuthorizeReceiver(options: {
         'Cache-Control': 'no-store',
         'Referrer-Policy': 'no-referrer',
         'X-Content-Type-Options': 'nosniff',
+        // ⚠️ `Connection: close`（官方接收端同款）：这个端口是「等着收凭据」的
+        //   一次性口子 ⇒ **每个请求都必须自己断开**。否则 keep-alive 的连接
+        //   会**累积**在本机上，而 `maxConnections = 8`（见下）⇒ 第 9 个
+        //   正常请求会被**拒**（连接被关）—— 那是一个「真回调进不来」的
+        //   可用性缺陷，与安全无关。
+        Connection: 'close',
       })
       res.end(body)
     }
@@ -411,9 +452,23 @@ export async function startRaccoonAuthorizeReceiver(options: {
         reason = 'origin'
       } else if (typeof req.headers['sec-fetch-dest'] === 'string' && req.headers['sec-fetch-dest'] !== 'document') {
         reason = 'fetch-dest'
+      } else if (raw.length > RACCOON_CALLBACK_URL_MAX_LENGTH) {
+        // ⚠️ **整个 URL 的长度上限**（官方接收端有这条：`rawUrl.length > 8192`）。
+        //   没有它 ⇒ 一个超长 URL 会被 `new URL()` **完整解析**（内存 + CPU
+        //   都归我们），而这条请求本来就只可能带一个 ≤4096 的 code。
+        reason = 'length'
       } else {
         const url = new URL(raw, `http://${authority}`)
         if (url.origin !== `http://${authority}` || url.pathname !== RACCOON_LOOPBACK_CALLBACK_PATH || url.hash !== '') {
+          // ⚠️⚠️ **协议相对 URL（`//evil/…`）在这一格被拒**，而且**是靠
+          //   `url.origin` 那一腿**：`new URL('//evil/x', 'http://127.0.0.1:P')`
+          //   解析出的是 **`http://evil/x`** ⇒ origin 不等 ⇒ 进这一格。
+          //
+          //   ⚠️ **不要**再加一条「`raw.startsWith('//')`」的显式检查：
+          //   那是**同义判据**（本仓记过的坑：一文件两套同义判据），
+          //   而且它**测不出差别** —— 变异把它去掉，origin 那腿照样拒
+          //   （实测 14 条变异里那条**无牙**）。要防协议相对 URL，靠的
+          //   是 **origin 严格等值**这一腿。
           reason = 'path'
         } else {
           const keys = [...url.searchParams.keys()]
@@ -459,6 +514,27 @@ export async function startRaccoonAuthorizeReceiver(options: {
   timer.unref?.()
   server = createServer({ maxHeaderSize: 8192 }, request)
   server.on('error', () => finish({ ok: false, reason: 'failed' }))
+  // ⚠️⚠️ **三条超时/连接数兜底**（官方接收端同款，2026-11-17 对齐）：
+  // 官方 `webLoginLoopback.js` 里有 `server.maxConnections = 8` /
+  // `headersTimeout = 5000` / `requestTimeout = 10000` /
+  // `setTimeout(20000, socket => socket.destroy())`。
+  //
+  // 没有它们的后果：一个**慢速连接**（不发完整请求头、也不断开）能占住这个
+  // 端口直到 5 分钟的整体超时 ⇒ 而这个端口是「等着收凭据」的口子，占住它
+  // 不只是资源问题，还是**可用性**问题（真回调进不来）。
+  //
+  // ⚠️ **socket 超时必须可注入**：20 秒的默认值在单测里没法等 ⇒
+  //   注入点让用例能把它压到几百毫秒（否则那条判据**测不到**，
+  //   变异验证会如实报「无牙」—— 那不是判据没用，是**够不着**）。
+  const socketTimeoutMs = typeof options.socketTimeoutMs === 'number'
+    && Number.isFinite(options.socketTimeoutMs)
+    && options.socketTimeoutMs > 0
+    ? options.socketTimeoutMs
+    : RACCOON_SOCKET_TIMEOUT_MS
+  server.maxConnections = 8
+  server.headersTimeout = 5_000
+  server.requestTimeout = 10_000
+  server.setTimeout(socketTimeoutMs, (socket) => socket.destroy())
   const requestedPort = typeof options.port === 'number'
     && Number.isInteger(options.port)
     && options.port > 0

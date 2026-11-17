@@ -16,6 +16,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import http from 'node:http'
+import net from 'node:net'
 import {
   buildRaccoonAuthorizeUrl,
   exchangeRaccoonAuthorizationCode,
@@ -26,6 +27,7 @@ import {
   RACCOON_AUTH_APPNAME,
   RACCOON_AUTHORIZATION_CODE_NOT_FOUND,
   RACCOON_AUTHORIZE_PATH,
+  RACCOON_CALLBACK_URL_MAX_LENGTH,
   RACCOON_IAM_ISSUER,
   RACCOON_LOOPBACK_CALLBACK_PATH,
 } from '../../src/raccoon-authorize.js'
@@ -57,6 +59,34 @@ function probe(
     })
     req.on('error', () => resolve({ status: null, body: 'connection-closed' }))
     req.end()
+  })
+}
+
+/**
+ * 用**原始请求行**发一个请求（`http.request` 的 `path` 会被规范化，
+ * 发不出协议相对 URL 那种形态）。
+ */
+function rawRequest(
+  port: number,
+  rawLine: string,
+): Promise<{ status: number | null; body: string }> {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write(`GET ${rawLine} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`)
+    })
+    let body = ''
+    // ⚠️ **不等 close**：我们回了 `Connection: close`，但 socket 的 close
+    //   事件在某些平台上有延迟 ⇒ 用「响应头到齐」判定完成（更准，也更快）。
+    socket.on('data', (chunk) => {
+      body += String(chunk)
+      if (body.includes('\r\n\r\n')) {
+        const match = /HTTP\/1\.1 (\d{3})/.exec(body)
+        const status = match === null ? null : Number(match[1])
+        socket.destroy()
+        resolve({ status, body })
+      }
+    })
+    socket.on('error', () => resolve({ status: null, body: 'connection-closed' }))
   })
 }
 
@@ -149,25 +179,30 @@ describe('startRaccoonAuthorizeReceiver：七条规则，跑在真 socket 上', 
     const receiver = await startRaccoonAuthorizeReceiver({ state: STATE, timeoutMs: 60_000 })
     try {
       const good = `/auth/callback?code=${encodeURIComponent(CODE)}&state=${STATE}`
-      const cases: Array<[string, Promise<{ status: number | null; body: string }>, string]> = [
-        ['POST 被拒（只收 GET）', probe(receiver.port, good, {}, 'POST'), 'method'],
-        ['外来 Host 头被拒', probe(receiver.port, good, { Host: 'example.com' }), 'host'],
-        ['外来 Origin 被拒', probe(receiver.port, good, { Origin: 'https://evil.example' }), 'origin'],
-        ['非 document 的 Sec-Fetch-Dest 被拒', probe(receiver.port, good, { 'Sec-Fetch-Dest': 'iframe' }), 'fetch-dest'],
-        ['多一个查询键被拒', probe(receiver.port, `${good}&foo=1`), 'keys'],
-        ['state 重复出现被拒', probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${STATE}&state=${STATE}`), 'keys'],
-        ['state 不匹配被拒', probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${'b'.repeat(64)}`), 'state'],
-        ['63 位 state 被拒', probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${'a'.repeat(63)}`), 'state'],
-        ['code 带控制字符被拒', probe(receiver.port, `/auth/callback?code=${encodeURIComponent('ab')}&state=${STATE}`), 'code'],
-        ['超长 code（>4096）被拒', probe(receiver.port, `/auth/callback?code=${encodeURIComponent('c'.repeat(5000))}&state=${STATE}`), 'code'],
-        ['路径不对被拒', probe(receiver.port, `/auth/callback2?code=x&state=${STATE}`), 'path'],
+      // ⚠️⚠️ **逐条串行**（不写成「数组字面量里直接调 probe」）：那会**同时**
+      //   发出 11 个请求 ⇒ 撞上 `maxConnections = 8`（官方接收端同款的上限）
+      //   ⇒ 后面的连接**被拒**（status 为 null）⇒ 用例红在「连接被关」，
+      //   而不是红在它想验的那条规则上（那才是**无牙**的判据）。
+      //   真实用法也是串行的：浏览器只投递**一次**回调。
+      const cases: Array<[string, () => Promise<{ status: number | null; body: string }>, string]> = [
+        ['POST 被拒（只收 GET）', () => probe(receiver.port, good, {}, 'POST'), 'method'],
+        ['外来 Host 头被拒', () => probe(receiver.port, good, { Host: 'example.com' }), 'host'],
+        ['外来 Origin 被拒', () => probe(receiver.port, good, { Origin: 'https://evil.example' }), 'origin'],
+        ['非 document 的 Sec-Fetch-Dest 被拒', () => probe(receiver.port, good, { 'Sec-Fetch-Dest': 'iframe' }), 'fetch-dest'],
+        ['多一个查询键被拒', () => probe(receiver.port, `${good}&foo=1`), 'keys'],
+        ['state 重复出现被拒', () => probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${STATE}&state=${STATE}`), 'keys'],
+        ['state 不匹配被拒', () => probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${'b'.repeat(64)}`), 'state'],
+        ['63 位 state 被拒', () => probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${'a'.repeat(63)}`), 'state'],
+        ['code 带控制字符被拒', () => probe(receiver.port, `/auth/callback?code=${encodeURIComponent('ab')}&state=${STATE}`), 'code'],
+        ['超长 code（>4096）被拒', () => probe(receiver.port, `/auth/callback?code=${encodeURIComponent('c'.repeat(5000))}&state=${STATE}`), 'code'],
+        ['路径不对被拒', () => probe(receiver.port, `/auth/callback2?code=x&state=${STATE}`), 'path'],
       ]
       const bodies: string[] = []
-      for (const [name, pending, expected] of cases) {
-        const res = await pending
+      for (const [name, run, expected] of cases) {
+        const res = await run()
         bodies.push(res.body)
         expect(`${name}: ${res.status} ${res.body}`).toContain(expected)
-        expect(res.status).toBe(400)
+        expect(res.status, `${name} 必须回 400（不是连接被关）`).toBe(400)
       }
       // ⚠️ 拒绝**不**消耗接收端：一条合法回调仍然能落地。
       const accepted = await probe(
@@ -194,8 +229,15 @@ describe('startRaccoonAuthorizeReceiver：七条规则，跑在真 socket 上', 
     const first = await probe(receiver.port, good, { Origin: RACCOON_API_BASE, 'Sec-Fetch-Dest': 'document' })
     expect(first.status).toBe(200)
     await receiver.result
-    const second = await probe(receiver.port, good).catch(() => null)
-    expect(second === null || second.status === 409).toBe(true)
+    const second = await probe(receiver.port, good)
+    // ⚠️ 两种「一次性」的表现都算过：**端口已消失**（`probe` 拿到
+    //   `{status:null}` —— 连接被拒）或端口还在但回 **409**。前者是**常态**
+    //   （我们回了 `Connection: close` 且落定即关端口），后者只在极窄的
+    //   竞态窗口里出现。
+    expect(second.status === null || second.status === 409, `第二次投递必须失败，收到 ${JSON.stringify(second)}`).toBe(true)
+    // ⚠️ **绝不**是 200：那意味着那枚 code 被**换第二次**（上游会 400，但
+    //   我们**不该**走到那一步 —— 一次性消费是我们自己的义务）。
+    expect(second.status).not.toBe(200)
   })
 
   it('没人回调时落定为 timeout', async () => {
@@ -233,6 +275,107 @@ describe('startRaccoonAuthorizeReceiver：七条规则，跑在真 socket 上', 
 
   it('畸形 state **提前抛**', async () => {
     await expect(startRaccoonAuthorizeReceiver({ state: 'z'.repeat(64) })).rejects.toThrow(/state/)
+  })
+
+  it('★★★ 超长回调 URL 被拒（URL 总长上限；**够得着**才叫判据）', async () => {
+    // ⚠️⚠️ **这条判据必须够得着**（本仓反复记过：「够不着的判据 = 没有」）：
+    //   Node 的 `maxHeaderSize: 8192`（含请求行与各头）在 URL 长到约
+    //   **8160** 时就回 **431**（实测：URL 长 8150 → 200、8160 → 431）
+    //   ⇒ 若把上限写成官方的 8192，**任何超限 URL 都到不了我们的处理器**
+    //   ⇒ 那条判据恒真、永远绿（**假绿**）。
+    //   ⇒ 我们的上限（4096）刻意**低于** Node 的阈值 ⇒ 它**真的**生效。
+    const receiver = await startRaccoonAuthorizeReceiver({ state: STATE, timeoutMs: 60_000 })
+    try {
+      // code 长度 4200 ⇒ URL 总长 4291（> 4096，且远低于 Node 的 431 阈值）。
+      const long = `/auth/callback?code=${'c'.repeat(4200)}&state=${STATE}`
+      expect(long.length).toBeGreaterThan(RACCOON_CALLBACK_URL_MAX_LENGTH)
+      expect(long.length, '必须落在 Node 的 431 阈值之内，否则测不到我们这条判据').toBeLessThan(8100)
+      const res = await probe(receiver.port, long)
+      expect(res.status).toBe(400)
+      expect(res.body).toContain('length')
+    } finally {
+      receiver.cancel()
+    }
+  })
+
+  it('★★★ 协议相对 URL（//evil/…）被拒（靠 origin 严格等值那一腿）', async () => {
+    const receiver = await startRaccoonAuthorizeReceiver({ state: STATE, timeoutMs: 60_000 })
+    try {
+      // ⚠️ 用**原始请求行**发（`http.request` 的 `path` 会被规范化）⇒
+      //   真的把 `//evil.example/...` 当成请求行发出去。
+      //
+      // ⚠️⚠️ **判据钉在「origin 那一腿」**：实测 `new URL('//evil/x',
+      //   'http://127.0.0.1:P')` 解析出的是 **`http://evil/x`** ⇒
+      //   **origin 不等** ⇒ 被拒。若哪天有人把那条 origin 判据放宽，
+      //   这条用例必须变红（那才是它要防的东西）。
+      const res = await rawRequest(receiver.port, `//evil.example/auth/callback?code=${encodeURIComponent(CODE)}&state=${STATE}`)
+      expect(res.status).toBe(400)
+      expect(res.body).toContain('path')
+      // ⚠️ 响应体里**不得**出现那个外来 host（它是被拒的理由，不该外泄成
+      //   一句可被反射的文本 —— 本仓记过「不转义就是一处反射型 XSS」）。
+      expect(res.body).not.toContain('evil.example')
+    } finally {
+      receiver.cancel()
+    }
+  })
+
+  it('★★★ 连接数上限是 8（官方接收端同款：慢连接不得占住这个端口）', async () => {
+    // ⚠️ 没有它 ⇒ 一个**慢速连接**（不发完整请求头、也不断开）能占住这个
+    //   端口直到 5 分钟整体超时 ⇒ 而这个端口是「等着收凭据」的口子，
+    //   占住它不只是资源问题，还是**可用性**问题（真回调进不来）。
+    const receiver = await startRaccoonAuthorizeReceiver({ state: STATE, timeoutMs: 60_000 })
+    try {
+      // 真开 8 个**不结束**的连接（发一半请求头就挂着）。
+      const sockets: Array<{ destroy: () => void }> = []
+      for (let i = 0; i < 8; i++) {
+        const socket = await new Promise<{ destroy: () => void }>((resolve, reject) => {
+          const req = http.request(
+            { host: '127.0.0.1', port: receiver.port, path: '/auth/callback', method: 'GET' },
+            () => resolve(req),
+          )
+          req.on('error', reject)
+          // 只写一半请求头就结束 ⇒ 服务端那边是「未完成的连接」。
+          req.write('GET /auth/callback?code=')
+          resolve(req)
+        })
+        sockets.push(socket)
+      }
+      // 第 9 个连接应当**拿不到**（连接数上限生效）⇒ 表现为连接被关掉。
+      const ninth = await probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${STATE}`)
+      expect(ninth.status === null || ninth.status === 400).toBe(true)
+      for (const socket of sockets) socket.destroy()
+    } finally {
+      receiver.cancel()
+    }
+  })
+
+  it('★★★ 慢速连接会被 socket 超时**掐掉**（官方接收端同款兜底）', async () => {
+    // ⚠️ 没有它 ⇒ 一个**慢速连接**（连上了但不发完整请求头、也不断开）能
+    //   占住这个端口直到 5 分钟整体超时 ⇒ 而这个端口是「等着收凭据」的口子，
+    //   占住它 = **真回调进不来**（可用性缺陷，不只是资源问题）。
+    //
+    // ⚠️ **超时值注入成 300ms**（默认 20 秒在单测里没法等 ⇒ 那条判据就
+    //   **够不着**，变异验证会如实报「无牙」）。
+    const receiver = await startRaccoonAuthorizeReceiver({
+      state: STATE,
+      timeoutMs: 60_000,
+      socketTimeoutMs: 300,
+    })
+    try {
+      // 连上但**什么都不发** ⇒ 服务端那边是一个空闲的 socket。
+      const socket = await new Promise<{ on: (e: string, cb: () => void) => void; destroy: () => void }>((resolve, reject) => {
+        const client = net.connect(receiver.port, '127.0.0.1', () => resolve(client))
+        client.on('error', reject)
+      })
+      let closed = false
+      socket.on('close', () => { closed = true })
+      // 等它被服务端掐掉（socket 超时 300ms + 一点余量）。
+      await new Promise((resolve) => setTimeout(resolve, 900))
+      expect(closed, '空闲 socket 必须被服务端掐掉（否则它一直占着这个「收凭据」的口子）').toBe(true)
+      socket.destroy()
+    } finally {
+      receiver.cancel()
+    }
   })
 })
 

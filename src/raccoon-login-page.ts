@@ -134,8 +134,6 @@ interface FlowState {
   authorizeStatus: 'idle' | 'waiting' | 'authorized' | 'failed'
   /** 失败原因词（`authorizeStatus === 'failed'` 时有值）。 */
   authorizeReason?: string
-  /** 已经换到的凭据（`authorizeStatus === 'authorized'` 时有值）。 */
-  authorizeCredential?: RaccoonCredential
 }
 
 /**
@@ -235,6 +233,7 @@ export async function startRaccoonLoginFlow(
       product,
       fetcher,
       settleOk,
+      settleErr,
       openAuthorizePage,
     }).catch(
       (error: unknown) => {
@@ -252,15 +251,31 @@ export async function startRaccoonLoginFlow(
   const port = await listenOnRandomPort(server)
   const loginUrl = `http://127.0.0.1:${port}${RACCOON_LOGIN_PAGE_PATHS.login}`
 
+  /**
+   * 关掉这一轮浏览器授权的接收端（**幂等**）。
+   *
+   * ⚠️⚠️⚠️ **这条是承重的**（真实安全缺陷，2026-11-17 修）：
+   * 授权码是一次性凭据，而一个**还开着**的回环接收端就是「凭据交换漏洞」——
+   * 本机任何进程都能往那个端口投递一枚 code，把凭据换成**它自己的**账号。
+   * 而 `state` 是**公开**的（在 URL 里、也在授权页的上下文里）⇒ 挡不住。
+   *
+   * ⚠️ **必须挂在「结果落定」上，而不是只挂在 `close()` 上**：
+   * 流程可以从**三条不同的路**落定 —— 授权换码成功 / 短信登录成功 / 扫码成功
+   * —— 而 `close()` **全仓无人调用**（`jet-hub-rpc.ts` 不调它）。
+   * 只挂在 `close()` 上 ⇒ 「授权等待中，用户改用短信登录成功」这条路
+   * **留着那个口子整整 5 分钟**（接收端自己的超时），
+   * 实测还能在流程结束后**真的**再换一次码。
+   */
+  const closeAuthorizeReceiver = (): void => {
+    state.authorizeReceiver?.cancel()
+    state.authorizeReceiver = undefined
+  }
+
   let closed = false
   const close = async (): Promise<void> => {
     if (closed) return
     closed = true
-    // ⚠️ 关掉这一轮浏览器授权的接收端：不关的话，它会**继续占着那个本机端口**
-    // 直到五分钟超时 —— 用户关掉登录页之后，本机上仍然留着一个「等着收凭据」
-    // 的口子。
-    state.authorizeReceiver?.cancel()
-    state.authorizeReceiver = undefined
+    closeAuthorizeReceiver()
     // 尚未落定则先 reject，避免调用方拿到一个永远悬挂的 promise。
     settleErr(new Error('raccoon: 登录流程已关闭'))
     await new Promise<void>((resolve) => {
@@ -274,11 +289,16 @@ export async function startRaccoonLoginFlow(
   }, timeoutMs)
   timer.unref?.()
 
-  // 结果落定即关服务器（含超时与失败路径）。
+  // 结果落定即关服务器 **并关掉回环接收端**（含超时与失败路径）。
+  //
+  // ⚠️⚠️ **关接收端必须和关本地页服务器在同一处**：它们是**两件**独立的事
+  // （本地页承载扫码/短信，回环承载授权回调），而**授权回调那条才是
+  // 凭据入口**。只关前者 ⇒ 授权那条的口子留着。
   void result
     .catch(() => {})
     .finally(() => {
       clearTimeout(timer)
+      closeAuthorizeReceiver()
       if (!closed) {
         closed = true
         void new Promise<void>((resolve) => {
@@ -296,6 +316,8 @@ interface HandleDeps {
   product: RaccoonProduct
   fetcher: typeof fetch
   settleOk: (value: RaccoonCredential) => void
+  /** 失败时的落定回调（**必须**有：否则失败会永远悬挂）。 */
+  settleErr: (reason: unknown) => void
   openAuthorizePage: (url: string) => void
 }
 
@@ -315,6 +337,9 @@ interface HandleDeps {
  * @param product - 产品配置。
  * @param fetcher - 注入的 fetch。
  * @param settleOk - 成功时的落定回调。
+ * @param settleErr - 失败时的落定回调（**必须**有：换码失败若不落定，
+ *   流程会永远悬挂 ⇒ 前端只会转圈到它自己的 5 分钟上限）。
+ * @param openAuthorizePage - 打开授权页的动作（注入点，单测不真开窗）。
  * @returns 这一轮的 `/authorize` URL（失败时为空串）。
  */
 async function runAuthorizeRound(
@@ -322,6 +347,7 @@ async function runAuthorizeRound(
   product: RaccoonProduct,
   fetcher: typeof fetch,
   settleOk: (value: RaccoonCredential) => void,
+  settleErr: (reason: unknown) => void,
   openAuthorizePage: (url: string) => void,
 ): Promise<string> {
   // 单飞：已经在飞 ⇒ 复用同一个接收端（**不再**占一个端口）。
@@ -376,14 +402,33 @@ async function runAuthorizeRound(
     if (!exchanged.ok || exchanged.credential === undefined) {
       state.authorizeStatus = 'failed'
       state.authorizeReason = exchanged.reason ?? 'invalid_response'
+      // ⚠️⚠️ **必须让流程落定**（真实缺陷，2026-11-17 修）：
+      // 不落定 ⇒ `result` 永远悬挂 ⇒ `jet-hub-rpc.ts` 里的
+      // `raccoonStarted.result.then(...)` 永远不跑 ⇒ **占位账号条目永远
+      // 留着**、前端 `login.poll` 一直转圈到它自己的 5 分钟上限，而用户
+      // 早就看到了「授权码已失效」—— 两边的症状**不同形**（一个是「卡住」，
+      // 一个是「失败」），用户无从判断到底成没成。
+      //
+      // ⚠️ 失败原因**只报原因词**（换码的报文可能回显那枚授权码）。
+      settleErr(new Error(`raccoon: 浏览器授权未完成（${state.authorizeReason ?? '未知原因'}）`))
       return
     }
-    state.authorizeCredential = exchanged.credential
     state.authorizeStatus = 'authorized'
     settleOk(exchanged.credential)
-  }).catch(() => {
+  }).catch((error: unknown) => {
+    // ⚠️ **这一支是防御性兜底，正常走不到**：`exchangeRaccoonAuthorizationCode`
+    //   自己把**所有**异常都吃掉了（网络失败、JSON 解析失败都变成
+    //   `{ok:false, reason:'…'}`）⇒ 它**不抛**。
+    //   ⇒ 变异验证里「把这一支的 settleErr 去掉」**测不出差别**（实测无牙，
+    //   如实登记）—— 那不是这条判据没用，而是**这条分支不可达**。
+    //
+    //   它**仍然要留**：万一换码那段将来加了新的抛出点（而**不**是返回
+    //   `{ok:false}`），流程不能永远悬挂。
     state.authorizeStatus = 'failed'
     state.authorizeReason = 'network'
+    settleErr(new Error(
+      `raccoon: 浏览器授权未完成（网络故障）：${error instanceof Error ? error.message : String(error)}`,
+    ))
   })
   // ⚠️ **宿主侧**开浏览器，而不是让页面 `window.open`：
   // 页面跳走就**离开了**我们这个本地页 ⇒ 换码成功后页面收不到「成功」，
@@ -455,7 +500,14 @@ async function handleRequest(
   }
 
   if (url.pathname === RACCOON_LOGIN_PAGE_PATHS.authorizeStart) {
-    const authorizeUrl = await runAuthorizeRound(state, product, deps.fetcher, deps.settleOk, deps.openAuthorizePage)
+    const authorizeUrl = await runAuthorizeRound(
+      state,
+      product,
+      deps.fetcher,
+      deps.settleOk,
+      deps.settleErr,
+      deps.openAuthorizePage,
+    )
     writeJson(response, {
       ok: authorizeUrl !== '',
       url: authorizeUrl,

@@ -131,16 +131,20 @@ code —— 它必然被拒，那正是判据）：
 
 ## 四、验证
 
-- **新增单测 36 条**（`tests/unit/raccoon-authorize.spec.ts`）：回环接收端
+- **新增单测 40 条**（`tests/unit/raccoon-authorize.spec.ts`）：回环接收端
   **真起 `127.0.0.1` 随机端口**、每条拒绝**真发 HTTP 请求**（用桩服务器测，测的
   就是「我们以为的规则」而不是规则本身）；换码用**注入的 fetch**（零网络）。
-- **新增整条链集成 4 条**（`tests/unit/raccoon-login-page.spec.ts`）：本地页 +
+- **新增整条链集成 6 条**（`tests/unit/raccoon-login-page.spec.ts`）：本地页 +
   回环 + 换码**串起来**（三段各自都对、串起来却不通，是这一族最常见的形态）。
-- **变异 14/14 有牙**（`scripts/mutate-raccoon-authorize.mjs`；⚠️ 该脚本按本仓
+- **变异 20/21 有牙**（`scripts/mutate-raccoon-authorize.mjs`；⚠️ 该脚本按本仓
   惯例**不入库**（`scripts/*` 是 gitignore 的本地工具目录），**结论入账**）。
   脚本会**先跑基线**（基线不绿就停）、每个变异**自证注入成功**（锚点未命中报
   `PATCH-NOT-APPLIED`，**不**当成「无牙」）、跑完**还原并复验**。
-- **全量 14123 通过**。仅 `qoder-web-usage`(4) 与 `magicrew-local-browser`(1)
+  ⚠️ **唯一一条无牙的如实登记**：M17「网络异常那一支不落定」—— 那一支**正常
+  走不到**（`exchangeRaccoonAuthorizationCode` 自己把**所有**异常都吃掉了、
+  从不抛）⇒ 那不是判据没用，是**分支不可达**。它**仍然保留**（万一将来换码那段
+  加了新的抛出点，流程不能永远悬挂），代码里也写了注释。**不为它编恒真用例**。
+- **全量 14129 通过**。仅 `qoder-web-usage`(4) 与 `magicrew-local-browser`(1)
   失败 —— 已在**改动前的基线上逐条复现**（前者在干净基线同样红、后者读本机真实
   浏览器目录），**与本 PR 无关**。
 
@@ -162,7 +166,103 @@ code —— 它必然被拒，那正是判据）：
 
 ---
 
-## 六、⚠️ 四条不能凭直觉改的点（已写进 `docs/agent-notes/providers-loomy-raccoon-minimax.md`）
+## 五之二、🔴🔴 **PR 自审抓出的两个真缺陷（已在本 PR 内修掉）**
+
+> 这两个是**本 PR 自己的代码**里的缺陷，由一次自审 + 官方 `app.asar` 源码
+> 交叉核对抓出。**PR 已发布但未合并**，所以在同一个 PR 里修掉最省事。
+> **一个是真安全漏洞**（凭据交换），**一个是 UX 死锁**（静默转圈 5 分钟）。
+
+### 🔴 缺陷 A：回环接收端在流程结束后**继续开着**，且仍会用真凭据换码
+
+**性质：安全漏洞。** 授权码是一次性凭据，而一个敞开的接收端就是「凭据交换
+漏洞」——这正是本 PR 自己在注释里写的那句话，但**收尾没做到**。
+
+**实测**（`tmp-leak-check.cjs`，跑完已删）：
+
+```
+回环端口 = 62531
+流程已落定（短信登录成功）
+落定后回环端口仍活着 = true      ← 泄漏
+端口在 301 秒后消失               ← 泄漏窗口 = 5 分钟（官方接收端自己的超时）
+```
+
+**根因两条**：
+
+1. **流程落定 ≠ 接收端关闭**。`result` 落定后只关**本地页服务器**（既有
+   契约），**没有**关回环接收端 —— 那句只在 `close()` 里，而 `close()`
+   **全仓无人调用**（`jet-hub-rpc.ts` 根本没有 `raccoonStarted.close()`）。
+2. **换码成功后立刻又换了一次**。实测：流程已用短信登录成功落定后，往那个
+   **还活着的**端口投递一枚 code → **HTTP 200**，且**真的向上游发了一次
+   换码请求**（`login_with_authorization_code` 计数 = 1）。
+
+**后果**：任何本机进程都能在 5 分钟窗口内向那个端口投递一枚 code，把凭据换成
+**它自己的**账号 —— 而用户以为流程已经结束了。`state` 校验挡不住：
+**`state` 是公开的**（在 URL 里、也在授权页的上下文里）。
+
+**为什么第一版的测试没抓到**：我只测了「取消」路径（`authorizeCancel` 端点
+**确实**调了 `cancel()`）和「流程超时」路径，**没测「流程因别的路径落定」**
+—— 而那正是真实场景（授权等待中，用户改用短信登录成功）。
+
+**修法**：`result` 落定的收尾里 `cancel()` 掉接收端（**与关本地页服务器同一处**
+—— 它们是两件独立的事：本地页承载扫码/短信，回环承载授权回调，**而后者才是
+凭据入口**）。
+
+**判据（行为级）**：断言「那个端口还在不在」，**不是**源码文本断言
+（`cancel()` 出现在源码里，改个写法就假红 —— 本仓反复记过的坑）。
+
+### 🔴 缺陷 B：换码失败时流程**永远悬挂**
+
+```
+D3 授权状态 = {"status":"failed","reason":"code_not_found"}
+D3 result = PENDING(still hanging)      ← 永不落定
+```
+
+`runAuthorizeRound` 里换码失败时只写了 `state.authorizeStatus = 'failed'`，
+**没有** `settleErr(...)` ⇒ `result` 永不 resolve/reject ⇒
+`jet-hub-rpc.ts` 的 `raccoonStarted.result.then(...)` 永远不跑 ⇒ 占位账号条目
+永远留着、**前端 `login.poll` 一直转圈到它自己的 5 分钟上限**。
+
+授权码失效（200035）、网络抖动、IAM 校验不通过 —— 三种都会这样。这正是仓库
+AGENTS.md 记过的 `login.poll` 失败终态那类形态（失败与「还没授权完」**同形**）。
+
+**修法**：换码失败时 `settleErr(new Error(...))`（带原因词，**不带报文**）。
+
+### ⚠️ 另外三条次要缺陷
+
+| # | 缺陷 | 修法 |
+|---|---|---|
+| C | `state.authorizeCredential` 写了从不读（死字段，且**驻留完整凭据**） | 删掉 |
+| D | 缺回调 URL 总长上限（超长 URL 被完整解析） | 加 `RACCOON_CALLBACK_URL_MAX_LENGTH` |
+| E | 缺 `maxConnections` / `headersTimeout` / `requestTimeout` / socket 超时（官方接收端全都有） | 逐条对齐官方 |
+
+⚠️ **D 与 E 各带一条「够不着」的教训**（如实登记）：
+
+- **D 的上限取 4096 而不是官方的 8192**：Node 的 `maxHeaderSize: 8192`
+  （含请求行与各头）在 URL 长到约 **8160** 时就回 **431**（实测 8150 → 200、
+  8160 → 431）⇒ **任何长于 8192 的 URL 根本到不了我们的处理器** ⇒ 写 8192
+  等于**一条永远走不到的死代码**。取 4096 ⇒ 它**真的**生效、**真的**能被
+  单测打到。
+- **E 的 socket 超时必须可注入**（`options.socketTimeoutMs`）：20 秒的默认值
+  在单测里没法等 ⇒ 没有注入点，那条判据就**够不着**（变异验证会如实报
+  「无牙」）。
+
+### ⚠️ 官方源码是权威（本 PR 的实现与它逐条对齐）
+
+把 `app.asar` 解出来（`npx @electron/asar extract`）逐份核对：
+
+| 文件 | 内容 |
+|---|---|
+| `build/electron/main/client/account/webLoginLoopback.js` | 回环接收端七条规则 + `maxConnections = 8` / `headersTimeout = 5000` / `requestTimeout = 10000` / `setTimeout(20000, socket => socket.destroy())` |
+| `build/electron/main/account/desktopLogin.js` | 换码成功门 + `AUTHORIZATION_CODE_NOT_FOUND = 200035` |
+| `build/shared/client/iamToken.js` | `isIamToken`（只看 `iss` 后缀）/ `iamTokenIsValid`（等值 `iss` + `sub` + `exp`） |
+
+⇒ 本仓的三处实现与它们**逐条一致**（连 `200035` 的错误分支都一样）。
+另外 **`iss` 已用真实凭据复验**（`~/.dsh/.credentials.yaml` 里那枚真实 token）：
+`iss = "xiaohuanxiong.com/iam"`、`sub` 非空、`exp` 未过期 ⇒ 严格等值**通过**。
+
+---
+
+## 六、⚠️ 六条不能凭直觉改的点（已写进 `docs/agent-notes/providers-loomy-raccoon-minimax.md`）
 
 1. **`iss` 是「裸 host + `/iam`」**（`xiaohuanxiong.com/iam`，**无 scheme**）。
    `iss` 是**等值**比较 ⇒ 按带 scheme 的严格等值去比，会**误拒每一枚真令牌**。
@@ -172,8 +272,11 @@ code —— 它必然被拒，那正是判据）：
 3. **页面投递时用的参数名在 desktop 形态下是 `code`**（非 desktop 才是
    `authorization_code`）—— 接收端只认 `code` + `state`，认错名字 = **永远收
    不到回调**。
-4. **上游形状是「单测锁不住」的**：单测只能锁「代码按某个形状写」，锁不住
-   「那个形状本身对不对」 ⇒ 三条上游事实各由**一条 e2e 探针**固定。
+4. **本地页服务器在登录落定那一刻就关了** ⇒ 页面那句「登录成功」是尽力而为的，
+   **真信号是 Jet Hub 的 `login.poll`**。
+5. **上游形状是「单测锁不住」的** ⇒ 三条上游事实各由**一条 e2e 探针**固定。
+6. **官方 `app.asar` 的三份源码是权威** —— 改之前先读那三份。
+
 
 ---
 

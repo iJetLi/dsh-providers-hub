@@ -778,19 +778,101 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
     await fetchLocal(`${redirect}?code=the-auth-code&state=${state}`, {
       headers: { Origin: 'https://xiaohuanxiong.com', 'Sec-Fetch-Dest': 'document' },
     })
-    // 轮询到终态：失败，且**只有**一个原因词（绝不带报文原文）。
-    let status: string = 'waiting'
-    let reason: string | undefined
-    for (let i = 0; i < 50 && status === 'waiting'; i++) {
-      const payload = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStatus}`)).json() as {
-        status: string
-        reason?: string
+    // ⚠️⚠️ **换码失败 ⇒ 流程立刻落定**（2026-11-17 修）⇒ **本地页服务器随之
+    //   关闭**（既有契约：结果落定即关服务器）⇒ 所以**不能**再轮询
+    //   `/raccoon/authorize/status`（那个端口已经没了）。
+    //   失败信息在**落定的那个错误**里。
+    const settled = await started.result.then(
+      () => 'resolved',
+      (error: unknown) => `rejected:${error instanceof Error ? error.message : String(error)}`,
+    )
+    expect(settled.startsWith('rejected:')).toBe(true)
+    // ⚠️ 只报**原因词**（换码的报文可能回显那枚授权码）。
+    expect(settled).toContain('code_not_found')
+    expect(settled).not.toContain('the-auth-code')
+  })
+
+  it('★★★ 换码失败时**流程必须落定**（不落定 ⇒ 前端只会转圈 5 分钟）', async () => {
+    // ⚠️⚠️ **真实缺陷**（2026-11-17 修）：换码失败时只写了状态、**没有**让
+    //   流程落定 ⇒ `result` 永远悬挂 ⇒ `jet-hub-rpc.ts` 里的
+    //   `raccoonStarted.result.then(...)` 永远不跑 ⇒ **占位账号条目永远
+    //   留着**、前端 `login.poll` 一直转圈到它自己的 5 分钟上限。
+    //   而页面那边**已经**显示了「授权码已失效」⇒ 两边的症状不同形。
+    const failing = vi.fn(async (url: string) => {
+      const text = String(url)
+      if (text.endsWith('/auth/mp/qrcode')) {
+        return jsonResponse({ code: 'OK', message: 'success', data: TICKET })
       }
-      status = payload.status
-      reason = payload.reason
+      return jsonResponse({ code: 200035, message: 'not found' }, 400)
+    }) as unknown as typeof fetch
+    started = await startRaccoonLoginFlow({ fetcher: failing, openAuthorizePage: () => {} })
+    const base = originOf(started.loginUrl)
+    const start = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as {
+      url: string
     }
-    expect(status).toBe('failed')
-    expect(reason).toBe('code_not_found')
-    expect(String(reason)).not.toContain('the-auth-code')
+    const parsed = new URL(start.url)
+    await fetchLocal(`${parsed.searchParams.get('redirect') ?? ''}?code=the-auth-code&state=${parsed.searchParams.get('state') ?? ''}`, {
+      headers: { Origin: 'https://xiaohuanxiong.com', 'Sec-Fetch-Dest': 'document' },
+    })
+    // ⚠️ 判据是「**落定了**」，不是「落定成什么」：失败必须**reject**
+    //   （成功是 resolve），而**不能**是永远悬挂。
+    const settled = await Promise.race([
+      started.result.then(() => 'resolved').catch((error: unknown) => `rejected:${error instanceof Error ? error.message : String(error)}`),
+      new Promise<string>((resolve) => setTimeout(() => resolve('HANGING'), 2_000)),
+    ])
+    expect(settled, '流程必须落定（reject 即可），不能永远悬挂').not.toBe('HANGING')
+    expect(settled.startsWith('rejected:')).toBe(true)
+    // ⚠️ 失败原因**只报原因词**：报文可能回显那枚授权码。
+    expect(settled).toContain('code_not_found')
+    expect(settled).not.toContain('the-auth-code')
+  })
+
+  it('★★★ 流程落定后，回环接收端**必须已死**（授权码是一次性凭据）', async () => {
+    // ⚠️⚠️⚠️ **真实安全缺陷**（2026-11-17 修）：回环接收端原本**只在**
+    //   `close()` 里被关掉，而 **`close()` 全仓无人调用** ⇒ 流程从**任何
+    //   别的路径**落定（授权换码成功 / **短信登录成功** / 扫码成功）时，
+    //   那个「等着收凭据」的口子**留着整整 5 分钟**（接收端自己的超时），
+    //   实测还能在流程结束后**真的**再换一次码。
+    //
+    // ⚠️ 判据是**行为级**的「那个端口还在不在」—— 断言源码里出现
+    //   `cancel()` 是**源码文本断言**，改个写法就假红（本仓记过的坑）。
+    const smsFetcher = vi.fn(async (url: string) => {
+      const text = String(url)
+      if (text.endsWith('/auth/mp/qrcode')) {
+        return jsonResponse({ code: 'OK', message: 'success', data: TICKET })
+      }
+      if (text.endsWith('/login_with_sms')) {
+        return jsonResponse({ code: 0, data: { access_token: 'sms.tok.en', refresh_token: 'r2' } })
+      }
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+    started = await startRaccoonLoginFlow({ fetcher: smsFetcher, openAuthorizePage: () => {} })
+    const base = originOf(started.loginUrl)
+    const start = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as {
+      url: string
+    }
+    const redirect = new URL(start.url).searchParams.get('redirect') ?? ''
+    const port = Number(new URL(redirect).port)
+
+    // ① 先确认那个端口**此刻**是活的（否则这条用例测不到任何东西）。
+    const aliveBefore = await fetch(`http://127.0.0.1:${port}/probe`).then(() => true).catch(() => false)
+    expect(aliveBefore, '回环端口此刻应当在监听（否则本用例恒真）').toBe(true)
+
+    // ② 改走短信登录并成功 ⇒ 流程落定（**不是**走授权那条路）。
+    await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.smsSend}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: '13800138000', captchaParam: 'x' }),
+    })
+    await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.smsVerify}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ smsCode: '123456' }),
+    })
+    await started.result
+
+    // ③ ★ 落定之后，那个「等着收凭据」的口子必须**已经关掉**。
+    const aliveAfter = await fetch(`http://127.0.0.1:${port}/probe`).then(() => true).catch(() => false)
+    expect(aliveAfter, '流程落定后回环接收端必须已死（否则本机进程可投递一枚 code 换走凭据）').toBe(false)
   })
 })
