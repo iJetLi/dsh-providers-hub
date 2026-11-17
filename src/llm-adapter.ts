@@ -2159,6 +2159,13 @@ export class CodeArtsAdapter extends LlmAdapter {
     return {
       id: model.id,
       name,
+      // ⚠️ 上游 `model_desc`（模型介绍）**原样透传**（2026-11-17 接）：
+      //    它是 CodeArts 客户端选择器里那行灰字的来源，落点是宿主
+      //    `LlmModelInfo.description` 与 Jet Hub 模型面板的第二行
+      //    （见 `src/models.ts` 的 `RemoteModel.description`）。
+      //    ⚠️ 三态：`undefined` ⇒ **不落键**（不写空串，否则「没有介绍」
+      //    与「介绍是空的」在客户端同形）。也**绝不**据此推断活动窗口。
+      ...(model.description === undefined ? {} : { description: model.description }),
       // ⚠️ `resolveModel` 用的**裸名**（不含倍率）—— 价格只属于选择列表语境
       //    （与 loomy / raccoon / trae / lobsterai 同款，见 `model-catalog.ts`
       //    的 `bareName` 字段注释）。

@@ -927,3 +927,79 @@ export function isCodeArtsBenefitModelKnown(model: string): boolean {      // �
   `src/llm-adapter.ts:3259` 与判定点 `:2648` 在**同一文件、同一 ESM 绑定**；若是类身份
   分裂，同文件的 `class CodeArtsAdapter extends LlmAdapter` 会先崩。且 reporter 自己在
   2026-10-15 已回「不是，我的华为账号出问题了」。
+
+## ⚠️⚠️ 模型介绍 `model_desc`：上游一直在发、插件一直丢（2026-11-17）
+
+### 取证（只读，零 token 消耗）
+
+`GET /v1/model/builtin`（签名 GET）2026-11-17 实测 **12 条**、HTTP 200，键并集 **15** 个：
+
+```
+model_id, model_name, model_category, enable, display_enabled, model_desc, model_sku,
+provider, channel_source, credit, time_slots, intervals, supports_images,
+max_tokens, context_window
+```
+
+⚠️ 本文件别处写的「键全集只有 7 个」**已过期**（`context_window` / `max_tokens` /
+`enable` / `display_enabled` / `model_category` / `channel_source` / `intervals` 都是后来的）。
+
+`model_desc` **12 条全带**、纯字符串、与 CodeArts 客户端模型选择器上那行灰字**逐字相同**，
+例如 `deepseek-v4.1-flash-1017` → `【限时体验】许愿式编程一键成真`。
+
+### 落点：插件的模型列表弹窗，**不是**宿主 `/model` 弹层
+
+宿主 `dsh-client-ui-model-selection` 的 `optionsOf` 会把 `description` 拼进
+`detail = ${provider} · ${description}`，而真正渲染它的 `PopupSelectView`
+（`dsh-client-ui-commands`）把 `detail` 放在**同一行行尾**：12px、tertiary、
+`white-space:nowrap` + ellipsis，弹层 `min-width:min(220px,100%)`
+⇒ 一句 20～60 字的介绍会被截成几个字，还会跟模型名抢宽度。
+用户的原话：「我从来没见到 DSH 显示副行，都是**一行**的」。
+
+⇒ 看得见的第二行只能在插件自己的「模型列表」弹窗里做（`.dim-jh-modelDesc`），
+**完整描述同时进行的 `title`**（行内必然 ellipsis，悬停是唯一能看到全文的地方）。
+宿主 `description` 仍照常填 —— 它唯一确证的收益是 `filterOptions` 会把 `detail`
+纳入搜索匹配（用户能按介绍里的字搜到模型）。
+
+### ⚠️ 三态：缺失 / 非字符串 / 纯空白 ⇒ **不落键**
+
+不写空串。写 `''` 会让「上游没给介绍」渲染成一格 0 高度的空白（行距莫名变松），
+且与「上游确实给了空介绍」在 UI 上同形。四层都必须三态（`parseModelInfo` →
+`toCatalogEntry` → `toModelInfo` → `model.list`），任何一层漏掉都表现为
+「这家看起来没有介绍」。
+
+### ⚠️ 不许据 `model_desc` 推断活动窗口
+
+`【限时体验】` 是**静态文案**，该字段**没有任何时间字段**。活动窗口要看
+`billing_discounts` / `off_peak` 那类真时间字段（那属于 promotional badge 那条腿）。
+同理不裁前缀、不改写措辞 —— 文案是上游的，我们只负责别丢。
+
+### ⚠️ 布局：`flex-wrap: wrap` + `flex: 0 0 100%`，**刻意不包 wrapper**
+
+`.dim-jh-modelInfo` 加 `flex-wrap: wrap`，介绍元素 `flex: 0 0 100%` 独占第二行。
+**不能**改成列方向或包一层 `.dim-jh-modelHead`：`model-benefit-hint.spec.ts`
+的「角标必须排在 id 之前」读的是 `.dim-jh-modelInfo` 的**直接子元素顺序**，
+包一层会把它变成假红（守卫本身没错，是破坏它的改法错）。
+
+### ⚠️ 一个真踩过的构建坑：`jet-hub-styles.js` 的注释里**不许出现反引号**
+
+该文件是内联在 JS **模板字符串**里的，注释里一个反引号就会终止字符串，
+esbuild 报的是 `Expected ";" but found "flex"`（看起来像 CSS 语法错，其实是 JS）。
+写 CSS 注释时用「」/ 直白文字，别用 Markdown 的反引号。
+
+### 守卫
+
+| 文件 | 打的是哪条腿 |
+|---|---|
+| `tests/unit/models.spec.ts` | 解析层：读到 `model_desc`、只 trim、四种空形态不落键 |
+| `tests/unit/jet-hub-rpc.spec.ts` | 端点层：响应带 `description`；缺失不写空串；`listAllModels` 分支（被关闭的条目）也带 |
+| `tests/unit/model-desc-row.spec.ts` | 客户端**真渲染**：第二行文案/title、DOM 顺序（name/id 在前、desc 最后）、无介绍不画、已下架时 title 仍求救、CSS 两条承重规则 |
+| `tests/e2e/codearts-model-desc-probe.e2e.spec.ts` | 真机只读：解析结果与原始 `model_desc` **逐条对拍**，并断言「至少一条有介绍」（防空跑绿） |
+
+变异验证（4/4 有牙）：解析层丢字段 / RPC 响应丢字段 / 客户端 `if (false)` 旁路 /
+`flex: 0 0 100%` → `0 1 auto`，各自都有用例变红。
+
+### 未做（如实登记）
+
+- `enable` / `display_enabled` 未读（语义未实测，且现在 12 条全为 `true`，读了也无差别）。
+- `context_window` 也出现在 builtin 里了，但窗口仍走 AgentCenter 那条腿（`model_parameters`），
+  本 PR 不动它（两源冲突时谁优先没有实测依据）。

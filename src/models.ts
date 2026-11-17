@@ -102,6 +102,20 @@ export interface RemoteModel {
    */
   contextWindow?: number
   /**
+   * 模型介绍（上游 `model_desc` 原样，如
+   * `【限时体验】许愿式编程一键成真`）；取不到时为 `undefined`。
+   *
+   * ⚠️ **只透传、不加工**：上游把促销性质的文案（截图里那些 `【限时体验】…`）
+   * 直接烘焙在 `model_desc` 里，本插件**不**据此推断活动窗口（那需要时间字段，
+   * `model_desc` 一个都没有）。裁剪 / 改写同样禁止 —— 文案是上游的，
+   * 我们只负责别把它丢掉。
+   *
+   * ⚠️ 为什么不拼进 `name`：`name` 已经带 ` · x倍率`（见 `toCatalogEntry`），
+   * 再拼一句 60 字的介绍会撑爆选择器主行。宿主 `LlmModelInfo.description`
+   * 是它该去的地方（见 `catalogEntry` 与本字段的 2026-11-17 取证）。
+   */
+  description?: string
+  /**
    * ⚠️⚠️ **刻意移除**（2026-10-30 第二轮审计 D-4 修）：AgentCenter 的
    * `max_tokens`（单次输出上限）**不再**进 `RemoteModel`。
    *
@@ -256,9 +270,25 @@ function parseModelInfo(
    * 用户要看的版本信息（裁掉就与旧版同名、无法区分）。
    */
   const name = typeof rawName === 'string' && rawName.length > 0 ? rawName : id
+  /**
+   * 模型介绍（`model_desc`，2026-11-17 真机取证：`/v1/model/builtin` **12 条全带**，
+   * 且与 CodeArts 客户端选择器上那行灰字**逐字相同**）：
+   *
+   * ```
+   * "model_id":"deepseek-v4.1-flash-1017","model_desc":"【限时体验】许愿式编程一键成真"
+   * ```
+   *
+   * ⚠️ 三态：字段缺失 / 不是字符串 / 只有空白 ⇒ **不落键**（不写 `''`）。
+   *   写空串会让宿主把「上游没给介绍」渲染成一格空的灰字，与「有介绍」同形。
+   * ⚠️ 只 trim 两端空白，**不改字**（既不裁 `【限时体验】` 前缀，也不改写措辞）。
+   */
+  const rawDescription = m['model_desc']
+  const description = typeof rawDescription === 'string' && rawDescription.trim().length > 0
+    ? rawDescription.trim()
+    : undefined
   if (seen.has(id)) return undefined
   seen.add(id)
-  return { id, name, ...readRateLabel(m, nowMs) }
+  return { id, name, ...(description === undefined ? {} : { description }), ...readRateLabel(m, nowMs) }
 }
 
 /**

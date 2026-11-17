@@ -1477,6 +1477,17 @@ export interface RpcModelListRequest {
 export interface RpcModelListEntry {
   id: string
   name: string
+  /**
+   * 模型介绍（适配器从远端读到的原文，如 CodeArts 的
+   * `【限时体验】许愿式编程一键成真`）。
+   *
+   * ⚠️ **缺失 = 该家没下发介绍**（不是空介绍）：客户端据此决定要不要画第二行，
+   * 缺失时逐字节保持旧布局（与全仓「未知不编造」同一条约定）。
+   *
+   * ⚠️ 文案是**上游的**：既不裁 `【限时体验】` 之类前缀，也不改写措辞 ——
+   * 它不代表我们能推断活动时间（时间窗口得看 `billing_discounts` 那类字段）。
+   */
+  description?: string
   /** true = 已关闭（不出现在对话框的模型选择里）。 */
   disabled: boolean
   /**

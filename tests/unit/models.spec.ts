@@ -105,6 +105,37 @@ describe('fetchCodeArtsRemoteModels', () => {
     expect(ids).not.toContain('something-VL')
   })
 
+  it('★ 读出上游 model_desc（模型介绍），缺失/空白/非字符串一律不落键', async () => {
+    // 取证：2026-11-17 真机 12 条全带 model_desc（如
+    // `【限时体验】许愿式编程一键成真`），与 CodeArts 客户端选择器上的灰字逐字相同。
+    // 旧代码不读该字段 ⇒ 上游下发了、我们丢掉。
+    const { fetcher } = makeFetcher({
+      [SNAP_MODEL_BUILTIN_URL]: {
+        body: JSON.stringify({
+          builtinModels: [
+            { model_id: 'glm-5.3', model_name: 'GLM-5.3', model_desc: '  【限时体验】面向复杂编程与长程任务  ' },
+            { model_id: 'GLM-5.2', model_name: 'GLM-5.2', model_desc: '' },
+            { model_id: 'kimi-k3', model_name: 'Kimi-K3', model_desc: '   ' },
+            // 上游偶尔给非字符串（历史上出现过数字/对象共存），绝不能 `String()` 后落键。
+            { model_id: 'speed', model_name: '智速模式', model_desc: 42 },
+            { model_id: 'no-desc', model_name: 'NoDesc' },
+          ],
+        }),
+      },
+    })
+    const models = await fetchCodeArtsRemoteModels(makeCredential(), fetcher)
+    const byId = new Map(models.map((m) => [m.id, m]))
+
+    // ⚠️ 只 trim 两端空白，**不改字**（不裁 `【限时体验】`、不改写措辞）。
+    expect(byId.get('glm-5.3')?.description).toBe('【限时体验】面向复杂编程与长程任务')
+    // ⚠️ 三态硬要求：空串 / 全空白 / 非字符串 / 缺失 ⇒ **键根本不出现**
+    //    （写 `''` 会让宿主/客户端把「上游没给」渲染成一格空的行，与「有介绍」同形）。
+    for (const id of ['GLM-5.2', 'kimi-k3', 'speed', 'no-desc']) {
+      expect(byId.get(id), `前置：${id} 必须在目录里，否则这一格是空跑`).toBeDefined()
+      expect(Object.hasOwn(byId.get(id)!, 'description'), `${id} 不该带 description 键`).toBe(false)
+    }
+  })
+
   it('merges opengw gateway/config benefit models with builtin models, deduped', async () => {
     const { fetcher } = makeFetcher({
       [OPENGW_GATEWAY_CONFIG_URL]: {
