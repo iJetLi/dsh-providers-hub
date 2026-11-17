@@ -56,6 +56,8 @@ import {
   promotionBadgeFor,
   qoderPromotionCandidate,
 } from './model-promotions.js'
+// ⚠️ 悬停候选行的类型与展示层**共用一份**（`promotion-tooltip.ts` 零 DOM、零网络）。
+import type { PromotionCandidateRow } from './promotion-tooltip.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import {
   registerAdapterIdempotent,
@@ -1399,6 +1401,32 @@ export class QoderAdapter extends LlmAdapter {
    */
   listAllModels(): readonly { id: string; name: string }[] {
     return this.catalog.listAllModels()
+  }
+
+  /**
+   * ★ 本家目录里的**未决**活动候选（方案 A：选择器悬停的数据来源）。
+   *
+   * ⚠️ 与 buddy 家**刻意不同**的一处：本家交的是 `catalogSource()`（远端 ∪ 兜底表
+   * 归一后的同一形状），所以**离线路径也有候选** —— 兜底表本来就带 promotion,
+   * 与 `qoderDisplayName` 的倍率后缀同判据（不是新增一份静态猜测）。buddy 家
+   * 反过来：它的兜底表**没有** promos，离线只能空。
+   *
+   * ⚠️ 逐条走 `qoderPromotionCandidate`（与 toCatalogEntry 同一个构造函数）,
+   * 不另写一份解析：同一 schema 两套判据是本仓的复发缺陷形态。日志出口也复用
+   * `this.promotionWarn`（按消息去重，免得渲染路径刷屏）。
+   *
+   * ⚠️ 交出去的是**未决候选**：徽标在装配时刻挑定并缓存正是 issue #101 要修的
+   * 形态；悬停侧每次渲染重读时钟。
+   */
+  promotionCandidates(): readonly PromotionCandidateRow[] {
+    const rows: PromotionCandidateRow[] = []
+    for (const model of this.catalogSource()) {
+      const promotion = qoderPromotionCandidate(
+        model.promotion, model.id, 'Asia/Shanghai', this.promotionWarn,
+      )
+      if (promotion !== undefined) rows.push({ modelId: model.id, promotion })
+    }
+    return rows
   }
 
   /**

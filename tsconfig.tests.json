@@ -100,5 +100,11 @@
     //     纳入会冒出与该替身写法同源的 `TS2322`。
     // 若将来把替身换成真实类型（`import type { … } from '../../src/…'`），
     // 再一并纳入 —— 不要在这里半途而废地只纳一半。
+    // ⚠️ 2026-11-17 补（PR #110 双审计返工）：`promotion-tooltip.spec.ts` 断言
+    //    `ModelPromotion['schedule']` 的**形状**（`validFrom` / `validUntil` 是 number、
+    //    `timezone` 是 string）以及 `promotionLifetimeText` 的返回是 `string | undefined`
+    //    —— 这些在 esbuild 转译下完全看不见，而这两条正是该模块存在的理由（时区腿 /
+    //    端点不含腿）。纳入后若有人把 `validUntil` 改成 `string` 立刻红。
+    "tests/unit/promotion-tooltip.spec.ts",
   ]
 }

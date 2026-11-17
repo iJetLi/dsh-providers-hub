@@ -427,3 +427,162 @@ describe('★ Qoder：目录自带 promotion 的行挂徽标', () => {
     expect('badge' in rowOf(await makeQoderAdapter([off], DAY_SH).listModels('qoder'), 'qmodel_38max')).toBe(false)
   })
 })
+
+/**
+ * ★ `promotionCandidates()` —— 悬停出口在**适配器侧**的那条腿。
+ *
+ * ## 为什么必须有它（而不是只测端点）
+ *
+ * 端点用例喂的是替身适配器，证明不了「真实目录里那份未决候选能不能被读出来」。
+ * 本仓反复出缺陷的形态就是「装配层全绿、取数点没接上」，而这条腿漏接的症状是
+ * **徽标照画、悬停整句消失** —— 界面上没有任何东西会报错。
+ *
+ * ## 判据本体：候选必须**未决**
+ *
+ * ⚠️ 与 `listModels()` 的对比必须挑对夹具：腾讯的活动**成对下发**，一条带
+ * `display: 'activeOnly'`、一条不带（不带的那条是常驻徽标，白天也画）。拿
+ * `standingEligible: true` 且无 activeOnly 的条目断言「白天不画」是**错的**
+ * —— 第一版就这么错过一次（实测 badge 在白天照样存在）。故这里用 activeOnly
+ * 那条：白天徽标不画，而候选表**照样交出**带窗口的活动。
+ */
+describe('★ promotionCandidates：适配器侧交出的必须是未决候选', () => {
+  /** 一条只在夜间窗口内成立、且徽标也只在该窗口内出现的活动。 */
+  const activeOnlyGlm: BuddyRemoteModel = {
+    id: 'glm-5.2', name: 'GLM-5.2', creditsRate: 'x0.79', contextWindow: 1_000_000,
+    promos: [{
+      id: 'glm-52-night-only',
+      source: 'promotion',
+      modelIds: ['glm-5.2'],
+      badge: { label: '夜间折扣', color: '#009273', display: 'activeOnly' },
+      hover: { zh: '每日 23:00–7:50 享 5 折。', en: '50% off daily from 23:00 to 07:50.' },
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '23:00', end: '7:50' }] },
+      timeDeclared: true,
+      standingEligible: true,
+      priority: 100,
+    }],
+  }
+
+  it('buddy：目录未落地 ⇒ 空数组（不抛、不编造）', async () => {
+    const adapter = makeBuddyAdapter({ remoteModels: async () => [activeOnlyGlm], now: DAY_SH })
+    expect(adapter.promotionCandidates()).toEqual([])
+    await adapter.listModels('buddy')
+    const rows = adapter.promotionCandidates()
+    expect(rows.map((row) => row.modelId)).toEqual(['glm-5.2'])
+    expect(rows[0]!.promotion.badge.label).toBe('夜间折扣')
+  })
+
+  it('★★★ buddy：白天徽标不画（activeOnly），候选表**仍交出**那条窗口', async () => {
+    const adapter = makeBuddyAdapter({ remoteModels: async () => [activeOnlyGlm], now: DAY_SH })
+    expect('badge' in rowOf(await adapter.listModels('buddy'), 'glm-5.2'),
+      'activeOnly 的徽标在窗口外必须不画').toBe(false)
+    // 同一条目录、同一个实例：候选表必须原样交出（带它的窗口）——
+    // 渲染侧才能在 23:00 那一刻自己把徽标与悬停画出来。
+    const rows = adapter.promotionCandidates()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.promotion.schedule?.daily).toEqual([{ start: '23:00', end: '7:50' }])
+    // 反向对照：同一条活动去掉 activeOnly ⇒ 白天徽标**要**画得出来
+    // （证明上面那条不是因为「本家永远不画」而恒真）。
+    const standing: BuddyRemoteModel = {
+      ...activeOnlyGlm,
+      promos: activeOnlyGlm.promos!.map((p) => ({
+        ...p, badge: { label: p.badge.label, color: p.badge.color },
+      })),
+    }
+    const standingAdapter = makeBuddyAdapter({ remoteModels: async () => [standing], now: DAY_SH })
+    expect(rowOf(await standingAdapter.listModels('buddy'), 'glm-5.2').badge)
+      .toEqual({ text: '夜间折扣', tone: 'success' })
+  })
+
+  it('★★ buddy：上游那句活动说明（hover）原样在候选里，而宿主徽标**装不下**它', async () => {
+    // 长句正是本条腿存在的理由。
+    const adapter = makeBuddyAdapter({ remoteModels: async () => [activeOnlyGlm], now: NIGHT_SH })
+    await adapter.listModels('buddy')
+    const hover = adapter.promotionCandidates()[0]!.promotion.hover
+    expect(hover?.zh).toBe('每日 23:00–7:50 享 5 折。')
+    expect(hover?.en).toBe('50% off daily from 23:00 to 07:50.')
+    // ⚠️ 而宿主徽标里**没有**它（契约只有 text + tone）⇒ 必须另开一条腿。
+    const badge = rowOf(await adapter.listModels('buddy'), 'glm-5.2').badge
+    expect(JSON.stringify(badge)).not.toContain('每日 23:00')
+    expect(badge).toEqual({ text: '夜间折扣', tone: 'success' })
+  })
+
+  // ⚠️ qoder 的适配器工厂住在上面那个 describe 里（作用域不互通），
+  //    这里必须自带一份 —— 复制构造而**不是**导出它：那个工厂的签名跟着
+  //    徽标判据演进，导出会让两个 describe 共享一份会漂移的夹具。
+  function makeQoder(overrides: Partial<QoderFallbackModel> = {}): QoderAdapter {
+    const entry: QoderFallbackModel = {
+      id: 'qmodel_38max',
+      name: 'Qwen3.8-Max',
+      contextWindow: 1_000_000,
+      priceFactor: 0.2,
+      promotion: {
+        active: false,
+        windowStart: '22:00',
+        windowEnd: '08:00',
+        badgeZh: '错峰 4 折',
+        badgeEn: 'Off-Peak 60% off',
+        timezone: 'Asia/Shanghai',
+      },
+      ...overrides,
+    }
+    return new QoderAdapter({
+      credentialRef: { name: 'QODER_ACCESS_TOKEN' } as never,
+      resolveCredential: async () => undefined,
+      refresh: async () => {},
+      product: { ...QODER, fallbackModels: [entry] } as never,
+      trafficGuardEnabled: () => false,
+      now: DAY_SH,
+      accountPool: {
+        hasLoggedInAccount: async () => true,
+        disabledModelsFor: () => new Set<string>(),
+      } as never,
+    } as never)
+  }
+
+  it('★★★ qoder：同步目录 ⇒ 候选立即可读（不需先 await 一次 listModels）', () => {
+    // 与 buddy 刻意不同：qoder 的目录来自 catalogSource()（远端 ∪ 兜底表）,
+    // 装配层同步可读。理由见 src/qoder-adapter.ts 的方法注释。
+    const rows = makeQoder().promotionCandidates()
+    expect(rows.map((row) => row.modelId)).toEqual(['qmodel_38max'])
+    expect(rows[0]!.promotion.badge.label).toBe('错峰 4 折')
+    // 反向对照：没有 promotion ⇒ 整行不出现（不是带一个 undefined 占位）。
+    expect(makeQoder({ promotion: undefined }).promotionCandidates()).toEqual([])
+  })
+
+  it('★★★ qoder：白天徽标不画，候选表**仍交出**那条窗口（与 buddy 对称）', async () => {
+    const adapter = makeQoder()
+    expect('badge' in rowOf(await adapter.listModels('qoder'), 'qmodel_38max'),
+      '窗口外不许画「错峰 4 折」（取舍 4）').toBe(false)
+    const rows = adapter.promotionCandidates()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.promotion.schedule?.daily).toEqual([{ start: '22:00', end: '08:00' }])
+    // 反向对照：换成夜间时钟 ⇒ 徽标画得出来（证明上面不是「永远不画」）。
+    const night = new QoderAdapter({
+      credentialRef: { name: 'QODER_ACCESS_TOKEN' } as never,
+      resolveCredential: async () => undefined,
+      refresh: async () => {},
+      product: { ...QODER, fallbackModels: [{
+        id: 'qmodel_38max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, priceFactor: 0.2,
+        promotion: { active: false, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 4 折' },
+      }] } as never,
+      trafficGuardEnabled: () => false,
+      now: NIGHT_SH,
+      accountPool: { hasLoggedInAccount: async () => true, disabledModelsFor: () => new Set<string>() } as never,
+    } as never)
+    expect(rowOf(await night.listModels('qoder'), 'qmodel_38max').badge)
+      .toEqual({ text: '错峰 4 折', tone: 'neutral' })
+  })
+
+  it('★★ qoder：读不懂窗口的条目**带 dailyUnusable 进**候选（渲染侧两道闸都拒）', () => {
+    // 上游说了有窗口而我们读不懂 ⇒ 不能替它编一个时刻画进悬停；但条目
+    // 必须**可见地**带着这个标记，否则客户端无从知道「是读不懂」还是「没有」。
+    const rows = makeQoder({
+      promotion: { active: true, windowStart: '24:30', windowEnd: '08:00', badgeZh: '错峰 4 折' },
+    }).promotionCandidates()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.promotion.schedule?.dailyUnusable).toBe(true)
+    // 反向对照：窗口合法 ⇒ 不带该标记（否则上面是恒真）。
+    expect(makeQoder().promotionCandidates()[0]!.promotion.schedule?.dailyUnusable)
+      .toBeUndefined()
+  })
+})

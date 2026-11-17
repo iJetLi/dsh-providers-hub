@@ -463,6 +463,227 @@ M7 member 当闲时读（红）· M8 徽标冻在加载时刻（红）· M10 边
 它已经把「未知」与「明确没有」分开 ⇒ 在适配器层写不写这个键**不可观察**。
 真正的三态闸门在那一行，那边已有守卫。**不为它编恒真用例**（#104 的同一条纪律）。
 
+### 19. ⚠️⚠️ 悬停这条腿：为什么徽标字段不够，以及占 single 槽的全部代价
+
+用户实测反馈「未发现可见徽标」引出两轮定位，结论值得完整留档：
+
+**第一轮（不是缺陷）**：截图里 `Hy4 flash · x0.00→免费 FREE` 那行 —— `免费`
+是价格腿产物（`src/buddy.ts` 的 `parsePromotions`，factor 0 ⇒ `免费`），只有真
+读到 `data.modelPromotions` 才算得出来；徽标腿读**同一个数组、同一个 id、
+同一个 `push()`**（buddy.ts:784 vs 791-793、821-822）。⇒「缺拉取活动清单的能力」
+被这张截图本身证伪。末尾那个 `FREE` 也不是徽标，是**同名消歧标记**
+（`variantLabelFor`：`hy4-flash` 与 `hy4-flash-free` 撞显示名 ⇒ 公共前缀尾巴大写）。
+
+**第二轮（真缺陷）**：起 web 的是 npm 全局 CLI `@deepseek-ai/dsh@0.2.1-rc.2`，
+它自带的 `dsh-llm/lib/index.js` 里 `badge` **0 次命中** ⇒ 宿主白名单不透传徽标。
+桌面端 asar（0.2.2-rc.3）同一处 1476 次命中。升级到 `@next`（0.2.2-rc.3）后白名单
+实测为 `...badge === void 0 ? {} : { badge: { text, tone } }`，徽标才落地。
+**教训**：「插件全绿 + 界面零徽标 + 零日志」先查**宿主版本**，再查装配层。
+
+升级后徽标画出来了，但只剩短标签一句。原因（三条实测，全部取证于本机）：
+
+| 事实 | 证据 | 后果 |
+|---|---|---|
+| 宿主 badge 契约只有 `{ text, tone }` | 0.2.2-rc.3 的 dsh-llm 里 `hover`/`tooltip`/`title` **各 0 次命中** | 上游 `hover.textZh` 那句长说明**无处可放** |
+| 宿主回落渲染不带 title | asar @34131065：`jsx(Tag,{tone,children:resolveText(text)})` | 走数据面 ⇒ 永远没有悬停 |
+| composer 菜单不渲染 description | `ModelSelect` 函数体内 `description` **0 次命中**（46 处全在 `/model` 弹窗那条路） | 「写进 description 换悬停」这条捷径不存在 |
+
+⇒ 唯一出口是 `conversation.input.model.label`（宿主文档原文：「A contribution
+replaces both and receives the badge in its owner props」）。用户选定该方案后
+落地为 `plugin-src/client/model-label.js` + `src/promotion-tooltip.ts`。
+
+**四条必须守住的判据**：
+
+1. ⚠️⚠️ **该槽是 `single`**（实测宿主声明：`kind: 'single'`、`scope: 'session'`、
+   `inline: true`）。赢家替**所有** provider 画行。所以组件必须两条腿：自家候选
+   画 chip + 长悬停；外来行画 `model.name` + **宿主给的** `model.badge`。占住格子
+   却只画裸名字 = 兄弟插件的徽标整片消失（dsh-connect-workbuddy 的 issue #138
+   是同一形状，方向相反）。
+2. ⚠️⚠️ **回落判据必须打在 model id，不能打在 provider**：`registerBuddyLlm` 走
+   `registerAdapterIdempotent` ⇒ 撞名时**本家的注册被跳过、保留别人的路由**。
+   若按「这家在不在候选表里」压掉宿主 badge，就会抹掉**别人按自己账号算出的**
+   徽标。按 model id 判：我们对这一行真有计划数据才压。
+3. ⚠️ **自家渠道绝不回落到目录缓存里的 badge**：`listModels` 那份 badge 是**装配
+   时刻**挑定的，宿主最长 20 分钟才重读目录。候选说「此刻不成立」时若回落到它,
+   画的就是过期徽标 —— 正是 issue #101 要修的形态。变异 N1（恒当外来）1 条红、
+   N2（恒当自家）3 条红。
+4. ⚠️ **取数完成必须 notify**：槽位在 `conversation.input.model` 挂载时注册，那一刻
+   RPC 还没回；没有「快照落地 ⇒ 叫醒已挂载行」这条，首屏要等下一次心跳（60 秒）
+   才画得出徽标，用户看到的就是「装完插件什么都没变」。
+
+**刻意不依赖的两个机制**（都有实测理由）：
+
+- `register({ inject })` 对 `single` 槽是否真被消费**无法从本机产物证实**（宿主文档
+  只在 keyed/chain 语境写过 inject）⇒ `rpcCall` 存在模块级 `boundRpcCall`，由注册
+  时绑定 + 心跳驱动，组件 props 里有没有它都不影响数据新鲜度。
+- 兄弟插件的 priority：WB `-105`、QD `-1` ⇒ 本仓取 **`-200`**（严格更低，且不相等,
+  同值会抛 `single slot already has a registration at priority N`）。
+
+**代价如实登记**：占住 single 槽后，`dsh-connect-workbuddy` 自己行上的**负载图标、
+「新」标记、折扣价后缀**不再由它渲染（它的徽标经 `model.badge` 数据面保住）。
+`dsh-connect-qoder` 更硬：实测其 `src/adapter.ts` 里 `badge` **0 次命中** ⇒ 它不发布
+数据面徽标，其错峰折扣 chip 由我们画不出来（我们的候选表也不含它的 provider）。
+两条都是 single 槽的固有形状，不是缺陷；要消除只能等宿主把该槽改成 `keyed`。
+
+**测试的两条方法论教训**（都在本次现场踩到）：
+
+- 替身 React **必须真的执行 useEffect**：第一版把 `useEffect` 写成空函数，于是
+  「失败保留快照」「心跳重取」「单飞闸门」三条腿一次都跑不到 —— 三条变异实测
+  **全绿**。用例名承诺了它没验证的事，比没有用例更糟。
+- 替身**必须收下并跑 useEffect 的清理函数**：心跳定时器住在模块级 `subscribeTick`
+  里，不回收 ⇒ 第一个用例之后 `tickTimer` 恒非 null ⇒ 后续用例的 `setInterval`
+  根本没建立，「过期后由心跳重取」那条**假绿**（实测期望 2 得到 1）。
+
+另外：读者语言必须**显式注入**（`resolveHostBadgeText(text, languageOverride)`）。
+宿主 `badge.text` 是表形态（LocalizedText），不 stub `navigator.language` 的话
+断言会随跑测试的机器 locale 翻脸 —— 中文机器上拿到「限时免费」而断言写
+`'Free now'`，红了也不是缺陷。
+
+**变异登记：客户端侧 19 条 + 服务端侧 9 条，全部有牙。**
+
+客户端侧（`tests/unit/model-label-promo.spec.ts`，20 条用例）：M1 外来 chip 删（1 红）、
+M2 悬停短路（1 红）、M3 priority 抬到 -100（1 红）、M4 上游色丢（1 红）、
+M5 名字换成 id（1 红）、M6b 失败清快照（1 红）、M6c 成功不记时间（1 红）、
+M7 去单飞闸门（1 红）、M8 与 M14 取数完成不 notify（各 1 红）、M9 忽略读者语言（1 红）、
+M10 自家分支 `if (false)`（3 红）、M11 不订阅（1 红）、M12 心跳不重取（1 红）、
+M13 心跳不 notify（1 红）、M15 notify 空转（2 红）、N1 恒当外来（1 红）、
+N2 恒当自家（3 红）、N3 不按 modelId 过滤（1 红）。
+
+服务端侧：`jet-hub-rpc.spec.ts` 的 P1 空数组占键（1 红）、P2b 去掉隔离（1 红）、
+P3 不告警（1 红）、P4 告警不点名（1 红）、P5 挑定徽标（1 红）；
+`model-promotions-wiring.spec.ts` 的 A1/A2 适配器取数点（各 3 红）、
+A3 恒空（3 红）、A4 剔掉 dailyUnusable（1 红）。
+
+**三条初跑无牙，都是判据/夹具的问题而不是「功能没问题」**（已补用例而不是删变异）：
+
+- 第一版 M6 打的是 `loadCandidates` 的**返回值**，而承重体是模块变量
+  `candidatesSnapshot` ⇒ 该变异态与修复态行为相同 ⇒ **变异根本没注入**。
+  换成 M6b（清空快照）才有牙。
+- M13（心跳不 notify）初跑全绿：`notify()` 在心跳里与 `subscribeTick` 的
+  `setTick` **冗余**。补一条「取数失败 ⇒ 成功路径的 notify 走不到」的用例,
+  把这一格单独隔离出来才有牙。
+- 初版三条（失败清快照 / 不记时间 / 去单飞）全绿，根因是替身 React 把
+  `useEffect` 写成空函数（见上面的方法论教训）。
+
+#### 19.1 PR #110 双审计返工（2026-11-17）：三条净损失 + 两处零覆盖
+
+**对抗审计 P1-1 —— 占 single 槽的「净损失 3 条」：**
+
+1. **名字/徽标先后必须跟 `placement` 走**（已修）。宿主 `placement` 两处排法**相反**：
+   `trigger`（composer 行）徽标在名字**前**、`option`（菜单候选行）徽标在名字**后**。
+   修前腿 2 恒 `name→chip` ⇒ 外来渠道在 trigger 行从「名前」漂到「名后」= 视觉回归。
+   修法是 `plugin-src/client/model-label.js` 的 `orderBadgeParts(placement, nameNode, chipNode)`，
+   `trigger` 返 `[chip, name]`、否则 `[name, chip]`；`placement` 缺省按 `option`。
+   **守卫**：`model-label-promo.spec.ts` 两条（`placement:'trigger'` 断言第一子节点是 chip、
+   `placement:'option'` 断言第一子节点是 name）。⚠️ 修前该分支**零用例**（全部 20 条都是 `'option'`）。
+2. **长名省略由宿主做，重画会丢**（如实登记，不修）。宿主对超长模型名有省略（`badgedName` 那套），
+   自造的 `dim-jh-modelLabel*` 没再实现 ⇒ 极长名字可能不被省略。
+3. **本地化是两套实现**（如实登记）。`resolveHostBadgeText` vs 宿主 `resolveText` 各写一遍。
+   这是「同一判据只留一份实现」红线的**已知例外**：宿主实现不在公开导出、本机也没有
+   `@deepseek-ai/dsh-client-ui-model-selection` 包（只有 cordis/cosmokit/dsh-agent/dsh-commands/
+   dsh-credentials/dsh-llm/schemastery）⇒ 无法 import。将来该包进入依赖应改为复用。
+
+**正向审计 P2 —— `src/promotion-tooltip.ts` 两腿零覆盖（已补）：**
+
+- `formatPromotionDay` 的**时区腿**（`:101-108`）：`validUntil` 是本机时区日历日。删掉 `timeZone`
+  （或改 UTC）会让 LM/CN 用户看到差一天的「截止日」。**无牙实测**：原 5 套 spec 对该变异全绿。
+- `promotionLifetimeText` 的 **`validUntil - 1` 端点腿**（`:127-129`）：上游给的是「这一天含在内」
+  ⇒ 减 1ms 落到前一日末尾。删掉 `- 1` 会把截止日**晚一天**。原同样零覆盖。
+- 修法：新建 `tests/unit/promotion-tooltip.spec.ts`（6 条），并在 `tsconfig.tests.json` 的 `include`
+  加这一份（它断言 `ModelPromotion['schedule']` 的形状与返回类型，esbuild 看不见）。
+- **变异**：T1 删 `- 1`（红 3 条）、T2 时区腿改 UTC（红 2 条）、T3 时区腿整段删（红 5 条）、
+  T4 `–` 改 `-`（红 1 条）⇒ 4/4 有牙。
+
+**对抗 P2-2 —— 选择器 5 条无牙变异（已补）：** M10 排序升序 / M11 同 priority tie /
+M14 `start===end` / M15 `weekdays:[]` / M6 1ms 窗口。补 3 条：两条活动同开+同 priority
+（稳定排序赢家=输入顺序第一个，两向锁住 ⇒ 比较方向反了会红）、priority 不同高的赢、
+空时段与空 weekdays 都不算在跑。
+
+⚠️ **我的假说错一次（如实记）**：第一版同 priority 用例断言两向都是 `'a'`，实测 `[b,a]` 得 `'b'`
+—— `sortPromotions` 是**稳定排序**，同优先级同来源返 0、不按 id 兜底。已改成「赢家=输入顺序第一个」。
+
+⚠️⚠️ **M15 追踪全过程（一条「无牙变异」的完整解剖，值得记住）**：
+1. 第一版用例经 `parseTencentPromotions` 造候选 ⇒ 无牙。根因：**`parseDailyWindows` 只回填
+   `{ start, end }`、根本不搬 `weekdays` 字段**（见它函数体），所以经解析器造的候选**永远没有
+   `weekdays`** ⇒ 打不到 `withinDailyWindows` 的星期闸门。
+2. 第二版改成**直接构造 `ModelPromotion`**（`weekdays: []`）+ 断言 `promotionWithinDailyWindow`，
+   仍无牙。根因：空数组时 `days.includes(today)` **本来就返回 false**，所以
+   `if (days.length === 0) return false` 那行只是「提前退出」、**行为上冗余**（等价变异）。
+3. 结论：真正**承重**的是 `if (!days.includes(clock.isoWeekday)) return false`。改成
+   **对照对**（`[2]`=今天 ⇒ true / `[3]` ⇒ false / `[]` ⇒ false / `[0,8,1.5]` 全非法 ⇒ false /
+   缺席 ⇒ true）后，变异承重行 ⇒ **RED（4 tests）**；变异那行冗余的 `days.length === 0` ⇒
+   **GREEN（等价）**，如实登记、**不为它编用例**。
+4. 教训（本仓反复踩）：**变异全绿先问「判据在断言什么」，其次问「被测那行是否承重」** ——
+   这不只是判据问题，也可能是**代码里有两行同义守卫、只有一行承重**。
+
+### 20. 无头出图与布局闸门：tools/model-label-shot.ts + measure-model-label.mjs
+
+照 dsh-connect-workbuddy 的 `tools/section-shot.tsx` 那条路（jsdom 不做布局,
+几何只能量）。两条命令：`pnpm shot:label` 生成 HTML，`pnpm shot:label:measure`
+出图 + 测量 + 断言（本机没有 Chrome，浏览器自动找 Edge）。
+
+**为什么必须有 measure 这一半**：只有生成器的话，整套工具是个**永远绿**的
+截图器 —— 判据全在浏览器里跑，没人读回来。这正是本仓登记的装饰性产物形态
+（「守卫有牙」≠「取值正确」）。
+
+### 三条实测踩到的坑（都在本次现场发生，不是推演）
+
+1. ⚠️⚠️ **闸门必须自己生成 HTML，不能只读现成的那一份**。变异验证里改完源码
+   直接跑 measure，它量到的是**上一轮**留下的 HTML（实测 html mtime 19:54:28
+   < 源码 19:54:36）⇒「删掉外来徽标代画」那组变异报出的红因是上一组「title
+   换成短标签」的判据 —— 红因与被测腿完全无关，却给出一条**错误的确凿证据**.
+2. ⚠️⚠️ **overflow 与 text-overflow 是两个字段，混成一个就恒绿**。上一版把
+   `overflow` 记成 `cs(name,'text-overflow')` ⇒ 永远读到 'ellipsis'，于是
+   「overflow:hidden 改成 visible」这一组变异**全绿**。拆开之后立刻有牙。
+3. ⚠️ **盒子几何抓不到「文字画到框外」**：overflow:visible 时名字的
+   `getBoundingClientRect().right` **完全不变**（文字只是溢出绘制）⇒ 只量
+   盒子的 overlapsChip / clipped 两条都照旧通过。这一格必须打在**计算样式**上。
+   同理 gap：读外层 `.cell` 的 6px 会漏掉本组件的 4px ⇒ 改成 0 时全绿,
+   必须量「胶囊左缘 − 名字右缘」这个实际空隙。
+
+另外两条通用坑（本仓已各有记录，这次又各踩一遍）：
+- 模板字符串里的注释**不能出现反引号**（esbuild 报 Expected ';'）——
+  `jet-hub-styles.js` 的文件头就写着这条，我在 shot 工具的注释里又犯了一次。
+- 变异「全绿」先怀疑**变异本身**：G4 初跑我误判成无牙，实际 EXIT=1,
+  错在我的分类器把「没匹配到标记」当成 GREEN。看退出码，别看猜的文本。
+
+### 这套工具证明什么、不证明什么（如实登记）
+
+| 判据 | 实测值 |
+|---|---|
+| 胶囊完整可见（12 档全过） | chipRight ≤ cellRight |
+| 挤压方向：名字先让位 | 窄档 nameClip=true 且 chip 完整 |
+| 成对判据 | clipped=7 行 **且** 存在不截的宽档（缺一即红）|
+| 胶囊 flex | `0 0 auto`（与宿主同）|
+| 名字截断声明 | `overflow:hidden` + `text-overflow:ellipsis` |
+| 实际间隙 | 4px（宿主参照行同为 4px）|
+| 悬停全文 | title 含上游原话 + 有效期，且**长过**胶囊本身 |
+| 外来徽标代画 | case2 每档都有胶囊，title 恰为短标签（不替上游编长句）|
+| 与宿主几何同构 | 同档截断状态一致 + 胶囊宽度差 ≤8px（实测 58 vs 55）|
+
+**不证明**（写在这里免得被当成视觉验收）：
+1. **截不到悬停**：`title` 由操作系统绘制、需真实鼠标停留 ⇒ headless 的
+   `--screenshot` 拿不到。那句改由 `--dump-dom` 以**文本**落进审计并断言。
+2. **配色不可比**：参照行只拿到宿主 CSS module 的 4 条规则，宿主胶囊的填充色
+   来自它的 **Tag 组件**自己的样式表 ⇒ 图里参照行是灰字、我们的是绿底描边。
+   这张图证明**几何同构**，不证明配色一致。
+3. 渲染方是**替身 React**，不是宿主 ModelSelect ⇒ `.cell` 那层几何按宿主实测值
+   手写，宿主改了这里不会跟着红。
+
+变异登记（6 条，**其中 2 条初跑无牙、补判据后才有**）：
+
+| 变异 | 初跑 | 现在 |
+|---|---|---|
+| G1 chip flex 改成收缩 | 8 处红 | 红 |
+| G2 名字 overflow:hidden → visible | **全绿**（overflow 字段被记成 text-overflow 的值）| 红（字段拆开）|
+| G5 本组件 gap:4px → 0 | **全绿**（探针读的是外层 .cell 的 6px）| 红（改量实际空隙）|
+| G3 title 换成短标签 | 红（生成器即失败：断言打在产出 HTML 上）| 红 |
+| G4 外来徽标分支反转 | 红（badge 为 undefined 时读 .tone 抛错）| 红 |
+| G6 去掉 text-overflow | 红（实测 clip）| 红 |
+
+⚠️ G4 的红因是**抛错**而不是判据 —— 合法，但要如实说明：它证明「这条分支
+会崩」，不证明「判据本身有牙」。真正打在该腿上的判据是 G1/G2/G5/G6 那类。
+
 ### ⚠️⚠️ PR #106 双审计返工（2026-11-17）：六条必修 + 一条实现与文档直接矛盾
 
 两份审计各自给出「修，但要返工」，交集之外各有独有项；以下是合并后的**必修**，

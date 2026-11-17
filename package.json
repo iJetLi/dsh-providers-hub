@@ -32,6 +32,8 @@
     "typecheck:tests": "tsc -p tsconfig.tests.json",
     "pretest": "npm run typecheck:tests",
     "test": "vitest run",
+    "shot:label": "vitest run --config vitest.shot.config.ts",
+    "shot:label:measure": "node tools/measure-model-label.mjs",
     "test:e2e:login": "cross-env DSH_CODEARTS_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/login.e2e.spec.ts",
     "test:e2e:officeace": "cross-env DSH_OFFICEACE_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/officeace-incognito-login.e2e.spec.ts",
     "test:e2e:officeace-abandoned": "cross-env DSH_OFFICEACE_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/officeace-abandoned-login.e2e.spec.ts",
