@@ -721,9 +721,64 @@ function UsageBadgeActive(props) {
    * 点过「展开」，切到 B 渠道时会直接看到全量列表 —— 用户会以为折叠功能时灵时不灵。
    */
   const [creditsExpanded, setCreditsExpanded] = React.useState(false);
+  /**
+   * ★★ **弹窗当前页签**（用户 2026-11-18 要求把弹窗拆成「积分 / 签到」两页）。
+   *
+   * | 值 | 页面 |
+   * |---|---|
+   * | `credits`（默认）| 订阅 + 积分明细 —— 用户打开弹窗的主要目的是看余额 |
+   * | `claim` | 签到按钮 + 汇总 + 逐渠道结果 |
+   *
+   * ⚠️ **刻意不持久化**（不用 localStorage / 服务端）：每次打开弹窗都回到「积分」。
+   *    若记住上次的「签到」，用户下次想看余额时会以为「余额没了」——
+   *    这类「记住偏好反而制造困惑」的开关，本仓一贯不持久化。
+   * ⚠️ 组件卸载（关掉弹窗）时这个 state 随之销毁 ⇒ 天然满足「每次打开都回到积分」。
+   */
+  const [activeTab, setActiveTab] = React.useState('credits');
   const root = React.useRef(null);
   /** 浮层根节点：只用于「样式表缺失时仍处于绝对定位」这道自检（见下面的 effect）。 */
   const popRef = React.useRef(null);
+  /**
+   * ★★ **积分页的内容高度**（用户 2026-11-18：「切换页签时弹窗高度不要变低，
+   * 让签到日志框自动变高就行」）。
+   *
+   * ## 为什么需要它
+   *
+   * 实测：积分页高 **259px**、签到页只有 **212px** ⇒ 切到签到页时弹窗**矮了 47px**，
+   * 视觉上像「换个页签窗口缩了一下」，很跳。
+   *
+   * ## 做法
+   *
+   * 1. 每次渲染 credits 页时把内容区实测高度存进本 ref（`useLayoutEffect`，
+   *    在浏览器绘制前写，避免闪烁）；
+   * 2. `claim` 页把该值作为**最小高度** ⇒ 高度不足时签到日志框自动撑开
+   *    （签到页的 `.dim-jh-badgeNote` 已放开换行，撑高是自然的）。
+   *
+   * ⚠️ 只记**积分页**的高度：签到页可能因为日志很长而更高，那种情况下
+   *    也不该反过来压缩积分页（用户只说「不要变低」）。
+   * ⚠️ 用 ref 而不是 state：改它不该触发额外渲染（高度是渲染的**结果**，
+   *    写 state 会造成「渲染 → 改 state → 再渲染」的多余循环）。
+   */
+  const creditsPaneHeightRef = React.useRef(0);
+  /** 积分页内容面板的 DOM 引用（测量高度用，见上面的 `creditsPaneHeightRef`）。 */
+  const creditsPanelRef = React.useRef(null);
+  /**
+   * 测量积分页高度（仅当当前在 credits 页签、且弹窗打开时）。
+   *
+   * ⚠️ 用 `useLayoutEffect` 而不是 `useEffect`：前者在浏览器**绘制前**执行，
+   *    这样切到签到页时拿到的是**上一次渲染的真实高度**，不会出现
+   *    「先短暂变矮、下一帧才撑回去」的闪烁。
+   * ⚠️ 依赖里带 `activeTab`：从签到页切回积分页、内容又变了（如展开更多账号）时
+   *    要重新测量，否则 minHeight 会一直是旧值。
+   */
+  React.useLayoutEffect(() => {
+    if (activeTab !== 'credits') return;
+    const node = creditsPanelRef.current;
+    if (node === null) return;
+    // `getBoundingClientRect` 含 padding/border（与弹窗的盒模型一致）
+    const height = Math.round(node.getBoundingClientRect().height);
+    if (height > 0) creditsPaneHeightRef.current = height;
+  });
   /** 供定时器与按钮调用的「读一次」入口（每次渲染替换，避免闭包过期）。 */
   const read = React.useRef(() => {});
   /**
@@ -1439,6 +1494,13 @@ function UsageBadgeActive(props) {
       React.createElement('div', { key: 'head', className: 'dim-jh-badgeHead' }, [
         React.createElement('span', { key: 'dot', className: 'dim-jh-badgeDot', 'data-tone': tone }),
         React.createElement('span', { key: 'title', className: 'dim-jh-badgeTitle' }, label),
+        /**
+         * ★ **页签切换器**（用户 2026-11-18 指定的位置：标题右侧、自动按钮左侧）。
+         *
+         * ⚠️ 位置在「标题」与「时间戳」之间：时间戳是**右对齐推送**的（`margin-left: auto`
+         * 由 CSS 的 `.dim-jh-badgeAt` 承担），故页签紧跟标题即可，无需额外定位。
+         */
+        renderTabs(),
         React.createElement('span', { key: 'at', className: 'dim-jh-badgeAt' },
           snapshot === null
             ? '读取中…'
@@ -1477,14 +1539,13 @@ function UsageBadgeActive(props) {
        * 原形态是两行：页签一行（27px）+ 轮换一行（38px + 7px 边距）= **72px**。
        * 合并后 **33px**，省 39px —— 这是「默认显示 15 个账号」能落地的另一半前提。
        *
-       * ## 布局（用户 2026-11-18 明确）
+       * ⚠️⚠️ **2026-11-18 起本行属于「积分」页，不再是弹窗公共区**（用户明确：
+       *     「这个归于积分页，不是共同页」）。
+       *     「轮换起点」与「显示偏好」都只影响**积分怎么显示/从哪个号开始烧**，
+       *     与签到毫无关系 ⇒ 放在签到页是噪音。
+       *     ⇒ 已移入 {@link renderTabContent} 的 credits 分支。
        *
-       * ```
-       * ┌──────────────────────────────────┐  ┌────────────────┐
-       * │ 轮换起点 ⓘ [ ▼ 默认__________ ] │  │自动│优先订阅│只看积分│
-       * └──────────────────────────────────┘  └────────────────┘
-       *        flex: 1 1 auto（吃满中间）            flex: 0 0 auto（贴最右）
-       * ```
+       * ## 布局（原公共区形态，现仅在积分页生效）
        *
        * - 轮换的黄框 `flex: 1 1 auto` ⇒ 吃掉中间所有空间，**下拉框跟着变宽**
        *   （实测约 165px，原 ~88px ⇒ 「位次 23」不再被截断）
@@ -1497,7 +1558,6 @@ function UsageBadgeActive(props) {
        *
        * ⚠️ 窄屏（< 720px）由 CSS 的 `flex-wrap: wrap` 回退两行 —— 不隐藏任何功能。
        */
-      renderToolbar(),
     ];
 
     // 首屏：读数未到 / 首次就失败 —— 说明白，但**不**渲染会说出
@@ -1515,15 +1575,139 @@ function UsageBadgeActive(props) {
           : `${readError}（可点右上角 ↻ 重试）`)
         : '正在读取用量…（首次要逐账号查询，可能要几秒）'));
       // 签到不依赖本渠道的读数，故首屏也放出来（用户可能就是想先签到）。
-      children.push(renderClaim());
+      children.push(renderTabContent());
       return wrapPopover(children);
     }
 
-    children.push(renderSubscription());
-    children.push(renderCredits());
-    children.push(renderClaim());
-    children.push(renderFoot());
+    /**
+     * ⚠️⚠️ **不要再在这里 push `renderSubscription()`**（真实缺陷，2026-11-18 截图报障）。
+     *
+     * 拆分页签时我在公共区留了一次、又在 `renderTabContent` 的 credits 分支里
+     * 留了一次 ⇒ 订阅区**渲染两遍**（用户截图：红框里一次、下面又一次）。
+     *
+     * 订阅数据与「积分」页是同一份东西（都是本渠道的余额口径），
+     * 故它只应在 credits 分支里渲染一次 —— 见 `renderTabContent`。
+     */
+    children.push(renderTabContent());
     return wrapPopover(children);
+  }
+
+  /**
+   * ★★ **按当前页签渲染内容**（用户 2026-11-18 要求把弹窗拆成两个标签页）。
+   *
+   * | 页签 | 内容 | 说明 |
+   * |---|---|---|
+   * | `credits`（默认）| 订阅 + 积分明细 | 用户打开弹窗的主要目的是看余额 |
+   * | `claim` | 签到按钮 + 汇总 + 逐渠道结果 | 原先堆在积分页底部，读不全 |
+   *
+   * ## ⚠️ 切页签**不得重置**其它状态
+   *
+   * `creditsExpanded`（展开其余 N 个）、`rotationState`、签到进度等都是
+   * 组件级别的 state，切换页签只是换渲染分支 ⇒ 它们自然保留。
+   * 唯一被重置的是「页签本身」，这是刻意的（见 `useState('credits')` 注释）。
+   *
+   * ## ⚠️ 页面为空时的兜底
+   *
+   * 首屏（`snapshot === null`）也走这里：此时积分区只有「正在读取…」占位，
+   * 而签到不依赖读数 ⇒ 上一版刻意在首屏也渲染签到。现在拆了页签，
+   * 首屏若停在「签到」页也必须能签到 ⇒ 两个分支都保留各自内容。
+   */
+  function renderTabContent() {
+    if (activeTab === 'claim') {
+      /**
+       * ⚠️ 签到页：把**积分页实测高度**作为最小高度 ⇒ 切页签时弹窗不变矮。
+       *
+       * `minHeight` 用内联样式而不是样式表：它是**运行期测量值**
+       * （依赖账号数量、展开状态、字体渲染），没法写成静态 CSS。
+       */
+      const minH = creditsPaneHeightRef.current;
+      return React.createElement('div', {
+        key: 'tabClaim',
+        className: 'dim-jh-badgeTabPanel',
+        role: 'tabpanel',
+        ...(minH > 0 ? { style: { minHeight: `${minH}px` } } : {}),
+      }, [renderClaim()]);
+    }
+    return React.createElement('div', {
+      key: 'tabCredits',
+      className: 'dim-jh-badgeTabPanel',
+      role: 'tabpanel',
+      /**
+       * 这个 ref 供 {@link creditsPaneHeightRef} 的测量 effect 读取
+       * （见该 ref 的注释：记录积分页高度，供签到页撑高用）。
+       */
+      ref: creditsPanelRef,
+    }, [
+      /**
+       * ★ **工具行属于「积分」页**（用户 2026-11-18 明确：「这个归于积分页，不是共同页」）。
+       *
+       * 轮换起点 + 显示偏好只影响**积分怎么显示 / 从哪个号开始烧**，与签到无关，
+       * 放在签到页是噪音 ⇒ 仅在 credits 分支渲染。
+       */
+      renderToolbar(),
+      snapshot === null ? null : renderSubscription(),
+      snapshot === null ? null : renderCredits(),
+      renderCreditsFoot(),
+    ].filter(Boolean));
+  }
+
+  /**
+   * ★★ **页签切换器**（用户 2026-11-18：拆成「积分 / 签到」两页）。
+   *
+   * ## 视觉：以「分段式」为主 + 「下划线」标选中
+   *
+   * 用户明确要求「C 为主，加上 B 的下划线」：
+   * - **C 的部分**：外层一个圆角边框包住两个页签，中间一道细分隔线
+   * - **B 的部分**：选中项底部加一条品牌色下划线
+   *
+   * ```
+   * ┌────────┬────────┐
+   * │  积分  │  签到  │
+   * │ ────── │        │   ← 选中项的下划线
+   * └────────┴────────┘
+   * ```
+   *
+   * ## 为什么放头部（红框位置）
+   *
+   * 用户指定的位置：标题右侧、「自动签到」按钮左侧。实测那里有 411px 可用，
+   * 页签只需约 95px ⇒ 不需要挤压任何现有元素。
+   *
+   * ## 可访问性
+   *
+   * `role="tablist"` + 每个按钮 `role="tab"` + `aria-selected`；
+   * 键盘 `←`/`→` 切换（符合 WAI-ARIA Tabs 模式）。
+   * ⚠️ 面板的 `role="tabpanel"` 在 {@link renderTabContent} 里加。
+   */
+  function renderTabs() {
+    const TABS = [
+      ['credits', '积分'],
+      ['claim', '签到'],
+    ];
+    const move = (delta) => {
+      const idx = TABS.findIndex(([key]) => key === activeTab);
+      const next = TABS[(idx + delta + TABS.length) % TABS.length][0];
+      setActiveTab(next);
+    };
+    return React.createElement('div', {
+      key: 'tabs',
+      className: 'dim-jh-badgeTabs',
+      role: 'tablist',
+      'aria-label': '用量弹窗页面',
+      onKeyDown: (event) => {
+        // ⚠️ 只在页签容器内响应左右键，不影响页面其它键盘行为
+        if (event.key === 'ArrowLeft') { event.preventDefault(); move(-1); }
+        if (event.key === 'ArrowRight') { event.preventDefault(); move(1); }
+      },
+    }, TABS.map(([key, label]) => React.createElement('button', {
+      key,
+      type: 'button',
+      className: 'dim-jh-badgeTab',
+      role: 'tab',
+      'aria-selected': activeTab === key,
+      // ⚠️ 不用 tabIndex=-1 的漫游焦点：本控件只有两项，
+      //    保持都可 Tab 到更符合直觉（WAI-ARIA 允许两种实现）。
+      onClick: () => setActiveTab(key),
+    }, label)));
   }
 
   /**
@@ -2761,7 +2945,14 @@ function UsageBadgeActive(props) {
   }
 
   /** 脚注：停用账号数、失败账号数与「显示的是旧读数」提示。 */
-  function renderFoot() {
+  /**
+   * 积分页的**脚注**（停用账号数 / 读取失败数 / 刷新失败提示）。
+   *
+   * ⚠️ 2026-11-18 从 `renderFoot` 改名：拆分页签后它只属于「积分」页
+   *    （这三件事都是关于**余额读数**的，与签到无关）。
+   *    名字带 `Credits` 是为了让「它该出现在哪个页签」在调用点一眼可见。
+   */
+  function renderCreditsFoot() {
     const parts = [];
     if (value?.disabledCount > 0) parts.push(`另有 ${value.disabledCount} 个账号已停用，未计入`);
     // ⚠️ 优先复用 `incompleteNote` 那句话：同一个事实（有几个账号没读到）在两个

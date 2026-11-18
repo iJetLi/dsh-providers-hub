@@ -388,6 +388,175 @@ describe('用量徽标：槽位接线', () => {
     expect(stmt, '必须从 availableGroup（非配额组）取单位').toContain('availableGroup')
     expect(stmt, '不得把 QUOTA_UNIT 当作可用积分的单位').not.toMatch(/formatUnits\([^)]*QUOTA_UNIT/)
   })
+  /**
+   * ★★ **弹窗拆分「积分 / 签到」两个页签**（用户 2026-11-18 要求）。
+   *
+   * 视觉 = **C 分段式为主 + B 的选中下划线**（用户原话：「C 为主，加上 B 的下划线」）。
+   * 位置 = 弹窗头部标题右侧、自动签到按钮左侧（用户标出的红框）。
+   */
+  describe('弹窗页签：积分 / 签到', () => {
+    /**
+     * ★★ **工具行属于积分页，不是弹窗公共区**（用户 2026-11-18 明确：
+     * 「这个归于积分页，不是共同页」，并贴了轮换起点+显示偏好那一行的截图）。
+     *
+     * 理由：「轮换起点」与「显示偏好」只影响**积分怎么显示 / 从哪个号开始烧**，
+     * 与签到毫无关系 ⇒ 放在签到页是噪音。
+     */
+    /**
+     * ★★★ **订阅区只能渲染一次**（真实缺陷，2026-11-18 截图报障）。
+     *
+     * 拆页签时我在弹窗公共区留了一次 `renderSubscription()`、又在
+     * `renderTabContent` 的 credits 分支里留了一次 ⇒ 订阅区**渲染两遍**
+     * （用户截图：红框里一次、下面又一次）。
+     *
+     * ⚠️ 这类「拆功能时把同一块内容留在两个层级」的缺陷不会报错、只会重复显示，
+     *    只能靠「数调用次数」的断言兜住。
+     */
+    it('订阅区只渲染一次（不得既在公共区又在积分分支）', () => {
+      // 1 次定义 + 1 次调用 = 2
+      const occurrences = (badge.match(/renderSubscription\(\)/g) ?? []).length
+      expect(occurrences, 'renderSubscription() 只能定义 1 次 + 调用 1 次').toBe(2)
+      // 调用点必须在 credits 分支内
+      const tabStart = badge.indexOf('function renderTabContent()')
+      const tabEnd = badge.indexOf('function renderTabs()', tabStart)
+      const tabFn = badge.slice(tabStart, tabEnd)
+      expect(tabFn, '订阅区必须在 renderTabContent 的 credits 分支').toContain('renderSubscription()')
+      // ⚠️ 反向：弹窗公共 children **数组字面量**里不得再有它。
+      //    切片范围只取 `const children = [` 到该数组闭合的 `];` ——
+      //    取太宽会把整个弹窗函数（含 renderTabContent 的调用）都圈进来。
+      const childrenStart = badge.indexOf('const children = [')
+      const childrenEnd = badge.indexOf('];', childrenStart)
+      expect(childrenStart, '应能找到 children 数组').toBeGreaterThan(-1)
+      expect(childrenEnd, '应能找到 children 数组的闭合').toBeGreaterThan(childrenStart)
+      const pubChildren = badge.slice(childrenStart, childrenEnd)
+      expect(pubChildren, '弹窗公共 children 不得含订阅区').not.toContain('renderSubscription()')
+    })
+    it('工具行只在积分页渲染（签到页不显示）', () => {
+      const tabStart = badge.indexOf('function renderTabContent()')
+      const tabEnd = badge.indexOf('function renderTabs()', tabStart)
+      const tabFn = badge.slice(tabStart, tabEnd)
+      // 工具行必须在 credits 分支里
+      expect(tabFn, '积分分支必须渲染工具行').toContain('renderToolbar()')
+      const claimPart = tabFn.slice(0, tabFn.indexOf('tabCredits'))
+      expect(claimPart, '签到分支不得渲染工具行').not.toContain('renderToolbar')
+      // ⚠️ 反向：`renderToolbar()` 全文只能出现 **2 次**：
+      //    1 次定义（`function renderToolbar()`）+ 1 次调用（积分分支）。
+      //    曾用「弹窗函数体切片」判断，但 `renderToolbar` 的调用点在
+      //    `renderTabContent` 里、而 `renderPopover` 定义在它之前 ⇒ 切片
+      //    根本覆盖不到公共区，断言恒真（变异 M1b 实测无牙）。
+      //    ⇒ 改成数出现次数。
+      const toolbarOccurrences = (badge.match(/renderToolbar\(\)/g) ?? []).length
+      expect(
+        toolbarOccurrences,
+        'renderToolbar() 只能定义 1 次 + 调用 1 次；多一次就意味着签到页也会显示',
+      ).toBe(2)
+    })
+
+    /**
+     * ★★ **切换页签时弹窗高度不得变矮**（用户 2026-11-18：
+     * 「如果从积分页切换到签到页，弹窗高度要变低的话，那就不要变，
+     * 让签到日志框自动变高就行」）。
+     *
+     * 实测：积分页 259px、签到页 212px ⇒ 差 47px 会明显「缩一下」。
+     * 做法：记录积分页高度，签到页用 `minHeight` 撑到该值。
+     */
+    it('签到页用积分页高度做 minHeight（切页签不变矮）', () => {
+      // 必须有测量用的 ref
+      expect(badge, '必须有积分页高度记录').toContain('creditsPaneHeightRef')
+      expect(badge, '必须有积分页 DOM ref').toContain('creditsPanelRef')
+      // 签到页必须用 minHeight 撑高
+      const tabStart = badge.indexOf('function renderTabContent()')
+      const tabEnd = badge.indexOf('function renderTabs()', tabStart)
+      const tabFn = badge.slice(tabStart, tabEnd)
+      expect(tabFn, '签到页必须设 minHeight').toContain('minHeight')
+      expect(tabFn, 'minHeight 必须来自积分页实测高度').toContain('creditsPaneHeightRef')
+    })
+
+    /**
+     * ⚠️⚠️ **面板不能是 `display: contents`**（真实缺陷，我第一版就这么写的）。
+     *
+     * `contents` 让元素**没有自己的盒子** ⇒ `min-height` 完全失效 ⇒
+     * 用户要求的「不变矮」根本做不到（实测设了 259px 仍渲染 212px）。
+     */
+    it('页签面板必须有盒子（display: contents 会让 minHeight 失效）', () => {
+      const rule = /\.dim-jh-badgeTabPanel \{([^}]*)\}/.exec(styles)
+      expect(rule, '应有 .dim-jh-badgeTabPanel 规则').not.toBeNull()
+      const body = rule[1].replace(/\/\*[\s\S]*?\*\//g, '')
+      expect(body, '面板不得用 display: contents（minHeight 会失效）').not.toMatch(/display:\s*contents/)
+      expect(body, '面板必须是 block').toMatch(/display:\s*block/)
+    })
+
+    it('页签控件使用 C 分段外框（border + overflow hidden + 圆角）', () => {
+      const rule = /\.dim-jh-badgeTabs \{([^}]*)\}/.exec(styles)
+      expect(rule, '应有 .dim-jh-badgeTabs 规则').not.toBeNull()
+      /**
+       * ⚠️⚠️ **必须先剥掉注释再断言**（变异实测教训，M1 无牙）：
+       * 该规则体的注释里就写着「必须 overflow: hidden」，
+       * 直接对原始串断言 ⇒ 把真正的声明删掉、注释仍在 ⇒ 照样通过。
+       * 这是本仓反复记录的「注释里有关键字 ⇒ 断言空转」形态。
+       */
+      const body = rule[1].replace(/\/\*[\s\S]*?\*\//g, '')
+      expect(body, '必须有边框（C 的分段外框）').toMatch(/border:\s*\.?5?px|border:\s*1px/)
+      // ⚠️ overflow: hidden 是圆角裁切的前提：否则首尾页签的直角会盖住圆角
+      expect(body, '必须 overflow: hidden（圆角裁切）').toMatch(/overflow:\s*hidden/)
+      expect(body, '必须有圆角').toMatch(/border-radius:/)
+    })
+
+    it('页签用 border-right 做分隔线（不是 gap —— gap 会让线断开）', () => {
+      const rule = /\.dim-jh-badgeTab \{([^}]*)\}/.exec(styles)
+      expect(rule, '应有 .dim-jh-badgeTab 规则').not.toBeNull()
+      // ⚠️ 剥注释再断言：注释里就写着「gap 会让线断开」，不剥会空转
+      const body = rule[1].replace(/\/\*[\s\S]*?\*\//g, '')
+      expect(body, '分隔线用 border-right').toMatch(/border-right:/)
+      expect(body, '不得用 gap 做分隔（线会断开）').not.toMatch(/gap:/)
+      // 最后一项不要右分隔线，否则与容器右边框叠成双线
+      expect(styles, '最后一项必须去掉右分隔线').toMatch(/\.dim-jh-badgeTab:last-child \{\s*border-right:\s*0/)
+    })
+
+    it('选中态是 B 的下划线，且用 inset box-shadow（不参与布局 ⇒ 零位移）', () => {
+      const sel = /\.dim-jh-badgeTab\[aria-selected="true"\] \{([^}]*)\}/.exec(styles)
+      expect(sel, '应有选中态规则').not.toBeNull()
+      // ⚠️ 剥注释再断言（同 M1 的教训）
+      const body = sel[1].replace(/\/\*[\s\S]*?\*\//g, '')
+      expect(body, '选中态必须有下划线（inset box-shadow）').toMatch(/box-shadow:\s*inset 0 -2px 0/)
+      // ⚠️ 反向：不得用 border-bottom（会让未选中项也占位、切换时内容跳动）
+      expect(body, '不得用 border-bottom 做下划线').not.toMatch(/border-bottom:/)
+      expect(body, '下划线用品牌色').toMatch(/brand-primary/)
+    })
+
+    it('页签在头部、只有两项，且带 WAI-ARIA 属性', () => {
+      const tabsFn = badge.slice(badge.indexOf('function renderTabs()'), badge.indexOf('function renderTabs()') + 2200)
+      // 只有「积分」「签到」两项
+      expect(tabsFn, '应有积分页签').toContain("'credits', '积分'")
+      expect(tabsFn, '应有签到页签').toContain("'claim', '签到'")
+      // 可访问性：role=tablist / role=tab / aria-selected
+      expect(tabsFn, 'role=tablist').toContain("role: 'tablist'")
+      expect(tabsFn, 'role=tab').toContain("role: 'tab'")
+      expect(tabsFn, 'aria-selected').toContain("'aria-selected'")
+      // 键盘左右键切换
+      expect(tabsFn, '支持 ArrowLeft').toContain('ArrowLeft')
+      expect(tabsFn, '支持 ArrowRight').toContain('ArrowRight')
+      // 渲染在头部
+      const headBlock = badge.slice(badge.indexOf("className: 'dim-jh-badgeHead'"), badge.indexOf("key: 'auto'"))
+      expect(headBlock, '页签必须渲染在头部').toContain('renderTabs()')
+    })
+
+    it('默认页签是「积分」（用户打开弹窗的主要目的是看余额）', () => {
+      expect(badge, '默认页签必须是 credits').toMatch(/useState\('credits'\)/)
+      // ⚠️ 反向：不得把页签状态持久化（否则用户下次打开想看余额会以为余额没了）
+      const tabsState = badge.slice(badge.indexOf('const [activeTab'), badge.indexOf('const [activeTab') + 600)
+      expect(tabsState, '不得读写 localStorage').not.toContain('localStorage')
+    })
+
+    it('签到页文本放开换行（拆分的核心收益：能读全每个渠道结果）', () => {
+      const rule = /\.dim-jh-badgeTabPanel \.dim-jh-badgeNote[^{]*\{([^}]*)\}/.exec(styles)
+      expect(rule, '应有签到页文本换行规则').not.toBeNull()
+      // ⚠️ 剥注释再断言（同 M1 的教训）
+      const body = rule[1].replace(/\/\*[\s\S]*?\*\//g, '')
+      expect(body, '必须放开换行').toMatch(/white-space:\s*normal/)
+      expect(body, '不能再用省略号').toMatch(/text-overflow:\s*clip/)
+    })
+  })
   it('⚠️⚠️ 胶囊**不限宽**（用户 2026-11-18：不要限制长度，让它自适应）', () => {
     /**
      * ⚠️⚠️ **判据已反转**（2026-11-18）。
@@ -702,16 +871,26 @@ describe('用量徽标：渲染门控与轮询', () => {
     //
     // ⚠️ 2026-10-20 审计整改：浮层渲染已抽成 `wrapPopover(children)`
     // （窄屏要 portal 到 body，见 usage-badge.js 的 NARROW_BREAKPOINT_PX）。
-    // 判据因此改成「首屏那条 return 必须**紧跟在** renderClaim 之后、且走
+    // 判据因此改成「首屏那条 return 必须**紧跟在** renderTabContent 之后、且走
     // wrapPopover」—— 仍锚定「首屏到此为止」这个语义，而不是锚定某种渲染写法。
-    expect(badge).toMatch(/children\.push\(renderClaim\(\)\);\s*\n\s*return wrapPopover\(children\);/)
-    // 反向对照：明细区那三行必须**不在**首屏分支里（否则「还没读到」会被
-    // 说成「该渠道还没有账号」）。它们出现在首屏 return 之后。
+    //
+    // ⚠️ 2026-11-18：拆分「积分 / 签到」页签后，首屏不再直接 push(renderClaim())，
+    // 而是走 `renderTabContent()`（它按页签分发）。语义不变：
+    // 首屏到此为止、不渲染积分明细。
+    expect(badge).toMatch(/children\.push\(renderTabContent\(\)\);\s*\n\s*return wrapPopover\(children\);/)
+    // 反向对照：明细区必须在**首屏 return 之后**的分支里（否则「还没读到」会被
+    // 说成「该渠道还没有账号」）。
     const firstScreenEnd = badge.indexOf('return wrapPopover(children);')
     expect(firstScreenEnd).toBeGreaterThan(-1)
     const afterFirstScreen = badge.slice(firstScreenEnd)
-    expect(afterFirstScreen).toContain('children.push(renderSubscription());')
-    expect(afterFirstScreen).toContain('children.push(renderCredits());')
+    // ⚠️ 2026-11-18：订阅区已移入 `renderTabContent` 的 credits 分支
+    //（拆页签 + 去重复后，公共区不再直接 push 订阅/积分）
+    expect(afterFirstScreen, '非首屏分支要 push 页签内容').toContain('children.push(renderTabContent());')
+    // 订阅区必须在 credits 分支里（只渲染一次，不得重复）
+    const tabStart = badge.indexOf('function renderTabContent()')
+    const tabEnd = badge.indexOf('function renderTabs()', tabStart)
+    const tabFn = badge.slice(tabStart, tabEnd)
+    expect(tabFn, '积分分支必须渲染订阅区').toContain('renderSubscription()')
   })
 
   it('客户端**不**直接调 credits.balances（那是逐账号打上游的端点）', () => {
@@ -770,8 +949,30 @@ describe('用量徽标：签到（本渠道 + 全部渠道）', () => {
     expect(badge).toMatch(/catch \(error\) \{\s*failed \+= 1;/)
   })
 
+  /**
+   * ⚠️ 2026-11-18 改：拆分「积分 / 签到」两个页签后，首屏与常规路径都走
+   * `renderTabContent()`（它按 activeTab 决定渲染积分区还是签到区）。
+   *
+   * 本用例守的**语义没变**：签到不依赖本渠道读数 ⇒ 首屏（snapshot === null）
+   * 也必须能签到。只是写法从「无条件 push(renderClaim())」变成
+   * 「renderTabContent 的两个分支都保留各自内容」。
+   */
   it('全部渠道按钮**不依赖**本渠道读数（首屏/失败态也渲染）', () => {
-    expect(badge).toMatch(/children\.push\(renderClaim\(\)\);\s*\n\s*children\.push\(renderFoot\(\)\);/)
+    // 首屏分支必须走 renderTabContent（它内部的 claim 分支保留签到）
+    const first = badge.indexOf('if (snapshot === null) {')
+    expect(first, '应能找到首屏分支').toBeGreaterThan(-1)
+    const firstReturn = badge.indexOf('return wrapPopover(children);', first)
+    expect(firstReturn, '首屏分支应有 return').toBeGreaterThan(first)
+    const firstScreenBlock = badge.slice(first, firstReturn)
+    expect(firstScreenBlock, '首屏必须走 renderTabContent').toContain('renderTabContent()')
+    // renderTabContent 的 claim 分支必须渲染签到
+    const tabStart = badge.indexOf('function renderTabContent()')
+    const tabEnd = badge.indexOf('function renderTabs()', tabStart)
+    expect(tabStart, '应存在 renderTabContent').toBeGreaterThan(-1)
+    expect(tabEnd, '应存在 renderTabs（用于界定上面那段的范围）').toBeGreaterThan(tabStart)
+    const tabFn = badge.slice(tabStart, tabEnd)
+    expect(tabFn, 'claim 页签必须渲染签到区').toContain('renderClaim()')
+    expect(tabFn, '按 activeTab 分发').toContain("activeTab === 'claim'")
   })
 
   it('签到成功后强制重读（否则要等下一轮轮询才看到新数字）', () => {
@@ -1470,9 +1671,10 @@ describe('用量徽标：号多了以后的两条整理（2026-10-03 用户要�
     expect(sumBlock).toContain('view.groups.map')
     expect(sumBlock).not.toContain('creditsExpanded')
     // 脚注（失败账号数所在处）同样不看展开状态
-    expect(badge).toMatch(/function renderFoot\(\)/)
-    const foot = badge.slice(badge.indexOf('function renderFoot()'), badge.indexOf('function balanceLine'))
-    expect(foot.length).toBeGreaterThan(0)
+    // ⚠️ 2026-11-18：`renderFoot` 改名为 `renderCreditsFoot`（拆分页签后它只属于积分页）
+    expect(badge).toMatch(/function renderCreditsFoot\(\)/)
+    const foot = badge.slice(badge.indexOf('function renderCreditsFoot()'), badge.indexOf('function balanceLine'))
+    expect(foot.length, '应能截取到 renderCreditsFoot 的函数体').toBeGreaterThan(0)
     expect(foot).not.toContain('creditsExpanded')
   })
 

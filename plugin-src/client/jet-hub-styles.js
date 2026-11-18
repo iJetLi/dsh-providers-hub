@@ -2344,6 +2344,115 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   color: var(--dsw-alias-label-tertiary);
 }
 
+/**
+ * ★★ **页签切换器「积分 / 签到」**（用户 2026-11-18）。
+ *
+ * ## 视觉 = C 分段式为主 + B 的下划线
+ *
+ * 用户原话：「C 为主，加上 B 的下划线」。故：
+ * - **C 的部分**：外层一个圆角边框包住两个页签，中间一道细分隔线
+ * - **B 的部分**：选中项底部加一条品牌色下划线
+ *
+ *     ┌────────┬────────┐
+ *     │  积分  │  签到  │
+ *     │ ────── │        │   ← 选中项下划线
+ *     └────────┴────────┘
+ *
+ * ## ⚠️ 实现要点
+ *
+ * 1. 外层 inline-flex + overflow: hidden：让内部分隔线与圆角自然裁切
+ * 2. 页签之间用 border-right 而不是 gap：这样分隔线**贯穿**整个高度
+ *    （用 gap 会断开，看起来像两个独立按钮而非一个分段控件）
+ * 3. 下划线用 box-shadow: inset 0 -2px 0（不是 border-bottom）：
+ *    border-bottom 会让**未选中项也占位**，加粗时内容跳动；
+ *    inset box-shadow 不参与布局 ⇒ 切换时零位移
+ * 4. 选中项 font-weight: 600 会让文字变宽、可能挤动相邻项
+ *    ⇒ 用 font-weight: 500 且**未选中项也预留**（见下方 letter-spacing 说明）
+ */
+.dim-jh-badgeTabs {
+  display: inline-flex;
+  align-items: stretch;
+  /* ⚠️ 必须 overflow: hidden：否则第一/最后一个页签的直角会盖住圆角 */
+  overflow: hidden;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-2);
+  /* ⚠️ 紧跟标题，与时间戳之间留出空隙（时间戳自己 margin-left:auto 推到右侧） */
+  margin-left: 10px;
+  flex: none;
+}
+.dim-jh-badgeTab {
+  border: 0;
+  /* ⚠️ 分隔线用 border-right：gap 会让线断开 */
+  border-right: .5px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 2px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  /* ⚠️ 下划线用 inset box-shadow：不参与布局 ⇒ 切换时零位移 */
+  box-shadow: inset 0 -2px 0 transparent;
+  transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+}
+/* 最后一个页签不要右分隔线（否则与容器右边框叠成双线） */
+.dim-jh-badgeTab:last-child { border-right: 0; }
+.dim-jh-badgeTab:hover { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); }
+/* 选中态：品牌色下划线 + 主文字色（对应 B 方案的视觉） */
+.dim-jh-badgeTab[aria-selected="true"] {
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: inset 0 -2px 0 var(--dsw-alias-brand-primary, #1677ff);
+}
+/* 键盘焦点环：跟随本文件既有约定（outline:none + box-shadow） */
+.dim-jh-badgeTab:focus-visible {
+  outline: none;
+  box-shadow: inset 0 -2px 0 var(--dsw-alias-brand-primary, #1677ff),
+    0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 30%, transparent);
+}
+/**
+ * ★★ **页签内容面板**（2026-11-18）。
+ *
+ * ⚠️⚠️ **不能用 display: contents**（真实缺陷，我第一版就是这么写的）：
+ *    contents 会让元素**没有自己的盒子** ⇒ min-height / height 全部失效
+ *    ⇒ 用户要求的「切到签到页不要变矮」根本做不到（实测 minHeight 设了 259px
+ *    却仍是 212px）。
+ *
+ * 必需行为：
+ * - 有盒子（这样内联 minHeight 才生效，用来把签到页撑到积分页的高度）
+ * - 但**不引入额外间距**（原来的 contents 是为了这个）
+ *   ⇒ 用 display: block + 让内部第一个子元素的上边距不被折叠
+ *      （.dim-jh-badgeSection 自带 margin-top: 7px，块级容器不会吞它）
+ *
+ * ⚠️ flex: 1 1 auto + min-height: 0：面板在弹窗这个 flex 列里可以伸缩，
+ *    但**不主动撑高**（撑高由内联 minHeight 决定）。
+ */
+.dim-jh-badgeTabPanel {
+  display: block;
+  /* ⚠️ flex 子项默认 min-height: auto 会让内容把它撑到自然高度；
+     这里保持 auto 是刻意的 —— 内容高时面板就该高（签到日志长时不裁切）。 */
+}
+
+/**
+ * ★ **签到页的文本放开换行**（用户接受「按推荐方案来」，2026-11-18）。
+ *
+ * 拆分页签前，签到的汇总与逐渠道结果是 nowrap + 省略号（挤在积分页底部，
+ * 读不全）；拆成独立页签后空间充足 ⇒ 放开换行，让用户能读全每个渠道的结果。
+ * 这是拆分页签最主要的使用体验收益。
+ *
+ * ⚠️ 只作用于**签到页内部**（.dim-jh-badgeTabPanel 下），
+ *    不影响积分页那些必须单行的账号行。
+ */
+.dim-jh-badgeTabPanel .dim-jh-badgeNote,
+.dim-jh-badgeTabPanel .dim-jh-badgeFoot {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.7;
+}
+
 .dim-jh-badgeCount {
   flex: none;
   font-size: 9.5px;
