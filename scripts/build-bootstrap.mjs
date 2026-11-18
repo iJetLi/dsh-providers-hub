@@ -46,6 +46,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { copyDetailDocs } from './lib/detail-docs.mjs'
+import { copyIconAsset } from './lib/icon-asset.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = dirname(HERE)
@@ -218,6 +219,11 @@ copyFileSync(join(REPO_ROOT, 'cordis.patch.yml'), join(pluginDir, 'cordis.patch.
 // 宿主 `readPackageDocument()` 抛 `DetailFailure('invalid')` ⇒ 详情页报错。
 // 路径清单不在这里维护：`locale/*.json` 声明了什么就复制什么。
 copyDetailDocs(REPO_ROOT, pluginDir)
+
+// 插件图标与详情文档同因：`files` 只约束 npm 通道，这里的复制清单是第二份。
+// 漏复制 ⇒ 产物里 `icon` 有声明、文件不在 ⇒ 宿主 `iconOf()` 抛错，被
+// `readPluginMeta()` 收成一条 metadata 诊断，图标回落成默认图。
+copyIconAsset(REPO_ROOT, pluginDir)
 
 // 精简 package.json：剔除 scripts（含 prepare）与 devDependencies，
 // 否则目标机 npm install 会触发 prepare 构建而失败。

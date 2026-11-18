@@ -5,6 +5,7 @@
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
+  "icon": "./icon.svg",
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
@@ -19,7 +20,8 @@
     "locale/*.json",
     "cordis.patch.yml",
     "docs/DETAIL.md",
-    "docs/DETAIL.zh.md"
+    "docs/DETAIL.zh.md",
+    "icon.svg"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

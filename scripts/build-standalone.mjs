@@ -52,6 +52,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { copyDetailDocs } from './lib/detail-docs.mjs'
+import { copyIconAsset } from './lib/icon-asset.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..')
@@ -520,6 +521,9 @@ copyFileSync(join(REPO_ROOT, 'cordis.patch.yml'), join(pluginDir, 'cordis.patch.
 // 宿主 `readPackageDocument()` 抛 `DetailFailure('invalid')` ⇒ 详情页报错。
 // 路径清单不在这里维护：`locale/*.json` 声明了什么就复制什么。
 copyDetailDocs(REPO_ROOT, pluginDir)
+
+// 插件图标与详情文档同因：`files` 只约束 npm 通道，这里的复制清单是第二份。
+copyIconAsset(REPO_ROOT, pluginDir)
 writeFileSync(join(pluginDir, 'package.json'), `${JSON.stringify(slimPkg, null, 2)}\n`, 'utf8')
 
 // 插件依赖 -> 插件目录下的 node_modules
