@@ -1706,6 +1706,35 @@ function UsageBadgeActive(props) {
   }
 
   /**
+   * ★ 账号行的**两段式**显示名（用户 2026-11-18：位次与账号名各成定宽列）。
+   *
+   * | 段 | 内容 | 列宽 |
+   * |---|---|---|
+   * | 位次 | **纯数字**（如 7 / 19） | 固定 22px，**右对齐** |
+   * | 账号名 | nickname + 可选后缀 | 固定 100px，左对齐 + 超长省略 |
+   *
+   * ## ⚠️ 为什么位次是纯数字、不再带「位次」二字
+   *
+   * 「位次 10」实测 34.7px，而纯数字 10 只要 11.7px —— 省 23px。
+   * 480px 弹窗里这 23px 直接决定分档段会不会被截断。
+   * 「位次」的语义不丢：该列的 title 写明「默认顺序里的第 N 位」。
+   *
+   * ## ⚠️ 为什么账号名里**不含**位次
+   *
+   * 两列要各自左对齐 ⇒ 必须是两个独立的盒（inline-block + 固定宽）。
+   * 拼成一个字符串就没法只给其中一段定宽。
+   *
+   * ⚠️ 与 accountOptionLabel 必须**同源**（同一个 nickname / 后缀口径）：
+   *    下拉框仍用那个函数（它是单行文本，不需要分列）。
+   */
+  function accountRowParts(account, reason) {
+    return {
+      position: String(account.position),
+      name: `${account.nickname}${reason === null ? '' : reasonSuffix(reason)}`,
+    };
+  }
+
+  /**
    * 「轮换起点」下拉框（用户 2026-11-10 需求）。
    *
    * ## 语义
@@ -2054,17 +2083,14 @@ function UsageBadgeActive(props) {
      * `rotationStartId` 从 `rotationState.selected` 取（服务端已把位次翻成 accountId）。
      */
     /**
-     * 积分行的显示名 —— **与下拉框共用 `accountOptionLabel`**（格式必然一致）。
+     * 积分行的**账号元数据**（位次要按它查，显示名也从它取）。
      *
      * ⚠️ `position` 从 `rotationState` 查（**默认顺序**的位次），
      *    不能用 `shown.map((row, i) => i + 1)` —— 那样会随起点漂移。
-     * ⚠️ 查不到（账号刚被删）⇒ 回落 `nickname || accountId`（不带位次）。
+     * ⚠️ 查不到（账号刚被删）⇒ 返回 null，调用方回落 `nickname || accountId`、
+     *    位次显示「—」。
      */
-    const accountLabelForCredits = (row) => {
-      const meta = rotationState?.accounts?.find((a) => a.id === row.accountId)
-      if (meta === undefined) return row.nickname || row.accountId
-      return accountOptionLabel(meta, reasonOf(meta))
-    }
+    const rowMetaOf = (row) => rotationState?.accounts?.find((a) => a.id === row.accountId) ?? null
     const { shown, hidden } = orderCreditRows(accounts, {
       limit: CREDITS_COLLAPSED_LIMIT,
       expanded: creditsExpanded,
@@ -2120,15 +2146,42 @@ function UsageBadgeActive(props) {
           const splitNote = row.balance === null
             ? null
             : renderSplitNote(splitParts(row.balance, windowDays, provider, imminentDays));
+          /**
+           * ★ **列对齐结构**（用户 2026-11-18）：
+           *
+           *   [位次 22px 右对齐] · [账号名 100px 左对齐+省略] · [总xx] · [长/短/临 紧跟]
+           *
+           * 前两列定宽 ⇒ **总积分的起始位置对所有账号都相同**（左对齐）；
+           * 长/短/临紧跟总积分之后（用户明确「长积分不需要单独左对齐」）。
+           *
+           * ⚠️ 列元素必须 inline-block + 固定 width：行容器是 display:block 的
+           *    行内流（不是 flex —— flex 会让行高从 14px 变 87px，前几轮实测过）。
+           * ⚠️ 必须 vertical-align: bottom：否则不同高度的 inline-block 会错位。
+           */
+          const meta = rowMetaOf(row);
+          const rowParts = meta === null ? null : accountRowParts(meta, reasonOf(meta));
           return React.createElement('div', {
             key: row.accountId,
             className: 'dim-jh-badgeRow dim-jh-badgeRowInline',
           }, [
+            // ① 位次列（纯数字，右对齐，定宽 22px）
+            React.createElement('span', {
+              key: 'pos',
+              className: 'dim-jh-badgeColPos',
+              title: rowParts === null
+                ? '位次：默认顺序里的第 N 位（该账号已不在池中）'
+                : `位次 ${rowParts.position}：默认顺序里的第 ${rowParts.position} 位`,
+            }, rowParts === null ? '—' : rowParts.position),
+            React.createElement('span', {
+              key: 'pos-sep',
+              className: 'dim-jh-badgeNoteSep',
+            }, '·'),
+            // ② 账号名列（定宽 100px，左对齐，超长省略，全文进 tooltip）
             React.createElement('span', {
               key: 'l',
               className: 'dim-jh-badgeRowName',
               title: row.accountId,
-            }, accountLabelForCredits(row)),
+            }, rowParts === null ? (row.nickname || row.accountId) : rowParts.name),
             /**
              * ⚠️ 名字与读数之间**必须有一个分隔符**（2026-11-18 真机报障）：
              * 两者都是 `display: inline`，仅靠 CSS 的 `margin-left: 8px` 在
@@ -2143,7 +2196,24 @@ function UsageBadgeActive(props) {
               key: 'v',
               className: 'dim-jh-badgeValue',
               'data-tone': row.balance === null ? 'warn' : 'ok',
-              title: row.error || undefined,
+              /**
+               * ★ 总积分的 tooltip（用户 2026-11-18：「总也要加上 tooltip 提示」）。
+               *
+               * 内容与其它段同款（一句话 + 细节），说明「这是该账号的总额」：
+               * - 正常：`总积分 7564.5（含长期/短期/临期，不含已过期）`
+               * - 查询失败：原样给错误原因（不给「总积分」前缀，因为读不到）
+               *
+               * ⚠️ 金额用**同一份 textContent**（totalCreditsText），不要另起一份口径 ——
+               *    两处各算一次必然漂移（本仓反复记录过的缺陷形态）。
+               */
+              title: row.balance === null
+                ? (row.error || '查询失败')
+                : (() => {
+                  const total = totalCreditsText(row.balance);
+                  return total === null
+                    ? balanceLine(row.balance)
+                    : `总积分 ${total}（含长期/短期/临期，不含已过期）`;
+                })(),
               /**
                * ⚠️ 余额加「总」前缀（用户 2026-11-18）：「把总积分写成总xx，类似长和短的
                *    表达，统一一点」。⇒ 与后面「长1600 · 短1400 · 临4464.5」同一套表达。
@@ -2157,9 +2227,15 @@ function UsageBadgeActive(props) {
                 const total = totalCreditsText(row.balance);
                 return total === null ? balanceLine(row.balance) : `总${total}`;
               })()),
-            // ⚠️ 分档说明现在是**行内兄弟**（不再是下一行的块）⇒ 传 `inline` 让
-            //    CSS 用 `display: contents` 把它摊平进父级 flex 流。
-            //    不这样做的话它会自成一块，又把行高撑回两行（等于没合并）。
+            /**
+             * ★ **总与长之间必须有点号**（用户 2026-11-18：「总跟长之间也要加点号分隔」）。
+             *
+             * ⚠️ 这个点号是**条件渲染**的：查不到余额时 splitNote 为 null，
+             *    此时不能留一个孤零零的点和后面空无一物 ⇒ 一起不渲染。
+             */
+            splitNote === null
+              ? null
+              : React.createElement('span', { key: 'v-sep', className: 'dim-jh-badgeNoteSep' }, '·'),
             splitNote === null
               ? null
               : React.createElement('span', { key: 'note-inline', className: 'dim-jh-badgeNoteInlineWrap' }, splitNote),

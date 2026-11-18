@@ -101,6 +101,8 @@ function narrowLayoutBlock(styles: string): string {
 
 describe('用量徽标：槽位接线', () => {
   const index = read('plugin-src/client/index.js')
+  // ⚠️ 列对齐/tooltip 断言需要读徽标源码
+  const badge = codeOf(read('plugin-src/client/usage-badge.js'))
   // ⚠️ 胶囊宽度断言需要读样式表
   const styles = read('plugin-src/client/jet-hub-styles.js')
 
@@ -108,6 +110,76 @@ describe('用量徽标：槽位接线', () => {
     expect(index).toContain("export const inject = ['slots', 'connection', 'modelDirectories'")
   })
 
+  /**
+   * ★★ **账号行的列对齐**（用户 2026-11-18 要求）：
+   * 「帐号名左对齐、总积分也左对齐、位次做成至少两位数字宽度」。
+   *
+   * 实现方式是**两个定宽列**：位次 22px（右对齐）+ 账号名 100px（左对齐 + 省略）。
+   * 前两列定宽 ⇒ 总积分的**起始位置**对所有账号天然一致。
+   *
+   * ⚠️ 为什么必须是「固定 width」而不是 max-width：
+   *    max-width 只在内容超长时生效，短名字时宽度随内容变 ⇒ 总积分仍不对齐。
+   *    这条是本用例的核心判据（把 width 改成 max-width 必须变红）。
+   */
+  it('账号行两列定宽：位次 22px 右对齐 + 账号名 100px 左对齐', () => {
+    const posRule = /\.dim-jh-badgeColPos \{([^}]*)\}/.exec(styles)
+    expect(posRule, '应能取到 .dim-jh-badgeColPos 规则体').not.toBeNull()
+    expect(posRule[1], '位次列必须固定 22px（两位数字宽）').toMatch(/width:\s*22px/)
+    // ⚠️ 反向：不得写成 max-width（那会让宽度随内容变，列就不对齐了）
+    expect(posRule[1], '位次列不得用 max-width').not.toMatch(/max-width:/)
+    expect(posRule[1], '位次列必须右对齐（个位/十位才对得齐）').toMatch(/text-align:\s*right/)
+    expect(posRule[1], '位次列必须等宽数字').toMatch(/tabular-nums/)
+
+    const nameRule = /\.dim-jh-badgeRow\.dim-jh-badgeRowInline > \.dim-jh-badgeRowName \{([^}]*)\}/.exec(styles)
+    expect(nameRule, '应能取到账号名列规则体').not.toBeNull()
+    expect(nameRule[1], '账号名列必须固定 100px').toMatch(/width:\s*100px/)
+    // ⚠️⚠️ 核心判据：不能是 max-width / 百分比（会导致总积分起点漂移）
+    expect(nameRule[1], '账号名列不得用 max-width（总积分起点会漂移）').not.toMatch(/max-width:/)
+    expect(nameRule[1], '账号名列不得用百分比宽度').not.toMatch(/width:\s*\d+%/)
+    expect(nameRule[1], '超长必须省略').toMatch(/text-overflow:\s*ellipsis/)
+    expect(nameRule[1], '必须 nowrap（否则会换行撑高）').toMatch(/white-space:\s*nowrap/)
+    // ⚠️ inline-block 才能既定宽又参与行内流（inline 的 width 无效）
+    expect(nameRule[1], '必须是 inline-block').toMatch(/display:\s*inline-block/)
+
+    // 列元素必须垂直对齐到同一基线，否则会上下错位
+    expect(nameRule[1], '账号名列必须 vertical-align: bottom').toMatch(/vertical-align:\s*bottom/)
+    expect(posRule[1], '位次列必须 vertical-align: bottom').toMatch(/vertical-align:\s*bottom/)
+  })
+
+  /**
+   * ★ 总与长之间必须有点号（用户 2026-11-18：「总跟长之间也要加点号分隔」）。
+   *
+   * ⚠️ 必须是**条件渲染**：查不到余额时 splitNote 为 null，此时不能留下
+   *    一个孤零零的点 + 空无一物。
+   */
+  it('总积分与分档段之间有点号分隔（且查不到余额时不渲染）', () => {
+    expect(badge, '必须有一个位于总积分与分档段之间的中点').toContain("key: 'v-sep'")
+    /**
+     * ⚠️⚠️ 断言必须锚定 **v-sep 自身所在的三元表达式**，不能只搜「附近有没有
+     *    splitNote === null」—— 变异实测（M5）证实那样**无牙**：把 v-sep 改成
+     *    无条件渲染后，它**前面**那段 note-inline 的判断语句仍在搜索窗口内，
+     *    于是断言照样通过（这正是本仓反复记录的「附近有就算」式假绿）。
+     *
+     * ⇒ 正确做法：取 v-sep 出现位置**往前** 120 字符的窗口（三元判断必然在它之前），
+     *    并要求该窗口里 `splitNote === null` 与 `? null` 都在。无条件渲染时
+     *    这两个结构不存在 ⇒ 精确变红。
+     */
+    const at = badge.indexOf("key: 'v-sep'")
+    expect(at, 'v-sep 必须存在').toBeGreaterThan(0)
+    const before = badge.slice(Math.max(0, at - 120), at)
+    expect(before, 'v-sep 必须由 splitNote === null 的三元守卫').toContain('splitNote === null')
+    expect(before, 'v-sep 的三元必须真的产出 null 分支').toContain('? null')
+  })
+
+  /**
+   * ★ 总积分必须有 tooltip（用户 2026-11-18：「总也要加上 tooltip 提示」）。
+   */
+  it('总积分带 tooltip，且金额与正文同源', () => {
+    expect(badge, '总积分必须有 tooltip').toContain('总积分 ${total}（含长期/短期/临期，不含已过期）')
+    // ⚠️ 金额必须复用 totalCreditsText（另算一份必然漂移）
+    const tipBlock = badge.slice(badge.indexOf('title: row.balance === null'), badge.indexOf('title: row.balance === null') + 700)
+    expect(tipBlock, 'tooltip 金额必须来自 totalCreditsText').toContain('totalCreditsText(row.balance)')
+  })
   it('⚠️⚠️ 胶囊**不限宽**（用户 2026-11-18：不要限制长度，让它自适应）', () => {
     /**
      * ⚠️⚠️ **判据已反转**（2026-11-18）。

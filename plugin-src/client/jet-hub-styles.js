@@ -2066,15 +2066,33 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   font-size: 10px;
   line-height: 14px;
 }
+/**
+ * ★★ **账号名列：固定 100px**（用户 2026-11-18：「账号名宽度为 100px」）。
+ *
+ * ## 为什么是固定宽而不是 max-width
+ *
+ * 用户要求「总积分显示统一从固定位置开始」⇒ 账号名的宽度必须**恒定**，
+ * 否则长名字会把总积分往右推。max-width 只在内容超长时生效，短名字时
+ * 宽度仍随内容变 ⇒ 后面的总积分不对齐。
+ *
+ * ## 100px 能放什么（实测 10px 字号）
+ *
+ * | 内容 | 宽度 | 结果 |
+ * |---|---|---|
+ * | 134****59 | 47.5px | 完整 |
+ * | 190****0883 | 59.3px | 完整 |
+ * | 177****4916 测试昵称 | 102px | 截断成 177****4916 测... |
+ *
+ * ⚠️ 截断时靠 title 兜底（hover 看全文）。
+ * ⚠️ inline-block 而非 inline：要能独立省略号，且参与行内流。
+ * ⚠️ vertical-align: bottom：与其它 inline-block 列基线对齐（否则会上下错位）。
+ */
 .dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeRowName {
-  /* ⚠️ 用 inline-block + 省略号：纯 inline 时名字与后续段黏在一起，
-     overflow 只能整体截断，读起来像「名字被吃掉一半」。
-     inline-block 让它能独立省略，且仍参与同一行内流。 */
   display: inline-block;
-  /* ⚠️ 实测 42% 会把「位次 1 · 134****59」压成「134****5」（账号尾号丢失）
-     ⇒ 放宽到 52%：正好容下最长形态（位次两位数 + 8 位账号），且仍给
-     后面的读数/三档留够空间。 */
-  max-width: 46%;
+  /* ⚠️ 必须 box-sizing: border-box（本文件全局可能没有 reset）：
+     否则 padding 会加在 100px 之外，位置又不对齐。 */
+  box-sizing: border-box;
+  width: 100px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2083,12 +2101,45 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   line-height: 14px;
   color: var(--dsw-alias-label-primary);
 }
+
+/**
+ * ★★ **位次列：固定 22px + 右对齐**（用户 2026-11-18：
+ * 「位次也做成至少两位数字宽度，在少于 100 个帐号时位次也是对齐的」）。
+ *
+ * 右对齐让个位与个位对齐、十位与十位对齐：
+ *
+ *     7 · 134****59  ...
+ *    19 · 190****0883 ...
+ *
+ * ⚠️ 22px 的依据：「位次 10」若带前缀要 34.7px，纯数字 10 只要 11.7px
+ *    ⇒ 22px 足够放两位数还有余量，且三位数（100+）也不会溢出。
+ * ⚠️ 必须 tabular-nums：等宽数字，否则 7 与 19 的右边界会因字形宽度不同而抖动。
+ * ⚠️ 必须是 inline-block（不是 inline）—— 固定宽度对 inline 无效。
+ */
+.dim-jh-badgeColPos {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 22px;
+  text-align: right;
+  vertical-align: bottom;
+  font-size: 10px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary);
+}
 /* ⚠️ 名字与读数之间**必须有明确间隔**（2026-11-18 实测 5px 太窄，
    渲染出来是「134****59 7464.50」黏成一串，读不出哪是账号哪是余额）。
    ⇒ 8px + 一个中点分隔符（由 JSX 侧的 · 提供，这里只给左边距）。 */
+/**
+ * 总积分读数（总7564.5）。
+ *
+ * ⚠️ 不再是**定宽列** —— 用户明确「长积分不需要单独左对齐」，
+ *    总积分后面紧跟长/短/临。
+ * ⚠️ 但因为位次列(22px)与账号名列(100px)是定宽，总积分的**起始位置**
+ *    对所有账号天然一致（左对齐），不需要再给本元素定宽。
+ */
 .dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeValue {
   display: inline;
-  margin-left: 8px;
   font-size: 10px;
   line-height: 14px;
   font-weight: 600;

@@ -111,9 +111,34 @@ describe('两处 label 共用同一函数（防格式漂移）', () => {
     expect(source).toMatch(/accountOptionLabel\(account, reason\)/)
   })
 
-  it('★ 积分列表调它（通过 accountLabelForCredits）', () => {
-    expect(source).toMatch(/accountLabelForCredits/)
-    expect(source).toContain('accountOptionLabel(meta, reasonOf(meta))')
+  /**
+   * ★ 积分列表与下拉框必须**同源**（防格式漂移）。
+   *
+   * ## ⚠️ 2026-11-18 改：积分列表改成「两列定宽」结构后，不再直接用
+   *    `accountOptionLabel` 拼整串（那样没法给位次和账号名各自定宽）。
+   * 但其**语义必须仍然同源**，这条守卫因此改判据而不是删掉：
+   *
+   * | 函数 | 用途 | 共同点 |
+   * |---|---|---|
+   * | `accountOptionLabel` | 下拉框（单行文本） | 都从 `account.position` /
+   * | `accountRowParts` | 积分列表（拆成两列） | `account.nickname` / `reasonSuffix` 取值 |
+   *
+   * ⇒ 判据变成三条：①两个函数都在、②两处都调 `reasonOf`、③两处都用
+   *    `reasonSuffix` 拼后缀（同一个后缀口径）。
+   */
+  it('★ 积分列表与下拉框同源（两处都从 position/nickname/reasonSuffix 取值）', () => {
+    expect(source, '下拉框函数必须在').toMatch(/accountOptionLabel\(account, reason\)/)
+    expect(source, '积分列表的两段式函数必须在').toMatch(/accountRowParts\(account, reason\)/)
+    // ① 两处都用同一个位次来源
+    expect(source, '两处都必须用 account.position').toContain('${account.position}')
+    // ② 两处都用同一个 nickname
+    expect(source, '两处都必须用 account.nickname').toContain('${account.nickname}')
+    // ③ 两处都用同一个后缀函数（这是最容易漂移的一格）
+    const suffixUses = (source.match(/reasonSuffix\(reason\)/g) || []).length
+    expect(suffixUses, 'reasonSuffix(reason) 应出现两次（下拉框 + 积分列表）').toBeGreaterThanOrEqual(2)
+    // ④ 积分列表的每一行都由 rowMetaOf 查到 meta 后再算（不能跳过 meta 直接拼）
+    expect(source, '账号行必须通过 rowMetaOf 取 meta').toContain('rowMetaOf(row)')
+    expect(source, '拿到 meta 后必须调 accountRowParts').toMatch(/accountRowParts\(meta, reasonOf\(meta\)\)/)
   })
 
   it('★ 用的是「位次」而不是「账号」', () => {
