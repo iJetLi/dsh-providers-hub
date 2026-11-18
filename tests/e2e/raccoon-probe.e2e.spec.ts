@@ -234,9 +234,11 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
    *
    * ⚠️ 只读：一个 GET，不发模型请求。
    */
-  it('★ 活动字段形状没漂：status 白名单 + discounts 条目 + ISO-8601 日期', async () => {
+  it('★ 活动字段形状没漂：status 白名单 + discounts 条目 + ISO-8601 日期', async (ctx) => {
     const first = await pickUsableEntry()
-    if (first === undefined) return
+    // ⚠️ 无可用凭据时必须**显式 skip**：静默 `return` 会让本用例在 CI 里显示 passed，
+    // 等于「上游形状漂了」这件事永远不会被这条守卫发现（2026-11-18 对抗审计）。
+    if (first === undefined) return ctx.skip()
     const response = await fetch(
       `${RACCOON.apiBase}${RACCOON.llmApiPrefix}/model_catalog`,
       { headers: raccoonHeaders(first.credential), signal: AbortSignal.timeout(30_000) },
@@ -259,6 +261,17 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
         + '（活动的时间腿会静默失效：chip 只剩 billing_status 快照）',
       ).toBeGreaterThan(0)
       for (const discount of promotion?.discounts ?? []) {
+        // ⚠️ 「声明了字段但读不出」（`null` / 数字 / 对象）必须红：解析层会把它记成
+        // `startAtUnreadable` / `endAtUnreadable` 并按「读不懂」处理，但那只是**降级**
+        // ——形状真漂了我们得知道（2026-11-18 对抗审计 P1-② 的可观测面）。
+        expect(
+          discount.startAtUnreadable,
+          `${model.id} 的 start_at 声明了却读不出（类型漂移）`,
+        ).toBeUndefined()
+        expect(
+          discount.endAtUnreadable,
+          `${model.id} 的 end_at 声明了却读不出（类型漂移）`,
+        ).toBeUndefined()
         for (const [field, value] of [['start_at', discount.startAt], ['end_at', discount.endAt]] as const) {
           if (value === undefined) continue
           expect(
@@ -271,9 +284,17 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
         }
       }
     }
-    // 目录里至少要有**一条**带活动字段的模型，否则上面整段是空跑
-    //（2026-11-18 实测：3 条 —— 两条 sensenova 限免 + Qwen4-Max 限时折扣）。
-    expect(activeModels, '整份目录没有任何活动状态 ⇒ 本段守卫空跑').toBeGreaterThan(0)
+    // ⚠️ **不能**断言「至少有 N 条活动」：活动有真实截止日（实测最晚一条 2026-11-30 结束），
+    // 那会成为一颗定时炸弹 —— 到期后无任何代码改动就自红（2026-11-18 对抗审计）。
+    // 改为：有活动就逐条验形状（上面已做）；一条都没有时要能自证「不是解析层把活动丢了」。
+    if (activeModels === 0) {
+      for (const model of models) {
+        expect(
+          model.promotion?.discounts ?? [],
+          `${model.id} 状态是 normal 却带着 billing_discounts（状态与条目错位）`,
+        ).toHaveLength(0)
+      }
+    }
   })
 
   it('⚠️ Raccoon-Auto 不在远端目录里（它是客户端 UI 合成条目）', async () => {

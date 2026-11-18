@@ -379,6 +379,22 @@ describe('RaccoonAdapter：徽标装配与悬停候选', () => {
     expect(adapter.promotionCandidates()).toEqual([])
   })
 
+  it('★★★ nextPromotionEdgeAt：活动结束时刻必须交得出去（不接这场播报，徽标要多挂 20 分钟）', async () => {
+    // 目录里两枚活动：QWEN4-Max 11-22 15:59:59Z 结束、SenseNova 11-30 15:59:59Z 结束。
+    const adapter = makeAdapter([QWEN_RAW, SENSE_RAW], () => AFTER_QWEN)
+    await adapter.listModels('raccoon') // 目录必须先落地：getter 只读已解析的候选，零网络
+    expect(
+      adapter.nextPromotionEdgeAt(AFTER_QWEN),
+      'QWEN 的终点已过 ⇒ 下一次边界应是 SenseNova 的 11-30 15:59:59Z',
+    ).toBe(Date.parse('2026-11-30T15:59:59Z'))
+    // 全部活动都结束 ⇒ 没有下一次边界。返回 undefined 是安全值
+    //（`nearestPromotionEdge` 逐源 try/catch、非有限数即跳过）。
+    expect(adapter.nextPromotionEdgeAt(Date.parse('2027-01-01T00:00:00Z'))).toBeUndefined()
+    // 目录为空时也不许抛（boot 早期就会调到）。
+    const empty = makeAdapter([GLM_RAW], () => AFTER_QWEN)
+    expect(empty.nextPromotionEdgeAt(AFTER_QWEN)).toBeUndefined()
+  })
+
   it('★ 坏日期的 warn 按消息去重（每次 listModels × 每条模型都跑，不去重会刷屏）', async () => {
     const warnings: string[] = []
     const adapter = makeAdapter(
@@ -486,5 +502,101 @@ describe('审计补漏：未知状态与「可解析但会误读」的时间戳'
     const badgeOf = (p: typeof promotion) => (p === undefined ? undefined : [p])
     expect(promotionBadgeFor(badgeOf(onlyOld), BETWEEN_SHORT_AND_LONG)).toBeUndefined()
     expect(promotionBadgeFor(badgeOf(promotion), BETWEEN_SHORT_AND_LONG)).toBeDefined()
+  })
+})
+
+describe('2026-11-18 双审计 + lead 复核补漏：空白状态 / 类型漂移 / 单边窗口 / 数组顺序', () => {
+  // 2031 年：任何真实活动都已结束。用来钉「永不过期」这种 fail-open。
+  const FAR_FUTURE = Date.parse('2031-01-01T00:00:00Z')
+
+  it('★★★ billing_status 带首尾空白 ⇒ 与不带空白同一个结论（此前一边留痕说"已知"、一边判"未知" ⇒ chip 静默消失且零日志）', () => {
+    for (const raw of [' discount', 'discount ', '\tdiscount\n']) {
+      const parsed = promoOf({ ...QWEN_RAW, billing_status: raw })
+      expect(parsed?.status, 'status 必须先 trim 再判: ' + JSON.stringify(raw)).toBe('discount')
+      expect(
+        parsed?.statusUnknown,
+        '既然认出是 discount，就不许再留一条"未知状态"的痕: ' + JSON.stringify(raw),
+      ).toBeUndefined()
+    }
+  })
+
+  it('★★ billing_status 真未知 ⇒ 收成 normal 但**必须留痕**（不许静默消失）', () => {
+    const parsed = promoOf({ ...QWEN_RAW, billing_status: 'discount_trial' })
+    expect(parsed?.status).toBe('normal')
+    expect(parsed?.statusUnknown).toBe('discount_trial')
+  })
+
+  it('★★★ end_at 声明了却读不出（null / 数字 / 对象）⇒ 不许落成"无上界窗口"', () => {
+    for (const bad of [null, 1_795_363_199_000, { at: 1 }]) {
+      const promotion = raccoonPromotionCandidate(
+        promoOf({
+          ...QWEN_RAW,
+          billing_discounts: [
+            { name: '坏的终点', multiplier: 0.67, active: true, start_at: '2026-11-15T16:00:00Z', end_at: bad },
+          ],
+        }),
+        'sn-bad',
+      )
+      // 读不懂 ⇒ dailyUnusable（宁可少画，也不画一条 2031 年还在的活动）
+      expect(
+        promotion?.schedule?.dailyUnusable,
+        'end_at 类型漂移必须按"读不懂"处理: ' + JSON.stringify(bad),
+      ).toBe(true)
+      expect(
+        promotionBadgeFor(promotion === undefined ? undefined : [promotion], FAR_FUTURE),
+        '读不懂终点 ⇒ 2031 年不许还画: ' + JSON.stringify(bad),
+      ).toBeUndefined()
+    }
+  })
+
+  it('★★★ 只给 start_at ⇒ 退回 billing_status 快照（无上界窗口会永不结束）', () => {
+    const warnings: string[] = []
+    const promotion = raccoonPromotionCandidate(
+      input({ discounts: [{ name: '只给起点', multiplier: 0.67, active: true, startAt: '2026-11-15T16:00:00Z' }] }),
+      'sn-start-only',
+      'Asia/Shanghai',
+      (message) => warnings.push(message),
+    )
+    expect(promotion?.schedule?.validUntil, '只给起点时不许落 validUntil').toBeUndefined()
+    expect(promotion?.schedule).toEqual({ timezone: 'Asia/Shanghai', snapshotActive: true })
+    expect(warnings.join('\n'), '必须留一条痕，否则症状与"上游没发窗口"同形').toContain(
+      'start_at without end_at',
+    )
+    // 反向对照：同样的数据补上 end_at 就必须落窗口（证明上面不是因为整条被丢掉）
+    const both = raccoonPromotionCandidate(
+      input({
+        discounts: [{
+          name: '两端齐',
+          multiplier: 0.67,
+          active: true,
+          startAt: '2026-11-15T16:00:00Z',
+          endAt: '2026-11-22T15:59:59Z',
+        }],
+      }),
+      'sn-start-only',
+    )
+    expect(both?.schedule?.validUntil).toBe(Date.parse('2026-11-22T15:59:59Z'))
+  })
+
+  it('★★ 只给 end_at ⇒ 仍落 validUntil（有上界就足够判断过期，不许一刀切成快照）', () => {
+    const promotion = raccoonPromotionCandidate(
+      input({ discounts: [{ name: '只给终点', multiplier: 0.67, active: true, endAt: '2026-11-22T15:59:59Z' }] }),
+      'sn-end-only',
+    )
+    expect(promotion?.schedule?.validUntil).toBe(Date.parse('2026-11-22T15:59:59Z'))
+    expect(promotion?.schedule?.snapshotActive).toBeUndefined()
+    expect(
+      promotionBadgeFor(promotion === undefined ? undefined : [promotion], Date.parse('2026-12-01T00:00:00Z')),
+      '过了 end_at 就必须消失',
+    ).toBeUndefined()
+  })
+
+  it('★★ 同两条优惠只换数组顺序 ⇒ 同一个到期日（取结束最晚的，不按数组顺序赌）', () => {
+    const short = { name: '短', multiplier: 0.8, active: true, endAt: '2026-11-18T15:59:59Z' }
+    const long = { name: '长', multiplier: 0.67, active: true, endAt: '2026-12-01T15:59:59Z' }
+    const forward = raccoonPromotionCandidate(input({ discounts: [short, long] }), 'sn-order')
+    const reverse = raccoonPromotionCandidate(input({ discounts: [long, short] }), 'sn-order')
+    expect(forward?.schedule?.validUntil).toBe(Date.parse('2026-12-01T15:59:59Z'))
+    expect(reverse?.schedule?.validUntil, '换顺序不许换出另一个到期日').toBe(forward?.schedule?.validUntil)
   })
 })

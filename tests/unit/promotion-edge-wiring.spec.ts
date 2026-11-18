@@ -14,7 +14,7 @@
  * | 例 | 断言 | 挡住什么 |
  * |---|---|---|
  * | ① 真实时间线 | 边界之前零播报；到点播报；之后按下一次边界继续排 | 接线被删 / 短路成 if (false) / 只排一次 |
- * | ② 接线形状 | 交给播报器的恰是**六家**边界源，且 fire 真的 emit 宿主事件 | 漏接一家（「六家变五家」全绿的形态）|
+ * | ② 接线形状 | 交给播报器的恰是**七家**边界源，且 fire 真的 emit 宿主事件 | 漏接一家（「七家变六家」全绿的形态）|
  * | ③ 空源 | 六家都说没有边界 ⇒ 最近边界 undefined | 「其实有别的东西在播」的假绿 |
  *
  * ⚠️ ① 跑的是**真实兜底表**的时间线：Qoder 的窗口 22:00–08:00（Asia/Shanghai），
@@ -146,7 +146,7 @@ describe('★ apply() 的徽标保鲜接线', () => {
     expect(gaps.every((gap) => gap > 1), '播报间隔异常：' + gaps.join(', ') + ' 小时').toBe(true)
   }, 60_000)
 
-  it('② 交给播报器的恰是六家边界源，且它们真的通向各自的适配器', () => {
+  it('② 交给播报器的恰是七家边界源，且它们真的通向各自的适配器', () => {
     const ctx = boot()
     const options = construction.options as CapturedOptions | undefined
     expect(options, 'apply() 没有构造边界播报器（接线被删）').toBeDefined()
@@ -154,9 +154,9 @@ describe('★ apply() 的徽标保鲜接线', () => {
     // ⚠️ 计数守卫：新增一家就要 +1（TRAE 于 2026-11-17 接入闲时窗口；
     // LobsterAI 同日接入限时免费 —— 顺序必须与 src/index.ts 的 edgeSources 一致，
     // 因为下面按 index 逐个钉返回值）。
-    expect(sources).toHaveLength(6)
+    expect(sources).toHaveLength(7)
 
-    const probes = ['buddy', 'workbuddy', 'qoder', 'qodercn', 'trae', 'lobsterai'] as const
+    const probes = ['buddy', 'workbuddy', 'qoder', 'qodercn', 'trae', 'lobsterai', 'raccoon'] as const
     probes.forEach((provider, index) => {
       const adapter = ctx.llm.adapterByProvider.get(provider) as EdgeCapableAdapter | undefined
       expect(adapter, provider + ' 未注册').toBeDefined()
@@ -199,7 +199,7 @@ describe('★ apply() 的徽标保鲜接线', () => {
     // 变异：删掉 index.ts 里那条 ctx.on 监听 ⇒ 本条红（calls 不再增长）。
     const ctx = boot()
     let calls = 0
-    const probes = ['buddy', 'workbuddy', 'qoder', 'qodercn', 'trae', 'lobsterai'] as const
+    const probes = ['buddy', 'workbuddy', 'qoder', 'qodercn', 'trae', 'lobsterai', 'raccoon'] as const
     for (const provider of probes) {
       const adapter = ctx.llm.adapterByProvider.get(provider) as EdgeCapableAdapter
       adapter!.nextPromotionEdgeAt = () => { calls += 1; return provider === 'qoder' ? Date.now() + 60_000 : undefined }
@@ -208,11 +208,11 @@ describe('★ apply() 的徽标保鲜接线', () => {
     ctx.emit('llm/adapters-updated')
     expect(calls, '目录落地后没有重新求边界 ⇒ 远端活动要等到下一次 fire 才被看见')
       .toBeGreaterThan(before)
-    // 一轮监听 = 六家各问一次；不成倍增长才证明没有 emit ⇄ schedule 递归。
+    // 一轮监听 = 七家各问一次；不成倍增长才证明没有 emit ⇄ schedule 递归。
     const grew = calls - before
-    expect(grew, '一次事件应只重问一轮（六家）：' + grew).toBeLessThanOrEqual(6)
+    expect(grew, '一次事件应只重问一轮（七家）：' + grew).toBeLessThanOrEqual(7)
   })
-  it('③ 六家都说没有边界 ⇒ 最近边界 undefined（不许退化成轮询）', () => {
+  it('③ 七家都说没有边界 ⇒ 最近边界 undefined（不许退化成轮询）', () => {
     // ①的排除项。初版在这里改适配器方法后推进时间轴 —— 那条 14:00 的播报来自
     // apply() 里已武装的定时器，改 getter 追不上它。故本例**直接问播报器读到的源**。
     boot()

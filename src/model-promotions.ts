@@ -1268,6 +1268,17 @@ export interface RaccoonDiscountInput {
   readonly startAt?: string | undefined
   /** 上游 `end_at`（同上）。 */
   readonly endAt?: string | undefined
+  /**
+   * `start_at` / `end_at` 键**存在但读不成字符串**（`null` / 数字时间戳 / 对象）。
+   *
+   * ⚠️⚠️ 「没声明」与「声明了但读不出」是两件事，揉成一件会让单边窗口逃过 fail-closed：
+   * 实测 `end_at: null` / `1795363199000` / `{}` 会被折成「没声明」⇒ 只剩 `validFrom`
+   * ⇒ 活动**永不结束**（2031 年仍画、零 warn）。有了这个标记，下游按「读不懂 ⇒ 不画」
+   * 处理（2026-11-18 对抗审计 P1-②）。
+   */
+  readonly startAtUnreadable?: true | undefined
+  /** 见 {@link startAtUnreadable}。 */
+  readonly endAtUnreadable?: true | undefined
   /** 上游 `daily_start`（'HH:mm'）。 */
   readonly dailyStart?: string | undefined
   /** 上游 `daily_end`（'HH:mm'）。 */
@@ -1358,17 +1369,24 @@ function pickRaccoonDiscount(
   if (discounts === undefined) return undefined
   const usable = discounts.filter((entry) => typeof entry.multiplier === 'number'
     && Number.isFinite(entry.multiplier as number))
-  if (usable.length === 0) return discounts.length === 0 ? undefined : discounts[0]
+  // 倍率**全都读不懂** ⇒ 不选（下游据此退回 `billing_status` 快照）。
+  // 原先返回 `discounts[0]` 是按数组顺序赌一条，与「读不懂就不画时间」的纪律相反，
+  // 也让同一份数据只换顺序就换出不同结论（2026-11-18 对抗审计 P2）。
+  if (usable.length === 0) return undefined
   const byKind = status === 'limited_free'
     ? usable.filter((entry) => entry.multiplier === 0)
     : usable.filter((entry) => (entry.multiplier as number) > 0 && (entry.multiplier as number) < 1)
+  // ⚠️ 选谁**不能依赖数组顺序**（2026-11-18 对抗审计 P2）：原先只有 `actives.length > 1`
+  // 才按 `end_at` 排，其余退回 `byKind[0] ?? usable[0]` —— 同样两条优惠只换数组顺序就能
+  // 换出不同到期日（`[短,长]` 报 11-22、`[长,短]` 报 12-30）。现在一律「结束得最晚的
+  // 优先，没有 end_at 的排最后」，与顺序无关。
+  const rank = (entry: RaccoonDiscountInput): number =>
+    raccoonInstantMs(entry.endAt) ?? Number.NEGATIVE_INFINITY
+  const pickLatest = (list: readonly RaccoonDiscountInput[]): RaccoonDiscountInput =>
+    list.reduce((best, entry) => (rank(entry) > rank(best) ? entry : best), list[0])
   const actives = byKind.filter((entry) => entry.active === true)
-  if (actives.length > 1) {
-    // 结束得最晚的优先；没有 end_at 的排最后（它连「什么时候结束」都不知道）。
-    const rank = (entry: RaccoonDiscountInput): number => raccoonInstantMs(entry.endAt) ?? Number.NEGATIVE_INFINITY
-    return actives.reduce((best, entry) => (rank(entry) > rank(best) ? entry : best), actives[0])
-  }
-  return actives[0] ?? byKind[0] ?? usable[0]
+  if (actives.length > 0) return pickLatest(actives)
+  return byKind.length > 0 ? pickLatest(byKind) : undefined
 }
 
 /**
@@ -1471,8 +1489,9 @@ export function raccoonPromotionCandidate(
 
   // ── 时间：绝对窗口 + 每日时段（两者都可能被上游声明）───────────────────────────
   const chosen = pickRaccoonDiscount(input.discounts, status)
-  const declaredFrom = chosen?.startAt !== undefined
-  const declaredUntil = chosen?.endAt !== undefined
+  // 「声明了」（键在，含类型漂移）与「读出了」（值能解析）是两件事。
+  const declaredFrom = chosen?.startAt !== undefined || chosen?.startAtUnreadable === true
+  const declaredUntil = chosen?.endAt !== undefined || chosen?.endAtUnreadable === true
   const fromMs = raccoonInstantMs(chosen?.startAt)
   const untilMs = raccoonInstantMs(chosen?.endAt)
   const dailyStart = chosen?.dailyStart
@@ -1497,14 +1516,28 @@ export function raccoonPromotionCandidate(
       + '), chip stays hidden — timestamps must be ISO-8601 **with** a timezone designator'
       + ' (`Z` or `±HH:MM`); a local-time string would be read 8h off, so it is rejected on purpose')
   }
-  const timeDeclared = unusable || fromMs !== undefined || untilMs !== undefined || dailyUsable
+  // ⚠️⚠️ 两端**不对称**，必须分开处理（2026-11-18 双审计 + 我实测）：
+  // - **只给 `end_at`**（有上界没下界）是**安全**的：窗口照样到点结束，`promotionWithin
+  //   AbsoluteWindow` 对缺失的 `validFrom` 本就不设约束 ⇒ 照常落 `validUntil`
+  //   （既有用例与官方实测里大量条目就只带 `end_at`；一刀切成快照会**丢掉过期能力**）。
+  // - **只给 `start_at`**（有下界没上界）**必须退快照**：那是一条永不结束的活动
+  //   （实测 400 天后 `promotionRunningAt` 仍 true）。退回 `billing_status` 快照 ——
+  //   那是上游自己对「此刻」的表态 —— 并留一条痕，否则症状与「上游没发窗口」同形。
+  const startOnly = declaredFrom && !declaredUntil
+  const windowed = !startOnly && (declaredFrom || declaredUntil)
+  if (startOnly && !unusable) {
+    safeWarn(warn, 'raccoon model "' + modelId + '": billing_discounts declares start_at without '
+      + 'end_at (' + String(chosen?.startAt ?? 'unreadable') + ') — a window with no upper bound '
+      + 'would never end, so the chip falls back to the billing_status snapshot')
+  }
+  const timeDeclared = unusable || (windowed && (fromMs !== undefined || untilMs !== undefined)) || dailyUsable
   const schedule: ModelPromotionSchedule = {
     // 与 Qoder 同一条纪律：**不读**上游未声明的时区，一律落产品自己的时区。
     // raccoon 只有 CN 站（xiaohuanxiong.com），`end_at` 的 15:59:59Z 就是 CN 的 23:59:59
     // ⇒ 用 UTC+8 读出来的「活动至 11月22日」与官方客户端在 CN 环境下一致。
     timezone: fallbackTimeZone,
-    ...fromMs === undefined ? {} : { validFrom: fromMs },
-    ...untilMs === undefined ? {} : { validUntil: untilMs },
+    ...windowed && fromMs !== undefined ? { validFrom: fromMs } : {},
+    ...windowed && untilMs !== undefined ? { validUntil: untilMs } : {},
     ...dailyUsable ? {
       daily: [{ start: dailyStart as string, end: dailyEnd as string }],
     } : {},

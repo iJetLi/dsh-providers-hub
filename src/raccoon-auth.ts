@@ -160,9 +160,33 @@ export function parseRaccoonCredential(value: string): RaccoonCredential | undef
  *    「上游发了但类型漂移」不会被悄悄折成 `undefined` 而变成「没声明」。
  *    ⚠️ 例外是 `billing_discounts` 本身：非数组时置 `discountsUnreadable`（见其注释）。
  */
+/**
+ * 上游 `billing_status` 的归一 —— **全文件唯一实现，两处共用**
+ * （`normalizeRemoteModel` 取 `status`；`readRaccoonPromotionInput` 取「未知状态」留痕）。
+ *
+ * ⚠️⚠️ 为什么必须同源（2026-11-18 双审计 P1，两份审计独立指出同一格）：
+ * 原先只有「留痕」那一侧 `trim()`、判 `status` 那一侧不 trim ⇒ `' discount'` /
+ * `'discount '` / `'\tdiscount\n'` 出现**两个互相抵消的结论**：留痕侧认为「这是已知
+ * 状态」（所以 `statusUnknown` 不填、`warns=0`），判据侧认为「不是这三个值」（所以收成
+ * `normal`、chip 不画）⇒ 症状是**活动徽标静默消失且全仓零日志**，正是本 PR 自己要修的
+ * 那类形态（issue #101 最难查的一格）。
+ *
+ * 归一后：空白变体一律认成已知状态（chip 正常画），真正的新状态进 `unknown` 播诊断。
+ */
+function normalizeBillingStatus(raw: unknown): {
+  readonly status: RaccoonModelMeta['status']
+  readonly unknown?: string
+} {
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  if (text === '' || text === 'normal') return { status: 'normal' }
+  if (text === 'discount' || text === 'limited_free') return { status: text }
+  return { status: 'normal', unknown: text }
+}
+
 function readRaccoonPromotionInput(
   entry: Record<string, unknown>,
   status: RaccoonModelMeta['status'],
+  statusUnknown: string | undefined,
   baseMultiplier: number,
   effectiveMultiplier: number,
   statusNote: string,
@@ -186,6 +210,12 @@ function readRaccoonPromotionInput(
       if (name === undefined || multiplier === undefined) continue
       const startAt = text(record.start_at)
       const endAt = text(record.end_at)
+      // ⚠️⚠️「没声明」与「声明了但读不出」必须分开（2026-11-18 对抗审计 P1-②）：
+      // 把非字符串一律折成 `undefined`，会让「只有一端可读」的单边窗口逃过下游的
+      // fail-closed，于是这条活动变成**永不结束** —— 实测 `end_at` 给 `null` / 数字
+      // 时间戳 / `{}` 时，chip 到 2031 年照样画且零 warn。
+      const startAtUnreadable = record.start_at !== undefined && startAt === undefined
+      const endAtUnreadable = record.end_at !== undefined && endAt === undefined
       const dailyStart = text(record.daily_start)
       const dailyEnd = text(record.daily_end)
       discounts.push({
@@ -194,19 +224,15 @@ function readRaccoonPromotionInput(
         ...record.active === true ? { active: true } : record.active === false ? { active: false } : {},
         ...startAt === undefined ? {} : { startAt },
         ...endAt === undefined ? {} : { endAt },
+        ...startAtUnreadable ? { startAtUnreadable: true as const } : {},
+        ...endAtUnreadable ? { endAtUnreadable: true as const } : {},
         ...dailyStart === undefined ? {} : { dailyStart },
         ...dailyEnd === undefined ? {} : { dailyEnd },
       })
     }
   }
-  // ⚠️ 未知 `billing_status`（上游加了第四种状态）：`status` 会被**收成 `normal`**
-  // （展示名不受影响，那是 `raccoon.ts` 的既有归一），但 chip 会**静默消失**。
-  // 故把原文带上，让构造函数播一条诊断 —— 这条是唯一能指路的痕。
-  const rawStatus = typeof entry.billing_status === 'string' ? entry.billing_status.trim() : ''
-  const statusUnknown = rawStatus !== ''
-    && rawStatus !== 'normal' && rawStatus !== 'discount' && rawStatus !== 'limited_free'
-    ? rawStatus
-    : undefined
+  // `statusUnknown` 由 `normalizeBillingStatus` 统一产出（**不在这里再判一遍白名单** ——
+  // 两处判据会各带一种 trim 口径，正是空白变体静默消失的成因）。
   return {
     status,
     ...statusUnknown === undefined ? {} : { statusUnknown },
@@ -235,10 +261,9 @@ function normalizeRemoteModel(entry: Record<string, unknown>): RaccoonRemoteMode
     ? entry.billing_effective_multiplier
     : Number.NaN
   const base = typeof entry.billing_multiplier === 'number' ? entry.billing_multiplier : Number.NaN
-  const rawStatus = typeof entry.billing_status === 'string' ? entry.billing_status : ''
-  const status: RaccoonModelMeta['status'] = rawStatus === 'discount' || rawStatus === 'limited_free'
-    ? rawStatus
-    : 'normal'
+  // 归一只有一处实现（`normalizeBillingStatus`）：判 `status` 与「未知状态留痕」必须同源。
+  const billingStatus = normalizeBillingStatus(entry.billing_status)
+  const status: RaccoonModelMeta['status'] = billingStatus.status
   const statusNote = typeof entry.billing_status_note === 'string' ? entry.billing_status_note : ''
 
   const meta: RaccoonModelMeta = {
@@ -265,7 +290,7 @@ function normalizeRemoteModel(entry: Record<string, unknown>): RaccoonRemoteMode
     // 理由与实测证据见 `raccoon-product.ts` 的注释。
     supportsImage: raccoonSupportsImage(id),
     // 计费活动的原料（未决候选），徽标在装配时刻现算 —— 见字段注释。
-    promotion: readRaccoonPromotionInput(entry, status, base, effective, statusNote),
+    promotion: readRaccoonPromotionInput(entry, status, billingStatus.unknown, base, effective, statusNote),
   }
 }
 

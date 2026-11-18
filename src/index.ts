@@ -6337,8 +6337,8 @@ async function fetchBalanceReading(
   // 而用户仍按优惠期选择模型」。**播报是零网络的**（理由与三条判据见
   // src/promotion-edge-broadcast.ts 的头注）。
   //
-  // ⚠️ 六家共用一个播报器、各自只交一个边界 getter：一条渠道算错不会让其余
-  // 五家失去保鲜（nearestPromotionEdge 逐源 try/catch）。
+  // ⚠️ 七家共用一个播报器、各自只交一个边界 getter：一条渠道算错不会让其余
+  // 六家失去保鲜（nearestPromotionEdge 逐源 try/catch）。
   // ⚠️ 生命周期挂 ctx.effect（AGENTS.md：自建定时器必须回收，unref 不算回收）。
   const promotionEdgeBroadcaster = createPromotionEdgeBroadcaster({
     edgeSources: () => [
@@ -6354,6 +6354,10 @@ async function fetchBalanceReading(
       // ISO 字符串，客户端自己算最近边界 + setTimeout 重拉）。**绝对时刻**，
       // 无每日重复 —— 与 TRAE 的星期窗口不同，边界最多两天。
       () => lobsteraiAdapter.nextPromotionEdgeAt(),
+      // Raccoon 的计费活动（`billing_discounts[].start_at/end_at`，ISO 带 `Z`）——
+      // 同为**绝对时刻**。⚠️ 这条腿 2026-11-18 才接上：不接的话 end_at 到点后徽标
+      // 要等下一次目录刷新（20 分钟）才消失，正是 issue #101 点名的那格。
+      () => raccoonAdapter.nextPromotionEdgeAt(),
     ],
     fire: () => { broadcastCatalogChanged(ctx) },
     warn: (message) => ctx.logger?.warn?.(message),

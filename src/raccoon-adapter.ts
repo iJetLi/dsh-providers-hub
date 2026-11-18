@@ -46,7 +46,7 @@ import {
 } from './raccoon-product.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import { planSessionTitleThinking } from './session-title.js'
-import { promotionBadgeFor, raccoonPromotionCandidate } from './model-promotions.js'
+import { nextPromotionEdgeMs, promotionBadgeFor, raccoonPromotionCandidate } from './model-promotions.js'
 import type { PromotionCandidateRow } from './promotion-tooltip.js'
 import {
   registerAdapterIdempotent,
@@ -617,6 +617,23 @@ export class RaccoonAdapter extends LlmAdapter {
       if (promotion !== undefined) rows.push({ modelId: model.id, promotion })
     }
     return rows
+  }
+
+  /**
+   * ★ 本家的下一次活动边界（epoch ms），供 `promotion-edge-broadcast` 定时重算徽标。
+   *
+   * ⚠️⚠️ 不接这个 getter 的后果（2026-11-18 我实测）：raccoon 的 `start_at`/`end_at` 是
+   * 「绝对时刻窗口」，而目录缓存 20 分钟一轮 —— 边界时刻不触发重算 ⇒ 8:00 结束的活动
+   * 要在行上**多挂最长 20 分钟**，正是 issue #101 点名的那格（「活动过期而用户仍按优惠
+   * 期选择」）。同批接上这个 getter 的 lobsterai（PR #114）就是同型。
+   *
+   * ⚠️ **零网络**：只读 `remoteModels` 里已解析好的候选，不触发 `fetchRemoteModels`。
+   * 返回 `undefined` 是安全值 —— `nearestPromotionEdge` 逐源 try/catch、非有限数即跳过。
+   */
+  nextPromotionEdgeAt(nowMs: number = this.nowMs()): number | undefined {
+    const rows = this.promotionCandidates()
+    if (rows.length === 0) return undefined
+    return nextPromotionEdgeMs(rows.map((row) => row.promotion), nowMs)
   }
 
   /**
