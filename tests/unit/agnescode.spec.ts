@@ -10,11 +10,18 @@
 
 import { createCipheriv, randomBytes } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
+import { CONTEXT_WINDOW_EXCEEDED_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 
 import {
   AGNESCODE_SESSION_FILE_PATTERN,
   agnescodeApiRoot,
+  agnescodeExpiryMs,
+  agnescodeSessionExpired,
+  decodeAgnescodeJwtExpMs,
   decryptAgnescodeSessionBlob,
+  fetchAgnescodeBalance,
+  fetchAgnescodeCatalog,
+  harvestAgnescodeLocalSession,
   parseAgnescodeCredential,
   parseAgnescodeSession,
   sortAgnescodeSessionFiles,
@@ -24,6 +31,8 @@ import {
 import { AGNESCODE, AGNESCODE_INTL } from '../../src/agnescode-product.js'
 import { buildAgnescodePayload, buildAgnescodeTools } from '../../src/agnescode-messages.js'
 import { fetchAgnescodeBalanceDetailed } from '../../src/agnescode-credits.js'
+import { AgnescodeAdapter } from '../../src/agnescode-adapter.js'
+import { probeById } from '../../src/index.js'
 
 const BFF_CN = 'https://api-agnes-code.agnes-ai.cn/v1'
 const BFF_INTL = 'https://api-agnes-code.agnes-ai.com/v1'
@@ -48,6 +57,14 @@ describe('trustAgnescodeBffBase（域名边界钉扎）', () => {
     expect(trustAgnescodeBffBase('')).toBeNull()
     expect(trustAgnescodeBffBase(undefined)).toBeNull()
     expect(trustAgnescodeBffBase(42)).toBeNull()
+  })
+
+  it('⚠️ 拒绝非默认端口（域名判据对「同域冒名端口」完全无感）', () => {
+    // 会话文件是**本地**文件：被篡改时 `https://api.agnes-ai.cn:8443` 就能把
+    // Bearer 打到一个监听在同一域、非标端口的冒名服务上 —— 域名照样匹配。
+    expect(trustAgnescodeBffBase('https://api-agnes-code.agnes-ai.cn:8443/v1')).toBeNull()
+    // 显式写 443 由 `URL` 规范化成默认端口（`url.port === ''`）⇒ 放行，符合同一判据。
+    expect(trustAgnescodeBffBase('https://agnes-ai.com:443')).toBe('https://agnes-ai.com')
   })
 })
 
@@ -172,6 +189,31 @@ describe('会话文件选择', () => {
     expect(sortAgnescodeSessionFiles(files, 'cn')[0]).toBe('code-auth-session.cn.v1')
     expect(sortAgnescodeSessionFiles(files, 'intl')[0]).toBe('code-auth-session.v1')
   })
+
+  it('⚠️ 严格模式零命中但家族文件在 ⇒ `format_drift`（不是「没装 App」）', async () => {
+    // 「装了桌面端但文件后缀变了」和「根本没装」是两件事：报 `file_missing`
+    // 会让用户去重装桌面端，而真正该做的是等适配 / 反馈版本。
+    const result = await harvestAgnescodeLocalSession({
+      product: AGNESCODE,
+      platform: 'win32',
+      env: { APPDATA: 'C:/Users/u/AppData/Roaming' },
+      readDirImpl: async () => ['code-auth-session.v2', 'Local State'],
+      readFileImpl: async () => { throw new Error('must not read') },
+    })
+    expect(result.ok).toBe(false)
+    expect(result.attempts[0]?.tier).toBe('format_drift')
+  })
+
+  it('家族文件也不存在 ⇒ 仍是 `file_missing`', async () => {
+    const result = await harvestAgnescodeLocalSession({
+      product: AGNESCODE,
+      platform: 'win32',
+      env: { APPDATA: 'C:/Users/u/AppData/Roaming' },
+      readDirImpl: async () => ['Local State'],
+      readFileImpl: async () => { throw new Error('must not read') },
+    })
+    expect(result.attempts[0]?.tier).toBe('file_missing')
+  })
 })
 
 describe('buildAgnescodePayload / buildAgnescodeTools', () => {
@@ -206,6 +248,209 @@ describe('buildAgnescodePayload / buildAgnescodeTools', () => {
     expect(tools[1]?.function.description).toBe('writes')
     // 参数缺省也整个省略（不是发 `undefined` 键）。
     expect(tools[1]?.function).not.toHaveProperty('parameters')
+  })
+})
+
+describe('目录与余额的**数值域**（0 / 负数一律不是「数据」）', () => {
+  const credential = JSON.stringify({ access_token: 'tok', bff_base: BFF_CN })
+  const json = (payload: unknown): typeof fetch =>
+    (async () => new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch
+
+  it('⚠️ `max_input_tokens: 0` / `max_output_tokens: 0` ⇒ **不声明**（不是声明 0）', async () => {
+    // 0 在目录里只可能表示「上游没给/哨兵」；放行它会让条目声明 `contextWindow: 0`，
+    // 而 `resolveModel` 与 `model-catalog-parity` 都按 `> 0` 判 ⇒ 同一份数据两套口径。
+    const entries = await fetchAgnescodeCatalog(parseAgnescodeCredential(credential, AGNESCODE)!, AGNESCODE, json({
+      data: [{ id: 'm0', name: 'M0', model_type: 'text', max_input_tokens: 0, max_output_tokens: 0 }],
+    }))
+    expect(entries).toHaveLength(1)
+    expect(entries?.[0]).not.toHaveProperty('contextWindow')
+    expect(entries?.[0]).not.toHaveProperty('maxTokens')
+  })
+
+  it('负数上限同样不声明', async () => {
+    const entries = await fetchAgnescodeCatalog(parseAgnescodeCredential(credential, AGNESCODE)!, AGNESCODE, json({
+      data: [{ id: 'mneg', model_type: 'text', max_input_tokens: -1, max_output_tokens: -4096 }],
+    }))
+    expect(entries?.[0]).not.toHaveProperty('contextWindow')
+    expect(entries?.[0]).not.toHaveProperty('maxTokens')
+  })
+
+  it('⚠️ 负余额 ⇒ 整份读数作废（不是「-5 积分」）', async () => {
+    const reading = await fetchAgnescodeBalance(parseAgnescodeCredential(credential, AGNESCODE)!, AGNESCODE, json({
+      code: '000000',
+      data: { total_balance: -5, permanent_balance: -5, time_sensitive_balance: 0 },
+    }))
+    expect(reading).toBeNull()
+  })
+})
+
+describe('AgnescodeAdapter 的接线判据（推理腿 / 预热自激 / 带图请求）', () => {
+  const product = AGNESCODE
+  const credential = parseAgnescodeCredential(
+    JSON.stringify({ access_token: 'spec-token', bff_base: BFF_CN }),
+    product,
+  )!
+
+  const slot = (accountId: string) => ({ accountId, credential })
+
+  it('⚠️ 推理腿必须走注入的 `fetchImpl`（选项注释承诺「三端点共用」）', async () => {
+    const calls: string[] = []
+    const fetchImpl = (async (url: string) => {
+      calls.push(String(url))
+      return new Response('data: [DONE]\n\n', {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }) as unknown as typeof fetch
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1')],
+      fetchImpl,
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 测试只关心出口，不关心 GenerateOptions 的完整形状
+    for await (const _chunk of adapter.stream({ model: 'm', messages: [{ role: 'user', content: 'hi' }] } as any)) {
+      // 消费完即可；断言的是「谁发的请求」。
+    }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain(`${BFF_CN}/chat/completions`)
+  })
+
+  it('⚠️ 目录拉失败不得自激成「预热 → catalog → 失败 → 再预热」的无限循环', async () => {
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls += 1
+      throw new TypeError('network down')
+    }) as unknown as typeof fetch
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1')],
+      fetchImpl,
+    })
+    // ① 异步路径（`catalog()` 拉失败后回兜底表，**不得**再触发预热）；
+    // ② 同步路径（`listAllModels()` 每次都触发预热 ⇒ 必须有节流/反重入）。
+    await adapter.resolveModel('agnescode', 'm')
+    adapter.listAllModels()
+    adapter.listAllModels()
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    // 旧实现（`catalog()` 失败时回落到 `syncCatalogEntries()` + 无闸门）下这条链会
+    // 自己喂自己（每轮一次 HTTP）⇒ 120ms 内就会攒出几十次；现在只允许 1 次。
+    expect(calls).toBeLessThanOrEqual(1)
+  })
+
+  it('⚠️ 带图请求在**进池循环前**就拒掉：不换号、不发请求、不写限流', async () => {
+    let calls = 0
+    const marks: string[] = []
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1'), slot('a2')],
+      fetchImpl: (async () => {
+        calls += 1
+        return new Response('', { status: 200 })
+      }) as unknown as typeof fetch,
+      markLimited: async (accountId: string) => { marks.push(accountId) },
+    })
+    await expect(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 同上：只需要一条带图消息
+      for await (const _chunk of adapter.stream({
+        model: 'm',
+        messages: [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'img-1' } }] }],
+      } as any)) {
+        // 不该产出任何 chunk。
+      }
+    }).rejects.toThrow(/不支持图片输入/)
+    expect(calls).toBe(0)
+    expect(marks).toEqual([])
+  })
+
+  it('⚠️ SSE 里的额度错误（无 status）必须写冷却并换号，不能当传输错误白轮', async () => {
+    // 流内错误没有 HTTP `status`：只看 status 会把它们归 `transport` ⇒ 不写标记、
+    // 下次请求照旧撞同一面墙（而用户看到的只是「重试也没用」）。
+    const marks: string[] = []
+    let calls = 0
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1'), slot('a2')],
+      fetchImpl: (async () => {
+        calls += 1
+        throw new LlmError('agnescode: 额度已用尽', 'QUOTA_EXCEEDED')
+      }) as unknown as typeof fetch,
+      markLimited: async (accountId: string) => { marks.push(accountId) },
+    })
+    await expect(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 只需要一条文本消息
+      for await (const _chunk of adapter.stream({ model: 'm', messages: [{ role: 'user', content: 'hi' }] } as any)) {
+        // 不该产出任何 chunk。
+      }
+    }).rejects.toThrow(/均受限/)
+    expect(calls).toBe(2)
+    expect(marks).toEqual(['a1', 'a2'])
+  })
+
+  it('⚠️ SSE 里的上下文超限（无 status）必须**不换号**（换号对同一请求无用）', async () => {
+    let calls = 0
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1'), slot('a2')],
+      fetchImpl: (async () => {
+        calls += 1
+        throw new LlmError('agnescode: 上下文超限', CONTEXT_WINDOW_EXCEEDED_CODE)
+      }) as unknown as typeof fetch,
+      markLimited: async () => { throw new Error('must not mark') },
+    })
+    await expect(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 只需要一条文本消息
+      for await (const _chunk of adapter.stream({ model: 'm', messages: [{ role: 'user', content: 'hi' }] } as any)) {
+        // 不该产出任何 chunk。
+      }
+    }).rejects.toThrow(/上下文超限/)
+    expect(calls).toBe(1)
+  })
+})
+
+describe('有效期（`expires_at` / JWT `exp` → 过期预检）', () => {
+  /** 造一枚只有 `exp` 的 JWT（签名段是假的 —— 本地只解 payload，不验签）。 */
+  function jwtWithExp(expSeconds: number): string {
+    const payload = Buffer.from(JSON.stringify({ exp: expSeconds }), 'utf8').toString('base64url')
+    return `header.${payload}.sig`
+  }
+
+  it('`decodeAgnescodeJwtExpMs`：能解出 `exp`，解不出时是**未知**（undefined）而不是已过期', () => {
+    expect(decodeAgnescodeJwtExpMs(jwtWithExp(1_700_000_000))).toBe(1_700_000_000_000)
+    expect(decodeAgnescodeJwtExpMs('plain-token')).toBeUndefined()
+    expect(decodeAgnescodeJwtExpMs('a.b')).toBeUndefined()
+    expect(decodeAgnescodeJwtExpMs('a.!!!.c')).toBeUndefined()
+  })
+
+  it('`agnescodeExpiryMs`：`expires_at` 优先于 JWT', () => {
+    const credential = parseAgnescodeCredential(
+      JSON.stringify({ access_token: jwtWithExp(1_700_000_000), bff_base: BFF_CN, expires_at: 2_000 }),
+      AGNESCODE,
+    )
+    expect(credential).toBeDefined()
+    expect(agnescodeExpiryMs(credential!)).toBe(2_000)
+  })
+
+  it('⚠️ `agnescodeSessionExpired`：过期才 true；有效期未知一律 false（未知 ≠ 过期）', () => {
+    const base = { bff_base: BFF_CN }
+    const now = 1_700_000_500_000
+    expect(agnescodeSessionExpired({ ...base, access_token: jwtWithExp(1_699_999_000) }, now)).toBe(true)
+    expect(agnescodeSessionExpired({ ...base, access_token: jwtWithExp(1_700_001_000) }, now)).toBe(false)
+    // 非 JWT（手工粘贴的 token）⇒ 本地判不了，绝不能拦。
+    expect(agnescodeSessionExpired({ access_token: 'plain-token', bff_base: BFF_CN }, now)).toBe(false)
+  })
+
+  it('⚠️ 探测路径对已过期会话给**可读原因**（而不是打一次上游拿回空目录）', async () => {
+    // 目录端点把 401 吞成 `[]` ⇒「重测」只会显示「没有模型」。过期预检在**发请求之前**
+    // 就抛 ⇒ 这条用例同时证明「没打网络」（fetch 是探针里构造的，我们无法 mock）。
+    const expiredToken = jwtWithExp(Math.floor(Date.now() / 1000) - 3600)
+    const adapter = probeById.agnescode.createProbeAdapter(
+      'AGNESCODE_ACCESS_TOKEN',
+      JSON.stringify({ access_token: expiredToken, bff_base: BFF_CN }),
+    )
+    await expect(adapter.listModels('agnescode')).rejects.toThrow(/会话已过期/)
   })
 })
 

@@ -40,6 +40,16 @@ import type { AgnescodeModelEntry, AgnescodeProduct } from './agnescode-product.
 /** 会话文件名（家族匹配：国内站 `.cn.v1`、国际站 `.v1`）。 */
 export const AGNESCODE_SESSION_FILE_PATTERN = /^code-auth-session[^/\\]*\.v1$/i
 
+/**
+ * **宽松**家族（只要求以 `code-auth-session` 开头）。
+ *
+ * 用途只有一处：严格模式一个都没命中、但宽松模式有时，说明桌面端**换了文件形状**
+ * （例如后缀改成 `.v2`）—— 那是「格式漂移」，不是「没装 App」。
+ * 两件事在面板上是完全不同的结论（用户会去重装 vs 去等适配），必须分开报。
+ * 与参考实现 `AGNESCODE_SESSION_FAMILY_PATTERN` 同形。
+ */
+export const AGNESCODE_SESSION_FAMILY_PATTERN = /^code-auth-session/i
+
 /** 桌面端 Chromium 配置目录（逐平台）。本仓只有 win32 有已验证的采集路径。 */
 export const AGNESCODE_APP_DATA_CANDIDATES: ReadonlyArray<{ platform: string; dirEnv: string; leaf: string }> = Object.freeze([
   { platform: 'win32', dirEnv: 'APPDATA', leaf: 'AgnesCode' },
@@ -113,6 +123,10 @@ export function trustAgnescodeBffBase(raw: unknown): string | null {
   }
   if (url.protocol !== 'https:') return null
   if (url.username !== '' || url.password !== '') return null
+  // ⚠️ 非默认端口一律拒（参考实现同一判据）：会话文件是**本地**文件，被篡改时
+  //    一个 `https://api.agnes-ai.cn:8443` 就能把 Bearer 打到一个监听在
+  //    同域同机的冒名端口上 —— 域名判据对此**完全无感**。官方 base 恒无端口。
+  if (url.port !== '') return null
   const host = url.hostname.toLowerCase()
   const trusted = host === 'agnes-ai.cn' || host.endsWith('.agnes-ai.cn')
     || host === 'agnes-ai.com' || host.endsWith('.agnes-ai.com')
@@ -370,16 +384,29 @@ export async function harvestAgnescodeLocalSession(options: AgnescodeHarvestOpti
   }
 
   for (const appDir of appDirs) {
-    let names: string[] = []
+    let listing: string[]
     try {
-      const listing = await readDirImpl(appDir)
-      names = listing.filter((name) => AGNESCODE_SESSION_FILE_PATTERN.test(name))
+      listing = await readDirImpl(appDir)
     } catch {
       attempts.push({ file: appDir, tier: tiers.FILE_MISSING, detail: 'the AgnesCode app directory is absent' })
       continue
     }
+    const names = listing.filter((name) => AGNESCODE_SESSION_FILE_PATTERN.test(name))
     if (names.length === 0) {
-      attempts.push({ file: appDir, tier: tiers.FILE_MISSING, detail: 'no code-auth-session*.v1 in the app directory' })
+      // ⚠️ 「没装 App」与「装了但文件形状变了」是**两件**事：严格模式零命中、
+      //    宽松模式有时，报 `format_drift` 而不是 `file_missing`（后者会让用户
+      //    去重装桌面端，而真正该做的是等适配 / 反馈版本号）。
+      const loose = listing.filter((name) => AGNESCODE_SESSION_FAMILY_PATTERN.test(name))
+      attempts.push(
+        loose.length === 0
+          ? { file: appDir, tier: tiers.FILE_MISSING, detail: 'no code-auth-session*.v1 in the app directory' }
+          : {
+              file: appDir,
+              tier: tiers.FORMAT_DRIFT,
+              // ⚠️ 只报文件名（不是内容）：这里可能正是一份新形状的会话文件。
+              detail: `code-auth-session* files exist but none ends in .v1: ${loose.join(', ')}`,
+            },
+      )
       continue
     }
     for (const name of sortAgnescodeSessionFiles(names, options.product.domain)) {
@@ -479,8 +506,12 @@ export async function fetchAgnescodeCatalog(
       // 作为 chat 模型上架。
       if (typeof model.model_type === 'string' && model.model_type !== 'text') continue
       seen.add(id)
-      const contextWindow = finiteInt(model.max_input_tokens)
-      const maxTokens = finiteInt(model.max_output_tokens)
+      // ⚠️ 只收**正**整数：`0` 是「上游没给/给了个哨兵」而不是「窗口为零」。
+      //    放行 0 会让目录条目声明 `contextWindow: 0`，而 `resolveModel` 与
+      //    `model-catalog-parity` 两处都按 `> 0` 判 ⇒ 同一份数据两套口径
+      //（上游给 0 时面板拿到的窗口其实是「未知」，只是被写成了 0）。
+      const contextWindow = positiveInt(model.max_input_tokens)
+      const maxTokens = positiveInt(model.max_output_tokens)
       out.push({
         id,
         name: typeof model.name === 'string' && model.name !== '' ? model.name : id,
@@ -523,26 +554,31 @@ export async function fetchAgnescodeBalance(
       ? envelope.data as Record<string, unknown>
       : null
     if (data === null) return null
-    const total = finiteNumber(data.total_balance)
+    const total = nonNegativeNumber(data.total_balance)
     if (total === null) return null
     return {
       total,
-      timeSensitive: finiteNumber(data.time_sensitive_balance) ?? 0,
-      permanent: finiteNumber(data.permanent_balance) ?? 0,
+      timeSensitive: nonNegativeNumber(data.time_sensitive_balance) ?? 0,
+      permanent: nonNegativeNumber(data.permanent_balance) ?? 0,
     }
   } catch {
     return null
   }
 }
 
-/** 只接受安全非负整数（0 是合法值：上限/余额可以是 0）。 */
-function finiteInt(raw: unknown): number | undefined {
-  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? Math.trunc(raw) : undefined
+/** 只接受**正**整数（0 / 负数 / 小数一律视为「未声明」）。 */
+function positiveInt(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : undefined
 }
 
-/** 只接受有限数字（0 合法 —— 余额为 0 是一次真实的「用完了」，不是缺值）。 */
-function finiteNumber(raw: unknown): number | null {
-  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null
+/**
+ * 只接受**非负**有限数字（0 合法 —— 余额为 0 是一次真实的「用完了」，不是缺值）。
+ *
+ * ⚠️ 负数必须挡掉：它不是「余额」，是上游的脏数据 / 另一种语义（欠费）。
+ *   放它过去会进 `CreditPackage.remaining`，卡片上出现「-1200 积分」。
+ */
+function nonNegativeNumber(raw: unknown): number | null {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : null
 }
 
 /**
@@ -553,4 +589,20 @@ function finiteNumber(raw: unknown): number | null {
 export function agnescodeExpiryMs(credential: AgnescodeCredential): number | undefined {
   if (typeof credential.expires_at === 'number' && Number.isFinite(credential.expires_at)) return credential.expires_at
   return decodeAgnescodeJwtExpMs(credential.access_token)
+}
+
+/**
+ * 「这枚凭据是不是已经过期了」——只用于**诊断/探测**，不参与选槽。
+ *
+ * ⚠️ 为什么单独抽出来（2026-11-19 二次自查）：桌面会话过期时三个端点都回 401，
+ * 而目录端点把 401 吞成空数组 ⇒ 用户点「重测」看到的是「没有模型」这种**答非所问**
+ * 的结论。有效期是**本地就能判**的确定性信息，用它换一句可读的原因
+ * （「请在本机重新登录桌面端再导入」）比多打一次上游有用。
+ *
+ * ⚠️ **未知 ≠ 过期**：`agnescodeExpiryMs` 拿不到值时一律 `false`（JWT 解析失败、
+ * 手工粘贴的非 JWT token 都会走到这里）——那类凭据只能靠真请求验。
+ */
+export function agnescodeSessionExpired(credential: AgnescodeCredential, now = Date.now()): boolean {
+  const expiry = agnescodeExpiryMs(credential)
+  return expiry !== undefined && expiry <= now
 }

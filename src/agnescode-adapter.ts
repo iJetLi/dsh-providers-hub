@@ -68,6 +68,9 @@ import { retryAfterMsFromResponse } from './retry-after.js'
 /** 目录缓存 TTL（5 分钟，与 qiniu / opencode 同档）。 */
 const CATALOG_TTL_MS = 300_000
 
+/** 后台预热的节流窗口（同一实例 60s 内最多试一次）。 */
+const WARM_THROTTLE_MS = 60_000
+
 /** 单槽（接线层解析好的账号 + 凭据）。 */
 export interface AgnescodeSlot {
   accountId: string
@@ -110,6 +113,12 @@ export class AgnescodeAdapter extends LlmAdapter {
   private readonly skeletonCatalog: ModelCatalog
   /** 最近一次成功拉到的目录（留给**同步**的 `listAllModels`）。 */
   private lastCatalog?: CatalogCacheEntry
+  /** 正在进行的预热（反重入；见 {@link warmCatalog} 的两道闸门）。 */
+  private warming?: Promise<void>
+  /** 上一次预热开始时刻（节流）。 */
+  private lastWarmAt = 0
+  /** 上一次目录拉取失败时刻（失败也节流，避免过期凭据被反复重打）。 */
+  private lastCatalogFailAt = 0
 
   constructor(private readonly options: AgnescodeAdapterOptions) {
     super()
@@ -190,6 +199,11 @@ export class AgnescodeAdapter extends LlmAdapter {
     const cached = this.lastCatalog
     if (cached !== undefined && cached.entries.length > 0) return cached.entries
     void this.warmCatalog()
+    return this.fallbackEntries()
+  }
+
+  /** 兜底目录（本家**刻意留空**，见 `agnescode-product.ts`）。 */
+  private fallbackEntries(): readonly CatalogEntry[] {
     return agnescodeFallbackModels(this.product).map((m) => ({
       id: m.id,
       name: m.name,
@@ -199,13 +213,38 @@ export class AgnescodeAdapter extends LlmAdapter {
     }))
   }
 
-  /** 后台预热一次目录；失败静默（没有账号时本来就不该有目录）。 */
+  /**
+   * 后台预热一次目录；失败静默（没有账号时本来就不该有目录）。
+   *
+   * ⚠️⚠️ 两道闸门缺一不可（2026-11-19 提交前自查）：
+   *   1. **反重入**（`warming`）：`syncCatalogEntries()` 会触发本函数，而它自己
+   *      又是 `catalog()` 的失败回落（本次已把那条回落改成直接返回兜底表，
+   *      但闸门必须留着 —— 否则任何一次「预热里再触发预热」的接线改动都会
+   *      重新变成自激）；
+   *   2. **节流**（`lastWarmAt` / `lastCatalogFailAt`）：`listAllModels()` 是同步
+   *      接口、每次调用都会触发预热 ⇒ 面板刷新快时会连打上游；失败的目录同样
+   *      要吃掉 60s 窗口，否则凭据过期时等于拿插件当压测工具。
+   *
+   * 自激的具体形态（已实测）：预热 → `catalog()` → 拉失败 → 回落 → 预热 → …
+   * 每轮一次 HTTP、永不停止，而用户看到的现象只是「面板卡」。
+   */
   private async warmCatalog(): Promise<void> {
-    try {
-      await this.catalog()
-    } catch {
-      // 预热失败不值得打扰用户。
-    }
+    if (this.warming !== undefined) return
+    // 成功与失败共用同一个节流窗口：刚失败过的目录不在一分钟内重打上游
+    //（凭据过期的形态下，否则等于拿插件当压测工具）。
+    const lastAttemptAt = Math.max(this.lastWarmAt, this.lastCatalogFailAt)
+    if (Date.now() - lastAttemptAt < WARM_THROTTLE_MS) return
+    this.lastWarmAt = Date.now()
+    this.warming = (async () => {
+      try {
+        await this.catalog()
+      } catch {
+        // 预热失败不值得打扰用户。
+      } finally {
+        this.warming = undefined
+      }
+    })()
+    await this.warming
   }
 
   /**
@@ -240,16 +279,30 @@ export class AgnescodeAdapter extends LlmAdapter {
       this.lastCatalog = { at: Date.now(), bffBase: base, entries }
       return entries
     }
-    return this.syncCatalogEntries()
+    // ⚠️ 这里**不能再走** `syncCatalogEntries()`：那会触发一次预热，而本次调用
+    //    本身就是预热（失败时构成无限自激）。直接回兜底表（本家是空表）。
+    // 同时记下失败时刻：预热路径据此节流（失败的目录在 60s 内不重打上游）。
+    this.lastCatalogFailAt = Date.now()
+    return this.fallbackEntries()
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const slots = await this.options.slots(options.model)
     if (slots.length === 0) {
       throw new LlmError(
-        `agnescode: 没有可用账号。请在 Jet Hub 的 ${this.product.displayName} 面板`
+        `${this.product.id}: 没有可用账号。请在 Jet Hub 的 ${this.product.displayName} 面板`
         + '点「导入本机登录态」（需要先在本机安装并登录 AgnesCode 桌面端）。',
         'MISSING_CREDENTIAL',
+      )
+    }
+
+    // ⚠️ 带图请求在**进池循环之前**就拒掉：图片支持与账号无关，放在循环里会让
+    //    每个槽都被白试一遍（`failureInfoOf` 对无 `status` 的错误归 `transport`
+    //    ⇒ 换号重试），最终仍是同一句「不支持图片」，只是白打整池。
+    if (hasImages(options.messages)) {
+      throw new LlmError(
+        `${this.product.id}: 模型 "${options.model}" 不支持图片输入（AgnesCode 目录只声明文本模态）`,
+        'UNSUPPORTED_CONTENT',
       )
     }
 
@@ -259,7 +312,7 @@ export class AgnescodeAdapter extends LlmAdapter {
       const slot = slots.find((s) => !tried.has(s.accountId))
       if (slot === undefined) {
         throw new LlmError(
-          `agnescode: 所有账号对该模型均受限${limited.length > 0 ? `（${limited.join('、')}）` : ''}`,
+          `${this.product.id}: 所有账号对该模型均受限${limited.length > 0 ? `（${limited.join('、')}）` : ''}`,
           'QUOTA_EXCEEDED',
         )
       }
@@ -292,7 +345,7 @@ export class AgnescodeAdapter extends LlmAdapter {
         if (failure.kind === 'server' || failure.kind === 'transport') {
           // 上游故障/网络问题：不写标记，只换下一个；槽耗尽时抛**原始错误**，
           // 否则单账号用户看到的是误导性的「额度用尽」。
-          this.options.warn?.(`agnescode: 账号 ${slot.accountId} ${failure.kind}，换下一个`)
+          this.options.warn?.(`${this.product.id}: 账号 ${slot.accountId} ${failure.kind}，换下一个`)
           if (tried.size >= slots.length) throw error
           continue
         }
@@ -308,13 +361,6 @@ export class AgnescodeAdapter extends LlmAdapter {
 
   /** 指定槽发一次请求。 */
   private async *streamVia(slot: AgnescodeSlot, options: GenerateOptions): AsyncIterable<StreamChunk> {
-    // 图片：本家没有一条目录声明能收图 ⇒ 带图直接拒绝（不静默丢弃）。
-    if (hasImages(options.messages)) {
-      throw new LlmError(
-        `agnescode: 模型 "${options.model}" 不支持图片输入（AgnesCode 目录只声明文本模态）`,
-        'UNSUPPORTED_CONTENT',
-      )
-    }
     const messages = serializeMessages(
       options.messages as readonly { role: string; content: unknown }[],
     )
@@ -328,14 +374,17 @@ export class AgnescodeAdapter extends LlmAdapter {
     })
     const base = trustAgnescodeBffBase(slot.credential.bff_base)
     if (base === null) {
-      throw new LlmError('agnescode: 凭据里的 BFF base 未通过 origin 钉扎，请重新导入登录态', 'AUTH')
+      throw new LlmError(
+        `${this.product.id}: 凭据里的 BFF base 未通过 origin 钉扎，请重新导入登录态`,
+        'AUTH',
+      )
     }
-    const response = await fetch(`${base}/chat/completions`, {
-      method: 'POST',
-      headers: { ...agnescodeHeaders(slot.credential), Accept: 'text/event-stream' },
-      body: JSON.stringify(payload),
-      ...options.signal === undefined ? {} : { signal: options.signal },
-    })
+    const response = await this.fetchChat(
+      `${base}/chat/completions`,
+      { ...agnescodeHeaders(slot.credential), Accept: 'text/event-stream' },
+      JSON.stringify(payload),
+      options.signal,
+    )
     if (!response.ok) {
       // ⚠️ 先读体：额度/语义在响应体里，而 body 只能读一次。
       const text = await response.text().catch(() => '')
@@ -351,14 +400,17 @@ export class AgnescodeAdapter extends LlmAdapter {
               ? 'QUOTA_EXCEEDED'
               : httpErrorCode(response.status)
       throw new LlmError(
-        `agnescode: HTTP ${response.status} — ${text.slice(0, 300)}`
+        `${this.product.id}: HTTP ${response.status} — ${text.slice(0, 300)}`
         + `${response.status === 401 || response.status === 403
           ? '（会话可能已过期：请在本机重新登录 AgnesCode 桌面端，再点「导入本机登录态」）'
           : ''}`,
         code,
         {
           status: response.status,
-          ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
+          // ⚠️ `providerRetryAfterMs` 在 `LlmError` 里被校验为 **> 0**：
+          //    上游回 `retry-after: 0` 时传 0 会让构造函数自己抛校验错，
+          //    把一个正常的 429 变成一条与真因无关的崩溃。
+          ...retryAfterMs === undefined || retryAfterMs <= 0 ? {} : { providerRetryAfterMs: retryAfterMs },
         },
       )
     }
@@ -368,7 +420,7 @@ export class AgnescodeAdapter extends LlmAdapter {
     if (!contentType.includes('text/event-stream')) {
       const peek = await response.text().catch(() => '')
       throw new LlmError(
-        `agnescode: 上游未返回事件流（content-type: ${contentType || '(空)'}）`
+        `${this.product.id}: 上游未返回事件流（content-type: ${contentType || '(空)'}）`
         + `${peek === '' ? '' : `；服务端原文：${peek.slice(0, 200)}`}`,
         'SERVER',
         { status: response.status },
@@ -378,12 +430,59 @@ export class AgnescodeAdapter extends LlmAdapter {
       response,
       options.signal !== undefined ? { signal: options.signal } : {},
       {
-        label: 'agnescode',
+        label: this.product.id,
         firstTokenTimeoutMs: this.product.fetchTimeoutMs,
         chunkTimeoutMs: this.product.fetchTimeoutMs,
         ...options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {},
       },
     )
+  }
+
+  /**
+   * 发推理请求：出口走注入的 `fetchImpl`，且**只对「等响应头」这一段**设上限。
+   *
+   * ⚠️ 为什么必须两件事一起做（2026-11-19 自查）：
+   *   1. 选项注释承诺「目录 / 余额 / 推理共用」`fetchImpl`，而推理腿原先直接用
+   *      全局 `fetch` ⇒ 注释与实现不一致，且推理路径在单测里**无法拦截**
+   *     （本仓红线：注释必须与实际一致）；
+   *   2. `product.fetchTimeoutMs` 此前只喂给 `consumeOpenAiSse` 的
+   *      `firstTokenTimeoutMs`，而那是**拿到响应头之后**的空闲超时 ⇒「等头」这段
+   *      没人负责，只能吃 undici 默认（约 300s）：网关卡在排队时用户看到的是
+   *      「永远转圈」（magicrew 的同型修法）。
+   *
+   * ⚠️ 拿到头**立即** `clearTimeout`：这条定时器只管等头，绝不能误杀后面的长回答。
+   */
+  private async fetchChat(
+    url: string,
+    headers: Record<string, string>,
+    body: string,
+    signal: AbortSignal | undefined,
+  ): Promise<Response> {
+    const fetcher = this.options.fetchImpl ?? globalThis.fetch
+    const headerController = new AbortController()
+    const headerTimer = setTimeout(
+      () => headerController.abort(
+        new LlmError(`${this.product.id}: 等待响应头超时（上游 BFF 可能正在排队）`, 'TIMEOUT'),
+      ),
+      this.product.fetchTimeoutMs,
+    )
+    try {
+      return await fetcher(url, {
+        method: 'POST',
+        headers,
+        body,
+        signal: signal === undefined
+          ? headerController.signal
+          : AbortSignal.any([signal, headerController.signal]),
+      })
+    } catch (error) {
+      // ⚠️ 只有**本控制器**超时才改写错误；调用方 abort 必须原样冒泡
+      //    （否则「用户点了停止」会被报成「上游超时」）。
+      if (headerController.signal.aborted) throw headerController.signal.reason
+      throw error
+    } finally {
+      clearTimeout(headerTimer)
+    }
   }
 }
 
@@ -423,10 +522,19 @@ function contextOverflowText(text: string): boolean {
     || lower.includes('reduce the length')
 }
 
-/** 从抛出的错误里还原语义（先看 `failure.status`，再看报文）。 */
+/**
+ * 从抛出的错误里还原语义（先看 `failure.status`，**再看 `failure.code`**，最后看报文）。
+ *
+ * ⚠️ 为什么必须认 `code`（2026-11-19 二次自查）：SSE 解帧器抛的错误（额度耗尽、
+ * 上下文超限）**没有 HTTP `status`** —— 只看 status 会把它们一律归 `transport`：
+ * - 429/额度类 ⇒ 白轮一遍池子，且**不写**冷却（下次请求照旧撞同一面墙）；
+ * - 上下文超限 ⇒ 同样白轮，而它换号**根本无用**（同一个请求对谁都太大）。
+ * 宿主的溢出压缩只认 `CONTEXT_WINDOW_EXCEEDED` 这个码，所以这里的归类错会让
+ * 唯一有效的动作（压缩重试）被掩盖（qiniu / gemini 的同型修法）。
+ */
 function failureInfoOf(error: unknown): { kind: FailureKind; retryAfterMs?: number } {
   const failure = (typeof error === 'object' && error !== null ? error : {}) as {
-    failure?: { status?: unknown; providerRetryAfterMs?: unknown }
+    failure?: { status?: unknown; providerRetryAfterMs?: unknown; code?: unknown }
   }
   const status = typeof failure.failure?.status === 'number' ? failure.failure.status : 0
   const retryAfterMs = typeof failure.failure?.providerRetryAfterMs === 'number'
@@ -434,7 +542,16 @@ function failureInfoOf(error: unknown): { kind: FailureKind; retryAfterMs?: numb
     ? failure.failure.providerRetryAfterMs
     : undefined
   const message = error instanceof Error ? error.message : String(error)
-  const kind = status === 0 ? 'transport' : kindOfStatus(status, message)
+  const failureCode = typeof failure.failure?.code === 'string' ? failure.failure.code : ''
+  const kind = status !== 0
+    ? kindOfStatus(status, message)
+    : failureCode === CONTEXT_WINDOW_EXCEEDED_CODE
+      ? 'context_window'
+      : failureCode === 'QUOTA_EXCEEDED' || failureCode === 'RATE_LIMIT'
+        ? 'rate_limit'
+        : failureCode === 'AUTH'
+          ? 'auth'
+          : 'transport'
   return retryAfterMs === undefined ? { kind } : { kind, retryAfterMs }
 }
 

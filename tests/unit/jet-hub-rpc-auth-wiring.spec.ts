@@ -206,9 +206,16 @@ async function setup(accounts: ProviderAccountEntry[]): Promise<{
   call: (method: string, payload: unknown) => Promise<{ ok: boolean; error?: { message?: string } }>
   spyOf: (serviceName: string) => ReturnType<typeof vi.fn>
   calledServices: () => string[]
+  /** 测试要预置/读回凭据库（`account.create` 的去重腿需要它）。 */
+  credentials: FakeCredentials
+  /** 池的持久化对象（可直接读回账号列表）。 */
+  state: { value: unknown }
+  /** 已 `apply()` 的上下文（测试要从里面取 auth 实例布桩）。 */
+  ctx: Context
 }> {
   const ctx = new Context()
-  ctx.provide('credentials', new FakeCredentials() as never)
+  const credentials = new FakeCredentials()
+  ctx.provide('credentials', credentials as never)
   ctx.provide('commands', { register: () => () => {}, definitions: [] } as never)
   ctx.provide('llm', {
     registerConfigurableProviders: () => ({ replace() {} }),
@@ -327,6 +334,9 @@ async function setup(accounts: ProviderAccountEntry[]): Promise<{
       return spy
     },
     calledServices: () => [...called],
+    credentials,
+    state,
+    ctx,
   }}
 
 function entry(provider: string, credentialRef: string): ProviderAccountEntry {
@@ -449,5 +459,46 @@ describe('★ registerJetHubRpc 的命名对象接线（真跑 apply + account.r
     const result = await call('account.refresh', { accountId: 'mystery-1' })
     expect(result.ok).toBe(false)
     expect(result.error?.message).toMatch(/Unknown provider/)
+  })
+
+  it('★★ AgnesCode：同一枚桌面会话重复导入 ⇒ **复用既有卡片**，不攒重复账号', async () => {
+    // 背景：`account.create` 每次都生成新的账号 id 与 ref，而「导入本机登录态」
+    // 读的是**同一份** `code-auth-session*.v1`。不判重就会攒出两张指向同一个号的
+    // 卡片 —— 推理轮换把它们当两个槽（「换号」换来同一枚 token），积分也画两遍。
+    const session = {
+      accessToken: 'ag-token-same',
+      userId: 'u-1',
+      nickname: '阿格妮丝',
+      bffBase: 'https://api-agnes-code.agnes-ai.cn/v1',
+    }
+    const { call, credentials, state, ctx } = await setup([
+      entry('agnescode', 'AGNESCODE_ACCOUNT_EXIST'),
+    ])
+    // 既有账号挂的是**同一枚** token（模拟上一次导入的结果）。
+    await credentials.set('AGNESCODE_ACCOUNT_EXIST', JSON.stringify({
+      access_token: session.accessToken,
+      bff_base: session.bffBase,
+      user_id: session.userId,
+    }))
+    // 本机采集是注入点：单测不碰真文件、不碰真 DPAPI。
+    const agnescodeAuth = (ctx as unknown as { agnescodeAuth: { harvest?: unknown } }).agnescodeAuth
+    agnescodeAuth.harvest = async () => ({ ok: true, attempts: [], session })
+
+    const result = await call('account.create', { provider: 'agnescode' }) as unknown as {
+      ok: boolean
+      value?: { accountId?: string; reused?: boolean }
+      error?: { message?: string }
+    }
+    expect(result.ok, `导入应成功，实际 error=${result.error?.message}`).toBe(true)
+    // 关键判据：账号 id 落回既有那张卡，而不是新造一张。
+    expect(result.value?.accountId).toBe('agnescode-1')
+    expect(result.value?.reused).toBe(true)
+    // 池里该 provider 仍然只有一张卡（新增的那张临时占位已被清掉）。
+    // ⚠️ 必须**按 provider 过滤**：`apply()` 会顺手给 opencode 建一条匿名通道，
+    //    那是背景噪声（不是本次被测对象）。
+    const accounts = (state.value as {
+      accounts?: Array<{ id: string; provider: string }>
+    }).accounts ?? []
+    expect(accounts.filter((a) => a.provider === 'agnescode').map((a) => a.id)).toEqual(['agnescode-1'])
   })
 })

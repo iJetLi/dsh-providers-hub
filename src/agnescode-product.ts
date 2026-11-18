@@ -108,8 +108,9 @@ export interface AgnescodeModelEntry {
  * 看到不同条目），任何一行写死在这里都可能与用户账号的真实目录冲突。
  *
  * 留空的代价是**可控的**：没有可用账号时注册表侧的目录门控本来就隐藏
- * 整家 provider（见 `provider-registry.ts` 的 `requiresLogin`），所以
- * 「空目录」只会出现在「不该显示」的时刻，不会出现「登录了却选不到模型」。
+ * 整家 provider（`providerCatalogVisible()` + `DSH_HIDE_MODELS_WITHOUT_ACCOUNT`
+ * 默认开启，见 `account-pool.ts`），所以「空目录」只会出现在「不该显示」的时刻，
+ * 不会出现「登录了却选不到模型」。
  *
  * 若将来要补表，**必须**先有真机取证（`test/live-agnescode.mjs` 同款探针），
  * 不接受按印象编 id / 窗口 / 上限。

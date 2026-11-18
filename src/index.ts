@@ -250,7 +250,7 @@ import {
 import { AgnescodeAuth } from './agnescode-auth.js'
 import { AgnescodeAdapter, registerAgnescodeLlm, type AgnescodeSlot } from './agnescode-adapter.js'
 import { AGNESCODE, AGNESCODE_INTL, type AgnescodeProduct } from './agnescode-product.js'
-import { parseAgnescodeCredential, trustAgnescodeBffBase } from './agnescode.js'
+import { agnescodeSessionExpired, parseAgnescodeCredential, trustAgnescodeBffBase } from './agnescode.js'
 import type { ZcodeCredential } from './zcode.js'
 import { GEMINI_DEFAULT_PROJECT, GEMINI_SESSION_LANE_SMOKE } from './gemini.js'
 import { createProviderCredits, creditsOf } from './provider-credits.js'
@@ -704,6 +704,13 @@ function probeSlotOf(product: AgnescodeProduct, credential: unknown): AgnescodeS
   if (parsed === undefined) throw new Error('凭据不是合法的 AgnesCode 会话（缺少 access_token / bff_base）')
   if (!trustAgnescodeBffBase(parsed.bff_base)) {
     throw new Error(`bff_base 不在 Agnes 域名边界内，拒绝发送凭据：${parsed.bff_base}`)
+  }
+  // ⚠️ 过期预检（只在这一条探测路径上）：会话过期时三个端点都回 401，而目录端点
+  //    把 401 吞成空数组 ⇒ 用户点「重测」只会看到「没有模型」这种**答非所问**的
+  //    结论。有效期是本地就能判的确定信息，用它换一句可读的下一步动作。
+  //    未知有效期（非 JWT / 解析失败）**不**拦 —— 那类只能靠真请求验。
+  if (agnescodeSessionExpired(parsed)) {
+    throw new Error(`本机 ${product.displayName} 会话已过期 ⇒ 请在本机重新登录桌面客户端后重新导入`)
   }
   return { accountId: product.id, credential: parsed }
 }
@@ -5002,7 +5009,9 @@ export function apply(ctx: Context): void {
       markLimited: async (accountId, modelId, resetAtMs) => {
         await pool.updateModelRateLimit(accountId, modelId, resetAtMs)
       },
-      warn: (message) => ctx.logger?.warn?.(`[agnescode] ${message}`),
+      // ⚠️ 前缀必须用 `product.id`：两站共用一个工厂，写死 `[agnescode]` 会让
+      //    国际站的诊断行挂在国内站的名下（排障时按前缀过滤会漏掉一半）。
+      warn: (message) => ctx.logger?.warn?.(`[${product.id}] ${message}`),
     })
     return { auth, adapter }
   }

@@ -28,6 +28,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { AccountPool } from './account-pool.js'
 import { AGNESCODE, type AgnescodeProduct } from './agnescode-product.js'
 import {
+  AGNESCODE_HARVEST_TIER,
   agnescodeExpiryMs,
   harvestAgnescodeLocalSession,
   parseAgnescodeCredential,
@@ -140,7 +141,10 @@ export class AgnescodeAuth extends Service {
         ok: false,
         attempts: [{
           file: null,
-          tier: 'untrusted_base',
+          // ⚠️ 用常量而不是字面量：本文件 `agnescode.ts` 的档位表是唯一真相源，
+          //    这里再写一遍 `'untrusted_base'` 就是「一文件两套同义判据」的翻版
+          //（改档位名时这张诊断行会静默变成另一个字符串）。
+          tier: AGNESCODE_HARVEST_TIER.UNTRUSTED_BASE,
           detail: 'the harvested session base failed origin pinning',
         }],
       }
@@ -169,10 +173,15 @@ export class AgnescodeAuth extends Service {
    *
    * ⚠️ 等待/采集是秒级以上的过程，期间插件可能被停用 ⇒ 回来时**再判一次**
    * `active`，不能把已停用插件的凭据写进库。
+   *
+   * @returns 是否真的写进去了。**必须把结果交给调用方**：静默 `return` 会让
+   *   `account.create` 接着 `updateAccount(...)` 并报成功，池里留下一张
+   *   「有账号、没凭据」的幽灵卡（导入按钮按一次多一张，且永远不可用）。
    */
-  async saveCredential(credential: AgnescodeCredential, refName = this.credentialRefName): Promise<void> {
-    if (!this.active) return
+  async saveCredential(credential: AgnescodeCredential, refName = this.credentialRefName): Promise<boolean> {
+    if (!this.active) return false
     await this.ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
+    return true
   }
 
   /** 面板状态：只看池里有没有该 provider 的可用凭据（与其余 provider 同判据）。 */
