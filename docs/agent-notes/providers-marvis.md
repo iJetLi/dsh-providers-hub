@@ -869,3 +869,87 @@ return rewriteMarvisBlockedIdentities(rewriteTencentContentFingerprints(text, pr
 
 ⚠️ **不要**把本表的替换值再写进 `CONTENT_FINGERPRINTS` 的 `find`：
 那会变成「找我们自己的产物再改一遍」的自指规则，零行为。
+
+## ⚠️⚠️⚠️ 2026-11-18：`uskey` 门禁生效 ⇒ **内容级判据整体失效**（本渠道对所有非官方进程 403）
+
+> **这一节推翻上面「身份句替换表」的有效性前提** —— 改任何身份句相关代码前先读它。
+> GitHub PR #126 提的「注入 uskey 钩子」方案已由用户拍板**不采纳**（原因见下），代码未合入。
+
+### 实发取证（本机 4 个账号，2026-11-18，`messages[]`-system 位、`stream:false`）
+
+| 格 | system 内容 | 11-16 实测 | 11-18 实测 |
+|---|---|---|---|
+| 01 | `You are an AI agent for coding work.`（本表第 1 条 `replace` 的产物） | 200 | **403 / 4100404** |
+| 02 | 同上、无尾句点 | 200 | 403 / 4100404 |
+| 03 | `You are an AI coding agent`（PR #126 提议的新产物） | 未测 | **403 / 4100404** |
+| 04 | 同上、带句点 | 未测 | 403 / 4100404 |
+| 05 | `You are an AI agent.` | 未测 | 403 / 4100404 |
+| 06 | `You are a coding agent.` | 未测 | 403 / 4100404 |
+| 07 | `You are a helpful assistant.`（PR #126 的「第四族」） | 未测 | 403 / 4100404 |
+| 08 | `You are a helpful software engineer assistant.` | 未测 | 403 / 4100404 |
+| 09 | `You are a helpful senior software engineer assistant.`（PR 声称 200） | 未测 | **403 / 4100404** |
+| 10 | `You are an AI assistant.`（本表登记为**放行句**） | 200 | **403 / 4100404** |
+| 11 | `You are an AI coding assistant, powered by a large language model`（登记表产物） | 403 | 403 / 4100404 |
+| 12 | **完全没有 system** | 200 | **403 / 4100404** |
+
+两个 model id（`deepseek-v4-pro-external` / `deepseek-v4-pro`）各跑一遍，24 格逐格相同。
+
+### 判读（五条，每条都做过对照）
+
+1. **与内容无关**：第 09/10/12 三格本该 200（10 是本表登记的放行句、12 连 system 都没有），今天全 403
+   ⇒ **内容级判据整体失效**，不再有任何「换个措辞就能过」的空间。
+2. **与 `Ual-Access-MarvisExt` 头有无无关**：把整个头删掉仍是 `403 / 4100404`
+   ⇒ 「不带 uskey」同样被拦（**不是**「不带就放行」）。
+3. **与账号无关**：3 个 token 有效的账号逐个跑全 403；第 4 个 token 已过期的账号回
+   `401 code=4100403 登录态过期/未登录` ⇒ **鉴权判在风控之前**（`4100403` 先于 `4100404`）。
+   这也是「uskey 缺失 ≠ 未登录」的分层证据：先验登录态，再验风控。
+4. **与 agentTag / scene 无关**：`agent_chat` 与 `preload_summary` + `auto_discovery` 两组同样 403。
+5. **`GET /v1/models` 是 404**（该路径不存在）⇒ **不能拿它当凭据有效性探针**，否则会把
+   「路径不存在」误读成「登录失效」。
+
+⇒ **`uskey` 是唯一准入判据**。真品的形状（PR #126 作者实测，与本仓 11-16 的 200 不矛盾）：
+524 字符 / 解码 392 字节 / 前缀恒 `CsDVDCER` / 有效期约 60 秒 / 由 QIMEI SDK 在 agent 进程内加密生成，
+**不可离线复刻**；而本仓 `uskeyOf()` 产出 504 字符、无魔数的随机 base64 ⇒ 必然 403。
+
+### 为什么**不采纳**「装钩子取真 uskey」这条修法（2026-11-18 用户拍板）
+
+PR #126 的做法：往 `MarvisAgent\<version>\_internal\sitecustomize.py` 写钩子，在 agent 进程内
+`gc.get_objects()` 全堆扫描定位 `LLMHeaderService` 并调 `build()` 取真 uskey。
+代码质量不差（幂等、拒覆盖他人 sitecustomize、`EPERM`⇒`needsElevation`、卸载只删自己那份、五种失败码带 hint），
+但**性质越界**：
+
+1. `_internal` 的受保护 ACL 是**安装器的设计意图**，不是权限 bug（作者自己也实测到需要 UAC）；
+2. `sitecustomize.py` 是 **Python 解释器级自动加载点**，生效范围是该解释器下的**所有** Python 进程，不止 agent；
+3. 取到的是 **QIMEI SDK 用 DPAPI 解封的设备身份 + 登录态派生**的凭据，不是公开 API key；
+4. 目的正是让请求被上游**当作官方 agent 进程**放行 —— 而这道判据就是服务方为区分「官方 / 第三方」设的。
+
+四条叠加 = 未经授权修改他人商业软件、取得其内部设备凭据、规避其准入控制，代价落在用户账号上
+（本仓已有「登了两遍就彻底封了」的报障史）。**仓库层面不替用户做这个决定。**
+
+### 将来若要修，前提与最低要求
+
+- **正解是官方通道**（开放 API / 申请 key / 白名单）。有它就不必碰任何人的安装目录。
+- 若真要走同类方案，必须做到：文案写明 UAC 提权 / 装完重启 Marvis / 每次 Marvis 升级要重装 /
+  Marvis 必须保持运行 / 消耗的是 **Marvis 账号**的额度而不是插件自己登录的那个号 / 封号风险；
+- 必须是 **默认关闭 + 显式二次确认**，不能像 PR #126 那样在 `src/index.ts` 的 `apply()` 里
+  无条件 `selfHealMarvisHook()`（等于每个用户启动时都去尝试写一次第三方软件目录）；
+- 落地硬要求（PR #126 现有实现均不满足）：RPC 目录**不能**放系统临时目录（带明文 uskey 的 JSON
+  在多用户机器上任何本地进程可读，60 秒有效期足够被冒用）；全堆扫描的开销要算清（每轮请求一次）；
+  `locateMarvisInstall()` 只认 Windows 的实现必须让 macOS/Linux 用户看到「本功能仅支持 Windows」，
+  而不是「未找到 Marvis 安装」。
+
+### 因此本文件上面那几节现在的地位
+
+- 「身份句黑名单 / 替换表 / 只换本体」那几节**结论仍然正确**，但它们的**收益前提**（内容级判据生效）
+  在当前上游状态下**不成立** —— 换措辞换不来放行；
+- **不要为了「修 403」再去调身份句**：今天调什么都 403。先确认 uskey 通路，再谈措辞；
+- 本表**不要删**：若将来 uskey 通路恢复（官方通道或上游回滚），它仍是零成本的次生防护。
+
+### 复现要点（踩过的坑）
+
+- `~/.dsh/.credentials.yaml` 的 `MARVIS_ACCOUNT_*` 行首**两个空格**，值是**单引号包住的 JSON 字符串**；
+  取 `refs` 后要**先剥引号**再交给 `parseMarvisCredential`。
+- **`parseMarvisCredential(value)` 收的是字符串**（它内部再 `JSON.parse`）—— 直接喂对象会**静默返回
+  `undefined`**，症状是「四个账号全部 parse-fail」，第一次很容易误判成凭据坏了。
+- `lib/marvis.js` 需要先 `npx tsc -p tsconfig.json` 生成；`lib/` 是 gitignored。
+- 探针只打印 `status` 与 `code`，**不要打印 token / openid**。
