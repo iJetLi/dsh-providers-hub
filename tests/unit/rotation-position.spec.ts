@@ -87,11 +87,11 @@ describe('orderCreditRows —— 双模式排序（后端口径）', () => {
     expect(shown.map((r) => r.accountId), 'b(临期) → c(短期) → a(永久)').toEqual(['b', 'c', 'a'])
   })
 
-  it('★ 设了起点 ⇒ **只提升起点自己**，其余仍按档位序（S2）', () => {
-    // 档位序 b → c → a；起点 = c ⇒ S2 只把 c 提到最前 ⇒ c → b → a
+  it('★ 设了起点 ⇒ **本档内循环**（S4）', () => {
+    // 档位序 b(临期) → c(短期) → a(永久)；起点 = c（短期档）
+    // 短期档只有 c 一个 ⇒ 循环后不变；临期 b 仍第一
     const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'c' })
-    expect(shown.map((r) => r.accountId), 'c 提到最前，b/a 保持档位序').toEqual(['c', 'b', 'a'])
-    // ⚠️ 与旧语义（整条旋转 = c → a → b）的关键差别：不把 b(临期) 甩到末尾
+    expect(shown.map((r) => r.accountId), '短期档仅 c ⇒ 顺序不变').toEqual(['b', 'c', 'a'])
   })
 
   it('★ 起点在首位 ⇒ 与模式 A 完全相同（幂等）', () => {

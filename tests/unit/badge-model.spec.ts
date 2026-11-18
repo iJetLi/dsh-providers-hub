@@ -711,14 +711,20 @@ describe('orderCreditRows：按后端选号机制排序 + 折叠', () => {
    * 语义与后端 `rotateFromPreferred` 一致：起点及其之后的账号绕到最前面，
    * 其余保持相对顺序（环形）。
    */
-  it('★★ 轮换起点：只提升起点自己（S2），其余保持档位序', () => {
+  it('★★ 轮换起点：本档内循环（S4）', () => {
     // 档位：imm(2天/临期) → short(10天/短期) → perm(30天/永久)
-    // 档位序 = [imm, short, perm]；起点 = short ⇒ S2 只把它摘到最前 ⇒ [short, imm, perm]
+    // 起点 = short（短期档）⇒ 短期档内循环；临期档整档仍在前面
     const rows = [acc('imm', 2), acc('short', 10), acc('perm', 30)]
     const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'short' })
-    expect(ids(shown), 'short 提到最前，imm 保持第二位（临期不被甩后）')
-      .toEqual(['short', 'imm', 'perm'])
-    // ⚠️ 旧语义（整条旋转）会得到 ['short','perm','imm'] —— imm 的临期被甩到最后
+    // 短期档只有 short 一个 ⇒ 循环后不变；临期 imm 仍第一
+    expect(ids(shown), '短期档只有 1 个 ⇒ 顺序不变').toEqual(['imm', 'short', 'perm'])
+  })
+
+  it('★★ 同档多账号时：从起点开始循环（用户截图报障的形态）', () => {
+    // 7 个全是临期档，起点 = 第 6 个 ⇒ 6 → 7 → 1 → 2 → 3 → 4 → 5
+    const rows = ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7'].map((id) => acc(id, 2))
+    const { shown } = orderCreditRows(rows, { ...base, limit: 10, rotationStartId: 'a6' })
+    expect(ids(shown), '从 a6 开始循环，a7 紧随其后').toEqual(['a6', 'a7', 'a1', 'a2', 'a3', 'a4', 'a5'])
   })
 
   it('未设起点时不做旋转（顺序 = 纯档位序）', () => {

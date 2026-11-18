@@ -893,7 +893,7 @@ export function orderCreditRows(rows, options = {}) {
    * |---|---|---|
    * | 默认 | `strictManualOrder` 关闭 | **档位序**：临期 → 短期 → 永久 → 不可用；同档按位次 |
    * | 严格 | `strictManualOrder` 开启 | **只按位次**（= 用户拖拽序），档位仅判可用性（不可用沉底）|
-   * | 起点 | 设了 `rotationStartId` | 在上面两种任一的基础上，**把起点及其之后绕到最前** |
+   * | 起点 | 设了 `rotationStartId` | 在上面两种任一的基础上，**起点所在档位内循环**（S4）|
    *
    * ## ⚠️ 与旧实现（积分降序）的差别
    *
@@ -941,41 +941,71 @@ export function orderCreditRows(rows, options = {}) {
   }));
   decorated.sort((a, b) => (a.sortKey - b.sortKey) || (a.index - b.index));
   const orderedByStrategy = decorated.map((entry) => entry.row);
-  // 「轮换起点」：在上面的策略序之上再绕一圈（与后端 rotateFromPreferred 同语义）
+  // 「轮换起点」：在上面的策略序之上，按 S4 语义旋转（与后端 rotateFromPreferred 同构）
   const ordered = typeof startId === 'string' && startId.length > 0
-    ? rotateRows(orderedByStrategy, startId)
+    ? rotateRows(orderedByStrategy, startId, tierOf)
     : orderedByStrategy;
   const hidden = Math.max(0, ordered.length - limit);
   return { shown: options.expanded === true ? ordered : ordered.slice(0, limit), hidden };
 }
 
 /**
- * 把 `startId` 对应的行**提到最前**，其余保持原相对顺序（环形）。
+ * 「轮换起点」：**S4 语义 —— 起点所在档位内循环，其他档位保持原序**。
  *
- * ⚠️ 与选号层的 `rotateFromPreferred` **不是同义判据**：
- * - 那个排的是 `{id, expiringBalance, permanentBalance}`（服务端，要判档位可用性）；
- * - 这个排的是 `{accountId, balance}`（客户端展示行，无档位概念）。
- * 两者类型与判据都不同，且**跨进程边界**（服务端 vs 浏览器）⇒ 无法共用。
+ * 与后端 `buddy-balance-rank.ts` 的 `rotateFromPreferred` **逐字节同构**：
+ * 弹窗列表顺序是用户判断「下一发会用谁」的唯一依据，两者分叉会直接误导。
+ *
+ * ## 为什么从 S2 改成 S4（真实报障 2026-11-18）
+ *
+ * S2 只把起点摘出来放最前、**不循环**。用户截图实测（7 个账号全是临期档）：
+ *
+ * ```
+ * 起点 = 位次 6
+ *   S2 ⇒ 6 → 1 → 2 → 3 → 4 → 5 → 7   ❌ 位次 7 被甩到最后
+ *   S4 ⇒ 6 → 7 → 1 → 2 → 3 → 4 → 5   ✅ 从 6 开始循环
+ * ```
+ *
+ * ## 规则（三条）
+ *
+ * 1. **起点所在档位内**：从起点开始**循环**；
+ * 2. **更优先的档**（如起点在永久档时的临期/短期）：整档**原样排前面**
+ *    —— 这是保住「临期绝不浪费」的关键；
+ * 3. **更低优先的档**：整档**原样排后面**。
+ *
+ * ⚠️ 与 S3（整条数组循环）的关键差别：S3 会让起点在永久档时把永久提到最前、
+ *    临期沉底。S4 只在**起点自己的档位内**绕 ⇒ 临期永远优先。
  *
  * ⚠️ 起点不在列表（账号刚被删）⇒ **原样返回**（不报错、不乱序）。
+ *
+ * @param rows - **已按策略排好序**的行（必须排在旋转之前）
+ * @param startId - 起点 accountId
+ * @param tierOf - 每行的档位（复刻后端口径）；用于划分「本档 / 更优先档 / 更低档」
  */
-function rotateRows(rows, startId) {
+function rotateRows(rows, startId, tierOf) {
   const index = rows.findIndex((row) => row?.accountId === startId);
-  if (index <= 0) return [...rows];
+  if (index < 0) return [...rows];
+  const startTier = tierOf(rows[index]);
   /**
-   * ★★ **S2 语义：只提升起点自己**（用户 2026-11-18 定稿）。
-   *
-   * 与后端 `buddy-balance-rank.ts` 的 `rotateFromPreferred` **逐字节同构**：
-   * 把起点那**一个元素**摘出来放最前，其余**保持档位序不变**。
-   *
-   * ⚠️ 旧的「整条旋转」（`[...slice(index), ...slice(0,index)]`）会把档位序里
-   *    排在起点**前面**的临期账号甩到末尾 ⇒ 临期白等到过期。
-   *    实测：起点在短期档时，临期号会从第 1 位掉到最后 1 位。
-   *
-   * ⚠️ 弹窗与后端必须**完全一致**：列表顺序现在是用户判断「下一发会用谁」的
-   *    唯一依据，两者分叉会直接误导。
+   * ⚠️ 分档边界用 `allowPermanent: true` 归一化后的档位判 —— 与后端
+   *    `tierRankOf` 同口径（`none` 档在锁定态下可能是「只剩永久」，
+   *    直接用会与可用档混淆）。这里 `tierOf` 已按调用方的 `allowPermanent` 算过，
+   *    故只在**本档 vs 其他档**这个粒度上使用，不重新判可用性。
    */
-  return [rows[index], ...rows.slice(0, index), ...rows.slice(index + 1)];
+  const before = [];
+  const sameTier = [];
+  const after = [];
+  for (const row of rows) {
+    const t = tierOf(row);
+    if (t < startTier) before.push(row);
+    else if (t > startTier) after.push(row);
+    else sameTier.push(row);
+  }
+  // 本档内从起点开始循环
+  const posInTier = sameTier.findIndex((row) => row?.accountId === startId);
+  const rotatedSameTier = posInTier > 0
+    ? [...sameTier.slice(posInTier), ...sameTier.slice(0, posInTier)]
+    : sameTier;
+  return [...before, ...rotatedSameTier, ...after];
 }
 
 /**
