@@ -394,6 +394,39 @@ describe('用量徽标：槽位接线', () => {
    * 视觉 = **C 分段式为主 + B 的选中下划线**（用户原话：「C 为主，加上 B 的下划线」）。
    * 位置 = 弹窗头部标题右侧、自动签到按钮左侧（用户标出的红框）。
    */
+  /**
+   * ★★ **签到日志：每个渠道独占一行**（用户 2026-11-18：
+   * 「签到日志不同 providers 结果换行显示」）。
+   *
+   * ⚠️ 改前是 `flex-wrap: wrap` + 行内 span ⇒ 十余个渠道挤成一两行，
+   *    靠点号分隔，且每项都可能被省略号截断 —— 用户看不出「哪个渠道出错了」。
+   */
+  describe('签到日志：逐渠道换行', () => {
+    it('渠道容器是竖向单列（flex-direction: column），不是 wrap', () => {
+      const rule = /\.dim-jh-badgeAutoChannels \{([^}]*)\}/.exec(styles)
+      expect(rule, '应有 .dim-jh-badgeAutoChannels 规则').not.toBeNull()
+      // ⚠️ 剥注释再断言（注释里会出现 wrap 这个词，不剥会误判）
+      const body = rule[1].replace(/\/\*[\s\S]*?\*\//g, '')
+      expect(body, '必须是竖向单列').toMatch(/flex-direction:\s*column/)
+      expect(body, '不得再用 flex-wrap: wrap（那会挤成一行）').not.toMatch(/flex-wrap/)
+    })
+
+    it('单个渠道元素是块级且允许换行', () => {
+      const rule = /\.dim-jh-badgeAutoChannel \{([^}]*)\}/.exec(styles)
+      expect(rule, '应有 .dim-jh-badgeAutoChannel 规则').not.toBeNull()
+      const body = rule[1].replace(/\/\*[\s\S]*?\*\//g, '')
+      expect(body, '渠道元素必须是 block（独占一行）').toMatch(/display:\s*block/)
+      expect(body, '必须允许自动换行').toMatch(/white-space:\s*normal/)
+      // ⚠️ 反向：不得再用省略号（截断会让「出错原因」消失）
+      expect(body, '不得用 ellipsis 截断').not.toMatch(/text-overflow:\s*ellipsis/)
+    })
+
+    it('已删除行尾点号分隔符（换行后是噪音）', () => {
+      // 该分隔符是为「横向挤一行」设计的；每渠道一行后每行末尾再挂点是纯噪音
+      expect(styles, '不得再有行尾点号分隔符规则'
+      ).not.toMatch(/\.dim-jh-badgeAutoChannel:not\(:last-child\)::after/)
+    })
+  })
   describe('弹窗页签：积分 / 签到', () => {
     /**
      * ★★ **工具行属于积分页，不是弹窗公共区**（用户 2026-11-18 明确：
