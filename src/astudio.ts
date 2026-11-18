@@ -24,6 +24,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { readCacheTokenCount } from './cache-token-count.js'
 import { maskLobsteraiPhoneTail } from './lobsterai.js'
 import {
   ASTUDIO_SESSION_DEAD_CODES,
@@ -1501,7 +1502,7 @@ export function astudioResponsesToChatSse(response: Response): Response {
         const outputDetails = typeof rawUsage.output_tokens_details === 'object' && rawUsage.output_tokens_details !== null
           ? rawUsage.output_tokens_details as Record<string, unknown>
           : undefined
-        const cachedTokens = typeof details?.cached_tokens === 'number' ? details.cached_tokens : 0
+        const cachedTokens = rawUsage.cache_read_reported === false ? undefined : readCacheTokenCount(details?.cached_tokens)
         const reasoningTokens = typeof outputDetails?.reasoning_tokens === 'number'
           ? outputDetails.reasoning_tokens
           : 0
@@ -1511,7 +1512,7 @@ export function astudioResponsesToChatSse(response: Response): Response {
           total_tokens: typeof rawUsage.total_tokens === 'number'
             ? rawUsage.total_tokens
             : inputTokens + outputTokens,
-          ...cachedTokens > 0 ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {},
+          ...cachedTokens !== undefined ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {},
           ...reasoningTokens > 0 ? { completion_tokens_details: { reasoning_tokens: reasoningTokens } } : {},
         }
       }

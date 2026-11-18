@@ -71,6 +71,7 @@ import { planSessionTitleThinking } from './session-title.js'
 // ⚠️ `detail` 那条腿**只留一份实现**（`openai-compat.ts`）：本仓库 6 份同义的
 // `errorDetail` 各写一条判据必然漂移（IKLBSH A1）。
 import { detailFieldText, TOOL_RESULT_IMAGE_TEXT } from './openai-compat.js'
+import { readCacheTokenCount } from './cache-token-count.js'
 
 /** 本适配器注册的 provider 路由名（历史常量，等价于 `LOBSTERAI.id`）。 */
 export const PROVIDER = 'lobsterai'
@@ -1929,18 +1930,17 @@ export class LobsteraiAdapter extends LlmAdapter {
           if (data.usage) {
             const promptTokens = data.usage.prompt_tokens ?? 0
             // 缓存命中字段有多处来源，取首个有值的（与 buddy 侧同口径）。
-            const cachedTokens = data.usage.prompt_tokens_details?.cached_tokens
-              ?? data.usage.prompt_cache_hit_tokens
-              ?? 0
+            const cachedTokens = readCacheTokenCount(data.usage.prompt_tokens_details?.cached_tokens)
+              ?? readCacheTokenCount(data.usage.prompt_cache_hit_tokens)
             const reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens
             yield {
               type: 'usage',
               usage: {
                 // inputTokens 只计**未命中缓存**的部分，命中部分单列
                 // cacheReadTokens，否则缓存命中率显示会偏大。
-                inputTokens: cachedTokens > 0 ? promptTokens - cachedTokens : promptTokens,
+                inputTokens: promptTokens - (cachedTokens ?? 0),
                 outputTokens: data.usage.completion_tokens ?? 0,
-                ...cachedTokens > 0 ? { cacheReadTokens: cachedTokens } : {},
+                ...cachedTokens !== undefined ? { cacheReadTokens: cachedTokens } : {},
                 ...reasoningTokens !== undefined && reasoningTokens > 0 ? { reasoningTokens } : {},
               },
             }

@@ -292,6 +292,23 @@ describe('astudioResponsesToChatSse —— 事件翻译', () => {
     expect(chunks.find((c) => c.type === 'usage')?.usage).toMatchObject({ outputTokens: 40, reasoningTokens: 41 })
   })
 
+  it.each([
+    { label: '明确为零', fields: {}, expected: { cacheReadTokens: 0 } },
+    { label: '未上报', fields: { cache_read_reported: false }, expected: {} },
+  ])('Responses 缓存计数为 0 且状态为 $label', async ({ fields, expected }) => {
+    const chunks = await collect(sseResponse([
+      ['response.output_text.delta', { type: 'response.output_text.delta', delta: 'x', output_index: 0, item_id: 'm' }],
+      ['response.completed', {
+        type: 'response.completed',
+        response: {
+          status: 'completed',
+          usage: { input_tokens: 100, output_tokens: 2, input_tokens_details: { cached_tokens: 0 }, ...fields },
+        },
+      }],
+    ]))
+    expect(chunks.find(c => c.type === 'usage')?.usage).toEqual({ inputTokens: 100, outputTokens: 2, ...expected })
+  })
+
   it('缓存命中要从 inputTokens 里扣出来单列（否则缓存命中率显示偏大）', async () => {
     const chunks = await collect(sseResponse([
       ['response.output_text.delta', { type: 'response.output_text.delta', delta: 'x', output_index: 0, item_id: 'm' }],

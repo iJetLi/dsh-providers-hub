@@ -38,6 +38,7 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { readCacheTokenCount } from './cache-token-count.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { createDsmlMarkerNormalizer, fixDsmlMarkers, readWithIdleTimeout, resolveToolPairing } from './sse.js'
 // ⚠️ 工具结果「有图无文」时的载体文本**只留一份实现**（`openai-compat.ts`）：
@@ -649,11 +650,11 @@ export function readGeminiUsage(raw: GeminiUsageMetadata | undefined): Partial<T
   if (raw === undefined || raw === null) return {}
   const out: Partial<TokenUsage> = {}
   const prompt = nonNegativeInt(raw.promptTokenCount)
-  const cached = nonNegativeInt(raw.cachedContentTokenCount) ?? 0
-  if (prompt !== undefined) out.inputTokens = Math.max(0, prompt - cached)
+  const cached = readCacheTokenCount(raw.cachedContentTokenCount)
+  if (prompt !== undefined) out.inputTokens = Math.max(0, prompt - (cached ?? 0))
   const candidates = nonNegativeInt(raw.candidatesTokenCount)
   if (candidates !== undefined) out.outputTokens = candidates
-  if (cached > 0) out.cacheReadTokens = cached
+  if (cached !== undefined) out.cacheReadTokens = cached
   const total = nonNegativeInt(raw.totalTokenCount)
   if (total !== undefined) out.totalTokens = total
   const thoughts = nonNegativeInt(raw.thoughtsTokenCount)

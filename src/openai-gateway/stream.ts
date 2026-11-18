@@ -63,9 +63,6 @@ function finishReason(reason: FinishReason): string {
  * - `prompt_cache_hit_tokens` 是 DeepSeek 系的私有名，本仓库多个适配器
  *   （`buddy-adapter.ts` / `openai-compat.ts` / `llm-adapter.ts` 等）在**读**它；
  * - 顶层 `reasoning_tokens` 同理由旧版网关发出，删掉会让既有消费者读不到。
- * 官方字段（`prompt_tokens_details.cached_tokens` /
- * `completion_tokens_details.reasoning_tokens`）**必须同时给**：
- * Codex 等标准客户端只认官方形态。
  */
 function usageJson(usage: TokenUsage): Record<string, unknown> {
   const normalized = toOpenAiUsage(usage)
@@ -74,7 +71,9 @@ function usageJson(usage: TokenUsage): Record<string, unknown> {
     completion_tokens: normalized.outputTokens,
     total_tokens: normalized.totalTokens,
     // 官方明细：`cached_tokens` 是 `prompt_tokens` 的**子集**（见 `usage.ts`）。
-    prompt_tokens_details: { cached_tokens: normalized.cachedTokens },
+    ...normalized.cachedTokens !== undefined
+      ? { prompt_tokens_details: { cached_tokens: normalized.cachedTokens } }
+      : {},
     ...normalized.reasoningTokens === undefined
       ? {}
       : {
@@ -82,7 +81,9 @@ function usageJson(usage: TokenUsage): Record<string, unknown> {
           completion_tokens_details: { reasoning_tokens: normalized.reasoningTokens },
         },
     // 私有兼容字段（见上方注释）：只在真有缓存命中时才发，避免凭空多出 0。
-    ...normalized.cachedTokens > 0 ? { prompt_cache_hit_tokens: normalized.cachedTokens } : {},
+    ...normalized.cachedTokens !== undefined && normalized.cachedTokens > 0
+      ? { prompt_cache_hit_tokens: normalized.cachedTokens }
+      : {},
   }
 }
 
