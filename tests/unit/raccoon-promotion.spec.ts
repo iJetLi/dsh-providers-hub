@@ -89,7 +89,8 @@ const IN_WINDOW = Date.parse('2026-11-18T00:00:00Z')
 const AFTER_QWEN = Date.parse('2026-11-23T00:00:00Z')
 /** 2026-11-10 08:00 Asia/Shanghai：两条活动都还没开始。 */
 const BEFORE_BOTH = Date.parse('2026-11-10T00:00:00Z')
-
+/** 2026-11-19 08:00 Asia/Shanghai：位于「短活动已结束 / 长活动仍在跑」之间。 */
+const BETWEEN_SHORT_AND_LONG = Date.parse('2026-11-19T00:00:00Z')
 /** 把上游原文喂给真实解析层，取回这一条的 `promotion` 原料。 */
 function promoOf(raw: Record<string, unknown>): RaccoonPromotionInput | undefined {
   const [model] = parseRaccoonModelCatalog({
@@ -389,5 +390,101 @@ describe('RaccoonAdapter：徽标装配与悬停候选', () => {
     await adapter.listModels('raccoon')
     adapter.promotionCandidates()
     expect(warnings).toHaveLength(1)
+  })
+})
+
+/**
+ * 2026-11-18 审计补的两条**静默**缺口。
+ *
+ * 这两条的共同形态：**没有异常、没有红、没有日志**，只是「该有的 chip 不见了」
+ * —— 与 issue #101 里最难查的那类（「徽标自己消失」）同形。故判据必须打在
+ * 「有没有留下痕」上，而不是「有没有画」。
+ */
+describe('审计补漏：未知状态与「可解析但会误读」的时间戳', () => {
+  it('★★ 未知 billing_status：不画 chip，但必须播一条诊断（否则上游加第四态 = 静默消失）', () => {
+    const warnings: string[] = []
+    const promotion = raccoonPromotionCandidate(
+      { status: 'normal', statusUnknown: 'discount_trial', baseMultiplier: 0.75 },
+      'sn-x',
+      'Asia/Shanghai',
+      (m) => warnings.push(m),
+    )
+    expect(promotion).toBeUndefined()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('discount_trial')
+    // 反向对照：白名单状态**不许**播这条（否则每个模型一条噪声）。
+    const clean: string[] = []
+    raccoonPromotionCandidate(
+      { status: 'normal', baseMultiplier: 0.75 }, 'sn-x', 'Asia/Shanghai', (m) => clean.push(m),
+    )
+    expect(clean).toEqual([])
+  })
+
+  it('★★ 没有时区指示符的时间戳必须**拒绝**，不能交给 Date.parse（本地时间会被读成 UTC）', () => {
+    // ⚠️ 这一格是本条的全部意义：`Date.parse('2026-11-22T23:59:59')` 是**成功**的，
+    //    在 UTC+8 机器上被读成 15:59:59Z —— 静默错 8 小时。判据必须断言「拒绝」。
+    expect(Date.parse('2026-11-22T23:59:59')).not.toBeNaN()
+    const warnings: string[] = []
+    const promotion = raccoonPromotionCandidate(
+      input({
+        discounts: [{
+          name: 'x', multiplier: 0.67, active: true,
+          startAt: '2026-11-15T16:00:00', endAt: '2026-11-22T15:59:59',
+        }],
+      }),
+      'sn-x', 'Asia/Shanghai', (m) => warnings.push(m),
+    )
+    expect(promotion?.schedule?.dailyUnusable).toBe(true)
+    expect(promotion?.schedule?.validUntil).toBeUndefined()
+    expect(promotionBadgeFor([promotion as never], IN_WINDOW)).toBeUndefined()
+    expect(warnings.join('\n')).toContain('timezone designator')
+  })
+
+  it('★★ 只有日期的形态同样拒绝（`2026-11-22` = 当天 00:00Z，比「当天结束」差一天）', () => {
+    const warnings: string[] = []
+    const promotion = raccoonPromotionCandidate(
+      input({ discounts: [{ name: 'x', multiplier: 0.67, active: true, endAt: '2026-11-22' }] }),
+      'sn-x', 'Asia/Shanghai', (m) => warnings.push(m),
+    )
+    expect(promotion?.schedule?.dailyUnusable).toBe(true)
+    expect(warnings).toHaveLength(1)
+  })
+
+  it('带偏移量的 ISO（`+08:00`）照常吃：严格判据只拒绝「没有时区」的形态', () => {
+    const promotion = raccoonPromotionCandidate(
+      input({
+        discounts: [{
+          name: 'x', multiplier: 0.67, active: true,
+          startAt: '2026-11-16T00:00:00+08:00', endAt: '2026-11-22T23:59:59+08:00',
+        }],
+      }),
+      'sn-x',
+    )
+    expect(promotion?.schedule?.validUntil).toBe(Date.parse('2026-11-22T23:59:59+08:00'))
+    expect(promotion?.schedule?.dailyUnusable).toBeUndefined()
+    expect(promotionBadgeFor([promotion as never], IN_WINDOW)).toBeDefined()
+  })
+
+  it('★★ 多条 active：取**结束得最晚**的那条（取早的那条会把还在跑的活动判成已结束）', () => {
+    const promotion = raccoonPromotionCandidate(
+      input({
+        discounts: [
+          { name: '旧', multiplier: 0.8, active: true, endAt: '2026-11-18T15:59:59Z' },
+          { name: '新', multiplier: 0.67, active: true, endAt: '2026-12-01T15:59:59Z' },
+        ],
+      }),
+      'sn-x',
+    )
+    expect(promotion?.schedule?.validUntil).toBe(Date.parse('2026-12-01T15:59:59Z'))
+    // 反向对照：只留「旧」那一条时，同一时刻（11-18 之后）必须已经消失。
+    const onlyOld = raccoonPromotionCandidate(
+      input({
+        discounts: [{ name: '旧', multiplier: 0.8, active: true, endAt: '2026-11-18T15:59:59Z' }],
+      }),
+      'sn-x',
+    )
+    const badgeOf = (p: typeof promotion) => (p === undefined ? undefined : [p])
+    expect(promotionBadgeFor(badgeOf(onlyOld), BETWEEN_SHORT_AND_LONG)).toBeUndefined()
+    expect(promotionBadgeFor(badgeOf(promotion), BETWEEN_SHORT_AND_LONG)).toBeDefined()
   })
 })

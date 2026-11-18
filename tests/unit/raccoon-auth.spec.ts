@@ -448,6 +448,35 @@ describe('fetchModels', () => {
       statusNote: '限时折扣',
     })
   })
+
+  /**
+   * 上游加了**第四种** `billing_status`：`raccoon.ts` 的既有归一把它收成 `normal`
+   * （对展示名无害），但 chip 就**静默消失**了 —— 留不下任何痕。故原料表必须带上原文。
+   */
+  it('未知 billing_status 必须留下原文（否则 chip 静默消失、全仓零日志）', async () => {
+    const { ctx, credentials } = makeCtx()
+    credentials.store.set('RACCOON_ACCESS_TOKEN', JSON.stringify(VALID_CRED))
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 0,
+      data: {
+        categories: [{
+          type: 'chat',
+          models: [{
+            name: 'sn-glm-5-3', description: 'GLM-5-3', visible: true,
+            tags: [], ability_level: 2, params: { context_window: 1000000, max_tokens: 100000 },
+            billing_multiplier: 0.75, billing_effective_multiplier: 0.5,
+            billing_status: 'discount_trial',
+          }],
+        }],
+      },
+    }))
+    const auth = newService(ctx, { fetcher: fetcher as unknown as typeof fetch })
+    const models = await auth.fetchModels()
+    // 归一仍落 normal（不改变任何既有行为）……
+    expect(models[0]?.promotion?.status).toBe('normal')
+    // ……但原文必须在，且白名单状态**不许**带这个键（否则成了「每个模型一条诊断」）。
+    expect(models[0]?.promotion?.statusUnknown).toBe('discount_trial')
+  })
 })
 
 describe('claimLoginReward / fetchCreditBalance（委托到积分模块）', () => {

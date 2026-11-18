@@ -1278,6 +1278,15 @@ export interface RaccoonDiscountInput {
 export interface RaccoonPromotionInput {
   /** 上游 `billing_status`：**唯一**决定画不画 chip 的字段。 */
   readonly status?: 'normal' | 'discount' | 'limited_free' | undefined
+  /**
+   * 上游 `billing_status` **有值但不在白名单**（如上游加了第四种状态）。
+   *
+   * ⚠️ `normalizeRemoteModel` 会把未知状态**收成 `normal`**（`raccoon.ts` 的
+   * `RaccoonModelMeta['status']` 只有三态），对展示名无害；但对 chip 就是
+   * 「上游说在打折、我们画不出来、**全仓零日志**」—— 与 qoder 那次「黑名单 ⊃ 收缩目录」
+   * 同形。故把原文留在这里，由构造函数播一条**诊断**（chip 仍不画：读不懂的东西不画）。
+   */
+  readonly statusUnknown?: string | undefined
   /** 上游 `billing_multiplier`（原价倍率）。 */
   readonly baseMultiplier?: number | undefined
   /** 上游 `billing_effective_multiplier`（**当前生效**倍率，折扣价只认它）。 */
@@ -1309,11 +1318,35 @@ function raccoonRateText(value: number | undefined): string | undefined {
 }
 
 /**
+ * Raccoon 的 ISO 时刻 → epoch 毫秒，**必须带时区指示符**。
+ *
+ * ⚠️⚠️ 为什么不复用共享的 `instantMs`（`Date.parse` 那条）：`Date.parse` 对
+ * **没有时区的时间串是「本地时区」语义**（`'2026-11-22T23:59:59'` 在 UTC+8 机器上
+ * 被读成 `15:59:59Z`），而本模块的窗口判据按 `timezone: 'Asia/Shanghai'` 解释；
+ * 一旦上游把 `Z` 去掉，`Date.parse` **照样成功**、只是**整体错 8 小时** ——
+ * 那是「静默说错一天」，比不画更糟（issue #101 的同族事故形态）。
+ *
+ * 上游实测（2026-11-17）全部是 `2026-11-22T15:59:59Z`；故这里**只放行**带
+ * `Z` 或 `±HH:MM` 的形态，其余一律视为「读不懂」⇒ 走 fail-closed + 一条 warn。
+ * `date only`（`'2026-11-22'`）**也拒绝**：它的语义是「当天 00:00Z」，与
+ * 「活动至 11月22日（当天结束）」差整整一天。
+ */
+function raccoonInstantMs(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const isoWithZone = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u
+  if (!isoWithZone.test(value)) return undefined
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? undefined : ms
+}
+
+/**
  * 从 `billing_discounts[]` 里挑**一条**画得出来的活动。
  *
  * 客户端 `az()` 对每一条都画一行「每日 …」/「活动至 …」，但 chip 只有一枚 ——
  * 本模块的 `ModelPromotion` 也是「每模型一枚」（`selectPromotionAt` 只挑一条）。
- * 故：按状态筛语义相符的那条（限免 ⇒ 0 倍；折扣 ⇒ 0 < m < 1），优先 `active`。
+ * 故：按状态筛语义相符的那条（限免 ⇒ 0 倍；折扣 ⇒ 0 < m < 1），优先 `active`；
+ * 多条 `active` 时**取结束得最晚的那条**（挑早的那条会把「还在跑的活动」判成已结束
+ * ⇒ 少报一枚真 chip，而这正是 chip 唯一的用途）。
  *
  * ⚠️ 实测（2026-11-17 21:4x）每个模型只有 **1 条**；多条时只取一条并**如实登记**
  * 取舍，而不是把没用上的那条悄悄丢掉还假装全画了。
@@ -1329,8 +1362,13 @@ function pickRaccoonDiscount(
   const byKind = status === 'limited_free'
     ? usable.filter((entry) => entry.multiplier === 0)
     : usable.filter((entry) => (entry.multiplier as number) > 0 && (entry.multiplier as number) < 1)
-  const activeOne = byKind.find((entry) => entry.active === true)
-  return activeOne ?? byKind[0] ?? usable[0]
+  const actives = byKind.filter((entry) => entry.active === true)
+  if (actives.length > 1) {
+    // 结束得最晚的优先；没有 end_at 的排最后（它连「什么时候结束」都不知道）。
+    const rank = (entry: RaccoonDiscountInput): number => raccoonInstantMs(entry.endAt) ?? Number.NEGATIVE_INFINITY
+    return actives.reduce((best, entry) => (rank(entry) > rank(best) ? entry : best), actives[0])
+  }
+  return actives[0] ?? byKind[0] ?? usable[0]
 }
 
 /**
@@ -1392,7 +1430,15 @@ export function raccoonPromotionCandidate(
   if (input === undefined) return undefined
   if (typeof modelId !== 'string' || modelId.length === 0) return undefined
   const status = input.status
-  if (status !== 'discount' && status !== 'limited_free') return undefined
+  // ⚠️ 未知状态：**不画**（读不懂），但必须留痕 —— 否则上游加第四种状态时，
+  // 症状是「活动消失了、全仓零日志」，与 issue #101 最难查的那类形态同形。
+  if (status !== 'discount' && status !== 'limited_free') {
+    if (input.statusUnknown !== undefined) {
+      safeWarn(warn, 'raccoon model "' + modelId + '": unknown billing_status "'
+        + input.statusUnknown + '" (expected normal/discount/limited_free), no chip is drawn')
+    }
+    return undefined
+  }
   if (input.discountsUnreadable === true) {
     safeWarn(warn, 'raccoon model "' + modelId + '": billing_discounts is not an array '
       + '(type drift), the end date is unknown — chip falls back to billing_status snapshot')
@@ -1427,8 +1473,8 @@ export function raccoonPromotionCandidate(
   const chosen = pickRaccoonDiscount(input.discounts, status)
   const declaredFrom = chosen?.startAt !== undefined
   const declaredUntil = chosen?.endAt !== undefined
-  const fromMs = instantMs(chosen?.startAt)
-  const untilMs = instantMs(chosen?.endAt)
+  const fromMs = raccoonInstantMs(chosen?.startAt)
+  const untilMs = raccoonInstantMs(chosen?.endAt)
   const dailyStart = chosen?.dailyStart
   const dailyEnd = chosen?.dailyEnd
   const dailyDeclaredBoth = dailyStart !== undefined && dailyEnd !== undefined
@@ -1448,7 +1494,8 @@ export function raccoonPromotionCandidate(
       + 'that cannot be parsed (start_at: ' + (chosen?.startAt ?? 'absent')
       + ', end_at: ' + (chosen?.endAt ?? 'absent')
       + ', daily: ' + (dailyDeclaredBoth ? (dailyStart + '–' + dailyEnd) : 'absent')
-      + '), chip stays hidden — the upstream may have changed the date format')
+      + '), chip stays hidden — timestamps must be ISO-8601 **with** a timezone designator'
+      + ' (`Z` or `±HH:MM`); a local-time string would be read 8h off, so it is rejected on purpose')
   }
   const timeDeclared = unusable || fromMs !== undefined || untilMs !== undefined || dailyUsable
   const schedule: ModelPromotionSchedule = {

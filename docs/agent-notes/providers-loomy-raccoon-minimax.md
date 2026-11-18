@@ -1171,7 +1171,28 @@ Qwen4-Max 实测 `billing_multiplier 0.75` + `multiplier 0.67` ⇒ 折后 `0.5`�
 `declaredFrom` 那一支，而用例走的是 `declaredUntil`；换成打中 `declaredUntil` 后
 ⇒ RED（2 failed）。这条要记在案：**绿了先怀疑锚点，不要直接登记「无牙」**。
 
-**未做/未采纳**：
+**⚠️⚠️ 审计补的三条静默缺口（同日，全部是「没有异常、没有红、没有日志」形态）**：
+
+1. **未知 `billing_status` 会静默吞掉整枚 chip**。`src/raccoon.ts` 的既有归一是
+   `rawStatus === 'discount' || 'limited_free' ? rawStatus : 'normal'`
+   —— 对展示名无害，但上游哪天加了第四种状态（`discount_trial` 之类），chip 就
+   **不画且全仓零日志**（与 qoder「黑名单 ⊃ 收缩目录」同族）。修法：原料表新增
+   `statusUnknown`（**原文**），构造函数见到它就播一条诊断；chip 仍然不画
+   （读不懂的东西不画）。⚠️ 白名单状态**不许**带这个键，否则变成「每模型一条噪声」。
+2. **`Date.parse` 对无时区时间串是「本地时区」语义** ⇒ 上游若把 `Z` 去掉，
+   `Date.parse` **照样成功**、只是整体**错 8 小时**（`'2026-11-22T23:59:59'` 在 UTC+8
+   机器上被读成 `15:59:59Z`）。那是「静默说错一天」，比不画更糟。修法：本家**不复用**
+   共享的 `instantMs`，改用 `raccoonInstantMs` —— 只放行带 `Z` 或 `±HH:MM` 的 ISO；
+   `date only`（`'2026-11-22'` = 当天 00:00Z）**同样拒绝**（差整整一天）。
+   ⚠️ 拒绝后走既有的 fail-closed + warn，报文里明写「必须有 timezone designator」。
+3. **多条 `active` 折扣取错条目会「少报」**：原实现取数组里第一条 active，若它已经
+   结束而另一条还在跑，chip 就被判成过期（chip 唯一的用途就是「此刻在打折」）。
+   修法：多条 active 时取 **`end_at` 最晚**的那条（读不懂 end_at 的排最后）。
+
+三条各自一条单测 + 变异（**M9** 未知状态不播诊断 / **M10** 放开时区判据回到
+`Date.parse` 宽松语义 / **M11** 多条 active 不再取最晚）⇒ 全部 RED，还原后复跑绿。
+
+未做/未采纳：
 
 - 客户端 chip 的 `title`（`billing_status_note`）在宿主徽标契约里**没有位置**
   （只有 `text`+`tone`）⇒ 那句说明走悬停腿的 `hover.zh`，与 #110 的方案 A 同一条通路。

@@ -199,8 +199,17 @@ function readRaccoonPromotionInput(
       })
     }
   }
+  // ⚠️ 未知 `billing_status`（上游加了第四种状态）：`status` 会被**收成 `normal`**
+  // （展示名不受影响，那是 `raccoon.ts` 的既有归一），但 chip 会**静默消失**。
+  // 故把原文带上，让构造函数播一条诊断 —— 这条是唯一能指路的痕。
+  const rawStatus = typeof entry.billing_status === 'string' ? entry.billing_status.trim() : ''
+  const statusUnknown = rawStatus !== ''
+    && rawStatus !== 'normal' && rawStatus !== 'discount' && rawStatus !== 'limited_free'
+    ? rawStatus
+    : undefined
   return {
     status,
+    ...statusUnknown === undefined ? {} : { statusUnknown },
     ...Number.isFinite(baseMultiplier) ? { baseMultiplier } : {},
     ...Number.isFinite(effectiveMultiplier) ? { effectiveMultiplier } : {},
     ...statusNote === '' ? {} : { statusNote },
