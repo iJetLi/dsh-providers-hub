@@ -37,6 +37,8 @@ import {
   describeBadgeError,
   formatUpdatedAt,
   orderCreditRows,
+  creditOrderLabel,
+  describeCreditOrder,
   autoBadgeName,
   BADGE_PREFERENCES,
   BADGE_PREFERENCE_LABELS,
@@ -673,6 +675,8 @@ export function UsageBadge(props) {
 function UsageBadgeActive(props) {
   const { provider, providerLabel, readBadge, writePreference, setAutoCheckin, dismissAutoCheckin, claimCredits } = props;
   const { sessionId, readRotation, writeRotation } = props;
+  /** ★ 读「严格手动顺序」开关（2026-11-18，供弹窗按后端选号机制排序）。未注入时视为关闭。 */
+  const readStrictManualOrder = props.readStrictManualOrder;
   const label = providerLabel(provider);
 
   /** `{ value, at }`：宿主返回的读数 + **到达**本地的时刻（兜底显示用）。 */
@@ -701,6 +705,16 @@ function UsageBadgeActive(props) {
    * `rotationState = { selected, stale, accounts }`；`null` = 还没读到。
    */
   const [rotationState, setRotationState] = React.useState(null);
+  /**
+   * ★ **「严格手动顺序」是否开启**（2026-11-18 加）。
+   *
+   * 影响弹窗列表排序口径：
+   * - `false`（默认）⇒ 档位序：临期 → 短期 → 永久 → 不可用
+   * - `true`         ⇒ 只按位次（拖拽序），档位仅判可用性
+   *
+   * ⚠️ 初值 false 且读失败不改 ⇒ 读不到时走默认档位序（不报错、不阻渲染）。
+   */
+  const [strictManualOrder, setStrictManualOrder] = React.useState(false);
   const [rotationError, setRotationError] = React.useState('');
   const [rotationBusy, setRotationBusy] = React.useState(false);
   /** 自动签到开关的写入错误（与偏好分开：两者是不同的设置项，别互相顶掉）。 */
@@ -1784,6 +1798,21 @@ function UsageBadgeActive(props) {
    * 3. **`readRotation` 未注入** —— 宿主跑的是旧代码（客户端新、宿主旧）。
    */
   async function loadRotation() {
+    /**
+     * ★ **先读「严格手动顺序」**（2026-11-18）。
+     *
+     * ⚠️ 必须放在 `supportsRotation` 早退**之前**：该开关只影响**列表排序**，
+     *    而 loomy / zcode / aggregate 这些「无轮换起点概念」的渠道同样要排序
+     *    ⇒ 放在早退之后就会漏掉它们。
+     * ⚠️ 任何异常都吞掉并按 false 处理 —— 次要状态不该阻断弹窗。
+     */
+    if (typeof readStrictManualOrder === 'function') {
+      try {
+        setStrictManualOrder((await readStrictManualOrder(provider)) === true);
+      } catch {
+        setStrictManualOrder(false);
+      }
+    }
     if (!supportsRotation(provider)) return;
     // ⚠️ 三条早退都必须**留下可见原因**（否则用户与我都在猜，见 renderRotation 的注释）。
     if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -2444,6 +2473,24 @@ function UsageBadgeActive(props) {
     const { shown, hidden } = orderCreditRows(accounts, {
       limit: CREDITS_COLLAPSED_LIMIT,
       expanded: creditsExpanded,
+      /**
+       * ★★ **按后端选号机制排序**（用户 2026-11-18 要求）。
+       *
+       * | 参数 | 作用 |
+       * |---|---|
+       * | `strictManualOrder` | 决定「档位序」还是「纯位次序」|
+       * | `allowPermanent` | 锁定态下「只剩永久」的号归不可用（沉底）|
+       * | `windowDays`/`imminentDays` | 与行内三档分色**同一份**窗口参数 |
+       *
+       * ⚠️ 窗口必须与 `splitParts()` 同源，否则「排序用的档位」与「行内显示的分档」
+       *    会互相矛盾（同一行说两套话）。
+       * ⚠️ `now` 现取：分档是时间的函数，缓存会让越线的包仍算旧档。
+       */
+      strictManualOrder,
+      allowPermanent: value?.locked !== true,
+      ...(Number.isFinite(windowDays) ? { windowDays } : {}),
+      ...(Number.isFinite(imminentDays) ? { imminentDays } : {}),
+      now: Date.now(),
       ...(rotationState?.selected == null ? {} : { rotationStartId: rotationState.selected }),
     });
     return React.createElement('div', { key: 'credits', className: 'dim-jh-badgeSection' }, [
@@ -2467,8 +2514,41 @@ function UsageBadgeActive(props) {
          */
         accounts.length === 0
           ? React.createElement('span', { key: 'l' }, creditSectionLabel(view.groups))
-          : React.createElement('span', { key: 'l' },
-            `帐号总数：${view.accountCount} 个`),
+          : React.createElement('span', { key: 'l', className: 'dim-jh-badgeCountLine' }, [
+            React.createElement('span', { key: 'cnt' }, `帐号总数：${view.accountCount} 个`),
+            /**
+             * ★★ **当前排序说明**（用户 2026-11-18 要求：
+             * 「在弹窗中的帐号总数：7个后面加一个当前排序的说明，
+             *  同时使用tooltip展示更加详细的解释」）。
+             *
+             * 三种状态与后端选号机制一一对应：
+             * | 条件 | 标签 | 色调 |
+             * |---|---|---|
+             * | 严格手动顺序 | 手动顺序 | 警示黄（临期优先失效）|
+             * | 设了轮换起点 | 起点优先 | 品牌蓝 |
+             * | 默认 | 临期优先 | 中性灰 |
+             *
+             * ⚠️ 标签必须**如实反映当前口径**：列表顺序现在 = 真实选号顺序，
+             *    用户据此判断「下一发用谁」；标签说谎会让该判断失真。
+             */
+            React.createElement('span', {
+              key: 'order',
+              className: 'dim-jh-badgeSortHint',
+              'data-order': strictManualOrder
+                ? 'manual'
+                : (rotationState?.selected == null ? 'tier' : 'start'),
+              title: describeCreditOrder({
+                strictManualOrder,
+                hasRotationStart: rotationState?.selected != null,
+                locked: value?.locked === true,
+                windowDays,
+                imminentDays,
+              }),
+            }, creditOrderLabel({
+              strictManualOrder,
+              hasRotationStart: rotationState?.selected != null,
+            })),
+          ]),
         accounts.length === 0 || sum === ''
           ? null
           /**

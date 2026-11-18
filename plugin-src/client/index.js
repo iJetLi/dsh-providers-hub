@@ -334,6 +334,34 @@ export function apply(ctx) {
       // budgetMs 缺省由宿主取 10 分钟；传 0 或负数表示不限时。
       claimCredits: (provider, runTasks, budgetMs) =>
         rpcCall('credits.claimAll', { provider, runTasks, budgetMs }),
+      /**
+       * ★ 读「严格手动顺序」开关（2026-11-18 加）。
+       *
+       * ## 为什么弹窗需要它
+       *
+       * 用户要求「弹窗列表按后端选号机制排序」。而后端有**两种**排序策略：
+       *
+       * | 策略 | 条件 | 顺序 |
+       * |---|---|---|
+       * | 档位序 | `strictManualOrder === false` | 临期 → 短期 → 永久 → 不可用 |
+       * | 手动序 | `strictManualOrder === true` | 按用户拖拽序（档位仅判可用性）|
+       *
+       * ⇒ 弹窗必须知道这个开关，否则严格模式下**列表顺序与真实选号不一致**
+       *（用户看到列表第一个，实际请求却发给第三个）。
+       *
+       * ⚠️ 这是**次要状态**：读不到就按 `false`（默认档位序）走，不报错、不阻渲染
+       * —— 与设置页 `loadStrictManualOrder` 同一取向（那次也刻意不摊成红条）。
+       * ⚠️ 宿主侧该端点是**纯内存读**（零网络），可以随徽标每轮刷新一起取。
+       */
+      readStrictManualOrder: async (provider) => {
+        try {
+          const res = await rpcCall('strictManualOrder.getEnabled', { provider });
+          return res?.enabled === true;
+        } catch {
+          // 读不到 ⇒ 按默认（档位序）处理，不让次要状态阻断弹窗
+          return false;
+        }
+      },
     }),
   }, UsageBadgeGuarded))
 }

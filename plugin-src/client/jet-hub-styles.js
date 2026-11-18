@@ -2400,6 +2400,60 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  * 4. 选中项 font-weight: 600 会让文字变宽、可能挤动相邻项
  *    ⇒ 用 font-weight: 500 且**未选中项也预留**（见下方 letter-spacing 说明）
  */
+/**
+ * ★ **「当前排序」说明标签**（2026-11-18，显示在「帐号总数：N 个」后面）。
+ *
+ * 用户要求「在帐号总数后面加一个当前排序的说明，同时使用 tooltip 展示更加详细的解释」。
+ *
+ * ## 视觉取舍
+ *
+ * - 小一号字 + 降透明：它是**补语**（说明列表怎么排的），不该与「帐号总数」抢注意力
+ * - 加淡边框做成小胶囊：与后面的「可用/总」数字视觉分层，不会连成一片
+ * - cursor: help：明确告诉用户「这里悬停有解释」
+ * - flex: none：绝不被压缩（被省略号吃掉就等于没标）
+ *
+ * ## 三种状态用不同色调区分（data-order）
+ *
+ * | 值 | 含义 | 色调 |
+ * |---|---|---|
+ * | tier | 默认档位序（临期优先）| 中性灰 |
+ * | start | 起点优先 | 品牌色（有主动设置）|
+ * | manual | 严格手动顺序 | 警示黄（会改变既有优先序，值得注意）|
+ */
+/**
+ * ⚠️ 外层包裹：帐号总数：N 个 + 排序标签 在同一个 span 里，
+ * 而 .dim-jh-badgeSectionTitle 的 gap: 8px 只作用于**它的直接子元素** ——
+ * 若这层不设 inline-flex，两段文字会**紧贴在一起**（实测截图报障）。
+ */
+.dim-jh-badgeCountLine {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.dim-jh-badgeSortHint {
+  flex: none;
+  padding: 0 5px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  font-size: 9.5px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: help;
+  white-space: nowrap;
+}
+/* 起点优先：品牌色（用户主动设了起点） */
+.dim-jh-badgeSortHint[data-order="start"] {
+  color: var(--dsw-alias-brand-primary, #1677ff);
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 40%, var(--dsw-alias-border-l2));
+}
+/* 严格手动顺序：警示黄 —— 它会让「临期优先」失效，值得用户注意 */
+.dim-jh-badgeSortHint[data-order="manual"] {
+  color: var(--dsw-alias-state-warn-primary, #b45309);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #b45309) 40%, var(--dsw-alias-border-l2));
+}
+
 .dim-jh-badgeTabs {
   display: inline-flex;
   align-items: stretch;

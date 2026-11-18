@@ -49,41 +49,66 @@ describe('sanitizePreferredRotation —— 两种格式并存', () => {
   })
 })
 
-describe('orderCreditRows —— 双模式排序', () => {
-  const rows = [
-    { accountId: 'a', balance: { total: 100 } },
-    { accountId: 'b', balance: { total: 300 } },
-    { accountId: 'c', balance: { total: 200 } },
-  ]
+/**
+ * ★★ **2026-11-18 重写：排序口径从「积分降序」改为「后端选号机制」**。
+ *
+ * 用户要求「模式 A 统一成按积分行号机制排序，模式 B 在 A 基础上更换轮换起点」。
+ *
+ * | 模式 | 顺序 |
+ * |---|---|
+ * | A（无起点）| **档位序**：临期 → 短期 → 永久 → 不可用（同档按位次）|
+ * | B（有起点）| A 的结果再**绕一圈**，起点及其之后提到最前 |
+ *
+ * ⇒ 模式 B 现在是「A + 旋转」，不再是「保持传入顺序 + 旋转」——
+ *    这是本次改动的**核心**：让两种模式共享同一套排序，只有起点不同。
+ */
+describe('orderCreditRows —— 双模式排序（后端口径）', () => {
+  const DAY = 86_400_000
+  const NOW = Date.UTC(2026, 10, 18, 9)
+  /** 造「剩 N 天到期」的行。 */
+  const acc = (id, days) => ({
+    accountId: id,
+    balance: {
+      total: 100,
+      packages: [{
+        name: 'p', unit: 'credits', remaining: 100, total: 100, used: 0, active: true,
+        cycleStartTime: '', cycleEndTime: '', expiredTime: '',
+        ...(days === undefined ? {} : { deductionEndTime: NOW + days * DAY }),
+      }],
+      expiredTotal: 0,
+    },
+  })
+  const base = { limit: 10, windowDays: 15, imminentDays: 5, now: NOW }
+  /** a=永久(30天) b=临期(2天) c=短期(10天) */
+  const rows = [acc('a', 30), acc('b', 2), acc('c', 10)]
 
-  it('★ 默认（无 rotationStartId）⇒ **积分降序**（既有行为不变）', () => {
-    const { shown } = orderCreditRows(rows, { limit: 10 })
-    expect(shown.map((r) => r.accountId)).toEqual(['b', 'c', 'a'])
-    // 变异：改成保持原序 ⇒ 本条红
+  it('★ 默认（无 rotationStartId）⇒ **档位序**：临期 → 短期 → 永久', () => {
+    const { shown } = orderCreditRows(rows, base)
+    expect(shown.map((r) => r.accountId), 'b(临期) → c(短期) → a(永久)').toEqual(['b', 'c', 'a'])
   })
 
-  it('★ 设了起点 ⇒ **起点最前**，其余保持传入顺序（不按余额）', () => {
-    const { shown } = orderCreditRows(rows, { limit: 10, rotationStartId: 'c' })
-    expect(shown.map((r) => r.accountId)).toEqual(['c', 'a', 'b'])
-    // ⚠️ 关键：'a' 在 'b' 前面 —— **没有按余额重排**（b=300 却在后面）
-    // 变异：把 rotateRows 换成「先按余额排再旋转」⇒ 本条红
+  it('★ 设了起点 ⇒ **档位序之上再绕一圈**（模式 B = 模式 A + 旋转）', () => {
+    // 档位序是 b → c → a；起点 = c ⇒ 绕成 c → a → b
+    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'c' })
+    expect(shown.map((r) => r.accountId), 'c 及其之后(a)提到最前，b 接在后').toEqual(['c', 'a', 'b'])
+    // ⚠️ 关键断言：'a'(永久) 排在 'b'(临期) 前面 —— 证明是「旋转」不是「重排档位」
   })
 
-  it('★ 起点在首位 ⇒ 原样（幂等）', () => {
-    const { shown } = orderCreditRows(rows, { limit: 10, rotationStartId: 'a' })
-    expect(shown.map((r) => r.accountId)).toEqual(['a', 'b', 'c'])
+  it('★ 起点在首位 ⇒ 与模式 A 完全相同（幂等）', () => {
+    const noStart = orderCreditRows(rows, base)
+    const startAtFirst = orderCreditRows(rows, { ...base, rotationStartId: 'b' })
+    expect(startAtFirst.shown.map((r) => r.accountId)).toEqual(noStart.shown.map((r) => r.accountId))
   })
 
-  it('起点不在列表（账号刚被删）⇒ **原样按传入顺序**，不回落到余额排序', () => {
-    const { shown } = orderCreditRows(rows, { limit: 10, rotationStartId: 'zzz' })
-    expect(shown.map((r) => r.accountId)).toEqual(['a', 'b', 'c'])
-    // ⚠️ 注意：这里**不是** ['b','c','a']（余额序）——
-    //    因为设了起点就走「保持传入顺序」这条腿，找不到就原样。
+  it('起点不在列表（账号刚被删）⇒ **原样按档位序**，不报错', () => {
+    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'zzz' })
+    expect(shown.map((r) => r.accountId), '找不到起点 ⇒ 保持档位序').toEqual(['b', 'c', 'a'])
   })
 
-  it('空 rotationStartId ⇒ 按默认模式（积分降序）', () => {
-    const { shown } = orderCreditRows(rows, { limit: 10, rotationStartId: '' })
-    expect(shown.map((r) => r.accountId)).toEqual(['b', 'c', 'a'])
+  it('空 rotationStartId ⇒ 按默认模式（档位序）', () => {
+    const noStart = orderCreditRows(rows, base)
+    const emptyStart = orderCreditRows(rows, { ...base, rotationStartId: '' })
+    expect(emptyStart.shown.map((r) => r.accountId)).toEqual(noStart.shown.map((r) => r.accountId))
   })
 
   it('折叠逻辑不受排序影响', () => {

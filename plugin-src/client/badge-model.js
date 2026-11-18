@@ -46,6 +46,13 @@
 
 import { formatUnits, formatQuota, formatQuotaLine, normalizeUnit, unitLabel, QUOTA_UNIT } from './credits-format.js';
 import { quotaWindowsOf, quotaPercentValue, quotaTone } from './quota-format.js';
+/**
+ * ⚠️ 引入它是为了在**客户端复刻后端的选号排序**（用户 2026-11-18 要求：
+ *    「弹窗列表按后端排序要使用的帐号机制排」）。
+ *    这是与后端 `buddy-balance-rank.ts` 的 `splitBuddyCreditsByExpiry` **同口径**
+ *    的分桶函数（同一个窗口参数、同样的 imminent ⊂ expiring 嵌套）。
+ */
+import { splitCreditsByExpiry } from './credit-expiry.js';
 
 /**
  * 三态偏好的取值。
@@ -720,30 +727,190 @@ function balanceOrder(row) {
  * @returns `{ shown, hidden }` —— `shown` 是要渲染的那些行，`hidden` 是被收起的条数
  *   （0 表示没有可折叠的，渲染层据此决定要不要那个按钮）。
  */
+/**
+ * ★★ **后端口径的账号档位**（用于弹窗列表排序，2026-11-18）。
+ *
+ * ## 为什么需要它
+ *
+ * 用户要求「弹窗列表按后端排序要使用的帐号机制排序」—— 即让用户一眼看出
+ * **下一发请求会先用谁**。但两侧的档位口径并不相同：
+ *
+ * | 剩余时间 | 后端 `splitBuddyCreditsByExpiry` | 客户端 `splitCreditsByExpiry` |
+ * |---|---|---|
+ * | 2 天  | `expiring` + `imminent` | `expiring` + `imminent` |
+ * | 10 天 | `expiring` | `expiring` + `shortTerm` |
+ * | 20 天 | **`permanent`** | **`longTerm`** |
+ * | 无日期 | `permanent` | `permanent` |
+ *
+ * ⇒ 同一个「20 天到期」的包：后端算 `permanent`（≥15 天一律永久），
+ *   客户端算 `longTerm`。**若直接按客户端的 longTerm 排，会与真实选号顺序不一致**。
+ *
+ * ## 因此这里**刻意复刻后端**的判定（而非复用客户端展示档）
+ *
+ * ```
+ * tier 0 (imminent)  : imminent > 0                    5 天内
+ * tier 1 (expiring)  : expiring > 0                    5~15 天（含 shortTerm）
+ * tier 2 (permanent) : permanent > 0 且未锁定            ≥15 天 或 无日期
+ * tier 3 (none)      : 其余（锁定态下只剩 permanent / 无余额 / 查不到）
+ * ```
+ *
+ * ⚠️ **`longTerm` 必须并入 `permanent`**：后端没有 longTerm 桶，
+ *    ≥15 天一律进 permanent。这正是本次排序「按后端口径」的关键。
+ * ⚠️ 前两档必须在 `allowPermanent === false` 之前判 —— 与后端
+ *    `buddyBalanceTier` 逐字节同构：锁定态下临期/短期仍可烧。
+ *
+ * @returns 0..3（数字即优先级，越小越先被选中）
+ */
+export const CREDIT_ORDER_TIER = Object.freeze({ imminent: 0, expiring: 1, permanent: 2, none: 3 });
+
+/** 档位是否「可用」（与后端 `buddyTierUsable` 同构）。 */
+export function backendOrderTierIsUsable(tier) {
+  return tier !== CREDIT_ORDER_TIER.none;
+}
+
+/**
+ * 后端口径的档位判定（导出**仅为单测**能直接断言「锁定门在永久判定之前」这一格 ——
+ * 该不变式无法通过排序结果观察到：把锁定门挪到永久判定之后，排序结果恰好相同）。
+ */
+export function backendOrderTier(split, allowPermanent) {
+  if (split == null) return CREDIT_ORDER_TIER.none;
+  const positive = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  if (positive(split.imminent) > 0) return CREDIT_ORDER_TIER.imminent;
+  if (positive(split.expiring) > 0) return CREDIT_ORDER_TIER.expiring;
+  // ⚠️ 锁定门必须在永久判定之前（与后端 buddyBalanceTier 同序）
+  if (allowPermanent === false) return CREDIT_ORDER_TIER.none;
+  // ⚠️ longTerm 并入 permanent：后端 ≥15 天一律算 permanent
+  if (positive(split.permanent) > 0 || positive(split.longTerm) > 0) return CREDIT_ORDER_TIER.permanent;
+  return CREDIT_ORDER_TIER.none;
+}
+
+/**
+ * ★ **当前排序的短标签**（显示在「帐号总数：N 个」后面，2026-11-18）。
+ *
+ * 用户要求「在帐号总数后面加一个当前排序的说明」—— 用 4 字短标签，
+ * 因为节标题一行还要放「可用/总」两组数字，长句放不下。
+ *
+ * | 状态 | 标签 |
+ * |---|---|
+ * | 严格手动顺序 | `手动顺序` |
+ * | 设了轮换起点 | `起点优先` |
+ * | 默认 | `临期优先` |
+ *
+ * ⚠️ 严格手动顺序**优先于**起点：后端 `rankBuddyAccountsByManualOrder` 里
+ *    档位只当可用性判据，起点旋转仍在其后 ⇒ 两者同时开启时，
+ *    「手动顺序」才是决定先后主因，起点只是把某一段绕到前面。
+ */
+export function creditOrderLabel(options = {}) {
+  if (options.strictManualOrder === true) return '手动顺序';
+  if (options.hasRotationStart === true) return '起点优先';
+  return '临期优先';
+}
+
+/**
+ * ★★ **当前排序的详细解释**（tooltip 用，2026-11-18）。
+ *
+ * 用户要求「同时使用 tooltip 展示更加详细的解释」。
+ *
+ * ⚠️ 文案必须**与后端 `rankBuddyAccountsByBalance` / `rankBuddyAccountsByManualOrder`
+ *    的实际行为逐条对应** —— 这个 tooltip 是用户理解「下一发会用谁」的唯一入口，
+ *    写错比不写更糟。
+ * ⚠️ 多行用 `\n`（原生 title 支持换行），每行一个要点。
+ */
+export function describeCreditOrder(options = {}) {
+  const lines = [];
+  const windowDays = Number.isFinite(options.windowDays) ? options.windowDays : 15;
+  const imminentDays = Number.isFinite(options.imminentDays) ? options.imminentDays : 5;
+  if (options.strictManualOrder === true) {
+    lines.push('当前：严格手动顺序');
+    lines.push('按「位次」（你在面板里的拖拽顺序）排列，档位不决定先后。');
+    lines.push('档位只决定「谁还可用」：不可用的账号仍排在最后。');
+    lines.push('⚠️ 此模式下「临期优先」失效 —— 离到期最近的号不保证排在前面。');
+  } else {
+    lines.push('当前：按积分档位排序（= 后端选号顺序）');
+    lines.push(`① ${imminentDays} 天内到期（临期）—— 最优先消耗`);
+    lines.push(`② ${imminentDays}~${windowDays} 天内到期（短期）`);
+    lines.push(`③ ${windowDays} 天以上或无到期日（永久）`);
+    lines.push('④ 不可用（无余额 / 查询失败）—— 排最后');
+    lines.push('同一档内按「位次」排列，不按金额。');
+  }
+  if (options.hasRotationStart === true) {
+    lines.push('');
+    lines.push('已设轮换起点：起点及其之后的账号绕到最前面。');
+  }
+  if (options.locked === true) {
+    lines.push('');
+    lines.push('「锁定永久积分」已开启：只剩永久积分的账号视为不可用，排在最后。');
+  }
+  return lines.join('\n');
+}
+
 export function orderCreditRows(rows, options = {}) {
   const limit = Number.isFinite(options.limit) ? options.limit : 0;
   const copy = Array.isArray(rows) ? rows : [];
   /**
-   * ## ⚠️ 双模式（用户 2026-11-10 要求）
+   * ## ★★ 排序口径（2026-11-18 重写：按**后端选号机制**排）
    *
-   * | 模式 | 顺序 |
-   * |---|---|
-   * | 未设起点（`rotationStartId` 缺席） | **积分降序**（既有行为，不变） |
-   * | 设了起点 | **起点 → 其余保持传入顺序**（= 账号池顺序，体现轮换循环） |
+   * 用户原话：「可以把模式 A 统一成按照积分行号机制排序吗？然后模式 B 在 A 的
+   * 基础上更换轮换起点，这样的排序机制是不是会更好表达了后端排序要使用的帐号机制」
    *
-   * ### 为什么「设了起点」要改顺序
+   * ⇒ 现在列表顺序 = **后端真实的选号顺序**，用户一眼看出「下一发先用谁」。
    *
-   * 积分窗口与「轮换起点」下拉框在**同一个弹窗**里，用户要能对照着看。
-   * 设了起点时按轮换顺序排（起点最前），用户一眼看出「下一发先用谁」。
+   * | 模式 | 条件 | 顺序 |
+   * |---|---|---|
+   * | 默认 | `strictManualOrder` 关闭 | **档位序**：临期 → 短期 → 永久 → 不可用；同档按位次 |
+   * | 严格 | `strictManualOrder` 开启 | **只按位次**（= 用户拖拽序），档位仅判可用性（不可用沉底）|
+   * | 起点 | 设了 `rotationStartId` | 在上面两种任一的基础上，**把起点及其之后绕到最前** |
    *
-   * ### ⚠️ 默认模式**语义不变**
+   * ## ⚠️ 与旧实现（积分降序）的差别
    *
-   * 未设起点时仍是积分降序 ⇒ 既有 14 处测试**不需要改**。
+   * 旧实现按 `balance.total` 降序 —— 那**不代表先烧谁**：一个「总 9000 但全是永久」
+   * 的号会排第一，而真正先烧的是下面某个「临期 44.87」的号 ⇒ 误导。
+   *
+   * ## 严格模式下为什么不再按档位排
+   *
+   * 后端的 `rankBuddyAccountsByManualOrder` 就是这么做的（档位只当可用性判据）。
+   * 弹窗必须**逐字节反映后端**，否则用户看到「列表第 1 个」而实际请求发给第 3 个。
+   *
+   * ⚠️ **`none` 档永远沉底**（两种模式都如此）：它包含「查不到余额」与
+   *    「锁定态下只剩永久」两类 —— 后者正是锁定要保护的对象，绝不能排前面。
    */
   const startId = options.rotationStartId;
+  const allowPermanent = options.allowPermanent !== false;
+  const strict = options.strictManualOrder === true;
+  const windowDays = Number.isFinite(options.windowDays) ? options.windowDays : undefined;
+  const imminentDays = Number.isFinite(options.imminentDays) ? options.imminentDays : undefined;
+  const now = Number.isFinite(options.now) ? options.now : Date.now();
+
+  /** 每行的档位（复刻后端口径）。查不到余额的归 none。 */
+  const tierOf = (row) => {
+    const packages = row?.balance?.packages;
+    // ⚠️ 配额单位（Gemini）没有「积分档位」概念 ⇒ 一律按 none 处理（沉底）
+    if (!Array.isArray(packages)) return CREDIT_ORDER_TIER.none;
+    const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
+    if (unit === QUOTA_UNIT) return CREDIT_ORDER_TIER.none;
+    const split = splitCreditsByExpiry(packages, windowDays, now, imminentDays);
+    return backendOrderTier(split, allowPermanent);
+  };
+
+  /**
+   * 排序：稳定排序（装饰 - 排序 - 解装饰），档内按传入下标（= 位次）。
+   *
+   * ⚠️ 严格模式把 tier 压成「可用/不可用」二值（与后端
+   *    `rankBuddyAccountsByManualOrder` 的 `unusable` 同构）。
+   */
+  const decorated = copy.map((row, index) => ({
+    row,
+    index,
+    sortKey: strict
+      ? (backendOrderTierIsUsable(tierOf(row)) ? 0 : 1)
+      : tierOf(row),
+  }));
+  decorated.sort((a, b) => (a.sortKey - b.sortKey) || (a.index - b.index));
+  const orderedByStrategy = decorated.map((entry) => entry.row);
+  // 「轮换起点」：在上面的策略序之上再绕一圈（与后端 rotateFromPreferred 同语义）
   const ordered = typeof startId === 'string' && startId.length > 0
-    ? rotateRows(copy, startId)
-    : [...copy].sort((a, b) => balanceOrder(b) - balanceOrder(a));
+    ? rotateRows(orderedByStrategy, startId)
+    : orderedByStrategy;
   const hidden = Math.max(0, ordered.length - limit);
   return { shown: options.expanded === true ? ordered : ordered.slice(0, limit), hidden };
 }

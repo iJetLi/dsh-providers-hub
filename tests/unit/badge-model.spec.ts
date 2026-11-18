@@ -14,10 +14,15 @@ import {
   orderCreditRows,
   planGroupsOf,
   windowPreview,
-} from '../../plugin-src/client/badge-model.js'
+
+  CREDIT_ORDER_TIER,
+  backendOrderTier,
+} from '../../plugin-src/client/badge-model.js';
 // 宿主侧的同一份枚举：两边必须逐字一致（`usage.badgePreference` 会拒绝非法值）
 import { BADGE_PREFERENCES as HOST_BADGE_PREFERENCES } from '../../src/badge-preferences.js'
 import { formatUnits, formatQuotaLine, unitLabel, QUOTA_UNIT } from '../../plugin-src/client/credits-format.js'
+// ⚠️ 与后端 `splitBuddyCreditsByExpiry` 同口径的分桶函数（本次「按后端排序」的依据）
+import { splitCreditsByExpiry } from '../../plugin-src/client/credit-expiry.js'
 
 /**
  * 用量徽标**折叠态**的纯逻辑回归（不依赖 react，故可直接 import 真实现）。
@@ -564,19 +569,129 @@ describe('incompleteNote：合计少算了账号时要说明', () => {
  * 那个号」，折叠边界错了只会觉得「怎么少了一个号」。而组件里那部分测不到
  * （`usage-badge.js` 依赖宿主注入的 react，本仓库装不了），故逻辑必须住在这里。
  */
-describe('orderCreditRows：按余额降序 + 折叠', () => {
-  const acc = (id, total) => ({ accountId: id, nickname: id, balance: total === null ? null : { total, packages: [], expiredTotal: 0 } })
+/**
+ * ★★ **2026-11-18 重写：排序口径从「余额降序」改为「后端选号机制」**。
+ *
+ * 用户原话：「可以把模式 A 统一成按照积分行号机制排序吗？……这样的排序机制
+ * 是不是会更好表达了后端排序要使用的帐号机制」
+ *
+ * ## 为什么必须改（旧口径是误导）
+ *
+ * 旧实现按 `balance.total` 降序 —— 那**不代表先烧谁**：
+ * 一个「总 9000 但全是永久」的号会排第一，而真正先烧的是下面某个「临期 44.87」的号。
+ *
+ * ## 新口径（与后端 `rankBuddyAccountsByBalance` 逐字节同构）
+ *
+ * ```
+ * 临期(imminent) → 短期(expiring) → 永久(permanent) → 不可用(none)
+ * 同档内按传入顺序（= 位次），不按金额
+ * ```
+ *
+ * ⚠️ **`longTerm` 必须并入 `permanent`**：后端没有 longTerm 桶，「≥15 天」一律算
+ *    permanent ⇒ 客户端若按 longTerm 单独排，会与真实选号顺序不一致。
+ */
+describe('orderCreditRows：按后端选号机制排序 + 折叠', () => {
+  const DAY = 86_400_000
+  const NOW = Date.UTC(2026, 10, 18, 9)
+  /** 造一个「剩 N 天到期」的资源包。`days === undefined` = 无到期日（真·永久）。 */
+  const pkg = (remaining, days) => ({
+    name: 'p', unit: 'credits', remaining, total: remaining, used: 0, active: true,
+    cycleStartTime: '', cycleEndTime: '', expiredTime: '',
+    ...(days === undefined ? {} : { deductionEndTime: NOW + days * DAY }),
+  })
+  /** 按「剩余天数」造一行；`null` = 查不到余额。 */
+  const acc = (id, days) => ({
+    accountId: id,
+    nickname: id,
+    balance: days === null ? null : { total: 100, packages: [pkg(100, days)], expiredTotal: 0 },
+  })
   const ids = (rows) => rows.map((row) => row.accountId)
+  const base = { limit: 5, expanded: false, windowDays: 15, imminentDays: 5, now: NOW }
 
-  it('按余额降序（用户先要看到「还有哪个号能用」）', () => {
-    const { shown, hidden } = orderCreditRows([acc('a', 10), acc('b', 300), acc('c', 50)], { limit: 5, expanded: false })
-    expect(ids(shown)).toEqual(['b', 'c', 'a'])
+  it('按档位排序：临期 → 短期 → 永久 → 不可用（不按金额）', () => {
+    // ⚠️ 刻意让「金额」与「紧迫度」反向：永久包金额最大，仍必须排最后
+    const rows = [
+      { accountId: 'perm', nickname: 'perm', balance: { total: 9000, packages: [pkg(9000, 30)], expiredTotal: 0 } },
+      { accountId: 'imm', nickname: 'imm', balance: { total: 10, packages: [pkg(10, 2)], expiredTotal: 0 } },
+      { accountId: 'short', nickname: 'short', balance: { total: 50, packages: [pkg(50, 10)], expiredTotal: 0 } },
+    ]
+    const { shown, hidden } = orderCreditRows(rows, base)
+    expect(ids(shown), '临期 → 短期 → 永久（哪怕永久金额最大）').toEqual(['imm', 'short', 'perm'])
     expect(hidden).toBe(0)
   })
 
-  it('读不到数的排**最后**（不能当 0 混进小余额里 —— 那格显示的是错误文案）', () => {
-    const { shown } = orderCreditRows([acc('dead', null), acc('a', 5), acc('b', 100)], { limit: 5, expanded: false })
-    expect(ids(shown)).toEqual(['b', 'a', 'dead'])
+  it('读不到数的排**最后**（不能混进可用档里 —— 那格显示的是错误文案）', () => {
+    const { shown } = orderCreditRows(
+      [acc('dead', null), acc('a', 10), acc('b', 2)],
+      base,
+    )
+    expect(ids(shown), 'a 是临期(2天)、b 是短期(10天)、dead 读不到').toEqual(['b', 'a', 'dead'])
+  })
+
+  it('⚠️ longTerm 并入 permanent：20 天到期与无日期同档，按位次排', () => {
+    // 这是本次改动的关键一格 —— 后端把「20 天」和「无日期」都算 permanent
+    const { shown } = orderCreditRows([acc('long20', 20), acc('nodate', undefined)], base)
+    expect(ids(shown), '两者同档 ⇒ 保持传入顺序').toEqual(['long20', 'nodate'])
+  })
+
+  it('锁定永久积分时「只剩永久」的号沉底（与后端 allowPermanent=false 同构）', () => {
+    const { shown } = orderCreditRows(
+      [acc('perm', 30), acc('imm', 2)],
+      { ...base, allowPermanent: false },
+    )
+    // imm 是临期 ⇒ 可用；perm 只剩永久 ⇒ 锁定时不可用 ⇒ 沉底
+    expect(ids(shown)).toEqual(['imm', 'perm'])
+  })
+
+  /**
+   * ⚠️⚠️ **锁定门必须在永久判定之前**（与后端 `buddyBalanceTier` 同序）。
+   *
+   * 若把 `if (allowPermanent === false) return none` 挪到永久判定之后，
+   * 「只剩永久」的号会返回 permanent 档（可用）⇒ **锁定永久积分形同虚设**。
+   *
+   * 变异实测（M2）证明：只靠上面那条「沉底」用例抓不到 —— 因为两者排序结果
+   * 恰好相同（都沉底）。必须**直接断言档位函数**本身。
+   */
+  it('★ 锁定门在永久判定之前：只剩永久的号返回 none（不是 permanent）', () => {
+    const packages = [pkg(9000, 30)] // 30 天 ⇒ 后端 permanent
+    const split = splitCreditsByExpiry(packages, 15, NOW, 5)
+    // 未锁定 ⇒ permanent（2）
+    expect(backendOrderTier(split, true), '未锁定时是 permanent 档').toBe(CREDIT_ORDER_TIER.permanent)
+    // 锁定 ⇒ none（3）—— 必须是 none，不能是 permanent
+    expect(backendOrderTier(split, false), '锁定时必须是 none（不可用）').toBe(CREDIT_ORDER_TIER.none)
+  })
+
+  /**
+   * ★★ **轮换起点旋转**（2026-11-18，此前**零用例** —— 变异 M5 实测无牙）。
+   *
+   * 语义与后端 `rotateFromPreferred` 一致：起点及其之后的账号绕到最前面，
+   * 其余保持相对顺序（环形）。
+   */
+  it('★★ 轮换起点：起点及其之后绕到最前（其余保持相对顺序）', () => {
+    // 档位：imm(2天/临期) → short(10天/短期) → perm(30天/永久)
+    // 设起点 = short ⇒ 旋转后应为 short → perm → imm
+    const rows = [acc('imm', 2), acc('short', 10), acc('perm', 30)]
+    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'short' })
+    expect(ids(shown), '起点 short 及其之后(perm)绕到最前，imm 接在后面').toEqual(['short', 'perm', 'imm'])
+  })
+
+  it('未设起点时不做旋转（顺序 = 纯档位序）', () => {
+    const rows = [acc('perm', 30), acc('imm', 2)]
+    expect(ids(orderCreditRows(rows, base).shown), '无起点 ⇒ 临期在前').toEqual(['imm', 'perm'])
+  })
+
+  it('起点不在列表里（账号已删）⇒ 原样，不报错不乱序', () => {
+    const rows = [acc('perm', 30), acc('imm', 2)]
+    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'gone' })
+    expect(ids(shown), '找不到起点 ⇒ 保持档位序').toEqual(['imm', 'perm'])
+  })
+  it('严格手动顺序：只按位次，档位仅判可用性', () => {
+    const { shown } = orderCreditRows(
+      [acc('perm', 30), acc('imm', 2), acc('dead', null)],
+      { ...base, strictManualOrder: true },
+    )
+    // 严格模式下 perm 与 imm 同权，按传入顺序；dead 不可用仍沉底
+    expect(ids(shown)).toEqual(['perm', 'imm', 'dead'])
   })
 
   it('排序稳定：余额相同的账号保持原顺序（否则每次渲染 DOM 抖动）', () => {
@@ -587,7 +702,7 @@ describe('orderCreditRows：按余额降序 + 折叠', () => {
   })
 
   it('折叠：只给 limit 条，`hidden` 如实报出被收起的条数', () => {
-    const rows = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id, index) => acc(id, index))
+    const rows = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id, index) => acc(id, index + 1))
     const collapsed = orderCreditRows(rows, { limit: 5, expanded: false })
     expect(collapsed.shown).toHaveLength(5)
     expect(collapsed.hidden).toBe(2)
@@ -598,7 +713,7 @@ describe('orderCreditRows：按余额降序 + 折叠', () => {
   })
 
   it('刚好等于 limit 时不产生折叠按钮（hidden 为 0）', () => {
-    const rows = ['a', 'b', 'c', 'd', 'e'].map((id, index) => acc(id, index))
+    const rows = ['a', 'b', 'c', 'd', 'e'].map((id, index) => acc(id, index + 1))
     expect(orderCreditRows(rows, { limit: 5, expanded: false }).hidden).toBe(0)
   })
 
