@@ -243,6 +243,14 @@ import {
   monkeycodeSigningPrompt,
   type MonkeycodeCredential,
 } from './monkeycode.js'
+// ⚠️ AgnesCode（`agnescode` / `agnescodeintl`，2026-11-19）：**本 fork 独有**。
+//    与 MonkeyCode 的**本质不同**：凭据不是可粘贴的 API Key，而是桌面客户端
+//    `AgnesCode` 的本机会话（Chromium os_crypt + DPAPI）⇒ 账号入口是「导入
+//    本机登录态」，且 `bffPublicBaseUrl` 是**每账号数据**（绝不硬编码）。
+import { AgnescodeAuth } from './agnescode-auth.js'
+import { AgnescodeAdapter, registerAgnescodeLlm, type AgnescodeSlot } from './agnescode-adapter.js'
+import { AGNESCODE, AGNESCODE_INTL, type AgnescodeProduct } from './agnescode-product.js'
+import { parseAgnescodeCredential, trustAgnescodeBffBase } from './agnescode.js'
 import type { ZcodeCredential } from './zcode.js'
 import { GEMINI_DEFAULT_PROJECT, GEMINI_SESSION_LANE_SMOKE } from './gemini.js'
 import { createProviderCredits, creditsOf } from './provider-credits.js'
@@ -677,6 +685,29 @@ async function autoclawSelfHeal(
  * ⚠️ 一致性与「漏一家」由 `tests/unit/provider-runtime-wiring.spec.ts` 的 probe
  * 域守卫从硬编码清单 + {@link PROBE_EXEMPT} 派生锁死（漏挂会让它**点名**变红）。
  */
+/**
+ * 探测路径的槽（AgnesCode）。
+ *
+ * ⚠️ 与其它 provider 的差别：本家的凭据不是「一个 key」，而是
+ * `{access_token, bff_base, …}` —— 而且 `bff_base` 决定请求**发去哪**
+ * （每账号下发）。故必须：
+ *   1. 解析一次（解析不出来就抛错，让「重测」显示**原因**而不是笼统的
+ *      「目录为空」）；
+ *   2. 用 `trustAgnescodeBffBase` 再钉一次域名边界 —— 探测路径的凭据来自
+ *      面板输入，可能被手改；把 `Authorization` 发到任意域名是凭据外泄。
+ *
+ * 抛错会被 `listModels` 的调用方（probe）接住并展示，不会静默。
+ */
+function probeSlotOf(product: AgnescodeProduct, credential: unknown): AgnescodeSlot {
+  const text = typeof credential === 'string' ? credential : JSON.stringify(credential ?? {})
+  const parsed = parseAgnescodeCredential(text, product)
+  if (parsed === undefined) throw new Error('凭据不是合法的 AgnesCode 会话（缺少 access_token / bff_base）')
+  if (!trustAgnescodeBffBase(parsed.bff_base)) {
+    throw new Error(`bff_base 不在 Agnes 域名边界内，拒绝发送凭据：${parsed.bff_base}`)
+  }
+  return { accountId: product.id, credential: parsed }
+}
+
 export const probeById: Record<string, NonNullable<ProviderRuntime['probe']>> = {
   // CodeBuddy 系（buddy / workbuddy）→ BuddyAdapter，按各自 product 发请求。
   buddy: {
@@ -809,6 +840,26 @@ export const probeById: Record<string, NonNullable<ProviderRuntime['probe']>> = 
         credential: credential as MonkeycodeCredential,
       }],
       product: MONKEYCODE_INTL,
+    }),
+  },
+  // AgnesCode 国内站（`agnescode`）。探测 = 用它自己的目录端点
+  // `GET {apiRoot}/v2/models` 打一次（**不消耗额度**，也不发推理请求）——
+  // 这是本家唯一「只读且能证明 Access Token 有效」的端点。
+  //
+  // ⚠️ 必须**单独一条**：`probeById` 是按 provider id 取工厂的，漏了它 ⇒
+  //    账号卡片的「重测」按钮点了没反应（查不到就回「不支持探测」，全程静默）。
+  agnescode: {
+    createProbeAdapter: (ref, credential) => new AgnescodeAdapter({
+      product: AGNESCODE,
+      slots: async () => [probeSlotOf(AGNESCODE, credential)],
+    }),
+  },
+  // 国际站（`agnescodeintl`）—— 与国内站逐行同构，只差 `product`。
+  // ⚠️ 同样必须单独一条（理由逐字同上）。
+  agnescodeintl: {
+    createProbeAdapter: (ref, credential) => new AgnescodeAdapter({
+      product: AGNESCODE_INTL,
+      slots: async () => [probeSlotOf(AGNESCODE_INTL, credential)],
     }),
   },
   // 百智云（`baizhi`）—— 静态 `sk-` Key 直连，无平台登录态、无每日额度。
@@ -4908,6 +4959,56 @@ export function apply(ctx: Context): void {
   const { auth: monkeycode, adapter: monkeycodeAdapter } = createMonkeycode(MONKEYCODE)
   const { auth: monkeycodeIntl, adapter: monkeycodeIntlAdapter } = createMonkeycode(MONKEYCODE_INTL)
 
+  // ===== AgnesCode（`agnescode` + `agnescodeintl`）—— **本 fork 独有** =====
+  //
+  // 与 MonkeyCode 的**根本差异**：凭据来自**桌面客户端的本机会话**
+  //（`%APPDATA%\AgnesCode\code-auth-session*.v1`，Chromium `os_crypt` + DPAPI），
+  // 不是用户能粘贴的 API Key ⇒ 账号入口是「导入本机登录态」。
+  //
+  // 为什么**必须两个 provider id**：国内站与国际站是两套独立账号体系
+  //（`*.agnes-ai.cn` / `*.agnes-ai.com`），而**模型目录按 provider 缓存一份** ——
+  // 单 id 下另一站的目录要么不进列表、要么被静默回退成本站模型（minimax 的
+  // 已知形态）。两站实现完全共用，只在 `product` 上分叉。
+  //
+  // ⚠️ 服务名由 AgnescodeAuth 依 product.id 派生 ⇒ 分别注册为
+  //    `ctx.agnescodeAuth` / `ctx.agnescodeintlAuth`（`declare module` 里两个键
+  //    缺一不可，否则 `ctx.xxxAuth` 取到 undefined 且没有任何报错）。
+  const createAgnescode = (product: AgnescodeProduct) => {
+    const auth = new AgnescodeAuth(ctx, { product })
+    const adapter = registerAgnescodeLlm(ctx, {
+      product,
+      // 槽序列由**接线层**解析（适配器不直接读凭据）。
+      // ⚠️ `modelId` 只在**推理路径**传进来：传了才按模型限流过滤，
+      //    目录路径不传 —— 否则被限流的账号会把整个目录一起拖空。
+      slots: async (modelId?: string) => {
+        const entries = await pool.listAccounts(product.id)
+        const usable = await Promise.all(entries.map(async (entry): Promise<AgnescodeSlot | undefined> => {
+          if (!entry.enabled) return undefined
+          if (modelId !== undefined && modelId.length > 0) {
+            const resetAt = entry.modelRateLimits?.[modelId]
+            if (typeof resetAt === 'number' && resetAt > Date.now()) return undefined
+          }
+          const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+          if (!resolved) return undefined
+          const parsed = parseAgnescodeCredential(resolved.value, product)
+          // ⚠️ 坏凭据不该让整家 provider 不可用：跳过这一槽，其余账号照常轮换。
+          if (parsed === undefined) return undefined
+          return { accountId: entry.id, credential: parsed }
+        }))
+        return usable.filter((slot): slot is AgnescodeSlot => slot !== undefined)
+      },
+      accountPool: pool,
+      // 撞墙（429 / 配额类业务码）后按账号+模型冷却，与其余渠道同款。
+      markLimited: async (accountId, modelId, resetAtMs) => {
+        await pool.updateModelRateLimit(accountId, modelId, resetAtMs)
+      },
+      warn: (message) => ctx.logger?.warn?.(`[agnescode] ${message}`),
+    })
+    return { auth, adapter }
+  }
+  const { auth: agnescode, adapter: agnescodeAdapter } = createAgnescode(AGNESCODE)
+  const { auth: agnescodeIntl, adapter: agnescodeIntlAdapter } = createAgnescode(AGNESCODE_INTL)
+
   // ===== 百智云（`baizhi`）—— 静态 Key 直连，**按量计费** =====
   //
   // 与 MonkeyCode 的关键差别（都是实测结论，不是设计偏好）：
@@ -5527,6 +5628,9 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     // 浏览器登录在卸载之后继续收窗/写回凭据（`loginViaBrowser` 每轮都判它）。
     monkeycode.stop()
     monkeycodeIntl.stop()
+    // AgnesCode 两站同样要 `stop()`：卸载后不该再有任何在途的凭据读写。
+    agnescode.stop()
+    agnescodeIntl.stop()
     baizhi.stop()
   }, 'jet-hub: multi-account refresh scheduler')
 
@@ -5550,6 +5654,9 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     // 浏览器登录在卸载之后继续收窗/写回凭据（`loginViaBrowser` 每轮都判它）。
     monkeycode.stop()
     monkeycodeIntl.stop()
+    // AgnesCode 两站同样要 `stop()`：卸载后不该再有任何在途的凭据读写。
+    agnescode.stop()
+    agnescodeIntl.stop()
     baizhi.stop()
   }, 'codearts-auth.scheduler (legacy)')
 
@@ -6225,6 +6332,11 @@ async function fetchBalanceReading(
     // ⚠️ 国际站同样必须进这张表：理由与国内站逐条相同 —— 「关闭整个 provider」
     //    依赖 `listAllModels()` 那份**不套黑名单**的全量目录，漏了会漏写黑名单。
     monkeycodeintl: pruned(MONKEYCODE_INTL.id, monkeycodeIntlAdapter),
+    // ⚠️ AgnesCode（2026-11-19）：必须进本表 —— `provider.status` 的「已关闭」
+    //    判据读的是 `listAllModels()` 那份**不套黑名单**的全量目录，表里缺它
+    //    ⇒「关闭整个 provider」时漏写黑名单 ⇒「显示已关闭、模型仍可选用」。
+    agnescode: pruned(AGNESCODE.id, agnescodeAdapter),
+    agnescodeintl: pruned(AGNESCODE_INTL.id, agnescodeIntlAdapter),
     // ⚠️ 百智云同样必须进这张表：理由与 monkeycode 逐条相同 ——
     //    `provider.status` 的「已关闭」判据读的是 `listAllModels()` 那份
     //    **不套黑名单**的全量目录，表里缺它 ⇒「关闭整个 provider」时漏写
@@ -6700,6 +6812,12 @@ async function fetchBalanceReading(
       //    与续期/积分/探测三条链路都按 provider id 取实例，漏了它 = 国际站账号
       //    的 token 永不过期检测、积分永不刷新、重测按钮点了没反应（全静默）。
       ['magicrewintl', magicrewIntlAuth],
+      // ⚠️ AgnesCode（2026-11-19）：两站**各占一行**。这个循环是
+      //    `registerProviderRuntime` 的唯一入口 —— 漏一行 = 该站不进 runtime 表
+      //    ⇒ 续期 / 积分 / 探测三条链路全部静默失效（面板一切 RPC 报
+      //    `unknown provider`）。
+      ['agnescode', agnescode],
+      ['agnescodeintl', agnescodeIntl],
     ]
     for (const [id, auth] of registry) {
       const descriptor = descriptorOf(id)
@@ -6915,6 +7033,12 @@ async function fetchBalanceReading(
     // ⚠️ MagiCrew 国际站（2026-11-01）：必须与上面 `['magicrewintl', magicrewIntlAuth]`
     //    是**同一个实例**，否则 spec 布在该实例上的 spy 收不到调用。
     magicrewintl: magicrewIntlAuth,
+    // ⚠️ AgnesCode（2026-11-19）：值必须是与上面 registry 数组里
+    //    `['agnescode', agnescode]` **同一个实例**，否则
+    //    `provider-runtime-wiring.spec.ts` 布在该实例上的 spy 收不到调用；
+    //    漏加 ⇒ 客户端 agnescode 面板所有 RPC 报 `unknown provider`。
+    agnescode,
+    agnescodeintl: agnescodeIntl,
   }, modelAdapters)
 
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已

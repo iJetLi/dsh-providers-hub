@@ -144,6 +144,10 @@ import { ACCIO } from './accio-product.js'
 // ⚠️ 本家符号**分属两个模块**：`astudioAccountNickname` 在 `astudio-auth.ts`，
 //    `isAstudioRefreshable` 与凭据类型在 `astudio.ts`（产品常量在 `astudio-product.ts`）。
 import { ASTUDIO } from './astudio-product.js'
+// ⚠️ AgnesCode（2026-11-19）：两站 product 常量 + auth 类型（`account.create`
+//    的本地导入分支按 id 分派到两个实例）。
+import { AGNESCODE, AGNESCODE_INTL } from './agnescode-product.js'
+import type { AgnescodeAuth } from './agnescode-auth.js'
 import { astudioAccountNickname, type AstudioAuth } from './astudio-auth.js'
 import {
   magicrewCredentialFingerprint,
@@ -1860,6 +1864,26 @@ export interface JetHubAuths {
    *    恒「未登录」而上游其实只需一次 refresh，且日志零字 —— issue IKKHL5）。
    */
   readonly marvis: MarvisAuth
+  /**
+   * AgnesCode 国内站（`agnescode`，2026-11-19）—— **本 fork 独有**。
+   *
+   * ⚠️ 凭据是**本机桌面客户端登录态**（`%APPDATA%\AgnesCode`，Chromium
+   *    `os_crypt` + DPAPI），不是可粘贴的 Key ⇒ 本家的 `account.create`
+   *    走「导入本机会话」分支（与 AStudio 同族）。
+   * ⚠️ **没有** refresh 端点 ⇒ 与 monkeycode / qiniu 同格：刻意**不进**
+   *    `SELF_HEAL_REFRESHABLE_PROVIDERS`，而是在 `SELF_HEAL_EXEMPT` 里登记理由。
+   */
+  readonly agnescode: AgnescodeAuth
+  /**
+   * AgnesCode 国际站（`agnescodeintl`）—— 与国内站是**两套独立账号体系**
+   *（`*.agnes-ai.cn` / `*.agnes-ai.com`），实现完全共用、只差 `product`。
+   *
+   * ⚠️ 与 `agnescode` 是**同一个类的两个实例** ⇒ `probeById` /
+   *    `WRITES_RATE_LIMIT_PROVIDERS` / ref 前缀表 / 积分表 / registry 数组 /
+   *    本接口每处都要两站到位，漏一处静默失效
+   *（minimax / monkeycode 都复发过同一形态）。
+   */
+  readonly agnescodeintl: AgnescodeAuth
 }
 
 /**
@@ -7594,6 +7618,70 @@ function registerJetHubEndpoints(
           })
 
           return { ok: true, value: { accountId: id, loginUrl: accioStarted.loginUrl } }
+        } else if (provider === AGNESCODE.id || provider === AGNESCODE_INTL.id) {
+          /**
+           * AgnesCode（2026-11-19）—— **没有 OAuth 授权页**可返回。
+           *
+           * 凭据是**本机桌面客户端**的登录态：`%APPDATA%\AgnesCode\code-auth-session*.v1`
+           *（Chromium `os_crypt` + DPAPI）⇒ 建账号 = 「导入本机会话」，与 AStudio
+           *（`astron-session.json`）是同一族但**不同种**（本家是 AES-GCM 包在
+           * `Local State` 的 DPAPI key 上）。
+           *
+           * ⚠️ 与 AStudio 同纪律：本分支**自己** `addAccount`、失败**自己**
+           *    `removeAccount`（Accio 那种「auth 内部自己登记」的形态在这里不成立 ——
+           *    `AgnescodeAuth` 刻意把「读」与「落」分开：`importLocal()` 不写库）。
+           *
+           * ⚠️ 返回值靠 `reused: true` + 空 `loginUrl` 命中前端成功出口
+           *（`jet-hub.js` 的 `if (res.reused)`），与 AStudio 同款偏离。
+           *
+           * ⚠️ 只做「导入本机登录态」这条腿。扫码设备码 + 本地回环回调
+           *（跨平台，`docs/AGNESCODE-SCAN-LOGIN.md`）**尚未接** ⇒ 非 Windows
+           *    平台会如实报 `UNSUPPORTED_PLATFORM` 的原因串，而不是假装成功。
+           */
+          const product = provider === AGNESCODE_INTL.id ? AGNESCODE_INTL : AGNESCODE
+          const auth = provider === AGNESCODE_INTL.id ? auths.agnescodeintl : auths.agnescode
+
+          await pool.addAccount({
+            id,
+            provider: product.id,
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            // 本家**没有** refresh 端点（与 monkeycode / qiniu 同格）。
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+
+          let imported: Awaited<ReturnType<typeof auth.importLocal>>
+          try {
+            imported = await auth.importLocal()
+          } catch (error) {
+            // ⚠️ 采集层抛错（DPAPI 子进程失败等）也必须清掉占位条目，
+            //    否则池里永久留一张「导入中」的空卡。
+            void pool.removeAccount(id).catch(() => {})
+            const reason = error instanceof Error ? error.message : String(error)
+            throw new Error(`导入本机 AgnesCode 登录态失败：${reason}`)
+          }
+
+          if (!imported.ok) {
+            void pool.removeAccount(id).catch(() => {})
+            // ⚠️ 逐档原因原样透出：本家失败形态**极多**（没有目录 / 没有 Local
+            //    State / key 不合法 / v10 解不开 / JWT 过期），压成一句
+            //    「导入失败」会让用户与排查者都无从下手。
+            const why = imported.attempts
+              .map((attempt) => `${attempt.tier}${attempt.file === null ? '' : `（${attempt.file}）`}: ${attempt.detail}`)
+              .join('；')
+            throw new Error(`导入本机 AgnesCode 登录态失败：${why === '' ? '没有找到可用的会话文件' : why}`)
+          }
+
+          // 「读」与「落」分开 ⇒ 这里才写库（写到本次账号的 ref，不是默认 ref）。
+          await auth.saveCredential(imported.credential, refName)
+          await pool.updateAccount(id, {
+            nickname: imported.credential.nickname ?? imported.credential.user_id ?? id,
+            expiresAt: imported.credential.expires_at,
+            refreshable: false,
+          })
+          return { ok: true, value: { accountId: id, loginUrl: '', reused: true } }
         } else if (provider === ASTUDIO.id) {
           /**
            * AStudio（讯飞 AstronStudio）**没有 OAuth 授权页**：推理凭据是**本机客户端

@@ -10180,6 +10180,8 @@ function GatewayPanel({ status, busy, notice, onToggle, onToggleAllowLan, onRelo
 // ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：钱包端点有「跨账号的到期余额探测」
 //    语义（`marvisExpiry` 走共享 `fetchBalanceWithCache`）⇒ 必须与后端
 //    `WIRED_EXPIRY_PROVIDERS` 集合相等（有 spec 守着）。
+// ⚠️ AgnesCode 两站（2026-11-19）：`agnescodeExpiry` 同走共享 `fetchBalanceWithCache`
+//    ⇒ 同改。漏了它的症状：只登了 AgnesCode 的用户看到「请先在……登录账号」这句错话。
 const AGG_WIRED_CHANNEL_IDS = [
   'buddy', 'workbuddy', 'loomy', 'codearts', 'zcode', 'lobsterai', 'trae',
   'accio', 'officeace', 'modelscope', 'autoclaw', 'autoclawintl',
@@ -10187,6 +10189,7 @@ const AGG_WIRED_CHANNEL_IDS = [
   'astudio', 'minimax', 'minimaxintl',
   'magicrew', 'magicrewintl',
   'monkeycode', 'monkeycodeintl', 'baizhi', 'marvis',
+  'agnescode', 'agnescodeintl',
 ];
 
 /**

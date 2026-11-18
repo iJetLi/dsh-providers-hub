@@ -59,6 +59,10 @@ import { MODELSCOPE } from './modelscope-product.js'
 import type { ModelscopeCredential } from './modelscope.js'
 // 腾讯 Marvis（2026-11-09）：钱包只有「剩余 / 总量」，没有任何到期时间。
 import { fetchMarvisBalanceDetailed } from './marvis-credits.js'
+// ⚠️ AgnesCode（2026-11-19）：订阅积分池（两个标量桶、无逐笔日期）。
+import { fetchAgnescodeBalanceDetailed } from './agnescode-credits.js'
+import { AGNESCODE, type AgnescodeProduct } from './agnescode-product.js'
+import type { AgnescodeCredential } from './agnescode.js'
 import { MARVIS } from './marvis-product.js'
 import type { MarvisCredential } from './marvis.js'
 // ⚠️ AutoClaw（智谱）：钱包余额折算（2026-10-17 审计 P0 修复新增）。
@@ -269,6 +273,14 @@ export const WIRED_EXPIRY_PROVIDERS: readonly string[] = Object.freeze([
   //    ⚠️⚠️ **决定候选表可见性的是本表、不是 `AGGREGATE_CHANNELS`** ——
   //    只加后者 ⇒ 归一化再对也没用，症状**静默**（该陷阱已复发 7 次）。
   'marvis',
+  // ⚠️ AgnesCode（两站，2026-11-19）：折算原语见 `agnescodeExpiry`，属
+  //    「**有余额但不下发到期时间**」那一类（订阅池只有两个标量桶）
+  //    ⇒ 有余额即 `NEVER`、烧光即 `UNUSABLE`。
+  //    ⚠️⚠️ **决定候选表可见性的是本表**（不是 `AGGREGATE_CHANNELS`）——
+  //    只改后者 ⇒ 归一化再对也没用，症状**静默**（该陷阱已复发 7 次）。
+  //    ⚠️ 两站各一：账池不互通、域名不同（`*.agnes-ai.cn` / `*.agnes-ai.com`）。
+  'agnescode',
+  'agnescodeintl',
   // ⚠️ **Qoder**（中国版 / 国际版，2026-10-20，用户要求补齐三档分档 + 永久锁）。
   //    折算原语见 `qoderExpiry`（两站共用，只换 product）。
   //
@@ -1485,6 +1497,38 @@ export async function marvisExpiry(
     async () => {
       const result = await fetchMarvisBalanceDetailed(credential, product)
       // ⚠️ 同 modelscope：`balance: null` ⇒ UNUSABLE。
+      return result.balance
+    },
+  ))
+}
+
+/**
+ * AgnesCode（`agnescode` / `agnescodeintl`，2026-11-19）：**本 fork 独有**。
+ *
+ * ## 判据
+ * 订阅积分池只给两个标量桶（`permanent_balance` / `time_sensitive_balance`），
+ * **没有任何逐笔日期** ⇒ 与 modelscope / marvis **同格**：
+ * · 有 `active && remaining > 0` 的包 ⇒ `NEVER`（可路由）；
+ * · 否则 `UNUSABLE`。
+ *
+ * ⚠️ **不许**用「限时桶大概 30 天后作废」去编一个日期 —— 本仓红线
+ *    （「没有日期」不得被读成「永久」，也**不得**反推一个日期）。
+ *    展示层已经用 `expiryUnknown` 表达「会过期但不知道何时」。
+ *
+ * ⚠️ 已知代价（与 modelscope / autoclaw 同型且**已被用户接受过**）：限时桶烧光时
+ *    不会被提前剔出轮换，会失败一次再换号。
+ */
+export async function agnescodeExpiry(
+  credential: AgnescodeCredential,
+  product: AgnescodeProduct,
+  /** 共享读数入口（见 {@link buddyExpiry} 的同名参数）。 */
+  cached?: () => Promise<CreditBalance | null | undefined>,
+): Promise<number> {
+  return sharedPackageExpiry(() => fetchBalanceWithCache(
+    cached,
+    async () => {
+      const result = await fetchAgnescodeBalanceDetailed(product, credential)
+      // ⚠️ 与 modelscope 同口径：`balance: null`（查不到）⇒ UNUSABLE。
       return result.balance
     },
   ))

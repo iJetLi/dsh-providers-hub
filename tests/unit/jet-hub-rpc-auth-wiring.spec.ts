@@ -126,6 +126,14 @@ const AUTH_SERVICE: Readonly<Record<string, string>> = {
   //    不变只重置有效期）⇒ 必须占一个真实 auth 键位，否则「过期账号自愈」
   //    与续期分派都会静默落到 undefined。
   marvis: 'marvisAuth',
+  // ⚠️ AgnesCode（2026-11-19）：服务名由 `${product.id}Auth` 派生 ⇒
+  //    `agnescodeAuth` / `agnescodeintlAuth`（**全小写、无连字符**）。
+  //    ⚠️ **不是** `agnescodeIntlAuth`（按变量名驼峰拼会恒 undefined —— 与本文件
+  //    对 magicrewintl / monkeycodeintl 记录的是同一个坑）。
+  //    本家**没有** refresh 端点，但仍要占一个真实 auth 键位（与 monkeycode / qiniu
+  //    同型）：它负责「用凭据自己的值重算 `expiresAt`」这条对账。
+  agnescode: 'agnescodeAuth',
+  agnescodeintl: 'agnescodeintlAuth',
 }
 
 /**
@@ -358,7 +366,8 @@ describe('★ registerJetHubRpc 的命名对象接线（真跑 apply + account.r
     // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis）：27 → 28。
     //    （三审 F🟢-5：本处原只写到 25，而断言已是 27 —— 注释漏了一步就会让
     //     下一个加 provider 的人以为“上次是 25”而把数字写回 25。）
-    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(28)
+    // ⚠️ 2026-11-19 加 agnescode + agnescodeintl（AgnesCode 两站）：28 → 30。
+    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(30)
     // 另一方向（原断言的**全部**证明力都在这条上，单独留着免得它随上面那条一起消失）：
     // 表里的每个键都必须是 registry 里真实存在的 provider id（防拼写错误造成的僵尸项）。
     for (const id of Object.keys(AUTH_SERVICE)) {

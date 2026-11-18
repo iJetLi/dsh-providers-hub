@@ -65,10 +65,15 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
     //    只差签到一项（2026-11-02 同日二版更正：一版曾写 `balance: false`）。
     // ⚠️ 2026-11-13 并入 doubao（豆包）⇒ 30 → 31；它声明 `channel: false`
     //    （纯签到渠道、无模型目录/适配器/auth 服务）⇒ channel 计数不变仍 29。
-    expect(PROVIDER_REGISTRY).toHaveLength(31)
+    // ⚠️ 2026-11-19 并入 **agnescode + agnescodeintl（AgnesCode 两站）**
+    //    ⇒ 31 → 33（同批 channel 29 → 31）。
+    //    ⚠️ 声明位置刻意在 **magicrew 之前**（不是紧邻 aggregate）：上面那条
+    //    「magicrewintl 必须紧邻 aggregate、magicrew 紧邻它」是硬断言
+    //（`ia - ii === 1` / `ii - im === 1`），插在两者之间会把它们挤开 ⇒ 直接红。
+    expect(PROVIDER_REGISTRY).toHaveLength(33)
     // ⚠️ 2026-10-22（A6）：codely **已翻 `channel: true`** —— 它的推理 / 目录 / 余额 / 签到 / 续期全部已接线，
     //    而 `channel` 在生产代码里**零个读取点** ⇒ 原来那个 `false` 只是为了让守卫不变红而选的，它同时把 codely 挡在聚合目录之外。现在真实接线已完成，翻正。
-    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(29)
+    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(31)
     expect(
       PROVIDER_REGISTRY.find((d) => d.id === 'codely')?.channel,
       'codely 已接线完成，必须是 channel: true（否则它的模型永不进聚合目录）',

@@ -130,6 +130,14 @@ export const REFRESH_PROVIDERS = [
   //    续期并回写池内 `expiresAt` ⇒ 不属 loomy / zcode 那类豁免。
   //    漏了它这一家的 `account.refresh` 行为覆盖就降为零。
   'marvis',
+  // ⚠️ AgnesCode（两站，2026-11-19）：与 qiniu / modelscope 同型 —— **没有续期端点**
+  //（凭据是桌面客户端导出的 `accessToken`，约 28 天的 JWT，过期只能重新导入登录态），
+  // 但 `AgnescodeAuth.refreshAccountCredential` 仍按统一接口用凭据自值重算
+  // `expiresAt` 并回写池 ⇒ **留在本表里**：
+  // 漏了这两家，它们的 `account.refresh` 行为覆盖就降为零（且**零报错**）。
+  // ⚠️ 两站各占一项：账池不互通、凭据 ref 前缀不同（`agnescode:` / `agnescodeintl:`）。
+  'agnescode',
+  'agnescodeintl',
 ] as const
 
 /**

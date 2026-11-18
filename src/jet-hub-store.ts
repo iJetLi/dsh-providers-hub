@@ -1635,6 +1635,15 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   //    漏加 = 国际站账号在 `state.json` 缺失时**静默消失**（凭据还在
   //    `.credentials.yaml` 里，只是索引建不出来，用户只能重新登录）。
   ['MONKEYCODEINTL', 'monkeycodeintl'],
+  // ⚠️ AgnesCode 两站（2026-11-19，本 fork 独有）：同款坑第 N 次。
+  //    漏加 = 该站账号在 `state.json` 缺失时**静默消失**（凭据还在
+  //    `.credentials.yaml` 里，只是索引建不出来，用户只能重新导入登录态）。
+  //    ⚠️ 两者是**超串关系**（`AGNESCODEINTL` 以 `AGNESCODE` 开头），顺序由
+  //    `ACCOUNT_REF_RE` 内部的**长度降序排序**保证，与本数组书写顺序无关。
+  //    ⚠️ 前缀必须与 `account.create` 生成的
+  //    `${provider.toUpperCase()}_ACCOUNT_${suffix}` 逐字对上。
+  ['AGNESCODE', 'agnescode'],
+  ['AGNESCODEINTL', 'agnescodeintl'],
   // ⚠️ 百智云（`BAIZHI_ACCOUNT_*`，2026-11-02）：与 MONKEYCODE 系列**无前缀关系**，
   //    但同样必须登记 —— 漏了它，`state.json` 里的账号列表损坏/缺失时，
   //    从凭据 ref 反推 provider 会失败 ⇒ 账号在重启后**静默消失**。
