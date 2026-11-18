@@ -206,6 +206,7 @@ import { modelscopeModelsUrl, modelscopeHeaders, type ModelscopeCredential } fro
 // 余额与推理同一个 host。
 // 见 `src/marvis-product.ts` / `src/marvis-adapter.ts` 模块头。
 import { MarvisAuth } from './marvis-auth.js'
+import { selfHealMarvisHook } from './marvis-hook-cli.js'
 import { MarvisAdapter, registerMarvisLlm, type MarvisSlot } from './marvis-adapter.js'
 import { MARVIS } from './marvis-product.js'
 import { orderMarvisSlots } from './marvis-slots.js'
@@ -4181,6 +4182,12 @@ export function apply(ctx: Context): void {
   // ⚠️ **不要**给模型网关加 UAL 签名头（`Ual-Access-Signature` 等）：
   //    实测加了会 403 → 被归一成 401「登录态过期」。签名只属于 `/v3/*` 业务
   //    接口，见 `src/marvis.ts` 的 `businessHeaders` 注释。
+  // ⚠️ **启动自愈**（2026-11-18）：`uskey` 只能由 Marvis 进程内的 SDK 生成，
+  //    故本渠道依赖一个装进 Marvis 版本目录的 `sitecustomize.py` 钩子。Marvis
+  //    每次升级都会换版本目录 ⇒ 钩子失效 ⇒ 用户侧表现为「昨天还好今天 403」。
+  //    这里在注册时静默补一次（幂等，通常只是读一个文件）；无写权限时只记 debug，
+  //    真正的错误留给请求路径用带 `hint` 的文案提示，不阻塞启动。
+  selfHealMarvisHook(ctx.logger)
   const marvisAuth = new MarvisAuth(ctx)
   const marvisAdapter = registerMarvisLlm(ctx, {
     // 单凭据回退 ref：池里没有 marvis 账号时用它（与其余 provider 同约定）。

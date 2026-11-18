@@ -47,6 +47,19 @@ import { nextUtc8DayStartMs } from './model-queue.js'
 import { retryAfterMsFromResponse } from './retry-after.js'
 import { reportLedgerAccount } from './token-ledger.js'
 import { llmHeaders, marvisAccountOf, marvisChatUrl, type MarvisCredential } from './marvis.js'
+import {
+  MarvisBridgeError,
+  USKEY_EXPECTED_LENGTH,
+  requestMarvisHeadersDetailed,
+  type MarvisBridgeFailureCode,
+} from './marvis-uskey-bridge.js'
+
+/** 桥降级后附在头对象上的失败信息（供 403 文案使用）。 */
+interface MarvisBridgeFailureInfo {
+  code: MarvisBridgeFailureCode | 'UNKNOWN'
+  message: string
+  hint?: string
+}
 import { buildMarvisPayload } from './marvis-messages.js'
 import { rewriteMarvisBlockedIdentities } from './marvis-identity.js'
 import {
@@ -446,6 +459,71 @@ export class MarvisAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * 取本次请求要用的头：优先向 MarvisAgent 进程索取真实头（含合法 uskey）。
+   *
+   * ⚠️ **为什么不缓存**：uskey 有效期实测约 60 秒（`62s` 活 / `96s` 死），
+   *    缓存一定过期 ⇒ 每次都实时要。桥的单次开销实测 ~130-250ms。
+   *
+   * ⚠️ 降级策略：桥不可用时退回 `llmHeaders()` 的本地构造。那条路必然
+   *    `403 4100404`，但比抛异常好 —— 用户能看到「uskey 桥未就绪」这类可操作
+   *    的错误，而不是一个语焉不详的连接失败。
+   *
+   * ⚠️ 桥失败是**环境问题**（钩子没装 / 马维斯没开 / 版本升级后钩子丢了），
+   *    不是「这个账号不行」。故**不换号重试**：换号只会把同一环境错误重复 N 遍，
+   *    还会把好好的账号一个个标记成失败。这里只记一条带 hint 的 warn，然后降级。
+   */
+  protected async requestHeaders(
+    slot: MarvisSlot,
+    options: GenerateOptions,
+  ): Promise<Record<string, string>> {
+    const fallback = (): Record<string, string> =>
+      llmHeaders(marvisAccountOf(slot.credential), { accept: 'text/event-stream' })
+    try {
+      const { headers, elapsedMs, uskeyLength } = await requestMarvisHeadersDetailed({
+        // conv/resp 实测**随便填都行**（空值也 200），故不编造会话语义。
+        convId: options.sessionId ?? '',
+        respId: '',
+        agentTag: 'agent_chat',
+        scene: 'agent_chat',
+        model: normalizeMarvisModelId(options.model),
+      })
+      // ⚠️ `uskeyLength !== 524` 是个**高价值预警**：正常恒为 524（392 字节）。
+      //    出现别的长度说明 agent 侧配置异常，此请求几乎必然 403。
+      //    不在这里抛错（万一是上游改了长度），但要留下痕迹，否则用户只看到一句
+      //    「请求被风控拦截」而完全无法定位。
+      if (uskeyLength !== undefined && uskeyLength !== USKEY_EXPECTED_LENGTH) {
+        this.options.warn?.(
+          `marvis: uskey 长度异常 ${uskeyLength}（预期 ${USKEY_EXPECTED_LENGTH}）`
+          + ' —— 极可能被风控拒绝，请检查 Marvis 客户端版本',
+        )
+      }
+      // 成功路径不写日志：这是每轮请求都走的必经之路，刷屏会淹没真正的告警。
+      void elapsedMs
+      return { ...headers, Accept: 'text/event-stream' }
+    }
+    catch (error) {
+      // 桥错误带结构化 code/hint（见 marvis-uskey-bridge 的 MarvisBridgeError）。
+      const isBridge = error instanceof MarvisBridgeError
+      const code = isBridge ? error.code : 'UNKNOWN'
+      const hint = isBridge ? error.hint : undefined
+      const detail = error instanceof Error ? error.message : String(error)
+      this.options.warn?.(
+        `marvis: uskey 桥不可用[${code}]，降级为本地头（预计 403）：${detail}`
+        + `${hint === undefined ? '' : ` ⇒ 修复：${hint}`}`,
+      )
+      const degraded = fallback()
+      // 把桥的失败原因挂在头对象上（不可枚举，避免污染 wire），
+      // 供 streamVia 在收到 403/4100404 时给出**真正有用**的错误文案。
+      Object.defineProperty(degraded, '__marvisBridgeFailure', {
+        value: { code, message: detail, hint } satisfies MarvisBridgeFailureInfo,
+        enumerable: false,
+        configurable: true,
+      })
+      return degraded
+    }
+  }
+
   /** 指定槽发一次请求（轮换循环的复用单元）。 */
   protected async *streamVia(
     slot: MarvisSlot,
@@ -490,11 +568,24 @@ export class MarvisAdapter extends LlmAdapter {
         ? { reasoningEffort: String(options.reasoningEffort) }
         : {},
     })
+    const requestHeaders = await this.requestHeaders(slot, options)
+    // 桥失败时 requestHeaders 已降级，并把原因挂在头对象上（非枚举）。
+    // 这里取出来：若本次果然被风控拒（403/4100404），错误文案要说**真原因**
+    // （钩子没装 / 马维斯没开），而不是让用户对着「请求被风控拦截」猜。
+    const bridgeFailure = (requestHeaders as { __marvisBridgeFailure?: MarvisBridgeFailureInfo })
+      .__marvisBridgeFailure
     const response = await fetch(marvisChatUrl(this.product.baseUrl), {
       method: 'POST',
+      // ⚠️⚠️ 2026-11-18 定论：网关的准入判据是 `Ual-Access-MarvisExt.uskey`
+      //    （真实值 524 字符 / 392 字节 / 前缀 `CsDVDCER`，由 agent 进程内的
+      //    QIMEI SDK 加密生成，**算法不可复现、不落盘、有效期约 60 秒**）。
+      //    自造的 376 字节随机数必然 403 `4100404`。
+      //    ⇒ 优先走 `marvis-uskey-bridge`，向 MarvisAgent 进程实时索取真实头；
+      //    桥不可用时**降级**为本地构造（会 403，但至少能拿到可操作的错误）。
+      //
       // ⚠️ 模型网关**绝不能**带 `Ual-Access-Signature` 等业务签名头：
       //    加了会被判「登录态过期」（403 → 401）。
-      headers: llmHeaders(marvisAccountOf(slot.credential), { accept: 'text/event-stream' }),
+      headers: requestHeaders,
       body: JSON.stringify(payload),
       ...options.signal === undefined ? {} : { signal: options.signal },
     })
@@ -510,6 +601,20 @@ export class MarvisAdapter extends LlmAdapter {
       // ⚠️ 额度必须用字面量 `'QUOTA_EXCEEDED'`（宿主 `QUOTA_EXCEEDED_CODE`
       //    的字面值是 `'QUOTA'`，客户端会把 message 换成「额度已用尽」）。
       const code = marvisErrorKindCode(info.kind)
+      // ⚠️ 只有「桥降级 + 风控拒」这一组合才改写文案：那是**本地环境没配好**，
+      //    与账号、与内容都无关。其余情形保持上游原文（便于比对上游变更）。
+      if (response.status === 403 && text.includes('4100404') && bridgeFailure !== undefined) {
+        throw new LlmError(
+          `marvis: uskey 桥不可用（${bridgeFailure.code}）⇒ 网关以「风控拦截」拒绝。`
+          + `${bridgeFailure.hint === undefined ? '' : ` 修复：${bridgeFailure.hint}。`}`
+          + ` 技术细节：${String(bridgeFailure.message).slice(0, 200)}`,
+          code,
+          {
+            status: response.status,
+            ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
+          },
+        )
+      }
       throw new LlmError(
         `marvis: HTTP ${response.status} — ${text.slice(0, 300)}`,
         code,
