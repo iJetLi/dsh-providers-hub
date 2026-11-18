@@ -413,7 +413,14 @@ describe('fetchModels', () => {
     expect(models[0]?.name).toBe('SenseNova-6.8-Flash · 免费')
   })
 
-  it('promotions 只由 billing_discounts 决定（不猜）', async () => {
+  /**
+   * ⚠️ 本用例原名「promotions 只由 `billing_discounts` 决定（不猜）」，但**断言体
+   * 从来没测过活动数组**（fixture 里根本没有 `billing_discounts`），只测了展示名 ——
+   * 名不副实，已被 2026-11-17 审计登记。2026-11-18 补上活动徽标腿后，这里改成它真正
+   * 该测的两件事：「倍率决定展示名」+「上游没发 `billing_discounts` 就不许凭空造字段」。
+   * 活动字段的完整判据见 `tests/unit/raccoon-promotion.spec.ts`。
+   */
+  it('展示名由 billing_* 倍率决定；上游没发 billing_discounts 就不造活动字段', async () => {
     const { ctx, credentials } = makeCtx()
     credentials.store.set('RACCOON_ACCESS_TOKEN', JSON.stringify(VALID_CRED))
     const fetcher = vi.fn(async () => jsonResponse({
@@ -433,6 +440,13 @@ describe('fetchModels', () => {
     const auth = newService(ctx, { fetcher: fetcher as unknown as typeof fetch })
     const models = await auth.fetchModels()
     expect(models[0]?.name).toBe('GLM-5-3-Flash · x0.2→x0.1')
+    // ★ 「不猜」的真判据：只有上游真发过的键才进原料表 ⇒ 没有 discounts 就必须没有该键。
+    expect(models[0]?.promotion).toEqual({
+      status: 'discount',
+      baseMultiplier: 0.2,
+      effectiveMultiplier: 0.1,
+      statusNote: '限时折扣',
+    })
   })
 })
 

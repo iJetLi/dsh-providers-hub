@@ -3269,6 +3269,9 @@ export function apply(ctx: Context): void {
   const raccoon = new RaccoonAuth(ctx)
   const raccoonAdapter = registerRaccoonLlm(ctx, {
     credentialRef: credentialRef(RACCOON.defaultCredentialRef),
+    // 活动徽标的日志出口：上游改了 `billing_discounts` 的日期格式时，症状是
+    // 「徽标消失、全仓零日志」—— 这条 warn 是唯一能指路的那一格。
+    warn: (message: string) => { ctx.logger?.warn?.(`[raccoon] ${message}`) },
     // 只从 raccoon 自己的账号池取账号，回退到自己的单凭据 ref，
     // 保证不会串用其它 provider 的凭据。
     // provider 实参用 RACCOON 而非字面量：写死字面量在改名/多产品场景下

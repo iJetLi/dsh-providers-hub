@@ -1100,7 +1100,86 @@ billing_effective_multiplier = 0.2`（那条活动**已结束**）。这不只�
 `billing_status_note`，与用例名不符 —— 做活动徽标（issue #101 第二腿）时
 应当补成真断言，别让它继续挂着这个名字。
 
+### ⚠️⚠️ 活动徽标腿：chip 与时间判据（2026-11-18，issue #101 的第五家）
+
+**背景**：三家（buddy / qoder / trae / lobsterai）都已接活动徽标，而 raccoon
+`git grep promos` 在 `raccoon-adapter.ts` / `raccoon-auth.ts` **零命中** ——
+上游明明一直在下发计费活动字段，我们**读丢了**。本次接上：`billing_status` 决定
+chip、「`billing_discounts[]`」决定有效期，悬停腿走 `promotionCandidates()`。
+
+**上游实测**（`GET /api/web/llm/v2/model_catalog`，2026-11-17 21:4x，10 个 chat 条目）：
+
+| 字段 | 形态 |
+|---|---|
+| `billing_status` | 白名单 `normal` / `discount` / `limited_free`（**唯一**决定画不画 chip） |
+| `billing_multiplier` | 原价倍率（`0.75` / `0.5` / `0.2` / `1`） |
+| `billing_effective_multiplier` | **当前生效**倍率（折扣价只认它；`0` = 限免） |
+| `billing_status_note` | 整句说明（「限时折扣至11月22日」/「限免到11月30日」） |
+| `billing_discounts` | **10/10 条目都有该键**，多数是 `[]`；活动中的形如 `[{name, multiplier, active, start_at, end_at}]` |
+| `points_multiplier` | **全部缺失** ⇒ 读它是一条死分支（别再补） |
+
+日期是 **ISO-8601 UTC 带 `Z`**（`2026-11-22T15:59:59Z` = CN 时间 11-22 23:59:59）；
+`daily_start` / `daily_end` 在这次探测里**没出现**，但客户端解析器会读它 ⇒ 已按「声明了就得能读」处理。
+
+**⚠️⚠️ 最容易踩的一格：`billing_discounts[].multiplier` 是「折扣比」，不是折后价。**
+Qwen4-Max 实测 `billing_multiplier 0.75` + `multiplier 0.67` ⇒ 折后 `0.5`（0.75×0.67≈0.5）。
+拿它当折后价会画成「当前 0.67 倍」，而**客户端也从不显示这个字段**（它只用来校验条目非空）。
+
+**判据逐字来自官方客户端**（`C:\Program Files\raccoon-ai\resources\app.asar`，2026-11-11 版）：
+
+- 解析层 `build/electron/main/client/models/hostedModelPresentation.js`：条目只保留
+  「`name` 非空 **且** `multiplier` 是有限数」的；`text()` = trim 后空串视同缺失。
+- 行内 chip（`out/_next/static/chunks/app/layout-8098b7d063162e43.js` 的 `aM`）：
+  `limited_free` ⇒ 只画「限免中」**不画倍率**；`discount` ⇒ 画「限时折扣」且
+  `title = billing_status_note`；`normal` ⇒ 不画 chip。
+- 悬停明细（同文件的 `az`）：摘要 = `originalLimitedFree` / `originalPrefix` +
+  （有 effective ⇒ `currentRate`；没有 ⇒ **上游 note**，再没有才是「限时折扣」）；
+  再逐条 discount：`dailyStart && dailyEnd` **优先**画「每日 s–e」，否则
+  `active === true && endAt` 画「活动至 …」。
+- i18n（chunk `67406`）：`freeOffer 限免中 / Free for now`、`limitedDiscount 限时折扣 / Limited-time discount`、
+  `originalLimitedFree 原 {{original}} 倍，当前限免`、`originalPrefix 原 {{original}} 倍，`、
+  `currentRate 当前 {{effective}} 倍`。倍率格式 `aL = String(Number(x.toFixed(2)))`。
+  ⇒ 我们**没有编任何一句文案**，填充的只有上游自己的数字。
+
+**⚠️ 时间腿的两处刻意分叉（都不是漏做，改前先读这段）**：
+
+1. **`start_at`/`end_at` 读了但读不懂 ⇒ fail-closed（`dailyUnusable`）**：那是
+   「上游声明了结束时刻而算不出来」，继续挂徽标正是 issue #101 的事故形态。
+2. **`billing_discounts` 整个读不懂（非数组）⇒ 退回 `billing_status` 快照，chip 照画**：
+   `billing_status` 是上游自己对「此刻在打折」的表态，chip **不依赖** discounts 才成立；
+   读不懂只损失「哪一天结束」。这与 1 方向相反是有意的 —— 1 是「知道却算不出」，
+   这里是「本来就没告诉」，把后者判死等于**少报**真实活动。两种情况都会留一条 warn
+   （`billing_discounts is not an array` / `cannot be parsed`），且 warn 按消息**去重**
+  （挂在 `toCatalogEntry` 上，每次 `listModels` × 每条模型都跑）。
+
+**其他取舍**：
+
+- **不给颜色**：payload 里没有任何颜色字段（客户端画的是 Tailwind 类）⇒ `tone` 落
+   `neutral`，与 lobsterai 同一条纪律（不替上游发明 hex）。
+- **每条模型只画一枚**：多条 `billing_discounts` 时按「状态相符（限免⇒0 倍 / 折扣⇒0<m<1）、
+  优先 `active`」挑一条；实测每模型只有 1 条。
+- **兜底表不带活动**（编译期快照，红线「静态表必然腐坏」）⇒ 离线 `promotionCandidates()`
+  返回空，与 buddy 同形；在线路径的候选只在 `remoteModels` 里。
+- `plugin-src/client/model-label.js` **不需要按 provider 白名单**：它只看
+  「`promotion.candidates` 的返回表里有没有这个 provider」，实现了 `promotionCandidates()`
+  的家自动出现 ⇒ 接上本方法即得到悬停。
+
+**† 变异验证（8 条，7 条一次就红）**：chip 文案互换 / 倍率精度 2→4 位 /
+丢掉 `validUntil` / 不写 `snapshotActive` / 徽标改用 `Date.now()`（不走注入时钟）/
+候选表不过滤 normal / 多条 discount 不再优先 `active` ⇒ 全部 RED。
+**⚠️ 第 8 条第一次是 GREEN，但那是「变异没打中被测腿」不是无牙**：我废掉的是
+`declaredFrom` 那一支，而用例走的是 `declaredUntil`；换成打中 `declaredUntil` 后
+⇒ RED（2 failed）。这条要记在案：**绿了先怀疑锚点，不要直接登记「无牙」**。
+
+**未做/未采纳**：
+
+- 客户端 chip 的 `title`（`billing_status_note`）在宿主徽标契约里**没有位置**
+  （只有 `text`+`tone`）⇒ 那句说明走悬停腿的 `hover.zh`，与 #110 的方案 A 同一条通路。
+- `sn-sensenova-*` 的**名字里**的「免费」来自兜底表（烘焙），chip 到期会自动消失，
+  但**名字不会** ⇒ 2026-11-30 之后仍须回来清（本文 §3「目录漂移」已登记同一笔债）。
+
 ### e2e 探针
+
 
 ```
 pnpm test:e2e:raccoon        # 只读：凭据/模型目录/倍率/积分余额/账单，零消耗

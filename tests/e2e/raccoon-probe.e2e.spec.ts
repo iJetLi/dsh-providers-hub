@@ -217,6 +217,65 @@ suite('Raccoon 只读探针（不发模型请求、不领取奖励）', () => {
     expect(byId.get('sn-glm-5-3-flash')?.name).toMatch(/^GLM-5-3-Flash · x0\.2(→x[0-9.]+)?$/)
   })
 
+  /**
+   * ★ 活动字段的**形状**守卫（2026-11-18，issue #101 的 raccoon 徽标腿）。
+   *
+   * 徽标是「此刻的函数」，而它唯一的原料是 `billing_status` / `billing_discounts`。
+   * 这一格最脆的是**日期格式**：客户端与我们都用 `Date.parse` 吃 `start_at` / `end_at`，
+   * 上游一旦改成 `2026-11-22 23:59:59`（缺时区）或 epoch 数字，`Date.parse` 仍可能
+   * 成功、却被当成 UTC 读 —— 那是**静默说错一天**，比不画更糟。
+   *
+   * 故这里把「今天实际下发的形态」钉成判据：
+   * 1. 每条模型的 `promotion` 原料都在（解析层不丢字段）；
+   * 2. `billing_status` 落在客户端同一白名单（`normal` / `discount` / `limited_free`）；
+   * 3. 状态非 `normal` 的条目**必须真有** `billing_discounts` 条目 —— 否则 chip 只是
+   *    靠 `billing_status` 快照在挂，说明上游换了表达方式，我们的时间腿等于失效；
+   * 4. 日期必须是**可解析的 ISO 时刻**，且是 `Z` 结尾的 UTC 形态。
+   *
+   * ⚠️ 只读：一个 GET，不发模型请求。
+   */
+  it('★ 活动字段形状没漂：status 白名单 + discounts 条目 + ISO-8601 日期', async () => {
+    const first = await pickUsableEntry()
+    if (first === undefined) return
+    const response = await fetch(
+      `${RACCOON.apiBase}${RACCOON.llmApiPrefix}/model_catalog`,
+      { headers: raccoonHeaders(first.credential), signal: AbortSignal.timeout(30_000) },
+    )
+    expect(response.status, `HTTP ${response.status}`).toBe(200)
+    const models = parseRaccoonModelCatalog(await response.json())
+    let activeModels = 0
+    for (const model of models) {
+      const promotion = model.promotion
+      expect(promotion, `${model.id} 没有活动原料（解析层丢字段了？）`).toBeDefined()
+      expect(
+        ['normal', 'discount', 'limited_free'].includes(String(promotion?.status)),
+        `${model.id} 的 billing_status 不在客户端白名单：${String(promotion?.status)}`,
+      ).toBe(true)
+      if (promotion?.status === 'normal') continue
+      activeModels += 1
+      expect(
+        (promotion?.discounts ?? []).length,
+        `${model.id} 状态是 ${String(promotion?.status)}，却没有 billing_discounts 条目`
+        + '（活动的时间腿会静默失效：chip 只剩 billing_status 快照）',
+      ).toBeGreaterThan(0)
+      for (const discount of promotion?.discounts ?? []) {
+        for (const [field, value] of [['start_at', discount.startAt], ['end_at', discount.endAt]] as const) {
+          if (value === undefined) continue
+          expect(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u.test(value),
+            `${model.id} 的 ${field} 不再是 ISO-8601 UTC 形态：${value}`
+            + '（若是「本地时间无时区」，Date.parse 会按 UTC 读 ⇒ 静默说错一天）',
+          ).toBe(true)
+          expect(Number.isFinite(Date.parse(value)), `${model.id} 的 ${field} 不可解析：${value}`)
+            .toBe(true)
+        }
+      }
+    }
+    // 目录里至少要有**一条**带活动字段的模型，否则上面整段是空跑
+    //（2026-11-18 实测：3 条 —— 两条 sensenova 限免 + Qwen4-Max 限时折扣）。
+    expect(activeModels, '整份目录没有任何活动状态 ⇒ 本段守卫空跑').toBeGreaterThan(0)
+  })
+
   it('⚠️ Raccoon-Auto 不在远端目录里（它是客户端 UI 合成条目）', async () => {
     const first = await pickUsableEntry()
     if (first === undefined) return

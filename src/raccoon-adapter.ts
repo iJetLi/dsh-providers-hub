@@ -46,6 +46,8 @@ import {
 } from './raccoon-product.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import { planSessionTitleThinking } from './session-title.js'
+import { promotionBadgeFor, raccoonPromotionCandidate } from './model-promotions.js'
+import type { PromotionCandidateRow } from './promotion-tooltip.js'
 import {
   registerAdapterIdempotent,
 } from './llm-register-compat.js'
@@ -170,15 +172,16 @@ export function raccoonReasoningInfo(): {
   return { efforts, defaultEffort }
 }
 
-/** 远端模型条目（已归一）。 */
-export interface RaccoonRemoteModel {
-  id: string
-  /** **已规范化**的展示名（含倍率）。 */
-  name: string
-  contextWindow: number
-  maxTokens: number
-  supportsImage: boolean
-}
+/**
+ * 远端模型条目（已归一）。
+ *
+ * ⚠️ **单一来源**在 `src/raccoon-auth.ts`（归一发生在那里）。本文件此前**另立**了一份
+ * 同名同形接口 —— 两套声明放一起，只要有人给一侧加字段，另一侧就静默看不到
+ * （`promotion` 字段本次就是这么漏的：类型检查直接报「Property 不存在」，
+ * 因为 adapter 用的是自己那份）。故改为 re-export，不保留第二份。
+ */
+export type { RaccoonRemoteModel } from './raccoon-auth.js'
+import type { RaccoonRemoteModel } from './raccoon-auth.js'
 
 /**
  * 只放行**安全正整数**。
@@ -287,6 +290,14 @@ export interface RaccoonAdapterOptions {
    * 缓存的**兜底表**会永久留在对话框里，远端目录真的落地也不重读。
    */
   onCatalogLoaded?: () => void
+  /**
+   * 日志出口（诊断用），目前只被**活动徽标**使用。
+   *
+   * ⚠️ 为什么必须有：上游一旦改 `billing_discounts` 的日期格式，症状就是
+   * 「徽标消失、全仓零日志」—— 那正是 issue #101 里最难查的形态
+   * （`hostedModelPresentation` 的解析层吞掉异常，客户端只是不画）。
+   */
+  warn?(message: string): void
 }
 
 // ── 请求级账号轮换（2026-10-05，用户报障「余额用完一个号就卡死」）────────
@@ -549,6 +560,18 @@ export class RaccoonAdapter extends LlmAdapter {
     // ⚠️ 必须走夹子（issue IKS1L5）：兜底表/远端都可能声明 100_000，而上游硬校验
     // 1..65536 ⇒ 声明值会被 DSH 原样回传进每一轮请求，命中就整轮 400。
     const maxTokens = clampRaccoonMaxTokens(model.maxTokens ?? fallback?.maxTokens)
+    // ★ 徽标（issue #101）：上游的计费活动（`billing_status`/`billing_discounts`）。
+    // ⚠️ 时钟必须在**装配时刻**读（与目录新鲜度同一个注入时钟）：目录是 20 分钟一份的
+    // 快照，把徽标在解析时挑定并缓存正是 issue #101 要修的形态
+    // （「活动 11月22日结束，22 日之后还挂着一枚限时折扣」）。
+    // ⚠️ 窗口外**什么都不画**（`standingEligible: false`）：宿主徽标契约只有 text+tone，
+    // 没有悬停位去说「还没到点」。
+    const promotion = raccoonPromotionCandidate(
+      model.promotion, model.id, 'Asia/Shanghai', this.promotionWarn,
+    )
+    const badge = promotionBadgeFor(
+      promotion === undefined ? undefined : [promotion], this.nowMs(),
+    )
     return {
       id: model.id,
       name: model.name,
@@ -562,7 +585,55 @@ export class RaccoonAdapter extends LlmAdapter {
       // 思考档位（两态：深度思考 / 关闭思考）。实测确证见 `raccoonReasoningInfo`。
       // ⚠️ 所有模型一致 —— `extra_body.thinking` 是 provider 级方言，与模型无关。
       reasoning: raccoonReasoningInfo(),
+      // ⚠️ 省略即「本家没有活动可画」（宿主据此回落到裸 name + 倍率）；不写空值。
+      ...badge === undefined ? {} : { badge },
     }
+  }
+
+  /** 注入时钟（与目录 TTL 同一个 `options.now`，单测可推进）。 */
+  private nowMs(): number {
+    return this.options.now?.() ?? Date.now()
+  }
+
+  /**
+   * ★ 本家目录里的**未决**活动候选（方案 A：选择器悬停的数据来源）。
+   *
+   * ⚠️ 与 buddy 家**刻意不同**的一处：本家远端条目里**本来就带** `billing_discounts`
+   * 的原料，故在线路径有候选；而兜底表是编译期快照（红线「静态表必然腐坏」），
+   * **不带**活动 ⇒ 离线路径返回空，与「上游没有活动」同形（与 buddy 一致）。
+   *
+   * ⚠️ 逐条走 `raccoonPromotionCandidate`（与 `toCatalogEntry` **同一个**构造函数），
+   * 不另写一份解析：同一 schema 两套判据是本仓的复发缺陷形态。
+   *
+   * ⚠️ 交出去的是**未决候选**：徽标在装配时刻挑定并缓存正是 issue #101 要修的形态；
+   * 悬停侧（`plugin-src/client/model-label.js`）每次渲染重读时钟。
+   */
+  promotionCandidates(): readonly PromotionCandidateRow[] {
+    const rows: PromotionCandidateRow[] = []
+    for (const model of this.remoteModels ?? []) {
+      const promotion = raccoonPromotionCandidate(
+        model.promotion, model.id, 'Asia/Shanghai', this.promotionWarn,
+      )
+      if (promotion !== undefined) rows.push({ modelId: model.id, promotion })
+    }
+    return rows
+  }
+
+  /**
+   * 徽标解析的日志出口（与 `options.warn` 同一个通道），**按消息去重**。
+   *
+   * ⚠️ 必须去重：本回调挂在 `toCatalogEntry` 上，对**目录里每一条**、每次 `listModels`
+   * 都跑；不去重就是「每次打开选择器 × 每个坏条目」一行。
+   * ⚠️ 上限 64 条：长期运行的进程不该攒出一张没人读的字典；封顶后不再播，
+   * 也不清空（宁可少一条日志，也不要一个会自己长大的内存）。
+   */
+  private readonly promotionWarned = new Set<string>()
+
+  private readonly promotionWarn = (message: string): void => {
+    if (this.promotionWarned.has(message)) return
+    if (this.promotionWarned.size >= 64) return
+    this.promotionWarned.add(message)
+    this.options.warn?.(message)
   }
 
   private async loadCatalogEntries(): Promise<readonly CatalogEntry[]> {
