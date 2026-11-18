@@ -30,7 +30,7 @@ import {
   exclusivePoolRemainingOf,
   packageExpiryMs,
   splitCreditsByExpiry,
-} from '../../plugin-src/client/credit-expiry.js'
+  formatCompactLeft,} from '../../plugin-src/client/credit-expiry.js'
 import { supportsCreditPackageList } from '../../plugin-src/client/credits-capabilities.js'
 import { splitBuddyCreditsByExpiry } from '../../src/buddy-balance-rank.js'
 import type { CreditBalance, CreditPackage } from '../../src/credits.js'
@@ -1864,3 +1864,55 @@ describe('★★ formatPackageExpiry：超出 Date 范围的到期值不得拼�
     expect(out).not.toContain('NaN')
   })
 })
+
+
+/**
+ * ★ **括号里的时长用汉字量词**（用户 2026-11-18：
+ * 「把括号里面的时间分别用汉字表达，如 1时32分，2天3时」）。
+ *
+ * ⚠️ 这是**弹窗正文专用**的紧凑写法，与 tooltip 的 formatLeftCn（「1 小时 32 分钟」）
+ *    刻意分叉：正文宽度极紧（161px 标识列 + 317px 尾段已占满 500px），
+ *    「1 小时 32 分钟」9 字符 → 「1时32分」5 字符，省约 40% 宽度。
+ */
+describe('formatCompactLeft：汉字量词（括号用）', () => {
+  const MIN = 60_000;
+  const HOUR = 3_600_000;
+  const DAY = 86_400_000;
+
+  it('有「天」时只给天与小时', () => {
+    expect(formatCompactLeft(2 * DAY + 3 * HOUR + 40 * MIN)).toBe('2天3时');
+    expect(formatCompactLeft(1 * DAY)).toBe('1天');
+    // 不足 1 小时的部分省略（不是四舍五入，而是按「天+时」粒度）
+    expect(formatCompactLeft(1 * DAY + 30 * MIN)).toBe('1天');
+  });
+
+  it('不足一天时给时与分', () => {
+    expect(formatCompactLeft(1 * HOUR + 32 * MIN)).toBe('1时32分');
+    expect(formatCompactLeft(7 * HOUR + 41 * MIN)).toBe('7时41分');
+    expect(formatCompactLeft(3 * HOUR)).toBe('3时');
+  });
+
+  it('不足一小时时只给分', () => {
+    expect(formatCompactLeft(32 * MIN)).toBe('32分');
+    expect(formatCompactLeft(1 * MIN)).toBe('1分');
+  });
+
+  it('⚠️ 向上取整到分钟（剩余 30 秒显示 1分，不是 0分）', () => {
+    expect(formatCompactLeft(30 * 1000)).toBe('1分');
+    expect(formatCompactLeft(1)).toBe('1分');
+  });
+
+  it('已过期 / 非法输入返回空串（调用方不渲染括号）', () => {
+    expect(formatCompactLeft(0)).toBe('');
+    expect(formatCompactLeft(-1000)).toBe('');
+    expect(formatCompactLeft(undefined)).toBe('');
+    expect(formatCompactLeft(NaN)).toBe('');
+  });
+
+  it('⚠️ 反向：不得再出现 h/m/d 这些英文缩写', () => {
+    for (const ms of [2 * DAY + 3 * HOUR, 1 * HOUR + 32 * MIN, 26 * MIN]) {
+      expect(formatCompactLeft(ms), '不得含英文单位').not.toMatch(/[hmd]/);
+      expect(formatCompactLeft(ms), '必须含中文量词').toMatch(/[天时分]/);
+    }
+  });
+});

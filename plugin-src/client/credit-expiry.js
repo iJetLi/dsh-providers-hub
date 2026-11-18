@@ -864,6 +864,35 @@ export function expiryCountdown(expiresAtMs, now) {
  * ⚠️ 与 `expiryCountdown` 一样**用向上取整到分钟**：剩余 30 秒要显示 `1m`
  * 而不是 `0m` —— 「马上就作废」恰恰是最该看到的信号。
  */
+/**
+ * 剩余时长的**紧凑中文写法**（弹窗正文括号用）。
+ *
+ * ## 形态（用户 2026-11-18 定）
+ *
+ * 「把括号里面的时间分别用汉字表达，如 1时32分，2天3时」
+ *
+ * | 剩余 | 输出 |
+ * |---|---|
+ * | 2 天 3 小时 40 分 | 2天3时 |
+ * | 1 天 0 小时 32 分 | 1天 |
+ * | 1 小时 32 分 | 1时32分 |
+ * | 0 小时 32 分 | 32分 |
+ * | 已过期 / 非法 | 空串（调用方不渲染括号）|
+ *
+ * ## ⚠️ 为什么用「天/时/分」单字而不是「天/小时/分钟」
+ *
+ * 括号在单行账号行里，宽度极度紧张（实测 161px 列宽 + 尾段 317px 已占满 500px）。
+ * 「1 小时 32 分钟」9 字符 → 「1时32分」5 字符，省约 40% 宽度。
+ * tooltip 里仍用完整中文（见 formatLeftCn），信息不丢。
+ *
+ * ## 进位规则
+ *
+ * - 有「时」时**省略分**（2天3时 / 1时32分 —— 后者保留分，因为不足一天）
+ *   实为：有「天」时只给天与小时；不足一天时给时与分；不足一小时只给分。
+ * - 与旧版（2h16m）的分支结构完全一致，只换量词。
+ * - ⚠️ 用向上取整到分钟：剩余 30 秒显示「1分」而不是「0分」——
+ *   「马上就作废」恰恰是最该看到的信号。
+ */
 export function formatCompactLeft(ms) {
   const left = Number(ms);
   if (!Number.isFinite(left) || left <= 0) return '';
@@ -871,9 +900,9 @@ export function formatCompactLeft(ms) {
   const days = Math.floor(minutes / 1440);
   const hours = Math.floor((minutes % 1440) / 60);
   const mins = minutes % 60;
-  if (days > 0) return hours > 0 ? `${days}d${hours}h` : `${days}d`;
-  if (hours > 0) return mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
-  return `${mins}m`;
+  if (days > 0) return hours > 0 ? `${days}天${hours}时` : `${days}天`;
+  if (hours > 0) return mins > 0 ? `${hours}时${mins}分` : `${hours}时`;
+  return `${mins}分`;
 }
 
 /**
@@ -884,7 +913,7 @@ export function formatCompactLeft(ms) {
  * | 函数 | 形态 | 用在哪 |
  * |---|---|---|
  * | `expiryCountdown` | `2 小时 16 分钟` / `3 天 4 小时` | 设置页卡片倒计时 |
- * | `formatCompactLeft` | `2h16m` | 弹窗正文的括号（宽度紧张） |
+ * | `formatCompactLeft` | `2时16分` | 弹窗正文的括号（宽度紧张） |
  * | `formatLeftCn`（本函数） | `2 小时 16 分钟` | **弹窗 tooltip**（无宽度限制） |
  *
  * ⚠️ 为什么 tooltip 不复用 `formatCompactLeft`（用户 2026-11-18 明确）：

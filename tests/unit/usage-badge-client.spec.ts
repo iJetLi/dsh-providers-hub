@@ -144,10 +144,23 @@ describe('用量徽标：槽位接线', () => {
    *    那样视觉上太紧凑、与下拉框风格不一致 ⇒ **已移除 .dim-jh-badgePosNum**。
    *    本条用例反向锁住它：不得再出现定宽数字块。
    */
-  it('账号标识列：整列 161px，格式为「位次 N · 名字」（与下拉框同款）', () => {
+  it('账号标识列：整列 170px，格式为「位次 N · 名字」（与下拉框同款）', () => {
     const idRule = /\.dim-jh-badgeColId \{([^}]*)\}/.exec(styles)
     expect(idRule, '应能取到 .dim-jh-badgeColId 规则体').not.toBeNull()
-    expect(idRule[1], '标识列必须固定 161px（实测上限）').toMatch(/width:\s*161px/)
+    /**
+     * ⚠️ 宽度随字号联动：11px 时是 161px，12px 时必须收到 133px。
+     *    依据：12px 下尾段（总+长/短/临+点号）从 318px 涨到 345px，
+     *    弹窗内宽 479px ⇒ 标识列最多 133px。改字号必须同步重算本值。
+     */
+    /**
+     * ⚠️ 宽度与字号强耦合，且**必须能装下「（无短临积分）」这 5 个字**
+     *    （用户 2026-11-18 明确要求「看看是否能完整显示无短临时积分这5个字」）。
+     *
+     * 依据（12px 实测）：「位次 1 · 」41px + 「康娣 戚（无短临积分）」123.6px
+     *   = 168.1px ⇒ 170px 刚好装下（余量 1.9px）。
+     * 尾段 336.2px + 170px = 506.2px ≤ 内宽 509px（弹窗 530px）✅
+     */
+    expect(idRule[1], '标识列必须固定 170px（完整显示「（无短临积分）」）').toMatch(/width:\s*170px/)
     expect(idRule[1], '标识列不得用 max-width（总积分起点会漂移）').not.toMatch(/max-width:/)
     expect(idRule[1], '标识列不得用百分比宽度').not.toMatch(/width:\s*\d+%/)
     expect(idRule[1], '超长必须省略').toMatch(/text-overflow:\s*ellipsis/)
@@ -155,6 +168,12 @@ describe('用量徽标：槽位接线', () => {
     expect(idRule[1], '必须是 inline-block').toMatch(/display:\s*inline-block/)
     expect(idRule[1], '必须 vertical-align: bottom').toMatch(/vertical-align:\s*bottom/)
     expect(idRule[1], '必须 box-sizing: border-box').toMatch(/box-sizing:\s*border-box/)
+
+    // 行字号/行高（用户 2026-11-18：「行高增加到 20px」「字号增大一号」）
+    const rowRule = /\.dim-jh-badgeRow\.dim-jh-badgeRowInline \{([^}]*)\}/.exec(styles)
+    expect(rowRule, '应能取到行容器规则体').not.toBeNull()
+    expect(rowRule[1], '行字号必须 12px').toMatch(/font-size:\s*12px/)
+    expect(rowRule[1], '行高必须 20px').toMatch(/line-height:\s*20px/)
 
     // ⚠️ 反向：不得再有定宽数字块（用户明确「不需要右对齐」「不那么紧凑」）
     expect(styles, '不得再保留 .dim-jh-badgePosNum 规则').not.toMatch(/\.dim-jh-badgePosNum\s*\{/)
@@ -845,7 +864,7 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
      * ⚠️ 本用例锁的是「加宽这件事真的发生了」，不是锁具体数字 ——
      *    但数字必须写死：改成 280 会回到要换行的形态，那是功能回归。
      */
-    expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*width: 500px/)
+    expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*width: 530px/)
     // 双层柔和阴影
     expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*box-shadow: 0 1px 2px[^}]*0 8px 24px/)
   })
@@ -929,8 +948,8 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(css).toMatch(/bottom: calc\(100% \+ 8px\)/)
     expect(css).toMatch(/right: 0/)
     // ⚠️ 2026-11-18 加宽 280 → 400（四段分档放不下，用户要求「加宽不加高」）
-    expect(css).toMatch(/width: 500px/)
-    expect(css).toMatch(/max-width: min\(500px, 92vw\)/)
+    expect(css).toMatch(/width: 530px/)
+    expect(css).toMatch(/max-width: min\(530px, 92vw\)/)
     expect(css).toMatch(/max-height: 58vh/)
     expect(css).toMatch(/overflow-y: auto/)
     expect(css).toMatch(/z-index: 40/)
@@ -952,7 +971,7 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(inline).not.toMatch(/(^|[^\w])maxWidth:/)
     // 窄屏规则必须还留在样式表里
     // ⚠️ 窄屏 220 → 300（220px 下四段必然折行 = 高度增长，用户明确不许）
-    expect(styles).toMatch(/@media \(max-width: 720px\) \{ \.dim-jh-badgePop \{[^}]*width: 380px/)
+    expect(styles).toMatch(/@media \(max-width: 720px\) \{ \.dim-jh-badgePop \{[^}]*width: 400px/)
   })
 
   /**

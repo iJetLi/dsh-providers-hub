@@ -1903,13 +1903,13 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  * ⚠️ 上限仍用 min() 收在 86vw 内：弹窗是 absolute，窗口本身可能很窄
  * （窄屏还会被下面的媒体查询降到 300px）。
  */
-.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 500px; max-width: min(500px, 92vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
+.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 530px; max-width: min(530px, 92vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
 /* 窄屏时徽标只留状态点，弹窗也随之收窄（否则它会盖住模型选择器）。
  * 宽度写 min() 而非媒体查询覆盖：弹窗是 absolute，媒体查询命中时按钮虽已
  * 收窄，但弹窗仍按 400px 渲染会显得与触发点不匹配。
  * ⚠️ 窄屏降到 300px（原 220px）：四段分档在 220px 里必然换行 ⇒ 每个账号多一行
  *    ⇒ 高度暴涨。宁可窄屏也保留 300px 的单行能力，超出部分由 86vw/76vw 兜底。 */
-@media (max-width: 720px) { .dim-jh-badgePop { width: 380px; max-width: min(380px, 88vw); } }
+@media (max-width: 720px) { .dim-jh-badgePop { width: 400px; max-width: min(400px, 88vw); } }
 .dim-jh-badgeHead { display: flex; align-items: center; gap: 5px; padding-bottom: 7px; }
 .dim-jh-badgeTitle { flex: none; max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dim-jh-badgeAt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }
@@ -2063,10 +2063,10 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* ⚠️ 2026-11-18 用户要求「字号再大一号」：10 → 11px，行高 14 → 15px。
+  /* ⚠️ 2026-11-18 用户要求「字号再大一号」：10 → 11px；
      11px 下分档段宽 213 → 234px ⇒ 弹窗同步加宽到 500px（否则溢出 6px）。 */
-  font-size: 11px;
-  line-height: 15px;
+  font-size: 12px;
+  line-height: 20px;
 }
 /**
  * ★★ **账号标识列（位次 + 账号名 + 原因）：固定 161px**
@@ -2097,13 +2097,26 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-badgeColId {
   display: inline-block;
   box-sizing: border-box;
-  width: 161px;
+  /* ★ 2026-11-18 用户定稿：本列 170px + 弹窗 530px。
+     
+     依据（12px 字号实测）：
+       「位次 1 · 」前缀              = 41.0px
+       「康娣 戚（无短临积分）」名字    = 123.6px
+       ⇒ 完整标签「位次 1 · 康娣 戚（无短临积分）」= 168.1px
+       ⇒ 170px 列宽可**完整显示**「（无短临积分）」这 5 个字（余量 1.9px）。
+     
+     尾段最大需求（总+长/短/临+点号）= 336.2px，
+     弹窗内宽 530 − 21 = 509px ⇒ 170 + 336.2 = 506.2px ≤ 509px ✅
+     （500px 时会差 25.3px、那 5 个字必被截断 —— 这就是加宽到 530 的原因）
+     
+     ⚠️ 宽度与字号强耦合：改字号必须重算本值（12px→336px 尾段，11px→318px）。 */
+  width: 170px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: bottom;
   font-size: 11px;
-  line-height: 15px;
+  line-height: 18px;
   color: var(--dsw-alias-label-primary);
 }
 
@@ -2129,8 +2142,8 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  */
 .dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeValue {
   display: inline;
-  font-size: 11px;
-  line-height: 15px;
+  font-size: 12px;
+  line-height: 20px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -2200,8 +2213,8 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-badgeRowNoteInline > .dim-jh-badgeNoteSep {
   /* ⚠️ 这里必须 inline（不是 flex item，故不会被 blockify） */
   display: inline;
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 12px;
+  line-height: 20px;
 }
 
 /* ⚠️⚠️ 中点分隔符**必须自带左右间距**（2026-11-18 真机报障）：
@@ -2216,8 +2229,8 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    而用户明确要求「高度不能增加」⇒ 用 line-height 压回并居中。 */
 .dim-jh-badgeRowNoteInline > .dim-jh-badgeNoteSep {
   margin: 0 3px;
-  font-size: 11px;
-  line-height: 10px;
+  font-size: 12px;
+  line-height: 20px;
   vertical-align: middle;
   color: var(--dsw-alias-label-tertiary);
 }
@@ -2225,8 +2238,8 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeNoteSep {
   display: inline;
   margin: 0 4px;
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 12px;
+  line-height: 20px;
   color: var(--dsw-alias-label-tertiary);
 }
 
