@@ -121,29 +121,48 @@ describe('用量徽标：槽位接线', () => {
    *    max-width 只在内容超长时生效，短名字时宽度随内容变 ⇒ 总积分仍不对齐。
    *    这条是本用例的核心判据（把 width 改成 max-width 必须变红）。
    */
-  it('账号行两列定宽：位次 22px 右对齐 + 账号名 100px 左对齐', () => {
-    const posRule = /\.dim-jh-badgeColPos \{([^}]*)\}/.exec(styles)
-    expect(posRule, '应能取到 .dim-jh-badgeColPos 规则体').not.toBeNull()
-    expect(posRule[1], '位次列必须固定 22px（两位数字宽）').toMatch(/width:\s*22px/)
-    // ⚠️ 反向：不得写成 max-width（那会让宽度随内容变，列就不对齐了）
-    expect(posRule[1], '位次列不得用 max-width').not.toMatch(/max-width:/)
-    expect(posRule[1], '位次列必须右对齐（个位/十位才对得齐）').toMatch(/text-align:\s*right/)
-    expect(posRule[1], '位次列必须等宽数字').toMatch(/tabular-nums/)
+  /**
+   * ★★ **账号标识列**（用户 2026-11-18：「位次列不需要跟帐号列分成两列，做成一列就行」）。
+   *
+   * 结构：`位次[13px 右对齐数字]·账号名`，整列固定 161px。
+   *
+   * ⚠️ 为什么必须是「固定 width」而不是 max-width：
+   *    max-width 只在内容超长时生效，短内容时宽度随内容变 ⇒ 总积分起点漂移。
+   * ⚠️ 为什么数字要单独包一层 13px 定宽块：
+   *    塞空格在比例字体下对不齐（空格宽度随字体变）；
+   *    定宽块 + text-align:right 由浏览器保证，任何字体/缩放都一致。
+   */
+  it('账号标识列合并成一列：161px，内含 13px 右对齐数字块', () => {
+    const idRule = /\.dim-jh-badgeColId \{([^}]*)\}/.exec(styles)
+    expect(idRule, '应能取到 .dim-jh-badgeColId 规则体').not.toBeNull()
+    expect(idRule[1], '标识列必须固定 161px（实测上限）').toMatch(/width:\s*161px/)
+    expect(idRule[1], '标识列不得用 max-width（总积分起点会漂移）').not.toMatch(/max-width:/)
+    expect(idRule[1], '标识列不得用百分比宽度').not.toMatch(/width:\s*\d+%/)
+    expect(idRule[1], '超长必须省略').toMatch(/text-overflow:\s*ellipsis/)
+    expect(idRule[1], '必须 nowrap（否则会换行撑高）').toMatch(/white-space:\s*nowrap/)
+    expect(idRule[1], '必须是 inline-block').toMatch(/display:\s*inline-block/)
+    expect(idRule[1], '必须 vertical-align: bottom').toMatch(/vertical-align:\s*bottom/)
+    expect(idRule[1], '必须 box-sizing: border-box').toMatch(/box-sizing:\s*border-box/)
 
-    const nameRule = /\.dim-jh-badgeRow\.dim-jh-badgeRowInline > \.dim-jh-badgeRowName \{([^}]*)\}/.exec(styles)
-    expect(nameRule, '应能取到账号名列规则体').not.toBeNull()
-    expect(nameRule[1], '账号名列必须固定 100px').toMatch(/width:\s*100px/)
-    // ⚠️⚠️ 核心判据：不能是 max-width / 百分比（会导致总积分起点漂移）
-    expect(nameRule[1], '账号名列不得用 max-width（总积分起点会漂移）').not.toMatch(/max-width:/)
-    expect(nameRule[1], '账号名列不得用百分比宽度').not.toMatch(/width:\s*\d+%/)
-    expect(nameRule[1], '超长必须省略').toMatch(/text-overflow:\s*ellipsis/)
-    expect(nameRule[1], '必须 nowrap（否则会换行撑高）').toMatch(/white-space:\s*nowrap/)
-    // ⚠️ inline-block 才能既定宽又参与行内流（inline 的 width 无效）
-    expect(nameRule[1], '必须是 inline-block').toMatch(/display:\s*inline-block/)
+    const numRule = /\.dim-jh-badgePosNum \{([^}]*)\}/.exec(styles)
+    expect(numRule, '应能取到 .dim-jh-badgePosNum 规则体').not.toBeNull()
+    expect(numRule[1], '位次数字块必须固定 13px').toMatch(/width:\s*13px/)
+    expect(numRule[1], '位次数字块必须右对齐（一位/两位才对得齐）').toMatch(/text-align:\s*right/)
+    expect(numRule[1], '位次数字块必须等宽数字').toMatch(/tabular-nums/)
+  })
 
-    // 列元素必须垂直对齐到同一基线，否则会上下错位
-    expect(nameRule[1], '账号名列必须 vertical-align: bottom').toMatch(/vertical-align:\s*bottom/)
-    expect(posRule[1], '位次列必须 vertical-align: bottom').toMatch(/vertical-align:\s*bottom/)
+  /**
+   * ★ **不可用账号只灰标识列**（用户 2026-11-18：「只有位次列（含帐号名）置灰，其他不置灰」）。
+   */
+  it('不可用账号只灰标识列，总积分与分档段不灰', () => {
+    const disabledRule = /\.dim-jh-badgeColId\[data-disabled="true"\] \{([^}]*)\}/.exec(styles)
+    expect(disabledRule, '必须有 data-disabled 的灰化规则').not.toBeNull()
+    expect(disabledRule[1], '灰化规则必须改 color').toMatch(/color:/)
+    // ⚠️ 反向：不得用 opacity（会让对比度一起降，深色主题下可能看不清）
+    expect(disabledRule[1], '灰化不得用 opacity').not.toMatch(/opacity:/)
+    // ⚠️ 反向：灰化规则的选择器只能命中标识列，不能是整行
+    const wholeRow = /\.dim-jh-badgeRow\.dim-jh-badgeRowInline\[data-disabled/.test(styles)
+    expect(wholeRow, '不得有「整行置灰」的规则').toBe(false)
   })
 
   /**
@@ -803,7 +822,7 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
      * ⚠️ 本用例锁的是「加宽这件事真的发生了」，不是锁具体数字 ——
      *    但数字必须写死：改成 280 会回到要换行的形态，那是功能回归。
      */
-    expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*width: 480px/)
+    expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*width: 500px/)
     // 双层柔和阴影
     expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*box-shadow: 0 1px 2px[^}]*0 8px 24px/)
   })
@@ -887,8 +906,8 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(css).toMatch(/bottom: calc\(100% \+ 8px\)/)
     expect(css).toMatch(/right: 0/)
     // ⚠️ 2026-11-18 加宽 280 → 400（四段分档放不下，用户要求「加宽不加高」）
-    expect(css).toMatch(/width: 480px/)
-    expect(css).toMatch(/max-width: min\(480px, 92vw\)/)
+    expect(css).toMatch(/width: 500px/)
+    expect(css).toMatch(/max-width: min\(500px, 92vw\)/)
     expect(css).toMatch(/max-height: 58vh/)
     expect(css).toMatch(/overflow-y: auto/)
     expect(css).toMatch(/z-index: 40/)
@@ -910,7 +929,7 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(inline).not.toMatch(/(^|[^\w])maxWidth:/)
     // 窄屏规则必须还留在样式表里
     // ⚠️ 窄屏 220 → 300（220px 下四段必然折行 = 高度增长，用户明确不许）
-    expect(styles).toMatch(/@media \(max-width: 720px\) \{ \.dim-jh-badgePop \{[^}]*width: 360px/)
+    expect(styles).toMatch(/@media \(max-width: 720px\) \{ \.dim-jh-badgePop \{[^}]*width: 380px/)
   })
 
   /**

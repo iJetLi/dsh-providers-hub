@@ -1903,13 +1903,13 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  * ⚠️ 上限仍用 min() 收在 86vw 内：弹窗是 absolute，窗口本身可能很窄
  * （窄屏还会被下面的媒体查询降到 300px）。
  */
-.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 480px; max-width: min(480px, 92vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
+.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 500px; max-width: min(500px, 92vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
 /* 窄屏时徽标只留状态点，弹窗也随之收窄（否则它会盖住模型选择器）。
  * 宽度写 min() 而非媒体查询覆盖：弹窗是 absolute，媒体查询命中时按钮虽已
  * 收窄，但弹窗仍按 400px 渲染会显得与触发点不匹配。
  * ⚠️ 窄屏降到 300px（原 220px）：四段分档在 220px 里必然换行 ⇒ 每个账号多一行
  *    ⇒ 高度暴涨。宁可窄屏也保留 300px 的单行能力，超出部分由 86vw/76vw 兜底。 */
-@media (max-width: 720px) { .dim-jh-badgePop { width: 360px; max-width: min(360px, 88vw); } }
+@media (max-width: 720px) { .dim-jh-badgePop { width: 380px; max-width: min(380px, 88vw); } }
 .dim-jh-badgeHead { display: flex; align-items: center; gap: 5px; padding-bottom: 7px; }
 .dim-jh-badgeTitle { flex: none; max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dim-jh-badgeAt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }
@@ -2057,91 +2057,101 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    双类把特异性提到 0,2,0 才能稳定压过它。 */
 .dim-jh-badgeRow.dim-jh-badgeRowInline {
   /* ⚠️ 不能用 flex（2026-11-18 三次实测后定论）：flex item 会被 blockify，
-     内部各段会各占一行（122px → 改 inline 后仍 50px）。纯行内流 ⇒ 实测 14px。 */
+     内部各段会各占一行（122px → 改 inline 后仍 50px）。纯行内流才保持单行。 */
   display: block;
   /* ⚠️ 单行不折：折行就是「高度增加」，用户明确不许。装不下由省略号收尾。 */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 10px;
-  line-height: 14px;
+  /* ⚠️ 2026-11-18 用户要求「字号再大一号」：10 → 11px，行高 14 → 15px。
+     11px 下分档段宽 213 → 234px ⇒ 弹窗同步加宽到 500px（否则溢出 6px）。 */
+  font-size: 11px;
+  line-height: 15px;
 }
 /**
- * ★★ **账号名列：固定 100px**（用户 2026-11-18：「账号名宽度为 100px」）。
+ * ★★ **账号标识列（位次 + 账号名 + 原因）：固定 161px**
+ * （用户 2026-11-18：「位次列不需要跟帐号列分成两列，做成一列就行」）。
  *
- * ## 为什么是固定宽而不是 max-width
+ * ## 为什么要合并成一列
+
+ * 分成两列时，位次列固定宽+右对齐，账号名列再固定宽 —— 视觉上中间会有一道
+ * 明显的空隙（两个定宽盒之间无法消除）。合并成一列后「位次 N·名字」是一段
+ * 连续文本，读起来自然。
  *
- * 用户要求「总积分显示统一从固定位置开始」⇒ 账号名的宽度必须**恒定**，
- * 否则长名字会把总积分往右推。max-width 只在内容超长时生效，短名字时
- * 宽度仍随内容变 ⇒ 后面的总积分不对齐。
+ * ## 161px 是实测出来的上限
  *
- * ## 100px 能放什么（实测 10px 字号）
+ * | 项 | 11px 下宽度 |
+ * |---|---|
+ * | 尾段最大（总积分 + 长/短/临含括号） | 约 317px |
+ * | 弹窗内宽（500 − 21） | 479px |
+ * | **⇒ 本列最大可用** | **161px** |
  *
- * | 内容 | 宽度 | 结果 |
- * |---|---|---|
- * | 134****59 | 47.5px | 完整 |
- * | 190****0883 | 59.3px | 完整 |
- * | 177****4916 测试昵称 | 102px | 截断成 177****4916 测... |
+ * 161px 能放：「位次 10·clover e」(100px) /「位次 1·康娣 戚（无短临积分）」(154px)
+ * 放不下：「位次 11·某个很长的邮箱地址（约 20 字符）」(194px) ⇒ **截断 + tooltip 全文**。
  *
- * ⚠️ 截断时靠 title 兜底（hover 看全文）。
- * ⚠️ inline-block 而非 inline：要能独立省略号，且参与行内流。
- * ⚠️ vertical-align: bottom：与其它 inline-block 列基线对齐（否则会上下错位）。
+ * ⚠️ 必须 inline-block + 固定 width：行容器是 display:block 的行内流（不是 flex），
+ *    只有 inline-block 才能既定宽又参与单行排版。
+ * ⚠️ 必须 box-sizing: border-box（否则 padding 会加在 161px 之外）。
+ * ⚠️ 必须 vertical-align: bottom（与相邻的行内元素对齐基线）。
  */
-.dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeRowName {
+.dim-jh-badgeColId {
   display: inline-block;
-  /* ⚠️ 必须 box-sizing: border-box（本文件全局可能没有 reset）：
-     否则 padding 会加在 100px 之外，位置又不对齐。 */
   box-sizing: border-box;
-  width: 100px;
+  width: 161px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: bottom;
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 11px;
+  line-height: 15px;
   color: var(--dsw-alias-label-primary);
 }
 
 /**
- * ★★ **位次列：固定 22px + 右对齐**（用户 2026-11-18：
- * 「位次也做成至少两位数字宽度，在少于 100 个帐号时位次也是对齐的」）。
+ * ★ **不可用账号：只有本列置灰**（用户 2026-11-18 明确：「不可用帐号只有位次列
+ * （含帐号名）置灰，其他不置灰」）。
  *
- * 右对齐让个位与个位对齐、十位与十位对齐：
- *
- *     7 · 134****59  ...
- *    19 · 190****0883 ...
- *
- * ⚠️ 22px 的依据：「位次 10」若带前缀要 34.7px，纯数字 10 只要 11.7px
- *    ⇒ 22px 足够放两位数还有余量，且三位数（100+）也不会溢出。
- * ⚠️ 必须 tabular-nums：等宽数字，否则 7 与 19 的右边界会因字形宽度不同而抖动。
- * ⚠️ 必须是 inline-block（不是 inline）—— 固定宽度对 inline 无效。
+ * ⚠️ 与「全行置灰」相反 —— 总积分与分档段**保持原色**，让用户仍能看到这个号
+ *    有多少积分、哪一档，只是知道它当前不能被选。
+ * ⚠️ 用 color 而不是 opacity：opacity 会让文字与背景的对比度一起降，
+ *    在深色主题下可能淡到看不清（本仓有过对比度审计记录）。
  */
-.dim-jh-badgeColPos {
-  display: inline-block;
-  box-sizing: border-box;
-  width: 22px;
-  text-align: right;
-  vertical-align: bottom;
-  font-size: 10px;
-  line-height: 14px;
-  font-variant-numeric: tabular-nums;
-  color: var(--dsw-alias-label-tertiary);
+.dim-jh-badgeColId[data-disabled="true"] {
+  color: var(--dsw-alias-label-tertiary, #8f959e);
 }
-/* ⚠️ 名字与读数之间**必须有明确间隔**（2026-11-18 实测 5px 太窄，
-   渲染出来是「134****59 7464.50」黏成一串，读不出哪是账号哪是余额）。
-   ⇒ 8px + 一个中点分隔符（由 JSX 侧的 · 提供，这里只给左边距）。 */
+
+/**
+ * ★★ **位次数字块：定宽 13px + 右对齐**（用户 2026-11-18：
+ * 「位次小于 10 时，采用位次 2 这种位次加空格再一位数字，看起来几乎对齐就行」）。
+ *
+ *     位次[  1]·康娣 戚      ← 数字块右对齐，1 贴右
+ *     位次[ 10]·clover e     ← 0 与上面的 1 同位置
+ *     位次[123]·xyz          ← 三位超出 13px，块自动撑开（用户接受）
+ *
+ * ⚠️ 为什么用定宽块而不是塞空格：
+ *    - 空格宽度随字体变化（比例字体下「位次 2」与「位次 11」的空格不等宽），
+ *      在非等宽字体下**根本对不齐**；
+ *    - 定宽块 + text-align:right 由浏览器保证，任何字体/缩放都一致。
+ *    ⇒ 用户的诉求是「看起来几乎对齐就行」，定宽块是**真对齐**（超预期）。
+ * ⚠️ tabular-nums：等宽数字，避免 1 与 0 字形宽度差导致的细微抖动。
+ */
+.dim-jh-badgePosNum {
+  display: inline-block;
+  width: 13px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 /**
  * 总积分读数（总7564.5）。
  *
- * ⚠️ 不再是**定宽列** —— 用户明确「长积分不需要单独左对齐」，
- *    总积分后面紧跟长/短/临。
- * ⚠️ 但因为位次列(22px)与账号名列(100px)是定宽，总积分的**起始位置**
- *    对所有账号天然一致（左对齐），不需要再给本元素定宽。
+ * ⚠️ 不定宽 —— 用户明确「长积分不需要单独左对齐」，总积分后面紧跟长/短/临。
+ * ⚠️ 但因为前面的标识列是固定 161px，总积分的**起始位置**对所有账号天然一致。
  */
 .dim-jh-badgeRow.dim-jh-badgeRowInline > .dim-jh-badgeValue {
   display: inline;
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 11px;
+  line-height: 15px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }

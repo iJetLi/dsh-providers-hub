@@ -138,7 +138,9 @@ describe('两处 label 共用同一函数（防格式漂移）', () => {
     expect(suffixUses, 'reasonSuffix(reason) 应出现两次（下拉框 + 积分列表）').toBeGreaterThanOrEqual(2)
     // ④ 积分列表的每一行都由 rowMetaOf 查到 meta 后再算（不能跳过 meta 直接拼）
     expect(source, '账号行必须通过 rowMetaOf 取 meta').toContain('rowMetaOf(row)')
-    expect(source, '拿到 meta 后必须调 accountRowParts').toMatch(/accountRowParts\(meta, reasonOf\(meta\)\)/)
+    // ⚠️ 2026-11-18：reason 先算出来（同一份 reasonOf 结果既判灰化、也拼后缀）
+    expect(source, '拿到 meta 后必须先算 reason').toMatch(/const reason = meta === null \? null : reasonOf\(meta\)/)
+    expect(source, '再用 reason 调 accountRowParts').toMatch(/accountRowParts\(meta, reason\)/)
   })
 
   it('★ 用的是「位次」而不是「账号」', () => {
@@ -149,7 +151,7 @@ describe('两处 label 共用同一函数（防格式漂移）', () => {
 
   it('★ 后缀保留全角括号', () => {
     expect(source).toContain("return '（本模型限流）'")
-    expect(source).toContain("return '（无临时积分）'")
+    expect(source).toContain("return '（无短临积分）'")
   })
 })
 

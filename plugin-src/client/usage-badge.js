@@ -1622,7 +1622,22 @@ function UsageBadgeActive(props) {
     // 返回 `none` 等价（选号层会跳过它，故起点也必须跳过）。
     if (rotationState?.locked === true) {
       const expiring = expiringOf(account.id);
-      // ⚠️ 只有**明确读到** `expiring === 0` 才判 —— 读不到（`undefined`）不倒向不可用。
+      /**
+       * ⚠️ 只有**明确读到** `expiring === 0` 才判 —— 读不到（`undefined`）不倒向不可用。
+       *
+       * 而 `expiring` 是 `imminent + shortTerm` 的**派生和**（credit-expiry.js 里
+       * 两个分支同加同减，守恒式锁死）⇒ 本判据的真实语义是「短临都没有」：
+       *
+       * | 短期 | 临期 | expiring | 判定 |
+       * |---|---|---|---|
+       * | 0 | 0 | 0 | **不可用**（锁定永久积分模式下没得用）|
+       * | >0 | 0 | >0 | 可用 |
+       * | 0 | >0 | >0 | 可用 |
+       * | >0 | >0 | >0 | 可用 |
+       *
+       * ⚠️ 「只有长期」「只有永久」也落第一行 ⇒ 不可用。这是**设计意图**：
+       *    「锁定永久积分」模式下长期/永久积分本来就不参与消费。
+       */
       if (expiring === 0) return 'no-expiring';
     }
     return null;
@@ -1677,7 +1692,19 @@ function UsageBadgeActive(props) {
     switch (reason) {
       case 'policy-blocked': return '（账号受限）';
       case 'rate-limited': return '（本模型限流）';
-      case 'no-expiring': return '（无临时积分）';
+      /**
+       * ⚠️ 2026-11-18 语义澄清：「无临时积分」→ **「无短临积分」**。
+       *
+       * 判据是 `expiring === 0`，而 `expiring` 是 **`imminent + shortTerm` 的派生和**
+       * （已逐场景验证：有短无临 ⇒ expiring>0；有临无短 ⇒ expiring>0）。
+       * ⇒ 该码真正表达的是「**短期和临期都没有**」，旧文案「无临时积分」会让用户
+       *    误以为「只要没有临期就算不可用」—— 而实际上「无短期」或「无临期」
+       *    单独出现时账号完全可用（用户 2026-11-18 亲自指出这一点）。
+       *
+       * ⚠️ 因此**不需要**再拆出「无短期积分」「无临期积分」两个码：
+       *    那两种情况下账号是可用的，不该标灰。
+       */
+      case 'no-expiring': return '（无短临积分）';
       default: return '';
     }
   }
@@ -2147,41 +2174,58 @@ function UsageBadgeActive(props) {
             ? null
             : renderSplitNote(splitParts(row.balance, windowDays, provider, imminentDays));
           /**
-           * ★ **列对齐结构**（用户 2026-11-18）：
+           * ★★ **合并成一列**（用户 2026-11-18：「位次列不需要跟帐号列分成两列，
+           * 做成一列就行」）：
            *
-           *   [位次 22px 右对齐] · [账号名 100px 左对齐+省略] · [总xx] · [长/短/临 紧跟]
+           *   位次[ 1]·康娣 戚（无短临积分）     ← 「位次」+ 定宽数字块 + ·账号名
+           *   位次[10]·clover e                ← 数字块右对齐 ⇒ 与上面的 1 同位置
            *
-           * 前两列定宽 ⇒ **总积分的起始位置对所有账号都相同**（左对齐）；
-           * 长/短/临紧跟总积分之后（用户明确「长积分不需要单独左对齐」）。
+           * ## 为什么合并
            *
-           * ⚠️ 列元素必须 inline-block + 固定 width：行容器是 display:block 的
-           *    行内流（不是 flex —— flex 会让行高从 14px 变 87px，前几轮实测过）。
-           * ⚠️ 必须 vertical-align: bottom：否则不同高度的 inline-block 会错位。
+           * 分成两个定宽盒时，盒与盒之间必然有一道空隙（inline-block 无法消除），
+           * 视觉上「位次」与「账号名」像两块不相干的东西。合并成一段连续文本后
+           * 读起来是「第 N 位的某个账号」。
+           *
+           * ## 位次数字为什么要单独包一个定宽块
+           *
+           * 用户要求「位次小于 10 时……看起来几乎对齐就行」。塞空格在比例字体下
+           * **对不齐**（空格宽度随字体变），而定宽块 + text-align:right 由浏览器
+           * 保证 ⇒ 是真对齐（超预期满足）。
+           *
+           * ## ⚠️ 置灰只作用于本列
+           *
+           * 用户 2026-11-18 明确：「不可用帐号只有位次列（含帐号名）置灰，其他不置灰」
+           * ⇒ data-disabled 挂在**本列**上，总积分与分档段保持原色。
            */
           const meta = rowMetaOf(row);
-          const rowParts = meta === null ? null : accountRowParts(meta, reasonOf(meta));
+          const reason = meta === null ? null : reasonOf(meta);
+          const rowParts = meta === null ? null : accountRowParts(meta, reason);
+          const disabled = reason !== null;
           return React.createElement('div', {
             key: row.accountId,
             className: 'dim-jh-badgeRow dim-jh-badgeRowInline',
           }, [
-            // ① 位次列（纯数字，右对齐，定宽 22px）
+            // ① 合并列：位次 + 账号名 + 原因后缀
             React.createElement('span', {
-              key: 'pos',
-              className: 'dim-jh-badgeColPos',
+              key: 'id',
+              className: 'dim-jh-badgeColId',
+              'data-disabled': disabled ? 'true' : 'false',
+              // 完整信息进 tooltip（名字超长被截断时靠它读全文）
               title: rowParts === null
-                ? '位次：默认顺序里的第 N 位（该账号已不在池中）'
-                : `位次 ${rowParts.position}：默认顺序里的第 ${rowParts.position} 位`,
-            }, rowParts === null ? '—' : rowParts.position),
-            React.createElement('span', {
-              key: 'pos-sep',
-              className: 'dim-jh-badgeNoteSep',
-            }, '·'),
-            // ② 账号名列（定宽 100px，左对齐，超长省略，全文进 tooltip）
-            React.createElement('span', {
-              key: 'l',
-              className: 'dim-jh-badgeRowName',
-              title: row.accountId,
-            }, rowParts === null ? (row.nickname || row.accountId) : rowParts.name),
+                ? '该账号已不在账号池中'
+                : `位次 ${rowParts.position}：默认顺序里的第 ${rowParts.position} 位 · ${rowParts.name}`,
+            }, [
+              React.createElement('span', { key: 'p' }, '位次 '),
+              // ⚠️ 定宽 13px + 右对齐的数字块（见 .dim-jh-badgePosNum 注释）
+              React.createElement('span', {
+                key: 'n',
+                className: 'dim-jh-badgePosNum',
+              }, rowParts === null ? '—' : rowParts.position),
+              React.createElement('span', { key: 's' }, '·'),
+              React.createElement('span', { key: 'd' }, rowParts === null
+                ? (row.nickname || row.accountId)
+                : rowParts.name),
+            ]),
             /**
              * ⚠️ 名字与读数之间**必须有一个分隔符**（2026-11-18 真机报障）：
              * 两者都是 `display: inline`，仅靠 CSS 的 `margin-left: 8px` 在
