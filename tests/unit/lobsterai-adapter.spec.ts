@@ -1218,6 +1218,24 @@ describe('LobsteraiAdapter SSE 消费', () => {
     expect(usage).toMatchObject({ usage: { inputTokens: 200, outputTokens: 10, cacheReadTokens: 800 } })
   })
 
+  it('★★ 上游明确上报 cached_tokens=0 时必须保留（不能折成「没上报」）', async () => {
+    // PR #122 的核心语义：`0` = 这次没命中，`undefined` = 上游没上报。
+    // 旧实现是 `cachedTokens > 0 ? { cacheReadTokens } : {}` ⇒ 明确 0 被丢掉，
+    // 面板上「命中率 0%」与「渠道不给这个数」就分不出来（前者该显示 0%，后者该不显示）。
+    const { adapter } = makeAdapter(() => sseResponse([
+      JSON.stringify({
+        choices: [{ delta: { content: 'x' } }],
+        usage: {
+          prompt_tokens: 1000, completion_tokens: 10,
+          prompt_tokens_details: { cached_tokens: 0 },
+        },
+      }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+    ]))
+    const usage = (await collect(generateOptions(), adapter)).find((c) => c.type === 'usage')
+    expect(usage).toMatchObject({ usage: { inputTokens: 1000, outputTokens: 10, cacheReadTokens: 0 } })
+  })
+
   it('上游把错误放进 SSE 帧时抛出 SERVER 错误', async () => {
     const { adapter } = makeAdapter(() => sseResponse([
       JSON.stringify({ error: { message: '模型不可用' } }),

@@ -366,6 +366,26 @@ describe('BuddyAdapter', () => {
       expect(body.max_tokens).toBe(128_000)
     })
 
+    it('★★ 上游明确上报 cached_tokens=0 时必须保留（不能折成「没上报」）', async () => {
+      // PR #122：`0` = 这次确实没命中缓存，`undefined` = 上游没给这个数。
+      // 旧实现是 `cachedTokens > 0 ? { cacheReadTokens } : {}` ⇒ 明确 0 被丢掉，
+      // 面板上「命中率 0%」与「渠道不给这个数」就分不出来。
+      const adapter = makeAdapter({
+        fetchImpl: async () => sseResponse(
+          'data: {"choices":[{"delta":{"content":"x"}}],"usage":{"prompt_tokens":1000,"completion_tokens":10,'
+          + '"prompt_tokens_details":{"cached_tokens":0}}}\n\n'
+          + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        ),
+      })
+      const chunks = await collectChunks(adapter, {
+        model: 'deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+        signal: new AbortController().signal,
+      } as never)
+      const usage = chunks.find((chunk) => chunk.type === 'usage')
+      expect(usage).toMatchObject({ usage: { inputTokens: 1000, outputTokens: 10, cacheReadTokens: 0 } })
+    })
+
     it('调用方显式给出的 maxTokens 优先于远端与兜底表', async () => {
       let body: Record<string, unknown> = {}
       const adapter = makeAdapter({

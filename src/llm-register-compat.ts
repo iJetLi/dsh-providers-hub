@@ -307,7 +307,12 @@ export async function* recordThroughStream(
           const reasoning = readCount(usage.reasoningTokens)
           if (input !== undefined) inputTokens = input
           if (output !== undefined) outputTokens = output
-          if (cacheRead !== undefined) cacheReadTokens = cacheRead > 0 ? cacheRead : undefined
+          // ⚠️ 明确上报的 0 必须原样保留（PR #122）：`0` = 这次没命中缓存，
+          // `undefined` = 上游没上报。折叠成 undefined 会让面板的命中率与网关
+          // 对外口径对不上（那边已经把两者分开了）。
+          // 下面 cacheWrite / reasoning 仍按旧的 `> 0` 省略 —— 那两个字段的
+          // 「0 与未上报」在本仓没有区分需求，别顺手改成同一套（会扩大改动面）。
+          if (cacheRead !== undefined) cacheReadTokens = cacheRead
           if (cacheWrite !== undefined) cacheWriteTokens = cacheWrite > 0 ? cacheWrite : undefined
           if (reasoning !== undefined) reasoningTokens = reasoning > 0 ? reasoning : undefined
           if (accountId === '') accountId = accountContext.accountId

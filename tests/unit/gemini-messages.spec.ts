@@ -334,6 +334,13 @@ describe('响应翻译', () => {
       inputTokens: 0,
       cacheReadTokens: 25,
     })
+    // ★ PR #122：明确上报的 0 与「未上报」必须分开 ——
+    // 0 = 这次确实没命中（面板该显示 0%），undefined = 上游不给这个数（该不显示）。
+    // 旧实现 `cached > 0 ? … : {}` 会把两者折成同一个。
+    expect(readGeminiUsage({ promptTokenCount: 10, cachedContentTokenCount: 0 })).toEqual({
+      inputTokens: 10,
+      cacheReadTokens: 0,
+    })
     expect(readGeminiUsage(undefined)).toEqual({})
   })
 })

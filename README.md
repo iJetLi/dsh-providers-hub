@@ -886,6 +886,8 @@ LISTEN  172.21.0.8:8326     # 绑上桥接 IP 后，端口映射才可达
 
 - Chat Completions 使用 `usage.prompt_tokens_details.cached_tokens`。渠道未上报时省略缓存明细。
 - Responses 使用 `usage.input_tokens_details.cached_tokens`。渠道未上报时，必填的计数保留为 `0`，并附加 `usage.cache_read_reported: false`。
+  ⚠️ `cache_read_reported` 是**本插件的非标扩展**（OpenAI 官方 schema 没有这个字段），只在「未上报」时出现、恒为 `false`；官方 Python/TS SDK 与 codex 都会忽略未知字段，本仓的 `astudio` 适配器是唯一回读方。严格按 `additionalProperties: false` 校验的客户端会在这条降级路径上报错，属已知边界。
+- 插件自己的**本地用量面板**按同一口径落盘：明确 `0` 原样记录，只有「未上报」才省略字段（PR #122 之前两者都会被省略，于是面板与网关口径对不上）。
 
 渠道明确上报的 `0` 表示本次未命中。计算命中率时，只纳入有实际缓存计数的请求。
 

@@ -417,6 +417,29 @@ describe('CodeArtsAdapter', () => {
    * （判据 `reasoning_tokens`：true=34、false=n/a 且 reasoning 字符 0、不发=45）。
    * 既然 IDE 用的是 `enable_thinking`，就只留这一份方言，不再发 `thinking`。
    */
+  it('★★ 上游明确上报 cached_tokens=0 时必须保留（不能折成「没上报」）', async () => {
+    // PR #122：`0` = 这次确实没命中缓存，`undefined` = 上游没给这个数。
+    // 旧实现是 `cachedTokens > 0 ? { cacheReadTokens } : {}` ⇒ 明确 0 被丢掉，
+    // 面板上「命中率 0%」与「渠道不给这个数」就分不出来。
+    const fetchImpl = vi.fn(async () => new Response(
+      'data: {"choices":[{"delta":{"content":"x"}}],"usage":{"prompt_tokens":1000,"completion_tokens":10,'
+      + '"prompt_tokens_details":{"cached_tokens":0}}}\n\n'
+      + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    ))
+    const adapter = makeAdapter({ fetchImpl })
+    const opts = {
+      provider: 'codearts',
+      model: 'deepseek-v4-flash',
+      messages: [],
+      signal: new AbortController().signal,
+    } as never
+    const chunks: Array<Record<string, any>> = []
+    for await (const chunk of adapter.stream(opts)) chunks.push(chunk as never)
+    const usage = chunks.find((chunk) => chunk.type === 'usage')
+    expect(usage).toMatchObject({ usage: { inputTokens: 1000, outputTokens: 10, cacheReadTokens: 0 } })
+  })
+
   it('maps the "off" effort onto enable_thinking=false, and sends enable_thinking=true for "on"', async () => {
     const seen: Array<Record<string, unknown>> = []
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

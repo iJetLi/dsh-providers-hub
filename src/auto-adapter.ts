@@ -710,6 +710,12 @@ export class AutoAdapter extends LlmAdapter {
     const base = { ...options, provider: target.provider, model: target.model }
     const forwarded = this.withTranslatedEffort(target, base, requested)
     let probe = emptyZeroOutputProbe()
+    // ⚠️ usage **先缓冲**、确认这个候选要留下才补发（PR #122）。
+    // 旧实现直接透传，理由是「对 BlockAssembler 是覆盖式赋值 ⇒ 重发安全」——
+    // 那条事实仍然成立，但「不炸」不等于「语义对」：把**失败候选**的缓存命中量
+    // 发给客户端会被读成「这次请求命中了 X」，而改道后实际用的是另一个账号。
+    // 代价（已登记）：usage 先于正文、且消费者在收到首帧前 abort 时这条 usage 会丢，
+    // 宿主的中断轮因此少记一次用量。两者不能同时要，这里选「宁可少记，不许错记」。
     let pendingUsage: Extract<StreamChunk, { type: 'usage' }> | undefined
     for await (const chunk of this.ctx.llm.stream(forwarded)) {
       probe = noteChunk(probe, chunk)

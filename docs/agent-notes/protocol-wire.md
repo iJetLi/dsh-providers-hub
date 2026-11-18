@@ -3086,3 +3086,42 @@ private ensureLoaded(): void {
 4. **`!` 非空断言是给「不可能」留的口子，不是给「现在不可能」** —— 阶段 1 与阶段 3 的判据写了两份，任何人加一个 `continue` 就断。
 5. **模块级单例在测试里会被多个实例共享**（single-flight 的 Map 必须在 `registerJetHubEndpoints` 内）。
 6. **源码文本断言只能证明「接线」，证明不了「作用域」** —— `setProviderStatuses` 那行文本在，但它在**错误的作用域**里。真正的守卫是编译器（TS2304）。
+
+## 缓存读取量的三态（PR #122 / issue #121）
+
+上游 `usage` 里的「缓存读取量」（OpenAI `prompt_tokens_details.cached_tokens` /
+Anthropic `cache_read_input_tokens` / Gemini `cachedContentTokenCount` /
+DeepSeek `prompt_cache_hit_tokens`）有**三种**状态，不是两种：
+
+| 状态 | `TokenUsage.cacheReadTokens` | 网关 Chat 出口 | 网关 Responses 出口 |
+|---|---|---|---|
+| 上游没上报 | 字段**缺席** | 省略整个 `prompt_tokens_details` | `cached_tokens: 0` + `cache_read_reported: false` |
+| 上游明确报 0 | **0** | `cached_tokens: 0` | `cached_tokens: 0`（**不**带 `cache_read_reported`） |
+| 正数 | 正数 | `cached_tokens: N` | `cached_tokens: N` |
+
+- ⚠️ 折叠任意两态都会让宿主 `dsh-client-ui-chat:8917` 的
+  `usage.cacheReadTokens === void 0 ? null : formatCacheHitPercent(...)` 判错：
+  「缺席」= 不显示命中率，「0」= 显示 0%。这正是 issue #121 的症状。
+- ⚠️ **判据只留一份实现**：`src/cache-token-count.ts` 的 `readCacheTokenCount()`。
+  不要在各家适配器里再写 `> 0` —— PR #122 之前有 7 家各写一份，`0` 就是被这些副本吃掉的。
+  记账链路同理：`token-ledger.ts` 的 `clampCount()` 会把「缺失」变成 0，所以缓存读取量
+  那条腿必须用 `readOptionalCount()`（保留三态），而 `cacheWrite`/`reasoning` 继续用
+  `clampCount` + `> 0`（那两个字段没有这个区分需求，别顺手统一）。
+- ⚠️ **判据口径**：`Number.isFinite && >= 0 ? Math.trunc`，**不要**用
+  `Number.isSafeInteger`。浮点/超界值在旧口径下是「截断后计入 inputTokens」的，判成
+  「未上报」会**漏算** —— 实测 `{inputTokens:60, cacheReadTokens:40.5}` 让 `totalTokens`
+  从 102 掉到 62，与 `usage.ts` 自己「只会多算、绝不漏算」的红线相反。
+  （2026-11-18 双审计在这一格有分歧：正向审计认为浮点不可达、属防御性收紧；我按
+  「与既有 `readCount`/`clampCount` 同口径」修，分歧已如实写在 PR 评论里。）
+- ⚠️ **`cache_read_reported` 是本仓非标扩展**：官方 Responses schema 的
+  `input_tokens_details.cached_tokens` **必填** ⇒ 只能补 0，再靠这个顶层字段标出
+  「这个 0 是补的」。codex（serde 无 `deny_unknown_fields`）与 openai-python
+  （`extra="allow"` + `construct_type` 不校验）都会忽略未知字段；严格
+  `additionalProperties: false` 的客户端会**恰好在「未上报」这条降级路径**报错 —— 已知边界。
+- ⚠️ **聚合/自动路由的 `pendingUsage` 取舍**：失败候选的 usage 不许外泄 ⇒ 必须先缓冲、
+  确认这个候选要留下才补发；代价是「usage 先于正文、且消费者在收到首帧前 abort」会
+  丢这一条（宿主中断轮少记一次用量）。选「宁可少记，不许错记」。
+- ⚠️ **`cacheCreationTokens` ≠ `cacheReadTokens`**：写入缓存不是读取缓存。
+  `readCacheTokenCount(a) ?? readCacheTokenCount(b)` 这种兜底链**只能接同义字段**
+  （我第一版在 `usage.ts` 里把两者串起来 ⇒ 完全没有缓存读取的请求被凭空多报命中，
+  且 `inputTokens` 也跟着缩水）。

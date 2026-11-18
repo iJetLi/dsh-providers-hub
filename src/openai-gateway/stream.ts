@@ -71,6 +71,15 @@ function usageJson(usage: TokenUsage): Record<string, unknown> {
     completion_tokens: normalized.outputTokens,
     total_tokens: normalized.totalTokens,
     // 官方明细：`cached_tokens` 是 `prompt_tokens` 的**子集**（见 `usage.ts`）。
+    //
+    // ⚠️ 「未上报」时**整段省略**（不是补 0）：官方 Chat schema 里
+    // `prompt_tokens_details` 是 `Optional[...] = None`，省略完全合法；而 codex
+    // 根本没有 Chat Completions 客户端路径（`codex-api/src/sse/` 只有 responses）。
+    // 2026-11-18 按 openai-python 的 `completion_usage.py`、codex-rs 的
+    // `sse/responses.rs` 与 `core/src/lib.rs` 源码核实后，删掉了原先那句
+    // 「官方字段必须同时给、Codex 等标准客户端只认官方形态」—— 它不成立。
+    // Responses 侧**相反**：`input_tokens_details.cached_tokens` 是必填 int，
+    // 只能补 0，再用 `cache_read_reported: false` 标出「这个 0 是补的」。
     ...normalized.cachedTokens !== undefined
       ? { prompt_tokens_details: { cached_tokens: normalized.cachedTokens } }
       : {},

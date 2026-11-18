@@ -45,13 +45,19 @@ describe('网关用量口径：DSH（互斥）→ OpenAI 官方（含缓存）',
   it('缓存写入也算真实输入（Anthropic 的 cache_creation），但**不算命中**', () => {
     const usage = toOpenAiUsage({ inputTokens: 10, outputTokens: 1, cacheWriteTokens: 5 })
     expect(usage.inputTokens).toBe(15)
-    expect(usage.cachedTokens).toBeUndefined()
+    expect(
+      Object.hasOwn(usage, 'cachedTokens'),
+      '缓存量未上报/非法时这个键必须**缺席** —— 只断言值是 undefined 时，把代码改成「键常在、值为 undefined」也能过（PR #122 审计 M7）',
+    ).toBe(false)
   })
 
   it('未上报缓存计数时仍保留完整 token 用量', () => {
     const usage = toOpenAiUsage({ inputTokens: 326134, outputTokens: 608 })
     expect(usage.inputTokens).toBe(326134)
-    expect(usage.cachedTokens).toBeUndefined()
+    expect(
+      Object.hasOwn(usage, 'cachedTokens'),
+      '缓存量未上报/非法时这个键必须**缺席** —— 只断言值是 undefined 时，把代码改成「键常在、值为 undefined」也能过（PR #122 审计 M7）',
+    ).toBe(false)
     expect(usage.totalTokens).toBe(326742)
   })
 
@@ -72,7 +78,10 @@ describe('网关用量口径：DSH（互斥）→ OpenAI 官方（含缓存）',
     })
     expect(usage.inputTokens).toBe(0)
     expect(usage.outputTokens).toBe(0)
-    expect(usage.cachedTokens).toBeUndefined()
+    expect(
+      Object.hasOwn(usage, 'cachedTokens'),
+      '缓存量未上报/非法时这个键必须**缺席** —— 只断言值是 undefined 时，把代码改成「键常在、值为 undefined」也能过（PR #122 审计 M7）',
+    ).toBe(false)
     expect(usage.totalTokens).toBe(0)
   })
 
@@ -93,6 +102,10 @@ describe('两个端点的 usage 口径必须一致（只改一个就会「换个
     { label: '明确为零', upstream: { prompt_tokens_details: { cached_tokens: 0 } }, cached: 0 },
     { label: 'DeepSeek 报正数', upstream: { prompt_cache_hit_tokens: 60 }, cached: 60 },
     { label: '非法计数', upstream: { prompt_tokens_details: { cached_tokens: -1 } }, cached: undefined },
+    // 浮点：旧实现 `count()` 是 `Math.trunc`（40.5 → 40），而 PR 初版用
+    // `Number.isSafeInteger` 会把它判成「未上报」⇒ `totalTokens` 从 102 掉到 62
+    // （input 少算 40）。这是 PR 自述「630 项全绿」时漏掉的唯一一格。
+    { label: '浮点（必须截断保留）', upstream: { prompt_tokens_details: { cached_tokens: 40.5 } }, cached: 40 },
   ])('渠道缓存计数 $label 时，两套 API 的流式与非流式都可区分', async ({ upstream, cached }) => {
     const data = [
       { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },

@@ -62,7 +62,7 @@ export interface TokenLedgerEntry {
   inputTokens: number
   /** 输出 token（含思考 token）。 */
   outputTokens: number
-  /** 缓存命中的输入 token（缺失时省略）。 */
+  /** 缓存命中的输入 token（缺失时省略；`0` = 明确没命中，与「没上报」不是一回事）。 */
   cacheReadTokens?: number
   /** 缓存写入的 token（缺失时省略）。 */
   cacheWriteTokens?: number
@@ -558,6 +558,19 @@ function clampCount(value: unknown): number {
 }
 
 /**
+ * 可选计数：缺失 → `undefined`，坏值/负数 → `undefined`，其余截断。
+ *
+ * ⚠️ 与 `clampCount` 的「坏值 → 0」**刻意分开**：缓存读取量有三态
+ * （未上报 / 明确 0 / 正数），`clampCount(undefined)` 会把「未上报」变成
+ * 「明确 0」，两者就无法再区分（PR #122）。
+ */
+function readOptionalCount(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : undefined
+}
+
+/**
  * 记录一笔请求。
  *
  * ⚠️ **本函数绝不抛错**（见模块头）。字段全部截断/钳制，写满即淘汰最旧。
@@ -565,7 +578,7 @@ function clampCount(value: unknown): number {
 export function recordTokenUsage(entry: Omit<TokenLedgerEntry, 'ts'>): void {
   try {
     const usageReported = entry.usageReported === true
-    const cacheRead = clampCount(entry.cacheReadTokens)
+    const cacheRead = readOptionalCount(entry.cacheReadTokens)
     const cacheWrite = clampCount(entry.cacheWriteTokens)
     const reasoning = clampCount(entry.reasoningTokens)
     // 账号：空串/缺失统一省略字段（「未归属」与「空账号」不伪造）。
@@ -602,9 +615,13 @@ export function recordTokenUsage(entry: Omit<TokenLedgerEntry, 'ts'>): void {
       usageReported,
       inputTokens: clampCount(entry.inputTokens),
       outputTokens,
-      // ⚠️ 0 / 缺失一律**省略字段**而不是写 0：与接口注释一致，
-      // 「没有缓存命中」与「命中 0 个」无从区分时，缺省是更诚实的表示。
-      ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
+      // ⚠️ 缓存读取量有三态（PR #122）：`undefined` = 上游没上报（**省略字段**）、
+      // `0` = 明确没命中（**原样落盘**）、`> 0` = 命中量。
+      // 旧注释「『没有缓存命中』与『命中 0 个』无从区分所以一律省略」在 PR #122
+      // 之后已成假话 —— 上游现在能区分，落盘也得跟着分，否则面板与网关对外口径对不上。
+      // ⚠️ 下面 cacheWrite / reasoning 仍用 `> 0`：那两个字段没有这个区分需求，
+      // 别顺手统一（会扩大改动面，也无上游先例）。
+      ...(cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {}),
       ...(cacheWrite > 0 ? { cacheWriteTokens: cacheWrite } : {}),
       ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
       // 首字用时：0 = 无任何块（失败/秒回空）⇒ 省略（不可测 ≠ 0ms）。

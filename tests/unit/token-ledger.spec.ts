@@ -61,7 +61,7 @@ describe('recordTokenUsage / readTokenLedger：明细', () => {
     }
   })
 
-  it('缓存/思考为 0 或缺失时省略字段（不伪造 0）', () => {
+  it('缓存写入/思考为 0 或缺失时省略；缓存读取的 0 必须保留（PR #122 三态）', () => {
     seed([{ ...OK, cacheReadTokens: 1_200, reasoningTokens: 33, cacheWriteTokens: 7 }])
     const row = readTokenLedger().entries[0]!
     expect(row.cacheReadTokens).toBe(1200)
@@ -69,9 +69,15 @@ describe('recordTokenUsage / readTokenLedger：明细', () => {
     expect(row.cacheWriteTokens).toBe(7)
     seed([OK])
     const bare = readTokenLedger().entries[0]!
-    expect(bare.cacheReadTokens).toBeUndefined()
+    expect(Object.hasOwn(bare, 'cacheReadTokens')).toBe(false)
     expect(bare.cacheWriteTokens).toBeUndefined()
     expect(bare.reasoningTokens).toBeUndefined()
+    // ★ 明确上报的 0 ≠ 未上报：落盘必须保留 0，否则网关对外的「命中 0%」
+    // 与本地面板的「渠道不给这个数」对不上（PR #122 P2①）。
+    seed([{ ...OK, cacheReadTokens: 0 }])
+    const zero = readTokenLedger().entries[0]!
+    expect(Object.hasOwn(zero, 'cacheReadTokens'), '明确 0 必须原样落盘，不能当「没上报」省略').toBe(true)
+    expect(zero.cacheReadTokens).toBe(0)
   })
 
   it('负数 / NaN / 小数统一钳制成非负整数', () => {

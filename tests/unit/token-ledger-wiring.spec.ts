@@ -137,6 +137,19 @@ describe('recordThroughStream：记账骨架', () => {
     expect(row.tps).toBeUndefined()
   })
 
+  it('★★ 明确上报的 cacheReadTokens=0 必须原样落账（PR #122：0 ≠ 未上报）', async () => {
+    resetTokenLedgerForTests()
+    await collect(recordThroughStream(
+      async function* () { yield { type: 'text' }; yield usageChunk(120, 34, { cacheReadTokens: 0 }) },
+      { channel: 'direct', provider: 'codearts', model: 'GLM-5.2', startedAt: Date.now() },
+    ))
+    const row = readTokenLedger().entries[0]!
+    // 旧实现 `cacheReadTokens = cacheRead > 0 ? cacheRead : undefined` 会把
+    // 「明确没命中」折成「没上报」⇒ 面板命中率与网关对外口径对不上。
+    expect(Object.hasOwn(row, 'cacheReadTokens'), '明确 0 必须落账，不能当「没上报」省略').toBe(true)
+    expect(row.cacheReadTokens).toBe(0)
+  })
+
   it('流结束但没等到 usage：usageReported=false（显示 — 而不是 0）', async () => {
     resetTokenLedgerForTests()
     await collect(recordThroughStream(
