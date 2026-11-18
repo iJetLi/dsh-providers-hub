@@ -18,6 +18,9 @@ import {
   CREDIT_ORDER_TIER,
   backendOrderTier,
   rotationStartHint,
+  creditOrderLabel,
+  describeCreditOrder,
+  sumAvailableCredits,
 } from '../../plugin-src/client/badge-model.js';
 // 宿主侧的同一份枚举：两边必须逐字一致（`usage.badgePreference` 会拒绝非法值）
 import { BADGE_PREFERENCES as HOST_BADGE_PREFERENCES } from '../../src/badge-preferences.js'
@@ -1054,5 +1057,119 @@ describe('★ 积分区节标题：单位标签必须按数据走，不写死「
 
   it('脏数据（缺 unit / 非对象项）不抛错', () => {
     expect(creditSectionLabel([null, undefined, {}, { unit: 123 }])).toBe('积分')
+  })
+})
+
+/**
+ * ★★ 排序标签与 tooltip 的**诚实性**（2026-11-18 正向审计 P2-1 / P2-2）。
+ *
+ * 用户要求「在帐号总数后面加一个当前排序的说明，同时使用 tooltip 展示更加详细的
+ * 解释」。这两处是用户理解「下一发会用谁」的唯一入口 ⇒ **写错比不写更糟**。
+ */
+describe('creditOrderLabel / describeCreditOrder：标签与 tooltip 不得说谎', () => {
+  it('★★ 无积分分档的渠道（配额单位）⇒ 标签「按位次」，不是「临期优先」', () => {
+    /**
+     * 审计 P2-2 实测：`QUOTA_UNIT`（Gemini 的并行百分比窗口）的行 `tierOf` 恒返回
+     * `none` ⇒ 排序实际只按位次，而标签恒写「临期优先」、tooltip 讲一套不存在的三档。
+     */
+    expect(creditOrderLabel({ hasTiered: false })).toBe('按位次')
+    // 对照：有分档 / 未声明（老调用方）都保持原样
+    expect(creditOrderLabel({ hasTiered: true })).toBe('临期优先')
+    expect(creditOrderLabel({})).toBe('临期优先')
+  })
+
+  it('★★ 无分档渠道的 tooltip 不出现「临期 / 短期 / 永久」三档', () => {
+    const text = describeCreditOrder({ hasTiered: false })
+    expect(text).toContain('本渠道没有积分到期分档')
+    expect(text).not.toContain('最优先消耗')
+    expect(text).not.toContain('永久')
+  })
+
+  it('★★ `imminentDays = 0`（关掉临期档）⇒ tooltip 不得写「① 0 天内到期」也不得给「0~」区间', () => {
+    const text = describeCreditOrder({ imminentDays: 0, windowDays: 15 })
+    expect(text).not.toContain('0 天内到期')
+    expect(text).not.toContain('0~')
+    expect(text).toContain('临期档已关闭')
+  })
+
+  it('★★ `imminentDays` 正常时三档文案逐条在位（对照格）', () => {
+    const text = describeCreditOrder({ imminentDays: 5, windowDays: 15 })
+    expect(text).toContain('5 天内到期（临期）')
+    expect(text).toContain('5~15 天内到期（短期）')
+    expect(text).toContain('15 天以上或无到期日（永久）')
+  })
+})
+
+/**
+ * ★★★ `sumAvailableCredits` 的行为级用例（2026-11-18 对抗审计 B02）。
+ *
+ * 它原来住在 `plugin-src/client/usage-badge.js` —— 那个文件首行 `import * as React`
+ * 指向 esbuild external（本仓无 react）⇒ **import 不进 vitest** ⇒ 三个 spec 对它的
+ * 任何改动都全绿。审计实测：把 `return seen ? total : null` 改成 `return null`
+ * （胶囊与弹窗的「可用积分」永远不显示）⇒ `3 passed`。
+ *
+ * 所以断言必须是**具体数值**，不能只断言「非 null」。
+ */
+describe('sumAvailableCredits：锁定永久积分时的「实际可用」', () => {
+  /**
+   * ⚠️ **基准时刻必须取 `Date.now()`**（我第一版写死 `Date.UTC(2026,9,1)` 就红了三格）：
+   * `sumAvailableCredits` 内部调 `splitCreditsByExpiry(packages, windowDays, undefined, imminentDays)`
+   * —— 第三个参数是 `now`，生产固定传 `undefined`（= 真实当下）。夹具若用过去的时间，
+   * 所有包都判「已过期」⇒ 和恒 0 ⇒ 断言全红，而**红因在夹具上、不在被测分支**
+   * （与 `orderCreditRows` 那个坑同型：参数不显式给就会静默走另一套默认值）。
+   */
+  const NOW = Date.now()
+  const DAY = 86_400_000
+  const opts = { locked: true, windowDays: 15, imminentDays: 5 }
+  const row = (packages) => ({ id: 'a', balance: { packages } })
+  const pkg = (days, remaining, extra = {}) => ({
+    remaining,
+    deductionEndTime: NOW + days * DAY,
+    active: true,
+    ...extra,
+  })
+
+  it('★★★ 短期 + 临期都算进来（不含长期 / 永久 / 已过期）', () => {
+    /**
+     * 四段必须逐段可见：短期 300 + 临期 100 = 400；
+     * 长期（30 天）与已过期（-1 天）都不得进和。
+     */
+    const total = sumAvailableCredits([
+      row([pkg(9, 300), pkg(2, 100), pkg(30, 5000), pkg(-1, 7000)]),
+    ], opts)
+    expect(total).toBe(400)
+  })
+
+  it('★★ 未锁定 ⇒ null（本函数只管锁定态）', () => {
+    expect(sumAvailableCredits([row([pkg(2, 100)])], { ...opts, locked: false, now: NOW })).toBeNull()
+    expect(sumAvailableCredits([row([pkg(2, 100)])], { ...opts, locked: undefined, now: NOW })).toBeNull()
+  })
+
+  it('★★ 只有永久/长期 ⇒ **0**（不是 null：锁定态下「可用 0」是准确答案）', () => {
+    /**
+     * ⚠️ 我第一版把这里写成 `toBeNull()` 就红了 —— **红因在判据上，不是实现有 bug**。
+     *
+     * `null` 的语义是「**不适用**」（未锁定 / 配额 / 无账号），而「锁定了但短期积分
+     * 一个也没有」是适用且答案是 0：面板显示「可用 0」是对的（用户立刻明白
+     * 自己只剩永久积分）。返回 null 会把整条「可用积分」藏起来，反而少一条信息。
+     */
+    expect(sumAvailableCredits([row([pkg(30, 5000)])], opts)).toBe(0)
+    // 这三格才是「不适用」
+    expect(sumAvailableCredits([], opts)).toBeNull()
+    expect(sumAvailableCredits(undefined, opts)).toBeNull()
+    expect(sumAvailableCredits([row([pkg(30, 5000)])], { ...opts, locked: false })).toBeNull()
+  })
+
+  it('★★ 配额单位（Gemini）⇒ 整条 null，不是 0', () => {
+    expect(sumAvailableCredits([row([{ unit: '%', remaining: 30 }])], opts)).toBeNull()
+  })
+
+  it('★ 多账号累加；读不到余额的账号跳过（不当 0）', () => {
+    const total = sumAvailableCredits([
+      row([pkg(2, 100)]),
+      { id: 'b', balance: undefined },
+      row([pkg(3, 50)]),
+    ], opts)
+    expect(total).toBe(150)
   })
 })

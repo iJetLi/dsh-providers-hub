@@ -141,6 +141,13 @@ export function daysUntilExpiry(pkg, now) {
  *   ⚠️ **省略 = 退化成两档**（临期窗口 = 总窗口），见 `normalizeImminentDays`。
  * @returns 窗口不可用时返回 `null`（调用方退化成不显示分类）。
  */
+/**
+ * 「距到期还有 N 天」的上界：超过 100 年就判上游数据异常而非照实打印。
+ *
+ * 2026-11-18 对抗审计 P2-④：`deductionEndTime: 1e308` 曾渲染成「还有 1.157e+300 天」。
+ */
+const MAX_PLAUSIBLE_DAYS = 36_500;
+
 export function splitCreditsByExpiry(packages, windowDays, now, imminentDays) {
   const days = normalizeWindowDays(windowDays);
   if (days === null || !Array.isArray(packages)) return null;
@@ -423,11 +430,27 @@ export function expiryBucketLabel(pkg, windowDays, now, imminentDays) {
    * ⚠️ 兼容：`imminentDays` 缺席（或 ≥ 总窗口）⇒ 退化成原来的两档标签。
    */
   const imminentDaysValue = normalizeImminentDays(imminentDays, days);
-  const tiered = imminentDaysValue < days;
+  /**
+   * ⚠️⚠️ **`imminentDays = 0` 是「关掉临期档」的合法配置**（后端
+   * `src/buddy-balance-rank.ts` 的 `DEFAULT_IMMINENT_WINDOW_DAYS` 注释明写
+   * 「设 0 可关掉临期档」），不是「临期窗口为零天」。
+   *
+   * 原判据只写 `imminentDaysValue < days` ⇒ `0 < 15` 为真 ⇒ 距离到期 2 天的包
+   * 渲染出 **「0~15 天内到期」**、悬停写 **「临期 = 不足 0 天」**
+   * （2026-11-18 正向审计 P2-1 实测）。分桶侧是对的（`{imminent:0, shortTerm:300}`），
+   * 只有文案腿分叉 ⇒ 用户在弹窗上看到荒谬的窗口区间。
+   */
+  const tiered = imminentDaysValue > 0 && imminentDaysValue < days;
   if (left < days) {
     if (tiered && left >= imminentDaysValue) return `${imminentDaysValue}~${days} 天内到期`;
     return `${Math.ceil(left)} 天内到期`;
   }
+  /**
+   * ⚠️ 上界钳制（2026-11-18 对抗审计 P2-④）：`deductionEndTime: 1e308` 会让
+   * `daysUntilExpiry` 返回约 `1.157e+300`，原样渲染成「还有 1.157e+300 天」——
+   * 荒谬且会撑破布局。真实积分不会超过 100 年，超过就说明上游数据异常。
+   */
+  if (!Number.isFinite(left) || left > MAX_PLAUSIBLE_DAYS) return '到期时间异常';
   return `还有 ${Math.ceil(left)} 天`;
 }
 
@@ -598,7 +621,12 @@ export function formatMonthDay(ms, now) {
  * 分桶的**带色分段**（供胶囊/卡片逐段渲染，各带各的 tone）。
  *
  * 段顺序与 `formatExpirySplitLine` 一致：`永久`（ok）→ `到期未知`（warn）→
- * `长期`（warn）→ `临期`（error，带倒计时）→ `已过期`（error）。
+ * `长期`（okSoft）→ `短期`（warn）→ `临期`（error，带倒计时）→ `已过期`（error）。
+ *
+ * ⚠️ 2026-11-18（正向审计 P3-e）更正两处**已失效**的描述：
+ *  · 漏了「短期」段（2026-11-17 三档新增），
+ *  · 「长期」的 tone 早已从 `warn`（黄）改成 `okSoft`（浅绿）—— 三档并存时
+ *    长期与短期都用黄，用户分不出哪个更急（见下方 `longTerm` 段的注释）。
  *
  * ## 为什么需要它（而不是复用 `formatExpirySplitLine` 的字符串）
  *

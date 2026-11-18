@@ -764,6 +764,42 @@ function balanceOrder(row) {
 export const CREDIT_ORDER_TIER = Object.freeze({ imminent: 0, expiring: 1, permanent: 2, none: 3 });
 
 /** 档位是否「可用」（与后端 `buddyTierUsable` 同构）。 */
+/**
+ * 锁定永久积分时「实际还能用多少」= 各账号 **短期 + 临期** 之和（不含长期/永久/已过期）。
+ *
+ * 2026-11-18 从 `usage-badge.js` 搬到这里，只为一件事：**能写行为级用例**。
+ * `usage-badge.js` `import * as React from 'react'`，而 react 是 esbuild 的 external
+ * （本仓 `node_modules` 里没有）⇒ 任何 import 它的测试都跑不起来 ⇒ 那个文件里的
+ * 每个纯计算都是「改坏了全绿」（对抗审计 B02 实测：把 `return seen ? total : null`
+ * 改成 `return null` —— 「可用积分」永远不显示 —— **三个 spec 全绿**）。
+ *
+ * @param accounts - `value.accounts`
+ * @param opts.locked - `value.locked`（true = 锁定永久积分）
+ * @param opts.windowDays - 长期窗口天数（与行内分档同源）
+ * @param opts.imminentDays - 临期窗口天数
+ * @returns 数值；null = **不适用**（未锁定 / 无数据 / 配额单位）
+ */
+export function sumAvailableCredits(accounts, opts) {
+  if (opts?.locked !== true) return null;
+  const rows = Array.isArray(accounts) ? accounts : [];
+  if (rows.length === 0) return null;
+  let total = 0;
+  let seen = false;
+  for (const row of rows) {
+    const packages = row?.balance?.packages;
+    if (!Array.isArray(packages)) continue;
+    // 配额单位没有「积分」概念（是并行百分比）⇒ 整条不适用
+    const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
+    if (unit === QUOTA_UNIT) return null;
+    const split = splitCreditsByExpiry(packages, opts.windowDays, undefined, opts.imminentDays);
+    if (split == null) continue;
+    // ⚠️ 只累加「短期 + 临期」：不含长期、不含永久、不含已过期
+    total += (split.shortTerm ?? 0) + (split.imminent ?? 0);
+    seen = true;
+  }
+  return seen ? total : null;
+}
+
 export function backendOrderTierIsUsable(tier) {
   return tier !== CREDIT_ORDER_TIER.none;
 }
@@ -837,6 +873,13 @@ export function rotationStartHint(tier) {
 export function creditOrderLabel(options = {}) {
   if (options.strictManualOrder === true) return '手动顺序';
   if (options.hasRotationStart === true) return '起点优先';
+  /**
+   * ⚠️⚠️ **无积分分档的渠道不能说「临期优先」**（2026-11-18 正向审计 P2-2）：
+   * 配额单位（Gemini 的 `QUOTA_UNIT`）的行没有「积分到期」概念，分档恒为
+   * `none`（见 `orderCreditRows` 里的 `tierOf`）⇒ 排序实际只按位次，
+   * 而标签写「临期优先」是**假话**，tooltip 还会讲一套并不存在的三档。
+   */
+  if (options.hasTiered === false) return '按位次';
   return '临期优先';
 }
 
@@ -859,10 +902,26 @@ export function describeCreditOrder(options = {}) {
     lines.push('按「位次」（你在面板里的拖拽顺序）排列，档位不决定先后。');
     lines.push('档位只决定「谁还可用」：不可用的账号仍排在最后。');
     lines.push('⚠️ 此模式下「临期优先」失效 —— 离到期最近的号不保证排在前面。');
+  } else if (options.hasTiered === false) {
+    /**
+     * ⚠️ **无积分分档的渠道**（配额单位，例如 Gemini 的百分比窗口）：三档讨论
+     * 对它根本不存在（`tierOf` 恒返回 `none`）⇒ 只讲实际发生的事。
+     */
+    lines.push('当前：按「位次」排列（本渠道没有积分到期分档）');
+    lines.push('配额类渠道的每个窗口是并行百分比，没有「哪档先用完」的概念。');
+    lines.push('不可用的账号（查询失败）仍排在最后。');
   } else {
     lines.push('当前：按积分档位排序（= 后端选号顺序）');
-    lines.push(`① ${imminentDays} 天内到期（临期）—— 最优先消耗`);
-    lines.push(`② ${imminentDays}~${windowDays} 天内到期（短期）`);
+    /**
+     * ⚠️ `imminentDays = 0` ⇒ 临期档被**关闭**（后端口径），此时不该出现
+     * 「① 0 天内到期（临期）」这一行，也不能让 ② 的区间变成 `0~15`。
+     */
+    if (imminentDays > 0) {
+      lines.push(`① ${imminentDays} 天内到期（临期）—— 最优先消耗`);
+      lines.push(`② ${imminentDays}~${windowDays} 天内到期（短期）`);
+    } else {
+      lines.push(`① ${windowDays} 天内到期（临期档已关闭，全部并入短期）`);
+    }
     lines.push(`③ ${windowDays} 天以上或无到期日（永久）`);
     lines.push('④ 不可用（无余额 / 查询失败）—— 排最后');
     lines.push('同一档内按「位次」排列，不按金额。');
@@ -876,6 +935,134 @@ export function describeCreditOrder(options = {}) {
     lines.push('「锁定永久积分」已开启：只剩永久积分的账号视为不可用，排在最后。');
   }
   return lines.join('\n');
+}
+
+/**
+ * 从 `account.getRotation` 的返回里取出「**全量启用账号的池序 id 列表**」。
+ *
+ * 这是 `orderCreditRows({ enabledAccountIds })` 的唯一生产来源 —— 抽成纯函数
+ * 的理由见本文件头部（单测环境没有 `react`，`usage-badge.js` 不能被 import ⇒
+ * 留在那边的逻辑只能做源码文本断言，而本仓已四次证明那类断言挡不住
+ * 「留着但失效」）。
+ *
+ * ## 口径（必须与后端逐字节一致）
+ *
+ * 后端 `src/credential-resolver.ts`：
+ * `pool.listAccountsByProvider(id).filter(a => a.enabled).map(a => a.id)`；
+ * 本端点 `mine = all.filter(a => a.provider === ... && a.enabled !== false)`
+ * —— 同一次池读、同序、同过滤（差异只有 `a.enabled` 与 `!== false` 对
+ * `undefined` 的处理，而池 Schema 里 `enabled` 是带默认值的布尔 ⇒ 实际同集）。
+ *
+ * ⚠️ **不做去重**：池里 id 唯一，去重只会掩盖上游异常。
+ * ⚠️ 形状防御：`rotationState` 可能是 `null`（还没读到）、`accounts` 可能非数组
+ *    （老宿主 / RPC 超时后 `setRotationState(null)`）⇒ 一律返回 `[]`，
+ *    调用方据此走「不传 `enabledAccountIds`」的原路径。
+ *
+ * @param rotationState - `{ accounts?: unknown } | null | undefined`
+ * @returns 池序 id 列表；不可用时 `[]`
+ */
+export function rotationIdsOf(rotationState) {
+  if (rotationState === null || typeof rotationState !== 'object') return [];
+  const accounts = rotationState.accounts;
+  if (!Array.isArray(accounts)) return [];
+  const out = [];
+  for (const entry of accounts) {
+    if (entry === null || typeof entry !== 'object') continue;
+    if (typeof entry.id === 'string' && entry.id.length > 0) out.push(entry.id);
+  }
+  return out;
+}
+
+/**
+ * 由 `account.getRotation` 的返回构造 `orderCreditRows` 的**轮换相关选项**。
+ *
+ * ## 为什么必须抽出来（而不是在 `usage-badge.js` 里 spread 两个字段）
+ *
+ * 这两个字段决定「弹窗顺序 = 真实选号顺序」这条用户可见承诺是否成立：
+ * | 字段 | 缺了会怎样 |
+ * |---|---|
+ * | `rotationStartId` | 起点完全失效，弹窗与选号都不旋转（功能消失）|
+ * | `enabledAccountIds` | 起点设在「被封禁 / 被模型限流 / 余额读取失败」的号上时，弹窗按默认序显示而真实选号已从下一个可用号开始 |
+ *
+ * `usage-badge.js` 依赖宿主注入的 `react`（esbuild external，本仓 node_modules
+ * 里没有）⇒ **无法在 vitest 里 import**，留在那里的逻辑只能做源码文本断言，
+ * 而本仓已四次证明那类断言挡不住「留着但失效」（`if (false && …)`、调了但
+ * 丢弃返回值、判据写进注释）。
+ *
+ * ## 不变量
+ *
+ * 1. **无起点 ⇒ 两个字段都不出现**（不是 `undefined`，是**不存在**）：
+ *    `rotateRows` 只在 `rotationStartId` 非空时被调用，多传一个空串会让
+ *    「没设起点」与「设了起点但值空」在日志里不可区分。
+ * 2. **有起点但拿不到池序 ⇒ 只给 `rotationStartId`**：退回 PR #127 之前的行为
+ *    （起点在候选里仍能旋转；不在候选里则原样），**不静默用默认序冒充**。
+ *
+ * @param rotationState - `account.getRotation` 的 `value`（或 `null`）
+ * @returns 可直接 spread 进 `orderCreditRows` options 的对象
+ */
+export function rotationOrderOptionsOf(rotationState) {
+  if (rotationState === null || typeof rotationState !== 'object') return {};
+  const selected = rotationState.selected;
+  if (typeof selected !== 'string' || selected.length === 0) return {};
+  const ids = rotationIdsOf(rotationState);
+  return ids.length === 0
+    ? { rotationStartId: selected }
+    : { rotationStartId: selected, enabledAccountIds: ids };
+}
+
+/**
+ * 构造 `orderCreditRows` 的**完整选项**（轮换 + 五个排序输入）。
+ *
+ * ## 为什么整段抽出来（2026-11-18 正向审计 P1-2 实测）
+ *
+ * 审计在 `usage-badge.js` 上做六个变异，**全部全绿**：
+ * | 变异 | 后果 | 原有用例 |
+ * |---|---|---|
+ * | 删 `imminentDays` | 临期档退化成短期档 | 全绿 |
+ * | `allowPermanent: true` 写死 | 「锁定永久」在弹窗里失效（但仍显示已锁定）| 全绿 |
+ * | 删 `rotationStartId` | 轮换起点功能整体消失 | 全绿 |
+ * | 删 `windowDays` | 短期/长期边界错位 | 全绿 |
+ * | `strictManualOrder: false` 写死 | 「严格手动顺序」开关失效 | 全绿 |
+ *
+ * 根因：`usage-badge.js` 依赖宿主注入的 `react`（esbuild external，本仓
+ * node_modules 里没有）⇒ **无法 import 进 vitest** ⇒ 这六个输入只能靠源码文本
+ * 断言看守，而那类断言挡不住「留着但失效」（本仓已四次复发）。
+ *
+ * ⇒ 把**整个选项对象**搬进来，六个输入在行为级一次钉死；`usage-badge.js`
+ *   只剩「传组件状态 + 调本函数 + spread」。
+ *
+ * ## 各输入的语义（每一条都对应一个真实报障或红线）
+ *
+ * - `strictManualOrder`：+`true` ⇒ 只按位次排（档位仅判可用性），与后端
+ *   `rankBuddyAccountsByManualOrder` 同构；
+ * - `allowPermanent`：`false`（= 用户开了「锁定永久积分」）⇒ 「只剩永久」的号
+ *   落 `none` 沉底，与后端 `buddyBalanceTier(..., {allowPermanent:false})` 同义；
+ * - `windowDays`/`imminentDays`：**必须与行内三档分色同一份**，否则同一行
+ *   「排序用的档位」与「显示的分档」互相矛盾（同一行说两套话）；
+ * - `now`：**现取**，分档是时间的函数，缓存会让已越线的包仍算旧档；
+ * - `limit`/`expanded`：折叠逻辑（与本函数无关，只为一次构造完整 options）。
+ *
+ * ⚠️ `windowDays`/`imminentDays` 只在**有限数**时才进选项 —— 传 `undefined`
+ *    给 `splitCreditsByExpiry` 与「不传」在它内部是同一个默认，但显式传会让
+ *    「组件没算出来」与「算了但是 0」不可区分（`0` 是合法值：后端
+ *    `src/buddy-balance-rank.ts` 明写「`imminentDays: 0` 可关掉临期档」）。
+ *
+ * @param input - 组件状态快照（见下方字段注释）
+ * @returns 可直接传给 `orderCreditRows` 的 options
+ */
+export function creditOrderOptionsOf(input) {
+  const source = input === null || typeof input !== 'object' ? {} : input;
+  const limit = Number.isFinite(source.limit) ? source.limit : 0;
+  const options = {
+    limit,
+    expanded: source.expanded === true,
+    strictManualOrder: source.strictManualOrder === true,
+    allowPermanent: source.locked !== true,
+    now: Number.isFinite(source.now) ? source.now : Date.now(),
+  };
+  if (Number.isFinite(source.windowDays)) options.windowDays = source.windowDays;
+  if (Number.isFinite(source.imminentDays)) options.imminentDays = source.imminentDays;
+  return { ...options, ...rotationOrderOptionsOf(source.rotationState) };
 }
 
 export function orderCreditRows(rows, options = {}) {
@@ -942,8 +1129,30 @@ export function orderCreditRows(rows, options = {}) {
   decorated.sort((a, b) => (a.sortKey - b.sortKey) || (a.index - b.index));
   const orderedByStrategy = decorated.map((entry) => entry.row);
   // 「轮换起点」：在上面的策略序之上，按 S4 语义旋转（与后端 rotateFromPreferred 同构）
+  /**
+   * ⚠️⚠️ **分组口径与可用性口径必须分开**（2026-11-18 对拍实测的分叉 4）：
+   * 后端 `rotateFromPreferred` 判可用性用**用户口径**
+   * （`buddyTierUsable(buddyBalanceTier(a, options))`，`options.allowPermanent`
+   * 就是用户的锁定开关），而**分档分组**恒用未锁定口径
+   * （`buddyBalanceTier(a, { allowPermanent: true })`，后端注释理由：
+   * 「`none` 档在锁定态可能是『只剩永久』，会混淆分组」）。
+   * 本函数原先两者都传 `tierOf`（用户口径）⇒ 锁定态下「只剩永久」的号与
+   * 「查不到余额」的号被并进同一组，弹窗顺序与真实选号顺序分叉。
+   */
+  const tierOfGroup = (row) => {
+    const packages = row?.balance?.packages;
+    if (!Array.isArray(packages)) return CREDIT_ORDER_TIER.none;
+    const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
+    if (unit === QUOTA_UNIT) return CREDIT_ORDER_TIER.none;
+    const split = splitCreditsByExpiry(packages, windowDays, now, imminentDays);
+    /** 恒解锁口径：与后端 `tierRankOf` 逐字节同构。 */
+    return backendOrderTier(split, true);
+  };
+  const enabledAccountIds = Array.isArray(options.enabledAccountIds)
+    ? options.enabledAccountIds
+    : [];
   const ordered = typeof startId === 'string' && startId.length > 0
-    ? rotateRows(orderedByStrategy, startId, tierOf)
+    ? rotateRows(orderedByStrategy, startId, tierOf, tierOfGroup, enabledAccountIds)
     : orderedByStrategy;
   const hidden = Math.max(0, ordered.length - limit);
   return { shown: options.expanded === true ? ordered : ordered.slice(0, limit), hidden };
@@ -980,15 +1189,46 @@ export function orderCreditRows(rows, options = {}) {
  * @param startId - 起点 accountId
  * @param tierOf - 每行的档位（复刻后端口径）；用于按档分组
  */
-function rotateRows(rows, startId, tierOf) {
-  const index = rows.findIndex((row) => row?.accountId === startId);
-  if (index < 0) return [...rows];
-  const startRow = rows[index];
-  const startTier = tierOf(startRow);
+function rotateRows(rows, startId, tierOf, tierOfGroup, enabledAccountIds) {
+  /**
+   * ## ⚠️⚠️ 2026-11-18 对拍实测：本函数曾与后端 `rotateFromPreferred` **三处分叉**
+   *
+   * `tests/unit/rotation-parity.spec.ts` 用同一份输入同时喂 `rotateFromPreferred`
+   * 与本函数，实测 4 条红（其中 3 条根因在下述两处，另 1 条根因是分组口径）。
+   * 「与后端逐字节同构」这句注释原先**没有任何跨侧用例**支撑 —— 变异范式打的是
+   * 「某一侧被改坏」，而分叉是「两侧从一开始就不一样」，所以 30+ 个变异全绿
+   * 也发现不了它。
+   */
+  // ① 定位起点：不在候选里时，用**全量启用账号**的池位次定位（后端成因 2 的修法）。
+  let index = rows.findIndex((row) => row?.accountId === startId);
+  if (index < 0) {
+    const ids = Array.isArray(enabledAccountIds) ? enabledAccountIds : [];
+    const startPosition = ids.indexOf(startId);
+    // 不变量 3：账号已被删除（不在全量启用账号里）⇒ 原样（= 默认起点）。
+    // ⚠️ 与「起点被账号级封禁 / 目标模型限流」**刻意区分**：后者账号还在、
+    //    只是被 `candidatesOf` 滤掉，用户的选择仍有意义，故要循环到下一个。
+    if (startPosition < 0) return [...rows];
+    index = rows.findIndex((row) => ids.indexOf(row?.accountId) >= startPosition);
+    // 起点是最后一位、其后没有候选 ⇒ 绕回开头（循环语义）。
+    if (index < 0) index = 0;
+  }
+  // ② 锚点：从 index 起**向后**找第一个**可用**项（step = 0 先检查自己）。
+  //    原先直接 `rows[index]` ⇒ 起点是 `none` 档时弹窗把它排第一，
+  //    而真实选号早已跳到下一个可用号。
+  let anchor = -1;
+  for (let step = 0; step < rows.length; step += 1) {
+    const at = (index + step) % rows.length;
+    if (backendOrderTierIsUsable(tierOf(rows[at]))) { anchor = at; break; }
+  }
+  // 全不可用 ⇒ 原样（与后端一致：不在这里抛，交给上层报真实原因）。
+  if (anchor < 0) return [...rows];
+  const startRow = rows[anchor];
+  // ③ 分组用**恒解锁口径**（`tierOfGroup`），不是可用性用的用户口径。
+  const startTier = tierOfGroup(startRow);
   // 按档分组（保持组内原序）
   const byTier = new Map();
   for (const row of rows) {
-    const t = tierOf(row);
+    const t = tierOfGroup(row);
     const group = byTier.get(t);
     if (group === undefined) byTier.set(t, [row]);
     else group.push(row);
@@ -1002,7 +1242,7 @@ function rotateRows(rows, startId, tierOf) {
       continue;
     }
     // 起点所在档：从起点**之后**继续循环，再绕回该档首至起点之前
-    const posInTier = group.findIndex((row) => row?.accountId === startId);
+    const posInTier = group.findIndex((row) => row?.accountId === startRow?.accountId);
     out.push(...(posInTier >= 0
       ? [...group.slice(posInTier + 1), ...group.slice(0, posInTier)]
       : group));

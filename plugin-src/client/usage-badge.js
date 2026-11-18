@@ -40,7 +40,9 @@ import {
   creditOrderLabel,
   describeCreditOrder,
   rotationStartHint,
+  creditOrderOptionsOf,
   backendOrderTier,
+  sumAvailableCredits,
   autoBadgeName,
   BADGE_PREFERENCES,
   BADGE_PREFERENCE_LABELS,
@@ -2592,29 +2594,30 @@ function UsageBadgeActive(props) {
      *    位次显示「—」。
      */
     const rowMetaOf = (row) => rotationState?.accounts?.find((a) => a.id === row.accountId) ?? null
-    const { shown, hidden } = orderCreditRows(accounts, {
+    /**
+     * ★★ **弹窗顺序 = 后端真实选号顺序**（用户 2026-11-18 要求）。
+     *
+     * ⚠️⚠️ 选项构造整体在 `creditOrderOptionsOf()` 里（`badge-model.js`）：
+     * 本文件依赖宿主注入的 `react`、**无法被单测 import** ⇒ 留在这里的六个
+     * 输入（`strictManualOrder` / `locked` / `windowDays` / `imminentDays` /
+     * `now` / 轮换两项）只能靠源码文本断言看守，而正向审计 2026-11-18 实测：
+     * 逐个删掉/写死它们**六个变异全部全绿**（症状分别是「临期档退化」
+     * 「锁定永久在弹窗失效」「轮换起点消失」「短期/长期边界错位」
+     * 「严格手动顺序失效」——用户全都可见，CI 全看不见）。
+     * ⇒ 抽成纯函数后在行为级钉死（见 `rotation-parity.spec.ts`）。
+     *
+     * ⚠️ `now: Date.now()` 必须**现取**：分档是时间的函数，缓存会让越线的包仍算旧档。
+     */
+    const { shown, hidden } = orderCreditRows(accounts, creditOrderOptionsOf({
       limit: CREDITS_COLLAPSED_LIMIT,
       expanded: creditsExpanded,
-      /**
-       * ★★ **按后端选号机制排序**（用户 2026-11-18 要求）。
-       *
-       * | 参数 | 作用 |
-       * |---|---|
-       * | `strictManualOrder` | 决定「档位序」还是「纯位次序」|
-       * | `allowPermanent` | 锁定态下「只剩永久」的号归不可用（沉底）|
-       * | `windowDays`/`imminentDays` | 与行内三档分色**同一份**窗口参数 |
-       *
-       * ⚠️ 窗口必须与 `splitParts()` 同源，否则「排序用的档位」与「行内显示的分档」
-       *    会互相矛盾（同一行说两套话）。
-       * ⚠️ `now` 现取：分档是时间的函数，缓存会让越线的包仍算旧档。
-       */
       strictManualOrder,
-      allowPermanent: value?.locked !== true,
-      ...(Number.isFinite(windowDays) ? { windowDays } : {}),
-      ...(Number.isFinite(imminentDays) ? { imminentDays } : {}),
+      locked: value?.locked === true,
+      windowDays,
+      imminentDays,
       now: Date.now(),
-      ...(rotationState?.selected == null ? {} : { rotationStartId: rotationState.selected }),
-    });
+      rotationState,
+    }));
     return React.createElement('div', { key: 'credits', className: 'dim-jh-badgeSection' }, [
       // 合计放进节标题右侧，省掉一整行
       React.createElement('div', { key: 'title', className: 'dim-jh-badgeSectionTitle' }, [
@@ -2665,10 +2668,14 @@ function UsageBadgeActive(props) {
                 locked: value?.locked === true,
                 windowDays,
                 imminentDays,
+                // ⚠️ 配额类渠道（`quotaGroup` 非空）没有积分到期分档 ⇒ 标签与
+                //    tooltip 都不能讲三档（否则是假话，审计 P2-2）。
+                hasTiered: quotaGroup === undefined,
               }),
             }, creditOrderLabel({
               strictManualOrder,
               hasRotationStart: rotationState?.selected != null,
+              hasTiered: quotaGroup === undefined,
             })),
           ]),
         accounts.length === 0 || sum === ''
@@ -3200,63 +3207,15 @@ function totalCreditsText(balance) {
 }
 
 /**
- * ★★ **可用积分合计**（用户 2026-11-18 要求）= 短期 + 临期。
+ * ⚠️ `sumAvailableCredits` 已搬到 `./badge-model.js`（2026-11-18）。
  *
- * ## 口径（用户确认「按 A 来」）
- *
- *     可用 = shortTerm + imminent
- *
- * ⚠️⚠️ **不是「总 − 永久」**。两个式子**不等价**，实测：
- *
- * | 场景 | 总 | 短+临 | 总−永久 |
- * |---|---|---|---|
- * | 永久+长期+短期+临期 | 8500 | **1900** | 3500（差 1600 = 长期）|
- * | 只有长期 | 1600 | **0** | 1600 |
- *
- * ⇒ 「总−永久」会把**长期**算进可用，而锁定永久积分模式下长期同样不被消费。
- *
- * ## 为什么口径必须与 reasonOf 一致
- *
- * 选号层的不可用判据是 `imminent + shortTerm === 0`（见 expiringOf）。
- * 若这里用「总−永久」，会出现「显示可用 3500 但该账号被标灰不可用」的自相矛盾。
- *
- * ## 边界
- *
- * - **未锁定永久积分 ⇒ 返回 null**（此时可用 == 总，显示两组数字是噪音）
- * - 读不到余额的账号（`balance` 缺失）**跳过**，不当 0（那会少报）
- * - 配额单位（Gemini）没有积分概念 ⇒ 返回 null
- * - 已过期额度不计入（`splitCreditsByExpiry` 把 expired 独立成桶）
- * - 混合单位渠道：只累加**与主积分组同单位**的账号
- *
- * ⚠️⚠️ **实现只此一处**：胶囊与弹窗右上角都调本函数。
- *    曾各写一份（弹窗那份配额判断还早退成整条 null），两处行为必然漂移。
- *
- * @param accounts - `value.accounts`
- * @param opts.locked - `value.locked`（true = 锁定永久积分）
- * @param opts.windowDays - 长期窗口天数（与行内分档同源）
- * @param opts.imminentDays - 临期窗口天数
- * @returns 数值；null = 不适用（未锁定 / 无数据 / 配额）
+ * 搬走的理由只有一个：**这个文件 import 不了进 vitest** —— 首行的
+ * `import * as React from 'react'` 指向 esbuild external，本仓 `node_modules` 没有
+ * react ⇒ 任何 import 本文件的测试都跑不起来 ⇒ 这里每个纯计算都是「改坏了全绿」。
+ * 对抗审计实测：把 `return seen ? total : null` 改成 `return null`（「可用积分」
+ * 永远不显示）**三个 spec 全绿**。搬过去后可写行为级用例（见
+ * `tests/unit/badge-model.spec.ts` 的 `sumAvailableCredits` 段）。
  */
-function sumAvailableCredits(accounts, opts) {
-  if (opts?.locked !== true) return null;
-  const rows = Array.isArray(accounts) ? accounts : [];
-  if (rows.length === 0) return null;
-  let total = 0;
-  let seen = false;
-  for (const row of rows) {
-    const packages = row?.balance?.packages;
-    if (!Array.isArray(packages)) continue;
-    // 配额单位没有「积分」概念（是并行百分比）⇒ 整条不适用
-    const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
-    if (unit === QUOTA_UNIT) return null;
-    const split = splitCreditsByExpiry(packages, opts.windowDays, undefined, opts.imminentDays);
-    if (split == null) continue;
-    // ⚠️ 只累加「短期 + 临期」：不含长期、不含永久、不含已过期
-    total += (split.shortTerm ?? 0) + (split.imminent ?? 0);
-    seen = true;
-  }
-  return seen ? total : null;
-}
 
 function balanceLine(balance) {
   const packages = balance.packages || [];

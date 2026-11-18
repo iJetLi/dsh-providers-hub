@@ -672,6 +672,40 @@ describe('daysUntilExpiry / expiryBucketLabel', () => {
       .toBe('到期时间未知')
   })
 
+  it('★★ 荒诞的时间戳不得渲染成「还有 1.157e+300 天」（对抗审计 P2-④）', () => {
+    /**
+     * `deductionEndTime: 1e308` ⇒ `daysUntilExpiry` 约 `1.157e+300` ⇒ 修前打印
+     * 「还有 1.157e+300 天」，既荒谬又会撑破徽标布局。真实积分不会超过 100 年。
+     */
+    expect(expiryBucketLabel(pkg({ deductionEndTime: 1e308 }), WINDOW_DAYS, NOW, IMMINENT_DAYS))
+      .toBe('到期时间异常')
+    expect(expiryBucketLabel(pkg({ deductionEndTime: 9e15 }), WINDOW_DAYS, NOW, IMMINENT_DAYS))
+      .toBe('到期时间异常')
+    // 对照：3008 天仍正常打印（证明钳制只挡荒诞值，不影响长周期包）
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW + 3008 * DAY }), WINDOW_DAYS, NOW, IMMINENT_DAYS))
+      .toBe('还有 3008 天')
+  })
+
+  it('★★ `imminentDays = 0` = **关掉临期档**，不是「零天窗口」', () => {
+    /**
+     * 2026-11-18 正向审计 P2-1 实测：原判据只写 `imminentDaysValue < days`
+     * ⇒ `0 < 15` 为真 ⇒ 距离到期 2 天的包渲染出 **「0~15 天内到期」**，
+     * 而悬停文案还写「临期 = 不足 0 天」。分桶侧是对的
+     * （`{imminent: 0, shortTerm: 300}`），只有文案腿分叉。
+     *
+     * `imminentDays: 0` 是**合法配置** —— 后端 `src/buddy-balance-rank.ts`
+     * 的默认值注释明写「设 0 可关掉临期档」。
+     */
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW + 2 * DAY }), WINDOW_DAYS, NOW, 0))
+      .toBe('2 天内到期')
+    // 短期区间内（9 天）也不得退化成 `0~15`
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW + 9 * DAY }), WINDOW_DAYS, NOW, 0))
+      .toBe('9 天内到期')
+    // 对照格：`imminentDays = 5` 时才给「5~15」（证明改动只作用在 0 上）
+    expect(expiryBucketLabel(pkg({ deductionEndTime: NOW + 9 * DAY }), WINDOW_DAYS, NOW, IMMINENT_DAYS))
+      .toBe('5~15 天内到期')
+  })
+
   it('★ 临期窗口缺席 ⇒ 标签退化成两档（旧后端兼容）', () => {
     // 不给第 4 参 ⇒ 临期窗口 = 总窗口 ⇒ 9 天仍标「9 天内到期」（今天的行为）。
     expect(expiryBucketLabel(pkg({ deductionEndTime: NOW + 9 * DAY }), WINDOW_DAYS, NOW))

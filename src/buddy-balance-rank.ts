@@ -298,6 +298,19 @@ export function splitBuddyCreditsByExpiry(
   imminentMs: number = BUDDY_IMMINENT_WINDOW_MS,
 ): BuddyCreditSplit | undefined {
   if (balance === null || balance === undefined) return undefined
+  /**
+   * ⚠️⚠️ **容器层也要挡**（2026-11-18 对抗审计 P2-③）。
+   *
+   * 元素层早有 `if (!pkg) continue`（2026-10-21 那次审计加的），但 `packages`
+   * 本身是 `{}` / 字符串 / `{ packages: {} }` 时 `for...of` 直接抛
+   * `TypeError: packages is not iterable`，而 `selector.classify` 没有 try/catch
+   * ⇒ **整条 `jet-hub/usage-badge` RPC 崩掉**（不是某个 provider 显示异常）。
+   *
+   * 客户端的 `splitCreditsByExpiry`（`plugin-src/client/credit-expiry.js:146`）
+   * 同输入返回 `null`（= 不适用）⇒ 修前是**前后端两套答案**。这里对齐成
+   * `undefined`（= 查询失败），与 `balance === null` 同义。
+   */
+  if (!Array.isArray(balance.packages)) return undefined
   let expiring = 0
   /**
    * `expiring` 的**子量**：其中距到期不足 `imminentMs` 的部分。
@@ -821,9 +834,24 @@ export function describeBuddyCreditSplit(
   const permanent = roundCreditsInline(split.permanent)
   const imminent = roundCreditsInline(split.imminent ?? 0)
   if (expiring <= 0 && permanent <= 0) return '无可用积分'
-  // ⚠️ `imminent` 是 `expiring` 的子量 ⇒ 明细行里要减掉它，否则两段相加会大于合计。
+  /**
+   * ⚠️⚠️ `imminent` 是 `expiring` 的**子量** ⇒ 明细行里必须减掉它，否则三段相加会
+   * 大于合计（`临期 100 · 15 天内到期 350 · 永久 1000` 读起来是 1450，实际 1350）。
+   *
+   * 2026-11-18 正向审计 P3-a：上面这句注释一直这么写，但代码**没减**，而
+   * `tests/unit/buddy-balance-rank.spec.ts` 的用例把错的输出钉死了 ⇒ 注释与实现
+   * 互相矛盾、CI 全绿。修法是把实现改成注释说的样子（区间也随之收窄成
+   * `5~15 天内到期`，与 `plugin-src/client/credit-expiry.js` 的 `expiryBucketLabel`
+   * 同一口径）。
+   *
+   * 本函数**当前无生产调用点**（只在 spec 里）—— 保留是为了将来接回展示层时
+   * 不再犯同一个错；不删是因为删掉会丢掉「三段相加 = 合计」这条不变式的记录。
+   */
   const imminentPart = imminent > 0 ? `临期 ${imminent} · ` : ''
-  return `${imminentPart}${windowDays} 天内到期 ${expiring} · 永久 ${permanent}`
+  const restDays = imminent > 0 ? `${imminentDays}~${windowDays}` : `${windowDays}`
+  // `imminent > expiring` 是上游数据异常 ⇒ 用 `Math.max(0, …)` 兜底，不输出负数。
+  const rest = imminent > 0 ? Math.max(0, roundCreditsInline(split.expiring - imminent)) : expiring
+  return `${imminentPart}${restDays} 天内到期 ${rest} · 永久 ${permanent}`
 }
 
 /** 展示用规整：两位小数（服务端精确值带浮点尾数噪声）。 */

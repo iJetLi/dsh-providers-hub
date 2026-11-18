@@ -471,6 +471,36 @@ describe('rankBuddyAccountsByBalance（稳定分档排序）', () => {
   })
 })
 
+describe('splitBuddyCreditsByExpiry：容器层形状防御（2026-11-18 对抗审计 P2-③）', () => {
+  /**
+   * 元素层早有 `if (!pkg) continue`（2026-10-21 加的），但 **`packages` 本身**
+   * 是 `{}` / 字符串时 `for...of` 会抛 `TypeError: packages is not iterable`，
+   * 而 `selector.classify` 没有 try/catch ⇒ **整条 `jet-hub/usage-badge` RPC 崩掉**
+   * （不是某个 provider 显示异常）。
+   *
+   * 客户端的 `splitCreditsByExpiry`（`plugin-src/client/credit-expiry.js:146`）
+   * 同输入返回 `null`（= 不适用）⇒ 修前是**前后端两套答案**。
+   */
+  it('★★ packages 不是数组 ⇒ undefined（查询失败），绝不抛', () => {
+    expect(splitBuddyCreditsByExpiry({ packages: {} } as never)).toBeUndefined()
+    expect(splitBuddyCreditsByExpiry({ packages: 'oops' } as never)).toBeUndefined()
+    expect(splitBuddyCreditsByExpiry({ packages: null } as never)).toBeUndefined()
+    expect(splitBuddyCreditsByExpiry({ packages: 42 } as never)).toBeUndefined()
+  })
+
+  it('★ 合法空数组仍给两桶 0（与「形状异常」区分开）', () => {
+    /**
+     * ⚠️ `imminent` / `expired` **只在 `> 0` 时出现**（`BuddyCreditSplit` 的
+     * 接口 JSDoc 明写：「多一个恒 0 的键会让所有逐键 `toEqual` 的既有用例全线变红，
+     * 且对 0 值毫无信息量」）。我第一版断言四键全在 ⇒ 红，**红因在判据上**。
+     */
+    const split = splitBuddyCreditsByExpiry({ packages: [] } as never)
+    expect(split).toEqual({ expiring: 0, permanent: 0 })
+    expect(split?.imminent).toBeUndefined()
+    expect(split?.expired).toBeUndefined()
+  })
+})
+
 describe('describeBuddyCreditSplit（展示文案）', () => {
   it('两桶都给出，并带上窗口天数', () => {
     expect(describeBuddyCreditSplit({ expiring: 250, permanent: 100.5 }))
@@ -490,9 +520,17 @@ describe('describeBuddyCreditSplit（展示文案）', () => {
    * 「其中 100 会在 5 天内烧掉」这个最关键的决策信息就丢了，
    * 而那正是引入临期档的全部目的。
    */
-  it('★ 有临期额度时单列「临期 X」', () => {
+  it('★ 有临期额度时单列「临期 X」，且短期段必须**减掉**临期（三段相加 = 合计）', () => {
+    /**
+     * 2026-11-18 正向审计 P3-a：旧期望是 `临期 100 · 15 天内到期 350 · 永久 1000`，
+     * 三段相加 1450 而合计是 1350 —— 断言把**错的输出**钉死了，注释里那句
+     * 「要减掉它」形同虚设。修正后的口径与弹窗标签一致（`5~15 天内到期`）。
+     */
     expect(describeBuddyCreditSplit({ expiring: 350, permanent: 1000, imminent: 100 }))
-      .toBe('临期 100 · 15 天内到期 350 · 永久 1000')
+      .toBe('临期 100 · 5~15 天内到期 250 · 永久 1000')
+    // ⚠️ 上游数据异常（临期 > 短期总量）时不得输出负数
+    expect(describeBuddyCreditSplit({ expiring: 50, permanent: 0, imminent: 80 }))
+      .toBe('临期 80 · 5~15 天内到期 0 · 永久 0')
   })
 
   it('无临期额度时文案与改动前逐字节相同（向后兼容）', () => {

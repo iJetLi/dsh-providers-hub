@@ -261,58 +261,32 @@ describe('用量徽标：槽位接线', () => {
    */
   describe('可用积分（锁定永久积分时）', () => {
     /**
-     * ⚠️⚠️ **必须锚定「累加那一行」本身**，不能只搜「文件里有没有 split.imminent」。
+     * ⚠️⚠️ **2026-11-18：这三条源码断言已被行为级用例取代，这里只留「防搬家搬出两份」。**
      *
-     * 变异实测教训（本用例第一版就是这么漏的）：
-     * - 把 `(split.shortTerm ?? 0) + (split.imminent ?? 0)` 改成只留 shortTerm
-     *   ⇒ 文件里 **别处**（如 renderSplitNote）仍有 `split.imminent` ⇒ 断言照样通过。
-     * - 删掉 `if (value?.locked !== true) return null;`
-     *   ⇒ 「locked 判据存在」的正则仍在**别处**（reasonOf）命中 ⇒ 照样通过。
+     * 原实现住在 `usage-badge.js`（`sumAvailableCredits`），而**该文件 import 不进
+     * vitest** —— 首行 `import * as React from 'react'` 指向 esbuild external
+     * （本仓 `node_modules` 无 react）。所以那时只能用「抽源码文本」的方式守卫，
+     * 而对抗审计 B02 实测：把 `return seen ? total : null` 改成 `return null`
+     * （胶囊与弹窗的「可用积分」永远不显示）⇒ **三个 spec 全绿**。
      *
-     * ⇒ 本用例改为**抽取累加表达式与守卫语句本身**再断言，任一变红。
+     * ⇒ 已把函数搬到 `plugin-src/client/badge-model.js`（可 import），行为级用例在
+     * `tests/unit/badge-model.spec.ts` 的 `sumAvailableCredits` 段（5 条，断言具体数值）。
+     * 这里保留的唯一职责是：`usage-badge.js` 不得**再长出一份本地实现**。
      */
-    it('可用 = 短期 + 临期（提取累加表达式，两个加数缺一即红）', () => {
-      // 提取 `total += (...) + (...);` 这一行
-      const sumLine = /total \+= \(split\.(\w+) \?\? 0\) \+ \(split\.(\w+) \?\? 0\);/.exec(badge)
-      expect(sumLine, '必须存在「total += (split.A ?? 0) + (split.B ?? 0)」形式的累加').not.toBeNull()
-      const [, a, b] = sumLine
-      // ⚠️ 两个加数必须**恰好**是 shortTerm 与 imminent（顺序不限）
-      expect([a, b].sort(), '累加的两项必须是 shortTerm + imminent').toEqual(['imminent', 'shortTerm'])
-      // ⚠️ 反向：不得是三加数（含 longTerm 就会变成「总−永久」口径）
-      expect(badge, '累加表达式不得含第三个加数').not.toMatch(/total \+= \(split\.\w+ \?\? 0\) \+ \(split\.\w+ \?\? 0\) \+/)
-    })
-
-    /**
-     * ⚠️⚠️ 同上：必须锚定 **availableReadingText 自己的函数体开头**的守卫，
-     *    而不是全文件搜 `locked`（reasonOf 里也有一处，会掩盖删除）。
-     */
-    /**
-     * ⚠️⚠️ 计算只此一处（`sumAvailableCredits`），locked 守卫也搬到了那里。
-     *    本用例锚定**函数体本身**，而不是全文件搜 locked
-     *    （reasonOf 里也有一处，会掩盖删除 —— 变异实测过）。
-     */
-    it('只在锁定永久积分时显示（锚定 sumAvailableCredits 的守卫本身）', () => {
-      const start = badge.indexOf('function sumAvailableCredits(accounts, opts) {')
-      expect(start, '必须存在 sumAvailableCredits 函数').toBeGreaterThan(0)
-      const body = badge.slice(start, start + 300)
-      expect(body, 'sumAvailableCredits 必须以 locked 判据开头').toMatch(/if \(opts\?\.locked !== true\) return null;/)
-      // 胶囊侧：未锁定时（返回 null）必须退回原读数
-      expect(badge, '未锁定时胶囊必须退回 view.reading').toContain('availableReadingText === null')
-      // 弹窗侧：同样按 availableText === null 退回「合计」
-      expect(badge, '未锁定时弹窗必须退回「合计」').toContain('availableText === null')
-    })
-
-    /**
-     * ★ **实现只此一处**（防再次复制成两份）
-     */
-    it('可用计算只有一处实现（胶囊与弹窗共用 sumAvailableCredits）', () => {
+    it('★★ sumAvailableCredits 只在 badge-model.js 有一份实现（防再次复制）', () => {
       const defs = badge.match(/function sumAvailableCredits\(/g) ?? []
-      expect(defs.length, 'sumAvailableCredits 只能定义一次').toBe(1)
+      expect(defs.length, 'usage-badge.js 里不得再有本地实现').toBe(0)
+      expect(badge, '必须从 badge-model.js import 它').toMatch(
+        /import \{[^}]*\bsumAvailableCredits\b[^}]*\} from '\.\/badge-model\.js'/s,
+      )
+      // 累加表达式也不得在本文件复现（曾复制出两份，变异漏抓）
+      expect(badge, '累加表达式不得在本文件出现').not.toMatch(/total \+= \(split\.\w+ \?\? 0\)/)
+    })
+
+    it('★ 胶囊与弹窗仍然共用同一个计算（两处调用点都在）', () => {
+      // import 行里是不带括号的 `sumAvailableCredits,` ⇒ 匹配到 `(` 的只有调用点
       const calls = badge.match(/sumAvailableCredits\(/g) ?? []
-      expect(calls.length, '应有一处定义 + 两处调用（胶囊、弹窗）').toBe(3)
-      // ⚠️ 反向：不得再有第二条累加表达式（曾复制出两份，变异漏抓）
-      const accum = badge.match(/total \+= \(split\.\w+ \?\? 0\) \+ \(split\.\w+ \?\? 0\);/g) ?? []
-      expect(accum.length, '累加表达式只能出现一次').toBe(1)
+      expect(calls.length, '胶囊与弹窗右上角各一处调用').toBe(2)
     })
 
     it('胶囊与弹窗右上角都渲染可用（两处，防只改一处）', () => {
@@ -1778,10 +1752,53 @@ describe('用量徽标：号多了以后的两条整理（2026-10-03 用户要�
 
   it('排序与折叠都走纯函数 orderCreditRows（组件里不再各写一份，逻辑由 badge-model.spec 锁）', () => {
     expect(badge).toMatch(/import \{[\s\S]*?orderCreditRows[\s\S]*?\} from '\.\/badge-model\.js'/)
-    expect(badge).toMatch(/orderCreditRows\(accounts, \{/)
+    /**
+     * ⚠️ 2026-11-18 改：选项对象整体搬进 `creditOrderOptionsOf()`（`badge-model.js`）。
+     *
+     * 原断言是 `orderCreditRows\(accounts, \{` —— 那次重构会让它变红（好事，
+     * 说明它至少能发现**结构**变化），但它守不住本次审计实测的六种「留着但失效」：
+     * 逐个删掉 `imminentDays` / `allowPermanent` 写死 / 删 `rotationStartId` /
+     * 删 `windowDays` / `strictManualOrder` 写死，**六格全绿**。
+     * ⇒ 六个输入已收进纯函数并由 `rotation-parity.spec.ts` 行为级钉死，
+     *   本文件只留「接线存在性」，**其局限如实登记在这里**。
+     */
+    expect(badge).toMatch(/orderCreditRows\(accounts, creditOrderOptionsOf\(\{/)
     expect(badge).toMatch(/limit: CREDITS_COLLAPSED_LIMIT/)
     // ⚠️ 组件里不得再自带排序实现：两份必然分叉（且组件的实现测不到，因为没装 react）
     expect(codeOf(badge)).not.toMatch(/function balanceOrder\(/)
+  })
+
+  it('★★ 渲染出口必须消费 orderCreditRows 的 `shown`（排序结果不得被丢弃）', () => {
+    /**
+     * 2026-11-18 正向审计 M7 实测：把渲染出口 `shown.map(...)` 改成
+     * `accounts.map(...)`（= **排序结果整条丢弃、弹窗退回原始池序**），
+     * 既有 112 条用例**全绿**。
+     *
+     * ⚠️ 局限如实登记：这是**源码文本断言**，挡不住「`shown.map` 留着但被
+     *    `if (false)` 包住」。真正行为化需要渲染该组件，而它依赖宿主注入的
+     *    `react`（esbuild external，本仓 node_modules 里没有）⇒ 做不到。
+     *    本仓已四次记录「源码断言挡不住留着但失效」；这里只能提高门槛
+     *    （精确到片段 + 反面断言 + 同时要求 `hidden` 被消费）。
+     */
+    /**
+     * ⚠️ 必须先按**原文**定位再切片、最后才剥注释：`codeOf()` 会删掉注释，
+     * 用它处理过的字符串去比原文算出的下标 ⇒ 切到空串（我第一版就这么红过）。
+     */
+    const startIdx = badge.indexOf("key: 'credits', className: 'dim-jh-badgeSection'")
+    expect(startIdx, '应能定位到积分页 section').toBeGreaterThan(0)
+    // 积分页 section 的终点：`hidden === 0` 的折叠按钮是本 section 最后一个元素，
+    // 之后是 `renderNote` 的定义（下一个顶层函数）。
+    const endIdx = badge.indexOf('  /** 一行灰色小字；空串返回 `null`（不占位）。 */', startIdx)
+    expect(endIdx, '应能定位到积分页 section 的终点').toBeGreaterThan(startIdx)
+    const credits = codeOf(badge.slice(startIdx, endIdx))
+    expect(credits.length, '应能截取到积分页 section').toBeGreaterThan(0)
+    expect(credits, '积分行必须由 `shown` 渲染').toContain('shown.map((row) =>')
+    expect(credits, '积分行不得直接渲染 `accounts`（会丢掉排序结果）').not.toMatch(/accounts\.map\(/)
+    /**
+     * `hidden` 必须被消费：折叠提示是「还有 N 个」的唯一来源，若它被丢弃，
+     * `limit` 折叠看起来仍正常（列表短了）但用户不知道还有多少号。
+     */
+    expect(codeOf(badge)).toMatch(/hidden === 0/)
   })
 
   it('展开状态随渠道切换重置（否则会显得「折叠时灵时不灵」）', () => {

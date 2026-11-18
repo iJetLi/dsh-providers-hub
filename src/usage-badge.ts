@@ -239,6 +239,8 @@ export function createUsageBadge(deps: UsageBadgeDeps): UsageBadge {
     if (!balances.ok) throw new BadgeRpcFailure(balances.error)
 
     const accounts = balances.value.accounts
+    /** 锁定态三来源：主路径 `balances.value.locked` → 兜底 `deps.readLocked` → 不写该字段。 */
+    const locked = balances.value.locked ?? deps.readLocked?.(provider)
     const snapshot: BadgeSnapshot = {
       at: now(),
       accounts,
@@ -256,9 +258,10 @@ export function createUsageBadge(deps: UsageBadgeDeps): UsageBadge {
        * 2. `deps.readLocked` —— 兜底（万一 collectBalances 的实现没带）；
        * 3. 都没有 ⇒ 不写该字段 ⇒ 前端按「未锁定」处理（向后兼容）。
        */
-      ...(balances.value.locked ?? deps.readLocked?.(provider)) === undefined
-        ? {}
-        : { locked: balances.value.locked ?? deps.readLocked?.(provider) },
+      // ⚠️ 只求值一次（2026-11-18 正向审计 P3-d）：原写法在判据与赋值里各调一次
+      //    `deps.readLocked?.(provider)`，两次之间用户在面板里改了开关就会
+      //    判据说「有值」而赋值拿到 `undefined` ⇒ 写出 `{ locked: undefined }`。
+      ...(locked === undefined ? {} : { locked }),
     }
     // ⚠️ `subscriptionOf` 的第二个参数是 `ReadonlySet`（它按 id 判「这条余额行
     //    属不属于启用账号」）—— 上面为了传 `accountIds` 用的是数组，这里再包一次。
