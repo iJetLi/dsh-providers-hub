@@ -47,6 +47,7 @@ import {
   type ModelPromotion,
 } from '../../src/model-promotions.js'
 import { promotionActiveNow } from '../../src/qoder-adapter.js'
+import { promotionTooltip } from '../../src/promotion-tooltip.js'
 import { parsePromotions } from '../../src/buddy.js'
 
 /** epoch 构造器：全部按 UTC 字面量写死，用例与本机时区无关。 */
@@ -730,6 +731,53 @@ describe('Qoder 的 promotion（qoderPromotionCandidate）', () => {
 
   it('空 modelId 直接丢弃（否则会把徽标挂到一个不存在的行上）', () => {
     expect(qoderPromotionCandidate({ active: true, badgeZh: 'A' }, '')).toBeUndefined()
+  })
+
+  /**
+   * 悬停那句（GitHub PR #110 建的出口）：官方把 `promotion.description` 当
+   * `promotionDescription` 塞进条目 detail —— 即**悬停正文**，而 `badge` 只是行上短标签。
+   *
+   * ⚠️ 本仓原先**整条丢掉** description（只读 badge），而两站今天**都在发**
+   * （2026-11-18 实测：CN「错峰时段4折优惠（10 PM-8 AM UTC+8）」、国际版同句英文）。
+   */
+  it('★ 上游给了 description ⇒ 进 hover，并按读者语言挑；缺了就不带（不编文案）', () => {
+    const withCopy = qoderPromotionCandidate({
+      active: false,
+      windowStart: '22:00',
+      windowEnd: '08:00',
+      badgeZh: '错峰 4 折',
+      badgeEn: 'Off-Peak 60% off',
+      descriptionZh: '错峰时段4折优惠（10 PM-8 AM UTC+8）',
+      descriptionEn: 'Off-Peak 60% off (10 PM-8 AM UTC+8)',
+    }, 'qmodel_38max')!
+    expect(withCopy.hover).toEqual({
+      zh: '错峰时段4折优惠（10 PM-8 AM UTC+8）',
+      en: 'Off-Peak 60% off (10 PM-8 AM UTC+8)',
+    })
+    // 悬停 = 上游原话 · 每日时段（有时段才写），三件都来自上游自己的字段。
+    // ⚠️ 下面两行**同时**断言「原话里的 10 PM-8 AM」与「派生的 22:00–08:00」——
+    // 同一窗口在悬停里出现两次是**刻意保留**，不是漏消重（2026-11-18 自审）：
+    // 腾讯那条 `hover`（`Nov 16 – Dec 1: free daily usage.`）与派生的「活动至…」
+    // 本来就是同一个形态；散文是自由文本，「它是否已经提了窗口」没有可判据的答案，
+    // 而按「有 hover 就不拼时段」去消重会把**腾讯的时段**一起抹掉（它的原话不写时段）。
+    // 保留的第二个理由：两者不一致时，并排显示才看得见上游自相矛盾。
+    expect(promotionTooltip(withCopy, 'zh-CN')).toContain('错峰时段4折优惠')
+    expect(promotionTooltip(withCopy, 'zh-CN')).toContain('22:00–08:00')
+    expect(promotionTooltip(withCopy, 'en-US')).toContain('Off-Peak 60% off (10 PM-8 AM UTC+8)')
+    // 只有中文那句时，英文读者退回中文（与 `pickCopy` 同口径），而不是整句消失。
+    const zhOnly = qoderPromotionCandidate({
+      active: false, windowStart: '22:00', windowEnd: '08:00', badgeZh: 'A',
+      descriptionZh: '中文说明',
+    }, 'm')!
+    expect(zhOnly.hover).toEqual({ zh: '中文说明' })
+    expect(promotionTooltip(zhOnly, 'en-US')).toContain('中文说明')
+
+    const noCopy = qoderPromotionCandidate({
+      active: false, windowStart: '22:00', windowEnd: '08:00', badgeZh: 'A',
+    }, 'm')!
+    expect(noCopy.hover).toBeUndefined()
+    expect(promotionTooltip(noCopy, 'zh-CN')).not.toContain('undefined')
+    expect(promotionTooltip(noCopy, 'zh-CN')).toContain('22:00–08:00')
   })
 })
 

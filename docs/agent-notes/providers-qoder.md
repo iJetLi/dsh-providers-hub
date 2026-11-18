@@ -1315,3 +1315,143 @@ Login-Version / X-Model-Key / X-Model-Source
 仍走 fetchFor」。⚠️ 断言必须用**有界等待 + 带解释的失败**：缺陷态的表现是「落回原始
 全局 fetch ⇒ 真发 HTTPS ⇒ 卡到超时」，直接 `await` 只会得到一句 `Test timed out in
 5000ms`，看不出真因（我第一版就是这么写的，红得毫无信息量）。
+
+---
+
+## ⚠️⚠️ 活动文案的双语键：官方是**四键**，我们原先只认 `zh`/`en`（2026-11-18）
+
+**症状**：上游一旦把 `promotion.badge` / `promotion.description` 改发区域变体
+（`cn_zh` / `en_us`），行上的徽标与悬停会**整条静默消失** ——
+`qoderPromotionCandidate` 在没有 label 时返回 `undefined`，且**不打任何日志**
+（解析层全绿、界面零徽标，与「上游没发活动」逐字同形）。
+
+### 一手证据（Qoder CN 0.5.11，`AppData\Local\Programs\Qoder CN\.qoder-versions\0.5.11`）
+
+`out/main/electronMain.js` 两个函数（混淆，需解字符串表）：
+
+```js
+function XS0(a){ … Object.keys(["en","zh",e(15862,-8743),e(16952,18998)] …) }   // 四键枚举
+function UO0(a){ const x=a.en??a[e(16324,5430)], t=a.zh??a[e(17414,-7444)]; … } // en→? zh→?
+```
+
+`out/renderer/assets/CAGvh22m.js` 的取词函数（**这才是渲染真相**）：
+
+```js
+function Yg1(e,t){ return e ? (B5(t)==="zh" ? e.zh??e.cn_zh : e.en??e.en_us)
+                             ?? e.zh??e.cn_zh??e.en??e.en_us : void 0 }
+```
+
+- 解混淆方法：`R(a,e)` 是解码器（`a-=161` 后取 `lW()` 字符串表，再做自定义 base64 →
+  `decodeURIComponent`）；表有**旋转偏移 216**。以 `en_us`/`cn_zh` 两个反查索引各自的
+  偏移**同为 216** ⇒ 自洽。两个混淆参数解出正是 `en_us` / `cn_zh`。
+- 取值还要 `trim`（官方 `Zq()`：`typeof v === 'string' ? v.trim() : ''`）——
+  **不 trim 的后果是画出一个空胶囊**，不是「没画」。
+- `XS0` 同时用于 `badge` 与 `description` ⇒ 两者**必须共用同一个读取函数**
+  （各写一份就是同一 schema 的两套判据）。
+
+### 实测事实（2026-11-18 两站零额度目录 GET）
+
+| 站点 | 模型数 | 带 `promotion` | `badge` 键 | `description` 键 |
+|---|---|---|---|---|
+| CN | 14 | 2（`qmodel_38max`、`qfmodel`） | `{en,zh}` | `{en,zh}` |
+| 国际版 | 17 | 3（`ultimate` + 同两条） | `{en,zh}` | `{en,zh}` |
+
+⇒ 四键是「**结构上可达、当前零实测**」，不是正在发生的故障。如实标注，不夸大。
+
+### 我们原先**整条丢掉**的活字段：`promotion.description`
+
+官方把它当 `promotionDescription` 塞进条目 `detail`（即**悬停正文**），`badge` 只是行上
+短标签。实测原文（CN）：`错峰时段4折优惠（10 PM-8 AM UTC+8）`。本仓解析层原先只读
+`badge`，而 PR #110 已经把悬停出口（`src/promotion-tooltip.ts` 的 `promotionTooltip`，
+读 `ModelPromotion.hover`）建好 —— 故本次把 `description` 读进来，
+经 `qoderPromotionCandidate` 放进 `hover`（缺了就不带，**不编文案**）。
+
+### 关键取舍：跨语言兜底**只在层内做一次**
+
+- `readLocalizedPair` 每格只认自己的两个键（中文格 `zh → cn_zh`，英文格 `en → en_us`）；
+- 官方尾部那条「首选键都没有就用任意一个」由**下游**实现（`promotionBadgeLabel` 英文读者
+  无 `labelEn` 退回 `label`；`promotionTooltip` 的 `pickCopy` 同理）。
+- 若在解析层也填一遍 ⇒ 同一件事两套兜底，迟早漂移（本仓反复踩的形态）。
+
+### 守卫与变异
+
+- 单测：`tests/unit/qoder-catalog.spec.ts` 的「promotion 的双语文本按官方四键口径读」
+  6 条（cn_zh / en_us / 双键优先级 / description 独立 / trim 与纯空白 / 非对象）。
+- 单测：`tests/unit/model-promotions.spec.ts` 的「上游给了 description ⇒ 进 hover」
+  （含 zh-only 时英文读者退回中文、缺 description 时 `hover` 缺席且不出现 `undefined`）。
+- e2e：`tests/e2e/qodercn-probe.e2e.spec.ts` 新增「徽标与悬停说明读得出来」——
+  判据是**原始报文与解析结果逐条对齐**（上游有文案 ⇒ 我们不得解析成空）
+  + **键集合白名单** `{en,zh,en_us,cn_zh}`（出现第五个键时有人要来看）。
+  ⚠️ 刻意**不写**「今天必须只发 zh/en」：那是现状，不是契约（写法见分类表）。
+- 变异（4 条，全有牙）：
+  - M1 删 `cn_zh` 回落 ⇒ 单测 1 红（点名「只发 cn_zh」那条）；
+  - M2 去掉 `trim` ⇒ 单测 1 红（点名「空胶囊」那条）；
+  - M3 不读 `description` ⇒ 单测 1 红 **+ e2e 红**，报文
+    `qmodel_38max 的上游 promotion.description 有文案（键 en,zh）但我们解析出来是空的`；
+  - M4（定向）删 `...hover` ⇒ 单测 1 红。⚠️ **第一次做错**：`.Replace()` 全局替换把
+    **腾讯那条同义行**一起删了（2 红），说明这两处是同一行字面量 —— 变异必须带上下文定位，
+    否则「红因」不是被测那条腿（与 CRLF/PATCH-NOT-APPLIED 同类教训）。
+
+### 未采纳 / 仍缺
+
+- `link_url`（`{zh: https://docs.qoder.cn/...}`）我们仍**不读**：官方 `oTe`/`Xs` 解析出的
+  promotion 对象里也没有它 ⇒ 它不是徽标/悬停的输入，读了只能进日志，暂不接。
+- `promotion` 的 `description`-only 形态（只有文案、没有价格/窗口）在 `parsePromotion`
+  入口就被丢（该函数要求至少一个价格/窗口字段）—— 无实测样本，未改。
+
+### 自审补记（2026-11-18 晚，同一 PR 的第二轮）：一条真盲区 + 三处「看着像缺陷、其实是取舍」
+
+**① 真盲区（已修）：e2e 只扫 `chat` 场景，而解析吃 `chat ∪ app`。**
+`qodercn-probe` 那条新用例原先只读 `parsed[QODER_CATALOG_SCENE]`（`= 'chat'`），
+但 `fetchQoderRemoteModels` 走 `parseQoderRemoteModelsForScenes(body, QODER_CATALOG_SCENES)`
+（`['chat','app']` 并集）—— 而 `lmodel` 这类模型**只发布在 `app`**（见上文 §「只发布在 app
+场景」）。后果：只出现在 `app` 的活动**整条不被核对**，上游哪天改发区域变体，这条守卫
+**静默通过**（假绿）。修法：遍历 `QODER_CATALOG_SCENES`。
+
+2026-11-18 复跑实测（CN，只读）：`场景 chat：14 条，带活动 2 条`、`场景 app：14 条，带活动
+2 条`，且**逐 id 重复**（2 条同 id 被去重）⇒ 今天两场景内容相同，但「只看 chat」这层
+盲区是结构性的（`app` 是唯一可能带活动却没人核对的场景）。
+
+两条判据的覆盖面**刻意不同**（这是本轮的关键，别统一）：
+- **键白名单**对**所有场景的所有条目**生效 —— 它只读原始报文，与「谁是赢家」无关。
+  若也限定在赢家，这条腿在 `app` 上会**恒空跑**（今天 app 的 4 次键检查正是它没空跑的
+  证据，日志里逐场景打印 `键检查 N 次`）。
+- **「上游有文案 ⇒ 我们不得读空」** 只对**赢家场景**生效：解析层按 scenes 顺序去重
+  （`chat` 优先），非赢家那条根本没被解析 ⇒ 对它断言会红在**错误的地方**（红因不是被测腿）。
+
+**② 悬停里时段出现两遍 —— 不是本次新增的缺陷，刻意保留。**
+Qoder 的 `description` 自带窗口（`10 PM-8 AM UTC+8`），`promotionTooltip` 又追加派生的
+`22:00–08:00 (Asia/Shanghai)`。**腾讯本来就是同一个形态**：其 `hover` 原文
+`Nov 16 – Dec 1: free daily usage.` 与派生的 `活动至 12月1日` 说的是同一件事
+（`tests/unit/model-promotions.spec.ts:74` 的真实上游形状）。`promotionTooltip` 的三段语义
+是「原话 · 期限 · 时段」，**不互相消重**，因为：
+- 「散文是否已经提了窗口」没有可判据的答案，任何消重都是替上游猜；
+- 反过来按「有 hover 就不拼时段」去重，会**抹掉腾讯的时段**（它的原话不写时段）；
+- 两者不一致时，并排显示才看得见上游自相矛盾（隐藏比并排更糟）。
+⇒ 单测 `model-promotions.spec.ts` 里那两行**同时**断言两种写法，是**刻意的期望**，
+已加注释说明；别当成漏消重来「修」。
+
+**③ 同文件两个读取器并存（`readString` 不 trim / `readTrimmed` trim）—— 判据不同，不许合并。**
+分界是「这块文本要不要给人看」：非本地化字段（`window_*` / `timezone` / `rule_id` /
+`key` / `display_name`）照官方 `oTe` 原样取值（不 trim），好处是 `dailyUnusable` 的日志里
+能看到**上游原文**；本地化文本（`badge` / `description`）必须 trim（官方 `Zq()`），
+否则 `"   "` 会被当成有文案 ⇒ **空胶囊**。合并成任一方都会静默改掉另一格语义。
+（形态上接近「一文件两套同义判据」这个复发缺陷，故在源码里写明了分界与后果。）
+
+**④ 已逐格复核「新字段不会在半路被丢掉」（buddy 那次 `promos` 白名单事故的同形检查）。**
+- `qoder-adapter.ts` 的 `promotionCandidates()`(:1421) / `toCatalogEntry()`(:1472) /
+  `nextPromotionEdgeAt()`(:1651) 三处都是**整对象透传** `model.promotion`；
+- `catalogSource()` = `this.remoteModels ?? this.product.fallbackModels`，**不重建对象、
+  无字段白名单**；
+- `reconcileWithFallback`（白名单式重建）**只有 `buddy-adapter.ts` 一处**，Qoder 不走它
+  ⇒ 不存在「重建时把 description 丢掉」的同形缺陷；
+- 渲染出口是真的：`plugin-src/client/model-label.js:257` 取 `promotionTooltip(selected, language)`，
+  `:264` 写进 `title` ⇒ 悬停**可见**，不是数据孤岛。
+- RPC 侧 `jet-hub-rpc.ts:10294-10303` 把 `promotionCandidates()` 的 rows 原样交给客户端
+  （按 provider 分格、失败只 warn 不清空）⇒ `hover` 随 JSON 原样过线。
+
+**⑤ 仍未改（承接上文，别当漏项）**：离线兜底表的 promotion **不带 description**
+（写死活动文案会腐坏 ⇒ 离线悬停只有派生时段；`promotionCandidates` 的注释里已写明
+「与 buddy 刻意不同」）；解析层**不跨场景合并字段**（同 id 只留赢家场景的整条，
+故若 chat/app 文案不同，我们只显示 chat 的）。
+
