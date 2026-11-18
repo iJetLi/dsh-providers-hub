@@ -1163,6 +1163,24 @@ export interface RpcCreditsBalanceExtra {
 export interface RpcCreditsBalancesResponse {
   accounts: RpcCreditsBalanceAccount[]
   /**
+   * 该 provider 当前是否处于「**锁定永久积分**」状态。
+   *
+   * ⚠️⚠️ 2026-11-18 补齐（真实缺陷）：客户端「可用积分 = 短期 + 临期」的显示
+   *    完全依赖本字段（`value.locked`），但此前**本响应从未回传它**
+   *    ⇒ `value.locked` 恒为 `undefined` ⇒ 用户明明在面板里锁定了永久积分，
+   *    胶囊与弹窗右上角的「可用/总」却始终不出现（用户报障）。
+   *
+   * ⚠️ 为什么不能由客户端去调 `account.getRotation` 取：那会多一次 RPC、
+   *    且两处读数的时刻不同（面板可能在两次调用之间被改），
+   *    「可用」与「锁定」必须来自**同一次响应**才自洽。
+   *
+   * 语义：
+   * - `true`  ⇒ 选号只消耗短期/临期，客户端显示「可用 X / 总 Y」
+   * - `false` ⇒ 全部积分都可消费，客户端只显示总计
+   * - 缺省（旧后端）⇒ 客户端按 `!== true` 处理，退回只显总计（向后兼容）
+   */
+  locked?: boolean
+  /**
    * 当前生效的「临时积分」窗口（天）—— **CodeBuddy / WorkBuddy / TRAE /
    * LobsterAI 返回**。
    *
@@ -2705,6 +2723,17 @@ export interface RpcUsageBadgeResponse {
   windowDays?: number
   /** 「临期」子窗口天数（与 {@link windowDays} 同生共死，缺省时前端退化成三段）。 */
   imminentDays?: number
+  /**
+   * 该 provider 当前是否「**锁定永久积分**」。
+   *
+   * ⚠️ 2026-11-18 补（真实缺陷）：客户端「可用积分 = 短期 + 临期」的显示
+   *    完全依赖本字段（`value.locked`），但徽标响应此前**从未回传它**
+   *    ⇒ 用户明明在面板里锁定，胶囊与弹窗右上角的「可用/总」始终不出现。
+   *
+   * - `true`  ⇒ 显示「可用 X / 总 Y」
+   * - `false` / 缺省 ⇒ 只显示总计（未锁定时两者相等，多显示一组是噪音）
+   */
+  locked?: boolean
   /** 订阅读数；该渠道没有订阅数据、或订阅查询失败时**整个字段缺席**。 */
   subscription?: RpcUsageBadgeSubscription
   /** 当前生效的显示偏好（顺带回传，省一次往返）。 */

@@ -4527,12 +4527,56 @@ function registerJetHubEndpoints(
       handleMethod('credits.balances', {
         provider,
         ...accountIds === undefined ? {} : { accountIds: [...accountIds] },
-      }) as Promise<BadgeRpcResult<RpcCreditsBalancesResponse>>,
+      }).then((raw): BadgeRpcResult<RpcCreditsBalancesResponse> => {
+        /**
+         * ★★ **统一在此补 `locked`**（用户 2026-11-18 报障的修法）。
+         *
+         * ## 缺陷
+         *
+         * 客户端「可用积分 = 短期 + 临期」的显示依赖 `value.locked`，
+         * 但 `credits.balances` 的**六个返回分支**（表分派 / qoder / officeace /
+         * 各特例 / 无账号 / 默认）**没有任何一个回传它**
+         * ⇒ `value.locked` 恒 `undefined`
+         * ⇒ 用户明明在面板里锁定了永久积分，胶囊与弹窗右上角的「可用/总」
+         *    却始终不显示（本次报障）。
+         *
+         * ## 为什么补在这里而不是六个分支各加一行
+         *
+         * 六个分支分散在 9380~9840 行、形态各异（`satisfies` / 裸对象 /
+         * 空数组早退）。逐处加必然漏（本仓反复记录过这种形态）。
+         * 而 `collectBalances` 是**徽标读数的唯一入口** ⇒ 在这里包一层
+         * 一次性覆盖全部路径。
+         *
+         * ⚠️ 只对 `ok: true` 且有 `value` 的结果注入；失败结果原样返回
+         *    （失败时前端本就退回「用量不可用」，不该凭空补字段）。
+         * ⚠️ `locked` 用**同一次 read** 从 pool 取，与选号层同源
+         *    （`pool.permanentLocked` 是进程内缓存，读它不产生 IO）。
+         */
+        const result = raw as BadgeRpcResult<RpcCreditsBalancesResponse>
+        if (result.ok === true && result.value !== null && typeof result.value === 'object') {
+          return {
+            ...result,
+            value: { ...result.value, locked: pool.permanentLocked(provider) === true },
+          }
+        }
+        return result
+      }),
     collectQuota: (provider) =>
       provider === CLINE.id
         ? handleMethod('cline.quota', { provider }) as Promise<BadgeRpcResult<RpcClineQuotaResponse>>
         : undefined,
     listAccounts: (provider) => pool.listAccountsByProvider(provider),
+    /**
+     * ★ 「锁定永久积分」状态（2026-11-18 补，用户报障）。
+     *
+     * 客户端「可用积分 = 短期 + 临期」用它决定是否显示「可用/总」。
+     * ⚠️ `pool.permanentLocked` 读的是**进程内缓存**（`permanentLockCache`），
+     *    不产生 IO，可以放心在每次徽标读数时调用。
+     * ⚠️ 与 `collectBalances` 那层注入**双保险**：那层覆盖 `credits.balances`
+     *    直连调用方，这层覆盖徽标快照（`usageBadge.read` 走的是自己的
+     *    `loadSnapshot`）。两条路都要有，否则面板与胶囊显示不一致。
+     */
+    readLocked: (provider) => pool.permanentLocked(provider) === true,
     readPreference: () => badgePreferences.load(),
     readAutoCheckin: () => autoCheckin.state(),
     warn: (message) => ctx.logger?.warn?.(message),

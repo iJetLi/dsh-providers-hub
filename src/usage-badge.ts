@@ -104,6 +104,14 @@ interface BadgeSnapshot {
   disabledCount: number
   windowDays?: number
   /**
+   * 该 provider 当前是否「锁定永久积分」。
+   *
+   * ⚠️ 2026-11-18 补（真实缺陷）：客户端「可用积分 = 短期 + 临期」完全依赖它，
+   *    但徽标快照此前**从未带这个字段** ⇒ 用户锁定后胶囊/弹窗的「可用/总」
+   *    仍不显示。字段语义见 `RpcCreditsBalancesResponse.locked`。
+   */
+  locked?: boolean
+  /**
    * 「临期」子窗口天数。
    *
    * ⚠️ 与 `windowDays` **同生共死**：徽标弹窗的 `splitParts` 用它把「15 天内」
@@ -140,6 +148,14 @@ export interface UsageBadgeDeps {
     provider: string,
   ): BadgeRpcResult<RpcClineQuotaResponse> | undefined | Promise<BadgeRpcResult<RpcClineQuotaResponse> | undefined>
   /** 该渠道的账号池条目（**同步**读内存副本；`enabled !== false` 视为启用）。 */
+  /**
+   * 读该 provider 是否「锁定永久积分」（进程内缓存，不产生 IO）。
+   *
+   * ⚠️ 必须由装配层注入（`pool.permanentLocked`），**不要在客户端另调一次
+   *    `account.getRotation`** —— 「可用」与「锁定」必须来自同一次读数，
+   *    否则两次调用之间用户在面板里改了开关，两个数字会互相矛盾。
+   */
+  readLocked?(provider: string): boolean
   listAccounts(provider: string): readonly ProviderAccountEntry[]
   /** 读当前生效的显示偏好。 */
   readPreference(): BadgePreference
@@ -230,6 +246,19 @@ export function createUsageBadge(deps: UsageBadgeDeps): UsageBadge {
       ...balances.value.windowDays === undefined ? {} : { windowDays: balances.value.windowDays },
       // ⚠️ 与 `windowDays` 成对透传：只带一半会让徽标的临期段恒 0（见字段注释）。
       ...balances.value.imminentDays === undefined ? {} : { imminentDays: balances.value.imminentDays },
+      /**
+       * ⚠️ 2026-11-18：与 windowDays/imminentDays 同批透传（客户端用它决定
+       *    是否显示「可用/总」）。
+       *
+       * 取值优先级：
+       * 1. `balances.value.locked` —— `collectBalances` 已在统一出口补上
+       *    （见 `jet-hub-rpc.ts` 的 `collectBalances` 包装），**这是主路径**；
+       * 2. `deps.readLocked` —— 兜底（万一 collectBalances 的实现没带）；
+       * 3. 都没有 ⇒ 不写该字段 ⇒ 前端按「未锁定」处理（向后兼容）。
+       */
+      ...(balances.value.locked ?? deps.readLocked?.(provider)) === undefined
+        ? {}
+        : { locked: balances.value.locked ?? deps.readLocked?.(provider) },
     }
     // ⚠️ `subscriptionOf` 的第二个参数是 `ReadonlySet`（它按 id 判「这条余额行
     //    属不属于启用账号」）—— 上面为了传 `accountIds` 用的是数组，这里再包一次。
@@ -307,6 +336,7 @@ export function createUsageBadge(deps: UsageBadgeDeps): UsageBadge {
           disabledCount: snapshot.disabledCount,
           ...snapshot.windowDays === undefined ? {} : { windowDays: snapshot.windowDays },
           ...snapshot.imminentDays === undefined ? {} : { imminentDays: snapshot.imminentDays },
+          ...snapshot.locked === undefined ? {} : { locked: snapshot.locked },
           ...snapshot.subscription === undefined ? {} : { subscription: snapshot.subscription },
           // 偏好**不进缓存**：它是用户随时可改的展示设置，缓存住会让「刚改完
           // 没生效」看起来像 bug（快照本身可能还是两分钟前的）。

@@ -74,6 +74,8 @@ function harness(options: {
   quota?: RpcClineQuotaResponse | { error: { code: string; message: string } } | 'throw' | undefined
   accounts?: ProviderAccountEntry[]
   preference?: BadgePreference
+  /** 锁定永久积分状态（用户 2026-11-18 报障的那个字段）。 */
+  locked?: boolean
   now?: () => number
 } = {}) {
   const calls = { balances: 0, quota: 0, preference: 0, balanceAccountIds: [] as (string[] | null)[] }
@@ -108,6 +110,13 @@ function harness(options: {
         : { ok: true as const, value: state.quota }
     },
     listAccounts: () => state.accounts,
+    /**
+     * ★ 「锁定永久积分」状态（2026-11-18 加）。
+     *
+     * ⚠️ 这是**真实缺陷的守卫锚点**：徽标响应此前从未回传 `locked`
+     *    ⇒ 客户端「可用/总」永不显示。桩返回注入值，用例断言它出现在响应里。
+     */
+    readLocked: () => options.locked === true,
     readPreference: () => { calls.preference += 1; return state.preference },
     /**
      * 「每日首次启动自动签到」的实时状态（顺带回传给弹窗右上角的状态灯）。
@@ -390,5 +399,51 @@ describe('缓存时长配置', () => {
       expect(badgeFailureTtlMs({ [DSH_JET_HUB_BADGE_TTL_MS]: raw } as NodeJS.ProcessEnv), raw).toBe(BADGE_FAILURE_TTL_MS)
     }
     expect(badgeTtlMs({} as NodeJS.ProcessEnv)).toBe(BADGE_TTL_MS)
+  })
+})
+
+/**
+ * ★★ **徽标必须回传 `locked`**（用户 2026-11-18 真实报障）。
+ *
+ * ## 缺陷
+ *
+ * 用户在面板里锁定了永久积分（`permanent-locks.json` 里 `trae: true` 等），
+ * 但胶囊与弹窗右上角的「可用 X积分/总 Y积分」**始终不显示**。
+ *
+ * 根因：客户端「可用积分 = 短期 + 临期」的显示完全依赖 `value.locked`，
+ * 而**徽标响应从未回传该字段** ⇒ `value.locked` 恒 `undefined`
+ * ⇒ 客户端按「未锁定」处理、只显示总计。
+ *
+ * ## 为什么必须单独写用例
+ *
+ * 该字段横跨三层（pool → usage-badge 快照 → RPC 响应），任何一层漏传
+ * 都不会报错、只会**静默不显示** —— 正是「静默降级」的典型形态，
+ * 没有行为级用例就只能靠用户报障才发现。
+ */
+describe('createUsageBadge：locked 透传（可用积分的显示前提）', () => {
+  it('徽标必须回传 locked=true（用户已锁定时）', async () => {
+    const { badge } = harness({ locked: true })
+    const result = await badge.read('trae')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.locked, '锁定态必须出现在响应里').toBe(true)
+  })
+
+  it('未锁定时回传 false（不是 undefined，前端才能区分「明确未锁」与「旧后端」）', async () => {
+    const { badge } = harness({ locked: false })
+    const result = await badge.read('trae')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.locked).toBe(false)
+  })
+
+  it('⚠️ 反向：装配层未提供 readLocked 时字段缺席（向后兼容，前端按未锁处理）', async () => {
+    const { deps } = harness({})
+    delete (deps as { readLocked?: unknown }).readLocked
+    const fresh = createUsageBadge(deps)
+    const result = await fresh.read('trae')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.locked, '旧装配层不应凭空冒出 locked').toBeUndefined()
   })
 })
