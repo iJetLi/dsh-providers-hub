@@ -85,7 +85,32 @@ import { ensureJetHubStyles } from './jet-hub-styles.js';
  */
 const POPOVER_ANCHOR_STYLE = Object.freeze({
   position: 'absolute',
-  right: 0,
+  /**
+   * ★★ **弹窗以胶囊为中心居中**（用户 2026-11-18 要求：
+   *    「弹窗居中于胶囊……我不是要求弹窗跟胶囊一样大，只是显示位置而已」）。
+   *
+   * ## 沿革
+   *
+   * | 时间 | 对齐 | 问题 |
+   * |---|---|---|
+   * | 原状 | `right: 0`（右边缘对齐胶囊右边缘）| 弹窗偏左，压住左侧模型选择器 |
+   * | 中途尝试 | `left: 0`（左边缘对齐胶囊左边缘）| ⚠️ 胶囊在输入区最右，530px 必溢出窗口 |
+   * | **现在** | **居中** | 两侧各溢出一半，视觉最平衡 |
+   *
+   * ## 实现
+   *
+   * `left: 50%` + `translateX(-50%)` —— 相对**定位父元素**（`.dim-jh-badge`，
+   * 它正好包住胶囊）居中。这样弹窗中心 = 胶囊中心。
+   *
+   * ⚠️ 为什么用 `left: 50%` 而不是 `left: 0; margin-left: -265px`：
+   *    弹窗宽度是 `min(530px, 92vw)` **会变**（窄窗口），写死半宽会错位。
+   *    `translateX(-50%)` 按**自身实际宽度**算，永远精确居中。
+   * ⚠️ 居中后必然两侧溢出（胶囊贴右边缘 + 弹窗 530px）⇒
+   *    由 `useLayoutEffect` 做**视口收敛**（见该 effect 的注释）。
+   */
+  left: '50%',
+  right: 'auto',
+  transform: 'translateX(-50%)',
   bottom: 'calc(100% + 8px)',
   maxHeight: '58vh',
   overflowY: 'auto',
@@ -847,6 +872,53 @@ function UsageBadgeActive(props) {
       console.warn(`[jet-hub] 浮层定位异常（position=${position}）：会撑高输入区（检查 POPOVER_ANCHOR_STYLE / NARROW_POPOVER_STYLE 是否被改坏）`);
     }
   }, [open]);
+
+  /**
+   * ★★ **居中弹窗的视口收敛**（用户 2026-11-18：弹窗居中于胶囊）。
+   *
+   * ## 要解决的问题
+   *
+   * `POPOVER_ANCHOR_STYLE` 用 `left: 50% + translateX(-50%)` 把弹窗**中心**对齐
+   * 胶囊中心。但胶囊挂在输入区**最右侧**，弹窗宽 530px ⇒ 居中后**右侧必然溢出**
+   * 窗口（实测：距右 60px 时溢出 379px）。
+   *
+   * ## 做法（两步收敛）
+   *
+   * 1. 先按居中算，测右边缘溢出量 → 整体左移；
+   * 2. 左移后若撞到视口左边缘 → 反向夹住（保持完整可见）。
+   *
+   * 收敛后弹窗**贴住视口边缘**，但仍比纯 `right: 0` 更居中：
+   * 「右对齐」在有空间时会用满右侧空间，而居中+收敛只在必要时贴边。
+   *
+   * ⚠️ 为什么用 `useLayoutEffect`：它在浏览器**绘制前**执行 ⇒ 用户看不到
+   *    「先溢出、再被推回来」的闪烁。
+   * ⚠️ 只在宽屏（非 portal）分支生效：窄屏走 `position: fixed; left/right: 8px`
+   *    已经天然贴住视口，不需要也不能再叠加 transform。
+   * ⚠️ 测量前必须**清掉上一次的 transform**：`getBoundingClientRect` 含
+   *    transform，不清会把已修正的位置当基线 ⇒ 多次打开后位移**累积**，
+   *    弹窗越移越偏。
+   * ⚠️ transform 用 `translateX(calc(-50% + Npx))` 形式：因为基础值已经是
+   *    `translateX(-50%)`，追加位移必须**保留那个 -50%**，否则居中被抹掉。
+   */
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    if (isNarrowViewport()) return; // 窄屏走 portal + fixed，已贴视口
+    const element = popRef.current;
+    if (element === null || typeof window === 'undefined') return;
+    // 先恢复基础居中位移再测（否则位移累积，见上面 ⚠️）
+    element.style.transform = 'translateX(-50%)';
+    const rect = element.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const overflowRight = Math.max(0, Math.round(rect.right - viewportWidth));
+    let shift = 0;
+    if (overflowRight > 0) {
+      // 向左推回；但不能把左边缘推出视口左侧
+      shift = Math.min(overflowRight, Math.max(0, Math.round(rect.left)));
+    }
+    element.style.transform = shift > 0
+      ? `translateX(calc(-50% - ${shift}px))`
+      : 'translateX(-50%)';
+  });
 
   // 换渠道时先清空旧读数：否则会短暂把上一个渠道的余额画到新渠道的名字下。
   React.useEffect(() => {

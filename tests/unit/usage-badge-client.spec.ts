@@ -1281,7 +1281,9 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     const inline = anchor![1]
     for (const decl of [
       "position: 'absolute'",
-      'right: 0',
+      // ★ 2026-11-18：居中于胶囊（原 right: 0 右对齐）
+      "left: '50%'",
+      "transform: 'translateX(-50%)'",
       "bottom: 'calc(100% + 8px)'",
       "maxHeight: '58vh'",
       "overflowY: 'auto'",
@@ -1322,12 +1324,75 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(badge).not.toMatch(/return React\.createElement\('div', \{ className: 'dim-jh-badgePop'/)
   })
 
+  /**
+   * ★★ **弹窗居中于胶囊**（用户 2026-11-18：「弹窗居中于胶囊……
+   * 「我不是要求弹窗跟胶囊一样大，只是显示位置而已」）。
+   *
+   * ## 沿革（三次对齐的取舍）
+   *
+   * | 对齐 | 实现 | 问题 |
+   * |---|---|---|
+   * | 右对齐（原状）| `right: 0` | 弹窗偏左，压住左侧模型选择器 |
+   * | 左对齐（中途）| `left: 0` | ⚠️ 胶囊在输入区最右，530px 必溢出窗口 |
+   * | **居中（现在）** | `left: 50% + translateX(-50%)` | 两侧对称展开，视觉最平衡 |
+   *
+   * ⚠️ 居中后右侧可能溢出（取决于输入区宽度）⇒ 由 `useLayoutEffect` 收敛。
+   */
+  it('★★ 弹窗居中于胶囊：left 50% + translateX(-50%)，且收敛保留 -50%', () => {
+    // ① 内联与样式表都必须居中
+    const css = styles.match(/\.dim-jh-badgePop \{([^}]*)\}/)![1]
+    expect(css, '样式表必须居中').toMatch(/left: 50%/)
+    expect(css, '样式表必须带 -50% 位移').toMatch(/transform: translateX\(-50%\)/)
+    const inlineRaw = badge.match(/const POPOVER_ANCHOR_STYLE = Object\.freeze\(\{([\s\S]*?)\}\)/)![1]
+    // ⚠️ 剥注释再断言：注释里写着「原来是 right: 0」，不剥会误判为残留
+    const inline = inlineRaw.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(inline, '内联必须居中').toContain("left: '50%'")
+    expect(inline, '内联必须带 -50% 位移').toContain("transform: 'translateX(-50%)'")
+    // ② 不得再有右对齐残留（同样剥注释）
+    const cssBody = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(cssBody, '不得有 right: 0').not.toMatch(/right: 0/)
+    expect(inline, '不得有 right: 0').not.toMatch(/right: 0/)
+  })
+
+  /**
+   * ⚠️⚠️ **收敛时必须保留 `-50%`**（真实陷阱）。
+   *
+   * 若把 `translateX(calc(-50% - Npx))` 写成 `translateX(-Npx)`，
+   * 居中位移被抹掉 ⇒ 弹窗从「中心对齐」退回「左边缘对齐」，整体右移半个宽度。
+   * 这种错在单次打开时看着「只是偏了一点」，很难发现。
+   */
+  it('★★ 溢出收敛必须保留 -50%（否则居中被抹掉）', () => {
+    /**
+     * ⚠️ 锚点必须用**收敛 effect 独有的**字符串（`overflowRight`），
+     * 不能用 `useLayoutEffect` —— 本文件还有别的 useLayoutEffect，
+     * 取第一个会切到无关代码上，断言假红/假绿。
+     */
+    const anchorIdx = badge.indexOf('const overflowRight = Math.max(0, Math.round(rect.right - viewportWidth))')
+    expect(anchorIdx, '应存在右侧溢出计算').toBeGreaterThan(-1)
+    const effect = badge.slice(anchorIdx - 600, anchorIdx + 800)
+    expect(effect, '收敛处必须写 calc(-50% - Npx)').toMatch(/translateX\(calc\(-50% - \$\{shift\}px\)\)/)
+    // ⚠️ 反向：不得出现「只有 -Npx、没有 -50%」的写法
+    expect(effect, '不得丢失 -50%').not.toMatch(/translateX\(-?\$\{shift\}px\)/)
+    // 测量前必须先复位到基础居中值（否则位移累积）
+    expect(effect, '测量前必须复位 transform').toMatch(/element\.style\.transform = 'translateX\(-50%\)'/)
+  })
   it('内联定位与样式表规则逐条一致（两处同义判据，改一处必须改另一处）', () => {
     // 样式表侧（CSS 长写法 → 内联 camelCase 写法）
     const css = styles.match(/\.dim-jh-badgePop \{([^}]*)\}/)![1]
     expect(css).toMatch(/position: absolute/)
     expect(css).toMatch(/bottom: calc\(100% \+ 8px\)/)
-    expect(css).toMatch(/right: 0/)
+    /**
+     * ★★ **2026-11-18：`right: 0`（右对齐）→ 居中于胶囊**（用户要求
+     * 「弹窗居中于胶囊……只是显示位置而已」）。
+     *
+     * 三处必须同时改，漏一处就会错位（本用例就是为此存在）：
+     * 1. 样式表 `.dim-jh-badgePop`
+     * 2. 内联 `POPOVER_ANCHOR_STYLE`
+     * 3. `useLayoutEffect` 收敛时**必须保留** `translateX(-50%)`（否则居中被抹掉）
+     */
+    expect(css, '左偏移 50% 才是居中').toMatch(/left: 50%/)
+    expect(css, '不得再有 right: 0（那会退回右对齐）').not.toMatch(/right: 0/)
+    expect(css, '必须自带 -50% 位移').toMatch(/transform: translateX\(-50%\)/)
     // ⚠️ 2026-11-18 加宽 280 → 400（四段分档放不下，用户要求「加宽不加高」）
     expect(css).toMatch(/width: 530px/)
     expect(css).toMatch(/max-width: min\(530px, 92vw\)/)

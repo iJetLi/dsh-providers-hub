@@ -1903,7 +1903,10 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  * ⚠️ 上限仍用 min() 收在 86vw 内：弹窗是 absolute，窗口本身可能很窄
  * （窄屏还会被下面的媒体查询降到 300px）。
  */
-.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 530px; max-width: min(530px, 92vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
+/* ⚠️ 2026-11-18：right: 0（右对齐）→ left: 0（左对齐胶囊，用户要求）。
+ * 居中后右侧必然溢出（胶囊贴输入区最右）⇒ 由 useLayoutEffect 做视口收敛。
+ * ⚠️ 必须与内联的 POPOVER_ANCHOR_STYLE 逐字对拍：两处任一处写反都会错位。 */
+.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); left: 50%; right: auto; transform: translateX(-50%); z-index: 40; width: 530px; max-width: min(530px, 92vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
 /* 窄屏时徽标只留状态点，弹窗也随之收窄（否则它会盖住模型选择器）。
  * 宽度写 min() 而非媒体查询覆盖：弹窗是 absolute，媒体查询命中时按钮虽已
  * 收窄，但弹窗仍按 400px 渲染会显得与触发点不匹配。
