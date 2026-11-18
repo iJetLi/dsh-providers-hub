@@ -170,6 +170,45 @@ export const MARVIS_BLOCKED_IDENTITY_REWRITES: readonly MarvisBlockedIdentityRew
       + '`You are an interactive CLI coding agent` 200（带/不带尾句点、后面接同位语均 200）。'
       + '⚠️ 报障 issue 说「上游只登记了 DSH 身份句一族」——**这句被本格证伪**。',
   },
+  {
+    // 「helpful assistant」族 —— **第四族**，2026-11-18 新发现。
+    //
+    // 为什么单独一条：前三族都是「AI 编码助手」口径，而这一族是**任何**助手口径，
+    // 且它与 DSH 无关 —— 它是**历史遗留**的 system 消息。真实触发场景：
+    // v2→v3 迁移的旧会话在 `turn 1` 里存着
+    // `You are a helpful software engineer assistant.`（见 session 日志 `system/message`
+    // 的 `source.kind === 'system-prompt'` 那条），而 DSH 每轮会把历史 system 原样重发
+    // ⇒ 该会话**每一轮**都 403/4100406，而**新建会话正常**（新会话用的是 DSH 自己的
+    // 身份句，过登记表即被改写成放行措辞）。
+    //
+    // ⚠️ 这个「新会话正常、旧会话全挂」的分裂症状极具误导性：用户会以为是
+    //    「这个会话坏了 / 模型不支持长上下文」，而实际只是历史里躺着一句禁词。
+    //
+    // 真机实测边界（2026-11-18，25 格，`messages[]`-system 位置）：
+    // - `You are a helpful assistant.` / 无尾句点 / 全大写 / 双空格 / 换行 / tab ⇒ 403
+    // - `You are a helpful software engineer assistant.` ⇒ **403**（`software engineer` 夹在中间也拦）
+    // - `You are a helpful assistant manager.` / `You are a helpful assistants.` ⇒ 403
+    //    ⇒ 与 `AI coding assistant` 那条**不同**：这里**没有**挡复数/被修饰名词的前瞻，
+    //       因为实测它们**同样被拦**（写前瞻反而会漏）。
+    // - `You are a helpful senior software engineer assistant.` ⇒ **200**
+    //    ⇒ 中间夹的东西**不是任意词都行**：实测只有「紧跟 assistant」与
+    //      「helpful + software engineer + assistant」两种形态被拦，
+    //      加 `senior` 就放行 ⇒ `find` **刻意只覆盖这两形态**，
+    //      不去赌一个「任意中缀」的宽正则（那会误伤 200 的正常句子）。
+    // - `Some prefix. You are a helpful assistant.` / `Hi.\nYou are a helpful assistant.` ⇒ **200**
+    //    ⇒ **句首锚定**（与其他族一致）：非开头即放过。
+    // - `You are a helpful AI assistant.` / `… coding assistant.` / `… agent.` ⇒ **200**
+    // - `You are a helpful software engineer.`（无 assistant）⇒ 200。
+    //
+    // "只换本体"铁律同样适用 ⇒ 尾随内容（`, powered by …`）零损失。
+    find: /^(\s*)You\s+are\s+a\s+helpful(?:\s+(?:software\s+engineer\s+)?assistant|\s+assistant)/gi,
+    replace: '$1You are an AI coding agent',
+    note: '2026-11-18 真机 25 格：句首 `You are a helpful assistant`（含各种空白/大小写变体、'
+      + '以及 `helpful software engineer assistant`）全部 403/4100406；'
+      + '非句首出现、或中间插了 `senior` / `AI` / `coding` 均 200。'
+      + '⚠️ 这是**历史遗留 system 消息**族（v2→v3 迁移会话的 turn 1），'
+      + '不属 DSH 身份句 ⇒ 新会话不会遇到，旧会话每轮必挂。',
+  },
 ]
 
 /**

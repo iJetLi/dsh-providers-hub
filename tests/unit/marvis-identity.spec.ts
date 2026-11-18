@@ -107,6 +107,50 @@ describe('★ rewriteMarvisBlockedIdentities：被拉黑身份句 → 实测放�
   it('★★ 大小写不敏感（上游匹配器同样大小写不敏感，改写不能只在标准写法的输入上生效）', () => {
     expect(rewriteMarvisBlockedIdentities('you are an ai coding assistant.')).toBe(ALLOWED_CODING)
     expect(rewriteMarvisBlockedIdentities('YOU ARE CLAUDE CODE.')).toBe(ALLOWED_CLI)
+    expect(rewriteMarvisBlockedIdentities('YOU ARE A HELPFUL ASSISTANT.')).toBe(ALLOWED_CODING)
+  })
+
+  // ── 第四族：「helpful assistant」（2026-11-18）─────────────────────────────
+  // 这一族的触发场景与其他三族**不同**：它来自**历史遗留**的 system 消息（v2→v3 迁移
+  // 会话的 turn 1），不是 DSH 身份句 ⇒ 新会话不会遇到，旧会话每轮必挂。
+  // 真机症状：同一模型下「新会话能用、原会话 403」，极易被误判成「会话坏了」。
+  it('★★★ 历史遗留的 `You are a helpful … assistant` 必须换掉（旧会话每轮 403 的根因）', () => {
+    // 真实值：v2→v3 迁移会话 `system/message` 的 `source.kind === 'system-prompt'` 原文。
+    // 实测 403/4100406；改写后 200（2026-11-18 真机，容器内 0.14MB 请求对照组）。
+    expect(
+      rewriteMarvisBlockedIdentities('You are a helpful software engineer assistant.'),
+    ).toBe(ALLOWED_CODING)
+    expect(rewriteMarvisBlockedIdentities('You are a helpful assistant.')).toBe(ALLOWED_CODING)
+    // 句首缩进/换行必须原样保留（`$1` 捕获），否则会改动 system 排版。
+    expect(rewriteMarvisBlockedIdentities('\n\n  You are a helpful assistant.')).toBe(
+      `\n\n  ${ALLOWED_CODING}`,
+    )
+  })
+
+  it('★★★ 第四族的边界：只覆盖实测被拦的两形态，不放宽成「任意中缀」', () => {
+    // 实测 403（拦）—— 这两形态必须换。
+    // ⚠️ 期望值用 `ALLOWED_CODING_BARE` + 原文尾随内容：`find` 只吃到 `assistant` 为止，
+    //    原文的 ` manager.` / `s.` 必须原样留在后面（"只换本体"铁律）。
+    expect(rewriteMarvisBlockedIdentities('You are a helpful assistant manager.')).toBe(
+      `${ALLOWED_CODING_BARE} manager.`,
+    )
+    expect(rewriteMarvisBlockedIdentities('You are a helpful assistants.')).toBe(
+      `${ALLOWED_CODING_BARE}s.`,
+    )
+    // 实测 200（放行）—— 这几个**不得**被动，否则是内容损失 + 误伤正常句子。
+    // 尤其是 `senior`：它只比被拦形态多一个词，却实测放行 ⇒ 证明不能写宽正则。
+    for (const allowed of [
+      'You are a helpful senior software engineer assistant.',
+      'You are a helpful AI assistant.',
+      'You are a helpful coding assistant.',
+      'You are a helpful agent.',
+      'You are a helpful software engineer.',
+    ]) {
+      expect(rewriteMarvisBlockedIdentities(allowed)).toBe(allowed)
+    }
+    // 句首锚定：非开头即放过（与其他三族一致）。
+    const midSentence = 'Some prefix. You are a helpful assistant.'
+    expect(rewriteMarvisBlockedIdentities(midSentence)).toBe(midSentence)
   })
 
   it('★★ 幂等：连跑两次与跑一次逐字节相同（第二次不得再改）', () => {
