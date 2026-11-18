@@ -948,6 +948,59 @@ function UsageBadgeActive(props) {
   });
 
   /**
+   * ★★ **胶囊上的「可用积分」**（用户 2026-11-18 要求）。
+   *
+   * ## 口径：可用 = 短期 + 临期
+   *
+   * ⚠️⚠️ **不是「总 − 永久」** —— 那两个式子**不等价**，实测：
+   *
+   * | 场景 | 总 | 短+临 | 总−永久 |
+   * |---|---|---|---|
+   * | 永久+长期+短期+临期 | 8500 | **1900** | 3500（差 1600 = 长期）|
+   * | 只有长期 | 1600 | **0** | 1600 |
+   *
+   * ⇒ 「总 − 永久」会把**长期**算进可用，而锁定模式下长期同样不被消费。
+   *
+   * ## 为什么必须与 reasonOf 同口径
+   *
+   * 选号层的不可用判据是 `imminent + shortTerm === 0`（见 reasonOf / expiringOf）。
+   * 若这里用「总−永久」，会出现「胶囊显示可用 3500，但该账号被标灰不可用」的
+   * 自相矛盾 —— 同一份数据两个说法。用户已确认按 A（短+临）实施。
+   *
+   * ## 只在锁定永久积分时显示
+   *
+   * 未锁定时可用 == 总，显示两组数字是噪音 ⇒ 返回 null，胶囊保持原样。
+   *
+   * ## 单位口径
+   *
+   * ⚠️ 必须与 `view.reading` 同源（同一个 `formatUnits` + 同单位），
+   *    否则混合单位渠道（积分 + token）会出现「可用 1900 / 总 94.54MToken」
+   *    这种无法比较的两个数放在一起。
+   *    ⇒ 只对**与总计同单位**的积分求可用；配额单位直接不适用。
+   */
+  /**
+   * ★★ **胶囊上的「可用积分」**（用户 2026-11-18 要求）。
+   *
+   * ⚠️⚠️ 计算只此一处（模块级 `sumAvailableCredits`）—— 胶囊与弹窗右上角共用，
+   *    避免两处口径漂移（曾各写一份，弹窗那份的配额判断还与这里不同）。
+   *
+   * 口径：可用 = 短期 + 临期（不含长期/永久/已过期），详见该函数注释。
+   * 未锁定永久积分时返回 null ⇒ 胶囊保持原样（只显示 view.reading）。
+   *
+   * 单位：与 view.reading 同源（取第一个非配额组的单位）。
+   */
+  const availableReadingText = (() => {
+    const creditGroup = view.groups.find((group) => group.unit !== QUOTA_UNIT);
+    if (creditGroup === undefined) return null;
+    const total = sumAvailableCredits(value?.accounts, {
+      locked: value?.locked,
+      windowDays: value?.windowDays,
+      imminentDays: value?.imminentDays,
+    });
+    return total === null ? null : formatUnits(total, creditGroup.unit);
+  })();
+
+  /**
    * 自动签到状态灯 —— 数据来自读数响应里的 `autoCheckin`（**不进宿主缓存**的
    * 实时字段，所以每轮读都能拿到最新的 `running` / `ranToday`）。
    */
@@ -1253,7 +1306,43 @@ function UsageBadgeActive(props) {
     // ⚠️ 类名是 Reading 而**不是** Value：.dim-jh-badgeValue 已被弹窗里的读数占用
     //（那条规则带 font-weight:600，且排在样式表更后面 —— 同名会让胶囊里的数字
     // 被静默加粗、并拿到 flex:none 而无法收缩）。
-    React.createElement('span', { key: 'value', className: 'dim-jh-badgeReading' }, view.reading),
+    /**
+     * ★★ **胶囊读数：可用 / 总**（用户 2026-11-18 要求）。
+     *
+     * 形态：`可用 1900积分/总 8500积分`
+     *
+     * ## 只在「锁定永久积分」时显示可用
+     *
+     * 未锁定时可用 == 总，显示「可用 8500/总 8500」纯属噪音
+     * ⇒ 保持原样（只显示 `view.reading`）。
+     *
+     * ## ⚠️ 可用 = 短期 + 临期
+     *
+     * 不是「总 − 永久」（那会把长期也算进去）。详见 availableCreditsTotal 的注释。
+     *
+     * ## tooltip
+     *
+     * 用户要求两处都加说明 ⇒ 悬停给出公式与口径。
+     * ⚠️ 胶囊的 `title` 已经用于「三段拼接」（读数→不完整说明→失败原因），
+     *    故这里**不能覆盖**它 —— 而是把可用说明**插到最前面**再拼原有的。
+     */
+    availableReadingText === null
+      ? React.createElement('span', { key: 'value', className: 'dim-jh-badgeReading' }, view.reading)
+      : React.createElement('span', {
+        key: 'value',
+        className: 'dim-jh-badgeReading',
+        title: [
+          `可用 ${availableReadingText}积分 / 总 ${view.reading}`,
+          '可用 = 短期 + 临期（锁定永久积分模式下只会消耗这两档）',
+          '不含：永久、长期、已过期',
+          '未锁定时可用即等于总计，故不单独显示',
+        ].join('\n'),
+      }, [
+        React.createElement('span', { key: 'av', className: 'dim-jh-badgeAvail' },
+          `可用 ${availableReadingText}积分`),
+        React.createElement('span', { key: 'sl', className: 'dim-jh-badgeReadingSlash' }, '/'),
+        React.createElement('span', { key: 'tot' }, view.reading),
+      ]),
     /**
      * 「这个数字不完整」的标记（用户 2026-10-03 要求）。
      *
@@ -2102,6 +2191,29 @@ function UsageBadgeActive(props) {
      * 本身已经是两个窗口剩余比例的平均值 —— 上游根本没有那个数。
      * 这类单位改为逐账号列出窗口行（见 {@link balanceLine}）。
      */
+    /**
+     * ★★ **可用积分合计**（用户 2026-11-18 要求）= 短期 + 临期。
+     *
+     * ⚠️⚠️ 实现**只此一处**（模块级 `sumAvailableCredits`）。
+     *    弹窗这里曾复制过一份（配额判断还写成 `return null` 的整条早退，
+     *    与胶囊那份行为不同）⇒ 两处口径必然漂移，已合并。
+     */
+    const availableCreditsTotal = sumAvailableCredits(accounts, {
+      locked: value?.locked,
+      windowDays: value?.windowDays,
+      imminentDays: value?.imminentDays,
+    });
+    /**
+     * 可用积分的**展示文本**（与总额同单位口径）。
+     *
+     * ⚠️ 必须与 `sum` 用同一个 `formatUnits` 口径（按组取单位）：
+     *    混合单位的渠道（积分 + token）里，「可用 100 / 总 200」不能把两种单位混起来算。
+     *    ⇒ 只对**积分组**（`group.unit !== QUOTA_UNIT` 且与总额同组）求可用。
+     */
+    const availableText = availableCreditsTotal === null
+      ? null
+      : formatUnits(availableCreditsTotal, quotaGroup === undefined ? view.groups[0]?.unit : QUOTA_UNIT);
+
     const quotaGroup = view.groups.find((group) => group.unit === QUOTA_UNIT);
     const sum = quotaGroup !== undefined
       ? (quotaGroup.quotaLines ?? []).join(' · ')
@@ -2157,11 +2269,48 @@ function UsageBadgeActive(props) {
             `帐号总数：${view.accountCount} 个`),
         accounts.length === 0 || sum === ''
           ? null
-          : React.createElement('span', { key: 'sum', className: 'dim-jh-badgeSectionSum' },
+          /**
+           * ★★ **右上角：可用 / 总**（用户 2026-11-18 要求）。
+           *
+           * 形态：`可用 1900积分 / 总 8500积分`
+           *
+           * ## 只在「锁定永久积分」时显示可用
+           *
+           * 未锁定时可用 == 总，显示两组数字是噪音 ⇒ 保持原样（只显示合计）。
+           *
+           * ## ⚠️ 可用 = 短期 + 临期（见 availableCreditsTotal 注释）
+           *
+           * **不是**「总 − 永久」—— 那会把长期也算进去，与选号层的
+           * 不可用判据（`imminent + shortTerm === 0`）自相矛盾。
+           *
+           * ## tooltip
+           *
+           * 用户要求「两个修改的地方都加上对应的 tooltip 说明解释」
+           * ⇒ 悬停给出公式与口径，让用户能自己核对这两个数字。
+           */
+          : React.createElement('span', {
+            key: 'sum',
+            className: 'dim-jh-badgeSectionSum',
+            title: availableText === null
+              ? (quotaGroup === undefined ? '本渠道所有账号的可累加余额合计' : sum)
+              : [
+                `可用 ${availableText}积分 / 总 ${sum}`,
+                '可用 = 短期 + 临期（锁定永久积分模式下只会消耗这两档）',
+                '不含：永久、长期、已过期',
+                '未锁定时可用即等于总计，故不单独显示',
+              ].join('\n'),
+          },
+          availableText === null
             // ⚠️ 「合计」二字只对**可累加的余额**成立。配额窗口是并行百分比，
             //   没有「一共」的语义（上游也没给过那个数），故配额下只给逐窗口读数。
             //   token / 积分都是余额口径，加「合计」无误。
-            quotaGroup === undefined ? `合计 ${sum}` : sum),
+            ? (quotaGroup === undefined ? `合计 ${sum}` : sum)
+            : [
+              React.createElement('span', { key: 'av', className: 'dim-jh-badgeSumAvail' },
+                `可用 ${availableText}积分`),
+              React.createElement('span', { key: 'sl', className: 'dim-jh-badgeSumSlash' }, ' / '),
+              React.createElement('span', { key: 'tot' }, `总 ${sum}`),
+            ]),
       ]),
       ...(accounts.length === 0
         ? [React.createElement('div', { key: 'empty', className: 'dim-jh-badgeNote' },
@@ -2637,6 +2786,65 @@ function totalCreditsText(balance) {
   // token 走既有的紧凑格式（94.54M），积分走方案 B
   if (unit === 'token') return formatUnits(balance.total, unit) ?? '0';
   return formatAmountShort(balance.total) === '' ? '0' : formatAmountShort(balance.total);
+}
+
+/**
+ * ★★ **可用积分合计**（用户 2026-11-18 要求）= 短期 + 临期。
+ *
+ * ## 口径（用户确认「按 A 来」）
+ *
+ *     可用 = shortTerm + imminent
+ *
+ * ⚠️⚠️ **不是「总 − 永久」**。两个式子**不等价**，实测：
+ *
+ * | 场景 | 总 | 短+临 | 总−永久 |
+ * |---|---|---|---|
+ * | 永久+长期+短期+临期 | 8500 | **1900** | 3500（差 1600 = 长期）|
+ * | 只有长期 | 1600 | **0** | 1600 |
+ *
+ * ⇒ 「总−永久」会把**长期**算进可用，而锁定永久积分模式下长期同样不被消费。
+ *
+ * ## 为什么口径必须与 reasonOf 一致
+ *
+ * 选号层的不可用判据是 `imminent + shortTerm === 0`（见 expiringOf）。
+ * 若这里用「总−永久」，会出现「显示可用 3500 但该账号被标灰不可用」的自相矛盾。
+ *
+ * ## 边界
+ *
+ * - **未锁定永久积分 ⇒ 返回 null**（此时可用 == 总，显示两组数字是噪音）
+ * - 读不到余额的账号（`balance` 缺失）**跳过**，不当 0（那会少报）
+ * - 配额单位（Gemini）没有积分概念 ⇒ 返回 null
+ * - 已过期额度不计入（`splitCreditsByExpiry` 把 expired 独立成桶）
+ * - 混合单位渠道：只累加**与主积分组同单位**的账号
+ *
+ * ⚠️⚠️ **实现只此一处**：胶囊与弹窗右上角都调本函数。
+ *    曾各写一份（弹窗那份配额判断还早退成整条 null），两处行为必然漂移。
+ *
+ * @param accounts - `value.accounts`
+ * @param opts.locked - `value.locked`（true = 锁定永久积分）
+ * @param opts.windowDays - 长期窗口天数（与行内分档同源）
+ * @param opts.imminentDays - 临期窗口天数
+ * @returns 数值；null = 不适用（未锁定 / 无数据 / 配额）
+ */
+function sumAvailableCredits(accounts, opts) {
+  if (opts?.locked !== true) return null;
+  const rows = Array.isArray(accounts) ? accounts : [];
+  if (rows.length === 0) return null;
+  let total = 0;
+  let seen = false;
+  for (const row of rows) {
+    const packages = row?.balance?.packages;
+    if (!Array.isArray(packages)) continue;
+    // 配额单位没有「积分」概念（是并行百分比）⇒ 整条不适用
+    const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
+    if (unit === QUOTA_UNIT) return null;
+    const split = splitCreditsByExpiry(packages, opts.windowDays, undefined, opts.imminentDays);
+    if (split == null) continue;
+    // ⚠️ 只累加「短期 + 临期」：不含长期、不含永久、不含已过期
+    total += (split.shortTerm ?? 0) + (split.imminent ?? 0);
+    seen = true;
+  }
+  return seen ? total : null;
 }
 
 function balanceLine(balance) {

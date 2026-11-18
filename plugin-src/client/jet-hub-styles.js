@@ -2321,6 +2321,29 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 /* ⚠️ 补语**不自己省略**（否则「默认」会被截成「默…」，比不显示更糟）：
    让它保持完整宽度，由胶囊的 max-width + overflow 统一裁；
    实测胶囊 240px 时「TRAE (字节) • 39575.71积分 默认 · 共 7 帐号」正好放得下。 */
+/**
+ * ★★ **胶囊与弹窗右上角的「可用 / 总」双数值**（用户 2026-11-18 要求）。
+ *
+ * 形态：可用 1900积分/总 8500积分
+ *
+ * ⚠️ 仅在**锁定永久积分**时渲染（未锁定时可用 == 总，显示两组数字是噪音）。
+ * ⚠️ 「可用」那一半用 --dsw-alias-label-primary（强调），
+ *    斜杠与「总」用次要色 —— 因为「可用」才是锁定模式下用户真正能花的钱，
+ *    「总」是参照系。这与既有的「读数强调、补语弱化」口径一致。
+ * ⚠️ 斜杠两侧不加空格（/）：胶囊横向空间极紧，且 可用X/总Y 已足够清晰。
+ */
+.dim-jh-badgeAvail,
+.dim-jh-badgeSumAvail {
+  color: var(--dsw-alias-label-primary);
+}
+.dim-jh-badgeReadingSlash {
+  color: var(--dsw-alias-label-tertiary);
+  margin: 0 1px;
+}
+.dim-jh-badgeSumSlash {
+  color: var(--dsw-alias-label-tertiary);
+}
+
 .dim-jh-badgeCount {
   flex: none;
   font-size: 9.5px;

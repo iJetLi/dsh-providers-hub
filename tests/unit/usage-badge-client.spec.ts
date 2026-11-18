@@ -241,6 +241,98 @@ describe('用量徽标：槽位接线', () => {
     const tipBlock = badge.slice(badge.indexOf('title: row.balance === null'), badge.indexOf('title: row.balance === null') + 700)
     expect(tipBlock, 'tooltip 金额必须来自 totalCreditsText').toContain('totalCreditsText(row.balance)')
   })
+  /**
+   * ★★ **可用积分 / 总积分**（用户 2026-11-18 要求）。
+   *
+   * 胶囊与弹窗右上角都显示 `可用 xxx积分/总 xxx积分`，**仅在锁定永久积分时**。
+   *
+   * ## ⚠️⚠️ 口径必须是「短期 + 临期」，不是「总 − 永久」
+   *
+   * 用户最初描述的是「总 − 永久」，但实测**两个式子不等价**：
+   *
+   * | 场景 | 总 | 短+临 | 总−永久 |
+   * |---|---|---|---|
+   * | 永久+长期+短期+临期 | 8500 | 1900 | 3500（差 1600 = 长期）|
+   * | 只有长期 | 1600 | 0 | 1600 |
+   *
+   * ⇒ 「总−永久」会把**长期**算进可用，而锁定模式下长期同样不被消费，
+   *    会与选号层不可用判据（`imminent + shortTerm === 0`）自相矛盾
+   *    （出现「显示可用 3500，但该账号被标灰不可用」）。用户确认按短+临实施。
+   */
+  describe('可用积分（锁定永久积分时）', () => {
+    /**
+     * ⚠️⚠️ **必须锚定「累加那一行」本身**，不能只搜「文件里有没有 split.imminent」。
+     *
+     * 变异实测教训（本用例第一版就是这么漏的）：
+     * - 把 `(split.shortTerm ?? 0) + (split.imminent ?? 0)` 改成只留 shortTerm
+     *   ⇒ 文件里 **别处**（如 renderSplitNote）仍有 `split.imminent` ⇒ 断言照样通过。
+     * - 删掉 `if (value?.locked !== true) return null;`
+     *   ⇒ 「locked 判据存在」的正则仍在**别处**（reasonOf）命中 ⇒ 照样通过。
+     *
+     * ⇒ 本用例改为**抽取累加表达式与守卫语句本身**再断言，任一变红。
+     */
+    it('可用 = 短期 + 临期（提取累加表达式，两个加数缺一即红）', () => {
+      // 提取 `total += (...) + (...);` 这一行
+      const sumLine = /total \+= \(split\.(\w+) \?\? 0\) \+ \(split\.(\w+) \?\? 0\);/.exec(badge)
+      expect(sumLine, '必须存在「total += (split.A ?? 0) + (split.B ?? 0)」形式的累加').not.toBeNull()
+      const [, a, b] = sumLine
+      // ⚠️ 两个加数必须**恰好**是 shortTerm 与 imminent（顺序不限）
+      expect([a, b].sort(), '累加的两项必须是 shortTerm + imminent').toEqual(['imminent', 'shortTerm'])
+      // ⚠️ 反向：不得是三加数（含 longTerm 就会变成「总−永久」口径）
+      expect(badge, '累加表达式不得含第三个加数').not.toMatch(/total \+= \(split\.\w+ \?\? 0\) \+ \(split\.\w+ \?\? 0\) \+/)
+    })
+
+    /**
+     * ⚠️⚠️ 同上：必须锚定 **availableReadingText 自己的函数体开头**的守卫，
+     *    而不是全文件搜 `locked`（reasonOf 里也有一处，会掩盖删除）。
+     */
+    /**
+     * ⚠️⚠️ 计算只此一处（`sumAvailableCredits`），locked 守卫也搬到了那里。
+     *    本用例锚定**函数体本身**，而不是全文件搜 locked
+     *    （reasonOf 里也有一处，会掩盖删除 —— 变异实测过）。
+     */
+    it('只在锁定永久积分时显示（锚定 sumAvailableCredits 的守卫本身）', () => {
+      const start = badge.indexOf('function sumAvailableCredits(accounts, opts) {')
+      expect(start, '必须存在 sumAvailableCredits 函数').toBeGreaterThan(0)
+      const body = badge.slice(start, start + 300)
+      expect(body, 'sumAvailableCredits 必须以 locked 判据开头').toMatch(/if \(opts\?\.locked !== true\) return null;/)
+      // 胶囊侧：未锁定时（返回 null）必须退回原读数
+      expect(badge, '未锁定时胶囊必须退回 view.reading').toContain('availableReadingText === null')
+      // 弹窗侧：同样按 availableText === null 退回「合计」
+      expect(badge, '未锁定时弹窗必须退回「合计」').toContain('availableText === null')
+    })
+
+    /**
+     * ★ **实现只此一处**（防再次复制成两份）
+     */
+    it('可用计算只有一处实现（胶囊与弹窗共用 sumAvailableCredits）', () => {
+      const defs = badge.match(/function sumAvailableCredits\(/g) ?? []
+      expect(defs.length, 'sumAvailableCredits 只能定义一次').toBe(1)
+      const calls = badge.match(/sumAvailableCredits\(/g) ?? []
+      expect(calls.length, '应有一处定义 + 两处调用（胶囊、弹窗）').toBe(3)
+      // ⚠️ 反向：不得再有第二条累加表达式（曾复制出两份，变异漏抓）
+      const accum = badge.match(/total \+= \(split\.\w+ \?\? 0\) \+ \(split\.\w+ \?\? 0\);/g) ?? []
+      expect(accum.length, '累加表达式只能出现一次').toBe(1)
+    })
+
+    it('胶囊与弹窗右上角都渲染可用（两处，防只改一处）', () => {
+      // 胶囊侧
+      expect(badge, '胶囊必须有可用段').toContain('dim-jh-badgeAvail')
+      // 弹窗侧
+      expect(badge, '弹窗必须有可用段').toContain('dim-jh-badgeSumAvail')
+      // 两处都要有「可用 ... 积分」模板
+      const availLabels = badge.match(/可用 \$\{[^}]*\}积分/g) ?? []
+      expect(availLabels.length, '「可用 X积分」模板应出现在胶囊与弹窗两处').toBeGreaterThanOrEqual(2)
+    })
+
+    it('两处都必须带 tooltip 说明（用户明确要求）', () => {
+      expect(badge, 'tooltip 必须说明公式').toContain('可用 = 短期 + 临期')
+      expect(badge, 'tooltip 必须说明不含项').toContain('不含：永久、长期、已过期')
+      // 两处（胶囊 reading + 弹窗 sum）各一份 tooltip
+      const tips = badge.match(/可用 = 短期 \+ 临期/g) ?? []
+      expect(tips.length, '公式说明应出现两次（胶囊 + 弹窗）').toBeGreaterThanOrEqual(2)
+    })
+  })
   it('⚠️⚠️ 胶囊**不限宽**（用户 2026-11-18：不要限制长度，让它自适应）', () => {
     /**
      * ⚠️⚠️ **判据已反转**（2026-11-18）。
