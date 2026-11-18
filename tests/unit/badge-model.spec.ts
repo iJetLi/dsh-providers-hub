@@ -711,13 +711,12 @@ describe('orderCreditRows：按后端选号机制排序 + 折叠', () => {
    * 语义与后端 `rotateFromPreferred` 一致：起点及其之后的账号绕到最前面，
    * 其余保持相对顺序（环形）。
    */
-  it('★★ 轮换起点：本档内循环（S4）', () => {
-    // 档位：imm(2天/临期) → short(10天/短期) → perm(30天/永久)
-    // 起点 = short（短期档）⇒ 短期档内循环；临期档整档仍在前面
+  it('★★ 轮换起点：起点绝对第一 + 其余档位优先（S5）', () => {
+    // imm=临期(2天) / short=短期(10天) / perm=永久(30天)
     const rows = [acc('imm', 2), acc('short', 10), acc('perm', 30)]
-    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'short' })
-    // 短期档只有 short 一个 ⇒ 循环后不变；临期 imm 仍第一
-    expect(ids(shown), '短期档只有 1 个 ⇒ 顺序不变').toEqual(['imm', 'short', 'perm'])
+    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'perm' })
+    // S5：perm 第一；之后 imm(临期) → short(短期)
+    expect(ids(shown), '起点 perm 第一，随后临期 imm').toEqual(['perm', 'imm', 'short'])
   })
 
   it('★★ 同档多账号时：从起点开始循环（用户截图报障的形态）', () => {

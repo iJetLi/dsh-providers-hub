@@ -100,8 +100,8 @@ describe('rotateFromPreferred —— S4 起点所在档位内循环', () => {
  *          S2 ⇒ B C D A E   ← C 仍在第 2 位
  * ```
  */
-describe('★★ S4：起点档内循环，且不得破坏「临期优先」', () => {
-  /** 造一个带三档的账号（用 expiring/imminent/permanent 三个字段直接表达分桶结果）。 */
+describe('★★ S5：起点绝对第一 + 其余档位优先 + 同档循环', () => {
+  /** 造一个带三档的账号。 */
   const mkTier = (id, { imminent = 0, expiring = 0, permanent = 0 }) => ({
     id, imminentBalance: imminent, expiringBalance: expiring, permanentBalance: permanent,
   })
@@ -113,54 +113,57 @@ describe('★★ S4：起点档内循环，且不得破坏「临期优先」', (
     mkTier('E', { permanent: 2000 }),
   ]
 
-  it('★ 起点在「短期」档 ⇒ 临期档整档仍在前，短期档内从起点循环', () => {
+  it('★★ 起点在「短期」档 ⇒ **起点第一**，之后临期档，再其余', () => {
     const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
     expect(ids(ranked), '档位序：C(临期) 在最前').toEqual(['C', 'B', 'D', 'A', 'E'])
     const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'B' })
-    // 临期档（C）整档前置；短期档 [B, D] 从 B 开始循环 ⇒ B, D；永久档 [A, E] 后置
-    expect(ids(out), 'C 仍在最前（临期档优先），短期档内 B→D').toEqual(['C', 'B', 'D', 'A', 'E'])
-    // ⚠️ 关键：临期账号**仍在最前**（S3 会把它甩到最后）
-    expect(ids(out)[0], '临期账号必须仍在第 1 位').toBe('C')
+    // S5：起点 B 第一；之后按档位序 C(临期) → D(短期) → A/E(永久)
+    expect(ids(out), 'B 第一，随后 C(临期)').toEqual(['B', 'C', 'D', 'A', 'E'])
+    expect(ids(out)[0], '起点必须在首位').toBe('B')
   })
 
-  it('★ 起点在「永久」档 ⇒ 临期/短期档整档仍在前', () => {
+  it('★★ 起点在「永久」档 ⇒ **起点第一**（哪怕临期档更优先）', () => {
     const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
     const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'A' })
-    // 临期 C → 短期 B, D（保持原序，起点不在此档）→ 永久档 [A, E] 从 A 循环（A 本就在前）
-    expect(ids(out), '临期/短期仍在前面，永久档内 A→E').toEqual(['C', 'B', 'D', 'A', 'E'])
+    // S5：A 第一；之后 C(临期) → B/D(短期) → E(永久)
+    expect(ids(out), 'A 第一，随后 C(临期)、B/D(短期)、E(永久)').toEqual(['A', 'C', 'B', 'D', 'E'])
   })
 
-  it('★★ S4 核心：同档内**循环**（起点之后的绕到前面，不是把起点摘出来）', () => {
-    // 五个全是同档（都有 expiring）⇒ 整档内循环
+  it('★★ 同档内**循环**（起点之后的绕到前面）', () => {
+    // 五个全是同档 ⇒ 整档内循环
     const same = ['a', 'b', 'c', 'd', 'e'].map((id) => mkTier(id, { expiring: 100 }))
     const ranked = rankBuddyAccountsByBalance(same, { allowPermanent: true })
     expect(ids(ranked)).toEqual(['a', 'b', 'c', 'd', 'e'])
     const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'c' })
-    // ⚠️ S2 会得到 [c, a, b, d, e]（b 被甩到 d 后面）；S4 得到 [c, d, e, a, b]
-    expect(ids(out), 'S4：从 c 开始循环').toEqual(['c', 'd', 'e', 'a', 'b'])
+    expect(ids(out), 'S5：起点 c 第一，其后 d/e，绕回 a/b').toEqual(['c', 'd', 'e', 'a', 'b'])
   })
 
-  it('★ 不变量：更低优先的档**整档后置**，不会被提前', () => {
+  it('★ 不变量：**起点永远是第一位**（遍历每个作为起点）', () => {
     const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
-    for (const startId of ['B', 'D', 'A', 'E', 'C']) {
+    for (const startId of ['A', 'B', 'C', 'D', 'E']) {
       const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: startId })
-      const startTier = buddyBalanceTier(out[0], { allowPermanent: true })
-      // 起点之后不可能出现「档位比起点更优先」的账号（否则就是破坏了档位优先级）
-      const firstBetter = out.findIndex((a) => {
-        const t = buddyBalanceTier(a, { allowPermanent: true })
-        return t < startTier
-      })
-      expect(firstBetter, `起点=${startId} 时不得把更优先的档排到起点之后`).toBe(-1)
+      expect(out[0].id, `起点=${startId} 必须在首位`).toBe(startId)
+      expect(out).toHaveLength(ranked.length)
+      expect(new Set(ids(out))).toEqual(new Set(ids(ranked)))
     }
   })
 
-  it('起点是临期档且在同档首位 ⇒ 与不设起点的结果相同', () => {
+  it('★ 不变量：起点之后按档位升序（不得出现跨档逆序）', () => {
+    const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
+    for (const startId of ['A', 'B', 'C', 'D', 'E']) {
+      const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: startId })
+      const ranks = out.slice(1).map((a) => buddyBalanceTier(a, { allowPermanent: true }))
+      const sorted = [...ranks].sort((x, y) => x - y)
+      expect(ranks, `起点=${startId} 之后必须按档位升序`).toEqual(sorted)
+    }
+  })
+
+  it('起点是临期档且已在该档首位 ⇒ 与不设起点的结果相同', () => {
     const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
     const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'C' })
-    expect(ids(out), 'C 本就在首位 ⇒ 循环后完全相同').toEqual(ids(ranked))
+    expect(ids(out), 'C 本就在首位 ⇒ 结果完全相同').toEqual(ids(ranked))
   })
 })
-
 describe('rotateFromPreferred —— 起点跳过不可用（Q2：循环到下一个）', () => {
   it('★ 选的号「只剩永久」+ 锁定 ⇒ 起点前移到下一个可用', () => {
     // 排序后（锁定）：a(临期) b(临期) c(永久→none) d(临期)
@@ -190,8 +193,8 @@ describe('rotateFromPreferred —— 起点跳过不可用（Q2：循环到下�
     // 未锁定：临期在前 ⇒ [a, d, b, c]
     expect(ids(ranked)).toEqual(['a', 'd', 'b', 'c'])
     const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'b' })
-    // b 可用 ⇒ S4：b 所在档（永久档 [b, c]）内从 b 循环 ⇒ b, c；临期档 [a, d] 仍前置
-    expect(ids(out), 'S4：临期档前置 [a,d]，永久档内 b→c').toEqual(['a', 'd', 'b', 'c'])
+    // S5：b 第一；之后按档位序 a, d(临期) → c(永久)
+    expect(ids(out), 'S5：b 第一，随后临期 a/d，再永久 c').toEqual(['b', 'a', 'd', 'c'])
   })
 
   it('全不可用 ⇒ 原样（交给上层报错，不在这里抛）', () => {

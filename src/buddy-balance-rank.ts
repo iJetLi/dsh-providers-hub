@@ -604,74 +604,82 @@ export function rotateFromPreferred<T extends BuddyAccountBalance>(
   // 全不可用 ⇒ 原样，交给上层报出真实原因（不要在这里抛）。
   if (anchor < 0) return [...ranked]
   /**
-   * ★★★ **S4 语义：起点所在档位内「循环」，其他档位保持原序**
-   * （用户 2026-11-18 二次定稿）。
+   * ★★★★ **S5 语义：起点**绝对第一** + 其余按档位优先 + 同档内循环**
+   * （用户 2026-11-18 三次定稿，最终版）。
    *
-   * ## 为什么从 S2 改成 S4（真实报障）
+   * ## 迭代脉络（每一次都是真实报障驱动的）
    *
-   * S2 只做「把起点摘出来放最前」，**没有循环**。用户截图实测：
+   * | 版本 | 规则 | 报障 |
+   * |---|---|---|
+   * | S3 | 整条数组循环 | ⚠️ 起点在永久档时永久排第一、**临期沉底**，白等到过期 |
+   * | S2 | 只把起点摘出来放最前（不循环）| ⚠️ 位次 7 被甩到最后 |
+   * | S4 | 起点档内循环，**更优先的档整档前置** | ⚠️ **起点被挤到第 2 位** |
+   * | **S5** | **起点绝对第一** + 其余档位优先 + 同档循环 | ✅ |
    *
-   * ```
-   * 7 个账号全是临期档，位次 1..7
-   * 起点 = 位次 6
-   *   S2 ⇒ 6 → 1 → 2 → 3 → 4 → 5 → 7   ❌ 位次 7 被甩到最后
-   *   S4 ⇒ 6 → 7 → 1 → 2 → 3 → 4 → 5   ✅ 从 6 开始循环
-   * ```
+   * ## 用户两次要求的原话（必须同时满足）
    *
-   * 用户原话：「选号 6，后面回到选号 1？应该是到选号 7 才对呀……都是同一档次的
-   * 情况下，肯定是按照循环来，而不是现在这种只是把选号 6 提到第一，其他的不变」
+   * 1. 「起点只提升自己，自己是什么档次就使用它的档次，
+   *     然后剩余全部按默认策略档位排列」 ⇒ **起点第一**
+   * 2. 「都是同一档次的情况下，肯定是按照循环来，
+   *     而不是现在这种只是把选号 6 提到第一，其他的不变」 ⇒ **同档循环**
    *
-   * ## 规则（三条）
-   *
-   * 1. **起点所在档位内**：从起点开始**循环**（起点 → 其后 → 绕回档首 → 档首至起点前）；
-   * 2. **更优先的档**（如起点在永久档时的临期/短期）：整档**原样排在前面** ——
-   *    这是保住「临期绝不浪费」的关键；
-   * 3. **更低优先的档**：整档**原样排在后面**。
-   *
-   * ## 与 S3（整条数组循环）的关键差别
-   *
-   * S3 是**整条**绕圈 ⇒ 起点在永久档时，永久账号排到最前，**临期被甩到末尾**、
-   * 会白等到过期。S4 只在**起点自己的档位内**绕 ⇒ 临期永远优先。
+   * S4 把第 1 条实现错了：它让「更优先的档」压过起点。
+   * 用户实测（Qoder 7 个账号，起点=位次5 永久档、位次2 是临期）：
    *
    * ```
-   * 池：A(位1·永久) B(位2·临期) C(位3·短期) D(位4·临期)
-   * 起点 = A（永久档）
-   *   S3 ⇒ A C? ... 永久被提到最前，临期沉底     ❌
-   *   S4 ⇒ B D C A                              ✅ 临期优先，永久档内从 A 开始
+   * S4 ⇒ 位2(临期) → 位5(起点) → 位6 → …    ❌ 起点不是第一
+   * S5 ⇒ 位5(起点) → 位2(临期) → 位6 → …    ✅
    * ```
    *
-   * ## 三条不变量（S4 版）
+   * ## 规则（三条，按优先级）
+   *
+   * 1. **起点绝对第一**（无论它是什么档）；
+   * 2. 其余账号按**档位优先序**：临期 → 短期 → 永久 → 不可用；
+   * 3. **起点所在档内**从起点之后继续循环（绕回该档首），其余档保持原序。
+   *
+   * ⚠️⚠️ **已知代价（用户明确接受）**：起点在「永久」档且池里存在临期账号时，
+   *    永久积分会先被烧掉 —— 这正是三档机制原本要避免的（临期会过期）。
+   *    弹窗的起点档位提示（`rotationStartHint`）已把该后果告知用户。
+   *    这里**不再替用户做「保护临期」的决定** —— 那是 S4 的错误。
+   *
+   * ## 三条不变量（S5 版）
    *
    * 1. **集合不变**：只重排，不增删；
-   * 2. **档位优先级不变**：任何账号不可能因为设了起点而「跳到比它档位更优先的档之前」；
-   * 3. **档内循环**：起点所在档位内的相对顺序是「循环位移」，不是「摘一个放最前」。
+   * 2. **起点必在首位**：只要找到可用起点，`out[0].id === startId`；
+   * 3. **档内循环**：起点所在档内的相对顺序是「循环位移」，
+   *    其余档内相对顺序**逐字节不变**。
    */
-  const anchorTier = buddyBalanceTier(ranked[anchor]!, options)
-  /**
-   * rank 的档位序（数字越小越优先）。⚠️ 用 `buddyBalanceTier(..., {allowPermanent: true})`
-   * 归一化：`none` 档在锁定态下可能是「只剩永久」，直接用会与可用档混淆。
-   * 这里只为**分档边界**服务，故统一按未锁定判。
-   */
+  const startAccount = ranked[anchor]!
+  const anchorTier = buddyBalanceTier(startAccount, options)
+  /** 分档边界用未锁定口径（`none` 档在锁定态可能是「只剩永久」，会混淆分组）。 */
   const tierRankOf = (account: T): number => buddyBalanceTier(account, { allowPermanent: true })
-  const anchorRank = tierRankOf(ranked[anchor]!)
-  // 起点档「之前」的档（更优先）按原序整体前置；「之后」的档整体后置。
-  const before: T[] = []
-  const sameTier: T[] = []
-  const after: T[] = []
+  const anchorRank = tierRankOf(startAccount)
+  // 按档分组（保持组内原序）
+  const byRank = new Map<number, T[]>()
   for (const account of ranked) {
-    const r = tierRankOf(account)
-    if (r < anchorRank) before.push(account)
-    else if (r > anchorRank) after.push(account)
-    else sameTier.push(account)
+    const rank = tierRankOf(account)
+    const group = byRank.get(rank)
+    if (group === undefined) byRank.set(rank, [account])
+    else group.push(account)
   }
-  // 本档内从起点开始循环
-  const posInTier = sameTier.findIndex((a) => a.id === ranked[anchor]!.id)
-  const rotatedSameTier = posInTier > 0
-    ? [...sameTier.slice(posInTier), ...sameTier.slice(0, posInTier)]
-    : sameTier
-  // ⚠️ `anchorTier` 只为可读性/调试保留；真正分组用 `tierRankOf`（见上方说明）
+  const result: T[] = [startAccount]
+  for (const rank of [...byRank.keys()].sort((a, b) => a - b)) {
+    const group = byRank.get(rank)!
+    if (rank !== anchorRank) {
+      // 其他档：整档原样（组内已排除起点？不 —— 起点只在 anchorRank 组里）
+      result.push(...group)
+      continue
+    }
+    // 起点所在档：从起点**之后**继续循环，再绕回该档首至起点之前
+    const posInTier = group.findIndex((a) => a.id === startAccount.id)
+    const ordered = posInTier >= 0
+      ? [...group.slice(posInTier + 1), ...group.slice(0, posInTier)]
+      : group
+    result.push(...ordered)
+  }
+  // ⚠️ `anchorTier` 只为可读性保留（真正的分组边界用 tierRankOf，见上方说明）
   void anchorTier
-  return [...before, ...rotatedSameTier, ...after]
+  return result
 }
 
 /**

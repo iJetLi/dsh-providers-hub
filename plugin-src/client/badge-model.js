@@ -950,62 +950,64 @@ export function orderCreditRows(rows, options = {}) {
 }
 
 /**
- * 「轮换起点」：**S4 语义 —— 起点所在档位内循环，其他档位保持原序**。
+ * 「轮换起点」：**S5 语义 —— 起点绝对第一 + 其余按档位优先 + 同档内循环**
+ * （用户 2026-11-18 三次定稿，最终版）。
  *
  * 与后端 `buddy-balance-rank.ts` 的 `rotateFromPreferred` **逐字节同构**：
  * 弹窗列表顺序是用户判断「下一发会用谁」的唯一依据，两者分叉会直接误导。
  *
- * ## 为什么从 S2 改成 S4（真实报障 2026-11-18）
+ * ## 迭代脉络（每次都是真实报障驱动的）
  *
- * S2 只把起点摘出来放最前、**不循环**。用户截图实测（7 个账号全是临期档）：
+ * | 版本 | 规则 | 报障 |
+ * |---|---|---|
+ * | S3 | 整条数组循环 | ⚠️ 起点在永久档时永久排第一、**临期沉底** |
+ * | S2 | 只把起点摘出来放最前（不循环）| ⚠️ 位次 7 被甩到最后 |
+ * | S4 | 起点档内循环，**更优先的档整档前置** | ⚠️ **起点被挤到第 2 位** |
+ * | **S5** | **起点绝对第一** + 其余档位优先 + 同档循环 | ✅ |
  *
- * ```
- * 起点 = 位次 6
- *   S2 ⇒ 6 → 1 → 2 → 3 → 4 → 5 → 7   ❌ 位次 7 被甩到最后
- *   S4 ⇒ 6 → 7 → 1 → 2 → 3 → 4 → 5   ✅ 从 6 开始循环
- * ```
+ * ## 规则（三条，按优先级）
  *
- * ## 规则（三条）
+ * 1. **起点绝对第一**（无论它是什么档）；
+ * 2. 其余账号按**档位优先序**：临期 → 短期 → 永久 → 不可用；
+ * 3. **起点所在档内**从起点之后继续循环，其余档保持原序。
  *
- * 1. **起点所在档位内**：从起点开始**循环**；
- * 2. **更优先的档**（如起点在永久档时的临期/短期）：整档**原样排前面**
- *    —— 这是保住「临期绝不浪费」的关键；
- * 3. **更低优先的档**：整档**原样排后面**。
- *
- * ⚠️ 与 S3（整条数组循环）的关键差别：S3 会让起点在永久档时把永久提到最前、
- *    临期沉底。S4 只在**起点自己的档位内**绕 ⇒ 临期永远优先。
+ * ⚠️⚠️ **已知代价（用户明确接受）**：起点在「永久」档且池里存在临期账号时，
+ *    永久积分会先被烧掉 —— 弹窗的起点档位提示已告知该后果。
  *
  * ⚠️ 起点不在列表（账号刚被删）⇒ **原样返回**（不报错、不乱序）。
  *
  * @param rows - **已按策略排好序**的行（必须排在旋转之前）
  * @param startId - 起点 accountId
- * @param tierOf - 每行的档位（复刻后端口径）；用于划分「本档 / 更优先档 / 更低档」
+ * @param tierOf - 每行的档位（复刻后端口径）；用于按档分组
  */
 function rotateRows(rows, startId, tierOf) {
   const index = rows.findIndex((row) => row?.accountId === startId);
   if (index < 0) return [...rows];
-  const startTier = tierOf(rows[index]);
-  /**
-   * ⚠️ 分档边界用 `allowPermanent: true` 归一化后的档位判 —— 与后端
-   *    `tierRankOf` 同口径（`none` 档在锁定态下可能是「只剩永久」，
-   *    直接用会与可用档混淆）。这里 `tierOf` 已按调用方的 `allowPermanent` 算过，
-   *    故只在**本档 vs 其他档**这个粒度上使用，不重新判可用性。
-   */
-  const before = [];
-  const sameTier = [];
-  const after = [];
+  const startRow = rows[index];
+  const startTier = tierOf(startRow);
+  // 按档分组（保持组内原序）
+  const byTier = new Map();
   for (const row of rows) {
     const t = tierOf(row);
-    if (t < startTier) before.push(row);
-    else if (t > startTier) after.push(row);
-    else sameTier.push(row);
+    const group = byTier.get(t);
+    if (group === undefined) byTier.set(t, [row]);
+    else group.push(row);
   }
-  // 本档内从起点开始循环
-  const posInTier = sameTier.findIndex((row) => row?.accountId === startId);
-  const rotatedSameTier = posInTier > 0
-    ? [...sameTier.slice(posInTier), ...sameTier.slice(0, posInTier)]
-    : sameTier;
-  return [...before, ...rotatedSameTier, ...after];
+  const out = [startRow];
+  const tiers = [...byTier.keys()].sort((a, b) => a - b);
+  for (const tier of tiers) {
+    const group = byTier.get(tier);
+    if (tier !== startTier) {
+      out.push(...group);
+      continue;
+    }
+    // 起点所在档：从起点**之后**继续循环，再绕回该档首至起点之前
+    const posInTier = group.findIndex((row) => row?.accountId === startId);
+    out.push(...(posInTier >= 0
+      ? [...group.slice(posInTier + 1), ...group.slice(0, posInTier)]
+      : group));
+  }
+  return out;
 }
 
 /**
