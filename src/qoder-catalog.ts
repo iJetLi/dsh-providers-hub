@@ -177,6 +177,58 @@ function readString(source: unknown, key: string): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+/**
+ * 双语文本块的四键读取 —— **逐字对齐官方 `Yg1()`**（Qoder CN 0.5.11
+ * `out/renderer/assets/CAGvh22m.js`，2026-11-18 解出）。
+ *
+ * 官方那句（混淆后）是：
+ *
+ * ```js
+ * function Yg1(e, t) {
+ *   return e ? (B5(t) === 'zh' ? e.zh ?? e.cn_zh : e.en ?? e.en_us)
+ *              ?? e.zh ?? e.cn_zh ?? e.en ?? e.en_us : void 0
+ * }
+ * ```
+ *
+ * 即「**首选键 → 区域变体 → 四键兜底**」，取值前还要 `trim()`（官方 `Zq()`：
+ * `typeof v === 'string' ? v.trim() : ''`）。
+ *
+ * ⚠️ 本仓只存 zh/en 两格（下游 `promotionTooltip` 按读者语言挑），故各自的取值序为
+ * 中文格 `zh → cn_zh`、英文格 `en → en_us`；**跨语言兜底交给下游**（那里本来就有，
+ * 见下方 `readLocalizedPair` 里的说明）。只认 `zh`/`en` 的旧写法一旦国区改发
+ * `cn_zh`，徽标与悬停会**整条静默消失**（`qoderPromotionCandidate` 在没有 label 时
+ * 返回 undefined，且**不打日志**）。
+ *
+ * 证据强度如实标注（2026-11-18 两站零额度目录 GET）：CN 14 条里 2 条、国际版
+ * 17 条里 3 条带 `promotion`，`badge` / `description` 的键**都只有 `{en, zh}`**
+ * ⇒ 四键是「**结构上可达、当前零实测**」，不是正在发生的故障。
+ *
+ * 另一条同源判据：官方对 `badge` 与 `description` 用的是**同一个**四键解析器
+ * （`XS0`），故两者在这里也必须共用本函数 —— 各写一份就是同一个 schema 的两套判据。
+ */
+function readLocalizedPair(value: unknown): { zh?: string; en?: string } {
+  const zh = readTrimmed(value, 'zh') ?? readTrimmed(value, 'cn_zh')
+  const en = readTrimmed(value, 'en') ?? readTrimmed(value, 'en_us')
+  // ⚠️ **不在这里做跨语言兜底**：官方尾部那条 `?? e.zh ?? e.cn_zh ?? e.en ?? e.en_us`
+  // 的含义是「首选键都没有时用任意一个」，而本仓的下游**本来就**跨语言回落
+  // （`promotionBadgeLabel` 英文读者无 `labelEn` ⇒ 退回 `label`；`promotionTooltip`
+  // 的 `pickCopy` 同理）。在这里再填一遍 = 同一件事写两套兜底，两套迟早会漂移。
+  // 这一层只负责「每个语言槽认自己的两个键」。
+  return {
+    ...zh === undefined ? {} : { zh },
+    ...en === undefined ? {} : { en },
+  }
+}
+
+/** 读**去空白后**仍非空的字符串字段（官方 `Zq()` 的 trim 口径）。 */
+function readTrimmed(source: unknown, key: string): string | undefined {
+  if (typeof source !== 'object' || source === null) return undefined
+  const value = (source as Record<string, unknown>)[key]
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? undefined : trimmed
+}
+
 /** 把任意值收窄成记录（数组与非对象都返回 undefined，与官方 `JsA()` 同口径）。 */
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -415,8 +467,11 @@ function parsePromotion(raw: unknown): QoderModelPromotion | undefined {
     && windowStart === undefined && windowEnd === undefined) {
     return undefined
   }
-  const badgeZh = readString(record.badge, 'zh')
-  const badgeEn = readString(record.badge, 'en')
+  // 徽标与说明**共用**官方的四键解析器（`XS0` 对两者一视同仁）：
+  // `badge` 是行上的短标签，`description` 是**悬停那句上游原话**（官方把它当
+  // `promotionDescription` 塞进条目 detail，见 `Yg1(e.promotion?.description, …)`）。
+  const badge = readLocalizedPair(record.badge)
+  const description = readLocalizedPair(record.description)
   // 徽标腿（issue #101）：时区与规则 id 都是**上游声明的原样事实**。
   const timezone = readString(record, 'timezone')
   const ruleId = readString(record, 'rule_id') ?? readString(record, 'ruleId')
@@ -426,8 +481,10 @@ function parsePromotion(raw: unknown): QoderModelPromotion | undefined {
     ...beforePromotionPriceFactor === undefined ? {} : { beforePromotionPriceFactor },
     ...windowStart === undefined ? {} : { windowStart },
     ...windowEnd === undefined ? {} : { windowEnd },
-    ...badgeZh === undefined ? {} : { badgeZh },
-    ...badgeEn === undefined ? {} : { badgeEn },
+    ...badge.zh === undefined ? {} : { badgeZh: badge.zh },
+    ...badge.en === undefined ? {} : { badgeEn: badge.en },
+    ...description.zh === undefined ? {} : { descriptionZh: description.zh },
+    ...description.en === undefined ? {} : { descriptionEn: description.en },
     ...timezone === undefined ? {} : { timezone },
     ...ruleId === undefined ? {} : { ruleId },
   }

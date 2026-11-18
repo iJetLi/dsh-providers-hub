@@ -853,6 +853,8 @@ export function qoderPromotionCandidate(
     readonly windowEnd?: string | undefined
     readonly badgeZh?: string | undefined
     readonly badgeEn?: string | undefined
+    readonly descriptionZh?: string | undefined
+    readonly descriptionEn?: string | undefined
     readonly timezone?: string | undefined
     readonly ruleId?: string | undefined
   } | undefined,
@@ -865,6 +867,20 @@ export function qoderPromotionCandidate(
   const label = promotion.badgeZh ?? promotion.badgeEn
   if (label === undefined) return undefined
   const labelEn = promotion.badgeEn
+  /**
+   * 悬停那句 = 上游 `promotion.description`（官方渲染层的 `promotionDescription`）。
+   *
+   * ⚠️ 只有**上游真的给了**才带：`hover` 缺席时 `promotionTooltip` 少一段，
+   * 不当成「上游说了一句空话」。也**不许**从 `discountFactor` 反推措辞
+   * （那是替上游说话，本仓红线）。
+   */
+  const hover: ModelPromotionCopy | undefined = promotion.descriptionZh === undefined
+    && promotion.descriptionEn === undefined
+    ? undefined
+    : {
+        ...promotion.descriptionZh === undefined ? {} : { zh: promotion.descriptionZh },
+        ...promotion.descriptionEn === undefined ? {} : { en: promotion.descriptionEn },
+      }
   const windowStart = promotion.windowStart
   const windowEnd = promotion.windowEnd
   // 「声明」与「读得懂」是两件事，必须分开算（见 dailyUnusable 的说明）。
@@ -897,6 +913,7 @@ export function qoderPromotionCandidate(
     source: 'promotion',
     modelIds: [modelId],
     badge: { label, ...labelEn === undefined ? {} : { labelEn } },
+    ...hover === undefined ? {} : { hover },
     timeDeclared: declaredWindow,
     // 取舍 4：宿主徽标没有悬停位，窗口外不画「还没到点」。
     standingEligible: false,

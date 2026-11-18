@@ -23,7 +23,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { QODER_CN } from '../../src/qoder-product.js'
-import { fetchQoderRemoteModels } from '../../src/qoder-catalog.js'
+import { QODER_CATALOG_SCENE, fetchQoderRemoteModels } from '../../src/qoder-catalog.js'
 import {
   QODER_REFRESH_PATH,
   QODER_USERINFO_PATH,
@@ -160,5 +160,79 @@ suite('QoderCN 登录与端点探针（只读，零额度）', () => {
     expect(models.some((m) => m.id === 'dfmodel'), '目录里没有 dfmodel').toBe(true)
     console.log(`[qodercn] 远端目录 ${models.length} 条：`
       + models.map((m) => `${m.id}=${m.name}`).join(', '))
+  })
+
+  /**
+   * 活动条目的**双语文本**（徽标 + 悬停说明）读得出来。
+   *
+   * 为什么要有这条（2026-11-18 实测）：
+   * - 官方渲染层的取词函数 `Yg1(e, locale)` 接受**四个键** `en / zh / en_us / cn_zh`
+   *   （`zh → cn_zh`、`en → en_us`，再做全键兜底），且 `Zq()` 会 `trim`；
+   * - 我们原先只读 `zh / en` ⇒ 上游一旦改发区域变体，徽标与悬停会**整条静默消失**
+   *   （`qoderPromotionCandidate` 在没有 label 时返回 undefined 且**不打日志**）；
+   * - `promotion.description`（悬停那句原话）我们**整条没读**，而它今天在两站都发。
+   *
+   * 判据**只打结构，不钉文案**：上游随时会改折扣措辞，逐字断言必然腐坏。
+   * 键集合的白名单是唯一「硬」的那格 —— 上游出现第五个语言键时要有人来看。
+   */
+  it('活动条目的徽标与悬停说明读得出来（键集合只用官方那四个）', async () => {
+    const entries = readQoderCredentialsFromDshStore({ refPrefix: 'QODERCN' })
+    if (entries.length === 0) {
+      console.log('  跳过：未找到 QODERCN_ACCOUNT_* 凭据（先在面板登录一次）')
+      return
+    }
+    const captured: string[] = []
+    const models = await fetchQoderRemoteModels(entries[0]!.credential, QODER_CN, {
+      fetcher: async (url, init) => {
+        const response = await fetch(url, init as RequestInit)
+        captured.push(await response.clone().text())
+        return response
+      },
+    })
+
+    const byId = new Map(models.map((m) => [m.id, m]))
+    const withPromotion = models.filter((m) => m.promotion !== undefined)
+    console.log(`[qodercn] 带活动 ${withPromotion.length} 条：`
+      + withPromotion.map((m) => `${m.id}=[${m.promotion!.badgeZh ?? ''}|${m.promotion!.badgeEn ?? ''}]`
+        + ` desc=${m.promotion!.descriptionZh === undefined ? '-' : 'y'}`).join(', '))
+
+    // 原始报文与解析结果**逐条对齐**（不是「必须活动」的契约断言）：
+    // 上游给了文案而我们读不出来 = 静默丢字，正是本 PR 要守的那格。
+    const ALLOWED = new Set(['en', 'zh', 'en_us', 'cn_zh'])
+    let checked = 0
+    for (const text of captured) {
+      let parsed: unknown
+      try { parsed = JSON.parse(text) } catch { continue }
+      const chat = (parsed as Record<string, unknown>)[QODER_CATALOG_SCENE]
+      if (!Array.isArray(chat)) continue
+      for (const raw of chat as Record<string, unknown>[]) {
+        const promotion = raw?.promotion as Record<string, unknown> | undefined
+        if (promotion === undefined) continue
+        const id = String(raw?.key ?? raw?.model_key ?? '')
+        const parsedModel = byId.get(id)
+        if (parsedModel?.promotion === undefined) continue
+        for (const field of ['badge', 'description'] as const) {
+          const block = promotion[field]
+          if (typeof block !== 'object' || block === null) continue
+          const keys = Object.keys(block as object)
+          for (const key of keys) {
+            expect(ALLOWED.has(key), `${id} 的 promotion.${field} 出现未知语言键 "${key}"`
+              + ' —— 官方读取口径是 en/zh/en_us/cn_zh，先取证再决定要不要加').toBe(true)
+          }
+          const upstreamHasText = keys.some((key) => {
+            const value = (block as Record<string, unknown>)[key]
+            return typeof value === 'string' && value.trim().length > 0
+          })
+          if (!upstreamHasText) continue
+          const read = field === 'badge'
+            ? parsedModel.promotion.badgeZh ?? parsedModel.promotion.badgeEn
+            : parsedModel.promotion.descriptionZh ?? parsedModel.promotion.descriptionEn
+          expect(read, `${id} 的上游 promotion.${field} 有文案（键 ${keys.join(',')}）`
+            + '但我们解析出来是空的 —— 键名口径漂了').toBeTruthy()
+          checked++
+        }
+      }
+    }
+    expect(checked, '两站今天都应至少有一条带文案的活动；0 说明报告结构变了').toBeGreaterThan(0)
   })
 })

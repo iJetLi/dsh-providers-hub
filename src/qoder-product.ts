@@ -239,6 +239,21 @@ export interface QoderModelPromotion {
   /** 英文角标文案（远端 `badge.en`，如「Off-Peak 60% off」）。徽标腿用。 */
   badgeEn?: string
   /**
+   * 活动说明的中文原文（远端 `promotion.description.zh`，如
+   * 「错峰时段4折优惠（10 PM-8 AM UTC+8）」）。
+   *
+   * ⚠️ **这是上游原话，不是我们能算出来的东西**：官方渲染层把它当
+   * `promotionDescription` 放进条目 detail（即**悬停那句**），而 `badge` 只是行上的
+   * 短标签。本仓原先**整条丢掉**它（解析层只读 badge），而 #110 已经把悬停出口
+   * （`src/promotion-tooltip.ts` 的 `promotionTooltip`）建好 —— 故这里补读，
+   * 由 `qoderPromotionCandidate` 放进 `ModelPromotion.hover`。
+   *
+   * 实测（2026-11-18）：CN 与国际版每个带 `promotion` 的条目**都**发这两个字段。
+   */
+  descriptionZh?: string
+  /** 活动说明的英文原文（远端 `promotion.description.en`）。悬停腿用。 */
+  descriptionEn?: string
+  /**
    * 窗口所写的时区（远端 `timezone`，实测 `Asia/Shanghai` / `Asia/Singapore`）。
    *
    * ⚠️ 必须原样保留：`22:00–08:00` 离开时区就没有意义，而它是**上游声明**的
