@@ -2431,6 +2431,29 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   gap: 6px;
   min-width: 0;
 }
+/**
+ * ★ **轮换起点的档位提示**（用户 2026-11-18 要求「不在同一个档次时需要有提示」）。
+ *
+ * S2 语义下起点会被提到最前、先烧它自己那一档 ⇒ 若它不是临期档，
+ * 「临期要排在它后面」这个后果必须让用户看见。
+ *
+ * ⚠️ 用**黄色**（state-warn）而不是错误红：这不是故障，是**信息性提醒** ——
+ *    用户的选择是合法的，只是后果与默认不同。
+ * ⚠️ 只在非临期档渲染 ⇒ 起点是临期档（最常见）时不占任何高度。
+ * ⚠️ 允许换行（white-space: normal）：文案约 30 字，窄弹窗里折成两行
+ *    也好过被省略号截断 —— 截断会让「其他账号的临期仍优先」这半句消失，
+ *    而那正是用户最需要知道的部分。
+ */
+.dim-jh-badgeRotationTierHint {
+  flex-basis: 100%;
+  margin-top: 3px;
+  font-size: 10px;
+  line-height: 1.55;
+  color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #b45309) 88%, var(--dsw-alias-label-secondary));
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .dim-jh-badgeSortHint {
   flex: none;
   padding: 0 5px;

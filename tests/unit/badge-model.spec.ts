@@ -17,6 +17,7 @@ import {
 
   CREDIT_ORDER_TIER,
   backendOrderTier,
+  rotationStartHint,
 } from '../../plugin-src/client/badge-model.js';
 // 宿主侧的同一份枚举：两边必须逐字一致（`usage.badgePreference` 会拒绝非法值）
 import { BADGE_PREFERENCES as HOST_BADGE_PREFERENCES } from '../../src/badge-preferences.js'
@@ -652,6 +653,49 @@ describe('orderCreditRows：按后端选号机制排序 + 折叠', () => {
    * 变异实测（M2）证明：只靠上面那条「沉底」用例抓不到 —— 因为两者排序结果
    * 恰好相同（都沉底）。必须**直接断言档位函数**本身。
    */
+  /**
+   * ★★ **轮换起点的档位提示**（用户 2026-11-18 要求：
+   * 「这种选择跟默认的不在同一个档次的下拉框时，需要有提示」）。
+   *
+   * S2 语义下起点被提到最前、先烧它自己那一档 ⇒ 若它不是临期档，
+   * 「临期要排在它后面」这个后果必须让用户看见。
+   */
+  describe('rotationStartHint：起点档位提示', () => {
+    it('★ 临期档 ⇒ 不提示（它本就是默认首选，不改变策略）', () => {
+      expect(rotationStartHint(CREDIT_ORDER_TIER.imminent), '临期不提示').toBeNull()
+    })
+
+    it('★ 短期档 ⇒ 提示（会先烧短期，临期稍后才轮到）', () => {
+      const hint = rotationStartHint(CREDIT_ORDER_TIER.expiring)
+      expect(hint, '短期档必须提示').not.toBeNull()
+      expect(hint).toContain('短期')
+      // ⚠️ 必须说清「其他账号的临期仍优先」—— 这是用户最需要知道的一半
+      expect(hint, '必须说明临期仍优先').toContain('临期仍优先')
+    })
+
+    it('★ 永久档 ⇒ 提示（会先烧永久）', () => {
+      const hint = rotationStartHint(CREDIT_ORDER_TIER.permanent)
+      expect(hint, '永久档必须提示').not.toBeNull()
+      expect(hint).toContain('永久')
+      expect(hint, '必须说明临期仍优先').toContain('临期仍优先')
+    })
+
+    it('不可用档 / 无法判定 ⇒ 不提示（下拉框已禁用，提示会自相矛盾）', () => {
+      expect(rotationStartHint(CREDIT_ORDER_TIER.none), 'none 档不提示').toBeNull()
+      expect(rotationStartHint(null), 'null 不提示').toBeNull()
+      expect(rotationStartHint(undefined), 'undefined 不提示').toBeNull()
+    })
+
+    it('三种档位的提示文案互不相同（避免复制粘贴写错）', () => {
+      const all = [
+        rotationStartHint(CREDIT_ORDER_TIER.imminent),
+        rotationStartHint(CREDIT_ORDER_TIER.expiring),
+        rotationStartHint(CREDIT_ORDER_TIER.permanent),
+      ]
+      const nonNull = all.filter((h) => h !== null)
+      expect(new Set(nonNull).size, '两条提示必须不同').toBe(nonNull.length)
+    })
+  })
   it('★ 锁定门在永久判定之前：只剩永久的号返回 none（不是 permanent）', () => {
     const packages = [pkg(9000, 30)] // 30 天 ⇒ 后端 permanent
     const split = splitCreditsByExpiry(packages, 15, NOW, 5)
@@ -667,12 +711,14 @@ describe('orderCreditRows：按后端选号机制排序 + 折叠', () => {
    * 语义与后端 `rotateFromPreferred` 一致：起点及其之后的账号绕到最前面，
    * 其余保持相对顺序（环形）。
    */
-  it('★★ 轮换起点：起点及其之后绕到最前（其余保持相对顺序）', () => {
+  it('★★ 轮换起点：只提升起点自己（S2），其余保持档位序', () => {
     // 档位：imm(2天/临期) → short(10天/短期) → perm(30天/永久)
-    // 设起点 = short ⇒ 旋转后应为 short → perm → imm
+    // 档位序 = [imm, short, perm]；起点 = short ⇒ S2 只把它摘到最前 ⇒ [short, imm, perm]
     const rows = [acc('imm', 2), acc('short', 10), acc('perm', 30)]
     const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'short' })
-    expect(ids(shown), '起点 short 及其之后(perm)绕到最前，imm 接在后面').toEqual(['short', 'perm', 'imm'])
+    expect(ids(shown), 'short 提到最前，imm 保持第二位（临期不被甩后）')
+      .toEqual(['short', 'imm', 'perm'])
+    // ⚠️ 旧语义（整条旋转）会得到 ['short','perm','imm'] —— imm 的临期被甩到最后
   })
 
   it('未设起点时不做旋转（顺序 = 纯档位序）', () => {

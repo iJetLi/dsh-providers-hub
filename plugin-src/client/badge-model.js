@@ -800,6 +800,40 @@ export function backendOrderTier(split, allowPermanent) {
  *    档位只当可用性判据，起点旋转仍在其后 ⇒ 两者同时开启时，
  *    「手动顺序」才是决定先后主因，起点只是把某一段绕到前面。
  */
+/**
+ * ★★ **轮换起点的档位提示**（用户 2026-11-18 要求）。
+ *
+ * ## 为什么需要它
+ *
+ * S2 语义下，起点会被**提升到最前**、先烧它自己那一档的积分。
+ * 若起点不是临期档，就意味着**临期积分要排在它后面** —— 这个后果必须让用户知道，
+ * 否则他会以为「设了起点 = 什么都没变」。
+ *
+ * ## 三种情况
+ *
+ * | 起点档位 | 是否提示 | 原因 |
+ * |---|---|---|
+ * | 临期 | **不提示** | 它本来就是默认首选，不改变任何策略 |
+ * | 短期 | 提示 | 会先烧短期，临期稍后才轮到 |
+ * | 永久 | 提示 | 会先烧永久（未锁定永久积分时才可选它）|
+ *
+ * @param tier - 起点账号的档位（`CREDIT_ORDER_TIER` 的值）；`null` = 无法判定
+ * @returns 提示文案；`null` = 不该渲染提示
+ */
+export function rotationStartHint(tier) {
+  if (!Number.isFinite(tier)) return null;
+  // 临期档 = 默认首选 ⇒ 无提示
+  if (tier === CREDIT_ORDER_TIER.imminent) return null;
+  if (tier === CREDIT_ORDER_TIER.expiring) {
+    return '⚠️ 起点是「短期」档：先烧它的短期积分，其他账号的临期仍优先';
+  }
+  if (tier === CREDIT_ORDER_TIER.permanent) {
+    return '⚠️ 起点是「永久」档：先烧它的永久积分，其他账号的临期仍优先';
+  }
+  // none 档（不可用）—— 下拉框已禁用，理论上选不到；万一选到也不提示
+  return null;
+}
+
 export function creditOrderLabel(options = {}) {
   if (options.strictManualOrder === true) return '手动顺序';
   if (options.hasRotationStart === true) return '起点优先';
@@ -928,7 +962,20 @@ export function orderCreditRows(rows, options = {}) {
 function rotateRows(rows, startId) {
   const index = rows.findIndex((row) => row?.accountId === startId);
   if (index <= 0) return [...rows];
-  return [...rows.slice(index), ...rows.slice(0, index)];
+  /**
+   * ★★ **S2 语义：只提升起点自己**（用户 2026-11-18 定稿）。
+   *
+   * 与后端 `buddy-balance-rank.ts` 的 `rotateFromPreferred` **逐字节同构**：
+   * 把起点那**一个元素**摘出来放最前，其余**保持档位序不变**。
+   *
+   * ⚠️ 旧的「整条旋转」（`[...slice(index), ...slice(0,index)]`）会把档位序里
+   *    排在起点**前面**的临期账号甩到末尾 ⇒ 临期白等到过期。
+   *    实测：起点在短期档时，临期号会从第 1 位掉到最后 1 位。
+   *
+   * ⚠️ 弹窗与后端必须**完全一致**：列表顺序现在是用户判断「下一发会用谁」的
+   *    唯一依据，两者分叉会直接误导。
+   */
+  return [rows[index], ...rows.slice(0, index), ...rows.slice(index + 1)];
 }
 
 /**

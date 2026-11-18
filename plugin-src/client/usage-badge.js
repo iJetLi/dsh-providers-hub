@@ -39,6 +39,8 @@ import {
   orderCreditRows,
   creditOrderLabel,
   describeCreditOrder,
+  rotationStartHint,
+  backendOrderTier,
   autoBadgeName,
   BADGE_PREFERENCES,
   BADGE_PREFERENCE_LABELS,
@@ -2193,6 +2195,43 @@ function UsageBadgeActive(props) {
       ? accounts[currentPosition - 1]
       : undefined;
     const currentReason = currentAccount === undefined ? null : reasonOf(currentAccount);
+    /**
+     * 算某账号的**档位**（与弹窗列表排序、后端选号**同一套口径**）。
+     *
+     * ⚠️ 必须复用 `splitCreditsByExpiry` + `backendOrderTier`，不能自己写一套：
+     *    「起点提示说的档位」与「列表排序用的档位」若分叉，用户会看到
+     *    「提示说是短期，但列表把它排在永久里」这种无法解释的矛盾。
+     * ⚠️ `windowDays`/`imminentDays` 在**本函数作用域**内不存在（它们在
+     *    `renderCredits` 里）⇒ 这里从 `value` 现取，与那边同源。
+     */
+    const creditRowTierOf = (accountId) => {
+      const row = (Array.isArray(value?.accounts) ? value.accounts : [])
+        .find((r) => r?.accountId === accountId || r?.id === accountId);
+      const packages = row?.balance?.packages;
+      if (!Array.isArray(packages)) return null;
+      const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
+      if (unit === QUOTA_UNIT) return null;
+      return backendOrderTier(
+        splitCreditsByExpiry(packages, value?.windowDays, Date.now(), value?.imminentDays),
+        value?.locked !== true,
+      );
+    };
+    /**
+     * ★★ **起点档位提示**（用户 2026-11-18 要求：「这种选择跟默认的不在同一个
+     * 档次的下拉框时，需要有提示」）。
+     *
+     * S2 语义下起点会被**提升到最前**、先烧它自己那一档。若它不是临期档，
+     * 「临期积分要排在它后面」这个后果必须让用户看见。
+     *
+     * ⚠️ 只在该账号**可用**时算档位：不可用账号已在下拉框禁用，
+     *    此时渲染「起点是永久档」会与「该号不可用」自相矛盾。
+     * ⚠️ 用**当前选中的位次**对应的账号（`currentAccount`），不是下拉框的
+     *    第一个选项 —— 两者在「选了 N 但该号被封禁」时不同。
+     */
+    const startTier = currentAccount === undefined || currentReason !== null
+      ? null
+      : creditRowTierOf(currentAccount.id);
+    const startHint = rotationStartHint(startTier);
 
     return React.createElement('div', { key: 'rotation', className: 'dim-jh-badgeRotation' }, [
       React.createElement('span', {
@@ -2233,6 +2272,17 @@ function UsageBadgeActive(props) {
         ? null
         : React.createElement('div', { key: 'hint', className: 'dim-jh-badgeNote' },
           `账号当前不可用${reasonSuffix(currentReason)}，已自动从下一个开始`),
+      /**
+       * ★★ **起点档位提示**（S2 语义的配套说明）。
+       *
+       * 只在起点是**非临期档**且该号可用时渲染 —— 临期档不改变任何策略，无需提示。
+       */
+      startHint === null
+        ? null
+        : React.createElement('div', {
+          key: 'tierHint',
+          className: 'dim-jh-badgeRotationTierHint',
+        }, startHint),
       rotationError === ''
         ? null
         : React.createElement('span', { key: 'err', className: 'dim-jh-badgeFail' }, rotationError),

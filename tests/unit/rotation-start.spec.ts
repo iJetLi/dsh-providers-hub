@@ -14,9 +14,23 @@
  * 2. **集合不变** —— 只重排，不增删；
  * 3. **默认（undefined）逐字节不变** —— 本功能的唯一回归面。
  *
- * ## ⚠️ 样例必须用 ≥5 元素且选中间项
+ * ## ⚠️⚠️ 2026-11-18 语义变更：S3「环形旋转」→ S2「只提升起点自己」
  *
- * 三元素选末位时「旋转」与「提到最前」结果**恰好相同** ⇒ 测不出差异（假绿）。
+ * 用户原话：「起点只提升自己，自己是什么档次就使用它的档次，
+ * 然后剩余全部按默认策略档位排列」
+ *
+ * | | 旧（S3，环形旋转）| 新（S2，只提自己）|
+ * |---|---|---|
+ * | 选 c | `c d e a b` | `c a b d e` |
+ * | 选 d | `d e a b c` | `d a b c e` |
+ *
+ * ### 为什么要改（核心）
+ *
+ * 环形旋转会把「档位序里排在起点**之前**」的账号甩到末尾 —— 而那些账号
+ * 可能就是**临期**的。临期积分一旦排到最后，就会白等到过期，而「临期优先」
+ * 正是三档机制存在的唯一理由。
+ *
+ * ⚠️ 样例必须用 ≥5 元素且选中间项：三元素选末位时两种语义结果相同 ⇒ 测不出差异。
  */
 import { describe, expect, it } from 'vitest'
 import { rotateFromPreferred, buddyBalanceTier, rankBuddyAccountsByBalance, rankBuddyAccountsByManualOrder } from '../../src/buddy-balance-rank.js'
@@ -24,7 +38,7 @@ import { rotateFromPreferred, buddyBalanceTier, rankBuddyAccountsByBalance, rank
 const mk = (id, expiring, permanent) => ({ id, expiringBalance: expiring, permanentBalance: permanent })
 const ids = (rows) => rows.map((r) => r.id)
 
-describe('rotateFromPreferred —— 纯环形旋转', () => {
+describe('rotateFromPreferred —— S2 只提升起点自己', () => {
   const five = ['a', 'b', 'c', 'd', 'e'].map((id) => mk(id, 100, 0))
 
   it('不设起点 ⇒ 逐字节不变（唯一回归面）', () => {
@@ -33,28 +47,29 @@ describe('rotateFromPreferred —— 纯环形旋转', () => {
     expect(ids(rotateFromPreferred(five, { rotationStartId: '' }))).toEqual(['a', 'b', 'c', 'd', 'e'])
   })
 
-  it('★ 选中间项 ⇒ 从它起绕一圈（不是"提到最前"）', () => {
-    // ⚠️ 这条是核心：选 c
-    //   旋转   ⇒ [c, d, e, a, b]
-    //   提到最前 ⇒ [c, a, b, d, e]  ← 错的实现会得到这个
+  it('★ 选中间项 ⇒ **只把它摘到最前**，其余保持原序（不是绕圈）', () => {
+    // S2：选 c ⇒ [c, a, b, d, e]
+    // ⚠️ 旧语义会得到 [c, d, e, a, b]（把 a/b 甩到末尾）—— 那正是要修掉的
     expect(ids(rotateFromPreferred(five, { rotationStartId: 'c' })))
-      .toEqual(['c', 'd', 'e', 'a', 'b'])
+      .toEqual(['c', 'a', 'b', 'd', 'e'])
   })
 
-  it('选第 4 个 ⇒ 4 → 5 → 1 → 2 → 3（用户原话的例子）', () => {
+  it('选第 4 个 ⇒ d → a → b → c → e（S2：只提它一个）', () => {
     expect(ids(rotateFromPreferred(five, { rotationStartId: 'd' })))
-      .toEqual(['d', 'e', 'a', 'b', 'c'])
+      .toEqual(['d', 'a', 'b', 'c', 'e'])
+    // ⚠️ 旧语义是 [d, e, a, b, c]
   })
 
   it('选首个 ⇒ 原样（幂等）', () => {
     expect(ids(rotateFromPreferred(five, { rotationStartId: 'a' }))).toEqual(['a', 'b', 'c', 'd', 'e'])
   })
 
-  it('选末个 ⇒ 原样（末位旋转等于不变）', () => {
+  it('选末个 ⇒ 提到最前（其余保持原序）', () => {
     expect(ids(rotateFromPreferred(five, { rotationStartId: 'e' }))).toEqual(['e', 'a', 'b', 'c', 'd'])
+    // ⚠️ 旧语义也是 [e,a,b,c,d]（末位绕圈 == 提到最前）⇒ 本条两种语义同结果
   })
 
-  it('★ 集合不变：只旋转，不增删', () => {
+  it('★ 集合不变：只重排，不增删', () => {
     const out = rotateFromPreferred(five, { rotationStartId: 'c' })
     expect(out).toHaveLength(five.length)
     expect(new Set(ids(out))).toEqual(new Set(ids(five)))
@@ -69,6 +84,66 @@ describe('rotateFromPreferred —— 纯环形旋转', () => {
     const out = rotateFromPreferred(input, { rotationStartId: 'c' })
     expect(ids(input)).toEqual(['a', 'b', 'c', 'd', 'e'])
     expect(out).not.toBe(input)
+  })
+})
+
+/**
+ * ★★ **S2 的核心价值：起点不能破坏「临期优先」**（用户 2026-11-18 定稿）。
+ *
+ * 旧语义（S3 环形旋转）的致命缺陷：起点若不在临期档，会把档位序里排在它
+ * **前面**的临期账号甩到**末尾** ⇒ 那些临期积分白等到过期。
+ *
+ * 实测（本 describe 的用例钉住的形态）：
+ * ```
+ * 池：A(位1·永久) B(位2·短期) C(位3·临期) D(位4·短期) E(位5·永久)
+ * 档位序：  C(临期) B(短期) D(短期) A(永久) E(永久)
+ * 起点=B： S3 ⇒ B D A E C   ← C 的临期被甩到最后
+ *          S2 ⇒ B C D A E   ← C 仍在第 2 位
+ * ```
+ */
+describe('★★ S2：起点不得破坏「临期优先」', () => {
+  /** 造一个带三档的账号（用 expiring/imminent/permanent 三个字段直接表达分桶结果）。 */
+  const mkTier = (id, { imminent = 0, expiring = 0, permanent = 0 }) => ({
+    id, imminentBalance: imminent, expiringBalance: expiring, permanentBalance: permanent,
+  })
+  const POOL = [
+    mkTier('A', { permanent: 1000 }),
+    mkTier('B', { expiring: 500 }),
+    mkTier('C', { imminent: 300 }),
+    mkTier('D', { expiring: 800 }),
+    mkTier('E', { permanent: 2000 }),
+  ]
+
+  it('★ 起点在「短期」档 ⇒ 临期账号仍排在第 2 位（不被甩到末尾）', () => {
+    const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
+    expect(ids(ranked), '档位序：C(临期) 在最前').toEqual(['C', 'B', 'D', 'A', 'E'])
+    const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'B' })
+    expect(ids(out), 'B 提到最前，C(临期) 保持第 2').toEqual(['B', 'C', 'D', 'A', 'E'])
+    // ⚠️ 反向对照：旧语义会得到 ['B','D','A','E','C'] —— C 的临期被甩到最后
+    expect(ids(out)[1], '临期账号必须在第 2 位').toBe('C')
+    expect(ids(out)[ids(out).length - 1], '临期账号绝不能在末位').not.toBe('C')
+  })
+
+  it('★ 起点在「永久」档 ⇒ 临期账号仍排在第 2 位', () => {
+    const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
+    const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'A' })
+    expect(ids(out), 'A 提到最前，C(临期) 保持第 2').toEqual(['A', 'C', 'B', 'D', 'E'])
+  })
+
+  it('★ 不变量：除起点外，其余元素相对顺序**逐字节不变**', () => {
+    const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
+    for (const startId of ['B', 'D', 'A', 'E', 'C']) {
+      const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: startId })
+      const expectedOthers = ranked.filter((a) => a.id !== startId).map((a) => a.id)
+      expect(out[0].id, '起点必须在首位').toBe(startId)
+      expect(out.slice(1).map((a) => a.id), `起点=${startId} 时其余顺序`).toEqual(expectedOthers)
+    }
+  })
+
+  it('起点是临期档时 ⇒ 与不设起点的结果相同（它本就是首选）', () => {
+    const ranked = rankBuddyAccountsByBalance(POOL, { allowPermanent: true })
+    const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'C' })
+    expect(ids(out), 'C 本就在首位 ⇒ 提升后完全相同').toEqual(ids(ranked))
   })
 })
 
@@ -101,8 +176,8 @@ describe('rotateFromPreferred —— 起点跳过不可用（Q2：循环到下�
     // 未锁定：临期在前 ⇒ [a, d, b, c]
     expect(ids(ranked)).toEqual(['a', 'd', 'b', 'c'])
     const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'b' })
-    // b 可用 ⇒ 直接从 b 起
-    expect(ids(out)).toEqual(['b', 'c', 'a', 'd'])
+    // b 可用 ⇒ S2 只把它摘到最前 ⇒ [b, a, d, c]
+    expect(ids(out), 'S2：b 提到最前，其余保持 [a,d,c]').toEqual(['b', 'a', 'd', 'c'])
   })
 
   it('全不可用 ⇒ 原样（交给上层报错，不在这里抛）', () => {
@@ -119,7 +194,8 @@ describe('两种策略都生效（strictManualOrder 不再是例外）', () => {
   it('默认模式（余额分档）下生效', () => {
     const ranked = rankBuddyAccountsByBalance(accounts, { allowPermanent: true })
     const out = rotateFromPreferred(ranked, { allowPermanent: true, rotationStartId: 'd' })
-    expect(ids(out)).toEqual(['d', 'e', 'a', 'b', 'c'])
+    // S2：d 提到最前，其余 [a,b,c,e] 保持原序
+    expect(ids(out)).toEqual(['d', 'a', 'b', 'c', 'e'])
   })
 
   it('★ 严格手动顺序下同样生效', () => {
@@ -129,7 +205,7 @@ describe('两种策略都生效（strictManualOrder 不再是例外）', () => {
       strictManualOrder: true,
       rotationStartId: 'd',
     })
-    expect(ids(out)).toEqual(['d', 'e', 'a', 'b', 'c'])
+    expect(ids(out), 'S2：d 提到最前，其余保持原序').toEqual(['d', 'a', 'b', 'c', 'e'])
   })
 })
 
@@ -146,16 +222,19 @@ describe('★★ 起点被封禁 / 被限流（不在候选集里）⇒ 循环�
   it('★ 选被封禁的 b ⇒ 从 c 开始（而不是回落默认的 a）', () => {
     const out = rotateFromPreferred(candidates, { rotationStartId: 'b', enabledAccountIds: pool })
     // 错的实现（找不到就原样）会得到 ['a', 'c', 'e'] —— 正是用户想避开的。
-    expect(ids(out)).toEqual(['c', 'e', 'a'])
+    // S2：锚点 = c ⇒ 只把 c 提到最前，其余 [a, e] 保持原序
+    expect(ids(out), 'S2：c 提到最前').toEqual(['c', 'a', 'e'])
   })
 
   it('选被封禁的 d ⇒ 从 e 开始', () => {
     const out = rotateFromPreferred(candidates, { rotationStartId: 'd', enabledAccountIds: pool })
-    expect(ids(out)).toEqual(['e', 'a', 'c'])
+    // S2：锚点 = e ⇒ 只把 e 提到最前，其余 [a, c] 保持原序
+    expect(ids(out), 'S2：e 提到最前').toEqual(['e', 'a', 'c'])
   })
 
   it('起点在候选里 ⇒ 仍按候选直接命中（本修法不改变既有语义）', () => {
     const out = rotateFromPreferred(candidates, { rotationStartId: 'e', enabledAccountIds: pool })
+    // e 本就在候选末位 ⇒ S2 提到最前
     expect(ids(out)).toEqual(['e', 'a', 'c'])
   })
 
