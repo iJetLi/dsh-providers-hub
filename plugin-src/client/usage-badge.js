@@ -52,7 +52,10 @@ import { formatUnits, formatQuotaLine, formatClaimGains, unitLabel, QUOTA_UNIT }
 import {
   expiryDateHints,
   expirySplitParts,
+  formatAmountShort,
   formatCompactLeft,
+  formatLeftCn,
+  formatMonthDay,
   formatExpirySplitLine,
   formatPoolSplitLine,
   splitCreditsByExpiry,
@@ -2141,7 +2144,19 @@ function UsageBadgeActive(props) {
               className: 'dim-jh-badgeValue',
               'data-tone': row.balance === null ? 'warn' : 'ok',
               title: row.error || undefined,
-            }, row.balance === null ? (row.error || '查询失败') : balanceLine(row.balance)),
+              /**
+               * ⚠️ 余额加「总」前缀（用户 2026-11-18）：「把总积分写成总xx，类似长和短的
+               *    表达，统一一点」。⇒ 与后面「长1600 · 短1400 · 临4464.5」同一套表达。
+               * ⚠️ 查询失败时**不加前缀**（`总查询失败` 说不通），原样显示原因。
+               */
+            }, row.balance === null
+              ? (row.error || '查询失败')
+              // ⚠️ totalCreditsText 返回 null = 该单位没有「总额」语义（配额窗口）
+              //    ⇒ 退化成 balanceLine（不带「总」前缀，否则读成「总5小时 6%」）
+              : (() => {
+                const total = totalCreditsText(row.balance);
+                return total === null ? balanceLine(row.balance) : `总${total}`;
+              })()),
             // ⚠️ 分档说明现在是**行内兄弟**（不再是下一行的块）⇒ 传 `inline` 让
             //    CSS 用 `display: contents` 把它摊平进父级 flex 流。
             //    不这样做的话它会自成一块，又把行高撑回两行（等于没合并）。
@@ -2231,69 +2246,108 @@ function UsageBadgeActive(props) {
   function renderSplitNote(parts) {
     if (!Array.isArray(parts) || parts.length === 0) return null;
     const children = [];
+    /**
+     * 段前缀缩写表（**只此一处**）。
+     * ⚠️ permanent / expired / unknownExpiry 不在表里：它们本来就短
+     *    （「永久 100」「已过期 7」），缩写反而难懂。
+     */
+    const SHORT_PREFIX = { longTerm: '长', shortTerm: '短', expiring: '临' };
+
     parts.forEach((part, index) => {
-      if (index > 0) children.push(React.createElement('span', { key: `sep-${part.key}`, className: 'dim-jh-badgeNoteSep' }, ' · '));
+      if (index > 0) {
+        children.push(React.createElement('span', {
+          key: `sep-${part.key}`,
+          className: 'dim-jh-badgeNoteSep',
+        }, '·'));
+      }
 
       const isImminent = part.key === 'expiring';
-      const compactLeft = isImminent ? formatCompactLeft(part.earliestIn) : '';
-      const hasBracket = isImminent && compactLeft.length > 0
-        && Number.isFinite(part.earliestAmount) && part.earliestAmount > 0;
-      /**
-       * 段文字**缩写**（弹窗专用，与卡片分叉 —— 见函数头注释的表）。
-       *
-       * ⚠️ 不能用 `part.text`（那是「长期 1600」的全称），本函数要给的是
-       *    `长1600`。前缀映射表放在这里、**只此一处**（别在 CSS/renderSplitNote
-       *    外再写一份，否则两处必然漂移）。
-       * ⚠️ `permanent` / `expired` / `unknownExpiry` 保持原样：它们本来就短
-       *    （「永久 100」「已过期 7」），缩写反而难懂。
-       */
-      const SHORT_PREFIX = { longTerm: '长', shortTerm: '短', expiring: '临' };
       const prefix = SHORT_PREFIX[part.key];
-      const text = prefix === undefined
-        ? part.text
-        // `part.text` 形如「长期 1600」⇒ 取出金额部分再拼缩写前缀
-        : `${prefix}${part.text.replace(/^[^\s]+\s*/, '')}`;
-
-      const imminentTip = isImminent
-        ? (hasBracket
-          ? `临期 ${part.earliestAmount} 积分最早 ${compactLeft} 后到期`
-          : '临期积分：再不用就作废，最优先消耗')
-        : undefined;
       /**
-       * 长期/短期：**日期进 tooltip**（不进正文）。`countdown` 就是那句
-       * 「最早 12月3日到期」，直接复用，不再加工。
+       * ⚠️ 金额格式（用户 2026-11-18 定：**方案 B**）：
+       *    - 整数 **不补** `.00`（1600 就是 1600）
+       *    - 一位小数 **不补** 尾 0（7464.5 就是 7464.5）
+       *    - 最多两位（三位以上截断）
+       *    - 非数字 ⇒ 空串（调用方据此不渲染该段金额）
+       *
+       * ⚠️ 不能用 `part.text`（它已带「长期 1600」的原始金额串，可能是
+       *    7464.4999999 这种浮点尾数）⇒ 一律从**数值**重新格式化。
        */
-      const datedTip = !isImminent && part.countdown !== undefined
-        ? `${text} 积分 · ${part.countdown}`
-        : undefined;
+      const amountText = formatAmountShort(part.amount);
+      const text = prefix === undefined || amountText === ''
+        ? part.text
+        : `${prefix}${amountText}`;
 
-      if (hasBracket) {
-        /**
-         * 临期 + 括号**包进同一个 span**：`title` 天然是一个区域，
-         * 悬停任一处都是同一句话（用户明确要求「跟临期的一起是一个 tooltip」）。
-         */
-        children.push(React.createElement('span', {
-          key: part.key,
-          className: 'dim-jh-badgeNotePart',
-          'data-tone': part.tone,
-          title: imminentTip,
-        }, `${text}（${part.earliestAmount} ${compactLeft}）`));
-        return;
+      /**
+       * ★★ 三行 tooltip（用户 2026-11-18 明确方案）。
+       *
+       * | 段 | tooltip |
+       * |---|---|
+       * | 长期 | `长期 1600 积分` / `最早 12月3日 到期（还有 15 天）` / `不着急，最后才用` |
+       * | 短期 | `短期 1400 积分` / `最早 11月28日 到期（还有 10 天）` / `临期用完后优先消耗` |
+       * | 临期 | `临期 4464.5 积分` / `其中 3864.5 积分最早 8 小时 10 分钟 后到期` / `最优先消耗，再不用就作废` |
+       *
+       * ⚠️⚠️ 临期第一行必须是**临期总额**（part.amount），不是最早批次；
+       *    第二行才是「其中 <最早批次>」。旧实现第一行误用了最早批次
+       *    （用户报障「tooltip 没按我定的方案」的原因之一）。
+       * ⚠️ 时间在 tooltip 里用**完整中文**（formatLeftCn），正文括号才用紧凑
+       *    写法（formatCompactLeft）—— 用户明确「tooltip 用 8 小时 10 分钟」。
+       */
+      let tip;
+      if (isImminent) {
+        const total = formatAmountShort(part.amount);
+        const earliest = formatAmountShort(part.earliestAmount);
+        const leftCn = formatLeftCn(part.earliestIn);
+        const lines = [`临期 ${total} 积分`];
+        if (earliest !== '' && leftCn !== '') {
+          lines.push(`其中 ${earliest} 积分最早 ${leftCn}后到期`);
+        }
+        lines.push('最优先消耗，再不用就作废');
+        tip = lines.join('\n');
+      } else if (prefix !== undefined) {
+        // 长期 / 短期：三行（含「还有 N 天」与用途说明）
+        const total = formatAmountShort(part.amount);
+        const fullName = part.key === 'longTerm' ? '长期' : '短期';
+        const lines = [`${fullName} ${total} 积分`];
+        // ⚠️ 必须用 formatMonthDay（它自带「日」）—— 手拼 getMonth/getDate 会漏成「12月3」
+        const dateText = part.earliestAt !== undefined ? formatMonthDay(part.earliestAt, Date.now()) : null;
+        const daysLeft = Number.isFinite(part.earliestIn)
+          ? Math.max(1, Math.ceil(part.earliestIn / 86400000))
+          : null;
+        if (dateText !== null && daysLeft !== null) {
+          lines.push(`最早 ${dateText} 到期（还有 ${daysLeft} 天）`);
+        } else if (part.countdown !== undefined) {
+          lines.push(part.countdown);
+        }
+        lines.push(part.key === 'longTerm' ? '不着急，最后才用' : '临期用完后优先消耗');
+        tip = lines.join('\n');
       }
+
+      /**
+       * 临期段带括号（用户 2026-11-18 明确「不要去掉括号，要保留」）:
+       *   正文形态 `临4464.5（3864.5 8h10m）`
+       *   ⚠️ 括号内金额同样走 formatAmountShort（方案 B），
+       *      时间走 formatCompactLeft（正文用紧凑写法）。
+       *   ⚠️ 临期段与括号**包在同一个 span**：title 天然是一个区域，
+       *      悬停任一处都是同一份提示（用户要求「跟临期一起是一个 tooltip」）。
+       */
+      const compactLeft = isImminent ? formatCompactLeft(part.earliestIn) : '';
+      const earliestText = isImminent ? formatAmountShort(part.earliestAmount) : '';
+      const hasBracket = isImminent && compactLeft !== '' && earliestText !== '';
 
       children.push(React.createElement('span', {
         key: part.key,
         className: 'dim-jh-badgeNotePart',
         'data-tone': part.tone,
-        ...(imminentTip === undefined ? {} : { title: imminentTip }),
-        ...(datedTip === undefined ? {} : { title: datedTip }),
-      }, text));
+        ...(tip === undefined ? {} : { title: tip }),
+      }, hasBracket ? `${text}（${earliestText} ${compactLeft}）` : text));
     });
+
     return React.createElement('div', {
       key: 'note',
       className: 'dim-jh-badgeRowNote dim-jh-badgeRowNoteInline',
       // 整行兜底：窄屏截断后仍能悬停读到全文（各段自己的 tooltip 优先）。
-      title: parts.map((p) => p.text).join(' · '),
+      title: parts.map((p2) => p2.text).join(' · '),
     }, children);
   }
 
@@ -2431,6 +2485,37 @@ function UsageBadgeActive(props) {
 }
 
 /** 一个账号的余额行（数值 + 单位）。 */
+/**
+ * 账号行**总额**的文本（用户 2026-11-18：「把总积分写成总xx……积分只表达到小数点两位」）。
+ *
+ * ## 与 balanceLine 的分工
+ *
+ * | 函数 | 形态 | 用在哪 |
+ * |---|---|---|
+ * | balanceLine | `39829.81积分`（带单位） | 折叠态胶囊 / 其它出口 |
+ * | totalCreditsText（本函数） | `39829.81`（**不带单位**，调用方加「总」前缀） | 弹窗账号行 |
+ *
+ * ⚠️ 用户明确「不需要带积分单位」⇒ 本函数**只回数字**。
+ *
+ * ## 三档特殊情形
+ *
+ * 1. **配额窗口（Gemini）**：没有「总额」这个概念（是并行百分比）⇒ 原样返回
+ *    formatQuotaLine 的结果，**不加「总」**（调用方用 `总` 前缀会读成
+ *    「总5小时 6%」——那是错的）。故这里返回带标记的对象形态不可行，
+ *    改为**返回 null**，调用方据此不加前缀、直接显示 balanceLine。
+ * 2. **token 单位**：走 formatTokens（94.54M），本身已是短形态 ⇒ 原样用。
+ * 3. **其它（积分）**：走 formatAmountShort（方案 B：不补尾 0）⇒ 正是用户要的。
+ */
+function totalCreditsText(balance) {
+  const packages = balance.packages || [];
+  const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
+  // 配额窗口：没有「总额」语义 ⇒ 返回 null 让调用方退化成 balanceLine
+  if (unit === QUOTA_UNIT) return null;
+  // token 走既有的紧凑格式（94.54M），积分走方案 B
+  if (unit === 'token') return formatUnits(balance.total, unit) ?? '0';
+  return formatAmountShort(balance.total) === '' ? '0' : formatAmountShort(balance.total);
+}
+
 function balanceLine(balance) {
   const packages = balance.packages || [];
   const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;

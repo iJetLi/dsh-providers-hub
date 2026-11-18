@@ -651,22 +651,30 @@ export function expirySplitParts(split, format, now, hints) {
   const expiringAmount = split.expiring > 0 ? split.expiring : 0;
   const expiring = expiringAmount > 0 ? format(expiringAmount) : null;
   const expiredText = expiredAmount > 0 ? format(expiredAmount) : null;
-  if (permanent !== null) parts.push({ key: 'permanent', text: `永久 ${permanent}`, tone: 'ok' });
+  if (permanent !== null) parts.push({ key: 'permanent', amount: knownPermanent, text: `永久 ${permanent}`, tone: 'ok' });
   // ⚠️ 「到期未知」用 `warn` 不用 `ok`：这不比「永久」安全 —— 用户看见绿字
   //    就不会去抢救，而这批额度**确实会作废**（issue IKTLMX）。也不上 `error`：
   //    `error` 留给「临期」那档（有确切倒计时，紧迫性更高）。
-  if (unknownExpiryText !== null) parts.push({ key: 'unknownExpiry', text: `到期未知 ${unknownExpiryText}`, tone: 'warn' });
+  if (unknownExpiryText !== null) parts.push({ key: 'unknownExpiry', amount: unknownAmount, text: `到期未知 ${unknownExpiryText}`, tone: 'warn' });
   if (longTerm !== null) {
     const earliestLong = hints && typeof hints.earliestLongTermAt === 'number' ? hints.earliestLongTermAt : null;
     parts.push({
       key: 'longTerm',
+      /** 原始数值（弹窗要按「方案 B」重新格式化，不能复用 text 里的字符串）。 */
+      amount: split.longTerm,
       text: `长期 ${longTerm}`,
-      // ★ 2026-11-17 改：长期从 `warn`（黄）改 `okSoft`（浅绿）。
+      // ★ 2026-11-17 改：长期从 warn（黄）改 okSoft（浅绿）。
       //   理由：三档并存时「长期」与「短期」都用黄 ⇒ 用户分不出哪个更急。
       //   语义上长期就是「不用管」，与深绿的「永久」同族但更浅 ——
       //   两者必须能分辨（代码里 2026-10-12 的既有要求：永久与长期不得同色）。
       tone: 'okSoft',
       ...(earliestLong !== null ? { countdown: `最早 ${formatMonthDay(earliestLong, now)}到期` } : {}),
+      /**
+       * ⚠️ 结构化字段（2026-11-18）：弹窗 tooltip 要写「最早 12月3日 到期（还有 15 天）」。
+       *    必须在**生产者**这里给出「还有多久」—— 消费方自己算会与分桶时刻漂移
+       *    （两边的 now 可能差几十秒，临界日会显示成两种说法）。
+       */
+      ...(earliestLong !== null ? { earliestAt: earliestLong, earliestIn: earliestLong - now } : {}),
     });
   }
   /**
@@ -679,9 +687,12 @@ export function expirySplitParts(split, format, now, hints) {
       : null;
     parts.push({
       key: 'shortTerm',
+      amount: shortTermAmount,
       text: `短期 ${shortTermText}`,
       tone: 'warn',
       ...(earliestShort !== null ? { countdown: `最早 ${formatMonthDay(earliestShort, now)}到期` } : {}),
+      // ⚠️ 同 longTerm：给消费方「还有多久」的结构化字段
+      ...(earliestShort !== null ? { earliestAt: earliestShort, earliestIn: earliestShort - now } : {}),
     });
   }
   /**
@@ -777,6 +788,12 @@ export function expirySplitParts(split, format, now, hints) {
         && tierEarliestAmount > 0;
       parts.push({
         key: 'expiring',
+        /**
+         * ⚠️ 临期**总额**（= imminent，旧后端时 = expiring 母量）。
+         *    tooltip 第一行必须用它；第二行才写「其中 <最早批次>」。
+         *    旧实现第一行误用了 earliestAmount（用户报障的根因之一）。
+         */
+        amount: tierAmount,
         text: `临期 ${tierText}`,
         tone: 'error',
         ...(countdownText.length > 0 ? { countdown: countdownText } : {}),
@@ -795,7 +812,7 @@ export function expirySplitParts(split, format, now, hints) {
    * tone 用 `warn` 而不是 `error`：它已经作废，不需要抢「马上要作废」的红色注意力。
    */
   if (expiredText !== null) {
-    parts.push({ key: 'expired', text: `已过期 ${expiredText}`, tone: 'warn' });
+    parts.push({ key: 'expired', amount: expiredAmount, text: `已过期 ${expiredText}`, tone: 'warn' });
   }
   return parts;
 }
@@ -857,6 +874,74 @@ export function formatCompactLeft(ms) {
   if (days > 0) return hours > 0 ? `${days}d${hours}h` : `${days}d`;
   if (hours > 0) return mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
   return `${mins}m`;
+}
+
+/**
+ * 剩余时长的**完整中文**写法（tooltip 用）。
+ *
+ * ## 与另两个函数的分工
+ *
+ * | 函数 | 形态 | 用在哪 |
+ * |---|---|---|
+ * | `expiryCountdown` | `2 小时 16 分钟` / `3 天 4 小时` | 设置页卡片倒计时 |
+ * | `formatCompactLeft` | `2h16m` | 弹窗正文的括号（宽度紧张） |
+ * | `formatLeftCn`（本函数） | `2 小时 16 分钟` | **弹窗 tooltip**（无宽度限制） |
+ *
+ * ⚠️ 为什么 tooltip 不复用 `formatCompactLeft`（用户 2026-11-18 明确）：
+ *    tooltip 是**展开阅读**的场景，没有宽度压力，缩写 `8h10m` 反而难读，
+ *    用户的原话方案写的就是「最早 2 小时 16 分钟后到期」。
+ * ⚠️ 与 `expiryCountdown` 的区别：后者是「距今多久写成熟」的展示函数，
+ *    可能返回空串（已过期）；本函数专门给「还剩多久」用，入参是**毫秒差**。
+ *
+ * | 剩余 | 输出 |
+ * |---|---|
+ * | ≥ 1 天 | `3 天 4 小时` |
+ * | 1~24 小时 | `2 小时 16 分钟` |
+ * | < 1 小时 | `26 分钟` |
+ * | 非法 / ≤ 0 | `''`（调用方不渲染） |
+ */
+export function formatLeftCn(ms) {
+  const left = Number(ms);
+  if (!Number.isFinite(left) || left <= 0) return '';
+  const minutes = Math.ceil(left / 60_000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  if (days > 0) return hours > 0 ? `${days} 天 ${hours} 小时` : `${days} 天`;
+  if (hours > 0) return mins > 0 ? `${hours} 小时 ${mins} 分钟` : `${hours} 小时`;
+  return `${mins} 分钟`;
+}
+
+/**
+ * 积分金额的**弹窗专用**格式化（用户 2026-11-18 定的方案 B）。
+ *
+ * ## 规则
+ *
+ * | 输入 | 输出 | 说明 |
+ * |---|---|---|
+ * | `1600`（整数） | `1600` | **不补 `.00`** |
+ * | `7464.5`（一位小数） | `7464.5` | **不补 `0`** |
+ * | `7464.15`（两位） | `7464.15` | 原样 |
+ * | `7464.156`（三位以上） | `7464.16` | **截到两位** |
+ * | `undefined` / `NaN` | `''` | 调用方据此不渲染 |
+ *
+ * ⚠️ 用户原话：「整数和一位小数位都不需要补 0」——
+ *    即「最多两位，但**不在尾部补 0**」。
+ *    曾一度按「严格 toFixed(2)」实现（`长1600.00`），被用户否掉：
+ *    整数补两个 0 反而让一行变长、且与后端给的原始值形态不符。
+ *
+ * ⚠️ 与 `credits-format.js` 的 `formatCredits` **刻意分开**：
+ *    那个是**全局口径**（整数不补、小数固定两位），本函数是
+ *    **弹窗单行专用**（小数只在必要时保留到两位、不补尾 0）。
+ *    改那个会影响账号卡片/胶囊等所有出口，不是本次改动的范围。
+ */
+export function formatAmountShort(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '';
+  // 先用 toFixed(2) 截断到两位（同时解决浮点尾数如 7464.4999999）
+  const rounded = Number(n.toFixed(2));
+  // Number 的默认字符串化天生「不补尾 0」⇒ 正是用户要的形态
+  return String(rounded);
 }
 
 /**

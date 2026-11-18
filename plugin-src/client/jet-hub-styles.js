@@ -1790,17 +1790,28 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    border-box（实测 offsetWidth 与 max-width 相等）。写上它只为在元素类型被改
    （span/div 默认是 content-box）时语义不悄悄漂移 —— 那种情况下 max-width 会从
    「占位宽度」变成「内容宽度」，胶囊会突然变宽 19px 而这行代码看着毫无变化。 */
-/* ⚠️ max-width **保持 216 → 240px**，不跟着新增补语一起放宽。
+/* ⚠️⚠️ **胶囊不限宽**（用户 2026-11-18 明确：「胶囊宽度不要限制长度，让它自适应，
+ * 不然会有截断」）。
  *
- * 2026-11-18 曾在胶囊上加「默认」+「· 共 7 帐号」两段补语，一度想把上限放到 310px
- * ⇒ **不可行**：usage-badge-client.spec.ts 有实测约束（130 组渠道名×读数最宽
- * 需求 209.34px；上限放到「无上限」时极窄 composer 220px 下胶囊**溢出 8.3px**，
- * 正是 2026-10-02「模型选择器图标被挤没」的形态）。上界取 240 是量出来的。
+ * ## 与旧约束的冲突及取舍
  *
- * ⇒ 补语改为**可牺牲**：.dim-jh-badgeCount { flex: 0 1 auto; min-width: 0;
- * overflow: hidden; text-overflow: ellipsis } —— 空间不够时先被省略号吃掉，
- * 而不是把整个胶囊撑出容器。用户在弹窗里仍能看到完整账号数（脚注/明细）。 */
-.dim-jh-badgeBtn { box-sizing: border-box; display: flex; align-items: center; gap: 5px; max-width: 240px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 1.5; cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; transition: background .15s ease, color .15s ease, border-color .15s ease; }
+ * 2026-10-02 曾因「徽标把模型选择器挤到只剩几十 px、图标被挤没」而加了
+ * max-width: 240px 上限（实测 130 组渠道名×读数最宽 209.34px）。
+ * 用户现在要求**优先保证胶囊自身内容完整**（否则「位次 2 · 共 7 帐号」被截断）。
+ *
+ * ## 怎么同时不搞坏宿主布局
+ *
+ * 1. 去掉 max-width（自适应）—— 满足用户要求
+ * 2. 胶囊外层 .dim-jh-badge 仍是 flex: 0 1 auto + min-width: 0
+ *    ⇒ 它**可以收缩**，不会把 composer 撑爆
+ * 3. 内部各段保留自己的省略规则（渠道名先让位、读数最后）
+ *    ⇒ 极窄容器下退化成「名字… • 读数」，不溢出
+ * 4. 窄屏（< 720px）本来只显示状态点，不受影响
+ *
+ * ⚠️ 真机验证必须确认：400px 宽 composer 下模型选择器仍可见可点。
+ * ⚠️ 若将来又出现「模型选择器被挤没」，应改**断点**（窄屏更早降级为只显点），
+ *    而不是回到限制 max-width —— 那样会重新引入用户明确反对的截断。 */
+.dim-jh-badgeBtn { box-sizing: border-box; display: flex; align-items: center; gap: 5px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 1.5; cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; transition: background .15s ease, color .15s ease, border-color .15s ease; }
 .dim-jh-badgeBtn:hover { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); }
 .dim-jh-badgeBtn[aria-expanded="true"] { background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #1677ff) 45%, var(--dsw-alias-border-l2)); }
 /* 聚合「待首次请求」占位胶囊（用户报障 2026-10-08：「也没胶囊了？」）。
@@ -1809,7 +1820,7 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    给一个点了没反应的按钮比没有按钮更糟。
    ⚠️ 宽度口径与 .dim-jh-badgeBtn 同步（gap 5px / padding 2px 9px / 字号 11px）：
    两者会在同一位置交替出现（首次请求成功后换成真胶囊），尺寸不一致会看到跳动。 */
-.dim-jh-badgePending { display: inline-flex; align-items: center; gap: 5px; max-width: 240px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 1.5; white-space: nowrap; }
+.dim-jh-badgePending { display: inline-flex; align-items: center; gap: 5px; min-width: 0; padding: 2px 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 1.5; white-space: nowrap; }
 .dim-jh-badgePending > span:last-child { overflow: hidden; text-overflow: ellipsis; }
 /* 三段式文本容器：渠道名 + 分隔符 + 读数。
    ⚠️ 必须是 flex 容器，两个文本子项才能各自独立收缩（这正是「数字不被截」的前提）。 */
@@ -1892,13 +1903,13 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  * ⚠️ 上限仍用 min() 收在 86vw 内：弹窗是 absolute，窗口本身可能很窄
  * （窄屏还会被下面的媒体查询降到 300px）。
  */
-.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 400px; max-width: min(400px, 86vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
+.dim-jh-badgePop { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 40; width: 480px; max-width: min(480px, 92vw); max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; padding: 9px 10px 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 11px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .14); text-align: left; white-space: normal; }
 /* 窄屏时徽标只留状态点，弹窗也随之收窄（否则它会盖住模型选择器）。
  * 宽度写 min() 而非媒体查询覆盖：弹窗是 absolute，媒体查询命中时按钮虽已
  * 收窄，但弹窗仍按 400px 渲染会显得与触发点不匹配。
  * ⚠️ 窄屏降到 300px（原 220px）：四段分档在 220px 里必然换行 ⇒ 每个账号多一行
  *    ⇒ 高度暴涨。宁可窄屏也保留 300px 的单行能力，超出部分由 86vw/76vw 兜底。 */
-@media (max-width: 720px) { .dim-jh-badgePop { width: 300px; max-width: min(300px, 76vw); } }
+@media (max-width: 720px) { .dim-jh-badgePop { width: 360px; max-width: min(360px, 88vw); } }
 .dim-jh-badgeHead { display: flex; align-items: center; gap: 5px; padding-bottom: 7px; }
 .dim-jh-badgeTitle { flex: none; max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dim-jh-badgeAt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }

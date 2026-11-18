@@ -101,44 +101,43 @@ function narrowLayoutBlock(styles: string): string {
 
 describe('用量徽标：槽位接线', () => {
   const index = read('plugin-src/client/index.js')
+  // ⚠️ 胶囊宽度断言需要读样式表
+  const styles = read('plugin-src/client/jet-hub-styles.js')
 
   it('注入 modelDirectories（当前渠道的唯一来源）', () => {
     expect(index).toContain("export const inject = ['slots', 'connection', 'modelDirectories'")
   })
 
-  it('⚠️⚠️ 徽标宽度必须收敛（否则挤压右侧模型选择器）', () => {
-    // 真机报障 2026-10-02：徽标 flex:none + max-width:280px 把模型选择器
-    // 压到只剩几十 px，**图标被挤没**（用户要放大到很大才看得见）。
-    // 两级收敛（用户定 1+2）：基础宽度有上限，窄屏（<720px）只剩状态点。
-    const styles = read('plugin-src/client/jet-hub-styles.js')
-    const btn = /\.dim-jh-badgeBtn \{[^}]*max-width:\s*(\d+)px/.exec(styles)
-    expect(btn, '应能解析出徽标按钮的 max-width').not.toBeNull()
-    // ⚠️ 两个维度都要满足，缺一不可：
-    // ① **内容自适应**：.dim-jh-badgeBtn 不设 width，由文字撑开
-    //    （短内容就短：Cline • 5积分 仅 93px）；
-    // ② **上限兜底**：max-width 必须 ≥ 实测最宽需求，且 ≤ 会挤坏模型选择器的值。
-    //
-    // 实测（Edge，宿主 UI 字体栈，dsf 1 与 1.5 都量过，差异 <0.4px）：
-    // 13 个渠道展示名 × 10 种现实读数（含 123456.78积分 / 9499.84积分 /
-    // 94.54MToken / 0积分）共 130 组，最宽需求 **209.34px**
-    //（WorkBuddy (国际版) • 123456.78积分）。
-    //
-    // ⚠️ 下界取 210（刚够最宽需求），上界取 240 —— 实测把上限放到「无上限」时，
-    // 极窄 composer（220px）下胶囊会**溢出容器 8.3px**，那正是 2026-10-02
-    //「模型选择器图标被挤没」的形态。故既有上限、又不能太小。
-    expect(Number(btn![1]), '徽标上限应能装下最长的「渠道名 • 读数」（实测需求 209.34px）')
-      .toBeGreaterThanOrEqual(210)
-    expect(Number(btn![1]), '徽标上限不得超过 240px（否则窄容器下会溢出、挤压模型选择器）')
-      .toBeLessThanOrEqual(240)
-    // ⚠️ 反向断言：不得写成固定 width（那会让短内容也占满，
-    // 既浪费横向空间，又让「内容自适应」失效）。
-    // 只取该规则体本身来判，避免正则跨规则误伤。
+  it('⚠️⚠️ 胶囊**不限宽**（用户 2026-11-18：不要限制长度，让它自适应）', () => {
+    /**
+     * ⚠️⚠️ **判据已反转**（2026-11-18）。
+     *
+     * 旧约束：max-width 210~240px（2026-10-02 因「徽标把模型选择器挤没」而加）。
+     * 新要求：用户明确「胶囊宽度不要限制长度，让它自适应，不然会有截断」
+     *   —— 胶囊上新增了「位次 2 · 共 7 帐号」两段补语，240px 会把它们截掉。
+     *
+     * ## 怎么同时不搞坏宿主布局（本用例守的第二条腿）
+     *
+     * 去掉 max-width 后，必须靠**外层可收缩**兜底：
+     * .dim-jh-badge 保持 flex: 0 1 auto + min-width: 0
+     * ⇒ 空间不足时外壳收缩、内部各段按既有规则让位，不会把 composer 撑爆。
+     */
     const btnRule = /\.dim-jh-badgeBtn \{([^}]*)\}/.exec(styles)
     expect(btnRule, '应能取到 .dim-jh-badgeBtn 的规则体').not.toBeNull()
-    expect(btnRule![1], '胶囊不得设固定宽度（会破坏内容自适应）')
+    // ① 不得再有 max-width 上限
+    expect(btnRule[1], '胶囊不得再限制 max-width（会截断「位次/共 N 帐号」）')
+      .not.toMatch(/max-width:/)
+    // ② 不得写死 width（否则短内容也占满）
+    expect(btnRule[1], '胶囊不得设固定宽度（会破坏内容自适应）')
       .not.toMatch(/(^|[;\s])width:/)
-    expect(styles, '窄屏应收敛为只剩状态点').toMatch(/@media \(max-width: 720px\)/)
-    expect(styles, '需 min-width:0 才能真正收缩/省略').toMatch(/min-width: 0/)
+    // ③ 必须有 min-width: 0（外层收缩的前提；缺了会让内容撑破容器）
+    expect(btnRule[1], '必须有 min-width: 0 —— 否则内容撑破 composer')
+      .toMatch(/min-width:\s*0/)
+    // ④ 外层容器仍可收缩（第二条腿）
+    const wrapRule = /\.dim-jh-badge \{([^}]*)\}/.exec(styles)
+    expect(wrapRule, '应能取到 .dim-jh-badge 的规则体').not.toBeNull()
+    expect(wrapRule[1], '外层必须 flex: 0 1 auto（可收缩）').toMatch(/flex:\s*0 1 auto/)
+    expect(wrapRule[1], '外层必须 min-width: 0').toMatch(/min-width:\s*0/)
   })
 
   it('⚠️⚠️ 折叠态必须渲染成**多个** span（否则数字仍会被截掉）', () => {
@@ -732,7 +731,7 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
      * ⚠️ 本用例锁的是「加宽这件事真的发生了」，不是锁具体数字 ——
      *    但数字必须写死：改成 280 会回到要换行的形态，那是功能回归。
      */
-    expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*width: 400px/)
+    expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*width: 480px/)
     // 双层柔和阴影
     expect(styles).toMatch(/\.dim-jh-badgePop \{[^}]*box-shadow: 0 1px 2px[^}]*0 8px 24px/)
   })
@@ -816,8 +815,8 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(css).toMatch(/bottom: calc\(100% \+ 8px\)/)
     expect(css).toMatch(/right: 0/)
     // ⚠️ 2026-11-18 加宽 280 → 400（四段分档放不下，用户要求「加宽不加高」）
-    expect(css).toMatch(/width: 400px/)
-    expect(css).toMatch(/max-width: min\(400px, 86vw\)/)
+    expect(css).toMatch(/width: 480px/)
+    expect(css).toMatch(/max-width: min\(480px, 92vw\)/)
     expect(css).toMatch(/max-height: 58vh/)
     expect(css).toMatch(/overflow-y: auto/)
     expect(css).toMatch(/z-index: 40/)
@@ -839,7 +838,7 @@ describe('用量徽标：弹窗的紧凑布局（信息一项不少）', () => {
     expect(inline).not.toMatch(/(^|[^\w])maxWidth:/)
     // 窄屏规则必须还留在样式表里
     // ⚠️ 窄屏 220 → 300（220px 下四段必然折行 = 高度增长，用户明确不许）
-    expect(styles).toMatch(/@media \(max-width: 720px\) \{ \.dim-jh-badgePop \{[^}]*width: 300px/)
+    expect(styles).toMatch(/@media \(max-width: 720px\) \{ \.dim-jh-badgePop \{[^}]*width: 360px/)
   })
 
   /**
@@ -1394,8 +1393,9 @@ describe('徽标 tooltip 标题：短语不得再拼后缀（!135 回归的守�
    */
   it('title 直接用 countdown，不再拼「后」', () => {
     // 正：长期/短期的 tooltip 由 countdown 直接构成
-    expect(badge, '长期/短期 tooltip 必须来自 part.countdown')
-      .toContain('${text} 积分 · ${part.countdown}')
+    // ⚠️ 2026-11-18：长期/短期改成**三行** tooltip（含「还有 N 天」+ 用途说明）
+    expect(badge, '长期/短期 tooltip 必须用三行结构')
+      .toContain("lines.push(part.key === 'longTerm' ? '不着急，最后才用' : '临期用完后优先消耗')")
     // 反：不得出现「拼了后缀」的形态
     expect(badge, '不得对 countdown 再拼「后」（混合批次时它是完整短语）')
       .not.toContain('${part.countdown}后')

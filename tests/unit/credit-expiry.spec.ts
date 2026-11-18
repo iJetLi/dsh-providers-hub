@@ -902,11 +902,11 @@ describe('★ expiryUnknown（「到期未知」子量，IKTLMX）', () => {
   it('★★ 分段渲染：到期未知用 warn（黄），不是 ok（绿）', () => {
     // ⚠️ 绿色会读成「不用管」——而这批额度**确实会作废**，正是要提醒的对象。
     expect(expirySplitParts({ permanent: 3000, longTerm: 0, expiring: 0, unknownExpiry: 3000 }, format, NOW))
-      .toEqual([{ key: 'unknownExpiry', text: '到期未知 3000', tone: 'warn' }])
+      .toEqual([{ key: 'unknownExpiry', amount: 3000, text: '到期未知 3000', tone: 'warn' }])
     expect(expirySplitParts({ permanent: 3100, longTerm: 0, expiring: 0, unknownExpiry: 3000 }, format, NOW))
       .toEqual([
-        { key: 'permanent', text: '永久 100', tone: 'ok' },
-        { key: 'unknownExpiry', text: '到期未知 3000', tone: 'warn' },
+        { key: 'permanent', amount: 100, text: '永久 100', tone: 'ok' },
+        { key: 'unknownExpiry', amount: 3000, text: '到期未知 3000', tone: 'warn' },
       ])
   })
 
@@ -955,10 +955,16 @@ describe('expirySplitParts（三档带色分段）', () => {
       NOW_MS,
     )
     expect(parts).toEqual([
-      { key: 'permanent', text: '永久 3852', tone: 'ok' },
-      { key: 'longTerm', text: '长期 3753', tone: 'okSoft' },
-      { key: 'shortTerm', text: '短期 200', tone: 'warn', countdown: `最早 ${formatMonthDay(NOW_MS + 10 * DAY, NOW_MS)}到期` },
-      { key: 'expiring', text: '临期 100', tone: 'error', countdown: '2 天 0 小时' },
+      { key: 'permanent', amount: 3852, text: '永久 3852', tone: 'ok' },
+      { key: 'longTerm', amount: 3753, text: '长期 3753', tone: 'okSoft' },
+      // ⚠️ 2026-11-18：longTerm/shortTerm 新增 earliestAt / earliestIn（供弹窗 tooltip
+      //    写「还有 N 天」）。两者只在**有确切时刻**时出现。
+      {
+        key: 'shortTerm', amount: 200, text: '短期 200', tone: 'warn',
+        countdown: `最早 ${formatMonthDay(NOW_MS + 10 * DAY, NOW_MS)}到期`,
+        earliestAt: NOW_MS + 10 * DAY, earliestIn: 10 * DAY,
+      },
+      { key: 'expiring', amount: 100, text: '临期 100', tone: 'error', countdown: '2 天 0 小时' },
     ])
   })
 
@@ -970,9 +976,9 @@ describe('expirySplitParts（三档带色分段）', () => {
       NOW_MS,
     )
     expect(parts).toEqual([
-      { key: 'permanent', text: '永久 3852', tone: 'ok' },
-      { key: 'longTerm', text: '长期 3753', tone: 'okSoft' },
-      { key: 'expiring', text: '临期 100', tone: 'error', countdown: '2 天 0 小时' },
+      { key: 'permanent', amount: 3852, text: '永久 3852', tone: 'ok' },
+      { key: 'longTerm', amount: 3753, text: '长期 3753', tone: 'okSoft' },
+      { key: 'expiring', amount: 100, text: '临期 100', tone: 'error', countdown: '2 天 0 小时' },
     ])
   })
 
@@ -983,13 +989,13 @@ describe('expirySplitParts（三档带色分段）', () => {
       NOW_MS,
     )
     expect(parts).toEqual([
-      { key: 'expiring', text: '临期 50', tone: 'error', countdown: '5 小时 20 分钟' },
+      { key: 'expiring', amount: 50, text: '临期 50', tone: 'error', countdown: '5 小时 20 分钟' },
     ])
   })
 
   it('零值桶不出现（不占版面）', () => {
     expect(expirySplitParts({ permanent: 100, longTerm: 0, expiring: 0, earliestExpiringAt: null }, format, NOW_MS))
-      .toEqual([{ key: 'permanent', text: '永久 100', tone: 'ok' }])
+      .toEqual([{ key: 'permanent', amount: 100, text: '永久 100', tone: 'ok' }])
   })
 
   it('分类不可用 / 全 0 时返回空数组', () => {
@@ -1004,9 +1010,9 @@ describe('expirySplitParts（三档带色分段）', () => {
    */
   it('最早作废时刻缺失/已过期时不给倒计时', () => {
     expect(expirySplitParts({ permanent: 0, longTerm: 0, expiring: 50, earliestExpiringAt: null }, format, NOW_MS))
-      .toEqual([{ key: 'expiring', text: '临期 50', tone: 'error' }])
+      .toEqual([{ key: 'expiring', amount: 50, text: '临期 50', tone: 'error' }])
     expect(expirySplitParts({ permanent: 0, longTerm: 0, expiring: 50, earliestExpiringAt: NOW_MS - DAY }, format, NOW_MS))
-      .toEqual([{ key: 'expiring', text: '临期 50', tone: 'error' }])
+      .toEqual([{ key: 'expiring', amount: 50, text: '临期 50', tone: 'error' }])
   })
 
   /**
@@ -1104,9 +1110,7 @@ describe('expirySplitParts（三档带色分段）', () => {
         NOW_MS,
       )
       expect(parts).toEqual([
-        {
-          key: 'expiring',
-          text: '临期 500',
+        { key: 'expiring', amount: 500, text: '临期 500',
           tone: 'error',
           countdown: '3 天 0 小时',
           /**
@@ -1126,8 +1130,8 @@ describe('expirySplitParts（三档带色分段）', () => {
         NOW_MS,
       )
       expect(parts).toEqual([
-        { key: 'permanent', text: '永久 22000', tone: 'ok' },
-        { key: 'expiring', text: '临期 3000', tone: 'error' },
+        { key: 'permanent', amount: 22000, text: '永久 22000', tone: 'ok' },
+        { key: 'expiring', amount: 3000, text: '临期 3000', tone: 'error' },
       ])
     })
 
@@ -1183,7 +1187,7 @@ describe('expirySplitParts（三档带色分段）', () => {
         NOW_MS,
       )
       // 无倒计时可给 ⇒ 只给金额，且**不许**留「其中 …于」的空壳
-      expect(parts).toEqual([{ key: 'expiring', text: '临期 3500', tone: 'error' }])
+      expect(parts).toEqual([{ key: 'expiring', amount: 3500, text: '临期 3500', tone: 'error' }])
     })
   })
 })
