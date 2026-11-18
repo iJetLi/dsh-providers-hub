@@ -23,7 +23,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { QODER_CN } from '../../src/qoder-product.js'
-import { QODER_CATALOG_SCENE, fetchQoderRemoteModels } from '../../src/qoder-catalog.js'
+import { QODER_CATALOG_SCENES, fetchQoderRemoteModels } from '../../src/qoder-catalog.js'
 import {
   QODER_REFRESH_PATH,
   QODER_USERINFO_PATH,
@@ -198,39 +198,88 @@ suite('QoderCN 登录与端点探针（只读，零额度）', () => {
 
     // 原始报文与解析结果**逐条对齐**（不是「必须活动」的契约断言）：
     // 上游给了文案而我们读不出来 = 静默丢字，正是本 PR 要守的那格。
+    //
+    // ⚠️ **必须遍历 `QODER_CATALOG_SCENES`，不能只看 `chat`**（2026-11-18 自审）：
+    //   解析层吃的是 `chat ∪ app` 并集，而 `lmodel` 这类模型**只发布在 `app`** ⇒
+    //   只看 chat 时「只出现在 app 的活动」整条不被核对，上游改发区域变体时这条
+    //   守卫会**静默通过**（假绿）。用例名里的「键集合」是唯一硬判据，覆盖面必须
+    //   与解析层同域。
+    // ⚠️ 跨场景同 id 时解析层**按 scenes 顺序去重、靠前的赢**（`chat` 优先）⇒
+    //   与解析结果对齐时只有「赢家场景」那条能断言；后出现的同 id 条目只登记
+    //   不断言（否则 chat 缺 description 而 app 有，红会红在错误的地方）。
     const ALLOWED = new Set(['en', 'zh', 'en_us', 'cn_zh'])
+    const rawId = (raw: Record<string, unknown>): string => String(raw.key ?? raw.model_key ?? '')
     let checked = 0
+    let keyChecks = 0
+    let skippedDuplicates = 0
     for (const text of captured) {
       let parsed: unknown
       try { parsed = JSON.parse(text) } catch { continue }
-      const chat = (parsed as Record<string, unknown>)[QODER_CATALOG_SCENE]
-      if (!Array.isArray(chat)) continue
-      for (const raw of chat as Record<string, unknown>[]) {
-        const promotion = raw?.promotion as Record<string, unknown> | undefined
-        if (promotion === undefined) continue
-        const id = String(raw?.key ?? raw?.model_key ?? '')
-        const parsedModel = byId.get(id)
-        if (parsedModel?.promotion === undefined) continue
-        for (const field of ['badge', 'description'] as const) {
-          const block = promotion[field]
-          if (typeof block !== 'object' || block === null) continue
-          const keys = Object.keys(block as object)
-          for (const key of keys) {
-            expect(ALLOWED.has(key), `${id} 的 promotion.${field} 出现未知语言键 "${key}"`
-              + ' —— 官方读取口径是 en/zh/en_us/cn_zh，先取证再决定要不要加').toBe(true)
-          }
-          const upstreamHasText = keys.some((key) => {
-            const value = (block as Record<string, unknown>)[key]
-            return typeof value === 'string' && value.trim().length > 0
-          })
-          if (!upstreamHasText) continue
-          const read = field === 'badge'
-            ? parsedModel.promotion.badgeZh ?? parsedModel.promotion.badgeEn
-            : parsedModel.promotion.descriptionZh ?? parsedModel.promotion.descriptionEn
-          expect(read, `${id} 的上游 promotion.${field} 有文案（键 ${keys.join(',')}）`
-            + '但我们解析出来是空的 —— 键名口径漂了').toBeTruthy()
-          checked++
+      const body = parsed as Record<string, unknown>
+      const scenes = QODER_CATALOG_SCENES
+        .filter((scene) => Array.isArray(body[scene])) as string[]
+      if (scenes.length === 0) continue // 报文里一个场景都没有 ⇒ 不是这份报告
+      // 第一遍：按 scenes 顺序算「每个 id 的赢家场景」（与 parseQoderRemoteModelsForScenes 同判）。
+      const winners = new Map<string, string>()
+      for (const scene of scenes) {
+        for (const raw of body[scene] as Record<string, unknown>[]) {
+          if (typeof raw !== 'object' || raw === null) continue
+          const id = rawId(raw)
+          if (id === '' || winners.has(id)) continue
+          winners.set(id, scene)
         }
+      }
+      // 第二遍：逐条核对。
+      // ⚠️ 两条判据的覆盖面**刻意不同**：
+      // - **键白名单**（ALLOWED）对**所有场景的所有条目**生效 —— 它只读原始报文，
+      //   与「谁是赢家」无关。今天 app 与 chat 的条目逐 id 重复，若把它也限定在赢家，
+      //   这条腿在 app 上就**恒空跑**（2026-11-18 实测 app 14 条、其中 2 条带活动）。
+      // - **「上游有文案 ⇒ 我们不得读空」** 只对赢家场景生效（解析层按 scenes 顺序
+      //   去重，非赢家那条根本没被解析）—— 否则 chat 缺 description 而 app 有，
+      //   红会红在错误的地方。
+      for (const scene of scenes) {
+        const list = body[scene] as Record<string, unknown>[]
+        let withPromotionInScene = 0
+        for (const raw of list) {
+          if (typeof raw !== 'object' || raw === null) continue
+          const promotion = raw.promotion as Record<string, unknown> | undefined
+          if (typeof promotion !== 'object' || promotion === null) continue
+          withPromotionInScene++
+          const id = rawId(raw)
+          const isWinner = winners.get(id) === scene
+          if (!isWinner) skippedDuplicates++
+          const parsedModel = isWinner ? byId.get(id) : undefined
+          for (const field of ['badge', 'description'] as const) {
+            const block = promotion[field]
+            if (typeof block !== 'object' || block === null) continue
+            const keys = Object.keys(block as object)
+            for (const key of keys) {
+              keyChecks++
+              expect(ALLOWED.has(key), `${id}（场景 ${scene}）的 promotion.${field} 出现未知语言键 "${key}"`
+                + ' —— 官方读取口径是 en/zh/en_us/cn_zh，先取证再决定要不要加').toBe(true)
+            }
+            if (parsedModel?.promotion === undefined) continue
+            const upstreamHasText = keys.some((key) => {
+              const value = (block as Record<string, unknown>)[key]
+              return typeof value === 'string' && value.trim().length > 0
+            })
+            if (!upstreamHasText) continue
+            const read = field === 'badge'
+              ? parsedModel.promotion.badgeZh ?? parsedModel.promotion.badgeEn
+              : parsedModel.promotion.descriptionZh ?? parsedModel.promotion.descriptionEn
+            expect(read, `${id}（场景 ${scene}）的上游 promotion.${field} 有文案（键 ${keys.join(',')}）`
+              + '但我们解析出来是空的 —— 键名口径漂了').toBeTruthy()
+            checked++
+          }
+        }
+        // 打印「键检查」次数是**为了证明非赢家场景那条腿不是空跑**（今天 app 与 chat
+        // 逐 id 重复，文案对齐在 app 上被跳过，但键白名单照查）。
+        console.log(`[qodercn] 场景 ${scene}：${list.length} 条，带活动 ${withPromotionInScene} 条`
+          + `，键检查 ${keyChecks} 次`)
+      }
+      if (skippedDuplicates > 0) {
+        console.log(`[qodercn] 跨场景同 id ${skippedDuplicates} 条（按 scenes 顺序去重，靠前的赢）：`
+          + '这些条目的文案按赢家场景核对，解析层并没有跨场景合并字段')
       }
     }
     expect(checked, '两站今天都应至少有一条带文案的活动；0 说明报告结构变了').toBeGreaterThan(0)

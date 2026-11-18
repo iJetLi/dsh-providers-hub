@@ -755,6 +755,12 @@ describe('Qoder 的 promotion（qoderPromotionCandidate）', () => {
       en: 'Off-Peak 60% off (10 PM-8 AM UTC+8)',
     })
     // 悬停 = 上游原话 · 每日时段（有时段才写），三件都来自上游自己的字段。
+    // ⚠️ 下面两行**同时**断言「原话里的 10 PM-8 AM」与「派生的 22:00–08:00」——
+    // 同一窗口在悬停里出现两次是**刻意保留**，不是漏消重（2026-11-18 自审）：
+    // 腾讯那条 `hover`（`Nov 16 – Dec 1: free daily usage.`）与派生的「活动至…」
+    // 本来就是同一个形态；散文是自由文本，「它是否已经提了窗口」没有可判据的答案，
+    // 而按「有 hover 就不拼时段」去消重会把**腾讯的时段**一起抹掉（它的原话不写时段）。
+    // 保留的第二个理由：两者不一致时，并排显示才看得见上游自相矛盾。
     expect(promotionTooltip(withCopy, 'zh-CN')).toContain('错峰时段4折优惠')
     expect(promotionTooltip(withCopy, 'zh-CN')).toContain('22:00–08:00')
     expect(promotionTooltip(withCopy, 'en-US')).toContain('Off-Peak 60% off (10 PM-8 AM UTC+8)')

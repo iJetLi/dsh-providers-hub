@@ -170,7 +170,19 @@ const EFFORT_ALIASES: ReadonlyMap<string, string> = new Map([
   ['off', 'none'],
 ])
 
-/** 读非空字符串字段。 */
+/**
+ * 读非空字符串字段。
+ *
+ * ⚠️ **本文件刻意并存两个读取器，别合并**（2026-11-18 自审登记）：
+ * - 本函数（**不 trim**）只用于**非本地化**字段 —— `window_start` / `window_end` /
+ *   `timezone` / `rule_id` / `key` / `display_name`。官方对窗口与 `rule_id` 是原样取值
+ *   （`oTe` 里没有 `Zq`），我们照抄这个口径；顺带的好处是**读不懂的窗口**在
+ *   `dailyUnusable` 的日志里能看到**上游原文**（带空白）而不是被我们改写过的一版。
+ * - {@link readTrimmed}（**trim**）只用于**本地化文本块**（`badge` / `description`），
+ *   因为官方 `Zq()` 对它们 trim，不 trim 会画出**空胶囊**（`"   "` 被当成有文案）。
+ * 合并任一方都会静默改掉另一格语义：合并成 trim ⇒ 日志/错误文案不再是上游原文；
+ * 合并成不 trim ⇒ 空胶囊回归。两者的分界是「这块文本要不要给人看」，不是风格。
+ */
 function readString(source: unknown, key: string): string | undefined {
   if (typeof source !== 'object' || source === null) return undefined
   const value = (source as Record<string, unknown>)[key]
