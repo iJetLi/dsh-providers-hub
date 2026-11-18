@@ -10053,7 +10053,7 @@ function registerJetHubEndpoints(
         if (llm === undefined) {
           return { ok: false, error: { code: 'bad-request', message: 'llm 服务不可用' } }
         }
-        let models: Array<{ id: string; name: string }>
+        let models: Array<{ id: string; name: string; description?: string }>
         try {
           models = await llm.listModels(req.provider)
         } catch (error) {
@@ -10167,7 +10167,7 @@ function registerJetHubEndpoints(
           ? new Set([...models.map((model) => model.id), ...all.map((model) => model.id)])
           : undefined
         const stillOnSale = (id: string): boolean => onSale === undefined || onSale.has(id)
-        let catalog: Array<{ id: string; name: string; isFree?: boolean }>
+        let catalog: Array<{ id: string; name: string; description?: string; isFree?: boolean }>
         if (all !== undefined) {
           catalog = [...all]
           // 全量目录里若仍有黑名单命中却缺失者，一并补上（保底，正常不会发生）。
@@ -10182,7 +10182,14 @@ function registerJetHubEndpoints(
           const filteredOut = Object.keys(disabledMap)
             .filter((id) => disabledMap[id] === true && !listedIds.has(id))
           catalog = [
-            ...models.map((model) => ({ id: model.id, name: model.name })),
+            ...models.map((model) => ({
+              id: model.id,
+              name: model.name,
+              // ⚠️ 介绍原样透传（缺失不落键）—— 本分支拿不到 `listAllModels()`，
+              //    只能靠 `listModels()` 的条目，而它同样带 `description`
+              //    （见 `model-catalog.ts` 的 `toModelInfo`）。
+              ...model.description === undefined ? {} : { description: model.description },
+            })),
             // 这些模型已被适配器过滤掉，拿不到原始 name，回退为 id。
             ...filteredOut.map((id) => ({ id, name: id })),
           ]
@@ -10239,6 +10246,10 @@ function registerJetHubEndpoints(
           models: catalog.map((model) => ({
             id: model.id,
             name: model.name,
+            // ⚠️ 模型介绍**照实透传**（2026-11-17）：只有适配器真读到才写，
+            //    缺失时不落键 ⇒ 客户端保持旧布局（不画空的第二行）。
+            //    ⚠️ 文案不改写，也不据它推断活动（见 `types.ts` 的字段注释）。
+            ...model.description === undefined ? {} : { description: model.description },
             // ⚠️⚠️ **「供应商整体关闭」意图为真 ⇒ 每条都显示为已关闭**（IKP8OF）。
             // 否则设置页与 `provider.status` 自相矛盾：分组说「已关闭」，
             // 而这里每条开关都显示「已打开」（意图关闭的模型**不在**黑名单里，

@@ -924,3 +924,47 @@ npx tsc --noEmit --strict --target ES2023 --module NodeNext --moduleResolution N
 - 单元测试覆盖核心逻辑（签名、续期、参数构造、账号池），不依赖网络
 - E2E 测试按 provider 分为独立脚本（`pnpm test:e2e:*`），**均带闸门且默认跳过**；哪些会消耗模型积分见 `tests/e2e/README.md`
 - 测试文件按约定放在 `tests/unit/` 与 `tests/e2e/` 目录
+
+### ⚠️⚠️ 别在工作区里跑 `pnpm install`：`node_modules` 是 junction 时会**改写主 checkout 的软链**
+
+2026-11-17 实测事故：工作区用
+
+```powershell
+New-Item -ItemType Junction -Path ".agents\worktrees\<x>\node_modules" -Target "<repo>\node_modules"
+```
+
+共享依赖后，在工作区里执行 `pnpm run build:all` / `pnpm install` —— pnpm 的
+「脚本前依赖校验」会把工作区当成 install 根，于是把**主 checkout** 的 8 个顶层
+软链改写成了指向工作区 `.pnpm` 的相对路径：
+
+```
+node_modules\typescript -> ..\.agents\worktrees\codearts-model-desc\node_modules\.pnpm\typescript@5.9.3\node_modules\typescript
+```
+
+从主 checkout 看还能解析（相对路径刚好对得上），从**工作区**看就是死链
+（`Test-Path node_modules\typescript\bin\tsc` = False）。销毁工作区的那一天，
+主 checkout 一起坏。
+
+**正确姿势**
+
+- 工作区要共享依赖，**按顶层条目逐个**建 junction（绝对路径），
+  `.bin` / `.pnpm` / `@scope` 都是目录，直接 junction；顶层那几个 **文件**
+  （`.modules.yaml` / `.package-map.json` / `.pnpm-workspace-state-v1.json`）用
+  **复制**（Windows 无开发者模式时建**文件**符号链会失败：`os error 2`）。
+- 构建**不要**走 `pnpm run`，直接调脚本，绕开 pnpm 的 install 前置：
+  `node node_modules\typescript\bin\tsc -p tsconfig.json && node scripts\copy-assets.mjs
+  && node plugin-src\client\build.mjs && node scripts\sync-bootstrap-lib.mjs`。
+- 已经搞坏了：删掉被改写的那几个顶层软链，再在**主 checkout**里
+  `pnpm install --frozen-lockfile --force --ignore-scripts`（不带 `--force` 会报
+  `Already up to date` 而**什么都不修**）。
+- 判据：`Get-ChildItem <repo>\node_modules -Force | Where-Object { $_.Target -like '*worktrees*' }`
+  必须为空。
+
+### ⚠️ 全量单测在本机有**既有偶发失败**，别当成自己造的
+
+2026-11-17 实测：纯 `origin/master` 工作树跑全量同样是
+`magicrew-local-browser`（本机目录存在性）+ `qoder-web-usage`（数值对拍）等
+**环境相关**用例红；并行满载时还会额外牵连 `qiniu-rpc` / `account-probe*` /
+`balance-cache-wiring` / `minimax-intl` / `models-dev-cache` / `session-title`
+（**单独跑就绿**）。判断是否回归的正确做法：同一批文件在
+**干净基线工作树**上跑一遍对比，而不是看总数的颜色。

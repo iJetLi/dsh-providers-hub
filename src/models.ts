@@ -102,6 +102,20 @@ export interface RemoteModel {
    */
   contextWindow?: number
   /**
+   * 模型介绍（上游 `model_desc` 原样，如
+   * `【限时体验】许愿式编程一键成真`）；取不到时为 `undefined`。
+   *
+   * ⚠️ **只透传、不加工**：上游把促销性质的文案（截图里那些 `【限时体验】…`）
+   * 直接烘焙在 `model_desc` 里，本插件**不**据此推断活动窗口（那需要时间字段，
+   * `model_desc` 一个都没有）。裁剪 / 改写同样禁止 —— 文案是上游的，
+   * 我们只负责别把它丢掉。
+   *
+   * ⚠️ 为什么不拼进 `name`：`name` 已经带 ` · x倍率`（见 `toCatalogEntry`），
+   * 再拼一句 60 字的介绍会撑爆选择器主行。宿主 `LlmModelInfo.description`
+   * 是它该去的地方（见 `catalogEntry` 与本字段的 2026-11-17 取证）。
+   */
+  description?: string
+  /**
    * ⚠️⚠️ **刻意移除**（2026-10-30 第二轮审计 D-4 修）：AgentCenter 的
    * `max_tokens`（单次输出上限）**不再**进 `RemoteModel`。
    *
@@ -220,9 +234,35 @@ export function normalizeModelId(id: string): string {
   return id
 }
 
+/**
+ * 文本「实际上有没有内容」——**`trim()` 不认零宽字符**。
+ *
+ * `\u200B`（ZWSP）/ `\u200C` / `\u200D` / `\u200E` / `\u200F` / `\u2060` / `\uFEFF`
+ * 都是 `Cf`（格式字符），`String.prototype.trim` 只认 `WhiteSpace` 与 `LineTerminator`
+ * ⇒ `'\u200B'.trim().length` 是 **1**。
+ *
+ * 后果：上游若只发这几个字符，判断会通过 ⇒ 客户端画出一格**看不见的第二行**
+ * （行高 +24px，看起来像列表莫名变松）。这与本仓 `protocol-wire.md` 里
+ * 「不可见字符按 Unicode 类别处理、枚举码点必漏」是同一条教训的展示层版本 ——
+ * 这里只判「有没有」，不需要完整类别表，故用**显式小集合**（覆盖 Cf 里实际会
+ * 出现在文案字段的那几个），不做通用化。
+ */
+function hasVisibleText(text: string): boolean {
+  return text.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').trim().length > 0
+}
+
 function parseModelInfo(
   m: Record<string, unknown>,
   seen: Set<string>,
+  /**
+   * 已解析条目的索引（`id → RemoteModel`）。
+   *
+   * ⚠️ **必须有**：同一条 id 可能被**两个端点**各下发一次（`opengw gateway/config`
+   * 的 benefit 组在前、`/v1/model/builtin` 在后），而 gateway 那侧**没有
+   * `model_desc`**。只靠 `seen` 做「先到先得」的话，先到的 gateway 条目会赢，
+   * 介绍就**静默消失**（正是本 PR 要修的那一类丢字段）。见下方去重分支。
+   */
+  byId: Map<string, RemoteModel>,
   /** 取倍率时用的「现在」（单测注入；缺省 `Date.now()`）。 */
   nowMs?: number,
 ): RemoteModel | undefined {
@@ -256,9 +296,49 @@ function parseModelInfo(
    * 用户要看的版本信息（裁掉就与旧版同名、无法区分）。
    */
   const name = typeof rawName === 'string' && rawName.length > 0 ? rawName : id
-  if (seen.has(id)) return undefined
+  /**
+   * 模型介绍（`model_desc`，2026-11-17 真机取证：`/v1/model/builtin` **12 条全带**，
+   * 且与 CodeArts 客户端选择器上那行灰字**逐字相同**）：
+   *
+   * ```
+   * "model_id":"deepseek-v4.1-flash-1017","model_desc":"【限时体验】许愿式编程一键成真"
+   * ```
+   *
+   * ⚠️ 三态：字段缺失 / 不是字符串 / 只有空白（含**零宽字符**，见 `hasVisibleText`）
+   *   ⇒ **不落键**（不写 `''`）。写空串会让宿主把「上游没给介绍」渲染成一格空的灰字，
+   *   与「有介绍」同形。
+   * ⚠️ 只 trim 两端空白，**不改字**（既不裁 `【限时体验】` 前缀，也不改写措辞）。
+   */
+  const rawDescription = m['model_desc']
+  const description = typeof rawDescription === 'string' && hasVisibleText(rawDescription)
+    ? rawDescription.trim()
+    : undefined
+  if (seen.has(id)) {
+    /**
+     * ⚠️⚠️ 同一条 id 第二次出现 ⇒ 不新增条目，但**要把介绍补齐**。
+     *
+     * 真实顺序是 `gateway/config`（benefit 组，**无 `model_desc`**）先、
+     * `/v1/model/builtin`（带 `model_desc`）后。两个端点对同一条 id 各下发一次时
+     * （例：`deepseek-v4.1-flash` 既在 gateway 的 benefit 组、也在 builtin 里），
+     * 「先到先得」会让 **gateway 那份赢** ⇒ 介绍在合并阶段就没了，
+     * 表现为「这个模型在另一个端点明明有介绍，界面上却是空白」。
+     * 这里只补**缺**的字段（已有的不覆盖），避免后到的名/倍率把先到的顶掉。
+     */
+    const existing = byId.get(id)
+    if (existing !== undefined && existing.description === undefined && description !== undefined) {
+      existing.description = description
+    }
+    return undefined
+  }
   seen.add(id)
-  return { id, name, ...readRateLabel(m, nowMs) }
+  const model: RemoteModel = {
+    id,
+    name,
+    ...(description === undefined ? {} : { description }),
+    ...readRateLabel(m, nowMs),
+  }
+  byId.set(id, model)
+  return model
 }
 
 /**
@@ -686,6 +766,14 @@ export async function fetchCodeArtsRemoteModels(
 
   const models: RemoteModel[] = []
   const seen = new Set<string>()
+  /**
+   * `id → 已解析条目`（与 `seen` 同一批键，多存一份对象引用）。
+   *
+   * ⚠️ 存在的唯一理由：两个端点可能对同一条 id 各下发一次，而**只有 builtin
+   * 带 `model_desc`** ⇒ 后到的那份要把介绍补到先到的条目上（见
+   * `parseModelInfo` 的去重分支）。没有它就只能「先到先得」并静默丢掉介绍。
+   */
+  const byId = new Map<string, RemoteModel>()
   // 来自 gateway/config 的 benefit 模型 id —— 调用时必须带 maas_type: benefit。
   //
   // ⚠️ 只记录**未被去掉日期后缀**的 id（即 chat 请求真正发出的那个 id）。
@@ -712,7 +800,7 @@ export async function fetchCodeArtsRemoteModels(
       if (typeof item === 'object' && item !== null) {
         const entry = item as Record<string, unknown>
         const rawId = typeof entry['model_id'] === 'string' ? entry['model_id'] : ''
-        const mi = parseModelInfo(entry, seen, nowMs)
+        const mi = parseModelInfo(entry, seen, byId, nowMs)
         if (mi) {
           // 仅当归一化未改写 id 时才记为 benefit（见上方说明）
           if (rawId.length > 0 && normalizeModelId(rawId) === rawId) benefitIds.push(mi.id)
@@ -750,7 +838,7 @@ export async function fetchCodeArtsRemoteModels(
           const rawId = entry['model_id']
           if (typeof rawId === 'string' && rawId.length > 0) builtinImageIds.push(rawId)
         }
-        const mi = parseModelInfo(entry, seen, nowMs)
+        const mi = parseModelInfo(entry, seen, byId, nowMs)
         if (mi) models.push(mi)
       }
     }

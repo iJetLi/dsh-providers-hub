@@ -1635,11 +1635,29 @@ function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
    * 标记只负责讲清因果，可操作性一律保留。
    */
   const benefitOnly = model.benefitOnly === true;
+  /**
+   * 模型介绍（服务端从远端原样带出，见 `RpcModelListEntry.description`）。
+   *
+   * ⚠️ 判据是「非空字符串」而不是 `!== undefined`：服务端已保证不写空串，
+   * 但客户端是**公开契约的另一端**（备份导入/第三方调用/将来换实现），
+   * 一条 `description: ''` 就会在这一行画出 0 高度的空白块 ⇒ 行距莫名变松。
+   *
+   * ⚠️ 零宽字符必须一并剥掉再判：`trim()` **不认** `\u200b`（`Cf`，不是空白），
+   * 于是 `'\u200b'.trim().length` 是 **1** ⇒ 上游只发一个零宽字符时会画出
+   * 一格**看不见的第二行**（行高 +24px）。与服务端 `hasVisibleText` 同一口径；
+   * 客户端**不信任**服务端（见上一条理由），两边都判。
+   */
+  const description = typeof model.description === 'string'
+    && model.description.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').trim().length > 0
+    ? model.description
+    : undefined;
   return React.createElement('label', {
     className: 'dim-jh-modelRow',
     'data-disabled': model.disabled ? 'true' : 'false',
     'data-dead': dead ? 'true' : 'false',
-    title: dead ? `${model.id}（上游已下架，点击「重新显示」可恢复）` : model.id,
+    // 有介绍时 title 让给**介绍全文**（行内会 ellipsis，悬停是唯一能看全的地方）；
+    // 没有介绍时保持旧行为（显示 id）。已下架的提示优先，不能被子介绍顶掉。
+    title: dead ? `${model.id}（上游已下架，点击「重新显示」可恢复）` : (description ?? model.id),
   },
     // ⚠️ 供应商图标放在**行首**（与左栏供应商列表同一视觉语言，用户 2026-10-26
     //    要求：「给所有页面供应商和模型左侧 + 供应商图标」）。
@@ -1648,7 +1666,18 @@ function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
     // ⚠️ 它在 `<label>` 内、但**不是可标记控件**，故不影响「点整行切开关」
     //    那条既有交互。真正的坑是插入第二个 checkbox，见上面的类注释。
     React.createElement(ProviderLogo, { provider }),
-    React.createElement('span', { className: 'dim-jh-modelInfo' },
+    React.createElement('span', {
+      className: 'dim-jh-modelInfo',
+      /**
+       * ⚠️ 换行**只在这一行**开启（CSS 选择器是 `.dim-jh-modelInfo[data-desc="true"]`）。
+       *
+       * `.dim-jh-modelInfo` 是**共享类名**：网关弹窗（「启用本机网关」/「允许局域网访问」）
+       * 与供应商开关弹窗的每一行都用它，而它们**没有**第二行子元素。
+       * 若把 `flex-wrap: wrap` 写在无条件规则上，那些行就多了「某天某个子元素变宽
+       * ⇒ 整行折成两行」的可能 —— 一次纯本家需求的改动不该有这种远场风险。
+       */
+      'data-desc': description !== undefined ? 'true' : 'false',
+    },
       React.createElement('strong', { className: 'dim-jh-modelName' }, model.name || model.id),
       dead ? React.createElement('span', { className: 'dim-jh-modelDead' }, '已下架') : null,
       // ⚠️ 角标放在 id **之前**：`dim-jh-modelId` 有 `max-width: 46%` 与 ellipsis，
@@ -1664,7 +1693,37 @@ function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
             + '纯积分制账号通常属于这种情况；换一个有福利包的账号即可。',
         }, '需福利包')
         : null,
-      React.createElement('code', { className: 'dim-jh-modelId' }, model.id)),
+      React.createElement('code', { className: 'dim-jh-modelId' }, model.id),
+      /**
+       * 模型介绍（**第二行**，2026-11-17）。
+       *
+       * ## 为什么落在插件面板而不是宿主选择器
+       *
+       * 宿主 `dsh-client-ui-model-selection` 把 `description` 塞进 `/model` 弹层的
+       * `detail`，而那个 `detail` 是**同一行行尾的 12px 灰字**（`PopupSelectView`：
+       * `.detail{white-space:nowrap;text-overflow:ellipsis}` + 弹层最窄 220px）
+       * ⇒ 一句 20～60 字的介绍在那行里会被截成几个字，还会把模型名挤短。
+       * 这里宽度足够，且用户正是**在这一页**决定开不开某个模型。
+       *
+       * ## 布局：`flex-basis:100%` 强制换行
+       *
+       * ⚠️ 刻意**不**给 `.dim-jh-modelInfo` 加列方向/包裹层：那会把
+       * `.dim-jh-modelName` / `.dim-jh-modelId` 从直接子元素变成孙元素，
+       * 而既有守卫（`model-benefit-hint.spec.ts` 的「角标在 id 之前」）读的是
+       * **直接子元素顺序** ⇒ 会变成假红。`flex:0 0 100%` 让本元素独占一行，
+       * 父容器一 `flex-wrap` 就落到第二行，DOM 结构逐字节不变。
+       *
+       * ⚠️ 缺失即**不渲染**（不画空的第二行）：`description` 为 `undefined`
+       * 表示该家没下发介绍（多数供应商如此），行高必须与旧版完全一致。
+       */
+      description !== undefined
+        ? React.createElement('span', {
+          className: 'dim-jh-modelDesc',
+          // 完整描述进 title：行内 still 会 ellipsis（半角 60 字在窄面板放不下），
+          // 悬停是唯一能看到全文的地方。
+          title: description,
+        }, description)
+        : null),
     dead
       // ⚠️ 失效模型**不渲染可见性开关**：它已被剔除出目录，开关没有意义；
       //    只给一个「重新显示」按钮（= 清掉失效记录）。

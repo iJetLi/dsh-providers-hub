@@ -1322,12 +1322,80 @@ describe('model.list / model.setDisabled 端点', () => {
     })
   })
 
+  /**
+   * 模型介绍（`description`，2026-11-17）。
+   *
+   * 上游 CodeArts `/v1/model/builtin` 的 `model_desc` 实测 12 条全带，客户端
+   * 选择器靠它画第二行灰字。插件这条链有**四个**可能丢字段的地方，任何一处漏
+   * 都会让界面「看起来这个家没有介绍」：
+   *
+   * 1. `src/models.ts` 的 `parseModelInfo`（读不读 `model_desc`）；
+   * 2. `src/llm-adapter.ts` 的 `toCatalogEntry`（进不进 `CatalogEntry`）；
+   * 3. `src/model-catalog.ts` 的 `toModelInfo`（进不进 `LlmModelInfo`）；
+   * 4. **本端点**（进不进 RPC 响应）。
+   *
+   * 前三条由 `models.spec.ts` 覆盖；本组只钉第 4 条。
+   * ⚠️ 并钉住「缺失不写空串」—— 空串会让客户端画出 0 高度的第二行（行距变松），
+   * 而且与「上游确实给了空介绍」无法区分。
+   */
+  describe('★ model.list 的 description（模型介绍）', () => {
+    it('★★★ 远端带介绍 ⇒ 原样出现在条目上（不裁前缀、不改写）', async () => {
+      const { call } = registerEndpoints({
+        models: [
+          { id: 'deepseek-v4.1-flash-1017', name: 'DeepSeek-V4.1-Flash-1017', description: '【限时体验】许愿式编程一键成真' },
+          { id: 'GLM-5.2', name: 'GLM-5.2' },
+        ],
+      })
+
+      const result = await call('model.list', { provider: 'codearts' })
+      expect(result.ok).toBe(true)
+      const models = (result.value as { models: Array<Record<string, unknown>> }).models
+
+      expect(models.find(m => m.id === 'deepseek-v4.1-flash-1017')?.description)
+        .toBe('【限时体验】许愿式编程一键成真')
+    })
+
+    it('★★ 没有介绍的模型 ⇒ 键缺席（不写空串 / 不写 undefined）', async () => {
+      const { call } = registerEndpoints({
+        models: [{ id: 'GLM-5.2', name: 'GLM-5.2' }],
+      })
+
+      const result = await call('model.list', { provider: 'codearts' })
+      const models = (result.value as { models: Array<Record<string, unknown>> }).models
+      expect(models, '前置：条目非空才能证明「不是没模型才没带」').toHaveLength(1)
+      expect(Object.hasOwn(models[0]!, 'description'), '缺失必须真的缺失').toBe(false)
+    })
+
+    it('★★ 走 `listAllModels` 分支（含被黑名单过滤的条目）也带介绍', async () => {
+      // ⚠️ 这条打的是**另一条构造 catalog 的分支**：有 `modelAdapters` 时目录来自
+      //    `listAllModels()`（`catalog = [...all]`）。若那条分支的对象重建只留
+      //    `id/name`，介绍会静默消失 —— 而「设置页里被关闭的模型」正好走这里。
+      const { call } = registerEndpoints({
+        models: [{ id: 'glm-5.3', name: 'GLM-5.3 · 0.79x', description: '【限时体验】面向复杂编程与长程任务' }],
+        disabledModels: { codearts: { 'glm-5.3': true } },
+        modelAdapters: {
+          codearts: {
+            listAllModels: () => [{ id: 'glm-5.3', name: 'GLM-5.3 · 0.79x', description: '【限时体验】面向复杂编程与长程任务' }],
+            catalogConfirmedRemote: () => true,
+          },
+        },
+      })
+
+      const result = await call('model.list', { provider: 'codearts' })
+      const models = (result.value as { models: Array<Record<string, unknown>> }).models
+      const row = models.find(m => m.id === 'glm-5.3')
+      expect(row, '前置：被关闭的模型必须仍在列表里（否则开关再也点不回来）').toBeDefined()
+      expect(row?.disabled, '前置：这一格必须是「已关闭」形态').toBe(true)
+      expect(row?.description).toBe('【限时体验】面向复杂编程与长程任务')
+    })
+  })
+
   /** 从 connection.fetch.register 捕获到的处理器。 */
   type Handler = (request: Request) => Promise<Response>
 
   /** 构造带 RPC 端点所需的 ctx 替身，返回注册进去的 fetch 处理器。 */
   function registerEndpoints(options: {
-    models: Array<{ id: string; name: string }>
+    models: Array<{ id: string; name: string; description?: string }>
     disabledModels?: Record<string, Record<string, boolean>>
     /** listModels 抛错时用于验证错误路径。 */
     listModelsError?: string
@@ -1350,7 +1418,7 @@ describe('model.list / model.setDisabled 端点', () => {
      * 省略时退化为「listModels + 裸 id 补回」的历史行为。
      */
     modelAdapters?: Record<string, {
-      listAllModels(): readonly { id: string; name: string }[]
+      listAllModels(): readonly { id: string; name: string; description?: string }[]
       /**
        * 「这份目录**确认**来自远端完整读取」的适配器自报钩子。
        *
