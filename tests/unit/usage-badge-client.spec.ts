@@ -333,6 +333,61 @@ describe('用量徽标：槽位接线', () => {
       expect(tips.length, '公式说明应出现两次（胶囊 + 弹窗）').toBeGreaterThanOrEqual(2)
     })
   })
+  /**
+   * ★★★ **禁止 TDZ：`availableText` 引用的标识符必须在此之前声明**
+   *
+   * ## 为什么写这条（2026-11-18 真机白屏报错）
+   *
+   * 我往 `renderCredits()` 中间插入「可用/总」代码时，把 `availableText`
+   * （引用了 `quotaGroup`）放在了 `const quotaGroup = ...` **之前** ⇒
+   * `const` 的 TDZ 生效 ⇒ 用户一点开弹窗就抛
+   * `Cannot access 'quotaGroup' before initialization`，整个徽标被错误边界拦住。
+   *
+   * ## 判据
+   *
+   * 对 `availableText` 里出现的每个依赖标识符，断言它的 `const` 声明位置
+   * **严格小于** `availableText` 的声明位置。
+   *
+   * ⚠️ 这比「跑一遍看崩不崩」更可靠：运行时只在**点开弹窗**那一刻才暴露，
+   *    而静态顺序断言在 CI 就红。
+   */
+  it('★★★ availableText 的所有依赖都必须在其之前声明（防 TDZ 白屏）', () => {
+    const availableTextAt = badge.indexOf('const availableText =')
+    expect(availableTextAt, '必须存在 availableText 声明').toBeGreaterThan(0)
+    // 取 availableText 那一整条语句（到分号）
+    const stmtEnd = badge.indexOf('\n', badge.indexOf(';', availableTextAt))
+    const stmt = badge.slice(availableTextAt, stmtEnd > 0 ? stmtEnd : availableTextAt + 400)
+    // 提取语句里引用的局部 const 标识符（排除 JS 关键字与属性访问）
+    const candidates = ['quotaGroup', 'availableGroup', 'availableCreditsTotal', 'view', 'sum', 'accounts', 'value']
+    const used = candidates.filter((name) => new RegExp(`(?<![.\\w])${name}(?![\\w])`).test(stmt))
+    expect(used.length, 'availableText 应至少引用 availableCreditsTotal/availableGroup').toBeGreaterThan(0)
+    for (const name of used) {
+      const declAt = badge.indexOf(`const ${name} =`)
+      // 该标识符若不是本文件的 const（如 view/accounts 是外层参数）则跳过
+      if (declAt < 0) continue
+      expect(
+        declAt,
+        `"${name}" 的 const 声明必须在 availableText 之前（否则 TDZ 白屏）`,
+      ).toBeLessThan(availableTextAt)
+    }
+  })
+
+  /**
+   * ★★ 可用积分的**单位必须取自非配额组**。
+   *
+   * ⚠️ 这里我曾写错成 `quotaGroup === undefined ? view.groups[0]?.unit : QUOTA_UNIT`
+   *    —— `quotaGroup` 存在时返回 `QUOTA_UNIT`（配额单位），
+   *    而 `availableCreditsTotal` 在配额渠道恒为 null（`sumAvailableCredits` 保证）
+   *    ⇒ 那个分支是死代码，且一旦命中就会把积分按配额格式渲染。
+   */
+  it('可用积分的单位取自非配额组（不是 QUOTA_UNIT）', () => {
+    const at = badge.indexOf('const availableText =')
+    expect(at).toBeGreaterThan(0)
+    const stmtEnd = badge.indexOf('\n', badge.indexOf(';', at))
+    const stmt = badge.slice(at, stmtEnd > 0 ? stmtEnd : at + 400)
+    expect(stmt, '必须从 availableGroup（非配额组）取单位').toContain('availableGroup')
+    expect(stmt, '不得把 QUOTA_UNIT 当作可用积分的单位').not.toMatch(/formatUnits\([^)]*QUOTA_UNIT/)
+  })
   it('⚠️⚠️ 胶囊**不限宽**（用户 2026-11-18：不要限制长度，让它自适应）', () => {
     /**
      * ⚠️⚠️ **判据已反转**（2026-11-18）。

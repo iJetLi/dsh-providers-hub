@@ -2204,17 +2204,35 @@ function UsageBadgeActive(props) {
       imminentDays: value?.imminentDays,
     });
     /**
+     * ⚠️⚠️ **本声明必须在 `availableText` 之前**（2026-11-18 真机报障）。
+     *
+     * 我曾把 `availableText`（引用了 `quotaGroup`）插在本行**之上**，
+     * 于是 `const` 的 TDZ 生效 ⇒ 一点开弹窗就抛
+     * `Cannot access 'quotaGroup' before initialization`，整个徽标被错误边界拦住
+     * （用户截图里的红框报错）。
+     *
+     * ⇒ 教训：往已有函数体中间插代码时，**必须确认插入点之前没有对后续
+     *    `const`/`let` 的引用**。`const` 不像 `var` 那样被提升到 undefined。
+     */
+    const quotaGroup = view.groups.find((group) => group.unit === QUOTA_UNIT);
+    /**
      * 可用积分的**展示文本**（与总额同单位口径）。
      *
-     * ⚠️ 必须与 `sum` 用同一个 `formatUnits` 口径（按组取单位）：
-     *    混合单位的渠道（积分 + token）里，「可用 100 / 总 200」不能把两种单位混起来算。
-     *    ⇒ 只对**积分组**（`group.unit !== QUOTA_UNIT` 且与总额同组）求可用。
+     * ⚠️ 必须与 `sum` 用同一个 `formatUnits` 单位，否则混合单位渠道
+     *    （积分 + token）会出现「可用 1900 / 总 94.54MToken」这种无法比较的并列。
+     *
+     * ⚠️⚠️ **单位永远取「非配额组」的单位，不能写成 `quotaGroup === undefined ? A : QUOTA_UNIT`**
+     *    （2026-11-18 修正我自己的错）：那个三元在 `quotaGroup` **存在**时返回
+     *    `QUOTA_UNIT`，而 `availableCreditsTotal` 已经由 `sumAvailableCredits`
+     *    保证**不是配额渠道**（配额时它返回 null）⇒ 该分支恒不成立，
+     *    真正的可用单位应当来自积分组本身。
+     *    正确写法：直接从「第一个非配额组」取单位（与胶囊侧同源）。
      */
-    const availableText = availableCreditsTotal === null
+    const availableGroup = view.groups.find((group) => group.unit !== QUOTA_UNIT);
+    const availableText = availableCreditsTotal === null || availableGroup === undefined
       ? null
-      : formatUnits(availableCreditsTotal, quotaGroup === undefined ? view.groups[0]?.unit : QUOTA_UNIT);
+      : formatUnits(availableCreditsTotal, availableGroup.unit);
 
-    const quotaGroup = view.groups.find((group) => group.unit === QUOTA_UNIT);
     const sum = quotaGroup !== undefined
       ? (quotaGroup.quotaLines ?? []).join(' · ')
       : view.groups.map((group) => `${formatUnits(group.total, group.unit) ?? '?'}${group.label}`).join(' · ');
