@@ -95,8 +95,53 @@ export interface AgnescodeModelEntry {
    * 出站只能回落 4096 ⇒ 长回答被静默截断（baizhi 那条 P0 的同型形态）。
    */
   readonly maxTokens?: number
+  /**
+   * 上游的**计费倍率**（`points_cost_multiplier`）。
+   *
+   * ⚠️ `0` 是真实价格（「免费」），不是缺值；缺字段才表示「上游没报价」。
+   * 实测（2026-11-19 真机）：`0` / `0.3` / `1` / `1.5` / `2.2` / `6` / `7.5` / `25`。
+   */
+  readonly multiplier?: number
+  /**
+   * 上游的订阅门控（`allowed_subscription`）。
+   *
+   * 空数组 = 不需要订阅；非空 = 该模型要这些档位之一（免费账号请求会
+   * 403 `subscription_required`，实测 2026-11-19）。**只用于展示**，
+   * 不得据此从目录里摘掉模型（参考实现同口径：门控是账号状态，不是模型事实）。
+   */
+  readonly subscriptions?: readonly string[]
   /** 能否收图。上游目录只声明 `model_type: "text"`，观测到之前一律 `false`。 */
   readonly vision: boolean
+}
+
+/**
+ * 目录里显示的名字：倍率挂在名字后面（` · x6.00`），缺字段则原样。
+ *
+ * ⚠️ 为什么倍率必须进 `name`（2026-11-19 真机取证 + 参考实现同款）：本仓的模型
+ * 选择器**没有**展示价格的通道（宿主 `LlmModelInfo` 只有 `description` / `badge`），
+ * 而 `points_cost_multiplier` 是**计费事实**：`kimi-k3` 是 6×、`gpt-6-astra` 是 25×，
+ * 不标出来用户会在「看起来一样」的两行里选中贵 25 倍的那个。参考实现用的正是
+ * ` · x{n.toFixed(2)}` 这个写法（与 SenseNova / WorkBuddy 选择器一致）。
+ * ⚠️ `0` 要显示成 `x0.00`（它是「免费」这条真实报价），不能当缺值吞掉。
+ */
+export function agnescodeDisplayName(entry: Pick<AgnescodeModelEntry, 'name' | 'multiplier'>): string {
+  const multiplier = entry.multiplier
+  if (typeof multiplier !== 'number' || !Number.isFinite(multiplier)) return entry.name
+  return `${entry.name} · x${multiplier.toFixed(2)}`
+}
+
+/** 订阅门控的说明文字（不需要订阅时 `undefined`）。 */
+export function agnescodeSubscriptionNote(
+  entry: Pick<AgnescodeModelEntry, 'subscriptions'>,
+): string | undefined {
+  const tiers = entry.subscriptions
+  if (tiers === undefined || tiers.length === 0) return undefined
+  return `需要 ${tiers.join(' / ')} 订阅；免费档请求会被上游 403（subscription_required）`
+}
+
+/** 「免费模型」判据：倍率为 **0**（这正是上游报价的含义，不是缺值）。 */
+export function agnescodeIsFree(entry: Pick<AgnescodeModelEntry, 'multiplier'>): boolean | undefined {
+  return entry.multiplier === 0 ? true : undefined
 }
 
 /**

@@ -225,6 +225,9 @@ describe('buildAgnescodePayload / buildAgnescodeTools', () => {
       tools: [],
     })
     expect(body.stream).toBe(true)
+    // ⚠️ 真机取证：不传 `stream_options.include_usage`，整条流**一帧 `usage` 都没有**
+    //    ⇒ 令牌台账永远空转。删掉这行必须让本断言红。
+    expect(body.stream_options).toEqual({ include_usage: true })
     expect(Array.isArray(body.tools)).toBe(true)
     const messages = body.messages as Array<Record<string, unknown>>
     expect(messages[0]?.role).toBe('system')
@@ -389,8 +392,7 @@ describe('AgnescodeAdapter 的接线判据（推理腿 / 预热自激 / 带图�
     expect(marks).toEqual(['a1', 'a2'])
   })
 
-  it('⚠️ SSE 里的上下文超限（无 status）必须**不换号**（换号对同一请求无用）', async () => {
-    let calls = 0
+  it('⚠️ SSE 里的上下文超限（无 status）必须**不换号**（换号对同一请求无用）', async () => {    let calls = 0
     const adapter = new AgnescodeAdapter({
       product,
       slots: async () => [slot('a1'), slot('a2')],
@@ -407,6 +409,138 @@ describe('AgnescodeAdapter 的接线判据（推理腿 / 预热自激 / 带图�
       }
     }).rejects.toThrow(/上下文超限/)
     expect(calls).toBe(1)
+  })
+
+  it('★ 真机形态的工具调用帧能合并成 tool 块 + finish tool-calls（首片带 id/name）', async () => {
+    // 帧形态照抄 2026-11-19 真机（agnes-2.5-pro + get_time）：
+    //   首片 {id,type:'function',index:0,function:{name:'get_time',arguments:''}}
+    //   后续只带 arguments 片段（实测是 "{" 与 "}" 两片）
+    //   末帧 delta 为空 + finish_reason:'tool_calls'，随后 [DONE]
+    const frames = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","type":"function","index":0,"function":{"name":"get_time","arguments":""}}]}}]}',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{"},"type":"function","index":0}]}}]}',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"}"},"type":"function","index":0}]}}]}',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      'data: [DONE]',
+    ].join('\n\n') + '\n\n'
+    let wireBody: Record<string, unknown> = {}
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1')],
+      fetchImpl: (async (_url: string, init: { body: string }) => {
+        wireBody = JSON.parse(init.body) as Record<string, unknown>
+        return new Response(frames, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })
+      }) as unknown as typeof fetch,
+    })
+    const chunks: Array<Record<string, unknown>> = []
+    for await (const chunk of adapter.stream({
+      model: 'agnes-2.5-pro',
+      messages: [{ role: 'user', content: '几点了？' }],
+      tools: [{ name: 'get_time', description: '时间', parameters: { type: 'object' } }],
+    } as never)) {
+      chunks.push(chunk as unknown as Record<string, unknown>)
+    }
+    // 请求侧：工具必须真的发出去（漏接 = 模型永远不调用工具，且没有报错）。
+    expect((wireBody.tools as Array<{ function: { name: string } }>)[0]?.function.name).toBe('get_time')
+    const toolEnd = chunks.find((c) => c.type === 'block-end'
+      && (c.block as { type?: string } | undefined)?.type === 'tool-call')
+    expect((toolEnd?.block as { arguments?: string } | undefined)?.arguments).toBe('{}')
+    expect(chunks.at(-1)?.type).toBe('finish')
+    expect((chunks.at(-1)?.reason as { kind?: string } | undefined)?.kind).toBe('tool-calls')
+  })
+
+  it('★ 目录名带计费倍率、免费标记、订阅门控说明（2026-11-19 真机字段）', async () => {
+    // 真机实测：`points_cost_multiplier` 取 0 / 0.3 / 1 / 1.5 / 2.2 / 6 / 7.5 / 25；
+    // `allowed_subscription` 非空 = 需要该档订阅（免费账号请求 403 subscription_required）。
+    const rows = [
+      { id: 'kimi-k3', name: 'Kimi K3', model_type: 'text', max_input_tokens: 1048576, max_output_tokens: 131072, points_cost_multiplier: 6, allowed_subscription: ['Starter', 'Plus', 'Pro'] },
+      { id: 'agnes-3.0-flash', name: 'Agnes 3.0 Flash', model_type: 'text', max_input_tokens: 512000, max_output_tokens: 65536, points_cost_multiplier: 0, allowed_subscription: [] },
+      { id: 'agnes-no-price', name: 'Agnes NoPrice', model_type: 'text' },
+      { id: 'auto', name: 'Auto', model_type: 'text' },
+    ]
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1')],
+      fetchImpl: (async () => new Response(JSON.stringify({ data: rows }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch,
+    })
+    const models = await adapter.listModels('agnescode')
+    const byId = (id: string) => models.find((m) => m.id === id)
+    expect(byId('kimi-k3')?.name).toBe('Kimi K3 · x6.00')
+    expect(byId('kimi-k3')?.description).toMatch(/Starter \/ Plus \/ Pro/)
+    expect(byId('agnes-3.0-flash')?.name).toBe('Agnes 3.0 Flash · x0.00')
+    expect('description' in (byId('agnes-3.0-flash') ?? {})).toBe(false)
+    // 上游没报价 ⇒ 名字**不加任何后缀**（不是 x0.00，也不是 x1.00）。
+    expect(byId('agnes-no-price')?.name).toBe('Agnes NoPrice')
+    expect(models.map((m) => m.id)).not.toContain('auto')
+    // `isFree` 只从 `listAllModels()` 出（宿主 `LlmModelInfo` 没有该字段，Jet Hub 免费桶读这条）。
+    const all = adapter.listAllModels()
+    expect(all.find((m) => m.id === 'agnes-3.0-flash')?.isFree).toBe(true)
+    expect(all.find((m) => m.id === 'kimi-k3')?.isFree).toBeUndefined()
+  })
+
+  it('⚠️ 403 `subscription_required` 不是认证失败：不换号、不给「重新登录」指路', async () => {    // 真机取证（2026-11-19）：免费账号请求 `deepseek-v4.1-flash` 回
+    // `403 {"code":"subscription_required","message":"该模型需要更高权益解锁，请升级订阅后使用。"}`
+    // 旧实现把它当 `AUTH` ⇒ 白轮整池 + 错误尾部挂「会话可能已过期，请重新登录」这条错指路。
+    let calls = 0
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1'), slot('a2')],
+      fetchImpl: (async () => {
+        calls += 1
+        return new Response(
+          JSON.stringify({ error: { code: 'subscription_required', message: '该模型需要更高权益解锁，请升级订阅后使用。' } }),
+          { status: 403, headers: { 'content-type': 'application/json' } },
+        )
+      }) as unknown as typeof fetch,
+      markLimited: async () => { throw new Error('must not mark') },
+    })
+    let caught: unknown
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 只需要一条文本消息
+      for await (const _chunk of adapter.stream({ model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }] } as any)) {
+        // 不该产出任何 chunk。
+      }
+    } catch (error) {
+      caught = error
+    }
+    expect(calls).toBe(1)
+    const failure = (caught as { failure?: { code?: string } }).failure
+    expect(failure?.code).toBe('PERMISSION')
+    expect((caught as Error).message).not.toMatch(/重新登录|会话可能已过期/)
+    expect((caught as Error).message).toMatch(/subscription_required/)
+  })
+
+  it('⚠️ 429 `daily_requests`（日墙）不得只冷却 60 秒', async () => {
+    // 真机取证：`429 {"code":"rate_limit_exceeded","message":"daily_requests limit exceeded"}`。
+    // 60s 冷却 ⇒ 每分钟撞一次同一面日墙；日墙要等次日 0 点（UTC+8）。
+    const marks: Array<{ at: number }> = []
+    const adapter = new AgnescodeAdapter({
+      product,
+      slots: async () => [slot('a1'), slot('a2')],
+      fetchImpl: (async () => new Response(
+        JSON.stringify({ error: { code: 'rate_limit_exceeded', message: 'daily_requests limit exceeded' } }),
+        { status: 429, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch,
+      markLimited: async (_accountId: string, _model: string, resetAtMs: number) => { marks.push({ at: resetAtMs }) },
+    })
+    await expect(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 只需要一条文本消息
+      for await (const _chunk of adapter.stream({ model: 'agnes-3.0-flash', messages: [{ role: 'user', content: 'hi' }] } as any)) {
+        // 不该产出任何 chunk。
+      }
+    }).rejects.toThrow(/均受限/)
+    expect(marks).toHaveLength(2)
+    for (const mark of marks) {
+      const delta = mark.at - Date.now()
+      expect(delta).toBeGreaterThan(60 * 60_000)
+      expect(delta).toBeLessThanOrEqual(25 * 60 * 60_000)
+    }
   })
 })
 

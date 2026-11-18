@@ -208,8 +208,11 @@ export class AgnescodeAuth extends Service {
     const credential = await this.readCredential(this.credentialRefName)
     if (credential === undefined) {
       throw new Error(
-        `AgnesCode：凭据 ${this.credentialRefName} 不可用。`
-        + 'AgnesCode 的登录态没有续期端点，请在 Jet Hub 的 AgnesCode 面板重新「导入本机登录态」。',
+        // ⚠️ 两站共用一个类 ⇒ 名字必须走 `product`（写死 AgnesCode 会让国际版
+        //    用户去国内站的入口里找「重新导入」按钮）。
+        `${this.product.displayName}：凭据 ${this.credentialRefName} 不可用。`
+        + `${this.product.displayName} 的登录态没有续期端点，请在 Jet Hub 的 `
+        + `${this.product.displayName} 面板重新「导入本机登录态」。`,
       )
     }
   }
@@ -231,7 +234,7 @@ export class AgnescodeAuth extends Service {
       //    于是按 `refreshAll` 的同口径：记一条 warn、跳过这一条。
       //    ⚠️ 真正的「未登录」由 `status()` / `checkExpired()` 表达，不靠这里抛。
       this.ctx.logger?.warn?.(
-        `[agnescode] 账号 ${accountId ?? '(未知)'} 的凭据 ${refName} 不可用，跳过对账`
+        `[${this.product.id}] 账号 ${accountId ?? '(未知)'} 的凭据 ${refName} 不可用，跳过对账`
         + '（AgnesCode 无续期端点，需要时请在面板重新导入本机登录态）',
       )
       return
@@ -242,7 +245,7 @@ export class AgnescodeAuth extends Service {
       credential,
       accessors: AGNESCODE_EXPIRY_ACCESSORS,
       ...accountId === undefined ? {} : { accountId },
-      tag: '[agnescode]',
+      tag: `[${this.product.id}]`,
     })
   }
 
@@ -258,7 +261,7 @@ export class AgnescodeAuth extends Service {
       const credential = await this.readCredential(entry.credentialRef)
       if (credential === undefined) {
         // 一个坏条目不该让整池停止对账。
-        this.ctx.logger?.warn?.(`[agnescode] 账号 ${entry.id} 的凭据 ${entry.credentialRef} 不可用，跳过对账`)
+        this.ctx.logger?.warn?.(`[${this.product.id}] 账号 ${entry.id} 的凭据 ${entry.credentialRef} 不可用，跳过对账`)
         continue
       }
       await syncAccountExpiry({
@@ -271,7 +274,7 @@ export class AgnescodeAuth extends Service {
           ...entry.expiresAt === undefined ? {} : { expiresAt: entry.expiresAt },
           refreshable: entry.refreshable,
         },
-        tag: '[agnescode]',
+        tag: `[${this.product.id}]`,
         warn: (message) => this.ctx.logger?.warn?.(message),
       })
     }

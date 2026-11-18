@@ -51,7 +51,7 @@ import type {
 import type { Context } from '@deepseek-ai/cordis'
 import type { AccountPool } from './account-pool.js'
 import { createModelCatalog, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
-import { AGNESCODE, agnescodeFallbackModels, type AgnescodeProduct } from './agnescode-product.js'
+import { AGNESCODE, agnescodeDisplayName, agnescodeFallbackModels, agnescodeIsFree, agnescodeSubscriptionNote, type AgnescodeModelEntry, type AgnescodeProduct } from './agnescode-product.js'
 import {
   agnescodeHeaders,
   fetchAgnescodeCatalog,
@@ -149,14 +149,16 @@ export class AgnescodeAdapter extends LlmAdapter {
    *
    * ⚠️ **不能 async**：`jet-hub-rpc` 的 `ModelCatalogSource` 是同步接口且消费者
    * 不 await，返回 Promise 会 `TypeError: all is not iterable`（minimax 的真实缺陷）。
+   *
+   * ⚠️ **必须委托给骨架**（2026-11-19 自查）：本方法原先自己从 `lastCatalog`
+   * 重新摊一遍，**丢掉了 `isFree`**（骨架那份是 `{id, name, isFree?}`，
+   * 而 Jet Hub 的免费桶只认该字段）；同时那也是「一判据两份实现」——
+   * 骨架的 `cached ?? syncCatalog()` 与本地的 `lastCatalog` 迟早会分叉。
+   * 语义完全一致（骨架的 `cached` 就是本适配器 `loadCatalog()` 的产物，
+   * 未暖时回落到 `syncCatalogEntries()`，同样会触发一次受节流的预热）。
    */
-  listAllModels(): readonly { id: string; name: string }[] {
-    const cached = this.lastCatalog
-    if (cached !== undefined && cached.entries.length > 0) {
-      return cached.entries.map((entry) => ({ id: entry.id, name: entry.name }))
-    }
-    void this.warmCatalog()
-    return agnescodeFallbackModels(this.product).map((m) => ({ id: m.id, name: m.name }))
+  listAllModels(): readonly { id: string; name: string; isFree?: boolean }[] {
+    return this.skeletonCatalog.listAllModels()
   }
 
   async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
@@ -204,13 +206,7 @@ export class AgnescodeAdapter extends LlmAdapter {
 
   /** 兜底目录（本家**刻意留空**，见 `agnescode-product.ts`）。 */
   private fallbackEntries(): readonly CatalogEntry[] {
-    return agnescodeFallbackModels(this.product).map((m) => ({
-      id: m.id,
-      name: m.name,
-      inputModalities: ['text'] as const,
-      ...m.contextWindow === undefined ? {} : { contextWindow: m.contextWindow },
-      ...m.maxTokens === undefined ? {} : { maxTokens: m.maxTokens },
-    }))
+    return agnescodeFallbackModels(this.product).map(toCatalogEntry)
   }
 
   /**
@@ -269,13 +265,7 @@ export class AgnescodeAdapter extends LlmAdapter {
       this.options.fetchImpl ?? globalThis.fetch,
     )
     if (remote !== null && remote.length > 0) {
-      const entries: CatalogEntry[] = remote.map((m) => ({
-        id: m.id,
-        name: m.name,
-        inputModalities: ['text'] as const,
-        ...m.contextWindow === undefined ? {} : { contextWindow: m.contextWindow },
-        ...m.maxTokens === undefined ? {} : { maxTokens: m.maxTokens },
-      }))
+      const entries: CatalogEntry[] = remote.map(toCatalogEntry)
       this.lastCatalog = { at: Date.now(), bffBase: base, entries }
       return entries
     }
@@ -337,6 +327,9 @@ export class AgnescodeAdapter extends LlmAdapter {
         if (failure.kind === 'context_window' || failure.kind === 'invalid_request') {
           throw error
         }
+        // 权益不足（403 `subscription_required`）：换号**没有任何用**（同一个订阅档
+        // 每个账号都一样），而且换号会把真实的「请升级订阅」淹没成「所有账号受限」。
+        if (failure.kind === 'entitlement') throw error
         if (failure.kind === 'auth') {
           if (tried.size >= slots.length) throw error
           limited.push(`${slot.accountId}(认证失败)`)
@@ -350,9 +343,16 @@ export class AgnescodeAdapter extends LlmAdapter {
           continue
         }
         // 限流 / 额度：标记该槽后换下一个。
-        const resetAtMs = failure.retryAfterMs !== undefined
-          ? Date.now() + Math.max(0, Math.min(failure.retryAfterMs, 30 * 60_000))
-          : Date.now() + 60_000
+        //
+        // ⚠️ 「每日请求量」与普通限流**不是**同一个冷却量级（2026-11-19 真机：
+        //    免费模型回 `429 daily_requests limit exceeded`）：按 60s 标记等于
+        //    每分钟重撞同一面日墙。日墙按「次日 0 点」记；上游若同时给了
+        //    `retry-after`，取两者更大的那个（上游口径优先）。
+        const resetAtMs = failure.daily === true
+          ? Math.max(agnescodeDailyResetAtMs(), Date.now() + (failure.retryAfterMs ?? 0))
+          : failure.retryAfterMs !== undefined
+            ? Date.now() + Math.max(0, Math.min(failure.retryAfterMs, 30 * 60_000))
+            : Date.now() + 60_000
         await this.options.markLimited?.(slot.accountId, options.model, resetAtMs)
         limited.push(`${slot.accountId}(${failure.kind})`)
       }
@@ -398,12 +398,19 @@ export class AgnescodeAdapter extends LlmAdapter {
             ? CONTEXT_WINDOW_EXCEEDED_CODE
             : kind === 'quota'
               ? 'QUOTA_EXCEEDED'
-              : httpErrorCode(response.status)
+              // ⚠️ 权益不足必须用 `PERMISSION`，**不能**用 `AUTH`：宿主会把 `AUTH`
+              //    的报文整条换成「API 密钥无效」，而「该模型需要更高订阅」这句
+              //    恰恰是唯一出路（Issue IKLBSH 的复发形态）。
+              : kind === 'entitlement'
+                ? 'PERMISSION'
+                : httpErrorCode(response.status)
       throw new LlmError(
         `${this.product.id}: HTTP ${response.status} — ${text.slice(0, 300)}`
-        + `${response.status === 401 || response.status === 403
-          ? '（会话可能已过期：请在本机重新登录 AgnesCode 桌面端，再点「导入本机登录态」）'
-          : ''}`,
+        // ⚠️ 「重新登录」这条指路**只对真·认证失败**有效。403 的权益不足挂上它
+        //    就是把人引向一个必然无效的动作（实测 `subscription_required`）。
+        + `${kind !== 'auth'
+          ? ''
+          : '（会话可能已过期：请在本机重新登录 AgnesCode 桌面端，再点「导入本机登录态」）'}`,
         code,
         {
           status: response.status,
@@ -486,8 +493,28 @@ export class AgnescodeAdapter extends LlmAdapter {
   }
 }
 
-/** 消息里是否有图片附件。 */
-function hasImages(messages: readonly { content: unknown }[]): boolean {
+/**
+ * 目录条目 → 骨架条目（**唯一**一处映射，远端与兜底共用）。
+ *
+ * ⚠️ 必须只有一份：倍率后缀 / 免费标记 / 订阅说明三条判据各自都在这里，
+ * 远端与兜底各写一遍就会「远端显示 x6.00、兜底显示原名」这种同数据两套口径
+ *（本仓已因「一判据两份实现」吃过多次亏）。
+ */
+function toCatalogEntry(model: AgnescodeModelEntry): CatalogEntry {
+  const free = agnescodeIsFree(model)
+  const note = agnescodeSubscriptionNote(model)
+  return {
+    id: model.id,
+    name: agnescodeDisplayName(model),
+    inputModalities: ['text'] as const,
+    ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+    ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+    ...(free === undefined ? {} : { isFree: free }),
+    ...(note === undefined ? {} : { description: note }),
+  }
+}
+
+/** 消息里是否有图片附件。 */function hasImages(messages: readonly { content: unknown }[]): boolean {
   const refs = new Map<string, unknown>()
   for (const message of messages) {
     if (Array.isArray(message.content)) collectImages(message.content, refs)
@@ -496,15 +523,71 @@ function hasImages(messages: readonly { content: unknown }[]): boolean {
 }
 
 /** 状态码 + 报文 → 语义类别。 */
-type FailureKind = 'auth' | 'rate_limit' | 'quota' | 'context_window' | 'invalid_request' | 'server' | 'transport'
+type FailureKind =
+  | 'auth'
+  | 'rate_limit'
+  | 'quota'
+  | 'context_window'
+  | 'invalid_request'
+  /** 账号权益不够（403 `subscription_required`）：换号无用、也没有「重新登录」这条路。 */
+  | 'entitlement'
+  | 'server'
+  | 'transport'
 
 function kindOfStatus(status: number, text: string): FailureKind {
-  if (status === 401 || status === 403) return 'auth'
+  if (status === 401) return 'auth'
+  // ⚠️ 403 有**两种完全不同的语义**（2026-11-19 真机取证）：
+  //    - 会话失效 ⇒ 重新登录有用；
+  //    - `subscription_required`（「该模型需要更高权益解锁，请升级订阅后使用」）⇒ 换号
+  //      和重新登录**都没用**，用户要做的只有升级订阅。
+  //    旧实现一律归 `auth` ⇒ 白轮整池 + 错误尾部还挂着「会话可能已过期，请重新登录」
+  //    这条**错误指路**（本仓红线：文案本身就是出路时不能给错）。
+  if (status === 403) return entitlementText(text) ? 'entitlement' : 'auth'
   if (status === 429) return 'rate_limit'
   if (status === 402) return 'quota'
   if (status >= 500) return 'server'
   if (contextOverflowText(text)) return 'context_window'
   return 'invalid_request'
+}
+
+/** 403 报文里是否在说「权益/订阅」而不是「凭据」。 */
+function entitlementText(text: string): boolean {
+  const lower = text.toLowerCase()
+  return lower.includes('subscription_required')
+    || lower.includes('subscription required')
+    || lower.includes('upgrade')
+    || text.includes('升级订阅')
+    || text.includes('权益')
+}
+
+/**
+ * 「每日请求量」限流的报文判据。
+ *
+ * ⚠️ 实测（2026-11-19 真机）：免费模型 `agnes-3.0-flash` 回
+ * `429 {"code":"rate_limit_exceeded","message":"daily_requests limit exceeded"}`。
+ * 这一条与普通限流的**冷却时长差两个数量级**：按 60s 处理 ⇒ 用户每分钟被劝一次
+ * 「再试」，每次都撞同一面日墙（而日墙要到次日 0 点才开）。
+ */
+function dailyLimitText(text: string): boolean {
+  const lower = text.toLowerCase()
+  return (lower.includes('daily') && lower.includes('limit'))
+    || lower.includes('每日')
+    || lower.includes('今日')
+}
+
+/**
+ * 下一次「当地 0 点」的时刻（毫秒）。
+ *
+ * ⚠️ 用 UTC+8：本家两站都是国内平台的日窗口，而本仓对「当日额度」的既有口径
+ * 正是 UTC+8 的 24:00（`loomyCooldownResetAtMs` / qoder 的当日限流标记同款）。
+ * ⚠️ 这是**推断**不是取证：上游只说 `daily`，没有给 reset 时间戳也没有
+ * `retry-after`。取「次日 0 点」是最不坏的一条（比 60s 真实、比 24h 精确）。
+ */
+function agnescodeDailyResetAtMs(now = Date.now()): number {
+  const OFFSET_MS = 8 * 3_600_000
+  const shanghaiNow = now + OFFSET_MS
+  const nextMidnight = (Math.floor(shanghaiNow / 86_400_000) + 1) * 86_400_000
+  return nextMidnight - OFFSET_MS
 }
 
 /**
@@ -532,7 +615,7 @@ function contextOverflowText(text: string): boolean {
  * 宿主的溢出压缩只认 `CONTEXT_WINDOW_EXCEEDED` 这个码，所以这里的归类错会让
  * 唯一有效的动作（压缩重试）被掩盖（qiniu / gemini 的同型修法）。
  */
-function failureInfoOf(error: unknown): { kind: FailureKind; retryAfterMs?: number } {
+function failureInfoOf(error: unknown): { kind: FailureKind; retryAfterMs?: number; daily?: boolean } {
   const failure = (typeof error === 'object' && error !== null ? error : {}) as {
     failure?: { status?: unknown; providerRetryAfterMs?: unknown; code?: unknown }
   }
@@ -552,7 +635,13 @@ function failureInfoOf(error: unknown): { kind: FailureKind; retryAfterMs?: numb
         : failureCode === 'AUTH'
           ? 'auth'
           : 'transport'
-  return retryAfterMs === undefined ? { kind } : { kind, retryAfterMs }
+  // 「每日请求量」只对限流类有意义（其它类别不看这个标记）。
+  const daily = kind === 'rate_limit' && dailyLimitText(message)
+  return {
+    kind,
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    ...(daily ? { daily } : {}),
+  }
 }
 
 /** 在 `ctx.llm` 上注册 AgnesCode 路由（幂等）。 */

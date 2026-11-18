@@ -512,11 +512,22 @@ export async function fetchAgnescodeCatalog(
       //（上游给 0 时面板拿到的窗口其实是「未知」，只是被写成了 0）。
       const contextWindow = positiveInt(model.max_input_tokens)
       const maxTokens = positiveInt(model.max_output_tokens)
+      // ⚠️ `0` 是真实报价（免费），不是缺值 ⇒ 不用 `positiveInt` 读它。
+      const multiplier = typeof model.points_cost_multiplier === 'number'
+        && Number.isFinite(model.points_cost_multiplier) && model.points_cost_multiplier >= 0
+        ? model.points_cost_multiplier
+        : undefined
+      // 订阅门控：空数组 = 不需要订阅。只做展示（不得据此摘模型）。
+      const subscriptions = Array.isArray(model.allowed_subscription)
+        ? model.allowed_subscription.filter((tier): tier is string => typeof tier === 'string' && tier !== '')
+        : undefined
       out.push({
         id,
         name: typeof model.name === 'string' && model.name !== '' ? model.name : id,
         ...(contextWindow === undefined ? {} : { contextWindow }),
         ...(maxTokens === undefined ? {} : { maxTokens }),
+        ...(multiplier === undefined ? {} : { multiplier }),
+        ...(subscriptions === undefined ? {} : { subscriptions }),
         // 目录只声明 `model_type: "text"`；在真机确认「能收图」之前一律 false，
         // 否则宿主会把图发上去、上游静默忽略（比直接拒绝更难排查）。
         vision: false,

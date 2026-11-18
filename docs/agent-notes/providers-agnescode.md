@@ -170,3 +170,95 @@ token **verbatim**（参考实现 trim 只用于空判），JWT 无空白，实�
 **变异验证**：4 次「删掉该腿」全部变红（端口判据 / `format_drift` / 判重 / `code` 归类）；
 其中两次因 CRLF + 缩进用字面量锚点报 `ANCHOR-MISSING`，换 `(?m)^\s*…` 正则锚点才命中
 （`ANCHOR-MISSING` ≠ 无牙）。
+
+## 11. 真机取证（2026-11-19，两站都跑通）
+
+⚠️ **这份是唯一的事实源**，别再按印象改这几处。取证方式：`harvestAgnescodeLocalSession`
+读本机真会话 → 用我们自己的模块直接打三个端点（脚本已删，勿把 token 写进仓库）。
+
+### 11.1 目录 `/v2/models` 的真实字段（两站并集）
+
+`allowed_subscription, auto_compact_threshold, created, description, display_label,
+gray_available, id, is_gray, max_input_tokens, max_output_tokens, model_type, object,
+owned_by, provider, supported_endpoint_types, points_cost_multiplier, thinking_toggle`
+
+实测值（国内站 8 行 / 国际站 12 行）：
+
+- `points_cost_multiplier`：`0`（`agnes-3.0-flash` / `2.5-flash`）/ `0.3` / `1` / `1.5` /
+  `2.2` / `6`（`kimi-k3`）/ `7.5` / `25`（`gpt-6-astra`）；`auto` 行**没有**该字段。
+- `allowed_subscription`：`agnes-*` 是 `[]`，其余是 `["Starter","Plus","Pro"]`。
+- `thinking_toggle`：`{default_enabled:true, switchable_endpoints:["chat"]}`（`glm-5.3` 没有）。
+- `display_label`：只有 `deepseek-v4.1-flash` 是 `"限时优惠"`，其余空串（与参考实现的
+  「空串必须当**没有**徽标」同判）。
+- `max_input_tokens` / `max_output_tokens` 全部为正整数（`512000/65536`、`1000000/393216`、
+  `1048576/131072` …）。
+
+### 11.2 三个已修的真缺陷
+
+- ⚠️⚠️ **403 `subscription_required` 被当成「认证失败」**（真机：免费档请求
+  `deepseek-v4.1-flash` 回 `403 {"code":"subscription_required","message":"该模型需要更高权益
+  解锁，请升级订阅后使用。"}`）。旧实现 `kindOfStatus(403) === 'auth'` ⇒ ①白轮整池
+  （同一订阅档每个账号都一样）；②错误尾部挂「会话可能已过期，请重新登录」——
+  **一条必然无效的指路**（本仓红线：文案本身就是出路时不能给错）。现在 403 先判报文，
+  权益类归 `entitlement`：**不换号**、`code` 用 `PERMISSION`（宿主会把 `AUTH` 的报文整条
+  换成「API 密钥无效」，Issue IKLBSH 同型）、「重新登录」这句只在真·认证失败时出现。
+- ⚠️ **429 `daily_requests limit exceeded` 只冷却 60 秒**（真机：免费模型
+  `agnes-3.0-flash`）。日墙要等次日 0 点，按 60s 标记等于每分钟劝用户重撞同一面墙。
+  现在报文命中 `daily…limit` ⇒ 冷却到**次日 UTC+8 0 点**（与 `loomyCooldownResetAtMs` /
+  qoder 当日标记同口径）；上游若同时给 `retry-after`，取两者更大的。⚠️「次日 0 点」是
+  **推断**（上游只说 daily，不给 reset 时间戳）—— 比 60s 真实、比 24h 精确，已在代码里
+  如实标注。
+- ⚠️ **计费倍率完全没展示**（真机确有 `points_cost_multiplier`，最高 25×）：本仓选择器
+  没有价格通道，而 `kimi-k3`(6×) 与 `gpt-6-astra`(25×) 在列表里看起来与 1× 无差别。
+  现在按参考实现与全仓既有约定把倍率写进 `name`（` · x6.00`；`x0.00` = 免费，**缺字段才
+  不加后缀**），`multiplier === 0` 同时产 `isFree`（Jet Hub 免费桶只认它），
+  `allowed_subscription` 非空则写进 `description`（「需要 Starter / Plus / Pro 订阅；
+  免费档请求会被上游 403」）。三条判据集中在 `agnescode-product.ts`、远端与兜底共用
+  `toCatalogEntry()` 一份实现。
+- ⚠️ **`listAllModels()` 自己摊目录时丢了 `isFree`**：骨架的 `listAllModels()` 是
+  `{id, name, isFree?}`，我们那份覆写只返回 `{id,name}` ⇒ 免费桶永远空。现在直接委托
+  给骨架（语义相同：骨架的 `cached` 就是本适配器 `loadCatalog()` 的产物）。
+- 两站共用一个 `AgnescodeAuth` 类，而日志 tag 与 `refresh()` 文案都写死 `agnescode`
+  ⇒ 国际站的诊断行挂错名（与适配器里已修的同一类）。现全部走 `product.id` / `displayName`。
+
+### 11.3 工具调用与用量（同样真机验证过）
+
+- **工具调用是通的**：真机 `agnes-2.5-pro` + `get_time` 返回
+  `{"choices":[{"delta":{"tool_calls":[{"id":"call_…","type":"function","index":0,
+  "function":{"name":"get_time","arguments":""}}]}}]}`，参数分两片（`"{"`、`"}"`）合并，
+  末帧 `finish_reason:"tool_calls"`。经**我们自己的适配器**再跑一遍，块序列是
+  `reasoning-delta ×6 → text-delta → tool-call-delta ×3(args 合成为 {}) → block-end → finish{tool-calls}`
+  ⇒ `options.tools` → `buildAgnescodeTools` → SSE 合并这条链完整（`44 条`用例里专门锁了这条）。
+- **`tools: []` 不会挂**（真机 200，模型正常回答）⇒「tools 恒带」这条约定可以继续。
+- ⚠️⚠️ **`stream_options.include_usage` 是必须的，而且原实现没发**（已修）：
+  不传这个字段，上游整条流里**一帧 `usage` 都没有**（实测 10 帧全无）⇒ 令牌台账
+  永远空转（面板上「本步用量」恒空，用户以为插件不记账）。传了之后末帧回
+  `{"usage":{"completion_tokens":29,"prompt_tokens":350,"total_tokens":379,
+  "completion_tokens_details":{"reasoning_tokens":14,"text_tokens":15}}}`，
+  适配器随即产出 `usage {inputTokens:98, outputTokens:30, cacheReadTokens:256, reasoningTokens:15}`
+  （`inputTokens` 已按共享口径扣掉缓存命中部分）。**国内站与国际站都实测 200 + 有 usage 帧**。
+  ⚠️ 免费模型（`agnes-3.0-flash`）今天撞了日限额 429，**没能**验证它对 `stream_options`
+  的接受度 —— 但同网关同协议，且 OpenAI 标准字段，先按「两站付费站已验证」推进。
+- **目录 `supported_endpoint_types` 恒 `["openai"]`**（CN 8 行全部如此，`model_type` 也恒
+  `"text"`）⇒ 不做该字段的门控（没有一条反例，加了就是永不触发的死代码）；`model_type !== 'text'`
+  的过滤保留（那是既有事实）。
+
+### 11.4 实测过但**刻意不做**的
+
+- **思考档位**：真机证明 BFF **接受 `reasoning_effort`**（`2.5-pro` 的 `low`/`medium` 均 200
+  且返回 `reasoning_content`），`thinking_toggle` 也证明模型有开关。但仍**不声明**，理由三条：
+  ① 档位是**按模型**的 —— `2.5-pro` 对 `high` 回 400（「Supported types are xhigh (default),
+  medium, and low」），而目录**不告诉**我们每个模型的梯子；
+  ② `xhigh` 今天**实测 500**（`'NoneType' object has no attribute '__aiter__'`，上游 bug），
+  而参考实现把 `2.5-pro` 的 `high` 别名到 `xhigh` ⇒ 照抄就会把「默认档」打成 500；
+  ③ 我们自己的 wire 形态（字段名 `reasoning_effort` + 哪个值）在**本仓代码路径**上未验过
+  （只验过「上游接受」）。⇒ 维持 `PROVIDERS_WITHOUT_REASONING`，等有逐模型梯子的来源再说。
+  附注：默认（不传该字段）**思考是开着的**，`reasoning-delta` 能正常流出（真机端到端跑过，
+  块序列 `reasoning-delta ×6 + text-delta ×1`）。
+- **`display_label` → 徽标**：`"限时优惠"` 是上游文案（比 TRAE 那种「只有数字」好办），
+  但现有徽标通道是 `model-promotions.ts` 的**按时间窗现算**体系（issue #101 的定案是
+  「在 `toCatalogEntry` 现算、条目只存未决候选表」），而这里是一个**静态行字段**。
+  硬塞进去会绕开那套窗口纪律（也不清楚「限时优惠」何时失效）。已登记为候选，不在本 PR。
+- `memberOnly` 模型**不从目录摘掉**（参考实现同口径：门控是账号状态，不是模型事实），
+  只在 `description` 上说清楚；请求撞门控时由上面的 `entitlement` 分类给出可执行文案。
+

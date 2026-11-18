@@ -72,12 +72,17 @@ export interface AgnescodePayloadInput {
  * - `max_tokens` 只放行**安全正整数**（0/负数/NaN 会让 DSH 抛
  *   `INVALID_MODEL_MAX_TOKENS`，那是崩，不是降级）；
  * - `tools` 恒带（可为空数组）：带工具的请求必须让上游看到该字段存在。
+ * - `stream_options.include_usage` **恒带**（2026-11-19 真机取证）：不传它，上游整条
+ *   流里**一帧 `usage` 都没有**（实测 10 帧全无），令牌台账因此永远是空的；带上后
+ *   末帧回 `{prompt_tokens:92, completion_tokens:32, reasoning_tokens:31}`。
+ *   这是 OpenAI 流式协议的标准开关，不依赖任何厂商扩展。
  */
 export function buildAgnescodePayload(input: AgnescodePayloadInput): Record<string, unknown> {
   return {
     model: input.model,
     messages: foldSystemIntoMessages(input.messages, input.system),
     stream: true,
+    stream_options: { include_usage: true },
     tools: buildAgnescodeTools(input.tools),
     ...typeof input.temperature === 'number' && Number.isFinite(input.temperature)
       ? { temperature: input.temperature }
