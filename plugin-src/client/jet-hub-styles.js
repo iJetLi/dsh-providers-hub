@@ -2120,27 +2120,6 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   color: var(--dsw-alias-label-tertiary, #8f959e);
 }
 
-/**
- * ★★ **位次数字块：定宽 13px + 右对齐**（用户 2026-11-18：
- * 「位次小于 10 时，采用位次 2 这种位次加空格再一位数字，看起来几乎对齐就行」）。
- *
- *     位次[  1]·康娣 戚      ← 数字块右对齐，1 贴右
- *     位次[ 10]·clover e     ← 0 与上面的 1 同位置
- *     位次[123]·xyz          ← 三位超出 13px，块自动撑开（用户接受）
- *
- * ⚠️ 为什么用定宽块而不是塞空格：
- *    - 空格宽度随字体变化（比例字体下「位次 2」与「位次 11」的空格不等宽），
- *      在非等宽字体下**根本对不齐**；
- *    - 定宽块 + text-align:right 由浏览器保证，任何字体/缩放都一致。
- *    ⇒ 用户的诉求是「看起来几乎对齐就行」，定宽块是**真对齐**（超预期）。
- * ⚠️ tabular-nums：等宽数字，避免 1 与 0 字形宽度差导致的细微抖动。
- */
-.dim-jh-badgePosNum {
-  display: inline-block;
-  width: 13px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
 
 /**
  * 总积分读数（总7564.5）。

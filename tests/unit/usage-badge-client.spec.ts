@@ -132,7 +132,19 @@ describe('用量徽标：槽位接线', () => {
    *    塞空格在比例字体下对不齐（空格宽度随字体变）；
    *    定宽块 + text-align:right 由浏览器保证，任何字体/缩放都一致。
    */
-  it('账号标识列合并成一列：161px，内含 13px 右对齐数字块', () => {
+  /**
+   * ★★ **账号标识列**（用户 2026-11-18 最终定稿）。
+   *
+   * 格式**与轮换起点下拉框完全同款**：`位次 N · 账号名`。
+   *
+   * 用户原话：「帐号列表中位次显示还是按照轮换起点下拉框的风格来吧。位次数字直接
+   * 在位次后面，不需要右对齐，与帐号名之间有点号分隔，有空格，不那么紧凑」
+   *
+   * ⚠️ 曾试过「13px 定宽数字块 + 右对齐」让位次严格对齐，被用户否掉：
+   *    那样视觉上太紧凑、与下拉框风格不一致 ⇒ **已移除 .dim-jh-badgePosNum**。
+   *    本条用例反向锁住它：不得再出现定宽数字块。
+   */
+  it('账号标识列：整列 161px，格式为「位次 N · 名字」（与下拉框同款）', () => {
     const idRule = /\.dim-jh-badgeColId \{([^}]*)\}/.exec(styles)
     expect(idRule, '应能取到 .dim-jh-badgeColId 规则体').not.toBeNull()
     expect(idRule[1], '标识列必须固定 161px（实测上限）').toMatch(/width:\s*161px/)
@@ -144,11 +156,22 @@ describe('用量徽标：槽位接线', () => {
     expect(idRule[1], '必须 vertical-align: bottom').toMatch(/vertical-align:\s*bottom/)
     expect(idRule[1], '必须 box-sizing: border-box').toMatch(/box-sizing:\s*border-box/)
 
-    const numRule = /\.dim-jh-badgePosNum \{([^}]*)\}/.exec(styles)
-    expect(numRule, '应能取到 .dim-jh-badgePosNum 规则体').not.toBeNull()
-    expect(numRule[1], '位次数字块必须固定 13px').toMatch(/width:\s*13px/)
-    expect(numRule[1], '位次数字块必须右对齐（一位/两位才对得齐）').toMatch(/text-align:\s*right/)
-    expect(numRule[1], '位次数字块必须等宽数字').toMatch(/tabular-nums/)
+    // ⚠️ 反向：不得再有定宽数字块（用户明确「不需要右对齐」「不那么紧凑」）
+    expect(styles, '不得再保留 .dim-jh-badgePosNum 规则').not.toMatch(/\.dim-jh-badgePosNum\s*\{/)
+    expect(badge, '不得再渲染定宽数字块').not.toContain('dim-jh-badgePosNum')
+  })
+
+  /**
+   * ★ 列表的位次标签必须**与下拉框逐字一致**（防格式漂移）。
+   *
+   * ⚠️ 两处都用 `位次 N · 名字` 的模板，但各自拼（一个在 option 文本、一个在列表），
+   *    必须断言模板本身相同，否则改一处另一处会静默漂移。
+   */
+  it('列表与下拉框的位次标签模板一致', () => {
+    // 两处都必须是「位次 + 空格 + position + 空格-点-空格 + name」的形态
+    const labelPattern = /位次 \$\{[^}]*position\} · \$\{[^}]*name\}/
+    const matches = badge.match(new RegExp(labelPattern.source, 'g')) ?? []
+    expect(matches.length, '应有至少两处「位次 N · 名字」模板（列表 + 下拉框）').toBeGreaterThanOrEqual(2)
   })
 
   /**

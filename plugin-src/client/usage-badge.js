@@ -1733,7 +1733,16 @@ function UsageBadgeActive(props) {
   }
 
   /**
-   * ★ 账号行的**两段式**显示名（用户 2026-11-18：位次与账号名各成定宽列）。
+   * ★ 账号行的**显示名分解**（位次 + 名字，供列表与下拉框共用同一套取值）。
+   *
+   * ⚠️ 2026-11-18 改：位次与账号名**不再各成定宽列**（用户：「按照轮换起点
+   *    下拉框的风格来吧……位次数字直接在位次后面，不需要右对齐，与帐号名之间有
+   *    点号分隔，有空格，不那么紧凑」）。
+   * ⇒ 两者拼成一段连续文本 `位次 N · 名字`，与下拉框逐字一致。
+   *
+   * ⚠️ 但它仍返回**结构化**的 position/name 而不是直接拼好的字符串：
+   *    列表要用 position 做 tooltip、判断是否为空；下拉框用 accountOptionLabel。
+   *    两处都从本函数取值 ⇒ 不会漂移。
    *
    * | 段 | 内容 | 列宽 |
    * |---|---|---|
@@ -2205,7 +2214,7 @@ function UsageBadgeActive(props) {
             key: row.accountId,
             className: 'dim-jh-badgeRow dim-jh-badgeRowInline',
           }, [
-            // ① 合并列：位次 + 账号名 + 原因后缀
+            // ① 合并列：位次 + 账号名 + 原因后缀（**与下拉框同款格式**）
             React.createElement('span', {
               key: 'id',
               className: 'dim-jh-badgeColId',
@@ -2214,18 +2223,12 @@ function UsageBadgeActive(props) {
               title: rowParts === null
                 ? '该账号已不在账号池中'
                 : `位次 ${rowParts.position}：默认顺序里的第 ${rowParts.position} 位 · ${rowParts.name}`,
-            }, [
-              React.createElement('span', { key: 'p' }, '位次 '),
-              // ⚠️ 定宽 13px + 右对齐的数字块（见 .dim-jh-badgePosNum 注释）
-              React.createElement('span', {
-                key: 'n',
-                className: 'dim-jh-badgePosNum',
-              }, rowParts === null ? '—' : rowParts.position),
-              React.createElement('span', { key: 's' }, '·'),
-              React.createElement('span', { key: 'd' }, rowParts === null
-                ? (row.nickname || row.accountId)
-                : rowParts.name),
-            ]),
+            }, rowParts === null
+              ? (row.nickname || row.accountId)
+              // ⚠️ **与下拉框完全同款**（用户 2026-11-18：「按照轮换起点下拉框的风格来」）
+              //    ⇒ 直接复用 accountOptionLabel 的拼法，不再手工拼三段。
+              //    这样两处格式永远一致（本仓反复记录过「同一语义两处实现」的漂移）。
+              : `位次 ${rowParts.position} · ${rowParts.name}`),
             /**
              * ⚠️ 名字与读数之间**必须有一个分隔符**（2026-11-18 真机报障）：
              * 两者都是 `display: inline`，仅靠 CSS 的 `margin-left: 8px` 在
