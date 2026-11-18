@@ -212,6 +212,8 @@ suite('QoderCN 登录与端点探针（只读，零额度）', () => {
     let checked = 0
     let keyChecks = 0
     let skippedDuplicates = 0
+    let unparsedWinners = 0
+    let missingPromotion = 0
     for (const text of captured) {
       let parsed: unknown
       try { parsed = JSON.parse(text) } catch { continue }
@@ -240,6 +242,7 @@ suite('QoderCN 登录与端点探针（只读，零额度）', () => {
       for (const scene of scenes) {
         const list = body[scene] as Record<string, unknown>[]
         let withPromotionInScene = 0
+        let sceneKeyChecks = 0
         for (const raw of list) {
           if (typeof raw !== 'object' || raw === null) continue
           const promotion = raw.promotion as Record<string, unknown> | undefined
@@ -255,10 +258,22 @@ suite('QoderCN 登录与端点探针（只读，零额度）', () => {
             const keys = Object.keys(block as object)
             for (const key of keys) {
               keyChecks++
+              sceneKeyChecks++
               expect(ALLOWED.has(key), `${id}（场景 ${scene}）的 promotion.${field} 出现未知语言键 "${key}"`
                 + ' —— 官方读取口径是 en/zh/en_us/cn_zh，先取证再决定要不要加').toBe(true)
             }
-            if (parsedModel?.promotion === undefined) continue
+            // ⚠️ 原先这里是一句 `if (parsedModel?.promotion === undefined) continue`：
+            //    而「上游这条 promotion 有文案、我们却读不出 promotion」**正是本用例要守的症状**
+            //    ⇒ 静默跳过等于把它放过去（正向审计 P2-2，2026-11-18）。现在分成两种情形计数、
+            //    末尾断言为 0；非赢家场景本来就不应该断言（解析层已去重）。
+            if (parsedModel === undefined) {
+              if (isWinner) unparsedWinners++
+              continue
+            }
+            if (parsedModel.promotion === undefined) {
+              missingPromotion++
+              continue
+            }
             const upstreamHasText = keys.some((key) => {
               const value = (block as Record<string, unknown>)[key]
               return typeof value === 'string' && value.trim().length > 0
@@ -275,7 +290,7 @@ suite('QoderCN 登录与端点探针（只读，零额度）', () => {
         // 打印「键检查」次数是**为了证明非赢家场景那条腿不是空跑**（今天 app 与 chat
         // 逐 id 重复，文案对齐在 app 上被跳过，但键白名单照查）。
         console.log(`[qodercn] 场景 ${scene}：${list.length} 条，带活动 ${withPromotionInScene} 条`
-          + `，键检查 ${keyChecks} 次`)
+          + `，键检查 ${sceneKeyChecks} 次`)
       }
       if (skippedDuplicates > 0) {
         console.log(`[qodercn] 跨场景同 id ${skippedDuplicates} 条（按 scenes 顺序去重，靠前的赢）：`
@@ -283,5 +298,9 @@ suite('QoderCN 登录与端点探针（只读，零额度）', () => {
       }
     }
     expect(checked, '两站今天都应至少有一条带文案的活动；0 说明报告结构变了').toBeGreaterThan(0)
+    expect(unparsedWinners, '赢家场景的条目在解析层根本没被认出来（`byId` 里没有）——'
+      + ' 这说明目录解析层与本用例的 id 口径已经分岔').toBe(0)
+    expect(missingPromotion, '上游发了 promotion、我们解析出来却没有 promotion 字段 ——'
+      + ' 这正是本用例要守的症状（原先这里是一句 continue，静默放行）').toBe(0)
   })
 })

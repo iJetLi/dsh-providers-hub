@@ -1327,6 +1327,18 @@ Login-Version / X-Model-Key / X-Model-Source
 
 ### 一手证据（Qoder CN 0.5.11，`AppData\Local\Programs\Qoder CN\.qoder-versions\0.5.11`）
 
+**两处证据的版本不同，可复核性也不同（2026-11-18 审计 P3 后补的对照表）**：
+
+| 论断 | 本机（Jet，只有 **0.5.6**）能否复核 | 依据 |
+|---|---|---|
+| 双语键是**四键**、且「首选键 → 区域变体 → 四键兜底」 | ✅ **可复核**，而且与 0.5.11 **逐字同构** | 0.5.6 `app.asar` 里 `function ou1(e,t){return e?(b7(t)==="zh"?e.zh??e.cn_zh:e.en??e.en_us)??e.zh??e.cn_zh??e.en??e.en_us:void 0}`（函数名不同，表达式相同）；`cn_zh`/`en_us` 各**只出现 2 次且就在这一行** |
+| `promotion.description` 是**给人看的那句** | ✅ 可复核，但**它不是悬停** | 0.5.6 renderer 渲染成 `<div className="text-xs leading-5 text-text-secondary">` 的**行内次要文本**，外层还接了 `onOpenLink`（即它能点击跳链）。文案塞在 `detail.promotionDescription`（`detail` 由 `modelDescription` / `promotionDescription` / `restrictionDescription` 三者拼成） |
+| 主进程 `XS0` 是四键枚举 | ❌ **不可复核** | 本机 0.5.6 的 `XS0` 是另外两个函数（`function XS0(a){if(!a)throw …;return a}` 与一个 react hook），与语言键无关 |
+| 官方 `Zq()` 是 `trim` | ❌ **不可复核** | 本机 0.5.6 的 `Zq(a,x,e,f,n)` 是另一个功能，与 trim 无关 |
+
+⇒ 下表里凡标注「0.5.11」的行，都是**作者侧证据**，本机无法独立复验；而**四键这条主张本身
+在 0.5.6 上就能复核**，所以「我们原先只认 `zh`/`en`」是实打实的口径缺口，不是推测。
+
 `out/main/electronMain.js` 两个函数（混淆，需解字符串表）：
 
 ```js
@@ -1360,7 +1372,8 @@ function Yg1(e,t){ return e ? (B5(t)==="zh" ? e.zh??e.cn_zh : e.en??e.en_us)
 
 ### 我们原先**整条丢掉**的活字段：`promotion.description`
 
-官方把它当 `promotionDescription` 塞进条目 `detail`（即**悬停正文**），`badge` 只是行上
+官方把它当 `promotionDescription` 塞进条目 `detail`（**0.5.6 实测是卡片里那行次要文本，不是悬停**；
+「悬停」是 0.5.11 侧的说法，本机不可复验），`badge` 只是行上
 短标签。实测原文（CN）：`错峰时段4折优惠（10 PM-8 AM UTC+8）`。本仓解析层原先只读
 `badge`，而 PR #110 已经把悬停出口（`src/promotion-tooltip.ts` 的 `promotionTooltip`，
 读 `ModelPromotion.hover`）建好 —— 故本次把 `description` 读进来，
