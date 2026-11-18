@@ -173,6 +173,65 @@ describe('parseQoderRemoteModels', () => {
     })
   })
 
+  /**
+   * 双语文本块的读取口径（对齐官方 `Yg1()` / `Zq()`）。
+   *
+   * ⚠️ 每条都对着**一个会静默失效的方向**：认错键 ⇒ 整条徽标消失；
+   * 不 trim ⇒ 上游发一个空格画出一个**空胶囊**。
+   */
+  describe('promotion 的双语文本按官方四键口径读（2026-11-18 对齐）', () => {
+    const promo = (extra: Record<string, unknown>) => qoderRemoteModelToFallback({
+      key: 'm', display_name: 'M', price_factor: 0.5,
+      promotion: { active: false, window_start: '22:00', window_end: '08:00', ...extra },
+    })?.promotion
+
+    it('只发 cn_zh ⇒ 中文槽拿到，英文槽不填（跨语言兜底在下游）', () => {
+      expect(promo({ badge: { cn_zh: '错峰 4 折' } })?.badgeZh).toBe('错峰 4 折')
+      expect(promo({ badge: { cn_zh: '错峰 4 折' } })?.badgeEn).toBeUndefined()
+    })
+
+    it('只发 en_us ⇒ 英文槽拿到', () => {
+      expect(promo({ badge: { en_us: 'Off-Peak 60% off' } })?.badgeEn).toBe('Off-Peak 60% off')
+    })
+
+    it('两个都发 ⇒ 先手键优先（zh 先于 cn_zh，en 先于 en_us）', () => {
+      const p = promo({ badge: { zh: '甲', cn_zh: '乙', en: 'A', en_us: 'B' } })
+      expect(p?.badgeZh).toBe('甲')
+      expect(p?.badgeEn).toBe('A')
+    })
+
+    it('★ description 与 badge 同口径读，且**两条腿互不影响**', () => {
+      const p = promo({ badge: { zh: '错峰 4 折' }, description: { zh: '错峰时段4折优惠（10 PM-8 AM UTC+8）' } })
+      expect(p?.badgeZh).toBe('错峰 4 折')
+      expect(p?.descriptionZh).toBe('错峰时段4折优惠（10 PM-8 AM UTC+8）')
+    })
+
+    it('★★ description 走**同一个**四键解析器（区域变体也必须读出来）', () => {
+      // 守的是「同一 schema 两套判据」：badge 读了 cn_zh/en_us 而 description 只读 zh/en 时，
+      // 上游改发区域变体就变成「徽标还在、原话没了」，且两条腿都静默（零日志）。
+      expect(promo({ description: { cn_zh: '中文原话' } })?.descriptionZh).toBe('中文原话')
+      expect(promo({ description: { en_us: 'English note' } })?.descriptionEn).toBe('English note')
+      // 优先级同 badge：zh 先于 cn_zh / en 先于 en_us。
+      expect(promo({ description: { zh: '甲', cn_zh: '乙' } })?.descriptionZh).toBe('甲')
+      expect(promo({ description: { en: 'A', en_us: 'B' } })?.descriptionEn).toBe('A')
+    })
+
+    it('★ 去空白：两边带空格要 trim，纯空白按官方口径**视为空**（否则画一个空胶囊）', () => {
+      expect(promo({ badge: { zh: '  错峰 4 折  ' } })?.badgeZh).toBe('错峰 4 折')
+      expect(promo({ badge: { zh: '   ' } })?.badgeZh).toBeUndefined()
+      expect(promo({ badge: { zh: ' ' , en: 'Off-Peak' } })?.badgeEn).toBe('Off-Peak')
+      // 英文格同样要 trim —— 用例名写着「两边」，原先只断言了中文格 ⇒ 英文腿零守卫
+      // （变异「英文格不 trim」在补这两行之前全绿）。
+      expect(promo({ badge: { en: '  Off-Peak 60% off  ' } })?.badgeEn).toBe('Off-Peak 60% off')
+      expect(promo({ badge: { en: '   ' } })?.badgeEn).toBeUndefined()
+    })
+
+    it('badge 不是对象 / 没有 badge ⇒ 都不产出（官方 XS0 也只吃对象）', () => {
+      expect(promo({ badge: '错峰 4 折' })?.badgeZh).toBeUndefined()
+      expect(promo({})?.badgeZh).toBeUndefined()
+    })
+  })
+
   it('丢掉 enable:false 与形状不符的条目，并按 id 去重', () => {
     const models = parseQoderRemoteModels({
       chat: [

@@ -61,6 +61,16 @@
     //    泛型 `orderAccountsForSession`）—— 这类形状错误在 esbuild 转译下完全看不见，
     //    而它是「把判定搬出 `src/index.ts`」的承重件。
     "tests/unit/marvis-slot-ordering.spec.ts",
+    // ⚠️ 2026-11-18 补（PR #119 正向审计 P2-1）：本 spec 断言 `promotion` 的**形状**
+    //    —— `badgeZh`/`badgeEn`/`descriptionZh`/`descriptionEn` 都是 `string | undefined`，
+    //    且 `hover` 缺席时字段真的是 `undefined`。这类形状错误在 esbuild
+    //    转译下完全看不见，纳入前 `typecheck:tests` 对它恒为「0 错」。
+    // ⚠️ 同批审计也要求纳入 `tests/unit/model-promotions.spec.ts`，实测**纳入即 6 处既有类型债**：
+    //    5× `TS2345`（`:563-567` 的 fixture 缺必填字段 `standingEligible`）
+    //    + 1× `TS2532 Object is possibly 'undefined'`（`:722`）。那些与本 PR 无关（是
+    //    `standingEligible` 变必填时的遗留），修它们属于另一件事 ⇒ 本轮只纳入本文件，
+    //    那 6 处债如实登记在 `docs/agent-notes/providers-qoder.md`。
+    "tests/unit/qoder-catalog.spec.ts",
     // ⚠️ 2026-11-02 二审 C🟢 补、四审 H-4 **更正归因**：这里是 monkeycode /
     // monkeycodeintl / baizhi 三个 provider 新增 spec 中**需要类型层检查**的那部分。
     // 二审时本段写成「下面这批是**全部** spec」，实际 13 份只点名了 7 份 —— 措辞已更正。

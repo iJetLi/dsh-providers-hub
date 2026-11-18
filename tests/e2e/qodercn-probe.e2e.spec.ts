@@ -23,7 +23,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { QODER_CN } from '../../src/qoder-product.js'
-import { fetchQoderRemoteModels } from '../../src/qoder-catalog.js'
+import { QODER_CATALOG_SCENES, fetchQoderRemoteModels } from '../../src/qoder-catalog.js'
 import {
   QODER_REFRESH_PATH,
   QODER_USERINFO_PATH,
@@ -160,5 +160,147 @@ suite('QoderCN 登录与端点探针（只读，零额度）', () => {
     expect(models.some((m) => m.id === 'dfmodel'), '目录里没有 dfmodel').toBe(true)
     console.log(`[qodercn] 远端目录 ${models.length} 条：`
       + models.map((m) => `${m.id}=${m.name}`).join(', '))
+  })
+
+  /**
+   * 活动条目的**双语文本**（徽标 + 悬停说明）读得出来。
+   *
+   * 为什么要有这条（2026-11-18 实测）：
+   * - 官方渲染层的取词函数 `Yg1(e, locale)` 接受**四个键** `en / zh / en_us / cn_zh`
+   *   （`zh → cn_zh`、`en → en_us`，再做全键兜底），且 `Zq()` 会 `trim`；
+   * - 我们原先只读 `zh / en` ⇒ 上游一旦改发区域变体，徽标与悬停会**整条静默消失**
+   *   （`qoderPromotionCandidate` 在没有 label 时返回 undefined 且**不打日志**）；
+   * - `promotion.description`（悬停那句原话）我们**整条没读**，而它今天在两站都发。
+   *
+   * 判据**只打结构，不钉文案**：上游随时会改折扣措辞，逐字断言必然腐坏。
+   * 键集合的白名单是唯一「硬」的那格 —— 上游出现第五个语言键时要有人来看。
+   */
+  it('活动条目的徽标与悬停说明读得出来（键集合只用官方那四个）', async () => {
+    const entries = readQoderCredentialsFromDshStore({ refPrefix: 'QODERCN' })
+    if (entries.length === 0) {
+      console.log('  跳过：未找到 QODERCN_ACCOUNT_* 凭据（先在面板登录一次）')
+      return
+    }
+    const captured: string[] = []
+    const models = await fetchQoderRemoteModels(entries[0]!.credential, QODER_CN, {
+      fetcher: async (url, init) => {
+        const response = await fetch(url, init as RequestInit)
+        captured.push(await response.clone().text())
+        return response
+      },
+    })
+
+    const byId = new Map(models.map((m) => [m.id, m]))
+    const withPromotion = models.filter((m) => m.promotion !== undefined)
+    console.log(`[qodercn] 带活动 ${withPromotion.length} 条：`
+      + withPromotion.map((m) => `${m.id}=[${m.promotion!.badgeZh ?? ''}|${m.promotion!.badgeEn ?? ''}]`
+        + ` desc=${m.promotion!.descriptionZh === undefined ? '-' : 'y'}`).join(', '))
+
+    // 原始报文与解析结果**逐条对齐**（不是「必须活动」的契约断言）：
+    // 上游给了文案而我们读不出来 = 静默丢字，正是本 PR 要守的那格。
+    //
+    // ⚠️ **必须遍历 `QODER_CATALOG_SCENES`，不能只看 `chat`**（2026-11-18 自审）：
+    //   解析层吃的是 `chat ∪ app` 并集，而 `lmodel` 这类模型**只发布在 `app`** ⇒
+    //   只看 chat 时「只出现在 app 的活动」整条不被核对，上游改发区域变体时这条
+    //   守卫会**静默通过**（假绿）。用例名里的「键集合」是唯一硬判据，覆盖面必须
+    //   与解析层同域。
+    // ⚠️ 跨场景同 id 时解析层**按 scenes 顺序去重、靠前的赢**（`chat` 优先）⇒
+    //   与解析结果对齐时只有「赢家场景」那条能断言；后出现的同 id 条目只登记
+    //   不断言（否则 chat 缺 description 而 app 有，红会红在错误的地方）。
+    const ALLOWED = new Set(['en', 'zh', 'en_us', 'cn_zh'])
+    const rawId = (raw: Record<string, unknown>): string => String(raw.key ?? raw.model_key ?? '')
+    let checked = 0
+    let keyChecks = 0
+    let skippedDuplicates = 0
+    let unparsedWinners = 0
+    let missingPromotion = 0
+    for (const text of captured) {
+      let parsed: unknown
+      try { parsed = JSON.parse(text) } catch { continue }
+      const body = parsed as Record<string, unknown>
+      const scenes = QODER_CATALOG_SCENES
+        .filter((scene) => Array.isArray(body[scene])) as string[]
+      if (scenes.length === 0) continue // 报文里一个场景都没有 ⇒ 不是这份报告
+      // 第一遍：按 scenes 顺序算「每个 id 的赢家场景」（与 parseQoderRemoteModelsForScenes 同判）。
+      const winners = new Map<string, string>()
+      for (const scene of scenes) {
+        for (const raw of body[scene] as Record<string, unknown>[]) {
+          if (typeof raw !== 'object' || raw === null) continue
+          const id = rawId(raw)
+          if (id === '' || winners.has(id)) continue
+          winners.set(id, scene)
+        }
+      }
+      // 第二遍：逐条核对。
+      // ⚠️ 两条判据的覆盖面**刻意不同**：
+      // - **键白名单**（ALLOWED）对**所有场景的所有条目**生效 —— 它只读原始报文，
+      //   与「谁是赢家」无关。今天 app 与 chat 的条目逐 id 重复，若把它也限定在赢家，
+      //   这条腿在 app 上就**恒空跑**（2026-11-18 实测 app 14 条、其中 2 条带活动）。
+      // - **「上游有文案 ⇒ 我们不得读空」** 只对赢家场景生效（解析层按 scenes 顺序
+      //   去重，非赢家那条根本没被解析）—— 否则 chat 缺 description 而 app 有，
+      //   红会红在错误的地方。
+      for (const scene of scenes) {
+        const list = body[scene] as Record<string, unknown>[]
+        let withPromotionInScene = 0
+        let sceneKeyChecks = 0
+        for (const raw of list) {
+          if (typeof raw !== 'object' || raw === null) continue
+          const promotion = raw.promotion as Record<string, unknown> | undefined
+          if (typeof promotion !== 'object' || promotion === null) continue
+          withPromotionInScene++
+          const id = rawId(raw)
+          const isWinner = winners.get(id) === scene
+          if (!isWinner) skippedDuplicates++
+          const parsedModel = isWinner ? byId.get(id) : undefined
+          for (const field of ['badge', 'description'] as const) {
+            const block = promotion[field]
+            if (typeof block !== 'object' || block === null) continue
+            const keys = Object.keys(block as object)
+            for (const key of keys) {
+              keyChecks++
+              sceneKeyChecks++
+              expect(ALLOWED.has(key), `${id}（场景 ${scene}）的 promotion.${field} 出现未知语言键 "${key}"`
+                + ' —— 官方读取口径是 en/zh/en_us/cn_zh，先取证再决定要不要加').toBe(true)
+            }
+            // ⚠️ 原先这里是一句 `if (parsedModel?.promotion === undefined) continue`：
+            //    而「上游这条 promotion 有文案、我们却读不出 promotion」**正是本用例要守的症状**
+            //    ⇒ 静默跳过等于把它放过去（正向审计 P2-2，2026-11-18）。现在分成两种情形计数、
+            //    末尾断言为 0；非赢家场景本来就不应该断言（解析层已去重）。
+            if (parsedModel === undefined) {
+              if (isWinner) unparsedWinners++
+              continue
+            }
+            if (parsedModel.promotion === undefined) {
+              missingPromotion++
+              continue
+            }
+            const upstreamHasText = keys.some((key) => {
+              const value = (block as Record<string, unknown>)[key]
+              return typeof value === 'string' && value.trim().length > 0
+            })
+            if (!upstreamHasText) continue
+            const read = field === 'badge'
+              ? parsedModel.promotion.badgeZh ?? parsedModel.promotion.badgeEn
+              : parsedModel.promotion.descriptionZh ?? parsedModel.promotion.descriptionEn
+            expect(read, `${id}（场景 ${scene}）的上游 promotion.${field} 有文案（键 ${keys.join(',')}）`
+              + '但我们解析出来是空的 —— 键名口径漂了').toBeTruthy()
+            checked++
+          }
+        }
+        // 打印「键检查」次数是**为了证明非赢家场景那条腿不是空跑**（今天 app 与 chat
+        // 逐 id 重复，文案对齐在 app 上被跳过，但键白名单照查）。
+        console.log(`[qodercn] 场景 ${scene}：${list.length} 条，带活动 ${withPromotionInScene} 条`
+          + `，键检查 ${sceneKeyChecks} 次`)
+      }
+      if (skippedDuplicates > 0) {
+        console.log(`[qodercn] 跨场景同 id ${skippedDuplicates} 条（按 scenes 顺序去重，靠前的赢）：`
+          + '这些条目的文案按赢家场景核对，解析层并没有跨场景合并字段')
+      }
+    }
+    expect(checked, '两站今天都应至少有一条带文案的活动；0 说明报告结构变了').toBeGreaterThan(0)
+    expect(unparsedWinners, '赢家场景的条目在解析层根本没被认出来（`byId` 里没有）——'
+      + ' 这说明目录解析层与本用例的 id 口径已经分岔').toBe(0)
+    expect(missingPromotion, '上游发了 promotion、我们解析出来却没有 promotion 字段 ——'
+      + ' 这正是本用例要守的症状（原先这里是一句 continue，静默放行）').toBe(0)
   })
 })
