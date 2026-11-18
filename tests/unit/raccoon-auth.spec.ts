@@ -413,7 +413,14 @@ describe('fetchModels', () => {
     expect(models[0]?.name).toBe('SenseNova-6.8-Flash · 免费')
   })
 
-  it('promotions 只由 billing_discounts 决定（不猜）', async () => {
+  /**
+   * ⚠️ 本用例原名「promotions 只由 `billing_discounts` 决定（不猜）」，但**断言体
+   * 从来没测过活动数组**（fixture 里根本没有 `billing_discounts`），只测了展示名 ——
+   * 名不副实，已被 2026-11-17 审计登记。2026-11-18 补上活动徽标腿后，这里改成它真正
+   * 该测的两件事：「倍率决定展示名」+「上游没发 `billing_discounts` 就不许凭空造字段」。
+   * 活动字段的完整判据见 `tests/unit/raccoon-promotion.spec.ts`。
+   */
+  it('展示名由 billing_* 倍率决定；上游没发 billing_discounts 就不造活动字段', async () => {
     const { ctx, credentials } = makeCtx()
     credentials.store.set('RACCOON_ACCESS_TOKEN', JSON.stringify(VALID_CRED))
     const fetcher = vi.fn(async () => jsonResponse({
@@ -433,6 +440,42 @@ describe('fetchModels', () => {
     const auth = newService(ctx, { fetcher: fetcher as unknown as typeof fetch })
     const models = await auth.fetchModels()
     expect(models[0]?.name).toBe('GLM-5-3-Flash · x0.2→x0.1')
+    // ★ 「不猜」的真判据：只有上游真发过的键才进原料表 ⇒ 没有 discounts 就必须没有该键。
+    expect(models[0]?.promotion).toEqual({
+      status: 'discount',
+      baseMultiplier: 0.2,
+      effectiveMultiplier: 0.1,
+      statusNote: '限时折扣',
+    })
+  })
+
+  /**
+   * 上游加了**第四种** `billing_status`：`raccoon.ts` 的既有归一把它收成 `normal`
+   * （对展示名无害），但 chip 就**静默消失**了 —— 留不下任何痕。故原料表必须带上原文。
+   */
+  it('未知 billing_status 必须留下原文（否则 chip 静默消失、全仓零日志）', async () => {
+    const { ctx, credentials } = makeCtx()
+    credentials.store.set('RACCOON_ACCESS_TOKEN', JSON.stringify(VALID_CRED))
+    const fetcher = vi.fn(async () => jsonResponse({
+      code: 0,
+      data: {
+        categories: [{
+          type: 'chat',
+          models: [{
+            name: 'sn-glm-5-3', description: 'GLM-5-3', visible: true,
+            tags: [], ability_level: 2, params: { context_window: 1000000, max_tokens: 100000 },
+            billing_multiplier: 0.75, billing_effective_multiplier: 0.5,
+            billing_status: 'discount_trial',
+          }],
+        }],
+      },
+    }))
+    const auth = newService(ctx, { fetcher: fetcher as unknown as typeof fetch })
+    const models = await auth.fetchModels()
+    // 归一仍落 normal（不改变任何既有行为）……
+    expect(models[0]?.promotion?.status).toBe('normal')
+    // ……但原文必须在，且白名单状态**不许**带这个键（否则成了「每个模型一条诊断」）。
+    expect(models[0]?.promotion?.statusUnknown).toBe('discount_trial')
   })
 })
 

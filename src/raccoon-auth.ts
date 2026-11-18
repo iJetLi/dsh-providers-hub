@@ -38,6 +38,7 @@ import {
   fetchRaccoonCreditBalance,
   fetchRaccoonOnboardingStatus,
 } from './raccoon-credits.js'
+import type { RaccoonDiscountInput, RaccoonPromotionInput } from './model-promotions.js'
 import {
   fetchRaccoonUserInfo,
   refreshRaccoonCredential,
@@ -110,6 +111,16 @@ export interface RaccoonRemoteModel {
   contextWindow: number
   maxTokens: number
   supportsImage: boolean
+  /**
+   * 上游的计费活动字段（`billing_status` / `billing_discounts` / 倍率）。
+   *
+   * ⚠️ 这里装的是**未决候选的原料**，不是挑好的徽标：徽标在 `toCatalogEntry`
+   * **装配时刻**现算（目录缓存 20 分钟，把「此刻」冻进缓存正是 issue #101 的形态）。
+   * ⚠️ 也**不是** `ModelPromotion[]`：构造函数 `raccoonPromotionCandidate` 有五种
+   * 丢弃/降级分支需要 `warn`，而本函数（`normalizeRemoteModel`）没有日志出口；
+   * 挪到装配层算才能每条坏数据只播一条痕（与 Qoder 的 `promotionWarn` 同做法）。
+   */
+  promotion?: RaccoonPromotionInput
 }
 
 /** `RaccoonAuth` 的构造选项。 */
@@ -131,6 +142,79 @@ export function parseRaccoonCredential(value: string): RaccoonCredential | undef
       : undefined
   } catch {
     return undefined
+  }
+}
+
+/**
+ * 上游 `billing_discounts[]` → 本模块的 camelCase 形状（**只改名，不解释**）。
+ *
+ * ⚠️ 三条判据都逐字来自官方客户端的目录解析
+ * （`build/electron/main/client/models/hostedModelPresentation.js`，2026-11-11 版 asar）：
+ *
+ * 1. **丢弃判据**：客户端只保留「`name` 非空 **且** `multiplier` 是有限数」的条目
+ *    （`if (!text(item.name) || multiplier === undefined) return []`）。这里同判据：
+ *    留一条没有倍率的半截数据只会让下层的「折后价」永远算不出来。
+ * 2. **`text()` = trim 后空串视同缺失**：上游实测有 `""` 形态（`billing_status_note`），
+ *    空串与「没发这个字段」在展示上必须同义。
+ * 3. **只收上游真发过的键**：`active` 只在布尔时收，日期只在字符串时收 —— 这样
+ *    「上游发了但类型漂移」不会被悄悄折成 `undefined` 而变成「没声明」。
+ *    ⚠️ 例外是 `billing_discounts` 本身：非数组时置 `discountsUnreadable`（见其注释）。
+ */
+function readRaccoonPromotionInput(
+  entry: Record<string, unknown>,
+  status: RaccoonModelMeta['status'],
+  baseMultiplier: number,
+  effectiveMultiplier: number,
+  statusNote: string,
+): RaccoonPromotionInput {
+  const text = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined
+    const trimmed = value.trim()
+    return trimmed === '' ? undefined : trimmed
+  }
+  const finite = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  const raw = entry.billing_discounts
+  const unreadable = raw !== undefined && !Array.isArray(raw)
+  const discounts: RaccoonDiscountInput[] = []
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) continue
+      const record = item as Record<string, unknown>
+      const name = text(record.name)
+      const multiplier = finite(record.multiplier)
+      if (name === undefined || multiplier === undefined) continue
+      const startAt = text(record.start_at)
+      const endAt = text(record.end_at)
+      const dailyStart = text(record.daily_start)
+      const dailyEnd = text(record.daily_end)
+      discounts.push({
+        name,
+        multiplier,
+        ...record.active === true ? { active: true } : record.active === false ? { active: false } : {},
+        ...startAt === undefined ? {} : { startAt },
+        ...endAt === undefined ? {} : { endAt },
+        ...dailyStart === undefined ? {} : { dailyStart },
+        ...dailyEnd === undefined ? {} : { dailyEnd },
+      })
+    }
+  }
+  // ⚠️ 未知 `billing_status`（上游加了第四种状态）：`status` 会被**收成 `normal`**
+  // （展示名不受影响，那是 `raccoon.ts` 的既有归一），但 chip 会**静默消失**。
+  // 故把原文带上，让构造函数播一条诊断 —— 这条是唯一能指路的痕。
+  const rawStatus = typeof entry.billing_status === 'string' ? entry.billing_status.trim() : ''
+  const statusUnknown = rawStatus !== ''
+    && rawStatus !== 'normal' && rawStatus !== 'discount' && rawStatus !== 'limited_free'
+    ? rawStatus
+    : undefined
+  return {
+    status,
+    ...statusUnknown === undefined ? {} : { statusUnknown },
+    ...Number.isFinite(baseMultiplier) ? { baseMultiplier } : {},
+    ...Number.isFinite(effectiveMultiplier) ? { effectiveMultiplier } : {},
+    ...statusNote === '' ? {} : { statusNote },
+    ...Array.isArray(raw) ? { discounts } : {},
+    ...unreadable ? { discountsUnreadable: true as const } : {},
   }
 }
 
@@ -180,6 +264,8 @@ function normalizeRemoteModel(entry: Record<string, unknown>): RaccoonRemoteMode
     // 「**默认支持**，只禁 RACCOON_TEXT_ONLY_MODELS 里实测确认的纯文本模型」，
     // 理由与实测证据见 `raccoon-product.ts` 的注释。
     supportsImage: raccoonSupportsImage(id),
+    // 计费活动的原料（未决候选），徽标在装配时刻现算 —— 见字段注释。
+    promotion: readRaccoonPromotionInput(entry, status, base, effective, statusNote),
   }
 }
 

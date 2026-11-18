@@ -1242,6 +1242,293 @@ function windowedSchedule(validFrom: number | undefined, validUntil: number | un
   }
 }
 
+// ── Raccoon（商汤小浣熊）的计费活动 ─────────────────────────────────────────────
+
+/**
+ * Raccoon `billing_discounts[]` 的一条，**已归一成 camelCase**。
+ *
+ * ⚠️ 这里收的不是上游原文（`start_at` / `daily_start` 那套），归一在
+ * `src/raccoon-auth.ts` 的 `normalizeRemoteModel` 里做完 —— 与 Qoder / TRAE 同一纪律：
+ * 本仓适配器已归一，若在本模块再写一份原文解析就是「同一个 schema 两套判据」。
+ */
+export interface RaccoonDiscountInput {
+  /** 上游 `name`（如「限时折扣至11月22日」）。客户端**只用它当非空校验**，不上屏。 */
+  readonly name?: string | undefined
+  /**
+   * 上游 `multiplier`。
+   *
+   * ⚠️⚠️ **这是折扣比，不是折后价**：Qwen4-Max 实测 `billing_multiplier 0.75` +
+   * `multiplier 0.67` ⇒ 折后 `0.5`（0.75 × 0.67 ≈ 0.5）。折后价**只认**
+   * `billing_effective_multiplier`，拿本字段当折后价会画成「0.67 倍」。
+   */
+  readonly multiplier?: number | undefined
+  /** 上游 `active` —— 取目录那一刻这条活动开不开（快照，会过期）。 */
+  readonly active?: boolean | undefined
+  /** 上游 `start_at`（ISO-8601，实测带 `Z`）。 */
+  readonly startAt?: string | undefined
+  /** 上游 `end_at`（同上）。 */
+  readonly endAt?: string | undefined
+  /** 上游 `daily_start`（'HH:mm'）。 */
+  readonly dailyStart?: string | undefined
+  /** 上游 `daily_end`（'HH:mm'）。 */
+  readonly dailyEnd?: string | undefined
+}
+
+/** Raccoon 目录行里与本模块有关的那族字段（`billing_*`）。 */
+export interface RaccoonPromotionInput {
+  /** 上游 `billing_status`：**唯一**决定画不画 chip 的字段。 */
+  readonly status?: 'normal' | 'discount' | 'limited_free' | undefined
+  /**
+   * 上游 `billing_status` **有值但不在白名单**（如上游加了第四种状态）。
+   *
+   * ⚠️ `normalizeRemoteModel` 会把未知状态**收成 `normal`**（`raccoon.ts` 的
+   * `RaccoonModelMeta['status']` 只有三态），对展示名无害；但对 chip 就是
+   * 「上游说在打折、我们画不出来、**全仓零日志**」—— 与 qoder 那次「黑名单 ⊃ 收缩目录」
+   * 同形。故把原文留在这里，由构造函数播一条**诊断**（chip 仍不画：读不懂的东西不画）。
+   */
+  readonly statusUnknown?: string | undefined
+  /** 上游 `billing_multiplier`（原价倍率）。 */
+  readonly baseMultiplier?: number | undefined
+  /** 上游 `billing_effective_multiplier`（**当前生效**倍率，折扣价只认它）。 */
+  readonly effectiveMultiplier?: number | undefined
+  /** 上游 `billing_status_note`（整句说明，如「限免到11月30日」）。 */
+  readonly statusNote?: string | undefined
+  /** 上游 `billing_discounts`（**空数组 = 没有活动**，不是「读不懂」）。 */
+  readonly discounts?: readonly RaccoonDiscountInput[] | undefined
+  /**
+   * `billing_discounts` 键**存在但读不懂**（不是数组）。
+   *
+   * ⚠️ 与「空数组」必须分开（同 `daily: []` 那条判据）：空数组是「上游没办活动」，
+   * 类型漂移是「上游说了什么而我们读不出来」。
+   */
+  readonly discountsUnreadable?: true | undefined
+}
+
+/**
+ * 倍率文案：**逐字照抄客户端**的 `aL = e => String(Number(e.toFixed(2)))`
+ * （`out/_next/static/chunks/app/layout-8098b7d063162e43.js` 的 modelBilling 段）。
+ *
+ * 2 位小数 + 去尾零：0.6666… → `0.67`、1 → `1`、0.5 → `0.5`。
+ * 非有限数 / 负数 → undefined（客户端 `number()` 同判据：`>= 0` 且 finite）。
+ */
+function raccoonRateText(value: number | undefined): string | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? String(Number(value.toFixed(2)))
+    : undefined
+}
+
+/**
+ * Raccoon 的 ISO 时刻 → epoch 毫秒，**必须带时区指示符**。
+ *
+ * ⚠️⚠️ 为什么不复用共享的 `instantMs`（`Date.parse` 那条）：`Date.parse` 对
+ * **没有时区的时间串是「本地时区」语义**（`'2026-11-22T23:59:59'` 在 UTC+8 机器上
+ * 被读成 `15:59:59Z`），而本模块的窗口判据按 `timezone: 'Asia/Shanghai'` 解释；
+ * 一旦上游把 `Z` 去掉，`Date.parse` **照样成功**、只是**整体错 8 小时** ——
+ * 那是「静默说错一天」，比不画更糟（issue #101 的同族事故形态）。
+ *
+ * 上游实测（2026-11-17）全部是 `2026-11-22T15:59:59Z`；故这里**只放行**带
+ * `Z` 或 `±HH:MM` 的形态，其余一律视为「读不懂」⇒ 走 fail-closed + 一条 warn。
+ * `date only`（`'2026-11-22'`）**也拒绝**：它的语义是「当天 00:00Z」，与
+ * 「活动至 11月22日（当天结束）」差整整一天。
+ */
+function raccoonInstantMs(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const isoWithZone = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u
+  if (!isoWithZone.test(value)) return undefined
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? undefined : ms
+}
+
+/**
+ * 从 `billing_discounts[]` 里挑**一条**画得出来的活动。
+ *
+ * 客户端 `az()` 对每一条都画一行「每日 …」/「活动至 …」，但 chip 只有一枚 ——
+ * 本模块的 `ModelPromotion` 也是「每模型一枚」（`selectPromotionAt` 只挑一条）。
+ * 故：按状态筛语义相符的那条（限免 ⇒ 0 倍；折扣 ⇒ 0 < m < 1），优先 `active`；
+ * 多条 `active` 时**取结束得最晚的那条**（挑早的那条会把「还在跑的活动」判成已结束
+ * ⇒ 少报一枚真 chip，而这正是 chip 唯一的用途）。
+ *
+ * ⚠️ 实测（2026-11-17 21:4x）每个模型只有 **1 条**；多条时只取一条并**如实登记**
+ * 取舍，而不是把没用上的那条悄悄丢掉还假装全画了。
+ */
+function pickRaccoonDiscount(
+  discounts: readonly RaccoonDiscountInput[] | undefined,
+  status: 'discount' | 'limited_free',
+): RaccoonDiscountInput | undefined {
+  if (discounts === undefined) return undefined
+  const usable = discounts.filter((entry) => typeof entry.multiplier === 'number'
+    && Number.isFinite(entry.multiplier as number))
+  if (usable.length === 0) return discounts.length === 0 ? undefined : discounts[0]
+  const byKind = status === 'limited_free'
+    ? usable.filter((entry) => entry.multiplier === 0)
+    : usable.filter((entry) => (entry.multiplier as number) > 0 && (entry.multiplier as number) < 1)
+  const actives = byKind.filter((entry) => entry.active === true)
+  if (actives.length > 1) {
+    // 结束得最晚的优先；没有 end_at 的排最后（它连「什么时候结束」都不知道）。
+    const rank = (entry: RaccoonDiscountInput): number => raccoonInstantMs(entry.endAt) ?? Number.NEGATIVE_INFINITY
+    return actives.reduce((best, entry) => (rank(entry) > rank(best) ? entry : best), actives[0])
+  }
+  return actives[0] ?? byKind[0] ?? usable[0]
+}
+
+/**
+ * Raccoon 计费状态 → 一条活动候选（画「限免中」/「限时折扣」）。
+ *
+ * ## 判据逐字来自官方客户端（三处，全部实读 asar）
+ *
+ * 1. **行内 chip**（`aM({model})`）：
+ *    - `billing_status === 'limited_free'` ⇒ 只画 `modelBilling.freeOffer`（「限免中」/
+ *      「Free for now」），**不画倍率**；
+ *    - `billing_status === 'discount'` ⇒ 画 `modelBilling.limitedDiscount`（「限时折扣」）
+ *      ，`title` 挂 `billing_status_note`，右侧再画 `rate(effective ?? base ?? points)`；
+ *    - 其余（`normal`）⇒ **不画 chip**（只有倍率）。
+ * 2. **悬停/明细**（`az({model})`，`desktop-model-billing-details`）：
+ *    - 摘要行 `consumption`：限免 ⇒ `originalLimitedFree`（「原 0.75 倍，当前限免」，无原价则
+ *      「当前限免」）；折扣 ⇒ `originalPrefix` +（有 effective ⇒ `currentRate`；
+ *      没有 ⇒ **退回上游 `billing_status_note`**，再没有才是「限时折扣」）；
+ *    - 再逐条 discount：`dailyStart && dailyEnd` ⇒ `daily`（「每日 09:00–22:00」）**优先**；
+ *      否则 `active === true && endAt` ⇒ `until`（「活动至 11月22日」）；否则不画。
+ * 3. **i18n 原文**（chunk `67406` 的 `zh` / `en` 两张表）：
+ *    `freeOffer: 限免中 / Free for now`、`limitedDiscount: 限时折扣 / Limited-time discount`、
+ *    `originalLimitedFree: 原 {{original}} 倍，当前限免 / Was {{original}}×, now free for a limited time`、
+ *    `originalPrefix: 原 {{original}} 倍，/ Was {{original}}×, `、
+ *    `currentRate: 当前 {{effective}} 倍 / now {{effective}}×`。
+ *
+ * ## 与「不替上游说话」的关系
+ *
+ * 文案**不是我们编的**：chip 两句与悬停两句都逐字取自官方 i18n 表，数字来自上游字段，
+ * `{{original}}`/`{{effective}}` 的填充只是把上游自己的倍率塞进上游自己的句子。
+ *
+ * ## 时间：什么时候必须消失
+ *
+ * - `billing_discounts[]` 的 `start_at`/`end_at` 可读 ⇒ 落**绝对窗口**，
+ *   `promotionWithinAbsoluteWindow` 到点即不画（issue #101 的核心：活动过期不许再挂）；
+ * - 声明了却读不懂 ⇒ `dailyUnusable`（**fail-closed**，与腾讯那条同方向）：宁可少画
+ *   一枚，也不能让一条结束不了的活动永久自我宣传；
+ * - **没声明**窗口 ⇒ 退回 `billing_status` 这张快照（`snapshotActive: true`）。
+ *   ⚠️ 这里与 `dailyUnusable` 的纪律**刻意分叉**：`billing_status` 是上游自己给的
+ *   「此刻在打折」表态，chip 不依赖 discounts 才成立；`billing_discounts` 读不懂只损失
+ *   「哪一天结束」，不足以让一枚上游明确说在打折的 chip 消失（那是**少报**真信息）。
+ *   而 `start_at` 读了是「知道了结束时刻却算不出来」，方向相反。
+ *
+ * ## 刻意不做的两件事
+ *
+ * - **不给颜色**：上游这件 payload 里没有任何颜色字段（`billing_discounts[]` 只有
+ *   name / multiplier / active / 日期），客户端画的是 Tailwind 类不是上游声明 ⇒
+ *   `tone` 落 neutral（与 lobsterai 同一取舍，不替上游发明 hex）。
+ * - **不读 `points_multiplier`**：本地实测 10/10 个模型**全部缺失**该键，
+ *   读它是一条死分支（`assert` 形状里没有这个字段）。
+ *
+ * @returns undefined = 这条没有可画的活动（`normal` / 输入缺失 / 不是活动态）。
+ */
+export function raccoonPromotionCandidate(
+  input: RaccoonPromotionInput | undefined,
+  modelId: string,
+  fallbackTimeZone: string = 'Asia/Shanghai',
+  warn?: (message: string) => void,
+): ModelPromotion | undefined {
+  if (input === undefined) return undefined
+  if (typeof modelId !== 'string' || modelId.length === 0) return undefined
+  const status = input.status
+  // ⚠️ 未知状态：**不画**（读不懂），但必须留痕 —— 否则上游加第四种状态时，
+  // 症状是「活动消失了、全仓零日志」，与 issue #101 最难查的那类形态同形。
+  if (status !== 'discount' && status !== 'limited_free') {
+    if (input.statusUnknown !== undefined) {
+      safeWarn(warn, 'raccoon model "' + modelId + '": unknown billing_status "'
+        + input.statusUnknown + '" (expected normal/discount/limited_free), no chip is drawn')
+    }
+    return undefined
+  }
+  if (input.discountsUnreadable === true) {
+    safeWarn(warn, 'raccoon model "' + modelId + '": billing_discounts is not an array '
+      + '(type drift), the end date is unknown — chip falls back to billing_status snapshot')
+  }
+
+  const limitedFree = status === 'limited_free'
+  const base = raccoonRateText(input.baseMultiplier)
+  const effective = raccoonRateText(input.effectiveMultiplier)
+
+  // ── 悬停摘要（`az()` 的 summary，逐句照抄 i18n）──────────────────────────────
+  let hoverZh: string
+  let hoverEn: string
+  if (limitedFree) {
+    hoverZh = base === undefined ? '当前限免' : '原 ' + base + ' 倍，当前限免'
+    hoverEn = base === undefined
+      ? 'Free for a limited time'
+      : 'Was ' + base + '×, now free for a limited time'
+  } else {
+    const prefixZh = base === undefined ? '' : '原 ' + base + ' 倍，'
+    const prefixEn = base === undefined ? '' : 'Was ' + base + '×, '
+    // 没有 effective 时退回上游整句说明，再没有才是「限时折扣」（客户端同一顺序）。
+    const note = (input.statusNote ?? '').trim()
+    const fallbackZh = note !== '' ? note : '限时折扣'
+    const fallbackEn = note !== '' ? note : 'Limited-time discount'
+    const bodyZh = effective === undefined ? fallbackZh : '当前 ' + effective + ' 倍'
+    const bodyEn = effective === undefined ? fallbackEn : 'now ' + effective + '×'
+    hoverZh = prefixZh + bodyZh
+    hoverEn = prefixEn + bodyEn
+  }
+
+  // ── 时间：绝对窗口 + 每日时段（两者都可能被上游声明）───────────────────────────
+  const chosen = pickRaccoonDiscount(input.discounts, status)
+  const declaredFrom = chosen?.startAt !== undefined
+  const declaredUntil = chosen?.endAt !== undefined
+  const fromMs = raccoonInstantMs(chosen?.startAt)
+  const untilMs = raccoonInstantMs(chosen?.endAt)
+  const dailyStart = chosen?.dailyStart
+  const dailyEnd = chosen?.dailyEnd
+  const dailyDeclaredBoth = dailyStart !== undefined && dailyEnd !== undefined
+  const dailyStartMinute = clockMinute(dailyStart, 'start')
+  const dailyEndMinute = clockMinute(dailyEnd, 'end')
+  const dailyUsable = dailyDeclaredBoth && dailyStartMinute !== undefined && dailyEndMinute !== undefined
+  // ⚠️ 只给一端 = 上游说了半句话：不拿它拼窗口（客户端同样要求两端齐），但留一条痕。
+  if ((dailyStart !== undefined) !== (dailyEnd !== undefined)) {
+    safeWarn(warn, 'raccoon model "' + modelId + '": billing_discounts.daily_start/daily_end '
+      + 'only one side is present, the daily window is ignored')
+  }
+  const unusable = (declaredFrom && fromMs === undefined)
+    || (declaredUntil && untilMs === undefined)
+    || (dailyDeclaredBoth && !dailyUsable)
+  if (unusable) {
+    safeWarn(warn, 'raccoon model "' + modelId + '": billing_discounts declares a time window '
+      + 'that cannot be parsed (start_at: ' + (chosen?.startAt ?? 'absent')
+      + ', end_at: ' + (chosen?.endAt ?? 'absent')
+      + ', daily: ' + (dailyDeclaredBoth ? (dailyStart + '–' + dailyEnd) : 'absent')
+      + '), chip stays hidden — timestamps must be ISO-8601 **with** a timezone designator'
+      + ' (`Z` or `±HH:MM`); a local-time string would be read 8h off, so it is rejected on purpose')
+  }
+  const timeDeclared = unusable || fromMs !== undefined || untilMs !== undefined || dailyUsable
+  const schedule: ModelPromotionSchedule = {
+    // 与 Qoder 同一条纪律：**不读**上游未声明的时区，一律落产品自己的时区。
+    // raccoon 只有 CN 站（xiaohuanxiong.com），`end_at` 的 15:59:59Z 就是 CN 的 23:59:59
+    // ⇒ 用 UTC+8 读出来的「活动至 11月22日」与官方客户端在 CN 环境下一致。
+    timezone: fallbackTimeZone,
+    ...fromMs === undefined ? {} : { validFrom: fromMs },
+    ...untilMs === undefined ? {} : { validUntil: untilMs },
+    ...dailyUsable ? {
+      daily: [{ start: dailyStart as string, end: dailyEnd as string }],
+    } : {},
+    ...unusable ? { dailyUnusable: true as const } : {},
+    // 没声明任何时间 ⇒ 只能信上游给的那张快照（billing_status 本身就是「此刻」的表态）。
+    ...timeDeclared ? {} : { snapshotActive: true as const },
+  }
+
+  return {
+    id: 'raccoon_billing:' + modelId,
+    source: 'promotion',
+    modelIds: [modelId],
+    badge: limitedFree
+      ? { label: '限免中', labelEn: 'Free for now', display: 'activeOnly' }
+      : { label: '限时折扣', labelEn: 'Limited-time discount', display: 'activeOnly' },
+    hover: { zh: hoverZh, en: hoverEn },
+    schedule,
+    timeDeclared,
+    // 取舍同 Qoder / lobsterai：窗口外不画「还没到点」（宿主徽标没有悬停位要说这句）。
+    standingEligible: false,
+    priority: 0,
+  }
+}
+
 // ── 保鲜：下一个会改变徽标的时刻 ────────────────────────────────────────────────
 
 /** 边界查找的默认上界（一年）：超出即认为「没有排定的边界」，不排定时器。 */
