@@ -32,21 +32,34 @@ const BLOCKED_TEXTS = [
   'Claude Code',
 ] as const
 
-/** 实测放行的替换值（2026-11-16，`messages[]`-system 位置，200）。 */
-const ALLOWED_CODING = 'You are an AI agent for coding work.'
+/**
+ * 实测放行的替换值。
+ *
+ * ⚠️ **2026-11-18 换代**：上一版是 `You are an AI agent for coding work`，
+ * 如今 **403/4100406** —— 上游把规则从「整句登记」收紧成「句首前缀登记」
+ * `^You are an? (AI )?(coding )?agent`，于是上一版的替换产物自己撞上了新规则。
+ * 真机 21 格复测定下的边界（system 位置）：
+ * - `You are an AI agent` / `You are an AI agent.` / `You are an AI agentX` ⇒ 403
+ * - `You are a coding agent` / `You are a coding agent for work.` ⇒ 403
+ * - `You are an AI` / `You are an agent.` / `You are an AI assistant.` ⇒ 200
+ * - `A\nYou are an AI agent.` / `Prefix. You are an AI agent.` ⇒ 200（只拦句首）
+ * ⇒ 替换值必须**不以** `You are an AI agent` / `You are a coding agent` 开头。
+ */
+const ALLOWED_CODING = 'You are an AI coding agent.'
 const ALLOWED_CLI = 'You are an interactive CLI coding agent.'
 /**
  * 同上但**不带尾句点**。
  *
  * ⚠️ 替换值刻意不带句点：句点由 `$1` 从原文带过来。原文没有句点（字符串结尾、
  * 或后面紧跟换行）时产物也不该凭空加 —— 加了就会和原文的终止符合成 `agent..`。
- * 两个变体都已真机实发 200（2026-11-16，含 `...coding agent\n- obey the user` 一格）。
+ * 两个变体都已真机实发 200（2026-11-18 各 5/5 稳定；2026-11-16 亦测过
+ * `...coding agent\n- obey the user` 一格）。
  */
-const ALLOWED_CODING_BARE = 'You are an AI agent for coding work'
+const ALLOWED_CODING_BARE = 'You are an AI coding agent'
 const ALLOWED_CLI_BARE = 'You are an interactive CLI coding agent'
 
 // 「只换身份句本体」⇒ 原文里的 `, powered by … model.` 必须原样留下。
-// 真机实测该形态 200（`You are an AI agent for coding work, powered by a large language model.`）。
+// 真机实测该形态 200（`You are an AI coding agent, powered by a large language model.` 5/5）。
 const ALLOWED_CODING_KEEPING_SUFFIX = `${ALLOWED_CODING_BARE}, powered by a large language model.`
 
 describe('★ rewriteMarvisBlockedIdentities：被拉黑身份句 → 实测放行措辞', () => {
@@ -55,7 +68,7 @@ describe('★ rewriteMarvisBlockedIdentities：被拉黑身份句 → 实测放�
     // 自证夹具：这句确实是登记表给 DSH 身份句用的 replace 值。
     expect(blocked).toContain('AI coding assistant')
     // ⚠️ 只换身份句本体 ⇒ `, powered by …` 必须**原样保留**（零内容损失）。
-    // 真机实测：`You are an AI agent for coding work, powered by a large language model.` 200
+    // 真机实测：`You are an AI coding agent, powered by a large language model.` 200（5/5）
     // ⇒ 被拦的是「身份句这个模式」，不是它所在的整句。
     expect(rewriteMarvisBlockedIdentities(blocked)).toBe(
       `${ALLOWED_CODING_BARE}, powered by a large language model.`,
@@ -67,7 +80,7 @@ describe('★ rewriteMarvisBlockedIdentities：被拉黑身份句 → 实测放�
     // 不带尾句点也要命中（登记表 `find` 刻意不带句点，两种形态都会出现）。
     // ⚠️ 产物也**不带**句点：句点由 `$1` 从原文带过来，原文没有就不该凭空加。
     expect(rewriteMarvisBlockedIdentities('You are an AI coding assistant')).toBe(
-      'You are an AI agent for coding work',
+      'You are an AI coding agent',
     )
   })
 
@@ -316,7 +329,7 @@ describe('★★★ 接线层：两处 system 位置都必须过这张表（漏�
     const assistant = messages.find((message) => message.role === 'assistant')
     // 正文原样带过去（不许被清洗）；带块数组时上游把它摊成纯文本。
     expect(JSON.stringify(assistant)).toContain('You are an AI coding assistant.')
-    expect(JSON.stringify(assistant)).not.toContain('AI agent for coding work')
+    expect(JSON.stringify(assistant)).not.toContain('AI coding agent')
   })
 
   it('★★★ `system` 入参与 messages[]-system **同时**存在时，两处都要换（只换一处等于没换）', async () => {

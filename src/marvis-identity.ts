@@ -33,7 +33,12 @@
  * | `You are Claude Code, Anthropic's CLI for Claude`（登记表产物） | 403 / 4100406 |
  * | `You are Claude Code.` / `You are Claude Code, an interactive CLI for coding` | 403 / 4100406 |
  * | `You are Claude.` | 403 / 4100406 |
- * | `You are an AI agent for coding work.` | **200** |
+ * | `You are an AI agent for coding work.` | ~~200~~ → **403 / 4100406**（2026-11-18 复测） |
+ * | `You are an AI agent.` / `You are an AI agent`（无句点） | 403 / 4100406 |
+ * | `You are an AI agentX`（非句末字符） | 403 / 4100406 ⇒ 前缀匹配，不要求整句 |
+ * | `You are a coding agent.` / `You are a coding agent for work.` | 403 / 4100406 |
+ * | `A\nYou are an AI agent.` / `Prefix. You are an AI agent.` | **200** ⇒ 只拦句首 |
+ * | `You are an AI` / `You are an agent.` / `You are an AI assistant.` | 200 |
  * | `You are an interactive CLI coding agent.` | **200** |
  * | `You are an AI coding agent.` / `You are an interactive coding assistant.` | 200 |
  * | `You are a CLI coding agent.` / `You are a coding assistant.` / `You are an AI assistant.` | 200 |
@@ -41,6 +46,10 @@
  * | `你是一个用于编码工作的 AI 智能体。` | 200 |
  *
  * ⇒ **至少两族身份句被封，且两族的「替换产物」都在黑名单里**。
+ * ⇒ **2026-11-18：第一族的替换产物 `You are an AI agent for coding work` 也已失效**
+ *    （403/4100406），规则从「整句登记」收紧为「句首前缀登记」
+ *    `^You are an? (AI )?(coding )?agent`。本表因此再换一次措辞（第三代 → 第四代），
+ *    新产物 `You are an AI coding agent` 真机 5/5 稳定 200。
  *
  * ## 已被证伪的替代方案：把 system 折进顶层 `system` 字段
  *
@@ -114,6 +123,23 @@ export const MARVIS_BLOCKED_IDENTITY_REWRITES: readonly MarvisBlockedIdentityRew
     // - `You are an AI agent for coding work, powered by a large language model.` ⇒ 200
     // ⇒ 被拦的是**身份句这个模式**，不是它所在的整句 ⇒ 残留的同位语/约束不会重新触发。
     //
+    // ⚠️⚠️ **上面第 3 格已失效（2026-11-18 复测）** —— 第三代跑步机又转了一格：
+    //    `You are an AI agent for coding work, powered by a large language model.`
+    //    如今 **403/4100406**，而它正是本表上一版 `replace` 的产物 ⇒ 现行管线自己把
+    //    请求改写成了一句被拦的文本（与第一代失效是同一类事故，不是新问题）。
+    //
+    //    新规则（真机 21 格复测）：被拦的是**句首**这个**前缀**模式，判据是
+    //    「system 内容以它开头」，**不是整句相等** —— 精确形式（14 格逐一验证一致）：
+    //      /^You\s+are\s+(?:an?\s+AI\s+agent|a\s+coding\s+agent)/i
+    //    - `You are an AI agent` / `You are an AI agentX` ⇒ 403（前缀匹配，尾字符不挡）
+    //    - `You are a coding agent` / `You are a coding agent for work` ⇒ 403
+    //    - `A\nYou are an AI agent.` / `Prefix. You are an AI agent.` ⇒ **200**（非开头即放过）
+    //    - `You are an AI` / `You are an agent` / `You are an AI assistant` ⇒ 200
+    //    - `You are an AI coding agent` ⇒ **200**（`AI` 与 `agent` 之间夹 `coding` 就不命中）
+    //    ⇒ 故新 `replace` 值**必须不与上面那个前缀匹配**。
+    //    实测放行且语义最接近的是 `You are an AI coding agent`（各 5/5 稳定 200，
+    //    带 `, powered by …` 同位语、带长尾约束均 200）。
+    //
     // ⚠️ **边界只有一层前瞻**，但它同时挡住两类过宽（正向审计 P3 实测的残留）：
     // - 复数 `assistants.` —— `assistant` 后面跟 `s`，前瞻既不是逗号也不是句末 ⇒ 不命中；
     // - 被修饰的名词短语 `assistant manager.` —— 后面跟 `m` ⇒ 同样不命中。
@@ -122,10 +148,12 @@ export const MARVIS_BLOCKED_IDENTITY_REWRITES: readonly MarvisBlockedIdentityRew
     //    「装饰性条件」，留着会让后来者以为两层判据都在承重。
     // 前瞻**不消费字符** ⇒ 满足「零内容损失」。
     find: /You\s+are\s+an?\s+AI\s+coding\s+assistant(?=\s*(?:,|[.:;!?。！？；]|$))/gi,
-    replace: 'You are an AI agent for coding work',
-    note: '2026-11-16 实发：原文（含/不含尾句点）与裸句均 403/4100406；'
-      + '`You are an AI agent for coding work` 200（带/不带尾句点、后面接 `, powered by …` 均 200）。'
-      + '⚠️ 这是 DSH 身份句过完共用登记表之后的产物 ⇒ 本节就是「现行管线失效」那条腿。',
+    replace: 'You are an AI coding agent',
+    note: '2026-11-16 实发：原文（含/不含尾句点）与裸句均 403/4100406。'
+      + ' ⚠️ 2026-11-18 复测：替换值 `You are an AI agent for coding work` **已失效**（403/4100406）'
+      + ' —— 新规则拦「句首 `You are an? (AI )?(coding )?agent` 前缀」，故改用实测 200 的'
+      + ' `You are an AI coding agent`（带 `, powered by …` 同位语、带长尾约束均 200）。'
+      + ' 每次上游再登记时**只需改这里的 `replace`**，`find` 不用动。',
   },
   {
     // Claude Code 身份句（含登记表产物）。同样**只换本体**（理由见上一条）。

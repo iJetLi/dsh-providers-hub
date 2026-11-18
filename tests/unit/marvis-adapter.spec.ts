@@ -258,14 +258,24 @@ describe('★ 推理：正常流与 content-type 闸门', () => {
     // ⇒ 只断言 ① 的产物就是**把被拦文本钉成了期望**（本文件此前正是如此）。
     // 「只换身份句本体」⇒ 原文 `, powered by a large language model.` 必须原样留下
     // （真机实测该形态 200；整句替换会把这半句删掉 = 内容损失）。
+    //
+    // ⚠️ **2026-11-18 复测：上一版期望值 `You are an AI agent for coding work, …`
+    //    本身已 403/4100406** —— 本断言因此改成了第三代产物。
+    //    这条用例的价值正在于此：每次上游再登记，它会先把「我们自己写的替换值被拦了」
+    //    这件事顶到台面上，而不是让用户在看板上看到一句 `非法请求`。
     expect(system?.content).toBe(
-      'You are an AI agent for coding work, powered by a large language model.',
+      'You are an AI coding agent, powered by a large language model.',
     )
     expect(String(system?.content)).not.toContain('DeepSeek Harness')
-    // ★★★ 反向判据：产物里**不得**再出现被拦的两种措辞 —— 上游随时可能再登记，
+    // ★★★ 反向判据：产物里**不得**再出现被拦的措辞 —— 上游随时可能再登记，
     // 但「自己别主动写禁词」这一条不依赖上游。
+    // 2026-11-18 追加：句首 `You are an AI agent` / `You are a coding agent` 也是禁词前缀。
+    // 精确形式（真机 14 格验证一致）—— 注意 `You are an AI coding agent` **不**命中。
     expect(String(system?.content)).not.toContain('AI coding assistant')
     expect(String(system?.content)).not.toContain('Claude Code')
+    expect(String(system?.content)).not.toMatch(
+      /^You\s+are\s+(?:an?\s+AI\s+agent|a\s+coding\s+agent)/i,
+    )
   })
 
   it('★★ 表未登记的中文句式也被兜底清掉（上游漂移容忍）', async () => {
