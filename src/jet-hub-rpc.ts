@@ -10170,6 +10170,36 @@ function registerJetHubEndpoints(
         let catalog: Array<{ id: string; name: string; description?: string; isFree?: boolean }>
         if (all !== undefined) {
           catalog = [...all]
+          // ⚠️⚠️ **介绍必须在这里按 id 从 `listModels()` 补回来**（2026-11-18 双审计 + 真机复核，GitHub PR #115）。
+          //
+          // 症状：codearts 适配器**实现了** `listAllModels()` ⇒ 本分支恒被选中
+          // （`catalog = [...all]` 是**整体替换**）⇒ 模型介绍在设置页里**永远看不到**，
+          // 而宿主模型选择器（走 `listModels()`）那边是好的 —— 与 PR 声称的落点正好相反。
+          //
+          // 为什么不能改骨架的 `listAllModels()`：它的产出被
+          // `tests/unit/model-catalog-parity.spec.ts` **逐字**锁着
+          // 「只吐 id / name / isFree 三键（不透出 description）」——
+          // 那是跨 provider 的目录契约（各家兜底表都走同一条路），
+          // 为一家加字段会悄悄改掉所有家的产出形状；而且那条用例的 fixture
+          // 恰好都不带 description ⇒ 改完**也不红**，比红更糟。
+          //
+          // ⇒ 修法落在**这一层**：两边都已在手（`all` = 契约三键、`models` = 带介绍），
+          //   按 id 对上即可。**只补缺、不覆盖**：`listAllModels()` 将来若真的开始
+          //   带介绍（或适配器自己给了更权威的值），一律以它为准。
+          if (models.length > 0) {
+            const described = new Map<string, string>()
+            for (const model of models) {
+              if (model.description !== undefined) described.set(model.id, model.description)
+            }
+            if (described.size > 0) {
+              for (const entry of catalog) {
+                const description = described.get(entry.id)
+                if (description !== undefined && entry.description === undefined) {
+                  entry.description = description
+                }
+              }
+            }
+          }
           // 全量目录里若仍有黑名单命中却缺失者，一并补上（保底，正常不会发生）。
           const known = new Set(catalog.map((model) => model.id))
           for (const id of Object.keys(disabledMap)) {

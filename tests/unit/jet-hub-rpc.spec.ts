@@ -1388,6 +1388,55 @@ describe('model.list / model.setDisabled 端点', () => {
       expect(row?.disabled, '前置：这一格必须是「已关闭」形态').toBe(true)
       expect(row?.description).toBe('【限时体验】面向复杂编程与长程任务')
     })
+
+    it('★★★ 介绍必须由 `model.list` 按 id 从 `listModels()` 补（`listAllModels()` 契约只吐三键）', async () => {
+      // ⚠️⚠️ 为什么这样测（2026-11-18 双审计 + 我复核 GitHub PR #115）：
+      //    ① `listAllModels()` 的契约被 `tests/unit/model-catalog-parity.spec.ts`
+      //       **逐字**锁着「只吐 id / name / isFree 三键（不透出 description）」⇒
+      //       修法**不能**落在骨架（那是改既有契约，且那条用例的 fixture 恰好都不带
+      //       description ⇒ 改完也不红、契约被悄悄改掉）；
+      //    ② 但 codearts 适配器**实现了** `listAllModels()` ⇒ `model.list` 恒走
+      //       `catalog = [...all]` 分支 ⇒ 介绍在那一层丢掉（宿主选择器有、
+      //       Jet Hub 模型面板没有 —— 正是 PR 声称的落点）；
+      //    ③ 上一格（`★★ 走 listAllModels 分支也带介绍`）的 fixture **手写**了
+      //       `description` ⇒ 它验的只是「RPC 层原样拷贝」，与真实形态不同。
+      //    ⇒ 本格拿**真骨架**当 `catalogSource`：它的 `listAllModels()` 只吐三键、
+      //      `listModels()` 带介绍 —— RPC 必须自己把两边按 id 对上。
+      const { createModelCatalog } = await import('../../src/model-catalog.js')
+      const entries = [
+        { id: 'with-desc', name: '有介绍 · x0.5', description: '【限时体验】许愿式编程一键成真' },
+        { id: 'without-desc', name: '没介绍 · x1' },
+      ]
+      const skeleton = createModelCatalog({}, {
+        product: { id: 'codearts' },
+        loadCatalog: async () => entries,
+        syncCatalog: () => entries,
+      })
+      // 前置自证：骨架两条腿确实「一个不带、一个带」，否则本格测不到东西。
+      expect(
+        skeleton.listAllModels().find((row) => row.id === 'with-desc'),
+        '前置：listAllModels 只吐 id/name（parity 契约，刻意不带 description）',
+      ).not.toHaveProperty('description')
+      const listed = await skeleton.listModels('codearts')
+      expect(listed.find((row) => row.id === 'with-desc')?.description)
+        .toBe('【限时体验】许愿式编程一键成真')
+
+      const { call } = registerEndpoints({
+        // `listModels()` 返回 `readonly` ⇒ 展开一次，`registerEndpoints` 的入参是可变数组
+        models: [...listed],
+        modelAdapters: { codearts: skeleton },
+      })
+      const result = await call('model.list', { provider: 'codearts' })
+      const models = (result.value as { models: Array<Record<string, unknown>> }).models
+      expect(
+        models.find((m) => m.id === 'with-desc')?.description,
+        '走 listAllModels 分支时 RPC 必须按 id 从 listModels 补回介绍，否则设置页永远没有第二行',
+      ).toBe('【限时体验】许愿式编程一键成真')
+      expect(
+        Object.hasOwn(models.find((m) => m.id === 'without-desc')!, 'description'),
+        '没介绍 ⇒ 不许凭空多出键',
+      ).toBe(false)
+    })
   })
 
   /** 从 connection.fetch.register 捕获到的处理器。 */
@@ -1418,7 +1467,7 @@ describe('model.list / model.setDisabled 端点', () => {
      * 省略时退化为「listModels + 裸 id 补回」的历史行为。
      */
     modelAdapters?: Record<string, {
-      listAllModels(): readonly { id: string; name: string; description?: string }[]
+      listAllModels(): readonly { id: string; name: string }[]
       /**
        * 「这份目录**确认**来自远端完整读取」的适配器自报钩子。
        *

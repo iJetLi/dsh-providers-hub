@@ -1606,13 +1606,21 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
  *
  * @param {{ provider: string,
  *           model: {id: string, name?: string, disabled?: boolean, dead?: boolean,
- *                   benefitOnly?: boolean},
+ *                   benefitOnly?: boolean, description?: string},
  *           busy: boolean, onToggle: Function, onRestore: Function }} props
  *
  * ⚠️ `provider` 是 2026-10-26 新增的入参（`ProviderLogo` 接线要用它取图标），
  *    但当时**漏更新上面这行 JSDoc** —— `tsconfig.client-check.json` 因此多出
  *    恰好 1 个 `TS2339: Property 'provider' does not exist on type ...`
  *    （77 → 78 个错误，实测用前后错误集差集确认）。已补。
+ *
+ * ⚠️ 同理，`description`（模型介绍，2026-11-17 GitHub PR #115）也必须写进这行
+ *    typedef —— 漏了会多出 **3 个** `TS2339: Property 'description' does not exist`
+ *    （`jet-hub.js(1658,36)` / `(1659,14)` / `(1660,13)`，实测）。而
+ *    `tsconfig.client-check.json` **本来就有 90+ 个既有错误**（`aggregate-panel-logic`
+ *    / `badge-model` 等），闸门只筛 `TS2304|TS2552`（未定义标识符）⇒
+ *    **这类新增 TS2339 永远不红**。所以「tsc 全绿」在这里等于「没人看」，
+ *    只能靠人工补 typedef。
  */
 function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
   const dead = model.dead === true;
@@ -1646,9 +1654,17 @@ function ModelToggle({ provider, model, busy, onToggle, onRestore }) {
    * 于是 `'\u200b'.trim().length` 是 **1** ⇒ 上游只发一个零宽字符时会画出
    * 一格**看不见的第二行**（行高 +24px）。与服务端 `hasVisibleText` 同一口径；
    * 客户端**不信任**服务端（见上一条理由），两边都判。
+   *
+   * ⚠️⚠️ **按 Unicode 类别剥，不许枚举码点**（2026-11-18 实测）：初版是
+   * `/[\u200b-\u200f\u2060\ufeff]/g`，我在它上面跑 18 格矩阵**逃逸 5 个**
+   * （`\u180e` MVS、`\u2066`/`\u2067`/`\u2069` LRI/RLI/PDI、`\u061c` ALM、`\ufff9`
+   * 行间注解），每一个都能画出隐形的一行。`Cf` 一族有 160+ 码点，枚举必漏
+   * （同一教训在 `docs/agent-notes/protocol-wire.md` 的网关地址闸上已经记过两次）。
+   * ⚠️ 这份正则必须与 `src/models.ts` 的 `hasVisibleText` **逐字同构**
+   * （客户端不能 import 服务端源码，故两处各存一份，靠共同用例锁住）。
    */
   const description = typeof model.description === 'string'
-    && model.description.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').trim().length > 0
+    && model.description.replace(/[\p{Cf}\p{Cc}\p{Cs}\p{Mn}\p{Me}\u115F\u1160\u2800\u3164\uFFA0\uFFFC]/gu, '').trim().length > 0
     ? model.description
     : undefined;
   return React.createElement('label', {

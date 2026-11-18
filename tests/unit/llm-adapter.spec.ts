@@ -701,6 +701,35 @@ describe('CodeArtsAdapter', () => {
     expect(models[0]!.id).toBe('GLM-5.2')
   })
 
+  it('★★ toCatalogEntry 必须把 model_desc 透传成 description（三态；2026-11-18 正向审计指出此层零守卫）', () => {
+    // ⚠️ 为什么单测这一层：`toCatalogEntry` 是 `model_desc` 从「目录解析结果」
+    // 变成「骨架条目的 description」的**唯一**关口 —— 把它那行
+    // `...(model.description === undefined ? {} : { description: model.description })`
+    // 删掉，2026-11-18 实测 **129 条用例全绿**（其余用例只验 id / name / 倍率）。
+    // 后果链：`listModels()` 的条目没有 `description` ⇒ 宿主选择器那行灰字消失，
+    // 且 `model.list` 的补缺段也补不出来（两边都空）⇒ 整条功能静默失效。
+    //
+    // 该方法只读入参与模块级纯函数（`codeartsContextWindow` / `codeartsRateSuffix` /
+    // `codeartsAcceptsImage`），不碰 `this` ⇒ 用原型直调即可，不必造完整 adapter。
+    const entryOf = (model: Record<string, unknown>): Record<string, unknown> => {
+      const toCatalogEntry = (CodeArtsAdapter.prototype as unknown as {
+        toCatalogEntry: (this: unknown, model: unknown) => Record<string, unknown>
+      }).toCatalogEntry
+      return toCatalogEntry.call({}, model)
+    }
+
+    // ① 有介绍 ⇒ 原样落键（不退化成 name / 不截断）
+    expect(
+      entryOf({ id: 'glm-5.3', name: 'glm-5.3', description: '【限时体验】面向复杂编程与长程任务' }).description,
+    ).toBe('【限时体验】面向复杂编程与长程任务')
+    // ② 上游没给 ⇒ **键缺席**（不写空串、不写 undefined）
+    expect(Object.hasOwn(entryOf({ id: 'glm-5.3', name: 'glm-5.3' }), 'description')).toBe(false)
+    // ③ 倍率仍在，且与 description 互不影响（同一条目的两条腿）
+    const withRate = entryOf({ id: 'glm-5.3', name: 'glm-5.3', description: '介绍', rateLabel: '0.7x' })
+    expect(withRate.description).toBe('介绍')
+    expect(withRate.name).toBe('glm-5.3 · x0.7')
+  })
+
   it('signs glm-5.3-flash requests with the maas_type: benefit header', async () => {
     // glm-5.3-flash 是 benefit（免费额度）模型：maas_type: benefit 必须
     // 参与 SDK-HMAC-SHA256 签名并随请求发送，否则后端返回

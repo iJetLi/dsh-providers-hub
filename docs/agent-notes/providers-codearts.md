@@ -957,13 +957,51 @@ max_tokens, context_window
 
 ⇒ 看得见的第二行只能在插件自己的「模型列表」弹窗里做（`.dim-jh-modelDesc`），
 **完整描述同时进行的 `title`**（行内必然 ellipsis，悬停是唯一能看到全文的地方）。
-宿主 `description` 仍照常填 —— 它唯一确证的收益是 `filterOptions` 会把 `detail`
-纳入搜索匹配（用户能按介绍里的字搜到模型）。
+⚠️⚠️ **宿主其实连 `description` 都不读**（2026-11-18 本机实测，不是推断）：
+`optionsOf()`（`dsh-client-ui-model-selection/lib/client.js:1956-1975`）给每个**模型**产的行是
+`{ id, label, group, ...active }` —— **没有 `description`、也没有 `detail`**；
+只有**加载失败行**才带 `detail: t('option.loadError', { message })`。
+⇒ 上面「拼进 `detail = ${provider} · ${description}`」那段**不成立**（本机
+`0.2.2-rc.1` 的产物里零依据），「`filterOptions` 把 `detail` 纳入搜索匹配」也就不成立
+（模型行根本没有 detail）。
+**真实结论：`description` 在本仓的唯一消费者就是 Jet Hub 面板。**
+⇒ `model.list` 那条腿必须真的把字段送到，否则用户侧**功能为零**（见下一节 —— 它原本正是断的）。
 
 ⚠️ **影响面不止 codearts**：`cline` / `lobsterai` 的 `CatalogEntry.description`
 **早就存在**（见 `src/model-catalog.ts` 的字段注释：「两家都会下发它，漏掉就是静默丢字段」），
 只是 `model.list` 以前把它丢了。本 PR 让它们**首次**出现在这个弹窗的第二行 ——
 同一份数据同一套 UI 的必然结果，不是 bug，但属于**行为扩展**，PR 里要写明。
+
+### ⚠️⚠️ `model.list` 有两条分支，`listAllModels()` 漏字段 = 设置页永远没有第二行（2026-11-18 修）
+
+`src/jet-hub-rpc.ts` 的 `model.list` 先取 `source.listAllModels()`，**拿到就整体替换**
+`catalog = [...all]`；拿不到才走 `models.map(...)` 那条。而
+`src/model-catalog.ts` 的 `listAllModels()` 原本 `.map()` 里**只挑 `{ id, name, ...isFree }`**
+—— `description` 在这一步就被剥掉了。codearts 适配器（`src/llm-adapter.ts:2101-2103`）
+**正好实现了** `listAllModels()`（直接委托骨架）⇒ 恒走 `all` 分支 ⇒
+面板上一条介绍都没有。而 PR 原有的守卫（`tests/unit/jet-hub-rpc.spec.ts:1378`）用
+**手写 fixture** `listAllModels: () => [{ …, description: '…' }]` 绕过真实骨架
+⇒ **恒绿假绿**（它验的是「RPC 拿到带 description 的对象会不会转发」，
+而真实骨架根本不产这个字段）。
+
+修法（2026-11-18 双审计 + 我复核定案，**不落骨架**）：
+`listAllModels()` 的产出被 `tests/unit/model-catalog-parity.spec.ts` **逐字**锁着
+「只吐 id / name / isFree 三键（不透出 description）」—— 那是**跨 provider 的目录契约**
+（各家兜底表都走同一条路），为一家加字段会悄悄改掉所有家的产出形状。更糟的是
+那条 parity 用例的两个 fixture **恰好都不带 description** ⇒ 改骨架**不会红**，
+契约被静默改掉（比变红更坏）。我第一版就是改骨架，走过这条路。
+
+⇒ 修法落在 **RPC 层**：`model.list` 的 `all` 分支里按 id 从 `listModels()` 补，
+**只补缺、不覆盖**（`listAllModels()` 将来真带了这个字段、或适配器给了更权威的值，
+一律以它为准）。两边都已在手（`all` = 契约三键、`models` = 带介绍），对上即可。
+`ModelCatalogSource.listAllModels` 的类型**不动**（仍是三键），表示它是契约。
+
+守卫换成**真骨架**：拿 `createModelCatalog({}, { product: { id: 'codearts' }, loadCatalog, syncCatalog })`
+当 `catalogSource`，先**前置自证**骨架两条腿确实「一个不带、一个带」
+（`listAllModels()` `not.toHaveProperty('description')` + `listModels()` 带介绍），
+再断言 `model.list` 把介绍补了回来、没介绍的条目**键缺席**。
+变异「把合并段包成 `if (false)`」实测变红：
+`expected undefined to be '【限时体验】许愿式编程一键成真'`。
 
 ### ⚠️ 三态：缺失 / 非字符串 / 纯空白 ⇒ **不落键**
 
@@ -971,6 +1009,42 @@ max_tokens, context_window
 且与「上游确实给了空介绍」在 UI 上同形。四层都必须三态（`parseModelInfo` →
 `toCatalogEntry` → `toModelInfo` → `model.list`），任何一层漏掉都表现为
 「这家看起来没有介绍」。
+
+#### ⚠️⚠️ 零宽判据必须按 **Unicode 类别**，枚举码点实测漏 5 个（2026-11-18）
+
+初版两端都写 `text.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').trim()`（枚举）。
+实测 18 格里**逃逸 5 个**：`\u180e`（MVS，Unicode 6.3 起由 `Zs` 改归 `Cf`）、
+`\u2066`（LRI）、`\u2067\u2069`（RLI+PDI）、`\u061c`（ALM）、`\ufff9`（行间注解）
+—— 它们**不可见但不是空白**，`trim()` 也去不掉 ⇒ 上游发这种串时面板会画出
+**看不见的第二行**（行高 +16/+24px，用户只觉得「列表莫名变松」）。
+
+最终两端统一：`/[\p{Cf}\p{Cc}\p{Cs}\p{Mn}\p{Me}\u115F\u1160\u2800\u3164\uFFA0\uFFFC]/gu`。
+⚠️⚠️ **光有类别还不够**（对抗审计点名、我逐个真跑复现）：下面 6 个「填充符」
+视觉上完全空白，但类别是 **`Lo`（字母）** 或 **`So`（其他符号）** —— `\p{Cf}` 一个都不含、
+`trim()` 也不吃：`U+3164` HANGUL FILLER、`U+115F` CHOSEONG FILL、`U+1160` JUNGSEONG FILL、
+`U+FFA0` HALFWIDTH HANGUL FILLER、`U+2800` BRAILLE PATTERN BLANK、`U+FFFC` OBJECT REPLACEMENT。
+实测这 6 个**全部 LEAK** ⇒ 仍能画出空白第二行，并把这行的 `title` 从 `model.id`
+抢成不可见字符（而 `.dim-jh-modelId` 有 `max-width:46%` + ellipsis ⇒
+**悬停是看全 id 的唯一入口**）。**刻意不剥 `Zs`**（句中普通空格是正常内容，两端交给 `trim()`）。这条与 `protocol-wire.md` 里
+「网关通配判据枚举码点必漏、必须按类别」是同一个教训的第 N 次复发
+—— 该文件写的是**类别 + NFKC**，这里只需要类别（没有 NFKC 的必要：这些字符
+不参与任何折写）。客户端 `jet-hub.js` 与 `src/models.ts` **各存一份同构正则**
+（客户端不能 import 服务端源码），靠 `models.spec.ts` / `model-desc-row.spec.ts`
+的**同一份矩阵**（各 6 格）锁住两处。
+
+
+#### ⚠️⚠️ CSS 模板字符串里终止注释的是 `*/`，不是 `/*`（2026-11-18 对抗审计实测）
+
+`plugin-src/client/jet-hub-styles.js` 整个样式是**一段模板字符串**。往注释里插 `/*`
+**无害**（esbuild exit 0）—— 真正会提前闭合那段注释的是 **`*/`**，而插了 `*/` 之后是
+**esbuild 0 + `tsc` 与基线逐行相同 + 单测全绿 = 三层全静默**（浏览器直接丢弃后续规则），
+全仓**没有**任何测试守 CSS 模板完整性。本 PR 新增的 14 行 CSS 实测**无反引号、无 `*/`**，
+但这条坑要记住：改那段样式后要 grep **整段文本**里的反引号**与** `*/`，
+不能只扫到第一个为止。
+
+另：第二行的真实增量是 **+22px**（弹窗等效行宽 466px、`line-height:16px`、真 Chromium 154
+无头实测 36 → 58px），作者注释写的「+24px」对不上；行宽 ≤340px 时会变 3 行（+47px），
+当前不可达（本机窗口最窄也没到）。
 
 ### ⚠️ 不许据 `model_desc` 推断活动窗口
 
@@ -1029,14 +1103,25 @@ esbuild 报的是 `Expected ";" but found "flex"`（看起来像 CSS 语法错�
 
 | 文件 | 打的是哪条腿 |
 |---|---|
-| `tests/unit/models.spec.ts` | 解析层：读到 `model_desc`、只 trim、四种空形态（含零宽）不落键；**跨端点去重时补齐介绍** |
-| `tests/unit/jet-hub-rpc.spec.ts` | 端点层：响应带 `description`；缺失不写空串；`listAllModels` 分支（被关闭的条目）也带 |
+| `tests/unit/models.spec.ts` | 解析层：读到 `model_desc`、只 trim、空形态不落键（`''` / 纯空白 / `null` / 数字 / 对象，**外加零宽矩阵 12 格**——含枚举漏掉的那 5 个；判据按 Unicode 类别，见上一节）；**跨端点去重时补齐介绍** |
+| `tests/unit/jet-hub-rpc.spec.ts` | 端点层：响应带 `description`；缺失不写空串；`listAllModels` 分支也带；**★★★ 真骨架 + 前置自证**（骨架只吐三键、RPC 按 id 从 `listModels()` 补）—— 上一格是手写 fixture，验不到数据源头（见 `listAllModels()` 那节） |
 | `tests/unit/model-desc-row.spec.ts` | 客户端**真渲染**：第二行文案/title、DOM 顺序（name/id 在前、desc 最后）、无介绍不画、`data-desc` 开关、已下架时 title 仍求救、CSS 两条承重规则 + **无条件规则不得带 wrap** |
 | `tests/e2e/codearts-model-desc-probe.e2e.spec.ts` | 真机只读：解析结果与原始 `model_desc` **逐条对拍**，并断言「至少一条有介绍」（防空跑绿） |
 
 变异验证（9/9 有牙）：解析层丢字段 / RPC 响应丢字段 / 客户端 `if (false)` 旁路 /
 `flex: 0 0 100%` → `0 1 auto` / **跨端点不补齐** / **服务端零宽判据退化** /
 **客户端去掉 `data-desc`** / **客户端零宽判据退化** / **wrap 写回无条件规则**。
+
+⚠️ 上面「9/9」是**作者侧自述**（脚本不入库，无法复核）。2026-11-18 双审计返工时
+另行补测并逐格实测有牙的 6 格：① `src/model-catalog.ts` 的 `listAllModels()` 删
+`description` 那行（红在**真骨架**用例上）② `src/models.ts` 零宽退回枚举（红在 `mvs` 那格）
+③ 客户端零宽退回枚举（红在真渲染那格）④ `src/jet-hub-rpc.ts` 的 `else` 分支丢字段（1 红）
+⑤ 同文件**统一出口**丢字段（2 红，两条分支都经过它）⑥ `plugin-src/client/jet-hub.js`
+的 `data-desc` 恒 `'false'`（`expected 'false' to be 'true'`）。
+
+⚠️ 第 ④/⑤ 两格要**按行号**变异，不能按字符串锚点：两处代码逐字相同、只差缩进
+（`else` 分支 14 空格、统一出口 12 空格）⇒ 用 12 空格当锚点会**子串命中** 14 空格那行
+（`count=2`，报 `PATCH-NOT-APPLIED` 才对，勉强替换则会打在错误的行上）。
 
 ### 未做（如实登记）
 

@@ -127,5 +127,15 @@
     //    —— 这些在 esbuild 转译下完全看不见，而这两条正是该模块存在的理由（时区腿 /
     //    端点不含腿）。纳入后若有人把 `validUntil` 改成 `string` 立刻红。
     "tests/unit/promotion-tooltip.spec.ts",
+    // ⚠️ 2026-11-18 补（GitHub PR #115 正向审计 P2-1）：纳入 `models.spec.ts` ——
+    //    它断言 `RemoteModel.description` 的**三态**（缺失 / 空串 / 非字符串一律
+    //    不落键）与 `model_desc` 的读取口径，esbuild 转译下这些形状完全看不见。
+    "tests/unit/models.spec.ts",
+    // ⚠️⚠️ **`model-desc-row.spec.ts` 刻意不纳入**（同 PR，另一条判据）：
+    //    它 `await import('../../plugin-src/client/jet-hub.js')` —— 那是**无类型
+    //    声明的纯 JS 客户端源码** ⇒ 纳入立刻 `TS7016`（实测），与本 PR 的改动无关。
+    //    仓内同型的真渲染守卫（`jet-hub-panel-wiring.spec.ts`、`jet-hub-tdz.spec.ts`）
+    //    也都不在 include 里，理由相同。要纳入必须先给 `jet-hub.js` 补 `.d.ts`，
+    //    那是独立任务；在此之前它的守卫力靠「真渲染断言」而不是编译器。
   ]
 }

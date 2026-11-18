@@ -20,13 +20,18 @@ function makeCredential(): CodeArtsCredential {
     refresh_token: 'rt',
     code_verifier: 'cv',
     dpop_private_key_jwk: 'jwk',
-  } as CodeArtsCredential
+    // ⚠️ `as unknown as` 是**刻意的**（2026-11-18 纳入 `tsconfig.tests.json` 时暴露）：
+    //    `dpop_private_key_jwk` 的真实类型是 `DpopPrivateJwk`（对象），这里塞的是
+    //    字符串占位 —— 裸 `as` 会报 TS2352。本 fixture 只喂给签名函数，运行时不读该字段。
+  } as unknown as CodeArtsCredential
 }
 
 /** 按 URL 路由返回不同响应的 mock fetch；记录每次请求的 URL 与头。 */
 function makeFetcher(routes: Record<string, { status?: number; body: string }>) {
   const calls: Array<{ url: string; headers: Headers }> = []
-  const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+  // ⚠️ 不用 `RequestInfo`：它属于 DOM lib，本配置只有 node 的 lib（TS2552）。
+  //    node 侧等价的是 `string | URL | Request`。
+  const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     calls.push({ url, headers: new Headers(init?.headers) })
     const route = routes[url]
@@ -121,6 +126,28 @@ describe('fetchCodeArtsRemoteModels', () => {
             // ⚠️ **零宽字符**不是空白：`trim()` 不会去掉 `\u200b`（`Cf`），
             //    只判 `trim().length > 0` 会让它通过 ⇒ 客户端画一格看不见的第二行。
             { model_id: 'zwsp-only', model_name: 'ZWSP', model_desc: '\u200b\u200b\u2060\ufeff' },
+            // ⚠️⚠️ 初版判据是 `/[\u200b-\u200f\u2060\ufeff]/g`（枚举），实测**逃逸 5 个**
+            //    （2026-11-18，GitHub PR #115 复核）：每一个都能画出隐形的一行。
+            //    ⇒ 判据已改成按 Unicode 类别 `[\p{Cf}\p{Cc}\p{Cs}\p{Mn}\p{Me}]`，
+            //      这几格就是那次的取证矩阵，别再退回枚举。
+            { model_id: 'mvs', model_name: 'MVS', model_desc: '\u180e' },
+            { model_id: 'lri', model_name: 'LRI', model_desc: '\u2066' },
+            { model_id: 'rli-pdi', model_name: 'RLI+PDI', model_desc: '\u2067\u2069' },
+            { model_id: 'alm', model_name: 'ALM', model_desc: '\u061c' },
+            { model_id: 'interlinear', model_name: '行间注解', model_desc: '\ufff9' },
+            // 控制符同样不能被 `trim()` 吃掉（`Cc`），否则落键后会画出空行
+            { model_id: 'control', model_name: 'CTRL', model_desc: '\u0001\u0002' },
+            // ⚠️⚠️ **光按 Unicode 类别还不够**（2026-11-18 对抗审计点名、我逐个实测复现）：
+            //    下面 6 个「填充符」**视觉上完全空白**，但类别是 `Lo`（字母）或 `So`（其他符号）
+            //    ⇒ `[\p{Cf}\p{Cc}\p{Cs}\p{Mn}\p{Me}]` 一个都不含、`trim()` 也不吃。
+            //    实测（`fetchCodeArtsRemoteModels` 真跑）：这 6 个全部 LEAK ⇒
+            //    客户端会画一格约 16px 的空白行，并把该行 `title` 从 `model.id` 抢走。
+            { model_id: 'hangul-filler', model_name: 'U+3164', model_desc: '\u3164' },
+            { model_id: 'braille-blank', model_name: 'U+2800', model_desc: '\u2800' },
+            { model_id: 'choseong-fill', model_name: 'U+115F', model_desc: '\u115f' },
+            { model_id: 'jungseong-fill', model_name: 'U+1160', model_desc: '\u1160' },
+            { model_id: 'halfwidth-fill', model_name: 'U+FFA0', model_desc: '\uffa0' },
+            { model_id: 'obj-replacement', model_name: 'U+FFFC', model_desc: '\ufffc' },
             { model_id: 'no-desc', model_name: 'NoDesc' },
           ],
         }),
@@ -133,7 +160,7 @@ describe('fetchCodeArtsRemoteModels', () => {
     expect(byId.get('glm-5.3')?.description).toBe('【限时体验】面向复杂编程与长程任务')
     // ⚠️ 三态硬要求：空串 / 全空白 / 非字符串 / 缺失 ⇒ **键根本不出现**
     //    （写 `''` 会让宿主/客户端把「上游没给」渲染成一格空的行，与「有介绍」同形）。
-    for (const id of ['GLM-5.2', 'kimi-k3', 'speed', 'zwsp-only', 'no-desc']) {
+    for (const id of ['GLM-5.2', 'kimi-k3', 'speed', 'zwsp-only', 'mvs', 'lri', 'rli-pdi', 'alm', 'interlinear', 'control', 'hangul-filler', 'braille-blank', 'choseong-fill', 'jungseong-fill', 'halfwidth-fill', 'obj-replacement', 'no-desc']) {
       expect(byId.get(id), `前置：${id} 必须在目录里，否则这一格是空跑`).toBeDefined()
       expect(Object.hasOwn(byId.get(id)!, 'description'), `${id} 不该带 description 键`).toBe(false)
     }
@@ -169,6 +196,38 @@ describe('fetchCodeArtsRemoteModels', () => {
     // ⚠️ 只补**缺**的字段：先到的 name/倍率不能被后到的顶掉（现在两边 name 不同，
     //    取先到的那个 —— 这是既有语义，本条只锁定「不被静默改写」）。
     expect(models.find((m) => m.id === 'deepseek-v4.1-flash')?.name).toBe('deepseek-v4.1-flash')
+  })
+
+  it('★★ 两个端点都带介绍（文案不同）⇒ 先到的赢，后到的**不许覆盖**', async () => {
+    // 上一条只锁了「补缺」，这一条锁另一半：**已有的不覆盖**（2026-11-18 正向审计
+    // 指出这一半零守卫 —— 把条件改成无条件赋值，44 条全绿）。
+    // 理由：`gateway/config` 的 benefit 组是**按账号权益**给的「限时体验」标注，
+    // 比 builtin 的通用介绍更贴近用户此刻的处境；反过来让后到的通用介绍顶掉它，
+    // 会把「你这个账号现在免费」换成一句泛泛的卖点。
+    const { fetcher } = makeFetcher({
+      [OPENGW_GATEWAY_CONFIG_URL]: {
+        body: JSON.stringify({
+          result: {
+            models: [
+              { model_id: 'deepseek-v4.1-flash', model_name: 'deepseek-v4.1-flash', model_desc: '【限时体验】本账号可用' },
+            ],
+          },
+        }),
+      },
+      [SNAP_MODEL_BUILTIN_URL]: {
+        body: JSON.stringify({
+          builtinModels: [
+            { model_id: 'deepseek-v4.1-flash', model_name: 'DeepSeek-V4.1-Flash', model_desc: '通用介绍（不该赢）' },
+          ],
+        }),
+      },
+    })
+    const models = await fetchCodeArtsRemoteModels(makeCredential(), fetcher)
+    expect(models.filter((m) => m.id === 'deepseek-v4.1-flash')).toHaveLength(1)
+    expect(
+      models.find((m) => m.id === 'deepseek-v4.1-flash')?.description,
+      '先到的介绍必须保住（后到的只补缺、不覆盖）',
+    ).toBe('【限时体验】本账号可用')
   })
 
   it('merges opengw gateway/config benefit models with builtin models, deduped', async () => {

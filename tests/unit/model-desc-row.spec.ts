@@ -123,6 +123,24 @@ describe('模型行 · 模型介绍（第二行 + 完整描述进 title）', () 
       // ⚠️ 零宽字符不是空白：`'\u200b'.trim()` 仍是 `'\u200b'` ⇒ 只判 trim 会画出
       //    一格看不见的第二行（行高 +24px）。
       { ...BASE, description: '\u200b\u200b\u2060\ufeff' },
+      // ⚠️⚠️ 初版客户端的剥除集合也是**枚举**（`\u200b-\u200f\u2060\ufeff`），
+      //    2026-11-18 实测逃逸这 5 个 ⇒ 每一个都能画出看不见的一行。
+      //    判据已改成 Unicode 类别 `[\p{Cf}\p{Cc}\p{Cs}\p{Mn}\p{Me}]`，别再退回枚举。
+      { ...BASE, description: '\u180e' },
+      { ...BASE, description: '\u2066' },
+      { ...BASE, description: '\u2067\u2069' },
+      { ...BASE, description: '\u061c' },
+      { ...BASE, description: '\ufff9' },
+      { ...BASE, description: '\u0001\u0002' },
+      // ⚠️⚠️ 光按类别还不够（2026-11-18 对抗审计点名、我逐个实测复现）：
+      //    这 6 个「填充符」视觉上完全空白，但类别是 `Lo`/`So`（`\p{Cf}` 等一个都不含），
+      //    `trim()` 也不吃 ⇒ 单靠类别仍会在此画出空白第二行、并把 title 抢成不可见字符。
+      { ...BASE, description: '\u3164' },
+      { ...BASE, description: '\u2800' },
+      { ...BASE, description: '\u115f' },
+      { ...BASE, description: '\u1160' },
+      { ...BASE, description: '\uffa0' },
+      { ...BASE, description: '\ufffc' },
       { ...BASE, description: 42 },
     ]) {
       const row = await renderRow(model)

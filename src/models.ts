@@ -248,7 +248,36 @@ export function normalizeModelId(id: string): string {
  * 出现在文案字段的那几个），不做通用化。
  */
 function hasVisibleText(text: string): boolean {
-  return text.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').trim().length > 0
+  // ⚠️⚠️ **必须按 Unicode 类别剥，不能枚举码点**（2026-11-18 复核 GitHub PR #115 时实测）。
+  //
+  // 初版是 `/[\u200b-\u200f\u2060\ufeff]/g`（5 段枚举），我在它上面跑了 18 格矩阵，
+  // **逃逸 5 个**：`\u180e`(MONGOLIAN VOWEL SEPARATOR，Unicode 6.3 起由 `Zs` 改归 `Cf`)、
+  // `\u2066`/`\u2067`/`\u2069`(LRI/RLI/PDI)、`\u061c`(ARABIC LETTER MARK)、
+  // `\ufff9`(行间注解起)… 一族 —— 每一个都能让 `trim()` 后长度 > 0 ⇒ 客户端画出
+  // **一格看不见的第二行**（行高 +24px，用户只看到「列表莫名变松」），
+  // 而那正是本函数存在的理由。`\p{Cf}` 一族有 160+ 个码点，枚举必漏。
+  //
+  // 剥掉的类别：
+  // - `Cf` 格式符（零宽、方向控制、软连字符、BOM…）：**不可见**
+  // - `Cc` 控制符（`\u0001` 等）：`trim()` 不认，原样留着就会落键
+  // - `Cs` 代理项（孤立代理，仅在畸形串里出现）
+  // - `Mn`/`Me` 组合/包围标记：单个组合符单独出现时不可见（`e\u0301` 剥完仍是 `e`，
+  //   不会把「有内容」判成「没内容」）
+  //
+  // ⚠️ **刻意不剥 `Zs`**：普通空格 `U+0020` 在**句中**是正常内容（`'a b'` 该保留），
+  // 两端空白由后面的 `trim()` 负责。
+  // ⚠️ 判据在 `src/models.ts` 与 `plugin-src/client/jet-hub.js` **各有一份**
+  // （客户端不能 import 服务端源码）⇒ 两处必须**逐字同构**，且
+  // `tests/unit/models.spec.ts` 的「零宽矩阵」是它们的共同守卫。
+  // ⚠️⚠️ **光有类别还不够，另有一族「填充符」**（2026-11-18 对抗审计点名、我逐个实测复现）：
+  // `U+115F`（Hangul Choseong Filler）、`U+1160`（Jungseong Filler）、`U+3164`（Hangul Filler）、
+  // `U+FFA0`（Halfwidth Hangul Filler）都是 **`Lo`**（字母），
+  // `U+2800`（Braille Pattern Blank）与 `U+FFFC`（Object Replacement Character）是 **`So`**
+  // —— 它们**视觉上完全空白**，但上面五个类别一个都不含 ⇒ 单靠类别仍会放行。
+  // 实测（`fetchCodeArtsRemoteModels` 真跑，15 格）：这 6 个**全部 LEAK**，
+  // 客户端会画出一格约 16px 的空白行，并把该行的 `title` 从 `model.id` 抢成不可见字符
+  // （`.dim-jh-modelId` 有 `max-width:46%` + ellipsis ⇒ 悬停是该模型 id 唯一看全的入口）。
+  return text.replace(/[\p{Cf}\p{Cc}\p{Cs}\p{Mn}\p{Me}\u115F\u1160\u2800\u3164\uFFA0\uFFFC]/gu, '').trim().length > 0
 }
 
 function parseModelInfo(

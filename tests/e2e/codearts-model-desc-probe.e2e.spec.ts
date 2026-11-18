@@ -32,8 +32,8 @@ describe.runIf(E2E)('codearts 模型介绍（model_desc 真机）', () => {
   it(
     '解析结果里的 description 与上游 model_desc 逐条一致',
     async () => {
-      const [entry] = readCodeArtsCredentialsFromDshStore()
-      expect(entry, '需要 DSH 凭据存储里有一个 CodeArts 账号（只读，不刷新）').toBeDefined()
+      const entries = readCodeArtsCredentialsFromDshStore()
+      expect(entries.length, '需要 DSH 凭据存储里至少一个 CodeArts 账号（只读，不刷新）').toBeGreaterThan(0)
 
       /** 原报文里的 `model_id → model_desc`（只收 builtin 那一条响应）。 */
       const rawDescs = new Map<string, unknown>()
@@ -49,8 +49,34 @@ describe.runIf(E2E)('codearts 模型介绍（model_desc 真机）', () => {
         return response
       }
 
-      const models = await fetchCodeArtsRemoteModels(entry!.credential, fetcher)
-      expect(models.length, '上游目录为空 —— 探针无从对拍').toBeGreaterThan(0)
+      // ⚠️⚠️ **必须遍历账号，且把「凭据不可用」与「上游没数据」分开报**
+      //    （2026-11-18 修）：原实现 `const [entry] = …` 只取**第一个**账号，
+      //    而本机 4 个账号的 `expires_at` 全落在 11-09 ~ 11-13（跑测那天是 11-18）
+      //    ⇒ 全部 401 `APIG.0301`。那一刻的失败文案是
+      //    「上游目录为空 —— 探针无从对拍」，把**凭据过期**伪装成**上游没数据** ——
+      //    两者的处置完全相反（一个要重新登录、一个是产品缺陷）。
+      let usable: (typeof entries)[number] | undefined
+      let models: Awaited<ReturnType<typeof fetchCodeArtsRemoteModels>> = []
+      const failures: string[] = []
+      for (const candidate of entries) {
+        try {
+          const got = await fetchCodeArtsRemoteModels(candidate.credential, fetcher)
+          if (got.length > 0) {
+            usable = candidate
+            models = got
+            break
+          }
+          failures.push(`${candidate.ref}: 目录为空（凭据被接受但没返回模型）`)
+        } catch (error) {
+          failures.push(`${candidate.ref}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      expect(
+        usable,
+        `本机 ${entries.length} 个 CodeArts 账号全部拿不到目录。`
+        + '先确认凭据是否过期（401 APIG.0301 Incorrect IAM authentication information），'
+        + '别当成「上游没数据」：\n  ' + failures.join('\n  '),
+      ).toBeDefined()
       expect(rawDescs.size, '没抓到 builtin 原始报文（端点或 URL 变了？）').toBeGreaterThan(0)
 
       /** 上游真给了非空介绍的条目（VL 模型会被插件过滤，所以从解析结果侧取）。 */
