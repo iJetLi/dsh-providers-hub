@@ -969,7 +969,7 @@ describe('TRAE 适配器 · SOLO SSE 到 OpenAI chunk 转换', () => {
     expect(usage?.usage.reasoningTokens).toBe(30)
   })
 
-  it('★ 无缓存命中时不发 cacheReadTokens（不伪造 0）', async () => {
+  it('上游明确报 0 时透出 cacheReadTokens', async () => {
     const { adapter } = makeAdapter({
       responses: [sseResponse(soloSse(
         ['output', { response: 'x' }],
@@ -979,7 +979,7 @@ describe('TRAE 适配器 · SOLO SSE 到 OpenAI chunk 转换', () => {
     })
     const chunks = await collect(adapter, BASIC_OPTIONS)
     const usage = chunks.find((c) => c.type === 'usage') as { usage: Record<string, unknown> } | undefined
-    expect(usage?.usage).not.toHaveProperty('cacheReadTokens')
+    expect(usage?.usage).toHaveProperty('cacheReadTokens', 0)
     expect(usage?.usage.inputTokens).toBe(4894)
   })
 

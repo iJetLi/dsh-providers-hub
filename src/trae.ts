@@ -36,6 +36,7 @@
 
 import { createHash } from 'node:crypto'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
+import { readCacheTokenCount } from './cache-token-count.js'
 import { jwtExpiresAtMs } from './buddy.js'
 import { TRAE_CHANNELS, type TraeProduct } from './trae-product.js'
 
@@ -2068,7 +2069,7 @@ export function traeUsageFromTokenUsage(raw: Record<string, unknown>): TokenUsag
     typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : undefined
 
   const promptTokens = num(raw.prompt_tokens)
-  const cacheRead = num(raw.cache_read_input_tokens)
+  const cacheRead = readCacheTokenCount(raw.cache_read_input_tokens)
   const cacheWrite = num(raw.cache_creation_input_tokens)
   const completionTokens = num(raw.completion_tokens)
   const reasoningTokens = num(raw.reasoning_tokens)
@@ -2080,7 +2081,7 @@ export function traeUsageFromTokenUsage(raw: Record<string, unknown>): TokenUsag
   return {
     inputTokens,
     outputTokens: completionTokens ?? 0,
-    ...cacheRead !== undefined && cacheRead > 0 ? { cacheReadTokens: cacheRead } : {},
+    ...cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {},
     ...cacheWrite !== undefined && cacheWrite > 0 ? { cacheWriteTokens: cacheWrite } : {},
     ...reasoningTokens !== undefined && reasoningTokens > 0 ? { reasoningTokens } : {},
   }

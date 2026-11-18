@@ -76,6 +76,7 @@
  */
 
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
+import { readCacheTokenCount } from '../cache-token-count.js'
 
 /**
  * 已归一化到 OpenAI 口径的用量。
@@ -90,8 +91,7 @@ export interface OpenAiUsage {
   outputTokens: number
   /** 总 token = 总输入 + 输出。 */
   totalTokens: number
-  /** 总输入里**命中缓存**的那部分（上者的子集）。 */
-  cachedTokens: number
+  cachedTokens?: number
   /** 思考 token（输出的子集）；上游没报时为 `undefined`。 */
   reasoningTokens?: number
 }
@@ -112,10 +112,10 @@ function count(value: unknown): number {
  * 故不进 `cachedTokens`。
  */
 export function toOpenAiUsage(usage: TokenUsage): OpenAiUsage {
-  const cached = count(usage.cacheReadTokens)
+  const cached = readCacheTokenCount(usage.cacheReadTokens)
   const written = count(usage.cacheWriteTokens)
   // ⚠️ 这一行是本次修复的核心：DSH 的 `inputTokens` 不含缓存，必须加回去。
-  const inputTokens = count(usage.inputTokens) + cached + written
+  const inputTokens = count(usage.inputTokens) + (cached ?? 0) + written
   const outputTokens = count(usage.outputTokens)
   const reported = typeof usage.totalTokens === 'number' && Number.isFinite(usage.totalTokens) && usage.totalTokens > 0
     ? Math.trunc(usage.totalTokens)
@@ -129,7 +129,7 @@ export function toOpenAiUsage(usage: TokenUsage): OpenAiUsage {
     // （本仓库无法穷举验证 14 个 provider），直接采信就会原样重现本缺陷。
     // 取较大者保证「只会多算、绝不漏算」—— 漏算的代价是自动压缩永不触发。
     totalTokens: Math.max(reported ?? 0, inputTokens + outputTokens),
-    cachedTokens: cached,
+    ...cached !== undefined ? { cachedTokens: cached } : {},
     ...count(usage.reasoningTokens) > 0 ? { reasoningTokens: count(usage.reasoningTokens) } : {},
   }
 }

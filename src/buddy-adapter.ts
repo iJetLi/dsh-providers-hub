@@ -65,6 +65,7 @@ import { rewriteTencentContentFingerprints } from './openai-gateway/tencent-fing
 // ⚠️ `detail` 那条腿**只留一份实现**（`openai-compat.ts`）：本仓库 6 份同义的
 // `errorDetail` 各写一条判据必然漂移（IKLBSH A1）。
 import { detailFieldText, TOOL_RESULT_IMAGE_TEXT } from './openai-compat.js'
+import { readCacheTokenCount } from './cache-token-count.js'
 // ⚠️ 原生搜索的错误码与错误类型从**契约文件**取（`native-search-contract.ts`）：
 //    取数虽已下沉到本适配器，但「同一种失败在任何渠道报同一个码」这条不能破 ——
 //    否则排查时会把「无账号」误判成「上游故障」。
@@ -4338,9 +4339,8 @@ export class BuddyAdapter extends LlmAdapter {
             // 后端在六处回传缓存信息，其中 cached_tokens 同时出现在
             // prompt_tokens_details 与 completion_tokens_details 里，但后者
             // **恒为 0**（实测）——只认 prompt_tokens_details，误取会永远读到 0。
-            const cachedTokens = data.usage.prompt_tokens_details?.cached_tokens
-              ?? data.usage.prompt_cache_hit_tokens
-              ?? 0
+            const cachedTokens = readCacheTokenCount(data.usage.prompt_tokens_details?.cached_tokens)
+              ?? readCacheTokenCount(data.usage.prompt_cache_hit_tokens)
             const cacheWriteTokens = data.usage.prompt_tokens_details?.cache_write_tokens
             const reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens
             yield {
@@ -4348,9 +4348,9 @@ export class BuddyAdapter extends LlmAdapter {
               usage: {
                 // 与 codearts 一致：inputTokens 只计**未命中缓存**的部分，
                 // 命中部分单列 cacheReadTokens，否则缓存命中率显示会偏大。
-                inputTokens: cachedTokens > 0 ? promptTokens - cachedTokens : promptTokens,
+                inputTokens: promptTokens - (cachedTokens ?? 0),
                 outputTokens: data.usage.completion_tokens ?? 0,
-                ...cachedTokens > 0 ? { cacheReadTokens: cachedTokens } : {},
+                ...cachedTokens !== undefined ? { cacheReadTokens: cachedTokens } : {},
                 ...cacheWriteTokens !== undefined && cacheWriteTokens > 0 ? { cacheWriteTokens } : {},
                 ...reasoningTokens !== undefined && reasoningTokens > 0 ? { reasoningTokens } : {},
               },

@@ -38,6 +38,7 @@
 
 import type { StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { readCacheTokenCount } from './cache-token-count.js'
 import { createDsmlMarkerNormalizer, fixDsmlMarkers, readWithIdleTimeout } from './sse.js'
 
 /** Anthropic 内容块（本实现用到的子集）。 */
@@ -516,7 +517,7 @@ export async function* consumeAnthropicSse(
      * 它们**不计入** `inputTokens`，否则缓存命中率会显示偏大
      * （Anthropic 的 `input_tokens` 本身就只含未命中部分）。
      */
-    cacheReadTokens = num(u.cache_read_input_tokens) ?? cacheReadTokens
+    cacheReadTokens = readCacheTokenCount(u.cache_read_input_tokens) ?? cacheReadTokens
     cacheWriteTokens = num(u.cache_creation_input_tokens) ?? cacheWriteTokens
   }
 

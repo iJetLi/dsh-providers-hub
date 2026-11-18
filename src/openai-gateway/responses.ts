@@ -971,7 +971,8 @@ function usageJson(usage: TokenUsage): Record<string, unknown> {
   const normalized = toOpenAiUsage(usage)
   return {
     input_tokens: normalized.inputTokens,
-    input_tokens_details: { cached_tokens: normalized.cachedTokens },
+    input_tokens_details: { cached_tokens: normalized.cachedTokens ?? 0 },
+    ...normalized.cachedTokens === undefined ? { cache_read_reported: false } : {},
     output_tokens: normalized.outputTokens,
     output_tokens_details: { reasoning_tokens: normalized.reasoningTokens ?? 0 },
     total_tokens: normalized.totalTokens,

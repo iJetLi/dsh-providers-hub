@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { toOpenAiUsage } from '../../src/openai-gateway/usage.js'
+import { consumeOpenAiSse } from '../../src/openai-compat.js'
 import { collectOpenAiCompletion, toOpenAiSse } from '../../src/openai-gateway/stream.js'
 import { collectResponsesResult, toResponsesSse, type OpenAiResponsesRequest } from '../../src/openai-gateway/responses.js'
 
@@ -44,13 +45,13 @@ describe('网关用量口径：DSH（互斥）→ OpenAI 官方（含缓存）',
   it('缓存写入也算真实输入（Anthropic 的 cache_creation），但**不算命中**', () => {
     const usage = toOpenAiUsage({ inputTokens: 10, outputTokens: 1, cacheWriteTokens: 5 })
     expect(usage.inputTokens).toBe(15)
-    expect(usage.cachedTokens).toBe(0)
+    expect(usage.cachedTokens).toBeUndefined()
   })
 
-  it('无缓存时与旧口径完全一致（trae 这类不报缓存的 provider 不受影响）', () => {
+  it('未上报缓存计数时仍保留完整 token 用量', () => {
     const usage = toOpenAiUsage({ inputTokens: 326134, outputTokens: 608 })
     expect(usage.inputTokens).toBe(326134)
-    expect(usage.cachedTokens).toBe(0)
+    expect(usage.cachedTokens).toBeUndefined()
     expect(usage.totalTokens).toBe(326742)
   })
 
@@ -65,13 +66,13 @@ describe('网关用量口径：DSH（互斥）→ OpenAI 官方（含缓存）',
     expect(usage.totalTokens).toBe(99)
   })
 
-  it('非法/负数用量一律当 0，绝不抛错中断整轮对话', () => {
+  it('非法缓存计数视为未知，其余非法用量按 0 处理', () => {
     const usage = toOpenAiUsage({
       inputTokens: -5 as never, outputTokens: Number.NaN as never, cacheReadTokens: -1 as never,
     })
     expect(usage.inputTokens).toBe(0)
     expect(usage.outputTokens).toBe(0)
-    expect(usage.cachedTokens).toBe(0)
+    expect(usage.cachedTokens).toBeUndefined()
     expect(usage.totalTokens).toBe(0)
   })
 
@@ -86,6 +87,50 @@ describe('两个端点的 usage 口径必须一致（只改一个就会「换个
   /** 用户报障里的真实一帧：raccoon 会话末。 */
   const raccoon = { inputTokens: 770, outputTokens: 633, cacheReadTokens: 207488 }
   const request: OpenAiResponsesRequest = { model: 'raccoon/sn-deepseek-v4-1-flash', input: 'hi' }
+
+  it.each([
+    { label: '未上报', upstream: {}, cached: undefined },
+    { label: '明确为零', upstream: { prompt_tokens_details: { cached_tokens: 0 } }, cached: 0 },
+    { label: 'DeepSeek 报正数', upstream: { prompt_cache_hit_tokens: 60 }, cached: 60 },
+    { label: '非法计数', upstream: { prompt_tokens_details: { cached_tokens: -1 } }, cached: undefined },
+  ])('渠道缓存计数 $label 时，两套 API 的流式与非流式都可区分', async ({ upstream, cached }) => {
+    const data = [
+      { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 100, completion_tokens: 2, ...upstream } },
+    ]
+    const body = data.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n'
+    const source = () => consumeOpenAiSse(new Response(body), {}, {
+      label: 'test', firstTokenTimeoutMs: 5_000, chunkTimeoutMs: 5_000,
+    })
+    const model = 'qoder/test'
+    const chat = await collectOpenAiCompletion(source(), 'chat_test', model)
+    const responses = await collectResponsesResult(source(), 'resp_test', model, request)
+    const chatFrames = []
+    for await (const frame of toOpenAiSse(source(), 'chat_test', model)) {
+      if (frame !== 'data: [DONE]\n\n') chatFrames.push(JSON.parse(frame.slice(6)))
+    }
+    const responsesFrames = []
+    for await (const frame of toResponsesSse(source(), 'resp_test', model, request)) {
+      if (frame.startsWith('event: response.completed\n')) {
+        const dataLine = frame.split('\n').find(line => line.startsWith('data: '))
+        responsesFrames.push(JSON.parse(dataLine!.slice(6)))
+      }
+    }
+
+    for (const usage of [chat.usage, chatFrames.find(frame => frame.usage)?.usage]) {
+      expect(usage).toMatchObject({ prompt_tokens: 100, completion_tokens: 2, total_tokens: 102 })
+      if (cached === undefined) expect(usage).not.toHaveProperty('prompt_tokens_details')
+      else expect(usage).toHaveProperty('prompt_tokens_details.cached_tokens', cached)
+    }
+    for (const usage of [responses.usage, responsesFrames[0]?.response.usage]) {
+      expect(usage).toMatchObject({
+        input_tokens: 100, output_tokens: 2, total_tokens: 102,
+        input_tokens_details: { cached_tokens: cached ?? 0 },
+      })
+      if (cached === undefined) expect(usage).toHaveProperty('cache_read_reported', false)
+      else expect(usage).not.toHaveProperty('cache_read_reported')
+    }
+  })
 
   it('/v1/responses：Codex 按官方口径反解出的上下文占用 ≈ 真实值', async () => {
     const result = await collectResponsesResult(

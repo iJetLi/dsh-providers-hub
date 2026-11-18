@@ -1181,10 +1181,9 @@ describe('TRAE token_usage → TokenUsage 口径', () => {
     expect(usage.cacheReadTokens).toBe(4864)
   })
 
-  it('★ 未命中（0）时省略字段，不写成 0', () => {
-    // 省略与写 0 的区别在 DSH 侧会被 `?? 0` 抹平，但**契约上**省略才是
-    // 「没有缓存命中」的诚实表示（与 recordTokenUsage 的约定一致）。
-    expect(traeUsageFromTokenUsage(COLD)).not.toHaveProperty('cacheReadTokens')
+  it('保留明确上报的 0，未上报时省略缓存计数', () => {
+    expect(traeUsageFromTokenUsage(COLD)).toHaveProperty('cacheReadTokens', 0)
+    expect(traeUsageFromTokenUsage({ prompt_tokens: 4894, completion_tokens: 118 })).not.toHaveProperty('cacheReadTokens')
   })
 
   it('★ prompt_tokens 含缓存 ⇒ 必须做减法（否则命中率偏小）', () => {

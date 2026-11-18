@@ -2888,6 +2888,7 @@ export class AggregateAdapter extends LlmAdapter {
         const target = targets[index]!
         // 该候选是否已经产出过内容（决定失败时能否安全切换，见上方长注释）。
         let emitted = false
+        let pendingUsage: Extract<StreamChunk, { type: 'usage' }> | undefined
         /**
          * 本候选「已产出可见内容 ⇒ 待定记录」的渠道（`undefined` = 没产出过内容）。
          *
@@ -3048,8 +3049,16 @@ export class AggregateAdapter extends LlmAdapter {
             if (chunk.type === 'block-start') {
               openedBlocks.set(chunk.index, chunk.blockType)
             }
+            if (!emitted && chunk.type === 'usage') {
+              pendingUsage = chunk
+              continue
+            }
             if (isVisibleContent(chunk)) {
               emitted = true
+              if (pendingUsage !== undefined) {
+                yield pendingUsage
+                pendingUsage = undefined
+              }
               // ⚠️ **先记「待定」渠道，不立刻写进 Map**（真实缺陷，对抗审计实测证伪）。
               //
               // 规格 §6.3 P3 的原文是「**只在成功时写** —— 写失败候选会让徽标指向一个
@@ -3063,6 +3072,7 @@ export class AggregateAdapter extends LlmAdapter {
             }
             yield chunk
           }
+          if (pendingUsage !== undefined) yield pendingUsage
           // ⚠️ 走到这里 = 该候选的流**正常结束**（没有抛错、没有失败帧）⇒ 提交「实际选中」。
           if (pendingProvider !== undefined) {
             // ⚠️ 是**实际发往**的 `target.provider`，不是候选序第一个（带图改道时可能不同）。

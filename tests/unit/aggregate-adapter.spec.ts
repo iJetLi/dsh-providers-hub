@@ -1569,7 +1569,7 @@ describe('★ M23：只产出元数据帧（block-start / usage）时仍可切�
     //      只保留 `usage`（那才是真正可安全重放的那一种）。
     const sent: string[] = []
     const ctx = makeCtx(sent, () => (async function* () {
-      yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 0 } }
+      yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 90 } }
       yield { type: 'finish', reason: { kind: 'error', failure: { message: '挂了', code: 'SERVER' } } }
     })())
     const adapter = new AggregateAdapter(ctx, { accountPool: makePool(), expiryProbe: async () => 100 })
@@ -1581,7 +1581,7 @@ describe('★ M23：只产出元数据帧（block-start / usage）时仍可切�
     expect(sent).toEqual(['buddy', 'codearts'])
     // ② 拿到了第二个候选的正文
     expect(chunks.some((c) => c.type === 'text')).toBe(true)
-    // ③ 第一个候选的失败帧**不透出**
+    expect(chunks.some((c) => c.type === 'usage')).toBe(false)
     expect(chunks.some((c) => c.type === 'finish' && (c as { reason?: { kind?: string } }).reason?.kind === 'error')).toBe(false)
   })
 

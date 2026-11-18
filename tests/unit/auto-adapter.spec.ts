@@ -698,7 +698,7 @@ describe('★★ auto：零输出撞墙时改道下一个 provider（B 方案）
 
   /** 上游越墙的真实 chunk 形态：一个 usage + `max-tokens` 终止帧，**零内容**。 */
   const WALL_HIT = [
-    { type: 'usage' },
+    { type: 'usage', usage: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 90 } },
     { type: 'finish', reason: { kind: 'max-tokens' } },
   ]
 
@@ -710,6 +710,7 @@ describe('★★ auto：零输出撞墙时改道下一个 provider（B 方案）
     // ⚠️ 关键：**不得**把 loomy 那个 max-tokens 终止帧透给 harness ——
     //    透出去 harness 就认为本轮结束了（它不重试 max-tokens），改道白做。
     expect(seen.filter((c) => c.type === 'finish').map((c) => c.reason?.kind)).toEqual(['stop'])
+    expect(seen.some((c) => c.type === 'usage')).toBe(false)
     // 用户看到的是 zcode 的正文。
     expect(seen.some((c) => c.type === 'text-delta')).toBe(true)
   })

@@ -679,14 +679,6 @@ export class AutoAdapter extends LlmAdapter {
    * ⚠️ 必须同时要求零输出 —— 有输出的 `max-tokens` 是「正常答到半截撞了输出
    * 上限」，那时换目标会**丢掉已产出的正文**（与 `aggregate-adapter.ts` 的
    * 「已吐内容就不许切换」是同一个安全方向）。
-   *
-   * ⚠️ **已透出帧的处理**：零输出意味着 `textDelta` 从未出现，而
-   * `block-start` 只在有内容时才发（`openai-compat.ts`）⇒ 这一轮唯一
-   * 可能已透出的只有 `usage` 帧，而它对 `BlockAssembler` 是**覆盖式**赋值
-   * ⇒ 重发安全。故这里**不必缓冲整个流**（那会把透传改成带前瞻的缓冲，属更大的
-   * 改动面，与 `aggregate-adapter.ts` 里「延迟 block-start」那条已知代价同类）。
-   * 一旦某天有适配器在零内容时也发 `block-start`，本条注释的前提即失效 ——
-   * 那时必须先缓冲再改道。
    */
   private async *dispatch(
     target: DispatchTarget,
@@ -718,8 +710,13 @@ export class AutoAdapter extends LlmAdapter {
     const base = { ...options, provider: target.provider, model: target.model }
     const forwarded = this.withTranslatedEffort(target, base, requested)
     let probe = emptyZeroOutputProbe()
+    let pendingUsage: Extract<StreamChunk, { type: 'usage' }> | undefined
     for await (const chunk of this.ctx.llm.stream(forwarded)) {
       probe = noteChunk(probe, chunk)
+      if (chunk.type === 'usage') {
+        pendingUsage = chunk
+        continue
+      }
       // ⚠️ 判定必须在**透出该终止帧之前**：一旦把 `max-tokens` 交给 harness，
       //    本轮就结束了（DSH 对 `max-tokens` 不自动重试），改道机会随即消失。
       if (chunk.type === 'finish' && isZeroOutputWallHit(probe)) {
@@ -751,8 +748,13 @@ export class AutoAdapter extends LlmAdapter {
           + `但池内已无其他候选可改道；如实上报该失败`,
         )
       }
+      if (chunk.type === 'finish' && pendingUsage !== undefined) {
+        yield pendingUsage
+        pendingUsage = undefined
+      }
       yield chunk
     }
+    if (pendingUsage !== undefined) yield pendingUsage
   }
 
   /**

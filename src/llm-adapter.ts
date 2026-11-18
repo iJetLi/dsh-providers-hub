@@ -53,6 +53,7 @@ import {
 } from './llm-register-compat.js'
 import { CODEARTS_PROVIDER, codeartsAcceptsImage, codeartsVisionModel } from './codearts-vision.js'
 import { reportLedgerAccount } from './token-ledger.js'
+import { readCacheTokenCount } from './cache-token-count.js'
 
 export const CHAT_API_BASE = 'https://snap-access.cn-north-4.myhuaweicloud.com/api/v2'
 /**
@@ -3572,17 +3573,16 @@ export class CodeArtsAdapter extends LlmAdapter {
           }
           if (data.usage) {
             const promptTokens = data.usage.prompt_tokens ?? 0
-            const cachedTokens = (data.usage as { prompt_tokens_details?: { cached_tokens?: number } }).prompt_tokens_details?.cached_tokens
-              ?? (data.usage as { prompt_cache_hit_tokens?: number }).prompt_cache_hit_tokens
-              ?? 0
+            const cachedTokens = readCacheTokenCount((data.usage as { prompt_tokens_details?: { cached_tokens?: number } }).prompt_tokens_details?.cached_tokens)
+              ?? readCacheTokenCount((data.usage as { prompt_cache_hit_tokens?: number }).prompt_cache_hit_tokens)
             const cacheWriteTokens = (data.usage as { prompt_tokens_details?: { cache_write_tokens?: number } }).prompt_tokens_details?.cache_write_tokens
             const reasoningTokens = (data.usage as { completion_tokens_details?: { reasoning_tokens?: number } }).completion_tokens_details?.reasoning_tokens
             yield {
               type: 'usage',
               usage: {
-                inputTokens: cachedTokens > 0 ? promptTokens - cachedTokens : promptTokens,
+                inputTokens: promptTokens - (cachedTokens ?? 0),
                 outputTokens: data.usage.completion_tokens ?? 0,
-                ...cachedTokens > 0 ? { cacheReadTokens: cachedTokens } : {},
+                ...cachedTokens !== undefined ? { cacheReadTokens: cachedTokens } : {},
                 ...cacheWriteTokens !== undefined && cacheWriteTokens > 0 ? { cacheWriteTokens } : {},
                 ...reasoningTokens !== undefined && reasoningTokens > 0 ? { reasoningTokens } : {},
               },
