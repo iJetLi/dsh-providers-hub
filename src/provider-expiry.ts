@@ -305,8 +305,16 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
     //    没有任何逐笔日期 ⇒ 有余额即 `NEVER`、烧光即 `UNUSABLE`）。
     //    ⚠️ 三处必须同改（本表 + `WIRED_EXPIRY_PROVIDERS` + 折算原语
     //    `agnescodeExpiry`）—— 漏任何一处都是**静默**的（聚合轮换列表里看不到它）。
-    //    ⚠️ `agnescodeintl` **必须传 `AGNESCODE_INTL`**：两站账池不互通、域名不同，
-    //    传国内站会让国际账号的余额请求打到错误 base（恒 401 → 恒 `UNUSABLE`）。
+    //    ⚠️ `agnescodeintl` **必须传 `AGNESCODE_INTL`** —— 但要说清**为什么**，因为
+    //    2026-11-19 我实测证伪了原注释给出的那个理由：「传国内站会让国际账号的余额
+    //    请求打到错误 base」**不成立** —— `fetchAgnescodeBalance` 的 host 取的是
+    //    **凭据里的 `bff_base`**（`src/agnescode.ts:579`，那才是权威），`product`
+    //    在余额路径上**只贡献超时**。
+    //    ⇒ 真正会因传错站而坏的是**手工录入无 base** 的那条路径：
+    //    `parseAgnescodeCredential` 用 `product.fallbackBffBase` 补 base，国际站账号
+    //    手工录入时若传错站，会补成 `.cn` 的 base ⇒ 恒 401 ⇒ 折算恒 `UNUSABLE`。
+    //    守卫在 `tests/unit/expiry-runtime-parity.spec.ts` 的
+    //    「必须拿到 INTL 的 product」（行为判据：断真实调用里的实参）。
     agnescode: {
       credentialExpiry: (c, context) => agnescodeExpiry(
         c as AgnescodeCredential,

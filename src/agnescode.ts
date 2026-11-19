@@ -150,6 +150,32 @@ export function agnescodeHeaders(credential: { access_token?: unknown }): Record
   return { ...AGNESCODE_BASE_HEADERS, Authorization: `Bearer ${token}` }
 }
 
+/**
+ * 凭据的**短期指纹**：只用于「缓存是不是同一个凭据」这一个判据，**不是**安全哈希。
+ *
+ * ## 为什么需要它
+ *
+ * 目录缓存键必须含「账号身份」，否则同站两账号会互串目录（2026-11-19 双审计实测）。
+ * 但只用 `accountId` 还不够：用户点「导入本机登录态」会**原地换掉该槽的凭据**
+ *（同一个 accountId、不同的 token）⇒ 只按 id 缓存会让改完凭据还要等 5 分钟 TTL。
+ *
+ * ## 为什么是「非安全哈希」
+ *
+ * - 输入是**已经在内存里**的 token（同进程同对象，指纹不扩大暴露面）；
+ * - 输出只喂给缓存比较，**不落盘、不进日志、不进错误文案**；
+ * - 因此不需要抗碰撞，只需要「变了就能看出来」—— 用 `djb2` 足够且零依赖。
+ *
+ * ⚠️ 刻意**不含** `expires_at`：续期会刷新到期时间但**不该**因此重拉目录。
+ */
+export function agnescodeCredentialFingerprint(credential: { access_token?: unknown }): string {
+  const token = typeof credential.access_token === 'string' ? credential.access_token : ''
+  let hash = 5381
+  for (let i = 0; i < token.length; i += 1) {
+    hash = ((hash * 33) ^ token.charCodeAt(i)) >>> 0
+  }
+  return `${token.length.toString(36)}.${hash.toString(36)}`
+}
+
 /** 解析后的凭据（落库形态）。 */
 export interface AgnescodeCredential {
   access_token: string

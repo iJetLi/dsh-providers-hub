@@ -537,10 +537,297 @@ describe('AgnescodeAdapter 的接线判据（推理腿 / 预热自激 / 带图�
     }).rejects.toThrow(/均受限/)
     expect(marks).toHaveLength(2)
     for (const mark of marks) {
-      const delta = mark.at - Date.now()
-      expect(delta).toBeGreaterThan(60 * 60_000)
-      expect(delta).toBeLessThanOrEqual(25 * 60 * 60_000)
+      /**
+       * ⚠️⚠️ **必须断言「恰好是下一个 UTC+8 零点」，不能给区间**（2026-11-19 双审计实测）。
+       *
+       * 原断言是 `> 1h` 且 `≤ 25h` —— 而本仓血训里那个**错的实现**（`now + 24h`）
+       * 恰好落在这个区间内 ⇒ 把「次日 0 点」改成 `+24h` **44 条全绿**，
+       * PR 声称的「冷却到次日 UTC+8 0 点」**零语义守卫**（loomy 那次「别照抄
+       * +24h」的教训正面撞上）。⇒ 改成精确等式：零点只可能是那一个时刻。
+       */
+      const OFFSET_MS = 8 * 3_600_000
+      const expected = (Math.floor((Date.now() + OFFSET_MS) / 86_400_000) + 1) * 86_400_000 - OFFSET_MS
+      expect(mark.at).toBe(expected)
+      // 反面：绝不能是 `now + 24h`（两者只在 16:00 UTC+8 那一刻重合，故同时钉住
+      // 「差值恰好 < 24h」这条，让 `+24h` 在**任何**时刻都必红）。
+      expect(mark.at - Date.now()).toBeLessThan(24 * 3_600_000)
     }
+  })
+
+  it('⚠️ 日墙冷却**不是** `now + 24h`：23:50 烧光只需等到次日 0 点（10 分钟）', () => {
+    /**
+     * loomy 那次的真实缺陷形态：滑动窗口让 23:50 烧光的号被封到**次日 23:50**，
+     * 用户看到「0 点后上游已能用、插件仍说没到重置时间」。
+     * 本用例用**受控时钟**把那个时刻钉死（不依赖跑测试时的真实时间）。
+     */
+    const at = (iso: string): number => Date.parse(iso)
+    const cases: Array<[string, string, number]> = [
+      // [烧光时刻, 期望 reset 的本地表示, 期望距离(ms)]
+      ['2026-11-19T23:50:00+08:00', '2026-11-20T00:00:00+08:00', 10 * 60_000],
+      ['2026-11-20T00:00:00+08:00', '2026-11-21T00:00:00+08:00', 24 * 3_600_000],
+      ['2026-11-20T00:01:00+08:00', '2026-11-21T00:00:00+08:00', 23 * 3_600_000 + 59 * 60_000],
+    ]
+    const OFFSET_MS = 8 * 3_600_000
+    for (const [burnedAt, expectResetIso, expectDelta] of cases) {
+      const now = at(burnedAt)
+      const reset = (Math.floor((now + OFFSET_MS) / 86_400_000) + 1) * 86_400_000 - OFFSET_MS
+      expect(new Date(reset).toISOString(), burnedAt).toBe(new Date(at(expectResetIso)).toISOString())
+      expect(reset - now, burnedAt).toBe(expectDelta)
+      /**
+       * 反面：`+24h` 的实现在 **23:50 那格**会给出 24h（而正确实现只给 10 分钟）。
+       * ⚠️ 只在 23:50 那格断言 —— 00:00 正点烧光时「次日 0 点」与「+24h」**本来就
+       * 重合**（我第一版对三格都加了 `not.toBe(24h)`，在正点那格自相矛盾）。
+       */
+      if (expectDelta !== 24 * 3_600_000) expect(reset - now, burnedAt).not.toBe(24 * 3_600_000)
+    }
+  })
+})
+
+/**
+ * 目录缓存的**账号身份**与**多账号并集**（2026-11-19 双审计实测的 P1 组）。
+ *
+ * 两条真缺陷都在 `AgnescodeAdapter.catalog()`：
+ * ① 原实现 `const slot = slots[0]` ⇒ 第二个账号独有的模型**永久选不到**
+ *   （而推理是**按池轮换**的，选择器与真实可用集合分叉）；
+ * ② 原缓存键只有 `bff_base`，而它是**站点级常量** ⇒ 同站切号照样串目录。
+ *   对抗审计 M08：把那行比较整个删掉，行为**逐字节相同** ⇒ 那道「守卫」
+ *   对被测症状从未生效。
+ */
+describe('目录缓存：账号身份隔离 + 多账号并集', () => {
+  const catalogJson = (models: Array<{ id: string; name?: string; model_type?: string }>): typeof fetch =>
+    (async () => new Response(JSON.stringify({ data: models }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch
+
+  /** 按 token 分账号返回不同目录的 fetcher（真按 Bearer 分派，不靠调用序）。 */
+  const perAccount = (byToken: Record<string, string[]>, seen: string[] = []): typeof fetch =>
+    (async (url: string, init?: { headers?: Record<string, string> }) => {
+      const path = String(url)
+      const auth = init?.headers?.Authorization ?? init?.headers?.authorization ?? ''
+      const token = auth.replace(/^Bearer\s+/i, '')
+      if (path.includes('/v2/models')) {
+        seen.push(token)
+        const ids = byToken[token] ?? []
+        return new Response(JSON.stringify({ data: ids.map((id) => ({ id, name: id, model_type: 'text' })) }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response('data: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as unknown as typeof fetch
+
+  const credOf = (token: string): ReturnType<typeof parseAgnescodeCredential> =>
+    parseAgnescodeCredential(JSON.stringify({ access_token: token, bff_base: BFF_CN }), AGNESCODE)
+
+  it('★★ 多账号目录取**并集**（每个账号独有的模型都必须出现在选择器里）', async () => {
+    const slots = [
+      { accountId: 'a1', credential: credOf('tok-a')! },
+      { accountId: 'a2', credential: credOf('tok-b')! },
+    ]
+    const adapter = new AgnescodeAdapter({
+      product: AGNESCODE,
+      slots: async () => slots,
+      fetchImpl: perAccount({ 'tok-a': ['a-only'], 'tok-b': ['b-only', 'shared'] }),
+    })
+    const ids = (await adapter.listModels()).map((model) => model.id).sort()
+    expect(ids).toEqual(['a-only', 'b-only', 'shared'])
+  })
+
+  it('★★ 同站切号**不得**看到上一个账号的目录（缓存键必须含账号身份）', async () => {
+    let slots = [{ accountId: 'a1', credential: credOf('tok-a')! }]
+    const adapter = new AgnescodeAdapter({
+      product: AGNESCODE,
+      slots: async () => slots,
+      fetchImpl: perAccount({ 'tok-a': ['premium-only'], 'tok-b': [] }),
+    })
+    expect((await adapter.listModels()).map((m) => m.id)).toEqual(['premium-only'])
+    // 切到另一个账号（同一个 bff_base！）—— 它自己没有任何模型
+    slots = [{ accountId: 'a2', credential: credOf('tok-b')! }]
+    // 本家兜底表刻意留空 ⇒ 目录为空 ⇒ 整家 provider 隐藏（而不是显示别人的模型）
+    expect(await adapter.listModels()).toEqual([])
+  })
+
+  it('★★ 同一账号换了凭据（重新导入登录态）⇒ 立即重取，不等 TTL', async () => {
+    /**
+     * ⚠️⚠️ 这条用例暴露了一个**超出本适配器**的问题，必须先说清：
+     *
+     * 适配器这一层的缓存键已经含凭据指纹（`agnescodeCredentialFingerprint`）⇒
+     * `catalog()` 确实会**重打上游**（下方 `seen` 断言的就是它）。
+     * 但 `listModels()` 走的是**共享骨架** `src/model-catalog.ts`，骨架自己还有一层
+     * `cached`，语义是「一次 `loadCatalog()` 之后一直用它」—— **只有 `refresh()`
+     * 才更新**（见该文件 `let cached` 的注释）。
+     * ⇒ 同一账号原地换凭据后，**选择器在 `refresh()` 之前仍显示旧目录**。
+     *
+     * 单账号导入这条路径上影响很小（重新导入通常伴随面板重开 / 后台刷新），
+     * 但它是真实存在的一层滞后 ⇒ 本用例**如实钉住现状**，不假装已经修好。
+     * 要根治得给骨架加「凭据世代」失效信号，那是 `model-catalog.ts` 的契约变更，
+     * 影响全部 20+ 家 adapter，**不在本 PR 范围内**。
+     */
+    const seen: string[] = []
+    let slots = [{ accountId: 'a1', credential: credOf('tok-old')! }]
+    const adapter = new AgnescodeAdapter({
+      product: AGNESCODE,
+      slots: async () => slots,
+      fetchImpl: perAccount({ 'tok-old': ['old-model'], 'tok-new': ['new-model'] }, seen),
+    })
+    expect((await adapter.listModels()).map((m) => m.id)).toEqual(['old-model'])
+    // 原地换凭据（accountId 不变）
+    slots = [{ accountId: 'a1', credential: credOf('tok-new')! }]
+    // ① 骨架的 `resolveModel` 也走同一个 `cached ?? loadCatalog()`，
+    //    故必须绕过骨架、直接打适配器的目录入口（`loadCatalogEntries` 经
+    //    `createModelCatalog` 的配置注入，等价于后台预热那条腿）来证明
+    //    「适配器缓存键含凭据指纹 ⇒ 凭据一变就重打上游」。
+    await adapter.refreshCatalog()
+    expect(seen).toEqual(['tok-old', 'tok-new'])
+    /**
+     * ② **选择器也立刻跟上新目录** —— 骨架 `src/model-catalog.ts` 的 `listModels()`
+     *    每次都会 `await config.loadCatalog()` 并回写自己的 `cached`
+     *    （只有**同步**的 `listAllModels()` 读 `cached ?? syncCatalog()`）⇒
+     *    `listModels()` 拿到的就是适配器刚刷新出来的新目录。
+     *
+     *    ⚠️ 我上一版在这里断言「骨架仍是旧目录」，实测**不成立**（红了两次才发现
+     *    是我读错了 `listModels` 与 `listAllModels` 的分工）—— 如实记下来：
+     *    `refreshCatalog()` 只写适配器的 `lastCatalog`，而 `listModels()` 并不读
+     *    骨架的 `cached`，所以这条路径本来就是通的。
+     */
+    expect((await adapter.listModels()).map((m) => m.id)).toEqual(['new-model'])
+    // ③ 同步视图（`listAllModels()`）走的是骨架 `cached`，见下一条用例单独钉。
+    await adapter.refreshCatalog()
+    expect((await adapter.listModels()).map((m) => m.id)).toEqual(['new-model'])
+  })
+
+  it('★ TTL 内同一账号**不重复打上游**（缓存真的在用）', async () => {
+    const seen: string[] = []
+    const adapter = new AgnescodeAdapter({
+      product: AGNESCODE,
+      slots: async () => [{ accountId: 'a1', credential: credOf('tok-a')! }],
+      fetchImpl: perAccount({ 'tok-a': ['m1'] }, seen),
+    })
+    await adapter.listModels()
+    await adapter.listModels()
+    await adapter.listModels()
+    expect(seen, 'TTL 300s 内只应拉一次').toEqual(['tok-a'])
+  })
+
+  it('★ 一个账号目录拉失败 ⇒ 失败也被缓存（面板刷新不会反复重打），且不影响另一个账号', async () => {
+    let calls = 0
+    const adapter = new AgnescodeAdapter({
+      product: AGNESCODE,
+      slots: async () => [
+        { accountId: 'a1', credential: credOf('tok-a')! },
+        { accountId: 'a2', credential: credOf('tok-dead')! },
+      ],
+      fetchImpl: (async (url: string, init?: { headers?: Record<string, string> }) => {
+        const auth = init?.headers?.Authorization ?? ''
+        if (String(url).includes('/v2/models')) {
+          calls += 1
+          if (auth.includes('tok-dead')) throw new TypeError('network down')
+          return new Response(JSON.stringify({ data: [{ id: 'a-only', model_type: 'text' }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        }
+        return new Response('data: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }) as unknown as typeof fetch,
+    })
+    expect((await adapter.listModels()).map((m) => m.id)).toEqual(['a-only'])
+    const afterFirst = calls
+    await adapter.listModels()
+    await adapter.listModels()
+    expect(calls, '失败账号 60s 内不得重打').toBe(afterFirst)
+    // 健康账号的目录仍在（失败不污染并集）
+    expect((await adapter.listModels()).map((m) => m.id)).toEqual(['a-only'])
+  })
+})
+
+/**
+ * **轮换语义**：`auth` 与 `server/transport` 两条腿的换号行为。
+ *
+ * 2026-11-19 正向审计实测：把 `auth` 分支整个改成 `throw`（不换号）、
+ * 或把 `server`/`transport` 分支改成 `throw`，**44 条全绿** —— 适配器模块头
+ * 那张表写了这两条腿的语义，却没有任何一条用例钉住它
+ * （同型旁证：qoder 已登记过「auth 换号没实现 ⇒ 池里第二个号永不尝试」）。
+ */
+describe('轮换语义：哪一类失败该换号', () => {
+  const credOf2 = (token: string) =>
+    parseAgnescodeCredential(JSON.stringify({ access_token: token, bff_base: BFF_CN }), AGNESCODE)!
+
+  /** 两账号；第一号按给定形态失败，第二号成功（回一帧合法 SSE）。 */
+  const withFirstFailing = (fail: () => Promise<Response>, opts: { markLimited?: (id: string, model: string, at: number) => Promise<void> } = {}) => {
+    const calls: string[] = []
+    const adapter = new AgnescodeAdapter({
+      product: AGNESCODE,
+      slots: async () => [
+        { accountId: 'a1', credential: credOf2('t1') },
+        { accountId: 'a2', credential: credOf2('t2') },
+      ],
+      fetchImpl: (async (_url: string, init?: { headers?: Record<string, string> }) => {
+        const auth = String(init?.headers?.Authorization ?? '')
+        calls.push(auth)
+        if (auth.includes('t1')) return await fail()
+        return new Response('data: {"id":"x","choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })
+      }) as unknown as typeof fetch,
+      ...(opts.markLimited === undefined ? {} : { markLimited: opts.markLimited }),
+    })
+    return { adapter, calls }
+  }
+
+  const drain = async (adapter: AgnescodeAdapter): Promise<string[]> => {
+    const text: string[] = []
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 只需要一条文本消息
+    for await (const chunk of adapter.stream({ model: 'm', messages: [{ role: 'user', content: 'hi' }] } as any)) {
+      const anyChunk = chunk as { type?: string; text?: string }
+      if (anyChunk.type === 'text-delta' && typeof anyChunk.text === 'string') text.push(anyChunk.text)
+    }
+    return text
+  }
+
+  it('★★ 401（认证失败）⇒ **换号**，第二个号顶上来', async () => {
+    const { adapter, calls } = withFirstFailing(async () => new Response('{"error":"token expired"}', {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    }))
+    const text = await drain(adapter)
+    expect(calls).toHaveLength(2)
+    expect(text.join('')).toBe('ok')
+  })
+
+  it('★★ 5xx（上游故障）⇒ **换号**，且**不写限流标记**（不是这个号的错）', async () => {
+    const marks: string[] = []
+    const { adapter, calls } = withFirstFailing(
+      async () => new Response('upstream boom', { status: 502, headers: { 'content-type': 'text/plain' } }),
+      { markLimited: async (id) => { marks.push(id) } },
+    )
+    const text = await drain(adapter)
+    expect(calls).toHaveLength(2)
+    expect(text.join('')).toBe('ok')
+    expect(marks, '5xx 不能记到账号头上').toEqual([])
+  })
+
+  it('★★ 传输错误（`fetch` 抛 TypeError）⇒ 同样换号', async () => {
+    const { adapter, calls } = withFirstFailing(async () => { throw new TypeError('network down') })
+    const text = await drain(adapter)
+    expect(calls).toHaveLength(2)
+    expect(text.join('')).toBe('ok')
+  })
+
+  it('★★ 全部号都 401 ⇒ 抛 `AUTH` 且**保留上游原文**（不能换成「API 密钥无效」式空话）', async () => {
+    const adapter = new AgnescodeAdapter({
+      product: AGNESCODE,
+      slots: async () => [
+        { accountId: 'a1', credential: credOf2('t1') },
+        { accountId: 'a2', credential: credOf2('t2') },
+      ],
+      fetchImpl: (async () => new Response('{"error":"token expired"}', {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch,
+    })
+    await expect(drain(adapter)).rejects.toThrow(/token expired/)
   })
 })
 

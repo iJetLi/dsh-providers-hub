@@ -775,6 +775,11 @@ describe('AStudio Provider Credits & Jet Hub RPC 接线验证', () => {
       // ⚠️ marvis（2026-11-09）：`JetHubAuths` 的键是 **provider id**，值是 auth 实例。
       //    漏这一格时 `pnpm typecheck:tests` 会直接编译失败（不是运行时才炸）。
       marvis: blank(),
+      // ⚠️ agnescode 两站（2026-11-19，PR #128）：同一条判据 —— 键是 provider id，
+      //    **两站各一格**。漏掉时 `pnpm typecheck:tests` 直接编译失败（本 PR 提交时
+      //    实测就是这两处红：本文件 + `jet-hub-rpc-signature.spec.ts`）。
+      agnescode: blank(),
+      agnescodeintl: blank(),
       astudio: astudioAuth,
     }
 

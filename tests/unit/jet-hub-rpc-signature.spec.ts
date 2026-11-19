@@ -93,6 +93,10 @@ describe('registerJetHubRpc：auths 是命名对象（类型层守卫）', () =>
       // astudio = goal 302 第 3 处接线（JetHubAuths.readonly astudio: AstudioAuth，
       // 由 #578 乙组落盘）。本用例是「完整命名对象调用能编译」的正向类型守卫，
       // 漏掉这个键会让 typecheck:tests 报 TS2345 —— 也正是该用例想要守的不变式。
+      // agnescode 两站（2026-11-19，PR #128）：`JetHubAuths` 的键是 **provider id**，
+      // 两站各一格；漏掉时 `pnpm typecheck:tests` 编译失败（本 PR 提交时实测这两处红）。
+      agnescode: stub,
+      agnescodeintl: stub,
       astudio: stub,
       autoclaw: stub,
       // ⚠️ AutoClaw 国际版（PR121）：与 `autoclaw` 是两个实例、两个 provider id，

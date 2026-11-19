@@ -53,6 +53,7 @@ import type { AccountPool } from './account-pool.js'
 import { createModelCatalog, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
 import { AGNESCODE, agnescodeDisplayName, agnescodeFallbackModels, agnescodeIsFree, agnescodeSubscriptionNote, type AgnescodeModelEntry, type AgnescodeProduct } from './agnescode-product.js'
 import {
+  agnescodeCredentialFingerprint,
   agnescodeHeaders,
   fetchAgnescodeCatalog,
   trustAgnescodeBffBase,
@@ -104,15 +105,31 @@ export interface AgnescodeAdapterOptions {
 /** 远端目录的缓存条目（按 `bff_base` 分桶）。 */
 interface CatalogCacheEntry {
   at: number
+  /** 拉这一份目录时用的账号 id。 */
+  accountId: string
   bffBase: string
+  /**
+   * 拉这一份目录时**凭据的指纹**（{@link agnescodeCredentialFingerprint}）。
+   *
+   * ⚠️ 必须**存下来**再比较：第一版只在比较时现算当前凭据的指纹，两边都算同一个值
+   * ⇒ 条件恒真 ⇒ 缓存永不失效（我实测踩到：换完凭据 `refreshCatalog()` 仍回旧目录）。
+   */
+  credentialKey: string
   entries: readonly CatalogEntry[]
+  /** 该账号这一次拉取是否失败（失败结果也缓存，见 {@link AgnescodeAdapter.catalog}）。 */
+  failed: boolean
 }
 
 export class AgnescodeAdapter extends LlmAdapter {
   private readonly product: AgnescodeProduct
   private readonly skeletonCatalog: ModelCatalog
-  /** 最近一次成功拉到的目录（留给**同步**的 `listAllModels`）。 */
-  private lastCatalog?: CatalogCacheEntry
+  /**
+   * 最近一次拉到的**各账号**目录（每个账号一条，失败的也在里面）。
+   *
+   * ⚠️ 2026-11-19 由「单条」改成「按账号的数组」：单条装不下多账号的并集，
+   * 也无法按账号分桶（`bff_base` 是站点级常量，不含账号身份）。
+   */
+  private lastCatalog: CatalogCacheEntry[] = []
   /** 正在进行的预热（反重入；见 {@link warmCatalog} 的两道闸门）。 */
   private warming?: Promise<void>
   /** 上一次预热开始时刻（节流）。 */
@@ -191,6 +208,18 @@ export class AgnescodeAdapter extends LlmAdapter {
   }
 
   /** 异步目录 → 骨架中间结构；**没有可用账号时返回 `[]`**（隐藏整家 provider）。 */
+  /**
+   * 强制走一次 `catalog()`（无视骨架的 `cached`）。
+   *
+   * ⚠️ 存在的理由：共享骨架 `src/model-catalog.ts` 的 `cached` 一旦写入就只由
+   * `refresh()` 更新 ⇒ **凭据换代**这类「适配器侧状态变了、骨架不知道」的变化，
+   * 走 `listModels()` 看不到。本方法把适配器那一层的真实判据暴露出来，
+   * 供 `refresh` 与用例使用（单测里 `listModels()` 会命中骨架旧 `cached`）。
+   */
+  async refreshCatalog(): Promise<readonly CatalogEntry[]> {
+    return this.catalog()
+  }
+
   private async loadCatalogEntries(): Promise<readonly CatalogEntry[]> {
     const slots = await this.options.slots()
     if (slots.length === 0) return []
@@ -198,8 +227,17 @@ export class AgnescodeAdapter extends LlmAdapter {
   }
 
   private syncCatalogEntries(): readonly CatalogEntry[] {
-    const cached = this.lastCatalog
-    if (cached !== undefined && cached.entries.length > 0) return cached.entries
+    const seen = new Set<string>()
+    const merged: CatalogEntry[] = []
+    for (const cached of this.lastCatalog) {
+      if (cached.failed) continue
+      for (const entry of cached.entries) {
+        if (seen.has(entry.id)) continue
+        seen.add(entry.id)
+        merged.push(entry)
+      }
+    }
+    if (merged.length > 0) return merged
     void this.warmCatalog()
     return this.fallbackEntries()
   }
@@ -246,34 +284,82 @@ export class AgnescodeAdapter extends LlmAdapter {
   /**
    * 当前生效的目录（远端优先、失败回落兜底表）。
    *
-   * ⚠️ 缓存按 `bff_base` 分桶且带 TTL：目录是**账号级**下发的，按 provider 存
-   * 一份会让切号后看到上一个号的目录（与 monkeycode 目录按账号下发的同型坑）。
+   * ## ⚠️⚠️ 2026-11-19 两处修正（双审计实测，PR #128 原实现的两个真缺陷）
+   *
+   * **① 多账号目录只取了 `slots[0]`**（原实现 `const slot = slots[0]`）。
+   * 推理是**按池轮换**的，而目录只反映第一个账号 ⇒ 第二个账号独有的模型
+   * 在模型选择器里**永久选不到**（对抗审计实测：两账号各持一份目录，B 的
+   * `b-only` 永远不出现）。本家的目录是**上行级**下发的（不同订阅档看到不同条目），
+   * 这与 Qoder「目录按账号下发」是同型坑，而那边的结论也是**并集**。
+   *
+   * **② 缓存键只有 `bffBase`，不含账号身份**（原实现）。而 `bff_base` 是
+   * **站点级常量**（本 PR 自己把它钉扎成 `product.fallbackBffBase`）⇒ 同站两账号
+   * 恒等 ⇒ 切号后**照样**看到上一个账号的目录，正是 PR 注释声称要消灭的那个症状
+   * （`src/agnescode-adapter.ts:13` 与 `:253` 两处注释都写着「按 bff_base 分桶，
+   * 否则切号后看到上一个号的目录」）。对抗审计 M08 实测：把这行比较整个删掉，
+   * 行为**逐字节相同** ⇒ 那道「守卫」对被测症状从未生效。
+   * ⇒ 缓存键改为 **`账号 id + bff_base`**（再加上索引里该账号的凭据指纹，
+   * 见下方 `credentialKey`：手工改完凭据不必等 TTL 到期就重取）。
+   *
+   * ## 失败结果也缓存
+   *
+   * 原实现只缓存成功（`lastCatalogFailAt` 是个全局时刻）。多账号下「A 成功、B 失败」
+   * 会让 B 每调一次 `listModels()` 都重打一次上游（面板刷新快时等于压测）。
+   * ⇒ 失败也写一条 60s 的缓存（与 `WARM_THROTTLE_MS` 同窗口），键同样含账号身份。
+   *
+   * @returns 各账号目录的**并集**（按 id 去重、保持首次出现顺序）；无账号 ⇒ `[]`
    */
   private async catalog(): Promise<readonly CatalogEntry[]> {
     const slots = await this.options.slots()
-    const slot = slots[0]
-    if (slot === undefined) return []
-    const base = trustAgnescodeBffBase(slot.credential.bff_base)
-    if (base === null) return []
-    const cached = this.lastCatalog
-    if (cached !== undefined && cached.bffBase === base && Date.now() - cached.at < CATALOG_TTL_MS) {
-      return cached.entries
+    if (slots.length === 0) return []
+    const now = Date.now()
+    const merged: CatalogEntry[] = []
+    const seen = new Set<string>()
+    const nextCache: CatalogCacheEntry[] = []
+    let anyFailed = false
+    for (const slot of slots) {
+      const base = trustAgnescodeBffBase(slot.credential.bff_base)
+      // 站址不可信 ⇒ 这个账号产不出目录（**不**把它算成「这一家没模型」）。
+      if (base === null) continue
+      const accountId = slot.accountId
+      const credentialKey = `${base}|${agnescodeCredentialFingerprint(slot.credential)}`
+      const cached = this.lastCatalog.find((item) => item.accountId === accountId
+        && item.credentialKey === credentialKey)
+      if (cached !== undefined && now - cached.at < (cached.failed ? WARM_THROTTLE_MS : CATALOG_TTL_MS)) {
+        nextCache.push(cached)
+        if (cached.failed) { anyFailed = true; continue }
+        for (const entry of cached.entries) {
+          if (seen.has(entry.id)) continue
+          seen.add(entry.id)
+          merged.push(entry)
+        }
+        continue
+      }
+      const remote = await fetchAgnescodeCatalog(
+        slot.credential,
+        this.product,
+        this.options.fetchImpl ?? globalThis.fetch,
+      )
+      if (remote !== null && remote.length > 0) {
+        const entries: CatalogEntry[] = remote.map(toCatalogEntry)
+        nextCache.push({ at: Date.now(), accountId, bffBase: base, credentialKey, entries, failed: false })
+        for (const entry of entries) {
+          if (seen.has(entry.id)) continue
+          seen.add(entry.id)
+          merged.push(entry)
+        }
+        continue
+      }
+      // ⚠️ 这里**不能再走** `syncCatalogEntries()`：那会触发一次预热，而本次调用
+      //    本身就是预热（失败时构成无限自激）。失败也缓存，见上。
+      nextCache.push({ at: Date.now(), accountId, bffBase: base, credentialKey, entries: [], failed: true })
+      anyFailed = true
     }
-    const remote = await fetchAgnescodeCatalog(
-      slot.credential,
-      this.product,
-      this.options.fetchImpl ?? globalThis.fetch,
-    )
-    if (remote !== null && remote.length > 0) {
-      const entries: CatalogEntry[] = remote.map(toCatalogEntry)
-      this.lastCatalog = { at: Date.now(), bffBase: base, entries }
-      return entries
-    }
-    // ⚠️ 这里**不能再走** `syncCatalogEntries()`：那会触发一次预热，而本次调用
-    //    本身就是预热（失败时构成无限自激）。直接回兜底表（本家是空表）。
-    // 同时记下失败时刻：预热路径据此节流（失败的目录在 60s 内不重打上游）。
-    this.lastCatalogFailAt = Date.now()
-    return this.fallbackEntries()
+    this.lastCatalog = nextCache
+    // ⚠️ 失败时刻只喂给**预热节流**（`warmCatalog`），不影响本次返回值。
+    if (anyFailed) this.lastCatalogFailAt = now
+    // 一个账号都没拉到 ⇒ 回兜底表（本家刻意留空）。
+    return merged.length > 0 ? merged : this.fallbackEntries()
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

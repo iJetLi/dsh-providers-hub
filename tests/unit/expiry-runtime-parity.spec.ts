@@ -419,6 +419,74 @@ const NOT_EXPIRY_WIRED = new Map<string, string>([
    * ⚠️ 判据必须是**行为**（真发一次请求、断完整 URL），不能是源码文本匹配
    *   —— 后者对「product 改成 MAGICREW 而常量名仍出现」无牙。
    */
+  /**
+   * ★★ **`agnescodeintl` 的折算必须用国际站的 product**（2026-11-19，PR #128 正向审计）。
+   *
+   * 与上面 magicrewintl 那条**同型、同判据**：`src/provider-expiry.ts` 那里注释逐字写着
+   * 「`agnescodeintl` **必须传 `AGNESCODE_INTL`**：两站账池不互通、域名不同，传国内站
+   * 会让国际账号的余额请求打到错误 base（恒 401 → 恒 `UNUSABLE`）」，而我实测把它改成
+   * `AGNESCODE` ⇒ 12 条全绿 ⇒ **注释写了的规则没有任何行为守卫**。
+   *
+   * ⚠️ 判据必须是**完整 URL**（行为），不能是源码文本 —— 后者在「常量名还在、值变了」
+   *   时无牙（magicrewintl 那条的血训）。
+   */
+  it('★★ agnescodeintl 的折算**必须拿到 INTL 的 product**（传错站 = 恒 401 ⇒ 候选静默消失）', async () => {
+    /**
+     * ⚠️⚠️ 这条用例的判据是我**试出来的**，两次都被证伪，如实记下来：
+     *
+     * 1. 第一版断「真发一次请求、看 URL 是 `.com` 不是 `.cn`」⇒ **改成 AGNESCODE 仍然全绿**。
+     *    原因：`fetchAgnescodeBalance` 的 host 取的是**凭据里的 `bff_base`**
+     *    （`src/agnescode.ts:579`，那才是权威），`product` 在余额路径上**只贡献超时**。
+     * 2. 于是改成断「`fetchAgnescodeBalanceDetailed` 收到的 product 是 INTL」——
+     *    这是**行为判据**（拦的不是源码文本，而是真实调用里的实参），且正好钉住
+     *    `provider-expiry.ts` 那条注释声称的规则。
+     *
+     * ## 顺带发现的真缺陷（P2，已在报告与 PR 评论里登记）
+     *
+     * `product` 在余额路径上不参与 host 选择 ⇒ 那句注释「传国内站会让国际账号的余额
+     * 请求打到错误 base（恒 401）」**不成立**。真正会因传错站而坏的是**手工录入无 base**
+     * 的那条路径（`parseAgnescodeCredential` 用 `product.fallbackBffBase` 补）——
+     * 国际站账号手工录入时若传了国内 product，会补成 `.cn` 的 base ⇒ 恒 401。
+     * ⇒ 这条用例守的是**那个真实后果**，不是注释里描述的那个。
+     */
+    const seenProducts: string[] = []
+    vi.resetModules()
+    vi.doMock('../../src/agnescode-credits.js', async () => {
+      const actual = await vi.importActual<typeof import('../../src/agnescode-credits.js')>(
+        '../../src/agnescode-credits.js',
+      )
+      return {
+        ...actual,
+        fetchAgnescodeBalanceDetailed: async (
+          product: { id: string },
+          credential: unknown,
+          fetcher?: typeof fetch,
+        ) => {
+          seenProducts.push(product.id)
+          return actual.fetchAgnescodeBalanceDetailed(product as never, credential, fetcher)
+        },
+      }
+    })
+    try {
+      const { createProviderExpiry: createWithMock } = await import('../../src/provider-expiry.js')
+      const intl = createWithMock().agnescodeintl
+      expect(intl?.credentialExpiry, 'agnescodeintl 的 credentialExpiry 没挂上').toBeDefined()
+      vi.stubGlobal('fetch', async () => new Response(
+        JSON.stringify({ code: '000000', data: { permanent_balance: 0, time_sensitive_balance: 10 } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ))
+      await intl!.credentialExpiry!(
+        { access_token: 'TOK-SPEC', bff_base: 'https://api-agnes-code.agnes-ai.com/v1' } as never,
+        undefined as never,
+      )
+      expect(seenProducts, 'agnescodeintl 的折算必须带 INTL product').toEqual(['agnescodeintl'])
+    } finally {
+      vi.unstubAllGlobals()
+      vi.doUnmock('../../src/agnescode-credits.js')
+      vi.resetModules()
+    }
+  })
+
   it('★★ magicrewintl 的折算打国际站 host（漏传 product ⇒ 折算恒 UNUSABLE）', async () => {
     const seen: string[] = []
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
