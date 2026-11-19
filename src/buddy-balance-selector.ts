@@ -393,18 +393,56 @@ export class BuddyBalanceSelector<
   }
 
   /**
-   * 当前生效的「临期」窗口（毫秒），**恒 ≤ {@link windowMs}**。
+   * 当前生效的「临期」窗口（毫秒），**恒 ≤ `windowMs`**。
    *
    * ⚠️ 同样**每次调用都重新解析**（理由见 `windowMs()` 上方）：
    * 一笔「5 天 + 30 秒」的余额，半分钟后就成了临期 ——
    * 缓存这个值会让选号继续按「短期」处理一笔马上要作废的积分。
    *
-   * ⚠️ 钳制走 `resolveCreditWindow` 的 `clamped` 分支（per-provider 版）
-   * 或 {@link resolveImminentWindowMs}（`deps` 覆盖版）——
-   * 两者方向一致，但入口不同，不要互相替代。
+   * ## ⚠️⚠️ 三层取值（2026-11-20 修真实缺陷）
+   *
+   * ```
+   * deps.imminentWindowMs（单测/特殊渠道的显式覆盖，最高优先）
+   *   > 本渠道设置的 imminentDays（resolveCreditWindow 已算好并钳制）
+   *   > 环境变量 / 内置默认（resolveImminentWindowMs 的回落层）
+   * ```
+   *
+   * ## 缺陷本体（用户 2026-11-20 报障「设了窗口但选号没用上临期」）
+   *
+   * 原实现是：
+   * ```ts
+   * return resolveImminentWindowMs(windowMs, this.deps.imminentWindowMs)
+   * ```
+   * —— **只认 `deps` 覆盖**，而 `resolveImminentWindowMs` 在第二参为
+   * `undefined` 时回落到 `buddyImminentWindowMs()`（**全局环境变量/默认 5 天**）。
+   *
+   * 于是 per-provider 改造时：
+   * - `windowMs()` 取到了本渠道设置 ✅
+   * - `imminentWindowMs()` **完全没读本渠道设置** ❌
+   *
+   * ⇒ 用户设「临期 30 / 短期 60」后，20 天后到期的积分被判成**短期**
+   *   （临期段恒为空 ⇒ `imminentBalance = 0` ⇒ `tier` 永远到不了 0）
+   *   ⇒ 选号**永远不优先烧临期积分**，而面板三档分色却按新窗口显示
+   *   —— 正是本仓红线「一文件两套同义判据」的又一次复发。
+   *
+   * ⚠️ 注意「更宽 vs 更窄」两种方向都会错：
+   * - 设置比默认**宽**（30 > 5）：该算临期的算成短期 ⇒ 不优先烧；
+   * - 设置比默认**窄**（1 < 5）：不该算临期的算成临期 ⇒ 提前烧掉长期积分。
    */
   private imminentWindowMs(windowMs: number): number {
-    return resolveImminentWindowMs(windowMs, this.deps.imminentWindowMs)
+    // ① 显式覆盖优先（单测 / 特殊渠道）—— 注入即完全绕开下面两层
+    if (this.deps.imminentWindowMs !== undefined) {
+      return resolveImminentWindowMs(windowMs, this.deps.imminentWindowMs)
+    }
+    /**
+     * ② 本渠道设置（已由 `resolveCreditWindow` 钳制到 `<= windowDays`）。
+     * ⚠️ 用**同一次** `resolvedWindow()` 的结果，但 `windowMs()` 可能已被
+     *    `deps.windowMs` 覆盖 ⇒ 这里的 `imminentDays` 必须再按**实际生效的**
+     *    `windowMs` 钳一次，否则 `deps.windowMs` 比设置窄时会出现「临期 > 短期」。
+     *    `resolveImminentWindowMs` 正是那个钳制入口，故直接复用它。
+     */
+    const { imminentDays } = this.resolvedWindow()
+    return resolveImminentWindowMs(windowMs, imminentDays * DAY_MS)
   }
 
   /**
