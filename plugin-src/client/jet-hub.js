@@ -8189,15 +8189,34 @@ function ProviderPanel({
           providerLabel,
           rpcCall,
           /**
-           * ⚠️ 结构必须是 `{ id, packages }`：
-           * `credits.balances` 的每条是 `{ accountId, nickname, balance }`，
-           * 逐包数据在 **`balance.packages`**（不是顶层 `packages`）——
-           * 写错这一格会让覆盖数恒为 0 且**没有任何报错**。
+           * ★★★ **逐包数据来自 `credits` 这个 state，不是 `accounts`**
+           *（真实缺陷，2026-11-20 用户报障「覆盖 0 个账号 / 预览全是 0」）。
+           *
+           * ## 我第一版写错的地方
+           *
+           * 传的是 `accounts`（= `providerRow.accounts`，**账号池列表**）——
+           * 它的每条是 `{ id, credentialRef, enabled, ... }`，**根本没有 `balance`**。
+           * 于是 `account.balance?.packages` 恒 `undefined` ⇒ `computeCoverage`
+           * 把每个账号都算成「无可用积分」⇒ **覆盖数恒 0、三档金额恒 0**，
+           * 且**不会有任何报错**（这正是注释里 warning 过的那种静默失效）。
+           *
+           * ## 正确来源
+           *
+           * `credits` state 的形状是 `{ [accountId]: { balance, error, extra } }`
+           *（由 `credits.balances` 的 `res.accounts` 逐条填充，见 loadCredits）。
+           * 逐包数据在 **`balance.packages`**。
+           *
+           * ⚠️ 传**函数**而不是快照：弹窗要在每次输入变化时重算（纯前端零请求），
+           *    面板的 `credits` 可能在这期间刷新过 ⇒ 每次调用都读**最新** state。
            */
-          accounts: () => accounts.map((account) => ({
-            id: account.accountId,
-            packages: account.balance?.packages,
-          })),
+          accounts: () => {
+            const rows = [];
+            for (const account of accounts) {
+              const entry = credits[account.id];
+              rows.push({ id: account.id, packages: entry?.balance?.packages });
+            }
+            return rows;
+          },
           onClose: () => setShowWindowModal(false),
         })
       : null,

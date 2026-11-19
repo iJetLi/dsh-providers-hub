@@ -1592,7 +1592,40 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  * ⚠️ min-height 压回 0：通用弹窗的 300px 是为「列表变短防跳动」设的，
  *    本弹窗内容固定，压回 0 可让高度随内容自适应（不留大片空白）。
  */
-.dim-jh-windowModal { min-height: 0; }
+/**
+ * ★ **弹窗与背景的视觉区分**（用户 2026-11-20 报障：
+ * 「档次窗口跟背景颜色没有什么区分，需要给窗口加一个边界边框，显眼区分一下」）。
+ *
+ * ## 为什么原来分不清
+ *
+ * .dim-jh-modal 的底色是 --dsw-alias-bg-layer-1，而宿主面板背景也接近这个色
+ * ⇒ 深色主题下两者**几乎同色**；它唯一的区分手段是 box-shadow: 0 16px 48px，
+ * 而阴影在暗背景上**几乎看不见**（黑色阴影叠在近黑底上）。
+ *
+ * ## 三条加固（缺任一条在暗色主题下都不够）
+ *
+ * 1. **实边框** 1px solid --dsw-alias-border-l2：最直接的「窗口边界」；
+ * 2. **更深的遮罩**（rgba(0,0,0,.32) → .5）：让弹窗外的区域明显压暗，
+ *    这是「弹窗浮起」最强的视觉信号；
+ * 3. **内描边** inset 0 0 0 1px 半透明白：让边框在**浅色主题**下也看得见
+ *    （浅色下 border-l2 本身已经很淡）。
+ *
+ * ⚠️ 只加在 .dim-jh-windowModal 上，**不动通用 .dim-jh-modal** ——
+ *    其它弹窗（模型列表 / 备份 / 额度）用户没报障，统一改会扩大回归面。
+ */
+.dim-jh-windowModal {
+  min-height: 0;
+  /* ① 实边框：暗色主题下最可靠的「窗口边界」 */
+  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  /* ② 内描边：浅色主题下的第二道保险（border-l2 在浅色下太淡） */
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
+    0 16px 48px rgba(0, 0, 0, 0.38);
+}
+/* ③ 该弹窗的遮罩再压暗一档（与上面同一条需求） */
+.dim-jh-modalOverlay:has(> .dim-jh-windowModal) {
+  background: rgba(0, 0, 0, 0.5);
+}
 /**
  * 单个输入行：色点 + 标签 + 输入框 + 单位 + 覆盖徽标，**全部同一行**。
  * ⚠️ flex-wrap: nowrap：徽标掉到下一行会让两行的对齐关系变乱
