@@ -47,6 +47,7 @@ import { buildRaccoonNickname, registerJetHubRpc, type JetHubAuthLike, type Mode
 import { ALL_PRODUCTS, CODEBUDDY, WORKBUDDY } from './product.js'
 import { mountOpenAiGateway } from './openai-gateway/index.js'
 import { installLoopResume } from './loop-recovery.js'
+import { installRateLimitResume } from './rate-limit-resume.js'
 import { installWebNative } from './web-native.js'
 import {
   attachTokenLedgerStore,
@@ -7058,6 +7059,12 @@ async function fetchBalanceReading(
   // ⚠️ 它依赖 `agents` 服务，故内部用 `ctx.inject(['agents'], …)` 挂载：
   // 该服务缺席的 profile 里本功能整体不生效，不会让插件永久 pending。
   installLoopResume(ctx)
+  // 会话因**限流 / 额度**被中断后，等到解禁时刻**自动继续**（见
+  // `rate-limit-resume.ts` 模块头）。与上面那个「思考死循环」是**不同失败类**：
+  // 一个管病态重复，一个管号池全被限流。
+  // ⚠️ 同样用 `ctx.inject(['agents'], …)` 挂载：没有 agent-loop 的 profile 里
+  // 本功能整体不生效，但**记录与 RPC 状态仍然可用**（钩子要能落盘、能显示）。
+  installRateLimitResume(ctx, pool)
   // 官方 `web_search` 在**支持原生搜索的渠道**下改走渠道自带后端
   //（其余渠道 `next()` 放行，官方链路逐字节不变）。
   //

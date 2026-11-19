@@ -3016,6 +3016,40 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 /* 自家渠道：颜色是**上游 hex 原话**（内联 style 覆盖上面这组），缺色时
    落 neutral。上游发什么色就画什么色，插件不做二次创作。 */
 .dim-jh-modelPromoChip[data-tone='upstream'] { color: var(--dsw-alias-status-success); background: color-mix(in srgb, var(--dsw-alias-status-success) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-status-success) 24%, transparent); }
+
+/* ── 限流中断后「解禁再继续」 ─────────────────────────────────────────────
+   ① 报错行行尾的切换按钮（原生 DOM 增强，见 rate-limit-resume.js）；
+   ② Jet Hub 设置页那一段的待续跑列表。
+   ⚠️ 本文件是 JS 模板字符串：注释里不能出现反引号，也不能写美元花括号插值。
+   颜色全部走宿主 token（跟随主题），不写死色值。 */
+
+/* 行尾格子：turnErrorRow 是 grid-template-columns: 10px minmax(0,1fr) auto,
+   新格子落进 auto 轨道 ⇒ 紧跟错误码。align-self:center 让它与单行文案对齐,
+   而不是被拉伸到两行高的文案块顶端。 */
+.dim-jh-resumeSlot { align-self: center; display: inline-flex; }
+
+.dim-jh-resumeToggle { display: inline-flex; align-items: center; gap: 5px; margin: 0; padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 8px; background: none;
+  font: inherit; font-size: 11px; line-height: 16px; cursor: pointer;
+  color: var(--dsw-alias-state-warn-primary, #d9822b); transition: border-color .15s ease, background .15s ease, color .15s ease; }
+
+.dim-jh-resumeToggle:hover:not(:disabled) { border-color: currentColor;
+  background: color-mix(in srgb, currentColor 8%, transparent); }
+.dim-jh-resumeToggle:disabled { opacity: 0.55; cursor: default; }
+.dim-jh-resumeToggle:focus-visible { outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 30%, transparent); }
+
+/* 「不自动继续」这一态：红色叉 + 红色描边（同一套 token，别换色系）。 */
+.dim-jh-resumeToggleOff { color: var(--dsw-alias-state-error-primary, #d93025); }
+
+.dim-jh-resumeIcon { flex: none; display: block; }
+.dim-jh-resumeText { white-space: nowrap; }
+
+/* 设置页的待续跑列表 */
+.dim-jh-resumeList { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.dim-jh-resumeRow { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px;
+  color: var(--dsw-alias-label-secondary, #4e5969); }
+.dim-jh-resumeRowText { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 `
 
 

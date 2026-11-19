@@ -50,6 +50,8 @@ import { QiniuKeyModal, QiniuKeyEditModal } from './qiniu-key-modal.js';
 // `baizhi.setApiKey` 但**零客户端调用点** ⇒ 用户填错 Key 只能删卡重建。
 import { BaizhiKeyModal } from './baizhi-key-modal.js';
 import { SyncModelsSection } from './sync-models-section.js';
+// 「限流中断 → 解禁后自动继续」设置段（宿主侧引擎见 `src/rate-limit-resume.ts`）。
+import { RateLimitResumeSection } from './rate-limit-resume.js';
 import { MonkeycodeKeyModal } from './monkeycode-key-modal.js';
 // ⚠️ 2026-10-22 整页白屏事故的兜底层（见该文件头的事故说明）。
 import { normalizeProbeNotice, safeNoticeDetails } from './notice-shape.js';
@@ -12410,6 +12412,12 @@ export function JetHubPage({ rpcCall }) {
               }, '打开供应商开关'))),
           // ② 定时签到
           renderCheckinSection(),
+          // ②b 限流续跑（解禁后自动继续）
+          //
+          // ⚠️ 与「定时签到」分开成两段：一个是每天定时打上游，一个是**被动**
+          //    等解禁时刻补一句「继续」，失败语义与调试路径都不同（那段还要列出
+          //    当前挂着的待续跑记录）。
+          React.createElement(RateLimitResumeSection, { rpcCall }),
           // ③ 备份与恢复
           React.createElement('div', { className: 'dim-jh-settingsSection' },
             React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '备份与恢复'),

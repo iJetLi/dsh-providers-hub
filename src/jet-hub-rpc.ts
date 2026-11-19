@@ -17,6 +17,9 @@
  *           nativeSearch.getEnabled / nativeSearch.setEnabled /
  *           sessionBalance.getEnabled / sessionBalance.setEnabled /
  *           panelEntry.get / panelEntry.set /
+ *           resume.getState / resume.setArmed / resume.setEnabled /
+ *           resume.fireNow / resume.forget（限流中断后的「解禁再继续」，
+ *           状态在 `src/rate-limit-resume.ts` 的模块级单例上）/
  * 另有一条 GET 路由 `/api/jet-hub/captcha-carrier`：渲染内部载体的载体页
  * （⚠ 手工诊断用；guest 加载不到它，见该路由注释里的主进程取证）。
  */
@@ -117,6 +120,15 @@ import { isMinimaxRefreshable, minimaxCredentialExpiresAtMs } from './minimax.js
 //    判合法性（非法即不写），否则「先写后判」会静默清掉用户原有的有效设置。
 //    ⚠️ 不要在这里另写一份 IP 校验（同义判据分两处必然漂移）。
 import { PANEL_ENTRY_VALUES, sanitizeMinimaxXff } from './jet-hub-store.js'
+// 「限流中断后解禁再继续」的状态出口（控制器在 `rate-limit-resume.ts` 的模块级
+// 单例上，见那个文件「为什么不给 registerJetHubRpc 加位置形参」的说明）。
+import {
+  fireRateLimitResumeNow,
+  forgetRateLimitResume,
+  readRateLimitResumeState,
+  setRateLimitResumeArmed,
+  setRateLimitResumeEnabled,
+} from './rate-limit-resume.js'
 import { GEMINI, geminiAccountLabel, geminiCredentialExpiresAtMs, isGeminiRefreshable } from './gemini.js'
 import type { GeminiAuth, StartedGeminiLoginFlow } from './gemini-auth.js'
 // OfficeAce（华为 MaaS 云端直连）：面板状态探测 / 登录流程 / 余额查询所需的
@@ -12289,6 +12301,77 @@ function registerJetHubEndpoints(
       // 消费方是客户端：`plugin-src/client/panel-entry.js` 在 `apply` 里先读一次
       // 本端点，再决定注不注入那两处入口；卡片写回后由同一份进程内副本通知两处
       // 注册逻辑重新求值。
+      /**
+       * ── 限流中断后「解禁再继续」（`rate-limit-resume.ts`）──
+       *
+       * 五条端点，全部由那个模块的**模块级单例**回答：它与宿主侧的
+       * `session/event` / `agent/*` 监听器共用同一个引擎。
+       *
+       * ⚠️ 功能没装上（例如本插件版本旧、或引擎构造失败）时如实回
+       * `available: false`，**不要**抛错 —— 客户端据此把按钮与开关都收掉：
+       * 界面不该显示一个永远不生效的功能。
+       *
+       * ⚠️ **不给 `registerJetHubRpc` 加位置形参**：那边的派生式不变量明令
+       * 禁止（可选的**位置**形参会静默把表落进错位置，本仓库复发 6 次）。
+       */
+      case 'resume.getState': {
+        const req = (payload ?? {}) as { sessionId?: unknown }
+        // 带了 `sessionId` 就只回那一个会话的钩子：报错行按钮问的正是「这一行
+        // 还能不能切」，把别的会话 id 一起送下去没有意义。
+        const sessionId = typeof req.sessionId === 'string' ? req.sessionId : undefined
+        return { ok: true, value: readRateLimitResumeState(sessionId) }
+      }
+
+      case 'resume.setArmed': {
+        const req = (payload ?? {}) as { sessionId?: unknown; armed?: unknown }
+        if (typeof req.sessionId !== 'string' || req.sessionId === '') {
+          return { ok: false, error: { code: 'bad-request', message: 'sessionId 必填' } }
+        }
+        // 与 `gateway.setEnabled` / `nativeSearch.setEnabled` 同约定：**不做
+        // 默认值猜测** —— 默认成 true 会静默打开用户特意关掉的开关。
+        if (typeof req.armed !== 'boolean') {
+          return { ok: false, error: { code: 'bad-request', message: '非空布尔 armed 必填' } }
+        }
+        const hook = setRateLimitResumeArmed(req.sessionId, req.armed)
+        // `hook: null` = 这个会话已经没有待续跑记录（例如用户已在别处重发了
+        // 消息，或解禁后已经投递成功）。客户端把它当成「把按钮收掉」的信号，
+        // 比回一个错误更有用：那本来就不是用户做错了什么。
+        return { ok: true, value: { hook: hook ?? null } }
+      }
+
+      case 'resume.setEnabled': {
+        const req = (payload ?? {}) as { enabled?: unknown }
+        if (typeof req.enabled !== 'boolean') {
+          return { ok: false, error: { code: 'bad-request', message: '非空布尔 enabled 必填' } }
+        }
+        const enabled = setRateLimitResumeEnabled(req.enabled)
+        if (enabled === undefined) return { ok: true, value: { enabled: true, available: false } }
+        ctx.logger.info(`[jet-hub] ${enabled ? '打开' : '关闭'}「解禁后自动继续」默认值`)
+        return { ok: true, value: { enabled, available: true } }
+      }
+
+      case 'resume.fireNow': {
+        const req = (payload ?? {}) as { sessionId?: unknown }
+        if (typeof req.sessionId !== 'string' || req.sessionId === '') {
+          return { ok: false, error: { code: 'bad-request', message: 'sessionId 必填' } }
+        }
+        const result = fireRateLimitResumeNow(req.sessionId)
+        // ⚠️ 失败**不**包成 `ok: true`（issue IKJOZA）：这里用户主动点了一次，
+        // 他必须看到「为什么没继续」（多半是解禁时刻还没到 / 会话不在内存）。
+        return result.ok
+          ? { ok: true, value: { fired: true } }
+          : { ok: true, value: { fired: false, reason: result.reason } }
+      }
+
+      case 'resume.forget': {
+        const req = (payload ?? {}) as { sessionId?: unknown }
+        if (typeof req.sessionId !== 'string' || req.sessionId === '') {
+          return { ok: false, error: { code: 'bad-request', message: 'sessionId 必填' } }
+        }
+        forgetRateLimitResume(req.sessionId)
+        return { ok: true, value: { forgotten: true } }
+      }
+
       case 'panelEntry.get': {
         const value: RpcPanelEntryGetResponse = { entry: pool.panelEntry() }
         return { ok: true, value }
