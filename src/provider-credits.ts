@@ -89,6 +89,9 @@ import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 import { claimCodelyDailyCheckIn, fetchCodelyBalanceDetailed } from './codely-credits.js'
 import type { CodelyCredential } from './codely-auth.js'
 import { fetchAccioBalanceDetailed } from './accio-credits.js'
+// ⚠️ AgnesCode（2026-11-19）：订阅积分池（两个标量桶，无逐笔日期）。
+import { fetchAgnescodeBalanceDetailed } from './agnescode-credits.js'
+import { AGNESCODE, AGNESCODE_INTL } from './agnescode-product.js'
 import { fetchAstudioBalanceDetailed, claimDaily } from './astudio-credits.js'
 // ⚠️ **本 fork 独有**（豆包，2026-10-29）：签到/余额原语（端点待实测，如实 inactive）。
 import { claimDoubaoDailyCheckin, fetchDoubaoBalanceDetailed } from './doubao-credits.js'
@@ -1335,6 +1338,24 @@ export function createProviderCredits(
           { warn: call.warn },
         ),
       precheckStatus: false,
+    },
+    /**
+     * AgnesCode 国内站（2026-11-19，本 fork 独有）。
+     *
+     * ⚠️ 两站**必须是两条 entry**（与 monkeycode / minimax 同纪律）：
+     *    `createProviderCredits` 是**按 provider id 显式登记**的表，
+     *    只写一条会让另一站的积分行恒「无余额实现」（面板显示查询失败）。
+     *    实现完全共用，只在 `product` 上分叉。
+     *
+     * ⚠️ 没有 `claim`：本家**没有**签到接口（未取证到，不凭空接一个）。
+     */
+    agnescode: {
+      fetchBalanceDetailed: async (credential) =>
+        fetchAgnescodeBalanceDetailed(AGNESCODE, credential),
+    },
+    agnescodeintl: {
+      fetchBalanceDetailed: async (credential) =>
+        fetchAgnescodeBalanceDetailed(AGNESCODE_INTL, credential),
     },
   }
 }

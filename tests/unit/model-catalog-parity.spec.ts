@@ -77,6 +77,11 @@ import { MonkeycodeAdapter } from '../../src/monkeycode-adapter.js'
 import { MONKEYCODE_INTL } from '../../src/monkeycode-product.js'
 import { BaizhiAdapter } from '../../src/baizhi-adapter.js'
 import { BAIZHI } from '../../src/baizhi-product.js'
+// ⚠️ **本 fork 独有**（AgnesCode，2026-11-19）：目录**完全按账号下发**（无静态兜底表）
+// ⇒ 必须注入 `fetchImpl`，否则本段对拍会真的打上游。
+import { AgnescodeAdapter } from '../../src/agnescode-adapter.js'
+import { AGNESCODE, AGNESCODE_INTL } from '../../src/agnescode-product.js'
+import { parseAgnescodeCredential } from '../../src/agnescode.js'
 // ⚠️ **本 fork 独有**（qiniu/七牛云，2026-10-29）。
 import { QiniuAdapter } from '../../src/qiniu-adapter.js'
 import { CodelyAdapter } from '../../src/codely-adapter.js'
@@ -827,6 +832,36 @@ id: 'autoclaw',
         slots: async () => [{ id: BAIZHI.id, apiKey: 'spec-token-baizhi' }],
       } as never),
     },
+    // AgnesCode（两站，2026-11-19）：目录**完全按账号下发**
+    //（`GET {apiRoot}/v2/models`，`data` 是数组、`auto` 是路由别名要剔除）
+    // ⇒ 必须注入 `fetchImpl`：不注入就会**真的**打上游（Qoder 那次已踩：
+    // 该端点对伪造凭据也回 200，测试静默变成随机真值）。
+    ...['agnescode', 'agnescodeintl'].map((id) => {
+      const product = id === 'agnescodeintl' ? AGNESCODE_INTL : AGNESCODE
+      return {
+        id,
+        make: () => new AgnescodeAdapter({
+          ...NO_CRED,
+          product,
+          slots: async () => [{
+            accountId: product.id,
+            credential: parseAgnescodeCredential(
+              JSON.stringify({ access_token: 'spec-token', bff_base: product.fallbackBffBase }),
+              product,
+            )!,
+          }],
+          fetchImpl: (async () => new Response(JSON.stringify({
+            data: [{
+              id: 'agnescode-spec-model',
+              name: 'Spec Model',
+              model_type: 'text',
+              max_input_tokens: 200_000,
+              max_output_tokens: 8_192,
+            }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch,
+        } as never),
+      }
+    }),
   ]
 
   /**
@@ -925,7 +960,8 @@ id: 'autoclaw',
     //    `channel: true` ⇒ 26 → 27。
     // ⚠️ 2026-11-02 并入 baizhi（百智云，`channel: true`）⇒ 27 → 28。
     // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis，`channel: true`）⇒ 28 → 29。
-    expect(CASES).toHaveLength(29)
+    // ⚠️ 2026-11-19 加 agnescode + agnescodeintl（AgnesCode 两站）⇒ 29 → 31。
+    expect(CASES).toHaveLength(31)
   })
 
   it('★★ `catalog` 具备 `refresh` 的家，适配器上必须**存在** `refresh` 成员（转发接线）', () => {
@@ -1015,11 +1051,33 @@ id: 'autoclaw',
     //     ⇒ 冷缓存返回空数组 = 该 provider 在设置页被误判为「已关闭」。
     const cold = make() as { listAllModels(): readonly { id: string; name: string }[] }
     const coldAll = cold.listAllModels()
-    expect(
-      coldAll.length,
-      `${id} **冷缓存**下 listAllModels 为空 —— 设置页会把整个 provider 误显示为`
-      + '「已关闭」（`closed = total > 0 && disabled === total` 的 total 来自本方法）',
-    ).toBeGreaterThan(0)
+    /**
+     * ⚠️⚠️ **唯一的「冷缓存允许为空」豁免：AgnesCode 两站（2026-11-19）**。
+     *
+     * 它俩的目录**完全账号级下发**（`GET {apiRoot}/v2/models`，`auto` 是路由别名）
+     * 且**刻意没有静态兜底表** —— 那条红线是本仓的（「静态兜底表必然腐坏」：
+     * Qoder 实测过上游 `dfmodel` 改了倍率/改名而表没跟上，用户界面上长期显示错价）。
+     *
+     * ⇒ 冷缓存（从未调过 `listModels`）时**结构上不可能非空**：
+     *    非空只能来自「编一份模型表」，那正好是红线禁止的。
+     *
+     * 已知代价（如实登记，**不是**「已解决」）：新装 / 未登录 / 登录后首轮预热前的窗口里，
+     * 设置页可能把该 provider 读成 `total = 0`（`closed` 判据要求 `total > 0`，
+     * 故这种形态是「未关闭」而不是「已关闭」，不会误伤开关）。
+     * 用户打开面板（触发 `listModels`）或后台刷新器跑过一轮之后即恢复。
+     * ⚠️ 这里**改判据而不是跳过断言**：必须仍然是个数组，且 `listModels`（异步、
+     * 有网络）**必须非空**（下一行的自检照旧）—— 否则本条会退化成恒真。
+     */
+    const ACCOUNT_SCOPED_COLD_EMPTY: ReadonlySet<string> = new Set(['agnescode', 'agnescodeintl'])
+    if (ACCOUNT_SCOPED_COLD_EMPTY.has(id)) {
+      expect(Array.isArray(coldAll), `${id} 的 listAllModels 必须返回数组（不得抛、不得 null）`).toBe(true)
+    } else {
+      expect(
+        coldAll.length,
+        `${id} **冷缓存**下 listAllModels 为空 —— 设置页会把整个 provider 误显示为`
+        + '「已关闭」（`closed = total > 0 && disabled === total` 的 total 来自本方法）',
+      ).toBeGreaterThan(0)
+    }
 
     // ⚠️ 先断言「列得出来」：若某家恒返回空数组，下面所有 `for` 循环体
     //    都**从未执行** ⇒ 本用例退化成恒真。这条是防 FALSE COVERAGE 的自检。

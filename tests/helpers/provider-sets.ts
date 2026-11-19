@@ -326,6 +326,14 @@ export const WRITES_RATE_LIMIT_PROVIDERS: readonly string[] = Object.freeze([
   //    次日零点、风控 → 同样走冷却）。漏登记 = 标记写进去却在 `probeById` 里
   //    查不到 ⇒「重测 / 重置」清不掉，冷却永不解除。
   'marvis',
+  // ⚠️ **本 fork 独有**（AgnesCode，2026-11-19）：`agnescode-adapter.ts` **会写**
+  //    `modelRateLimits`（429 / 额度类业务码 → 冷却，走注入的 `markLimited` →
+  //    接线层的 `pool.updateModelRateLimit`）。漏登记 = 标记写进去却在
+  //    `probeById` 里查不到 ⇒「重测 / 重置」清不掉（monkeycode / baizhi 同型）。
+  'agnescode',
+  // ⚠️ 国际站：与国内站是**同一个适配器类的两个实例** ⇒ 同样会写。漏登记 =
+  //    国际站的冷却永不解除（与 `monkeycodeintl` / `minimaxintl` 同型同因）。
+  'agnescodeintl',
   ])
 
 /** **期望**注册进 `probeById` 的 provider id（会写标记 − {@link PROBE_EXEMPT}）。 */

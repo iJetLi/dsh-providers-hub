@@ -674,6 +674,13 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   // ⚠️ 腾讯 Marvis（2026-11-09，本 fork 独有）：钱包端点与推理**同一个 host**
   //    （`yybadaccess.3g.qq.com`），只是路径不同（`/v3/` vs `/v1/`）。
   marvis: '/v3/marvis_get_wallet',
+  // ⚠️ **本 fork 独有**（AgnesCode，2026-11-19）：余额走**账号级**端点
+  //    `{apiRoot}/api/v2/subscription/credits-balance` —— 注意它**不在 `/v1` 下**
+  //    （`apiRoot` = BFF base 去掉尾部 `/v1`，见 `agnescodeApiRoot`）。
+  //    ⚠️ 推理是 `POST {bffBase}/chat/completions`（OpenAI 兼容），与余额不同源。
+  //    两站是**同一路径、不同 host**（`*.agnes-ai.cn` / `*.agnes-ai.com`）⇒ 单列两条。
+  agnescode: '/api/v2/subscription/credits-balance',
+  agnescodeintl: '/api/v2/subscription/credits-balance',
 }
 
 /**
@@ -892,7 +899,11 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    在这里的语义是「进 credits 表」（签到 `claim` 走同一张表），余额那一腿
     //    由 `credits.balances` 端点短路成空列表（`src/jet-hub-rpc.ts` 的 doubao 分支）。
     //    上面「手写端点清单」那条已把 doubao 排除（它没有端点路径可写）。
-    expect(expected.length).toBe(25)
+    //    ⚠️ 2026-11-19 并入 agnescode + agnescodeintl（AgnesCode 两站，
+    //    `credits.balance: true`、不在特例表）⇒ 25 → 27。余额走账号级
+    //    `{apiRoot}/api/v2/subscription/credits-balance`（**不在 `/v1` 下**、
+    //    信封 `code` 是字符串 `"000000"`），两站同一路径、不同 host。
+    expect(expected.length).toBe(27)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
     //    都是 `createProviderCredits({ loomy, raccoon, zcode })`。deps 只应影响**实现**，

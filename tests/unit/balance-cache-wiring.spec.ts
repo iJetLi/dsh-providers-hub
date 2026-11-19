@@ -224,6 +224,11 @@ describe('★★ 接线的**透传**腿（`provider-expiry.ts` 的 `context.cach
     //    `context.cachedBalance` 透传给了 `marvisExpiry`（与 modelscope /
     //    magicrew 同构）。漏登记 ⇒ 本表与生产漂移（本用例即清单）。
     'marvis',
+    // ⚠️ AgnesCode 两站（2026-11-19）：`agnescodeExpiry` 同样收 `context.cachedBalance`
+    //    （订阅池两个标量桶 → `sharedPackageExpiry`，聚合每轮会对同一账号反复提问）。
+    //    ⚠️ 两站各一项：账池不互通、域名族不同；漏了它本表就漏测那两家的透传。
+    'agnescode',
+    'agnescodeintl',
   ] as const
 
   it('★★ 所有接了 `cachedBalance` 透传的渠道都必须真的透传（本表即清单）', async () => {

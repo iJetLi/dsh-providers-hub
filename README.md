@@ -424,6 +424,8 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 | `monkeycode` | MonkeyCode | 浏览器登录（备用：粘贴 Key + Signing Secret） | 余额 + 每日签到 |
 | `monkeycodeintl` | MonkeyCode 国际站 | 同上（共用实现） | 余额 + 每日签到 |
 | `baizhi` | 百智云 | 浏览器登录（备用：粘贴 Key） | 余额 + 每日签到 |
+| `agnescode` | AgnesCode | 导入本机桌面客户端登录态（Windows DPAPI） | 余额（订阅积分池；**无签到**） |
+| `agnescodeintl` | AgnesCode（国际版） | 同上（共用实现，`*.agnes-ai.com`） | 余额（订阅积分池；**无签到**） |
 
 各渠道的能力与限制要点：
 

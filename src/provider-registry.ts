@@ -1193,6 +1193,60 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
   },
 
   {
+    /**
+     * AgnesCode 国内站（`agnescode`，2026-11-19）。
+     *
+     * ⚠️ 这家**不是** `api.agnes-ai.cn` 那个 OpenAI 兼容的 API 产品：
+     * 凭据是桌面客户端 `AgnesCode` 的本机会话（`%APPDATA%\AgnesCode` 的
+     * `code-auth-session.cn.v1`，Chromium os_crypt + DPAPI），推理打的是
+     * 会话里下发的 `bffPublicBaseUrl`（`api-agnes-code.agnes-ai.cn/v1`）。
+     * 因此它没有 API Key 可粘贴 —— 账号入口是「导入本机登录态」。
+     *
+     * ⚠️ 与 `monkeycode` / `monkeycodeintl` 同纪律：两站是**独立账号体系**，
+     * 模型目录按 provider 缓存 ⇒ 必须两个 id。实现完全共用
+     * （`AgnescodeAuth` / `AgnescodeAdapter`），只在 `product` 上分叉。
+     *
+     * ⚠️ **声明位置**：必须插在 `marvis` **之前**。
+     *    末尾三家的相邻关系是硬断言（`provider-registry.spec.ts`）：
+     *    `marvis` 紧邻 `magicrew`（差 1）、`magicrew` 紧邻 `magicrewintl`（差 1）、
+     *    `magicrewintl` 紧邻 `aggregate`（差 1）—— 插在任何一家之间都会把它们
+     *    各自的相邻断言挤坏。**新增 provider 一律插在 `marvis` 之前。**
+     *
+     * ⚠️ `credits.dailyCheckin` **不登记**：AgnesCode 没有签到接口（未取证到，
+     * 与 WorkBuddy 国际版「后端无签到」那次同型判据：没探到就不假装有）。
+     * ⚠️ `creditPackages` **不登记**：余额端点只给「限时 / 永久」两个标量桶，
+     * 没有逐包的到期日期 —— 登记会让卡片 hover 出现我们编的明细
+     * （与 monkeycode 拒绝 `creditPackages` 的理由逐字相同）。
+     * ⚠️ `permanentLock` / `usesExpiryWindow` **不登记**：那两个能力断言的本家
+     * 语义（按包分桶 + `splitBuddyCreditsByExpiry`）在这家并不存在。
+     * ⚠️ `rateLimit` **省略（= true）**：适配器确实会写 `modelRateLimits`
+     * （429 冷却），且 `probeById` 里有本家探针（拉一次目录，不消耗额度）。
+     */
+    id: 'agnescode',
+    label: 'AgnesCode',
+    displayName: 'AgnesCode',
+    logoClass: 'agnescode',
+    credits: { balance: true, dailyCheckin: false },
+    channel: true,
+  },
+  {
+    /**
+     * AgnesCode 国际版（`agnescodeintl`）。
+     *
+     * ⚠️ 与国内站**独立账号体系**（不同的 host 族与不同的桌面构建），
+     * 故必须是另一个 id。能力标记与国内站逐项一致 —— 两站共用一个
+     * `AgnescodeProduct` 形状与同一套实现，没有理由在能力上分叉。
+     */
+    id: 'agnescodeintl',
+    label: 'AgnesCode (国际版)',
+    displayName: 'AgnesCode (国际版)',
+    // ⚠️ 与国内站共用同一份图标资产（同一个产品的两套部署）。
+    logoClass: 'agnescode',
+    credits: { balance: true, dailyCheckin: false },
+    channel: true,
+  },
+
+  {
     // 腾讯 Marvis（2026-11-09 接入）。
     //
     // ## 为什么只有一条模型

@@ -126,6 +126,14 @@ const AUTH_SERVICE: Readonly<Record<string, string>> = {
   //    不变只重置有效期）⇒ 必须占一个真实 auth 键位，否则「过期账号自愈」
   //    与续期分派都会静默落到 undefined。
   marvis: 'marvisAuth',
+  // ⚠️ AgnesCode（2026-11-19）：服务名由 `${product.id}Auth` 派生 ⇒
+  //    `agnescodeAuth` / `agnescodeintlAuth`（**全小写、无连字符**）。
+  //    ⚠️ **不是** `agnescodeIntlAuth`（按变量名驼峰拼会恒 undefined —— 与本文件
+  //    对 magicrewintl / monkeycodeintl 记录的是同一个坑）。
+  //    本家**没有** refresh 端点，但仍要占一个真实 auth 键位（与 monkeycode / qiniu
+  //    同型）：它负责「用凭据自己的值重算 `expiresAt`」这条对账。
+  agnescode: 'agnescodeAuth',
+  agnescodeintl: 'agnescodeintlAuth',
 }
 
 /**
@@ -198,9 +206,16 @@ async function setup(accounts: ProviderAccountEntry[]): Promise<{
   call: (method: string, payload: unknown) => Promise<{ ok: boolean; error?: { message?: string } }>
   spyOf: (serviceName: string) => ReturnType<typeof vi.fn>
   calledServices: () => string[]
+  /** 测试要预置/读回凭据库（`account.create` 的去重腿需要它）。 */
+  credentials: FakeCredentials
+  /** 池的持久化对象（可直接读回账号列表）。 */
+  state: { value: unknown }
+  /** 已 `apply()` 的上下文（测试要从里面取 auth 实例布桩）。 */
+  ctx: Context
 }> {
   const ctx = new Context()
-  ctx.provide('credentials', new FakeCredentials() as never)
+  const credentials = new FakeCredentials()
+  ctx.provide('credentials', credentials as never)
   ctx.provide('commands', { register: () => () => {}, definitions: [] } as never)
   ctx.provide('llm', {
     registerConfigurableProviders: () => ({ replace() {} }),
@@ -319,6 +334,9 @@ async function setup(accounts: ProviderAccountEntry[]): Promise<{
       return spy
     },
     calledServices: () => [...called],
+    credentials,
+    state,
+    ctx,
   }}
 
 function entry(provider: string, credentialRef: string): ProviderAccountEntry {
@@ -358,7 +376,8 @@ describe('★ registerJetHubRpc 的命名对象接线（真跑 apply + account.r
     // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis）：27 → 28。
     //    （三审 F🟢-5：本处原只写到 25，而断言已是 27 —— 注释漏了一步就会让
     //     下一个加 provider 的人以为“上次是 25”而把数字写回 25。）
-    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(28)
+    // ⚠️ 2026-11-19 加 agnescode + agnescodeintl（AgnesCode 两站）：28 → 30。
+    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(30)
     // 另一方向（原断言的**全部**证明力都在这条上，单独留着免得它随上面那条一起消失）：
     // 表里的每个键都必须是 registry 里真实存在的 provider id（防拼写错误造成的僵尸项）。
     for (const id of Object.keys(AUTH_SERVICE)) {
@@ -440,5 +459,46 @@ describe('★ registerJetHubRpc 的命名对象接线（真跑 apply + account.r
     const result = await call('account.refresh', { accountId: 'mystery-1' })
     expect(result.ok).toBe(false)
     expect(result.error?.message).toMatch(/Unknown provider/)
+  })
+
+  it('★★ AgnesCode：同一枚桌面会话重复导入 ⇒ **复用既有卡片**，不攒重复账号', async () => {
+    // 背景：`account.create` 每次都生成新的账号 id 与 ref，而「导入本机登录态」
+    // 读的是**同一份** `code-auth-session*.v1`。不判重就会攒出两张指向同一个号的
+    // 卡片 —— 推理轮换把它们当两个槽（「换号」换来同一枚 token），积分也画两遍。
+    const session = {
+      accessToken: 'ag-token-same',
+      userId: 'u-1',
+      nickname: '阿格妮丝',
+      bffBase: 'https://api-agnes-code.agnes-ai.cn/v1',
+    }
+    const { call, credentials, state, ctx } = await setup([
+      entry('agnescode', 'AGNESCODE_ACCOUNT_EXIST'),
+    ])
+    // 既有账号挂的是**同一枚** token（模拟上一次导入的结果）。
+    await credentials.set('AGNESCODE_ACCOUNT_EXIST', JSON.stringify({
+      access_token: session.accessToken,
+      bff_base: session.bffBase,
+      user_id: session.userId,
+    }))
+    // 本机采集是注入点：单测不碰真文件、不碰真 DPAPI。
+    const agnescodeAuth = (ctx as unknown as { agnescodeAuth: { harvest?: unknown } }).agnescodeAuth
+    agnescodeAuth.harvest = async () => ({ ok: true, attempts: [], session })
+
+    const result = await call('account.create', { provider: 'agnescode' }) as unknown as {
+      ok: boolean
+      value?: { accountId?: string; reused?: boolean }
+      error?: { message?: string }
+    }
+    expect(result.ok, `导入应成功，实际 error=${result.error?.message}`).toBe(true)
+    // 关键判据：账号 id 落回既有那张卡，而不是新造一张。
+    expect(result.value?.accountId).toBe('agnescode-1')
+    expect(result.value?.reused).toBe(true)
+    // 池里该 provider 仍然只有一张卡（新增的那张临时占位已被清掉）。
+    // ⚠️ 必须**按 provider 过滤**：`apply()` 会顺手给 opencode 建一条匿名通道，
+    //    那是背景噪声（不是本次被测对象）。
+    const accounts = (state.value as {
+      accounts?: Array<{ id: string; provider: string }>
+    }).accounts ?? []
+    expect(accounts.filter((a) => a.provider === 'agnescode').map((a) => a.id)).toEqual(['agnescode-1'])
   })
 })

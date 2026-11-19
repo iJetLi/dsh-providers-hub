@@ -345,6 +345,16 @@ const MAGICREW_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAY
  */
 const MARVIS_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzBCNUZGRiIvPjxwYXRoIGQ9Ik01IDE4VjZoMi42bDQuNCA3LjFMMTYuNCA2SDE5djEyaC0yLjVWOS45bC0zLjkgNi4yaC0xLjJMNy41IDkuOVYxOEg1eiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg=='
 
+/**
+ * AgnesCode（`agnescode` + `agnescodeintl`，2026-11-19）—— **占位图标**。
+ *
+ * ⚠️ 这是**自制占位**，不是官方 logo：本轮没取到可核对的官方 SVG
+ *（网页端 `app.agnes-ai.cn` 根路径实测 403 维护页）。
+ * 形状 = 圆角方块 + 白色「A」，与其它占位图标同风格；拿到官方资产后**只换
+ * 本常量**即可（两站共用，与 `magicrewintl` / `monkeycodeintl` 同型）。
+ */
+const AGNESCODE_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzBGNzY2RSIvPjxwYXRoIGQ9Ik0xMS4xIDVoMS44TDE3IDE5aC0yLjZsLS45LTNIMTAuNWwtLjkgM0g3TDExLjEgNXoiIGZpbGw9IiNmZmYiLz48cGF0aCBkPSJNMTIgOS4ybC0xLjQgNC4zaDIuOEwxMiA5LjJ6IiBmaWxsPSIjMEY3NjZFIi8+PC9zdmc+'
+
 export const PROVIDER_ICONS = {
   codearts: CODEARTS_ICON,
   buddy: CODEBUDDY_ICON,
@@ -398,6 +408,13 @@ export const PROVIDER_ICONS = {
   //    漏加这行 ⇒ `provider-registry.spec.ts` 的「键集合 == registry id 集合」
   //    断言变红（而不是渲染出空白图标）—— 这正是把图标表做成纯数据模块的理由。
   marvis: MARVIS_ICON,
+  // ⚠️ AgnesCode（2026-11-19，本 fork 独有）：**自制占位图标**（见 AGNESCODE_ICON
+  //    注释）。`PROVIDER_ICONS` 的键集合与 registry 的 id 集合必须完全相等
+  //    （`provider-icon-coverage.spec.ts` + `provider-registry.spec.ts` 都有
+  //    行为断言）⇒ 两站漏任一键都会红，而不是渲染出一张空白图标。
+  agnescode: AGNESCODE_ICON,
+  // ⚠️ 国际站与国内站共用同一个占位（同产品、两套部署），与 magicrewintl 同型。
+  agnescodeintl: AGNESCODE_ICON,
   aggregate: AGGREGATE_ICON,
   // ⚠️ Codely（Unity，本 fork 独有）：UI 先行阶段（registry 里 channel:false），
   //    但图标键集合守卫按**全量** registry 比对 —— 漏加这行会红（而非渲染空白图标）。

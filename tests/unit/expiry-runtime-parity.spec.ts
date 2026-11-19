@@ -101,7 +101,12 @@ const EXPECTED_WIRED = [
   // ⚠️ 腾讯 Marvis（`marvis`，2026-11-09）：属「有余额但不下发到期时间」那一类
   //    （钱包只有 total/used/frozen）⇒ 有余额即 `NEVER`、烧光即 `UNUSABLE`。
   //    ⚠️ 三处必须同改：本清单 + `WIRED_EXPIRY_PROVIDERS` + `createProviderExpiry()`。
-  'accio', 'astudio', 'autoclaw', 'autoclawintl', 'baizhi', 'buddy', 'codearts',
+  // ⚠️ AgnesCode（两站，2026-11-19）：属「有余额但不下发到期时间」那一类
+  //    （订阅积分池只有 `permanent_balance` / `time_sensitive_balance` 两个标量桶）⇒
+  //    有余额即 `NEVER`、烧光即 `UNUSABLE`。
+  //    ⚠️ 三处必须同改：本清单 + `WIRED_EXPIRY_PROVIDERS` + `createProviderExpiry()`。
+  //    ⚠️ 两站各占一项：账池不互通、域名族不同（`*.agnes-ai.cn` / `*.agnes-ai.com`）。
+  'accio', 'agnescode', 'agnescodeintl', 'astudio', 'autoclaw', 'autoclawintl', 'baizhi', 'buddy', 'codearts',
   'lobsterai', 'loomy', 'magicrew', 'magicrewintl', 'marvis', 'minimax', 'minimaxintl',
   'modelscope', 'monkeycode', 'monkeycodeintl', 'officeace', 'qoder', 'qodercn',
   'trae', 'workbuddy', 'zcode',

@@ -29,6 +29,16 @@
 > `marvis`（腾讯 Marvis，**QQ / 微信 OAuth + 双套鉴权**：模型网关不带 UAL 签名、
 > `/v3/*` 钱包必须带签名，见 `src/marvis.ts` 模块头）。它们与本 fork 的其它
 > 「本 fork 独有」渠道一样，都要求把「八处静默失效的接线」全部补齐（见 AGENTS.md）。
+>
+> 📌 **再次补记（2026-11-19）**：`agnescode` / `agnescodeintl`（AgnesCode 两站）。
+> 它**不是** API Key 产品，而是「**读 Windows 桌面客户端的登录态**」那一类：
+> `%APPDATA%\AgnesCode\code-auth-session*.v1` 的 `v10` blob 用 `Local State` 的
+> `os_crypt.encrypted_key`（DPAPI 包裹的 32 字节 AES key）解 AES-256-GCM；解密后
+> 拿 `accessToken` + **每账号下发的 `bffPublicBaseUrl`**（绝不硬编码）。
+> 坑点清单见 `docs/agent-notes/providers-agnescode.md`，首次接入请**先读它**：
+> 本家**刻意没有静态兜底模型表**（目录完全账号级下发），因此
+> `model-catalog-parity` 的「冷缓存 `listAllModels` 非空」那一格对它**改判据豁免**，
+> 理由与代价逐条写在用例里。
 
 因此你要添加的 provider 如果属于**已有脉系**（比如再加一个腾讯系产品），只需加一份 `BuddyProduct` 配置并注册实例；如果是**全新的脉系**（全新的API协议、认证方式、签到流程），需要仿照 LobsterAI 创建一套独立但遵循相同架构模式的实现。
 

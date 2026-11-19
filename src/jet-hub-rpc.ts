@@ -144,6 +144,11 @@ import { ACCIO } from './accio-product.js'
 // ⚠️ 本家符号**分属两个模块**：`astudioAccountNickname` 在 `astudio-auth.ts`，
 //    `isAstudioRefreshable` 与凭据类型在 `astudio.ts`（产品常量在 `astudio-product.ts`）。
 import { ASTUDIO } from './astudio-product.js'
+// ⚠️ AgnesCode（2026-11-19）：两站 product 常量 + auth 类型（`account.create`
+//    的本地导入分支按 id 分派到两个实例）。
+import { AGNESCODE, AGNESCODE_INTL, type AgnescodeProduct } from './agnescode-product.js'
+import { agnescodeExpiryMs, parseAgnescodeCredential, type AgnescodeCredential } from './agnescode.js'
+import type { AgnescodeAuth } from './agnescode-auth.js'
 import { astudioAccountNickname, type AstudioAuth } from './astudio-auth.js'
 import {
   magicrewCredentialFingerprint,
@@ -1860,6 +1865,26 @@ export interface JetHubAuths {
    *    恒「未登录」而上游其实只需一次 refresh，且日志零字 —— issue IKKHL5）。
    */
   readonly marvis: MarvisAuth
+  /**
+   * AgnesCode 国内站（`agnescode`，2026-11-19）—— **本 fork 独有**。
+   *
+   * ⚠️ 凭据是**本机桌面客户端登录态**（`%APPDATA%\AgnesCode`，Chromium
+   *    `os_crypt` + DPAPI），不是可粘贴的 Key ⇒ 本家的 `account.create`
+   *    走「导入本机会话」分支（与 AStudio 同族）。
+   * ⚠️ **没有** refresh 端点 ⇒ 与 monkeycode / qiniu 同格：刻意**不进**
+   *    `SELF_HEAL_REFRESHABLE_PROVIDERS`，而是在 `SELF_HEAL_EXEMPT` 里登记理由。
+   */
+  readonly agnescode: AgnescodeAuth
+  /**
+   * AgnesCode 国际站（`agnescodeintl`）—— 与国内站是**两套独立账号体系**
+   *（`*.agnes-ai.cn` / `*.agnes-ai.com`），实现完全共用、只差 `product`。
+   *
+   * ⚠️ 与 `agnescode` 是**同一个类的两个实例** ⇒ `probeById` /
+   *    `WRITES_RATE_LIMIT_PROVIDERS` / ref 前缀表 / 积分表 / registry 数组 /
+   *    本接口每处都要两站到位，漏一处静默失效
+   *（minimax / monkeycode 都复发过同一形态）。
+   */
+  readonly agnescodeintl: AgnescodeAuth
 }
 
 /**
@@ -1936,6 +1961,44 @@ async function findMarvisAccountByOpenid(params: {
     if (resolved === undefined) continue
     const parsed = parseMarvisCredential(resolved.value)
     if (parsed !== undefined && parsed.openid === openid) return existing
+  }
+  return undefined
+}
+
+/**
+ * 在账号池里找「**同一次桌面登录**」的既有 AgnesCode 条目 —— 判重实现。
+ *
+ * 为什么要判重（2026-11-19 二次自查）：`account.create` 每次生成新的
+ * `${provider}-${shortId()}` 与 `AGNESCODE_ACCOUNT_${suffix}`，而「导入本机登录态」
+ * 读的是**同一份** `code-auth-session*.v1` ⇒ 用户连点两次就得到两张指向**同一个号**
+ * 的卡片。症状不只是重复显示：推理轮换会把它当两个槽，「换号」换到的其实是同一枚
+ * token（429 照旧撞墙），积分也被画两遍。
+ *
+ * 判据优先级（与其余判重实现同纪律：边界 ⇒ 跳过，绝不猜）：
+ *   ① `user_id` 两边都非空且相等 ⇒ 同一个账号（重登会换 token，但 user_id 稳定）；
+ *   ② 否则比 **token 全等**（同一次桌面会话导出的就是同一枚 JWT）。
+ * 读不到凭据的条目、解析失败的条目一律**跳过**（无法判定 ≠ 失配）。
+ */
+async function findAgnescodeAccountDuplicate(params: {
+  ctx: Context
+  pool: AccountPool
+  product: AgnescodeProduct
+  credential: AgnescodeCredential
+  /** 本次新建的占位条目（必须排除，否则永远命中自己）。 */
+  skipAccountId: string
+}): Promise<ProviderAccountEntry | undefined> {
+  const { ctx, pool, product, credential, skipAccountId } = params
+  const myUser = credential.user_id ?? ''
+  for (const existing of pool.listAccountsByProvider(product.id)) {
+    if (existing.id === skipAccountId) continue
+    const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
+      .catch(() => undefined)
+    if (resolved === undefined) continue
+    const parsed = parseAgnescodeCredential(resolved.value, product)
+    if (parsed === undefined) continue
+    const otherUser = parsed.user_id ?? ''
+    if (myUser !== '' && otherUser !== '' && myUser === otherUser) return existing
+    if (parsed.access_token === credential.access_token) return existing
   }
   return undefined
 }
@@ -7638,6 +7701,108 @@ function registerJetHubEndpoints(
           })
 
           return { ok: true, value: { accountId: id, loginUrl: accioStarted.loginUrl } }
+        } else if (provider === AGNESCODE.id || provider === AGNESCODE_INTL.id) {
+          /**
+           * AgnesCode（2026-11-19）—— **没有 OAuth 授权页**可返回。
+           *
+           * 凭据是**本机桌面客户端**的登录态：`%APPDATA%\AgnesCode\code-auth-session*.v1`
+           *（Chromium `os_crypt` + DPAPI）⇒ 建账号 = 「导入本机会话」，与 AStudio
+           *（`astron-session.json`）是同一族但**不同种**（本家是 AES-GCM 包在
+           * `Local State` 的 DPAPI key 上）。
+           *
+           * ⚠️ 与 AStudio 同纪律：本分支**自己** `addAccount`、失败**自己**
+           *    `removeAccount`（Accio 那种「auth 内部自己登记」的形态在这里不成立 ——
+           *    `AgnescodeAuth` 刻意把「读」与「落」分开：`importLocal()` 不写库）。
+           *
+           * ⚠️ 返回值靠 `reused: true` + 空 `loginUrl` 命中前端成功出口
+           *（`jet-hub.js` 的 `if (res.reused)`），与 AStudio 同款偏离。
+           *
+           * ⚠️ 只做「导入本机登录态」这条腿。扫码设备码 + 本地回环回调
+           *（跨平台，`docs/AGNESCODE-SCAN-LOGIN.md`）**尚未接** ⇒ 非 Windows
+           *    平台会如实报 `UNSUPPORTED_PLATFORM` 的原因串，而不是假装成功。
+           */
+          const product = provider === AGNESCODE_INTL.id ? AGNESCODE_INTL : AGNESCODE
+          const auth = provider === AGNESCODE_INTL.id ? auths.agnescodeintl : auths.agnescode
+
+          await pool.addAccount({
+            id,
+            provider: product.id,
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            // 本家**没有** refresh 端点（与 monkeycode / qiniu 同格）。
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+
+          let imported: Awaited<ReturnType<typeof auth.importLocal>>
+          try {
+            imported = await auth.importLocal()
+          } catch (error) {
+            // ⚠️ 采集层抛错（DPAPI 子进程失败等）也必须清掉占位条目，
+            //    否则池里永久留一张「导入中」的空卡。
+            void pool.removeAccount(id).catch(() => {})
+            const reason = error instanceof Error ? error.message : String(error)
+            throw new Error(`导入本机 AgnesCode 登录态失败：${reason}`)
+          }
+
+          if (!imported.ok) {
+            void pool.removeAccount(id).catch(() => {})
+            // ⚠️ 逐档原因原样透出：本家失败形态**极多**（没有目录 / 没有 Local
+            //    State / key 不合法 / v10 解不开 / JWT 过期），压成一句
+            //    「导入失败」会让用户与排查者都无从下手。
+            const why = imported.attempts
+              .map((attempt) => `${attempt.tier}${attempt.file === null ? '' : `（${attempt.file}）`}: ${attempt.detail}`)
+              .join('；')
+            throw new Error(`导入本机 AgnesCode 登录态失败：${why === '' ? '没有找到可用的会话文件' : why}`)
+          }
+
+          // ⚠️⚠️ 判重（2026-11-19 二次自查）：本机导入读的是**同一份**
+          //    `code-auth-session*.v1`，连点两次就会得到两张指向同一个号的卡片 ——
+          //    推理轮换把它当两个槽（「换号」换来的是同一枚 token，429 照旧撞墙），
+          //    积分也被画两遍。命中既有条目 ⇒ 复用那一张、删掉本次占位。
+          //    ⚠️ 判重必须排在「写本次 ref」之前：否则先写一枚随后被 `removeAccount`
+          //    删掉的临时凭据（纯浪费，且在两次写之间有个窗口能读到它）。
+          const duplicate = await findAgnescodeAccountDuplicate({
+            ctx, pool, product, credential: imported.credential, skipAccountId: id,
+          })
+          if (duplicate !== undefined) {
+            if (!await auth.saveCredential(imported.credential, duplicate.credentialRef)) {
+              void pool.removeAccount(id).catch(() => {})
+              throw new Error('导入本机 AgnesCode 登录态失败：插件正在停用，登录态未写入凭据库（请重试）')
+            }
+            await pool.updateAccount(duplicate.id, {
+              nickname: imported.credential.nickname ?? imported.credential.user_id ?? duplicate.id,
+              expiresAt: agnescodeExpiryMs(imported.credential),
+              refreshable: false,
+            })
+            await pool.removeAccount(id)
+            return { ok: true, value: { accountId: duplicate.id, loginUrl: '', reused: true } }
+          }
+          // 「读」与「落」分开 ⇒ 这里才写库（写到本次账号的 ref，不是默认 ref）。
+          // ⚠️ 返回值必须判：采集期间插件被停用 ⇒ `saveCredential` 刻意不落库
+          //    （它回 `false`）。此时**不能**接着 `updateAccount` 并报成功，
+          //    否则池里留下一张「有账号、没凭据」的幽灵卡，点一次导入多一张。
+          if (!await auth.saveCredential(imported.credential, refName)) {
+            void pool.removeAccount(id).catch(() => {})
+            throw new Error('导入本机 AgnesCode 登录态失败：插件正在停用，登录态未写入凭据库（请重试）')
+          }
+          await pool.updateAccount(id, {
+            nickname: imported.credential.nickname ?? imported.credential.user_id ?? id,
+            // ⚠️ 必须用 `agnescodeExpiryMs` 算：采集写进凭据的 JSON **没有**
+            //    `expires_at` 字段（只有 access_token / bff_base / user_id / nickname），
+            //    直接读 `credential.expires_at` 恒 `undefined` ⇒ 新建账号的到期信息
+            //    要等启动后首轮 `refreshAll()` 对账才有（面板上先显示「未知」）。
+            expiresAt: agnescodeExpiryMs(imported.credential),
+            refreshable: false,
+          })
+          // ⚠️ 这里**必须**是 `reused: false`（不是 AStudio 那种恒 true）：前端
+          //    看到 `reused` 就提示「已复用本机已有的账号凭据，**未新建账号**」，
+          //    而本路径刚刚真的建了一张卡 —— 用户会以为没建成、再点一次，
+          //    正好喂给上面那条判重的「重复卡片」缺陷。
+          //    `reused: false` + 空 `loginUrl` 落到前端「已成功导入账号凭据。」那格。
+          return { ok: true, value: { accountId: id, loginUrl: '', reused: false } }
+          return { ok: true, value: { accountId: id, loginUrl: '', reused: true } }
         } else if (provider === ASTUDIO.id) {
           /**
            * AStudio（讯飞 AstronStudio）**没有 OAuth 授权页**：推理凭据是**本机客户端

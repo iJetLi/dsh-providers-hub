@@ -762,6 +762,10 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     //    自愈链无事可做。可核对：`src/baizhi-auth.ts` 全文无 `fetch(` 续期调用，
     //    只有 `refreshAccountCredential` 的有效期对账（与 qiniu / loomy 同型）。
     ['baizhi', '静态 sk- API Key，无 refresh 端点（只有有效期对账，没有续期请求）⇒ 自愈链无事可做'],
+    // ⚠️ **本 fork 独有**（AgnesCode，2026-11-19）：桌面客户端会话凭据
+    //    （约 28 天 JWT），协议里没有 refresh 端点 ⇒ 自愈链无事可做。
+    ['agnescode', '桌面客户端会话凭据（约 28 天 JWT）、无 refresh 端点 ⇒ 自愈链无事可做'],
+    ['agnescodeintl', '与国内站同源：同一套会话格式与端点，无 refresh 端点'],
   ])
 
   it('★ Set 里的字面量恰好是 codearts / buddy / workbuddy（多一个少一个都红）', () => {
@@ -852,6 +856,12 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
       //    `ttwid`），上游**没有 refresh 端点**（续期只能人工重扫码，cookies 无刷新令牌）⇒
       //    自愈链对它无事可做。与 zcode / loomy 同型：余额能读 ≠ 凭据能续。
       ['doubao', '浏览器 cookie 凭据、上游无 refresh 端点（续期只能人工重扫码）'],
+      // ⚠️ **本 fork 独有**（AgnesCode，2026-11-19）：凭据是**桌面客户端登录态**的
+      //    拷贝（`access_token` JWT，约 28 天）；协议里**没有**任何 `refresh` 端点
+      //    （参考实现的 1054 行里只有目录 / 余额 / 推理三个端点）⇒ 自愈链无事可做。
+      //    ⚠️ 与 baizhi 同型：**余额能读 ≠ 凭据能续**。
+      ['agnescode', '桌面客户端会话凭据（约 28 天 JWT）、上游无 refresh 端点（余额能读 ≠ 凭据能续）'],
+      ['agnescodeintl', '与国内站同源：同一套会话格式与端点，无 refresh 端点'],
     ])
     const { literals, constants } = selfHealSetParts()
     const inSet = new Set([...literals, ...constants.map((c) => ID_OF[c] ?? c)])

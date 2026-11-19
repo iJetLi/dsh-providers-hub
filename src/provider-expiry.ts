@@ -80,7 +80,13 @@ import {
   // ⚠️ MonkeyCode 国内站 / 国际站 + 百智云（本 fork 独有，2026-11-02 新增）
   monkeycodeExpiry,
   baizhiExpiry,
+  // ⚠️ AgnesCode（国内站 / 国际站共用，本 fork 独有，2026-11-19 新增）
+  agnescodeExpiry,
 } from './aggregate-expiry.js'
+// ⚠️ AgnesCode（2026-11-19）：两站共用同一个折算原语，但**必须各传各的 product**
+//（账号池不互通、域名族不同）。
+import { AGNESCODE, AGNESCODE_INTL } from './agnescode-product.js'
+import type { AgnescodeCredential } from './agnescode.js'
 // ⚠️ Qoder（国际版 / 中国版，2026-10-20 新增）：与 minimax 同款 —— 两站共用
 //    同一套 `src/qoder*.ts` 实现，差异全在 `src/qoder-product.ts` 的
 //    `QODER` / `QODER_CN` 常量（域名 / client_id / 模型表）。
@@ -290,6 +296,30 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
       credentialExpiry: (c, context) => marvisExpiry(
         c as MarvisCredential,
         MARVIS,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
+    // ⚠️ AgnesCode（两站，2026-11-19）：与 marvis **同格**（订阅池只有两个标量桶、
+    //    没有任何逐笔日期 ⇒ 有余额即 `NEVER`、烧光即 `UNUSABLE`）。
+    //    ⚠️ 三处必须同改（本表 + `WIRED_EXPIRY_PROVIDERS` + 折算原语
+    //    `agnescodeExpiry`）—— 漏任何一处都是**静默**的（聚合轮换列表里看不到它）。
+    //    ⚠️ `agnescodeintl` **必须传 `AGNESCODE_INTL`**：两站账池不互通、域名不同，
+    //    传国内站会让国际账号的余额请求打到错误 base（恒 401 → 恒 `UNUSABLE`）。
+    agnescode: {
+      credentialExpiry: (c, context) => agnescodeExpiry(
+        c as AgnescodeCredential,
+        AGNESCODE,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
+    agnescodeintl: {
+      credentialExpiry: (c, context) => agnescodeExpiry(
+        c as AgnescodeCredential,
+        AGNESCODE_INTL,
         context?.cachedBalance === undefined
           ? undefined
           : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,

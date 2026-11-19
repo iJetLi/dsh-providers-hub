@@ -264,7 +264,26 @@ describe('modelAdapters 的键集合守卫（行为断言）', () => {
     }
 
     expect(body.result.ok, `provider.status 失败：${JSON.stringify(body.result)}`).toBe(true)
-    const missing = channelIds.filter((id) => (body.result.value.statuses[id]?.models.total ?? 0) === 0)
+    /**
+     * ⚠️ **目录完全按账号下发的两家**（AgnesCode 两站，2026-11-19）不计入本判据。
+     *
+     * 这条守的是「关掉整个 provider 时拿不到全量目录 ⇒ 显示未关闭、模型仍可选」。
+     * 而 AgnesCode 的 `GET {apiRoot}/v2/models` 是**账号级**端点（没有账号就
+     * 403；目录里也没有任何东西可关），且本仓红线禁止编静态兜底表
+     *（「静态兜底表必然腐坏」，本家的目录/价格都是每账号下发的）
+     * ⇒ 本用例在**没有账号**的桩环境里必然读到 `total = 0`，而那个 0 是**事实**：
+     * 此刻它确实一个模型都没有，不存在「可选却关不掉」的模型。
+     *
+     * ⚠️ 已知代价（如实登记）：**已登录**账号在首轮 `apply()` 之后、后台目录预热
+     *    完成之前的极短窗口里，`provider.status` 也可能读到 0。那是「预热还没回来」，
+     *    不是「目录为空」；根因是 `listAllModels()` 必须同步（minimax 的已知约束），
+     *    而本家没有静态表可回落。根治需要宿主提供「目录预热完成」事件 —— 属接口
+     *    扩张，不在本 PR 范围。
+     */
+    const NO_ACCOUNT_SCOPED_CATALOG = new Set(['agnescode', 'agnescodeintl'])
+    const missing = channelIds
+      .filter((id) => !NO_ACCOUNT_SCOPED_CATALOG.has(id))
+      .filter((id) => (body.result.value.statuses[id]?.models.total ?? 0) === 0)
     expect(
       missing,
       '`modelAdapters` 漏了这些 channel 的键（它们的目录取不到 ⇒ provider.status 报 total=0 '

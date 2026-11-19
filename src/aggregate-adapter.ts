@@ -1375,6 +1375,15 @@ export class AggregateAdapter extends LlmAdapter {
     // 永远不可见（**静默**）。它是 `x-api-key: sk-…` 的按量付费网关，
     // 与 MonkeyCode 两站的 oma_ 凭据/每日额度完全无关，只是同源上游。
     'baizhi',
+    // ⚠️ AgnesCode（两站，2026-11-19）：`channel: true` ⇒ 必须进本清单，否则
+    //    它的模型**永不进聚合、静默不可见**。
+    //    ⚠️⚠️ 本数组只是**第一道门**；决定候选表可见性的是
+    //    `aggregate-expiry.ts` 的 `WIRED_EXPIRY_PROVIDERS` —— 两站都已登记
+    //    （`agnescodeExpiry`：有余额即 `NEVER`、烧光即 `UNUSABLE`，因为订阅池
+    //    只给两个标量桶、没有任何逐笔日期）。
+    //    该陷阱（只改本数组、忘了那张表 ⇒ 候选层被静默剔掉）已复发 7 次。
+    'agnescode',
+    'agnescodeintl',
     // officeace（2026-10-12）：华为 MaaS 云端直连渠道，`channel: true`
     // ⇒ 必须进聚合目录，否则它的模型**永不进聚合、静默不可见**。
     // ⚠️ 本数组**只是第一道门**（模型层归并）。真正决定「在不在候选表里」的是

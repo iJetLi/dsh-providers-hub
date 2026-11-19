@@ -297,6 +297,13 @@ export const PROVIDERS_WITHOUT_REASONING: readonly string[] = Object.freeze([
   // Codely：能力表里的 `reasoning` 是**徽标**（`CODERLY_ABILITY_LABEL`），
   // 不是 DSH 的档位声明 —— `resolveModel` 从不返回 `reasoning`。
   'codely',
+  // AgnesCode（两站，2026-11-19）：目录条目里**没有**任何档位字段
+  //（`GET {apiRoot}/v2/models` 的条目只给 `id` / `name` / `max_input_tokens` /
+  //  `max_output_tokens` / `model_type`，真机取证），而适配器也刻意不声明
+  // ⇒ 「选模型后默认最强档」对它不成立，必须显式登记，否则面板会说假话。
+  // ⚠️ 将来若上游下发档位，把它从这里删掉并同时给 `resolveModel` 接上。
+  'agnescode',
+  'agnescodeintl',
 ])
 
 /**
