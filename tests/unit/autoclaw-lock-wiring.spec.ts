@@ -140,9 +140,9 @@ describe('★ AutoClaw：`index.ts` 的接线（源码级，按渠道切片）',
     )
     // 建了不用 = 死代码，锁定仍无执行路径。
     expect(selectorBlock('autoclawBalanceSelector'), '中国版的 balance.selector 必须指向 autoclawBalanceSelector')
-      .toContain('lockedError: autoclawLockedError(\'AutoClaw\'),')
+      .toContain('lockedError: autoclawLockedError(\'AutoClaw\', \'autoclaw\'),')
     expect(selectorBlock('autoclawIntlBalanceSelector'), '国际版的 balance.selector 必须指向 autoclawIntlBalanceSelector')
-      .toContain('lockedError: autoclawLockedError(\'AutoClaw (国际版)\'),')
+      .toContain('lockedError: autoclawLockedError(\'AutoClaw (国际版)\', \'autoclawintl\'),')
   })
 
   it('★★ 两站都必须 reportPickedAccount: true（账本归属不能因新增 balance 而丢）', () => {
@@ -150,8 +150,8 @@ describe('★ AutoClaw：`index.ts` 的接线（源码级，按渠道切片）',
     //    「分档选中」那一支若不回报，token 用量记不到本渠道（静默）。
     //    ⚠️ 逐站切片 —— 全局计数的形态本仓库已实测无牙两次。
     for (const [name, display] of [
-      ['autoclawBalanceSelector', "autoclawLockedError('AutoClaw')"],
-      ['autoclawIntlBalanceSelector', "autoclawLockedError('AutoClaw (国际版)')"],
+      ['autoclawBalanceSelector', "autoclawLockedError('AutoClaw', 'autoclaw')"],
+      ['autoclawIntlBalanceSelector', "autoclawLockedError('AutoClaw (国际版)', 'autoclawintl')"],
     ] as const) {
       const block = selectorBlock(name)
       expect(block, `${name} 的区间必须含 lockedError: ${display}`).toContain(`lockedError: ${display}`)

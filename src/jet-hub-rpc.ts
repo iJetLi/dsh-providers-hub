@@ -52,6 +52,7 @@ import type { TraeAuth } from './trae-auth.js'
 import type { ClineAuth } from './cline-auth.js'
 import { LOOMY } from './loomy-product.js'
 import { buddyExpiringWindowDays, buddyImminentWindowDays } from './buddy-balance-rank.js'
+import { resolveCreditWindow, safeCreditWindowReader } from './credit-window.js'
 // ⚠️ **值导入**（不是类型）：一键「拒绝非临期」要把这份清单传给账号池。
 //    它是一份**冻结的静态数组**（`Object.freeze([...])`），模块级求值安全 ——
 //    与 `WIRED_EXPIRY_PROVIDERS` 自己那条注释里说的「不要读 runtime 注册表」不矛盾
@@ -445,6 +446,9 @@ import type {
   RpcSessionBalanceSetEnabledRequest,
   RpcSessionBalanceSetEnabledResponse,
   RpcStrictManualOrderGetRequest,
+  RpcCreditWindowGetRequest,
+  RpcCreditWindowSetRequest,
+  RpcCreditWindowResponse,
   RpcStrictManualOrderGetResponse,
   RpcStrictManualOrderSetRequest,
   RpcStrictManualOrderSetResponse,
@@ -9099,10 +9103,12 @@ function registerJetHubEndpoints(
            * 「锁定文案写 15 天内」而分档段只有三段，用户会以为是缺陷）。
            */
           ...(usesExpiryWindow
-            ? {
-              windowDays: buddyExpiringWindowDays(),
-              imminentDays: buddyImminentWindowDays(),
-            }
+            ? (() => {
+              // ★ per-provider 窗口（2026-11-19）：走 resolveCreditWindow 唯一取值点。
+              // ⚠️ 必须与选号路径同源，否则「面板说临期、选号当短期」。
+              const w = resolveCreditWindow(provider, safeCreditWindowReader(pool))
+              return { windowDays: w.windowDays, imminentDays: w.imminentDays }
+            })()
             : {}),
         })
         if (req.locked === undefined) {
@@ -9839,9 +9845,11 @@ function registerJetHubEndpoints(
             ok: true,
             value: {
               accounts: values,
-              windowDays: buddyExpiringWindowDays(),
-              // ⚠️ 与 `windowDays` 成对（见 `credits.permanentLock` 处的说明）。
-              imminentDays: buddyImminentWindowDays(),
+              // ★ per-provider 窗口（2026-11-19）：与选号路径同源（resolveCreditWindow）。
+              ...(() => {
+                const w = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
+                return { windowDays: w.windowDays, imminentDays: w.imminentDays }
+              })(),
             } satisfies RpcCreditsBalancesResponse,
           }
         }
@@ -9939,9 +9947,11 @@ function registerJetHubEndpoints(
               //    读数成功与否**无关**。只在成功路径带它会让「空账号池 / 查询
               //    失败」时形状不一致 —— 守卫用例遍历 registry 时正会红
               //（实测症状：`officeace 必须回传 windowDays`）。
-              windowDays: buddyExpiringWindowDays(),
-              // ⚠️ 与 `windowDays` 同款：成功/失败都带（形状一致）。
-              imminentDays: buddyImminentWindowDays(),
+              // ★ per-provider 窗口（2026-11-19）：与选号路径同源。
+              ...(() => {
+                const w = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
+                return { windowDays: w.windowDays, imminentDays: w.imminentDays }
+              })(),
             } satisfies RpcCreditsBalancesResponse,
           }
         }
@@ -10070,8 +10080,11 @@ function registerJetHubEndpoints(
         const value: RpcCreditsBalancesResponse = usesWindow
           ? {
             accounts: values,
-            windowDays: buddyExpiringWindowDays(),
-            imminentDays: buddyImminentWindowDays(),
+            // ★ per-provider 窗口（2026-11-19）：与选号路径同源。
+            ...(() => {
+              const w = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
+              return { windowDays: w.windowDays, imminentDays: w.imminentDays }
+            })(),
           }
           : { accounts: values }
         return { ok: true, value }
@@ -12276,6 +12289,96 @@ function registerJetHubEndpoints(
           + `${req.enabled ? '（选号完全按拖拽序，余额档位只判可用性）' : '（回到余额分档优先）'}`,
         )
         const value: RpcStrictManualOrderSetResponse = { enabled: pool.strictManualOrder(req.provider) }
+        return { ok: true, value }
+      }
+
+      // ── per-provider 积分分档窗口（面板「分档窗口」弹窗）──
+      //
+      // 语义：覆盖该渠道的「短期窗口」（≥ 此值算永久）与「临期窗口」（< 此值算临期）。
+      // 优先级 = 本渠道设置 > 环境变量 > 内置默认，**只对当前 provider 生效**。
+      //
+      // ⚠️⚠️ **保存后立刻生效，不需要重启 / 重选模型 / 切会话**：
+      // 两条消费链路（选号 `buddy-balance-selector` 与展示 `credits.*`）
+      // 都通过 `resolveCreditWindow` **每次现读** `pool.creditWindow`，
+      // 没有任何缓存 —— 这是本功能的硬承诺，改动消费者时不能破坏它
+      //（`tests/unit/credit-window.spec.ts` 有守卫）。
+      case 'credits.window.get': {
+        const req = payload as RpcCreditWindowGetRequest
+        if (typeof req?.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        const resolved = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
+        const value: RpcCreditWindowResponse = {
+          windowDays: resolved.windowDays,
+          imminentDays: resolved.imminentDays,
+          source: resolved.source,
+          clamped: resolved.clamped,
+        }
+        return { ok: true, value }
+      }
+
+      case 'credits.window.set': {
+        const req = payload as RpcCreditWindowSetRequest
+        if (typeof req?.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        /**
+         * ⚠️ **不做默认值猜测**（与 `strictManualOrder.setEnabled` 同约定）：
+         * 字段若不是有限非负数一律拒绝，而不是「当成 0」或「当成未设置」。
+         * 猜默认值的后果分别是「静默关掉某档」与「静默不动」——两种都不是用户意图。
+         */
+
+        const windowRaw = req.windowDays
+        const imminentRaw = req.imminentDays
+        const bad = (name: string, raw: unknown): string | null =>
+          (raw === undefined || raw === null)
+            ? null
+            : (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0
+              ? `${name} 必须是非负有限数字（收到 ${JSON.stringify(raw)}）`
+              : null)
+        const badWindow = bad('windowDays', windowRaw)
+        const badImminent = bad('imminentDays', imminentRaw)
+        const badField = badWindow ?? badImminent
+        if (badField !== null) {
+          return { ok: false, error: { code: 'bad-request', message: badField } }
+        }
+        const windowDays = windowRaw === undefined || windowRaw === null ? undefined : (windowRaw as number)
+        const imminentDays = imminentRaw === undefined || imminentRaw === null ? undefined : (imminentRaw as number)
+        /**
+         * 合并语义：只传一个字段时另一个**保持原值**（不是清空）。
+         * 两个都不传 ⇒ 整条删键（恢复默认）。
+         */
+        /**
+         * ⚠️ 这里读的是「当前值」用于**合并**（只传一个字段时另一个保留原值）。
+         *
+         * 与只读端点不同，写路径若拿到不完整的 pool 应当**明确报错**而不是
+         * 静默当作「未设置」—— 否则用户只改一个字段时，另一个会被悄悄清空。
+         * ⇒ 先用 `safeCreditWindowReader` 读（兼容替身），再用
+         *   `pool.creditWindow` 是否存在决定是否允许「部分更新」。
+         */
+        const canReadCurrent = typeof (pool as { creditWindow?: unknown }).creditWindow === 'function'
+        const current = safeCreditWindowReader(pool)(req.provider)
+        const next = windowDays === undefined && imminentDays === undefined
+          ? undefined
+          : {
+            ...(windowDays === undefined ? current?.windowDays === undefined ? {} : { windowDays: current.windowDays } : { windowDays }),
+            ...(imminentDays === undefined ? current?.imminentDays === undefined ? {} : { imminentDays: current.imminentDays } : { imminentDays }),
+          }
+        await pool.setCreditWindow(req.provider, next)
+        // ⚠️ 与 `credits.permanentLock` 同款：本次写入会改变**选号结果**
+        //    （积分落到哪个档位），故广播一次让界面重读状态。
+        broadcastCatalogChanged(ctx)
+        const resolved = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
+        ctx.logger.info(
+          `[jet-hub] ${req.provider} 分档窗口 → 短期 ${resolved.windowDays} 天 / 临期 ${resolved.imminentDays} 天`
+          + `（来源 ${resolved.source}${resolved.clamped ? '，临期已钳制' : ''}）`,
+        )
+        const value: RpcCreditWindowResponse = {
+          windowDays: resolved.windowDays,
+          imminentDays: resolved.imminentDays,
+          source: resolved.source,
+          clamped: resolved.clamped,
+        }
         return { ok: true, value }
       }
 

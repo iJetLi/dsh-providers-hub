@@ -870,6 +870,43 @@ export function rotationStartHint(tier) {
   return null;
 }
 
+/**
+ * ★★ **临期括号里要不要显示金额**（2026-11-20 用户要求）。
+ *
+ * 用户原话：「如果临期积分只有一笔，则括号里面只显示时间即可」。
+ *
+ * ## 三种形态
+ *
+ * ```
+ * 只有一笔 ⇒ 临471.27（52分钟）      ← 金额已在正文，括号里只留时间
+ * 有多笔   ⇒ 临471.27（300 52分钟）  ← 300 = 最早那批的金额
+ * 无日期   ⇒ 临3000                 ← 不产括号（不编造时间）
+ * ```
+ *
+ * ## ⚠️ 判据用「差值 > 0.005」而不是 `===`
+ *
+ * 两个理由：
+ * 1. `earliestAmount` 是**浮点累加**值（多个同刻到期的包相加），
+ *    `===` 会因浮点误差把「其实只有一笔」误判成「有多笔」；
+ * 2. 显示层统一格式到 **2 位小数**，两个数在该精度下相同就不该被用户看出差别
+ *    ⇒ 0.005 正好是显示精度的一半。
+ *
+ * ⚠️ 与 `formatAmountShort` 的取舍无关：即使它把 471.27 显示成 `471.27`、
+ *    把 471.2700001 也显示成 `471.27`，本判据仍认为「只有一笔」——
+ *    两者一致，不会出现「正文与括号数字看起来相同却被判成多笔」。
+ *
+ * @param amount - 临期**总额**（`part.amount`）
+ * @param earliestAmount - 最早那批的金额（`part.earliestAmount`）
+ * @returns `true` = 最早那批只是**部分** ⇒ 括号里要带金额
+ */
+export function isEarliestPartial(amount, earliestAmount) {
+  const total = Number(amount);
+  const earliest = Number(earliestAmount);
+  if (!Number.isFinite(total) || !Number.isFinite(earliest)) return false;
+  // 只有一批时两者相等（允许浮点误差）⇒ 不是部分
+  return total - earliest > 0.005;
+}
+
 export function creditOrderLabel(options = {}) {
   if (options.strictManualOrder === true) return '手动顺序';
   if (options.hasRotationStart === true) return '起点优先';

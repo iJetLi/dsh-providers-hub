@@ -2,8 +2,9 @@ import { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { BuddyCredential } from './buddy.js'
 import type { BuddyProduct } from './product.js'
-import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
+import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeCreditWindows, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, PreferredRotationMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
+import type { CreditWindowMap, CreditWindowSetting } from './jet-hub-store.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
@@ -467,6 +468,16 @@ export class AccountPool {
    * 「用户仍需要显式开一次开关」，那是可见、可逆的。
    */
   private strictManualOrderCache: StrictManualOrderMap = {}
+  /**
+   * per-provider 分档窗口覆盖值的进程内副本（{@link CreditWindowMap}）。
+   *
+   * 缺键语义是**回落环境变量/默认**（= 升级前行为：全局 15 / 5）。
+   *
+   * ⚠️ **每次现读，不缓存给调用方**（与 {@link strictManualOrderCache} 同款纪律）：
+   * 用户在弹窗里保存后，窗口必须**立刻**对后续请求生效 ——
+   * 消费者（`resolveCreditWindow`）每次都问本表，不允许把值存进构造期字段。
+   */
+  private creditWindowCache: CreditWindowMap = {}
   private preferredRotationCache: PreferredRotationMap = {}
   /**
    * 「面板入口」的进程内副本：Jet Hub 的唯一入口位置（两个取值互斥）。
@@ -626,6 +637,7 @@ export class AccountPool {
       // 严格手动顺序同理：老文档没有该键 → 空表（= 全部走余额分档，与升级前一致）。
       // 过一遍 sanitize：老契约后端可能绕过 schema 直接给出原始文档。
       this.strictManualOrderCache = sanitizeStrictManualOrder(state.strictManualOrder)
+      this.creditWindowCache = sanitizeCreditWindows(state.creditWindows)
           this.preferredRotationCache = sanitizePreferredRotation(state.preferredRotation)
     }
     this.loadLocks(state)
@@ -734,6 +746,13 @@ export class AccountPool {
         //    漏键 ⇒ 用户开过的「严格手动顺序」在**任何**一次其它写入时被抹掉，
         //    重启后静默回到余额分档优先（用户只看到「拖拽又不灵了」）。
         strictManualOrder: this.strictManualOrderCache,
+        /**
+         * ⚠️⚠️ **必须带上本键**（与 `strictManualOrder` 同一个「整体替换」陷阱，
+         * 漏一行 ⇒ 用户设过的分档窗口在**任何一次**其它写入（改账号/黑名单/开关）时
+         * 被静默抹掉，重启后回到全局默认窗口 —— 而用户只看到「我设的 7 天又变回 15 了」，
+         * 且没有任何日志或提示指向真正的原因。
+         */
+        creditWindows: this.creditWindowCache,
             preferredRotation: this.preferredRotationCache,
         // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同一个整体替换陷阱）：
         //    漏键会让用户改过的面板入口在**任何**一次账号/黑名单/网关/顺序写入时
@@ -1336,6 +1355,65 @@ export class AccountPool {
     this.loaded = true
     if (this.store.kind === 'memory') {
       this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，严格手动顺序开关仅本次会话有效')
+      return
+    }
+    await this.queueStoreSave()
+  }
+
+  /**
+   * 读某 provider 的**分档窗口覆盖设置**（`undefined` = 未设置 ⇒ 回落环境变量/默认）。
+   *
+   * ⚠️ **调用方必须每次现读**，不能把返回值存进构造期字段：
+   * 用户在弹窗里保存后，窗口必须立刻对后续请求生效（不需要重启/重选模型/切会话）。
+   * 消费者的唯一正确用法见 `src/credit-window.ts` 的 `resolveCreditWindow`。
+   *
+   * ⚠️ 返回的是**副本**：调用方拿到后即使改了也不会污染缓存
+   * （`strictManualOrder` 返回布尔没有这个问题，本方法返回对象故必须防御）。
+   */
+  creditWindow(provider: string): CreditWindowSetting | undefined {
+    this.ensureLoaded()
+    if (provider.length === 0) return undefined
+    const entry = this.creditWindowCache[provider]
+    if (entry === undefined) return undefined
+    return { ...entry }
+  }
+
+  /**
+   * 写某 provider 的分档窗口并落盘。
+   *
+   * @param setting - `undefined` / 两个字段都 `undefined` ⇒ **删键**（恢复默认）
+   *
+   * ## ⚠️ 三条纪律
+   *
+   * 1. **稀疏表删键**：恢复默认时 `delete`，不写 `{}` / `null` / `0`
+   *    （`0` 是合法值「关掉该档」，不能兼作「未设置」）。
+   * 2. **走 `queueStoreSave()`**：与 `setStrictManualOrder` 同款 ——
+   *    自己 `store.save()` 会与账号/黑名单的写入乱序覆盖。
+   * 3. **先更内存再落盘**：落盘失败不影响本次会话的正确性
+   *    （与 `setPermanentLocked` 同取向）。
+   */
+  async setCreditWindow(provider: string, setting: CreditWindowSetting | undefined): Promise<void> {
+    this.ensureLoaded()
+    if (provider.length === 0) return
+    const windowDays = setting?.windowDays
+    const imminentDays = setting?.imminentDays
+    const validWindow = typeof windowDays === 'number' && Number.isFinite(windowDays) && windowDays >= 0
+    const validImminent = typeof imminentDays === 'number' && Number.isFinite(imminentDays) && imminentDays >= 0
+    const next: CreditWindowMap = { ...this.creditWindowCache }
+    if (!validWindow && !validImminent) {
+      // 恢复默认：删键（不留空对象噪音）
+      if (next[provider] === undefined) return
+      delete next[provider]
+    } else {
+      next[provider] = {
+        ...(validWindow ? { windowDays: windowDays as number } : {}),
+        ...(validImminent ? { imminentDays: imminentDays as number } : {}),
+      }
+    }
+    this.creditWindowCache = next
+    this.loaded = true
+    if (this.store.kind === 'memory') {
+      this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，分档窗口设置仅本次会话有效')
       return
     }
     await this.queueStoreSave()

@@ -54,6 +54,7 @@ import {
 } from './token-ledger.js'
 import { createTokenLedgerStore } from './token-ledger-store.js'
 import { buddyExpiringWindowDays } from './buddy-balance-rank.js'
+import { resolveCreditWindow, safeCreditWindowReader } from './credit-window.js'
 import { BuddyBalanceSelector } from './buddy-balance-selector.js'
 import type { BuddyNoAccountReason } from './buddy-balance-selector.js'
 import type { LoomyNoAccountReason } from './loomy-balance-selector.js'
@@ -1570,10 +1571,12 @@ export function apply(ctx: Context): void {
    */
   const buddyBalanceSelector = new BuddyBalanceSelector({
     product: CODEBUDDY,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveBuddyCredentialByRef,
   })
   const workbuddyBalanceSelector = new BuddyBalanceSelector({
     product: WORKBUDDY,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveBuddyCredentialByRef,
   })
 
@@ -1665,9 +1668,10 @@ export function apply(ctx: Context): void {
    *
    * @param displayName - 产品名（用户据此知道去哪个面板解锁）。
    */
-  const buddyLockedError = (displayName: string) =>
+  const buddyLockedError = (displayName: string, providerId: string) =>
     (reason: BuddyNoAccountReason): LlmError => {
-      const days = buddyExpiringWindowDays()
+      // ★ per-provider 窗口（2026-11-19）：文案里的「N 天内到期」必须与**实际筛号用的窗口**同源
+      const days = resolveCreditWindow(providerId, safeCreditWindowReader(pool)).windowDays
       if (reason.kind === 'unknown') {
         return new LlmError(
           `${displayName}：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能全部完成`
@@ -1912,9 +1916,10 @@ export function apply(ctx: Context): void {
    *    不是「这个函数后面跟着谁」。
    */
   const astudioLockedError =
-    (displayName: string) =>
+    (displayName: string, providerId: string) =>
     (reason: BuddyNoAccountReason): Error => {
-      const days = buddyExpiringWindowDays()
+      // ★ per-provider 窗口（2026-11-19）：文案里的「N 天内到期」必须与**实际筛号用的窗口**同源
+      const days = resolveCreditWindow(providerId, safeCreditWindowReader(pool)).windowDays
       if (reason.kind === 'unknown') {
         return new LlmError(
           `${displayName}：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能全部完成`
@@ -2016,9 +2021,10 @@ export function apply(ctx: Context): void {
    * 差异只在 `MINIMAX_INTL` 的主机与 ref 前缀），各写一遍 = 改一处漏一处。
    * 但 `displayName` **必须**逐站区分：两站账号不互通，用户要知道去哪个面板解锁。
    */
-  const minimaxLockedError = (displayName: string) =>
+  const minimaxLockedError = (displayName: string, providerId: string) =>
     (reason: BuddyNoAccountReason): Error => {
-      const days = buddyExpiringWindowDays()
+      // ★ per-provider 窗口（2026-11-19）：文案里的「N 天内到期」必须与**实际筛号用的窗口**同源
+      const days = resolveCreditWindow(providerId, safeCreditWindowReader(pool)).windowDays
       if (reason.kind === 'unknown') {
         return new LlmError(
           `${displayName}：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能全部完成`
@@ -2137,9 +2143,10 @@ export function apply(ctx: Context): void {
    * ⇒ 位置的真正守卫是 `tests/unit/magicrew-lock-wiring.spec.ts` 的
    * `expect(mine).toBeLessThan(loomy)`，不要再靠「会变红」这种口耳相传的理由排序。
    */
-  const autoclawLockedError = (displayName: string) =>
+  const autoclawLockedError = (displayName: string, providerId: string) =>
     (reason: BuddyNoAccountReason): Error => {
-      const days = buddyExpiringWindowDays()
+      // ★ per-provider 窗口（2026-11-19）：文案里的「N 天内到期」必须与**实际筛号用的窗口**同源
+      const days = resolveCreditWindow(providerId, safeCreditWindowReader(pool)).windowDays
       if (reason.kind === 'unknown') {
         return new LlmError(
           `${displayName}：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能全部完成`
@@ -2261,9 +2268,10 @@ export function apply(ctx: Context): void {
    * ⇒ 位置的真正守卫是 `tests/unit/magicrew-lock-wiring.spec.ts` 的
    * `expect(mine).toBeLessThan(loomy)`，不要再靠「会变红」这种口耳相传的理由排序。
    */
-  const magicrewLockedError = (displayName: string) =>
+  const magicrewLockedError = (displayName: string, providerId: string) =>
     (reason: BuddyNoAccountReason): Error => {
-      const days = buddyExpiringWindowDays()
+      // ★ per-provider 窗口（2026-11-19）：文案里的「N 天内到期」必须与**实际筛号用的窗口**同源
+      const days = resolveCreditWindow(providerId, safeCreditWindowReader(pool)).windowDays
       if (reason.kind === 'unknown') {
         return new LlmError(
           `${displayName}：无法确认是否有可用账号。已锁定永久积分，而本次余额查询未能全部完成`
@@ -2298,7 +2306,7 @@ export function apply(ctx: Context): void {
           + '若写的是 HTTP 403 / 405 或网络异常，那是**上游网关（WAF）拒绝了本机请求**，'
           // ⚠️ 点 `403 / 405` 两个码而**不是**只点 403（2026-11-04 四审建议 ③(1)）：
           //    真机上海外出口下**国内站回 403、国际站回 405**（2026-11-04 取证），
-          //    本档是两站共用的（`magicrewLockedError('超级麦吉')` / `…('MagiCrew (国际版)')`），
+          //    本档是两站共用的（`magicrewLockedError('超级麦吉', 'magicrew')` / `…('MagiCrew (国际版)')`），
           //    只写 403 会让国际站用户在锁定态看到与卡片上不符的码、以为说的是另一件事。
           + `不是凭据问题、也不是积分用尽（旧版实测直连与多个代理出口都回 403 / 405，`
           + '但那份矩阵只变出口、UA 恒为旧常量）——'
@@ -2448,7 +2456,7 @@ export function apply(ctx: Context): void {
         balance: {
           kind: 'buddy',
           selector: buddyBalanceSelector,
-          lockedError: buddyLockedError('CodeBuddy'),
+          lockedError: buddyLockedError('CodeBuddy', 'buddy'),
           // 免费模型跳过「锁定 + 临期积分」这道门（判据见 BuddyAdapter.isFreeModel）。
           // `buddyAdapter` 在此处是自引用：闭包只在注册完成后才执行，故无 TDZ 问题。
           isFreeModel: (modelId) => buddyAdapter.isFreeModel(modelId),
@@ -2501,7 +2509,7 @@ export function apply(ctx: Context): void {
         balance: {
           kind: 'buddy',
           selector: workbuddyBalanceSelector,
-          lockedError: buddyLockedError('WorkBuddy'),
+          lockedError: buddyLockedError('WorkBuddy', 'workbuddy'),
           // 免费模型跳过「锁定 + 临期积分」这道门（判据见 BuddyAdapter.isFreeModel）。
           // 用户报障「账户可用却提示没有可用账号」正是缺了这一条：免费模型不扣积分，
           // 却被永久积分锁定拦下。
@@ -2575,6 +2583,7 @@ export function apply(ctx: Context): void {
    */
   const lobsteraiBalanceSelector = new BuddyBalanceSelector({
     product: LOBSTERAI,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveLobsteraiCredentialByRef,
     fetchBalance: (credential, product) => fetchLobsteraiCreditBalance(credential, product),
   })
@@ -2598,7 +2607,7 @@ export function apply(ctx: Context): void {
         balance: {
           kind: 'buddy',
           selector: lobsteraiBalanceSelector,
-          lockedError: buddyLockedError('LobsterAI'),
+          lockedError: buddyLockedError('LobsterAI', 'lobsterai'),
           // ⚠️ LobsterAI 的「免费」是**钱包**概念不是**模型**概念，没有模型级免费：
           //   `lobsterai-credits.ts:340` 的 `/api/user/quota` 只给
           //   `freeCreditsTotal=300`（免费**积分额度**），`lobsterai-errors.ts`
@@ -2719,6 +2728,7 @@ export function apply(ctx: Context): void {
    */
   const qoderBalanceSelector = new BuddyBalanceSelector({
     product: QODER,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveQoderCredentialByRef,
     // ⚠️ **余额查询也必须走该账号的出口代理**（真实报障 2026-10-21）：
     //    国际版 `openapi.qoder.sh` 被 SNI 阻断，直连恒 10.7s 超时 ⇒ 余额恒 null
@@ -2740,6 +2750,7 @@ export function apply(ctx: Context): void {
   })
   const qoderCnBalanceSelector = new BuddyBalanceSelector({
     product: QODER_CN,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveQoderCredentialByRef,
     fetchBalance: async (credential, product) =>
       fetchQoderCreditBalance(credential, product, await fetcherForQoderCredential(credential)),
@@ -2981,6 +2992,7 @@ export function apply(ctx: Context): void {
    */
   const traeBalanceSelector = new BuddyBalanceSelector({
     product: TRAE,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveTraeCredentialByRef,
     fetchBalance: (credential, product) => fetchTraeCreditBalance(credential, product),
   })
@@ -2999,7 +3011,7 @@ export function apply(ctx: Context): void {
         balance: {
           kind: 'buddy',
           selector: traeBalanceSelector,
-          lockedError: buddyLockedError('TRAE'),
+          lockedError: buddyLockedError('TRAE', 'trae'),
           // 免费模型跳过「锁定 + 临期积分」这道门（判据见 TraeAdapter.isFreeModel）。
           // ⚠️ TRAE 确有 `rate: 0` 的合法免费模型（见 `trae.ts` 的 readConsumptionRate
           // 注释与 `traeDisplayName` 把 0 显示成「免费」），不跳过就会在锁定时被
@@ -3443,6 +3455,7 @@ export function apply(ctx: Context): void {
    */
   const minimaxBalanceSelector = new BuddyBalanceSelector({
     product: MINIMAX,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveMinimaxCredentialByRef,
     fetchBalance: (credential, product) => fetchMinimaxCreditBalance(credential, fetch, product),
     // ⚠️ 带原因变体（见文件头长注释）。中国站不传 xff（那是国际站的地理分流）。
@@ -3451,6 +3464,7 @@ export function apply(ctx: Context): void {
   })
   const minimaxIntlBalanceSelector = new BuddyBalanceSelector({
     product: MINIMAX_INTL,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveMinimaxCredentialByRef,
     // ⚠️ `fetchFor`：余额端点也在 `agent.minimax.io` 上 ⇒ 大陆出口恒 307
     //    ⇒ 折算恒失败 ⇒ 该渠道在聚合轮换里被**静默剔除**（面板却还能刷新，
@@ -3516,7 +3530,7 @@ export function apply(ctx: Context): void {
         balance: {
           kind: 'buddy',
           selector: minimaxBalanceSelector,
-          lockedError: minimaxLockedError('MiniMax Code (中国版)'),
+          lockedError: minimaxLockedError('MiniMax Code (中国版)', 'minimax'),
           // ⚠️ 本家没有模型级免费概念（产品表零 `isFree` 字段，上游目录也不返回）。
           isFreeModel: NO_FREE_MODEL,
           /**
@@ -3634,7 +3648,7 @@ export function apply(ctx: Context): void {
         balance: {
           kind: 'buddy',
           selector: minimaxIntlBalanceSelector,
-          lockedError: minimaxLockedError('MiniMax Code (国际版)'),
+          lockedError: minimaxLockedError('MiniMax Code (国际版)', 'minimaxintl'),
           // ⚠️ 本家没有模型级免费概念（产品表零 `isFree` 字段，上游目录也不返回）。
           isFreeModel: NO_FREE_MODEL,
           // ⚠️ 与中国版**同因**：本家旧闭包是纯池选号、账本一直在回报 ⇒
@@ -3867,6 +3881,7 @@ export function apply(ctx: Context): void {
    */
   const autoclawBalanceSelector = new BuddyBalanceSelector({
     product: AUTOCLAW,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveAutoclawCredentialByRef,
     fetchBalance: (credential, product) => fetchAutoclawCreditBalance(credential, { product }),
     // ⚠️ 带原因变体（见文件头长注释）。
@@ -3874,6 +3889,7 @@ export function apply(ctx: Context): void {
   })
   const autoclawIntlBalanceSelector = new BuddyBalanceSelector({
     product: AUTOCLAW_INTL,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveAutoclawCredentialByRef,
     fetchBalance: (credential, product) => fetchAutoclawCreditBalance(credential, { product }),
     // ⚠️ 两站各建实例、各传自己的 product（缓存与端点都必须分开）。
@@ -3906,7 +3922,7 @@ export function apply(ctx: Context): void {
           kind: 'buddy',
           selector: autoclawBalanceSelector,
           // ⚠️ 本家独有文案（池名是「钱包流水批次」而不是 buddy 的「资源包」）。
-          lockedError: autoclawLockedError('AutoClaw'),
+          lockedError: autoclawLockedError('AutoClaw', 'autoclaw'),
           // ⚠️⚠️ 本家**曾**标过 `isFree: true`，那是**错的**（2026-10-21 二轮审计订正）：
           //   初版把「远端目录里没有它、但直接调用能用」误当成「不扣费」，而真机
           //   实测它**每次都扣积分**（`docs/autoclaw-models.md:25`）。现有 4 个模型
@@ -4082,7 +4098,7 @@ export function apply(ctx: Context): void {
         balance: {
           kind: 'buddy',
           selector: autoclawIntlBalanceSelector,
-          lockedError: autoclawLockedError('AutoClaw (国际版)'),
+          lockedError: autoclawLockedError('AutoClaw (国际版)', 'autoclawintl'),
           // ⚠️ 同国内版：本家无模型级免费（`isFree` 全为 false，见那处说明）。
           isFreeModel: NO_FREE_MODEL,
           reportPickedAccount: true,
@@ -4369,6 +4385,7 @@ export function apply(ctx: Context): void {
    */
   const magicrewBalanceSelector = new BuddyBalanceSelector<MagicrewProduct, MagicrewCredential>({
     product: MAGICREW,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: (refName) => magicrewAuth.currentCredential(refName),
     fetchBalance: async (credential, product) => await fetchMagicrewBalance({
       jwt: credential.jwt,
@@ -4433,7 +4450,7 @@ export function apply(ctx: Context): void {
       balance: {
         kind: 'buddy',
         selector: magicrewBalanceSelector,
-        lockedError: magicrewLockedError('超级麦吉'),
+        lockedError: magicrewLockedError('超级麦吉', 'magicrew'),
         isFreeModel: NO_FREE_MODEL,
         /**
          * ⚠️⚠️ **本家是本开关唯一的开启者**（2026-11-04 真机报障「模型都选不了了」）。
@@ -4523,6 +4540,7 @@ export function apply(ctx: Context): void {
    */
   const magicrewIntlBalanceSelector = new BuddyBalanceSelector<MagicrewProduct, MagicrewCredential>({
     product: MAGICREW_INTL,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: (refName) => magicrewIntlAuth.currentCredential(refName),
     fetchBalance: async (credential, product) => await fetchMagicrewBalance({
       jwt: credential.jwt,
@@ -4560,7 +4578,7 @@ export function apply(ctx: Context): void {
       balance: {
         kind: 'buddy',
         selector: magicrewIntlBalanceSelector,
-        lockedError: magicrewLockedError('MagiCrew (国际版)'),
+        lockedError: magicrewLockedError('MagiCrew (国际版)', 'magicrewintl'),
         isFreeModel: NO_FREE_MODEL,
         /** ⚠️ 与国内站成对存在，理由见上方国内站那段注释（国际站 405）。 */
         degradeLockedWhenUnknown: true,
@@ -4629,6 +4647,7 @@ export function apply(ctx: Context): void {
    */
   const astudioBalanceSelector = new BuddyBalanceSelector({
     product: ASTUDIO,
+    readCreditWindow: safeCreditWindowReader(pool),
     resolveCredential: resolveAstudioCredentialByRef,
     fetchBalance: (credential, product) => fetchAstudioCreditBalance(credential, product),
     // ⚠️ 带原因变体（见文件头那段长注释）：AStudio 的失败分流有四档
@@ -4663,7 +4682,7 @@ export function apply(ctx: Context): void {
         //    的返回类型里声明了 `isFree?`，兜底表零个 `isFree: true`，
         //    上游目录也不返回该字段）⇒ 显式表态，不要删字段（见 `NO_FREE_MODEL`）。
         isFreeModel: NO_FREE_MODEL,
-        lockedError: astudioLockedError('AStudio'),
+        lockedError: astudioLockedError('AStudio', 'astudio'),
         // ⚠️⚠️ **必须是 `true`**（2026-10-21 合并审计发现：PR !119 原写的 `false`
         //    让上面 `reportAccount` 成了**不可达的死接线**）。
         //
@@ -5727,6 +5746,17 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     //     `resolveOfficeAceCredential`），锁定态**绝不回落池**。
     credentialProvider: createOfficeAceCredentialProvider({
       permanentLocked: () => pool.permanentLocked(OFFICEACE.id),
+      /**
+       * ★ **per-provider 窗口（2026-11-19）**：锁定态的「能不能烧」判据用
+       * 本渠道自己的窗口，而不是全局环境变量。
+       *
+       * ⚠️ 必须注入**函数**（`() =>`）而不是值：`officeace-lock.ts` 的
+       * `windowMs()` 每次调用都会问一次，这样用户在面板里保存窗口后
+       * 立刻对后续请求生效（不需要重启/重选模型/切会话）。
+       * ⚠️ 不注入会走 `buddyExpiringWindowMs()` 的全局默认 ⇒ 面板文案与实际
+       * 筛号分叉（`officeace-lock.ts:52` 的注释记的正是这个坑）。
+       */
+      windowMs: () => resolveCreditWindow(OFFICEACE.id, safeCreditWindowReader(pool)).windowDays * 24 * 60 * 60 * 1000,
       // 锁定判定要**逐账号**看余额 ⇒ 取全部启用账号（与未锁定取号同一份清单）。
       accounts: () => enabledOfficeAceAccounts()
         .map((entry) => ({ id: entry.id, credentialRef: entry.credentialRef })),

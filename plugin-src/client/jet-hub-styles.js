@@ -1584,6 +1584,44 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-modePick { display: flex; flex-direction: column; margin: 4px 0 8px; }
 .dim-jh-modePick input[type="radio"] { margin: 0; accent-color: var(--dsw-alias-brand-primary, #1677ff); }
 /* 弹窗底部动作区：右对齐（生成/确认按钮） */
+
+/* ===== 分档窗口弹窗（2026-11-19）===== */
+/**
+ * 弹窗宽度 560px（与通用弹窗一致）：两行输入 + 三行预览 + 徽标，
+ * 需要足够宽度让「输入框 + 天 + 覆盖 N 个账号」在一行里排开。
+ * ⚠️ min-height 压回 0：通用弹窗的 300px 是为「列表变短防跳动」设的，
+ *    本弹窗内容固定，压回 0 可让高度随内容自适应（不留大片空白）。
+ */
+.dim-jh-windowModal { min-height: 0; }
+/**
+ * 单个输入行：色点 + 标签 + 输入框 + 单位 + 覆盖徽标，**全部同一行**。
+ * ⚠️ flex-wrap: nowrap：徽标掉到下一行会让两行的对齐关系变乱
+ *    （用户要求「在红色框里面分别用红色和黄色写明覆盖多少个帐号」= 紧贴输入）。
+ */
+.dim-jh-windowField { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.dim-jh-windowLabel { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dim-jh-windowDot { width: 8px; height: 8px; flex: none; border-radius: 999px; }
+.dim-jh-windowDot[data-tone="imminent"] { background: var(--dsw-alias-state-error-primary, #d93025); }
+.dim-jh-windowDot[data-tone="short"] { background: var(--dsw-alias-state-warn-primary, #b45309); }
+.dim-jh-windowDot[data-tone="permanent"] { background: var(--dsw-alias-state-success-primary, #15803d); }
+.dim-jh-windowInput { width: 92px; flex: none; box-sizing: border-box; padding: 4px 6px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.dim-jh-windowInput:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+.dim-jh-windowInput[aria-invalid="true"] { border-color: var(--dsw-alias-state-error-primary, #d93025); }
+.dim-jh-windowUnit { flex: none; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+.dim-jh-windowCover { flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; line-height: 1.7; white-space: nowrap; }
+.dim-jh-windowCover b { font-weight: 700; font-variant-numeric: tabular-nums; }
+.dim-jh-windowCover[data-tone="imminent"] { color: var(--dsw-alias-state-error-primary, #d93025); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 12%, transparent); border: .5px solid color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 25%, transparent); }
+.dim-jh-windowCover[data-tone="short"] { color: var(--dsw-alias-state-warn-primary, #b45309); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #b45309) 12%, transparent); border: .5px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, #b45309) 25%, transparent); }
+.dim-jh-windowHint { padding-left: 15px; font-size: 10px; line-height: 1.6; color: var(--dsw-alias-label-tertiary); }
+.dim-jh-windowWarn { padding-left: 15px; font-size: 10px; line-height: 1.6; color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dim-jh-windowInvalid { color: var(--dsw-alias-state-error-primary, #d93025); }
+.dim-jh-windowPreview { display: flex; flex-direction: column; gap: 5px; margin-top: 4px; padding: 9px 11px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); }
+.dim-jh-windowPreviewTitle { margin-bottom: 1px; font-size: 10px; font-weight: 600; color: var(--dsw-alias-label-tertiary); letter-spacing: .03em; }
+.dim-jh-windowPreviewRow { display: flex; align-items: center; gap: 9px; font-size: 11px; }
+.dim-jh-windowPreviewRange { flex: none; min-width: 128px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }
+.dim-jh-windowPreviewAmount { flex: 1; text-align: right; font-weight: 600; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; }
+.dim-jh-windowSpacer { flex: 1; }
+
 .dim-jh-modalActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 /* ── 备份 / 恢复弹窗的方向切换条（2026-10-27 合并两个入口后新增）──
    ⚠️ 这是「换一页」不是「选项」：两个按钮互斥、点即生效，故用按钮 + data-active

@@ -2313,6 +2313,80 @@ export interface RpcStrictManualOrderSetResponse {
 }
 
 /**
+ * RPC: per-provider 积分分档窗口的**读取**请求。
+ *
+ * 用于面板「分档窗口」弹窗：打开时读一次，显示当前生效的两条线与来源。
+ */
+export interface RpcCreditWindowGetRequest {
+  provider: string
+}
+
+/**
+ * RPC: per-provider 积分分档窗口的**响应**（读写共用）。
+ *
+ * ## ⚠️ 三个字段缺一不可
+ *
+ * | 字段 | 用途 | 缺了会怎样 |
+ * |---|---|---|
+ * | `windowDays` / `imminentDays` | 弹窗输入框的预填值 + 面板分档 | 输入框空白、三档分色错 |
+ * | `source` | 弹窗显示「当前用的是哪一级」 | 用户分不清「我设的 7 天」与「环境变量恰好 7 天」|
+ * | `clamped` | 提示「原填 N 已被钳制为 M」 | **静默改写用户输入**（本仓明令禁止）|
+ */
+export interface RpcCreditWindowResponse {
+  /**
+   * 当前生效的「短期窗口」（天）：距过期 **≤** 此值算「短期」。
+   *
+   * ⚠️ 这是**钳制后**的生效值，不是用户原始输入。
+   */
+  windowDays: number
+  /**
+   * 当前生效的「临期窗口」（天）：距过期 **<** 此值算「临期」。
+   *
+   * ⚠️ 恒 `<= windowDays`（临期 ⊂ 短期，倒挂会让「短期」段变负）。
+   */
+  imminentDays: number
+  /**
+   * 这一对值来自哪一级。
+   *
+   * - `'setting'` = 本渠道单独设置（覆盖了下一级）
+   * - `'env'` = 环境变量
+   * - `'default'` = 内置默认（15 / 5）
+   */
+  source: 'setting' | 'env' | 'default'
+  /**
+   * `imminentDays` 是否被**钳制**过（用户填的临期 > 短期）。
+   *
+   * ⚠️ 弹窗必须据此提示「原填 N 天，已钳制为 M 天」——
+   * 静默改写会让用户以为保存失败或行为异常。
+   */
+  clamped: boolean
+}
+
+/**
+ * RPC: per-provider 积分分档窗口的**写入**请求。
+ *
+ * ## ⚠️ 三态语义（`undefined` 与 `0` 必须分清）
+ *
+ * | 传入 | 结果 |
+ * |---|---|
+ * | 两个字段都 `undefined` / 都省略 | **删除本渠道设置**（回落环境变量/默认）|
+ * | `windowDays: 7, imminentDays: 3` | 存 7 / 3 |
+ * | `windowDays: 0` | **合法**（关掉「短期」档 ⇒ 全部算永久）|
+ * | `imminentDays: 0` | **合法**（关掉「临期」档 ⇒ 全部落「短期」）|
+ *
+ * ⚠️ 无法用 `null` 表达「清除」：JSON 的 `null` 到这里是 `null` 而非
+ * `undefined`，两者都按「未提供」处理（保守：不会误清用户设置）。
+ *
+ * ⚠️ 只传一个字段时，另一个**保持原值**（不是清空）—— 弹窗总是两个都传，
+ * 但允许「只清一项」的调用方。
+ */
+export interface RpcCreditWindowSetRequest {
+  provider: string
+  windowDays?: number
+  imminentDays?: number
+}
+
+/**
  * RPC: 「面板入口」的读取响应（插件详情页设置卡片里的下拉）。
  *
  * 语义：Jet Hub 的**唯一**入口位置，两个取值严格互斥 ——

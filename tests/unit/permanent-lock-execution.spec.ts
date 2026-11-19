@@ -81,7 +81,7 @@ const LOCK_EXECUTION_PATHS: Record<
      *
      * `drives` 是**裸符号**，对 `src/index.ts` 那五项**无牙** ——
      * 符号的定义还在文件里，删掉使用点照样 `includes` 为真。
-     * 本字段存「调用形态」的片段（如 `lockedError: astudioLockedError('AStudio'),`），
+     * 本字段存「调用形态」的片段（如 `lockedError: astudioLockedError('AStudio', 'astudio'),`），
      * 只有真的接在被测渠道上才会命中。
      *
      * ⚠️ **`module === 'src/index.ts'` 的登记项必须填本字段**（本文件末尾有一条
@@ -160,7 +160,7 @@ const LOCK_EXECUTION_PATHS: Record<
     module: 'src/index.ts',
     spec: 'tests/unit/astudio-lock-wiring.spec.ts',
     drives: 'astudioLockedError',
-    anchor: "lockedError: astudioLockedError('AStudio'),",
+    anchor: "lockedError: astudioLockedError('AStudio', 'astudio'),",
   },
   // ⚠️ minimax / minimaxintl（2026-10-20）：与 astudio **同一条**执行路径
   //    （`createCredentialResolver` 的 `kind: 'buddy'` 分支），但判别符号必须
@@ -173,13 +173,13 @@ const LOCK_EXECUTION_PATHS: Record<
     module: 'src/index.ts',
     spec: 'tests/unit/minimax-lock-wiring.spec.ts',
     drives: 'minimaxLockedError',
-    anchor: "lockedError: minimaxLockedError('MiniMax Code (中国版)'),",
+    anchor: "lockedError: minimaxLockedError('MiniMax Code (中国版)', 'minimax'),",
   },
   minimaxintl: {
     module: 'src/index.ts',
     spec: 'tests/unit/minimax-lock-wiring.spec.ts',
     drives: 'minimaxLockedError',
-    anchor: "lockedError: minimaxLockedError('MiniMax Code (国际版)'),",
+    anchor: "lockedError: minimaxLockedError('MiniMax Code (国际版)', 'minimaxintl'),",
   },
   // ⚠️ autoclaw / autoclawintl（2026-10-21，用户要求「补锁定开关」）：
   //    与 astudio / minimax 同一条执行路径（`createCredentialResolver` 的
@@ -192,13 +192,13 @@ const LOCK_EXECUTION_PATHS: Record<
     module: 'src/index.ts',
     spec: 'tests/unit/autoclaw-lock-wiring.spec.ts',
     drives: 'autoclawLockedError',
-    anchor: "lockedError: autoclawLockedError('AutoClaw'),",
+    anchor: "lockedError: autoclawLockedError('AutoClaw', 'autoclaw'),",
   },
   autoclawintl: {
     module: 'src/index.ts',
     spec: 'tests/unit/autoclaw-lock-wiring.spec.ts',
     drives: 'autoclawLockedError',
-    anchor: "lockedError: autoclawLockedError('AutoClaw (国际版)'),",
+    anchor: "lockedError: autoclawLockedError('AutoClaw (国际版)', 'autoclawintl'),",
   },
   // ⚠️ magicrew / magicrewintl（2026-11-01，用户要求「加永久/长期/临期和锁定永久积分」）：
   //    与 astudio / minimax / autoclaw 同一条执行路径（`createCredentialResolver`
@@ -213,13 +213,13 @@ const LOCK_EXECUTION_PATHS: Record<
     module: 'src/index.ts',
     spec: 'tests/unit/magicrew-lock-wiring.spec.ts',
     drives: 'magicrewLockedError',
-    anchor: "lockedError: magicrewLockedError('超级麦吉'),",
+    anchor: "lockedError: magicrewLockedError('超级麦吉', 'magicrew'),",
   },
   magicrewintl: {
     module: 'src/index.ts',
     spec: 'tests/unit/magicrew-lock-wiring.spec.ts',
     drives: 'magicrewLockedError',
-    anchor: "lockedError: magicrewLockedError('MagiCrew (国际版)'),",
+    anchor: "lockedError: magicrewLockedError('MagiCrew (国际版)', 'magicrewintl'),",
   },
 }
 
@@ -272,7 +272,7 @@ describe('★ 普查：凡登记 permanentLock 的渠道，都必须有一条执
        *
        * | 变异 | 只查 `drives` | 查 `anchor` |
        * |---|---|---|
-       * | 删 `lockedError: astudioLockedError('AStudio')` 行 | **绿** | 红 |
+       * | 删 `lockedError: astudioLockedError('AStudio', 'astudio')` 行 | **绿** | 红 |
        * | 整段删掉 astudio 的 `balance:{…}` 计划 | **绿** | 红 |
        * | 把 `selector` 换成不读锁定表的假实现 | **绿** | 红 |
        *

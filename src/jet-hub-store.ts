@@ -124,6 +124,31 @@ export type PermanentLockMap = Record<string, boolean>
 export type StrictManualOrderMap = Record<string, boolean>
 
 /**
+ * 单个 provider 的**积分分档窗口**覆盖值（天）。
+ *
+ * 两个字段**都可选**：只覆盖其中一个时，另一个仍回落环境变量/默认。
+ * 这与「清空某一项」在语义上一致 —— 读侧对 `undefined` 走下一级。
+ *
+ * ⚠️ `0` 是合法值（表示「关掉该档」），**不能**与 `undefined`（未覆盖）混淆：
+ * 前者是「用户明确要 0 天」，后者是「用户没设，用默认」。
+ */
+export interface CreditWindowSetting {
+  /** 「短期窗口」（≥ 此值算永久）。`undefined` = 回落下一级。 */
+  windowDays?: number
+  /** 「临期窗口」（< 此值算临期）。`undefined` = 回落下一级。 */
+  imminentDays?: number
+}
+
+/**
+ * per-provider 的分档窗口覆盖表：provider id → {@link CreditWindowSetting}。
+ *
+ * ⚠️ **稀疏表**：未设置的 provider 不出现（不是写空对象）。
+ * ⚠️ 条目本身若两个字段都 `undefined`，`sanitizeCreditWindows` 会**丢掉整个条目**
+ *    （否则会留下永不消费的噪音键）。
+ */
+export type CreditWindowMap = Record<string, CreditWindowSetting>
+
+/**
  * 「轮换起点」的会话级偏好：provider → (sessionId → 账号 id)。
  *
  * ## ⚠️ 为什么是两层稀疏表（provider 再 session）
@@ -453,6 +478,27 @@ export interface JetHubState {
    */
   strictManualOrder?: StrictManualOrderMap
   /**
+   * **per-provider 的积分分档窗口**（{@link CreditWindowMap}）：
+   * provider id → `{ windowDays, imminentDays }`。
+   *
+   * 语义：覆盖该渠道的「短期窗口」（≥ 此值算永久）与「临期窗口」（< 此值算临期）。
+   * **只对当前 provider 生效**，与全局环境变量互不干扰。
+   *
+   * ## 优先级（三级，高 → 低）
+   *
+   * ```
+   * 本表的值  >  环境变量（DSH_BUDDY_EXPIRING_WINDOW_DAYS / DSH_BUDDY_IMMINENT_WINDOW_DAYS）  >  内置默认（15 / 5）
+   * ```
+   *
+   * ⚠️ **缺键 = 回落环境变量/默认**（老用户升级后行为**逐字节一致**）。
+   * ⚠️ 两个字段**都可选**：只设一个也合法（另一个回落下一级）。
+   * ⚠️ `0` 是**合法值**（关掉该档），所以「清空」必须**删键**而不是写 `0`/`null`。
+   * ⚠️ 之所以住在这里而不是独立文件：与 `strictManualOrder` 同级、同样是
+   *    「可逆且方向保守」的设置 —— 老版本整体重写 `state.json` 时丢键会回到
+   *    默认窗口，用户再设一次即可，不会静默改变选号结果。
+   */
+  creditWindows?: CreditWindowMap
+  /**
    * 「面板入口」：Jet Hub 的**唯一**入口位置（{@link PanelEntry}）。
    *
    * 两个取值**严格互斥**，任一时刻只有一个入口存在：
@@ -637,6 +683,9 @@ export const jetHubSchema = Schema.object({
   // ⚠️ 绝不能写成 `Schema.boolean().default(false)` —— 它是**按 provider 的稀疏表**，
   //   不是全局布尔；写成布尔会把「只给某一家开」这件事从数据形状上抹掉。
   strictManualOrder: Schema.dict(Schema.any()).default({}),
+  // per-provider 分档窗口：**默认空表** = 全部回落环境变量/默认（升级前行为）。
+  // ⚠️ 与 strictManualOrder 同款：schema 只保证「是个 dict」，合法性归 sanitizeCreditWindows。
+  creditWindows: Schema.dict(Schema.any()).default({}),
   // 「轮换起点」：**默认空表** = 升级前行为。schema 只负责类型，合法性由
   // sanitizePreferredRotation 读写两侧统一判（与上一行同款）。
   preferredRotation: Schema.dict(Schema.any()).default({}),
@@ -754,6 +803,62 @@ export function sanitizeStrictManualOrder(raw: unknown): StrictManualOrderMap {
     // provider id 必须非空字符串（空串既不是合法 provider，也会让面板渲染出幽灵行）。
     if (provider.length === 0) continue
     if (flag === true) result[provider] = true
+  }
+  return result
+}
+
+/**
+ * 归一化 per-provider 的分档窗口覆盖表（{@link JetHubState.creditWindows}）。
+ *
+ * ## 判据（逐条都是「宁可回落默认，也不接受脏值」）
+ *
+ * | 输入 | 结果 |
+ * |---|---|
+ * | 非对象 / `null` / 数组 | **空表**（= 全部回落环境变量/默认）|
+ * | provider id 为空串 | 丢弃该条 |
+ * | 条目不是对象 / 是数组 | 丢弃该条 |
+ * | 字段不是**有限非负数字** | 丢弃该字段（回落下一级）|
+ * | 两个字段都无效 | **丢弃整个条目**（不留空对象噪音键）|
+ * | 合法值（含 `0`）| 保留 |
+ *
+ * ⚠️⚠️ **`0` 必须保留**：它是「关掉该档」的合法值（`DSH_BUDDY_IMMINENT_WINDOW_DAYS=0`
+ * 就是关掉临期档）。用 `if (value)` 判会把 `0` 当假值丢掉 ——
+ * 后果是用户设了 0 却静默变回默认 5 天，且**没有任何提示**。
+ *
+ * ⚠️ **不接受数字字符串**（`'7'`）：`state.json` 是可被用户手改的文件，
+ * 而 `'7'` 这类脏值若被接受，写入侧（写 number）与读取侧（可能写 string）
+ * 会形成两种类型，后续 `days * DAY_MS` 在字符串上会得到 `NaN` 或字符串拼接。
+ * ⇒ 一律要求 `typeof === 'number'`。
+ *
+ * ⚠️ 不接受 `Infinity` / `NaN`（`Number.isFinite` 挡住）：
+ * `Infinity` 会让「永久」档永远为空（一切都被判成临期/短期），
+ * 而 `NaN` 会让分桶全落 `unknownExpiry`。两者都是静默的错误形态。
+ *
+ * ⚠️ 上下界不在这里钳制（`windowDays` 的上限、`imminentDays <= windowDays` 的
+ * 嵌套约束）—— 那些是**业务语义**，归 `resolveCreditWindow`
+ * （全仓唯一钳制点）。本函数只管「形状与类型是否可信」。
+ */
+export function sanitizeCreditWindows(raw: unknown): CreditWindowMap {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const result: CreditWindowMap = {}
+  /** 只接受有限非负数字；其余（含数字字符串、`NaN`、`Infinity`、负数）一律 undefined。 */
+  const readDays = (value: unknown): number | undefined => {
+    if (typeof value !== 'number') return undefined
+    if (!Number.isFinite(value) || value < 0) return undefined
+    return value
+  }
+  for (const [provider, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (provider.length === 0) continue
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+    const source = entry as Record<string, unknown>
+    const windowDays = readDays(source.windowDays)
+    const imminentDays = readDays(source.imminentDays)
+    // ⚠️ 两个字段都没读到 ⇒ 整条丢弃（空对象会留下永不消费的噪音键）。
+    if (windowDays === undefined && imminentDays === undefined) continue
+    result[provider] = {
+      ...(windowDays === undefined ? {} : { windowDays }),
+      ...(imminentDays === undefined ? {} : { imminentDays }),
+    }
   }
   return result
 }
@@ -1411,6 +1516,7 @@ class SettingsStore implements JetHubStore {
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
         strictManualOrder?: unknown
+        creditWindows?: unknown
         preferredRotation?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
@@ -1443,6 +1549,8 @@ class SettingsStore implements JetHubStore {
       sessionBalanceEnabled: sanitizeSessionBalanceEnabled(value.sessionBalanceEnabled),
       // 老文档没这个键 → 空表（= 全部走余额分档，升级前行为）。
       strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
+      // 老文档没这个键 → 空表（= 全部回落环境变量/默认）。
+      creditWindows: sanitizeCreditWindows(value.creditWindows),
       preferredRotation: sanitizePreferredRotation(value.preferredRotation),
       // 老文档没新键 → 按老布尔迁移（只有明确 false 才是「仅设置页」）；两者都没有 → 仅侧栏。
       panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
@@ -1506,6 +1614,7 @@ class SettingsStore implements JetHubStore {
       //    症状极难归因：用户只会看到「拖拽又不灵了」，而面板序号还停在 1。
       //    过一遍 sanitize：入参可能来自任何调用方，脏值不该被写进文档。
       strictManualOrder: sanitizeStrictManualOrder(state.strictManualOrder),
+      creditWindows: sanitizeCreditWindows(state.creditWindows),
       preferredRotation: sanitizePreferredRotation(state.preferredRotation),
       // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同因，是同一个
       //    `replace` 整体替换陷阱的第二个受害者）：漏键会让用户改过的
@@ -1875,6 +1984,7 @@ class FileStore implements JetHubStore {
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
         strictManualOrder?: unknown
+        creditWindows?: unknown
         preferredRotation?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
@@ -1905,6 +2015,8 @@ class FileStore implements JetHubStore {
         sessionBalanceEnabled: sanitizeSessionBalanceEnabled(value.sessionBalanceEnabled),
         // 老文档没这个键 → 空表（= 全部走余额分档，与升级前行为一致）。
         strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
+        // 老文档没这个键 → 空表（= 全部回落环境变量/默认）。
+        creditWindows: sanitizeCreditWindows(value.creditWindows),
         preferredRotation: sanitizePreferredRotation(value.preferredRotation),
         // 老文档没新键 → 按老布尔迁移（与 `SettingsStore` 同一判据）；两者都没有 → 仅侧栏。
         panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
@@ -2010,6 +2122,7 @@ class FileStore implements JetHubStore {
         sessionBalanceEnabled: true,
         // 同上：恢复出的文档不含严格手动顺序信息 → 空表（与全新安装一致）。
         strictManualOrder: {},
+        creditWindows: {},
         preferredRotation: {},
         // 同上：恢复出的文档不含面板入口信息 → 默认「仅侧栏」（与全新安装一致）。
         panelEntry: DEFAULT_PANEL_ENTRY,

@@ -3356,3 +3356,74 @@ describe('AccountPool · setAccountsEnabled（供应商级批量启停）', () =
     })
   })
 })
+
+/**
+ * ★ per-provider 分档窗口的存储层守卫（2026-11-19）。
+ *
+ * 走**真实 AccountPool**（不是替身），验证「内存缓存 + 落盘载荷 + 返回值副本」。
+ */
+describe('AccountPool：per-provider 分档窗口', () => {
+  it('★★ 缺键 => undefined（回落环境变量/默认，升级前行为）', () => {
+    const seeded = createMockContext()
+    const pool = new AccountPool(seeded as never)
+    expect(pool.creditWindow('trae')).toBeUndefined()
+  })
+
+  it('★ 写入后可读回', async () => {
+    const seeded = createMockContext()
+    const pool = new AccountPool(seeded as never)
+    await pool.setCreditWindow('trae', { windowDays: 7, imminentDays: 3 })
+    expect(pool.creditWindow('trae')).toEqual({ windowDays: 7, imminentDays: 3 })
+  })
+
+  it('★★★ 返回值是副本（变异 M8 实测无牙后补）', async () => {
+    const seeded = createMockContext()
+    const pool = new AccountPool(seeded as never)
+    await pool.setCreditWindow('trae', { windowDays: 7 })
+    const got = pool.creditWindow('trae')
+    got.windowDays = 999
+    expect(pool.creditWindow('trae').windowDays, '外部改副本不该影响存储').toBe(7)
+  })
+
+  it('★★ 恢复默认 = 删键（不是写空对象）', async () => {
+    const seeded = createMockContext()
+    const pool = new AccountPool(seeded as never)
+    await pool.setCreditWindow('trae', { windowDays: 7 })
+    await pool.setCreditWindow('trae', undefined)
+    expect(pool.creditWindow('trae')).toBeUndefined()
+  })
+
+  it('★★★ 落盘载荷必须带 creditWindows（漏了会被其它写入抹掉）', async () => {
+    const seeded = createMockContext()
+    const pool = new AccountPool(seeded as never)
+    await pool.setCreditWindow('trae', { windowDays: 7, imminentDays: 3 })
+    const raw = seeded.replacePayloads.at(-1) as { creditWindows?: Record<string, unknown> }
+    expect(raw.creditWindows, '落盘载荷必须包含 creditWindows').toEqual({
+      trae: { windowDays: 7, imminentDays: 3 },
+    })
+  })
+
+  it('★★ 其它写入不得抹掉已存的窗口', async () => {
+    const seeded = createMockContext()
+    const pool = new AccountPool(seeded as never)
+    await pool.setCreditWindow('trae', { windowDays: 7 })
+    await pool.setProviderOrder(['buddy', 'zcode'])
+    const raw = seeded.replacePayloads.at(-1) as { creditWindows?: Record<string, unknown> }
+    expect(raw.creditWindows, '无关写入后窗口必须还在').toEqual({ trae: { windowDays: 7 } })
+    expect(pool.creditWindow('trae')).toEqual({ windowDays: 7 })
+  })
+
+  it('★ 数字 0 被正确保存（不是被当假值丢掉）', async () => {
+    const seeded = createMockContext()
+    const pool = new AccountPool(seeded as never)
+    await pool.setCreditWindow('trae', { imminentDays: 0 })
+    expect(pool.creditWindow('trae')).toEqual({ imminentDays: 0 })
+  })
+
+  it('⚠️ 空 provider id => 无操作', async () => {
+    const seeded = createMockContext()
+    const pool = new AccountPool(seeded as never)
+    await pool.setCreditWindow('', { windowDays: 7 })
+    expect(pool.creditWindow('')).toBeUndefined()
+  })
+})

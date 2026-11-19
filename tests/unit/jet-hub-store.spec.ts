@@ -217,6 +217,8 @@ describe('老契约后端（SettingsStore）', () => {
       sessionBalanceEnabled: true,
       // save 未携带严格手动顺序 → 写出空表（= 全部走余额分档，升级前行为）。
       strictManualOrder: {},
+      // 分档窗口同理：缺省即空表（= 全部回落环境变量/默认）
+      creditWindows: {},
       preferredRotation: {},
       // save 未携带面板入口 → 写出「仅侧栏」（缺省），读回同值。
       panelEntry: 'sidebar',
@@ -390,6 +392,8 @@ describe('文件后端（FileStore）', () => {
       sessionBalanceEnabled: true,
       // 严格手动顺序缺省空表 —— 与升级前行为一致（余额分档优先）
       strictManualOrder: {},
+      // 分档窗口同理：缺省即空表（= 全部回落环境变量/默认）
+      creditWindows: {},
       preferredRotation: {},
       // 面板入口缺省「仅侧栏」—— 与升级前行为一致
       panelEntry: 'sidebar',
@@ -916,6 +920,8 @@ describe('文件后端（FileStore）', () => {
       sessionBalanceEnabled: true,
       // 严格手动顺序同理：写盘时缺省即空表（= 余额分档优先），读回同值。
       strictManualOrder: {},
+      // 分档窗口同理：缺省即空表（= 全部回落环境变量/默认）
+      creditWindows: {},
       preferredRotation: {},
       // 面板入口同理：写盘时缺省即「仅侧栏」，读回同值。
       panelEntry: 'sidebar',

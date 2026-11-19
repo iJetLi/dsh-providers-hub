@@ -81,7 +81,9 @@ describe('index.ts 的接线（源码级，仅守纯文本形态的约定）', (
     // 报错文案里的窗口天数必须**运行时解析**（可用环境变量覆盖），
     // 不能在文案里写死字面量 —— 否则用户改了窗口，报错还在说 15 天。
     expect(indexCode).toContain("from './buddy-balance-rank.js'")
-    expect(indexCode).toContain('buddyExpiringWindowDays()')
+    // ★ 2026-11-19：per-provider 窗口后，窗口值改由 resolveCreditWindow 现读
+    //（它内部按「本渠道设置 > 环境变量 > 默认」解析，仍满足「不能写死字面量」）
+    expect(indexCode).toContain('resolveCreditWindow(')
   })
 
   /**
@@ -218,8 +220,8 @@ describe('index.ts 的接线（源码级，仅守纯文本形态的约定）', (
   })
 
   it('两个 provider 各自的报错文案用其产品名', () => {
-    expect(indexCode).toContain("buddyLockedError('CodeBuddy')")
-    expect(indexCode).toContain("buddyLockedError('WorkBuddy')")
+    expect(indexCode).toContain("buddyLockedError('CodeBuddy', 'buddy')")
+    expect(indexCode).toContain("buddyLockedError('WorkBuddy', 'workbuddy')")
   })
 })
 

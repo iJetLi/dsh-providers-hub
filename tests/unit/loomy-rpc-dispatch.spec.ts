@@ -151,7 +151,8 @@ describe('Loomy RPC 分派', () => {
     //    「哪些渠道真的回传 windowDays」由**真跑端点**的行为用例守：
     //    `provider-registry-consumers.spec.ts` 的
     //    「credits.permanentLock 的响应体取决于 registry」。
-    expect(rpcSource).toMatch(/windowDays: buddyExpiringWindowDays\(\)/)
+    // ★ 2026-11-19：改为 per-provider 现读（resolveCreditWindow().windowDays）
+    expect(rpcSource).toMatch(/resolveCreditWindow\(/)
     expect(rpcSource).toContain("from './buddy-balance-rank.js'")
     expect(typesSource).toMatch(/interface RpcPermanentLockResponse \{[\s\S]*?windowDays\?: number/)
   })

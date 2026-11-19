@@ -38,6 +38,7 @@ import {
   formatUpdatedAt,
   orderCreditRows,
   creditOrderLabel,
+  isEarliestPartial,
   describeCreditOrder,
   rotationStartHint,
   creditOrderOptionsOf,
@@ -3013,17 +3014,51 @@ function UsageBadgeActive(props) {
        *      时间走 formatCompactLeft（正文用紧凑写法）。
        *   ⚠️ 临期段与括号**包在同一个 span**：title 天然是一个区域，
        *      悬停任一处都是同一份提示（用户要求「跟临期一起是一个 tooltip」）。
+       *
+       * ## ★ 2026-11-20 改：只有一笔临期时，括号里**只显示时间**
+       *
+       * 用户要求：「如果临期积分只有一笔，则括号里面只显示时间即可」。
+       *
+       * 原因：只有一笔时 `earliestAmount === amount`，括号里再写金额就是
+       * **把同一个数字印两遍** —— 视觉噪音，且看起来像 bug：
+       *
+       * ```
+       * 只有一笔 ⇒ 临471.27（471.27 52分钟）   ← 旧形态，金额重复
+       * 只有一笔 ⇒ 临471.27（52分钟）          ← 新形态
+       * 有多笔   ⇒ 临471.27（300 52分钟）      ← 保持不变（300 说明「先到期的是这些」）
+       * ```
+       *
+       * ⚠️ 「是否只有一笔」的判据是 `earliestAmount < amount`（差值 > 0.005），
+       *    **不是**用 `===`：
+       *    ① `earliestAmount` 是浮点累加值（多个同刻到期包相加），`===` 会因
+       *       浮点误差误判成「有多笔」；
+       *    ② 显示层都格式到 2 位小数，肉眼相同就该视为相同。
+       * ⚠️ tooltip **不受影响**：它的第一行是总额、第二行才是「其中 X」，
+       *    两层信息本就不重复（`earliestAmount === amount` 时第二行等价于
+       *    「全部最早到期」，读起来仍通顺，故不改）。
        */
       const compactLeft = isImminent ? formatCompactLeft(part.earliestIn) : '';
       const earliestText = isImminent ? formatAmountShort(part.earliestAmount) : '';
-      const hasBracket = isImminent && compactLeft !== '' && earliestText !== '';
+      /**
+       * 最早那批是否**只是临期总额的一部分**（否则括号里的金额是重复信息）。
+       *
+       * ⚠️ 判据抽在 `badge-model.js` 的 `isEarliestPartial`（纯函数）：
+       *    那里的注释解释了为什么用「差值 > 0.005」而不是 `===`。
+       *    **不要在这里内联一份** —— 两处同义判据必然漂移。
+       */
+      const earliestIsPartial = isImminent && isEarliestPartial(part.amount, part.earliestAmount);
+      const hasBracket = isImminent && compactLeft !== ''
+        // 有多笔 ⇒ 金额 + 时间；只有一笔 ⇒ 仅时间（金额已在正文里）
+        && (earliestIsPartial ? earliestText !== '' : true);
+      /** 括号内的文本：部分到期带金额，全部到期只留时间。 */
+      const bracketText = earliestIsPartial ? `${earliestText} ${compactLeft}` : compactLeft;
 
       children.push(React.createElement('span', {
         key: part.key,
         className: 'dim-jh-badgeNotePart',
         'data-tone': part.tone,
         ...(tip === undefined ? {} : { title: tip }),
-      }, hasBracket ? `${text}（${earliestText} ${compactLeft}）` : text));
+      }, hasBracket ? `${text}（${bracketText}）` : text));
     });
 
     return React.createElement('div', {

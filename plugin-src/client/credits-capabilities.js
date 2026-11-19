@@ -240,6 +240,22 @@ export function supportsPermanentLock(provider) {
 }
 
 /**
+ * 该 provider 的积分是否**按到期时间分档**（= registry 的 `usesExpiryWindow`）。
+ *
+ * 语义：走 `splitBuddyCreditsByExpiry` 那套「临期 / 短期 / 永久」分桶的渠道。
+ * 没有这个概念的渠道（纯 token 余额、百分比配额）**没有窗口可设** ——
+ * 「分档窗口」按钮只在前者为 true 时渲染。
+ *
+ * ⚠️ 与 {@link supportsPermanentLock} **不是同一个集合**：有的渠道有分档但没有
+ * 锁定（如早期的 trae），有的反过来。别用其中一个去判另一个。
+ * ⚠️ 判据**必须**读 registry 的同名字段，不能在客户端另写一份 Set ——
+ * 那是「一文件两套同义判据」，加渠道时必然漏一处（本仓明令）。
+ */
+export function usesExpiryWindow(provider) {
+  return descriptorOf(provider)?.usesExpiryWindow === true;
+}
+
+/**
  * 该 provider 的余额是否**真的由多个资源包构成且有到期信息**（决定账号名 hover 要不要列包）。
  *
  * ⚠️ 只有 `buddy` / `workbuddy` / `lobsterai` 具备。这不是"避免冗余"，而是**防止显示错误信息**：

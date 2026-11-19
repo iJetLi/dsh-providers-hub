@@ -265,11 +265,11 @@ describe('★ Magicrew：`index.ts` 的接线（源码级，按站切片）', ()
     expect(
       selectorBlock('magicrewBalanceSelector'),
       '国内版的 balance.selector 必须指向 magicrewBalanceSelector',
-    ).toContain("lockedError: magicrewLockedError('超级麦吉'),")
+    ).toContain("lockedError: magicrewLockedError('超级麦吉', 'magicrew'),")
     expect(
       selectorBlock('magicrewIntlBalanceSelector'),
       '国际版的 balance.selector 必须指向 magicrewIntlBalanceSelector',
-    ).toContain("lockedError: magicrewLockedError('MagiCrew (国际版)'),")
+    ).toContain("lockedError: magicrewLockedError('MagiCrew (国际版)', 'magicrewintl'),")
   })
 
   it('★★ 两个 `balance` 段都必须带 `isFreeModel: NO_FREE_MODEL`（不得省略）', () => {
@@ -466,7 +466,7 @@ describe('★ Magicrew：`index.ts` 的接线（源码级，按站切片）', ()
     expect(block, '必须明确写「不用重新登录」').toContain('不用重新登录')
     /**
      * ⚠️ **两个码都要点**（2026-11-04 四审建议 ③(1)）：本档是**两站共用**的
-     * （`magicrewLockedError('超级麦吉')` 与 `…('MagiCrew (国际版)')`），而真机上
+     * （`magicrewLockedError('超级麦吉', 'magicrew')` 与 `…('MagiCrew (国际版)')`），而真机上
      * **国内站回 403、国际站回 405**。只写 403 时，国际站用户在锁定态
      * 看到的码与卡片上「HTTP 405」不符 ⇒ 以为是两件事，反而不信这条文案。
      *

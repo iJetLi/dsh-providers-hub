@@ -143,11 +143,11 @@ describe('★ MiniMax：`index.ts` 的接线（源码级，守纯文本形态的
     //（它不透传 xff ⇒ 被地理分流到中国站 ⇒ 该渠道在聚合轮换里被静默剔除）。
     expect(indexCode, '中国版不得误用国际站实例')
       .not.toMatch(/product: MINIMAX,[\s\S]{0,400}selector:\s*minimaxIntlBalanceSelector,/)
-    expect(indexCode).toMatch(/lockedError:\s*minimaxLockedError\('MiniMax Code \(中国版\)'\)/)
-    expect(indexCode).toMatch(/lockedError:\s*minimaxLockedError\('MiniMax Code \(国际版\)'\)/)
+    expect(indexCode).toMatch(/lockedError:\s*minimaxLockedError\('MiniMax Code \(中国版\)',\s*'minimax'\)/)
+    expect(indexCode).toMatch(/lockedError:\s*minimaxLockedError\('MiniMax Code \(国际版\)',\s*'minimaxintl'\)/)
     for (const [selector, display] of [
-      ['minimaxBalanceSelector', "minimaxLockedError('MiniMax Code (中国版)')"],
-      ['minimaxIntlBalanceSelector', "minimaxLockedError('MiniMax Code (国际版)')"],
+      ['minimaxBalanceSelector', "minimaxLockedError('MiniMax Code (中国版)', 'minimax')"],
+      ['minimaxIntlBalanceSelector', "minimaxLockedError('MiniMax Code (国际版)', 'minimaxintl')"],
     ] as const) {
       const at = indexCode.indexOf(`selector: ${selector},`)
       expect(at, `找不到 selector: ${selector},`).toBeGreaterThan(-1)
@@ -193,8 +193,8 @@ describe('★ MiniMax：`index.ts` 的接线（源码级，守纯文本形态的
    */
   it('⚠️ 两站都必须 `reportPickedAccount: true`（逐站切片，不得只数全局次数）', () => {
     for (const [selector, display] of [
-      ['minimaxBalanceSelector', "minimaxLockedError('MiniMax Code (中国版)')"],
-      ['minimaxIntlBalanceSelector', "minimaxLockedError('MiniMax Code (国际版)')"],
+      ['minimaxBalanceSelector', "minimaxLockedError('MiniMax Code (中国版)', 'minimax')"],
+      ['minimaxIntlBalanceSelector', "minimaxLockedError('MiniMax Code (国际版)', 'minimaxintl')"],
     ] as const) {
       const at = indexCode.indexOf(`selector: ${selector},`)
       expect(at, `找不到 selector: ${selector},`).toBeGreaterThan(-1)

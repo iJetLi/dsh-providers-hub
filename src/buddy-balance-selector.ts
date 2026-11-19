@@ -54,8 +54,13 @@ import {
   type BuddyCreditSplit,
   type BuddyTierOptions,
 } from './buddy-balance-rank.js'
+import { resolveCreditWindow } from './credit-window.js'
+import type { ResolvedCreditWindow } from './credit-window.js'
+import type { CreditWindowSetting } from './jet-hub-store.js'
 
 /** 余额缓存 TTL（毫秒），与 Loomy 同值。 */
+const DAY_MS = 24 * 60 * 60 * 1000
+
 export const BUDDY_BALANCE_CACHE_TTL_MS = 60_000
 
 /**
@@ -276,6 +281,17 @@ export type BuddySelectionDeps<
    */
   imminentWindowMs?: number
   /**
+   * ★ **读取本渠道的分档窗口设置**（2026-11-19 加，per-provider 窗口）。
+   *
+   * 注入 `AccountPool.creditWindow`。返回 `undefined` = 未设置 ⇒ 回落环境变量/默认。
+   *
+   * ⚠️ **每次现读**（`resolveCreditWindow` 每次调用都问一遍）：
+   * 用户在弹窗里保存后必须立刻生效。实现方**不得**缓存返回值。
+   * ⚠️ 未注入时（单测替身 / 旧装配层）视为「无 per-provider 设置」⇒
+   * 行为与改动前**逐字节一致**（这是本功能的唯一回归面）。
+   */
+  readCreditWindow?: (provider: string) => CreditWindowSetting | undefined
+  /**
    * **带原因**的余额查询（可选，传了就优先用它）。
    *
    * 见 {@link BalanceQueryDetail} 的长注释：`fetchBalance` 的 `null` 把四种
@@ -345,11 +361,35 @@ export class BuddyBalanceSelector<
   /**
    * 当前生效的「临时积分」窗口（毫秒）。
    *
-   * ⚠️ **每次调用都重新解析环境变量**，不能缓存：窗口可被用户随时改，
+   * ⚠️ **每次调用都重新解析**，不能缓存：窗口可被用户随时改，
    * 而提示文案与选号判据必须取同一个值 —— 缓存会让两者在不同时刻分裂。
+   *
+   * ⚠️⚠️ **2026-11-19 起改为 per-provider**：取值走 `resolveCreditWindow`
+   * （全仓唯一取值点），优先级 = 本渠道设置 > 环境变量 > 内置默认。
+   * 这样用户在面板弹窗里保存后**立刻**对后续请求生效
+   *（不需要重启 / 重选模型 / 切会话）。
+   *
+   * ⚠️ `deps.windowMs` 仍是**显式覆盖的逃生门**（单测与特殊渠道用）：
+   * 它一旦注入就**完全绕开** per-provider 逻辑 —— 这是刻意的，
+   * 否则单测无法把窗口固定成确定值。
+   * ⚠️ **绝不能**把 per-provider 的值写进 `deps.windowMs`：
+   * 那是构造期字段，写进去就永久固定，保存后不再生效。
    */
   private windowMs(): number {
-    return this.deps.windowMs ?? buddyExpiringWindowDays() * 24 * 60 * 60 * 1000
+    if (this.deps.windowMs !== undefined) return this.deps.windowMs
+    return this.resolvedWindow().windowDays * DAY_MS
+  }
+
+  /**
+   * 当前生效的**完整窗口解析结果**（天 + 来源 + 是否钳制）。
+   *
+   * ⚠️ 与 {@link windowMs} / {@link imminentWindowMs} 共用同一份解析，
+   * 避免「毫秒版」与「天数版」两次调用时环境变量被中途改掉而分裂
+   *（`resolveCreditWindow` 内部会读两次 env，但都发生在同一次调用内）。
+   */
+  private resolvedWindow(): ResolvedCreditWindow {
+    const providerId = (this.deps.product as { id?: string }).id ?? ''
+    return resolveCreditWindow(providerId, (provider) => this.deps.readCreditWindow?.(provider))
   }
 
   /**
@@ -359,9 +399,9 @@ export class BuddyBalanceSelector<
    * 一笔「5 天 + 30 秒」的余额，半分钟后就成了临期 ——
    * 缓存这个值会让选号继续按「短期」处理一笔马上要作废的积分。
    *
-   * ⚠️ 钳制走 {@link resolveImminentWindowMs}（全仓唯一钳制点）：
-   * 用户可能把 15 天调到 3 天而临期仍是默认 5 天，此处必须自动收敛，
-   * 否则「临期窗口 > 总窗口」会让分档表自相矛盾。
+   * ⚠️ 钳制走 `resolveCreditWindow` 的 `clamped` 分支（per-provider 版）
+   * 或 {@link resolveImminentWindowMs}（`deps` 覆盖版）——
+   * 两者方向一致，但入口不同，不要互相替代。
    */
   private imminentWindowMs(windowMs: number): number {
     return resolveImminentWindowMs(windowMs, this.deps.imminentWindowMs)

@@ -149,7 +149,7 @@ describe('★ AStudio：`index.ts` 的接线（源码级，守纯文本形态的
     expect(planCode, 'balance.selector 必须指向 astudioBalanceSelector')
       .toMatch(/kind:\s*'buddy',\s*\n\s*selector:\s*astudioBalanceSelector,/)
     expect(planCode, '必须传 lockedError（否则锁定时报通用错误）')
-      .toMatch(/lockedError:\s*astudioLockedError\('AStudio'\)/)
+      .toMatch(/lockedError:\s*astudioLockedError\('AStudio',\s*'astudio'\)/)
     expect(planCode, '必须接限流判定（池被筛空时会误报「请先登录」）')
       .toMatch(/throwIfAllRateLimited:\s*throwIfAllAccountsRateLimited/)
   })

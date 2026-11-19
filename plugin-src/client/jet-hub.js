@@ -9,6 +9,7 @@ import {
   supportsBalanceTier,
   supportsAccountTest,
   supportsPermanentLock,
+  usesExpiryWindow,
   supportsSubscriptionQuota,
   permanentLockCopy,
   checkinProviders,
@@ -245,7 +246,267 @@ const PROVIDERS = Object.freeze(
  * 不要在别处再抄一份 `{ codearts: 'CodeArts (华为云)', … }` —— 那样改名时必然
  * 出现「徽标写着旧名字、设置页写着新名字」的分裂。查不到时**原样返回 id**：
  * 徽标宁可显示一个裸 id（可排查），也不要显示空白。
+ *//**
+ * 「分档窗口」弹窗组件（2026-11-19）。
+ *
+ * ## 需求（用户原话）
+ *
+ * 「在插件的 providers 页面增加一个按钮……点击后弹出一个弹窗，可以在弹窗上设置
+ *  两个档次的日期，默认为环境变量的默认值，如果在这个弹窗填写了，则使用这个值
+ *  代替默认值或者环境变量值，这个设置只对当前 providers 生效」
+ * +「输入数字时实时显示当前窗口覆盖多少个帐号」
+ * +「临期在上、短期在下」
+ *
+ * ## 判定逻辑全部搬进了 `credit-window-ui.js`（可单测）
+ *
+ * 本组件只负责：读初始值 → 收集输入 → 实时预览 → 调 RPC 保存。
+ *
+ * ## ⚠️ 「实时预览」是纯前端重算，零请求
+ *
+ * 数据来自 `props.accounts()`（面板已有的逐包读数），
+ * 用 `computeCoverage` 按草稿窗口重算 ⇒ 改数字即时刷新。
  */
+import { computeCoverage, clampImminent, describeWindowSource, parseWindowInput, windowRangeLabels } from './credit-window-ui.js'
+
+export function CreditWindowModal(props) {
+  const { provider, providerLabel, rpcCall, accounts, onClose } = props
+
+  /** 服务端已生效的值（保存后回填；也是「恢复默认」的对照）。 */
+  const [saved, setSaved] = React.useState(null)
+  /** 读取中 / 首次读取失败。 */
+  const [loadError, setLoadError] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [saveError, setSaveError] = React.useState('')
+  /** 草稿值（输入框的原始**字符串**，便于区分「空」与「0」）。 */
+  const [draftWindow, setDraftWindow] = React.useState('')
+  const [draftImminent, setDraftImminent] = React.useState('')
+
+  // ---- 打开时读一次当前生效值 ----
+  React.useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const res = await rpcCall('credits.window.get', { provider })
+        if (!alive) return
+        if (res?.ok !== true) {
+          setLoadError(res?.error?.message ?? '读取失败')
+          return
+        }
+        setSaved(res.value)
+        // 预填「当前生效值」而不是留空：用户要看到「现在是多少」才能判断要不要改。
+        setDraftWindow(String(res.value.windowDays))
+        setDraftImminent(String(res.value.imminentDays))
+      } catch (caught) {
+        if (alive) setLoadError(String(caught))
+      }
+    })()
+    return () => { alive = false }
+  }, [provider])
+
+  // ---- 解析草稿 ----
+  const parsedWindow = parseWindowInput(draftWindow)
+  const parsedImminent = parseWindowInput(draftImminent)
+  /**
+   * 生效的草稿值：非法/为空时**回落到当前生效值**（而不是 0），
+   * 这样预览始终可算、且不会因为用户清空输入框就「闪成 0 天」。
+   */
+  const effectiveWindow = typeof parsedWindow === 'number' ? parsedWindow : (saved?.windowDays ?? 15)
+  const rawImminent = typeof parsedImminent === 'number' ? parsedImminent : (saved?.imminentDays ?? 5)
+  const { imminent: effectiveImminent, clamped } = clampImminent(rawImminent, effectiveWindow)
+
+  const windowInvalid = parsedWindow === null
+  const imminentInvalid = parsedImminent === null
+
+  // ---- 实时预览（纯前端重算） ----
+  const coverage = computeCoverage(accounts(), effectiveWindow, effectiveImminent, Date.now())
+  const ranges = windowRangeLabels(effectiveWindow, effectiveImminent)
+
+  /** 是否有未保存的改动。 */
+  const dirty = saved !== null && (
+    String(saved.windowDays) !== draftWindow.trim() || String(saved.imminentDays) !== draftImminent.trim()
+  )
+
+  const onSave = async () => {
+    if (windowInvalid || imminentInvalid) return
+    setBusy(true)
+    setSaveError('')
+    try {
+      const payload = { provider }
+      // ⚠️ 空输入 = 该字段不传（后端「保持原值」）；这比传 0 安全 ——
+      //    `0` 是「关掉该档」，与「没填」是两件事。
+      if (typeof parsedWindow === 'number') payload.windowDays = parsedWindow
+      if (typeof parsedImminent === 'number') payload.imminentDays = parsedImminent
+      const res = await rpcCall('credits.window.set', payload)
+      if (res?.ok !== true) {
+        setSaveError(res?.error?.message ?? '保存失败')
+        return
+      }
+      setSaved(res.value)
+      // 回填**服务端生效值**（可能被钳制过）—— 让用户看见实际结果
+      setDraftWindow(String(res.value.windowDays))
+      setDraftImminent(String(res.value.imminentDays))
+    } catch (caught) {
+      setSaveError(String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onReset = async () => {
+    setBusy(true)
+    setSaveError('')
+    try {
+      // 两个字段都不传 ⇒ 后端删键（回落环境变量/默认）
+      const res = await rpcCall('credits.window.set', { provider })
+      if (res?.ok !== true) {
+        setSaveError(res?.error?.message ?? '恢复失败')
+        return
+      }
+      setSaved(res.value)
+      setDraftWindow(String(res.value.windowDays))
+      setDraftImminent(String(res.value.imminentDays))
+    } catch (caught) {
+      setSaveError(String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 单个字段行（含覆盖账号数徽标）。 */
+  const field = (options) => React.createElement('div', { className: 'dim-jh-windowField' },
+    React.createElement('div', { className: 'dim-jh-windowLabel' },
+      React.createElement('span', {
+        className: 'dim-jh-windowDot',
+        'data-tone': options.tone,
+      }),
+      React.createElement('span', null, options.label),
+      React.createElement('input', {
+        type: 'number',
+        className: 'dim-jh-windowInput',
+        min: 0,
+        step: 1,
+        value: options.value,
+        // ⚠️ 允许空串（= 用默认）；`type=number` 的原生上下箭头仍可用
+        onChange: (event) => options.onChange(event.target.value),
+        'aria-label': options.ariaLabel,
+        'aria-invalid': options.invalid ? 'true' : undefined,
+      }),
+      React.createElement('span', { className: 'dim-jh-windowUnit' }, '天'),
+      React.createElement('span', {
+        className: 'dim-jh-windowCover',
+        'data-tone': options.tone,
+        title: `当前窗口下，本渠道有 ${options.count} 个账号的「${options.label.replace('窗口', '')}」积分`,
+      },
+        '覆盖 ',
+        React.createElement('b', null, options.count),
+        ' 个账号',
+      ),
+    ),
+    React.createElement('div', { className: 'dim-jh-windowHint' }, options.hint),
+    options.warn === undefined ? null : React.createElement('div', { className: 'dim-jh-windowWarn' }, options.warn),
+  )
+
+  return React.createElement('div', {
+    className: 'dim-jh-modalOverlay',
+    onClick: (event) => { if (event.target === event.currentTarget) onClose() },
+  },
+    React.createElement('div', {
+      className: 'dim-jh-modal dim-jh-windowModal',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': `${providerLabel} 分档窗口`,
+    },
+      React.createElement('div', { className: 'dim-jh-modalHead' },
+        React.createElement('div', { className: 'dim-jh-modalTitle' },
+          React.createElement('strong', null, '积分分档窗口'),
+          React.createElement('span', { className: 'dim-jh-modalSubtitle' }, providerLabel)),
+        React.createElement('button', {
+          className: 'dim-jh-btn',
+          onClick: onClose,
+          title: '关闭',
+        }, '×'),
+      ),
+
+      loadError !== ''
+        ? React.createElement('div', { className: 'dim-jh-modalBody' },
+          React.createElement('p', { className: 'dim-jh-modalHint' }, `读取当前设置失败：${loadError}`))
+        : React.createElement('div', { className: 'dim-jh-modalBody' },
+          // ★ 临期在上、短期在下（与预览的三档顺序一致）
+          field({
+            tone: 'imminent',
+            label: '临期窗口',
+            ariaLabel: '临期窗口天数',
+            value: draftImminent,
+            invalid: imminentInvalid,
+            onChange: setDraftImminent,
+            count: coverage.imminentAccounts,
+            hint: `距过期 < ${effectiveImminent} 天 → 算「临期」。来源：${describeWindowSource(saved?.source, saved?.windowDays, saved?.imminentDays)}`,
+          }),
+          field({
+            tone: 'short',
+            label: '短期窗口',
+            ariaLabel: '短期窗口天数',
+            value: draftWindow,
+            invalid: windowInvalid,
+            onChange: setDraftWindow,
+            count: coverage.shortTermAccounts,
+            hint: `距过期 ≤ ${effectiveWindow} 天 → 算「短期」（含上面的临期）。来源：${describeWindowSource(saved?.source, saved?.windowDays, saved?.imminentDays)}`,
+            warn: clamped
+              ? `⚠️ 临期窗口不能大于短期窗口，已按 ${effectiveWindow} 天计算`
+              : '⚠️ 临期窗口必须 ≤ 短期窗口',
+          }),
+          (windowInvalid || imminentInvalid)
+            ? React.createElement('p', { className: 'dim-jh-modalHint dim-jh-windowInvalid' },
+              windowInvalid ? '短期窗口' : '', windowInvalid && imminentInvalid ? ' 与 ' : '', imminentInvalid ? '临期窗口' : '',
+              ' 必须是 0 ~ 36500 之间的整数')
+            : null,
+
+          // ---- 实时预览 ----
+          React.createElement('div', { className: 'dim-jh-windowPreview' },
+            React.createElement('div', { className: 'dim-jh-windowPreviewTitle' }, '改动后预览（本渠道当前余额，按新窗口重新分档）'),
+            ...[
+              ['imminent', ranges.imminent, coverage.imminentAmount],
+              ['short', ranges.shortTerm, coverage.shortTermAmount],
+              ['permanent', ranges.permanent, coverage.permanentAmount],
+            ].map(([tone, text, amount]) => React.createElement('div', { key: tone, className: 'dim-jh-windowPreviewRow' },
+              React.createElement('span', { className: 'dim-jh-windowDot', 'data-tone': tone }),
+              React.createElement('span', { className: 'dim-jh-windowPreviewRange' }, text),
+              React.createElement('span', { className: 'dim-jh-windowPreviewAmount' }, formatAmount(amount)),
+            )),
+          ),
+          saveError === ''
+            ? null
+            : React.createElement('p', { className: 'dim-jh-modalHint dim-jh-windowInvalid' }, saveError),
+        ),
+
+      React.createElement('div', { className: 'dim-jh-modalActions' },
+        React.createElement('button', {
+          className: 'dim-jh-btn',
+          disabled: busy,
+          title: '清除本渠道设置，回落环境变量或内置默认',
+          onClick: () => void onReset(),
+        }, '恢复默认'),
+        React.createElement('span', { className: 'dim-jh-windowSpacer' }),
+        React.createElement('button', { className: 'dim-jh-btn', disabled: busy, onClick: onClose }, '取消'),
+        React.createElement('button', {
+          className: 'dim-jh-btn',
+          'data-kind': 'primary',
+          disabled: busy || windowInvalid || imminentInvalid,
+          onClick: () => void onSave(),
+        }, busy ? '保存中…' : '保存'),
+      ),
+    ),
+  )
+}
+
+/** 金额格式化（预览用）。整数不带小数，其余保留两位。 */
+function formatAmount(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  if (Math.abs(value - Math.round(value)) < 1e-9) return String(Math.round(value))
+  return value.toFixed(2)
+}
+
+
 export function providerLabel(id) {
   return PROVIDERS.find(p => p.id === id)?.label ?? id;
 }
@@ -4931,6 +5192,14 @@ function ProviderPanel({
    * 不在这里写死（把 Loomy 的「每日赠送额度」套到 buddy 上会误导用户）。
    */
   const canLockPermanent = supportsPermanentLock(provider);
+  /**
+   * ★ 是否渲染「分档窗口」按钮（2026-11-19）。
+   *
+   * 判据复用 registry 的 `usesExpiryWindow`（「是否按到期时间分桶」），
+   * 与后端回传 `windowDays`/`imminentDays` 的判据**同一份事实** ——
+   * 两处各写一份 Set 是「一文件两套同义判据」的经典形态（本仓有明令）。
+   */
+  const supportsExpiryWindow = usesExpiryWindow(provider);
   // 窗口天数用上面与余额共用的 `expiryWindowDays`（两个来源同值，互为备份）。
   // ⚠️ 文案必须用它渲染：窗口可被 `DSH_BUDDY_EXPIRING_WINDOW_DAYS` 覆盖，
   // 前端写死 15 就会出现「提示说只烧 15 天内的、实际按 31 天筛号」。
@@ -5081,6 +5350,13 @@ function ProviderPanel({
   // 避免每次进入面板都发 cline.quota / cline.requestLog（那两发在非 Cline
   // 渠道会直接 bad-request）。
   const [showQuota, setShowQuota] = React.useState(false);
+  /**
+   * 「分档窗口」弹窗（2026-11-19）。
+   *
+   * ⚠️ 只在 `usesExpiryWindow` 的渠道渲染按钮（无分档概念的渠道设了也没用）。
+   * ⚠️ 关闭即卸载 ⇒ 每次打开重新读一次当前值（不缓存，与后端「每次现读」一致）。
+   */
+  const [showWindowModal, setShowWindowModal] = React.useState(false);
   /**
    * MiniMax 国际站绕地理分流用的 `X-Forwarded-For`（issue IKMEVG）。
    *
@@ -7110,6 +7386,46 @@ function ProviderPanel({
         provider === 'qoder' || provider === 'qodercn'
           ? React.createElement(QoderTrafficGuardToggle, { key: provider, provider, rpcCall })
           : null,
+        /**
+         * ★ **分档窗口按钮**（2026-11-19，用户指定位置：永久积分 与 模型 之间）。
+         *
+         * ⚠️ 只在 `usesExpiryWindow` 的渠道渲染：没有「按到期分桶」概念的渠道
+         *（如纯 token 余额、百分比配额）没有窗口可设，渲染一个点了没用的按钮
+         * 比不渲染更糟（本仓记过同型教训）。
+         */
+        supportsExpiryWindow
+          ? React.createElement('button', {
+              className: 'dim-jh-btn dim-jh-iconTextBtn',
+              title: `设置本渠道的积分分档窗口（距过期多少天算「临期」/「短期」）。`
+                + `默认取环境变量（现在 ${expiryWindowDays ?? 15} / ${imminentWindowDays ?? 5} 天），`
+                + `在这里设置后只对 ${providerLabel} 生效，且保存后立即生效。`,
+              'aria-label': '分档窗口',
+              onClick: () => setShowWindowModal(true),
+            },
+            React.createElement('svg', {
+              width: 14,
+              height: 14,
+              viewBox: '0 0 24 24',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 2,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              'aria-hidden': 'true',
+              focusable: 'false',
+            },
+            // 滑块图标（三档调节的语义）
+            React.createElement('path', { d: 'M4 21v-7' }),
+            React.createElement('path', { d: 'M4 10V3' }),
+            React.createElement('path', { d: 'M12 21v-9' }),
+            React.createElement('path', { d: 'M12 8V3' }),
+            React.createElement('path', { d: 'M20 21v-5' }),
+            React.createElement('path', { d: 'M20 12V3' }),
+            React.createElement('path', { d: 'M1 14h6' }),
+            React.createElement('path', { d: 'M9 8h6' }),
+            React.createElement('path', { d: 'M17 16h6' })),
+            '分档窗口')
+          : null,
         // 「负载均衡」开关：**只对支持会话分散的渠道渲染**（supportsSessionBalance：
         // zcode / marvis）。与页头开关同款 Switch 形态；挂在按钮行（面板页头最右），
         // 与「一键领取积分 / 重测所有」同一排。
@@ -7845,6 +8161,31 @@ function ProviderPanel({
           value: minimaxXff,
           onSaved: (next) => setMinimaxXff(next),
           onClose: () => setShowMinimaxXff(false),
+        })
+      : null,
+    /**
+     * ★ **分档窗口弹窗**（2026-11-19）：覆盖层，独立 state。
+     *
+     * ⚠️ `accounts` 传**函数**而不是快照：弹窗要在每次输入变化时重算覆盖账号数
+     *（纯前端，零请求），而面板的账号列表可能在这期间刷新过 ——
+     * 传函数保证拿到的是**最新**读数，不会用到开弹窗那一刻的旧值。
+     */
+    showWindowModal
+      ? React.createElement(CreditWindowModal, {
+          provider,
+          providerLabel,
+          rpcCall,
+          /**
+           * ⚠️ 结构必须是 `{ id, packages }`：
+           * `credits.balances` 的每条是 `{ accountId, nickname, balance }`，
+           * 逐包数据在 **`balance.packages`**（不是顶层 `packages`）——
+           * 写错这一格会让覆盖数恒为 0 且**没有任何报错**。
+           */
+          accounts: () => accounts.map((account) => ({
+            id: account.accountId,
+            packages: account.balance?.packages,
+          })),
+          onClose: () => setShowWindowModal(false),
         })
       : null,
     // 出口代理弹窗（仅 opencode）：覆盖层，与上面两个弹窗各自独立 state，
