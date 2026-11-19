@@ -220,6 +220,18 @@ export function jwtNickname(token: string): string {
   }
 }
 
+/**
+ * 凭据的「上次签发/刷新时刻」（毫秒）；读不到返回 `undefined`。
+ *
+ * ⚠️ **刻意不做 `expires_at - access TTL` 的回退**：access TTL 上游按批次在缩
+ * （本机解出 60 / 30 / 28 天三批），我们无从得知某一代的确切值，回退算出来的
+ * 只会是个错的数。读不到就如实返回 `undefined`（= 保活腿不生效，行为退回改造前），
+ * 而不是编一个 —— 本仓红线。
+ */
+export function credentialIssuedAtMs(credential: BuddyCredential): number | undefined {
+  return jwtIssuedAtMs(credential.access_token)
+}
+
 /** 凭据是否已过期；无法解析过期时间时不判定过期（对齐 Rust is_expired）。 */
 export function isExpired(credential: BuddyCredential): boolean {
   const expiresAt = credentialExpiresAtMs(credential)
@@ -321,8 +333,59 @@ function absoluteExpiryMs(
   return String(baseMs + relativeSeconds * 1000)
 }
 
-/** 从 JWT payload 读取 `iat`（秒）并换算为毫秒。 */
-function jwtIssuedAtMs(token: string): number | undefined {
+/**
+ * 从 JWT payload 读取 `iat`（签发时刻，秒）并换算为毫秒。
+ *
+ * ## ⚠️⚠️ 这条腿同时服务「到期时间推算」与「保活续期」（issue #124，2026-11-19）
+ *
+ * `iat` 在**续期之后**恰好等于「上次刷新时刻」（续期会重签 access_token）。
+ * 本仓调度器每 30 分钟一轮，而 lead-time 判据只在「距过期不足 1 小时」放行
+ * ⇒ 对 access TTL 以**天**计的渠道，续期可能连续数十天一次都不发，
+ * `refresh_token` 被服务端**闲置失效**（CodeBuddy 实测 28 天 ⇒ 401
+ * `12153: refresh token is invalid`，面板写 `refreshable: false`，用户只能重登
+ * 且 **28 天后必复发**）。
+ *
+ * ⇒ 用「距上次刷新（= `iat`）的时长」做保活判据，比「按 TTL 比例 / 固定天数」
+ *   稳：本机解出三批样本的 access TTL 分别是 **60 / 30 / 28 天**且上游在持续
+ *   收缩，任何写死的天数或比例都会在某一代上贴到闲置窗口红线。
+ *
+ * ⚠️ 与 {@link jwtExpiresAtMs} 同口径：**只做 JWT payload 解码、不验签**
+ *    （该值只用于续期调度，不参与任何安全判定）。
+ *
+ * ## ⚠️ 解码口径：`'base64url'` 不是打字法事故（2026-11-19 实测订正）
+ *
+ * 本文件既有写法是 `Buffer.from(parts[1], 'base64url')`。我曾以为那是对
+ * `base64` 的打字法错误 —— **错**。三条独立证据：
+ * 1. `Buffer.isEncoding('base64url') === true`（对照组 `Buffer.isEncoding('zzzzzzzz') === false`）；
+ * 2. **`@types/node` 官方声明里就有它**：`buffer.d.ts` 的
+ *    「Valid string encodings: … | 'base64' | 'base64url' | …」，以及
+ *    `crypto.d.ts` 的 `type BinaryToTextEncoding = "base64" | "base64url" | …`；
+ * 3. 它是**内建**的（编译在 node 可执行文件内部），`node_modules` 对它 0 处
+ *    monkeypatch ⇒ 不存在「第三方改我们解码行为」的隐通道。
+ *
+ * ⇒ 它只是**不可读**，不是写错。
+ *
+ * ⚠️ **等价性只在「解码」方向成立**：`Buffer.from(x, 'base64')` 与
+ *    `Buffer.from(x, 'base64url')` **逐字节等价**（实测 800 组真实 JWT 形状 ×
+ *    payload 长度三种 mod 3 余数全覆盖 = 0 差异；23 组畸形输入也全同），因为
+ *    Node 的解码器对 `+/` 与 `-_` 两套字母表都接受。
+ *
+ *    但 **`buf.toString(...)` 方向不等价**：`'base64url'` 是 **base64url**
+ *    （URL-safe、无 padding），32 字节编出 **43** 字符，而 `'base64'` 编出
+ *    **44** 字符并带 `=`。本仓另有 6 处**编码**点依赖这个语义（PKCE 的
+ *    `code_verifier` / `challenge`、网关 API 密钥的定长 43 位判据
+ *    `KEY_PATTERN`）—— 改过去会**静默换 key ⇒ 所有客户端同时 401**。
+ *    **绝不可**照抄「两种写法等价」去改它们。
+ *
+ *    ⚠️ `TextDecoder('base64url')` 抛 `RangeError` **不能**当「非法」的证据 ——
+ *    `TextDecoder` 只认 WHATWG 标签，`'base64'` 同样不是合法 label。
+ *
+ *    ⚠️ 本处**沿用既有写法**，与同文件 `jwtExpiresAtMs` / `jwtNickname` 同一种
+ *    解码口径 —— 同一语义出现两种写法会给未来留下分叉口子（且因解码等价，
+ *    改错一处**测试全绿、行为不变**，双写法会静默固化）。要不要全仓统一
+ *    是**独立任务**（49 处、含 `accio-oauth.ts` 的 PKCE 生成），不在本 issue 范围。
+ */
+export function jwtIssuedAtMs(token: string): number | undefined {
   if (typeof token !== 'string' || token.length === 0) return undefined
   const parts = token.split('.')
   if (parts.length < 2) return undefined

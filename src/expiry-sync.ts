@@ -84,6 +84,24 @@ export interface ExpiryAccessors<TCredential> {
    */
   refreshExpiresAtOf?: (credential: TCredential) => number | undefined
   /**
+   * **上次签发/刷新时刻**（毫秒）。供「保活续期」判据用（issue #124，2026-11-19）。
+   *
+   * ## 这条腿为谁而加（CodeBuddy：access TTL 以**天**计）
+   *
+   * lead-time 判据只在「距过期不足 1 小时」放行 ⇒ 对 access TTL = 28/30/60 天
+   * 的渠道，续期可能连续数十天一次都不发，`refresh_token` 被服务端**闲置失效**
+   * （实测 401 `12153: refresh token is invalid`，症状是「凭据过期 / API 密钥无效」
+   * 且面板写 `refreshable: false`，用户唯一出路是重登，且 28 天后**必复发**）。
+   *
+   * ⇒ 判据增加一条「距上次刷新已超过 {@link KEEPALIVE_MAX_IDLE_MS}」。
+   *   `iat` 在续期后会重签 ⇒ 它天然就是「上次刷新时刻」，不需要新字段。
+   *
+   * ⚠️ **不提供时行为与从前逐字节相同**（与 `refreshExpiresAtOf` 同款纪律）：
+   * 这条腿对 access TTL ≈ 1 小时的渠道**多余**（它们每轮都在 lead 窗口内，
+   * 强行保活只会白烧一次性 refresh_token），故只给需要的家开。
+   */
+  issuedAtOf?: (credential: TCredential) => number | undefined
+  /**
    * `AccountPool.findAccountIdByCredential` 的凭据身份。
    *
    * ⚠️ 该参数的语义是「**凭据内容**」（通常是 access_token）而**不是 ref 名**，
@@ -91,6 +109,25 @@ export interface ExpiryAccessors<TCredential> {
    */
   identityOf: (credential: TCredential) => string
 }
+
+/**
+ * 「保活续期」的最大闲置时长：距上次刷新超过它就必须发一次续期请求。
+ *
+ * ## 为什么是 7 天（而不是 issue #124 建议的 3~7 天中位数、或 TTL 的比例）
+ *
+ * 上游**没有**下发 `refresh_token` 的闲置窗口（issue 作者拿不到、我也拿不到），
+ * 所以这个值只能是**下界估计**，取值方向必须偏保守：
+ * - **取得太长**：refresh_token 仍可能在窗口外被作废（本缺陷原样复发）；
+ * - **取得太短**：每次续期都消耗/重签一次 refresh_token，而对一次性 token 的
+ *   渠道这会**提前报废**（本仓 2026-10-27 两次同型事故，见 `shouldRefreshNow` 注释）。
+ *
+ * 7 天对已知最紧的一批（access TTL 28 天）意味着**每 7 天一次**，安全余量 4 倍；
+ * 对 60 天那批是 8~9 次/周期 —— 都在「不会把 token 烧掉」的量级。
+ *
+ * ⚠️ 一旦上游给出更具体的闲置时长（issue 里已请报障者补响应原文），
+ *    只改这一个常量即可。
+ */
+export const KEEPALIVE_MAX_IDLE_MS = 7 * 24 * 60 * 60 * 1000
 
 /** 容差：毫秒时间戳来自 JWT 的秒级 `exp`，换算后可能有 1 秒内的舍入。 */
 const EXPIRY_TOLERANCE_MS = 1000
@@ -144,11 +181,36 @@ export function shouldRefreshNowWithRefreshExpiry<TCredential>(params: {
   expiresAtMs: number | undefined
   /** refresh_token 的到期时刻（毫秒）；`undefined` = 读不到（当作不知）。 */
   refreshExpiresAtMs: number | undefined
+  /**
+   * **上次签发/刷新时刻**（毫秒）；`undefined` = 读不到 ⇒ 保活腿不生效。
+   *
+   * ⚠️ issue #124：对 access TTL 以「天」计的渠道（CodeBuddy），仅靠 lead-time
+   * 会让续期连续数十天不发，`refresh_token` 在服务端**闲置失效**。
+   */
+  issuedAtMs?: number | undefined
+  /** 保活窗口；缺省 {@link KEEPALIVE_MAX_IDLE_MS}。传 `Infinity` 可关掉这条腿。 */
+  keepAliveMaxIdleMs?: number
   nowMs?: number
 }): boolean {
   const nowMs = params.nowMs ?? Date.now()
   // 主腿：access 进入 lead 窗口（含已过期 / 读不到）。
   if (shouldRefreshNow(params.expiresAtMs, nowMs)) return true
+  // 保活腿：距上次刷新超过窗口 ⇒ 主动续一次（让 refresh_token 保持活性）。
+  // ⚠️ 读不到 `iat` 就**放弃这条腿**（fail-open 到旧行为）—— fail-closed 会让
+  //    所有解不出 JWT 的凭据每 30 分钟被无谓刷一次，正是 `REFRESH_LEAD_MS`
+  //    那次事故的形态。
+  const issuedAtMs = params.issuedAtMs
+  const keepAliveMaxIdleMs = params.keepAliveMaxIdleMs ?? KEEPALIVE_MAX_IDLE_MS
+  // ⚠️ `keepAliveMaxIdleMs > 0` 是**必需**守卫（正向审计 P3-2）：传 0 或负数会让
+  //    `nowMs - issuedAtMs >= 0` 恒真 ⇒ 每 30 分钟一轮都真发续期请求 ⇒ 一次性
+  //    refresh_token 被白烧（2026-10-27 两次同型事故）。非正值一律当「关掉这条腿」。
+  if (issuedAtMs !== undefined
+    && Number.isFinite(issuedAtMs)
+    && Number.isFinite(keepAliveMaxIdleMs)
+    && keepAliveMaxIdleMs > 0
+    && nowMs - issuedAtMs >= keepAliveMaxIdleMs) {
+    return true
+  }
   // refresh 这条腿：读不到就**放弃这条腿**（fail-open 到「按 access 判」）。
   const r = params.refreshExpiresAtMs
   if (r === undefined || !Number.isFinite(r)) return false
@@ -253,6 +315,13 @@ export async function refreshAccountWithReconcile<TCredential>(params: {
    * 「凭据已死」当非终态 ⇒ 静默死号。必填是为了让漏接线在 `tsc` 就红。
    */
   makeTerminalError: (message: string) => Error
+  /**
+   * 覆盖「保活窗口」；缺省 {@link KEEPALIVE_MAX_IDLE_MS}（7 天）。
+   *
+   * 只在提供了 `accessors.issuedAtOf` 的家上生效（见该字段注释）。
+   * 传 `Infinity` 可关掉保活腿（等价于改造前）。
+   */
+  keepAliveMaxIdleMs?: number
   warn?: (message: string) => void
   info?: (message: string) => void
 }): Promise<boolean> {
@@ -262,6 +331,10 @@ export async function refreshAccountWithReconcile<TCredential>(params: {
   if (!shouldRefreshNowWithRefreshExpiry({
     expiresAtMs: expiresAt,
     refreshExpiresAtMs: accessors.refreshExpiresAtOf?.(credential),
+    issuedAtMs: accessors.issuedAtOf?.(credential),
+    ...params.keepAliveMaxIdleMs === undefined
+      ? {}
+      : { keepAliveMaxIdleMs: params.keepAliveMaxIdleMs },
   })) {
     // 凭据仍在有效期内：只把池值对账，不发请求。
     await syncAccountExpiry({

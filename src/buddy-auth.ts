@@ -9,6 +9,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   credentialExpiresAtMs,
+  credentialIssuedAtMs,
   isExpired,
   isRefreshable,
 } from './buddy.js'
@@ -36,10 +37,36 @@ import {
  * `BuddyAuth` 一个类服务两个产品（buddy / workbuddy），故 tag 取
  * `this.product.id`，日志里能区分是哪个面板。
  */
-const BUDDY_EXPIRY_ACCESSORS: ExpiryAccessors<BuddyCredential> = {
+/**
+ * ⚠️ **导出是刻意的**（2026-11-19，issue #124 正向审计 P1-1）。
+ *
+ * 审计实测：`issuedAtOf: credentialIssuedAtMs` 这一行删掉 ⇒ **15 条用例全绿，
+ * 而缺陷原样复发**。根因是当时 15 条里 12 条手传 `issuedAtMs` 直接测判据、
+ * 3 条只测 `jwtIssuedAtMs` 本身 —— **没有一条跨越「访问器 → 判据」这条缝**。
+ *
+ * ⇒ 导出本表，让用例能用**真实访问器**走一次 `refreshAccountWithReconcile`，
+ *    把接线本身钉住（见 `tests/unit/buddy-keepalive-refresh.spec.ts` 的接线段）。
+ */
+export const BUDDY_EXPIRY_ACCESSORS: ExpiryAccessors<BuddyCredential> = {
   expiresAtOf: credentialExpiresAtMs,
   refreshableOf: isRefreshable,
   identityOf: (credential) => credential.access_token ?? '',
+  /**
+   * ★★ **保活续期腿**（issue #124，2026-11-19）。
+   *
+   * 本家 access_token 的有效期以**天**计（本机解出三批：**60 / 30 / 28 天**，
+   * 上游还在持续收缩），而 lead-time 判据只在「距过期不足 1 小时」放行
+   * ⇒ 28 天里每一轮（每 30 分钟一次）都被跳过 ⇒ `refresh_token` 闲置 28 天
+   * 后被服务端作废（实测 `401 {"code":12153,"msg":"12153:refresh token is invalid"}`）。
+   *
+   * 提供本腿后，判据变成「**距上次刷新满 7 天就续一次**」，`refresh_token`
+   * 始终在闲置窗口内被使用。
+   *
+   * ⚠️ `workbuddy`（国际版）与 `buddy` **共用本表**（同一个 `BuddyAuth` 类，
+   * 只有 `product` 不同）⇒ 两国站点同时生效。国际版**未实测**（无账号），
+   * 但它与本家共用同一套签发/续期端点形态，风险与收益同源。
+   */
+  issuedAtOf: credentialIssuedAtMs,
 }
 
 /**
@@ -357,6 +384,33 @@ export class BuddyAuth extends Service {
         }
         const credential = parseCredential(resolved.value)
         if (!credential || !isRefreshable(credential)) {
+          /**
+           * ⚠️⚠️ **必须留日志**（issue #124 的次要发现，2026-11-19）。
+           *
+           * 原实现这里是一句 `continue` —— **零日志**。于是「凭据 JSON 坏了/
+           * 少了 refresh_token」与「refresh_token 被服务端作废」在用户侧
+           * **完全同形**（面板都写 `refreshable: false`、都要重登），
+           * 连排查的人都分不出是哪一种。报障者本机 `.credentials.yaml` 的
+           * `scope` 里就出现过**裸换行**（标准 `JSON.parse` 会炸）⇒ 这条路径
+           * 结构上可达。
+           *
+           * ⚠️ **不打印凭据内容**（它是 bearer 凭据）：只给账号 id、解析结果
+           * 与一段固定判据说明。
+           */
+          this.ctx.logger?.warn?.(
+            `[${this.product.id}] [credential-unparsable] 账号 ${entry.id} 的凭据${
+              credential === undefined ? '无法解析（JSON 损坏或字段缺失）' : '不携带 refresh_token'
+            }，已标记为不可续期（需重新登录）。`
+            // ⚠️ 唯一锚点 `[credential-unparsable]`（正向审计 P2-2）：下面
+            //     `RefreshTokenExpiredError` 那条的结尾也是「需重新登录」，
+            //     `grep 需重新登录` 分不开发是哪一种。锚点让两者可区分。
+            // ⚠️ 本日志**只出现一次**（正向审计 P2-1）：写 `refreshable: false` 之后，
+            //    `refreshAll` 首行 `if (!entry.refreshable) continue` 会永久跳过该账号
+            //    ⇒ 不会每 30 分钟刷一条。代价是「后来才坏」的账号要靠当时的这条日志，
+            //    过期账号不会再报，这是**有意的**（否则日志会被同一账号塞满）。
+            + '注意：这与「refresh_token 被服务端作废」（那条带 [refresh-token-expired] 锚点）'
+            + '是两种不同原因，本行不含凭据内容。',
+          )
           await pool.updateAccount(entry.id, { refreshable: false })
           continue
         }
@@ -381,7 +435,7 @@ export class BuddyAuth extends Service {
             // 忽略 updateAccount 本身的错误
           }
           this.ctx.logger?.warn?.(
-            `[${this.product.id}] 账号 ${entry.id} 的 refresh_token 已失效，`
+            `[${this.product.id}] [refresh-token-expired] 账号 ${entry.id} 的 refresh_token 已失效，`
             + '已标记为不可续期（需重新登录）',
           )
         } else {
