@@ -286,18 +286,30 @@ export function CreditWindowModal(props) {
     let alive = true
     void (async () => {
       try {
+        /**
+         * ⚠️⚠️ **`rpcCall` 已经解包过了**（`unwrapRpcResult`，
+         * `plugin-src/management-rpc.mjs:37`）：
+         *
+         * - 成功 ⇒ 直接返回 **`value`**（这里是 `{ windowDays, imminentDays, source, clamped }`）
+         * - 失败 ⇒ **抛 `Error`**（带 `.code`），**不会**返回 `ok:false`
+         *
+         * ⇒ 原来写 `if (res?.ok !== true)` 是错的：`res` 是 value 对象、没有 `ok` 字段
+         *   ⇒ 判据恒真 ⇒ 每次打开都显示「读取失败」（真实报障 2026-11-20）。
+         *   正确判据是「`res` 里有没有我们需要的字段」。
+         */
         const res = await rpcCall('credits.window.get', { provider })
         if (!alive) return
-        if (res?.ok !== true) {
-          setLoadError(res?.error?.message ?? '读取失败')
+        if (typeof res?.windowDays !== 'number' || typeof res?.imminentDays !== 'number') {
+          setLoadError('返回结构异常（缺少 windowDays / imminentDays）')
           return
         }
-        setSaved(res.value)
+        setSaved(res)
         // 预填「当前生效值」而不是留空：用户要看到「现在是多少」才能判断要不要改。
-        setDraftWindow(String(res.value.windowDays))
-        setDraftImminent(String(res.value.imminentDays))
+        setDraftWindow(String(res.windowDays))
+        setDraftImminent(String(res.imminentDays))
       } catch (caught) {
-        if (alive) setLoadError(String(caught))
+        // `rpcCall` 失败时会抛错（含 `.code`），这里如实转成可读文案。
+        if (alive) setLoadError(caught instanceof Error ? caught.message : String(caught))
       }
     })()
     return () => { alive = false }
@@ -336,17 +348,18 @@ export function CreditWindowModal(props) {
       //    `0` 是「关掉该档」，与「没填」是两件事。
       if (typeof parsedWindow === 'number') payload.windowDays = parsedWindow
       if (typeof parsedImminent === 'number') payload.imminentDays = parsedImminent
+      // ⚠️ `rpcCall` 成功即返回 value、失败即抛错（见 load effect 的注释）。
       const res = await rpcCall('credits.window.set', payload)
-      if (res?.ok !== true) {
-        setSaveError(res?.error?.message ?? '保存失败')
+      if (typeof res?.windowDays !== 'number' || typeof res?.imminentDays !== 'number') {
+        setSaveError('保存返回结构异常')
         return
       }
-      setSaved(res.value)
+      setSaved(res)
       // 回填**服务端生效值**（可能被钳制过）—— 让用户看见实际结果
-      setDraftWindow(String(res.value.windowDays))
-      setDraftImminent(String(res.value.imminentDays))
+      setDraftWindow(String(res.windowDays))
+      setDraftImminent(String(res.imminentDays))
     } catch (caught) {
-      setSaveError(String(caught))
+      setSaveError(caught instanceof Error ? caught.message : String(caught))
     } finally {
       setBusy(false)
     }
@@ -358,15 +371,15 @@ export function CreditWindowModal(props) {
     try {
       // 两个字段都不传 ⇒ 后端删键（回落环境变量/默认）
       const res = await rpcCall('credits.window.set', { provider })
-      if (res?.ok !== true) {
-        setSaveError(res?.error?.message ?? '恢复失败')
+      if (typeof res?.windowDays !== 'number' || typeof res?.imminentDays !== 'number') {
+        setSaveError('恢复返回结构异常')
         return
       }
-      setSaved(res.value)
-      setDraftWindow(String(res.value.windowDays))
-      setDraftImminent(String(res.value.imminentDays))
+      setSaved(res)
+      setDraftWindow(String(res.windowDays))
+      setDraftImminent(String(res.imminentDays))
     } catch (caught) {
-      setSaveError(String(caught))
+      setSaveError(caught instanceof Error ? caught.message : String(caught))
     } finally {
       setBusy(false)
     }
