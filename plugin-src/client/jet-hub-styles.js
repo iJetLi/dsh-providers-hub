@@ -1650,9 +1650,93 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-windowInvalid { color: var(--dsw-alias-state-error-primary, #d93025); }
 .dim-jh-windowPreview { display: flex; flex-direction: column; gap: 5px; margin-top: 4px; padding: 9px 11px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); }
 .dim-jh-windowPreviewTitle { margin-bottom: 1px; font-size: 10px; font-weight: 600; color: var(--dsw-alias-label-tertiary); letter-spacing: .03em; }
-.dim-jh-windowPreviewRow { display: flex; align-items: center; gap: 9px; font-size: 11px; }
+/**
+ * ★★ **预览行布局**（2026-11-20 二次修订）。
+ *
+ * ## 为什么改成两行
+ *
+ * 第一版是**一行四格**：色点 + 区间(128px) + 条 + 金额(76px)。
+ * 但弹窗内容区只有约 340px ⇒ 减去区间与金额后，**条只剩 38px**。
+ * 于是「临期占 1.4%」这种真实数据算出来的条宽只有 **0.5px**、加最小宽度后
+ * 也才 **0.8px** —— 用户依然看不见，会以为「进度条坏了」。
+ *
+ * ⇒ 改成**两行**：
+ * 
+ * ● 临期 < 1 天                    393.37
+ *   [██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   ← 条独占整行（约 300px）
+ * 
+ * 条宽从 38px → ~300px，**1.4% 也能有 4px+**，肉眼可见。
+ *
+ * ⚠️ 用 flex-wrap: wrap + 条 flex-basis: 100% 实现，不新增 DOM 层级。
+ */
+.dim-jh-windowPreviewRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  /* 档与档之间留呼吸（条属于上一行，组间距要明显大于行内间距） */
+  margin-bottom: 2px;
+}
+/* 第一行：色点 + 区间 + 金额（同一行，金额靠右） */
+.dim-jh-windowPreviewHead {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
 .dim-jh-windowPreviewRange { flex: none; min-width: 128px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }
-.dim-jh-windowPreviewAmount { flex: 1; text-align: right; font-weight: 600; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; }
+/**
+ * ★★ **预览进度条 / 色柱条**（用户 2026-11-20 报障「不是应该有进度条吗？怎么没有」）。
+ *
+ * ## ⚠️ 这是我第一版的遗漏
+ *
+ * 方案图里画了色条，但代码只渲染了「色点 + 区间 + 金额」三格，**没有条**。
+ * 用户看到金额变了、却看不到柱状分布。
+ *
+ * ## 布局：条在中间，吃掉剩余宽度
+ *
+ * 
+ * ● 临期 < 1 天   [████████░░░░░░░░░░]   393.37
+ * ● 短期 1~2 天   [████████████░░░░░░]   607.10
+ * ● 永久 ≥ 2 天   [██████████████████]   27263.00
+ * 
+ *
+ * - 预览条 flex: 1：吃掉「区间」与「金额」之间的全部空间
+ * - 区间 min-width: 128px（已有）：三条的起点对齐，不会因文字长短参差
+ * - 金额 min-width: 76px：右对齐，数字位数变化时**不推挤进度条**
+ *   （⚠️ 原来是 flex: 1，会把条挤没 —— 这也是「看不到条」的一部分原因）
+ */
+.dim-jh-windowPreviewBar {
+  /* ★ 独占一行：父级是 column，故块级元素天然占满整行（~300px） */
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  /* ⚠️ 缩进对齐到文字，让条看起来属于这一档而不是独立一块 */
+  margin-left: 15px;
+  /* 7px 而不是 5px：小档位（3%）在 228px 上是 6.8px 宽，
+     5px 高时看起来只是个点，7px 才能读成一小段 */
+  height: 7px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-3);
+  overflow: hidden;
+}
+.dim-jh-windowPreviewFill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  /* ⚠️ 宽度由内联 style 给（取决于实时金额），这里只给过渡动画 */
+  transition: width .18s ease;
+}
+.dim-jh-windowPreviewFill[data-tone="imminent"] { background: var(--dsw-alias-state-error-primary, #d93025); }
+.dim-jh-windowPreviewFill[data-tone="short"] { background: var(--dsw-alias-state-warn-primary, #b45309); }
+.dim-jh-windowPreviewFill[data-tone="permanent"] { background: var(--dsw-alias-state-success-primary, #15803d); }
+/* ⚠️ 金额改成固定宽度：原 flex: 1 会把进度条挤到 0 宽（真实原因之一） */
+/**
+ * ⚠️ 金额**留在第一行**（与区间同行）：margin-left: auto 会把它推到最右，
+ * 但若它排在条之后就会被 flex-wrap 换到第二行（实测截图里金额单独占一行，
+ * 与区间分离，很难读）。
+ * ⇒ 用 order 让金额**排在条之前**（视觉顺序仍是「区间 … 金额」，因为金额靠右）。
+ */
+.dim-jh-windowPreviewAmount { flex: none; margin-left: auto; min-width: 76px; text-align: right; font-weight: 600; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; }
 .dim-jh-windowSpacer { flex: 1; }
 
 .dim-jh-modalActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }

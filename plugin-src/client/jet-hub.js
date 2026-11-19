@@ -266,7 +266,7 @@ const PROVIDERS = Object.freeze(
  * 数据来自 `props.accounts()`（面板已有的逐包读数），
  * 用 `computeCoverage` 按草稿窗口重算 ⇒ 改数字即时刷新。
  */
-import { computeCoverage, clampImminent, describeWindowSource, parseWindowInput, windowRangeLabels } from './credit-window-ui.js'
+import { barPercent, computeCoverage, clampImminent, coverageTotal, describeWindowSource, parseWindowInput, windowRangeLabels } from './credit-window-ui.js'
 
 export function CreditWindowModal(props) {
   const { provider, providerLabel, rpcCall, accounts, onClose } = props
@@ -332,6 +332,14 @@ export function CreditWindowModal(props) {
   // ---- 实时预览（纯前端重算） ----
   const coverage = computeCoverage(accounts(), effectiveWindow, effectiveImminent, Date.now())
   const ranges = windowRangeLabels(effectiveWindow, effectiveImminent)
+  /**
+   * 三档总额（进度条分母）与每档宽度百分比。
+   *
+   * ⚠️ 算法抽在 `credit-window-ui.js` 的 `coverageTotal` / `barPercent`（纯函数）：
+   *    那里的注释解释了「最小可见宽度 3%」与「不除零」的理由。
+   *    **不要在这里内联一份** —— 两处同义判据必然漂移，且这里跑不进单测。
+   */
+  const previewTotal = coverageTotal(coverage)
 
   /** 是否有未保存的改动。 */
   const dirty = saved !== null && (
@@ -351,15 +359,37 @@ export function CreditWindowModal(props) {
       // ⚠️ `rpcCall` 成功即返回 value、失败即抛错（见 load effect 的注释）。
       const res = await rpcCall('credits.window.set', payload)
       if (typeof res?.windowDays !== 'number' || typeof res?.imminentDays !== 'number') {
-        setSaveError('保存返回结构异常')
-        return
+        throw new Error('保存返回结构异常（缺少 windowDays / imminentDays）')
       }
       setSaved(res)
       // 回填**服务端生效值**（可能被钳制过）—— 让用户看见实际结果
       setDraftWindow(String(res.windowDays))
       setDraftImminent(String(res.imminentDays))
+      /**
+       * ★ **保存成功 ⇒ 自动关闭弹窗**（用户 2026-11-20 要求）。
+       *
+       * ⚠️ 关闭放在 `setSaved`/回填**之后**：若先关再回填，`saved` 会在卸载后
+       *    才更新（React 18 下不报错但语义混乱，且若将来加了「关闭不卸载」会出错）。
+       * ⚠️ 不弹「保存成功」提示：用户点保存的意图就是「改完关掉」，
+       *    成功时的最好反馈是**窗口消失**（多一次点击反而不顺手）。
+       */
+      onClose()
     } catch (caught) {
-      setSaveError(caught instanceof Error ? caught.message : String(caught))
+      /**
+       * ★ **保存失败 ⇒ alert 警告**（用户 2026-11-20 要求）。
+       *
+       * ⚠️ 同时**保留**弹窗内的 `saveError` 文案（双写）：
+       *    `alert` 点掉就没了，而「哪里错了」需要留在界面上让用户对照着改。
+       * ⚠️ `alert` 可能被宿主环境禁用（无头/沙箱）⇒ 包 try，不能因为弹窗失败
+       *    就让保存流程崩掉（`setSaveError` 已经在下面兜住了信息）。
+       */
+      const message = caught instanceof Error ? caught.message : String(caught)
+      setSaveError(message)
+      try {
+        window.alert(`保存分档窗口失败：\n${message}`)
+      } catch {
+        // alert 不可用（宿主禁用 / 非浏览器环境）—— 界面上已有红字，不重复报错
+      }
     } finally {
       setBusy(false)
     }
@@ -482,9 +512,31 @@ export function CreditWindowModal(props) {
               ['short', ranges.shortTerm, coverage.shortTermAmount],
               ['permanent', ranges.permanent, coverage.permanentAmount],
             ].map(([tone, text, amount]) => React.createElement('div', { key: tone, className: 'dim-jh-windowPreviewRow' },
-              React.createElement('span', { className: 'dim-jh-windowDot', 'data-tone': tone }),
-              React.createElement('span', { className: 'dim-jh-windowPreviewRange' }, text),
-              React.createElement('span', { className: 'dim-jh-windowPreviewAmount' }, formatAmount(amount)),
+              /**
+               * ★ 第一行：色点 + 区间 + 金额（同行）。
+               * ★ 第二行：进度条**独占整行**。
+               *
+               * ⚠️ 为什么必须分两行（实测决定）：一行四格时，弹窗内容区只有
+               *    约 340px，减去区间 128px + 金额 76px 后条只剩 **38px**
+               *    ⇒ 「临期占 1.4%」这种真实数据算出来的条宽只有 **0.5px**，
+               *    肉眼完全看不见（用户会以为「进度条又没渲染」）。
+               *    分两行后条宽 ≈ 245px，同一比例下是 **5px**，可见。
+               */
+              React.createElement('div', { className: 'dim-jh-windowPreviewHead' },
+                React.createElement('span', { className: 'dim-jh-windowDot', 'data-tone': tone }),
+                React.createElement('span', { className: 'dim-jh-windowPreviewRange' }, text),
+                React.createElement('span', { className: 'dim-jh-windowPreviewAmount' }, formatAmount(amount)),
+              ),
+              /**
+               * 进度条（色柱条）：宽度 = 该档金额 / 三档总额。
+               * 见 `barPercent` 的注释（含「最小可见宽度 2%」的理由）。
+               */
+              React.createElement('span', { className: 'dim-jh-windowPreviewBar' },
+                React.createElement('span', {
+                  className: 'dim-jh-windowPreviewFill',
+                  'data-tone': tone,
+                  style: { width: `${barPercent(amount, previewTotal)}%` },
+                })),
             )),
           ),
           saveError === ''

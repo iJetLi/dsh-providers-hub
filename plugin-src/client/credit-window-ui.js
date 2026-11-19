@@ -151,7 +151,62 @@ export function computeCoverage(accounts, windowDays, imminentDays, now) {
   return out
 }
 
-/** 把来源代码翻译成弹窗里显示的中文标注。 */
+/**
+ * 预览进度条的**最小可见宽度**（百分比）。
+ *
+ * ⚠️ 为什么不直接用裸比例（实测决定，2026-11-20）：
+ * 真实数据临期 393 / 短期 607 / 永久 27263 ⇒ 占比 **1.4% / 2.1% / 96.5%**。
+ * 条可用宽度约 228px ⇒ 前两条只有 **3.2px / 4.8px**，肉眼读成一个点。
+ * 用户会以为「进度条没渲染」—— 这正是本功能被报障两次的形态。
+ *
+ * ⇒ 金额 > 0 的档位强制至少 3%（约 7px）。
+ *    代价是三条之和可能略超 100%，但那是刻意的：
+ *    「看得出来有个条」比「比例绝对精确」重要，且差额 < 3% 肉眼无感。
+ */
+export const MIN_VISIBLE_PERCENT = 3
+
+/**
+ * 计算某档在进度条上的宽度百分比。
+ *
+ * @param amount - 该档金额
+ * @param total - 三档总额
+ * @returns 0 ~ 100 的百分比
+ *
+ * ## 边界（每条都有测试）
+ *
+ * | 输入 | 返回 | 理由 |
+ * |---|---|---|
+ * | `amount = 0` | `0` | 空档不能画假条 |
+ * | `total = 0` | `0` | 不除零（`NaN` 会让 `width: NaN%` 整条不渲染）|
+ * | 金额 > 0 但占比 < 3% | `3` | 最小可见宽度（见 {@link MIN_VISIBLE_PERCENT}）|
+ * | 金额 > 0 且占比 > 3% | 真实占比 | |
+ * | 占比 > 100%（数据异常）| `100` | 夹住，不允许条溢出容器 |
+ */
+export function barPercent(amount, total) {
+  const a = Number(amount)
+  const t = Number(total)
+  if (!Number.isFinite(a) || !Number.isFinite(t)) return 0
+  if (!(a > 0) || !(t > 0)) return 0
+  const pct = (a / t) * 100
+  if (!Number.isFinite(pct)) return 0
+  return Math.max(MIN_VISIBLE_PERCENT, Math.min(100, pct))
+}
+
+/**
+ * 三档总额（进度条的分母）。
+ *
+ * ⚠️ 必须用**同一份** `coverage` 的三个金额求和，不要另算一次 ——
+ * 两处各算会因「永久是否并入 longTerm」这类口径差异而漂移。
+ */
+export function coverageTotal(coverage) {
+  if (coverage === null || typeof coverage !== 'object') return 0
+  const sum = Number(coverage.imminentAmount || 0)
+    + Number(coverage.shortTermAmount || 0)
+    + Number(coverage.permanentAmount || 0)
+  return Number.isFinite(sum) && sum > 0 ? sum : 0
+}
+
+/** 单个字段行（含覆盖账号数徽标）。 */
 export function describeWindowSource(source, windowDays, imminentDays) {
   if (source === 'setting') return '本渠道设置'
   if (source === 'env') return '环境变量'
