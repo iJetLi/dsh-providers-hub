@@ -654,6 +654,40 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
       const limit = readOptions.staleTtlMs ?? staleTtlMs
       const force = readOptions.force === true
       slots.set(key, { provider, entry: { id: accountId, ...entry } })
+      /**
+       * ★★★ **磁盘缓存：重启后的第一眼不等网络**（2026-11-20）。
+       *
+       * ## ⚠️⚠️ 这条路径才是 `credits.balances` 端点真正走的那条
+       *
+       * 第一版我只接在 `getServingStale`（`read()` 用）里，**完全没生效** ——
+       * 实测缓存文件从未生成、积分窗口仍然 1~2 秒。
+       *
+       * 根因：`jet-hub-rpc.ts` 的 `credits.balances` 端点调的是
+       * **`balanceCacheOf()!.readStale(...)`**，而 `readStale` 在下面直接
+       * `await cache.get({ force })` 回源，**不经过 `getServingStale`**。
+       *
+       * ⇒ 两条路径都要接，缺一条就等于没做（这正是本仓库反复强调的
+       *   「同一语义两套判据」的反面：**两条消费路径**必须都覆盖）。
+       *
+       * ## ⚠️ `force` 时**不读盘**
+       *
+       * 用户点面板「刷新积分」就是要真实值，给他磁盘缓存等于假按钮
+       *（与下面「`force` 下不兼顶」是同一条纪律）。
+       */
+      const diskReading = force ? undefined : readDiskReading(provider, accountId)
+      if (diskReading !== undefined) {
+        const cached = diskReading as BalanceReading
+        /**
+         * ⚠️ **返回时必须标 `stale: true`** —— 与 `getServingStale` 那条同理：
+         * 不标的话刷新器会认为读数新鲜、永不回源 ⇒ 一直显示上次退出时的余额。
+         *
+         * ⚠️ 同时写进 `lastSuccess`：这样**真实失败**时还能拿它兼顶
+         *（磁盘缓存本来就是一个合法的「上次成功值」，丢掉它是浪费）。
+         * 但**不能**写进 `TtlCache` 槽（那会把它标成新鲜 → 见上面 `getServingStale` 的说明）。
+         */
+        lastSuccess.set(key, { at: cached.at, value: cached.value })
+        return { at: cached.at, value: cached.value, stale: true }
+      }
       const fresh = await cache.get({ force })
 
       /**
@@ -666,6 +700,21 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
         // ⚠️ **兼顶回滚的值不算「成功」**：它是上一轮的成功值 + 本轮的失败，
         //   若把它当新鲜成功写进表，就会**刷新兼顶上界的计时起点** ⇒ 上界永不到期。
         if (fresh.stale !== true) lastSuccess.set(key, fresh)
+        /**
+         * ★ **把成功读数记进磁盘镜像**（2026-11-20）。
+         *
+         * ⚠️⚠️ 这条路径才是 `credits.balances` 端点走的 —— 第一版我只在
+         * `read()` 里记，故**磁盘文件从未生成**（实测：跑完 DSH 后
+         * `~/.dsh/cache/balance-readings.json` 不存在）。
+         *
+         * ⚠️ 只记成功（无 `error`）且**非兼顶回滚**的值：兼顶回滚是「上一轮的
+         * 成功值 + 本轮的失败」，落盘它会让下次启动显示一个更旧的值。
+         *
+         * ⚠️ 只置脏标记，不写盘（写盘时机由 30 分钟定时器 / 退出钩子控制）。
+         */
+        if (fresh.stale !== true && fresh.value !== undefined) {
+          noteDiskReading(provider, accountId, { at: fresh.at, value: fresh.value })
+        }
         return { at: fresh.at, value: fresh.value, stale: false }
       }
 
