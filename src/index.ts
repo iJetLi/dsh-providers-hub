@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto'
 import { codeartsImagePart, codeartsVisionModel, registerCodeArtsLlm, PROVIDER as CODEARTS_PROVIDER } from './llm-adapter.js'
 // ⚠️ `analyzeImage`：让纯文本模型也能看图（2026-10-21）。模块头有完整判据链。
 import { installAnalyzeImage } from './analyze-image.js'
-import { startCatalogPrewarm } from './catalog-prewarm.js'
+import { selectPrewarmProviders, startCatalogPrewarm } from './catalog-prewarm.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
 import { registerBuddyLlm } from './buddy-adapter.js'
 import { registerLobsteraiLlm } from './lobsterai-adapter.js'
@@ -6584,8 +6584,60 @@ async function fetchBalanceReading(
   //
   // ⚠️ **不 await**：`apply()` 是同步函数，预热会发网络请求（与既有的
   // opencode 能力预热同款约定）。停止函数挂 `ctx.effect`，插件释放后停手。
+  //
+  // ---------------------------------------------------------------------------
+  // ★★★ **2026-11-20：预热只挑「有账号」的 provider**（真实启动卡顿修复）
+  //
+  // ## 实测（33 个 provider，冷启动第 1 轮）
+  //
+  // ```
+  // +     8ms  22 个 provider 全部完成
+  // +  1289ms  workbuddy / codearts
+  // + 12586ms  cline (12585ms)   ← 独占 12.5 秒
+  // ```
+  //
+  // ## 根因
+  //
+  // `providers: Object.keys(modelAdapters)` 把**全部 33 个**都拿去预热，
+  // 而其中大部分**根本没有可用账号**（本机实测：60 个账号只覆盖 10 家，
+  // 其余 23 家一个账号都没有）。
+  //
+  // ⚠️ 骨架层 `ModelCatalog.listModels` **已有账号门控**
+  // （`providerCatalogVisible` → `hasLoggedInAccount`），没账号时返回 `[]`。
+  // 但**门控拦不住「门控自身的成本」**：
+  //
+  // 1. `hasLoggedInAccount` 要**逐个解析凭据**（`ctx.credentials.resolve`
+  //    + `JSON.parse`）—— 它不发网络，但对**每个** provider 都要跑一遍；
+  // 2. 凭据只要**能解析**就算「已登录」⇒ **停用的账号也会通过门控**
+  //    （`enabled` 刻意不参与该判据，见 `hasLoggedInAccount` 的注释）；
+  // 3. 通过门控后真的去拉远端目录 —— 本机 `cline` 的账号**已停用但凭据还在**
+  //    ⇒ 它会完整走完「两个端点 + models.dev 6.47MB」的链路 ⇒ **12.5 秒**。
+  //
+  // ## 修法
+  //
+  // 预热前先用**同步**判据筛一遍：只预热「账号池里至少有一个**启用**账号」的
+  // provider。理由：
+  //
+  // - 没有启用账号 ⇒ 用户此刻用不到这家 ⇒ 目录拉下来也没人看；
+  // - 与页头「供应商开关」/ 模型选择器的可见性**同源**（都是「有没有启用账号」）；
+  // - 纯同步（`listAccountsByProvider` 读内存副本），不引入异步开销。
+  //
+  // ⚠️ **刻意不用 `hasLoggedInAccount`**：它是异步的（逐个解析凭据），
+  // 33 家筛一遍反而比预热本身还慢；而且它**不看 `enabled`** —— 正是本缺陷的
+  // 成因之一（停用账号照样通过）。
+  //
+  // ⚠️ **代价（已确认接受）**：用户新登录/重新启用一个 provider 后，它的目录
+  // 不在本轮预热里 ⇒ 要等下一次 `listModels`（打开设置页 / 切模型）才拉。
+  // 那是**用户主动动作触发的**，不构成卡顿。
+  //
+  // ⚠️ 筛选逻辑抽在 `selectPrewarmProviders`（**纯函数**，可被单测直接断言）：
+  // index.ts 无法单测（装配层），把它留在这里等于这段逻辑零守卫。
+  const prewarmProviders = selectPrewarmProviders(
+    Object.keys(modelAdapters),
+    (provider) => pool.listAccountsByProvider(provider),
+  )
   ctx.effect(() => startCatalogPrewarm({
-    providers: Object.keys(modelAdapters),
+    providers: prewarmProviders,
     warm: (provider) => ctx.llm.listModels(provider),
     logger: { warn: (message) => ctx.logger?.warn?.(message) },
   }))

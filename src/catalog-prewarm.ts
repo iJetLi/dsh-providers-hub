@@ -90,6 +90,59 @@ function defaultSchedule(fn: () => void, ms: number): () => void {
 }
 
 /**
+ * ★★★ **筛出「值得预热」的 provider**（2026-11-20，真实启动卡顿修复）。
+ *
+ * ## 它修的是什么
+ *
+ * 实测（33 个 provider，冷启动第 1 轮）：
+ *
+ * ```
+ * +     8ms  22 个 provider 全部完成
+ * +  1289ms  workbuddy / codearts
+ * + 12586ms  cline (12585ms)   ← 独占 12.5 秒
+ * ```
+ *
+ * 本机 60 个账号只覆盖 **10 家**，其余 **23 家一个账号都没有**，却照样被预热。
+ * 更糟的是 `cline`：账号 **已停用但凭据还在** ⇒ 骨架的账号门控
+ * （`providerCatalogVisible` → `hasLoggedInAccount`，判据是「凭据可解析」，
+ * **刻意不看 `enabled`**）照样放行 ⇒ 它完整走完「两个端点 + models.dev 6.47MB」
+ * 的链路 ⇒ 12.5 秒。
+ *
+ * ## 判据：至少一个**启用**账号
+ *
+ * - 没有启用账号 ⇒ 用户此刻用不到这家 ⇒ 目录拉下来也没人看；
+ * - 与页头供应商开关 / 模型选择器的可见性**同源**；
+ * - **同步**（读账号池内存副本），不引入异步开销。
+ *
+ * ⚠️ **刻意不用 `hasLoggedInAccount`**：它异步（逐个解析凭据），33 家筛一遍
+ * 比预热本身还慢；且它**不看 `enabled`** —— 正是本缺陷的成因之一。
+ *
+ * ⚠️ **代价（已确认接受）**：用户新登录/重新启用一个 provider 后，它的目录
+ * 不在本轮预热里 ⇒ 要等下一次 `listModels`（打开设置页 / 切模型）才拉。
+ * 那是**用户主动动作触发的**，不构成启动卡顿。
+ *
+ * @param providers - 全部候选 provider id（通常是 `Object.keys(modelAdapters)`）
+ * @param listAccounts - 读某 provider 的全部账号（含停用），通常是
+ *   `(p) => pool.listAccountsByProvider(p)`
+ * @returns 过滤后的 provider 列表（保持原顺序）
+ *
+ * ⚠️ **读池异常时保守保留**该 provider：预热失败只是慢，误删会让目录
+ * **永不预热**（那是更糟的静默失效，客户端会永久停在兜底表上）。
+ */
+export function selectPrewarmProviders(
+  providers: readonly string[],
+  listAccounts: (provider: string) => readonly { enabled?: boolean }[],
+): string[] {
+  return providers.filter((provider) => {
+    try {
+      return listAccounts(provider).some((account) => account.enabled !== false)
+    } catch {
+      return true
+    }
+  })
+}
+
+/**
  * 启动有界预热，返回**停止函数**（须挂到 `ctx.effect` 上）。
  *
  * 每轮对每个 provider 各调一次 {@link CatalogPrewarmOptions.warm}。

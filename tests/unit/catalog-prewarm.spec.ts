@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path'
 import {
   CATALOG_PREWARM_DELAYS_MS,
   isPrewarmSpacingValid,
+  selectPrewarmProviders,
   startCatalogPrewarm,
 } from '../../src/catalog-prewarm.js'
 import { REMOTE_CATALOG_COOLDOWN_MS } from '../../src/remote-catalog-gate.js'
@@ -322,5 +323,100 @@ describe('IKJVTF 接线：十个适配器都接上了广播', () => {
     // 形状不可识别必须记 warning（HTTP 200 + 网关降级返回 `{}` / HTML）
     expect(source).toMatch(/isClineRecommendedShape\(payload\)/)
     expect(source).toMatch(/isClineModelsShape\(payload\)/)
+  })
+})
+
+/**
+ * ★★★ **预热只挑「有启用账号」的 provider**（2026-11-20 真实启动卡顿修复）。
+ *
+ * ## 实测背景（33 个 provider，冷启动第 1 轮）
+ *
+ *     +     8ms  22 个 provider 全部完成
+ *     +  1289ms  workbuddy / codearts
+ *     + 12586ms  cline (12585ms)   ← 独占 12.5 秒
+ *
+ * 本机 60 个账号只覆盖 **10 家**，其余 **23 家一个账号都没有**，却照样被预热。
+ *
+ * ⚠️ 更关键的是 `cline`：账号 **已停用但凭据还在** ⇒ 骨架的账号门控
+ *（`hasLoggedInAccount` 判据是「凭据可解析」，**刻意不看 `enabled`**）
+ *  照样放行 ⇒ 它完整走完「两个端点 + models.dev 6.47MB」⇒ 12.5 秒。
+ *
+ * ⇒ 预热前用**同步**判据筛：只留「至少一个**启用**账号」的 provider。
+ */
+describe('selectPrewarmProviders：预热只挑有启用账号的 provider', () => {
+  /** 造一个「provider → 账号列表」的读取器；未登记的 provider 抛错。 */
+  const poolOf = (table) => (provider) => {
+    const accounts = table[provider]
+    if (accounts === undefined) throw new Error(`未登记：${provider}`)
+    return accounts
+  }
+
+  it('★★★ 只保留「至少一个启用账号」的 provider', () => {
+    const list = poolOf({
+      buddy: [{ enabled: true }],
+      workbuddy: [{ enabled: true }, { enabled: true }],
+      cline: [{ enabled: false }],
+      opencode: [{ enabled: false }],
+      trae: [{ enabled: true }, { enabled: false }],
+    })
+    const out = selectPrewarmProviders(
+      ['buddy', 'workbuddy', 'cline', 'opencode', 'trae'],
+      list,
+    )
+    expect(out).toEqual(['buddy', 'workbuddy', 'trae'])
+  })
+
+  it('★★★ 停用账号不得让该 provider 通过（真实缺陷的核心形态）', () => {
+    // ⚠️ 这正是 cline 的形态：凭据还在 ⇒ hasLoggedInAccount 返回 true ⇒
+    //    骨架门控放行 ⇒ 真的去拉 12.5 秒的目录。
+    const list = poolOf({ cline: [{ enabled: false }] })
+    expect(selectPrewarmProviders(['cline'], list)).toEqual([])
+  })
+
+  it('★★ `enabled` 缺省视为启用（与账号池其它判据一致）', () => {
+    // 账号池里 `enabled` 可选，缺省 = 启用（既有口径是 `a.enabled !== false`）
+    const list = poolOf({ buddy: [{}], trae: [{ enabled: undefined }] })
+    expect(selectPrewarmProviders(['buddy', 'trae'], list)).toEqual(['buddy', 'trae'])
+  })
+
+  /**
+   * ★★★ **必须看「所有」账号，不能只看第一条**（变异 M3 无牙后补）。
+   *
+   * 之前的用例里「首条账号」恰好能代表结果 ⇒ 把实现改成 `list[0].enabled`
+   * 时全绿。真实形态里**停用账号经常排在前面**（先加后停用），
+   * 只看第一条会把「其实还有启用账号」的 provider 误排除 ⇒ 目录永不预热。
+   */
+  it('★★★ 首条停用但后续有启用 ⇒ 必须保留', () => {
+    const list = poolOf({ buddy: [{ enabled: false }, { enabled: true }] })
+    expect(selectPrewarmProviders(['buddy'], list)).toEqual(['buddy'])
+  })
+
+  it('★★ 首条启用但后续全停用 ⇒ 保留（已有一条启用即可）', () => {
+    const list = poolOf({ buddy: [{ enabled: true }, { enabled: false }, { enabled: false }] })
+    expect(selectPrewarmProviders(['buddy'], list)).toEqual(['buddy'])
+  })
+
+  it('★ 全停用 ⇒ 空数组（预热整体跳过）', () => {
+    const list = poolOf({ a: [{ enabled: false }], b: [{ enabled: false }] })
+    expect(selectPrewarmProviders(['a', 'b'], list)).toEqual([])
+  })
+
+  it('★ 保持原顺序（不得重排）', () => {
+    const list = poolOf({
+      z: [{ enabled: true }],
+      a: [{ enabled: true }],
+      m: [{ enabled: true }],
+    })
+    expect(selectPrewarmProviders(['z', 'a', 'm'], list)).toEqual(['z', 'a', 'm'])
+  })
+
+  it('★★ 读池抛错 ⇒ 保守保留（宁可慢，不要永不预热）', () => {
+    // ⚠️ 误删的后果是「目录永不预热」⇒ 客户端永久停在兜底表，比慢更糟。
+    const list = () => { throw new Error('池读取失败') }
+    expect(selectPrewarmProviders(['a', 'b'], list)).toEqual(['a', 'b'])
+  })
+
+  it('★ 空输入 ⇒ 空输出', () => {
+    expect(selectPrewarmProviders([], () => [])).toEqual([])
   })
 })
