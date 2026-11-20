@@ -76,6 +76,26 @@ export interface ResolvedCreditWindow {
   readonly clamped: boolean
 }
 
+/**
+ * 「短期窗口」的**上限**（天）：100 年。
+ *
+ * ## 为什么必须有上限（2026-11-21，PR #129 正向审计 P2）
+ *
+ * `sanitizeCreditWindows` 已挡掉 `Infinity`（理由逐字写着「会让『永久』档永远为空
+ * —— 一切都被判成临期/短期」），但**同型的有限大值没挡**：`1e9` 通过
+ * `Number.isFinite` ⇒ `windowMs = 8.64e13` ⇒ `remaining <= windowMs` 恒真 ⇒
+ * **`permanent` 恒 0**，症状与 `Infinity` 一模一样。
+ *
+ * ⇒ 挡 A 却没挡同型的 B 是本仓反复出事的形态，故在**唯一天数入口**补这道闸。
+ *
+ * ⚠️ 取 `36_500` 是为了与客户端 `plugin-src/client/credit-window-ui.js` 的
+ * `parseWindowInput` **同值**（那边拒绝 `> 36_500`）：两端口径一致，
+ * 才不会出现「UI 说非法、后端却收下」或反向的错位。
+ * 那边是**拒绝**（让用户重填），这边是**钳制**（手改文件不该让面板崩）——
+ * 两侧方向不同是刻意的：UI 有用户可交互，文件只有一行字。
+ */
+export const MAX_CREDIT_WINDOW_DAYS = 36_500
+
 /** 读取本渠道设置的函数（注入 `AccountPool.creditWindow`）。 */
 export type CreditWindowReader = (provider: string) => CreditWindowSetting | undefined
 
@@ -168,12 +188,24 @@ export function resolveCreditWindow(
   const envWindow = env.buddyExpiringWindowDays()
   const envImminent = env.buddyImminentWindowDays()
 
-  const windowDays = fromSettingWindow ? setWindow! : envWindow
-  const rawImminent = fromSettingImminent ? setImminent! : envImminent
+  const pickedWindow = fromSettingWindow ? setWindow! : envWindow
+  const pickedImminent = fromSettingImminent ? setImminent! : envImminent
+  // ★ 上限闸（见 {@link MAX_CREDIT_WINDOW_DAYS}）：必须在**选级之后**钳，
+  //   否则「env 给了超大值」这条也不受控（只钳 setting 会漏一级）。
+  const windowDays = Math.min(pickedWindow, MAX_CREDIT_WINDOW_DAYS)
+  const rawImminent = Math.min(pickedImminent, MAX_CREDIT_WINDOW_DAYS)
   // ★ 全仓唯一的业务钳制：临期 ⊂ 短期（倒挂会让「短期」段变成负区间）
   const imminentDays = Math.min(rawImminent, windowDays)
-  // ⚠️ `>` 而不是 `>=`：相等不是钳制（用户填 5/5 是合法配置）
-  const clamped = rawImminent > windowDays
+  /**
+   * `clamped` 必须**同时**表达两种钳制，否则弹窗会漏报：
+   * ① 倒挂（`imminent > window`）；
+   * ② 超过上限（`picked* > MAX`）—— 手改文件写 `1e9` 的用户有权知道它被压到了 36500。
+   *
+   * ⚠️ 倒挂那条用 `>` 而不是 `>=`：相等不是钳制（用户填 5/5 是合法配置）。
+   */
+  const clamped = pickedWindow > MAX_CREDIT_WINDOW_DAYS
+    || pickedImminent > MAX_CREDIT_WINDOW_DAYS
+    || rawImminent > windowDays
 
   // ---- 来源判定 ----
   let source: CreditWindowSource

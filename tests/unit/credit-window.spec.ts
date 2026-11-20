@@ -12,6 +12,7 @@ import {
   sanitizeCreditWindows,
 } from '../../src/jet-hub-store.js'
 import {
+  MAX_CREDIT_WINDOW_DAYS,
   isEmptyCreditWindowSetting,
   resolveCreditWindow,
 } from '../../src/credit-window.js'
@@ -148,5 +149,69 @@ describe('isEmptyCreditWindowSetting', () => {
   it('★ `0` 不是空（它是合法的显式设置）', () => {
     expect(isEmptyCreditWindowSetting({ windowDays: 0 })).toBe(false)
     expect(isEmptyCreditWindowSetting({ imminentDays: 0 })).toBe(false)
+  })
+})
+
+/**
+ * **上限闸**（2026-11-21，PR #129 正向审计 P2）。
+ *
+ * `sanitizeCreditWindows` 挡掉了 `Infinity`，理由逐字写着「会让『永久』档永远为空
+ * —— 一切都被判成临期/短期」。但**同型的有限大值没挡**：
+ * `1e9` 通过 `Number.isFinite` ⇒ `windowMs = 8.64e13` ⇒ `remaining <= windowMs`
+ * 恒真 ⇒ `permanent` 恒 0 —— 与 `Infinity` 症状**一模一样**。
+ *
+ * ⇒ 这组用例钉住「手改 state.json 写进超大值」这条路径。
+ */
+describe('上限闸：超大 windowDays 不得让「永久」档恒空', () => {
+  const envOf = (w: number, i: number) => ({
+    buddyExpiringWindowDays: () => w,
+    buddyImminentWindowDays: () => i,
+  })
+  const readerOf = (setting: { windowDays?: number; imminentDays?: number } | undefined) =>
+    () => setting
+
+  it('★★ `windowDays: 1e9` ⇒ 钳制到上限（不是原样放行）', () => {
+    const r = resolveCreditWindow('qoder', readerOf({ windowDays: 1e9 }), envOf(15, 5))
+    expect(r.windowDays).toBe(MAX_CREDIT_WINDOW_DAYS)
+    expect(r.windowDays).toBeLessThan(1e9)
+    // 必须报「被钳制过」，否则弹窗会静默改写用户输入
+    expect(r.clamped).toBe(true)
+  })
+
+  it('★★ `imminentDays: 1e9`（window 正常）⇒ 同样钳制', () => {
+    const r = resolveCreditWindow('qoder', readerOf({ windowDays: 30, imminentDays: 1e9 }), envOf(15, 5))
+    expect(r.imminentDays).toBe(30) // 先钳上限到 36500，再被 window 倒挂钳到 30
+    expect(r.windowDays).toBe(30)
+    expect(r.clamped).toBe(true)
+  })
+
+  it('★ 环境变量给超大值也受控（只钳 setting 会漏一级）', () => {
+    const r = resolveCreditWindow('qoder', readerOf(undefined), envOf(1e9, 5))
+    expect(r.windowDays).toBe(MAX_CREDIT_WINDOW_DAYS)
+    expect(r.clamped).toBe(true)
+  })
+
+  it('★ 上限本身是合法值（36500 不被钳，边界精确）', () => {
+    const atLimit = resolveCreditWindow('qoder', readerOf({ windowDays: MAX_CREDIT_WINDOW_DAYS }), envOf(15, 5))
+    expect(atLimit.windowDays).toBe(MAX_CREDIT_WINDOW_DAYS)
+    expect(atLimit.clamped).toBe(false)
+  })
+
+  it('★ 刚超一点点（36501）⇒ 钳制（边界另一侧）', () => {
+    const r = resolveCreditWindow('qoder', readerOf({ windowDays: MAX_CREDIT_WINDOW_DAYS + 1 }), envOf(15, 5))
+    expect(r.windowDays).toBe(MAX_CREDIT_WINDOW_DAYS)
+    expect(r.clamped).toBe(true)
+  })
+
+  it('★★ 上限与客户端 `parseWindowInput` 同值（两端口径不得漂移）', async () => {
+    /**
+     * 客户端那边是**拒绝** `> 36_500`，后端是**钳制** —— 方向刻意不同，
+     * 但**阈值必须同值**：否则会出现「UI 允许 40000、后端压到 36500」
+     * 这种用户看得见却不理解的错位。
+     */
+    const source = await import('node:fs').then((fs) =>
+      fs.readFileSync(new URL('../../plugin-src/client/credit-window-ui.js', import.meta.url), 'utf8'))
+    expect(source).toContain('36_500')
+    expect(MAX_CREDIT_WINDOW_DAYS).toBe(36_500)
   })
 })

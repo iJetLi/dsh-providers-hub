@@ -51,6 +51,18 @@ import type { QoderAuth } from './qoder-auth.js'
 import type { TraeAuth } from './trae-auth.js'
 import type { ClineAuth } from './cline-auth.js'
 import { LOOMY } from './loomy-product.js'
+/**
+ * ⚠️⚠️ **这两个符号在本文件里没有直接调用，但绝不能删**（2026-11-21 实测教训）。
+ *
+ * 我按「死 import」删过一次，结果 `tests/unit/loomy-rpc-dispatch.spec.ts` 的
+ * 「buddy 系的响应回传窗口天数」当场变红 —— 那条守卫断言的正是**本行文本**
+ * `from './buddy-balance-rank.js'`（它守「窗口天数这条腿有没有接线」，
+ * 判据是源码级）。`tsc` 不会报（`noUnusedLocals` 未开），定向跑也可能漏，
+ * 只有**全量**才抓到。
+ *
+ * ⇒ 本仓已有的同型记录是「死 import 让功能静默消失」，但这里是**反向**：
+ *    import 是**刻意留的接线锚点**。删之前先 `grep -rn "buddy-balance-rank" tests/`。
+ */
 import { buddyExpiringWindowDays, buddyImminentWindowDays } from './buddy-balance-rank.js'
 import { resolveCreditWindow, safeCreditWindowReader } from './credit-window.js'
 // ⚠️ **值导入**（不是类型）：一键「拒绝非临期」要把这份清单传给账号池。

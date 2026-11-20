@@ -53,6 +53,12 @@ import {
   reportLedgerAccount,
 } from './token-ledger.js'
 import { createTokenLedgerStore } from './token-ledger-store.js'
+/**
+ * ⚠️ **别当成死 import 删掉**（2026-11-21 实测教训）：
+ * `tests/unit/buddy-permanent-lock.spec.ts` 的「导入选号器（漏 import 就等于没接）」
+ * 断言的就是本行文本 —— 删掉它该用例当场变红，而 `tsc` 不报错
+ *（`noUnusedLocals` 未开）。删之前先 `grep -rn "buddy-balance-rank" tests/`。
+ */
 import { buddyExpiringWindowDays } from './buddy-balance-rank.js'
 import { resolveCreditWindow, safeCreditWindowReader } from './credit-window.js'
 import { BuddyBalanceSelector } from './buddy-balance-selector.js'
