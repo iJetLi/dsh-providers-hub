@@ -58,6 +58,7 @@ describe('balance-disk-cache', () => {
     it('★ 按 provider + accountId 分别存（不串味）', () => {
       noteDiskReading('buddy', 'a1', reading)
       noteDiskReading('trae', 'a1', { other: true })
+      // ⚠️ 读的是**内存镜像**，不依赖是否已 flush（首次那条已落盘，第二条只置脏）。
       expect(readDiskReading('buddy', 'a1')).toEqual(reading)
       expect(readDiskReading('trae', 'a1')).toEqual({ other: true })
       expect(readDiskReading('buddy', 'a2')).toBeUndefined()
@@ -65,19 +66,46 @@ describe('balance-disk-cache', () => {
   })
 
   describe('⚠️ 写盘时机（用户指定只有三个）', () => {
-    it('★★★ `noteDiskReading` **不立即写盘**（只置脏标记）', () => {
+    /**
+     * ★★★ **首次成功立即写盘，之后不再写**（2026-11-21 修订）。
+     *
+     * ## 为什么第一版是错的（真实缺陷）
+     *
+     * 第一版：`noteDiskReading` 只置脏标记，写盘全靠「30 分钟定时器」+「退出钩子」。
+     * 实测后果：用户重启间隔只有几分钟 ⇒ 30 分钟没到、钩子没跑
+     * ⇒ **`flushDisk` 从未被调用** ⇒ 缓存文件**从未生成** ⇒ 功能完全没生效。
+     *
+     * ⇒ 补「启动后首次成功即写一次」（`primedThisProcess` 保证每进程只多写一次）。
+     * 「减少写盘」的目标仍成立：一天重启 10 次也只是 10 次额外写盘。
+     */
+    it('★★★ 首次 `noteDiskReading` 立即写盘（自举前提）', () => {
       noteDiskReading('buddy', 'a1', reading)
-      // ⚠️ 这是用户要求「减少不必要的缓存写盘」的核心实现：
-      //    徽标 60 秒轮询一次，若每次读数都写就是每天上千次。
-      expect(existsSync(balanceDiskCacheFile())).toBe(false)
-      expect(isDiskDirty()).toBe(true)
+      // ⚠️ 首条必须落盘，否则下次启动永远没有缓存可读。
+      expect(existsSync(balanceDiskCacheFile()), '首次成功应立刻落盘').toBe(true)
+      expect(isDiskDirty(), '已写盘 ⇒ 脏标记清').toBe(false)
     })
 
-    it('★★★ `flushDisk` 才真的写盘', () => {
-      noteDiskReading('buddy', 'a1', reading)
-      expect(flushDisk()).toBe(true)
-      expect(existsSync(balanceDiskCacheFile())).toBe(true)
+    it('★★★ 之后的 `noteDiskReading` **不立即写盘**（用户要求减少写盘）', () => {
+      noteDiskReading('buddy', 'a1', reading) // 首次 ⇒ 写盘
+      // 之后的读数只置脏标记，等 30 分钟定时器 / 退出钩子
+      noteDiskReading('buddy', 'a2', reading)
+      expect(isDiskDirty(), '第二条只置脏标记').toBe(true)
+      // 文件里仍只有第一条（第二次还没 flush）
+      const parsed = JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as {
+        readings: Record<string, unknown>
+      }
+      expect(Object.keys(parsed.readings)).toEqual(['buddy:a1'])
+    })
+
+    it('★★★ `flushDisk` 把后续读数写盘', () => {
+      noteDiskReading('buddy', 'a1', reading) // 首次已自动写
+      noteDiskReading('buddy', 'a2', reading) // 只置脏
+      expect(flushDisk(), '有脏数据 ⇒ 写').toBe(true)
       expect(isDiskDirty()).toBe(false)
+      const parsed = JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as {
+        readings: Record<string, unknown>
+      }
+      expect(Object.keys(parsed.readings).sort()).toEqual(['buddy:a1', 'buddy:a2'])
     })
 
     it('★★ 没有脏数据 ⇒ flush 不写盘（空转的定时器不产生 IO）', () => {
@@ -86,9 +114,8 @@ describe('balance-disk-cache', () => {
     })
 
     it('★★ 写盘后再次 flush ⇒ 不重复写（脏标记已清）', () => {
-      noteDiskReading('buddy', 'a1', reading)
-      expect(flushDisk()).toBe(true)
-      expect(flushDisk()).toBe(false)
+      noteDiskReading('buddy', 'a1', reading) // 首次自动写
+      expect(flushDisk(), '首次已写 ⇒ 无脏数据').toBe(false)
     })
 
     it('★ 写盘间隔常量是 30 分钟（用户指定）', () => {

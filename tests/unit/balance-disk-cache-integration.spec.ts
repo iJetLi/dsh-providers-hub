@@ -128,7 +128,16 @@ describe('createBalanceCache：磁盘缓存的冷启动路径', () => {
     expect(calls, '只有 a2 该回源').toEqual(['a2'])
   })
 
-  it('★★ 成功回源**只记进磁盘镜像、不立即写盘**（用户要求减少写盘）', async () => {
+  /**
+   * ★★★ **首次成功必须落盘**（2026-11-21 修订 —— 第一版这里是错的）。
+   *
+   * 第一版断言「不立即写盘」，而真实缺陷正是**从不写盘**：
+   * 用户重启间隔只有几分钟 ⇒ 30 分钟定时器没到、退出钩子没跑
+   * ⇒ 缓存文件从未生成 ⇒ 功能完全没生效。
+   *
+   * ⇒ 现在首次成功即写一次（每进程仅一次），之后的读数才走 30 分钟节奏。
+   */
+  it('★★★ 成功回源后**首次立即落盘**（自举前提）', async () => {
     const cache = createBalanceCache({
       ttlMs: 120_000,
       fetch: async (provider: string, entry: { id: string }) =>
@@ -136,10 +145,9 @@ describe('createBalanceCache：磁盘缓存的冷启动路径', () => {
     })
 
     await cache.read('buddy', [acct('a1')])
-    // ⚠️ 这时候**不该**已经有文件：`flushDisk` 才写，由 30 分钟定时器 /
-    //    退出钩子触发。复位内存后 prime 读不到任何东西 ⇒ 证明没写盘。
+    // 复位内存后仍能读回 ⇒ 证明真的落盘了
     resetBalanceDiskCacheStateForTest()
-    expect(primeFromDisk(), '尚未 flush ⇒ 磁盘上还没有').toBe(0)
+    expect(primeFromDisk(), '首次成功必须已落盘').toBeGreaterThan(0)
   })
 
   it('★ 磁盘读数被真正替换的路径：flush 之后新读数覆盖旧值', async () => {

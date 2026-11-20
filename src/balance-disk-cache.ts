@@ -119,6 +119,14 @@ let diskRead = false
 /** 是否有「自上次写盘以来」的新读数（决定 flush 要不要真的写）。 */
 let dirty = false
 
+/**
+ * 本次进程是否已经「首次成功写盘」过（见 `noteDiskReading`）。
+ *
+ * ⚠️ 必须声明在 `noteDiskReading` **之前**：`let` 虽提升，但赋值前的读取是 TDZ
+ * ⇒ 运行时抛 `ReferenceError`（TS 不报错，只在真跑时炸）。
+ */
+let primedThisProcess = false
+
 /** 读数键（与 `balance-cache.ts` 的 `keyOf` 同形：`provider:accountId`）。 */
 function keyOf(provider: string, accountId: string): string {
   return `${provider}:${accountId}`
@@ -156,7 +164,25 @@ export function primeFromDisk(): number {
       if (typeof record.at !== 'number' || record.reading === undefined) continue
       out[key] = { at: record.at, reading: record.reading }
     }
-    memory = out
+    /**
+     * ⚠️⚠️ **与内存合并，不能整体覆盖**（2026-11-21 实测缺陷）。
+     *
+     * ## 为什么（真实失败）
+     *
+     * 原实现是 `memory = out`（整体替换）。触发形态：
+     *
+     * 1. `noteDiskReading('buddy','a1')` ⇒ 首次 ⇒ **立即写盘**，`dirty = false`；
+     * 2. `noteDiskReading('trae','a1')` ⇒ 只置内存 + `dirty = true`（未写盘）；
+     * 3. 下一次 `readDiskReading` 里 `if (!diskRead) primeFromDisk()` ——
+     *    而 `diskRead` 仍是 `false`（**首次写盘路径没有置它**）
+     *    ⇒ 重新读盘 ⇒ `memory = out` **把第 2 步那条未写盘的覆盖掉了**。
+     *
+     * 症状：`readDiskReading('trae','a1')` 返回 `undefined`，而它明明刚记过。
+     * 实测就是本文件「按 provider 分别存」那条用例变红。
+     *
+     * ⇒ 改为**磁盘值打底 + 内存值覆盖**（内存里的更新，且可能尚未落盘）。
+     */
+    memory = { ...out, ...memory }
     return Object.keys(out).length
   } catch {
     // 半截 JSON / 编码问题：当作没有缓存。
@@ -188,6 +214,35 @@ export function noteDiskReading(provider: string, accountId: string, reading: un
   if (!cacheEnabled) return
   memory[keyOf(provider, accountId)] = { at: Date.now(), reading }
   dirty = true
+  /**
+   * ★★★ **启动后首次成功 ⇒ 立刻写盘一次**（2026-11-21，真实缺陷修复）。
+   *
+   * ## 它修的是什么（实测）
+   *
+   * 用户按要求重启验证，但 `~/.dsh/cache/balance-readings.json` **仍不存在**。
+   *
+   * 根因是**我漏实现了这个分支**：模块头写着「写盘时机 ① = 启动后首次拉取成功」，
+   * 但代码只挂了「30 分钟定时器」和「退出钩子」两条。
+   *
+   * ⇒ 用户重启间隔只有几分钟 ⇒ 30 分钟没到、退出钩子没跑（进程被重启而非正常卸载）
+   * ⇒ **`flushDisk` 从未被调用** ⇒ 下次启动仍然没有缓存可读
+   * ⇒ 整个功能**完全没生效**（用户看到的现象就是「积分没中缓存」）。
+   *
+   * ## 为什么必须「首次成功即写」
+   *
+   * 这一条是**整个方案能自举的前提**：没有第一次落盘，就永远没有「下次启动读得到」。
+   * 而用户重启的间隔是**不可控的**（可能几分钟、可能几小时），
+   * 依赖「30 分钟后」等于假设用户不频繁重启 —— 那个假设不成立。
+   *
+   * ## ⚠️ 只写一次，不破坏「减少写盘」的目标
+   *
+   * `primedThisProcess` 保证**每个进程只多写这一次**。之后仍按 30 分钟节奏
+   * ⇒ 一天重启 10 次也只是 10 次额外写盘，完全可接受。
+   */
+  if (!primedThisProcess) {
+    primedThisProcess = true
+    flushDisk()
+  }
 }
 
 /**
@@ -212,6 +267,16 @@ export function flushDisk(now: number = Date.now()): boolean {
     writeFileSync(tmp, JSON.stringify(payload), 'utf8')
     renameSync(tmp, path)
     dirty = false
+    /**
+     * ⚠️ **写盘成功 ⇒ 标记「已读过盘」**（2026-11-21）。
+     *
+     * 不置它的后果：下一次 `readDiskReading` 会因 `!diskRead` 再读一遍盘，
+     * 而那时 `memory` 里可能有**尚未落盘**的新读数 ⇒ 旧实现整体覆盖会丢掉它们
+     *（现已改为合并，但重复读盘仍是白费 IO）。
+     *
+     * ⇒ 写盘意味着「内存镜像与磁盘已一致到这一刻」，不再需要懒读。
+     */
+    diskRead = true
     return true
   } catch {
     // ⚠️ 写盘失败**静默**：缓存是纯优化，不能影响功能。
@@ -230,6 +295,8 @@ export function clearBalanceDiskCache(): void {
   memory = {}
   diskRead = false
   dirty = false
+  // ⚠️ 同时复位「首次成功已写盘」标志，否则同一进程内的下一个用例不会再触发首次写盘。
+  primedThisProcess = false
   try {
     unlinkSync(balanceDiskCacheFile())
   } catch {
@@ -248,4 +315,5 @@ export function resetBalanceDiskCacheStateForTest(): void {
   memory = {}
   diskRead = false
   dirty = false
+  primedThisProcess = false
 }

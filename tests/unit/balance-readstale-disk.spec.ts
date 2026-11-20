@@ -18,10 +18,12 @@
  * ⚠️ 教训：`balance-cache.ts` 有**两条消费路径**（`read` 与 `readStale`），
  * 只覆盖一条 = 完全没做。这类「两条同义路径」的漏接在本仓库反复出现。
  */
+import { existsSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createBalanceCache, type BalanceReading } from '../../src/balance-cache.js'
 import {
+  balanceDiskCacheFile,
   clearBalanceDiskCache,
   flushDisk,
   isDiskDirty,
@@ -103,11 +105,14 @@ describe('createBalanceCache：readStale 的磁盘缓存（credits.balances 真�
     const out = await cache.readStale('buddy', 'a1', {})
     expect(balanceOf(out)).toBe(42)
 
-    // ⚠️ 这条是「磁盘文件从未生成」的克星：修复前 `isDiskDirty()` 恒 false。
-    expect(isDiskDirty(), '★★★ 成功读数必须置脏标记（否则永不落盘）').toBe(true)
-
-    // flush 之后模拟重启，应能读回
-    expect(flushDisk()).toBe(true)
+    /**
+     * ⚠️ 2026-11-21 修订：**首次成功会立即写盘**（`primedThisProcess`），
+     * 故这里脏标记已清 —— 但文件**已经存在**，那才是「会不会落盘」的真判据。
+     *
+     * 第一版断言 `isDiskDirty() === true`，在补了「首次立即写盘」之后失效。
+     */
+    expect(existsSync(balanceDiskCacheFile()), '★★★ 成功读数必须落盘').toBe(true)
+    expect(isDiskDirty(), '首次已写盘 ⇒ 脏标记清').toBe(false)
     resetBalanceDiskCacheStateForTest()
     primeFromDisk()
     expect((readDiskReading('buddy', 'a1') as { value?: { balance?: number } })?.value?.balance)
