@@ -446,6 +446,10 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 - **`loomy`** 是唯一用**短信验证码**登录、且**不能自动续期**的渠道。
 - **`zcode`** 的领取路径需要一次性验证参数，由本机浏览器环境产出（web 版需要
   chromium，桌面版用自带内核）。
+  ⚠️ 这正是它被登记进 `PROVIDER_REGISTRY.autoCheckinExcluded`（**默认不参加
+  自动签到**）的原因：否则用户什么都没点、每天开着 DSH 就起一棵浏览器进程树，
+  并按**设备**烧阿里云验证码配额（同设备每小时 150 次）。想让它自动领取请在
+  「渠道管理 → ZCode」拨开「ZCode 自动签到」（opt-in，默认关）。
   ⚠ **推理（对话）路径是否也要它，由服务端开关决定**：官方 3.14.5 起
   `GET /api/v1/client/configs` 会下发 `captcha.skip_model_request`
   —— 当前实测是 `true`（**不校验**，故按最省的方式「先探后取」：
@@ -584,6 +588,12 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
 使用前请查看[魔搭社区用户协议](https://modelscope.cn/protocol/用户协议)。
 面板展示可用魔粒余额及日奖励批次的实际到期时间。根据[魔粒体系说明](https://modelscope.cn/docs/magicube/intro)，
 短期魔粒有效 24 小时，长期魔粒有效 90 天，均按发放时间起算。
+
+ZCode 与魔搭**相反**：默认**不**参加全局自动签到。可在「渠道管理 → ZCode」拨开
+「**ZCode 自动签到**」（opt-in，默认关），打开后它跟随全局签到时间自动领取。
+⚠️ 打开的代价由本机支付：领取会拉起浏览器完成阿里云验证，该验证按**设备**限流
+（同设备每小时 150 次），且同一个时段失败后不再重试（下个时段再来）。关闭时
+手动「一键领取积分」照常可用。
 
 
 ### 模型列表开关

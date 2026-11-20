@@ -2962,3 +2962,40 @@ Issue #45 第 2 点建议「连续 N 次 3012 后熔断该账号」。**不做**
 同码多因，按最坏假设惩罚账号）。
 真正的保护是：① 把成因修对；② **把版本号打进诊断行**（本轮新增），
 下次跨代时一行就能看出。
+
+
+## 自动签到：从「硬排除」到「opt-in 放行」（2026-11-20）
+
+**来由**：有用户要求「zcode 也能自动签到」（zhuweiyou/codearts2api issue #28）。
+宿主层先做了一版调度（PR #29），随后判定该改在源头 —— 两处调度会对同一账号
+各产一枚 captcha，故宿主层那版已关闭，功能落在本仓。
+
+**为什么默认仍然是关**（这一条是本节的全部理由）：`claimAll` 的 zcode 分支要产
+阿里云验证码 param，web 版会拉起 headful Chromium，且该配额按**设备**限流。
+`autoCheckinExcluded` 登记的就是这件事，所以本轮**不动 registry**，只加一个
+**默认关闭**的 opt-in：
+
+- `AutoCheckinDoc.zcodeEnabled?: true` —— 判据 `=== true`；落盘「**开才写键、关就删键**」，
+  与 `modelscopeEnabled`（关才写 `false`）**逐字相反**。两格默认方向相反，落盘形态
+  就必须相反，否则「从没设置过」与「特意关掉」在磁盘上同形，面板再也分不出来。
+- 放行判据单独成 `isAutoCheckinOptedIn()`，**不并进** `isAutoCheckinExcluded()`：
+  后者是「排除表 == registry 名单」那几条锚点用例（`provider-registry.spec.ts` /
+  `provider-registry-consumers.spec.ts`）的对象，揉进去就再也锁不住 registry。
+- RPC `zcode.autoCheckin`（读 / 写；非法值**拒绝**，与 `modelscope.autoCheckin` 同口径）。
+- 面板 `ZcodeAutoCheckinToggle`，只在 `provider === 'zcode'` 的渠道面板里渲染。
+
+**本轮定的新口径：失败不在同一时段重试。** opt-in 放行的 zcode 这一轮失败 ⇒
+把**它自己**的逐渠道水位线推到本时段。原路径（`proven.size === 0` ⇒ 整轮不记账
+⇒ 指数退避、封顶 30 分钟一轮）是为「凭据没续上 / 网络不通」这类**可恢复**失败
+设计的，套在有验证码代价的渠道上等于一天最多 48 次白烧设备级配额。
+⚠️ 光 `unretryable.add()` **拦不住重试** —— 它只让该渠道不拖住 `pendingSlot`；
+真正让它这一轮不再被 `claim` 的是 `providerSlots` 那一格。
+
+**未覆盖（如实登记）**：`zcode.autoCheckin` 的 get/set 要真 RPC 栈，本仓库没有
+可直接复用的 RPC 夹具 —— 与魔搭那一格当初登记的是同一条缺口。面板那一格改用
+源码级断言（`tests/unit/zcode-auto-checkin-toggle.spec.ts`，react 不在依赖内、
+组件无法渲染）。变异验证：把渲染行的 provider 改成别的 ⇒ 1 红；把 `checked`
+判据写成 `!== false` ⇒ 1 红。
+
+**回归**：`tests/unit/auto-checkin.spec.ts` 新增「ZCode 自动签到（opt-in，默认关）」
+与「ZCode opt-in 的 sanitize 语义」两组共 10 条，加上面 6 条接线守卫。

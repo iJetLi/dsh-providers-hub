@@ -4149,6 +4149,67 @@ function ModelscopeAutoCheckinToggle({ rpcCall }) {
     error ? React.createElement('span', { role: 'alert' }, error) : null);
 }
 
+/**
+ * ZCode 自动签到的 **opt-in** 开关（**默认关闭**）。
+ *
+ * 与上面魔搭那一格语义相反：魔搭默认参加全局调度，这里默认**不**参加。差异
+ * 不是风格，而是代价 —— ZCode 的领取会拉起 headful Chromium 产阿里云 captcha，
+ * 该配额按**设备**限流。服务端的放行判据见 `src/auto-checkin.ts`
+ * 的 `isAutoCheckinOptedIn`（registry 的排除表照旧保留）。
+ */
+function ZcodeAutoCheckinToggle({ rpcCall }) {
+  const [enabled, setEnabled] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const saveInFlight = React.useRef(false);
+
+  React.useEffect(() => {
+    let active = true;
+    rpcCall('zcode.autoCheckin', {}).then((value) => {
+      if (typeof value?.enabled !== 'boolean') throw new Error('服务端未返回开关状态');
+      if (active) setEnabled(value.enabled);
+    }).catch((cause) => {
+      if (active) setError(cause?.message || '读取 ZCode 自动签到设置失败');
+    });
+    return () => { active = false; };
+  }, [rpcCall]);
+
+  const save = async (nextEnabled) => {
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      const value = await rpcCall('zcode.autoCheckin', { enabled: nextEnabled });
+      if (typeof value?.enabled !== 'boolean') throw new Error('服务端未返回开关状态');
+      setEnabled(value.enabled);
+    } catch (cause) {
+      setError(cause?.message || '保存 ZCode 自动签到设置失败');
+    } finally {
+      saveInFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  return React.createElement(React.Fragment, null,
+    React.createElement('label', {
+      className: 'dim-jh-nativeSearch',
+      title: "默认关闭。打开后 ZCode 跟随全局签到时间自动领取。"
+              + "⚠️ 领取会在本机拉起浏览器完成阿里云验证，该验证按设备限流"
+              + "（同设备每小时 150 次）；一个时段失败后不再重试，下个时段再来。"
+              + "关闭时仍可手动点「一键领取积分」。",
+    },
+    React.createElement('input', {
+      type: 'checkbox',
+      role: 'switch',
+      checked: enabled === true,
+      disabled: enabled === null || busy,
+      onChange: (event) => void save(event.target.checked),
+    }),
+    'ZCode 自动签到'),
+    error ? React.createElement('span', { role: 'alert' }, error) : null);
+}
+
 
 function ProviderPanel({
   provider,
@@ -7021,6 +7082,7 @@ function ProviderPanel({
             }, '订阅额度')
           : null,
         provider === 'modelscope' ? React.createElement(ModelscopeAutoCheckinToggle, { rpcCall }) : null,
+        provider === 'zcode' ? React.createElement(ZcodeAutoCheckinToggle, { rpcCall }) : null,
         supportsCredits
           ? React.createElement('button', {
               className: 'dim-jh-btn',
