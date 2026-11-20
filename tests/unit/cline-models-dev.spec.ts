@@ -9,7 +9,7 @@ import {
   parseClineModelsDev,
   stripClineSnapshotSuffix,
 } from '../../src/cline-models-dev.js'
-import { clearModelsDevCache, setModelsDevForTest } from '../../src/models-dev-cache.js'
+import { clearModelsDevCache, MODELS_DEV_MAX_ATTEMPTS, setModelsDevForTest } from '../../src/models-dev-cache.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -238,7 +238,10 @@ describe('makeClineModelsDevLoader', () => {
     await expect(load()).rejects.toThrow(/models\.dev/)
     await expect(load()).rejects.toThrow(/models\.dev/)
     // ⚠️ 失败**不写缓存** ⇒ 第二次必须真的再发一次请求（否则「失败被固化」）。
-    expect(fetcher).toHaveBeenCalledTimes(2 * 3)
+    // ⚠️ 2026-11-20：尝试次数从 3 降到 2（models.dev 会阻塞 cline 目录 ⇒
+    //    直接卡首屏，见 `MODELS_DEV_MAX_ATTEMPTS` 的注释）。这里用**常量**
+    //    而不是字面量 6，避免下次调整次数时又假失败。
+    expect(fetcher).toHaveBeenCalledTimes(2 * MODELS_DEV_MAX_ATTEMPTS)
   })
 
   /**

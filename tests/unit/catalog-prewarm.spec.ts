@@ -5,7 +5,6 @@ import { dirname, resolve } from 'node:path'
 
 import {
   CATALOG_PREWARM_DELAYS_MS,
-  CATALOG_PREWARM_INITIAL_DELAY_MS,
   isPrewarmSpacingValid,
   selectPrewarmProviders,
   startCatalogPrewarm,
@@ -202,10 +201,11 @@ describe('预热间隔 > 闸门冷却（★ 硬约束）', () => {
     expect(isPrewarmSpacingValid([0, 30_000])).toBe(false) // 相等也不行：闸门用 `<=` 判剩余量
   })
 
-  it('isPrewarmSpacingValid：**首项不参与**校验（启动延迟无需 > 冷却）', () => {
-    // 10 秒 ≠ 30 秒，但它是启动延迟 ⇒ 合规
-    expect(isPrewarmSpacingValid([10_000])).toBe(true)
+  it('isPrewarmSpacingValid：首项 0（立即）不参与校验', () => {
+    // 首项 0 = 立即，不与冷却竞争 ⇒ 单元素 [0] 合规
     expect(isPrewarmSpacingValid([0])).toBe(true)
+    // 而 [10_000] 是**不合规**的：非零项必须 > 冷却
+    expect(isPrewarmSpacingValid([10_000])).toBe(false)
   })
 })
 
@@ -311,32 +311,47 @@ describe('IKJVTF 接线：十个适配器都接上了广播', () => {
    * ⇒ 用 `schedule` 注入直接断言：**首个排程的 ms 必须是 10 秒**，
    * 且在那个定时器触发**之前** `warm` 不得被调用。
    */
-  it('★★★ 首轮默认延后 10 秒（不立即抢宿主首屏）', async () => {
+  /**
+   * ★★★ **首轮必须立即开始（首项 = 0）**（2026-11-20 二次修订）。
+   *
+   * ## 上一版把首项改成 10 秒是**错的**，实测首屏反而更慢（60 秒+）
+   *
+   * 原因在 `RemoteCatalogGate.run()` 的 in-flight 去重：
+   *
+   * ```ts
+   * if (this.inFlight !== undefined) {
+   *   await this.inFlight      // 复用别人正在飞的那次请求
+   *   return
+   * }
+   * ```
+   *
+   * ⇒ **预热越早开始，宿主首屏越受益**：宿主调 `listModels` 时若预热已在飞，
+   * 它 `await` 的是同一次请求，零额外成本。反过来（延后 10 秒）会让宿主
+   * **自己发起**首轮请求，预热 10 秒后才重复一遍 —— 纯双输。
+   *
+   * ⚠️ 所以本用例守的是「**不许加人为延迟**」，而不只是「值是 0」。
+   */
+  it('★★★ 首轮立即开始（首项 = 0，不得加人为延迟）', async () => {
     const warm = vi.fn(async () => {})
     const scheduled: Array<{ fn: () => void; ms: number }> = []
     const stop = startCatalogPrewarm({
       providers: ['buddy'],
       warm,
-      // ⚠️ 不传 delaysMs ⇒ 走默认 [10_000, 35_000, 75_000]
+      // ⚠️ 不传 delaysMs ⇒ 走默认 [0, 35_000, 75_000]
       schedule: (fn, ms) => { scheduled.push({ fn, ms }); return () => {} },
     })
 
-    // 装配阶段就该排出「10 秒后跑首轮」这一个定时器
-    expect(scheduled, '必须排一个定时器').toHaveLength(1)
-    expect(scheduled[0]!.ms, '首轮延迟必须是默认的 10 秒（不是 0）').toBe(10_000)
-    // 定时器触发前，warm 一次都不该被调用（给宿主首屏让路）
-    expect(warm, '首轮延迟到期前不得预热').not.toHaveBeenCalled()
+    // 首轮排在 microtask 上：装配阶段**不该**有定时器（只有轮间才用 schedule）
+    expect(scheduled, '首轮不得排定时器（应立即执行）').toHaveLength(0)
 
-    // 手动触发首轮
-    scheduled[0]!.fn()
+    // 排空 microtask 后首轮就已开跑
     for (let i = 0; i < 5; i += 1) await Promise.resolve()
-    expect(warm).toHaveBeenCalledWith('buddy')
+    expect(warm, '首轮必须立即开跑（不得延后）').toHaveBeenCalledWith('buddy')
     stop()
   })
 
-  it('★★ 默认常量首项就是 10 秒（接线层不传即生效）', () => {
-    expect(CATALOG_PREWARM_DELAYS_MS[0]).toBe(10_000)
-    expect(CATALOG_PREWARM_INITIAL_DELAY_MS).toBe(10_000)
+  it('★★ 默认常量首项是 0（接线层不传即立即预热）', () => {
+    expect(CATALOG_PREWARM_DELAYS_MS[0], '首项必须 0（立即）').toBe(0)
     // 后续两段仍是「> 冷却」的补拉间隔
     expect(CATALOG_PREWARM_DELAYS_MS[1]).toBe(35_000)
     expect(CATALOG_PREWARM_DELAYS_MS[2]).toBe(75_000)

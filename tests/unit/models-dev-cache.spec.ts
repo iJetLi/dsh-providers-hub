@@ -244,14 +244,21 @@ describe('重试：3 次都失败才放弃', () => {
     await clearModelsDevCache()
   })
 
-  it('⚠️⚠️ 失败会重试到 3 次才放弃', async () => {
+  /**
+   * ## ⚠️ 2026-11-20：尝试次数从 3 降到 2
+   *
+   * models.dev 只补全 cline / opencode 两家的目录细节，拿不到有静态兜底。
+   * 而实测证实这条链路**会阻塞首屏**（cline 的目录加载器会 await 它），
+   * 每多一次重试就是多一个超时窗口的等待 —— 见 `MODELS_DEV_MAX_ATTEMPTS`。
+   */
+  it('⚠️⚠️ 失败会重试到 2 次才放弃', async () => {
     const failing = vi.fn(async () => new Response('boom', { status: 500 }))
     const record = async (ms: number): Promise<void> => { sleptFor.push(ms) }
     const ok = await refreshModelsDevAsync({ fetcher: failing as unknown as typeof fetch, force: true, sleep: record })
     expect(ok).toBe(false)
-    expect(failing, '必须恰好尝试 3 次').toHaveBeenCalledTimes(3)
+    expect(failing, '必须恰好尝试 2 次').toHaveBeenCalledTimes(2)
     // ⚠️ 退避是**指数**的，且最后一次失败后不再多睡一次。
-    expect(sleptFor, '退避间隔必须指数增长，且只在两次尝试之间').toEqual([2000, 4000])
+    expect(sleptFor, '退避间隔必须指数增长，且只在两次尝试之间').toEqual([2000])
     // ⚠️ 重试期间旧缓存仍可用（这是重试安全的前提）。
     expect(readProviderModelsSync('opencode').old?.name).toBe('Old')
   })
@@ -283,7 +290,8 @@ describe('重试：3 次都失败才放弃', () => {
     // 「超时 × 2」，它会小于含重试的最坏耗时 ⇒ 正常重试中被当成「已死」再起一个。
     expect(MODELS_DEV_DEADLOCK_MS).toBeGreaterThan(MODELS_DEV_WORST_CASE_MS)
     // 反向：也不该大到失去意义（否则真卡死的刷新会永久占住去重位）。
-    expect(MODELS_DEV_DEADLOCK_MS).toBeLessThan(MODELS_DEV_WORST_CASE_MS * 4)
+    // ⚠️ 2026-11-20：超时 8s / 尝试 2 次 ⇒ 最坏 18s，死锁阈值 60s（3.3 倍余量）。
+    expect(MODELS_DEV_DEADLOCK_MS).toBeLessThanOrEqual(MODELS_DEV_WORST_CASE_MS * 4)
   })
 
   it('⚠️ 失败日志点名「已重试 N 次」（可观测性：用户要知道等过）', async () => {

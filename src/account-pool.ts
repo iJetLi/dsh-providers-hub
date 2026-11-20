@@ -2723,6 +2723,51 @@ export class AccountPool {
   }
 
   /**
+   * ★★★ **该 provider 是否有「已登录**且启用**」的账号**（2026-11-20，真实启动卡顿修复）。
+   *
+   * ## 它与 {@link hasLoggedInAccount} 的唯一差别：**看 `enabled`**
+   *
+   * | 方法 | 判据 | 用途 |
+   * |---|---|---|
+   * | `hasLoggedInAccount` | 凭据可解析（**不看 enabled**）| 目录**展示**门控（既有语义，**不要改它**）|
+   * | **本方法** | 凭据可解析 **且** `enabled !== false` | 判断「这个 provider 值不值得为它拉目录」|
+   *
+   * ## 为什么必须新增而不是改 `hasLoggedInAccount`
+   *
+   * `hasLoggedInAccount` 刻意不看 `enabled`，理由写在它的注释里：
+   * 「停用只应影响自动选号，与是否已登录无关」（与续期调度器同一条约定）。
+   * 那条语义是**对的**，不能动。
+   *
+   * 但**目录拉取**是另一回事：一个被用户**主动停用**的 provider，其目录
+   * 拉下来也没人看，却要付真实代价 —— 实测（本机）：
+   *
+   * ```
+   * cline: 账号已停用但凭据还在 ⇒ 通过 hasLoggedInAccount 门控
+   *        ⇒ 真的去拉「两个端点 + models.dev」
+   *        ⇒ models.dev 实测 25 秒超时、MODELS_DEV_TIMEOUT_MS=90s、重试 3 次
+   *        ⇒ 首屏被拖到 60 秒+
+   * ```
+   *
+   * ⇒ 目录拉取的判据应当比「展示」更严：**停用的 provider 不拉目录**。
+   *
+   * ⚠️ **不影响**「停用账号也能测试/重测」那条既有能力 —— 那些路径走的是
+   * `resolveCredentialForAccount`（按 id 显式探测），与本方法无关。
+   *
+   * ⚠️ 无账号 / 全部停用 ⇒ `false`；读凭据异常 ⇒ 保守返回 `true`
+   *（宁可多拉一次，也不要让目录因一次读取抖动而消失 —— 与
+   * `providerCatalogVisible` 的保守方向一致）。
+   */
+  async hasEnabledLoggedInAccount(provider: string): Promise<boolean> {
+    for (const entry of this.listAccountsByProvider(provider)) {
+      // ★ 与 hasLoggedInAccount 的唯一差别：跳过停用账号。
+      if (entry.enabled === false) continue
+      const credential = await this.resolveCredentialByRef(entry.credentialRef)
+      if (credential !== undefined) return true
+    }
+    return false
+  }
+
+  /**
    * 按账号 id 解析凭据（**不检查 enabled**）。
    *
    * 限流重测必须能对已停用账号发请求（用户明确要求"停用的账号也能发送"），
@@ -3935,10 +3980,30 @@ export async function providerCatalogVisible(
 ): Promise<boolean> {
   if (!resolveHideWithoutAccountFlag(process.env.DSH_HIDE_MODELS_WITHOUT_ACCOUNT)) return true
   if (accountPool === undefined) return true
-  // 能力检测：单测替身通常只 mock 了 disabledModelsFor 等少量方法。
-  if (typeof accountPool.hasLoggedInAccount !== 'function') return true
+  /**
+   * ★★★ **2026-11-20：优先用「已登录**且启用**」判据**（真实启动卡顿修复）。
+   *
+   * 改前只查 `hasLoggedInAccount`（**不看 `enabled`**）⇒ **停用账号挡不住门控**
+   * ⇒ 本机 `cline`（账号已停用但凭据还在）照样去拉目录 ⇒ 拉 models.dev
+   * ⇒ 实测 25 秒超时 × `MODELS_DEV_TIMEOUT_MS=90s` × 3 次重试 ⇒ **首屏 60 秒+**。
+   *
+   * ⚠️ **语义变化（有意为之）**：停用账号的 provider 现在**不展示模型**。
+   * 这与用户预期一致（他主动停用了），且「停用 ≠ 登出」—— 重新启用即恢复。
+   * ⚠️ `hasLoggedInAccount` 的「不看 enabled」语义**保持不变**，它仍服务于
+   * 其它调用方；本函数只是改用更严的那个判据。
+   */
+  const strict = accountPool.hasEnabledLoggedInAccount
+  if (typeof strict !== 'function') {
+    // 单测替身只 mock 了旧方法 ⇒ 退回既有判据（不改变替身行为）。
+    if (typeof accountPool.hasLoggedInAccount !== 'function') return true
+    try {
+      return await accountPool.hasLoggedInAccount(provider)
+    } catch {
+      return true
+    }
+  }
   try {
-    return await accountPool.hasLoggedInAccount(provider)
+    return await strict.call(accountPool, provider)
   } catch {
     // 读凭据异常（存储损坏等）时保守展示：宁可多显示，也不要让用户
     // 因为一次读取抖动而「所有模型都不见了」且无从排查。

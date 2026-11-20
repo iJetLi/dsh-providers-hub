@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   AccountPool,
+  providerCatalogVisible,
   rateLimitSinkEnabled,
   sinkAccountToProviderEnd,
 } from '../../src/account-pool.js'
@@ -3425,5 +3426,181 @@ describe('AccountPool：per-provider 分档窗口', () => {
     const pool = new AccountPool(seeded as never)
     await pool.setCreditWindow('', { windowDays: 7 })
     expect(pool.creditWindow('')).toBeUndefined()
+  })
+})
+
+
+/**
+ * ★★★ **停用账号不得让 provider 通过目录门控**（2026-11-20 真实首屏卡顿修复）。
+ *
+ * ## 真实缺陷
+ *
+ * `hasLoggedInAccount` 的判据是「凭据可解析」，**刻意不看 `enabled`**
+ *（那条语义是对的 —— 停用只影响自动选号，与「是否已登录」无关，
+ * 见 `TRAE 签到设备轮换代次` 那个 describe 里的「账号被停用时仍返回 true」用例）。
+ *
+ * 但**目录拉取**付的是真金白银：本机 `cline` 的账号已停用、凭据还在
+ * ⇒ 通过门控 ⇒ 真的去拉「两个端点 + models.dev」
+ * ⇒ models.dev 实测 25 秒超时 × `MODELS_DEV_TIMEOUT_MS` × 重试 ⇒ **首屏 60 秒+**。
+ *
+ * ⇒ 新增 `hasEnabledLoggedInAccount`：目录拉取用更严的判据（看 `enabled`）。
+ *
+ * ⚠️ **两个方法都必须保留**：老的「不看 enabled」语义服务于展示与其它调用方，
+ * 不能因为新增了严格版就把它改掉。
+ *
+ * ⚠️ 本节是**独立顶层 describe**（自带 ctx/pool/工厂）—— 追加段落时若不确认
+ * 作用域，会以 ReferenceError 整段失败（本文件已有一次前车之鉴，见
+ * `setAccountsEnabled` 上方的说明）。
+ */
+describe('AccountPool · hasEnabledLoggedInAccount（目录拉取专用判据）', () => {
+  let ctx: ReturnType<typeof createMockContext>
+  let pool: AccountPool
+
+  /** 本地工厂（不跨 describe 复用，避免作用域耦合）。 */
+  function makeTraeAccount(overrides: Partial<ProviderAccountEntry> = {}): ProviderAccountEntry {
+    return {
+      id: 'trae-1',
+      provider: 'trae',
+      nickname: 'trae-user',
+      enabled: true,
+      credentialRef: 'TRAE_ACCOUNT_T1',
+      createdAt: Date.now(),
+      refreshable: true,
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    ctx = createMockContext()
+    pool = new AccountPool(ctx as never)
+  })
+
+  it('★★★ 账号停用但凭据还在 ⇒ false（不得拉目录）', async () => {
+    await pool.addAccount(makeTraeAccount({ enabled: false }))
+    await ctx.credentials.set(credentialRef('TRAE_ACCOUNT_T1'), '{"access_token":"AT"}')
+    // ⚠️ 旧判据（凭据可解析）应为 true —— 那正是本缺陷的成因
+    expect(await pool.hasLoggedInAccount('trae'), '旧判据：凭据在就算已登录').toBe(true)
+    // ★ 新判据必须 false
+    expect(await pool.hasEnabledLoggedInAccount('trae'), '新判据：停用 ⇒ 不拉目录').toBe(false)
+  })
+
+  it('★★ 有启用账号 ⇒ true（正常路径不受影响）', async () => {
+    await pool.addAccount(makeTraeAccount())
+    await ctx.credentials.set(credentialRef('TRAE_ACCOUNT_T1'), '{"access_token":"AT"}')
+    expect(await pool.hasEnabledLoggedInAccount('trae')).toBe(true)
+  })
+
+  it('★★ 一个停用 + 一个启用 ⇒ true（只要有一个启用就拉）', async () => {
+    await pool.addAccount(makeTraeAccount({ id: 'trae-off', enabled: false }))
+    await pool.addAccount(makeTraeAccount({ id: 'trae-on', credentialRef: 'TRAE_ACCOUNT_T2' }))
+    // 只有**启用**那个的凭据可用
+    await ctx.credentials.set(credentialRef('TRAE_ACCOUNT_T2'), '{"access_token":"AT"}')
+    expect(await pool.hasEnabledLoggedInAccount('trae')).toBe(true)
+  })
+
+  it('★★ 只有停用号的凭据可用 ⇒ false（不得因它拉目录 —— cline 的真实形态）', async () => {
+    await pool.addAccount(makeTraeAccount({ id: 'trae-off', enabled: false }))
+    await pool.addAccount(makeTraeAccount({ id: 'trae-on', credentialRef: 'TRAE_ACCOUNT_T2' }))
+    // ⚠️ **只有停用那个**有凭据；启用那个读不到
+    await ctx.credentials.set(credentialRef('TRAE_ACCOUNT_T1'), '{"access_token":"AT"}')
+    expect(await pool.hasEnabledLoggedInAccount('trae'), '停用号的凭据不算数').toBe(false)
+  })
+
+  it('★ 无账号 ⇒ false', async () => {
+    expect(await pool.hasEnabledLoggedInAccount('trae')).toBe(false)
+  })
+
+  it('★ enabled 缺省视为启用（与账号池其它判据一致）', async () => {
+    const entry = makeTraeAccount()
+    delete (entry as { enabled?: boolean }).enabled
+    await pool.addAccount(entry)
+    await ctx.credentials.set(credentialRef('TRAE_ACCOUNT_T1'), '{"access_token":"AT"}')
+    expect(await pool.hasEnabledLoggedInAccount('trae')).toBe(true)
+  })
+})
+
+
+/**
+ * ★★★ **`providerCatalogVisible` 必须用「已登录**且启用**」判据**
+ *（2026-11-20 真实首屏卡顿修复 —— 变异 M2 无牙后补）。
+ *
+ * ## 它守的是哪一环
+ *
+ * `hasEnabledLoggedInAccount`（上面的 describe）只是**判据本身**。
+ * 真正决定「要不要为某家拉目录」的是**接线**：骨架 `ModelCatalog.listModels`
+ * 第一步就是
+ *
+ * ```ts
+ * if (!await providerCatalogVisible(deps.accountPool, providerId)) return []
+ * ```
+ *
+ * ⇒ 若本函数退回「不看 enabled」的旧判据，**停用账号照样会去拉目录**
+ *（本机 cline = models.dev 25 秒超时 × 重试 = 首屏 60 秒+），
+ * 而 `hasEnabledLoggedInAccount` 自己的用例**全绿** —— 那正是 M2 的形态。
+ *
+ * ⚠️ 判据必须**行为级**（真的调这个函数），不能只做源码文本断言：
+ * 文本断言挡不住「函数留着但接线改回去」。
+ */
+describe('AccountPool · providerCatalogVisible（目录门控接线）', () => {
+  let ctx: ReturnType<typeof createMockContext>
+  let pool: AccountPool
+  const ENV_KEY = 'DSH_HIDE_MODELS_WITHOUT_ACCOUNT'
+  let savedEnv: string | undefined
+
+  function makeTraeAccount(overrides: Partial<ProviderAccountEntry> = {}): ProviderAccountEntry {
+    return {
+      id: 'trae-1',
+      provider: 'trae',
+      nickname: 'trae-user',
+      enabled: true,
+      credentialRef: 'TRAE_ACCOUNT_T1',
+      createdAt: Date.now(),
+      refreshable: true,
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    savedEnv = process.env[ENV_KEY]
+    // 门控默认开启（只有显式假值才关），这里显式写 '1' 避免受外部环境影响。
+    process.env[ENV_KEY] = '1'
+    ctx = createMockContext()
+    pool = new AccountPool(ctx as never)
+  })
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env[ENV_KEY]
+    else process.env[ENV_KEY] = savedEnv
+  })
+
+  it('★★★ 账号停用但凭据还在 ⇒ **不得**为它拉目录（false）', async () => {
+    await pool.addAccount(makeTraeAccount({ enabled: false }))
+    await ctx.credentials.set(credentialRef('TRAE_ACCOUNT_T1'), '{"access_token":"AT"}')
+    // 先确认底层判据确实分叉（否则本用例测不到接线）
+    expect(await pool.hasLoggedInAccount('trae'), '旧判据为 true').toBe(true)
+    expect(await pool.hasEnabledLoggedInAccount('trae'), '新判据为 false').toBe(false)
+    // ★ 接线必须走严格判据
+    expect(await providerCatalogVisible(pool, 'trae'), '停用 ⇒ 不拉目录').toBe(false)
+  })
+
+  it('★★ 有启用账号 ⇒ true（正常展示不受影响）', async () => {
+    await pool.addAccount(makeTraeAccount())
+    await ctx.credentials.set(credentialRef('TRAE_ACCOUNT_T1'), '{"access_token":"AT"}')
+    expect(await providerCatalogVisible(pool, 'trae')).toBe(true)
+  })
+
+  it('★★ 无账号 ⇒ false（既有语义不变）', async () => {
+    expect(await providerCatalogVisible(pool, 'trae')).toBe(false)
+  })
+
+  it('★ 池缺席 ⇒ true（能力检测，不因缺依赖而隐藏全部模型）', async () => {
+    expect(await providerCatalogVisible(undefined, 'trae')).toBe(true)
+  })
+
+  it('★ 显式关闭开关 ⇒ true（用户选择不看门控）', async () => {
+    process.env[ENV_KEY] = '0'
+    await pool.addAccount(makeTraeAccount({ enabled: false }))
+    // 没有凭据也无所谓：开关关闭时直接放行
+    expect(await providerCatalogVisible(pool, 'trae')).toBe(true)
   })
 })
