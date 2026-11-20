@@ -226,6 +226,74 @@ describe('ZCode 自动签到（opt-in，默认关）', () => {
     expect(calls).toEqual([])
   })
 
+  it('★★★ `ok: true` 但逐 plan 全失败（zcode 的真实失败形态）也必须推进水位线', async () => {
+    /**
+     * 2026-11-21 正向审计 P1：PR 的「有代价渠道失败不在本时段重试」原先只挂在
+     * `throw` 与 `!result.ok` 两条腿，而 **zcode 的真实失败形态是第三条腿** ——
+     * HTTP 成功、`ok: true`，而逐 plan 的 `failed` 里写着 `3007`（captcha 被拒）
+     * 或 `3012`（风控）。
+     *
+     * 此时 `coversToday === 0` ⇒ provider 不进 `proven` ⇒ 被当 `lagging`
+     * **反复补领**。而 zcode 单渠道池没有 3 小时窗口，09:00→21:00 约 33 次退避
+     * ⇒ 每天约 66 次 × 每次一棵 **headful** 浏览器（`--headless` 过不了 captcha）
+     * + 1~2 枚**设备级** captcha（上游 150/小时），3012 还有 30min→24h→停用的冷却。
+     *
+     * 上一条用例（`!ok`）与本条是**同一条不变式的两个入口**，缺任一条都会
+     * 让这个保护只覆盖一半。
+     */
+    const calls: string[] = []
+    const softFail = async (): Promise<BadgeRpcResult<RpcCreditsClaimAllResponse>> => {
+      calls.push('zcode')
+      return {
+        ok: true,
+        value: {
+          summary: {
+            claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 0, failed: 1,
+          },
+        },
+      }
+    }
+    const { runner, store } = makeRunner({ providers: ['zcode'], claim: softFail })
+    await runner.setZcodeEnabled(true)
+    await runner.runIfDue()
+    expect(calls).toEqual(['zcode'])
+    // 逐渠道水位线必须推进（判据是「今天什么都没证明」，不是「报错了」）
+    expect(store.current().providerSlots?.zcode).toBe(slotKey('2026-10-02', '09:00'))
+    // 再跑一轮（模拟退避到点）：必须零请求 —— 修前这里是 ['zcode']（反复补领）
+    calls.length = 0
+    await runner.runIfDue()
+    expect(calls).toEqual([])
+  })
+
+  it('★★ 反向：部分成功时**不压制**（少领比不领更糟）', async () => {
+    /**
+     * 判据必须是「记账口径 `coversToday === 0`」而不是「`summary.failed > 0`」：
+     * 一次调用可能领到 1 个 plan、另有 1 个失败 —— 这时已经证明过今天，
+     * 若按 `failed > 0` 压制，用户会**少领一次**。这条钉住方向。
+     */
+    const partial = async (): Promise<BadgeRpcResult<RpcCreditsClaimAllResponse>> => ({
+      ok: true,
+      value: {
+        summary: {
+          claimed: 1, totalCredit: 100, alreadyClaimed: 0, inactive: 0, failed: 1,
+        },
+      },
+    })
+    const { runner, store } = makeRunner({ providers: ['zcode'], claim: partial })
+    await runner.setZcodeEnabled(true)
+    await runner.runIfDue()
+    /**
+     * 判据看**整轮水位线是否推进**，不看 `providerSlots`：
+     * `providerSlots.zcode` 在「今天已处理」时**本来就会写**（那是正常路径的
+     * 「这条渠道今天处理过了」），拿它区分不了「正常记账」与「失败压制」。
+     *
+     * 两者的区别在 `lastSlot`：失败压制时整轮**不记账** ⇒ `lastSlot` 保持空且
+     * `lastResult` 写「本轮未计入今日，稍后重试」；部分成功时 `coversToday > 0`
+     * ⇒ `proven` ⇒ 整轮记账 ⇒ `lastSlot` 推进。
+     */
+    expect(store.current().lastSlot).not.toBe('')
+  })
+
   it('isAutoCheckinOptedIn 只认显式 `true`（脏数据不放行）', () => {
     expect(isAutoCheckinOptedIn('zcode', { zcodeEnabled: true })).toBe(true)
     expect(isAutoCheckinOptedIn('zcode', {})).toBe(false)

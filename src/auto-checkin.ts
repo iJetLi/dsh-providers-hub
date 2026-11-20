@@ -1209,7 +1209,34 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       const coversToday = summary.coversToday ?? (summary.claimed + summary.alreadyClaimed)
       totals.coversToday += coversToday
       channels.push({ provider, text: describeChannel(summary) })
-      if (coversToday > 0) proven.add(provider)
+      if (coversToday > 0) {
+        proven.add(provider)
+      } else if (costly) {
+        /**
+         * ⚠️⚠️ **`ok: true` 但有代价渠道照样可能是「完全失败」**（2026-11-21 正向审计 P1）。
+         *
+         * 本分支上方两条失败腿（`throw` 与 `!result.ok`）都加了 `costlyFailed`，
+         * 但**zcode 的真实失败形态是第三条腿**：HTTP 成功、`ok: true`，而逐 plan
+         * 的 `failed` 里写着 `3007`（captcha 被拒）/ `3012`（风控）。
+         *
+         * 此时 `coversToday === 0`（`computeClaimSummary` 的 `coversToday` 只计
+         * claimed / already-claimed）⇒ provider 不进 `proven` ⇒ 被当 `lagging`
+         * **反复补领**。而 zcode 的单渠道池**没有 3 小时窗口**，09:00→21:00 约
+         * **33 次**退避 ⇒ 每天约 **66 次** × 每次一棵 **headful** 浏览器
+         *（`--headless` 过不了 captcha）+ 1~2 枚**设备级** captcha（上游 150/小时），
+         * 且 `3012` 还有 30min → 24h → 停用的冷却惩罚。
+         *
+         * ⇒ 判据与另两条腿**逐字同构**：只要「有代价 + 今天什么都没证明」，
+         *   就记进 `costlyFailed`（写逐渠道水位线 ⇒ 本时段不再重试）。
+         *
+         * ⚠️ 为什么用 `coversToday === 0` 而不是 `summary.failed > 0`：
+         * 一次调用可能「部分成功」（领到 1 个 plan、另 1 个失败），那种情况
+         * `coversToday > 0` 已经进 `proven`，不该再压制 —— 压制会让用户少领。
+         * 判据必须读**记账口径**（`coversToday`），不是**错误计数**（`failed`）。
+         */
+        unretryable.add(provider)
+        costlyFailed.add(provider)
+      }
     }
 
     if (providers.length === 0) {
