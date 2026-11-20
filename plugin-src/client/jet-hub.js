@@ -352,10 +352,43 @@ export function CreditWindowModal(props) {
     setSaveError('')
     try {
       const payload = { provider }
-      // ⚠️ 空输入 = 该字段不传（后端「保持原值」）；这比传 0 安全 ——
-      //    `0` 是「关掉该档」，与「没填」是两件事。
-      if (typeof parsedWindow === 'number') payload.windowDays = parsedWindow
-      if (typeof parsedImminent === 'number') payload.imminentDays = parsedImminent
+      /**
+       * ⚠️⚠️ **只传用户真正改过的字段**（2026-11-21 对抗审计 P2-1，真缺陷）。
+       *
+       * ## 缺陷本体：不改任何东西、直接点保存 ⇒ 把 env/默认值**固化**成渠道设置
+       *
+       * 弹窗的草稿是拿 `credits.window.get` 返回的**生效值**预填的（那是
+       * `resolveCreditWindow` 的结果，可能是「环境变量」或「内置默认」给的）。
+       * 早先这里无条件把两个草稿都放进 payload ⇒ 用户明明什么都没改，
+       * 一点保存就把生效值写成了**渠道设置**：
+       *
+       * ```
+       * DSH_BUDDY_EXPIRING_WINDOW_DAYS=31，无渠道设置
+       * ⇒ 打开弹窗（预填 31 / 5）⇒ 直接点保存
+       * ⇒ 落盘 { windowDays: 31, imminentDays: 5 }
+       * ⇒ 来源徽标从「环境变量」变成「本渠道设置」
+       * ⇒ 此后**删掉环境变量也不再回落**（三级优先级被静默粘住）
+       * ```
+       *
+       * ⇒ 判据：只有与 `saved`（上次生效值）**不同**的字段才进 payload。
+       *    后端语义是「没传的字段保持原值」⇒ 没改动的那一格继续走 env/默认。
+       *
+       * ⚠️ 两个字段都没改动时**一个请求都不发**（下面早退）：因为后端
+       *    「两个都不传 ⇒ 整条删键（恢复默认）」—— 那会把用户原有的设置**删掉**，
+       *    比固化更糟。这条早退与保存按钮的 `!dirty` 禁用是**双保险**。
+       *
+       * ⚠️ 空输入 = 该字段不传（后端「保持原值」）；这比传 0 安全 ——
+       *    `0` 是「关掉该档」，与「没填」是两件事。
+       */
+      const windowChanged = typeof parsedWindow === 'number' && parsedWindow !== saved?.windowDays
+      const imminentChanged = typeof parsedImminent === 'number' && parsedImminent !== saved?.imminentDays
+      if (windowChanged) payload.windowDays = parsedWindow
+      if (imminentChanged) payload.imminentDays = parsedImminent
+      if (payload.windowDays === undefined && payload.imminentDays === undefined) {
+        // 没有任何真正的改动 ⇒ 不发请求（发出去会命中「两个都不传 ⇒ 删键」）。
+        onClose()
+        return
+      }
       // ⚠️ `rpcCall` 成功即返回 value、失败即抛错（见 load effect 的注释）。
       const res = await rpcCall('credits.window.set', payload)
       if (typeof res?.windowDays !== 'number' || typeof res?.imminentDays !== 'number') {
@@ -556,7 +589,12 @@ export function CreditWindowModal(props) {
         React.createElement('button', {
           className: 'dim-jh-btn',
           'data-kind': 'primary',
-          disabled: busy || windowInvalid || imminentInvalid,
+          /**
+           * ⚠️ **`!dirty` 必须在**（2026-11-21 对抗审计 P2-1）。
+           * `dirty` 这个变量原先**全文件只有定义、没有消费方**（死变量），
+           * 于是「没改动也能点保存」⇒ 见 `onSave` 里那段缺陷说明。
+           */
+          disabled: busy || windowInvalid || imminentInvalid || !dirty,
           onClick: () => void onSave(),
         }, busy ? '保存中…' : '保存'),
       ),

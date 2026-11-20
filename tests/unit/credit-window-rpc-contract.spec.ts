@@ -198,3 +198,27 @@ describe('源码级兜底：弹窗不得误解 rpcCall 契约', () => {
   })
 })
 
+
+/**
+ * ★★ **两个窗口必须成对回传**（2026-11-21 对抗审计：这条不变式**零守卫**）。
+ *
+ * 变体实测：把 `credits.permanentLock` 回传里的 `imminentDays` 撤掉 ⇒
+ * **没有任何 credit-window / RPC 用例变红**。而 `src/jet-hub-rpc.ts:9149`
+ * 的注释逐字写着「两个窗口必须成对回传：只给 `windowDays` 会让前端
+ * `normalizeImminentDays(undefined)` 退化成『临期窗口 = 总窗口』
+ * ⇒ 面板『临期』段恒为 0、临时积分全落『短期』段」。
+ *
+ * ⇒ 用**计数式**源码断言：4 处回传点全部成对，且不存在「只给 windowDays」的形态。
+ *   ⚠️ 局限如实登记：源码文本断言挡不住 `if (false)` 包住（本仓已知弱点）。
+ *   真正的行为级守卫需要构造 4 条 RPC 通道的 pool 替身，成本高于本条不变式的价值。
+ */
+describe('成对回传守卫（源码级，局限已登记）', () => {
+  it('★★ 4 处窗口回传点全部 `windowDays` + `imminentDays` 成对', async () => {
+    const source = await import('node:fs').then((fs) =>
+      fs.readFileSync(new URL('../../src/jet-hub-rpc.ts', import.meta.url), 'utf8'))
+    const paired = source.match(/return \{ windowDays: w\.windowDays, imminentDays: w\.imminentDays \}/g) ?? []
+    expect(paired.length, '成对回传点数量变了：要么新增了回传（请一并改成成对），要么有处被改成了单字段').toBe(4)
+    // 反向：不得出现「只给 windowDays」的回传形态
+    expect(source).not.toMatch(/return \{ windowDays: w\.windowDays \}/)
+  })
+})

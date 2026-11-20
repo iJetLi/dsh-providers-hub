@@ -12401,12 +12401,23 @@ function registerJetHubEndpoints(
         /**
          * ⚠️ 这里读的是「当前值」用于**合并**（只传一个字段时另一个保留原值）。
          *
-         * 与只读端点不同，写路径若拿到不完整的 pool 应当**明确报错**而不是
-         * 静默当作「未设置」—— 否则用户只改一个字段时，另一个会被悄悄清空。
-         * ⇒ 先用 `safeCreditWindowReader` 读（兼容替身），再用
-         *   `pool.creditWindow` 是否存在决定是否允许「部分更新」。
+         * ## 为什么**必须**先断言 pool 支持读当前值（2026-11-21 对抗审计 P2-3）
+         *
+         * 本段原有一个 `const canReadCurrent = typeof pool.creditWindow === 'function'`
+         * —— **定义了却零使用点**（死变量），而它上方的注释逐字写着「写路径若拿到
+         * 不完整的 pool 应当**明确报错**而不是静默当作『未设置』」。承诺没兑现：
+         * 真出现不完整 pool 时，`current` 恒 `undefined` ⇒ 只传一个字段的「部分更新」
+         * 会退化成「整体覆盖」⇒ **另一个字段被悄悄清空**，正是注释要防的症状。
+         *
+         * ⇒ 把死变量变成真闸门：宁可让这个端点显式失败（用户看到可读错误、
+         *    设置不会被无声改写），也不允许静默丢字段。
+         *
+         * ⚠️ 真实宿主一定实现了该方法（`AccountPool.creditWindow`），
+         *    这条只会挡「单测替身漏实现」与「版本错配」两种情形。
          */
-        const canReadCurrent = typeof (pool as { creditWindow?: unknown }).creditWindow === 'function'
+        if (typeof (pool as { creditWindow?: unknown }).creditWindow !== 'function') {
+          return { ok: false, error: { code: 'internal', message: '账号池不支持按渠道读取分档窗口，无法安全执行「只改一个字段」的部分更新（另一个字段会被覆盖）。请升级宿主后重试。' } }
+        }
         const current = safeCreditWindowReader(pool)(req.provider)
         const next = windowDays === undefined && imminentDays === undefined
           ? undefined

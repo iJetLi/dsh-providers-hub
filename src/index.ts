@@ -5763,6 +5763,22 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
        * 筛号分叉（`officeace-lock.ts:52` 的注释记的正是这个坑）。
        */
       windowMs: () => resolveCreditWindow(OFFICEACE.id, safeCreditWindowReader(pool)).windowDays * 24 * 60 * 60 * 1000,
+      /**
+       * ⚠️⚠️ **必须与 `windowMs` 成对注入**（2026-11-21 对抗审计 P2-4）。
+       *
+       * `officeace-lock.ts:138` 声明了 `imminentWindowMs?: () => number`，
+       * `:274` 用 `deps.imminentWindowMs?.()` —— 但这里原先把 `imminentWindowMs`
+       * **漏了**（生产零注入）⇒ 锁定态的「临期」子窗口恒取全局默认 5 天，
+       * 与用户在面板里设的 `imminentDays` 分叉。
+       *
+       * 这正是本 PR 在 `buddy-balance-selector.ts` 里刚修过的**同型缺陷**
+       *（可选参数造成静默旁路：`windowMs` 接了、`imminentWindowMs` 没接）。
+       *
+       * ⚠️ 今天**零可观测后果**（`split.imminent` 尚无消费方），
+       *    但一旦有人接上消费方，症状就是「面板说临期、锁却按 5 天判」。
+       *    所以现在就补，别留给下一个人。
+       */
+      imminentWindowMs: () => resolveCreditWindow(OFFICEACE.id, safeCreditWindowReader(pool)).imminentDays * 24 * 60 * 60 * 1000,
       // 锁定判定要**逐账号**看余额 ⇒ 取全部启用账号（与未锁定取号同一份清单）。
       accounts: () => enabledOfficeAceAccounts()
         .map((entry) => ({ id: entry.id, credentialRef: entry.credentialRef })),

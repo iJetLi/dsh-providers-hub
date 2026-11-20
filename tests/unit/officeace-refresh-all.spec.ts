@@ -993,3 +993,26 @@ describe('IKLPTZ 防复发：结构与类型的判据', () => {
     }
   })
 })
+
+/**
+ * ★★ **officeace 锁定态必须成对注入两个窗口**（2026-11-21 对抗审计 P2-4）。
+ *
+ * `src/officeace-lock.ts:138` 声明了 `imminentWindowMs?: () => number`、
+ * `:274` 用 `deps.imminentWindowMs?.()`，但 `src/index.ts` 原先**只注入了 `windowMs`**
+ * ⇒ 锁定态的「临期」子窗口恒取全局默认 5 天，与用户在面板里设的 `imminentDays` 分叉。
+ *
+ * 这正是本 PR 在 `buddy-balance-selector.ts` 里刚修过的**同型缺陷**
+ *（可选参数造成静默旁路：`windowMs` 接了、`imminentWindowMs` 没接）。
+ *
+ * ⚠️ 为什么需要这条源码级守卫：撤掉注入后**跑遍现有 officeace 用例全绿**
+ *    （实测 M6 无牙）—— 因为 `split.imminent` 今天还没有消费方，
+ *    「零可观测后果」正是它无法被行为级用例发现的原因。
+ */
+describe('officeace 窗口注入（源码级，局限已登记）', () => {
+  it('★★ `windowMs` 与 `imminentWindowMs` 必须成对注入', async () => {
+    const source = await import('node:fs').then((fs) =>
+      fs.readFileSync(new URL('../../src/index.ts', import.meta.url), 'utf8'))
+    expect(source).toContain('windowMs: () => resolveCreditWindow(OFFICEACE.id')
+    expect(source).toContain('imminentWindowMs: () => resolveCreditWindow(OFFICEACE.id')
+  })
+})
