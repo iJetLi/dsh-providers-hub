@@ -4242,7 +4242,7 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
           }, phase === 'loading' ? '读取中…' : '刷新'))),
       React.createElement('p', {
         className: 'dim-jh-modalHint',
-        title: '总处理量 = 输入 + 输出；缓存写入不重复计入。输出速率的均值对离群样本敏感；P50/P90 是完整分布估算。速率要求解码时长至少 100ms。明细最多保留最近 500 笔，重启清空；按日累计写入 token-ledger.json。',
+        title: '总处理量 = 输入 + 输出；缓存写入不重复计入。输出速率的均值对离群样本敏感；P50/P90 是完整分布估算。速率要求解码时长至少 100ms。统计（上方汇总）累计进程启动至今的全部请求、无上限，重启清空；下方明细列表只保留最近 500 笔；按日累计写入 token-ledger.json。',
       },
         '按渠道、供应商、账号和模型统计用量。悬停数字查看 Token 拆分与性能口径；逐笔明细重启后清空，按日历史会保留。'),
       React.createElement('div', { className: 'dim-jh-ledgerPaneBody' },
@@ -4279,7 +4279,7 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
           }, '完成'))),
       React.createElement('p', {
         className: 'dim-jh-modalHint',
-        title: '总处理量 = 输入 + 输出；缓存写入不重复计入。输出速率的均值对离群样本敏感；P50/P90 是完整分布估算。速率要求解码时长至少 100ms。明细最多保留最近 500 笔，重启清空；按日累计写入 token-ledger.json。',
+        title: '总处理量 = 输入 + 输出；缓存写入不重复计入。输出速率的均值对离群样本敏感；P50/P90 是完整分布估算。速率要求解码时长至少 100ms。统计（上方汇总）累计进程启动至今的全部请求、无上限，重启清空；下方明细列表只保留最近 500 笔；按日累计写入 token-ledger.json。',
       },
         '按渠道、供应商、账号和模型统计用量。悬停数字查看 Token 拆分与性能口径；逐笔明细重启后清空，按日历史会保留。'),
       React.createElement('div', { className: 'dim-jh-modalBody' },

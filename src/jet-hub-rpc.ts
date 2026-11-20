@@ -12716,9 +12716,14 @@ function registerJetHubEndpoints(
        * 随意刷新。数据在重启后为空是**既定行为**（第 1 期不持久化），UI 负责
        * 把「进程内存账本」这一事实讲清楚。
        *
-       * ⚠️ 这里**不**做渠道/provider 过滤：账本条数上限 500，全量下发即可，
-       * 过滤维度（渠道、provider、模型）都由 UI 在聚合树上展开，避免为每个
-       * 维度各造一个 RPC 端点。
+       * ⚠️ **汇总无上限、明细 500 条**（2026-11-20 用户要求）：
+       * `snapshot.totals` / `channels[]` 覆盖**进程启动至今全部请求**，
+       * `snapshot.entries[]` 只给最近 500 条。两者范围不同，不要互相反推。
+       *
+       * ⚠️ 这里**不**做渠道/provider 过滤：聚合树本身就是全量的（且条数
+       * 已无上限，下发整棵树仍是常数级开销 —— 树的大小取决于「有多少个
+       * provider/账号/模型」，与请求次数无关）。过滤维度（渠道、provider、
+       * 模型）都由 UI 在聚合树上展开，避免为每个维度各造一个 RPC 端点。
        */
       case 'usage.tokenLedger': {
         const req = payload as RpcUsageTokenLedgerRequest

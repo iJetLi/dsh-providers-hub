@@ -2876,9 +2876,19 @@ export interface RpcUsageBadgePreferenceResponse {
  * 数据来自进程内存的 `src/token-ledger.ts`：记账点在注册收敛层
  * （`llm-register-compat.ts` 的包装适配器），渠道由网关侧打标区分。
  * **重启即丢**（第 1 期不持久化），UI 需说明这一点而不是伪装成历史报表。
+ *
+ * ⚠️ **汇总与明细的范围不同**（2026-11-20 用户要求）：
+ * - `snapshot.totals` / `snapshot.channels[]` = **进程启动至今全部请求**（无上限）
+ * - `snapshot.entries[]` = 最近 {@link TOKEN_LEDGER_ENTRY_LIMIT} 条
+ *
+ * ⇒ 不要用 `entries` 求和去当汇总。
  */
 export interface RpcUsageTokenLedgerRequest {
-  /** 明细最多多少条；省略 = 服务端上限（`TOKEN_LEDGER_LIMIT`）。 */
+  /**
+   * **明细**最多多少条；省略 = 服务端上限（`TOKEN_LEDGER_ENTRY_LIMIT`，500）。
+   *
+   * ⚠️ 它只影响 `entries[]`，**不影响** `totals` / `channels[]`。
+   */
   limit?: number
 }
 

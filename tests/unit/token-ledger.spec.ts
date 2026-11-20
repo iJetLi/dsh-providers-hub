@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   MIN_DECODE_MS_FOR_TPS,
+  TOKEN_LEDGER_ENTRY_LIMIT,
   TOKEN_LEDGER_LIMIT,
   attachTokenLedgerStore,
   deleteTokenLedgerDay,
@@ -95,14 +96,64 @@ describe('recordTokenUsage / readTokenLedger：明细', () => {
     expect(rows[1]!.error).toBeUndefined()
   })
 
-  it('写满上限后淘汰最旧（保持 TOKEN_LEDGER_LIMIT 条）', () => {
+  /**
+   * ★★★ **累计无上限 / 明细仍限 500**（2026-11-20 用户要求）。
+   *
+   * 用户原话：「现在它是只统计最多最近 500 次数据，可以把它做成无限制吗？
+   * 就是一直统计，直到重启清空，下面列表详情就保留还是最近 500 次」
+   *
+   * ⚠️ 原用例是「写满上限后淘汰最旧（保持 TOKEN_LEDGER_LIMIT 条）」——
+   * 那条守的正是**要改掉的行为**（数组截断 ⇒ 汇总被连带截断）。
+   * 现在拆成两条，分别钉「累计」与「明细」。
+   */
+  it('★★★ 累计无上限：写满 500 次后，汇总仍统计**全部**请求', () => {
     resetTokenLedgerForTests()
-    for (let i = 0; i < TOKEN_LEDGER_LIMIT + 50; i++) {
+    const total = TOKEN_LEDGER_ENTRY_LIMIT + 50
+    for (let i = 0; i < total; i++) {
       recordTokenUsage({ ...OK, outputTokens: i })
     }
-    expect(tokenLedgerSize()).toBe(TOKEN_LEDGER_LIMIT)
-    // 最新在前：最旧（outputTokens=0..49）已被淘汰，最前是最新的那条
-    expect(readTokenLedger().entries[0]!.outputTokens).toBe(TOKEN_LEDGER_LIMIT + 49)
+    const snap = readTokenLedger()
+    // 数组不再截断 ⇒ 内部条数 = 全部
+    expect(tokenLedgerSize(), 'ledger 数组不得再被截断').toBe(total)
+    // ★ 核心：汇总必须覆盖全部请求，而不是最近 500 次
+    expect(snap.totals.requests, '汇总必须统计全部请求（缺陷时是 500）').toBe(total)
+    // outputTokens 是 0..total-1 的等差数列，求和可校验
+    expect(snap.totals.outputTokens).toBe(((total - 1) * total) / 2)
+  })
+
+  it('★★★ 明细列表仍只给最近 TOKEN_LEDGER_ENTRY_LIMIT 条（用户要求保留 500）', () => {
+    resetTokenLedgerForTests()
+    const total = TOKEN_LEDGER_ENTRY_LIMIT + 50
+    for (let i = 0; i < total; i++) {
+      recordTokenUsage({ ...OK, outputTokens: i })
+    }
+    const entries = readTokenLedger().entries
+    expect(entries, '明细条数必须仍被限制').toHaveLength(TOKEN_LEDGER_ENTRY_LIMIT)
+    // 最新在前：最前是最后写入的那条
+    expect(entries[0]!.outputTokens).toBe(total - 1)
+    // 最旧的那 50 条不在明细里（但仍在汇总里，见上一条）
+    expect(entries.at(-1)!.outputTokens).toBe(50)
+  })
+
+  it('★★ 明细与汇总的范围不同（不得用 entries 反推 totals）', () => {
+    resetTokenLedgerForTests()
+    const total = TOKEN_LEDGER_ENTRY_LIMIT + 200
+    for (let i = 0; i < total; i++) {
+      recordTokenUsage({ ...OK, outputTokens: 1 })
+    }
+    const snap = readTokenLedger()
+    const entrySum = snap.entries.reduce((s, e) => s + e.outputTokens, 0)
+    expect(snap.totals.outputTokens, '汇总应覆盖全部').toBe(total)
+    expect(entrySum, '明细求和只有最近 500 条').toBe(TOKEN_LEDGER_ENTRY_LIMIT)
+    expect(snap.totals.outputTokens).toBeGreaterThan(entrySum)
+  })
+
+  it('★ limit 参数只影响明细，不影响汇总', () => {
+    resetTokenLedgerForTests()
+    for (let i = 0; i < 20; i++) recordTokenUsage({ ...OK, outputTokens: 10 })
+    const snap = readTokenLedger({ limit: 5 })
+    expect(snap.entries).toHaveLength(5)
+    expect(snap.totals.requests, 'limit 不得影响汇总').toBe(20)
   })
 
   it('record 绝不抛错：垃圾入参（null/undefined/异常对象）安静落账', () => {

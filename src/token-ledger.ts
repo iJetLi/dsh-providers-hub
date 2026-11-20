@@ -21,9 +21,29 @@ import { AsyncLocalStorage } from 'node:async_hooks'
  * ## 存储是进程内存，重启即丢（刻意，第 1 期与 cline-request-log 同决策）
  *
  * 高频写入的派生数据持久化会把每笔推理变成一次磁盘写；「本周用量」这类
- * 长周期诉求随第 2 期持久化一并做。上限 {@link TOKEN_LEDGER_LIMIT} 条，
- * 写满淘汰最旧。聚合树在读取时按需重建（条数有限，O(n) 足够快，
- * 不为省这点计算引入增量维护的双写复杂度）。
+ * 长周期诉求由**第 2 期的日聚合落盘**另行解决（`token-ledger-store.ts`）。
+ *
+ * ## ⚠️⚠️ 累计**无上限**，明细**保留最近 500 条**（2026-11-20 用户要求）
+ *
+ * 用户原话：「现在它是只统计最多最近 500 次数据，可以把它做成无限制吗？
+ * 就是一直统计，直到重启清空，下面列表详情就保留还是最近 500 次」
+ *
+ * | 输出 | 范围 | 常量 |
+ * |---|---|---|
+ * | `channels[]` / `totals`（汇总）| **全部累计**（重启清空）| 无 |
+ * | `entries[]`（明细列表）| 最近 500 条 | {@link TOKEN_LEDGER_ENTRY_LIMIT} |
+ *
+ * ⚠️ **改动的关键**：原实现在 `recordTokenUsage` 里把 `ledger` 数组截断到 500 条，
+ * 而聚合树是**遍历该数组**重建的 ⇒ 汇总被连带截断（用户看到的「总处理 X 次」
+ * 其实是「最近 500 次」）。现在不截数组，只在 `entries` 输出处切片。
+ *
+ * ⚠️ **内存代价不再是常数**：`ledger` 会一直增长（约 200~300 字节/条）。
+ * 按 5 万次/天 × 30 天 ≈ 150 万条 ≈ 300~450 MB。本模块的前提是「进程内存、
+ * 重启即丢」，故接受；若将来要长期不停机运行，正确方向是分层淘汰
+ *（旧明细折叠进聚合），而不是加持久化。
+ *
+ * ⚠️ 聚合树在读取时按需重建（O(总请求数)，不为省这点计算引入增量维护的
+ * 双写复杂度）—— 条数现在无上限，故这个 O(n) 的代价也随之增长。
  *
  * ## ⚠️ record() **绝不抛错**：它在推理的关键路径上
  *
@@ -184,8 +204,33 @@ export interface TokenLedgerSnapshot {
   entries: TokenLedgerEntry[]
 }
 
-/** 流水上限。500 条足够回溯近期活动，内存占用可忽略。 */
-export const TOKEN_LEDGER_LIMIT = 500
+/**
+ * **明细列表**的上限（只限制 `snapshot.entries` 的长度）。
+ *
+ * ⚠️⚠️ **它不再限制累计**（2026-11-20 用户要求）。
+ *
+ * 历史：这个常量原名 `TOKEN_LEDGER_LIMIT`，同时承担两件事 ——
+ * ① `ledger` 数组的截断长度；② `entries` 的返回条数。
+ * 因为聚合树是**从 `ledger` 数组重建**的（见 {@link readTokenLedger} 的实现
+ * 说明），① 一旦截断，**汇总也被一起截断**（只统计最近 500 次）。
+ *
+ * 用户原话：「现在它是只统计最多最近 500 次数据，可以把它做成无限制吗？
+ * 就是一直统计，直到重启清空，下面列表详情就保留还是最近 500 次」
+ *
+ * ⇒ 现在两件事分开：
+ * - **累计（聚合树 + 全局小计）= 无上限**，进程存活期间一直累加，重启清空；
+ * - **明细列表 = 仍保留最近 500 条**（用户明确要求「详情保留 500」）。
+ */
+export const TOKEN_LEDGER_ENTRY_LIMIT = 500
+
+/**
+ * @deprecated 用 {@link TOKEN_LEDGER_ENTRY_LIMIT}。
+ *
+ * 保留别名只为不打断既有引用（`tests/unit/token-ledger.spec.ts` 等）。
+ * ⚠️ **语义已变窄**：它现在**只**表示「明细列表条数上限」，
+ * **不再**是「累计上限」—— 累计已无上限。
+ */
+export const TOKEN_LEDGER_LIMIT = TOKEN_LEDGER_ENTRY_LIMIT
 
 /**
  * TPS 计算的**最小解码时长**（毫秒）：短于此值 ⇒ 该笔不可测，不计入均值。
@@ -633,7 +678,43 @@ export function recordTokenUsage(entry: Omit<TokenLedgerEntry, 'ts'>): void {
         : {}),
     }) as TokenLedgerEntry
     ledger.unshift(record)
-    if (ledger.length > TOKEN_LEDGER_LIMIT) ledger.length = TOKEN_LEDGER_LIMIT
+    /**
+     * ⚠️⚠️ **这里刻意不再截断 `ledger` 数组**（2026-11-20 用户要求）。
+     *
+     * ## 为什么删掉这行会改变汇总语义
+     *
+     * 聚合树（渠道 / provider / 账号 / 模型四级 + 全局小计）是在
+     * {@link readTokenLedger} 里**遍历 `ledger` 数组**现场重建的。
+     * 原实现有这一行：
+     *
+     * ```ts
+     * if (ledger.length > TOKEN_LEDGER_LIMIT) ledger.length = TOKEN_LEDGER_LIMIT
+     * ```
+     *
+     * ⇒ 数组只留最近 500 条 ⇒ **重建出来的汇总也只覆盖最近 500 次**，
+     *   用户看到「总处理 21416.3M / 49574 次」其实是「最近 500 次」的数字
+     *   （真实报障：「只统计最多最近 500 次数据」）。
+     *
+     * ## 现在的语义
+     *
+     * - **累计 = 无上限**：进程存活期间一直累加，**重启清空**（与既有
+     *   「账本是进程内存、重启即丢」的决策一致，不引入持久化）；
+     * - **明细列表 = 仍只下发最近 {@link TOKEN_LEDGER_ENTRY_LIMIT} 条**
+     *   （在 `readTokenLedger` 的 `entries` 处切，不是在这里截数组）。
+     *
+     * ## ⚠️ 内存代价（如实登记）
+     *
+     * 每条 `TokenLedgerEntry` 是冻结的普通对象（约 200~300 字节，
+     * `model` ≤ 160 / `provider` ≤ 64 / `error` ≤ 200 字符均已截断）。
+     * 按重度使用 5 万次 / 天、连续跑 30 天 ≈ 150 万条 ≈ **300~450 MB** ——
+     * 这是**真实的内存增长**，不再是常数。
+     *
+     * 之所以接受：本模块的设计前提就是「进程内存、重启即丢」，
+     * 且用户明确要了「一直统计」。若将来要长期运行，正确方向是给
+     * `ledger` 加**分层淘汰**（例如「保留最近 N 条明细，旧的折叠进聚合」），
+     * 那是增量维护双写 —— 本模块头部明确拒绝过（见「不为 O(n) 引入双写」），
+     * 故此处不做，只把代价写清楚。
+     */
     // 每日聚合落盘（第 2 期）：后端内部自己节流与兜错，这里不再包 try ——
     // 挂载契约要求 append 绝不抛错（见 attachTokenLedgerStore 的说明）。
     try {
@@ -779,12 +860,34 @@ function addAggregateTotals(
  * 读取账本快照（聚合树 + 全局小计 + 最近明细）。
  *
  * 纯读取、不改状态；每次按需重建聚合树（见模块头「不为 O(n) 引入双写」）。
- * 聚合与明细都来自同一份 `ledger`，**天然同源**——不存在「树与小计各算一遍」
- * 的口径漂移。各级排序：渠道按 `direct → gateway`、provider/账号/模型按 token
+ * 各级排序：渠道按 `direct → gateway`、provider / 账号 / 模型按 token
  * 合计降序（谁烧得多谁在前）。
+ *
+ * ## ⚠️⚠️ 聚合范围 = **全部累计**，明细范围 = **最近 N 条**（2026-11-20 起）
+ *
+ * 这两个范围**刻意不同**：
+ *
+ * | 输出 | 覆盖范围 |
+ * |---|---|
+ * | `channels[]` / `totals` | **进程启动至今的全部请求**（无上限，重启清空）|
+ * | `entries[]` | 最近 {@link TOKEN_LEDGER_ENTRY_LIMIT} 条（用户要求保留 500）|
+ *
+ * 实现上：第一遍遍历**整个 `ledger` 数组**（不再被截断，见 `recordTokenUsage`
+ * 里的说明）⇒ 汇总是全量；第二遍 `entries` 用 `slice(0, limit)` 切最近 N 条。
+ *
+ * ⚠️ 因此**不能**从 `entries` 反推 `totals`（两者范围不同）。
+ * 客户端若做「按当前筛选项重算小计」这类事，必须用 `channels[]` 里的聚合行，
+ * 不能拿 `entries` 求和 —— 那会得出「只有最近 500 次」的旧口径。
+ * 既有用例里没有这种做法（客户端读 `totals` 而非求和 `entries`），但改
+ * 这里时必须检查。
+ *
+ * ⚠️ 性能：`ledger` 不再有上限 ⇒ 这个函数的复杂度是 **O(总请求数)**。
+ * 面板每次刷新都调用它。按 15 万条估算，一次重建约十几毫秒量级，
+ * 可接受；若将来条数涨到百万级，需要引入增量聚合（本模块头部明确拒绝过
+ * 双写，届时应连「模疑」一起重新设计，而不是只加缓存）。
  */
 export function readTokenLedger(options: { limit?: number } = {}): TokenLedgerSnapshot {
-  const limit = Math.max(0, Math.min(options.limit ?? TOKEN_LEDGER_LIMIT, TOKEN_LEDGER_LIMIT))
+  const limit = Math.max(0, Math.min(options.limit ?? TOKEN_LEDGER_ENTRY_LIMIT, TOKEN_LEDGER_ENTRY_LIMIT))
 
   // ── 第一遍：逐条累加进四级聚合（全局小计顺路算出）──
   // ⚠️ 各级小计都是 **AccumulatingTotals**（Σ/份数累加）—— 父级均值必须由
