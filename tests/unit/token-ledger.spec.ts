@@ -97,38 +97,49 @@ describe('recordTokenUsage / readTokenLedger：明细', () => {
   })
 
   /**
-   * ★★★ **累计无上限 / 明细仍限 500**（2026-11-20 用户要求）。
+   * ★★★ **汇总无上限 / 明细有界 / 内存不增长**（2026-11-20 用户最终需求）。
    *
-   * 用户原话：「现在它是只统计最多最近 500 次数据，可以把它做成无限制吗？
-   * 就是一直统计，直到重启清空，下面列表详情就保留还是最近 500 次」
+   * 用户原话（纠正第一版）：
+   * > 「我现在的需求只是统计后的结果保留无限制，没必要每个请求都保留详情
+   * >  无限制呀，500 条上限后，采用结果量就行，基本无内存上涨的呀」
    *
-   * ⚠️ 原用例是「写满上限后淘汰最旧（保持 TOKEN_LEDGER_LIMIT 条）」——
-   * 那条守的正是**要改掉的行为**（数组截断 ⇒ 汇总被连带截断）。
-   * 现在拆成两条，分别钉「累计」与「明细」。
+   * ⇒ 汇总走**增量聚合**（行数与请求数无关），明细走**500 条封顶数组**。
+   * 下面几条同时钉住「汇总对」「明细对」「内存不涨」三件事。
    */
-  it('★★★ 累计无上限：写满 500 次后，汇总仍统计**全部**请求', () => {
+  it('★★★ 汇总无上限：写满 500 次后，汇总仍统计**全部**请求', () => {
     resetTokenLedgerForTests()
     const total = TOKEN_LEDGER_ENTRY_LIMIT + 50
     for (let i = 0; i < total; i++) {
       recordTokenUsage({ ...OK, outputTokens: i })
     }
     const snap = readTokenLedger()
-    // 数组不再截断 ⇒ 内部条数 = 全部
-    expect(tokenLedgerSize(), 'ledger 数组不得再被截断').toBe(total)
-    // ★ 核心：汇总必须覆盖全部请求，而不是最近 500 次
-    expect(snap.totals.requests, '汇总必须统计全部请求（缺陷时是 500）').toBe(total)
+    // ★ 核心：汇总必须覆盖全部请求
+    expect(snap.totals.requests, '汇总必须统计全部请求（旧缺陷时是 500）').toBe(total)
     // outputTokens 是 0..total-1 的等差数列，求和可校验
     expect(snap.totals.outputTokens).toBe(((total - 1) * total) / 2)
+    /**
+     * ★★★ **渠道维度也必须是全量**（变异 M3 实测无牙后补）。
+     *
+     * 上面的断言只看了 `snap.totals`（来自 `aggregateTotals`）；
+     * 而 `snap.channels` 是**另一个来源**（聚合树）。把读取改回
+     * 「遍历 ledger 重建」时，`totals` 仍然对（独立累加器），
+     * 只有 `channels` 会退化成 500 —— 之前的用例正好漏了这一半。
+     */
+    const chReq = snap.channels.reduce((s, c) => s + c.totals.requests, 0)
+    expect(chReq, '各渠道之和也必须是全量（不能只看 totals）').toBe(total)
+    expect(snap.channels[0]!.totals.requests, '渠道行本身也必须是全量').toBe(total)
   })
 
-  it('★★★ 明细列表仍只给最近 TOKEN_LEDGER_ENTRY_LIMIT 条（用户要求保留 500）', () => {
+  it('★★★ 明细有界：`ledger` 数组仍封顶 TOKEN_LEDGER_ENTRY_LIMIT（内存恒定）', () => {
     resetTokenLedgerForTests()
     const total = TOKEN_LEDGER_ENTRY_LIMIT + 50
     for (let i = 0; i < total; i++) {
       recordTokenUsage({ ...OK, outputTokens: i })
     }
+    // ★ 内存有界的关键：数组条数不得随请求数增长
+    expect(tokenLedgerSize(), 'ledger 必须被截断（内存恒定）').toBe(TOKEN_LEDGER_ENTRY_LIMIT)
     const entries = readTokenLedger().entries
-    expect(entries, '明细条数必须仍被限制').toHaveLength(TOKEN_LEDGER_ENTRY_LIMIT)
+    expect(entries).toHaveLength(TOKEN_LEDGER_ENTRY_LIMIT)
     // 最新在前：最前是最后写入的那条
     expect(entries[0]!.outputTokens).toBe(total - 1)
     // 最旧的那 50 条不在明细里（但仍在汇总里，见上一条）
@@ -154,6 +165,62 @@ describe('recordTokenUsage / readTokenLedger：明细', () => {
     const snap = readTokenLedger({ limit: 5 })
     expect(snap.entries).toHaveLength(5)
     expect(snap.totals.requests, 'limit 不得影响汇总').toBe(20)
+  })
+
+  /**
+   * ★★★ **守恒守卫**：聚合树与全局小计必须与写入次数严格一致。
+   *
+   * 这是「增量双写」唯一的风险点 —— 若某条路径 update 了 ledger 但没 update
+   * 聚合（或反之），两边就漂移，且**不会有任何报错**。
+   */
+  it('★★★ 守恒：渠道汇总之和 == 全局小计（增量累加不得漂移）', () => {
+    resetTokenLedgerForTests()
+    // 混合渠道/provider/账号/模型，覆盖所有维度
+    for (let i = 0; i < 30; i++) {
+      recordTokenUsage({
+        ...OK,
+        channel: i % 2 === 0 ? 'direct' : 'gateway',
+        provider: i % 3 === 0 ? 'buddy' : 'workbuddy',
+        accountId: i % 4 === 0 ? undefined : `acct-${i % 3}`,
+        model: i % 5 === 0 ? 'model-a' : 'model-b',
+        inputTokens: 10,
+        outputTokens: 5,
+      })
+    }
+    const snap = readTokenLedger()
+    const chReq = snap.channels.reduce((s, c) => s + c.totals.requests, 0)
+    const chIn = snap.channels.reduce((s, c) => s + c.totals.inputTokens, 0)
+    const chOut = snap.channels.reduce((s, c) => s + c.totals.outputTokens, 0)
+    expect(chReq, '各渠道请求数之和必须等于全局').toBe(snap.totals.requests)
+    expect(chIn).toBe(snap.totals.inputTokens)
+    expect(chOut).toBe(snap.totals.outputTokens)
+    expect(snap.totals.requests).toBe(30)
+    expect(snap.totals.inputTokens).toBe(300)
+    expect(snap.totals.outputTokens).toBe(150)
+  })
+
+  it('★★ 清空后聚合与小计同时归零（不得留幽灵数据）', () => {
+    resetTokenLedgerForTests()
+    for (let i = 0; i < 10; i++) recordTokenUsage({ ...OK, outputTokens: 7 })
+    expect(readTokenLedger().totals.requests).toBe(10)
+    resetTokenLedgerForTests()
+    const snap = readTokenLedger()
+    expect(snap.totals.requests, 'reset 必须同时清聚合树').toBe(0)
+    expect(snap.channels, 'reset 必须同时清聚合树').toHaveLength(0)
+    expect(snap.entries).toHaveLength(0)
+  })
+
+  it('★★★ 明细写入不被聚合路径吞掉（两个结构都要更新）', () => {
+    resetTokenLedgerForTests()
+    recordTokenUsage({ ...OK, outputTokens: 42 })
+    const snap = readTokenLedger()
+    // 两边都要有这条
+    expect(snap.entries, '明细必须有').toHaveLength(1)
+    expect(snap.entries[0]!.outputTokens).toBe(42)
+    expect(snap.totals.requests, '汇总必须有').toBe(1)
+    expect(snap.totals.outputTokens).toBe(42)
+    // 且聚合树里也能查到
+    expect(snap.channels[0]!.totals.requests).toBe(1)
   })
 
   it('record 绝不抛错：垃圾入参（null/undefined/异常对象）安静落账', () => {
@@ -651,5 +718,70 @@ describe('readTokenLedgerHistory（第 4 期 · 历史视图）', () => {
       expect(snap.totals, `totals.${field}`).not.toHaveProperty(field)
     }
     expect(row.avgTtftMs).toBe(100)
+  })
+
+  /**
+   * ★★★ **内存不随请求数增长**（2026-11-20 用户最终需求的核心保证）。
+   *
+   * ## 为什么这条必须是行为级而不是「读代码推断」
+   *
+   * 第一版为了「汇总无上限」把 `ledger` 数组改成不截断 —— 汇总确实全量了，
+   * 但内存随请求数线性涨。用户当场指出方向错误。
+   *
+   * ⇒ 现在拆成两个结构：`ledger`（500 封顶）+ `aggregateTree`（行数固定）。
+   * 这条用例直接钉「同一个结构反复写入，规模不变」。
+   *
+   * ⚠️ 用**构造数据**（`recordTokenUsage`），不发任何真实请求。
+   * ⚠️ 不测 `process.memoryUsage()` —— GC 噪音让它不稳定（会 flaky）。
+   *    改测**结构规模**：`tokenLedgerSize()` 与聚合行数，这两个是确定的。
+   */
+  it('★★★ 内存不增长：写 2000 次后，明细 500 条、聚合行数不变', () => {
+    resetTokenLedgerForTests()
+    /** 统计聚合树的总行数（渠道→provider→账号→模型 的叶子数）。 */
+    const countAggregateRows = () => {
+      const snap = readTokenLedger()
+      let n = 0
+      for (const ch of snap.channels) {
+        for (const pr of ch.providers) {
+          for (const ac of pr.accounts) n += ac.models.length
+        }
+      }
+      return n
+    }
+
+    // 前 10 次：用到 1 个渠道 / 1 provider / 1 账号 / 1 模型
+    for (let i = 0; i < 10; i++) recordTokenUsage({ ...OK, outputTokens: 1 })
+    const rowsAfter10 = countAggregateRows()
+
+    // 再写 1990 次（同样的维度组合）⇒ 行数不得增加
+    for (let i = 0; i < 1990; i++) recordTokenUsage({ ...OK, outputTokens: 1 })
+    const rowsAfter2000 = countAggregateRows()
+
+    expect(rowsAfter2000, '聚合行数必须与请求数无关').toBe(rowsAfter10)
+    expect(rowsAfter2000).toBe(1)
+    expect(tokenLedgerSize(), '明细必须封顶 500').toBe(TOKEN_LEDGER_ENTRY_LIMIT)
+
+    // 而汇总确实是 2000
+    expect(readTokenLedger().totals.requests).toBe(2000)
+  })
+
+  it('★★ 聚合行数只随「维度组合数」增长，不随请求数', () => {
+    resetTokenLedgerForTests()
+    const countRows = () => {
+      const snap = readTokenLedger()
+      let n = 0
+      for (const ch of snap.channels) for (const pr of ch.providers) for (const ac of pr.accounts) n += ac.models.length
+      return n
+    }
+    // 1 组维度，写 100 次
+    for (let i = 0; i < 100; i++) recordTokenUsage({ ...OK, provider: 'p1', model: 'm1', outputTokens: 1 })
+    expect(countRows()).toBe(1)
+    // 新增 1 组维度（换 model）⇒ 行数 +1，与原维度写入次数无关
+    recordTokenUsage({ ...OK, provider: 'p1', model: 'm2', outputTokens: 1 })
+    expect(countRows()).toBe(2)
+    // 再写 100 次同维度 ⇒ 仍是 2
+    for (let i = 0; i < 100; i++) recordTokenUsage({ ...OK, provider: 'p1', model: 'm2', outputTokens: 1 })
+    expect(countRows()).toBe(2)
+    expect(readTokenLedger().totals.requests).toBe(201)
   })
 })
