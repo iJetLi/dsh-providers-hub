@@ -152,8 +152,22 @@ export const ZCODE_MARKETING_ACTION_URL = `${ZCODE_ORIGIN}/api/v1/marketing/touc
  *   ⇒ 1024 那期（2026-10-23）在 `3.16.3` 能拿到；1103 这期（ZCODE GLOBAL BUILD）
  *   把门槛抬到了 `3.17.1` —— 服务端是**按活动**下发门控的，定值必然腐坏。
  *   **下期若再抬，这里要重新二分**（别当成一次性结论）。
+ *
+ * ⚠⚠ **1120 期（ZCODE WEEKEND BUILD，5 亿 token / GLM-5.3-Flash）又抬了一次**（2026-11-20
+ *  真机只读实测，`scripts/probe-zcode-weekend*.mjs`；4 个真实账号逐一验证，结果完全一致）：
+ *
+ *  | `X-ZCode-App-Version` | `GET /marketing/touch` 的 `data.deliveries` |
+ *  |---|---|
+ *  | `3.14.3` / … / `3.17.1` / `3.17.2` / `3.18.0` / `3.18.1` | **`[]`（空）** |
+ *  | **`3.18.2`** 及以上 | `[{campaign_id:"2101141259813175296", … plan_id:"zcode-v3-start-plan-wk-1120", grant_units:500000000 …}]` ★ |
+ *
+ *  ⇒ 门槛**精确为 `3.18.2`**（`3.18.1` 空、`3.18.2` 即有，补丁级二分）。
+ *  用户报障「zcode 的周末 5 亿又领不了」的根因就是这里还停在 `3.17.1`
+ *  ⇒ 投放读到空数组（与「今天没活动」同形，零报错）。
+ *  ⚠ 与 1024/1103 期同规律：活动形态（`claim_zcode_plan` 按钮 + `claim` 端点）**未变**，
+ *  变的只有**版本门槛**；`claim` 端点同抬（沿用「两端点同抬」的实测规律）。
  */
-export const ZCODE_VERSION_GATED_MIN_APP_VERSION = '3.17.1'
+export const ZCODE_VERSION_GATED_MIN_APP_VERSION = '3.18.2'
 
 /**
  * **推理路径**的版本下限（与营销/领取的逐期门控**分开**）。

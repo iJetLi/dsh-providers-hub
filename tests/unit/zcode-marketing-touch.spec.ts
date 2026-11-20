@@ -152,7 +152,70 @@ const POPUP_DELIVERY = {
   },
 }
 
+/**
+ * 1120 期（ZCODE WEEKEND BUILD，5 亿 token / GLM-5.3-Flash）。
+ *
+ * 2026-11-20 本机只读实测原样抓取（`scripts/probe-zcode-weekend.mjs`，
+ * `X-ZCode-App-Version: 3.18.2`）。只删掉 bundle 资产的 base64/HTML 文案，
+ * 结构（`claim_zcode_plan` 按钮、`grant_units`、`priority`、`plan_id`）一字未改。
+ */
+const DELIVERY_WEEKEND = {
+  campaign_id: '2101141259813175296',
+  resource_position: 'banner',
+  priority: 50,
+  banner: {
+    buttons: [
+      { text: { format: '', content: '' }, action: { type: 'close', args: null } },
+      {
+        text: { format: '', content: '' },
+        action: { type: 'claim_zcode_plan', args: { plan_id: 'zcode-v3-start-plan-wk-1120' } },
+      },
+    ],
+    background: {
+      type: 'bundle',
+      bundle: { bundle: { src: 'https://cdn-zcode.z.ai/marketing/touch/assets/weekend-banner-3.1.2.zip', sha256: 'x' }, entry: 'index.html' },
+      args: {
+        zcode_plan: {
+          plan_id: 'zcode-v3-start-plan-wk-1120',
+          name: 'ZCODE WEEKEND BUILD',
+          priority: 101,
+          starts_at: 1795172400,
+          ends_at: 1795395600,
+          entitlements: [
+            {
+              entitlement_id: 'ent-zcode-v3-start-plan-wk-1120-1',
+              show_name: 'GLM-5.3-Flash',
+              meter: 'model_usage',
+              unit_type: 'token',
+              capabilities: ['model:glm-5.3-flash'],
+              grant_units: 500000000,
+              period: 'one_time',
+              effective_at: 1795186800,
+              priority: 101,
+            },
+          ],
+        },
+      },
+    },
+  },
+}
+
 describe('★ 营销投放解析（纯函数，判定打在实测报文的真实形状上）', () => {
+  it('★★ 1120 WEEKEND BUILD：真实报文里能提出 `zcode-v3-start-plan-wk-1120` 且金额 5 亿', () => {    /**
+     * 2026-11-20 本机只读实测原样（`scripts/probe-zcode-weekend.mjs`，
+     * `X-ZCode-App-Version: 3.18.2`）。形态与 1024 完全同构，只是 plan_id/活动名变了 ——
+     * 锁住「换一期活动时解析层不需要改」（只有版本门槛在漂移）。
+     */
+    const plans = claimablePlansFromMarketingDeliveries([DELIVERY_WEEKEND])
+    expect(plans).toHaveLength(1)
+    const plan = plans[0]!
+    expect(plan.planId).toBe('zcode-v3-start-plan-wk-1120')
+    expect(plan.grantUnits).toBe(500_000_000)
+    expect(plan.unitType).toBe('token')
+    expect(plan.name).toBe('ZCODE WEEKEND BUILD')
+    expect(plan.marketingCampaignId).toBe('2101141259813175296')
+  })
+
   it('★ 1024 活动：提取 plan_id、求和 5 亿、取到 name/priority/campaignId', () => {
     const plans = claimablePlansFromMarketingDeliveries([DELIVERY_1024])
     expect(plans).toHaveLength(1)
@@ -258,20 +321,21 @@ describe('★ 营销投放解析（纯函数，判定打在实测报文的真实
   })
 })
 
-describe('★ 版本门控（实测 2026-11-03：3.14.3/3.16.3 均空，3.17.1 起才有投放）', () => {
+describe('★ 版本门控（实测 2026-11-20：3.18.1 及以下均空，3.18.2 起才有 WEEKEND BUILD 投放）', () => {
   it('凭据里的 3.14.3 被抬到门槛值', () => {
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe('3.17.1')
-    expect(ZCODE_VERSION_GATED_MIN_APP_VERSION).toBe('3.17.1')
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe('3.18.2')
+    expect(ZCODE_VERSION_GATED_MIN_APP_VERSION).toBe('3.18.2')
   })
 
   it('凭据里是更新版本时**不降级**（向前兼容）', () => {
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.17.2' })).toBe('3.17.2')
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.18.2' })).toBe('3.18.2')
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.19.0' })).toBe('3.19.0')
     expect(zcodeVersionGatedAppVersion({ app_version: '4.0.0' })).toBe('4.0.0')
   })
 
   it('缺版本/空串 ⇒ 用最低版本（不是空串，那会让服务端按未知版本处理）', () => {
-    expect(zcodeVersionGatedAppVersion({})).toBe('3.17.1')
-    expect(zcodeVersionGatedAppVersion({ app_version: '   ' })).toBe('3.17.1')
+    expect(zcodeVersionGatedAppVersion({})).toBe('3.18.2')
+    expect(zcodeVersionGatedAppVersion({ app_version: '   ' })).toBe('3.18.2')
   })
 
   it('点分版本比较', () => {
@@ -436,7 +500,20 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
      * ★★ 版本门控的**接线**判据：凭据里写的是 3.14.3，但营销请求必须带门控版
      *（本机实测：带 3.14.3 时服务端回 `deliveries: []` ⇒ 这条不成立就等于没集成）。
      */
-    expect(net.marketingVersions).toEqual(['3.17.1'])
+    expect(net.marketingVersions).toEqual(['3.18.2'])
+  })
+
+  it('★ 1120 WEEKEND BUILD 也被一键领取真的领到（plan_id 与门控版本都对）', async () => {
+    const net = makeClaimFetch({ deliveries: [DELIVERY_WEEKEND] })
+    const auth = await makeAuth(net.fetchImpl)
+
+    const outcomes = await auth.claimDaily(async () => fakeParam('p'))
+
+    expect(outcomes[0]?.kind).toBe('claimed')
+    expect(net.claimPlanIds).toEqual(['zcode-v3-start-plan-wk-1120'])
+    // 营销查询与 claim 两个端点都必须带门控版本 3.18.2（同一份常量）
+    expect(net.marketingVersions).toEqual(['3.18.2'])
+    expect(net.claimVersions).toEqual(['3.18.2'])
   })
 
   it('★★ **claim 也必须带门控版本** —— 真机实测：3.14.3 ⇒ `1004 no permission`，3.16.2 ⇒ `code 0`', async () => {
@@ -463,8 +540,8 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
 
     expect(net.claimVersions).toHaveLength(net.claimPlanIds.length)
     expect(net.claimVersions).toEqual([
-      '3.17.1',
-      '3.17.1',
+      '3.18.2',
+      '3.18.2',
     ])
     // 反向对照：凭据里只有 3.14.3 —— 若实现没覆盖，上面两格会变成 '3.14.3'
     expect(CREDENTIAL.app_version).toBe('3.14.3')
@@ -552,7 +629,7 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
 
 describe('★ 请求层：失败一律降级，且不谎报', () => {
   it('fetchZcodeMarketingPlans：HTTP 500 / 非 JSON / 抛错 ⇒ 空数组', async () => {
-    const version = { app_version: '3.17.1' }
+    const version = { app_version: '3.18.2' }
     const bad = (async () => new Response('boom', { status: 500 })) as unknown as typeof fetch
     expect(await fetchZcodeMarketingPlans(CREDENTIAL, bad)).toEqual([])
 
@@ -563,7 +640,7 @@ describe('★ 请求层：失败一律降级，且不谎报', () => {
     const throwing = (async () => { throw new Error('network down') }) as unknown as typeof fetch
     expect(await fetchZcodeMarketingPlans(CREDENTIAL, throwing)).toEqual([])
     // 版本对象本身不参与断言，仅确认工具函数不抛
-    expect(zcodeVersionGatedAppVersion(version)).toBe('3.17.1')
+    expect(zcodeVersionGatedAppVersion(version)).toBe('3.18.2')
   })
 
   it('reportZcodeMarketingAction：只有 `{code:0}` 算成功', async () => {
