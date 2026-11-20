@@ -10260,7 +10260,7 @@ const AGG_EXPIRY_REPROBE_MS = 2 * 60 * 1000;
  * ⚠️ 该端点**不做**余额探测（规格 §8.3）—— 否则打开面板就会对每个渠道打一次上游
  * 请求。实时余额仍由各渠道自己的面板负责。
  */
-function AggregatePanel({ rpcCall }) {
+function AggregatePanel({ rpcCall, providerStatuses, providerBusy, onToggleProvider }) {
   const [models, setModels] = React.useState(null);
   const [rejections, setRejections] = React.useState({});
   const [busy, setBusy] = React.useState(false);
@@ -10874,12 +10874,52 @@ function AggregatePanel({ rpcCall }) {
     const minutes = Math.floor((Date.now() - lastProbeAt) / 60_000);
     return minutes < 1 ? '刚刚' : `${minutes} 分钟前`;
   })();
+  /**
+   * 聚合的「启用 / 关闭」开关状态 —— 与普通供应商**逐字同一判据**。
+   *
+   * ⚠️ 2026-11-20 用户要求：常驻侧边栏的 Jet Hub 里，聚合面板上要有一个像普通
+   *    供应商那样的开关，不必绕去「设置 → 打开供应商开关」弹窗。
+   *
+   * ⚠️ 判据走 `providerSwitchState()`（与 `ProviderPanel` / `ProviderSwitchPanel`
+   *    同一份）：关闭 = 通过 `provider.setEnabled` 把聚合目录里的**每一个虚拟模型**
+   *    写进黑名单 + 写「关闭意图」；`aggregate-adapter.ts` 的 `listModels` 判
+   *    `providerClosedFor('aggregate')` ⇒ 关闭即时生效（列表直接返回空）。
+   * ⚠️ **不做乐观更新**：`aria-checked` 完全由页面级 `providerStatuses` 决定。
+   */
+  const switchState = providerSwitchState(providerStatuses?.['aggregate']);
+  const switchBusy = providerBusy?.has?.('aggregate') === true;
   return React.createElement('div', {
     className: 'dim-jh-aggPanel',
   },
   // ── 说明区 ──
   React.createElement('section', { className: 'dim-jh-aggIntro' },
-    React.createElement('h2', { className: 'dim-jh-aggTitle' }, '聚合'),
+    // 标题行：左边「聚合」标题，右边「启用/关闭」开关（与普通供应商页头同款控件）。
+    React.createElement('div', {
+      className: 'dim-jh-aggTitleRow',
+      style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' },
+    },
+      React.createElement('h2', { className: 'dim-jh-aggTitle', style: { margin: 0 } }, '聚合'),
+      React.createElement('button', {
+        className: 'dim-jh-providerSwitch',
+        type: 'button',
+        role: 'switch',
+        'aria-checked': switchState.checked ? 'true' : 'false',
+        'aria-label': `聚合 (跨渠道)：${switchState.checked ? '已启用' : '已关闭'}`,
+        // 与普通供应商同款：不用 disabled（否则 Chromium 不显示原生 tooltip），
+        // 改用 aria-disabled + 点击早退，保住「为什么点不动」的可读原因。
+        'aria-disabled': switchState.disabled === true || switchBusy ? 'true' : 'false',
+        title: switchBusy
+          ? '正在提交「聚合」的开关变更…'
+          : switchState.reason
+            ?? `点击${switchState.checked ? '关闭' : '打开'}「聚合」`
+            + '（关闭 = 把聚合目录里的全部虚拟模型从模型选择器里移除；再打开即恢复，'
+            + '不影响各渠道自身的账号与黑名单）',
+        onClick: () => {
+          if (switchState.disabled === true || switchBusy) return;
+          void onToggleProvider?.('aggregate', !switchState.checked);
+        },
+      },
+      React.createElement('span', { className: 'dim-jh-providerSwitchThumb' }))),
     React.createElement('p', { className: 'dim-jh-aggIntroLine' },
       '把同一个模型在各渠道的条目聚合成一个名字，请求时按「积分最快作废」自动选渠道。'),
     React.createElement('p', { className: 'dim-jh-aggIntroLine' },
@@ -12850,7 +12890,15 @@ export function JetHubPage({ rpcCall }) {
         //    塞进 `ProviderPanel` 会得到一个「没有登录按钮、没有账号列表」的空面板。
         //    先例：网关也是旁路功能用独立组件（`GatewayPanel`，以覆盖层渲染）。
         ? (p.id === 'aggregate'
-            ? React.createElement(AggregatePanel, { key: p.id + '-' + version, rpcCall })
+            ? React.createElement(AggregatePanel, {
+                key: p.id + '-' + version,
+                rpcCall,
+                // 聚合页头也要「启用/关闭」开关（2026-11-20 用户要求），
+                // 复用页面级状态与切换动作，与普通供应商同源。
+                providerStatuses,
+                providerBusy,
+                onToggleProvider: toggleProvider,
+              })
             : React.createElement(ProviderPanel, {
                 key: p.id + '-' + version,
                 provider: p.id,
