@@ -93,6 +93,22 @@ export interface AutoCheckinDoc {
   enabled: boolean
   modelscopeEnabled?: false
   /**
+   * zcode 参加自动签到的**opt-in** 开关。**默认关闭**。
+   *
+   * ⚠️ 这一格与本文件其余开关的惯例**刻意相反**：`enabled` / `modelscopeEnabled`
+   * 是「缺席 = 开」（只有显式 `false` 才算关），而它是「缺席 = 关」（只有显式
+   * `true` 才算开）。原因不是风格分歧，而是 zcode 的签到**有代价**：`claimAll`
+   * 会拉起 headful Chromium 产阿里云 captcha，且该配额按**设备**限流
+   * （见 {@link isAutoCheckinExcluded}）。上游把 zcode 登记进
+   * `PROVIDER_REGISTRY.autoCheckinExcluded` 正是为了「用户没点头就不许起浏览器」，
+   * 默认打开等于替所有用户做了这个决定。
+   *
+   * ⚠️ 落盘形态同样反过来：**只在打开时写 `zcodeEnabled: true`，关闭时删键**。
+   * 若照抄 modelscope 的「关时落 `false`」，那么「默认关 + 缺席」与「用户点过关」
+   * 两种状态在磁盘上同形，面板就再也无法区分「没设置过」与「特意关掉」。
+   */
+  zcodeEnabled?: true
+  /**
    * 每天**两个**执行时刻（`HH:MM`，UTC+8，升序、去重、恰好两个）。
    *
    * 用户 2026-10-18 要求：「每天几点自动启动…一天两次实现无遗漏」—— 原先的
@@ -271,6 +287,10 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
     // 它们不是用户点出来的值。
     enabled: record.enabled !== false,
     ...(record.modelscopeEnabled === false ? { modelscopeEnabled: false } : {}),
+    // ⚠️ **只有显式 `true` 才算打开**（默认关，见 `AutoCheckinDoc.zcodeEnabled`）：
+    // 判据与上一格正好相反，不是笔误。`'true'` / `1` 这些「不是用户点出来的值」
+    // 一律按关闭处理 —— 这一格打开会让宿主拉起浏览器，宁可保守。
+    ...(record.zcodeEnabled === true ? { zcodeEnabled: true } : {}),
     times: sanitizeTimes(record.times),
     jitterMinutes: sanitizeJitter(record.jitterMinutes),
     lastDate: typeof record.lastDate === 'string' && DATE_RE.test(record.lastDate) ? record.lastDate : '',
@@ -640,6 +660,7 @@ class FileAutoCheckinStore implements AutoCheckinStore {
       schema: SCHEMA,
       enabled: doc.enabled,
       modelscopeEnabled: doc.modelscopeEnabled,
+      zcodeEnabled: doc.zcodeEnabled,
       times: doc.times,
       jitterMinutes: doc.jitterMinutes,
       lastDate: doc.lastDate,
@@ -746,6 +767,10 @@ export function isUnsupportedCheckin(message: string): boolean {
  *   一旦 zcode 的 claim 分支又开始调 `mintCaptcha`，而本表没登记，用例会红）。
  * - 用户仍可在面板里**手动**点 zcode 的「一键领取积分」—— 那是有意行为，
  *   浏览器弹出来是用户自己能理解的交互。
+ * - 2026-11-20 追加：面板上另有一个**默认关闭**的 opt-in 开关
+ *   （{@link isAutoCheckinOptedIn}）。它**不改这张表**，只在
+ *   `performRun` 那一格放行时多问一句「用户是否明确点过开」—— registry 仍是
+ *   「谁有代价」的唯一真相源，本表的反向守护用例照旧有效。
  */
 export function isAutoCheckinExcluded(provider: string): boolean {
   // ⚠️ 2026-10-08 改：判据从**硬编码** `provider === ZCODE.id` 改为查
@@ -753,6 +778,29 @@ export function isAutoCheckinExcluded(provider: string): boolean {
   //    **行为完全不变**（宿主侧另有一份副本），是「唯一真相源」名不副实的一处。
   //    ⚠️ 用 `=== true` 而不是 truthy：该字段可选，省略 = 不排除。
   return descriptorOf(provider)?.autoCheckinExcluded === true
+}
+
+/**
+ * 用户是否**明确点过「开」**，允许某个「有代价」的渠道参加自动签到。
+ *
+ * ## 为什么放行判据单独成一个函数
+ *
+ * 排除表（{@link isAutoCheckinExcluded}）记的是客观事实「这家签到要起浏览器」，
+ * 而「用户同意不同意」是主观授权，两者不能揉进同一个判据 —— 揉进去之后
+ * `provider-registry.spec.ts` / `provider-registry-consumers.spec.ts` 那几条
+ * 「排除表 == registry 名单」的锚点就再也锁不住 registry 了。故
+ * `performRun` 里是「**先查排除表，再问有没有 opt-in**」两格。
+ *
+ * ⚠️ 判据是 `=== true`（缺席 / 脏数据 = 不放行），与 `enabled` 那格相反：
+ *    放行的代价由用户的设备级 captcha 配额与浏览器进程树支付，宁可保守。
+ * ⚠️ 目前只有 `zcode` 有这一格；新增「有代价」渠道时要在这里加一条，
+ *    并在 `AutoCheckinDoc` 上补对应的 opt-in 字段。
+ */
+export function isAutoCheckinOptedIn(
+  provider: string,
+  doc: Pick<AutoCheckinDoc, 'zcodeEnabled'>,
+): boolean {
+  return provider === 'zcode' && doc.zcodeEnabled === true
 }
 
 /** 把一轮结果拼成一句中文摘要（给状态灯提示与日志用）。 */
@@ -947,6 +995,17 @@ export interface AutoCheckin {
   state(): RpcUsageAutoCheckinState
   modelscopeEnabled(): boolean
   setModelscopeEnabled(enabled: boolean): Promise<void>
+  /**
+   * zcode 是否获准参加自动签到（opt-in，**默认 `false`**）。
+   * 与 `modelscopeEnabled()` 的默认值相反，语义见 {@link AutoCheckinDoc.zcodeEnabled}。
+   */
+  zcodeEnabled(): boolean
+  /**
+   * 写 zcode 的 opt-in。⚠️ **不立刻跑一轮**（与 `setModelscopeEnabled` 一致，
+   * 与 `setEnabled` 不同）：这一格打开的副作用是「到点拉起浏览器」，
+   * 用户点完立刻弹一个 Chromium 窗口比「下个时段再生效」更让人意外。
+   */
+  setZcodeEnabled(enabled: boolean): Promise<void>
   /** 写开关；**打开时若有时段没跑，立刻跑一轮**（否则用户会以为开关没生效）。 */
   setEnabled(enabled: boolean): Promise<RpcUsageAutoCheckinState>
   /**
@@ -1050,6 +1109,17 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
      */
     const unretryable = new Set<string>()
     /**
+     * 本轮**真的尝试过、且失败**的「有代价」渠道（opt-in 放行的 zcode）。
+     *
+     * 单独记一份，因为「不该重试」在这里有两层含义：
+     * - `unretryable` 让它不拖住整轮水位线；
+     * - 本集合让它**自己的逐渠道水位线**推进到本时段（见下面两处 `providerSlots`），
+     *   否则退避重试会把它再打一遍 —— 而它每次尝试都是一棵浏览器进程树 + 一枚
+     *   **设备级** captcha（阿里云按设备限流 150 次/小时，纯 zcode 池在本分支会
+     *   一路退避到 30 分钟一轮 ⇒ 一天最多 48 次）。
+     */
+    const costlyFailed = new Set<string>()
+    /**
      * 逐渠道水位线的**当前有效值**：只保留池里还存在的渠道。
      *
      * ⚠️ 为什么会残留（2026-11-01 第二轮审计 P3）：渠道被删 / 改名后，键还留在文档里；
@@ -1074,13 +1144,16 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       // ⚠️ 排除表先于**任何**上游请求生效（见 isAutoCheckinExcluded 的说明）：
       // zcode 的代价发生在**调用期间**（拉起浏览器产 captcha），事后再判断已经
       // 太晚 —— 必须在调 `claim` 之前就把它摘掉。
+      // 唯一的放行途径是面板上那个**默认关闭**的 opt-in 开关（见
+      // {@link isAutoCheckinOptedIn}）；`costly` 留着给下面的失败分支复用。
       if (provider === 'modelscope' && doc.modelscopeEnabled === false) {
         totals.skipped += 1
         channels.push({ provider, text: '自动签到已关闭' })
         unretryable.add(provider)
         continue
       }
-      if (isAutoCheckinExcluded(provider)) {
+      const costly = isAutoCheckinExcluded(provider)
+      if (costly && !isAutoCheckinOptedIn(provider, doc)) {
         totals.skipped += 1
         channels.push({ provider, text: '需手动签到' })
         unretryable.add(provider)
@@ -1092,6 +1165,10 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       } catch (error) {
         totals.errors += 1
         channels.push({ provider, text: '出错' })
+        // ⚠️ 有代价的渠道（opt-in 放行进来的 zcode）失败后**不在本时段重试**：
+        // 一次尝试 = 一棵浏览器进程树 + 一枚**设备级** captcha（阿里云按设备限流
+        // 150 次/小时），退避重试会把配额烧穿。宁可这个时段不领，下个时段再来。
+        if (costly) { unretryable.add(provider); costlyFailed.add(provider) }
         deps.warn?.(`[jet-hub] 自动签到：${provider} 调用异常: ${String(error)}`)
         continue
       }
@@ -1105,6 +1182,8 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
         }
         totals.errors += 1
         channels.push({ provider, text: '出错' })
+        // 同上：有代价的渠道不在本时段重试（理由见 `catch` 分支的注释）。
+        if (costly) { unretryable.add(provider); costlyFailed.add(provider) }
         deps.warn?.(`[jet-hub] 自动签到：${provider} 失败: ${message || '未知错误'}`)
         continue
       }
@@ -1161,8 +1240,19 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       //   在这里直接 return，`lastResult` / `channels` 停在几天前那一轮 ⇒ 凭据全过期
       //   时面板永远显示「上次：昨天的成功」，用户看不到「今天一直在失败」。
       dueFailures += 1
+      // ★ 有代价的渠道失败 ⇒ 把**它自己**的逐渠道水位线推到本时段，整轮水位线照旧
+      //   不推进。退避重试是为「凭据没续上 / 网络不通」这类**可恢复**失败准备的，
+      //   而 zcode 每重试一次就是一棵浏览器进程树 + 一枚设备级 captcha（按设备限流
+      //   150 次/小时）：纯 zcode 池不记这一格，会一路退避到 30 分钟一轮 ⇒ 一天最多
+      //   48 次白烧配额。代价是「本轮 zcode 的偶发失败要等下个时段」，认了。
+      const hasCostlyFailure = targetSlot !== '' && costlyFailed.size > 0
+      const costlySlots: Record<string, string> = { ...doc.providerSlots }
+      if (hasCostlyFailure) {
+        for (const provider of costlyFailed) costlySlots[provider] = targetSlot
+      }
       doc = {
         ...doc,
+        ...(hasCostlyFailure ? { providerSlots: costlySlots } : {}),
         lastResult: `${describeRun(totals)}（本轮未计入今日，稍后重试）`,
         lastAt: now(),
         channels,
@@ -1184,6 +1274,12 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
     for (const provider of providers) {
       const value = proven.has(provider) ? targetSlot : (prunedSlots[provider] ?? '')
       if (value !== '') nextProviderSlots[provider] = value
+    }
+    // ★ 有代价的渠道本轮失败 ⇒ 也记到本时段。`unretryable` 只是让它不拖住
+    //   `pendingSlot`，**拦不住重试本身**（补领时按 `providerSlots` 跳过），
+    //   不记这一格它就会在退避窗口内被反复拉起浏览器（理由见上面 `costlyFailed`）。
+    if (targetSlot !== '') {
+      for (const provider of costlyFailed) nextProviderSlots[provider] = targetSlot
     }
     // ★ 待补 = 「有渠道证明了今天，但这个渠道还没有，且它**有可能**领到」。
     //   设计上不该重试的（排除表 / 无签到接口）不算待补，否则它们会拖住水位线。
@@ -1382,6 +1478,16 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       const next = { ...doc }
       if (enabled) delete next.modelscopeEnabled
       else next.modelscopeEnabled = false
+      await deps.store.save(next)
+      doc = next
+    },
+    zcodeEnabled: () => doc.zcodeEnabled === true,
+    async setZcodeEnabled(enabled) {
+      // ⚠️ 落盘形态与 modelscope **相反**：开 = 写 `true`，关 = **删键**
+      //（这一格默认关，缺席就是关；落 `false` 会让「没设置过」与「特意关掉」同形）。
+      const next = { ...doc }
+      if (enabled) next.zcodeEnabled = true
+      else delete next.zcodeEnabled
       await deps.store.save(next)
       doc = next
     },

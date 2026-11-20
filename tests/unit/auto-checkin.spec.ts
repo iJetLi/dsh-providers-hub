@@ -8,6 +8,7 @@ import {
   describeChannel,
   describeRun,
   isAutoCheckinExcluded,
+  isAutoCheckinOptedIn,
   DEFAULT_AUTO_CHECKIN_TIMES,
   isUnsupportedCheckin,
   latestDueSlotKey,
@@ -155,6 +156,82 @@ describe('魔搭自动签到开关', () => {
     time.set(utc8MomentMs('2026-10-02', '21:01'))
     await runner.runIfDue()
     expect(calls).toEqual(['buddy', 'buddy', 'modelscope'])
+  })
+})
+
+/**
+ * ZCode 参加自动签到的 **opt-in** 开关（默认关）。
+ *
+ * 与上面魔搭那一组**判据相反**，所以必须单独成组而不是并进去：魔搭是「缺席 = 开」，
+ * ZCode 是「缺席 = 关」。两组锁的其实是同一句话 —— 有代价的渠道只能被用户点出来。
+ *
+ * ⚠️ ZCode 的代价不在「请求数」而在「副作用」：`claim` 会拉起 headful Chromium
+ * 产阿里云 captcha，配额按**设备**限流。故本组除默认值外，还锁「失败后同一个
+ * 时段不再拉第二次浏览器」（否则退避重试会一路烧设备级配额）。
+ */
+describe('ZCode 自动签到（opt-in，默认关）', () => {
+  it('★ 默认不参加调度：其余渠道照常，zcode 一个请求都不发', async () => {
+    const { runner, calls } = makeRunner({ providers: ['buddy', 'zcode'] })
+    expect(runner.zcodeEnabled()).toBe(false)
+    await runner.runIfDue()
+    expect(calls).toEqual(['buddy'])
+    // 跳过不等于失败：总开关仍是开的（否则用户会以为自动签到挂了）
+    expect(runner.state().enabled).toBe(true)
+  })
+
+  it('打开后随全局时段领取；关闭 ⇒ 落盘**删键**（不是落 false）', async () => {
+    const { runner, store, calls } = makeRunner({ providers: ['zcode'] })
+    await runner.setZcodeEnabled(true)
+    expect(store.current().zcodeEnabled).toBe(true)
+    expect(runner.zcodeEnabled()).toBe(true)
+    await runner.runIfDue()
+    expect(calls).toEqual(['zcode'])
+
+    await runner.setZcodeEnabled(false)
+    expect(Object.hasOwn(store.current(), 'zcodeEnabled')).toBe(false)
+    expect(runner.zcodeEnabled()).toBe(false)
+    // 关掉之后同一个时段不再打上游（面板那格回到「需手动签到」）
+    calls.length = 0
+    await runner.runIfDue()
+    expect(calls).toEqual([])
+  })
+
+  it('★ 只放行 zcode：排除表里其余渠道（doubao）不受这个开关影响', async () => {
+    expect(isAutoCheckinExcluded('doubao')).toBe(true)
+    const { runner, calls } = makeRunner({ providers: ['doubao', 'zcode'] })
+    await runner.setZcodeEnabled(true)
+    await runner.runIfDue()
+    expect(calls).toEqual(['zcode'])
+  })
+
+  it('★★ 整轮不记账时，失败的 zcode 仍推进**自己**的水位线 ⇒ 不再拉第二次浏览器', async () => {
+    const calls: string[] = []
+    // 「验证码超时」**不是** `isUnsupportedCheckin` 的两种文案之一 ⇒ 走真实失败分支
+    const failing = async (): Promise<BadgeRpcResult<RpcCreditsClaimAllResponse>> => {
+      calls.push('zcode')
+      return { ok: false, error: { code: 'bad-request', message: '验证码超时' } }
+    }
+    const { runner, store } = makeRunner({ providers: ['zcode'], claim: failing })
+    await runner.setZcodeEnabled(true)
+    await runner.runIfDue()
+    expect(calls).toEqual(['zcode'])
+    // 整轮没有任何渠道证明「今天」⇒ 日级/时段级水位线**照旧不推进**（旧语义保留）
+    expect(store.current().lastSlot).toBe('')
+    // ……但它自己的逐渠道水位线必须已经推进，否则 30 分钟一轮的退避重试会
+    // 把设备级 captcha 配额一路烧穿（一天最多 48 次）。
+    expect(store.current().providerSlots?.zcode).toBe(slotKey('2026-10-02', '09:00'))
+    // 再跑一轮（模拟退避到点）：这一次必须是零请求。
+    calls.length = 0
+    await runner.runIfDue()
+    expect(calls).toEqual([])
+  })
+
+  it('isAutoCheckinOptedIn 只认显式 `true`（脏数据不放行）', () => {
+    expect(isAutoCheckinOptedIn('zcode', { zcodeEnabled: true })).toBe(true)
+    expect(isAutoCheckinOptedIn('zcode', {})).toBe(false)
+    // 别的渠道没有这一格
+    expect(isAutoCheckinOptedIn('doubao', { zcodeEnabled: true })).toBe(false)
+    expect(isAutoCheckinOptedIn('buddy', { zcodeEnabled: true })).toBe(false)
   })
 })
 
@@ -1506,5 +1583,44 @@ describe('魔搭独立开关（PR #83）的 sanitize 语义', () => {
       const doc = sanitizeAutoCheckin({ modelscopeEnabled: raw })
       expect(Object.hasOwn(doc, 'modelscopeEnabled'), `raw=${String(raw)} 不该落键`).toBe(false)
     }
+  })
+})
+
+/**
+ * ⚠️⚠️ **ZCode opt-in 的存储语义 —— 与上面那组逐字相反。**
+ *
+ * 上一组的红线是「缺席 = 开」，这一组的红线是「缺席 = **关**」。两条红线共同的
+ * 上游约束是「只有用户真的点过才算数」，但默认值方向相反，于是落盘形态也必须相反：
+ * 魔搭是「关才落 `false`」，ZCode 是「**开才落 `true`**」。
+ *
+ * 为什么值得单独一组：把判据写成 `!== false`（照抄上一组）会让一次 `git revert`
+ * 或一次脏数据把「用户没同意」变成「宿主每天替他起浏览器」，而这条链的代价按
+ * **设备**限流，面板上又没有痕迹。`'true'` / `1` 这些不是用户点出来的值必须当关。
+ */
+describe('ZCode opt-in 的 sanitize 语义', () => {
+  it('★ 缺席 ⇒ 不落键（= 走「默认关」）', () => {
+    expect(Object.hasOwn(sanitizeAutoCheckin({}), 'zcodeEnabled')).toBe(false)
+    expect(sanitizeAutoCheckin({}).zcodeEnabled).toBeUndefined()
+  })
+
+  it('★★★ 用户点了「开」⇒ 必须落 true', () => {
+    expect(sanitizeAutoCheckin({ zcodeEnabled: true }).zcodeEnabled).toBe(true)
+  })
+
+  it('★★ 非 true 的一切值都当「关」（不落键）—— 与 `modelscopeEnabled` 那组相反', () => {
+    for (const raw of [false, 'true', 0, 1, null, undefined, '']) {
+      const doc = sanitizeAutoCheckin({ zcodeEnabled: raw })
+      expect(Object.hasOwn(doc, 'zcodeEnabled'), `raw=${String(raw)} 不该落键`).toBe(false)
+    }
+  })
+
+  it('★ 往返：`true` 落盘后重新读出仍是 true（否则开关活不过一次重启）', () => {
+    expect(sanitizeAutoCheckin(sanitizeAutoCheckin({ zcodeEnabled: true })).zcodeEnabled).toBe(true)
+  })
+
+  it('★ 与 `modelscopeEnabled` 互不干扰（两格判据不同方向，不能互相覆盖）', () => {
+    const doc = sanitizeAutoCheckin({ modelscopeEnabled: false, zcodeEnabled: true })
+    expect(doc.modelscopeEnabled).toBe(false)
+    expect(doc.zcodeEnabled).toBe(true)
   })
 })

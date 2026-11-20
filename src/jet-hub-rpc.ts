@@ -12874,6 +12874,29 @@ function registerJetHubEndpoints(
       }
 
       /**
+       * zcode 参加自动签到的 **opt-in** 开关（读 / 写，**默认关闭**）。
+       *
+       * ⚠️ 默认值与 `modelscope.autoCheckin` **相反**，不是笔误：zcode 的签到会
+       * 拉起 headful Chromium 产阿里云 captcha，且配额按**设备**限流，故
+       * `PROVIDER_REGISTRY` 把它登记进排除表。本 RPC 是唯一的放行入口 ——
+       * 打开之后 zcode 才会随全局时段（`usage.autoCheckin` 的 `times`）自动领取。
+       *
+       * ⚠️ `enabled` 省略时**只读**；给出时必须是布尔值。非法值**拒绝**而不是
+       * 静默回落 —— 与 `modelscope.autoCheckin` 同口径（回落会让「设置没生效」
+       * 看起来像「保存成功」，而这一格点错的代价是一棵浏览器进程树）。
+       */
+      case 'zcode.autoCheckin': {
+        const enabled = (payload as { enabled?: unknown } | undefined)?.enabled
+        if (enabled !== undefined) {
+          if (typeof enabled !== 'boolean') {
+            return { ok: false, error: { code: 'bad-request', message: 'ZCode 自动签到开关必须为布尔值' } }
+          }
+          await autoCheckin.setZcodeEnabled(enabled)
+        }
+        return { ok: true, value: { enabled: autoCheckin.zcodeEnabled() } }
+      }
+
+      /**
        * 「每日首次启动自动签到」开关（读 / 写，**全局一个**，不分渠道）。
        *
        * ⚠️ `enabled` 省略时**只读**；给出时必须是布尔值。非法值拒绝而不是静默
