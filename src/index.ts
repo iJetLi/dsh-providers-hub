@@ -291,6 +291,8 @@ import { createExpiryProbe } from './aggregate-expiry.js'
 // ⚠️ 共享余额读数缓存（2026-10-15，规格 §5.7）：装配层建**一个**实例，
 //    `credits.balances` 端点与 buddy 系四家的折算共用它（见下面 `balanceCache` 的长注释）。
 import { createBalanceCache, createBalanceRefresher, REFRESH_PERIOD_FALLBACK_MS, type BalanceCacheEntry } from './balance-cache.js'
+// ★ 余额读数的磁盘缓存（SWR 的写盘调度）：三个写盘时机见下方接线处。
+import { BALANCE_DISK_FLUSH_INTERVAL_MS, flushDisk as flushBalanceDisk, primeFromDisk as primeBalanceDiskCache } from './balance-disk-cache.js'
 // ⚠️ 模型目录的后台刷新器（用户 2026-10-18 要求：20 分钟定时更新）。
 //    与余额刷新器**共用同一套骨架**（武装 + 单飞 + 幂等），但**不复用实例** ——
 //    余额缓存 key 是 `(provider, accountId)`、目录的 key 是 provider，语义不同。
@@ -6054,6 +6056,54 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   // ⚠️ 回收：定时器必须随插件卸载而停，否则进程退出会被它挂住
   //   （与上面 `closeAllProxyDispatchers` 的回收并列，同款约定）。
   ctx.effect(() => () => { clearInterval(modelsDevTimer) })
+
+  // ===== 余额读数的**磁盘缓存**接线（2026-11-20，用户要求「重启后积分也快」）=====
+  //
+  // ## 三个写盘时机（用户明确指定，**只有这三个**）
+  //
+  // | 时机 | 实现 |
+  // |---|---|
+  // | ① 启动后首次拉取成功 | `noteDiskReading` 置脏 ⇒ 下面那个 30 分钟定时器的**首次**触发就写 |
+  // | ② 每隔 30 分钟 | `setInterval` |
+  // | ③ 插件卸载（退出）时 | `ctx.effect` 清理钩子 |
+  //
+  // ⚠️ **不在每次读数后写盘**：徽标每 60 秒轮询一次 ⇒ 每天上千次写。
+  // 而余额变化频率远低于此 —— 用户明确要求「减少不必要的缓存写盘」。
+  //
+  // ## ⚠️ 为什么用 `flushDisk` 而不是直接写
+  //
+  // `flushDisk` 内部判「有没有脏数据」（`dirty`）⇒ 没有新读数就**完全不写盘**
+  // （空转的定时器不产生 IO）。
+  //
+  // ## ⚠️ 启动时先 prime 一次
+  //
+  // `primeFromDisk()` 把上次的读数读进内存镜像 ⇒ `balance-cache.ts` 的
+  // `readDiskReading` 才能命中。**必须在这里调**：若等第一次 `read()` 惰性触发，
+  // 那次读仍然要读盘（虽然是同步的、很快），而提前 prime 让它更早可用。
+  //
+  // ⚠️ 顺序：**先 prime 再挂定时器**（否则定时器的首轮可能早于 prime）。
+  const primedBalanceCount = primeBalanceDiskCache()
+  if (primedBalanceCount > 0) {
+    // ⚠️ 只记**条数**不记具体账号（余额是敏感数据，日志里不该出现 id）。
+    ctx.logger?.info?.(`[jet-hub] 余额磁盘缓存已载入 ${primedBalanceCount} 条（首屏免等网络）`)
+  }
+  const balanceDiskFlushTimer = setInterval(() => {
+    // ⚠️ 返回值刻意忽略：写失败是静默的（缓存是纯优化，见 `balance-disk-cache.ts`）。
+    flushBalanceDisk()
+  }, BALANCE_DISK_FLUSH_INTERVAL_MS)
+  // ⚠️ `unref()`：不拦进程退出（与上面 `modelsDevTimer` 同款）。
+  ;(balanceDiskFlushTimer as unknown as { unref?: () => void }).unref?.()
+  ctx.effect(() => () => {
+    clearInterval(balanceDiskFlushTimer)
+    /**
+     * ★ **退出时补最后一次**（写盘时机 ③）。
+     *
+     * ⚠️ 这是「尽力而为」：`ctx.effect` 的清理钩子在**插件卸载**时跑，
+     * 而 DSH 被任务管理器强杀 / 系统关机 / 崩溃时**不会触发**。
+     * ⇒ 有 30 分钟定时器兜底（最坏丢 30 分钟内的变化，对余额完全可接受）。
+     */
+    flushBalanceDisk()
+  })
   // ⚠️ 这里**不再**调 `registerOpencodeRpc`：opencode 的端点已并入
   // `registerJetHubRpc` 内部的 handleMethod（见 `opencode-rpc.ts` 模块头）。
   // 代理 dispatcher 是常驻连接池：插件卸载必须回收，否则进程退出会挂住。

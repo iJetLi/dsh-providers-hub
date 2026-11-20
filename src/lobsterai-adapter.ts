@@ -1097,6 +1097,17 @@ export class LobsteraiAdapter extends LlmAdapter {
       }
       this.remoteModels = models
       this.remoteMeta = new Map(models.map((model) => [model.id, model]))
+              /**
+         * ★ **落盘（SWR 写盘那一半）** —— 2026-11-20，与 `buddy-adapter` 同款。
+         *
+         * ⚠️ 本家**只有一个目录来源** ⇒ 「拿到非空目录」即 `complete`
+         *（与 `RemoteCatalogGate` 对裸布尔的归一化口径一致：`complete = got`）。
+         * 故不需要额外的完整性判据。
+         *
+         * ⚠️ 只写**非空**目录：空目录若覆盖磁盘上更好的旧缓存，下次启动会更差。
+         * 那一层由 `writeCatalogCache` 自己挡（`entries.length === 0` 直接返回 false）。
+         */
+        this.catalog.rememberForDisk?.(this.syncCatalogEntries())
       this.promotionIndex = promotions
       // ⚠️ 读不懂的起止**必须留一条日志**：这条腿的症状与「上游没办活动」完全同形
       // （都是没有徽标），不留痕就永远诊断不出来（与「目录未声明 maxTokens 时告警一次」

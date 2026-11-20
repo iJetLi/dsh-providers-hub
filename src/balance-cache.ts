@@ -52,6 +52,8 @@
 
 import { TtlCache } from './ttl-cache.js'
 import type { ProviderAccountEntry } from './types.js'
+// ★ 磁盘缓存（跨进程）：重启后第一眼不等网络。见 `getServingStale` 里那段说明。
+import { noteDiskReading, readDiskReading } from './balance-disk-cache.js'
 
 /** 陈旧兼顶的默认上界（15 分钟）。 */
 const DEFAULT_STALE_TTL_MS = 900_000
@@ -503,6 +505,53 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
     }
     // 没有可兼顶的值 ⇒ 照常回源（冷启动路径）。
     slots.set(key, { provider, entry })
+    /**
+     * ★★★ **磁盘缓存：重启后的第一眼不等网络**（2026-11-20）。
+     *
+     * ## 它解决什么
+     *
+     * 内存层（本模块的 `TtlCache`，15 分钟）在**进程重启后是空的** ⇒ 冷启动
+     * 第一次 `read()` 会逐账号回源 ⇒ 实测积分窗口要 ~1 秒才出数。
+     *
+     * 磁盘层（`balance-disk-cache.ts`）跨进程存活 ⇒ 重启后**立刻**有上次的读数。
+     *
+     * ## ⚠️⚠️ 为什么放在「回源之前」而不是回源之后
+     *
+     * 目标就是**别等网络**。放回源之后等于没做 —— 那 1 秒已经付掉了。
+     *
+     * ## ⚠️ 返回的是**旧读数**（用户明确接受，且要求完全静默）
+     *
+     * 用户原话：「有缓存就先返回，后台会自动远端拉取，然后自动替换缓存，
+     * 所以没必要丢弃缓存，加快展示是目标」。
+     *
+     * ⇒ 这里返回 `{ ...diskReading, stale: true }`：`stale` 标记**必须带**，
+     * 因为后台刷新器（`createBalanceRefresher`）正是靠 `peekStale().stale`
+     * 判「该不该刷」—— 不标它，旧读数会被当成新鲜的 ⇒ **永远不会被刷新**，
+     * 那就是「显示 24 小时前的余额且永不自愈」的严重缺陷。
+     *
+     * ## ⚠️ 后台刷新不由本函数触发
+     *
+     * 与上面「读路径不发任何请求」同一条纪律：本函数**只返回旧值**，
+     * 重取交给后台刷新器（它每 60 秒跑一次，会看到 `stale: true` 并刷新）。
+     */
+    const diskReading = readDiskReading(provider, entry.id)
+    if (diskReading !== undefined) {
+      /**
+       * ⚠️⚠️ **刻意不写进 `TtlCache`**（不用 `cache.set`）。
+       *
+       * `TtlCache.set(value)` 会以**此刻**为 `atMs` 写入 ⇒ 该条目被当成
+       * **新鲜** ⇒ `peekStale().stale === false` ⇒ 后台刷新器认为「不用刷」
+       * ⇒ **永远不会被真实值替换**，用户一直看到上次退出时的余额。
+       *
+       * ⇒ 只返回旧值（标 `stale: true`），**不进缓存**。于是：
+       * - 本次调用拿到旧值（首屏快）；
+       * - 刷新器看不到新鲜条目 ⇒ 会去回源 ⇒ 下次轮询拿到真实值。
+       *
+       * ⚠️ 代价：同一进程内**每次**冷读都会读一次盘（`readDiskReading` 内部
+       * 走内存镜像，实际是 Map 查找，不是 IO）—— 可忽略。
+       */
+      return { ...(diskReading as BalanceReading), stale: true }
+    }
     return await cache.get()
   }
 
@@ -525,6 +574,20 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
             ? await cache.get({ force: true })
             : await getServingStale(provider, key, cache, entry),
         )
+        /**
+         * ★ **把成功读数记进磁盘缓存的内存镜像**（2026-11-20）。
+         *
+         * ⚠️ 这里**只置脏标记，不写盘** —— 真正落盘由三个时机触发
+         * （启动首次成功 / 每 30 分钟 / 退出时），用户明确要求「减少不必要的
+         * 缓存写盘」。徽标每 60 秒轮询一次，若每次读数都写盘就是每天上千次。
+         *
+         * ⚠️ **只记成功的**（`value !== undefined` 且无 `error`）：把失败读数
+         * 落盘会让下次启动显示「查询失败」，而那时网络可能完全正常。
+         */
+        const reading = out.get(entry.id)
+        if (reading !== undefined && reading.value !== undefined) {
+          noteDiskReading(provider, entry.id, reading)
+        }
       }
       return out
     },

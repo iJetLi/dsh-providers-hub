@@ -2067,6 +2067,21 @@ export class CodeArtsAdapter extends LlmAdapter {
       // 拿不到判定时退回 `got`（= 旧行为），避免把「判不出」当成「残缺」
       // 而让每个 provider 都反复重拉。
       this.remoteComplete = this.options.catalogComplete?.() ?? true
+      /**
+       * ★ **落盘（SWR 写盘那一半）** —— 2026-11-20，与 `buddy-adapter` 同款。
+       *
+       * ⚠️ **只在 `remoteComplete` 时写**：残缺目录落盘会被固化，下次启动读到它
+       * ⇒ 缺失的模型永久消失（见 `model-catalog-cache.ts` 模块头）。
+       *
+       * ⚠️⚠️ **必须用 `syncCatalogEntries()` 而不是 `catalogEntries()`**：
+       * 后者是 `async` 且内部 `await this.ensureRemoteModels()` —— 我们此刻
+       * **正在** `ensureRemoteModels` 里面，再调它会造成重入（闸门的 `inFlight`
+       * 会返回自己那轮的 Promise ⇒ 自等死锁）。
+       * 而 `syncCatalogEntries()` 读的就是刚赋好的 `this.remoteModels`，正是要写盘的内容。
+       */
+      if (this.remoteComplete) {
+        this.catalog.rememberForDisk?.(this.syncCatalogEntries())
+      }
       return { got: true, complete: this.remoteComplete }
     })
   }
