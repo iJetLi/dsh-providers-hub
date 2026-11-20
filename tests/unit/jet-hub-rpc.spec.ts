@@ -45,6 +45,22 @@ import { RACCOON } from '../../src/raccoon-product.js'
 import { AggregateAdapter } from '../../src/aggregate-adapter.js'
 
 /**
+ * ★ **等一个广播合并窗口过去**（2026-11-20）。
+ *
+ * `broadcastCatalogChanged` 从 `queueMicrotask`（同 tick 合并）改成了
+ * `setTimeout` **800ms 合并窗口** —— 见 `src/catalog-broadcast.ts` 模块头的
+ * 实测时间线（各家目录网络错开落地，microtask 合并率接近 0，宿主因此重算 16 次）。
+ *
+ * ⚠️ 于是「`await call(...)` 之后立刻断言 `emitted`」不再成立：广播还没派发。
+ * 所有断言「**应广播**」的用例必须先等这个窗口。
+ *
+ * ⚠️ 只给「应广播」的用例加；断言 `emitted` 为**空**的用例不用等
+ *（不广播时等多久都是空，加了只是白等）。
+ */
+const flushBroadcast = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 900) })
+
+
+/**
  * 注册**生产的那张** `probeById`（Task 8 起探测适配器由能力注册表提供）。
  *
  * ⚠️ 复用生产表而**不是**在测试里重写一份：本文件的断言正是「生产把哪个适配器
@@ -2103,11 +2119,13 @@ describe('model.list / model.setDisabled 端点', () => {
 
     await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: true })
     // 关闭要广播
+    await flushBroadcast()
     expect(emitted).toContain('llm/adapters-updated')
 
     // 重新打开同样要广播：两个方向都会改变可见目录。
     emitted.length = 0
     await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: false })
+    await flushBroadcast()
     expect(emitted).toContain('llm/adapters-updated')
   })
 
@@ -2552,6 +2570,7 @@ describe('model.list / model.setDisabled 端点', () => {
       })
       // ⚠️ 仍须广播：客户端那份 `status === 'ready'` 的目录缓存要靠它失效，
       //    调用方（前端）也据此刷新开关状态。
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
     })
 
@@ -2666,6 +2685,7 @@ describe('model.list / model.setDisabled 端点', () => {
 
       await call('model.setAllDisabled', { provider: 'buddy', disabled: true })
 
+      await flushBroadcast()
       expect(emitted).toEqual(['llm/adapters-updated'])
     })
 
@@ -2677,6 +2697,7 @@ describe('model.list / model.setDisabled 端点', () => {
 
       await call('model.setAllDisabled', { provider: 'buddy', disabled: false })
 
+      await flushBroadcast()
       expect(emitted).toEqual(['llm/adapters-updated'])
     })
 
@@ -2864,6 +2885,7 @@ describe('model.list / model.setDisabled 端点', () => {
         disabled: true,
       })
 
+      await flushBroadcast()
       expect(emitted).toEqual(['llm/adapters-updated'])
     })
 
@@ -5150,6 +5172,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
     it('关闭后广播 llm/adapters-updated（否则界面要重启才更新）', async () => {
       const { call, emitted } = setup({ catalog: CATALOG })
       await call('provider.setEnabled', { provider: 'buddy', enabled: false })
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
     })
 
@@ -5203,6 +5226,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
       expect((result.value as { models?: number }).models).toBe(0)
       // 账号确实被停用 + 必须广播（否则界面开关不刷新）。
       expect(writeOrder).toContain('accounts')
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
       expect(storedAccounts()[0].enabled).toBe(false)
       // 判据联动：`provider.status` 必须靠「关闭意图」腿报 closed:true。
@@ -5340,6 +5364,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
       // 先关模型、后停账号（无账号 ⇒ accounts 写入为 0 条）。
       expect(writeOrder).toEqual(['models'])
       // 必须广播（前端开关状态靠它刷新）。
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
     })
 
@@ -5391,6 +5416,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
       // 账号集合真的变化时才 push），空目录时它只剩 `accounts` —— 意图是否落下
       // 由下面 `provider.status` 的 `closed` 反向证明。
       expect(writeOrder).toContain('accounts')
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
       expect(storedAccounts()[0].enabled).toBe(false)
 
@@ -6081,6 +6107,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
       expect(result.value).toMatchObject({ models: 2, accounts: 1 })
       expect(storedDisabled().buddy).toBeUndefined()
       expect(storedAccounts()[0].enabled).toBe(true)
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
     })
 
@@ -6108,6 +6135,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
     it('⚠️ 打开也要广播（两个方向都改变 listModels 结果）', async () => {
       const { call, emitted } = setup({ catalog: CATALOG })
       await call('provider.setEnabled', { provider: 'buddy', enabled: true })
+      await flushBroadcast()
       expect(emitted).toEqual(['llm/adapters-updated'])
     })
   })

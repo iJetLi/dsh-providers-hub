@@ -43,12 +43,43 @@ import { REMOTE_CATALOG_COOLDOWN_MS } from './remote-catalog-gate.js'
 /**
  * 预热轮次的间隔（毫秒，**相对上一轮结束**，见 `runChain`）。
  *
- * - `0` —— 首次立即执行（凭据往往已就绪，能一把拿到目录）；
- * - `35_000` / `75_000` —— 两段补拉间隔，覆盖「首拉时凭据未就绪 / 网络抖动」。
+ * ## ★ 2026-11-20：首项从 `0` 改为 {@link CATALOG_PREWARM_INITIAL_DELAY_MS}
  *
- * ⚠️ 非零项必须**大于** {@link REMOTE_CATALOG_COOLDOWN_MS}，否则被闸门挡回。
+ * 实测（探针抓到的 `listModels` 时间线，33 个 provider）：
+ *
+ * ```
+ * + 0s    11  ███
+ * + 1s   216  ███████████████████████████████████████████████████████
+ * +15s   208  ███████████████████████████████████████████████████████
+ * +31s   199  ███████████████████████████████████████████████████████
+ * +37s   104  █████████████████████████████████████████████████████
+ * ```
+ *
+ * ## 为什么 `0`（立即）是错的
+ *
+ * `apply()` 一返回，宿主的 `buildModelCatalog` 就要对**每个** provider
+ * `await listModels()` 来渲染首屏。而预热在**同一时刻**也对同一批 provider
+ * 发目录请求 ⇒ 两边**抢同一批上游连接**，且预热完成的每一次目录落地还会
+ * 广播 `llm/adapters-updated` ⇒ **宿主再重算一轮**（乘数效应）。
+ *
+ * ⇒ 首屏被自己插队的预热拖慢。让预热**先让路**（10 秒），宿主首屏用
+ * 静态兜底表立即出模型列表，之后预热再补齐真实目录并广播。
+ *
+ * ⚠️ **代价**：首屏模型列表可能短暂是兜底表（不完整）。但兜底表本就是
+ * 「客户端首帧」的既有形态（见模块头的自愈说明），且 10 秒后自动补齐。
+ *
+ * ⚠️ **非零项必须大于** {@link REMOTE_CATALOG_COOLDOWN_MS}，否则被闸门挡回 ——
+ * 这条约束由 `isPrewarmSpacingValid()` 守着。
  */
-export const CATALOG_PREWARM_DELAYS_MS: readonly number[] = [0, 35_000, 75_000]
+export const CATALOG_PREWARM_DELAYS_MS: readonly number[] = [10_000, 35_000, 75_000]
+
+/**
+ * 首轮预热的延后量（毫秒）。见 {@link CATALOG_PREWARM_DELAYS_MS} 的说明。
+ *
+ * ⚠️ 它**不参与** `isPrewarmSpacingValid()` 的「> 冷却」判据 —— 首轮不与任何
+ * 上一轮竞争，只需「晚于宿主首屏」。故它单独成常量，语义更清楚。
+ */
+export const CATALOG_PREWARM_INITIAL_DELAY_MS = 10_000
 
 /** 日志出口（两级可选链，与仓库既有约定一致：日志不该成为功能的单点故障）。 */
 export interface CatalogPrewarmLogger {
@@ -210,13 +241,29 @@ export function startCatalogPrewarm(options: CatalogPrewarmOptions): () => void 
     }, gap))
   }
 
-  // 立即那一轮：**排到 microtask**，不在调用栈内触达 `warm`。
-  // `apply()` 是同步函数，而 `warm` 会发起网络请求 —— 同步调用它等于把
-  // 首个请求塞进插件启动路径（与既有的 opencode 能力预热同款约定）。
-  queueMicrotask(() => {
-    if (stopped) return
-    void runChain(0)
-  })
+  // ★ 首轮**延后启动**（默认 10 秒），让宿主首屏先出。
+  //
+  // ⚠️ 2026-11-20 之前是 `queueMicrotask(() => runChain(0))`（立即）。
+  //    实测那样会与宿主 `buildModelCatalog` 抢同一批上游连接，
+  //    见 {@link CATALOG_PREWARM_DELAYS_MS} 的时间线。
+  //
+  // ⚠️ `delays[0]` 的语义**同时**是「首轮前的延迟」与「首轮与次轮的间隔」：
+  //    - 作为首轮延迟：`10_000` ⇒ 启动 10 秒后才跑第一轮（给宿主首屏让路）；
+  //    - 作为间隔：`runChain` 用它排下一轮（见下面的 `gap` 计算）。
+  //    两个语义共用同一个数，是因为「首轮让路」与「轮间间隔」都受同一条
+  //    约束驱动：**别和闸门/宿主抢**。写成两个常量会让「改一个忘另一个」。
+  const initialDelay = delays[0] ?? 0
+  if (initialDelay > 0) {
+    cancels.push(schedule(() => {
+      if (stopped) return
+      void runChain(0)
+    }, initialDelay))
+  } else {
+    queueMicrotask(() => {
+      if (stopped) return
+      void runChain(0)
+    })
+  }
 
   return () => {
     stopped = true
@@ -230,8 +277,19 @@ export function startCatalogPrewarm(options: CatalogPrewarmOptions): () => void 
  *
  * 抽成函数是为了让**接线层**也能断言（不止单测）：间隔小于冷却时预热等于没做，
  * 且症状是「静默无效」（没有任何报错，只是目录一直补不回来）。
+ *
+ * ## ⚠️ 2026-11-20：**首项不参与**校验
+ *
+ * `delays[0]` 的语义是「**首轮启动前**的延迟」（现在 = 10 秒，给宿主首屏让路），
+ * 它**不是**轮间间隔、也不与闸门冷却竞争（首轮之前没有任何失败发生过）。
+ * 把它纳入「> 冷却」判据是**假约束**：10 秒并不需要大于 30 秒。
+ *
+ * ⇒ 从**第二项**起才是真正的「上一轮结束 → 下一轮开始」间隔，只有它们必须
+ * 大于冷却（否则重试被闸门原样挡回）。
+ *
+ * @param delays - 完整延迟数组；只有 `slice(1)` 参与校验
  */
 export function isPrewarmSpacingValid(delays: readonly number[] = CATALOG_PREWARM_DELAYS_MS): boolean {
-  // 只看**非零**的那些：立即那一轮（0）不受冷却约束。
-  return delays.filter((delay) => delay > 0).every((delay) => delay > REMOTE_CATALOG_COOLDOWN_MS)
+  // ⚠️ `slice(1)`：首项是「启动延迟」，不是轮间间隔（见上）。
+  return delays.slice(1).filter((delay) => delay > 0).every((delay) => delay > REMOTE_CATALOG_COOLDOWN_MS)
 }

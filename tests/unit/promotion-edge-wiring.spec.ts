@@ -186,8 +186,12 @@ describe('★ apply() 的徽标保鲜接线', () => {
     const emitted: number[] = []
     ctx.on('llm/adapters-updated', () => { emitted.push(1) })
     options!.fire()
-    // broadcastCatalogChanged 走 queueMicrotask ⇒ 同步断言看不到，交给 microtask 排空。
-    return Promise.resolve().then(() => {
+    /**
+     * ⚠️ 2026-11-20：`broadcastCatalogChanged` 从 `queueMicrotask`（同 tick）
+     * 改成了 **800ms 合并窗口**（见 `src/catalog-broadcast.ts` 模块头）⇒
+     * 排空一个 microtask 已经等不到广播，必须等窗口。
+     */
+    return new Promise<void>((resolve) => { setTimeout(resolve, 900) }).then(() => {
       expect(emitted.length, 'fire 没有 emit llm/adapters-updated ⇒ 播报是空转').toBeGreaterThanOrEqual(1)
     })
   })
