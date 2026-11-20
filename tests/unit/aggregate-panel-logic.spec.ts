@@ -1626,3 +1626,53 @@ describe('★★ 按临期重探定时器（第 5 条判据，此前零覆盖）
     //    提醒改判据 —— 那是刻意的：复述文案在那种情况下必须重写成「每 N 秒」。
   })
 })
+
+/**
+ * ★★ 聚合面板的「启用 / 关闭」开关（2026-11-20 用户要求）：
+ * 常驻侧边栏的 Jet Hub 里，聚合面板要能像普通供应商那样直接开关，
+ * 不必绕去「设置 → 打开供应商开关」弹窗。
+ *
+ * ⚠️ `AggregatePanel` 是闭包内组件、未导出，这里沿用本文件的源码切片模式。
+ * 判据尽量钉在**会真正影响行为**的三件事上（避免只断言一句文案）：
+ *   ① props 解构里必须拿到 `onToggleProvider`（否则点击是空转）；
+ *   ② 状态必须走 `providerSwitchState(providerStatuses?.['aggregate'])`
+ *      （与普通供应商同源判据，不能自己重写一份）；
+ *   ③ 点击里必须真的调 `onToggleProvider('aggregate', !switchState.checked)`。
+ */
+describe('★★ 聚合面板的启用/关闭开关（行为级接线，2026-11-20）', () => {
+  it('AggregatePanel 渲染开关且接线到页面级 provider.setEnabled 动作', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const dir = fileURLToPath(new URL('.', import.meta.url))
+    const source = await fs.readFile(path.resolve(dir, '../../plugin-src/client/jet-hub.js'), 'utf8')
+    const start = source.indexOf('function AggregatePanel(')
+    expect(start, 'AggregatePanel 必须存在').toBeGreaterThan(0)
+    const end = source.indexOf('\nexport function ', start)
+    const body = source.slice(start, end > 0 ? end : undefined)
+    const code = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+    // ① props 解构含 onToggleProvider（少了它就是点击空转的假开关）。
+    expect(code, 'AggregatePanel 必须接收 onToggleProvider（否则开关点了没反应）')
+      .toMatch(/function\s+AggregatePanel\s*\(\s*\{[^}]*onToggleProvider/)
+    // ② 状态判据与普通供应商同源。
+    expect(code, "开关状态必须走 providerSwitchState(providerStatuses?.['aggregate'])")
+      .toMatch(/providerSwitchState\(\s*providerStatuses\?\.\[\s*'aggregate'\s*\]\s*\)/)
+    // ③ 真的渲染出 role="switch" 的开关。
+    expect(code, '必须渲染 role="switch" 的开关').toContain(`role: 'switch'`)
+    // ④ 点击真的调 onToggleProvider('aggregate', …)（不是只画个图标）。
+    expect(code, "点击必须调 onToggleProvider('aggregate', …)")
+      .toMatch(/onToggleProvider\?\.\(\s*'aggregate'\s*,/)
+
+    // ⑤ **调用点必须真的把 onToggleProvider 传进来**（否则组件内再正确也是空转）。
+    //    ⚠️ 判据必须落在整份源码里的 `React.createElement(AggregatePanel, { … })`
+    //    实参上，而不是组件体（组件体那道守卫看不出调用点漏传 —— 实测漏传后它仍绿）。
+    const callStart = source.indexOf('React.createElement(AggregatePanel,')
+    expect(callStart, '必须存在 AggregatePanel 的调用点').toBeGreaterThan(0)
+    const callEnd = source.indexOf('})', callStart)
+    const callArgs = source.slice(callStart, callEnd > 0 ? callEnd : undefined)
+    expect(callArgs, 'AggregatePanel 调用点必须传 onToggleProvider（否则开关点了没反应）')
+      .toMatch(/onToggleProvider\s*:/)
+    expect(callArgs, 'AggregatePanel 调用点必须传 providerStatuses（否则开关读数永远是默认）')
+      .toMatch(/providerStatuses\s*[,:]/)
+  })
+})
