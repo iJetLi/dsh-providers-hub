@@ -303,9 +303,20 @@ export function apply(ctx) {
        *
        * ⚠️ 传**位次**（1-based），不是 accountId —— 用户 2026-11-10 要求「跟随位次」：
        *    选「位次 1」后去管理界面拖拽，回来仍是「位次 1」= 新的第 1 个号。
+       *
+       * ★ `tierAtSelection`（S6，2026-11-20）：**选定那一刻该账号的积分档位**。
+       *   服务端靠它判断「起点那一档是否已烧完」——不同则交出首位。
+       *   `undefined` = 算不出（无余额读数 / 恢复默认）⇒ 服务端回落 S5。
+       *   ⚠️ 不能省略：省了之后服务端永远拿不到快照，S6 对**所有新选择**
+       *   都静默不生效，而用户只会觉得「重选了起点还是先烧自己的短期」。
        */
-      writeRotation: (provider, sid, position) =>
-        rpcCall('account.setRotation', { provider, sessionId: sid, position }),
+      writeRotation: (provider, sid, position, tierAtSelection) =>
+        rpcCall('account.setRotation', {
+          provider,
+          sessionId: sid,
+          position,
+          ...(typeof tierAtSelection === 'string' ? { tierAtSelection } : {}),
+        }),
       readBadge: (provider, options) => rpcCall('usage.badge', { provider, ...options }),
       /**
        * 聚合 provider「上次**实际**转发成功的渠道」（P3）。

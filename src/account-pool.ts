@@ -4,7 +4,7 @@ import type { BuddyCredential } from './buddy.js'
 import type { BuddyProduct } from './product.js'
 import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeCreditWindows, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, PreferredRotationMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
-import type { CreditWindowMap, CreditWindowSetting } from './jet-hub-store.js'
+import type { CreditWindowMap, CreditWindowSetting, RotationStartTier } from './jet-hub-store.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
@@ -1420,6 +1420,31 @@ export class AccountPool {
   }
 
   /**
+   * ★ **轮换起点选定那一刻的档位**（S6，2026-11-20）。
+   *
+   * 返回 `undefined` **只有一种含义**：该会话没配起点。
+   *
+   * ## ⚠️ 2026-11-20 收窄：不再有「老数据无快照」这一支
+   *
+   * 用户决定「最彻底：清除已选的起点」⇒ `sanitizePreferredRotation` 会丢弃
+   * 一切没有 `tierAtSelection` 的条目 ⇒ 缓存里**只要有条目，档位必然存在**。
+   * ⇒ 本方法的 `undefined` 现在唯一表示「没设起点」。
+   *
+   * ⚠️ 与 {@link preferredRotationFor} 分开读：后者返回 `accountId`
+   * （消费方定位账号），本方法返回档位枚举。**签名上别造假耦合**，
+   * 将来若两者语义分叉会很难改。
+   *
+   * ⚠️ 每次现读，不缓存（与 `preferredRotationFor` 同款）。
+   */
+  rotationStartTierFor(provider: string, sessionId: string | undefined): RotationStartTier | undefined {
+    this.ensureLoaded()
+    if (provider.length === 0) return undefined
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    const entry = this.preferredRotationCache[provider]?.[sessionId]
+    return entry?.tierAtSelection
+  }
+
+  /**
    * 「轮换起点」：某 provider 在某**会话**下指定的起始账号 id。
    *
    * `undefined` = 默认起点（不干预）。**只挪起点，不改任何选号策略**。
@@ -1444,31 +1469,17 @@ export class AccountPool {
       .filter((a) => a.provider === provider && a.enabled !== false)
 
     /**
-     * ## ⚠️ 三种历史格式都要认（任一崩掉都是「读偏好直接失败」）
+     * **位次 → 当前账号**（用户 2026-11-10 要求「跟随位次」）。
      *
-     * | 形态 | 来源 | `in` 运算符安全吗 |
-     * |---|---|---|
-     * | 裸字符串 `"acc-id"` | 本功能最早那版 | ❌ **会抛 TypeError** |
-     * | `{ accountId, at }` | 早期版本 | ✅ |
-     * | `{ position, at }` | 本版起 | ✅ |
+     * ## ⚠️ 2026-11-20 起这里**只有一种格式**
      *
-     * ⚠️ **真实缺陷（2026-11-10）**：原写 `'accountId' in entry`，遇到裸字符串
-     *    直接抛 `TypeError: Cannot use 'in' operator to search for 'position' in …`
-     *    ⇒ 读偏好失败 ⇒ 下拉框**永远显示「默认」**（用户报障的正是这个）。
-     * ⚠️ `sanitizePreferredRotation` 会**原样保留**裸字符串（不转换），
-     *    因为它的注释说「补 `at = 0`」—— 但那是**对象**形态，字符串那支没转换。
-     *    ⇒ 这里必须自己判 `typeof entry === 'string'`。
-     */
-    // ① 裸字符串（最老格式）：直接当 accountId
-    if (typeof entry === 'string') {
-      return entry.length > 0 ? entry : undefined
-    }
-    // ② 旧对象格式 `{ accountId, at }`：仍跟随该账号
-    if (typeof entry === 'object' && entry !== null && 'accountId' in entry) {
-      return entry.accountId.length > 0 ? entry.accountId : undefined
-    }
-    /**
-     * 新格式：**位次 → 当前账号**（用户 2026-11-10 要求「跟随位次」）。
+     * 旧版曾在此处判三种历史形态（裸字符串 / `{accountId,at}` / `{position,at}`），
+     * 其中裸字符串那支还踩过 `'accountId' in entry` 抛 TypeError 的真实缺陷。
+     *
+     * 现在 `sanitizePreferredRotation` **丢弃**一切没有 `position` 或没有
+     * `tierAtSelection` 的条目（用户决定「最彻底：清除已选起点」）⇒
+     * 缓存里只可能是 `{ position, at, tierAtSelection }` ⇒
+     * 那段兼容代码已**无消费可能**，随本次改动一起删除。
      *
      * ⚠️ 三条边界**全部回落默认**，绝不 clamp —— clamp 会在账号变少时
      *    **静默**把设置挪到别的号上，而「回落默认」至少是用户能理解的行为。
@@ -1479,7 +1490,11 @@ export class AccountPool {
   }
 
   /**
-   * 写入「轮换起点」；`accountId` 传 `null` = 恢复默认起点。
+   * 写入「轮换起点」；`position` 传 `null` = 恢复默认起点。
+   *
+   * @param tierAtSelection - ★ **选定那一刻的档位**（S6，2026-11-20）。
+   *   落盘后用于判断「起点那一档是否已烧完」。`undefined` = 不知道
+   *   （老客户端 / 老数据）⇒ 消费方回落 S5 语义。
    *
    * ⚠️ 与 {@link setStrictManualOrder} 同款：走同一条写队列（`queueStoreSave`），
    * 不能自己 `store.save(...)` —— 那会与账号/黑名单的写入乱序覆盖。
@@ -1490,21 +1505,43 @@ export class AccountPool {
     provider: string,
     sessionId: string,
     position: number | null,
+    /**
+     * ★ **选定那一刻的档位**（S6 必填，2026-11-20）。
+     *
+     * ⚠️ `position === null`（恢复默认）时**忽略本参数**；其余情况**必须提供**
+     * —— 没有档位的条目会被 `sanitizePreferredRotation` 丢弃，等于白写。
+     * 故这里的类型是「`position` 非空时必填」，但 TS 无法表达这种依赖，
+     * 运行时兜底：`position !== null && tierAtSelection === undefined` ⇒ 直接 return（不写脏数据）。
+     */
+    tierAtSelection?: RotationStartTier,
   ): Promise<void> {
     this.ensureLoaded()
     if (provider.length === 0 || sessionId.length === 0) return
     // ⚠️ 位次必须是正整数（1-based）；`null` = 恢复默认
     if (position !== null && (!Number.isInteger(position) || position < 1)) return
+    /**
+     * ⚠️ **设起点却没给档位 ⇒ 拒绝写入**（2026-11-20）。
+     *
+     * 写进去也会被 `sanitizePreferredRotation` 丢掉（它要求档位必填），
+     * 结果是「RPC 回 ok、但设置没生效」—— 那种静默失败最难排查。
+     * ⇒ 在源头就 return，让调用方看到「没有变化」。
+     */
+    if (position !== null && tierAtSelection === undefined) return
     const current = this.preferredRotationCache[provider]?.[sessionId]
-    const currentPosition = typeof current === 'object' && current !== null && 'position' in current
-      ? current.position
-      : null
-    if (position === currentPosition) return
+    const currentPosition = current?.position ?? null
+    /**
+     * ⚠️ **档位变了也要写**：只比较位次会在「用户重选同一位次、但该号档位
+     * 已变化」时不落盘 ⇒ 快照过期 ⇒ 新语义按错误的档位判断。
+     */
+    const currentTier = current?.tierAtSelection
+    if (position === currentPosition && tierAtSelection === currentTier) return
     const next: PreferredRotationMap = { ...this.preferredRotationCache }
     const sessions = { ...(next[provider] ?? {}) }
     // ⚠️ 写入时**带上 at**：淘汰按它排序（见 `prunePreferredRotation`）。
     if (position === null) delete sessions[sessionId]
-    else sessions[sessionId] = { position, at: Date.now() }
+    else if (tierAtSelection !== undefined) {
+      sessions[sessionId] = { position, at: Date.now(), tierAtSelection }
+    }
     if (Object.keys(sessions).length > 0) next[provider] = sessions
     else delete next[provider]
     this.preferredRotationCache = sanitizePreferredRotation(next)

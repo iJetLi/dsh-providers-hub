@@ -871,6 +871,60 @@ export function rotationStartHint(tier) {
 }
 
 /**
+ * ★★★ **轮换起点当前的「降档」状态提示**（S6，2026-11-20）。
+ *
+ * ## 为什么需要它（用户要求「有必要说明的地方加 tooltip」）
+ *
+ * S6 之后起点的行为是**两段式**的，用户不看说明很难理解：
+ *
+ * | 阶段 | 行为 |
+ * |---|---|
+ * | 起点**还有**选定那一档的积分 | 起点绝对第一（先烧它的） |
+ * | 那一档**已烧完** | 起点交出首位，回到「从起点往后数」的档位循环 |
+ *
+ * 用户看到的现象是「我的起点突然不排第一了」—— 若不解释，会被当成 bug
+ *（本仓已有过「用户把正确行为当缺陷报障」的先例）。
+ *
+ * @param selectionTier - 选定起点时的档位（`account.getRotation` 的 `tierAtSelection`）
+ * @param currentTier - 起点**此刻**的档位（`CREDIT_ORDER_TIER.*`）
+ * @returns 提示文案；`null` = 不需要提示（还在原档 / 无快照 / 无起点）
+ *
+ * ## 三种返回
+ *
+ * 1. **`null`**：无快照（老数据）、或在原档 ⇒ 不打扰用户；
+ * 2. **降档提示**：明确说「已交回队列」+ 下一个是谁，避免被当成 bug；
+ * 3. **升档提示**：用户又充了积分（罕见）⇒ 说明会重新优先消耗。
+ */
+export function rotationTierShiftHint(selectionTier, currentTier) {
+  if (typeof selectionTier !== 'string' || selectionTier.length === 0) return null;
+  if (!Number.isFinite(currentTier)) return null;
+  const labelOf = (t) => {
+    if (t === 'imminent') return '临期';
+    if (t === 'expiring') return '短期';
+    if (t === 'permanent') return '永久';
+    return '不可用';
+  };
+  const nowTier = currentTier === CREDIT_ORDER_TIER.imminent
+    ? 'imminent'
+    : currentTier === CREDIT_ORDER_TIER.expiring
+      ? 'expiring'
+      : currentTier === CREDIT_ORDER_TIER.permanent
+        ? 'permanent'
+        : 'none';
+  if (nowTier === selectionTier) return null;
+  const rank = { imminent: 0, expiring: 1, permanent: 2, none: 3 };
+  const from = labelOf(selectionTier);
+  const to = labelOf(nowTier);
+  if (rank[nowTier] > rank[selectionTier]) {
+    // 降档：起点那一档烧完了
+    return `ℹ️ 起点的「${from}」积分已用完（现剩「${to}」）⇒ 已交回轮换队列：`
+      + `先按档位轮流消耗其他账号，绕一圈后才轮到它`;
+  }
+  // 升档（用户又充了积分）
+  return `ℹ️ 起点现有「${from}」积分（原为「${to}」）⇒ 重新优先消耗它`;
+}
+
+/**
  * ★★ **临期括号里要不要显示金额**（2026-11-20 用户要求）。
  *
  * 用户原话：「如果临期积分只有一笔，则括号里面只显示时间即可」。
@@ -1042,9 +1096,21 @@ export function rotationOrderOptionsOf(rotationState) {
   const selected = rotationState.selected;
   if (typeof selected !== 'string' || selected.length === 0) return {};
   const ids = rotationIdsOf(rotationState);
+  /**
+   * ★ **起点选定时的档位快照**（S6，2026-11-20）。
+   *
+   * ⚠️ 缺了它 ⇒ `rotateRows` 走 S5（起点绝对第一）⇒ **弹窗显示的选号顺序
+   * 与真实选号分叉**：起点临期烧完后，服务端已交首位、弹窗仍把它排第一。
+   * 这正是本仓「显示与行为分叉」的经典形态。
+   *
+   * `null` / 非字符串 = 老数据没有快照 ⇒ 不传（两端同时回落 S5，保持一致）。
+   */
+  const tier = typeof rotationState.tierAtSelection === 'string'
+    ? { tierAtSelection: rotationState.tierAtSelection }
+    : {};
   return ids.length === 0
-    ? { rotationStartId: selected }
-    : { rotationStartId: selected, enabledAccountIds: ids };
+    ? { rotationStartId: selected, ...tier }
+    : { rotationStartId: selected, enabledAccountIds: ids, ...tier };
 }
 
 /**
@@ -1189,7 +1255,23 @@ export function orderCreditRows(rows, options = {}) {
     ? options.enabledAccountIds
     : [];
   const ordered = typeof startId === 'string' && startId.length > 0
-    ? rotateRows(orderedByStrategy, startId, tierOf, tierOfGroup, enabledAccountIds)
+    ? rotateRows(
+      orderedByStrategy,
+      startId,
+      tierOf,
+      tierOfGroup,
+      enabledAccountIds,
+      /**
+       * ★ **起点选定时的档位快照**（S6，2026-11-20）。
+       *
+       * ⚠️ 必须与后端**读同一份数据**（`account.getRotation` 回的
+       * `tierAtSelection`），否则「弹窗显示的选号顺序」与「实际选号」
+       * 会在降档后分叉 —— 那正是本函数 2026-11-18 三处分叉的同型缺陷。
+       *
+       * `undefined` / `null` ⇒ 老数据 ⇒ 保持 S5。
+       */
+      typeof options.tierAtSelection === 'string' ? options.tierAtSelection : undefined,
+    )
     : orderedByStrategy;
   const hidden = Math.max(0, ordered.length - limit);
   return { shown: options.expanded === true ? ordered : ordered.slice(0, limit), hidden };
@@ -1226,7 +1308,7 @@ export function orderCreditRows(rows, options = {}) {
  * @param startId - 起点 accountId
  * @param tierOf - 每行的档位（复刻后端口径）；用于按档分组
  */
-function rotateRows(rows, startId, tierOf, tierOfGroup, enabledAccountIds) {
+function rotateRows(rows, startId, tierOf, tierOfGroup, enabledAccountIds, tierAtSelection) {
   /**
    * ## ⚠️⚠️ 2026-11-18 对拍实测：本函数曾与后端 `rotateFromPreferred` **三处分叉**
    *
@@ -1235,6 +1317,13 @@ function rotateRows(rows, startId, tierOf, tierOfGroup, enabledAccountIds) {
    * 「与后端逐字节同构」这句注释原先**没有任何跨侧用例**支撑 —— 变异范式打的是
    * 「某一侧被改坏」，而分叉是「两侧从一开始就不一样」，所以 30+ 个变异全绿
    * 也发现不了它。
+   *
+   * ## ★ 2026-11-20 S6：起点降档后交出首位
+   *
+   * 与后端 `rotateFromPreferred` 的 S6 分支**逐字节同构**（见那里的长注释）。
+   * 判据：`起点当前档位 === tierAtSelection` 才占首位；否则回到档位排序。
+   *
+   * ⚠️ `tierAtSelection` 为 `undefined` ⇒ 保持 S5（老数据 / 老客户端）。
    */
   // ① 定位起点：不在候选里时，用**全量启用账号**的池位次定位（后端成因 2 的修法）。
   let index = rows.findIndex((row) => row?.accountId === startId);
@@ -1262,6 +1351,47 @@ function rotateRows(rows, startId, tierOf, tierOfGroup, enabledAccountIds) {
   const startRow = rows[anchor];
   // ③ 分组用**恒解锁口径**（`tierOfGroup`），不是可用性用的用户口径。
   const startTier = tierOfGroup(startRow);
+
+  /**
+   * ★★ **S6：起点降档则交出首位**（与后端逐字节同构）。
+   *
+   * `tierAtSelection` 是**用户选定起点那一刻**的档位（服务端落盘）。
+   * `undefined` ⇒ 老数据 / 老客户端 ⇒ 保持 S5。
+   */
+  const tierNow = (() => {
+    if (startTier === CREDIT_ORDER_TIER.imminent) return 'imminent';
+    if (startTier === CREDIT_ORDER_TIER.expiring) return 'expiring';
+    if (startTier === CREDIT_ORDER_TIER.permanent) return 'permanent';
+    return undefined;
+  })();
+  /**
+   * ⚠️ 2026-11-20：不再有「无快照回落 S5」—— 缺档位一律按「已变」处理
+   * (生产链路由 sanitizePreferredRotation 保证有值；缺值只可能是直接调用)。
+   */
+  const tierStillHeld = tierAtSelection !== undefined && tierNow === tierAtSelection;
+
+  if (!tierStillHeld) {
+    /**
+     * 交出首位：**从起点开始按池序循环** → 再按档位稳定排序。
+     *
+     * 用户要求「回到默认策略顺序」= 从起点之后继续循环，**不是**回到位次 1。
+     * ⚠️ 与后端同构：池序缺失时退化为「档内原序」。
+     */
+    const ids = Array.isArray(enabledAccountIds) ? enabledAccountIds : [];
+    let rotated = [...rows];
+    if (ids.length > 0) {
+      const posOf = (id) => {
+        const at = ids.indexOf(id);
+        return at < 0 ? Number.MAX_SAFE_INTEGER : at;
+      };
+      rotated = [...rows].sort((a, b) => posOf(a?.accountId) - posOf(b?.accountId));
+      const startAt = rotated.findIndex((row) => row?.accountId === startRow?.accountId);
+      if (startAt >= 0) rotated = [...rotated.slice(startAt), ...rotated.slice(0, startAt)];
+    }
+    // ⚠️ 稳定排序（ES2019+ 保证）⇒ 同档内保持上面旋转后的相对序。
+    return rotated.sort((a, b) => tierOfGroup(a) - tierOfGroup(b));
+  }
+
   // 按档分组（保持组内原序）
   const byTier = new Map();
   for (const row of rows) {

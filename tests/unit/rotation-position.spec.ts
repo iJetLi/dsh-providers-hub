@@ -21,31 +21,52 @@ import { sanitizePreferredRotation } from '../../src/jet-hub-store.js'
 const SRC = join(process.cwd(), 'plugin-src', 'client', 'usage-badge.js')
 const source = readFileSync(SRC, 'utf8')
 
-describe('sanitizePreferredRotation —— 两种格式并存', () => {
-  it('★ 新格式 `{position, at}` ⇒ 原样保留', () => {
-    const out = sanitizePreferredRotation({ p: { s: { position: 2, at: 100 } } })
-    expect(out.p?.s).toEqual({ position: 2, at: 100 })
+describe('sanitizePreferredRotation —— 2026-11-20 起只认一种格式', () => {
+  /**
+   * ★★★ 用户决定「最彻底」：
+   * 「做成最彻底的方法就行，清除已选的起点，回归默认，等用户重新选就可以生效新的」
+   *
+   * ⇒ 只保留 `{ position, at, tierAtSelection }`，其余**一律丢弃**。
+   * 丢弃后回落「默认起点」，用户重选一次即写入完整条目。
+   */
+  it('★★ 新格式（含档位快照）⇒ 原样保留', () => {
+    const out = sanitizePreferredRotation({ p: { s: { position: 2, at: 100, tierAtSelection: 'imminent' } } })
+    expect(out.p?.s).toEqual({ position: 2, at: 100, tierAtSelection: 'imminent' })
   })
 
-  it('★ 旧格式 `{accountId, at}` ⇒ **仍可读**（升级用户不丢设置）', () => {
-    const out = sanitizePreferredRotation({ p: { s: { accountId: 'acc-1', at: 100 } } })
-    expect(out.p?.s).toEqual({ accountId: 'acc-1', at: 100 })
+  it('★★★ 旧格式 {accountId, at} ⇒ 丢弃（无位次、无档位）', () => {
+    expect(sanitizePreferredRotation({ p: { s: { accountId: 'acc-1', at: 100 } } })).toEqual({})
   })
 
-  it('★ 更旧的裸字符串 ⇒ 补 at=0', () => {
-    const out = sanitizePreferredRotation({ p: { s: 'acc-1' } })
-    expect(out.p?.s).toEqual({ accountId: 'acc-1', at: 0 })
+  it('★★★ 更旧的裸字符串 ⇒ 丢弃', () => {
+    expect(sanitizePreferredRotation({ p: { s: 'acc-1' } })).toEqual({})
+  })
+
+  it('★★★ S5 格式 {position, at}（无档位快照）⇒ 丢弃', () => {
+    // ⚠️ 本次改动的核心：无档位的起点无法判断「用户当初想烧哪一档」，
+    //    任何回落都只能是猜测（回落 S5 ⇒ bug 依旧；回落「已降档」⇒ 界面与行为分叉）。
+    expect(sanitizePreferredRotation({ p: { s: { position: 2, at: 100 } } })).toEqual({})
+  })
+
+  it('★★ 非法档位值 ⇒ 丢弃整条（不保留半成品）', () => {
+    for (const bad of ['x', 0, null, {}, []]) {
+      expect(sanitizePreferredRotation({ p: { s: { position: 2, at: 100, tierAtSelection: bad } } }))
+        .toEqual({})
+    }
   })
 
   it('position 非正整数 ⇒ 丢弃（不静默改成 1）', () => {
     for (const bad of [0, -1, 1.5, '2', null]) {
-      expect(sanitizePreferredRotation({ p: { s: { position: bad, at: 100 } } })).toEqual({})
+      expect(sanitizePreferredRotation({ p: { s: { position: bad, at: 100, tierAtSelection: 'imminent' } } }))
+        .toEqual({})
     }
   })
 
-  it('position 合法但 accountId 也在 ⇒ **优先 position**（新格式胜出）', () => {
-    const out = sanitizePreferredRotation({ p: { s: { position: 3, accountId: 'old', at: 100 } } })
-    expect(out.p?.s).toEqual({ position: 3, at: 100 })
+  it('at 非法 ⇒ 丢弃', () => {
+    for (const bad of [-1, NaN, '1', null]) {
+      expect(sanitizePreferredRotation({ p: { s: { position: 2, at: bad, tierAtSelection: 'imminent' } } }))
+        .toEqual({})
+    }
   })
 })
 
@@ -87,9 +108,15 @@ describe('orderCreditRows —— 双模式排序（后端口径）', () => {
     expect(shown.map((r) => r.accountId), 'b(临期) → c(短期) → a(永久)').toEqual(['b', 'c', 'a'])
   })
 
-  it('★ 设了起点 ⇒ **起点绝对第一**（S5）', () => {
-    // 档位序 b(临期) → c(短期) → a(永久)；起点 = c ⇒ S5 把 c 提到第一
-    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'c' })
+  it('★ 设了起点且档位未变 ⇒ **起点绝对第一**（S6 的"还持有原档"分支）', () => {
+    // 档位序 b(临期) → c(短期) → a(永久)；起点 = c（短期档）
+    // ⇒ 传入 tierAtSelection='expiring' 表示「选它时就是短期档，且现在还是」
+    //   ⇒ 起点仍占首位（S5 行为保留）
+    const { shown } = orderCreditRows(rows, {
+      ...base,
+      rotationStartId: 'c',
+      tierAtSelection: 'expiring',
+    })
     expect(shown.map((r) => r.accountId), 'c 第一，随后 b(临期) → a(永久)').toEqual(['c', 'b', 'a'])
   })
 
@@ -195,65 +222,32 @@ describe('位次按「默认顺序」算，不随起点漂移', () => {
     expect(codeLines.some((line) => /shown\.map\(\(row,\s*i\)/.test(line))).toBe(false)
   })
 })
+/**
+ * ⚠️ **2026-11-20：原来那组「裸字符串不得让 in 运算符抛错」的用例已整块删除**。
+ *
+ * 那组守的是 `preferredRotationFor` 里的三支兼容判断（真实缺陷 2026-11-10：
+ * `'accountId' in entry` 对裸字符串抛 TypeError ⇒ 下拉框永远显示默认）。
+ *
+ * 本次改动的目标是**清除旧格式** ⇒ `sanitizePreferredRotation` 丢弃一切
+ * 没有 `position` / `tierAtSelection` 的条目 ⇒ 旧条目**进不了缓存** ⇒
+ * 兼容代码已删 ⇒ 该缺陷的成因被**结构性消除**。
+ *
+ * 新的守卫比原来更强（见上面 describe 里的「旧格式 ⇒ 丢弃」两条）：
+ * 旧数据连进入的机会都没有，而不是「进去后被小心处理」。
+ */
+describe('★ 类型收敛：PreferredRotationEntry 只剩一种形态（2026-11-20）', () => {
+  const storeSource = readFileSync(join(process.cwd(), 'src', 'jet-hub-store.ts'), 'utf8')
 
-describe('⚠️ 裸字符串格式不得让 `in` 运算符抛错（真实缺陷，2026-11-10）', () => {
-  /**
-   * ## 缺陷经过
-   *
-   * 用户报障：「下拉框无论选哪项都自动回跳默认，窗口闪一下」。
-   *
-   * 根因链：
-   * 1. `state.json` 里存的是**最老格式**（裸字符串 `"buddy-53b8288f"`）；
-   * 2. `sanitizePreferredRotation` **原样保留**它（不转换）；
-   * 3. `setPreferredRotation` 里写 `'position' in current` ⇒
-   *    **对字符串用 `in` 直接抛 `TypeError`**；
-   * 4. 写入崩溃 ⇒ RPC 返错 ⇒ 前端回跳默认 + 闪一下。
-   *
-   * ⇒ 本组用例锁死：**三种格式都不得抛错**。
-   */
-  it('★ 三种格式的判断都不抛错（用 typeof 收窄）', () => {
-    const cases = [
-      ['buddy-1', 'string'],
-      [{ accountId: 'buddy-1', at: 0 }, 'legacy-object'],
-      [{ position: 2, at: 1 }, 'position-object'],
-      [undefined, 'undefined'],
-      [null, 'null'],
-    ]
-    for (const [entry] of cases) {
-      // 复现 preferredRotationFor 的三支判断 —— 不得抛
-      expect(() => {
-        if (typeof entry === 'string') return entry
-        if (typeof entry === 'object' && entry !== null && 'accountId' in entry) return entry.accountId
-        if (typeof entry === 'object' && entry !== null && 'position' in entry) return entry.position
-        return undefined
-      }).not.toThrow()
-    }
+  it('★★★ 不再有 string 分支（裸字符串格式已彻底移除）', () => {
+    const entryType = /export interface PreferredRotationEntry \{[\s\S]*?\n\}/.exec(storeSource)
+    expect(entryType, '应是 interface 而非含 string 的 union').not.toBeNull()
+    expect(entryType[0]).not.toContain('| string')
   })
 
-  it('★ 源码里不得出现裸 `in` 判断（必须先用 typeof 收窄）', () => {
-    const poolSource = readFileSync(join(process.cwd(), 'src', 'account-pool.ts'), 'utf8')
-    // 匹配 `'xxx' in entry` / `'xxx' in current` 这类，但前面没有 typeof 的
-    /**
-     * ⚠️ **必须排除注释行**（本用例第一版漏了，把注释里那句
-     * 「原写 `'accountId' in entry`」当成真实代码 ⇒ 假红）。
-     */
-    const codeLines = poolSource.split('\n').filter((line) => {
-      const t = line.trim()
-      return t.length > 0 && !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*')
-    })
-    const risky = codeLines.filter(
-      (line) => /'[a-zA-Z]+' in (entry|current)/.test(line) && !line.includes('typeof'),
-    )
-    expect(risky).toEqual([])
-  })
-
-  it('★ `PreferredRotationEntry` 类型含 string 分支', () => {
-    const storeSource = readFileSync(join(process.cwd(), 'src', 'jet-hub-store.ts'), 'utf8')
-    expect(storeSource).toMatch(/export type PreferredRotationEntry =[\s\S]*?\| string/)
-  })
-
-  it('★ `atOf` 辅助把裸字符串当 `at = 0`（淘汰时最先丢）', () => {
-    const storeSource = readFileSync(join(process.cwd(), 'src', 'jet-hub-store.ts'), 'utf8')
-    expect(storeSource).toContain("return typeof entry === 'string' ? 0 : entry.at")
+  it('★★★ tierAtSelection 是必填字段（不是可选）', () => {
+    const entryType = /export interface PreferredRotationEntry \{[\s\S]*?\n\}/.exec(storeSource)
+    expect(entryType).not.toBeNull()
+    expect(entryType[0], 'tierAtSelection 必须必填').toMatch(/tierAtSelection: RotationStartTier/)
+    expect(entryType[0], '不得是可选的 ?:').not.toMatch(/tierAtSelection\?:/)
   })
 })

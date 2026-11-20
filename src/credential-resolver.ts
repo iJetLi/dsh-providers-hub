@@ -117,6 +117,7 @@
  *    有专门一条锁死这个现状）。
  */
 
+import type { RotationStartTier } from './jet-hub-store.js'
 import type { BuddyNoAccountReason, BuddySelectorLike } from './buddy-balance-selector.js'
 import { pickBuddyAccount } from './buddy-balance-selector.js'
 import { sessionBalanceEnabled } from './session-balance.js'
@@ -215,6 +216,18 @@ export interface ResolverPool<TCredential = unknown> {
    * 大量单测用结构化替身池，它们不认识本方法）。
    */
   preferredRotationFor?(provider: string, sessionId: string | undefined): string | undefined
+  /**
+   * ★ **起点选定那一刻的档位**（S6 可选能力；真实 `AccountPool` 已实现）。
+   *
+   * 用于判断「起点那一档是否已烧完」：不同则交出首位（见 `rotateFromPreferred`）。
+   *
+   * ⚠️ **未实现 / 返回 `undefined` ⇒ 回落 S5**（起点绝对第一）。
+   * 这正是老数据与单测替身的行为，与改动前逐字节一致。
+   *
+   * ⚠️ 必须与 {@link preferredRotationFor} **成对**实现：只实现前者会让
+   * S6 对老数据「静默不生效」且零报错（用户只会觉得「重选了起点还是先烧自己的」）。
+   */
+  rotationStartTierFor?(provider: string, sessionId: string | undefined): RotationStartTier | undefined
 }
 
 /** 注入的共享设施。 */
@@ -617,6 +630,21 @@ export function createCredentialResolver<TCredential>(
             .listAccountsByProvider(providerId)
             .filter(a => a.enabled)
             .map(a => a.id)
+      /**
+       * ★ **起点选定时的档位快照**（S6，2026-11-20）。
+       *
+       * `undefined` 的两种来源都回落 S5（起点绝对第一）：
+       * 1. 没配起点；
+       * 2. **老数据**（升级前选的起点，`state.json` 里没有该字段）。
+       *
+       * ⚠️ 与 `rotationStartId` **成对读取**：只传 id 不传档位 ⇒ 永远走 S5
+       * ⇒ 本功能对老数据「静默不生效」且**不会有任何报错**
+       *（用户只会觉得「我明明重选过起点，怎么还是先烧自己的短期」）。
+       * ⇒ 两者必须一起读、一起传。
+       */
+      const rotationStartTier = rotationStartId === undefined
+        ? undefined
+        : deps.pool.rotationStartTierFor?.(providerId, sessionId)
       const picked = await pickBuddyAccount<TCredential>(plan.selector, candidates, {
         allowPermanent,
         resolveCredential: config.readCredential,
@@ -625,6 +653,7 @@ export function createCredentialResolver<TCredential>(
         //    单测替身与结构化 stub 不实现它时必须走既有语义（`=== true` 判据）。
         strictManualOrder: deps.pool.strictManualOrder?.(providerId) === true,
         ...(rotationStartId === undefined ? {} : { rotationStartId }),
+        ...(rotationStartTier === undefined ? {} : { rotationStartTier }),
         ...(enabledAccountIds === undefined ? {} : { enabledAccountIds }),
       })
       if (picked.kind === 'account') {

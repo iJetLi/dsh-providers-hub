@@ -198,19 +198,76 @@ export type CreditWindowMap = Record<string, CreditWindowSetting>
  * 换算成位次需要账号池，而 `sanitizePreferredRotation` 是**纯函数**看不到池
  * ⇒ 换算在 `AccountPool.preferredRotationFor` 里做（见那里的注释）。
  */
-export type PreferredRotationEntry =
-  | { position: number, at: number }
-  | { accountId: string, at: number }
+/**
+ * 「轮换起点」选定那一刻，该账号**所在的积分档位**（S6，2026-11-20 新增）。
+ *
+ * ## 为什么必须存快照而不是实时算
+ *
+ * 用户需求：「起点临期已耗尽、但还有短期/永久时，不再排第一，回归默认策略顺序」
+ *
+ * 判据是「**起点当前档位 == 用户选定它时的档位** ⇒ 才占首位」。
+ * 若实时算（拿当前档位和当前档位比）**恒成立** ⇒ 那个 bug 依旧存在。
+ * ⇒ 必须把「选它那一刻的档位」落盘。
+ *
+ * ⚠️ 档位只会**下降**（临期 → 短期 → 永久 → none），不会上升
+ * （除非用户又充了积分），故「当前 < 选定时」就等于「那一档已烧完」。
+ */
+export type RotationStartTier = 'imminent' | 'expiring' | 'permanent'
+
+/** {@link RotationStartTier} 的全部合法取值（校验用，避免手写枚举漂移）。 */
+export const ROTATION_START_TIERS: readonly RotationStartTier[] = Object.freeze([
+  'imminent',
+  'expiring',
+  'permanent',
+])
+
+/** 判定任意值是否是合法档位（`sanitize` 与 RPC 校验共用同一份）。 */
+export function isRotationStartTier(value: unknown): value is RotationStartTier {
+  return typeof value === 'string' && (ROTATION_START_TIERS as readonly string[]).includes(value)
+}
+
+/**
+ * 「轮换起点」的设置条目。
+ *
+ * ## ⚠️⚠️ 2026-11-20：**只剩一种形态**（旧格式一律丢弃）
+ *
+ * 用户决定：「做成最彻底的方法，清除已选的起点，回归默认，等用户重新选
+ * 就可以生效新的」。
+ *
+ * ## 历史（已删除的两种格式）
+ *
+ * | 旧形态 | 来源 | 现在 |
+ * |---|---|---|
+ * | 裸字符串 `"accountId"` | 本功能最早那一版 | **丢弃** |
+ * | `{ accountId, at }` | 早期版本 | **丢弃** |
+ * | `{ position, at }`（无档位）| S5 版 | **丢弃** |
+ *
+ * ⇒ 只剩 `{ position, at, tierAtSelection }`，且 **`tierAtSelection` 必填**。
+ *
+ * ## 为什么必须删干净（而不是「保留但回落」）
+ *
+ * 无档位快照的起点无法判断「用户当初想烧哪一档」，任何回落都只能是猜测：
+ * - 回落 S5（起点绝对第一）⇒ **bug 依旧**（临期烧完继续烧自己的短期）；
+ * - 回落「已降档」⇒ 起点失去优先权但界面还显示它被选中（显示与行为分叉）。
+ *
+ * ⇒ 两者都不可接受，故**清除**：用户重新选一次即写入带快照的条目。
+ *
+ * ⚠️ 降级安全：旧版本代码读新条目时认 `position` 字段即可正常工作
+ * （它不认第三个字段，会忽略）⇒ 降级不会崩，只是 S6 语义失效。
+ */
+export interface PreferredRotationEntry {
+  /** 账号在**启用账号池序**中的位次（1-based）。 */
+  position: number
+  /** 写入时刻（淘汰按它排序）。 */
+  at: number
   /**
-   * ⚠️ **最老格式**（本功能最早那版，无 `at`）。
+   * **选定那一刻该账号的积分档位**（S6 核心）。
    *
-   * `sanitizePreferredRotation` **原样保留**它（不转换）—— 因为 historically
-   * 它是直接当 accountId 用的。故消费方（`AccountPool.preferredRotationFor`）
-   * 必须自己判 `typeof entry === 'string'`。
-   *
-   * ⚠️ 若在类型里漏掉这一支，in 运算符会在运行时抛 `TypeError`（真实缺陷）。
+   * ⚠️ **必填**：没有它的条目会被 `sanitizePreferredRotation` 丢弃。
+   * 为什么必须存快照而不是实时算 —— 见 {@link RotationStartTier}。
    */
-  | string
+  tierAtSelection: RotationStartTier
+}
 export type PreferredRotationMap = Record<string, Record<string, PreferredRotationEntry>>
 
 /**
@@ -240,36 +297,42 @@ export function sanitizePreferredRotation(raw: unknown): PreferredRotationMap {
     for (const [sessionId, entry] of Object.entries(sessions as Record<string, unknown>)) {
       if (sessionId.length === 0) continue
       /**
-       * ⚠️ **三种历史形态都要认**（任一丢弃都是「静默丢用户数据」）：
+       * ## ⚠️⚠️ 2026-11-20：**旧格式一律丢弃**（用户决定「最彻底」）
        *
-       * | 形态 | 来源 |
+       * 用户原话：「做成最彻底的方法就行，清除已选的起点，回归默认，
+       * 等用户重新选就可以生效新的」
+       *
+       * | 形态 | 处理 |
        * |---|---|
-       * | 裸字符串 ``"accountId"`` | 本功能最早那一版（无 ``at``） |
-       * | ``{ accountId, at }`` | 早期版本 |
-       * | ``{ position, at }`` | **本版起** |
+       * | 裸字符串 `"accountId"`（最老）| **丢弃** |
+       * | `{ accountId, at }`（早期）| **丢弃** |
+       * | `{ position, at }` 无档位（S5）| **丢弃** |
+       * | `{ position, at, tierAtSelection }`（本版）| **保留** |
        *
-       * ⚠️ 裸字符串补 ``at = 0``（= 最旧，淘汰时最先丢，符合直觉）。
+       * ## 为什么丢弃而不是转换
+       *
+       * 前两种没有 `position`，换算成位次需要账号池，而本函数是**纯函数**
+       * 看不到池；第三种虽有位次但**没有档位快照**，无法判断「用户当初想烧
+       * 哪一档」—— 任何回落都只能是猜测，而两种猜测都不可接受
+       *（详见 `PreferredRotationEntry` 的注释）。
+       *
+       * ⇒ 丢弃后回落「默认起点」，用户重选一次即写入完整条目。
+       *
+       * ⚠️ 这个清除是**持久的**：本函数在读写两侧都跑（`ensureLoaded` 与
+       * `queueStoreSave`），下次写盘旧条目就物理消失。
        */
-      if (typeof entry === 'string') {
-        if (entry.length === 0) continue
-        clean[sessionId] = { accountId: entry, at: 0 }
-        continue
-      }
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
       const record = entry as Record<string, unknown>
       const at = record.at
       // ``at`` 必须是非负有限数（淘汰要按它排序）
       if (typeof at !== 'number' || !Number.isFinite(at) || at < 0) continue
-      // ⚠️ 新格式优先认 ``position``；位次必须是正整数（1-based）
+      // ⚠️ 位次必须是正整数（1-based）
       const position = record.position
-      if (typeof position === 'number' && Number.isInteger(position) && position >= 1) {
-        clean[sessionId] = { position, at }
-        continue
-      }
-      // 旧格式 ``{ accountId, at }`` —— 保留（换算成位次需要账号池，本层看不到）
-      const accountId = record.accountId
-      if (typeof accountId !== 'string' || accountId.length === 0) continue
-      clean[sessionId] = { accountId, at }
+      if (typeof position !== 'number' || !Number.isInteger(position) || position < 1) continue
+      // ★ 档位快照必须存在且合法 —— 缺了就是旧格式，整条丢弃
+      const tierRaw = record.tierAtSelection
+      if (!isRotationStartTier(tierRaw)) continue
+      clean[sessionId] = { position, at, tierAtSelection: tierRaw }
     }
     if (Object.keys(clean).length === 0) continue
     // ⚠️ 淘汰放在**读取侧**也做一次：老文档（超上限）读进来时就收敛，

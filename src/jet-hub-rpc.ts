@@ -117,7 +117,7 @@ import { isMinimaxRefreshable, minimaxCredentialExpiresAtMs } from './minimax.js
 // ⚠️ `sanitizeMinimaxXff` 与存储层**同一份判据**：RPC 层必须在写盘**之前**用它
 //    判合法性（非法即不写），否则「先写后判」会静默清掉用户原有的有效设置。
 //    ⚠️ 不要在这里另写一份 IP 校验（同义判据分两处必然漂移）。
-import { PANEL_ENTRY_VALUES, sanitizeMinimaxXff } from './jet-hub-store.js'
+import { PANEL_ENTRY_VALUES, ROTATION_START_TIERS, isRotationStartTier, sanitizeMinimaxXff } from './jet-hub-store.js'
 import { GEMINI, geminiAccountLabel, geminiCredentialExpiresAtMs, isGeminiRefreshable } from './gemini.js'
 import type { GeminiAuth, StartedGeminiLoginFlow } from './gemini-auth.js'
 // OfficeAce（华为 MaaS 云端直连）：面板状态探测 / 登录流程 / 余额查询所需的
@@ -8121,6 +8121,14 @@ function registerJetHubEndpoints(
             selected: selectedId,
             selectedPosition,
             locked,
+            /**
+             * ★ **起点选定时的档位快照**（S6，2026-11-20）。
+             *
+             * `null` = 没有快照（老数据 / 未设置）⇒ 客户端/服务端都回落 S5。
+             * 客户端用它判断「是否该提示用户重选一次以启用新规则」
+             *（旧快照缺失时，S6 对这条起点不生效）。
+             */
+            tierAtSelection: pool.rotationStartTierFor(req.provider, req.sessionId) ?? null,
             /** 选中的账号已不在**启用**列表里（被删/被停用）⇒ 客户端显示「已失效」。 */
             stale: selectedId !== null && selectedPosition === null,
             accounts: enriched.map((a, i) => {
@@ -8174,7 +8182,12 @@ function registerJetHubEndpoints(
        * ⚠️ 回传**落盘后重读的值**（不做乐观更新，与 `gateway.setEnabled` 同取向）。
        */
       case 'account.setRotation': {
-        const req = payload as { provider?: unknown, sessionId?: unknown, position?: unknown }
+        const req = payload as {
+          provider?: unknown
+          sessionId?: unknown
+          position?: unknown
+          tierAtSelection?: unknown
+        }
         if (typeof req.provider !== 'string' || req.provider.length === 0) {
           return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
         }
@@ -8192,6 +8205,26 @@ function registerJetHubEndpoints(
           && (typeof req.position !== 'number' || !Number.isInteger(req.position) || req.position < 1)) {
           return { ok: false, error: { code: 'bad-request', message: 'position 必须是正整数或 null' } }
         }
+        /**
+         * ★ **档位快照**（S6，2026-11-20）：**缺省合法**（老客户端不传 ⇒ 回落 S5），
+         * 但**传了就必须是合法枚举**。
+         *
+         * ⚠️ 非法值一律 `bad-request`，**不静默丢弃**：静默丢弃会让用户以为
+         * 「新规则已生效」（他确实重选了起点），实际走的还是 S5 老语义
+         * —— 症状是「我重选了起点，还是先烧自己的短期」，且零报错、无从排查。
+         * ⇒ 宁可拒绝这次写入，让用户看到明确错误。
+         */
+        const rawTier = req.tierAtSelection
+        if (rawTier !== undefined && rawTier !== null && !isRotationStartTier(rawTier)) {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: `tierAtSelection 必须是 ${ROTATION_START_TIERS.join(' / ')} 之一或省略（收到 ${JSON.stringify(rawTier)}）`,
+            },
+          }
+        }
+        const tierAtSelection = isRotationStartTier(rawTier) ? rawTier : undefined
         /**
          * ⚠️ **写入前校验位次在范围内**：否则用户会得到一个「选了永远不生效」的设置
          *（`preferredRotationFor` 越界回落默认，全程零提示）。
@@ -8211,6 +8244,7 @@ function registerJetHubEndpoints(
             req.provider,
             req.sessionId,
             typeof req.position === 'number' ? req.position : null,
+            tierAtSelection,
           )
         } catch (error) {
           return {
@@ -8220,7 +8254,11 @@ function registerJetHubEndpoints(
         }
         return {
           ok: true,
-          value: { selected: pool.preferredRotationFor(req.provider, req.sessionId) ?? null },
+          value: {
+            selected: pool.preferredRotationFor(req.provider, req.sessionId) ?? null,
+            /** ⚠️ 回传落盘后的档位（客户端据此确认新规则已生效）。 */
+            tierAtSelection: pool.rotationStartTierFor(req.provider, req.sessionId) ?? null,
+          },
         }
       }
 

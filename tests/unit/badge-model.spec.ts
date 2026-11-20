@@ -717,7 +717,8 @@ describe('orderCreditRows：按后端选号机制排序 + 折叠', () => {
   it('★★ 轮换起点：起点绝对第一 + 其余档位优先（S5）', () => {
     // imm=临期(2天) / short=短期(10天) / perm=永久(30天)
     const rows = [acc('imm', 2), acc('short', 10), acc('perm', 30)]
-    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'perm' })
+    // ★ S6：必须传选定时的档位（perm 是永久档）⇒ 档位未变 ⇒ 仍占首位
+    const { shown } = orderCreditRows(rows, { ...base, rotationStartId: 'perm', tierAtSelection: 'permanent' })
     // S5：perm 第一；之后 imm(临期) → short(短期)
     expect(ids(shown), '起点 perm 第一，随后临期 imm').toEqual(['perm', 'imm', 'short'])
   })
@@ -725,7 +726,8 @@ describe('orderCreditRows：按后端选号机制排序 + 折叠', () => {
   it('★★ 同档多账号时：从起点开始循环（用户截图报障的形态）', () => {
     // 7 个全是临期档，起点 = 第 6 个 ⇒ 6 → 7 → 1 → 2 → 3 → 4 → 5
     const rows = ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7'].map((id) => acc(id, 2))
-    const { shown } = orderCreditRows(rows, { ...base, limit: 10, rotationStartId: 'a6' })
+    // ★ S6：7 个全是临期档 ⇒ 传 'imminent'
+    const { shown } = orderCreditRows(rows, { ...base, limit: 10, rotationStartId: 'a6', tierAtSelection: 'imminent' })
     expect(ids(shown), '从 a6 开始循环，a7 紧随其后').toEqual(['a6', 'a7', 'a1', 'a2', 'a3', 'a4', 'a5'])
   })
 

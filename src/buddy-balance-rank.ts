@@ -53,6 +53,7 @@
  */
 
 import { isExclusiveCreditPool, type CreditBalance } from './credits.js'
+import type { RotationStartTier } from './jet-hub-store.js'
 
 /**
  * 「临时积分」的时间窗口：距扣费截止不足 **15 天**的积分算临时（会很快作废），
@@ -529,6 +530,24 @@ export interface BuddyTierOptions {
    */
   rotationStartId?: string
   /**
+   * ★ **起点选定那一刻的档位**（S6，2026-11-20）。
+   *
+   * 语义：`rotateFromPreferred` 只在「起点**当前**档位 == 本字段」时让起点
+   * 绝对第一；不同（= 那一档已烧完、档位下降）则**交出首位**，回到档位排序。
+   * 详见 {@link rotateFromPreferred} 的 S6 说明。
+   *
+   * ## 三个取值的含义
+   *
+   * | 值 | 行为 |
+   * |---|---|
+   * | `'imminent'` / `'expiring'` / `'permanent'` | 按 S6 判降档 |
+   * | **`undefined`** | **保持 S5**（起点绝对第一）—— 老数据 / 老客户端 |
+   *
+   * ⚠️ `undefined` 走 S5 是刻意的向后兼容：升级前选的起点没有这个快照，
+   *    静默改变其行为违反本仓纪律。用户重选一次起点即启用 S6。
+   */
+  rotationStartTier?: RotationStartTier
+  /**
    * 「轮换起点的定位基准」：**全量启用账号**的 id 列表（池序，**不过滤**封禁/限流）。
    *
    * ⚠️ 存在的理由（PR #59 正向审计 P1-a）：`rotationStartId` 指向的账号
@@ -667,6 +686,60 @@ export function rotateFromPreferred<T extends BuddyAccountBalance>(
   /** 分档边界用未锁定口径（`none` 档在锁定态可能是「只剩永久」，会混淆分组）。 */
   const tierRankOf = (account: T): number => buddyBalanceTier(account, { allowPermanent: true })
   const anchorRank = tierRankOf(startAccount)
+
+  /**
+   * ★★★★ **S6：起点只在「还持有选定那一档」时占首位**（2026-11-20，第四次修订）。
+   *
+   * ## 它修的是什么（用户真实报障）
+   *
+   * > 「位次4 那个 4016 的帐号，本来是有临期积分的，然后我选用它作为轮换起点，
+   * >  消耗完临期积分后，它不会切换到下一个有临期积分的帐号也就是位次5，
+   * >  而是直接消耗了位次4 的短期积分」
+   *
+   * ## 根因
+   *
+   * `expiringBalance` 是**母量**（= 临期 + 短期），而 `buddyBalanceTier` 只看它：
+   *
+   * ```
+   * if (imminent > 0) → 临期(0)
+   * if (expiring > 0) → 短期(1)   ← 临期烧完、短期还在，落这里
+   * ```
+   *
+   * S5 规则是「起点绝对第一，只要可用」⇒ 起点临期烧完后落到「短期」档
+   * （**仍然可用**）⇒ 永远占第一位 ⇒ 继续烧自己的短期/永久。
+   *
+   * ## 判据（这是本版全部逻辑）
+   *
+   * ```
+   * 起点当前档位 == 用户选定它时的档位  ⇒  起点绝对第一（S5 行为）
+   * 不等（= 那一档已烧完，档位下降）    ⇒  交出首位，回到档位排序
+   * ```
+   *
+   * ⚠️ `tierAtSelection` 必须是**落盘的快照**，不能实时算 ——
+   *    实时算等于「当前 == 当前」，恒成立，bug 依旧（见 `RotationStartTier` 注释）。
+   *
+   * ## ⚠️ 2026-11-20 二改：不再有「无快照回落 S5」
+   *
+   * 用户决定「最彻底：清除已选的起点，回归默认」⇒ `sanitizePreferredRotation`
+   * 丢弃一切无档位的条目 ⇒ 只要走到本函数且存在起点，`rotationStartTier`
+   * **必然有值**。故这里不再写 `tierAtSelection === undefined || …` 那种回落 ——
+   * 那个回落会让老数据继续踩本 bug，正是要消除的行为。
+   */
+  const tierAtSelection = options.rotationStartTier
+  const tierNow = ((): RotationStartTier | undefined => {
+    const rank = tierRankOf(startAccount)
+    if (rank === BUDDY_BALANCE_TIER.imminent) return 'imminent'
+    if (rank === BUDDY_BALANCE_TIER.expiring) return 'expiring'
+    if (rank === BUDDY_BALANCE_TIER.permanent) return 'permanent'
+    return undefined
+  })()
+  /**
+   * ⚠️ `tierAtSelection === undefined` 只可能来自**直接调用本函数的测试/内部代码**
+   *（生产链路由 `sanitizePreferredRotation` 保证有值）。那种情况按「档位已变」处理
+   * ⇒ 起点交出首位。**不回落 S5** —— 那会让缺陷复现。
+   */
+  const tierStillHeld = tierAtSelection !== undefined && tierNow === tierAtSelection
+
   // 按档分组（保持组内原序）
   const byRank = new Map<number, T[]>()
   for (const account of ranked) {
@@ -675,6 +748,48 @@ export function rotateFromPreferred<T extends BuddyAccountBalance>(
     if (group === undefined) byRank.set(rank, [account])
     else group.push(account)
   }
+
+  /**
+   * ★ **S6 交出首位后的排序**：从起点开始按池序循环，再按档位稳定排序。
+   *
+   * 用户明确要求：「回归默认策略顺序不是指按照位次1来的默认，而是从轮换起点
+   * 开始的策略循环，本起点消耗完临期了，则切换到起点后的下一个符合默认策略的帐号」
+   *
+   * ⇒ 顺序 = `旋转到起点开头(池序)` → `按档位稳定排序`。
+   * 这样同档内是「从起点往后数」的循环，不是从位次 1 数。
+   *
+   * ⚠️ 需要**池序**（`enabledAccountIds`）。生产链路里只要配了起点就必然传入
+   * （见 `credential-resolver`）。单测替身没传时退化为「档内原序」——
+   * 那个降级**不会**影响本函数的正确性（只是循环原点不同），但会让测试与
+   * 生产行为不一致，故这里显式写明。
+   */
+  const rotatedByPoolOrder = ((): T[] => {
+    const poolIds = options.enabledAccountIds
+    if (poolIds === undefined || poolIds.length === 0) return [...ranked]
+    // 按池位次排序（不在池里的排最后，保持原相对序）
+    const posOf = (id: string): number => {
+      const at = poolIds.indexOf(id)
+      return at < 0 ? Number.MAX_SAFE_INTEGER : at
+    }
+    const byPool = [...ranked].sort((a, b) => posOf(a.id) - posOf(b.id))
+    const startAt = byPool.findIndex((a) => a.id === startAccount.id)
+    if (startAt < 0) return byPool
+    return [...byPool.slice(startAt), ...byPool.slice(0, startAt)]
+  })()
+
+  if (!tierStillHeld) {
+    /**
+     * 起点已降档 ⇒ 交出首位。
+     *
+     * ⚠️ 排序必须**稳定**（`Array.prototype.sort` 在 ES2019+ 稳定），
+     * 且比较器只比档位、不掺下标 —— 这样同档内保持 `rotatedByPoolOrder`
+     * 的相对序（即「从起点往后数」的循环）。
+     */
+    return [...rotatedByPoolOrder].sort(
+      (a, b) => tierRankOf(a) - tierRankOf(b),
+    )
+  }
+
   const result: T[] = [startAccount]
   for (const rank of [...byRank.keys()].sort((a, b) => a - b)) {
     const group = byRank.get(rank)!

@@ -41,8 +41,10 @@ import {
   isEarliestPartial,
   describeCreditOrder,
   rotationStartHint,
+  rotationTierShiftHint,
   creditOrderOptionsOf,
   backendOrderTier,
+  CREDIT_ORDER_TIER,
   sumAvailableCredits,
   autoBadgeName,
   BADGE_PREFERENCES,
@@ -352,12 +354,23 @@ const ROTATION_REASON_TEXT = Object.freeze({
  *
  * ⚠️ 文案里**不出现**「优先账号」—— 那是 v1 的废弃命名。
  */
+/**
+ * 轮换起点的完整说明（挂在标签与 ⓘ 的 `title` 上）。
+ *
+ * ## ★ S6 修订（2026-11-20）
+ *
+ * 起点行为现在是**两段式**的，旧文案「起点优先于积分档位」只描述了前半段，
+ * 会让用户误以为「起点永远第一」—— 那正是本次修的 bug 的旧行为。
+ */
 const ROTATION_TIP_LABEL = '只改「从哪个账号开始轮换」，不改任何选号策略。\n\n'
-  + '例：7 个账号，选「账号 4」⇒ 按 4 → 5 → 6 → 7 → 1 → 2 → 3 轮换；'
-  + '不可用的账号会自动跳过。\n\n'
+  + '【起点这一档还没用完时】先烧它的 —— 例：选「位次 4」，'
+  + '若它有临期积分，就从 4 开始，按档位顺序 4 → 5 → 6 → 7 → 1 → 2 → 3 轮换。\n\n'
+  + '【起点这一档用完之后】自动交回轮换队列，不再是第一位：'
+  + '改为按档位优先（临期 → 短期 → 永久）从起点往后轮流消耗**其他**账号，'
+  + '绕一圈后才再轮到它的低档积分。\n\n'
+  + '也就是说：指定一个「只有永久积分」的账号当起点，会**先消耗永久积分**；'
+  + '永久用完后才轮到别人。\n\n'
   + '「默认」= 按渠道原有策略决定起点：余额分档的渠道会优先用在临期积分更多的账号。\n\n'
-  + '⚠️ 起点优先于积分档位 —— 若指定一个「只有永久积分」的账号，'
-  + '会从它开始，也就会先消耗永久积分。\n\n'
   + '本设置只对当前会话生效，换会话回到「默认」。';
 
 /** `<select>` 上的一句话版（下拉展开时浏览器不显示 `title`，故长文案挂在标签与 ⓘ 上）。 */
@@ -1941,6 +1954,15 @@ function UsageBadgeActive(props) {
         selectedPosition: typeof value?.selectedPosition === 'number' ? value.selectedPosition : null,
         stale: value?.stale === true,
         locked: value?.locked === true,
+        /**
+         * ★ **起点选定时的档位快照**（S6，2026-11-20）。
+         *
+         * `null` = 没有快照（老数据 / 未设置）⇒ 轮换仍走 S5（起点绝对第一）。
+         * 客户端用它做两件事：
+         * 1. 传给 `badgeView` 的 `tierAtSelection`，让**弹窗顺序**与真实选号同构；
+         * 2. 判断是否要提示「重选一次起点以启用新规则」。
+         */
+        tierAtSelection: typeof value?.tierAtSelection === 'string' ? value.tierAtSelection : null,
         accounts: Array.isArray(value?.accounts) ? value.accounts : [],
       });
       setRotationError('');
@@ -1963,6 +1985,54 @@ function UsageBadgeActive(props) {
    *    用户 2026-11-10 要求「跟随位次」（选「位次 1」后拖拽，回来仍是位次 1）。
    * ⚠️ `''` = 恢复默认 ⇒ 传 `null`。
    */
+  /**
+   * ★ **算出某个账号此刻的积分档位**（S6，2026-11-20）。
+   *
+   * 用户选起点时，把这个快照一起写进去 —— 之后服务端靠它判断
+   * 「起点那一档是否已烧完」。
+   *
+   * ## ⚠️ 为什么在客户端算
+   *
+   * 服务端 `AccountPool` **没有余额读数**（余额是每笔请求现查的、60s 缓存），
+   * 而面板此刻手上正好有 `credits`（`credits.balances` 的结果）。
+   * 让服务端为了一个下拉框选择去打一轮上游不划算（同 `account.getRotation`
+   * 「序号只是展示、不为它触网」的既有取向）。
+   *
+   * ⚠️ 判据必须与后端 `buddyBalanceTier` **同源**：
+   * 用 `splitCreditsByExpiry` + `backendOrderTier(split, true)`（恒解锁口径），
+   * 与 `tierOfGroup` 完全同一条链路 —— 不要自己写「临期>0 就临期」的简化判据
+   *（那会漏掉「expiring 母量」的语义，正是本次 bug 的根源）。
+   *
+   * @returns `'imminent' | 'expiring' | 'permanent' | undefined`
+   *   `undefined` = 读不到余额 ⇒ 不传档位（服务端回落 S5，保守）。
+   */
+  function tierAtSelectionOf(accountId) {
+    /**
+     * ⚠️ **数据源必须是 `value`（`snapshot?.value`），不是 `creditRows`** ——
+     * 后者是 `renderCredits` 的局部变量，本函数（`onPickRotation` 那条腿）
+     * 取不到，写了就是 TS2304 + 运行时 ReferenceError（真实踩过：
+     * `credits-capabilities.spec.ts` 的「未声明变量」静态检查当场红）。
+     *
+     * `value.accounts` 每条是 `{ accountId, balance, ... }`，形状与
+     * `creditRows` 同源（都来自 `usage.badge`），故判据可以完全复用。
+     */
+    const row = (Array.isArray(value?.accounts) ? value.accounts : [])
+      .find((r) => r?.accountId === accountId || r?.id === accountId);
+    const packages = row?.balance?.packages;
+    if (!Array.isArray(packages)) return undefined;
+    const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
+    // ⚠️ 配额类渠道（百分比）没有「档位」概念 —— 与 tierOfGroup 同判据。
+    if (unit === QUOTA_UNIT) return undefined;
+    const split = splitCreditsByExpiry(packages, value?.windowDays, Date.now(), value?.imminentDays);
+    if (split === null || split === undefined) return undefined;
+    // ⚠️ 恒解锁口径（与后端 `tierRankOf` / 客户端 `tierOfGroup` 同源）
+    const tier = backendOrderTier(split, true);
+    if (tier === CREDIT_ORDER_TIER.imminent) return 'imminent';
+    if (tier === CREDIT_ORDER_TIER.expiring) return 'expiring';
+    if (tier === CREDIT_ORDER_TIER.permanent) return 'permanent';
+    return undefined;
+  }
+
   async function onPickRotation(positionText) {
     if (typeof writeRotation !== 'function') return;
     if (typeof sessionId !== 'string' || sessionId.length === 0) return;
@@ -1970,7 +2040,20 @@ function UsageBadgeActive(props) {
     setRotationError('');
     try {
       const position = positionText === '' ? null : Number(positionText);
-      await writeRotation(provider, sessionId, position);
+      /**
+       * ★ **带上"选定那一刻的档位"**（S6）。
+       *
+       * ⚠️ 用**位次**从下拉框的账号列表里查出 accountId，再查余额档位 ——
+       *    不能用 `creditRows` 的下标（那是策略序，与下拉框的池序不同）。
+       * ⚠️ 恢复默认（`position === null`）时不传档位（服务端会删键）。
+       */
+      const pickedAccount = position === null
+        ? undefined
+        : (rotationState?.accounts ?? []).find((a) => a?.position === position);
+      const tierAtSelection = pickedAccount === undefined
+        ? undefined
+        : tierAtSelectionOf(pickedAccount.id);
+      await writeRotation(provider, sessionId, position, tierAtSelection);
       await loadRotation();
     } catch (error) {
       setRotationError(describeBadgeError(error, '轮换起点保存失败'));
@@ -2307,6 +2390,18 @@ function UsageBadgeActive(props) {
       ? null
       : creditRowTierOf(currentAccount.id);
     const startHint = rotationStartHint(startTier);
+    /**
+     * ★★★ **S6 降档提示**（2026-11-20）。
+     *
+     * 为什么必须有：S6 之后起点是「两段式」的 —— 还持有那一档时排第一，
+     * 那一档烧完就交回队列。用户看到的现象是「我的起点突然不排第一了」，
+     * 若不解释会被当成 bug（本仓有用户把正确行为当缺陷报障的先例）。
+     *
+     * ⚠️ 2026-11-20 起**不再有「老数据」这一支**：用户要求「最彻底」——
+     *    `sanitizePreferredRotation` 会丢弃一切没有档位快照的条目 ⇒
+     *    缓存里只要有起点就必然有档位。故这里只需处理「降档 / 升档」两种。
+     */
+    const tierShiftHint = rotationTierShiftHint(rotationState.tierAtSelection, startTier);
 
     return React.createElement('div', { key: 'rotation', className: 'dim-jh-badgeRotation' }, [
       React.createElement('span', {
@@ -2358,6 +2453,21 @@ function UsageBadgeActive(props) {
           key: 'tierHint',
           className: 'dim-jh-badgeRotationTierHint',
         }, startHint),
+      /**
+       * ★ **S6 降档提示**：起点那一档烧完了 ⇒ 已交回队列。
+       * 与上面的「起点是 X 档」提示**互斥渲染**（后者讲选定时的影响，
+       * 前者讲降档后的事实，同时出现会自相矛盾）。
+       */
+      tierShiftHint === null
+        ? null
+        : React.createElement('div', {
+          key: 'tierShiftHint',
+          className: 'dim-jh-badgeRotationTierHint',
+          // tooltip 补充完整规则（用户要求「有必要的地方加 tooltip」）
+          title: '轮换起点规则：起点还持有选定那一档积分时，先烧它的；'
+            + '那一档用完后自动交回轮换队列 —— 按档位优先（临期→短期→永久）'
+            + '从起点往后轮流消耗其他账号，绕一圈后才再轮到它。',
+        }, tierShiftHint),
       rotationError === ''
         ? null
         : React.createElement('span', { key: 'err', className: 'dim-jh-badgeFail' }, rotationError),

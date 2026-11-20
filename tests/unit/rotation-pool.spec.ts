@@ -89,58 +89,93 @@ describe('★★ AccountPool 的「轮换起点」（行为级）', () => {
     pool = new AccountPool(makeCtx(doc) as never)
   })
 
-  it('{position, at} ⇒ 位次换算成「启用账号」里那一个的 id（停用不计入位次）', () => {
-    doc.preferredRotation = { buddy: { s1: { position: 2, at: 1 } } }
+  /**
+   * ⚠️ 2026-11-20：**旧格式一律丢弃**（用户决定「最彻底」）。
+   *
+   * 现在只有 `{ position, at, tierAtSelection }` 会被保留；
+   * 其余形态（裸字符串 / `{accountId,at}` / 无档位的 `{position,at}`）
+   * 在 `sanitizePreferredRotation` 里就被丢弃 ⇒ `preferredRotationFor` 返回 `undefined`。
+   */
+  it('★★ 完整格式 ⇒ 位次换算成「启用账号」里那一个的 id（停用不计入位次）', () => {
+    doc.preferredRotation = { buddy: { s1: { position: 2, at: 1, tierAtSelection: 'imminent' } } }
     pool = new AccountPool(makeCtx(doc) as never)
     expect(pool.preferredRotationFor('buddy', 's1')).toBe('b')
   })
 
-  it('{position, at} 的位次 3 ⇒ c（停用的 d 不占位次）', () => {
-    doc.preferredRotation = { buddy: { s1: { position: 3, at: 1 } } }
+  it('★★ 位次 3 ⇒ c（停用的 d 不占位次）', () => {
+    doc.preferredRotation = { buddy: { s1: { position: 3, at: 1, tierAtSelection: 'imminent' } } }
     pool = new AccountPool(makeCtx(doc) as never)
     expect(pool.preferredRotationFor('buddy', 's1')).toBe('c')
   })
 
-  it('裸字符串形态（最老格式）⇒ 原样返回该 id，不抛 TypeError', () => {
+  it('★★★ 裸字符串（最老格式）⇒ 丢弃 ⇒ 回落默认', () => {
     doc.preferredRotation = { buddy: { s1: 'c' } }
-    pool = new AccountPool(makeCtx(doc) as never)
-    expect(pool.preferredRotationFor('buddy', 's1')).toBe('c')
-  })
-
-  it('{accountId, at} 形态 ⇒ 跟随该账号', () => {
-    doc.preferredRotation = { buddy: { s1: { accountId: 'a', at: 1 } } }
-    pool = new AccountPool(makeCtx(doc) as never)
-    expect(pool.preferredRotationFor('buddy', 's1')).toBe('a')
-  })
-
-  it('位次越界（账号变少）⇒ undefined（回落默认，绝不 clamp）', () => {
-    doc.preferredRotation = { buddy: { s1: { position: 9, at: 1 } } }
     pool = new AccountPool(makeCtx(doc) as never)
     expect(pool.preferredRotationFor('buddy', 's1')).toBeUndefined()
   })
 
-  it('空 sessionId / 空 provider ⇒ undefined（默认起点）', () => {
-    doc.preferredRotation = { buddy: { s1: { position: 1, at: 1 } } }
+  it('★★★ {accountId, at}（旧对象格式）⇒ 丢弃 ⇒ 回落默认', () => {
+    doc.preferredRotation = { buddy: { s1: { accountId: 'a', at: 1 } } }
+    pool = new AccountPool(makeCtx(doc) as never)
+    expect(pool.preferredRotationFor('buddy', 's1')).toBeUndefined()
+  })
+
+  it('★★★ {position, at}（S5 格式，无档位快照）⇒ 丢弃 ⇒ 回落默认', () => {
+    doc.preferredRotation = { buddy: { s1: { position: 2, at: 1 } } }
+    pool = new AccountPool(makeCtx(doc) as never)
+    expect(pool.preferredRotationFor('buddy', 's1')).toBeUndefined()
+  })
+
+  it('★★ 位次越界（账号变少）⇒ undefined（回落默认，绝不 clamp）', () => {
+    doc.preferredRotation = { buddy: { s1: { position: 9, at: 1, tierAtSelection: 'imminent' } } }
+    pool = new AccountPool(makeCtx(doc) as never)
+    expect(pool.preferredRotationFor('buddy', 's1')).toBeUndefined()
+  })
+
+  it('★ 空 sessionId / 空 provider ⇒ undefined（默认起点）', () => {
+    doc.preferredRotation = { buddy: { s1: { position: 1, at: 1, tierAtSelection: 'imminent' } } }
     pool = new AccountPool(makeCtx(doc) as never)
     expect(pool.preferredRotationFor('buddy', '')).toBeUndefined()
     expect(pool.preferredRotationFor('', 's1')).toBeUndefined()
   })
 
+  /** ★ 档位读取（S6 新增方法）。 */
+  it('★★ rotationStartTierFor ⇒ 返回档位快照', () => {
+    doc.preferredRotation = { buddy: { s1: { position: 2, at: 1, tierAtSelection: 'permanent' } } }
+    pool = new AccountPool(makeCtx(doc) as never)
+    expect(pool.rotationStartTierFor('buddy', 's1')).toBe('permanent')
+  })
+
+  it('★★★ rotationStartTierFor：旧格式被丢弃 ⇒ undefined（与「没设起点」同义）', () => {
+    doc.preferredRotation = { buddy: { s1: { position: 2, at: 1 } } }
+    pool = new AccountPool(makeCtx(doc) as never)
+    expect(pool.rotationStartTierFor('buddy', 's1')).toBeUndefined()
+    expect(pool.preferredRotationFor('buddy', 's1')).toBeUndefined()
+  })
+
   it('=== 写路径：setPreferredRotation 落盘后能被读回（写→读闭环）', async () => {
-    await pool.setPreferredRotation('buddy', 's1', 2)
+    await pool.setPreferredRotation('buddy', 's1', 2, 'imminent')
     expect(pool.preferredRotationFor('buddy', 's1')).toBe('b')
+    expect(pool.rotationStartTierFor('buddy', 's1')).toBe('imminent')
     const stored = (doc.preferredRotation as Record<string, Record<string, { position: number }>>).buddy
     expect(stored?.s1?.position).toBe(2)
   })
 
+  it('★★★ 写路径：设起点但**不给档位** ⇒ 拒绝写入（不产生脏数据）', async () => {
+    // ⚠️ 写进去也会被 sanitize 丢掉（它要求档位必填）⇒ 那种「RPC 说 ok 但没生效」
+    //    的静默失败最难排查，故在源头就拒绝。
+    await pool.setPreferredRotation('buddy', 's1', 2)
+    expect(pool.preferredRotationFor('buddy', 's1')).toBeUndefined()
+  })
+
   it('=== 写路径：位次非法（0 / 非整数）⇒ 不落盘', async () => {
-    await pool.setPreferredRotation('buddy', 's1', 0)
-    await pool.setPreferredRotation('buddy', 's1', 1.5)
+    await pool.setPreferredRotation('buddy', 's1', 0, 'imminent')
+    await pool.setPreferredRotation('buddy', 's1', 1.5, 'imminent')
     expect(pool.preferredRotationFor('buddy', 's1')).toBeUndefined()
   })
 
   it('=== 写路径：null ⇒ 删键、恢复默认', async () => {
-    await pool.setPreferredRotation('buddy', 's1', 2)
+    await pool.setPreferredRotation('buddy', 's1', 2, 'imminent')
     expect(pool.preferredRotationFor('buddy', 's1')).toBe('b')
     await pool.setPreferredRotation('buddy', 's1', null)
     expect(pool.preferredRotationFor('buddy', 's1')).toBeUndefined()
