@@ -34,6 +34,8 @@ import { AccountPool, asProxyText, isPolicyBlockedAccount } from './account-pool
 import { AUTO_PROVIDER as AUTO_PROVIDER_ID } from './auto-adapter.js'
 import { resolveAutoBadgeRewrite, type AutoBadgeState } from './auto-badge.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
+// ★ 余额磁盘缓存（qoder 特例分支也要用，见 credits.balances 里那段说明）。
+import { noteDiskReading, readDiskReading } from './balance-disk-cache.js'
 import { gatewayPublicUrl, isGatewayEnabled, isGatewayHostFromEnv } from './openai-gateway/config.js'
 import { collectGatewayCatalogSnapshot, toGatewayModelIds, type GatewayModelSource } from './openai-gateway/models.js'
 import {
@@ -9842,6 +9844,47 @@ function registerJetHubEndpoints(
            *    一个账号炸不影响别人（`fetchQoderBalanceDetailed` 本身不抛）。
            */
           values.push(...await Promise.all(accounts.map(async (account) => {
+            /**
+             * ★★★ **磁盘缓存：重启后第一眼不等网络**（2026-11-21，真实漏洞修复）。
+             *
+             * ## 为什么必须加在这里（用户实测发现）
+             *
+             * `qoder` / `qodercn` 是**特例分支**，先于查表短路 —— 它们
+             * **不经过** `collectCreditBalances`，因此也**不经过**
+             * `readCachedBalance` ⇒ 我先前在 `balance-cache.ts` 里做的磁盘缓存
+             * **对这两家完全无效**。
+             *
+             * 实测证据：探针只看到 `primeFromDisk` 被调用，而
+             * `readStale` / `noteDiskReading` / `flushDisk` **一次都没触发**；
+             * 而用户的 14 个账号（qoder 7 + qodercn 7）恰好全在这条分支里
+             * ⇒ 「积分完全没有缓存」的表象。
+             *
+             * ## ⚠️ `force` 时不读盘
+             *
+             * 面板「刷新积分」按钮要真实值（与正常路径同一条纪律）。
+             *
+             * ## ⚠️ 返回时必须标 `stale` 语义
+             *
+             * 这里返回的是**旧读数**：带 `error` 说明「显示的是缓存」，
+             * 与正常路径的兼顶读数同款文案（用户据此知道不是最新的）。
+             */
+            const qoderForce = payload !== null && typeof payload === 'object'
+              && (payload as { force?: unknown }).force === true
+            if (!qoderForce) {
+              const cachedQoder = readDiskReading(req.provider, account.id)
+              if (cachedQoder !== undefined) {
+                const cached = cachedQoder as { at?: number; value?: unknown }
+                const cachedBalance = cached.value as RpcCreditsBalancesResponse['accounts'][number]['balance']
+                if (cachedBalance !== null && cachedBalance !== undefined) {
+                  return {
+                    accountId: account.id,
+                    nickname: account.nickname,
+                    balance: cachedBalance,
+                    error: `显示的是 ${new Date(cached.at ?? Date.now()).toLocaleString('zh-CN')} 的缓存读数`,
+                  }
+                }
+              }
+            }
             const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
             if (!resolved) {
               return {
@@ -9885,6 +9928,20 @@ function registerJetHubEndpoints(
             }
             if (addOnDetail === undefined && (webStore.grants ?? []).length > 0) {
               addOnDetail = { kind: 'ledger', grants: webStore.grants!, nowMs: Date.now() }
+            }
+            /**
+             * ★ **成功读数记进磁盘镜像**（2026-11-21）。
+             *
+             * ⚠️ 只记非 `null` 的余额：把「查询失败」落盘会让下次启动显示失败，
+             * 而那时网络可能完全正常（与正常路径「只记成功」同一条纪律）。
+             *
+             * ⚠️ 只置脏标记，不写盘（首次成功由 `noteDiskReading` 内部立即落盘一次）。
+             */
+            if (detailed.balance !== null) {
+              noteDiskReading(req.provider, account.id, {
+                at: Date.now(),
+                value: withQoderAddOnDetail(detailed.balance, addOnDetail),
+              })
             }
             return {
               accountId: account.id,

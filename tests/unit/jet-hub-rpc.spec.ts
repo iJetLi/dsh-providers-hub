@@ -5,7 +5,7 @@ import {
 } from '../../src/cline-request-log.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   collectClaimResults,
   collectCreditBalances,
@@ -8037,5 +8037,89 @@ describe('strictManualOrder 端点接线', () => {
       expect(result.error?.code, String(bad)).toBe('bad-request')
     }
     expect(state.setCalls).toEqual([])
+  })
+})
+
+/**
+ * ★★★ **qoder 特例分支的磁盘缓存**（2026-11-21，真实漏洞修复）。
+ *
+ * ## 它守的是什么（用户实测发现）
+ *
+ * `credits.balances` 端点有**两条取数路径**：
+ *
+ *     if (isQoderFamily(provider))  → Promise.all(... fetchQoderBalanceDetailed)  ← 直连上游
+ *     其余 provider                  → collectCreditBalances → readCachedBalance
+ *
+ * 我先前只在**后者**接了磁盘缓存 ⇒ 对 qoder / qodercn **完全无效**。
+ * 而用户恰有 14 个账号（qoder 7 + qodercn 7）全在这条特例分支里
+ * ⇒ 表现就是「积分完全没有缓存」。
+ *
+ * 实测证据：探针只看到 `primeFromDisk`，而 `readStale` / `noteDiskReading` /
+ * `flushDisk` 一次都没触发。
+ *
+ * ## ⚠️ 为什么用源码文本断言
+ *
+ * 该分支在 `registerJetHubRpc` 的巨型 switch 里，真跑一次 `credits.balances`
+ * 需要构造十几层替身（ctx.credentials / pool / qoderFetchForAccount /
+ * fetchQoderBalanceDetailed / loadQoderWebStore …）。而本缺陷的形态是
+ * 「**这两行根本不存在**」⇒ 文本断言足以抓住它。
+ *
+ * ⚠️ 文本断言挡不住「留着但失效」，故其中两条断言**顺序与条件**
+ * （force 在前、只记非 null），而不只是「有没有这个词」。
+ */
+describe('qoder 特例分支的磁盘缓存接线', () => {
+  // ⚠️ 自包含路径解析：本文件里 `here` 是另一个 describe 的块级变量，末尾取不到。
+  const rpcSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../../src/jet-hub-rpc.ts'),
+    'utf8',
+  )
+
+  /** 取出 `credits.balances` 的 qoder 分支那段源码（到下一个 case 为止）。 */
+  const qoderBranch = (): string => {
+    const start = rpcSource.indexOf("case 'credits.balances'")
+    if (start < 0) throw new Error('找不到 credits.balances')
+    const qoder = rpcSource.indexOf('if (isQoderFamily(req.provider))', start)
+    if (qoder < 0) throw new Error('找不到 qoder 分支')
+    const next = rpcSource.indexOf("case '", qoder)
+    return rpcSource.slice(qoder, next < 0 ? undefined : next)
+  }
+
+  it('★★★ qoder 分支必须读磁盘缓存（readDiskReading）', () => {
+    expect(qoderBranch(), 'qoder 是特例分支，不经过 readCachedBalance ⇒ 必须自己读盘')
+      .toContain('readDiskReading(')
+  })
+
+  it('★★★ qoder 分支成功取数后必须记盘（noteDiskReading）', () => {
+    expect(qoderBranch(), '不记盘 ⇒ 磁盘文件永不生成')
+      .toContain('noteDiskReading(')
+  })
+
+  it('★★★ 读盘必须被 `!qoderForce` 真实守卫（刷新按钮不能变假）', () => {
+    const branch = qoderBranch()
+    /**
+     * ⚠️⚠️ **不能只断言「qoderForce 在 readDiskReading 之前」**（变异 M3 实测无牙）：
+     * 把 `if (!qoderForce)` 改成 `if (true)` 时，那个变量声明**仍在**、
+     * 位置也不变 ⇒ 顺序断言照样通过，而 force 守卫已经**完全失效**
+     * （面板点「刷新积分」会返回磁盘旧值 = 假按钮）。
+     *
+     * ⇒ 必须断言**守卫表达式本身**出现在 `if (...)` 里。
+     */
+    expect(branch, '必须有 `if (!qoderForce)` 守卫').toMatch(/if\s*\(\s*!qoderForce\s*\)/)
+    // 且读盘真的在那个 if 块内（取 if 与 readDiskReading 之间的片段，不得闭合）
+    const guardIdx = branch.indexOf('if (!qoderForce)')
+    const readIdx = branch.indexOf('readDiskReading(')
+    expect(readIdx, '读盘必须在守卫之后').toBeGreaterThan(guardIdx)
+    const between = branch.slice(guardIdx, readIdx)
+    expect(between, '守卫与读盘之间不得有闭合大括号（否则不在同一块内）')
+      .not.toContain('\n            }')
+  })
+
+  it('★★ 只记非 null 的余额（失败不落盘）', () => {
+    const branch = qoderBranch()
+    const noteIdx = branch.indexOf('noteDiskReading(')
+    expect(noteIdx).toBeGreaterThan(-1)
+    const around = branch.slice(Math.max(0, noteIdx - 300), noteIdx)
+    expect(around, '记盘必须被 detailed.balance !== null 包住')
+      .toMatch(/detailed\.balance !== null/)
   })
 })
