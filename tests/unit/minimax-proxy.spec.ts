@@ -514,14 +514,44 @@ describe('⑦ ★★ 三条链路真走账号出口（行为级，取代无牙�
     const log: string[] = []
     const { createProviderCredits } = await import('../../src/provider-credits.js')
     const table = createProviderCredits()   // 刻意不注入
-    await table.minimaxintl!.fetchBalanceDetailed!({ access_token: 't' }, {
-      resolveCredential: async () => undefined,
-      warn: () => {},
-      accountPool: {} as never,
-      accountId: 'acct-intl-4',
-    }).catch(() => undefined)
-    // 没有注入器可记账 ⇒ 只能断言「不抛 TypeError」这一层（真发请求被网络拦下）。
+    /**
+     * ⚠️⚠️ **必须把全局 `fetch` 换成桩**（2026-11-21 修，全量跑偶发红）。
+     *
+     * 这条用例的本意是「没注入器 ⇒ 走**那条默认路径**，不抛 TypeError」。
+     * 但「默认路径」= `fetchMinimaxCreditBalanceDetailed(…, globalThis.fetch, …)`
+     * ⇒ 它**真的会发一次 HTTPS 请求**到 `agent.minimax.io`。
+     *
+     * 后果就是本仓库反复记过的那种形态：**单跑必绿、全量偶发红** ——
+     * 全量时几十个 worker 并跑，这次请求要么被 `testTimeout` 掐掉，
+     * 要么拿到的 `error` 文案与本机网络状态有关。实测在**未改动的 master**
+     * 上连跑 3 轮就出现过 1 次红（`minimax-proxy.spec.ts` ⑦ 组）。
+     *
+     * ⚠️ 判据因此要打在**「用了哪个 fetcher」**上，而不是「请求结果如何」：
+     *    把全局 `fetch` 换成「记下自己被调用、然后立刻失败」的桩 ⇒
+     *    「确实退回了全局 fetch」这件事实被**直接观测到**（比只看 `log` 空数组强：
+     *    原判据断言「记账器没被调用」，而那在**任何**路径下都成立，
+     *    包括「实现直接抛错、压根没取 fetcher」—— 是**恒真判据**）。
+     */
+    const globalCalls: string[] = []
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal('fetch', ((input: unknown) => {
+      globalCalls.push(String(input))
+      return Promise.reject(new Error(`global-fetch-stub:${String(input)}`))
+    }) as unknown as typeof fetch)
+    try {
+      await table.minimaxintl!.fetchBalanceDetailed!({ access_token: 't' }, {
+        resolveCredential: async () => undefined,
+        warn: () => {},
+        accountPool: {} as never,
+        accountId: 'acct-intl-4',
+      }).catch(() => undefined)
+    } finally {
+      vi.stubGlobal('fetch', originalFetch)
+    }
+    // 记账器（注入器）没被调用 —— 这仍然成立。
     expect(log).toEqual([])
+    // ★ 真正有牙的那条：默认路径**确实**用了全局 fetch。
+    expect(globalCalls.length, '未注入出口时必须退回全局 fetch —— 否则这条「默认路径」无覆盖').toBeGreaterThan(0)
   })
 })
 

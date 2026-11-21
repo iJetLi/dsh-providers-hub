@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -303,13 +303,23 @@ describe('balance-disk-cache', () => {
  */
 describe('余额磁盘缓存：值没变就不写盘', () => {
   /**
-   * ⚠️ 这组用例**必须自己初始化环境**：它们写在 `describe('balance-disk-cache')`
-   * **之外**，拿不到那个 `beforeEach` 的临时目录与开关（第一版因此直接 ENOENT）。
+   * ## ⚠️⚠️ 观察方式：受控时钟 + 文件顶层 `at`（2026-11-21 修）
    *
-   * ⚠️ 观察方式也是**读文件里的 `at`**，不是 `flushDisk()` 的返回值 ——
-   * `noteDiskReading` **内部就会立即写盘**（作者的设计），写没写在返回值上看不出来。
+   * `noteDiskReading` **内部就会立即写盘**（作者的设计），写没写在返回值上看不出来，
+   * 所以必须看文件。但文件顶层的 `at` 是 `flushDisk(now = Date.now())` —— **墙钟**，
+   * 同一毫秒内的两次写盘会得到**相同的 `at`**。
+   *
+   * 实测（连跑 20 轮「值真的变了必须写盘」）：**15 轮**前后 `at` 相同
+   * ⇒ 反向守卫随机假红（`expected 1795272207488 not to be 1795272207488`）。
+   * 这不是被测代码的问题，是**判据选错了观测量**：墙钟分辨率不能当「写没写」的证据。
+   *
+   * ⇒ 把 `Date.now` 换成受控时钟：**只在我们推进之后才前进**。于是
+   * 「写了一次」与「没写」在文件 `at` 上必然可区分，判据恢复确定性。
    */
   let home: string
+  let clock = 1_700_000_000_000
+  /** 推进受控时钟 —— 让「再写一次」在文件 `at` 上可观察。 */
+  const tick = (): void => { clock += 1_000 }
   const fileAt = (): number => (JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as { at: number }).at
 
   beforeEach(() => {
@@ -317,8 +327,13 @@ describe('余额磁盘缓存：值没变就不写盘', () => {
     process.env.DSH_HOME = home
     setBalanceDiskCacheEnabledForTest(true)
     resetBalanceDiskCacheStateForTest()
+    // ⚠️ 必须在这个 describe 的 beforeEach 里装：`vi.restoreAllMocks()` 在 afterEach，
+    //    上个用例的桩不会漏到这里。
+    clock = 1_700_000_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
   })
   afterEach(() => {
+    vi.restoreAllMocks()
     setBalanceDiskCacheEnabledForTest(false)
     rmSync(home, { recursive: true, force: true })
   })
@@ -326,6 +341,8 @@ describe('余额磁盘缓存：值没变就不写盘', () => {
   it('★★★ 同一个值（仅 `at` 不同）不得触发第二次写盘', () => {
     noteDiskReading('qoder', 'acct-1', { at: 1, value: { remaining: 100 } })
     const first = fileAt()
+    // ⚠️ 先推进时钟：若这里真的写了盘，`at` 必然变 ⇒ 断言会红（而不是碰运气）。
+    tick()
     // 同样的 value、不同的 at ⇒ 不该再写（文件 at 不变）。
     noteDiskReading('qoder', 'acct-1', { at: 999_999, value: { remaining: 100 } })
     expect(fileAt(), '仅 `at` 变了不算值变化 —— 否则徽标轮询就是 O(N) 同步写').toBe(first)
@@ -334,6 +351,7 @@ describe('余额磁盘缓存：值没变就不写盘', () => {
   it('★★★ 键序不同但内容相同 ⇒ 仍不得写盘', () => {
     noteDiskReading('qoder', 'acct-1', { at: 1, value: { a: 1, b: 2 } })
     const first = fileAt()
+    tick()
     noteDiskReading('qoder', 'acct-1', { at: 2, value: { b: 2, a: 1 } })
     expect(fileAt(), '键序不是语义 —— 对象构造路径不同不该触发写盘').toBe(first)
   })
@@ -341,14 +359,22 @@ describe('余额磁盘缓存：值没变就不写盘', () => {
   it('★★★ 值真的变了必须写盘（反向守卫，防判据过度收敛）', () => {
     noteDiskReading('qoder', 'acct-1', { at: 1, value: { remaining: 100 } })
     const first = fileAt()
+    tick()
     noteDiskReading('qoder', 'acct-1', { at: 2, value: { remaining: 90 } })
     expect(fileAt(), '余额变了必须落盘（否则强杀后丢新值 = 本 PR 要修的原缺陷）').not.toBe(first)
+    // ⚠️ 再看**语义内容**：只断言「文件被动过」会让「写了但写的是旧值」也绿。
+    const stored = (JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as {
+      readings: Record<string, { reading: { value: { remaining: number } } }>
+    }).readings['qoder:acct-1']
+    expect(stored?.reading.value.remaining, '落盘的必须是**新值**').toBe(90)
   })
 
   it('★★★ `error` / `stale` 是语义字段 —— 变了也要写盘', () => {
     noteDiskReading('qoder', 'acct-1', { at: 1, value: { remaining: 100 } })
     const first = fileAt()
+    tick()
     noteDiskReading('qoder', 'acct-1', { at: 2, value: { remaining: 100 }, error: '上游挂了' })
     expect(fileAt(), '`error` 参与语义').not.toBe(first)
   })
 })
+
