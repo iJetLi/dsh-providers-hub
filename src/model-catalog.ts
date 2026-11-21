@@ -702,10 +702,24 @@ export function createModelCatalog(
         //    后台任务的异常不得变成 unhandledRejection 把宿主进程带走。
         void Promise.resolve()
           .then(() => loadCatalogFromAdapter())
-          .then((entries) => {
-            // ⚠️ 这里**不写盘**（不知道 `complete`），只记下来供 `rememberCatalogForDisk`
-            //    与「后续调用走适配器」使用。
-            freshFromRemote = entries
+          .then(() => {
+            /**
+             * ⚠️⚠️ **这里绝不能设 `freshFromRemote`**（对抗审计 P1-1，真缺陷）。
+             *
+             * 我原来写的是 `.then((entries) => { freshFromRemote = entries })` ——
+             * 而 `loadCatalogFromAdapter()` 在**远端失败时不抛错、只回兜底表**
+             * （cline 等多数家的真实失败形态）⇒ 兜底表被当成「远端成功」记下
+             * ⇒ 后续调用 `if (freshFromRemote !== undefined) return loadCatalogFromAdapter()`
+             * 直接把**磁盘里那份好缓存永久丢弃**。
+             *
+             * 实测：磁盘 2 条 ⇒ 首次返回 m1,m2 ⇒ 后台落地后再调只剩 m99（真机即 460→5）
+             * ⇒ **本 PR 的主功能自我拆台**。
+             *
+             * 正确判据只有一处：**适配器调 `rememberCatalogForDisk`**
+             * （它只在 `complete === true` 时调）——那里已经设了 `freshFromRemote`。
+             * 后台刷新这一格**什么都不记**：成功的话适配器会自己认证；
+             * 失败（回兜底）就保持 `undefined` ⇒ 继续用磁盘缓存。
+             */
           })
           .catch(() => {
             // 后台刷新失败**完全静默**：用户此刻看到的是磁盘缓存，功能正常。
