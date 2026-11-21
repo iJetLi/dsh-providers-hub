@@ -9870,6 +9870,38 @@ function registerJetHubEndpoints(
              */
             const qoderForce = payload !== null && typeof payload === 'object'
               && (payload as { force?: unknown }).force === true
+            /**
+             * ## ⚠️⚠️ **qoder 特例分支只有「磁盘」与「远端」两层，刻意没有内存层**
+             *
+             * 2026-11-21 审计时发现并**明确决定保持现状**（用户选「方案 B」）：
+             *
+             * | 层 | 普通 provider | **qoder 特例** |
+             * |---|---|---|
+             * | 内存（TTL 120s）| `balance-cache.ts` 的 `TtlCache` | ❌ **无** |
+             * | 磁盘（跨进程）| `balance-disk-cache.ts` | ✅ `readDiskReading` |
+             * | 远端 | `fetchBalanceReading` | ✅ `fetchQoderBalanceDetailed` |
+             *
+             * ## 为什么不做
+             *
+             * 本家的取数形态与通用原语**不匹配**：`fetchQoderBalanceDetailed` 只吃
+             * `QoderCredential`（不吃通用 `credential` 形状）、且**必须按账号取出口代理**
+             * （国际版 `openapi.qoder.sh` 在部分网络下被 SNI 阻断，中国版直连 160ms）。
+             * 把它塞进 `fetchBalanceReading` 会破坏「面板与折算共用同一取数实现」
+             * 这条既有约束（见 `src/index.ts` 的 `fetchBalanceReading` 头注释）。
+             *
+             * ## ⚠️ 代价（已确认接受）
+             *
+             * 打开积分面板**反复刷新**会反复打上游（每个 qoder 账号一次）。
+             * 磁盘层只挡住「重启后的第一次」，挡不住「同一会话内反复刷新」。
+             *
+             * ⚠️ **不要把它当成漏接**：`catalog-disk-wiring.spec.ts` 那类普查
+             * 针对的是**模型目录**的落盘，与余额无关；余额这层的「内存缺失」
+             * 是**有意**的取舍，不是遗漏。
+             *
+             * ⚠️ 若将来要补：在端点闭包外维护一个 `TtlCache<...>`（与
+             * `balance-cache.ts` 同款 120 秒），**不要**改成走 `readStale`
+             *（那会让两条路径的取数实现分叉）。
+             */
             if (!qoderForce) {
               const cachedQoder = readDiskReading(req.provider, account.id)
               if (cachedQoder !== undefined) {

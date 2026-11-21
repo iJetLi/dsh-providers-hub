@@ -686,6 +686,67 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
        * 用户点面板「刷新积分」就是要真实值，给他磁盘缓存等于假按钮
        *（与下面「`force` 下不兼顶」是同一条纪律）。
        */
+      /**
+       * ★★★ **三层缓存的优先级：内存 → 磁盘 → 远端**（2026-11-21 真实缺陷修复）。
+       *
+       * ## 缺陷（实测证伪了我的第一版实现）
+       *
+       * 第一版**先查磁盘、再查内存**：
+       *
+       * ```ts
+       * const diskReading = readDiskReading(...)   // ← 先
+       * if (diskReading) return 旧值
+       * const fresh = await cache.get({ force })   // ← 后
+       * ```
+       *
+       * 后果（用例 `balance-layer-priority2.spec.ts` 实测打穿）：
+       *
+       * - 内存 `TtlCache` 里有一条 **5 秒前**的新鲜读数（222）；
+       * - 磁盘镜像里是 **2 小时前**的旧读数（111）；
+       * - ⇒ 返回 **111**，`stale: true`。
+       *
+       * 而内存里那条 222 是**刚刚成功拉到的真实值**，被一份更旧的数据遮蔽了
+       * ⇒ 用户看到的余额比实际更旧，且**每次**都这样（不是偶发）。
+       *
+       * ## 正确顺序
+       *
+       * | 层 | 判据 | 优先级 |
+       * |---|---|---|
+       * | **内存**（`TtlCache`，TTL 内新鲜）| `peekStale().stale === false` | **最高** |
+       * | **磁盘**（跨进程）| `readDiskReading` 有值 | 次之（内存无新鲜值时）|
+       * | **远端** | `cache.get()` 回源 | 兜底 |
+       *
+       * ⚠️ 内存新鲜值优先是**必然正确**的：它是本进程**刚刚**从上游拉到的，
+       * 磁盘那份无论多新都不可能比它更新。
+       *
+       * ⚠️ 但**内存过期值不优先**：过期条目应当让位给磁盘（磁盘可能更新，
+       * 因为另一个进程/上一次会话刚写过）。这正是下面用 `peekStale().stale`
+       * 而不是 `peek()` 的原因（`peek()` 会顺手销毁过期条目）。
+       */
+      const memoryFresh = cache.peekStale()
+      if (
+        !force
+        && memoryFresh !== undefined
+        && memoryFresh.stale === false
+        /**
+         * ⚠️⚠️ **必须同时要求 `value !== undefined`**（2026-11-21 实测回归）。
+         *
+         * 失败读数（`{ value: undefined, error }`）**也是** TTL 内的新鲜条目 ——
+         * `TtlCache` 不知道「成功」与「失败」的区别，它只按时间判新鲜。
+         *
+         * 只判 `stale === false` 会让失败读数被当作「内存新鲜值」直接返回，
+         * 于是调用方拿不到 `stale: true` 与 `error` ⇒ **陈旧/失败标注消失**
+         * ⇒ 用户误以为上游已恢复（那正是 issue IKJVCW 的形态）。
+         *
+         * 实测：`balance-cache.spec.ts` 的「上游仍失败时，第二次读取仍须标
+         * stale」当场变红（`expected false to be true`）。
+         */
+        && memoryFresh.value.value !== undefined
+      ) {
+        // ★ 内存有**新鲜且成功**的值 ⇒ 直接用它（最高优先级）。
+        return { at: memoryFresh.value.at, value: memoryFresh.value.value, stale: false }
+      }
+
       const diskReading = force ? undefined : readDiskReading(provider, accountId)
       if (diskReading !== undefined) {
         const cached = diskReading as BalanceReading
