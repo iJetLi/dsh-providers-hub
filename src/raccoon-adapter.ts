@@ -406,6 +406,21 @@ export function shouldRotateRaccoonAccount(errorText: string, status: number): b
 }
 
 /**
+ * ★★ **是否值得「换下一个账号」** —— `upstream`（上游网关 5xx）**不换号**。
+ *
+ * 与 loomy 同款、同理由（2026-11-21 正向审计用数据推翻我第一版的「参与换号」）：
+ * 主形态 `该模型服务暂时不可用` 是**模型级**故障，换账号大概率无效；
+ * 而换号的代价是「最坏 N 发全量 prompt」，比「同一个号 + 宿主重试」更贵。
+ *
+ * ⚠️ raccoon 侧**本机零 5xx 实测样本** —— 这一格是为守住
+ * 「`classifyLoomyFailure` 与 `classifyRaccoonFailure` **逐格同构**」而同步的，
+ * 不是 raccoon 的独立发现（同 {@link RaccoonFailureClass} 里那句标注）。
+ */
+export function rotatesRaccoonAccount(cls: RaccoonFailureClass): boolean {
+  return cls !== 'other' && cls !== 'upstream'
+}
+
+/**
  * 499「客户端断开」口径的统一抛出：归 aborted 形态，而非普通错误。
  *
  * 🔴 实测（2026-10-11，本会话多次）：raccoon 网关返回 **HTTP 499 + body
@@ -978,7 +993,7 @@ export class RaccoonAdapter extends LlmAdapter {
        */
       let failureClass = classifyRaccoonFailure(errorText, status)
       const accountPool = this.options.accountPool
-      if (accountPool && failureClass !== 'other') {
+      if (accountPool && rotatesRaccoonAccount(failureClass)) {
         const tried = new Set<string>()
         if (activeAccountId) tried.add(activeAccountId)
         const markCurrentAccount = async (): Promise<void> => {
@@ -1027,7 +1042,9 @@ export class RaccoonAdapter extends LlmAdapter {
           `raccoon: 模型 ${options.model} 所有账号均不可用（${errorDetail(errorText)}）`,
           failureClass === 'rate' ? 'RATE_LIMIT'
             : failureClass === 'auth' ? 'AUTH'
-              : 'QUOTA_EXCEEDED',
+              // ⚠️ 上游故障不是额度问题（同 loomy，2026-11-21 正向审计 P1）。
+              : failureClass === 'upstream' ? 'SERVER'
+                : 'QUOTA_EXCEEDED',
           { status },
         )
       }

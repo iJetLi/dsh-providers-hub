@@ -513,6 +513,35 @@ export function shouldRotateLoomyAccount(errorText: string, status: number): boo
 }
 
 /**
+ * ★★ **是否值得「换下一个账号」** —— 与 {@link shouldRotateLoomyAccount} **不同**：
+ * `upstream`（上游网关 5xx）**不换号**。
+ *
+ * ## 为什么 upstream 不参与换号（2026-11-21 正向审计用数据推翻了我的第一版）
+ *
+ * 我第一版让 `upstream` 参与换号（对齐 qoder）。审计指出主形态是**模型级**故障：
+ *
+ * | 报文 | 次数 | 语义 |
+ * |---|---|---|
+ * | `该模型服务暂时不可用，请切换其他模型试试` | 18 / 23 | **模型级** —— 换账号大概率无效（同一模型在别的号上同样不可用）|
+ * | `<html>504 Gateway Time-out</html>` | 5/23 | 网关级，换号**可能**有效 |
+ *
+ * 而 swap 的代价：`LOOMY_MAX_ROTATE = 8` ⇒ 最坏 **8 发全量 prompt**，
+ * 比修前的「同一个号 1 次 + 宿主重试 5 次 = 6 发」更贵（池 ≥7 时 **+33% 成本**）。
+ * 而该会话 prompt 已达 **24.5 万 tokens** ⇒ 这是实打实的钱。
+ *
+ * ⇒ **只补归因，不动换号行为**（即报障者建议的「修法 1：零风险」）。
+ *   `upstream` 类的价值是：① 不再显示成「模型不可用」误导用户去手动切模型；
+ *   ② 不写冷却（网关抖动不是账号坏了）。
+ *
+ * ⚠️ **代价如实登记**：这只改归因，**不解决**「宿主 `llm-retry` 白重试 5 次」
+ *   （错误码仍是 `SERVER`，在宿主 `DEFAULT_RETRYABLE_CODES` 里）。要解决它得改
+ *   错误码或填准确 `providerRetryAfterMs`，属宿主策略面，本轮未动。
+ */
+export function rotatesLoomyAccount(cls: LoomyFailureClass): boolean {
+  return cls !== 'other' && cls !== 'upstream'
+}
+
+/**
  * **Loomy 专属**：`HTTP 200 + 业务码 100002` 是否该按「认证失败、值得换号」处理。
  *
  * ## 为什么它是一条**独立**判据，而不是加进 {@link classifyLoomyFailure}
@@ -1367,7 +1396,7 @@ export class LoomyAdapter extends LlmAdapter {
        */
       let failureClass = classifyLoomyFailure(errorText, status)
       const accountPool = this.options.accountPool
-      if (accountPool && failureClass !== 'other') {
+      if (accountPool && rotatesLoomyAccount(failureClass)) {
         const tried = new Set<string>()
         if (activeAccountId) tried.add(activeAccountId)
         /**
@@ -1429,7 +1458,17 @@ export class LoomyAdapter extends LlmAdapter {
           `loomy: 模型 ${options.model} 所有账号均不可用（${errorDetail(errorText)}）`,
           failureClass === 'rate' ? 'RATE_LIMIT'
             : failureClass === 'auth' ? 'AUTH'
-              : 'QUOTA_EXCEEDED',
+              /**
+               * ⚠️ **上游故障不是额度问题**（2026-11-21 正向审计 P1）。
+               *
+               * 这个三元链原先只有 rate / auth / 兜底 `QUOTA_EXCEEDED` 三格。
+               * 加了 `upstream` 之后若不加本格，全池 5xx 的终态码会落
+               * `QUOTA_EXCEEDED` —— 用户看到「额度已用尽」这个**假原因**
+               * （与 issue #130「归因要准」的诉求正相反），而该形态在修前**不可达**。
+               * ⇒ 上游故障走 `SERVER`（= 5xx 的通用码，与 `httpErrorCode` 同口径）。
+               */
+              : failureClass === 'upstream' ? 'SERVER'
+                : 'QUOTA_EXCEEDED',
           { status },
         )
       }

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   LoomyAdapter, classifyLoomyFailure, loomyCooldownResetAtMs, parseLoomyRemoteModels,
-  reasoningFromEfforts, recordsLoomyRateLimit, shouldRotateLoomyAccount,
+  reasoningFromEfforts, recordsLoomyRateLimit, rotatesLoomyAccount, shouldRotateLoomyAccount,
 } from '../../src/loomy-adapter.js'
 import { classifyRaccoonFailure } from '../../src/raccoon-adapter.js'
 import { LOOMY, loomyContextWindow } from '../../src/loomy-product.js'
@@ -750,13 +750,39 @@ describe('classifyLoomyFailure 判据（与 raccoon 逐格同构）', () => {
     expect(classifyLoomyFailure('First Token Timeout or Upstream Timeout', 504)).toBe('upstream')
   })
 
-  it('★★ `upstream` 值得换号，但**绝不写冷却**', () => {
+  it('★★★ `upstream` **不参与换号**，且**绝不写冷却**（正反两面都守）', () => {
     const gateway = '<html>504 Gateway Time-out</html>'
-    // 换号：报障者实测「不换号」是缺陷的一半
-    expect(shouldRotateLoomyAccount(gateway, 504)).toBe(true)
+    /**
+     * ⚠️ **我第一版写成「值得换号」，被正向审计用数据推翻了**：
+     * 主形态 `该模型服务暂时不可用`（18/23）是**模型级**故障 ⇒ 换账号大概率无效；
+     * 而 `LOOMY_MAX_ROTATE = 8` ⇒ 最坏 8 发全量 prompt，比修前「同一个号 1 次 +
+     * 宿主重试 5 次 = 6 发」更贵（池 ≥7 时 +33%），而该会话 prompt 达 24.5 万 tokens。
+     * ⇒ 只补归因、不动换号行为（= 报障者建议的「修法 1：零风险」）。
+     */
+    expect(shouldRotateLoomyAccount(gateway, 504), '判据本身仍归「非 other」').toBe(true)
+    expect(rotatesLoomyAccount('upstream'), '但生产路径**不得**为 upstream 换号').toBe(false)
+    // 其它三类仍照旧换号（反向对照：不能把整条换号关掉）
+    expect(rotatesLoomyAccount('quota')).toBe(true)
+    expect(rotatesLoomyAccount('rate')).toBe(true)
+    expect(rotatesLoomyAccount('auth')).toBe(true)
     // 不写冷却：网关抖动不是「这个号坏了」，写了会把一次抖动放大成
     // 「整池被封 24h」（2026-10-06 事故同型）
     expect(recordsLoomyRateLimit('upstream')).toBe(false)
+  })
+
+  it('★★★ 生产调用点必须用 `rotatesLoomyAccount`（不是 `!== \'other\'`）', async () => {
+    /**
+     * 审计实测：**生产闸门不调 `shouldRotate*`** —— 换号循环的判据是内联的
+     * `failureClass !== 'other'`，所以「把 upstream 排除出换号」这件事
+     * 在**行为级**上原先零守卫（把谓词改回 `!== 'other'` 也不会红）。
+     * ⇒ 源码级钉住生产调用点用的是新谓词。
+     */
+    const source = await import('node:fs').then((fs) =>
+      fs.readFileSync(new URL('../../src/loomy-adapter.ts', import.meta.url), 'utf8'))
+    expect(source, '换号循环必须用 rotatesLoomyAccount(failureClass)')
+      .toContain('rotatesLoomyAccount(failureClass)')
+    expect(source, '不得退回内联的 !== \'other\'（upstream 会重新参与换号）')
+      .not.toContain("if (accountPool && failureClass !== 'other')")
   })
 
   it('★★★ 中文腿只认「暂时不可用」—— 本仓自产文案不得被误伤', () => {
@@ -771,6 +797,23 @@ describe('classifyLoomyFailure 判据（与 raccoon 逐格同构）', () => {
     expect(classifyLoomyFailure('附件服务不可用或读取失败', 500)).toBe('other')
     // 报障原句必须仍然命中
     expect(classifyLoomyFailure('该模型服务暂时不可用，请切换其他模型试试', 503)).toBe('upstream')
+  })
+
+  it('★★★ 全池 5xx 的**终态码**必须是 SERVER，不是 QUOTA_EXCEEDED', async () => {
+    /**
+     * 正向审计 P1：这个三元链原先只有 rate / auth / 兜底 `QUOTA_EXCEEDED` 三格。
+     * 加了 `upstream` 而不加格子的话，**全池 5xx** 会落 `QUOTA_EXCEEDED`
+     * —— 用户看到「额度已用尽」这个**假原因**，而该形态在修前**不可达**。
+     * 这与 issue #130「归因要准」的诉求正相反。
+     *
+     * ⚠️ 采用源码级断言：行为级要构造「池内全部号都 5xx」的完整 fetch 流程，
+     *    成本远高于这条不变式的价值；而它恰恰是「三元链缺一格」这种**结构性**
+     *    缺陷，源码形态足够锁住。
+     */
+    const source = await import('node:fs').then((fs) =>
+      fs.readFileSync(new URL('../../src/loomy-adapter.ts', import.meta.url), 'utf8'))
+    expect(source, 'upstream 必须单独走 SERVER，不能落进 QUOTA_EXCEEDED 兜底')
+      .toContain("failureClass === 'upstream' ? 'SERVER'")
   })
 
   it('★★ 状态码闸门：**同一句文案**在 4xx 上不得判 upstream（防白烧整池）', () => {
