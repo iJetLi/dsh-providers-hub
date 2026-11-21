@@ -110,6 +110,33 @@ const MIN_FIRE_DELAY_MS = 5 * 1000
 const MAX_WAIT_MS = 24 * 60 * 60 * 1000
 /** 同一钩子最多推迟/重试多少次，超过就放弃。 */
 const MAX_DEFERRALS = 48
+
+/**
+ * **每个会话**被自动续跑的**总次数**上限（2026-11-21 对抗审计 P0）。
+ *
+ * ## 为什么 `MAX_DEFERRALS` 挡不住「限流 → 解禁 → 继续 → 又限流」
+ *
+ * 那个 48 只在**单个钩子内部**对「投递失败 / 号池顺延」计数，而**成功投递会
+ * `drop(hook)`** ⇒ 下一轮再被限流时 {@link noteInterruption} 建的是**新钩子**、
+ * `deferrals` 从 0 重来 ⇒ 循环**没有任何寿命上限**。
+ *
+ * 审计实测（engine 级）：连续 100 轮限流/解禁，`deliver` 被调 **100 次**，
+ * 每轮 `deferrals` 都是 0；接线级 10 轮 = 10 次 followup，且
+ * `MIN_FIRE_DELAY_MS=5s` ⇒ 最快 **12 次/分钟**。
+ * `quota`（积分耗尽、等多久都不会好）同样每小时重试一次、**永不放弃**。
+ *
+ * ## 上限取值的理由
+ *
+ * - `rate`（429）：给 3 次 —— 一次正常续跑之后仍连续被限流，说明这个渠道
+ *   当前就是不可用，再自动重试只是烧额度；3 次足够覆盖「抖动」。
+ * - `quota`（积分耗尽）：**只给 1 次** —— 额度不会因为等待而恢复
+ *   （要等的是计费周期），多次自动续跑是纯浪费。
+ *
+ * ⚠️ **用户手动发消息会重置计数**（见 `noteUserMessage`）：那是「用户回来了、
+ *    重新开始」的语义，不是继续消耗自动额度。
+ * ⚠️ 计数**落盘、跨重启生效** —— 否则重启就是绕过上限的后门。
+ */
+const MAX_RESUMES_BY_KIND: Record<RateLimitResumeClass, number> = { rate: 3, quota: 1 }
 /** 投递失败（会话不在内存 / agents 未就绪）后的重试间隔。 */
 const RETRY_MS = 2 * 60 * 1000
 /** 同时挂着的钩子上限（正常使用远达不到，纯防异常增长）。 */
@@ -251,7 +278,18 @@ export interface RateLimitResumeEngineOptions {
   readonly now?: () => number
   readonly schedule?: (task: () => void, delayMs: number) => unknown
   readonly cancel?: (handle: unknown) => void
-  readonly persist?: (hooks: readonly RateLimitResumeHook[], enabled: boolean) => void
+  /**
+   * 落盘回调。
+   *
+   * ⚠️ 第三个参数 `resumes`（`sessionId → 已自动续跑次数`）**必须一起落盘**：
+   * 那是跨钩子的寿命上限的计数，只存内存的话**重启就是绕过上限的后门**
+   * （2026-11-21 对抗审计 P0 的配套要求）。
+   */
+  readonly persist?: (
+    hooks: readonly RateLimitResumeHook[],
+    enabled: boolean,
+    resumes: Readonly<Record<string, number>>,
+  ) => void
   readonly readPoolReset?: (provider: string, model: string) => number | undefined
   readonly deliver?: (hook: RateLimitResumeHook) => { ok: true } | { ok: false; reason: string }
   readonly note?: (decision: RateLimitResumeDecision) => void
@@ -296,6 +334,14 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
   const maxHooks = options.maxHooks !== undefined && options.maxHooks > 0 ? options.maxHooks : MAX_HOOKS
 
   const hooks = new Map<string, InternalHook>()
+  /**
+   * **跨钩子**的续跑计数（`sessionId → 已自动续跑次数`）。
+   *
+   * ⚠️ 必须与 `hooks` 分开：后者是「当前这次中断」，成功投递就 `drop`；
+   * 本表记的是「这个会话一共被我们自动拉起来过几次」，只在
+   * ①成功投递 +1 ②用户手动发言清零 ③用户从面板移除时清零。
+   */
+  const resumes = new Map<string, number>()
   const recent: RateLimitResumeDecision[] = []
   let enabled = options.enabled !== false
   let disposed = false
@@ -315,7 +361,7 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
   }
 
   function save(): void {
-    persist([...hooks.values()].map(snapshot), enabled)
+    persist([...hooks.values()].map(snapshot), enabled, Object.fromEntries(resumes))
   }
 
   function record(sessionId: string, message: string): void {
@@ -388,6 +434,9 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
       result = { ok: false, reason: error instanceof Error ? error.message : String(error) }
     }
     if (result.ok) {
+      // ★ 成功投递 ⇒ 记一次「已自动续跑」（跨钩子计数，见 MAX_RESUMES_BY_KIND）。
+      resumes.set(hook.sessionId, (resumes.get(hook.sessionId) ?? 0) + 1)
+      save()
       drop(hook, '已自动继续')
       return
     }
@@ -432,6 +481,20 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
       if (sessionId === '') return undefined
       const previous = hooks.get(sessionId)
       if (previous !== undefined) drop(previous, '同一会话又出现新的中断')
+      /**
+       * ★ **跨钩子的寿命上限**（对抗审计 P0，见 {@link MAX_RESUMES_BY_KIND}）。
+       * 少了这一格，「限流 → 解禁 → 继续 → 又限流」会无限循环。
+       */
+      const used = resumes.get(sessionId) ?? 0
+      const cap = MAX_RESUMES_BY_KIND[input.kind]
+      if (used >= cap) {
+        record(
+          sessionId,
+          `该会话已自动续跑 ${used} 次（${input.kind} 类上限 ${cap}），本次不再自动继续`
+          + ' —— 请手动发送消息，之后计数会重置',
+        )
+        return undefined
+      }
       if (hooks.size >= maxHooks) {
         const oldest = [...hooks.values()].sort((left, right) => left.resetAtMs - right.resetAtMs)[0]
         if (oldest !== undefined) drop(oldest, '待续跑记录过多，淘汰最早的一条')
@@ -478,6 +541,12 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
     noteUserMessage(sessionId: string): void {
       const hook = hooks.get(sessionId)
       if (hook !== undefined) drop(hook, '用户手动发送了消息')
+      /**
+       * ★ **用户回来了 ⇒ 自动续跑计数清零**（对抗审计 P0 配套）。
+       * 不清零的话，用户正常聊了几轮之后再撞一次限流就会被「上限已到」拒绝，
+       * 而那与「连续被限流」完全不是一回事。
+       */
+      if (resumes.delete(sessionId)) save()
     },
     /** 某个会话的 agent 真的被销毁：**不撤钩子**（见模块头第 2 条），只记一笔。 */
     noteAgentGone(sessionId: string): void {
@@ -541,6 +610,21 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
     /** 改全局默认（只影响**之后**的中断）。 */
     setEnabled(value: boolean): boolean {
       enabled = value === true
+      /**
+       * ★ **必须追溯已挂着的钩子**（2026-11-21 对抗审计 P1）。
+       *
+       * 原实现只改 `enabled` 一个布尔就 `save()` ⇒ 用户**当下**关掉开关之后，
+       * 已经挂上定时器的那些钩子**照样会到点投递**（审计实测：关掉后仍 fired=1）。
+       * 这不是「下次生效」的问题 —— 用户的意思是「现在别动我的会话」。
+       *
+       * ⇒ 关：逐个取消武装 + 取消定时器（`armTimer` 见到 `!hook.armed` 会自己
+       *    清掉 timer 且不重排）；开：把落盘里仍 `armed` 的钩子重新武装回来。
+       * ⚠️ 不 `drop` 它们 —— 钩子本身是「待续跑」的事实，开关只管「要不要自动做」。
+       */
+      for (const hook of hooks.values()) {
+        hook.armed = enabled
+        armTimer(hook)
+      }
       save()
       return enabled
     },
@@ -563,7 +647,19 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
       for (const hook of hooks.values()) armTimer(hook)
     },
     /** 从持久化文档恢复。 */
-    restore(list: unknown): void {
+    restore(list: unknown, savedResumes?: unknown): void {
+      /**
+       * ★ 恢复**跨钩子续跑计数**（对抗审计 P0 配套）。先于 hooks 恢复，
+       * 因为下面「跳过已过期记录」不该影响计数 —— 计数反映的是**历史**，
+       * 与那条钩子还在不在无关（否则关一次宿主就能绕过上限）。
+       */
+      if (isRecord(savedResumes)) {
+        for (const [sessionId, value] of Object.entries(savedResumes)) {
+          if (sessionId === '') continue
+          if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) continue
+          resumes.set(sessionId, value)
+        }
+      }
       if (!Array.isArray(list)) return
       const current = now()
       for (const raw of list) {
@@ -587,7 +683,16 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
           kind: raw.kind === 'quota' ? 'quota' : 'rate',
           unlockAtMs,
           resetAtMs,
-          armed: raw.armed !== false,
+          /**
+           * ★ **全局开关必须管住落盘的已武装钩子**（对抗审计 P1）。
+           *
+           * 原实现是 `armed: raw.armed !== false` ⇒ 用户明确设了
+           * `DSH_RATE_LIMIT_RESUME=0`（或界面上关掉）之后，重启时**落盘里
+           * `armed: true` 的钩子照样被武装**、到点照样发请求。
+           * 审计实测：env=0 + 落盘 armed:true ⇒ 仍然 followup。
+           * ⇒ 只有引擎**整体启用**时才继承落盘的 armed。
+           */
+          armed: enabled && raw.armed !== false,
           deferrals: typeof raw.deferrals === 'number' && Number.isInteger(raw.deferrals) && raw.deferrals >= 0
             ? Math.min(raw.deferrals, MAX_DEFERRALS)
             : 0,
@@ -602,6 +707,7 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
     forget(sessionId: string): void {
       const hook = hooks.get(sessionId)
       if (hook !== undefined) drop(hook, '用户移除')
+      if (resumes.delete(sessionId)) save()
     },
     /** 关闭引擎：清掉全部定时器（fiber 卸载时调用，必须幂等且不抛错）。 */
     dispose(): void {
@@ -718,6 +824,8 @@ function failureOf(event: ObservedEvent): unknown {
 interface PersistedDocument {
   enabled: boolean
   hooks: unknown
+  /** `sessionId → 已自动续跑次数`（跨钩子寿命上限的计数，必须落盘）。 */
+  resumes: unknown
 }
 
 /**
@@ -741,23 +849,27 @@ export function installRateLimitResume(ctx: Context, pool: AccountPool): void {
   const file = home === undefined ? undefined : join(home, 'jet-hub', RATE_LIMIT_RESUME_FILE)
 
   function load(): PersistedDocument {
-    if (file === undefined || !existsSync(file)) return { enabled: true, hooks: [] }
+    if (file === undefined || !existsSync(file)) return { enabled: true, hooks: [], resumes: {} }
     try {
       const parsed: unknown = JSON.parse(readFileSync(file, 'utf-8'))
-      if (!isRecord(parsed)) return { enabled: true, hooks: [] }
-      return { enabled: parsed.enabled !== false, hooks: parsed.hooks }
+      if (!isRecord(parsed)) return { enabled: true, hooks: [], resumes: {} }
+      return { enabled: parsed.enabled !== false, hooks: parsed.hooks, resumes: parsed.resumes }
     } catch (error) {
       ctx.logger?.warn?.(`[jet-hub] 读取 ${file} 失败，限流续跑按默认（开启）处理: ${String(error)}`)
-      return { enabled: true, hooks: [] }
+      return { enabled: true, hooks: [], resumes: {} }
     }
   }
 
-  function save(hooks: readonly RateLimitResumeHook[], enabled: boolean): void {
+  function save(
+    hooks: readonly RateLimitResumeHook[],
+    enabled: boolean,
+    resumes: Readonly<Record<string, number>>,
+  ): void {
     if (file === undefined) return
     try {
       mkdirSync(dirname(file), { recursive: true })
       const tmp = `${file}.tmp`
-      writeFileSync(tmp, `${JSON.stringify({ schema: SCHEMA, enabled, hooks }, null, 2)}\n`, 'utf-8')
+      writeFileSync(tmp, `${JSON.stringify({ schema: SCHEMA, enabled, hooks, resumes }, null, 2)}\n`, 'utf-8')
       renameSync(tmp, file)
     } catch (error) {
       ctx.logger?.warn?.(`[jet-hub] 写入 ${file} 失败: ${String(error)}`)
@@ -774,7 +886,7 @@ export function installRateLimitResume(ctx: Context, pool: AccountPool): void {
     //    「用户在界面上关过」。先把落盘值写进引擎（设置页读它），再让环境变量
     //    直接把默认值压成 false。
     enabled: loaded.enabled && rateLimitResumeEnabled(),
-    persist: (hooks, enabled) => save(hooks, enabled),
+    persist: (hooks, enabled, resumes) => save(hooks, enabled, resumes),
     note: (decision) => {
       ctx.logger?.info?.(`[jet-hub] 限流续跑 ${decision.sessionId}: ${decision.message}`)
     },
@@ -887,7 +999,7 @@ export function installRateLimitResume(ctx: Context, pool: AccountPool): void {
   }
 
   controller = engine
-  engine.restore(loaded.hooks)
+  engine.restore(loaded.hooks, loaded.resumes)
 
   ctx.inject(['agents'], (scope) => {
     const typed = scope as unknown as AgentsScope

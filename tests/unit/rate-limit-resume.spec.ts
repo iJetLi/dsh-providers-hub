@@ -271,6 +271,163 @@ describe('createRateLimitResumeEngine', () => {
     restored.restore(saved)
     expect(restored.status().hooks[0]).toMatchObject({ sessionId: 'session-a', turn: 9 })
   })
+
+/**
+ * ★★★ **跨钩子的寿命上限**（2026-11-21 对抗审计 P0）。
+ *
+ * ## 这个缺口是什么
+ *
+ * `MAX_DEFERRALS = 48` 只在**单个钩子内部**对「投递失败 / 号池顺延」计数，
+ * 而**成功投递会 `drop(hook)`** ⇒ 下一轮再被限流时建的是**新钩子**、
+ * `deferrals` 从 0 重来 ⇒ 「限流 → 解禁 → 继续 → 又限流」**没有寿命上限**。
+ *
+ * 审计实测（engine 级）：连续 100 轮，`deliver` 被调 **100 次**、每轮
+ * `deferrals` 都是 0；接线级最快 **12 次/分钟**；`quota`（积分耗尽、
+ * 等多久都不会好）同样每小时重试、**永不放弃**。
+ *
+ * ⚠️ **这是我自己写错的地方**：我在 PR #131 的评论里写过「MAX_DEFERRALS=48
+ * 在两条路径都检查 ⇒ 不存在无限循环」—— 那个结论只看了单钩子，是错的。
+ * 这组用例就是为了让那条错误结论**不可能再被写出来**。
+ */
+describe('★★★ 跨钩子寿命上限（P0：限流→解禁→继续→又限流 必须有上界）', () => {
+  it('★★★ rate 类：连续限流 10 轮，自动续跑**最多 3 次**', () => {
+    const calls: string[] = []
+    const engine = engineWith({
+      deliver: () => { calls.push('resume'); return { ok: true } },
+    })
+    // 每轮：记录中断 → 时钟跨过解禁时刻 ⇒ 定时器到点投递成功 ⇒ drop ⇒ 下一轮建新钩子
+    for (let i = 0; i < 10; i++) {
+      engine.noteInterruption({
+        sessionId: 's1', turn: i + 1, provider: 'p', model: 'm', kind: 'rate',
+        failure: { code: 'RATE_LIMIT', message: '429' },
+      })
+      advanceTo(clock + 3 * 60 * 60 * 1000)
+    }
+    expect(calls.length, 'rate 类续跑必须有上界（3 次），否则无限循环').toBe(3)
+  })
+
+  it('★★★ quota 类：只给 **1** 次（额度不会因为等待而恢复）', () => {
+    const calls: string[] = []
+    const engine = engineWith({
+      deliver: () => { calls.push('resume'); return { ok: true } },
+    })
+    for (let i = 0; i < 5; i++) {
+      engine.noteInterruption({
+        sessionId: 's2', turn: i + 1, provider: 'p', model: 'm', kind: 'quota',
+        failure: { code: 'QUOTA', message: '积分不足' },
+      })
+      advanceTo(clock + 3 * 60 * 60 * 1000)
+    }
+    expect(calls.length, 'quota 类续跑必须有上界（1 次）').toBe(1)
+  })
+
+  it('★★ 用户手动发言 ⇒ 计数清零（那是「用户回来了」，不是继续消耗自动额度）', () => {
+    const calls: string[] = []
+    const engine = engineWith({
+      deliver: () => { calls.push('resume'); return { ok: true } },
+    })
+    // 先用掉 rate 类的 3 次额度
+    for (let i = 0; i < 5; i++) {
+      engine.noteInterruption({
+        sessionId: 's3', turn: i + 1, provider: 'p', model: 'm', kind: 'rate',
+        failure: { code: 'RATE_LIMIT', message: '429' },
+      })
+      advanceTo(clock + 3 * 60 * 60 * 1000)
+    }
+    expect(calls.length).toBe(3)
+    // 用户回来说了句话 ⇒ 计数清零，可以再自动续跑
+    engine.noteUserMessage('s3')
+    engine.noteInterruption({
+      sessionId: 's3', turn: 99, provider: 'p', model: 'm', kind: 'rate',
+      failure: { code: 'RATE_LIMIT', message: '429' },
+    })
+    advanceTo(clock + 3 * 60 * 60 * 1000)
+    expect(calls.length, '用户发言后应能再续一次').toBe(4)
+  })
+
+  it('★★ 计数**落盘**：重启（新引擎 restore）不得绕过上限', () => {
+    const persisted: Array<{ hooks: unknown; resumes: unknown }> = []
+    const engine = engineWith({
+      deliver: () => ({ ok: true }),
+      persist: (hooks, _enabled, resumes) => { persisted.push({ hooks, resumes }) },
+    })
+    for (let i = 0; i < 5; i++) {
+      engine.noteInterruption({
+        sessionId: 's4', turn: i + 1, provider: 'p', model: 'm', kind: 'rate',
+        failure: { code: 'RATE_LIMIT', message: '429' },
+      })
+      advanceTo(clock + 3 * 60 * 60 * 1000)
+    }
+    const last = persisted[persisted.length - 1]
+    expect(last?.resumes, '续跑计数必须出现在落盘数据里').toEqual({ s4: 3 })
+
+    // 模拟重启：新引擎 restore 同一份计数
+    const calls: string[] = []
+    const revived = engineWith({
+      deliver: () => { calls.push('resume'); return { ok: true } },
+    })
+    revived.restore([], { s4: 3 })
+    revived.noteInterruption({
+      sessionId: 's4', turn: 1, provider: 'p', model: 'm', kind: 'rate',
+      failure: { code: 'RATE_LIMIT', message: '429' },
+    })
+    advanceTo(clock + 3 * 60 * 60 * 1000)
+    expect(calls, '重启不得成为绕过上限的后门').toEqual([])
+  })
+})
+
+/**
+ * ★★★ **全局开关必须管住落盘的已武装钩子**（对抗审计 P1）。
+ *
+ * 原实现 `armed: raw.armed !== false` 完全忽略引擎的 `enabled` ⇒ 用户明确设了
+ * `DSH_RATE_LIMIT_RESUME=0` 之后，重启时落盘里 `armed: true` 的钩子照样被武装、
+ * 到点照样发请求。审计实测：env=0 + 落盘 armed:true ⇒ 仍然 followup。
+ */
+describe('★★★ 全局开关管住落盘的 armed 钩子（P1）', () => {
+  it('★★★ **运行时**关掉开关 ⇒ 已挂着的钩子立刻不再投递', () => {
+    /**
+     * 审计 PROBE-A4：关掉开关之后，**已经挂上定时器的钩子仍会 fired 一次**。
+     * 只改布尔不追溯 = 用户说的「现在别动我的会话」没有被执行。
+     */
+    const calls: string[] = []
+    const engine = engineWith({
+      deliver: () => { calls.push('resume'); return { ok: true } },
+    })
+    engine.noteInterruption({
+      sessionId: 's8', turn: 1, provider: 'p', model: 'm', kind: 'rate',
+      failure: { code: 'RATE_LIMIT', message: '429' },
+    })
+    // 此刻钩子已武装并有定时器
+    engine.setEnabled(false)
+    advanceTo(clock + 3 * 60 * 60 * 1000)
+    expect(calls, '运行时关掉开关后，已挂着的钩子不得再投递').toEqual([])
+
+    // 重新打开 ⇒ 钩子还在（开关只管「要不要自动做」，不该丢掉「待续跑」这个事实）
+    engine.setEnabled(true)
+    advanceTo(clock + 6 * 60 * 60 * 1000)
+    expect(calls, '重新打开后应恢复投递').toEqual(['resume'])
+  })
+
+  it('★★★ `enabled: false` ⇒ restore 后不得投递', () => {
+    const calls: string[] = []
+    const engine = engineWith({
+      enabled: false,
+      deliver: () => { calls.push('resume'); return { ok: true } },
+    })
+    engine.restore([{
+      sessionId: 's9',
+      turn: 1,
+      provider: 'p',
+      model: 'm',
+      kind: 'rate',
+      resetAtMs: clock + 60_000,
+      unlockAtMs: clock + 60_000,
+      armed: true,
+    }])
+    advanceTo(clock + 3 * 60 * 60 * 1000)
+    expect(calls, '全局关闭时，落盘里的 armed:true 也不得触发投递').toEqual([])
+  })
+})
 })
 
 describe('installRateLimitResume', () => {
