@@ -1156,6 +1156,48 @@ export async function startAutoclawSmsLoginFlow(
   })
 
   const server = http.createServer((req, res) => {
+    /**
+     * ⚠️⚠️ **每个响应都必须 `Connection: close`**（2026-11-21 修，真实缺陷）。
+     *
+     * ## 症状
+     *
+     * 「打开登录页 → 关掉弹窗 → 再打开」第二次直接失败：
+     *
+     * ```
+     * TypeError: fetch failed
+     *   Caused by: SocketError: other side closed (UND_ERR_SOCKET)
+     * ```
+     *
+     * ## 真因：**固定端口 + keep-alive 连接池**的必然碰撞
+     *
+     * 本服务跑在**注册过的固定端口**（`AUTOCLAW_OAUTH_CALLBACK_PORTS`，
+     * 首选 `18432` —— 随机端口会被 Z.ai 以 `Redirect URI not registered`
+     * 拒绝，见 {@link listenOnCallbackPorts}）。
+     *
+     * 于是「第一轮」与「第二轮」用的是**同一个 origin**，而客户端
+     * （undici / 浏览器）都按 origin 维护 keep-alive 连接池：
+     *
+     * 1. 第一轮：客户端 GET 登录页 ⇒ 收到 `Connection: keep-alive`
+     *    ⇒ 这条 socket 被**留在池子里**（实测响应头 `keep-alive: timeout=5`）；
+     * 2. `close()` ⇒ 服务端关掉 socket，但**客户端池子不知道**；
+     * 3. 第二轮在**同一个端口**重新起服务 ⇒ 客户端从池里取到那条**死 socket**
+     *    ⇒ 复用到已关闭的连接 ⇒ `other side closed`。
+     *
+     * 实测：同一进程里连开两轮，第二轮 100% 失败；带 `Connection: close`
+     * 请求头则正常（这就证明了池化是唯一变量）。
+     *
+     * ## 修法
+     *
+     * 与 `raccoon-authorize.ts` 的回环接收端**同一处方**：这个端口本来就是
+     * 「临时的一口子」，没有任何理由让客户端复用连接。服务端显式声明
+     * `Connection: close` ⇒ 每次请求都自带一条新连接、响应后即断
+     * ⇒ 池子里永远不会留下指向本服务的 socket。
+     *
+     * ⚠️ 用 `setHeader`（而不是逐个 `writeHead` 加参数）是刻意的：本处理器有
+     * **十余个** `writeHead` 出口（登录页 / 回调页 / 换码 / 发码 / 提交码 / 404），
+     * 逐个加必然漏一个 —— 而漏掉的那个正好会把死 socket 塞回池子。
+     */
+    res.setHeader('Connection', 'close')
     void handleRequest(req, res)
   })
 
