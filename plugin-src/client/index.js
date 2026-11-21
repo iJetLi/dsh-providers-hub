@@ -96,6 +96,9 @@ import { withErrorBoundary } from './error-boundary.js'
 //   该槽是 single：注册成功即成为**所有** provider 行的渲染方，故组件内部必须
 //   同时保住兄弟插件的徽标（读宿主给的 model.badge）。判据与代价见该文件头。
 import { registerModelLabelSlot } from './model-label.js'
+// 「限流中断 → 解禁后自动继续」的报错行行尾按钮（原生 DOM 增强）。宿主侧引擎
+// 在 `src/rate-limit-resume.ts`，两条 RPC 出口见 `src/jet-hub-rpc.ts`。
+import { installRateLimitResumeUi } from './rate-limit-resume.js'
 
 /**
  * ⚠️ **模块级常量，不要在 `apply()` 或 `inject` 回调里新建**（2026-10-25 审计 A3-3）。
@@ -115,6 +118,15 @@ export function apply(ctx) {
     const raw = await callManagementRpc(ctx.connection, JET_HUB_RPC_CHANNEL, endpoint, payload, signal)
     return unwrapRpcResult(raw)
   }
+
+  /**
+   * 「限流中断 → 解禁后自动继续」的**报错行行尾按钮**（原生 DOM 增强）。
+   *
+   * ⚠️ 它必须挂在 `ctx.effect` 上：插件卸载 / 热替换时要把 MutationObserver 与
+   * 轮询定时器一起停掉、把已插入的按钮摘干净，否则留下一个没人收的观察者。
+   * 设置页那一段开关由 `jet-hub.js` 的 `renderSettingsPanel` 渲染（React 树里）。
+   */
+  ctx.effect(() => installRateLimitResumeUi({ rpcCall }), 'jet-hub: 限流续跑按钮')
 
   /**
    * zcode 内部 captcha 载体的贡献循环（二期 Task 4）。
