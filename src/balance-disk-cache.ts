@@ -268,7 +268,26 @@ export function readDiskReading(provider: string, accountId: string): unknown | 
  */
 export function noteDiskReading(provider: string, accountId: string, reading: unknown): void {
   if (!cacheEnabled) return
-  memory[keyOf(provider, accountId)] = { at: Date.now(), reading }
+  const key = keyOf(provider, accountId)
+  /**
+   * ★★★ **只有「值真的变了」才写盘**（2026-11-21 审计补，本轮新代码的真缺陷）。
+   *
+   * 上一版（`67fa1308`）的意图写在注释里是「每次**变化**立即落盘」，但实现是
+   * **每次调用**都 `dirty = true` 再 `flushDisk()` ⇒ 写盘频率 = 读数频率。
+   *
+   * 而读数的真实频率不低：徽标每 60 秒轮询一次、每次覆盖**所有**账号；
+   * `flushDisk` 又是 **`writeFileSync`（同步）** 且每次序列化**整份** memory
+   * ⇒ 每个账号一次同步全量写 = **O(N) 写放大 + 阻塞事件循环**。
+   * 用户「减少写盘」的诉求与「强杀不丢数据」在这里可以同时满足：
+   * **值变了才写**，值没变一个字节都不用落盘。
+   *
+   * ⚠️ 比较的是 `reading` 本身（不是 `at`）：重启后用户看到的是**旧值**，
+   *    `at` 新一点并不会让它变新；而 `at` 每次必变，拿它做判据等于没判。
+   */
+  const previous = memory[key]
+  const changed = previous === undefined || JSON.stringify(previous.reading) !== JSON.stringify(reading)
+  memory[key] = { at: Date.now(), reading }
+  if (!changed) return
   dirty = true
   /**
    * ★★★ **立即落盘**（2026-11-21）。
