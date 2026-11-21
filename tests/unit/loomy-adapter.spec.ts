@@ -759,6 +759,20 @@ describe('classifyLoomyFailure 判据（与 raccoon 逐格同构）', () => {
     expect(recordsLoomyRateLimit('upstream')).toBe(false)
   })
 
+  it('★★★ 中文腿只认「暂时不可用」—— 本仓自产文案不得被误伤', () => {
+    /**
+     * 我第一版写的是 `暂时不可用|服务不可用`，随后复核本仓自产文案时发现
+     * `src/astudio-credits.ts` 的 `额度服务不可用（HTTP 500）`（那条是
+     * 「后端地址没配」）与 `src/accio-messages.ts` 的 `附件服务不可用或读取失败`
+     * 都会命中 —— 它们与网关无关，判成 upstream 会逐个号重打一遍、白烧整池。
+     * ⇒ 收窄成只认「暂时不可用」（报障原句 `该模型服务**暂时**不可用` 仍覆盖）。
+     */
+    expect(classifyLoomyFailure('额度服务不可用（HTTP 500）', 500)).toBe('other')
+    expect(classifyLoomyFailure('附件服务不可用或读取失败', 500)).toBe('other')
+    // 报障原句必须仍然命中
+    expect(classifyLoomyFailure('该模型服务暂时不可用，请切换其他模型试试', 503)).toBe('upstream')
+  })
+
   it('★★ 状态码闸门：**同一句文案**在 4xx 上不得判 upstream（防白烧整池）', () => {
     // 400 参数错的文案里也可能带 gateway/upstream 字样 —— 泛化会让确定性
     // 失败变成「可换号」，逐个号重打一遍。

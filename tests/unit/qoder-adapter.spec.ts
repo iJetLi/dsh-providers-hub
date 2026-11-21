@@ -3222,3 +3222,40 @@ describe('传输级失败：换号优先 + 同号退避 + cause 可读（issue I
     expect(transportErrorDetail(dirty)).not.toContain('p a@')
   })
 })
+
+/**
+ * ★★ **判据共享后的 qoder 新行为**（2026-11-21，随 loomy issue #130 的修正引入）。
+ *
+ * 判据被提取到 `src/upstream-error.ts` 作为**唯一实现**，qoder 改为
+ * `import` + 同名 `re-export` —— **接口零改动**，但行为**不是**零变化：
+ * 共用实现比 qoder 原来的正则多了中文腿（`暂时不可用`）。
+ *
+ * 这是有意的（同一形态本该同判），但如果**没有这条用例**，将来有人把中文腿
+ * 删掉、或把 qoder 的 re-export 换回私有副本，qoder 侧不会有任何红灯。
+ *
+ * ⚠️ 为什么 qoder 也要测：qoder 是这条判据的**原始宿主**（2026-10-20 那次
+ * 1374 会话实测：`504 Gateway Time-out` 74 次 + `First Token Timeout` 6 次），
+ * 它的行为不能被「提取成共用实现」这个重构悄悄改掉而不留痕。
+ */
+describe('qoder：判据共享后的中文腿（issue #130 副产物）', () => {
+  it('★★ 中文「暂时不可用」+ 5xx ⇒ `upstream`', () => {
+    expect(classifyQoderFailure('SERVER', '该模型服务暂时不可用，请切换其他模型试试', 503)).toBe('upstream')
+    expect(classifyQoderFailure('SERVER', '服务暂时不可用', 500)).toBe('upstream')
+  })
+
+  it('★★ 同一句中文但 4xx ⇒ 不得判 `upstream`（状态码闸门）', () => {
+    expect(classifyQoderFailure('INVALID_REQUEST', '服务暂时不可用', 400)).toBe('other')
+  })
+
+  it('★★ `服务不可用`（无「暂时」）**不得**判 upstream —— 本仓自产文案会误伤', () => {
+    /**
+     * `src/astudio-credits.ts` 有 `额度服务不可用（HTTP 500）`、
+     * `src/accio-messages.ts` 有 `附件服务不可用或读取失败`。
+     * 前者是「后端地址没配」、后者是「读附件失败」，**都与网关无关**；
+     * 判成 upstream 会逐个号重打一遍。
+     * ⇒ 中文腿只认「暂时不可用」，这两条必须落 `other`。
+     */
+    expect(classifyQoderFailure('SERVER', '额度服务不可用（HTTP 500）', 500)).toBe('other')
+    expect(classifyQoderFailure('SERVER', '附件服务不可用或读取失败', 500)).toBe('other')
+  })
+})
