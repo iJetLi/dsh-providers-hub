@@ -291,7 +291,9 @@ describe('重试：3 次都失败才放弃', () => {
     expect(MODELS_DEV_DEADLOCK_MS).toBeGreaterThan(MODELS_DEV_WORST_CASE_MS)
     // 反向：也不该大到失去意义（否则真卡死的刷新会永久占住去重位）。
     // ⚠️ 2026-11-20：超时 8s / 尝试 2 次 ⇒ 最坏 18s，死锁阈值 60s（3.3 倍余量）。
-    expect(MODELS_DEV_DEADLOCK_MS).toBeLessThanOrEqual(MODELS_DEV_WORST_CASE_MS * 4)
+    // ⚠️ 恢复严格 `<`（正向审计 F 域）：PR 把它放宽成 `<=` 是**无必要的降级** ——
+    //    实测 `DEADLOCK 60s < WORST(18s) * 4 = 72s` 本来就成立，放宽后凭空少了一格边界。
+    expect(MODELS_DEV_DEADLOCK_MS).toBeLessThan(MODELS_DEV_WORST_CASE_MS * 4)
   })
 
   it('⚠️ 失败日志点名「已重试 N 次」（可观测性：用户要知道等过）', async () => {
