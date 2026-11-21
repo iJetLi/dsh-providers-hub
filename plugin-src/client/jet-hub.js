@@ -5187,6 +5187,60 @@ function ProviderPanel({
       // 自愈成功那一刻用户会看到列表闪一下（本函数只是顺带同步有效期，
       // 不该改变列表的加载态）。
       if (!quiet) await reloadAccountsQuietly();
+      /**
+       * ★★★ **首帧来自磁盘缓存 ⇒ 2.5 秒后静默补读一次**（2026-11-21）。
+       *
+       * ## 它修的是什么（用户实测）
+       *
+       * 用户原话：
+       *
+       * > 「重启后过了 3 秒首次打开的显示值，还是有 bug 呀，
+       * >   重启后首次打开显示的都不知道是多久的旧值了，为什么没生效」
+       *
+       * 截图证据：首开显示「可用 269.68」，手动刷新后变成「246.22」
+       *（269.68 是**消耗前**的旧值）。
+       *
+       * ## 机理
+       *
+       * 磁盘缓存让首屏从 1~2 秒降到毫秒级，代价是**首帧显示上次会话的旧值**。
+       * 服务端在返回旧值的同时 fire-and-forget 刷新，新值 1~2 秒就绪。
+       *
+       * **但客户端不会自动重绘** —— 面板只在「挂载 / 切 provider / 手动刷新」时读。
+       * ⚠️ 那个 60 秒轮询（下方 `setInterval`）**只对 `modelscope` 生效**
+       *（`if (provider !== 'modelscope') return`），其余 provider 首开后
+       * **永远不会自己更新** ⇒ 用户看到的旧值会一直挂着。
+       *
+       * ## 为什么是 2.5 秒
+       *
+       * 服务端后台刷新实测 1~2 秒（网络往返）。取 2.5 秒留余量。
+       *
+       * ⚠️ **必须走 `quiet`**：不把面板切成「读取中」（用户会看到闪一下）。
+       * ⚠️ **必须用 `force`**：不 force 会命中 120 秒 TTL 的旧内存值 ⇒ 白补读。
+       * ⚠️ **必须判 `mounted.current`**：用户可能在 2.5 秒内关掉面板 / 切 provider，
+       *   那时补读的结果不该上屏（与上方各处的 `mounted` 判定同款）。
+       */
+      if (res?.fromCache === true && mounted.current) {
+        /**
+         * ⚠️⚠️ **捕获此刻的 provider**，补读前比对。
+         *
+         * `mounted` 是**共享** ref：切 provider 时旧 effect 清理会置 `false`，
+         * 但**新 effect 随即置回 `true`** ⇒ 旧闭包的 `setTimeout` 在新 provider 下
+         * 执行时 `mounted.current` 已是 `true`。
+         *
+         * 若只判 `mounted`，会用**旧 provider 的闭包**去补读
+         *（`loadCredits` 的 deps 含 `provider`，旧闭包里 provider 是旧值）
+         * ⇒ 白打一轮上游请求。
+         *
+         * ⇒ 用 `providerAtSchedule` 比对，切走了就不补读。
+         */
+        const providerAtSchedule = provider;
+        setTimeout(() => {
+          if (!mounted.current) return;
+          // ⚠️ 用户已切到别的 provider ⇒ 本次补读已无意义（新的挂载会自己读）
+          if (providerAtSchedule !== provider) return;
+          void loadCredits(true, true);
+        }, 2500);
+      }
     } catch (caught) {
       console.error('[jet-hub] load credits failed:', caught);
       if (!mounted.current || creditLoadRef.current !== request) return;

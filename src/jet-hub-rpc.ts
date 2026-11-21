@@ -9745,6 +9745,19 @@ function registerJetHubEndpoints(
       case 'credits.balances': {
         const req = payload as RpcCreditsBalancesRequest
         /**
+         * ★★★ **本次查询是否有账号命中磁盘缓存**（2026-11-21）。
+         *
+         * 用于回传 `fromCache`，让客户端知道「首帧可能是旧值，2~3 秒后要补读一次」。
+         *
+         * ⚠️ 为什么由 `readCachedBalance` 闭包**写外部变量**而不是改返回值：
+         * `collectCreditBalances` 的返回类型（`RpcCreditsBalanceAccount[]`）
+         * 被多处消费，改它影响面大；而本标记只服务本端点的一次响应。
+         *
+         * ⚠️ **只记「磁盘缓存命中」**（stale 且无 error），不记「上游失败兼顶」——
+         * 后者补读只会再失败一次、白打一轮请求。
+         */
+        let sawDiskCacheHit = false
+        /**
          * ★ 共享读数槽要用的**凭据**（2026-10-16）。
          *
          * ⚠️ 为什么不能直接用 `accounts` 里现成的：那些条目只有 `credentialRef`，
@@ -10351,6 +10364,30 @@ function registerJetHubEndpoints(
                     { force: forced },
                   )
                   if (reading.value === undefined) return undefined
+                  /**
+                   * ★★★ **记录「本次是否有账号来自磁盘缓存」**
+                   *（2026-11-21，用于客户端决定要不要补读一次）。
+                   *
+                   * ## 为什么需要
+                   *
+                   * 磁盘缓存让重启后首屏从 1~2 秒降到毫秒级，代价是**首帧显示上次会话的旧值**。
+                   * 服务端会 fire-and-forget 刷新，新值 1~2 秒后就绪 ——
+                   * **但客户端不会自动重绘**（面板只在挂载/切 provider/手动刷新时读，
+                   * 60 秒轮询此前只对 `modelscope` 生效）。
+                   *
+                   * ⇒ 用户实测：「重启后过 3 秒首次打开，显示的还是很旧的旧值」。
+                   *
+                   * ## 判据
+                   *
+                   * `reading.stale === true` **且** `reading.error === undefined`
+                   * ⇒ 这是「磁盘缓存命中」（不是「上游失败兼顶」）。
+                   *
+                   * ⚠️ 后者（带 error 的 stale）不该触发补读 —— 上游已挂，
+                   *   补读只会再失败一次、白打一轮请求。
+                   */
+                  if (reading.stale === true && reading.error === undefined) {
+                    sawDiskCacheHit = true
+                  }
                   return {
                     balance: reading.value as CreditBalance,
                     stale: reading.stale,
@@ -10376,13 +10413,30 @@ function registerJetHubEndpoints(
         const value: RpcCreditsBalancesResponse = usesWindow
           ? {
             accounts: values,
+            /**
+             * ★ **本次是否有账号来自磁盘缓存**（2026-11-21）。
+             *
+             * 客户端据此在 2~3 秒后**静默补读一次**（不上屏，用户明确要求
+             * 「前端不显示任何信息」）。
+             *
+             * ⚠️ 为什么必须有它：磁盘缓存让首屏从 1~2 秒降到毫秒级，
+             * 代价是首帧显示上次会话的旧值；服务端会 fire-and-forget 刷新，
+             * 新值 1~2 秒就绪 —— **但客户端不会自动重绘**
+             *（60 秒轮询此前只对 `modelscope` 生效）。
+             *
+             * ⇒ 用户实测：「重启后过 3 秒首次打开，显示的还是旧值」。
+             */
+            ...sawDiskCacheHit ? { fromCache: true } : {},
             // ★ per-provider 窗口（2026-11-19）：与选号路径同源。
             ...(() => {
               const w = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
               return { windowDays: w.windowDays, imminentDays: w.imminentDays }
             })(),
           }
-          : { accounts: values }
+          : {
+            accounts: values,
+            ...sawDiskCacheHit ? { fromCache: true } : {},
+          }
         return { ok: true, value }
       }
 
