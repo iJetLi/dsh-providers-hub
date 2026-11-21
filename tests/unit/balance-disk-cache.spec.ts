@@ -285,3 +285,70 @@ describe('balance-disk-cache', () => {
   })
 })
 
+
+/**
+ * ★★★ **只有「值真的变了」才落盘**（本轮新代码的 O(N) 写盘修法）。
+ *
+ * ## 为什么这条必须存在
+ *
+ * `BalanceReading` 的第一个字段是 **`at`（取数时刻）** —— 它**每次读数都变**。
+ * 我第一版修法是裸 `JSON.stringify(reading)` 比对 ⇒ **永远判「变了」**
+ * ⇒ 写盘频率一点没降、判据等于没判（自己踩的坑，写在这里免得后人重踩）。
+ *
+ * ⇒ 正确判据是「**语义字段**的稳定序列化」：排除 `at`、键序归一、保留
+ * `value` / `error` / `stale`。
+ *
+ * ⚠️ 徽标每 60 秒轮询一次、每次覆盖**所有**账号，而 `flushDisk` 是
+ * `writeFileSync`（同步）且序列化整份 memory ⇒ 判据失效就是 O(N) 同步写盘。
+ */
+describe('余额磁盘缓存：值没变就不写盘', () => {
+  /**
+   * ⚠️ 这组用例**必须自己初始化环境**：它们写在 `describe('balance-disk-cache')`
+   * **之外**，拿不到那个 `beforeEach` 的临时目录与开关（第一版因此直接 ENOENT）。
+   *
+   * ⚠️ 观察方式也是**读文件里的 `at`**，不是 `flushDisk()` 的返回值 ——
+   * `noteDiskReading` **内部就会立即写盘**（作者的设计），写没写在返回值上看不出来。
+   */
+  let home: string
+  const fileAt = (): number => (JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as { at: number }).at
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'bdc-dedup-'))
+    process.env.DSH_HOME = home
+    setBalanceDiskCacheEnabledForTest(true)
+    resetBalanceDiskCacheStateForTest()
+  })
+  afterEach(() => {
+    setBalanceDiskCacheEnabledForTest(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it('★★★ 同一个值（仅 `at` 不同）不得触发第二次写盘', () => {
+    noteDiskReading('qoder', 'acct-1', { at: 1, value: { remaining: 100 } })
+    const first = fileAt()
+    // 同样的 value、不同的 at ⇒ 不该再写（文件 at 不变）。
+    noteDiskReading('qoder', 'acct-1', { at: 999_999, value: { remaining: 100 } })
+    expect(fileAt(), '仅 `at` 变了不算值变化 —— 否则徽标轮询就是 O(N) 同步写').toBe(first)
+  })
+
+  it('★★★ 键序不同但内容相同 ⇒ 仍不得写盘', () => {
+    noteDiskReading('qoder', 'acct-1', { at: 1, value: { a: 1, b: 2 } })
+    const first = fileAt()
+    noteDiskReading('qoder', 'acct-1', { at: 2, value: { b: 2, a: 1 } })
+    expect(fileAt(), '键序不是语义 —— 对象构造路径不同不该触发写盘').toBe(first)
+  })
+
+  it('★★★ 值真的变了必须写盘（反向守卫，防判据过度收敛）', () => {
+    noteDiskReading('qoder', 'acct-1', { at: 1, value: { remaining: 100 } })
+    const first = fileAt()
+    noteDiskReading('qoder', 'acct-1', { at: 2, value: { remaining: 90 } })
+    expect(fileAt(), '余额变了必须落盘（否则强杀后丢新值 = 本 PR 要修的原缺陷）').not.toBe(first)
+  })
+
+  it('★★★ `error` / `stale` 是语义字段 —— 变了也要写盘', () => {
+    noteDiskReading('qoder', 'acct-1', { at: 1, value: { remaining: 100 } })
+    const first = fileAt()
+    noteDiskReading('qoder', 'acct-1', { at: 2, value: { remaining: 100 }, error: '上游挂了' })
+    expect(fileAt(), '`error` 参与语义').not.toBe(first)
+  })
+})

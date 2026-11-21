@@ -266,6 +266,40 @@ export function readDiskReading(provider: string, accountId: string): unknown | 
  * （`balance-cache.ts`）已经过滤了「成功且非兼顶」的值，
  * 失败读数不会触发写盘 ⇒ 上游抖动时不产生额外 IO。
  */
+/**
+ * ★★★ **内容指纹**：判断两条读数「是不是同一个值」。
+ *
+ * ## 为什么不能用 `JSON.stringify(reading)` 直接比（我自己踩的坑）
+ *
+ * `BalanceReading` 的第一个字段是 **`at`（取到该读数的时刻，以毫秒计）** ——
+ * 它**每次读数都会变**。于是裸 `JSON.stringify` 比对**永远判「变了」**，
+ * 我那格「值没变就不写盘」的判据**等于没判**（写盘频率一点没降）。
+ *
+ * ## 两条纪律
+ *
+ * 1. **排除 `at`**：它不承载「余额是多少」这个信息，只记时刻。
+ *    重启后用户看到的是**旧值**（`value`），`at` 新一点不会让它变新。
+ * 2. **键序归一**：`JSON.stringify({a:1,b:2})` 与 `{b:2,a:1}` 是不同字符串，
+ *    而它们是**同一个值**。比较前把对象的键排序，否则「对象构造路径不同」
+ *    会让判据失效（上游解析/缓存兼顶的构造路径确实不同）。
+ *
+ * ⚠️ `error` 与 `stale` **参与**比对：它们是语义字段（「本次失败」/「这是旧值」），
+ *   变了就是用户看到的东西变了，必须落盘。
+ */
+function contentKeyOf(reading: unknown): string {
+  if (reading === null || typeof reading !== 'object') return `raw:${JSON.stringify(reading) ?? 'undefined'}`
+  const record = reading as Record<string, unknown>
+  // 排序键的稳定序列化（递归；数组保持顺序 —— 顺序本身是语义）。
+  const stable = (value: unknown): unknown => {
+    if (value === null || typeof value !== 'object') return value
+    if (Array.isArray(value)) return value.map(stable)
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    return Object.fromEntries(entries.map(([k, v]) => [k, stable(v)]))
+  }
+  // 只取语义字段（`at` 刻意排除，见上）。
+  return JSON.stringify(stable({ value: record.value, error: record.error, stale: record.stale }))
+}
+
 export function noteDiskReading(provider: string, accountId: string, reading: unknown): void {
   if (!cacheEnabled) return
   const key = keyOf(provider, accountId)
@@ -285,7 +319,7 @@ export function noteDiskReading(provider: string, accountId: string, reading: un
    *    `at` 新一点并不会让它变新；而 `at` 每次必变，拿它做判据等于没判。
    */
   const previous = memory[key]
-  const changed = previous === undefined || JSON.stringify(previous.reading) !== JSON.stringify(reading)
+  const changed = previous === undefined || contentKeyOf(previous.reading) !== contentKeyOf(reading)
   memory[key] = { at: Date.now(), reading }
   if (!changed) return
   dirty = true
