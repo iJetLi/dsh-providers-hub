@@ -374,6 +374,64 @@ describe('★★★ 跨钩子寿命上限（P0：限流→解禁→继续→又�
     advanceTo(clock + 3 * 60 * 60 * 1000)
     expect(calls, '重启不得成为绕过上限的后门').toEqual([])
   })
+
+  /**
+   * ★★★ **重开总开关不得撤销「逐个关闭」**（对抗审计 P1，2026-11-21）。
+   *
+   * 我上一版 `setEnabled` 写的是 `hook.armed = enabled` —— 一锅端。后果：
+   * 用户在列表里把某个会话关掉（`hook.armed=false`）之后，只要重新打开总开关，
+   * 它就被**一起打开**（审计实测 deliveries=2）。那等于替他撤销了「这一个别动」。
+   * ⇒ `userEnabled`（全局）与 `hook.armed`（逐会话）是两个维度，只能取与。
+   */
+  it('★★★ 重开总开关不得把用户逐个关掉的会话重新武装', () => {
+    const calls: string[] = []
+    const engine = engineWith({ deliver: () => { calls.push('resume'); return { ok: true } } })
+    engine.noteInterruption({
+      sessionId: 'a', turn: 1, provider: 'p', model: 'm', kind: 'rate',
+      failure: { code: 'RATE_LIMIT', message: '429' },
+    })
+    engine.noteInterruption({
+      sessionId: 'b', turn: 1, provider: 'p', model: 'm', kind: 'rate',
+      failure: { code: 'RATE_LIMIT', message: '429' },
+    })
+    // 用户单独关掉 b
+    engine.setArmed('b', false)
+    // 关总开关再开回来（模拟用户「先全关、再全开」的操作节奏）
+    engine.setEnabled(false)
+    engine.setEnabled(true)
+    advanceTo(clock + 3 * 60 * 60 * 1000)
+    expect(calls, '被逐个关掉的 b 不得因重开总开关而被重新武装').toEqual(['resume'])
+  })
+
+  it('★★★ `lockedOff`（env 硬闸门）下界面开不起来', () => {
+    const calls: string[] = []
+    const engine = engineWith({
+      lockedOff: true,
+      deliver: () => { calls.push('resume'); return { ok: true } },
+    })
+    engine.noteInterruption({
+      sessionId: 'z', turn: 1, provider: 'p', model: 'm', kind: 'rate',
+      failure: { code: 'RATE_LIMIT', message: '429' },
+    })
+    expect(engine.setEnabled(true), 'env 关着时 setEnabled(true) 必须返回 false（生效值）').toBe(false)
+    advanceTo(clock + 3 * 60 * 60 * 1000)
+    expect(calls, 'env=DSH_RATE_LIMIT_RESUME=0 时界面不得越过它').toEqual([])
+  })
+
+  /**
+   * ★★ **结构化码不得被文案正则掩码**（对抗审计：删掉整条 `RATE_CODES` 仍 22/22 绿）。
+   *
+   * 原用例写的是 `{ code: 'RATE_LIMIT', message: '429' }` —— message 里的 `429`
+   * 同样命中 `RATE_TEXT`，于是**删掉码判据也照样通过**。判据必须让其它腿不足以
+   * 挡住它（本仓库记过同型教训：zcode 的 `action.type` 那次）。
+   */
+  it('★★ 结构化码 `RATE_LIMITED` / `TOO_MANY_REQUESTS` 必须**单独**生效（无文案辅助）', () => {
+    expect(classifyRateLimitFailure({ code: 'RATE_LIMITED', message: 'opaque' })).toBe('rate')
+    expect(classifyRateLimitFailure({ code: 'TOO_MANY_REQUESTS', message: 'opaque' })).toBe('rate')
+    // 反向：文案与状态码都不帮忙 ⇒ 必须是 undefined（不是 rate）
+    expect(classifyRateLimitFailure({ code: 'SOMETHING', message: 'opaque' })).toBeUndefined()
+  })
+
 })
 
 /**
@@ -528,12 +586,22 @@ describe('installRateLimitResume', () => {
     expect(doc.enabled).toBe(true)
   })
 
-  it('全局默认可以关掉（新中断不再 armed）', () => {
+  it('全局默认可以关掉（生效值变 false）', () => {
     const { ctx, pool, emitSession } = harness()
     installRateLimitResume(ctx as never, pool as never)
     expect(setRateLimitResumeEnabled(false)).toBe(false)
     emitSession(session, rateLimitTurnEnd(raccoonMessageAt(Date.now() + 30 * 60 * 1000)))
-    expect(readRateLimitResumeState('session-a').hooks[0]!.armed).toBe(false)
+    /**
+     * ⚠️ **语义变更（2026-11-21 对抗审计 P1 修复的必然结果）**：
+     * `hook.armed` 的含义已从「**生效**是否自动继续」改成「**用户对该会话的意图**」，
+     * 全局开关由 `state.enabled`（= `!lockedOff && userEnabled`）单独表达，两者取与。
+     *
+     * 为什么要拆：原先 `setEnabled` 写 `hook.armed = enabled`，用户逐个关掉的会话
+     * 会在**重开总开关**时被一起打开（实测 deliveries=2）—— 等于替他撤销了
+     * 「这一个别动」的决定。拆开后「全局关掉」不再改写用户意图。
+     */
+    expect(readRateLimitResumeState('session-a').hooks[0]!.armed, '用户意图仍是「要续跑」').toBe(true)
+    expect(readRateLimitResumeState('session-a').enabled, '但全局生效值是 false').toBe(false)
   })
 
   it('注入类 user/message 不撤钩子，人类发言才撤（真缺陷回归）', () => {

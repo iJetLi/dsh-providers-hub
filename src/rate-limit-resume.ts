@@ -294,6 +294,15 @@ export interface RateLimitResumeEngineOptions {
   readonly deliver?: (hook: RateLimitResumeHook) => { ok: true } | { ok: false; reason: string }
   readonly note?: (decision: RateLimitResumeDecision) => void
   readonly enabled?: boolean
+  /**
+   * **环境变量级硬闸门**（`DSH_RATE_LIMIT_RESUME=0`）。为真时**界面也开不起来**。
+   *
+   * 审计实测（对抗 P1）：env=0 + 落盘 `enabled:true` 时，原生行为是「UI 一开就生效」
+   * ⇒ 用户在宿主层面明确说「不要这个功能」，界面上点一下就能越过 —— 那不是开关，
+   * 那是建议。语义上 env 是「这个宿主根本不要它」，用户开关是「我要不要」，
+   * 两者必须取**与**，且 env 不可被 UI 覆盖。
+   */
+  readonly lockedOff?: boolean
   readonly maxHooks?: number
 }
 
@@ -343,7 +352,20 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
    */
   const resumes = new Map<string, number>()
   const recent: RateLimitResumeDecision[] = []
-  let enabled = options.enabled !== false
+  /** `DSH_RATE_LIMIT_RESUME=0` 的硬闸门：一旦为真，**任何 UI 操作都开不起来**。 */
+  const lockedOff = options.lockedOff === true
+  /**
+   * **用户开关**（落盘 `enabled`，UI 可改）。
+   *
+   * ⚠️ 与 `hook.armed` 是**两个维度**：
+   * - `userEnabled` = 「这个功能整体要不要自动做」；
+   * - `hook.armed`   = 「**这个会话**要不要自动继续」（用户在列表里逐个关）。
+   * 早先 `setEnabled` 把 `hook.armed = enabled` 一锅端 ⇒ 用户重新打开总开关时，
+   * 他逐个关掉的那几个会话被**一起打开**（审计实测 deliveries=2）。
+   */
+  let userEnabled = options.enabled !== false
+  /** 生效值 = 硬闸门没关 **且** 用户开关是开的。 */
+  const enabledNow = (): boolean => !lockedOff && userEnabled
   let disposed = false
 
   function snapshot(hook: InternalHook): RateLimitResumeHook {
@@ -361,7 +383,7 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
   }
 
   function save(): void {
-    persist([...hooks.values()].map(snapshot), enabled, Object.fromEntries(resumes))
+    persist([...hooks.values()].map(snapshot), userEnabled, Object.fromEntries(resumes))
   }
 
   function record(sessionId: string, message: string): void {
@@ -387,7 +409,7 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
       cancel(hook.timer)
       hook.timer = undefined
     }
-    if (disposed || !hook.armed) return
+    if (disposed || !hook.armed || !enabledNow()) return
     const raw = hook.resetAtMs - now()
     if (!Number.isFinite(raw)) return
     const delay = Math.min(Math.max(raw, MIN_FIRE_DELAY_MS), MAX_WAIT_MS)
@@ -399,7 +421,7 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
 
   /** 到点：先复核号池，再投递；投递不成按 {@link RETRY_MS} 重试（**不丢钩子**）。 */
   function attempt(hook: InternalHook): void {
-    if (disposed || hooks.get(hook.sessionId) !== hook || !hook.armed) return
+    if (disposed || hooks.get(hook.sessionId) !== hook || !hook.armed || !enabledNow()) return
     const current = now()
     if (current < hook.unlockAtMs - 1000) {
       // 被提前唤醒（时钟跳变 / 注入的假调度器 / 重试间隔早于解禁时刻）：
@@ -514,7 +536,7 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
         kind: input.kind,
         unlockAtMs: resolved.at,
         resetAtMs: resolved.at,
-        armed: enabled,
+        armed: true,
         deferrals: 0,
         timer: undefined,
       }
@@ -609,7 +631,16 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
     },
     /** 改全局默认（只影响**之后**的中断）。 */
     setEnabled(value: boolean): boolean {
-      enabled = value === true
+      /**
+       * ★ **只改用户开关，不动 `hook.armed`**（对抗审计 P1，2026-11-21）。
+       *
+       * 我在上一版把 `hook.armed = enabled` 一锅端 —— 后果是：用户逐个关掉的会话
+       * 在重新打开总开关时被**一起打开**（实测 deliveries=2），等于替他撤销了
+       * 「这一个别动」的决定。两个维度必须分开。
+       *
+       * ⚠️ `lockedOff`（env 硬闸门）下本方法**开不起来**：返回生效值而非入参。
+       */
+      userEnabled = value === true
       /**
        * ★ **必须追溯已挂着的钩子**（2026-11-21 对抗审计 P1）。
        *
@@ -621,12 +652,9 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
        *    清掉 timer 且不重排）；开：把落盘里仍 `armed` 的钩子重新武装回来。
        * ⚠️ 不 `drop` 它们 —— 钩子本身是「待续跑」的事实，开关只管「要不要自动做」。
        */
-      for (const hook of hooks.values()) {
-        hook.armed = enabled
-        armTimer(hook)
-      }
+      for (const hook of hooks.values()) armTimer(hook)
       save()
-      return enabled
+      return enabledNow()
     },
     /** 读当前状态（RPC 与持久化都走它）。 */
     status(): {
@@ -635,7 +663,7 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
       recent: readonly RateLimitResumeDecision[]
     } {
       return {
-        enabled,
+        enabled: enabledNow(),
         hooks: [...hooks.values()]
           .map(snapshot)
           .sort((left, right) => left.resetAtMs - right.resetAtMs),
@@ -684,15 +712,11 @@ export function createRateLimitResumeEngine(options: RateLimitResumeEngineOption
           unlockAtMs,
           resetAtMs,
           /**
-           * ★ **全局开关必须管住落盘的已武装钩子**（对抗审计 P1）。
-           *
-           * 原实现是 `armed: raw.armed !== false` ⇒ 用户明确设了
-           * `DSH_RATE_LIMIT_RESUME=0`（或界面上关掉）之后，重启时**落盘里
-           * `armed: true` 的钩子照样被武装**、到点照样发请求。
-           * 审计实测：env=0 + 落盘 armed:true ⇒ 仍然 followup。
-           * ⇒ 只有引擎**整体启用**时才继承落盘的 armed。
+           * ★ 落盘的 `armed` 是**用户对这个会话的意图**，原样继承；
+           * 「全局要不要自动做」由 {@link enabledNow} 在 `armTimer` 里另判。
+           * 两者取与 ⇒ env=0 时即便落盘 armed:true 也不会投递（审计 P1 有牙）。
            */
-          armed: enabled && raw.armed !== false,
+          armed: raw.armed !== false,
           deferrals: typeof raw.deferrals === 'number' && Number.isInteger(raw.deferrals) && raw.deferrals >= 0
             ? Math.min(raw.deferrals, MAX_DEFERRALS)
             : 0,
@@ -886,6 +910,12 @@ export function installRateLimitResume(ctx: Context, pool: AccountPool): void {
     //    「用户在界面上关过」。先把落盘值写进引擎（设置页读它），再让环境变量
     //    直接把默认值压成 false。
     enabled: loaded.enabled && rateLimitResumeEnabled(),
+    /**
+     * ★ **env 是硬闸门，界面不得越过**（对抗审计 P1）。
+     * `rateLimitResumeEnabled()` 读 `DSH_RATE_LIMIT_RESUME`；它关着时
+     * `setEnabled(true)` 返回 false、不投递。
+     */
+    lockedOff: !rateLimitResumeEnabled(),
     persist: (hooks, enabled, resumes) => save(hooks, enabled, resumes),
     note: (decision) => {
       ctx.logger?.info?.(`[jet-hub] 限流续跑 ${decision.sessionId}: ${decision.message}`)
