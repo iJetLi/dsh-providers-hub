@@ -85,27 +85,56 @@ describe('balance-disk-cache', () => {
       expect(isDiskDirty(), '已写盘 ⇒ 脏标记清').toBe(false)
     })
 
-    it('★★★ 之后的 `noteDiskReading` **不立即写盘**（用户要求减少写盘）', () => {
-      noteDiskReading('buddy', 'a1', reading) // 首次 ⇒ 写盘
-      // 之后的读数只置脏标记，等 30 分钟定时器 / 退出钩子
+    /**
+     * ★★★ **每条读数都必须立即落盘**（2026-11-21 二次修订）。
+     *
+     * ## 上一版是错的（用户实测打穿）
+     *
+     * 上一版：首次写盘，之后只置脏标记，靠「30 分钟定时器 + 退出钩子」。
+     *
+     * 而**退出钩子在强制退出时不触发**（任务管理器 / 关机 / 崩溃）
+     * ⇒ 新值全部丢失 ⇒ 下次重启又读到旧文件。
+     *
+     * 实测证据：文件 mtime 是 20:37（确实写过），但里面 60 条读数的时刻
+     * 全是 17:45~19:52（**50~176 分钟前**）—— 那次写盘写的是旧读数。
+     *
+     * ## 修法
+     *
+     * `noteDiskReading` 每次都调 `flushDisk()`。
+     *
+     * ⚠️ 成本可接受：`flushDisk` 是同步原子写（tmp → rename），60 条约 40KB，
+     * 实测 <5ms；而余额查询本身要 1~2 秒（网络往返）⇒ 写盘开销不到 0.5%。
+     */
+    it('★★★ 每条读数都必须立即落盘（强杀不丢新值）', () => {
+      noteDiskReading('buddy', 'a1', reading)
       noteDiskReading('buddy', 'a2', reading)
-      expect(isDiskDirty(), '第二条只置脏标记').toBe(true)
-      // 文件里仍只有第一条（第二次还没 flush）
-      const parsed = JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as {
-        readings: Record<string, unknown>
-      }
-      expect(Object.keys(parsed.readings)).toEqual(['buddy:a1'])
-    })
-
-    it('★★★ `flushDisk` 把后续读数写盘', () => {
-      noteDiskReading('buddy', 'a1', reading) // 首次已自动写
-      noteDiskReading('buddy', 'a2', reading) // 只置脏
-      expect(flushDisk(), '有脏数据 ⇒ 写').toBe(true)
-      expect(isDiskDirty()).toBe(false)
+      // ⚠️ 两条都必须在文件里（不是只有第一条）
       const parsed = JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as {
         readings: Record<string, unknown>
       }
       expect(Object.keys(parsed.readings).sort()).toEqual(['buddy:a1', 'buddy:a2'])
+      expect(isDiskDirty(), '已写盘 ⇒ 脏标记清').toBe(false)
+    })
+
+    it('★★★ 读数变化后文件内容真的更新（不是只改内存镜像）', () => {
+      noteDiskReading('buddy', 'a1', { at: 1, value: { balance: 111 } })
+      let parsed = JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as {
+        readings: Record<string, { reading: { value: { balance: number } } }>
+      }
+      expect(parsed.readings['buddy:a1']?.reading.value.balance).toBe(111)
+
+      // 新值 222
+      noteDiskReading('buddy', 'a1', { at: 2, value: { balance: 222 } })
+      parsed = JSON.parse(readFileSync(balanceDiskCacheFile(), 'utf8')) as typeof parsed
+      expect(
+        parsed.readings['buddy:a1']?.reading.value.balance,
+        '★★★ 磁盘文件必须反映最新值（否则重启读到旧值）',
+      ).toBe(222)
+    })
+
+    it('★★ 没有新读数时 flushDisk 不重复写（避免空转 IO）', () => {
+      noteDiskReading('buddy', 'a1', reading) // 已自动写
+      expect(flushDisk(), '无脏数据 ⇒ 不写').toBe(false)
     })
 
     it('★★ 没有脏数据 ⇒ flush 不写盘（空转的定时器不产生 IO）', () => {
