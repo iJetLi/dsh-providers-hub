@@ -820,6 +820,38 @@ describe('issue #123：拒发原因的公开与脱敏', () => {
       .toBe('code=40012；message=需要完成人机验证')
   })
 
+  it('★★★ 全角分隔符 / 多值 / 裸 sk- / sid / 方案+冒号（对抗审计 8/10 那批）', () => {
+    /**
+     * 对抗审计实测我第一版**漏 8/10**（只 JSON 与无空格 key=value 有牙）：
+     *
+     * | 形态 | 我第一版的错 |
+     * |---|---|
+     * | `token = FAKE` | 被认证方案规则的 `Token` **吃掉**、值残留（**修 A③ 引入的新回归**）|
+     * | `token＝FAKE` / `token：FAKE` | 只认 ASCII 分隔符 |
+     * | `session_id` / `sid` | 词表没有 |
+     * | 裸 `sk-…` | 没有字段名可锚 |
+     * | `Bearer: x` / `Bearer= x` | 方案后只认空白 |
+     * | `token=a,b` | 值规则排除逗号 ⇒ 第二值漏 |
+     */
+    const cases: Array<[string, string]> = [
+      ['token = FAKE（方案撞字段名）', 'token = FAKE_R1'],
+      ['全角等号', 'token＝FAKE_R2'],
+      ['全角冒号', 'token：FAKE_R3'],
+      ['session_id', 'session_id=FAKE_R4'],
+      ['sid', 'sid=FAKE_R5'],
+      ['裸 sk-', 'sk-FAKE_R6abcdefgh'],
+      ['Bearer 冒号', 'Bearer: FAKE_R7'],
+      ['Bearer 等号', 'Bearer=FAKE_R8'],
+      ['多值第二值', 'token=FAKE_R9,FAKE_R0'],
+      ['Basic 冒号', 'Authorization: Basic: FAKE_RX'],
+      ['裸 session', 'session=FAKE_RY'],
+      ['session_key', 'session_key=FAKE_RZ'],
+    ]
+    for (const [label, input] of cases) {
+      expect(redactBaizhiText(input), `漏了（${label}）：${input}`).not.toMatch(/FAKE_R[0-9X]/)
+    }
+  })
+
   it('★★★ 词表覆盖 `x-api-key` / `secretKey` / `password` / `Basic` 认证', () => {
     // 正向审计 A③ X1–X9：这些形态原先会漏。
     const cases = [

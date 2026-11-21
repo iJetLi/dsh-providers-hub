@@ -213,37 +213,39 @@ function unwrapEnvelope(raw: unknown): unknown {
  */
 export function redactBaizhiText(text: string): string {
   /**
-   * ⚠️ **顺序不能反**（实测踩过）：必须先吃 `Bearer xxx`，再吃 `key=value`。
+   * ⚠️ **顺序与词表都有讲究**（2026-11-21 对抗审计实测 8/10 形态漏，全修在此）。
    *
-   * 反过来的话 `Authorization: Bearer TOKEN` 会被 key=value 规则先匹配成
-   * `Authorization=***`（`\S+` 只吃掉 `Bearer` 这个词）⇒ **TOKEN 原样留在后面**
-   * —— 我那版用例就是这么红出来的（`'Authorization=*** FAKE_TOKEN…'`）。
+   * ## 为什么 `Token` **不**在认证方案词表里
+   *
+   * 我把 `Token` 当认证方案加进去（想覆盖 `Token xxx`），结果**撞上字段名**：
+   * `token = FAKE` 被方案规则吃成 `token ***`，**值原样留在后面** —— 这是我
+   * 修 A③ 时引入的**新回归**（旧版反而能打码）。⇒ 方案只认 `Bearer|Basic|Digest`。
+   *
+   * ## 分隔符要认全角
+   *
+   * 中文报障常带全角 `＝`/`：`（`token＝FAKE`），只认 ASCII 会整条漏。
    */
   return text
+    // ① 认证方案 + 令牌（方案后可跟空白**或冒号** —— `Bearer: xxx` 也是常见写法）
+    .replace(/\b(Bearer|Basic|Digest)[:\s=]+[A-Za-z0-9._~+/=-]+/gi, '$1 ***')
+    // ② Cookie 专名（含全角分隔符）
+    .replace(/(?:baizhi_session|sl-session)\s*[=:：＝]\s*[^;,\s]+/gi, 'cookie=***')
     /**
-     * ① 认证方案后的令牌（先）。`Bearer` 之外还有 `Basic`（base64 的用户名:口令）
-     * 与 `Digest` —— 上游错误体回显 `Authorization` 头时三种都可能出现。
-     */
-    .replace(/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 ***')
-    // ② `Cookie: baizhi_session=xxx; sl-session=yyy`
-    .replace(/(?:baizhi_session|sl-session)=[^;\s]+/gi, 'cookie=***')
-    /**
-     * ③ `key=value` / `key: value` / **JSON 形态** `"key":"value"`（后）。
+     * ③ 通用键值：`key=v` / `key: v` / `"key":"v"` / 全角分隔 / **多值**。
      *
-     * ⚠️ **必须容忍键值两侧的引号** —— 我第一版写的是裸 `key\s*[=:]`，
-     * 于是 `{"session_cookie":"FAKE_ABC"}` **原样输出、凭据直接漏到界面上**
-     *（自测探针实跑抓到的，不是理论）。而**上游的错误体就是 JSON** ⇒ 现实可达。
-     *
-     * `["']?` 两侧各一个可选引号，覆盖 `"key":"v"` / `'key': 'v'` / `key=v`。
+     * - 词表覆盖三类写法（`api_key` / `api-key` / `apikey`）与常见敏感键名，
+     *   并补审计点名的 `session_id` / `sid` / `client_secret` / `password`；
+     * - 值用 `[^"'}\s]+`（**含逗号**）⇒ `token=a,b` 的两段一起吃掉
+     *   （旧版只吃第一段，第二值漏；这是审计 D 组的实测格）；
+     * - 值遇 `"`/`'`/`}`/空白即停 ⇒ 不会跨 JSON 字段误吃。
      */
     .replace(
-      // 词表覆盖三类写法（`api_key` / `api-key` / `apikey`）与常见敏感键名。
-      // 正向审计 X1–X9 实测过 `x-api-key`/`secretKey`/`password` 等原先会漏。
-      /((?:x-)?api[-_]?key|secret[-_]?key|client[-_]?secret|session[-_]?cookie|access[-_]?token|refresh[-_]?token|authorization|password|passwd|cookie|token|secret)["']?\s*[=:]\s*["']?[^"',}\s]+/gi,
+      /((?:x-)?api[-_]?key|secret[-_]?key|client[-_]?secret|session(?:[-_]?(?:id|cookie|key|token))?|access[-_]?token|refresh[-_]?token|authorization|password|passwd|cookie|token|secret|sid)["']?\s*[=:：＝]\s*["']?[^"'}\s]+/gi,
       '$1=***',
     )
+    // ④ 裸 `sk-…`（上游 key 的常见前缀，不带任何字段名）
+    .replace(/\bsk-[A-Za-z0-9._-]{8,}/g, 'sk-***')
 }
-
 /**
  * 从领取响应里取**允许公开**的失败原因（issue #123 第 3 项）。
  *
