@@ -1499,8 +1499,58 @@ export async function collectCreditBalances<TCredential = BuddyCredential, TProd
       const cached = await deps.readCachedBalance(entry.id, { force: deps.force === true })
       if (cached !== undefined) {
         balance = cached.balance
-        if (cached.stale) {
-          error = `本次查询失败，显示的是 ${new Date(cached.at).toLocaleString('zh-CN')} 的数据（${cached.error ?? '上游不可达'}）`
+        /**
+         * ★★★ **只有「真实失败」才设 `error`，缓存命中不设**
+         *（2026-11-21 真实回归修复）。
+         *
+         * ## 回归现象（用户截图实测）
+         *
+         * 7 个 qodercn 账号的积分行全部显示成：
+         *
+         * ```
+         * 积分  显示的是 2026/11/21 20:16:10 的缓存读数
+         * ```
+         *
+         * 而用户要的是**积分数字**，不是「数据来源」。
+         *
+         * ## 机理
+         *
+         * 客户端的 `CreditBalanceRow` 是**二选一**渲染：
+         *
+         * ```js
+         * if (error || !balance) {
+         *   return <dd data-tone="warn">{error}</dd>   // ← 只显示 error，积分不渲染
+         * }
+         * // 有 balance 才往下画积分
+         * ```
+         *
+         * ⇒ 只要 `error` 有值，**积分数字根本不出现**。
+         *
+         * ## 为什么原来设 error 是对的、现在不对
+         *
+         * 本段逻辑原本只服务**兼顶**（`getServingStale` 的「上游失败、拿上次成功值顶上」）——
+         * 那种情况确实该告诉用户「这是旧数据，因为查失败了」。
+         *
+         * 但我新加的**磁盘缓存命中**也返回 `stale: true`（语义是「这是上次会话的数据」），
+         * 它**不是失败** —— 它是**正常且预期**的首屏路径。
+         * 两者共用同一个 `stale` 标记 ⇒ 被这段逻辑一视同仁地当成失败。
+         *
+         * ## 判据：`cached.error !== undefined`
+         *
+         * | 来源 | `stale` | `error` | 该不该提示 |
+         * |---|---|---|---|
+         * | 兼顶（上游失败）| true | **有值** | ✅ 该提示「本次查询失败」 |
+         * | **磁盘缓存命中** | true | **无值** | ❌ **不该提示**（用户要积分）|
+         * | 正常新鲜值 | false | 无值 | ❌ 不提示 |
+         *
+         * ⇒ 只有「带 `error` 的 stale」才是真失败。
+         *
+         * ⚠️ 这与用户 2026-10-16 的原始要求**不矛盾**：他当时要的是
+         * 「**查失败时**拿旧数据顶上并说明原因」，不是「每次命中缓存都说明来源」。
+         * 且他在 2026-11-21 明确说：「期间都是后台静默完成，**前端也不必要显示任何信息**」。
+         */
+        if (cached.stale && cached.error !== undefined) {
+          error = `本次查询失败，显示的是 ${new Date(cached.at).toLocaleString('zh-CN')} 的数据（${cached.error}）`
         }
       }
     }
@@ -9948,7 +9998,34 @@ function registerJetHubEndpoints(
                     accountId: account.id,
                     nickname: account.nickname,
                     balance: cachedBalance,
-                    error: `显示的是 ${new Date(cached.at ?? Date.now()).toLocaleString('zh-CN')} 的缓存读数`,
+                    /**
+                     * ⚠️⚠️ **绝不设 `error`**（2026-11-21 真实回归修复）。
+                     *
+                     * 我上一版写的是：
+                     *
+                     * ```ts
+                     * error: `显示的是 ${...} 的缓存读数`,
+                     * ```
+                     *
+                     * 那是**错的** —— 客户端 `CreditBalanceRow` 的渲染逻辑是：
+                     *
+                     * ```js
+                     * if (error || !balance) {
+                     *   return <dd data-tone="warn" title={error}>{error}</dd>   // ← 只显示 error
+                     * }
+                     * // 有 balance 才往下渲染积分
+                     * ```
+                     *
+                     * ⇒ 只要带 `error`，**积分数字根本不渲染**，用户看到的是
+                     * 「显示的是 2026/11/21 20:16:10 的缓存读数」那一整行
+                     *（截图实测：7 个 qodercn 账号全部如此）。
+                     *
+                     * 用户明确要求：「**我要求的是显示积分，而不是积分的来源**」。
+                     *
+                     * ⇒ 缓存命中时**只返回 balance**，不附加任何说明。
+                     * 代价是用户看不出这是缓存值 —— 那是用户接受的取舍
+                     *（他原话：「期间都是后台静默完成，前端也不必要显示任何信息」）。
+                     */
                   }
                 }
               }

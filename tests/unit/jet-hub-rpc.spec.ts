@@ -8197,4 +8197,93 @@ describe('qoder 特例分支的磁盘缓存接线', () => {
       .toContain('余额查询失败')
     expect(branch, '必须带 detailed.error 作为原因').toContain('detailed.error')
   })
+
+  /**
+   * ★★★ **缓存命中时绝不给积分行附 `error`**（2026-11-21 真实回归）。
+   *
+   * ## 回归现象（用户截图实测）
+   *
+   * 7 个 qodercn 账号的积分行全部显示成
+   * 「积分  显示的是 2026/11/21 20:16:10 的缓存读数」。
+   *
+   * 用户原话：「**我要求的是显示积分，而不是积分的来源**」。
+   *
+   * ## 机理
+   *
+   * 客户端 `CreditBalanceRow` 是**二选一**渲染：
+   * `if (error || !balance) return <dd>{error}</dd>` ⇒ 只要 `error` 有值，
+   * **积分数字根本不渲染**。
+   *
+   * ⚠️ 本处用源码文本断言：真跑 `credits.balances` 需要十几层替身
+   *（ctx.credentials / pool / qoderFetchForAccount / fetchQoderBalanceDetailed /
+   * loadQoderWebStore …），成本远超收益。而缺陷形态是「**多了一行 error**」，
+   * 文本断言足以抓住。
+   */
+  it('★★★ qoder 缓存命中分支不得带 error（否则积分数字被顶掉）', () => {
+    const branch = qoderBranch()
+    // 定位「命中磁盘 ⇒ 返回」那个块：从 readDiskReading 到主路径凭据解析之间
+    const readIdx = branch.indexOf('readDiskReading(')
+    expect(readIdx).toBeGreaterThan(-1)
+    const mainIdx = branch.indexOf('const resolved = await ctx.credentials.resolve', readIdx)
+    expect(mainIdx).toBeGreaterThan(readIdx)
+    const hitBlock = branch.slice(readIdx, mainIdx)
+
+    // 必须返回 balance
+    expect(hitBlock, '必须回传 balance').toContain('balance: cachedBalance')
+    /**
+     * ⚠️⚠️ **不得出现 `error:` 赋值**（只看**代码行**，排除注释）。
+     *
+     * 去掉这一行后，客户端才会渲染积分数字。
+     *
+     * ⚠️ 必须剥注释：修复点的说明里**故意引用了错误写法**作为对照
+     *（`error: \`显示的是 ... 的缓存读数\``），不剥会把注释当成代码。
+     */
+    const codeOnly = hitBlock
+      .split('\n')
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join('\n')
+    expect(codeOnly, '★★★ 缓存命中不得设 error（用户要积分，不要来源说明）')
+      .not.toMatch(/\berror\s*:\s*[`'"]/)
+  })
+})
+
+/**
+ * ★★★ **正常路径（非 qoder）的 `stale → error` 转换必须判 `cached.error`**
+ *（2026-11-21 真实回归）。
+ *
+ * 见 `qoder 缓存命中分支不得带 error` 那条的说明。
+ *
+ * 本处守的是 `collectCreditBalances` 里那段：
+ *
+ * ```ts
+ * if (cached.stale && cached.error !== undefined) {   // ← 必须两个条件
+ *   error = `本次查询失败，显示的是 ...`
+ * }
+ * ```
+ *
+ * ⚠️ 若退化成只判 `cached.stale`，则**磁盘缓存命中**（stale 但无 error）
+ * 也会被当成失败 ⇒ 所有 provider 的积分行都变成「显示的是…的缓存读数」
+ * ⇒ 用户看到的不是积分。这正是本次回归的形态。
+ */
+describe('credits.balances 的 stale → error 转换判据', () => {
+  const rpcSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../../src/jet-hub-rpc.ts'),
+    'utf8',
+  )
+
+  it('★★★ 必须同时判 `stale` 与 `error !== undefined`（只判 stale 会让缓存命中被当失败）', () => {
+    // 定位 collectCreditBalances 里那段转换
+    const marker = 'if (cached.stale'
+    const idx = rpcSource.indexOf(marker)
+    expect(idx, '找不到 stale → error 转换').toBeGreaterThan(-1)
+
+    // 取该行完整内容
+    const lineStart = rpcSource.lastIndexOf('\n', idx) + 1
+    const lineEnd = rpcSource.indexOf('\n', idx)
+    const line = rpcSource.slice(lineStart, lineEnd).trim()
+
+    expect(line, '★★★ 必须判 cached.error !== undefined（否则缓存命中被当失败）')
+      .toMatch(/cached\.error\s*!==\s*undefined/)
+    expect(line, '且必须判 cached.stale').toMatch(/cached\.stale/)
+  })
 })
