@@ -48,7 +48,7 @@ import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
 //    ⚠️ `Login-Version` / `Cosy-ClientIp` / `Cosy-MachineId` 是 **WASM 头表自带的**，
 //    不在补的清单里（补了永远命中不了「缺失」分支 = 死代码），见 `alignmentEntries()`。
 import { applyQoderAlignmentHeaders, withQoderAlignmentHeaders } from './qoder-align.js'
-import { acquireQoderRequest, qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
+import { acquireQoderRequest, isQoderSlotBusy, qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
 import { retryAfterMsFromResponse } from './retry-after.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
 import {
@@ -281,7 +281,15 @@ export { looksLikeUpstreamProviderError }
  * 后者是**额度专用**判据（含文案兜底），保留原样不动（既有调用方与测试
  * 依赖它）。本函数是**更宽**的分类入口，额度也在其中。
  */
-export type QoderFailureClass = 'quota' | 'rate' | 'auth' | 'upstream' | 'other' | 'transport'
+/**
+ * `.` `slot-busy`（issue #117）：**本地并发名额被占** —— 不是上游错误，是
+ * 「这个账号正在跑别的请求」。语义上属于「**要换号、但绝不写冷却**」：
+ * - {@link shouldRotateQoderAccount} 是 `cls !== 'other'` ⇒ 自动为 true ✅
+ * - {@link recordsQoderRateLimit} 只认 `quota`/`rate` ⇒ 自动为 false ✅
+ *   （名额忙不是账号额度问题，写冷却会把**好号**封掉）
+ */
+export type QoderFailureClass =
+  | 'quota' | 'rate' | 'auth' | 'upstream' | 'other' | 'transport' | 'slot-busy'
 
 /**
  * 单次 `stream()` 里，**传输级失败**最多允许的额外尝试次数（不含首发）。
@@ -2056,7 +2064,13 @@ export class QoderAdapter extends LlmAdapter {
     //
     // ⇒ 用 `this.product.id`（取值恰好是 `'qoder'` / `'qodercn'`），
     //   国际版的输出**逐字节不变**，中国版从此说自己的名字。
-    const label = this.product.id
+    //
+    // ⚠️ 声明**下移**到「名额拿到之后、`sendEncrypted` 之前」（issue #117）：
+    //   `tests/unit/qoder-proxy.spec.ts` 有一条加固断言 ——「从 `const label` 起
+    //   600 **字符**（去注释后）的窗口里必须出现 `fetcherForCurrentAccount()`，
+    //   且不得出现裸 `await fetch(`」。本 PR 在两者之间插入了换号逻辑，
+    //   把那个调用挤出了窗口 ⇒ 断言变红。把 label 挪到**紧邻** `sendEncrypted`
+    //   的位置既保住原断言的语义（它要守的是「推理块走 fetcher」），又让窗口重归紧凑。
     /**
      * 本轮已用掉的**传输级**额外尝试次数（每次换一个账号，见
      * {@link QODER_TRANSPORT_MAX_RETRIES}）。
@@ -2088,9 +2102,31 @@ export class QoderAdapter extends LlmAdapter {
     let emitted = false
     for (;;) {
       const request = await buildRequest(credential)
-      using slot = guardTraffic
-        ? await acquireQoderRequest(this.product.id, credential.uid!, options.signal)
-        : undefined
+      /**
+       * ★★★ **名额被占 ⇒ 换下一个账号**（GitHub issue #117 的主修）。
+       *
+       * 修前这里是裸 `await acquireQoderRequest(...)`：名额被占时抛 `QUEUE`，
+       * 而**抛点在换号通路之外**（`switchAccountOnQuota` 只挂在额度/401-403/
+       * 其它非 ok 三条分支上）⇒ 一个账号占着名额 = **整条渠道的新会话全部失败**，
+       * 多账号池在这一步完全没起作用。
+       *
+       * 现在把它接上：命中结构化标记就换号并 `continue` 重发。
+       * ⚠️ 三条边界全部在 {@link acquireSlotOrRotate} 里。
+       */
+      const acquired = await this.acquireSlotOrRotate({
+        guardTraffic,
+        credential,
+        options,
+        tried: triedAccounts,
+        activeAccountId,
+        emitted,
+      })
+      if (acquired.kind === 'rotate') {
+        credential = acquired.credential
+        activeAccountId = acquired.accountId
+        continue
+      }
+      using slot = acquired.slot
       if (queueAttempts > 0 && Date.now() >= queueDeadline) {
         throw new LlmError('qoder: 排队等待超时', 'QUEUE')
       }
@@ -2122,6 +2158,9 @@ export class QoderAdapter extends LlmAdapter {
        * ② **abort 绝不重试**（用户点了停止还继续发是不可接受的行为）；
        * ③ **耗尽后抛原错误**，保住 `cause`（上层要能程序化取真因）。
        */
+      // ⚠️ 声明在 `try` **之前**（`catch` 与后面若干分支都要用它），
+      //    但仍在 `using slot` 之后 —— 见上方「声明下移」那段注释。
+      const label = this.product.id
       try {
         response = await this.sendEncrypted(request, options, fetcherForCurrentAccount())
       } catch (error) {
@@ -2422,6 +2461,63 @@ export class QoderAdapter extends LlmAdapter {
    *   忘记传时静默退化成「一律记额度冷却」—— 那正是 2026-10-10「全池被封」的形态。
    * @returns 新凭据；无可用账号时 `undefined`（调用方如实抛出原错误）。
    */
+  /**
+   * 申请本地并发名额；**名额被占时自动换下一个账号**（GitHub issue #117）。
+   *
+   * ## 为什么单独抽一个方法而不是就地 `try/catch`
+   *
+   * 调用点用的是 `using slot = …`（`Disposable` 的**作用域**释放）。若把
+   * `await acquireQoderRequest(...)` 直接包进 `try`，「换号后 continue」与
+   * 「slot 在迭代结束时释放」这两件事会混在同一个 try 里 —— 换号路径上
+   * `using` 根本没执行，而正常路径上它又必须活到迭代末尾。抽成「返回
+   * `{kind:'ok', slot}` 或 `{kind:'rotate', …}`」就干净了：调用方拿到结果再决定
+   * `continue` 还是 `using`，两件事各自在自己的作用域里。
+   *
+   * ## 三条边界（issue 逐条点名的，全部在这里）
+   *
+   * 1. **拿不到当前账号 id ⇒ 不换号**：没有身份就无法把它加进 `tried`，
+   *    池可能把同一个号再给回来（死循环风险）。
+   * 2. **已 `emitted` ⇒ 不换号**：换号会重发整条请求，已输出的片段会被再吐一遍
+   *    （与 PR #79 对抗审计 P0 那条不变式**同源**）。
+   * 3. **换不到号 ⇒ 抛原错误**：所有号都忙时，「本地排队」才是正确结论 ——
+   *    不能静默挂起、也不能变成无限重试。
+   *
+   * ⚠️ 计数语义：本路径**不消费** `transportRetries` / `queueAttempts` ——
+   * 名额是本地资源竞争，不是上游让我等、也不是传输故障。上限由 `tried` 集合
+   * 与池的大小天然兜住（每个号最多试一次）。
+   */
+  private async acquireSlotOrRotate(input: {
+    readonly guardTraffic: boolean
+    readonly credential: QoderCredential
+    readonly options: GenerateOptions
+    readonly tried: Set<string>
+    readonly activeAccountId: string | undefined
+    readonly emitted: boolean
+  }): Promise<
+    | { readonly kind: 'ok'; readonly slot: Disposable | undefined }
+    | { readonly kind: 'rotate'; readonly credential: QoderCredential; readonly accountId: string }
+  > {
+    try {
+      const slot = input.guardTraffic
+        ? await acquireQoderRequest(this.product.id, input.credential.uid!, input.options.signal)
+        : undefined
+      return { kind: 'ok', slot }
+    } catch (error) {
+      // 边界③的一半：不是名额冲突 ⇒ 原样抛（其它错误仍走既有通路）。
+      if (!isQoderSlotBusy(error)) throw error
+      // 边界②：已经向消费者吐过内容 ⇒ 换号会重放，宁可失败。
+      if (input.emitted) throw error
+      // 边界①：没有账号身份 ⇒ 无法 `tried`，不换。
+      if (input.activeAccountId === undefined || input.activeAccountId.length === 0) throw error
+      const next = await this.switchAccountOnQuota(
+        input.options, input.tried, input.activeAccountId, 'slot-busy',
+      )
+      // 边界③的另一半：换不到号 ⇒ 抛原错误（「本地排队」是正确结论）。
+      if (next === undefined) throw error
+      return { kind: 'rotate', credential: next.credential, accountId: next.accountId }
+    }
+  }
+
   private async switchAccountOnQuota(
     options: GenerateOptions,
     tried: Set<string>,

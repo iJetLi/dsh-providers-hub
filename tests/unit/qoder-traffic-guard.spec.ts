@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { acquireQoderRequest, qoderTrafficGuardEnabled } from '../../src/qoder-traffic-guard.js'
+import { LlmError } from '@deepseek-ai/dsh-llm'
+import { recordsQoderRateLimit, shouldRotateQoderAccount } from '../../src/qoder-adapter.js'
+import { acquireQoderRequest, isQoderSlotBusy, qoderTrafficGuardEnabled } from '../../src/qoder-traffic-guard.js'
 
 /**
  * `src/qoder-traffic-guard.ts` 的纯函数单测（PR #79 审计补；PR #80 补「至多生效一次」）。
@@ -216,5 +218,82 @@ describe('acquireQoderRequest：abort 与 dispose', () => {
       (error: unknown) => error,
     )
     expect(result).toMatchObject({ code: 'QUEUE' })
+  })
+})
+
+/**
+ * ★★★ GitHub issue #117：名额被占必须能被**换号通路**识别。
+ *
+ * 修前 `acquireQoderRequest` 抛 `QUEUE` 而**抛点在换号通路之外** ⇒ 一个账号占着
+ * 名额 = 整条渠道的新会话全部失败，多账号池在这一步完全没起作用。
+ *
+ * 修法：在错误对象上挂**结构化标记**（`Symbol.for('dsh.qoder.traffic.slot-busy')`），
+ * 适配器据此走 `switchAccountOnQuota`。
+ *
+ * ⚠️ 报障者在 issue 里明确警告：**不要匹配中文文案** ——「文案改词/换语言就会
+ * 静默失效，那一刻症状精确退回缺陷原样」。所以这里的守卫必须：
+ * ① 认出标记；② 同时钉住「文案与错误码**逐字未变**」（它们是对用户可见的契约）。
+ */
+describe('issue #117：名额冲突的结构化标记', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  /**
+   * 造一个「名额被占」的错误。
+   *
+   * ⚠️ 两个本文件的既有规范（文件头写着）：**每条用例用唯一 uid** +
+   * **必须 dispose**。我第一版用固定 uid 且不释放 ⇒ 第一条用例留下的 `active`
+   * 让后续用例的第一次 acquire 就抛错，失败出现在**别的用例**上（最难查的串台）。
+   */
+  async function busyError(provider = 'qoder'): Promise<unknown> {
+    const uid = nextUid()
+    const first = await acquireQoderRequest(provider, uid)
+    let captured: unknown
+    try {
+      await acquireQoderRequest(provider, uid)
+    } catch (error) {
+      captured = error
+    } finally {
+      ;(first as Disposable)[Symbol.dispose]()
+    }
+    if (captured === undefined) throw new Error('第二条本应被拒绝')
+    return captured
+  }
+
+  it('★★★ 名额被占的错误带标记 ⇒ `isQoderSlotBusy` 为真', async () => {
+    const error = await busyError()
+    expect(isQoderSlotBusy(error), '不带标记就换不了号').toBe(true)
+  })
+
+  it('★★★ 文案与错误码**逐字不变**（对用户可见的契约，issue 的硬要求）', async () => {
+    const error = await busyError()
+    expect(error).toBeInstanceOf(LlmError)
+    expect((error as LlmError).code, '码必须是 QUEUE').toBe('QUEUE')
+    expect((error as LlmError).message, '文案必须逐字保留').toBe('qoder: 本地账号并发已满，请稍后重试')
+  })
+
+  it('★★★ 不靠文案判定：把文案改掉，标记仍然为真', async () => {
+    /**
+     * 这条是**反向保护**：如果实现退化成 `message.includes('并发已满')`，
+     * 上游/翻译一改词就静默失效。这里直接构造一个**同码不同文案**的错误，
+     * 并断言「没有标记 ⇒ 不认」，反过来说明标记才是唯一判据。
+     */
+    const plain = new LlmError('qoder: 本地账号并发已满，请稍后重试', 'QUEUE')
+    expect(isQoderSlotBusy(plain), '只靠文案的错误不得被认成名额冲突').toBe(false)
+  })
+
+  it('★★★ 其它错误不得被误认（防误换号）', async () => {
+    expect(isQoderSlotBusy(new LlmError('boom', 'QUEUE'))).toBe(false)
+    expect(isQoderSlotBusy(new Error('本地账号并发已满'))).toBe(false)
+    expect(isQoderSlotBusy(undefined)).toBe(false)
+    expect(isQoderSlotBusy(null)).toBe(false)
+    expect(isQoderSlotBusy('QUEUE')).toBe(false)
+  })
+
+  it('★★★ `slot-busy` 在两张判定表上的语义：要换号、但**绝不写冷却**', () => {
+    // 名额忙不是账号额度问题 —— 写冷却会把**好号**封掉（issue 的验收标准之一）。
+    expect(shouldRotateQoderAccount('slot-busy'), '所有号都忙才该失败，单号忙必须换').toBe(true)
+    expect(recordsQoderRateLimit('slot-busy'), '写冷却会把好号封掉').toBe(false)
   })
 })
