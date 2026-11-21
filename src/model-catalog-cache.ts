@@ -56,7 +56,7 @@
  * 那由调用方（骨架）用 `isCatalogFresh` 判，本模块只管存取。
  */
 
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -133,10 +133,65 @@ interface CacheFile {
   complete: true
 }
 
-/** 缓存目录（`$DSH_HOME/cache/model-catalog`）。 */
+/**
+ * 缓存目录（`$DSH_HOME/jet-hub/cache/model-catalog`）。
+ *
+ * ## ⚠️ 2026-11-21：从 `$DSH_HOME/cache/model-catalog` 移到这里（用户要求）
+ *
+ * 用户原话：「缓存路径我觉得不对，应该路径中要有一级是以插件命名的文件夹，
+ * 这样才方便知道是本插件的缓存」。
+ *
+ * 改前放在 `$DSH_HOME/cache/` 下，与**上游第三方**的缓存（`models-dev.json`、
+ * `opencode-capabilities.json`）混在一起 —— 用户在那个目录里根本分不清
+ * 「哪些是插件自己的、哪些是上游数据的镜像」。
+ *
+ * ⇒ 移进 **`$DSH_HOME/jet-hub/`**（本插件既有的持久化目录，`state.json` /
+ * `permanent-locks.json` / `auto-checkin.json` 都在这里）下的 `cache/` 子目录。
+ *
+ * ⚠️ **为什么不直接放 `jet-hub/` 根下**：根下的文件是**状态**（丢了会影响
+ * 功能，比如账号池、锁定表）；缓存是**纯优化**（丢了只是慢一次）。
+ * 分开放让「可以安全删除」这件事一眼可见。
+ *
+ * ⚠️ **旧路径的清理**：改路径后旧目录会变成孤儿。启动时会调
+ * {@link pruneLegacyCacheDir} 删掉它（一次性，幂等）。
+ */
 export function modelCatalogCacheDir(): string {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+  return join(home, 'jet-hub', 'cache', 'model-catalog')
+}
+
+/**
+ * 旧版（2026-11-21 之前）的缓存目录：`$DSH_HOME/cache/model-catalog`。
+ *
+ * ⚠️ 只用于**一次性清理**（见 {@link pruneLegacyCacheDir}）。
+ */
+function legacyModelCatalogCacheDir(): string {
+  const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
   return join(home, 'cache', 'model-catalog')
+}
+
+/**
+ * 删掉旧路径下的缓存目录（**幂等**，启动时调一次）。
+ *
+ * ⚠️ 存在意义：路径迁移后旧目录会留下孤儿文件（实测 4 个 provider 的
+ * 目录缓存约 25KB）。不清它会一直占着 `~/.dsh/cache/`，而用户按新路径
+ * 找不到它们时会困惑「为什么删了还在」。
+ *
+ * ⚠️ 失败静默（删不掉只是留个孤儿，不该阻断启动）。
+ *
+ * @returns 是否真的删了一个存在的目录（供诊断与单测）
+ */
+export function pruneLegacyCacheDir(): boolean {
+  const legacy = legacyModelCatalogCacheDir()
+  // ⚠️ 防御：新路径若与旧路径重合（未来再改路径时可能），绝不删当前在用的。
+  if (legacy === modelCatalogCacheDir()) return false
+  try {
+    if (!existsSync(legacy)) return false
+    rmSync(legacy, { recursive: true, force: true })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
