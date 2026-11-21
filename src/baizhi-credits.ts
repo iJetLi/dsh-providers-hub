@@ -182,7 +182,15 @@ function describeFailure(status: number, body: string): string {
       + '请重新用「浏览器登录」进入百智云并完成登录'
   }
   if (status === 429) return '请求过于频繁（HTTP 429），请稍后再试'
-  const text = body.trim().slice(0, 160)
+  /**
+   * ★★ **上游 body 必须先脱敏再截断**（正向审计 P1-1）。
+   *
+   * 这条是 `platformRequest` 的**唯一**错误出口 ⇒ 在它这里脱敏能一次覆盖
+   * 「领取 / 取题 / 换券」三处 HTTP 400 的 body，以及所有把它塞进
+   * `outcome.message` 与 `deps.warn` 的相邻分支（审计实测这些路径原先会
+   * 把凭据形态的值原样带到界面与日志）。
+   */
+  const text = redactBaizhiText(body).trim().slice(0, 160)
   return text.length > 0 ? `HTTP ${status}：${text}` : `HTTP ${status}`
 }
 
@@ -212,8 +220,11 @@ export function redactBaizhiText(text: string): string {
    * —— 我那版用例就是这么红出来的（`'Authorization=*** FAKE_TOKEN…'`）。
    */
   return text
-    // ① `Bearer xxx`（先）
-    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer ***')
+    /**
+     * ① 认证方案后的令牌（先）。`Bearer` 之外还有 `Basic`（base64 的用户名:口令）
+     * 与 `Digest` —— 上游错误体回显 `Authorization` 头时三种都可能出现。
+     */
+    .replace(/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 ***')
     // ② `Cookie: baizhi_session=xxx; sl-session=yyy`
     .replace(/(?:baizhi_session|sl-session)=[^;\s]+/gi, 'cookie=***')
     /**
@@ -225,7 +236,12 @@ export function redactBaizhiText(text: string): string {
      *
      * `["']?` 两侧各一个可选引号，覆盖 `"key":"v"` / `'key': 'v'` / `key=v`。
      */
-    .replace(/(session_cookie|access_token|refresh_token|api_key|apikey|authorization|cookie|token|secret)["']?\s*[=:]\s*["']?[^"',}\s]+/gi, '$1=***')
+    .replace(
+      // 词表覆盖三类写法（`api_key` / `api-key` / `apikey`）与常见敏感键名。
+      // 正向审计 X1–X9 实测过 `x-api-key`/`secretKey`/`password` 等原先会漏。
+      /((?:x-)?api[-_]?key|secret[-_]?key|client[-_]?secret|session[-_]?cookie|access[-_]?token|refresh[-_]?token|authorization|password|passwd|cookie|token|secret)["']?\s*[=:]\s*["']?[^"',}\s]+/gi,
+      '$1=***',
+    )
 }
 
 /**
@@ -256,9 +272,19 @@ export function publicClaimReason(raw: unknown): string | undefined {
   const inner = record.data !== null && typeof record.data === 'object' && !Array.isArray(record.data)
     ? record.data as Record<string, unknown>
     : record
+  /**
+   * ★ **外层信封的字段只在「信封本身是失败」时才取**（正向审计 P1-2）。
+   *
+   * 真实上游回 `{ code: 0, message: 'success', data: { claimed: false } }` ——
+   * 把外层 `message` 当原因会写出**「上游未发放（message=success）」**这种自相
+   * 矛盾的话。我第一版就是这个行为，而**测试 fixture 恰好省掉了顶层 `message`**
+   * ⇒ 用例是假绿（审计用真实信封形状打出来的）。
+   */
+  const outerCode = record.code
+  const envelopeOk = outerCode === 0 || outerCode === '0'
   const parts: string[] = []
   for (const key of ['code', 'error_code', 'reason', 'message', 'msg', 'detail']) {
-    const value = inner[key] ?? record[key]
+    const value = inner[key] ?? (envelopeOk ? undefined : record[key])
     if (typeof value !== 'string' && typeof value !== 'number') continue
     /**
      * ⚠️ **`code: 0` 是成功码，不是失败原因**。

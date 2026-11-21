@@ -781,14 +781,60 @@ describe('issue #123：拒发原因的公开与脱敏', () => {
     }
   })
 
-  it('★★★ 结果先脱敏**再**截断（反序会把 token 切成半截漏出去）', () => {
-    // 构造一个「token 恰好跨 200 字边界」的报文：若先截断，`token=abc…` 会被切半，
-    // 脱敏正则就匹配不上、半截 token 直接漏到界面。
+  it('★★ 结果不超过 200 字，且跨边界的凭据仍被打码', () => {
+    /**
+     * ⚠️ **更正**（正向审计 P2-3）：我原先在这条用例的注释里断言
+     * 「反序（先截断）会把 token 切成半截漏出去」—— **那个说法不成立**。
+     * 实测：脱敏正则吃整段 `[^"',}\s]+`，被切半的 `token=SECRET_SE` 仍会被
+     * 整段吃掉 ⇒ 反序**也**不会漏。顺序保留是为了鲁棒性，不是因为反序必漏。
+     * （原注释已更正；变异 M3「换顺序」实测全绿，属**等价变异**。）
+     */
     const long = 'x'.repeat(190) + ' token=SECRET_SECRET_SECRET ' + 'y'.repeat(50)
     const reason = publicClaimReason({ message: long })
     expect(reason).toBeDefined()
     expect(reason!.length).toBeLessThanOrEqual(200)
     expect(reason).not.toContain('SECRET_SECRET')
+  })
+
+  it('★★★ `publicClaimReason` **内部**必须脱敏（删掉那个调用仍全绿的假绿）', () => {
+    /**
+     * 正向审计 P2-2：我在别处测了 `redactBaizhiText`，但**没测** `publicClaimReason`
+     * 会不会调用它 ⇒ 删掉内部那行脱敏，**50/50 全绿**。
+     * 这条用例直接喂一个带凭据的报文，钉住「值被取出来之后也要过一遍脱敏」。
+     */
+    const reason = publicClaimReason({ message: 'token=FAKE_INNER_ABC 鉴权失败' })
+    expect(reason).toBeDefined()
+    expect(reason, '内部没调 redactBaizhiText 就会原样带出').not.toContain('FAKE_INNER_ABC')
+    expect(reason).toContain('***')
+  })
+
+  it('★★★ `message: "success"` 不是失败原因（真实信封 {code:0,message:success,data}）', () => {
+    /**
+     * 正向审计 P1-2：真实上游回 `{code:0, message:'success', data:{claimed:false}}`，
+     * 而我第一版会取外层 `message` ⇒ 写出**「上游未发放（message=success）」**。
+     * 我原来的 fixture 恰好省掉了顶层 `message`，所以是假绿。
+     */
+    expect(publicClaimReason({ code: 0, message: 'success', data: { claimed: false } })).toBeUndefined()
+    // 反向对照：信封**本身**是失败时，外层 message 仍然要取（否则真因又丢了）
+    expect(publicClaimReason({ code: 40012, message: '需要完成人机验证', data: { claimed: false } }))
+      .toBe('code=40012；message=需要完成人机验证')
+  })
+
+  it('★★★ 词表覆盖 `x-api-key` / `secretKey` / `password` / `Basic` 认证', () => {
+    // 正向审计 A③ X1–X9：这些形态原先会漏。
+    const cases = [
+      '{"x-api-key":"FAKE_X1"}',
+      '"api-key": "FAKE_X2"',
+      '{"secretKey":"FAKE_X3"}',
+      'secret_key=FAKE_X4',
+      '{"password":"FAKE_X5"}',
+      'Authorization: Basic FAKE_X6',
+      '{"client_secret":"FAKE_X7"}',
+    ]
+    for (const input of cases) {
+      const out = redactBaizhiText(input)
+      expect(out, `漏了：${input}`).not.toMatch(/FAKE_X\d/)
+    }
   })
 
   it('★★ 上游没有任何可公开字段 ⇒ 返回 undefined（调用方写「原因未知」）', () => {
@@ -843,5 +889,49 @@ describe('issue #123：失败文案要带上游原因与官网入口', () => {
     const message = outcome.kind === 'failed' ? outcome.message : ''
     expect(message).toContain('原因未知')
     expect(message).toContain('https://baizhi.cloud/console/')
+  })
+})
+
+/**
+ * ★★★ 正向审计 P1-1：**相邻失败分支**也必须脱敏。
+ *
+ * 我只给 `claimed=false` 那一格接了脱敏，而这三条路径的 body 会原样进
+ * `outcome.message` / `deps.warn`：
+ * ① 取题（challenge）HTTP 400 的 body；② 换券（redeem）400；③ 领取（claim）400。
+ * 审计实测这些路径**凭据形态的值会存活**。修法是在 `describeFailure`（唯一出口）
+ * 里脱敏 ⇒ 一次覆盖三处 + 所有 `warn`。
+ */
+describe('issue #123：HTTP 失败 body 的脱敏（P1-1）', () => {
+  it('★★★ 取题 400 的 body 带凭据形态 ⇒ message 不得原样带出', async () => {
+    const { fetchImpl } = routeFetch([
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }) },
+      {
+        match: BAIZHI.captchaChallengePath,
+        status: 400,
+        // 假凭据（字面量，不引用任何真实值）
+        body: JSON.stringify({ error: 'bad request', token: 'FAKE_LEAK_CHALLENGE' }),
+      },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    expect(outcome.kind).toBe('failed')
+    const message = outcome.kind === 'failed' ? outcome.message : ''
+    expect(message, '400 body 里的 token 不得原样进失败文案').not.toContain('FAKE_LEAK_CHALLENGE')
+    expect(message).toContain('HTTP 400')
+  })
+
+  it('★★★ 领取 400 的 body 带凭据形态 ⇒ 同样不得原样带出', async () => {
+    const { fetchImpl } = routeFetch([
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }) },
+      { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
+      { match: BAIZHI.captchaRedeemPath, body: JSON.stringify({ code: 0, data: { token: 'deadbeef:1234567890abcde', success: true } }) },
+      {
+        match: BAIZHI.dailyTemporaryCreditPath,
+        status: 400,
+        body: JSON.stringify({ session_cookie: 'FAKE_LEAK_CLAIM', message: 'nope' }),
+      },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    const message = outcome.kind === 'failed' ? outcome.message : ''
+    expect(message).not.toContain('FAKE_LEAK_CLAIM')
   })
 })
