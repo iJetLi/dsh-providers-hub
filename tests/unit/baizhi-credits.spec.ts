@@ -848,7 +848,9 @@ describe('issue #123：拒发原因的公开与脱敏', () => {
       ['session_key', 'session_key=FAKE_RZ'],
     ]
     for (const [label, input] of cases) {
-      expect(redactBaizhiText(input), `漏了（${label}）：${input}`).not.toMatch(/FAKE_R[0-9X]/)
+      // ⚠️ 断言用 `/FAKE_R/`（不限字符）：我原先写 `[0-9X]` 而假值里有 `FAKE_RY`/`FAKE_RZ`
+      // ⇒ 那两条**断言恒真**（对抗审计 E8 实测「缩词表仍全绿」当场抓到的假绿）。
+      expect(redactBaizhiText(input), `漏了（${label}）：${input}`).not.toMatch(/FAKE_R/)
     }
   })
 
@@ -965,5 +967,43 @@ describe('issue #123：HTTP 失败 body 的脱敏（P1-1）', () => {
     const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
     const message = outcome.kind === 'failed' ? outcome.message : ''
     expect(message).not.toContain('FAKE_LEAK_CLAIM')
+  })
+})
+
+/**
+ * ★★★ 对抗审计最后两组「无守卫」（E12 / E6 / E13）。
+ *
+ * - **E12**：`!after.ok`（复核钱包本身失败）那条分支没有任何用例 —— 它是
+ *   「不能断言未发放」的**唯一**出口，文案必须同样脱敏且给官网入口。
+ * - **E6/E13**：白名单若被加进 `data` / `user_id`，没有任何用例会红
+ *   —— 那会把**账号标识**（用户 id）带进界面。
+ */
+describe('issue #123：复核失败分支与白名单边界', () => {
+  it('★★★ 复核钱包失败 ⇒ 「无法确认」文案 + 脱敏 + 官网入口', async () => {
+    const { fetchImpl } = routeFetch([
+      // 预检成功（未领取）
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      // 复核失败（500，body 带凭据形态）
+      { match: BAIZHI.walletBalancePath, status: 500, body: '{"token":"FAKE_COUNTERCHECK"}', once: true },
+      { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
+      { match: BAIZHI.captchaRedeemPath, body: JSON.stringify({ code: 0, data: { token: 'deadbeef:1234567890abcde', success: true } }) },
+      { match: BAIZHI.dailyTemporaryCreditPath, body: JSON.stringify({ code: 0, data: { claimed: false } }) },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    expect(outcome.kind).toBe('failed')
+    const message = outcome.kind === 'failed' ? outcome.message : ''
+    expect(message, '必须说明「无法确认」而不是断言未发放').toContain('无法确认')
+    expect(message, '复核失败的 body 同样要脱敏').not.toContain('FAKE_COUNTERCHECK')
+    expect(message, '同样要给官网入口').toContain('https://baizhi.cloud/console/')
+  })
+
+  it('★★★ 白名单不得取 `data` / `user_id` 这类账号标识', () => {
+    /**
+     * 若有人把 `data` 或 `user_id` 加进 `publicClaimReason` 的白名单，
+     * 账号标识会直接被印到界面/日志上。这条用例是那个边界的守卫。
+     */
+    expect(publicClaimReason({ data: 'FAKE_DATA_BLOB' }), '`data` 不是原因字段').toBeUndefined()
+    expect(publicClaimReason({ user_id: 'FAKE_UID_123' }), '`user_id` 不在白名单').toBeUndefined()
+    expect(publicClaimReason({ data: { user_id: 'FAKE_UID_456' } })).toBeUndefined()
   })
 })
