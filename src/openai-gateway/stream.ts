@@ -55,14 +55,18 @@ interface ToolState {
    */
   closed: boolean
   /**
-   * **出站**的稠密索引（按工具块首次出现顺序分配 0,1,2…）。
+   * **出站**的稠密索引（按**首次真正发出**的顺序分配 0,1,2…）。
    *
    * DSH 的 `chunk.index` 是**块索引**，与正文/思考共用同一个计数器 ⇒ 先出正文
    * 再出工具时它是 `1`。而 OpenAI 规范里 `tool_calls[].index` 是本帧调用在
    * 数组中的位置（0-based、稠密），openai-node 用它做 `toolCallSnapshot[index]`。
    * 直传块索引会让客户端组装出空洞。
+   *
+   * ⚠️ **延迟分配**（2026-11-21 对抗审计 P2-2）：名字不可用的调用会被抑制
+   * （一帧都不发），若它**提前占号**，后面真正发出的工具 index 会是 1,2…而缺 0
+   * ⇒ 又成了空洞（正是 issue D 要修的形态）。⇒ 只有**真正发帧时**才 `??=` 分配。
    */
-  openAiIndex: number
+  openAiIndex?: number
   /**
    * **已经发给客户端的**参数字符串（流式专用）。
    *
@@ -223,7 +227,6 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
           arguments: '',
           sentArguments: '',
           closed: false,
-          openAiIndex: state.nextToolIndex++,
         }
         state.tools.set(chunk.index, tool)
       }
@@ -262,6 +265,8 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
        * （它也是在名字可用时才发 `added`）。
        */
       if (!hasUsableToolName(tool.name)) return undefined
+      // ★ 首次真正发帧时才占号（P2-2：被抑制的调用不得留下 index 空洞）。
+      tool.openAiIndex ??= state.nextToolIndex++
       // 首帧把**已累积**的参数一次带出（此前一帧都没发过）；之后发增量。
       const payload = tool.sentArguments.length === 0 ? tool.arguments : chunk.argumentsDelta
       tool.sentArguments += payload
@@ -313,6 +318,16 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
        */
       const block = chunk.block
       if (block.type === 'text') {
+        /**
+         * ★★★ **first-close-wins 同样适用于正文/思考**（2026-11-21 对抗审计 P2-1）。
+         *
+         * 我只把 first-close-wins 加给了 `tool-call`，正文这格漏了 ⇒ 畸形流里
+         * 第二个 `block-end` 会**无条件覆盖**权威正文：实测
+         * `text-delta "AAA"` + `block-end "AAA"` + 重复 `block-end "ZZZ"`
+         * ⇒ 非流式 **`"ZZZ"`**（改前与 `BlockAssembler` / `responses.ts` 都是 `"AAA"`）
+         * ⇒ **改前对、改后错**。
+         */
+        if (state.contentOverrides.has(chunk.index)) return undefined
         // 按块号记录（多正文块的形态见 `Accumulated.contentOverrides` 的说明）。
         state.contentOverrides.set(chunk.index, block.text)
         /**
@@ -327,6 +342,8 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
         return undefined
       }
       if (block.type === 'reasoning') {
+        // 同上的 first-close-wins（思考块与正文同型）。
+        if (state.reasoningOverrides.has(chunk.index)) return undefined
         state.reasoningOverrides.set(chunk.index, block.text)
         if (!state.reasoningSentBlocks.has(chunk.index) && block.text.length > 0) {
           state.reasoningSentBlocks.add(chunk.index)
@@ -361,12 +378,13 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
           sentArguments: authoritative,
           argumentsOverride: block.arguments,
           closed: true,
-          openAiIndex: state.nextToolIndex++,
         }
         if (hasUsableToolName(block.name)) tool.name = block.name
         state.tools.set(chunk.index, tool)
         // 名字不可用 ⇒ 一帧都不发（与 delta / 补发分支同口径，见 P1′）。
         if (!hasUsableToolName(tool.name)) return undefined
+        // ★ 首次真正发帧时才占号（P2-2）。
+        tool.openAiIndex ??= state.nextToolIndex++
         return {
           delta: {
             tool_calls: [{
@@ -424,6 +442,7 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
        * 在「有 delta 但参数为空」这条路径上**没修好**。
        */
       if (hasUsableToolName(tool.name) && tool.sentArguments.length === 0) {
+        tool.openAiIndex ??= state.nextToolIndex++
         /**
          * ★ **出站值必须归一化**（审计 P2′）。
          *
@@ -567,7 +586,9 @@ export async function collectOpenAiCompletion(
    *   否则客户端会收到 `"name": ""` 并报 `unknown tool ""`。
    */
   const toolCalls = [...state.tools.values()]
-    .sort((left, right) => left.openAiIndex - right.openAiIndex)
+    // 非流式出口的 `openAiIndex` 可能从未分配（流式才需要它）⇒ 用哨兵值排到最后，
+    // 其余按分配顺序；无号者彼此的相对顺序由 Map 插入顺序决定（稳定排序）。
+    .sort((left, right) => (left.openAiIndex ?? Number.MAX_SAFE_INTEGER) - (right.openAiIndex ?? Number.MAX_SAFE_INTEGER))
     .filter((tool) => hasUsableToolName(tool.name))
     .map((tool) => {
       const raw = tool.argumentsOverride ?? tool.arguments

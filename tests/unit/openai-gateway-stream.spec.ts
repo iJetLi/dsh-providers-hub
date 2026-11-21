@@ -580,3 +580,50 @@ describe('issue #134：补发分支的名字闸门与归一化（P1′/P2′）'
     expect(toolFrames(out.join(''))[0]?.args, '流式 "" 会让客户端 JSON.parse("") 抛错').toBe('{}')
   })
 })
+
+/**
+ * ★★★ 两点对抗审计在**我修完 P1′/P2′ 之后**仍能复现（2026-11-21）。
+ *
+ * P2-1：first-close-wins 我只加给了 `tool-call`，**正文/思考那格漏了** ⇒
+ *       重复 `block-end` 会无条件覆盖权威正文（改前与 `BlockAssembler` /
+ *       `responses.ts` 都是第一值）⇒ **改前对、改后错**。
+ * P2-2：空名工具被抑制（一帧不发）却**提前占了 `openAiIndex`** ⇒ 后面真正发出的
+ *       工具 index 变成 1,2…而缺 0 ⇒ 又是空洞（正是 issue D 要修的形态）。
+ */
+describe('issue #134：正文的 first-close-wins 与 index 延迟分配', () => {
+  it('★★★ 重复 block-end 的正文不得覆盖第一个权威值', async () => {
+    const response = await collectOpenAiCompletion(chunks([
+      { type: 'text-delta', index: 0, text: 'AAA' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'AAA' } } as never,
+      // 畸形：同一块第二次收尾
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'ZZZ' } } as never,
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]), 'r', 'm')
+    expect(response.choices[0]!.message.content, '改前与 BlockAssembler/Responses 都是 "AAA"').toBe('AAA')
+  })
+
+  it('★★★ 重复 block-end 的空串同样不得把正文清成 null', async () => {
+    const response = await collectOpenAiCompletion(chunks([
+      { type: 'text-delta', index: 0, text: 'AAA' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'AAA' } } as never,
+      { type: 'block-end', index: 0, block: { type: 'text', text: '' } } as never,
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]), 'r', 'm')
+    expect(response.choices[0]!.message.content, '空串覆盖会让正文变成 null').toBe('AAA')
+  })
+
+  it('★★★ 空名工具被抑制后，后续工具的流式 index 必须从 0 开始', async () => {
+    const out: string[] = []
+    for await (const item of toOpenAiSse(chunks([
+      // 第一块：名字永不可用 ⇒ 一帧都不发，且**不得占号**
+      { type: 'tool-call-delta', index: 0, id: 'bad' as never, name: '' as never, argumentsDelta: '{}' },
+      // 第二块：正常工具 ⇒ 出站 index 必须是 0（不是 1）
+      { type: 'tool-call-delta', index: 1, id: 'good' as never, name: 'Run' as never, argumentsDelta: '{}' },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]), 'r', 'm')) out.push(item)
+
+    const joined = out.join('')
+    expect(joined, '被抑制的调用若提前占号，后续 index 会从 1 开始 = 空洞').toContain('"index":0')
+    expect(joined).not.toContain('"index":1')
+  })
+})
