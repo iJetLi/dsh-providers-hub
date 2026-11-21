@@ -251,6 +251,11 @@ describe('★★ 聚合渠道白名单与 registry 对齐（漏一家即红并�
   })
 })
 
+/** `badge.text` 的类型是 `LocalizedText`；本仓只用字符串形态，取它即可（issue #100）。 */
+function badgeText(entry: { badge?: { text: unknown } } | undefined): unknown {
+  return entry?.badge?.text
+}
+
 describe('AggregateAdapter：目录播报', () => {
   it('providerInfo 的 id 必须等于注册路由（DSH 校验）', () => {
     const adapter = new AggregateAdapter(makeCtx({}), { accountPool: makePool() })
@@ -371,7 +376,8 @@ describe('AggregateAdapter：目录播报', () => {
     await warmCatalog(adapter)
     const models = await adapter.listModels(AGGREGATE_PROVIDER)
     const entry = models.find((m) => m.id === 'deepseek-v4-1-flash')
-    expect(entry!.name).toBe('DeepSeek V4.1 Flash · 最低 x0.15')
+    expect(entry!.name).toBe('DeepSeek V4.1 Flash')
+    expect(badgeText(entry!), '倍率走 badge 通道（issue #100）').toBe('最低 x0.15')
   })
 
   it('★ 多个候选时取**最便宜**的那个倍率（轮换的第二判据就是倍率升序）', async () => {
@@ -383,7 +389,8 @@ describe('AggregateAdapter：目录播报', () => {
     const models = await adapter.listModels(AGGREGATE_PROVIDER)
     const entry = models.find((m) => m.id === 'deepseek-v4-1-flash')
     // 最便宜的是 codearts 的 x0.03 —— 那才是最可能被路由到的那个价。
-    expect(entry!.name).toBe('DeepSeek V4.1 Flash · 最低 x0.03')
+    expect(entry!.name).toBe('DeepSeek V4.1 Flash')
+    expect(badgeText(entry!), '倍率走 badge 通道（issue #100）').toBe('最低 x0.03')
   })
 
   it('★ 全部候选都无倍率标注 ⇒ 不加后缀（不得渲染出 xInfinity）', async () => {
@@ -406,7 +413,8 @@ describe('AggregateAdapter：目录播报', () => {
     await warmCatalog(adapter)
     const models = await adapter.listModels(AGGREGATE_PROVIDER)
     const entry = models.find((m) => m.id === 'deepseek-v4-1-flash')
-    expect(entry!.name).toBe('DeepSeek V4.1 Flash · 最低 免费')
+    expect(entry!.name).toBe('DeepSeek V4.1 Flash')
+    expect(badgeText(entry!), '倍率走 badge 通道（issue #100）').toBe('最低 免费')
   })
 
   it('★★ 跨临期档：显示的倍率不得声称「本次就用这个价」（真实缺陷，复审实测）', async () => {
@@ -432,8 +440,10 @@ describe('AggregateAdapter：目录播报', () => {
     const entry = models.find((m) => m.id === 'deepseek-v4-1-flash')
     expect(entry, '虚拟模型必须存在').toBeDefined()
     // ⛔ 修前这里是 `· x0.03`（读起来像「本次就用 0.03」，而实际可能发往 x0.29）。
-    expect(entry!.name, '必须标明这是下界，不能声称本次就用它').toBe('DeepSeek V4.1 Flash · 最低 x0.03')
-    expect(entry!.name, '「最低」二字不可省').toContain('最低')
+    expect(entry!.name).toBe('DeepSeek V4.1 Flash')
+    expect(badgeText(entry!), '必须标明这是下界，不能声称本次就用它').toBe('最低 x0.03')
+    // ⚠️ 「最低」二字不可省 —— 该断言已由上一行（badge 文本）承担；
+    //    `name` 现在只承担身份（issue #100），不含倍率。
   })
 
   it('★ 倍率只加在选择器路径上：resolveModel 仍是规范名（三处既有断言钉住）', async () => {    // ⚠️ `resolveModel` / `describeCatalog` 的名字被逐字钉住（本文件 :88、
@@ -467,7 +477,8 @@ describe('AggregateAdapter：目录播报', () => {
     const entry = models.find((m) => m.id === 'deepseek-v4-1-flash')
     // 前置断言：模型确实在（否则下面那条断言会因 undefined 而**假通过**的变体）。
     expect(entry, '虚拟模型必须存在（buddy 是已接入候选）').toBeDefined()
-    expect(entry!.name).toBe('DeepSeek V4.1 Flash · 最低 x0.15')
+    expect(entry!.name).toBe('DeepSeek V4.1 Flash')
+    expect(badgeText(entry!), '倍率走 badge 通道（issue #100）').toBe('最低 x0.15')
   })
 
   it('被用户关闭的虚拟模型不播报（套 disabledModelsFor 黑名单）', async () => {
@@ -1785,8 +1796,9 @@ describe('★ 未接入临期折算的渠道：模型**仍然可见**（用户 2
     expect(cline!.expiryWired, '客户端据此决定「关掉时写哪张表」').toBe(false)
     // 手工打开后它的价格该算进「最低」—— 否则选择器会说谎（更便宜的候选被用上却没报）。
     const models = await adapter.listModels(AGGREGATE_PROVIDER)
-    expect(models.find((m) => m.id === 'deepseek-v4-1-flash')!.name)
-      .toBe('DeepSeek V4.1 Flash · 最低 x0.01')
+    const opened = models.find((m) => m.id === 'deepseek-v4-1-flash')
+    expect(opened!.name, 'issue #100：名字只承担身份').toBe('DeepSeek V4.1 Flash')
+    expect(badgeText(opened), '倍率走 badge，且要算进「最低」').toBe('最低 x0.01')
   })
 
   it('`auto` 始终在目录里（它不参与任何过滤，池跨全部渠道）', async () => {
@@ -4174,10 +4186,12 @@ describe('aggregate：目录加载不得同步折算余额（实测 7 秒）', (
     // 落地点 ①：再次 listModels 能看到折算出来的虚拟模型（含倍率后缀）。
     const second = await adapter.listModels(AGGREGATE_PROVIDER)
     expect(second.map((m) => m.id), '★ 后台补算完成后必须能被再次播报').toContain('deepseek-v4-1-flash')
+    const computed = second.find((m) => m.id === 'deepseek-v4-1-flash')
+    expect(computed?.name, 'issue #100：名字只承担身份').toBe('DeepSeek V4.1 Flash')
     expect(
-      second.find((m) => m.id === 'deepseek-v4-1-flash')?.name,
+      badgeText(computed),
       '★ 且是**折算过**的那一份（倍率来自真实目录）',
-    ).toBe('DeepSeek V4.1 Flash · 最低 x0.15')
+    ).toBe('最低 x0.15')
 
     // 落地点 ②：同步视图（设置页开关清单的来源）也立刻可见。
     expect(adapter.listAllModels().map((m) => m.id)).toContain('deepseek-v4-1-flash')

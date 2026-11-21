@@ -31,7 +31,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // ⚠️ `contentHasImage` 是**值导入**（`auto-adapter.ts` 同款）：带图判定必须与宿主
 // capability 判据**同一函数**（它含 tool-result 递归），自己写一遍必然漂移。
 import { LlmAdapter, LlmError, ProviderRequestId, ReasoningEffortId, contentHasImage } from '@deepseek-ai/dsh-llm'
-import type { LlmErrorOptions } from '@deepseek-ai/dsh-llm'
+import type { LlmErrorOptions, LlmModelBadge } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -1546,10 +1546,13 @@ export class AggregateAdapter extends LlmAdapter {
        * 未命中就不声明（与「未知」同义，不猜）。
        */
       const contextWindow = this.cachedContextWindowOf(model.key)
+      // ★ issue #100：倍率走 `badge`，`name` 只承担模型身份（维护者拍板的那一条）。
+      const badge = this.pickerBadgeOf(model)
       const entry: LlmModelInfo & { contextWindow?: number } = {
         provider,
         id: model.key,
-        name: this.pickerNameOf(model),
+        name: this.nameOf(model),
+        ...(badge === undefined ? {} : { badge }),
         inputModalities: ['text', 'image'],
         ...contextWindow === undefined ? {} : { contextWindow },
       }
@@ -1712,7 +1715,7 @@ export class AggregateAdapter extends LlmAdapter {
   listAllModels(): readonly { id: string; name: string }[] {
     return [
       { id: AGGREGATE_AUTO_MODEL, name: this.autoModelInfo().name },
-      ...this.catalog.map((model) => ({ id: model.key, name: this.pickerNameOf(model) })),
+      ...this.catalog.map((model) => ({ id: model.key, name: this.nameOf(model) })),
     ]
   }
 
@@ -1853,7 +1856,24 @@ export class AggregateAdapter extends LlmAdapter {
    * ⚠️ 只用于 `listModels` / `listAllModels`（选择器与设置页「显示列表」）。
    * **不得**用于 `resolveModel` / `describeCatalog` —— 见 {@link nameOf} 的注释。
    */
-  private pickerNameOf(model: VirtualModel): string {
+  /**
+   * 虚拟模型在选择器里的**倍率徽标**（issue #100，维护者拍板的那一条）。
+   *
+   * ## 为什么倍率从 `name` 挪到 `badge`
+   *
+   * 原实现把倍率拼进展示名（`GLM-5.3 · 最低 x0.045`），维护者在 issue #100 里
+   * 逐字写「**这是本提案里最该做的一条**」：模型名应当只承担**身份**，倍率是
+   * 另一维信息 —— 拼在一起既让名字不可选（用户搜不到纯模型名），又让同一模型
+   * 在不同渠道组合下改名。
+   *
+   * ⚠️ 但**不能**直接把倍率丢掉（维护者同句：「去掉之后要另开一条通路显示倍率，
+   * 否则是信息丢失」）⇒ 走宿主 `LlmModelInfo.badge`（`dsh-llm` 0.2.2 起的通道，
+   * 本仓 `agnescode-product.ts` 也记过「选择器只有 description / badge 两条通道」）。
+   *
+   * ⚠️ 措辞**必须带「最低」**：见下面 `best` 的判据注释 —— 它是**下界**，
+   * 不是「本次就用这个价」。这条语义原本锁在用例里，现在锁在 badge 上。
+   */
+  private pickerBadgeOf(model: VirtualModel): LlmModelBadge | undefined {
     // ⚠️ 降级集合**算一次**（`rejectedFor` 含 D4 的 id 漂移降级，逐候选重算纯属浪费）。
     const rejected = this.rejectedFor(model)
     const prices = model.candidates
@@ -1863,18 +1883,19 @@ export class AggregateAdapter extends LlmAdapter {
       //    未接入候选**真的会参与**（赋 `NEVER`），它的价格该算进去。
       //
       // ⚠️ 若这里保留「已接入」判据：用户手工打开一个更便宜的未接入候选后，选择器里的
-      //    「· 最低 x0.03」会**说谎** —— 正是本方法头警告的那类误导。
+      //    「最低 x0.03」会**说谎** —— 正是本方法头警告的那类误导。
       //
       // ⚠️ `gateOf` 是同步、零网络的（只读注入的三张表）⇒ 本方法「同步 + 零网络」的
       //    契约不变（`listModels` / `listAllModels` 的渲染路径不能打网络）。
       .filter((candidate) => this.gateOf(model.key, candidate.provider, candidate.realId, rejected) === 'allowed')
       .map((candidate) => candidate.price)
       .filter((price) => Number.isFinite(price))
-    if (prices.length === 0) return model.name
+    if (prices.length === 0) return undefined
     const best = Math.min(...prices)
     // ⚠️ 「最低」二字不可省：见方法头那段实测 —— 省掉会让用户以为本次就用这个价。
-    return `${model.name} · 最低 ${best === 0 ? '免费' : `x${best}`}`
+    return { text: `最低 ${best === 0 ? '免费' : `x${best}`}`, tone: 'neutral' }
   }
+
 
   /**
    * 解析一个虚拟模型 —— **目录已有就用它；目录为空时立刻回保守元数据、绝不等待**。
