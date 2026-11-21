@@ -3,6 +3,10 @@ import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm
 import { OpenAiGatewayError } from './messages.js'
 import { normalizeUpstreamFailure, upstreamStatusOrFallback } from './model-errors.js'
 import { toOpenAiUsage } from './usage.js'
+// ⚠️ 判据**必须复用** `../sse.js` 的唯一来源：名字可用性、参数归一化、截断判定。
+//    就地写 `name.trim().length > 0` / `JSON.parse` 尝试是本仓库反复记过的漂移源
+//    （`messages.ts` 的 `resolveToolPairing` 那次）。
+import { hasUsableToolName, isTruncatedArguments, normalizeToolArguments } from '../sse.js'
 
 /**
  * 失败后给出纠错建议的钩子。
@@ -32,13 +36,61 @@ export async function withSuggestion(message: string, suggest: SuggestionHook | 
 interface ToolState {
   id: string
   name?: string
+  /** delta 累积的**裸拼接串**（流式期间逐帧发给客户端的就是它的增量）。 */
   arguments: string
+  /**
+   * `block-end` 的**权威参数**（非流式出口优先取它）。
+   *
+   * 所有适配器都在收尾循环里用 `block-end` 补发最终块，且**在那一刻才做归一化**
+   * （空参数补 `{}`、DSML 清洗、残缺 JSON 原样）。Chat 路由如果不采纳，等于
+   * 把这层保证整层丢掉 —— GitHub issue #134。
+   */
+  argumentsOverride?: string
+  /**
+   * 该块已收尾：**后续同 index 的 delta 必须忽略**。
+   *
+   * 上游重试会让 index 从 0 重排（真实形态，见 `aggregate-adapter.ts` 与
+   * `docs/agent-notes/protocol-wire.md`），没有这格就会把同一个调用的参数
+   * **拼两遍**（实测 `{"a":1}{"a":1}`）。
+   */
+  closed: boolean
+  /**
+   * **出站**的稠密索引（按工具块首次出现顺序分配 0,1,2…）。
+   *
+   * DSH 的 `chunk.index` 是**块索引**，与正文/思考共用同一个计数器 ⇒ 先出正文
+   * 再出工具时它是 `1`。而 OpenAI 规范里 `tool_calls[].index` 是本帧调用在
+   * 数组中的位置（0-based、稠密），openai-node 用它做 `toolCallSnapshot[index]`。
+   * 直传块索引会让客户端组装出空洞。
+   */
+  openAiIndex: number
+  /**
+   * **已经发给客户端的**参数字符串（流式专用）。
+   *
+   * ## 为什么需要它（2026-11-21 自查发现的流式缺口）
+   *
+   * 「无参数工具」的上游形态是 `argumentsDelta: ''` —— 客户端一个参数字符都
+   * **不会**收到，于是它那边累积成 `''`，`JSON.parse('')` 直接抛
+   * `Unexpected end of JSON input`（issue #134 现象 1）。
+   *
+   * 非流式出口靠 `argumentsOverride` 已经拿到 `'{}'`；**流式不能把已发帧收回**，
+   * 但只要「一个字符都没发过」，就可以在 `block-end` 时补一帧权威值 ——
+   * 客户端累积结果就与「一次性收到 `{}`」等价。
+   *
+   * ⚠️ 一旦发出过**任何**参数（哪怕一个 `{`），就**不能**补发：客户端是按
+   * **增量拼接**的，补一帧完整值会变成 `{...{...}` 拼接错乱。
+   */
+  sentArguments: string
 }
 
 interface Accumulated {
   content: string
   reasoning: string
   tools: Map<number, ToolState>
+  /** `block-end` 的权威正文/思考（流式不再补帧，只供非流式出口）。 */
+  contentOverride?: string
+  reasoningOverride?: string
+  /** 下一个工具块的出站稠密索引。 */
+  nextToolIndex: number
   usage?: TokenUsage
   finishReason?: string
 }
@@ -141,16 +193,40 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
     case 'tool-call-delta': {
       let tool = state.tools.get(chunk.index)
       if (!tool) {
-        tool = { id: String(chunk.id), arguments: '' }
+        tool = {
+          id: String(chunk.id),
+          arguments: '',
+          sentArguments: '',
+          closed: false,
+          openAiIndex: state.nextToolIndex++,
+        }
         state.tools.set(chunk.index, tool)
       }
-      tool.id = String(chunk.id || tool.id)
-      if (chunk.name !== undefined) tool.name = chunk.name
+      // ★ 已收尾的块，后续同 index 的 delta 一律忽略（否则参数拼两遍）。
+      if (tool.closed) return undefined
+      /**
+       * ★ 判据与 `responses.ts` **逐字对齐**：
+       * - `id`：只允许**非空**覆盖（`String(x || y)` 挡不住 `'   '`）；
+       * - `name`：用 `hasUsableToolName`（trim 后非空），**不是** `!== undefined`
+       *   —— 后续分片常带 `name: ''`（它不是 undefined），无条件覆盖会把首片
+       *   解析出的真名抹成空 ⇒ 客户端报 `unknown tool ""`，坏块入会话、每轮重放。
+       */
+      /**
+       * ⚠️ 判据是 **`trim()` 后非空**，不是 `length > 0`：
+       * `'   '` 的 length 是 3，`length > 0` 与 `||` 都挡不住它（issue #134 根因 B
+       * 原话：「`id` 用 `||` 只挡 `''`，挡不住 `'   '`」）。
+       * 与 Responses 侧**同改**（两边判据必须逐格一致，否则同一份流在两个
+       * 端点上会给出不同 id）。
+       */
+      if (String(chunk.id).trim().length > 0) tool.id = String(chunk.id)
+      if (hasUsableToolName(chunk.name)) tool.name = chunk.name
       tool.arguments += chunk.argumentsDelta
+      tool.sentArguments += chunk.argumentsDelta
       return {
         delta: {
           tool_calls: [{
-            index: chunk.index,
+            // ★ 出站用**稠密**索引，不是 DSH 块索引。
+            index: tool.openAiIndex,
             id: tool.id,
             type: 'function',
             function: {
@@ -180,8 +256,95 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
       state.finishReason = finishReason(chunk.reason)
       return { delta: {}, finish_reason: state.finishReason }
     case 'block-start':
-    case 'block-end':
       return undefined
+    case 'block-end': {
+      /**
+       * ★★★ **权威覆盖**（GitHub issue #134 的主修）。
+       *
+       * 本仓库把「`block-end` 是权威覆盖」写成了纪律（`sse.ts` 的
+       * `BlockAssembler` 实测、`docs/agent-notes/dev-tasks.md:167`），九个适配器
+       * **全部**在收尾循环里用 `block-end` 补发最终块、且**在那一刻才做归一化**
+       * （空参数补 `{}`、DSML 清洗、正文去重/切分归位）。
+       * 原先这里直接 `return undefined` ⇒ 那层保证在 Chat 路由上整层丢失。
+       *
+       * ⚠️ **流式不回补**：delta 逐帧已经发给客户端了，再补一帧会让客户端
+       *    重复拼接。这里只把权威值记进状态，供**非流式出口**和
+       *    「无 delta 只有 block-end」两种场景使用。
+       */
+      const block = chunk.block
+      if (block.type === 'text') {
+        state.contentOverride = block.text
+        return undefined
+      }
+      if (block.type === 'reasoning') {
+        state.reasoningOverride = block.text
+        return undefined
+      }
+      if (block.type !== 'tool-call') return undefined
+
+      let tool = state.tools.get(chunk.index)
+      if (tool === undefined) {
+        /**
+         * **只有 `block-end` 没有 delta 的块也不能丢**（与 `responses.ts` 的
+         * 「只发 block-end 没有 delta 的块也不能丢」互为对偶 —— 有些适配器
+         * 在收尾循环里首次成块）。补发一帧完整调用，否则该调用对客户端
+         * 完全不存在。
+         */
+        tool = {
+          id: String(block.id),
+          arguments: block.arguments,
+          sentArguments: block.arguments,
+          argumentsOverride: block.arguments,
+          closed: true,
+          openAiIndex: state.nextToolIndex++,
+        }
+        if (hasUsableToolName(block.name)) tool.name = block.name
+        state.tools.set(chunk.index, tool)
+        return {
+          delta: {
+            tool_calls: [{
+              index: tool.openAiIndex,
+              id: tool.id,
+              type: 'function',
+              function: {
+                ...tool.name === undefined ? {} : { name: tool.name },
+                arguments: block.arguments,
+              },
+            }],
+          },
+        }
+      }
+      if (String(block.id).trim().length > 0) tool.id = String(block.id)
+      // ⚠️ 这一格比 delta 那格更危险：`block-end` 一覆盖就再没有帧来修它。
+      if (hasUsableToolName(block.name)) tool.name = block.name
+      tool.argumentsOverride = block.arguments
+      tool.closed = true
+      /**
+       * ★★ **流式补发权威参数**（2026-11-21 自查发现：非流式修好了、流式没有）。
+       *
+       * 「无参数工具」的上游形态是 `argumentsDelta: ''` ⇒ 客户端累积成 `''`
+       * ⇒ `JSON.parse('')` 抛 `Unexpected end of JSON input`（issue #134 现象 1）。
+       * 只要客户端**一个参数字符都没收到过**（`sentArguments === ''`），
+       * 就补一帧权威值；补完两者等价。
+       *
+       * ⚠️ 反过来**绝不**在已发过参数时补：客户端按增量拼接，补完整值会错乱。
+       */
+      if (tool.sentArguments.length === 0 && block.arguments.length > 0) {
+        tool.sentArguments = block.arguments
+        return {
+          delta: {
+            tool_calls: [{
+              index: tool.openAiIndex,
+              id: tool.id,
+              type: 'function',
+              // 只补 `arguments`：id/name 客户端已经有了，重发会让部分客户端重复建项。
+              function: { arguments: block.arguments },
+            }],
+          },
+        }
+      }
+      return undefined
+    }
   }
 }
 
@@ -191,7 +354,7 @@ export async function* toOpenAiSse(
   model: string,
   suggest?: SuggestionHook,
 ): AsyncIterable<string> {
-  const state: Accumulated = { content: '', reasoning: '', tools: new Map() }
+  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), nextToolIndex: 0 }
   try {
     for await (const chunk of chunks) {
       const event = consumeChunk(state, chunk)
@@ -259,7 +422,7 @@ export async function collectOpenAiCompletion(
   model: string,
   suggest?: SuggestionHook,
 ): Promise<Record<string, unknown>> {
-  const state: Accumulated = { content: '', reasoning: '', tools: new Map() }
+  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), nextToolIndex: 0 }
   try {
     for await (const chunk of chunks) {
       const event = consumeChunk(state, chunk)
@@ -289,15 +452,35 @@ export async function collectOpenAiCompletion(
     })
     throw new OpenAiGatewayError(await withSuggestion(message, suggest), normalized.status, normalized.type, normalized.code)
   }
-  const toolCalls = [...state.tools.entries()].sort(([a], [b]) => a - b).map(([, tool]) => ({
-    id: tool.id,
-    type: 'function',
-    function: { name: tool.name ?? '', arguments: tool.arguments },
-  }))
+  /**
+   * 非流式出口（issue #134 的 C / D / F 三条一起收在这里）。
+   *
+   * - **排序**按出站稠密索引（`openAiIndex`），不是 DSH 块索引；
+   * - **参数**优先取 `block-end` 的权威值，再按「截断保持原样、否则归一化」；
+   *   残缺参数**不得**伪造成 `{}`（那会掩盖分片丢失，见 `sse.ts` 的理由）；
+   * - **空名调用剔除** —— 与 Responses 的 `hasContent` 同判据（名字可用性），
+   *   否则客户端会收到 `"name": ""` 并报 `unknown tool ""`。
+   */
+  const toolCalls = [...state.tools.values()]
+    .sort((left, right) => left.openAiIndex - right.openAiIndex)
+    .filter((tool) => hasUsableToolName(tool.name))
+    .map((tool) => {
+      const raw = tool.argumentsOverride ?? tool.arguments
+      return {
+        id: tool.id,
+        type: 'function',
+        function: {
+          name: tool.name as string,
+          arguments: isTruncatedArguments(raw) ? raw : normalizeToolArguments(raw),
+        },
+      }
+    })
+  const finalContent = state.contentOverride ?? state.content
+  const finalReasoning = state.reasoningOverride ?? state.reasoning
   const message: Record<string, unknown> = {
     role: 'assistant',
-    content: state.content || null,
-    ...state.reasoning.length === 0 ? {} : { reasoning_content: state.reasoning },
+    content: finalContent || null,
+    ...finalReasoning.length === 0 ? {} : { reasoning_content: finalReasoning },
     ...toolCalls.length === 0 ? {} : { tool_calls: toolCalls },
   }
   return {
