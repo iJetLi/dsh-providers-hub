@@ -64,22 +64,34 @@ describe('createBalanceCache：readStale 的磁盘缓存（credits.balances 真�
     primeFromDisk()
   }
 
-  it('★★★ 磁盘有读数 ⇒ readStale **不发网络**且返回该值', async () => {
+  it('★★★ 磁盘有读数 ⇒ readStale **立即返回旧值**（不等网络）', async () => {
     seedDiskAndRestart()
 
-    const calls: string[] = []
+    /**
+     * ⚠️⚠️ **判据是「返回值不等网络」，不是「完全不发请求」**
+     *（2026-11-21 修订 —— 第一版断言「零请求」是错的）。
+     *
+     * 命中磁盘后必须 fire-and-forget 刷一次，否则磁盘上的余额**永远不会变新**
+     * （那是真实缺陷：两条更新路径同时断掉 ⇒ 余额冻结在首次落盘值）。
+     *
+     * ⇒ 用一个**永不 resolve 的 fetch** 来证明「返回值不等它」：
+     * 若实现 await 了网络，本用例会超时；能拿到旧值就说明没等。
+     */
+    let fetchStarted = false
     const cache = createBalanceCache({
       ttlMs: 120_000,
-      fetch: async (provider: string, entry: { id: string }) => {
-        calls.push(`${provider}:${entry.id}`)
-        return { provider, id: entry.id, balance: 1 }
+      fetch: async () => {
+        fetchStarted = true
+        // 永不 resolve：模拟慢网络。返回值必须不等它。
+        return await new Promise<never>(() => {})
       },
     })
 
     const out = await cache.readStale('buddy', 'a1', {})
-    expect(balanceOf(out), '必须返回磁盘里的旧读数').toBe(999)
-    // ⚠️ 这条是本次修复的核心：修复前它会调到 fetch（calls 非空）。
-    expect(calls, '★★★ readStale 不得打网络（那正是要消除的 1~2 秒）').toHaveLength(0)
+    expect(balanceOf(out), '必须立即返回磁盘旧值（不等那个永不返回的 fetch）').toBe(999)
+    expect(out.stale, '旧值必须标 stale').toBe(true)
+    // 后台刷新**确实发起了**（否则余额永不更新）
+    expect(fetchStarted, '必须触发后台刷新').toBe(true)
   })
 
   it('★★★ readStale 返回的磁盘读数**必须标 stale: true**', async () => {
@@ -149,9 +161,14 @@ describe('createBalanceCache：readStale 的磁盘缓存（credits.balances 真�
     })
 
     const hit = await cache.readStale('buddy', 'a1', {})
-    expect(balanceOf(hit)).toBe(999)
+    expect(balanceOf(hit), 'a1 命中磁盘 ⇒ 旧值').toBe(999)
     const miss = await cache.readStale('buddy', 'a2', {})
-    expect(balanceOf(miss), 'a2 没有磁盘值 ⇒ 回源').toBe(5)
-    expect(calls).toEqual(['a2'])
+    expect(balanceOf(miss), 'a2 没有磁盘值 ⇒ 回源拿新值').toBe(5)
+    /**
+     * ⚠️ 2026-11-21 修订：`calls` 现在会含 `a1`（命中磁盘后的**后台刷新**）。
+     * 判据改为「**a2 必须回源**」+「a1 的返回值是旧值」——
+     * 后者已在上面断言，故这里只守「不串号」这一件事。
+     */
+    expect(calls, 'a2 必须真的回源').toContain('a2')
   })
 })

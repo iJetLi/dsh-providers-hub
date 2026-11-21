@@ -9876,6 +9876,42 @@ function registerJetHubEndpoints(
                 const cached = cachedQoder as { at?: number; value?: unknown }
                 const cachedBalance = cached.value as RpcCreditsBalancesResponse['accounts'][number]['balance']
                 if (cachedBalance !== null && cachedBalance !== undefined) {
+                  /**
+                   * ★★★ **命中磁盘后必须触发后台刷新**（2026-11-21 真实缺陷修复）。
+                   *
+                   * ## 缺陷
+                   *
+                   * 上一版在这里**直接 return** ⇒ 后面的 `noteDiskReading` 走不到
+                   * ⇒ 磁盘上的 qoder 余额**永远不会被新值替换**，用户看到的数字
+                   * 越来越旧（虽然文案标了「缓存读数」，但它永远不会变新）。
+                   *
+                   * ⚠️ 与 `balance-cache.ts` 两条路径是**同一个缺陷的第三处**
+                   *（本仓库反复出现的「同义路径漏一条」形态）。
+                   *
+                   * ## 修法：fire-and-forget 重取一次
+                   *
+                   * ⚠️ **不 await**：本分支的全部价值就是「首屏不等网络」。
+                   * ⚠️ **必须 catch**：后台异常不得变成 unhandledRejection。
+                   * ⚠️ 复用同一套取数（凭据解析 + `fetchQoderBalanceDetailed`
+                   *   + 按账号取代理），保证「后台刷出来的值」与「正常路径」同源。
+                   */
+                  void (async () => {
+                    try {
+                      const r = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+                      if (!r) return
+                      const cred = JSON.parse(r.value) as QoderCredential
+                      const fresh = await fetchQoderBalanceDetailed(cred, product, {
+                        fetcher: qoderFetchForAccount(account.id),
+                      })
+                      if (fresh.balance === null) return
+                      noteDiskReading(req.provider, account.id, {
+                        at: Date.now(),
+                        value: fresh.balance,
+                      })
+                    } catch {
+                      // 后台刷新失败静默：用户此刻看到的是磁盘缓存，功能正常。
+                    }
+                  })()
                   return {
                     accountId: account.id,
                     nickname: account.nickname,

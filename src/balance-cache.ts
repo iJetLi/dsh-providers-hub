@@ -543,13 +543,25 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
        * **新鲜** ⇒ `peekStale().stale === false` ⇒ 后台刷新器认为「不用刷」
        * ⇒ **永远不会被真实值替换**，用户一直看到上次退出时的余额。
        *
-       * ⇒ 只返回旧值（标 `stale: true`），**不进缓存**。于是：
-       * - 本次调用拿到旧值（首屏快）；
-       * - 刷新器看不到新鲜条目 ⇒ 会去回源 ⇒ 下次轮询拿到真实值。
+       * ⇒ 只返回旧值（标 `stale: true`），**不进缓存**。
        *
-       * ⚠️ 代价：同一进程内**每次**冷读都会读一次盘（`readDiskReading` 内部
-       * 走内存镜像，实际是 Map 查找，不是 IO）—— 可忽略。
+       * ⚠️⚠️ **但必须自己触发后台刷新**（2026-11-21 真实缺陷修复）：
+       * 上一版的注释写着「刷新器看不到新鲜条目 ⇒ 会去回源」——**那是错的**。
+       * 刷新器（`createBalanceRefresher`）遍历的是 `peekStale()` 有条目的键，
+       * 而我们刻意没写进 `TtlCache` ⇒ 它**根本看不到这个账号** ⇒ 不会刷。
+       *
+       * ⇒ 两条更新路径同时断掉 ⇒ 余额冻结在第一次落盘的值。
+       * 修法与 `readStale` 那条同款：fire-and-forget 强制回源 + 成功后记盘。
        */
+      void cache.get({ force: true })
+        .then((refreshed) => {
+          if (refreshed.error !== undefined) return
+          if (refreshed.stale === true || refreshed.value === undefined) return
+          noteDiskReading(provider, entry.id, { at: refreshed.at, value: refreshed.value })
+        })
+        .catch(() => {
+          // 后台刷新失败静默：用户此刻看到的是磁盘缓存，功能正常。
+        })
       return { ...(diskReading as BalanceReading), stale: true }
     }
     return await cache.get()
@@ -686,6 +698,41 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
          * 但**不能**写进 `TtlCache` 槽（那会把它标成新鲜 → 见上面 `getServingStale` 的说明）。
          */
         lastSuccess.set(key, { at: cached.at, value: cached.value })
+        /**
+         * ★★★ **命中磁盘后必须触发后台刷新**（2026-11-21 真实缺陷修复）。
+         *
+         * ## 缺陷（我上一版留下的）
+         *
+         * 上一版在这里**直接 return**，于是：
+         *
+         * - 磁盘上的读数**永远不会被新值替换**（`noteDiskReading` 在下面，走不到）；
+         * - 后台刷新器看 `peekStale()` —— 而磁盘值**刻意没写进 `TtlCache` 槽**
+         *   （写进去会被标成新鲜）⇒ 它看不到任何条目 ⇒ **也不会去刷**。
+         *
+         * ⇒ 两条更新路径同时断掉 ⇒ 余额**冻结在第一次落盘的值**，
+         * 用户看到的数字越来越旧（虽然 UI 标了 stale，但永远不会变新）。
+         *
+         * ## 修法：fire-and-forget 刷一次
+         *
+         * `void cache.get({ force: true })` 绕过 TTL 强制回源，成功后由
+         * 下面的 `noteDiskReading` 落盘 ⇒ 下次启动读到的是新值。
+         *
+         * ⚠️ **不 await**：本函数的全部价值就是「不等网络」。
+         * ⚠️ **必须 `.catch`**：后台任务的异常不得变成 unhandledRejection
+         *   把宿主进程带走（`fetchBalanceReading` 在凭据缺失时会抛）。
+         * ⚠️ **成功后要记盘**：`cache.get()` 自己不落盘，故这里显式接一次
+         *   `noteDiskReading`（与下面主路径同款判据：非兼顶、value 非空）。
+         */
+        void cache.get({ force: true })
+          .then((refreshed) => {
+            if (refreshed.error !== undefined) return
+            if (refreshed.stale === true || refreshed.value === undefined) return
+            lastSuccess.set(key, refreshed)
+            noteDiskReading(provider, accountId, { at: refreshed.at, value: refreshed.value })
+          })
+          .catch(() => {
+            // 后台刷新失败完全静默：用户此刻看到的是磁盘缓存，功能正常。
+          })
         return { at: cached.at, value: cached.value, stale: true }
       }
       const fresh = await cache.get({ force })

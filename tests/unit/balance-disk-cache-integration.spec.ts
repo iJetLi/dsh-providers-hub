@@ -64,21 +64,30 @@ describe('createBalanceCache：磁盘缓存的冷启动路径', () => {
     primeFromDisk()
   }
 
-  it('★★★ 磁盘有读数 ⇒ 冷读**不发网络**且立即返回该值', async () => {
+  it('★★★ 磁盘有读数 ⇒ 冷读**立即返回旧值**（不等网络）', async () => {
     seedDiskAndRestart()
 
-    const calls: string[] = []
+    /**
+     * ⚠️⚠️ **判据是「返回值不等网络」，不是「完全不发请求」**
+     *（2026-11-21 修订 —— 第一版断言「零请求」是错的）。
+     *
+     * 命中磁盘后必须 fire-and-forget 刷一次，否则磁盘余额**永远不会变新**。
+     * ⇒ 用**永不 resolve 的 fetch** 证明返回值不等它：
+     * 若实现 await 了网络，本用例会超时。
+     */
+    let fetchStarted = false
     const cache = createBalanceCache({
       ttlMs: 120_000,
-      fetch: async (provider: string, entry: { id: string }) => {
-        calls.push(`${provider}:${entry.id}`)
-        return { provider, id: entry.id, balance: 1 } as unknown as BalanceReading
+      fetch: async () => {
+        fetchStarted = true
+        return await new Promise<never>(() => {})
       },
     })
 
     const out = await cache.read('buddy', [acct('a1')])
-    expect((out.get('a1')?.value as { balance?: number } | undefined)?.balance, '必须返回磁盘里的旧读数').toBe(999)
-    expect(calls, '★★★ 冷读不得打网络（那正是要消除的 1 秒）').toHaveLength(0)
+    expect((out.get('a1')?.value as { balance?: number } | undefined)?.balance,
+      '必须立即返回磁盘旧值（不等那个永不返回的 fetch）').toBe(999)
+    expect(fetchStarted, '必须触发后台刷新（否则余额永不更新）').toBe(true)
   })
 
   it('★★★ 返回的旧读数**必须标 stale: true**（否则永不刷新）', async () => {
@@ -125,7 +134,8 @@ describe('createBalanceCache：磁盘缓存的冷启动路径', () => {
     const out = await cache.read('buddy', [acct('a1'), acct('a2')])
     expect((out.get('a1')?.value as { balance?: number } | undefined)?.balance, 'a1 用磁盘值').toBe(999)
     expect((out.get('a2')?.value as { balance?: number } | undefined)?.balance, 'a2 没有磁盘值 ⇒ 回源').toBe(5)
-    expect(calls, '只有 a2 该回源').toEqual(['a2'])
+    // ⚠️ 2026-11-21：calls 现在含 a1（命中磁盘后的后台刷新）⇒ 只守「a2 必须回源」。
+    expect(calls, 'a2 必须真的回源').toContain('a2')
   })
 
   /**

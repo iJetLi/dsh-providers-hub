@@ -8114,13 +8114,32 @@ describe('qoder 特例分支的磁盘缓存接线', () => {
       .not.toContain('\n            }')
   })
 
-  it('★★ 只记非 null 的余额（失败不落盘）', () => {
+  it('★★ 每一处记盘都必须有 null 守卫（失败不落盘）', () => {
     const branch = qoderBranch()
-    const noteIdx = branch.indexOf('noteDiskReading(')
-    expect(noteIdx).toBeGreaterThan(-1)
-    const around = branch.slice(Math.max(0, noteIdx - 300), noteIdx)
-    expect(around, '记盘必须被 detailed.balance !== null 包住')
-      .toMatch(/detailed\.balance !== null/)
+    /**
+     * ⚠️ 2026-11-21 修订：本分支现在有**两处** `noteDiskReading`
+     *（主路径 + 命中磁盘后的后台刷新），故判据从「第一处」改为「**每一处**」。
+     *
+     * 两处的守卫变量名不同（主路径 `detailed.balance`、后台刷新 `fresh.balance`），
+     * 但语义相同：**余额为 null（查询失败）时不落盘**。
+     */
+    const indices: number[] = []
+    let from = 0
+    for (;;) {
+      const i = branch.indexOf('noteDiskReading(', from)
+      if (i < 0) break
+      indices.push(i)
+      from = i + 1
+    }
+    expect(indices.length, '至少要有记盘调用').toBeGreaterThan(0)
+
+    for (const i of indices) {
+      const around = branch.slice(Math.max(0, i - 400), i)
+      expect(
+        around,
+        `第 ${i} 处的记盘必须有 null 守卫（detailed.balance !== null 或 fresh.balance === null 早退）`,
+      ).toMatch(/\.balance !== null|\.balance === null/)
+    }
   })
 
   /**
@@ -8138,6 +8157,38 @@ describe('qoder 特例分支的磁盘缓存接线', () => {
    * ⚠️ 实测已排除的两条：网络正常（TLS 184ms、HTTP 401 是缺凭据的正常响应）、
    * 凭据未过期（`expiresAt` 还剩 577 小时）⇒ 真因只能靠这条日志定位。
    */
+  it('★★★ 命中磁盘后必须触发后台刷新（否则余额冻结在首次落盘值）', () => {
+    const branch = qoderBranch()
+    /**
+     * ⚠️⚠️ **这条守的是「余额不冻结」**（2026-11-21 真实缺陷）。
+     *
+     * 上一版命中磁盘后**直接 return** ⇒ 后面的 `noteDiskReading` 走不到
+     * ⇒ 磁盘上的 qoder 余额永远不会被新值替换 ⇒ 用户看到的数字越来越旧。
+     *
+     * ⚠️ 判据必须落在「**命中分支内部真的发起了取数**」，而不只是
+     * 「有个 void (async …)」—— 后者可以被 `if (true) return` 短路
+     *（变异 M4 实测：那样改仍然全绿）。
+     *
+     * ⇒ 断言：命中分支里必须出现 `fetchQoderBalanceDetailed` 调用，
+     *   且它与 `readDiskReading` 之间**不得有提前的无条件 return**。
+     */
+    const readIdx = branch.indexOf('readDiskReading(')
+    expect(readIdx, '必须有读盘').toBeGreaterThan(-1)
+
+    // 命中分支的范围：从读盘到主路径的凭据解析（`const resolved =`）
+    const mainPathIdx = branch.indexOf('const resolved = await ctx.credentials.resolve', readIdx)
+    expect(mainPathIdx, '必须能定位主路径起点').toBeGreaterThan(readIdx)
+    const hitBranch = branch.slice(readIdx, mainPathIdx)
+
+    expect(hitBranch, '命中分支内必须发起后台取数（否则余额永不更新）')
+      .toContain('fetchQoderBalanceDetailed')
+    expect(hitBranch, '命中分支内必须记盘')
+      .toContain('noteDiskReading(')
+    // ⚠️ 不得有「无条件早退」把后台刷新短路掉
+    expect(hitBranch, '不得有 if (true) return 这类无条件短路')
+      .not.toMatch(/if\s*\(\s*true\s*\)\s*return/)
+  })
+
   it('★★ qoder 分支：查询失败必须打 warn 日志（否则真因无从定位）', () => {
     const branch = qoderBranch()
 
