@@ -3854,6 +3854,83 @@ describe('model.list / model.setDisabled 端点', () => {
       expect(JSON.stringify(providers.buddy)).toContain('每日赠送免费额度')
     })
   })
+/**
+ * `provider.closed` —— **徽标专用**的极轻只读端点（Gitee issue IKWS0A，2026-11-21）。
+ *
+ * 报障：`workbuddy` 供应商关闭后，会话输入区右侧的积分徽标**仍显示该渠道并持续
+ * 查询额度**，且当同一 id 被另一个插件占用（**字面同名、上游不同**）时，
+ * 徽标显示的名称与实际消耗额度的渠道不一致。
+ *
+ * 该端点存在的唯一理由是**成本**：`provider.status` 内部有 `fullCatalogIds`
+ *（自述最长 2000ms），而徽标每 5 秒问一次 ⇒ 不能复用。故这里**必须**钉住
+ * 「判据与 `provider.status` 同源」与「任意 id 不报错」两件事。
+ */
+describe('provider.closed（徽标专用极轻端点）', () => {
+  const MODELS = [{ id: 'm1', name: 'M1' }]
+
+  it('★★ 关闭后 true / 未关闭 false（判据与 `provider.status` 同源）', async () => {
+    const { call } = registerEndpoints({ models: MODELS })
+    // 先真的关掉一家（走既有写端点，确保是**同一份**关闭意图）
+    const off = await call('provider.setEnabled', { provider: 'buddy', enabled: false })
+    expect(off.ok).toBe(true)
+
+    const r = await call('provider.closed', { providers: ['buddy', 'qoder'] })
+    expect(r.ok).toBe(true)
+    expect(r.value.closed.buddy, '关闭的渠道必须报 true（徽标据此不渲染）').toBe(true)
+    expect(r.value.closed.qoder, '没关的渠道必须报 false（徽标照常渲染）').toBe(false)
+    // ★ 与 provider.status 的 closed **必须逐格相同** —— 这是「同一份判据」的守卫
+    const st = await call('provider.status', { providers: ['buddy', 'qoder'] })
+    expect(st.ok).toBe(true)
+    expect(r.value.closed.buddy).toBe(st.value.statuses.buddy.closed)
+    expect(r.value.closed.qoder).toBe(st.value.statuses.qoder.closed)
+  })
+
+  it('★ 关闭后再打开 ⇒ 翻回 false（不留粘滞）', async () => {
+    const { call } = registerEndpoints({ models: MODELS })
+    await call('provider.setEnabled', { provider: 'buddy', enabled: false })
+    await call('provider.setEnabled', { provider: 'buddy', enabled: true })
+    const r = await call('provider.closed', { providers: ['buddy'] })
+    expect(r.value.closed.buddy).toBe(false)
+  })
+
+  it('★ 未知 provider ⇒ false（只读端点不加白名单，与 provider.status 契约一致）', async () => {
+    const { call } = registerEndpoints({ models: MODELS })
+    const r = await call('provider.closed', { providers: ['p0', 'not-a-provider'] })
+    expect(r.ok, '未知 id 不能报错 —— 徽标会对任意当前 provider 发这一问').toBe(true)
+    expect(r.value.closed.p0).toBe(false)
+    expect(r.value.closed['not-a-provider']).toBe(false)
+  })
+
+  it('★ 非法参数 ⇒ bad-request（缺省 / 非数组 / 元素非字符串）', async () => {
+    const { call } = registerEndpoints({ models: MODELS })
+    for (const bad of [{}, { providers: 'buddy' }, { providers: [1] }, { providers: [null] }]) {
+      const r = await call('provider.closed', bad as never)
+      expect(r.ok, `参数 ${JSON.stringify(bad)} 必须被拒`).toBe(false)
+      expect((r as { error?: { code?: string } }).error?.code).toBe('bad-request')
+    }
+  })
+
+  it('★★ 返回体**无原型**（`__proto__` 不得污染，Issue #84 P2-1 同因）', async () => {
+    const { call } = registerEndpoints({ models: MODELS })
+    const r = await call('provider.closed', { providers: ['__proto__'] })
+    expect(r.ok).toBe(true)
+    /**
+     * ⚠️ **不要断言 `getPrototypeOf(r.value.closed) === null`** —— 我第一版就是这么写的，
+     * 实测失败：RPC 会序列化返回体，无原型特性在传输后必然丢失。
+     *
+     * 那层 `Object.create(null)` 防的是**服务端**在
+     * `statuses['__proto__'] = …` 时走 setter 改掉进程内 `Object.prototype`
+     *（Issue #84 P2-1 的原形态：`Object.prototype` 被换成镜像对象、进程内全局污染），
+     * **不是**为了让客户端收到一个无原型对象。
+     *
+     * ⇒ 正确的可观测判据只有一条：**调用之后 `Object.prototype` 没被污染**。
+     *    （服务端那一行 `Object.create(null)` 由代码评审与这条判据共同守护。）
+     */
+    expect(({} as Record<string, unknown>).closed, 'Object.prototype 不得被污染').toBeUndefined()
+    expect(({} as Record<string, unknown>).statuses).toBeUndefined()
+  })
+})
+
 })
 
 
@@ -3882,6 +3959,7 @@ describe('model.list / model.setDisabled 端点', () => {
  * 积分可查，永远查不出问题；让它抛异常 → 退化成 `jet-hub/handler-failed`，
  * 丢失「provider 不支持」这一原因。
  */
+
 describe('积分端点的 provider 能力边界', () => {
   /** 从 connection.fetch.register 捕获到的处理器。 */
   type Handler = (request: Request) => Promise<Response>

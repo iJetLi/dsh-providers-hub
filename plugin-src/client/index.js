@@ -327,6 +327,25 @@ export function apply(ctx) {
        */
       readActiveProvider: (canonicalId) =>
         rpcCall('aggregate.activeProvider', canonicalId === undefined ? {} : { canonicalId }),
+      /**
+       * 「这个供应商被用户关闭了吗」（Gitee issue IKWS0A）。
+       *
+       * ⚠️ **必须注入**：`usage-badge.js` 的门控用 `props.readProviderClosed`，
+       *    拿不到函数时它**故意**退化成「未关闭」（止损判据读不到时宁可多显示）。
+       *    所以漏了这一行 ⇒ 修复**静默失效**，而徽标看起来一切正常。
+       *
+       * ⚠️ 走 `provider.closed` 而不是 `provider.status`：后者要为每家算
+       *    `total`/`disabled`，内部有 `fullCatalogIds`（自述最长 2000ms），
+       *    而本查询每 5 秒一次（`ACTIVE_PROVIDER_POLL_MS`）。
+       *    新端点是纯内存同步读，零 IO 零上游。
+       *
+       * ⚠️ 客户端拿到的是 `{ closed: Record<string, boolean> }` ⇒ 这里**就地**
+       *    折算成布尔，别把「查表」的责任漏给上层（否则每个调用点都要写一遍
+       *    `?.closed?.[id] === true`，本仓库已有「一语义两处写法」的多次事故）。
+       */
+      readProviderClosed: (provider) =>
+        rpcCall('provider.closed', { providers: [provider] })
+          .then((value) => value?.closed?.[provider] === true),
       // ⚠️ **这里曾有一个 `readExpiryOrder` prop，已删除**（真实死代码，审计实测指出）：
       //    它在 `c12b3ab` 上就已**零消费者** —— `AggregatePanel` 自己直接
       //    `rpcCall('aggregate.expiryOrder', {})`（`jet-hub.js`），从不经过本 prop。

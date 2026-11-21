@@ -2137,3 +2137,56 @@ describe('徽标三段分成行也必须接日期提示', () => {
     expect(source).toMatch(/import \{[\s\S]{0,600}expiryDateHints[\s\S]{0,600}\} from '\.\/credit-expiry\.js'/)
   })
 })
+
+/**
+ * ★★ **供应商关闭后徽标不得渲染**（Gitee issue IKWS0A，2026-11-21 用户报障）。
+ *
+ * 报障：`workbuddy` 供应商关闭后，输入区右侧徽标**仍显示该渠道并持续查询额度**；
+ * 且当同一 id 被另一个插件占用（**字面同名、上游不同**）时，徽标显示的名称与
+ * 实际消耗额度的渠道不一致。
+ *
+ * ## 为什么做源码级断言
+ *
+ * 本仓库对 `plugin-src/client/*` 的既有做法就是源码级（react 不在依赖里，
+ * 组件无法在单测内渲染）。本文件已有大量同款断言。
+ *
+ * ⚠️ 它挡不住 `if (false) return null` 这种旁路 —— 这是源码文本断言的已知弱点，
+ *    故同时断「组件依赖了那个 prop」这条更结构化的形态（漏注入会让
+ *    `closed` 恒 false ⇒ 修复静默失效，而徽标看起来一切正常）。
+ */
+describe('IKWS0A：供应商关闭后徽标不渲染', () => {
+  const read = (rel: string): string =>
+    require('node:fs').readFileSync(require('node:path').resolve(__dirname, rel), 'utf8')
+      .replace(/\r\n/g, '\n')
+
+  it('★★ 注入侧：`index.js` 必须提供 `readProviderClosed`（漏注入 ⇒ 修复静默失效）', () => {
+    const source = read('../../plugin-src/client/index.js')
+    /**
+     * ⚠️ 必须**锚定行首缩进 + 完整形态**，不能只 `toContain('readProviderClosed:')`：
+     * 我第一版就是这么写的，实测**无牙** —— 把键名改成 `__unused_readProviderClosed:`
+     * 后该断言仍然通过（子串还在），而修复**已静默失效**（prop 拿不到 ⇒ closed 恒 false）。
+     */
+    expect(source, '必须注入 readProviderClosed').toMatch(/^ {6}readProviderClosed: \(provider\) =>/m)
+    // 且必须走轻量端点，不能复用 provider.status（它有 fullCatalogIds，最长 2000ms）
+    expect(source).toContain("rpcCall('provider.closed'")
+    // 就地折算成布尔，不把查表责任漏给上层
+    expect(source).toContain('value?.closed?.[provider] === true')
+  })
+
+  it('★★ 消费侧：`usage-badge.js` 必须有「关闭 ⇒ 不渲染」门控', () => {
+    const source = read('../../plugin-src/client/usage-badge.js')
+    // 轮询关闭状态（用户可能在会话开着时去关供应商）
+    expect(source).toContain('readProviderClosed')
+    expect(source).toContain('ACTIVE_PROVIDER_POLL_MS')
+    // 门控本体
+    expect(source, '关闭时必须 return null（从而 UsageBadgeActive 不挂载 ⇒ 60s 余额轮询也停）')
+      .toContain('if (closed) return null;')
+    // 既有门控必须逐字还在（本仓库对这两行有逐字断言，改动它们是高危）
+    expect(source).toContain('if (!supportsCreditBalance(provider)) return null;')
+  })
+
+  it('★ 判据打在**重定向之前**的 provider 上（聚合时不得误判 `aggregate`）', () => {
+    const source = read('../../plugin-src/client/usage-badge.js')
+    expect(source, '必须保留重定向前的原始 provider').toContain('const rawProvider = state?.current?.provider;')
+  })
+})

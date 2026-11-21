@@ -409,6 +409,20 @@ export function UsageBadge(props) {
   // 重试计时器被无限清除、永远解析不出来（比不重试还糟）。
   // 「非 null 就跳过」既省了重复解析，也天然挡住了这个循环。
   const resolvedRef = React.useRef(false);
+  /**
+   * 「当前渠道是否被用户关闭」（Gitee issue IKWS0A，2026-11-21 用户报障）。
+   *
+   * 报障原文：`workbuddy` 供应商关闭后，会话输入区右侧的徽标**仍显示该渠道
+   * 并持续查询额度**；且当同一 id 被另一个插件也占用（`dsh-connect-workbuddy`
+   * 的国内版 vs 本仓库的国际版，**字面同名、上游不同**）时，徽标显示的名称
+   * 与实际消耗额度的渠道**不一致**。
+   *
+   * 根因：徽标这条路径从不读关闭状态（`providerClosed` 在客户端只被模型中心
+   * 面板的分组标题用过）。`resolveBadgeProvider` 只做 aggregate 重定向 ——
+   * 「只要 id 字面相等就按该渠道渲染」。本仓库把「唯一真相源」当红线，
+   * 所以这里**不自己判断**，而是问宿主（`pool.providerClosedFor`，纯内存零 IO）。
+   */
+  const [closed, setClosed] = React.useState(false);
   /** 快照读取异常只记一次（见 safe() 处说明）。 */
   const snapshotErrorRef = React.useRef(false);
 
@@ -517,7 +531,17 @@ export function UsageBadge(props) {
   //    （见下），而下面那两行门控是**既有断言逐字钉住的**，必须继续用 `provider`
   //    这个名字 —— 换名（如 `resolved`）会让 `usage-badge-client.spec.ts` 的正则
   //    `typeof provider !== 'string' || provider.length === 0` 失配而变红（实测撞过）。
-  let provider = state?.current?.provider;
+  /**
+   * 宿主要求渲染的**原始** provider id（重定向**之前**的值）。
+   *
+   * ⚠️ 单独留一份的原因：下面 641 行会把 `aggregate` **就地替换**成真实渠道，
+   *    而「这个供应商是否被用户关闭」必须打在**会话实际选中的那个 id**上。
+   *    本 issue 的场景（Gitee IKWS0A）就是 `workbuddy` —— 非聚合时两者相同；
+   *    聚合时前者是 `aggregate`（永不关闭）⇒ 该判据天然不生效，正是我们要的
+   *    （聚合的真实渠道由宿主路由保证，关掉的渠道不会被选中）。
+   */
+  const rawProvider = state?.current?.provider;
+  let provider = rawProvider;
   /**
    * 当前选中的**模型 id**（聚合时 = 虚拟模型键，如 `glm-5-3`）。
    *
@@ -634,6 +658,45 @@ export function UsageBadge(props) {
     //    否则它会一直显示旧模型的渠道（与「定时器常驻」那条需求同因）。
   }, [isAggregate, readActiveProvider, modelId]);
 
+  /**
+   * 轮询「这个渠道被关掉了吗」。
+   *
+   * ## 为什么必须轮询而不是只读一次
+   *
+   * 报障者的场景是「**重新打开会话**」，那种情况读一次就够；但用户也可能
+   * 在会话开着时去设置页关掉供应商 —— 只读一次的话徽标会**一直挂着**，
+   * 直到下次挂载。节奏复用 {@link ACTIVE_PROVIDER_POLL_MS}（与「上次渠道」
+   * 同款：宿主端该端点是**纯内存同步读**，零网络零余额查询）。
+   *
+   * ⚠️ 失败一律当作「未关闭」：这是**止损**用的判据，读不到时宁可多显示一个
+   *    徽标（用户还能看到读数），也不要因为一次 IPC 抖动把徽标整条藏掉
+   *   （那会让用户分不清「关了」与「徽标坏了」—— 2026-10-08 报障的教训）。
+   */
+  React.useEffect(() => {
+    const readProviderClosed = props.readProviderClosed;
+    if (typeof readProviderClosed !== 'function') {
+      setClosed(false);
+      return undefined;
+    }
+    if (typeof rawProvider !== 'string' || rawProvider.length === 0) {
+      setClosed(false);
+      return undefined;
+    }
+    let alive = true;
+    const refresh = () => {
+      Promise.resolve()
+        .then(() => readProviderClosed(rawProvider))
+        .then((value) => { if (alive) setClosed(value === true); })
+        .catch(() => { if (alive) setClosed(false); });
+    };
+    refresh();
+    const timer = setInterval(refresh, ACTIVE_PROVIDER_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [props.readProviderClosed, rawProvider]);
+
   // ⚠️ 重定向结果可能是 `null`（聚合且无历史）⇒ 下面**既有的**空 provider 门控
   //    天然拦掉它 —— 复用同一形态，不另造判据（规格 §6.6）。
   // ⚠️ 就地赋回 `provider`（不新造变量名）：那两行门控必须逐字不变，见上方 `let` 的注释。
@@ -703,6 +766,18 @@ export function UsageBadge(props) {
   }
   // 不是本插件的渠道 → 不渲染，且**不会**发任何请求。
   if (!supportsCreditBalance(provider)) return null;
+  /**
+   * ★ **供应商已被用户关闭 ⇒ 不渲染徽标，也不再查询额度**（Gitee issue IKWS0A）。
+   *
+   * 放在 `supportsCreditBalance` 门控**之后**是刻意的：那道门控是既有断言钉住的
+   * 形态（`if (!supportsCreditBalance(provider)) return null;` 必须逐字不变），
+   * 而本判据是**新加的一条**，两者不该合并。
+   *
+   * ⚠️ 返回 `null` 不只是隐藏：`UsageBadgeActive` 因此**不挂载**
+   * ⇒ 它内部的 60 秒余额轮询根本不会启动 ⇒ 报障者说的「持续查询额度」一并解决。
+   * 这也符合本插件的定位（徽标是止损工具，关掉的渠道没有额度可止损）。
+   */
+  if (closed) return null;
   return React.createElement(UsageBadgeActive, { ...props, provider });
 }
 

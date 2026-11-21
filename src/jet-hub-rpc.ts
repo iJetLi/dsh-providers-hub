@@ -11476,6 +11476,53 @@ function registerJetHubEndpoints(
        * 「曾被关闭、后来从服务端目录下线」的历史遗留键才能被清掉；且目录故障时
        * 用户仍应能把开关全打开。
        */
+      /**
+       * 「这些供应商是不是被用户关闭了」—— **徽标专用**的极轻只读端点。
+       *
+       * ## 为什么需要它（Gitee issue IKWS0A，2026-11-21 用户报障）
+       *
+       * 用户报障：`workbuddy` 供应商**关闭后**，会话输入区右侧的积分徽标
+       * **仍显示该渠道、并持续查询额度**，且当同一 id 被另一个插件也占用时
+       *（`dsh-connect-workbuddy` 的国内版 vs 本仓库的国际版，**字面同名、上游不同**），
+       * 徽标显示的名称与实际消耗额度的渠道**不一致**。
+       *
+       * 根因：徽标渲染路径（`usage-badge.js`）从不读关闭状态 ——
+       * `resolveBadgeProvider` 只做 aggregate 重定向，只要「当前会话模型的
+       * provider id 与某渠道字面相等」就按该渠道渲染，与该渠道是否被关闭无关。
+       *
+       * ## 为什么不能复用 `provider.status`
+       *
+       * 那个端点要为每一家算 `total` / `disabled`，而算法里有
+       * `fullCatalogIds(provider)`（该函数自述**最长 2000ms**）。徽标是每 60 秒
+       * 轮询一次的热路径 ⇒ 用它等于给会话输入区挂一个 2 秒的抖动源。
+       *
+       * 本端点只调 `pool.providerClosedFor` —— **纯内存同步读、零 IO、零上游**
+       *（见 `account-pool.ts` 该方法的注释），且与 `provider.status` 里 `closed`
+       * 的权威判据**是同一份**（`closedByIntent`；`disabled === total` 那半已被
+       * Issue #84 明确废弃为「谎报」，故这里不重复计算，也不得另造第二套）。
+       *
+       * ⚠️ 判据方向：**只有 `true` 才代表「用户关了它」**。未知 id / 未关闭
+       * 一律 `false` —— 与 `provider.status`「任意 id 回一条宽松结果」的既有契约
+       * 一致，**不加白名单**（这是只读端点，加白名单会让徽标对未知 id 报错）。
+       */
+      case 'provider.closed': {
+        const req = payload as { providers?: unknown }
+        if (!Array.isArray(req.providers) || req.providers.some((id) => typeof id !== 'string')) {
+          return { ok: false, error: { code: 'bad-request', message: 'providers 必须是字符串数组' } }
+        }
+        /**
+         * ⚠️ **必须无原型**（`Object.create(null)`，与 `provider.status` 同因、
+         * 同一条 Issue #84 P2-1）：`provider` 是**调用方传入的任意字符串**，
+         * 普通对象上 `closed['__proto__'] = …` 会走 `Object.prototype.__proto__`
+         * 的 setter 改原型，而不是加自有键。
+         */
+        const closed = Object.create(null) as Record<string, boolean>
+        for (const provider of req.providers as string[]) {
+          closed[provider] = pool.providerClosedFor(provider)
+        }
+        return { ok: true, value: { closed } }
+      }
+
       case 'provider.setEnabled': {
         const req = payload as RpcProviderSetEnabledRequest
         // ⚠️ `enabled` 不做默认值猜测：缺失或非布尔一律拒绝。默认成 true 会静默
