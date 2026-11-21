@@ -1163,10 +1163,48 @@ export function createBalanceRefresher(
       // ⚠️ **幂等**：重复武装会叠加出多个 interval，刷新频率随登录/重启次数翻倍
       //（`MultiAccountRefreshScheduler.notifyAccountAdded` 的同款理由）。
       if (timer !== undefined) return
+      /**
+       * ★★★ **立即跑一轮，不等第一个周期**（2026-11-21 真实缺陷修复）。
+       *
+       * ## 缺陷（用户实测打穿）
+       *
+       * 上一版只挂定时器、**没有立即 tick**：
+       *
+       * ```ts
+       * timer = setIntervalImpl(() => { void tick() }, periodMs)   // 首轮要等 60 秒
+       * ```
+       *
+       * ⇒ 用户「重启后过 3 秒打开积分窗口」时，**后台刷新压根还没开始**
+       * ⇒ 内存是空的（刚重启）⇒ 走磁盘缓存 ⇒ 显示上次会话的旧值
+       * ⇒ 而且界面不会自动重绘（60 秒轮询只对 modelscope 生效）
+       * ⇒ **旧值一直挂着，直到用户手动点刷新**。
+       *
+       * 用户原话：
+       *
+       * > 「我明明是在重启后过了 3 秒才打开的，正常来说，内存已经有最新数值了，
+       * >   为什么窗口还是显示旧值，这不奇怪吗？」
+       *
+       * **他的推理完全正确** —— 内存本该有新值，但那个「本该」的前提
+       *（启动即拉一次）**从来没有实现过**。
+       *
+       * ## 修法
+       *
+       * `start()` 里**立即** `void tick()`（fire-and-forget），再挂定时器。
+       * 这样启动后约 1~2 秒（网络往返）内存里就有真新值了。
+       *
+       * ⚠️ **不 await**：`start()` 是同步调用（挂在 `ctx.effect` 里），
+       * 等待会让插件启动路径阻塞在网络上。
+       * ⚠️ **必须 `.catch`**：`tick()` 内部已 try/catch，但保险起见兜一层 ——
+       * 后台异常不得变成 unhandledRejection 带走宿主进程。
+       * ⚠️ **放在挂定时器之前**：让首轮尽可能早开始。
+       */
+      void tick().catch(() => {
+        // tick 内部已记日志；这里只防 unhandledRejection。
+      })
       timer = setIntervalImpl(() => { void tick() }, periodMs)
       timer.unref?.()                          // 不拦进程退出（与既有定时器同款）
       options.info?.(
-        `[jet-hub] 余额缓存后台刷新器已武装（每 ${Math.round(periodMs / 1000)} 秒一轮）`,
+        `[jet-hub] 余额缓存后台刷新器已武装（启动即拉一轮，此后每 ${Math.round(periodMs / 1000)} 秒一轮）`,
       )
     },
     tick,
