@@ -251,6 +251,16 @@ export class BaizhiAdapter extends LlmAdapter {
       if (fetched.length === 0) return false
       this.remoteModels = fetched
       this.catalogAt = this.options.now?.() ?? Date.now()
+      /**
+       * ★ **落盘（SWR 写盘那一半）** —— 2026-11-21。
+       *
+       * ⚠️ 本家**只有一个目录来源**（`fetchRemoteModels` 注入）⇒「拿到非空目录」
+       * 即 `complete`（与 `RemoteCatalogGate` 对裸布尔的归一化口径一致）。
+       *
+       * ⚠️ 用 `syncCatalogEntries()` 而不是 `catalogEntries()`：后者是 async
+       * 且内部会 `await ensureRemoteModels()` ⇒ 在此处调用会重入闸门。
+       */
+      this.catalog.rememberForDisk?.(this.syncCatalogEntries())
       return true
     })
 

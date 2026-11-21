@@ -615,6 +615,22 @@ export class ZcodeAdapter extends LlmAdapter {
         // ⚠️ **只在成功时**记时刻：失败不写，否则一次抖动会把上界刷新掉、
         //    下轮还要等满 20 分钟才发现上游没恢复。
         this.catalogAt = this.nowImpl()
+        /**
+         * ★ **落盘（SWR 写盘那一半）** —— 2026-11-21。
+         *
+         * ⚠️ **这是漏接补上的**：2026-11-20 批量给 8 家适配器接
+         * `rememberForDisk` 时**漏了本家**（实测 `~/.dsh/cache/model-catalog/`
+         * 下只有 buddy / qoder / qodercn / trae 四个文件，zcode 缺失）。
+         *
+         * ⚠️ 本家**只有一个目录来源**（`fetchRemoteModels` 注入）⇒
+         * 「拿到非空目录」即 `complete`，与 `RemoteCatalogGate` 对裸布尔的
+         * 归一化口径一致（`complete = got`），故不需要额外完整性判据。
+         *
+         * ⚠️ 用 `syncCatalogEntries()`：它读刚赋好的 `this.remoteModels`
+         *（`catalogEntries()` 是 async 且内部会 `await ensureRemoteModels()`
+         * ⇒ 在此处调用会重入闸门）。
+         */
+        this.catalog.rememberForDisk?.(this.syncCatalogEntries())
         return true
       })
       if (this.remoteModels !== undefined

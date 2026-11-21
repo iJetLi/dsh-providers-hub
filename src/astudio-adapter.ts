@@ -394,6 +394,16 @@ export class AstudioAdapter extends LlmAdapter {
         // ⚠️ **只在成功时**记时刻（失败不写）：否则一次网络抖动会把 TTL 上界
         //    刷新掉，下轮还要等满 20 分钟才发现上游其实没恢复。
         this.catalogAt = this.nowImpl()
+        /**
+         * ★ **落盘（SWR 写盘那一半）** —— 2026-11-21。
+         *
+         * ⚠️ 本家**只有一个目录来源**，且上面已经排除 `visible.length === 0`
+         * ⇒「走到这里」即拿到非空目录 ⇒ `complete = got`
+         *（与 `RemoteCatalogGate` 对裸布尔的归一化口径一致）。
+         *
+         * ⚠️ 用 `syncCatalogEntries()`：它读刚赋好的 `this.remoteModels`。
+         */
+        this.catalog.rememberForDisk?.(this.syncCatalogEntries())
         this.options.onCatalogLoaded?.()
         return converted
       } catch (error) {
