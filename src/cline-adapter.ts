@@ -621,6 +621,19 @@ export class ClineAdapter extends LlmAdapter {
         // 与「merged 里有没有补进条目」无关 —— 上游确实没有 cline-pass 块时
         // 读到的是空表，那同样属于「已就绪」，不该无限重试。
         this.remoteComplete = complete && this.modelsDev !== undefined
+        /**
+         * ★ **落盘（SWR 写盘那一半）** —— 2026-11-20，与 `buddy-adapter` 同款。
+         *
+         * ⚠️⚠️ **cline 是「残缺不能落盘」这条约束最要紧的一家**：它有**三个**
+         * 独立来源（`recommended-models` + `/api/v1/models` + models.dev）。
+         * 只拿到其中两个就落盘 ⇒ 下次启动读到残缺目录 ⇒ 那 466 条按量计费模型
+         * **永久消失**（只能删缓存文件才能恢复）。这正是 issue IKJVTF 的形态。
+         *
+         * ⇒ 必须判 `remoteComplete`（= `complete && modelsDev 已读到`）。
+         */
+        if (this.remoteComplete) {
+          this.catalog.rememberForDisk?.(this.syncCatalogEntries())
+        }
         return { got: true, complete: this.remoteComplete }
       } catch (error) {
         // 拉取失败保持未定义，后续 listModels/resolveModel 仍回退静态兜底表。

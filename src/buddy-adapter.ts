@@ -2249,6 +2249,21 @@ export class BuddyAdapter extends LlmAdapter {
       // 拿不到判定时退回「完整」（= 旧行为），避免把「判不出」当成残缺
       // 而让 provider 反复重拉。
       this.remoteComplete = this.options.catalogComplete?.() ?? true
+      /**
+       * ★ **落盘（SWR 的写盘那一半）** —— 2026-11-20，用户要求「重启后无感加载」。
+       *
+       * ⚠️⚠️ **必须判 `remoteComplete`**：残缺目录落盘会被固化成「上次的好缓存」，
+       * 下次启动读到它 ⇒ 缺失的模型**永久消失**（只能删缓存文件才能恢复）。
+       * 这与 `RemoteCatalogGate` 只按 `complete` 清冷却是同一条语义。
+       *
+       * ⚠️ 写在**赋值之后**：`rememberForDisk` 要把刚落地的目录写到磁盘，
+       * 早于赋值会写到上一版。
+       *
+       * ⚠️ 可选成员（`?.`）：单测替身没有它时零行为变化。
+       */
+      if (this.remoteComplete) {
+        this.catalog.rememberForDisk?.(this.catalogEntries(reconciled))
+      }
       return { got: true, complete: this.remoteComplete }
     })
   }

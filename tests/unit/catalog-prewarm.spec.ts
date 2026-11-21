@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path'
 import {
   CATALOG_PREWARM_DELAYS_MS,
   isPrewarmSpacingValid,
+  selectPrewarmProviders,
   startCatalogPrewarm,
 } from '../../src/catalog-prewarm.js'
 import { REMOTE_CATALOG_COOLDOWN_MS } from '../../src/remote-catalog-gate.js'
@@ -26,6 +27,8 @@ describe('startCatalogPrewarm', () => {
     const stop = startCatalogPrewarm({
       providers: ['cline'],
       warm,
+      // ⚠️ 显式 [0]：本用例测「立即轮不等定时器」，与首延迟无关。
+      delaysMs: [0],
       schedule: () => () => {},
     })
     // `apply()` 是同步函数：warm 不能在调用栈内被 await，但必须已被排入。
@@ -40,6 +43,7 @@ describe('startCatalogPrewarm', () => {
     const stop = startCatalogPrewarm({
       providers: ['cline', 'buddy', 'zcode'],
       warm,
+      delaysMs: [0],
       schedule: () => () => {},
     })
     for (let i = 0; i < 5; i += 1) await Promise.resolve()
@@ -56,6 +60,7 @@ describe('startCatalogPrewarm', () => {
       providers: ['buddy', 'cline'],
       warm,
       logger: { warn },
+      delaysMs: [0],
       schedule: () => () => {},
     })
     for (let i = 0; i < 5; i += 1) await Promise.resolve()
@@ -79,6 +84,7 @@ describe('startCatalogPrewarm', () => {
     const stop = startCatalogPrewarm({
       providers: ['cline'],
       warm,
+      delaysMs: [0, 35_000, 75_000],
       schedule: (fn, ms) => { pending.push({ fn, ms }); return () => {} },
     })
 
@@ -109,7 +115,7 @@ describe('startCatalogPrewarm', () => {
       cancels.push(cancel)
       return cancel
     })
-    const stop = startCatalogPrewarm({ providers: ['cline'], warm, schedule })
+    const stop = startCatalogPrewarm({ providers: ['cline'], warm, delaysMs: [0, 35_000, 75_000], schedule })
     for (let i = 0; i < 5; i += 1) await Promise.resolve()
     // 链式：立即轮跑完后才排第一段（不是启动时一次性排两段）
     expect(schedule).toHaveBeenCalledTimes(1)
@@ -124,6 +130,7 @@ describe('startCatalogPrewarm', () => {
     const stop = startCatalogPrewarm({
       providers: ['cline'],
       warm,
+      delaysMs: [0],
       schedule: (fn) => { pending.push(fn); return () => {} },
     })
     // ⚠️ 立即那一轮排在 microtask 上，此刻尚未触达 `warm`（见上一条用例）；
@@ -139,6 +146,8 @@ describe('startCatalogPrewarm', () => {
     const stop = startCatalogPrewarm({
       providers: ['cline'],
       warm,
+      // ⚠️ 显式 [0]：本用例测「立即轮不等定时器」，与首延迟无关。
+      delaysMs: [0],
       schedule: () => () => {},
     })
     for (let i = 0; i < 5; i += 1) await Promise.resolve()
@@ -161,19 +170,42 @@ describe('startCatalogPrewarm', () => {
  * 一直补不回来）。故这条判据必须有用例守着，别只写在注释里。
  */
 describe('预热间隔 > 闸门冷却（★ 硬约束）', () => {
-  it('★ 每个非零间隔都严格大于 REMOTE_CATALOG_COOLDOWN_MS', () => {
+  it('★ 每个**轮间**间隔都严格大于 REMOTE_CATALOG_COOLDOWN_MS', () => {
     expect(REMOTE_CATALOG_COOLDOWN_MS).toBe(30_000)
-    for (const delay of CATALOG_PREWARM_DELAYS_MS.filter((d) => d > 0)) {
+    /**
+     * ⚠️ **`slice(1)`**：首项是「首轮启动前的延迟」（10 秒，给宿主首屏让路），
+     * 不是轮间间隔、也不与闸门冷却竞争 —— 见 `isPrewarmSpacingValid` 的注释。
+     */
+    for (const delay of CATALOG_PREWARM_DELAYS_MS.slice(1).filter((d) => d > 0)) {
       expect(delay, `预热间隔 ${delay}ms 不大于冷却 ${REMOTE_CATALOG_COOLDOWN_MS}ms，会被闸门挡回`)
         .toBeGreaterThan(REMOTE_CATALOG_COOLDOWN_MS)
     }
   })
 
-  it('isPrewarmSpacingValid 对不合规间隔返回 false（接线层可据此断言）', () => {
+  /**
+   * ★★ **间隔校验**（2026-11-20 修订）。
+   *
+   * ⚠️ 判据从「所有非零项」改成「**第二项起**」：
+   * `delays[0]` 现在是「首轮**启动前**的延迟」（10 秒，给宿主首屏让路），
+   * 它**不是**轮间间隔、也不与闸门冷却竞争（首轮之前没有失败发生过）。
+   * 把它纳入「> 冷却」判据是**假约束**（10 秒不需要大于 30 秒）。
+   */
+  it('isPrewarmSpacingValid：默认排程合规', () => {
+    // 默认 = [10_000, 35_000, 75_000] ⇒ 只看 [35_000, 75_000]，都 > 30_000
     expect(isPrewarmSpacingValid(CATALOG_PREWARM_DELAYS_MS)).toBe(true)
-    expect(isPrewarmSpacingValid([0, 10_000])).toBe(false)
+  })
+
+  it('isPrewarmSpacingValid：**第二项起**小于冷却 ⇒ 不合规', () => {
+    // ⚠️ 首项 10_000 不参与校验（它是启动延迟），故 [10_000, 10_000] 才是违规的
+    expect(isPrewarmSpacingValid([10_000, 10_000])).toBe(false)
     expect(isPrewarmSpacingValid([0, 30_000])).toBe(false) // 相等也不行：闸门用 `<=` 判剩余量
-    expect(isPrewarmSpacingValid([0])).toBe(true) // 只有立即那一轮，不受冷却约束
+  })
+
+  it('isPrewarmSpacingValid：首项 0（立即）不参与校验', () => {
+    // 首项 0 = 立即，不与冷却竞争 ⇒ 单元素 [0] 合规
+    expect(isPrewarmSpacingValid([0])).toBe(true)
+    // 而 [10_000] 是**不合规**的：非零项必须 > 冷却
+    expect(isPrewarmSpacingValid([10_000])).toBe(false)
   })
 })
 
@@ -260,13 +292,69 @@ describe('IKJVTF 接线：十个适配器都接上了广播', () => {
 
     await adapter.listModels('buddy')
 
-    // ⚠️ `listModels` 内部有多个 `await`，`queueMicrotask` 派发的广播通常在
-    // 它返回前就已排空；故这里**不**断言「此刻还没广播」（那会变成时序脆弱）。
+    // ⚠️ `listModels` 内部有多个 `await`；广播现在走 **800ms 合并窗口**
+    // （2026-11-20 从 `queueMicrotask` 改的，见 `catalog-broadcast.ts` 模块头），
+    // 故必须真的等一个窗口过去，等 microtask 是等不到的。
     // 关键不变式是**广播真的发生了**（源码文本断言证明不了这一点）。
-    await new Promise((resolve) => { queueMicrotask(() => resolve(undefined)) })
+    await new Promise((resolve) => { setTimeout(resolve, 900) })
     expect(emitted).toContain('llm/adapters-updated')
-    // 同 tick 合并：一次目录落地只广播一次。
+    // 同一合并窗口：一次目录落地只广播一次。
     expect(emitted.filter((event) => event === 'llm/adapters-updated')).toHaveLength(1)
+  })
+
+  /**
+   * ★★★ **首轮延后 10 秒**（2026-11-20 真实启动卡顿修复，变异 M4/M6 无牙后补）。
+   *
+   * 之前的用例都显式传 `delaysMs`（为了不等 10 秒），于是「**默认值**是 10 秒」
+   * 和「`runChain` 真的用首项做延迟」这两件事**零覆盖** ⇒ 把它们改回 0 全绿。
+   *
+   * ⇒ 用 `schedule` 注入直接断言：**首个排程的 ms 必须是 10 秒**，
+   * 且在那个定时器触发**之前** `warm` 不得被调用。
+   */
+  /**
+   * ★★★ **首轮必须立即开始（首项 = 0）**（2026-11-20 二次修订）。
+   *
+   * ## 上一版把首项改成 10 秒是**错的**，实测首屏反而更慢（60 秒+）
+   *
+   * 原因在 `RemoteCatalogGate.run()` 的 in-flight 去重：
+   *
+   * ```ts
+   * if (this.inFlight !== undefined) {
+   *   await this.inFlight      // 复用别人正在飞的那次请求
+   *   return
+   * }
+   * ```
+   *
+   * ⇒ **预热越早开始，宿主首屏越受益**：宿主调 `listModels` 时若预热已在飞，
+   * 它 `await` 的是同一次请求，零额外成本。反过来（延后 10 秒）会让宿主
+   * **自己发起**首轮请求，预热 10 秒后才重复一遍 —— 纯双输。
+   *
+   * ⚠️ 所以本用例守的是「**不许加人为延迟**」，而不只是「值是 0」。
+   */
+  it('★★★ 首轮立即开始（首项 = 0，不得加人为延迟）', async () => {
+    const warm = vi.fn(async () => {})
+    const scheduled: Array<{ fn: () => void; ms: number }> = []
+    const stop = startCatalogPrewarm({
+      providers: ['buddy'],
+      warm,
+      // ⚠️ 不传 delaysMs ⇒ 走默认 [0, 35_000, 75_000]
+      schedule: (fn, ms) => { scheduled.push({ fn, ms }); return () => {} },
+    })
+
+    // 首轮排在 microtask 上：装配阶段**不该**有定时器（只有轮间才用 schedule）
+    expect(scheduled, '首轮不得排定时器（应立即执行）').toHaveLength(0)
+
+    // 排空 microtask 后首轮就已开跑
+    for (let i = 0; i < 5; i += 1) await Promise.resolve()
+    expect(warm, '首轮必须立即开跑（不得延后）').toHaveBeenCalledWith('buddy')
+    stop()
+  })
+
+  it('★★ 默认常量首项是 0（接线层不传即立即预热）', () => {
+    expect(CATALOG_PREWARM_DELAYS_MS[0], '首项必须 0（立即）').toBe(0)
+    // 后续两段仍是「> 冷却」的补拉间隔
+    expect(CATALOG_PREWARM_DELAYS_MS[1]).toBe(35_000)
+    expect(CATALOG_PREWARM_DELAYS_MS[2]).toBe(75_000)
   })
 
   it('index.ts 接线了冷启动预热，且停止函数挂 ctx.effect', () => {
@@ -275,8 +363,13 @@ describe('IKJVTF 接线：十个适配器都接上了广播', () => {
     expect(source).toMatch(/ctx\.effect\(\(\)\s*=>\s*startCatalogPrewarm\(/)
     // 走 ctx.llm 公开路径（对 withDeadModelPruning 包装透明）。
     expect(source).toMatch(/warm:\s*\(provider\)\s*=>\s*ctx\.llm\.listModels\(provider\)/)
-    // provider 列表来自 modelAdapters，不写死清单（写死必然漂移）。
-    expect(source).toMatch(/providers:\s*Object\.keys\(modelAdapters\)/)
+    /**
+     * provider 列表由 `selectPrewarmProviders(...)` 筛出（2026-11-20）。
+     * ⚠️ 断言「筛选函数被调用」而不是「== Object.keys」：后者是**筛选前**的
+     * 全量，而本改动的目的正是**不再**预热全部（实测 33 家 → 8 家）。
+     */
+    expect(source).toMatch(/selectPrewarmProviders\(/)
+    expect(source).toMatch(/Object\.keys\(modelAdapters\)/)
   })
 
   /**
@@ -322,5 +415,100 @@ describe('IKJVTF 接线：十个适配器都接上了广播', () => {
     // 形状不可识别必须记 warning（HTTP 200 + 网关降级返回 `{}` / HTML）
     expect(source).toMatch(/isClineRecommendedShape\(payload\)/)
     expect(source).toMatch(/isClineModelsShape\(payload\)/)
+  })
+})
+
+/**
+ * ★★★ **预热只挑「有启用账号」的 provider**（2026-11-20 真实启动卡顿修复）。
+ *
+ * ## 实测背景（33 个 provider，冷启动第 1 轮）
+ *
+ *     +     8ms  22 个 provider 全部完成
+ *     +  1289ms  workbuddy / codearts
+ *     + 12586ms  cline (12585ms)   ← 独占 12.5 秒
+ *
+ * 本机 60 个账号只覆盖 **10 家**，其余 **23 家一个账号都没有**，却照样被预热。
+ *
+ * ⚠️ 更关键的是 `cline`：账号 **已停用但凭据还在** ⇒ 骨架的账号门控
+ *（`hasLoggedInAccount` 判据是「凭据可解析」，**刻意不看 `enabled`**）
+ *  照样放行 ⇒ 它完整走完「两个端点 + models.dev 6.47MB」⇒ 12.5 秒。
+ *
+ * ⇒ 预热前用**同步**判据筛：只留「至少一个**启用**账号」的 provider。
+ */
+describe('selectPrewarmProviders：预热只挑有启用账号的 provider', () => {
+  /** 造一个「provider → 账号列表」的读取器；未登记的 provider 抛错。 */
+  const poolOf = (table) => (provider) => {
+    const accounts = table[provider]
+    if (accounts === undefined) throw new Error(`未登记：${provider}`)
+    return accounts
+  }
+
+  it('★★★ 只保留「至少一个启用账号」的 provider', () => {
+    const list = poolOf({
+      buddy: [{ enabled: true }],
+      workbuddy: [{ enabled: true }, { enabled: true }],
+      cline: [{ enabled: false }],
+      opencode: [{ enabled: false }],
+      trae: [{ enabled: true }, { enabled: false }],
+    })
+    const out = selectPrewarmProviders(
+      ['buddy', 'workbuddy', 'cline', 'opencode', 'trae'],
+      list,
+    )
+    expect(out).toEqual(['buddy', 'workbuddy', 'trae'])
+  })
+
+  it('★★★ 停用账号不得让该 provider 通过（真实缺陷的核心形态）', () => {
+    // ⚠️ 这正是 cline 的形态：凭据还在 ⇒ hasLoggedInAccount 返回 true ⇒
+    //    骨架门控放行 ⇒ 真的去拉 12.5 秒的目录。
+    const list = poolOf({ cline: [{ enabled: false }] })
+    expect(selectPrewarmProviders(['cline'], list)).toEqual([])
+  })
+
+  it('★★ `enabled` 缺省视为启用（与账号池其它判据一致）', () => {
+    // 账号池里 `enabled` 可选，缺省 = 启用（既有口径是 `a.enabled !== false`）
+    const list = poolOf({ buddy: [{}], trae: [{ enabled: undefined }] })
+    expect(selectPrewarmProviders(['buddy', 'trae'], list)).toEqual(['buddy', 'trae'])
+  })
+
+  /**
+   * ★★★ **必须看「所有」账号，不能只看第一条**（变异 M3 无牙后补）。
+   *
+   * 之前的用例里「首条账号」恰好能代表结果 ⇒ 把实现改成 `list[0].enabled`
+   * 时全绿。真实形态里**停用账号经常排在前面**（先加后停用），
+   * 只看第一条会把「其实还有启用账号」的 provider 误排除 ⇒ 目录永不预热。
+   */
+  it('★★★ 首条停用但后续有启用 ⇒ 必须保留', () => {
+    const list = poolOf({ buddy: [{ enabled: false }, { enabled: true }] })
+    expect(selectPrewarmProviders(['buddy'], list)).toEqual(['buddy'])
+  })
+
+  it('★★ 首条启用但后续全停用 ⇒ 保留（已有一条启用即可）', () => {
+    const list = poolOf({ buddy: [{ enabled: true }, { enabled: false }, { enabled: false }] })
+    expect(selectPrewarmProviders(['buddy'], list)).toEqual(['buddy'])
+  })
+
+  it('★ 全停用 ⇒ 空数组（预热整体跳过）', () => {
+    const list = poolOf({ a: [{ enabled: false }], b: [{ enabled: false }] })
+    expect(selectPrewarmProviders(['a', 'b'], list)).toEqual([])
+  })
+
+  it('★ 保持原顺序（不得重排）', () => {
+    const list = poolOf({
+      z: [{ enabled: true }],
+      a: [{ enabled: true }],
+      m: [{ enabled: true }],
+    })
+    expect(selectPrewarmProviders(['z', 'a', 'm'], list)).toEqual(['z', 'a', 'm'])
+  })
+
+  it('★★ 读池抛错 ⇒ 保守保留（宁可慢，不要永不预热）', () => {
+    // ⚠️ 误删的后果是「目录永不预热」⇒ 客户端永久停在兜底表，比慢更糟。
+    const list = () => { throw new Error('池读取失败') }
+    expect(selectPrewarmProviders(['a', 'b'], list)).toEqual(['a', 'b'])
+  })
+
+  it('★ 空输入 ⇒ 空输出', () => {
+    expect(selectPrewarmProviders([], () => [])).toEqual([])
   })
 })

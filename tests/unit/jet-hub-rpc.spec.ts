@@ -5,7 +5,7 @@ import {
 } from '../../src/cline-request-log.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   collectClaimResults,
   collectCreditBalances,
@@ -43,6 +43,22 @@ import { LoomyAdapter } from '../../src/loomy-adapter.js'
 import { LOOMY, type LoomyProduct } from '../../src/loomy-product.js'
 import { RACCOON } from '../../src/raccoon-product.js'
 import { AggregateAdapter } from '../../src/aggregate-adapter.js'
+
+/**
+ * ★ **等一个广播合并窗口过去**（2026-11-20）。
+ *
+ * `broadcastCatalogChanged` 从 `queueMicrotask`（同 tick 合并）改成了
+ * `setTimeout` **800ms 合并窗口** —— 见 `src/catalog-broadcast.ts` 模块头的
+ * 实测时间线（各家目录网络错开落地，microtask 合并率接近 0，宿主因此重算 16 次）。
+ *
+ * ⚠️ 于是「`await call(...)` 之后立刻断言 `emitted`」不再成立：广播还没派发。
+ * 所有断言「**应广播**」的用例必须先等这个窗口。
+ *
+ * ⚠️ 只给「应广播」的用例加；断言 `emitted` 为**空**的用例不用等
+ *（不广播时等多久都是空，加了只是白等）。
+ */
+const flushBroadcast = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 900) })
+
 
 /**
  * 注册**生产的那张** `probeById`（Task 8 起探测适配器由能力注册表提供）。
@@ -2103,11 +2119,13 @@ describe('model.list / model.setDisabled 端点', () => {
 
     await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: true })
     // 关闭要广播
+    await flushBroadcast()
     expect(emitted).toContain('llm/adapters-updated')
 
     // 重新打开同样要广播：两个方向都会改变可见目录。
     emitted.length = 0
     await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: false })
+    await flushBroadcast()
     expect(emitted).toContain('llm/adapters-updated')
   })
 
@@ -2552,6 +2570,7 @@ describe('model.list / model.setDisabled 端点', () => {
       })
       // ⚠️ 仍须广播：客户端那份 `status === 'ready'` 的目录缓存要靠它失效，
       //    调用方（前端）也据此刷新开关状态。
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
     })
 
@@ -2666,6 +2685,7 @@ describe('model.list / model.setDisabled 端点', () => {
 
       await call('model.setAllDisabled', { provider: 'buddy', disabled: true })
 
+      await flushBroadcast()
       expect(emitted).toEqual(['llm/adapters-updated'])
     })
 
@@ -2677,6 +2697,7 @@ describe('model.list / model.setDisabled 端点', () => {
 
       await call('model.setAllDisabled', { provider: 'buddy', disabled: false })
 
+      await flushBroadcast()
       expect(emitted).toEqual(['llm/adapters-updated'])
     })
 
@@ -2864,6 +2885,7 @@ describe('model.list / model.setDisabled 端点', () => {
         disabled: true,
       })
 
+      await flushBroadcast()
       expect(emitted).toEqual(['llm/adapters-updated'])
     })
 
@@ -5150,6 +5172,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
     it('关闭后广播 llm/adapters-updated（否则界面要重启才更新）', async () => {
       const { call, emitted } = setup({ catalog: CATALOG })
       await call('provider.setEnabled', { provider: 'buddy', enabled: false })
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
     })
 
@@ -5203,6 +5226,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
       expect((result.value as { models?: number }).models).toBe(0)
       // 账号确实被停用 + 必须广播（否则界面开关不刷新）。
       expect(writeOrder).toContain('accounts')
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
       expect(storedAccounts()[0].enabled).toBe(false)
       // 判据联动：`provider.status` 必须靠「关闭意图」腿报 closed:true。
@@ -5340,6 +5364,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
       // 先关模型、后停账号（无账号 ⇒ accounts 写入为 0 条）。
       expect(writeOrder).toEqual(['models'])
       // 必须广播（前端开关状态靠它刷新）。
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
     })
 
@@ -5391,6 +5416,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
       // 账号集合真的变化时才 push），空目录时它只剩 `accounts` —— 意图是否落下
       // 由下面 `provider.status` 的 `closed` 反向证明。
       expect(writeOrder).toContain('accounts')
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
       expect(storedAccounts()[0].enabled).toBe(false)
 
@@ -6081,6 +6107,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
       expect(result.value).toMatchObject({ models: 2, accounts: 1 })
       expect(storedDisabled().buddy).toBeUndefined()
       expect(storedAccounts()[0].enabled).toBe(true)
+      await flushBroadcast()
       expect(emitted).toContain('llm/adapters-updated')
     })
 
@@ -6108,6 +6135,7 @@ describe('provider.status / provider.setEnabled 端点', () => {
     it('⚠️ 打开也要广播（两个方向都改变 listModels 结果）', async () => {
       const { call, emitted } = setup({ catalog: CATALOG })
       await call('provider.setEnabled', { provider: 'buddy', enabled: true })
+      await flushBroadcast()
       expect(emitted).toEqual(['llm/adapters-updated'])
     })
   })
@@ -8009,5 +8037,253 @@ describe('strictManualOrder 端点接线', () => {
       expect(result.error?.code, String(bad)).toBe('bad-request')
     }
     expect(state.setCalls).toEqual([])
+  })
+})
+
+/**
+ * ★★★ **qoder 特例分支的磁盘缓存**（2026-11-21，真实漏洞修复）。
+ *
+ * ## 它守的是什么（用户实测发现）
+ *
+ * `credits.balances` 端点有**两条取数路径**：
+ *
+ *     if (isQoderFamily(provider))  → Promise.all(... fetchQoderBalanceDetailed)  ← 直连上游
+ *     其余 provider                  → collectCreditBalances → readCachedBalance
+ *
+ * 我先前只在**后者**接了磁盘缓存 ⇒ 对 qoder / qodercn **完全无效**。
+ * 而用户恰有 14 个账号（qoder 7 + qodercn 7）全在这条特例分支里
+ * ⇒ 表现就是「积分完全没有缓存」。
+ *
+ * 实测证据：探针只看到 `primeFromDisk`，而 `readStale` / `noteDiskReading` /
+ * `flushDisk` 一次都没触发。
+ *
+ * ## ⚠️ 为什么用源码文本断言
+ *
+ * 该分支在 `registerJetHubRpc` 的巨型 switch 里，真跑一次 `credits.balances`
+ * 需要构造十几层替身（ctx.credentials / pool / qoderFetchForAccount /
+ * fetchQoderBalanceDetailed / loadQoderWebStore …）。而本缺陷的形态是
+ * 「**这两行根本不存在**」⇒ 文本断言足以抓住它。
+ *
+ * ⚠️ 文本断言挡不住「留着但失效」，故其中两条断言**顺序与条件**
+ * （force 在前、只记非 null），而不只是「有没有这个词」。
+ */
+describe('qoder 特例分支的磁盘缓存接线', () => {
+  // ⚠️ 自包含路径解析：本文件里 `here` 是另一个 describe 的块级变量，末尾取不到。
+  const rpcSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../../src/jet-hub-rpc.ts'),
+    'utf8',
+  )
+
+  /** 取出 `credits.balances` 的 qoder 分支那段源码（到下一个 case 为止）。 */
+  const qoderBranch = (): string => {
+    const start = rpcSource.indexOf("case 'credits.balances'")
+    if (start < 0) throw new Error('找不到 credits.balances')
+    const qoder = rpcSource.indexOf('if (isQoderFamily(req.provider))', start)
+    if (qoder < 0) throw new Error('找不到 qoder 分支')
+    const next = rpcSource.indexOf("case '", qoder)
+    return rpcSource.slice(qoder, next < 0 ? undefined : next)
+  }
+
+  it('★★★ qoder 分支必须读磁盘缓存（readDiskReading）', () => {
+    expect(qoderBranch(), 'qoder 是特例分支，不经过 readCachedBalance ⇒ 必须自己读盘')
+      .toContain('readDiskReading(')
+  })
+
+  it('★★★ qoder 分支成功取数后必须记盘（noteDiskReading）', () => {
+    expect(qoderBranch(), '不记盘 ⇒ 磁盘文件永不生成')
+      .toContain('noteDiskReading(')
+  })
+
+  it('★★★ 读盘必须被 `!qoderForce` 真实守卫（刷新按钮不能变假）', () => {
+    const branch = qoderBranch()
+    /**
+     * ⚠️⚠️ **不能只断言「qoderForce 在 readDiskReading 之前」**（变异 M3 实测无牙）：
+     * 把 `if (!qoderForce)` 改成 `if (true)` 时，那个变量声明**仍在**、
+     * 位置也不变 ⇒ 顺序断言照样通过，而 force 守卫已经**完全失效**
+     * （面板点「刷新积分」会返回磁盘旧值 = 假按钮）。
+     *
+     * ⇒ 必须断言**守卫表达式本身**出现在 `if (...)` 里。
+     */
+    expect(branch, '必须有 `if (!qoderForce)` 守卫').toMatch(/if\s*\(\s*!qoderForce\s*\)/)
+    // 且读盘真的在那个 if 块内（取 if 与 readDiskReading 之间的片段，不得闭合）
+    const guardIdx = branch.indexOf('if (!qoderForce)')
+    const readIdx = branch.indexOf('readDiskReading(')
+    expect(readIdx, '读盘必须在守卫之后').toBeGreaterThan(guardIdx)
+    const between = branch.slice(guardIdx, readIdx)
+    expect(between, '守卫与读盘之间不得有闭合大括号（否则不在同一块内）')
+      .not.toContain('\n            }')
+  })
+
+  it('★★ 每一处记盘都必须有 null 守卫（失败不落盘）', () => {
+    const branch = qoderBranch()
+    /**
+     * ⚠️ 2026-11-21 修订：本分支现在有**两处** `noteDiskReading`
+     *（主路径 + 命中磁盘后的后台刷新），故判据从「第一处」改为「**每一处**」。
+     *
+     * 两处的守卫变量名不同（主路径 `detailed.balance`、后台刷新 `fresh.balance`），
+     * 但语义相同：**余额为 null（查询失败）时不落盘**。
+     */
+    const indices: number[] = []
+    let from = 0
+    for (;;) {
+      const i = branch.indexOf('noteDiskReading(', from)
+      if (i < 0) break
+      indices.push(i)
+      from = i + 1
+    }
+    expect(indices.length, '至少要有记盘调用').toBeGreaterThan(0)
+
+    for (const i of indices) {
+      const around = branch.slice(Math.max(0, i - 400), i)
+      expect(
+        around,
+        `第 ${i} 处的记盘必须有 null 守卫（detailed.balance !== null 或 fresh.balance === null 早退）`,
+      ).toMatch(/\.balance !== null|\.balance === null/)
+    }
+  })
+
+  /**
+   * ★★ **qoder 余额查询失败必须留日志**（2026-11-21）。
+   *
+   * ## 为什么（用户实测发现）
+   *
+   * `qoder` 与 `qodercn` 走**完全相同**的代码路径（同一个 `isQoderFamily`
+   * 分支、同一个 `fetchQoderBalanceDetailed`），而磁盘缓存里 `qodercn` 有数据、
+   * `qoder`（国际版，7 个账号）**一条都没有** ⇒ 国际版查询全部失败。
+   *
+   * 但失败分支此前**完全静默** —— 只把 `error` 塞进响应，服务端日志一个字都没有
+   * ⇒ 无法判断是网络 / 凭据 / 上游报文变形 / 企业版无数字中的哪一种。
+   *
+   * ⚠️ 实测已排除的两条：网络正常（TLS 184ms、HTTP 401 是缺凭据的正常响应）、
+   * 凭据未过期（`expiresAt` 还剩 577 小时）⇒ 真因只能靠这条日志定位。
+   */
+  it('★★★ 命中磁盘后必须触发后台刷新（否则余额冻结在首次落盘值）', () => {
+    const branch = qoderBranch()
+    /**
+     * ⚠️⚠️ **这条守的是「余额不冻结」**（2026-11-21 真实缺陷）。
+     *
+     * 上一版命中磁盘后**直接 return** ⇒ 后面的 `noteDiskReading` 走不到
+     * ⇒ 磁盘上的 qoder 余额永远不会被新值替换 ⇒ 用户看到的数字越来越旧。
+     *
+     * ⚠️ 判据必须落在「**命中分支内部真的发起了取数**」，而不只是
+     * 「有个 void (async …)」—— 后者可以被 `if (true) return` 短路
+     *（变异 M4 实测：那样改仍然全绿）。
+     *
+     * ⇒ 断言：命中分支里必须出现 `fetchQoderBalanceDetailed` 调用，
+     *   且它与 `readDiskReading` 之间**不得有提前的无条件 return**。
+     */
+    const readIdx = branch.indexOf('readDiskReading(')
+    expect(readIdx, '必须有读盘').toBeGreaterThan(-1)
+
+    // 命中分支的范围：从读盘到主路径的凭据解析（`const resolved =`）
+    const mainPathIdx = branch.indexOf('const resolved = await ctx.credentials.resolve', readIdx)
+    expect(mainPathIdx, '必须能定位主路径起点').toBeGreaterThan(readIdx)
+    const hitBranch = branch.slice(readIdx, mainPathIdx)
+
+    expect(hitBranch, '命中分支内必须发起后台取数（否则余额永不更新）')
+      .toContain('fetchQoderBalanceDetailed')
+    expect(hitBranch, '命中分支内必须记盘')
+      .toContain('noteDiskReading(')
+    // ⚠️ 不得有「无条件早退」把后台刷新短路掉
+    expect(hitBranch, '不得有 if (true) return 这类无条件短路')
+      .not.toMatch(/if\s*\(\s*true\s*\)\s*return/)
+  })
+
+  it('★★ qoder 分支：查询失败必须打 warn 日志（否则真因无从定位）', () => {
+    const branch = qoderBranch()
+
+    expect(branch, '失败分支必须有 logger.warn').toMatch(/ctx\.logger\?\.warn\?\.\(/)
+    expect(branch, 'warn 文案必须说明是余额查询失败')
+      .toContain('余额查询失败')
+    expect(branch, '必须带 detailed.error 作为原因').toContain('detailed.error')
+  })
+
+  /**
+   * ★★★ **缓存命中时绝不给积分行附 `error`**（2026-11-21 真实回归）。
+   *
+   * ## 回归现象（用户截图实测）
+   *
+   * 7 个 qodercn 账号的积分行全部显示成
+   * 「积分  显示的是 2026/11/21 20:16:10 的缓存读数」。
+   *
+   * 用户原话：「**我要求的是显示积分，而不是积分的来源**」。
+   *
+   * ## 机理
+   *
+   * 客户端 `CreditBalanceRow` 是**二选一**渲染：
+   * `if (error || !balance) return <dd>{error}</dd>` ⇒ 只要 `error` 有值，
+   * **积分数字根本不渲染**。
+   *
+   * ⚠️ 本处用源码文本断言：真跑 `credits.balances` 需要十几层替身
+   *（ctx.credentials / pool / qoderFetchForAccount / fetchQoderBalanceDetailed /
+   * loadQoderWebStore …），成本远超收益。而缺陷形态是「**多了一行 error**」，
+   * 文本断言足以抓住。
+   */
+  it('★★★ qoder 缓存命中分支不得带 error（否则积分数字被顶掉）', () => {
+    const branch = qoderBranch()
+    // 定位「命中磁盘 ⇒ 返回」那个块：从 readDiskReading 到主路径凭据解析之间
+    const readIdx = branch.indexOf('readDiskReading(')
+    expect(readIdx).toBeGreaterThan(-1)
+    const mainIdx = branch.indexOf('const resolved = await ctx.credentials.resolve', readIdx)
+    expect(mainIdx).toBeGreaterThan(readIdx)
+    const hitBlock = branch.slice(readIdx, mainIdx)
+
+    // 必须返回 balance
+    expect(hitBlock, '必须回传 balance').toContain('balance: cachedBalance')
+    /**
+     * ⚠️⚠️ **不得出现 `error:` 赋值**（只看**代码行**，排除注释）。
+     *
+     * 去掉这一行后，客户端才会渲染积分数字。
+     *
+     * ⚠️ 必须剥注释：修复点的说明里**故意引用了错误写法**作为对照
+     *（`error: \`显示的是 ... 的缓存读数\``），不剥会把注释当成代码。
+     */
+    const codeOnly = hitBlock
+      .split('\n')
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join('\n')
+    expect(codeOnly, '★★★ 缓存命中不得设 error（用户要积分，不要来源说明）')
+      .not.toMatch(/\berror\s*:\s*[`'"]/)
+  })
+})
+
+/**
+ * ★★★ **正常路径（非 qoder）的 `stale → error` 转换必须判 `cached.error`**
+ *（2026-11-21 真实回归）。
+ *
+ * 见 `qoder 缓存命中分支不得带 error` 那条的说明。
+ *
+ * 本处守的是 `collectCreditBalances` 里那段：
+ *
+ * ```ts
+ * if (cached.stale && cached.error !== undefined) {   // ← 必须两个条件
+ *   error = `本次查询失败，显示的是 ...`
+ * }
+ * ```
+ *
+ * ⚠️ 若退化成只判 `cached.stale`，则**磁盘缓存命中**（stale 但无 error）
+ * 也会被当成失败 ⇒ 所有 provider 的积分行都变成「显示的是…的缓存读数」
+ * ⇒ 用户看到的不是积分。这正是本次回归的形态。
+ */
+describe('credits.balances 的 stale → error 转换判据', () => {
+  const rpcSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../../src/jet-hub-rpc.ts'),
+    'utf8',
+  )
+
+  it('★★★ 必须同时判 `stale` 与 `error !== undefined`（只判 stale 会让缓存命中被当失败）', () => {
+    // 定位 collectCreditBalances 里那段转换
+    const marker = 'if (cached.stale'
+    const idx = rpcSource.indexOf(marker)
+    expect(idx, '找不到 stale → error 转换').toBeGreaterThan(-1)
+
+    // 取该行完整内容
+    const lineStart = rpcSource.lastIndexOf('\n', idx) + 1
+    const lineEnd = rpcSource.indexOf('\n', idx)
+    const line = rpcSource.slice(lineStart, lineEnd).trim()
+
+    expect(line, '★★★ 必须判 cached.error !== undefined（否则缓存命中被当失败）')
+      .toMatch(/cached\.error\s*!==\s*undefined/)
+    expect(line, '且必须判 cached.stale').toMatch(/cached\.stale/)
   })
 })

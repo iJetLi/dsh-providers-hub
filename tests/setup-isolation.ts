@@ -42,6 +42,10 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+// ★ 单测默认关闭模型目录 / 余额的磁盘缓存（见下方两段的说明）。
+import { setCatalogCacheEnabledForTest } from '../src/model-catalog-cache.js'
+import { setBalanceDiskCacheEnabledForTest } from '../src/balance-disk-cache.js'
+
 /** 每个测试文件独享的状态目录。 */
 const stateDir = mkdtempSync(join(tmpdir(), 'dsh-jet-hub-'))
 
@@ -145,3 +149,72 @@ if (process.env.DSH_AUTOCLAW_APPDATA === undefined) {
 if (process.env.DSH_CODEARTS_CACHE_DIR === undefined) {
   process.env.DSH_CODEARTS_CACHE_DIR = mkdtempSync(join(tmpdir(), 'dsh-codearts-cache-'))
 }
+
+/**
+ * ⚠️⚠️ **模型目录的磁盘缓存（SWR）必须隔离**（2026-11-20 实测污染）。
+ *
+ * `src/model-catalog-cache.ts` 的缓存目录是
+ * `$DSH_HOME/cache/model-catalog/<provider>.json`，而 `DSH_HOME` 缺失时回退
+ * `~/.dsh` —— 即**用户的真实目录**。
+ *
+ * ## 实测到的形态（第一版没有隔离时的真实事故）
+ *
+ * `createModelCatalog` 一接上 SWR 就**真的往真实目录写盘**，于是单测里每个
+ * 用例的假目录都落进 `~/.dsh/cache/model-catalog/`，**下一个用例启动时先读到
+ * 上一个用例的假目录** ⇒ 用例互相串味。
+ *
+ * `buddy-adapter.spec.ts` 一次红 **5 条**，且症状极具误导性：
+ *
+ * ```
+ * expected 'Hy4 preview' to be 'GLM-5.3 · x0.79'
+ * ```
+ *
+ * —— 名字对不上，因为读到的根本不是本用例的目录。**单独跑那条是绿的，
+ * 跑整个文件才红**，属于最难归因的一类。
+ *
+ * ⇒ 与 `DSH_JET_HUB_STATE_DIR` / `DSH_CODEARTS_CACHE_DIR` 同型，
+ *   在本层**进程级**隔离成临时目录（每测试文件一个）。
+ *
+ * ⚠️⚠️ **必须无条件覆盖，不能像上面几个变量那样判 `=== undefined`**
+ * （2026-11-20 实测踩到）：`DSH_HOME` 在**用户的 shell / DSH 进程环境里
+ * 通常已经是 `C:\Users\<user>\.dsh`** ⇒ `=== undefined` 判据**恒为假**
+ * ⇒ 隔离**完全不生效**，测试照样往真实目录写。
+ *
+ * 实测后果：我第一次修完以为已隔离，重跑测试仍然红，且
+ * `~/.dsh/cache/model-catalog/buddy.json` 又被创建 —— 正是本变量的
+ * 默认值把它指向了真实目录。
+ *
+ * ⇒ 本变量是**唯一**必须无条件覆盖的隔离项（其余几个在测试环境里本来就没设）。
+ */
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-home-model-catalog-'))
+
+/**
+ * ★★★ **单测里默认关掉模型目录的磁盘缓存**（2026-11-20，实测串味）。
+ *
+ * ## 为什么「隔离目录」还不够
+ *
+ * 上面的 `DSH_HOME` 隔离只保证**不污染用户的真实目录**，但**同一测试文件内**
+ * 的所有用例仍然共用那一个临时目录 ⇒ 用例之间照样串味。
+ *
+ * 实测形态（`buddy-adapter.spec.ts`）：单跑任意一条都绿，跑**整个 describe**
+ * 就红 5 条 —— 因为第一条用例把它的假目录（1 条模型）写进了缓存，第二条用例
+ * 构造时**先读到那份缓存** ⇒ 断言拿到的 `models[0].name` 是第一条的名字。
+ *
+ * ⇒ 单测默认关闭（`readCatalogCache` 恒 `undefined`、`writeCatalogCache` 恒
+ * `false`），行为回到加缓存前。要看真实读写的用例（`model-catalog-cache.spec.ts`）
+ * 自己 `beforeEach(() => setCatalogCacheEnabledForTest(true))` 打开。
+ *
+ * ⚠️ 这是本仓库既定取向：`models-dev-cache` 的「注入的 fetcher 不落盘」、
+ *    `DSH_CODEARTS_CACHE_DIR` 的隔离，都是同一类「测试不该碰真实缓存」。
+ */
+setCatalogCacheEnabledForTest(false)
+
+/**
+ * ★★★ **单测里同样关掉余额磁盘缓存** —— 与上面模型目录缓存同因。
+ *
+ * `balance-cache.ts` 现在会在「冷启动回源之前」读磁盘缓存。若不关，
+ * 同一测试文件内的用例会读到**上一个用例**留下的假余额 ⇒ 断言拿到别的用例的值。
+ *
+ * 要看真实读写的用例（`balance-disk-cache.spec.ts`）自己显式打开。
+ */
+setBalanceDiskCacheEnabledForTest(false)

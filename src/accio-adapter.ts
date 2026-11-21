@@ -1310,6 +1310,17 @@ export class AccioAdapter extends LlmAdapter {
       // ⚠️ **只在成功赋值后**记时刻：失败/空结果不写，否则一次抖动会把上界
       //    刷新掉、下轮还要等满 20 分钟才发现上游没恢复。
       this.catalogAt = this.options.now?.() ?? Date.now()
+              /**
+         * ★ **落盘（SWR 写盘那一半）** —— 2026-11-20，与 `buddy-adapter` 同款。
+         *
+         * ⚠️ 本家**只有一个目录来源** ⇒ 「拿到非空目录」即 `complete`
+         *（与 `RemoteCatalogGate` 对裸布尔的归一化口径一致：`complete = got`）。
+         * 故不需要额外的完整性判据。
+         *
+         * ⚠️ 只写**非空**目录：空目录若覆盖磁盘上更好的旧缓存，下次启动会更差。
+         * 那一层由 `writeCatalogCache` 自己挡（`entries.length === 0` 直接返回 false）。
+         */
+        this.catalog.rememberForDisk?.(this.syncCatalogEntries())
       return true
     })
   }

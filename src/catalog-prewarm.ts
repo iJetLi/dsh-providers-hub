@@ -43,8 +43,32 @@ import { REMOTE_CATALOG_COOLDOWN_MS } from './remote-catalog-gate.js'
 /**
  * 预热轮次的间隔（毫秒，**相对上一轮结束**，见 `runChain`）。
  *
- * - `0` —— 首次立即执行（凭据往往已就绪，能一把拿到目录）；
+ * - `0` —— **首次立即执行**（见下方「为什么首项必须是 0」）；
  * - `35_000` / `75_000` —— 两段补拉间隔，覆盖「首拉时凭据未就绪 / 网络抖动」。
+ *
+ * ## ★★ 为什么首项必须是 `0`（2026-11-20 二次修订，上一版改成 10_000 是错的）
+ *
+ * 上一版为了「给宿主首屏让路」把首项改成 `10_000`，**实测反而更慢**（60 秒+）。
+ * 根因是我误判了两者的关系：
+ *
+ * `RemoteCatalogGate.run()` 里有一条 **in-flight 去重**：
+ *
+ * ```ts
+ * if (this.inFlight !== undefined) {
+ *   await this.inFlight      // ← 复用别人正在飞的那次请求，不重新发起
+ *   return
+ * }
+ * ```
+ *
+ * ⇒ **预热越早开始，宿主首屏越受益**：宿主调 `listModels` 时若预热已在飞，
+ * 它 `await` 的是**同一次请求**，零额外成本。
+ *
+ * 反过来（首项 = 10 秒）会让宿主**自己发起**首轮网络请求，预热 10 秒后才
+ * 重复一遍同样的工作 —— 既慢又浪费，纯属双输。
+ *
+ * ⚠️ 所以「预热和首屏抢连接」这个担心**不成立**：它们共享同一个 Promise。
+ * 真正拖慢首屏的另有其人（`models.dev` 的 90 秒超时 × 3 次重试），
+ * 见 `models-dev-cache.ts` 的 `MODELS_DEV_TIMEOUT_MS`。
  *
  * ⚠️ 非零项必须**大于** {@link REMOTE_CATALOG_COOLDOWN_MS}，否则被闸门挡回。
  */
@@ -87,6 +111,59 @@ function defaultSchedule(fn: () => void, ms: number): () => void {
   // ⚠️ 浏览器/其它宿主没有 `unref`，故用可选调用。
   ;(timer as unknown as { unref?: () => void }).unref?.()
   return () => clearTimeout(timer)
+}
+
+/**
+ * ★★★ **筛出「值得预热」的 provider**（2026-11-20，真实启动卡顿修复）。
+ *
+ * ## 它修的是什么
+ *
+ * 实测（33 个 provider，冷启动第 1 轮）：
+ *
+ * ```
+ * +     8ms  22 个 provider 全部完成
+ * +  1289ms  workbuddy / codearts
+ * + 12586ms  cline (12585ms)   ← 独占 12.5 秒
+ * ```
+ *
+ * 本机 60 个账号只覆盖 **10 家**，其余 **23 家一个账号都没有**，却照样被预热。
+ * 更糟的是 `cline`：账号 **已停用但凭据还在** ⇒ 骨架的账号门控
+ * （`providerCatalogVisible` → `hasLoggedInAccount`，判据是「凭据可解析」，
+ * **刻意不看 `enabled`**）照样放行 ⇒ 它完整走完「两个端点 + models.dev 6.47MB」
+ * 的链路 ⇒ 12.5 秒。
+ *
+ * ## 判据：至少一个**启用**账号
+ *
+ * - 没有启用账号 ⇒ 用户此刻用不到这家 ⇒ 目录拉下来也没人看；
+ * - 与页头供应商开关 / 模型选择器的可见性**同源**；
+ * - **同步**（读账号池内存副本），不引入异步开销。
+ *
+ * ⚠️ **刻意不用 `hasLoggedInAccount`**：它异步（逐个解析凭据），33 家筛一遍
+ * 比预热本身还慢；且它**不看 `enabled`** —— 正是本缺陷的成因之一。
+ *
+ * ⚠️ **代价（已确认接受）**：用户新登录/重新启用一个 provider 后，它的目录
+ * 不在本轮预热里 ⇒ 要等下一次 `listModels`（打开设置页 / 切模型）才拉。
+ * 那是**用户主动动作触发的**，不构成启动卡顿。
+ *
+ * @param providers - 全部候选 provider id（通常是 `Object.keys(modelAdapters)`）
+ * @param listAccounts - 读某 provider 的全部账号（含停用），通常是
+ *   `(p) => pool.listAccountsByProvider(p)`
+ * @returns 过滤后的 provider 列表（保持原顺序）
+ *
+ * ⚠️ **读池异常时保守保留**该 provider：预热失败只是慢，误删会让目录
+ * **永不预热**（那是更糟的静默失效，客户端会永久停在兜底表上）。
+ */
+export function selectPrewarmProviders(
+  providers: readonly string[],
+  listAccounts: (provider: string) => readonly { enabled?: boolean }[],
+): string[] {
+  return providers.filter((provider) => {
+    try {
+      return listAccounts(provider).some((account) => account.enabled !== false)
+    } catch {
+      return true
+    }
+  })
 }
 
 /**
@@ -157,9 +234,15 @@ export function startCatalogPrewarm(options: CatalogPrewarmOptions): () => void 
     }, gap))
   }
 
-  // 立即那一轮：**排到 microtask**，不在调用栈内触达 `warm`。
+  // ★ 立即那一轮：**排到 microtask**，不在调用栈内触达 `warm`。
+  //
   // `apply()` 是同步函数，而 `warm` 会发起网络请求 —— 同步调用它等于把
   // 首个请求塞进插件启动路径（与既有的 opencode 能力预热同款约定）。
+  //
+  // ⚠️⚠️ **不要再加人为延迟**（2026-11-20 二次修订）：上一版曾改成
+  // 「延后 10 秒给宿主让路」，实测**反而更慢**（60 秒+）。
+  // 原因见 {@link CATALOG_PREWARM_DELAYS_MS} 的 in-flight 去重说明：
+  // 预热越早开始，宿主首屏越能直接复用同一次在飞请求。
   queueMicrotask(() => {
     if (stopped) return
     void runChain(0)
@@ -177,6 +260,17 @@ export function startCatalogPrewarm(options: CatalogPrewarmOptions): () => void 
  *
  * 抽成函数是为了让**接线层**也能断言（不止单测）：间隔小于冷却时预热等于没做，
  * 且症状是「静默无效」（没有任何报错，只是目录一直补不回来）。
+ *
+ * ## ⚠️ 2026-11-20 二次修订：恢复「只看非零项」
+ *
+ * 上一版曾改成 `slice(1)`，理由是「首项是启动延迟、不参与校验」。现在首项
+ * 回到 `0`（立即），那两个分支的语义重新统一为：
+ *
+ * - **首项 `0`** = 立即 ⇒ 不与任何冷却竞争，`.filter(d => d > 0)` 自然排除它；
+ * - **其余项** = 轮间间隔 ⇒ 必须大于冷却。
+ *
+ * ⚠️ 这正是改动前的原始实现 —— 上一版加的 `slice(1)` 是为「首项 = 10 秒」
+ * 那个错误设计服务的，现在随之撤销。
  */
 export function isPrewarmSpacingValid(delays: readonly number[] = CATALOG_PREWARM_DELAYS_MS): boolean {
   // 只看**非零**的那些：立即那一轮（0）不受冷却约束。

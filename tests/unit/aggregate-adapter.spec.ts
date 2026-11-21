@@ -4438,9 +4438,11 @@ describe('aggregate：目录加载不得同步折算余额（实测 7 秒）', (
     } as never
     // ⚠️ 走**真实装配**（`registerAggregateLlm` 才会注入广播），不手工传回调。
     const adapter = registerAggregateLlm(ctx, { accountPool: makePool() })
-    // 让注册时那次预热跑完（fire-and-forget）。
+    // 让注册时那次预热跑完（fire-and-forget），**并等广播合并窗口**。
+    // ⚠️ 2026-11-20：`broadcastCatalogChanged` 从 microtask 改成 800ms 窗口，
+    //    等 `setTimeout 0` 已经等不到广播了（见 `src/catalog-broadcast.ts`）。
     for (let i = 0; i < 10; i += 1) await Promise.resolve()
-    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    await new Promise((resolve) => { setTimeout(resolve, 900) })
     expect(adapter.listAllModels().map((m) => m.id)).toContain('deepseek-v4-1-flash')
     expect(
       emitted,
@@ -4465,14 +4467,15 @@ describe('aggregate：目录加载不得同步折算余额（实测 7 秒）', (
     } as never
     const adapter = registerAggregateLlm(ctx, { accountPool: makePool() })
     for (let i = 0; i < 10; i += 1) await Promise.resolve()
-    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    // ⚠️ 等广播合并窗口（800ms），不是 `setTimeout 0`（见上一条用例的说明）。
+    await new Promise((resolve) => { setTimeout(resolve, 900) })
     const afterPrewarm = emitted.filter((e) => e === 'llm/adapters-updated').length
     expect(afterPrewarm, '前置：预热落地时应广播一次').toBeGreaterThan(0)
 
     // 强制重推**同一份**目录（`force = true` 会真的再读一遍上游，但结果相同）。
     await adapter.refreshCatalog(true)
     for (let i = 0; i < 10; i += 1) await Promise.resolve()
-    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    await new Promise((resolve) => { setTimeout(resolve, 900) })
     expect(
       emitted.filter((e) => e === 'llm/adapters-updated').length,
       '★ 目录内容未变 ⇒ 不得再广播（否则是广播风暴）',

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { broadcastCatalogChanged } from '../../src/catalog-broadcast.js'
+import { CATALOG_BROADCAST_COALESCE_MS, broadcastCatalogChanged } from '../../src/catalog-broadcast.js'
 import { RemoteCatalogGate } from '../../src/remote-catalog-gate.js'
 
 /** 极简 ctx 替身：只需要 `emit` 与 `logger`。 */
@@ -8,11 +8,24 @@ function makeCtx(): { emit: ReturnType<typeof vi.fn>; logger: { warn: ReturnType
   return { emit: vi.fn(), logger: { warn: vi.fn() } }
 }
 
-/** 等一个 microtask 队列跑完（广播是 `queueMicrotask` 派发的）。 */
-const flushMicrotasks = (): Promise<void> => new Promise((resolve) => { queueMicrotask(() => resolve()) })
+/**
+ * 等**合并窗口**过去（2026-11-20 起广播走 `setTimeout` 窗口，不再是 microtask）。
+ *
+ * ⚠️ 为什么从 microtask 改成定时器窗口：实测冷启动时 8 家 provider 的目录
+ * 是**网络响应错开**落地的（几十毫秒到十几秒），`queueMicrotask` 只在同一
+ * tick 内合并 ⇒ 合并率接近 0 ⇒ 宿主对每个 provider 重算 16 次。
+ * 改窗口后同一窗口内的广播只派发一次（见模块头的实测时间线）。
+ */
+const flushBroadcast = (): Promise<void> =>
+  new Promise((resolve) => { setTimeout(resolve, CATALOG_BROADCAST_COALESCE_MS + 50) })
 
 /**
  * 目录变更广播（issue IKJVTF 的缺陷①）。
+ *
+ * ⚠️ **2026-11-20**：派发从 `queueMicrotask`（同 tick 合并）改为
+ * `setTimeout` **合并窗口**（`CATALOG_BROADCAST_COALESCE_MS`）。
+ * 理由见 `src/catalog-broadcast.ts` 模块头的实测时间线 —— 各家目录是
+ * **网络错开**落地的，microtask 合并率接近 0，导致宿主重复重算 16 次。
  *
  * 真实缺陷：`dsh-client-ui-model-selection` 的 `ModelCatalogDirectory` 在
  * `status === 'ready'` 时**短路返回缓存**，只在宿主事件上 `refresh()`。
@@ -26,25 +39,25 @@ describe('broadcastCatalogChanged', () => {
     broadcastCatalogChanged(ctx as never)
     // ⚠️ 同步 emit 会把「监听器重入 listModels」变成闸门内的重入 —— 见模块头。
     expect(ctx.emit).not.toHaveBeenCalled()
-    await flushMicrotasks()
+    await flushBroadcast()
     expect(ctx.emit).toHaveBeenCalledWith('llm/adapters-updated')
   })
 
-  it('同一 ctx 连续多次调用只派发一次（同 tick 合并）', async () => {
+  it('同一 ctx 在**同一合并窗口**内多次调用只派发一次', async () => {
     const ctx = makeCtx()
     broadcastCatalogChanged(ctx as never)
     broadcastCatalogChanged(ctx as never)
     broadcastCatalogChanged(ctx as never)
-    await flushMicrotasks()
+    await flushBroadcast()
     expect(ctx.emit).toHaveBeenCalledTimes(1)
   })
 
   it('派发完成后可以再次广播（不是一次性的）', async () => {
     const ctx = makeCtx()
     broadcastCatalogChanged(ctx as never)
-    await flushMicrotasks()
+    await flushBroadcast()
     broadcastCatalogChanged(ctx as never)
-    await flushMicrotasks()
+    await flushBroadcast()
     expect(ctx.emit).toHaveBeenCalledTimes(2)
   })
 
@@ -52,7 +65,7 @@ describe('broadcastCatalogChanged', () => {
     const ctx = makeCtx()
     ctx.emit.mockImplementation(() => { throw new Error('listener boom') })
     broadcastCatalogChanged(ctx as never)
-    await expect(flushMicrotasks()).resolves.toBeUndefined()
+    await expect(flushBroadcast()).resolves.toBeUndefined()
     expect(ctx.logger.warn).toHaveBeenCalledOnce()
   })
 
@@ -70,8 +83,8 @@ describe('broadcastCatalogChanged', () => {
       }
     })
     broadcastCatalogChanged(ctx as never)
-    await flushMicrotasks()
-    await flushMicrotasks()
+    await flushBroadcast()
+    await flushBroadcast()
     // ⚠️ 只派发一次；重入的每一次调用都在 `pending` 处被合并（直接 return，
     // 不会再排 microtask）⇒ 不会指数放大。
     expect(ctx.emit).toHaveBeenCalledTimes(1)
@@ -79,12 +92,53 @@ describe('broadcastCatalogChanged', () => {
     expect(reentered).toBe(1)
   })
 
+  /**
+   * ★★★ **错开落地的多次广播必须合并成一次**（2026-11-20 真实启动卡顿修复）。
+   *
+   * ## 它守的是什么
+   *
+   * 实测冷启动时 8 家 provider 的目录是**网络响应错开**落地的（几十到几千毫秒），
+   * 每一家落地都调一次广播。旧的 `queueMicrotask` 合并只在**同一 tick** 生效
+   * ⇒ 这 8 次几乎全在不同 tick ⇒ 全部派发 ⇒ 宿主对 33 个 provider 重算 8 轮
+   * （实测单 provider 被 `listModels` 16 次）。
+   *
+   * ⇒ 改成时间窗口后，同一窗口内的多次调用只派发一次。
+   */
+  it('★★★ 错开落地（同一窗口内不同 tick）的多次广播只派发一次', async () => {
+    const ctx = makeCtx()
+    // 模拟 8 家目录在不同 tick 落地（每次间隔 10ms，都在窗口内）
+    for (let i = 0; i < 8; i++) {
+      broadcastCatalogChanged(ctx as never)
+      await new Promise((r) => { setTimeout(r, 10) })
+    }
+    // 窗口未到 ⇒ 还没派发
+    expect(ctx.emit, '窗口内不该派发').not.toHaveBeenCalled()
+    await flushBroadcast()
+    expect(ctx.emit, '窗口内 8 次调用必须合并成 1 次').toHaveBeenCalledTimes(1)
+  })
+
+  it('★★ 窗口过去后再调用 ⇒ 派发新一轮（不是一次性的）', async () => {
+    const ctx = makeCtx()
+    broadcastCatalogChanged(ctx as never)
+    await flushBroadcast()
+    expect(ctx.emit).toHaveBeenCalledTimes(1)
+    broadcastCatalogChanged(ctx as never)
+    await flushBroadcast()
+    expect(ctx.emit).toHaveBeenCalledTimes(2)
+  })
+
+  it('★ 窗口常量必须在合理区间（100ms~3s）', () => {
+    // ⚠️ 太短 ⇒ 合并率低（退化成 microtask）；太长 ⇒ 用户察觉更新延迟
+    expect(CATALOG_BROADCAST_COALESCE_MS).toBeGreaterThanOrEqual(100)
+    expect(CATALOG_BROADCAST_COALESCE_MS).toBeLessThanOrEqual(3000)
+  })
+
   it('不同 ctx 各自独立派发（两个 profile 不互相吞掉）', async () => {
     const a = makeCtx()
     const b = makeCtx()
     broadcastCatalogChanged(a as never)
     broadcastCatalogChanged(b as never)
-    await flushMicrotasks()
+    await flushBroadcast()
     expect(a.emit).toHaveBeenCalledTimes(1)
     expect(b.emit).toHaveBeenCalledTimes(1)
   })
@@ -92,7 +146,7 @@ describe('broadcastCatalogChanged', () => {
   it('logger 缺席时不抛错（极简 profile）', async () => {
     const ctx = { emit: vi.fn(() => { throw new Error('boom') }) }
     broadcastCatalogChanged(ctx as never)
-    await expect(flushMicrotasks()).resolves.toBeUndefined()
+    await expect(flushBroadcast()).resolves.toBeUndefined()
   })
 })
 

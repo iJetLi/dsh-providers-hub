@@ -52,6 +52,8 @@
 
 import { TtlCache } from './ttl-cache.js'
 import type { ProviderAccountEntry } from './types.js'
+// ★ 磁盘缓存（跨进程）：重启后第一眼不等网络。见 `getServingStale` 里那段说明。
+import { noteDiskReading, readDiskReading } from './balance-disk-cache.js'
 
 /** 陈旧兼顶的默认上界（15 分钟）。 */
 const DEFAULT_STALE_TTL_MS = 900_000
@@ -503,6 +505,65 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
     }
     // 没有可兼顶的值 ⇒ 照常回源（冷启动路径）。
     slots.set(key, { provider, entry })
+    /**
+     * ★★★ **磁盘缓存：重启后的第一眼不等网络**（2026-11-20）。
+     *
+     * ## 它解决什么
+     *
+     * 内存层（本模块的 `TtlCache`，15 分钟）在**进程重启后是空的** ⇒ 冷启动
+     * 第一次 `read()` 会逐账号回源 ⇒ 实测积分窗口要 ~1 秒才出数。
+     *
+     * 磁盘层（`balance-disk-cache.ts`）跨进程存活 ⇒ 重启后**立刻**有上次的读数。
+     *
+     * ## ⚠️⚠️ 为什么放在「回源之前」而不是回源之后
+     *
+     * 目标就是**别等网络**。放回源之后等于没做 —— 那 1 秒已经付掉了。
+     *
+     * ## ⚠️ 返回的是**旧读数**（用户明确接受，且要求完全静默）
+     *
+     * 用户原话：「有缓存就先返回，后台会自动远端拉取，然后自动替换缓存，
+     * 所以没必要丢弃缓存，加快展示是目标」。
+     *
+     * ⇒ 这里返回 `{ ...diskReading, stale: true }`：`stale` 标记**必须带**，
+     * 因为后台刷新器（`createBalanceRefresher`）正是靠 `peekStale().stale`
+     * 判「该不该刷」—— 不标它，旧读数会被当成新鲜的 ⇒ **永远不会被刷新**，
+     * 那就是「显示 24 小时前的余额且永不自愈」的严重缺陷。
+     *
+     * ## ⚠️ 后台刷新不由本函数触发
+     *
+     * 与上面「读路径不发任何请求」同一条纪律：本函数**只返回旧值**，
+     * 重取交给后台刷新器（它每 60 秒跑一次，会看到 `stale: true` 并刷新）。
+     */
+    const diskReading = readDiskReading(provider, entry.id)
+    if (diskReading !== undefined) {
+      /**
+       * ⚠️⚠️ **刻意不写进 `TtlCache`**（不用 `cache.set`）。
+       *
+       * `TtlCache.set(value)` 会以**此刻**为 `atMs` 写入 ⇒ 该条目被当成
+       * **新鲜** ⇒ `peekStale().stale === false` ⇒ 后台刷新器认为「不用刷」
+       * ⇒ **永远不会被真实值替换**，用户一直看到上次退出时的余额。
+       *
+       * ⇒ 只返回旧值（标 `stale: true`），**不进缓存**。
+       *
+       * ⚠️⚠️ **但必须自己触发后台刷新**（2026-11-21 真实缺陷修复）：
+       * 上一版的注释写着「刷新器看不到新鲜条目 ⇒ 会去回源」——**那是错的**。
+       * 刷新器（`createBalanceRefresher`）遍历的是 `peekStale()` 有条目的键，
+       * 而我们刻意没写进 `TtlCache` ⇒ 它**根本看不到这个账号** ⇒ 不会刷。
+       *
+       * ⇒ 两条更新路径同时断掉 ⇒ 余额冻结在第一次落盘的值。
+       * 修法与 `readStale` 那条同款：fire-and-forget 强制回源 + 成功后记盘。
+       */
+      void cache.get({ force: true })
+        .then((refreshed) => {
+          if (refreshed.error !== undefined) return
+          if (refreshed.stale === true || refreshed.value === undefined) return
+          noteDiskReading(provider, entry.id, { at: refreshed.at, value: refreshed.value })
+        })
+        .catch(() => {
+          // 后台刷新失败静默：用户此刻看到的是磁盘缓存，功能正常。
+        })
+      return { ...(diskReading as BalanceReading), stale: true }
+    }
     return await cache.get()
   }
 
@@ -525,6 +586,20 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
             ? await cache.get({ force: true })
             : await getServingStale(provider, key, cache, entry),
         )
+        /**
+         * ★ **把成功读数记进磁盘缓存的内存镜像**（2026-11-20）。
+         *
+         * ⚠️ 这里**只置脏标记，不写盘** —— 真正落盘由三个时机触发
+         * （启动首次成功 / 每 30 分钟 / 退出时），用户明确要求「减少不必要的
+         * 缓存写盘」。徽标每 60 秒轮询一次，若每次读数都写盘就是每天上千次。
+         *
+         * ⚠️ **只记成功的**（`value !== undefined` 且无 `error`）：把失败读数
+         * 落盘会让下次启动显示「查询失败」，而那时网络可能完全正常。
+         */
+        const reading = out.get(entry.id)
+        if (reading !== undefined && reading.value !== undefined) {
+          noteDiskReading(provider, entry.id, reading)
+        }
       }
       return out
     },
@@ -591,6 +666,136 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
       const limit = readOptions.staleTtlMs ?? staleTtlMs
       const force = readOptions.force === true
       slots.set(key, { provider, entry: { id: accountId, ...entry } })
+      /**
+       * ★★★ **磁盘缓存：重启后的第一眼不等网络**（2026-11-20）。
+       *
+       * ## ⚠️⚠️ 这条路径才是 `credits.balances` 端点真正走的那条
+       *
+       * 第一版我只接在 `getServingStale`（`read()` 用）里，**完全没生效** ——
+       * 实测缓存文件从未生成、积分窗口仍然 1~2 秒。
+       *
+       * 根因：`jet-hub-rpc.ts` 的 `credits.balances` 端点调的是
+       * **`balanceCacheOf()!.readStale(...)`**，而 `readStale` 在下面直接
+       * `await cache.get({ force })` 回源，**不经过 `getServingStale`**。
+       *
+       * ⇒ 两条路径都要接，缺一条就等于没做（这正是本仓库反复强调的
+       *   「同一语义两套判据」的反面：**两条消费路径**必须都覆盖）。
+       *
+       * ## ⚠️ `force` 时**不读盘**
+       *
+       * 用户点面板「刷新积分」就是要真实值，给他磁盘缓存等于假按钮
+       *（与下面「`force` 下不兼顶」是同一条纪律）。
+       */
+      /**
+       * ★★★ **三层缓存的优先级：内存 → 磁盘 → 远端**（2026-11-21 真实缺陷修复）。
+       *
+       * ## 缺陷（实测证伪了我的第一版实现）
+       *
+       * 第一版**先查磁盘、再查内存**：
+       *
+       * ```ts
+       * const diskReading = readDiskReading(...)   // ← 先
+       * if (diskReading) return 旧值
+       * const fresh = await cache.get({ force })   // ← 后
+       * ```
+       *
+       * 后果（用例 `balance-layer-priority2.spec.ts` 实测打穿）：
+       *
+       * - 内存 `TtlCache` 里有一条 **5 秒前**的新鲜读数（222）；
+       * - 磁盘镜像里是 **2 小时前**的旧读数（111）；
+       * - ⇒ 返回 **111**，`stale: true`。
+       *
+       * 而内存里那条 222 是**刚刚成功拉到的真实值**，被一份更旧的数据遮蔽了
+       * ⇒ 用户看到的余额比实际更旧，且**每次**都这样（不是偶发）。
+       *
+       * ## 正确顺序
+       *
+       * | 层 | 判据 | 优先级 |
+       * |---|---|---|
+       * | **内存**（`TtlCache`，TTL 内新鲜）| `peekStale().stale === false` | **最高** |
+       * | **磁盘**（跨进程）| `readDiskReading` 有值 | 次之（内存无新鲜值时）|
+       * | **远端** | `cache.get()` 回源 | 兜底 |
+       *
+       * ⚠️ 内存新鲜值优先是**必然正确**的：它是本进程**刚刚**从上游拉到的，
+       * 磁盘那份无论多新都不可能比它更新。
+       *
+       * ⚠️ 但**内存过期值不优先**：过期条目应当让位给磁盘（磁盘可能更新，
+       * 因为另一个进程/上一次会话刚写过）。这正是下面用 `peekStale().stale`
+       * 而不是 `peek()` 的原因（`peek()` 会顺手销毁过期条目）。
+       */
+      const memoryFresh = cache.peekStale()
+      if (
+        !force
+        && memoryFresh !== undefined
+        && memoryFresh.stale === false
+        /**
+         * ⚠️⚠️ **必须同时要求 `value !== undefined`**（2026-11-21 实测回归）。
+         *
+         * 失败读数（`{ value: undefined, error }`）**也是** TTL 内的新鲜条目 ——
+         * `TtlCache` 不知道「成功」与「失败」的区别，它只按时间判新鲜。
+         *
+         * 只判 `stale === false` 会让失败读数被当作「内存新鲜值」直接返回，
+         * 于是调用方拿不到 `stale: true` 与 `error` ⇒ **陈旧/失败标注消失**
+         * ⇒ 用户误以为上游已恢复（那正是 issue IKJVCW 的形态）。
+         *
+         * 实测：`balance-cache.spec.ts` 的「上游仍失败时，第二次读取仍须标
+         * stale」当场变红（`expected false to be true`）。
+         */
+        && memoryFresh.value.value !== undefined
+      ) {
+        // ★ 内存有**新鲜且成功**的值 ⇒ 直接用它（最高优先级）。
+        return { at: memoryFresh.value.at, value: memoryFresh.value.value, stale: false }
+      }
+
+      const diskReading = force ? undefined : readDiskReading(provider, accountId)
+      if (diskReading !== undefined) {
+        const cached = diskReading as BalanceReading
+        /**
+         * ⚠️ **返回时必须标 `stale: true`** —— 与 `getServingStale` 那条同理：
+         * 不标的话刷新器会认为读数新鲜、永不回源 ⇒ 一直显示上次退出时的余额。
+         *
+         * ⚠️ 同时写进 `lastSuccess`：这样**真实失败**时还能拿它兼顶
+         *（磁盘缓存本来就是一个合法的「上次成功值」，丢掉它是浪费）。
+         * 但**不能**写进 `TtlCache` 槽（那会把它标成新鲜 → 见上面 `getServingStale` 的说明）。
+         */
+        lastSuccess.set(key, { at: cached.at, value: cached.value })
+        /**
+         * ★★★ **命中磁盘后必须触发后台刷新**（2026-11-21 真实缺陷修复）。
+         *
+         * ## 缺陷（我上一版留下的）
+         *
+         * 上一版在这里**直接 return**，于是：
+         *
+         * - 磁盘上的读数**永远不会被新值替换**（`noteDiskReading` 在下面，走不到）；
+         * - 后台刷新器看 `peekStale()` —— 而磁盘值**刻意没写进 `TtlCache` 槽**
+         *   （写进去会被标成新鲜）⇒ 它看不到任何条目 ⇒ **也不会去刷**。
+         *
+         * ⇒ 两条更新路径同时断掉 ⇒ 余额**冻结在第一次落盘的值**，
+         * 用户看到的数字越来越旧（虽然 UI 标了 stale，但永远不会变新）。
+         *
+         * ## 修法：fire-and-forget 刷一次
+         *
+         * `void cache.get({ force: true })` 绕过 TTL 强制回源，成功后由
+         * 下面的 `noteDiskReading` 落盘 ⇒ 下次启动读到的是新值。
+         *
+         * ⚠️ **不 await**：本函数的全部价值就是「不等网络」。
+         * ⚠️ **必须 `.catch`**：后台任务的异常不得变成 unhandledRejection
+         *   把宿主进程带走（`fetchBalanceReading` 在凭据缺失时会抛）。
+         * ⚠️ **成功后要记盘**：`cache.get()` 自己不落盘，故这里显式接一次
+         *   `noteDiskReading`（与下面主路径同款判据：非兼顶、value 非空）。
+         */
+        void cache.get({ force: true })
+          .then((refreshed) => {
+            if (refreshed.error !== undefined) return
+            if (refreshed.stale === true || refreshed.value === undefined) return
+            lastSuccess.set(key, refreshed)
+            noteDiskReading(provider, accountId, { at: refreshed.at, value: refreshed.value })
+          })
+          .catch(() => {
+            // 后台刷新失败完全静默：用户此刻看到的是磁盘缓存，功能正常。
+          })
+        return { at: cached.at, value: cached.value, stale: true }
+      }
       const fresh = await cache.get({ force })
 
       /**
@@ -603,6 +808,21 @@ export function createBalanceCache(options: BalanceCacheOptions): BalanceCache {
         // ⚠️ **兼顶回滚的值不算「成功」**：它是上一轮的成功值 + 本轮的失败，
         //   若把它当新鲜成功写进表，就会**刷新兼顶上界的计时起点** ⇒ 上界永不到期。
         if (fresh.stale !== true) lastSuccess.set(key, fresh)
+        /**
+         * ★ **把成功读数记进磁盘镜像**（2026-11-20）。
+         *
+         * ⚠️⚠️ 这条路径才是 `credits.balances` 端点走的 —— 第一版我只在
+         * `read()` 里记，故**磁盘文件从未生成**（实测：跑完 DSH 后
+         * `~/.dsh/cache/balance-readings.json` 不存在）。
+         *
+         * ⚠️ 只记成功（无 `error`）且**非兼顶回滚**的值：兼顶回滚是「上一轮的
+         * 成功值 + 本轮的失败」，落盘它会让下次启动显示一个更旧的值。
+         *
+         * ⚠️ 只置脏标记，不写盘（写盘时机由 30 分钟定时器 / 退出钩子控制）。
+         */
+        if (fresh.stale !== true && fresh.value !== undefined) {
+          noteDiskReading(provider, accountId, { at: fresh.at, value: fresh.value })
+        }
         return { at: fresh.at, value: fresh.value, stale: false }
       }
 

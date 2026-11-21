@@ -393,11 +393,20 @@ describe('Qoder 同族 RPC 注册表（src/jet-hub-rpc.ts）', () => {
     //    但「特例必须在查表**之前**短路」这条更重要的不变式原先无人守。
     //    ⇒ 改为断言**顺序**（特例早于查表）+ 保留原有两条内容断言。
     const start = code.indexOf("case 'credits.balances'")
-    // ⚠️ 切片长度要**够覆盖到查表那一行**：2026-10-12 加 officeace 特例后，
-    //    `creditsOf(credits, req.provider)` 被推到 4000 字符之外 ⇒ 原长度下
-    //    `lookupAt` 变成 -1、报「找不到查表分派」。这里放宽到 8000（仍是
-    //    「本 case 内」的合理范围），改的是**窗口**不是判据。
-    const branch = code.slice(start, start + 8000)
+    /**
+     * ⚠️⚠️ **切片必须覆盖到查表那一行**（2026-11-21 再次放宽）。
+     *
+     * 历史：原 3000 → 2026-10-12 加 officeace 特例后推到 4000+ → 放宽到 8000。
+     * **实测 2026-11-21 时距离已是 19150 字符**（用户 issue 累积的注释与特例分支
+     * 使这个 case 体变得很长）⇒ 8000 窗口下 `lookupAt` 恒 -1 ⇒ 该用例**长期假红**
+     * （它被算进「6 条基线红」，实际是本条测试自身腐坏，不是产品缺陷）。
+     *
+     * ⇒ 改为**按结构切片**而不是按长度：从 case 起点切到**下一个 `case '`**
+     * （或下一个 `}` 收尾）。这样无论 case 体长到多少都成立。
+     */
+    const nextCase = code.indexOf("case '", start + 10)
+    const branch = code.slice(start, nextCase < 0 ? start + 40000 : nextCase)
+    expect(branch.length, '切片必须覆盖本 case 的全部内容').toBeGreaterThan(1000)
     expect(branch).toContain('isQoderFamily(req.provider)')
     // ⚠️ 2026-10-21 改：此处原断言 `fetchQoderCreditBalance(credential, product)`。
     //    面板改用**带原因**的变体 `fetchQoderBalanceDetailed`（同一个文件里

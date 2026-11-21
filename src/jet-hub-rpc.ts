@@ -34,6 +34,8 @@ import { AccountPool, asProxyText, isPolicyBlockedAccount } from './account-pool
 import { AUTO_PROVIDER as AUTO_PROVIDER_ID } from './auto-adapter.js'
 import { resolveAutoBadgeRewrite, type AutoBadgeState } from './auto-badge.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
+// ★ 余额磁盘缓存（qoder 特例分支也要用，见 credits.balances 里那段说明）。
+import { noteDiskReading, readDiskReading } from './balance-disk-cache.js'
 import { gatewayPublicUrl, isGatewayEnabled, isGatewayHostFromEnv } from './openai-gateway/config.js'
 import { collectGatewayCatalogSnapshot, toGatewayModelIds, type GatewayModelSource } from './openai-gateway/models.js'
 import {
@@ -1497,8 +1499,58 @@ export async function collectCreditBalances<TCredential = BuddyCredential, TProd
       const cached = await deps.readCachedBalance(entry.id, { force: deps.force === true })
       if (cached !== undefined) {
         balance = cached.balance
-        if (cached.stale) {
-          error = `本次查询失败，显示的是 ${new Date(cached.at).toLocaleString('zh-CN')} 的数据（${cached.error ?? '上游不可达'}）`
+        /**
+         * ★★★ **只有「真实失败」才设 `error`，缓存命中不设**
+         *（2026-11-21 真实回归修复）。
+         *
+         * ## 回归现象（用户截图实测）
+         *
+         * 7 个 qodercn 账号的积分行全部显示成：
+         *
+         * ```
+         * 积分  显示的是 2026/11/21 20:16:10 的缓存读数
+         * ```
+         *
+         * 而用户要的是**积分数字**，不是「数据来源」。
+         *
+         * ## 机理
+         *
+         * 客户端的 `CreditBalanceRow` 是**二选一**渲染：
+         *
+         * ```js
+         * if (error || !balance) {
+         *   return <dd data-tone="warn">{error}</dd>   // ← 只显示 error，积分不渲染
+         * }
+         * // 有 balance 才往下画积分
+         * ```
+         *
+         * ⇒ 只要 `error` 有值，**积分数字根本不出现**。
+         *
+         * ## 为什么原来设 error 是对的、现在不对
+         *
+         * 本段逻辑原本只服务**兼顶**（`getServingStale` 的「上游失败、拿上次成功值顶上」）——
+         * 那种情况确实该告诉用户「这是旧数据，因为查失败了」。
+         *
+         * 但我新加的**磁盘缓存命中**也返回 `stale: true`（语义是「这是上次会话的数据」），
+         * 它**不是失败** —— 它是**正常且预期**的首屏路径。
+         * 两者共用同一个 `stale` 标记 ⇒ 被这段逻辑一视同仁地当成失败。
+         *
+         * ## 判据：`cached.error !== undefined`
+         *
+         * | 来源 | `stale` | `error` | 该不该提示 |
+         * |---|---|---|---|
+         * | 兼顶（上游失败）| true | **有值** | ✅ 该提示「本次查询失败」 |
+         * | **磁盘缓存命中** | true | **无值** | ❌ **不该提示**（用户要积分）|
+         * | 正常新鲜值 | false | 无值 | ❌ 不提示 |
+         *
+         * ⇒ 只有「带 `error` 的 stale」才是真失败。
+         *
+         * ⚠️ 这与用户 2026-10-16 的原始要求**不矛盾**：他当时要的是
+         * 「**查失败时**拿旧数据顶上并说明原因」，不是「每次命中缓存都说明来源」。
+         * 且他在 2026-11-21 明确说：「期间都是后台静默完成，**前端也不必要显示任何信息**」。
+         */
+        if (cached.stale && cached.error !== undefined) {
+          error = `本次查询失败，显示的是 ${new Date(cached.at).toLocaleString('zh-CN')} 的数据（${cached.error}）`
         }
       }
     }
@@ -9842,6 +9894,142 @@ function registerJetHubEndpoints(
            *    一个账号炸不影响别人（`fetchQoderBalanceDetailed` 本身不抛）。
            */
           values.push(...await Promise.all(accounts.map(async (account) => {
+            /**
+             * ★★★ **磁盘缓存：重启后第一眼不等网络**（2026-11-21，真实漏洞修复）。
+             *
+             * ## 为什么必须加在这里（用户实测发现）
+             *
+             * `qoder` / `qodercn` 是**特例分支**，先于查表短路 —— 它们
+             * **不经过** `collectCreditBalances`，因此也**不经过**
+             * `readCachedBalance` ⇒ 我先前在 `balance-cache.ts` 里做的磁盘缓存
+             * **对这两家完全无效**。
+             *
+             * 实测证据：探针只看到 `primeFromDisk` 被调用，而
+             * `readStale` / `noteDiskReading` / `flushDisk` **一次都没触发**；
+             * 而用户的 14 个账号（qoder 7 + qodercn 7）恰好全在这条分支里
+             * ⇒ 「积分完全没有缓存」的表象。
+             *
+             * ## ⚠️ `force` 时不读盘
+             *
+             * 面板「刷新积分」按钮要真实值（与正常路径同一条纪律）。
+             *
+             * ## ⚠️ 返回时必须标 `stale` 语义
+             *
+             * 这里返回的是**旧读数**：带 `error` 说明「显示的是缓存」，
+             * 与正常路径的兼顶读数同款文案（用户据此知道不是最新的）。
+             */
+            const qoderForce = payload !== null && typeof payload === 'object'
+              && (payload as { force?: unknown }).force === true
+            /**
+             * ## ⚠️⚠️ **qoder 特例分支只有「磁盘」与「远端」两层，刻意没有内存层**
+             *
+             * 2026-11-21 审计时发现并**明确决定保持现状**（用户选「方案 B」）：
+             *
+             * | 层 | 普通 provider | **qoder 特例** |
+             * |---|---|---|
+             * | 内存（TTL 120s）| `balance-cache.ts` 的 `TtlCache` | ❌ **无** |
+             * | 磁盘（跨进程）| `balance-disk-cache.ts` | ✅ `readDiskReading` |
+             * | 远端 | `fetchBalanceReading` | ✅ `fetchQoderBalanceDetailed` |
+             *
+             * ## 为什么不做
+             *
+             * 本家的取数形态与通用原语**不匹配**：`fetchQoderBalanceDetailed` 只吃
+             * `QoderCredential`（不吃通用 `credential` 形状）、且**必须按账号取出口代理**
+             * （国际版 `openapi.qoder.sh` 在部分网络下被 SNI 阻断，中国版直连 160ms）。
+             * 把它塞进 `fetchBalanceReading` 会破坏「面板与折算共用同一取数实现」
+             * 这条既有约束（见 `src/index.ts` 的 `fetchBalanceReading` 头注释）。
+             *
+             * ## ⚠️ 代价（已确认接受）
+             *
+             * 打开积分面板**反复刷新**会反复打上游（每个 qoder 账号一次）。
+             * 磁盘层只挡住「重启后的第一次」，挡不住「同一会话内反复刷新」。
+             *
+             * ⚠️ **不要把它当成漏接**：`catalog-disk-wiring.spec.ts` 那类普查
+             * 针对的是**模型目录**的落盘，与余额无关；余额这层的「内存缺失」
+             * 是**有意**的取舍，不是遗漏。
+             *
+             * ⚠️ 若将来要补：在端点闭包外维护一个 `TtlCache<...>`（与
+             * `balance-cache.ts` 同款 120 秒），**不要**改成走 `readStale`
+             *（那会让两条路径的取数实现分叉）。
+             */
+            if (!qoderForce) {
+              const cachedQoder = readDiskReading(req.provider, account.id)
+              if (cachedQoder !== undefined) {
+                const cached = cachedQoder as { at?: number; value?: unknown }
+                const cachedBalance = cached.value as RpcCreditsBalancesResponse['accounts'][number]['balance']
+                if (cachedBalance !== null && cachedBalance !== undefined) {
+                  /**
+                   * ★★★ **命中磁盘后必须触发后台刷新**（2026-11-21 真实缺陷修复）。
+                   *
+                   * ## 缺陷
+                   *
+                   * 上一版在这里**直接 return** ⇒ 后面的 `noteDiskReading` 走不到
+                   * ⇒ 磁盘上的 qoder 余额**永远不会被新值替换**，用户看到的数字
+                   * 越来越旧（虽然文案标了「缓存读数」，但它永远不会变新）。
+                   *
+                   * ⚠️ 与 `balance-cache.ts` 两条路径是**同一个缺陷的第三处**
+                   *（本仓库反复出现的「同义路径漏一条」形态）。
+                   *
+                   * ## 修法：fire-and-forget 重取一次
+                   *
+                   * ⚠️ **不 await**：本分支的全部价值就是「首屏不等网络」。
+                   * ⚠️ **必须 catch**：后台异常不得变成 unhandledRejection。
+                   * ⚠️ 复用同一套取数（凭据解析 + `fetchQoderBalanceDetailed`
+                   *   + 按账号取代理），保证「后台刷出来的值」与「正常路径」同源。
+                   */
+                  void (async () => {
+                    try {
+                      const r = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+                      if (!r) return
+                      const cred = JSON.parse(r.value) as QoderCredential
+                      const fresh = await fetchQoderBalanceDetailed(cred, product, {
+                        fetcher: qoderFetchForAccount(account.id),
+                      })
+                      if (fresh.balance === null) return
+                      noteDiskReading(req.provider, account.id, {
+                        at: Date.now(),
+                        value: fresh.balance,
+                      })
+                    } catch {
+                      // 后台刷新失败静默：用户此刻看到的是磁盘缓存，功能正常。
+                    }
+                  })()
+                  return {
+                    accountId: account.id,
+                    nickname: account.nickname,
+                    balance: cachedBalance,
+                    /**
+                     * ⚠️⚠️ **绝不设 `error`**（2026-11-21 真实回归修复）。
+                     *
+                     * 我上一版写的是：
+                     *
+                     * ```ts
+                     * error: `显示的是 ${...} 的缓存读数`,
+                     * ```
+                     *
+                     * 那是**错的** —— 客户端 `CreditBalanceRow` 的渲染逻辑是：
+                     *
+                     * ```js
+                     * if (error || !balance) {
+                     *   return <dd data-tone="warn" title={error}>{error}</dd>   // ← 只显示 error
+                     * }
+                     * // 有 balance 才往下渲染积分
+                     * ```
+                     *
+                     * ⇒ 只要带 `error`，**积分数字根本不渲染**，用户看到的是
+                     * 「显示的是 2026/11/21 20:16:10 的缓存读数」那一整行
+                     *（截图实测：7 个 qodercn 账号全部如此）。
+                     *
+                     * 用户明确要求：「**我要求的是显示积分，而不是积分的来源**」。
+                     *
+                     * ⇒ 缓存命中时**只返回 balance**，不附加任何说明。
+                     * 代价是用户看不出这是缓存值 —— 那是用户接受的取舍
+                     *（他原话：「期间都是后台静默完成，前端也不必要显示任何信息」）。
+                     */
+                  }
+                }
+              }
+            }
             const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
             if (!resolved) {
               return {
@@ -9885,6 +10073,43 @@ function registerJetHubEndpoints(
             }
             if (addOnDetail === undefined && (webStore.grants ?? []).length > 0) {
               addOnDetail = { kind: 'ledger', grants: webStore.grants!, nowMs: Date.now() }
+            }
+            /**
+             * ★ **成功读数记进磁盘镜像**（2026-11-21）。
+             *
+             * ⚠️ 只记非 `null` 的余额：把「查询失败」落盘会让下次启动显示失败，
+             * 而那时网络可能完全正常（与正常路径「只记成功」同一条纪律）。
+             *
+             * ⚠️ 只置脏标记，不写盘（首次成功由 `noteDiskReading` 内部立即落盘一次）。
+             */
+            if (detailed.balance !== null) {
+              noteDiskReading(req.provider, account.id, {
+                at: Date.now(),
+                value: withQoderAddOnDetail(detailed.balance, addOnDetail),
+              })
+            } else {
+              /**
+               * ★ **失败必须留一条日志**（2026-11-21）。
+               *
+               * ## 为什么（用户实测：qoder 国际版 7 个账号的缓存一条都没有）
+               *
+               * 排查时发现：`qoder` 与 `qodercn` **走完全相同的代码路径**
+               * （同一个 `isQoderFamily` 分支、同一个 `fetchQoderBalanceDetailed`），
+               * 而 `qodercn` 有缓存、`qoder` 一条都没有 ⇒ **国际版查询全部失败**。
+               *
+               * 但失败分支此前**完全静默**：只把 `error` 塞进响应，
+               * 服务端日志里一个字都没有 ⇒ 无法从日志判断「是网络 / 凭据 /
+               * 上游报文变形 / 企业版无数字」中的哪一种。
+               *
+               * ⚠️ 实测排除的两条：网络正常（TLS 184ms、HTTP 401 是缺凭据的正常响应）、
+               * 凭据未过期（`expiresAt` 还有 577 小时）⇒ 真因只能靠这条日志定位。
+               *
+               * ⚠️ 只记 `warn` 不记 `error`：单账号失败是**常态**（余额查询本来就可能
+               * 因上游抖动失败），不该把日志级别抬高。
+               */
+              ctx.logger?.warn?.(
+                `[jet-hub] ${product.id} 账号 ${account.id} 余额查询失败：${detailed.error ?? '原因未知'}`,
+              )
             }
             return {
               accountId: account.id,

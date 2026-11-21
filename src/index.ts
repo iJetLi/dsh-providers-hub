@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto'
 import { codeartsImagePart, codeartsVisionModel, registerCodeArtsLlm, PROVIDER as CODEARTS_PROVIDER } from './llm-adapter.js'
 // ⚠️ `analyzeImage`：让纯文本模型也能看图（2026-10-21）。模块头有完整判据链。
 import { installAnalyzeImage } from './analyze-image.js'
-import { startCatalogPrewarm } from './catalog-prewarm.js'
+import { selectPrewarmProviders, startCatalogPrewarm } from './catalog-prewarm.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
 import { registerBuddyLlm } from './buddy-adapter.js'
 import { registerLobsteraiLlm } from './lobsterai-adapter.js'
@@ -291,6 +291,8 @@ import { createExpiryProbe } from './aggregate-expiry.js'
 // ⚠️ 共享余额读数缓存（2026-10-15，规格 §5.7）：装配层建**一个**实例，
 //    `credits.balances` 端点与 buddy 系四家的折算共用它（见下面 `balanceCache` 的长注释）。
 import { createBalanceCache, createBalanceRefresher, REFRESH_PERIOD_FALLBACK_MS, type BalanceCacheEntry } from './balance-cache.js'
+// ★ 余额读数的磁盘缓存（SWR 的写盘调度）：三个写盘时机见下方接线处。
+import { BALANCE_DISK_FLUSH_INTERVAL_MS, flushDisk as flushBalanceDisk, primeFromDisk as primeBalanceDiskCache } from './balance-disk-cache.js'
 // ⚠️ 模型目录的后台刷新器（用户 2026-10-18 要求：20 分钟定时更新）。
 //    与余额刷新器**共用同一套骨架**（武装 + 单飞 + 幂等），但**不复用实例** ——
 //    余额缓存 key 是 `(provider, accountId)`、目录的 key 是 provider，语义不同。
@@ -6054,6 +6056,54 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   // ⚠️ 回收：定时器必须随插件卸载而停，否则进程退出会被它挂住
   //   （与上面 `closeAllProxyDispatchers` 的回收并列，同款约定）。
   ctx.effect(() => () => { clearInterval(modelsDevTimer) })
+
+  // ===== 余额读数的**磁盘缓存**接线（2026-11-20，用户要求「重启后积分也快」）=====
+  //
+  // ## 三个写盘时机（用户明确指定，**只有这三个**）
+  //
+  // | 时机 | 实现 |
+  // |---|---|
+  // | ① 启动后首次拉取成功 | `noteDiskReading` 置脏 ⇒ 下面那个 30 分钟定时器的**首次**触发就写 |
+  // | ② 每隔 30 分钟 | `setInterval` |
+  // | ③ 插件卸载（退出）时 | `ctx.effect` 清理钩子 |
+  //
+  // ⚠️ **不在每次读数后写盘**：徽标每 60 秒轮询一次 ⇒ 每天上千次写。
+  // 而余额变化频率远低于此 —— 用户明确要求「减少不必要的缓存写盘」。
+  //
+  // ## ⚠️ 为什么用 `flushDisk` 而不是直接写
+  //
+  // `flushDisk` 内部判「有没有脏数据」（`dirty`）⇒ 没有新读数就**完全不写盘**
+  // （空转的定时器不产生 IO）。
+  //
+  // ## ⚠️ 启动时先 prime 一次
+  //
+  // `primeFromDisk()` 把上次的读数读进内存镜像 ⇒ `balance-cache.ts` 的
+  // `readDiskReading` 才能命中。**必须在这里调**：若等第一次 `read()` 惰性触发，
+  // 那次读仍然要读盘（虽然是同步的、很快），而提前 prime 让它更早可用。
+  //
+  // ⚠️ 顺序：**先 prime 再挂定时器**（否则定时器的首轮可能早于 prime）。
+  const primedBalanceCount = primeBalanceDiskCache()
+  if (primedBalanceCount > 0) {
+    // ⚠️ 只记**条数**不记具体账号（余额是敏感数据，日志里不该出现 id）。
+    ctx.logger?.info?.(`[jet-hub] 余额磁盘缓存已载入 ${primedBalanceCount} 条（首屏免等网络）`)
+  }
+  const balanceDiskFlushTimer = setInterval(() => {
+    // ⚠️ 返回值刻意忽略：写失败是静默的（缓存是纯优化，见 `balance-disk-cache.ts`）。
+    flushBalanceDisk()
+  }, BALANCE_DISK_FLUSH_INTERVAL_MS)
+  // ⚠️ `unref()`：不拦进程退出（与上面 `modelsDevTimer` 同款）。
+  ;(balanceDiskFlushTimer as unknown as { unref?: () => void }).unref?.()
+  ctx.effect(() => () => {
+    clearInterval(balanceDiskFlushTimer)
+    /**
+     * ★ **退出时补最后一次**（写盘时机 ③）。
+     *
+     * ⚠️ 这是「尽力而为」：`ctx.effect` 的清理钩子在**插件卸载**时跑，
+     * 而 DSH 被任务管理器强杀 / 系统关机 / 崩溃时**不会触发**。
+     * ⇒ 有 30 分钟定时器兜底（最坏丢 30 分钟内的变化，对余额完全可接受）。
+     */
+    flushBalanceDisk()
+  })
   // ⚠️ 这里**不再**调 `registerOpencodeRpc`：opencode 的端点已并入
   // `registerJetHubRpc` 内部的 handleMethod（见 `opencode-rpc.ts` 模块头）。
   // 代理 dispatcher 是常驻连接池：插件卸载必须回收，否则进程退出会挂住。
@@ -6584,8 +6634,60 @@ async function fetchBalanceReading(
   //
   // ⚠️ **不 await**：`apply()` 是同步函数，预热会发网络请求（与既有的
   // opencode 能力预热同款约定）。停止函数挂 `ctx.effect`，插件释放后停手。
+  //
+  // ---------------------------------------------------------------------------
+  // ★★★ **2026-11-20：预热只挑「有账号」的 provider**（真实启动卡顿修复）
+  //
+  // ## 实测（33 个 provider，冷启动第 1 轮）
+  //
+  // ```
+  // +     8ms  22 个 provider 全部完成
+  // +  1289ms  workbuddy / codearts
+  // + 12586ms  cline (12585ms)   ← 独占 12.5 秒
+  // ```
+  //
+  // ## 根因
+  //
+  // `providers: Object.keys(modelAdapters)` 把**全部 33 个**都拿去预热，
+  // 而其中大部分**根本没有可用账号**（本机实测：60 个账号只覆盖 10 家，
+  // 其余 23 家一个账号都没有）。
+  //
+  // ⚠️ 骨架层 `ModelCatalog.listModels` **已有账号门控**
+  // （`providerCatalogVisible` → `hasLoggedInAccount`），没账号时返回 `[]`。
+  // 但**门控拦不住「门控自身的成本」**：
+  //
+  // 1. `hasLoggedInAccount` 要**逐个解析凭据**（`ctx.credentials.resolve`
+  //    + `JSON.parse`）—— 它不发网络，但对**每个** provider 都要跑一遍；
+  // 2. 凭据只要**能解析**就算「已登录」⇒ **停用的账号也会通过门控**
+  //    （`enabled` 刻意不参与该判据，见 `hasLoggedInAccount` 的注释）；
+  // 3. 通过门控后真的去拉远端目录 —— 本机 `cline` 的账号**已停用但凭据还在**
+  //    ⇒ 它会完整走完「两个端点 + models.dev 6.47MB」的链路 ⇒ **12.5 秒**。
+  //
+  // ## 修法
+  //
+  // 预热前先用**同步**判据筛一遍：只预热「账号池里至少有一个**启用**账号」的
+  // provider。理由：
+  //
+  // - 没有启用账号 ⇒ 用户此刻用不到这家 ⇒ 目录拉下来也没人看；
+  // - 与页头「供应商开关」/ 模型选择器的可见性**同源**（都是「有没有启用账号」）；
+  // - 纯同步（`listAccountsByProvider` 读内存副本），不引入异步开销。
+  //
+  // ⚠️ **刻意不用 `hasLoggedInAccount`**：它是异步的（逐个解析凭据），
+  // 33 家筛一遍反而比预热本身还慢；而且它**不看 `enabled`** —— 正是本缺陷的
+  // 成因之一（停用账号照样通过）。
+  //
+  // ⚠️ **代价（已确认接受）**：用户新登录/重新启用一个 provider 后，它的目录
+  // 不在本轮预热里 ⇒ 要等下一次 `listModels`（打开设置页 / 切模型）才拉。
+  // 那是**用户主动动作触发的**，不构成卡顿。
+  //
+  // ⚠️ 筛选逻辑抽在 `selectPrewarmProviders`（**纯函数**，可被单测直接断言）：
+  // index.ts 无法单测（装配层），把它留在这里等于这段逻辑零守卫。
+  const prewarmProviders = selectPrewarmProviders(
+    Object.keys(modelAdapters),
+    (provider) => pool.listAccountsByProvider(provider),
+  )
   ctx.effect(() => startCatalogPrewarm({
-    providers: Object.keys(modelAdapters),
+    providers: prewarmProviders,
     warm: (provider) => ctx.llm.listModels(provider),
     logger: { warn: (message) => ctx.logger?.warn?.(message) },
   }))
