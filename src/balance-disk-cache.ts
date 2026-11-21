@@ -43,7 +43,7 @@
  * 绝不能让「读余额」因此失败。故所有写盘路径整段 `try/catch`。
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -100,37 +100,12 @@ export function isBalanceDiskCacheEnabled(): boolean {
  *
  * ⇒ 移进本插件既有的持久化目录 `$DSH_HOME/jet-hub/` 下的 `cache/` 子目录
  *（与 `model-catalog-cache.ts` 同款）。理由与「为什么不放根下」见那边注释。
+ *
+ * ⚠️ **旧路径的孤儿由人工清理一次**（不做进代码，理由同 `model-catalog-cache.ts`）。
  */
 export function balanceDiskCacheFile(): string {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
   return join(home, 'jet-hub', 'cache', 'balance-readings.json')
-}
-
-/** 旧版（2026-11-21 之前）的缓存文件路径 —— 只用于一次性清理。 */
-function legacyBalanceDiskCacheFile(): string {
-  const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
-  return join(home, 'cache', 'balance-readings.json')
-}
-
-/**
- * 删掉旧路径下的缓存文件（**幂等**，启动时调一次）。
- *
- * ⚠️ 路径迁移后旧文件会留下孤儿（实测 39.7KB）。理由与
- * `model-catalog-cache.ts` 的 `pruneLegacyCacheDir` 同款。
- *
- * @returns 是否真的删了一个存在的文件
- */
-export function pruneLegacyBalanceCache(): boolean {
-  const legacy = legacyBalanceDiskCacheFile()
-  // ⚠️ 防御：新路径若与旧路径重合，绝不删当前在用的。
-  if (legacy === balanceDiskCacheFile()) return false
-  try {
-    if (!existsSync(legacy)) return false
-    unlinkSync(legacy)
-    return true
-  } catch {
-    return false
-  }
 }
 
 /**

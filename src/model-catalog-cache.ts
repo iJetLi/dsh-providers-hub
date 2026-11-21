@@ -56,7 +56,7 @@
  * 那由调用方（骨架）用 `isCatalogFresh` 判，本模块只管存取。
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -152,46 +152,13 @@ interface CacheFile {
  * 功能，比如账号池、锁定表）；缓存是**纯优化**（丢了只是慢一次）。
  * 分开放让「可以安全删除」这件事一眼可见。
  *
- * ⚠️ **旧路径的清理**：改路径后旧目录会变成孤儿。启动时会调
- * {@link pruneLegacyCacheDir} 删掉它（一次性，幂等）。
+ * ⚠️ **旧路径的孤儿由人工清理一次**（不做进代码）：迁移是一次性运维动作，
+ * 把它写成启动钩子会让插件永久背一段只对老用户有用的死代码，
+ * 且每次启动都要 `existsSync` 一次。
  */
 export function modelCatalogCacheDir(): string {
   const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
   return join(home, 'jet-hub', 'cache', 'model-catalog')
-}
-
-/**
- * 旧版（2026-11-21 之前）的缓存目录：`$DSH_HOME/cache/model-catalog`。
- *
- * ⚠️ 只用于**一次性清理**（见 {@link pruneLegacyCacheDir}）。
- */
-function legacyModelCatalogCacheDir(): string {
-  const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
-  return join(home, 'cache', 'model-catalog')
-}
-
-/**
- * 删掉旧路径下的缓存目录（**幂等**，启动时调一次）。
- *
- * ⚠️ 存在意义：路径迁移后旧目录会留下孤儿文件（实测 4 个 provider 的
- * 目录缓存约 25KB）。不清它会一直占着 `~/.dsh/cache/`，而用户按新路径
- * 找不到它们时会困惑「为什么删了还在」。
- *
- * ⚠️ 失败静默（删不掉只是留个孤儿，不该阻断启动）。
- *
- * @returns 是否真的删了一个存在的目录（供诊断与单测）
- */
-export function pruneLegacyCacheDir(): boolean {
-  const legacy = legacyModelCatalogCacheDir()
-  // ⚠️ 防御：新路径若与旧路径重合（未来再改路径时可能），绝不删当前在用的。
-  if (legacy === modelCatalogCacheDir()) return false
-  try {
-    if (!existsSync(legacy)) return false
-    rmSync(legacy, { recursive: true, force: true })
-    return true
-  } catch {
-    return false
-  }
 }
 
 /**

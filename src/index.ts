@@ -292,9 +292,7 @@ import { createExpiryProbe } from './aggregate-expiry.js'
 //    `credits.balances` 端点与 buddy 系四家的折算共用它（见下面 `balanceCache` 的长注释）。
 import { createBalanceCache, createBalanceRefresher, REFRESH_PERIOD_FALLBACK_MS, type BalanceCacheEntry } from './balance-cache.js'
 // ★ 余额读数的磁盘缓存（SWR 的写盘调度）：三个写盘时机见下方接线处。
-// ★ 缓存路径迁移的旧目录清理（见 apply() 里那段）。
-import { pruneLegacyCacheDir as pruneLegacyCatalogCacheDir } from './model-catalog-cache.js'
-import { BALANCE_DISK_FLUSH_INTERVAL_MS, flushDisk as flushBalanceDisk, primeFromDisk as primeBalanceDiskCache, pruneLegacyBalanceCache } from './balance-disk-cache.js'
+import { BALANCE_DISK_FLUSH_INTERVAL_MS, flushDisk as flushBalanceDisk, primeFromDisk as primeBalanceDiskCache } from './balance-disk-cache.js'
 // ⚠️ 模型目录的后台刷新器（用户 2026-10-18 要求：20 分钟定时更新）。
 //    与余额刷新器**共用同一套骨架**（武装 + 单飞 + 幂等），但**不复用实例** ——
 //    余额缓存 key 是 `(provider, accountId)`、目录的 key 是 provider，语义不同。
@@ -6085,26 +6083,6 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   //
   // ⚠️ 顺序：**先 prime 再挂定时器**（否则定时器的首轮可能早于 prime）。
   const primedBalanceCount = primeBalanceDiskCache()
-  /**
-   * ★ **清理旧路径的缓存孤儿**（2026-11-21 路径迁移）。
-   *
-   * 缓存从 `$DSH_HOME/cache/` 移到 `$DSH_HOME/jet-hub/cache/`（用户要求
-   * 「路径里要有一级是插件名」）。旧路径会留下孤儿文件
-   *（实测模型目录 4 个 provider 约 25KB + 余额 39.7KB）。
-   *
-   * ⚠️ **幂等**：删过一次之后 `existsSync` 为假，后续启动零成本。
-   * ⚠️ **失败静默**（删不掉只是留个孤儿，不该阻断启动）。
-   */
-  try {
-    if (pruneLegacyCatalogCacheDir()) {
-      ctx.logger?.info?.('[jet-hub] 已清理旧路径的模型目录缓存（迁移到 jet-hub/cache/）')
-    }
-    if (pruneLegacyBalanceCache()) {
-      ctx.logger?.info?.('[jet-hub] 已清理旧路径的余额缓存（迁移到 jet-hub/cache/）')
-    }
-  } catch {
-    // 清理是尽力而为，任何异常都不该影响启动。
-  }
   if (primedBalanceCount > 0) {
     // ⚠️ 只记**条数**不记具体账号（余额是敏感数据，日志里不该出现 id）。
     ctx.logger?.info?.(`[jet-hub] 余额磁盘缓存已载入 ${primedBalanceCount} 条（首屏免等网络）`)

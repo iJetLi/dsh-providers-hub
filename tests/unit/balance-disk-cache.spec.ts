@@ -12,7 +12,6 @@ import {
   isDiskDirty,
   noteDiskReading,
   primeFromDisk,
-  pruneLegacyBalanceCache,
   readDiskReading,
   resetBalanceDiskCacheStateForTest,
   setBalanceDiskCacheEnabledForTest,
@@ -255,37 +254,5 @@ describe('balance-disk-cache', () => {
       expect(() => { clearBalanceDiskCache() }).not.toThrow()
     })
   })
-
-  /**
-   * ★★ **旧路径清理**（2026-11-21 路径迁移，与模型目录缓存同款）。
-   */
-  describe('旧路径清理（迁移到 jet-hub/cache/）', () => {
-    it('★★★ 缓存路径必须含 jet-hub 一级（用户要求）', () => {
-      const f = balanceDiskCacheFile()
-      expect(f, '路径必须含 jet-hub').toContain('jet-hub')
-      expect(f, '且必须在 jet-hub/cache 下').toContain(join('jet-hub', 'cache'))
-    })
-
-    it('★★ 旧文件存在 ⇒ 被删掉', () => {
-      const legacy = join(tempHome, 'cache', 'balance-readings.json')
-      mkdirSync(join(tempHome, 'cache'), { recursive: true })
-      writeFileSync(legacy, '{}', 'utf8')
-      expect(existsSync(legacy)).toBe(true)
-
-      expect(pruneLegacyBalanceCache(), '应真的删了').toBe(true)
-      expect(existsSync(legacy), '旧文件必须消失').toBe(false)
-    })
-
-    it('★★ 旧文件不存在 ⇒ 返回 false（幂等）', () => {
-      expect(pruneLegacyBalanceCache()).toBe(false)
-    })
-
-    it('★★ 不得误删新路径的缓存', () => {
-      noteDiskReading('buddy', 'a1', reading)
-      expect(existsSync(balanceDiskCacheFile())).toBe(true)
-
-      pruneLegacyBalanceCache()
-      expect(existsSync(balanceDiskCacheFile()), '新缓存必须还在').toBe(true)
-    })
-  })
 })
+

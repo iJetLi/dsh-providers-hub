@@ -8,7 +8,6 @@ import {
   isCatalogCacheEnabled,
   modelCatalogCacheDir,
   modelCatalogCacheFile,
-  pruneLegacyCacheDir,
   readCatalogCache,
   readCatalogCacheAt,
   setCatalogCacheEnabledForTest,
@@ -204,43 +203,5 @@ describe('model-catalog-cache', () => {
       expect(() => { clearCatalogCache('nope') }).not.toThrow()
     })
   })
-
-  /**
-   * ★★ **旧路径清理**（2026-11-21 路径迁移）。
-   *
-   * 缓存从 `$DSH_HOME/cache/` 移到 `$DSH_HOME/jet-hub/cache/`（用户要求
-   * 「路径里要有一级是插件名」）。旧目录会留孤儿文件，启动时清一次。
-   */
-  describe('旧路径清理（迁移到 jet-hub/cache/）', () => {
-    it('★★★ 缓存路径必须含 jet-hub 一级（用户要求）', () => {
-      const dir = modelCatalogCacheDir()
-      expect(dir, '路径必须含 jet-hub（否则用户认不出是本插件的缓存）')
-        .toContain('jet-hub')
-      expect(dir, '且必须在 jet-hub/cache 下（与状态文件分开）')
-        .toContain(join('jet-hub', 'cache'))
-    })
-
-    it('★★ 旧目录存在 ⇒ 被删掉', () => {
-      const legacy = join(tempHome, 'cache', 'model-catalog')
-      mkdirSync(legacy, { recursive: true })
-      writeFileSync(join(legacy, 'buddy.json'), '{}', 'utf8')
-      expect(existsSync(legacy)).toBe(true)
-
-      expect(pruneLegacyCacheDir(), '应真的删了').toBe(true)
-      expect(existsSync(legacy), '旧目录必须消失').toBe(false)
-    })
-
-    it('★★ 旧目录不存在 ⇒ 返回 false（幂等，不抛错）', () => {
-      expect(pruneLegacyCacheDir()).toBe(false)
-      expect(pruneLegacyCacheDir()).toBe(false)
-    })
-
-    it('★★ 不得误删新路径的缓存', () => {
-      writeCatalogCache('buddy', entries, true)
-      expect(existsSync(modelCatalogCacheFile('buddy'))).toBe(true)
-
-      pruneLegacyCacheDir()
-      expect(existsSync(modelCatalogCacheFile('buddy')), '新缓存必须还在').toBe(true)
-    })
-  })
 })
+
