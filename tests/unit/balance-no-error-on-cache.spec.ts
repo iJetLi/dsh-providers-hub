@@ -111,4 +111,56 @@ describe('缓存命中不得污染积分显示', () => {
     expect(failOut.error, '真失败时 error 必须有值').toBeDefined()
     expect(failOut.stale, '真失败时也标 stale').toBe(true)
   })
+
+  /**
+   * ★★★ **磁盘命中 + 后台刷新失败 ⇒ 仍要能读到磁盘值（不空白）**。
+   *
+   * ## 为什么需要这条（评估「内存提升」方案时实测发现）
+   *
+   * 用户提出的设计是「磁盘值应提升进内存槽，窗口每次读内存」。
+   * 评估时实测发现：**后台刷新的失败结果会写进内存槽**，把本可用的磁盘值挤掉。
+   *
+   * ```
+   * 内存槽: { error: '上游挂了', stale: false }   ← 失败读数
+   * 磁盘:   111（可用）
+   * ```
+   *
+   * 好在磁盘兜底仍然生效（内存判据要求 `value !== undefined`，
+   * 失败读数不满足 ⇒ 继续走磁盘分支）⇒ 第二次读仍拿到 111。
+   *
+   * ⚠️ **这条用例锁的就是那个「好在」** —— 一旦有人把内存判据放宽成
+   * 「`stale === false` 就返回」，失败读数就会顶掉磁盘值
+   * ⇒ 用户看到空白/错误，而磁盘里明明有数据。
+   */
+  it('★★★ 磁盘命中后后台刷新失败 ⇒ 第二次读仍拿到磁盘值（不空白）', async () => {
+    noteDiskReading('buddy', 'b1', {
+      at: Date.now() - 3600_000,
+      value: { balance: 111 },
+    } as unknown as BalanceReading)
+    flushDisk()
+    resetBalanceDiskCacheStateForTest()
+    primeFromDisk()
+
+    const cache = createBalanceCache({
+      ttlMs: 120_000,
+      fetch: async () => {
+        throw new Error('上游挂了')
+      },
+    })
+
+    // 第一次：命中磁盘 ⇒ 111
+    const first = await cache.readStale('buddy', 'b1', {})
+    expect((first.value as { balance?: number }).balance, '首次命中磁盘').toBe(111)
+
+    // 等后台刷新（它会失败）
+    await new Promise((r) => setTimeout(r, 100))
+
+    // 第二次：后台刷新失败了，但磁盘还有值 ⇒ 仍应拿到 111
+    const second = await cache.readStale('buddy', 'b1', {})
+    expect(
+      (second.value as { balance?: number }).balance,
+      '★★★ 刷新失败不得让磁盘兜底失效（用户会看到空白）',
+    ).toBe(111)
+    expect(second.stale, '仍应标 stale').toBe(true)
+  })
 })
