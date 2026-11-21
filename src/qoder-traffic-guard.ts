@@ -15,8 +15,13 @@ const accounts = new Map<string, { active: boolean; lastDispatch: number }>()
  *
  * ## 为什么用 `Symbol.for` 而不是模块内 `Symbol()`
  *
- * `Symbol.for` 走全局注册表 ⇒ 即使模块被重复加载（两份 lib / 不同 realm），
- * 键仍然相等。模块内 `Symbol()` 在那种场景下会**静默不相等** ⇒ 换号永不触发。
+ * `Symbol.for` 走全局注册表 ⇒ 即使模块被重复加载，**键**仍然相等。
+ *
+ * ⚠️ **但这条保证被 `instanceof LlmError` 抵消了**（对抗审计 P3 实测）：
+ * 原生 node 双副本下 `error instanceof LlmError` 就是 `false`（两个副本各有自己的
+ * `LlmError` 类）⇒ 整体判定仍会失效，`Symbol.for` 单独并不足以跨副本。
+ * 生产路径只有一份模块，**该场景不可达**；保留 `Symbol.for` 是为了「键不相等」
+ * 这条**更常见**的失效面（同进程内重复求值 / 热重载），不是为了跨副本。
  */
 const SLOT_BUSY = Symbol.for('dsh.qoder.traffic.slot-busy')
 

@@ -2517,7 +2517,12 @@ export class QoderAdapter extends LlmAdapter {
       // 边界②：已经向消费者吐过内容 ⇒ 换号会重放，宁可失败。
       if (input.emitted) throw error
       // 边界①：没有账号身份 ⇒ 无法 `tried`，不换。
-      if (input.activeAccountId === undefined || input.activeAccountId.length === 0) throw error
+      /**
+       * ⚠️ 判据是 **`trim()` 后非空**（对抗审计 P3）：`'   '` 的 `length` 是 3，
+       * 只看 `length === 0` 会放行一个**不是身份**的值 ⇒ 它进了 `tried` 也排不掉
+       * 任何真实账号。与 qoder 其它处「空白 id 不覆盖真 id」的判据同形。
+       */
+      if (input.activeAccountId === undefined || input.activeAccountId.trim().length === 0) throw error
       /**
        * ⚠️ **换号过程自己抛错时，必须抛回原来那个「名额忙」错误**（正向审计 P2-2）。
        *
@@ -2534,8 +2539,20 @@ export class QoderAdapter extends LlmAdapter {
         next = await this.switchAccountOnQuota(
           input.options, input.tried, input.activeAccountId, 'slot-busy',
         )
-      } catch {
-        // 取号失败 ⇒ 抛原错误（`QUEUE` 码保住，文案也保住）。
+      } catch (switchError) {
+        /**
+         * ⚠️⚠️ **只把「无码的意外」折成原错误，有码的必须透传**（对抗审计 P2-4）。
+         *
+         * 我第一版是裸 `catch { throw error }` —— 太宽：换到的新账号**凭据缺 `uid`**
+         * 时 `switchAccountOnQuota` 会抛带 `MISSING_CREDENTIAL` 的 `LlmError`，
+         * 被我折成「并发已满 / `QUEUE`」⇒ 用户看到**完全错误的指引**
+         *（以为等一等就好，实际要去重新登录）。
+         *
+         * 这与同文件 transport 分支的 P2-8 纪律**逐字同形**：
+         * 「**诊断信息可以丢，用户可见的错误码不能丢**」。
+         * 折成原错误的只有「池读盘失败」这类裸 `Error`（它们没有码可用）。
+         */
+        if (switchError instanceof LlmError) throw switchError
         throw error
       }
       // 边界③的另一半：换不到号 ⇒ 抛原错误（「本地排队」是正确结论）。
