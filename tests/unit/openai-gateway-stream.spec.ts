@@ -516,3 +516,67 @@ describe('issue #134：block-end-only 正文的流式补发', () => {
     expect(joined.match(/"content":"hello"/g)?.length, '正文只应出现一次').toBe(1)
   })
 })
+
+/**
+ * ★★★ 两条正向审计在**最新 HEAD 上仍能复现**的泄漏（2026-11-21 P1′ / P2′）。
+ *
+ * P1′：我只在 `tool-call-delta` 分支加了「名字不可用就不发帧」，**补发分支漏了** ——
+ *      于是「名字永不可用 + `block-end` 带参数」仍会发出一帧**没有 name** 的
+ *      `tool_calls`（客户端攒出 `name: ''` = IKLRIK 会话损坏）。
+ * P2′：`block-end`-only 工具的出站帧原样吐 `block.arguments` ⇒ 空参数时流式是
+ *      `""`、非流式是 `{}`，两个出口分叉且客户端 `JSON.parse("")` 抛错。
+ */
+describe('issue #134：补发分支的名字闸门与归一化（P1′/P2′）', () => {
+  function toolFrames(sse: string): Array<{ id: string; name: string; args: string }> {
+    const tools: Array<{ id: string; name: string; args: string }> = []
+    for (const line of sse.split('\n')) {
+      if (!line.startsWith('data: ') || line.includes('[DONE]')) continue
+      let ev: { choices?: Array<{ delta?: { tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }> }
+      try { ev = JSON.parse(line.slice(6)) } catch { continue }
+      for (const tc of ev.choices?.[0]?.delta?.tool_calls ?? []) {
+        let slot = tools[tc.index ?? 0]
+        if (slot === undefined) { slot = { id: '', name: '', args: '' }; tools[tc.index ?? 0] = slot }
+        if (typeof tc.id === 'string') slot.id = tc.id
+        if (typeof tc.function?.name === 'string' && tc.function.name.length > 0) slot.name = tc.function.name
+        if (typeof tc.function?.arguments === 'string') slot.args += tc.function.arguments
+      }
+    }
+    return tools
+  }
+
+  it('★★★ 名字永不可用 + block-end 带参数 ⇒ **一帧都不发**（P1′）', async () => {
+    const out: string[] = []
+    for await (const item of toOpenAiSse(chunks([
+      { type: 'tool-call-delta', index: 0, id: 'c1' as never, name: '' as never, argumentsDelta: '' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'c1' as never, name: '' as never, arguments: '{"a":1}' } } as never,
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]), 'r', 'm')) out.push(item)
+    expect(toolFrames(out.join('')), '没有 name 的帧 = 客户端 unknown tool ""').toEqual([])
+  })
+
+  it('★★★ **有 delta 但参数为空**的无参数工具：流式也必须拿到 "{}"', async () => {
+    /**
+     * 变异 M12 暴露的真缺陷：我原先在补发条件里多写了 `block.arguments.length > 0`
+     * ⇒ 「delta 已发（所以有 id/name）、但参数是空串」这条路径**整条跳过补发**
+     * ⇒ 客户端仍 `JSON.parse("")` 抛错。
+     * ⚠️ 这条用例与上一条（block-end-only）走的是**不同分支**，缺一不可。
+     */
+    const out: string[] = []
+    for await (const item of toOpenAiSse(chunks([
+      { type: 'tool-call-delta', index: 0, id: 'c1' as never, name: 'list_dir' as never, argumentsDelta: '' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'c1' as never, name: 'list_dir' as never, arguments: '' } } as never,
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]), 'r', 'm')) out.push(item)
+    expect(toolFrames(out.join(''))[0]?.args).toBe('{}')
+  })
+
+  it('★★★ block-end-only 工具的流式补发必须归一化（空参数 → "{}"）（P2′）', async () => {
+    const out: string[] = []
+    for await (const item of toOpenAiSse(chunks([
+      // 只有 block-end，没有 delta（codearts 链路可达）
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'c1' as never, name: 'Run' as never, arguments: '' } } as never,
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]), 'r', 'm')) out.push(item)
+    expect(toolFrames(out.join(''))[0]?.args, '流式 "" 会让客户端 JSON.parse("") 抛错').toBe('{}')
+  })
+})

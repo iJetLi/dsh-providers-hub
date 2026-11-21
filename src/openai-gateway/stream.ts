@@ -344,26 +344,36 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
          * 在收尾循环里首次成块）。补发一帧完整调用，否则该调用对客户端
          * 完全不存在。
          */
+        /**
+         * ★ **流式补发帧必须归一化**（正向审计 P2′）。
+         *
+         * 这一帧是客户端看到的**全部**参数（此前一帧都没发过）⇒ 空参数必须给
+         * `'{}'`，否则 `JSON.parse('')` 抛错；而非流式出口会调
+         * `normalizeToolArguments` ⇒ 不归一化就两出口分叉。
+         * 判据与非流式**同一份**：截断保持原样、其余归一化。
+         */
+        const authoritative = isTruncatedArguments(block.arguments)
+          ? block.arguments
+          : normalizeToolArguments(block.arguments)
         tool = {
           id: String(block.id),
           arguments: block.arguments,
-          sentArguments: block.arguments,
+          sentArguments: authoritative,
           argumentsOverride: block.arguments,
           closed: true,
           openAiIndex: state.nextToolIndex++,
         }
         if (hasUsableToolName(block.name)) tool.name = block.name
         state.tools.set(chunk.index, tool)
+        // 名字不可用 ⇒ 一帧都不发（与 delta / 补发分支同口径，见 P1′）。
+        if (!hasUsableToolName(tool.name)) return undefined
         return {
           delta: {
             tool_calls: [{
               index: tool.openAiIndex,
               id: tool.id,
               type: 'function',
-              function: {
-                ...tool.name === undefined ? {} : { name: tool.name },
-                arguments: block.arguments,
-              },
+              function: { name: tool.name, arguments: authoritative },
             }],
           },
         }
@@ -393,25 +403,47 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
        *
        * ⚠️ 反过来**绝不**在已发过参数时补：客户端按增量拼接，补完整值会错乱。
        */
-      if (tool.sentArguments.length === 0 && block.arguments.length > 0) {
-        tool.sentArguments = block.arguments
+      /**
+       * ★★★ **补发分支同样必须过名字闸门**（2026-11-21 正向审计 P1′，一行但真泄漏）。
+       *
+       * 我上一轮只在 `tool-call-delta` 分支加了「名字不可用就不发帧」，
+       * **补发分支漏了** —— 于是「名字永不可用 + `block-end` 带参数」这条路径
+       * 仍会发出一帧 `{ id, function: { arguments } }`（**没有 name**），
+       * 客户端攒出来正是 `name: ''`，也就是 IKLRIK 的会话级损坏形态。
+       * 审计用 `delta{name:''}` + `block-end{args:'{"a":1}'}` 当场复现。
+       *
+       * ⇒ 名字不可用时**一帧都不发**（与非流式出口 `filter(hasUsableToolName)`
+       *   的剔除口径一致：这条调用对两个出口都不存在）。
+       */
+      /**
+       * ⚠️ **不能加 `block.arguments.length > 0` 的前置条件**（变异 M12 暴露的）。
+       *
+       * 「无参数工具」的权威值就是空串，归一化后是 `{}`。我原先多写了
+       * `block.arguments.length > 0` ⇒ 空参数场景**整条补发被跳过** ⇒ 客户端
+       * 仍然攒出 `arguments: ''` ⇒ `JSON.parse('')` 抛错，issue #134 现象 1
+       * 在「有 delta 但参数为空」这条路径上**没修好**。
+       */
+      if (hasUsableToolName(tool.name) && tool.sentArguments.length === 0) {
+        /**
+         * ★ **出站值必须归一化**（审计 P2′）。
+         *
+         * 这是「客户端此前一帧都没收到过」的补发 ⇒ 它就是客户端看到的**全部**
+         * 参数。若原样吐出 `block.arguments`，而适配器那一刻给的是空串
+         * （无参数工具），客户端就拿到 `arguments: ""` ⇒ `JSON.parse("")` 抛错
+         * （非流式出口会归一化成 `{}`，两个出口又会分叉）。
+         * 用与非流式**同一份**判据：截断保持原样、其余归一化。
+         */
+        const authoritative = isTruncatedArguments(block.arguments)
+          ? block.arguments
+          : normalizeToolArguments(block.arguments)
+        tool.sentArguments = authoritative
         return {
           delta: {
             tool_calls: [{
               index: tool.openAiIndex,
               id: tool.id,
               type: 'function',
-              /**
-               * ⚠️ **必须带上 `name`（若可用）**：名字可能正是**这一刻**才从
-               * `block-end` 拿到（「名字只在 block-end 到达」是正常形态），
-               * 而客户端此前一帧都没收到过 ⇒ 不带 name 它就攒出 `name: ''`
-               * （IKLRIK 会话级损坏）。
-               * （只发过部分参数时 id/name 客户端已有，那时本分支不会进来。）
-               */
-              function: {
-                ...hasUsableToolName(tool.name) ? { name: tool.name } : {},
-                arguments: block.arguments,
-              },
+              function: { name: tool.name, arguments: authoritative },
             }],
           },
         }
