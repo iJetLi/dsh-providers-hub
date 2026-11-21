@@ -16,6 +16,7 @@ import {
   recordsQoderRateLimit,
   shouldRotateQoderAccount,
 } from '../../src/qoder-adapter.js'
+import { acquireQoderRequest } from '../../src/qoder-traffic-guard.js'
 import { QODER, QODER_CN } from '../../src/qoder-product.js'
 import type { QoderFallbackModel } from '../../src/qoder-product.js'
 import { qoderMachineOs } from '../../src/qoder-align.js'
@@ -2243,6 +2244,94 @@ describe('QoderAdapter 排队错误（10605 model_queued）', () => {
       }
       return { pool, marks, picks }
     }
+
+    /**
+     * ★★★ **名额被占 ⇒ 换下一个账号**（GitHub issue #117 的核心行为）。
+     *
+     * ## 为什么这条必须存在（正向审计 P1）
+     *
+     * 我第一版只加了 5 条**判据级**用例（标记产出、文案码不变、两张判定表），
+     * 审计实测：**把换号段整体换成 `throw error`（= 退回缺陷前），3 个 spec 240 条
+     * 仍全绿** —— 核心接线零守卫。判据有牙不等于接线有牙。
+     *
+     * ## 这条守的是「端到端真的换号」
+     *
+     * acct-A 的名额被**外部持有**（模拟另一个并发会话）⇒ 本请求 acquire 时撞名额
+     * ⇒ 必须换到 acct-B 并**成功产出内容**，且**不得写冷却标记**（名额忙不是额度问题，
+     * 写冷却会把好号封掉 —— issue 的验收标准）。
+     */
+    /**
+     * ★★ **换号后必须重置 `authRefreshed`**（正向审计 P2-1）—— **弱守卫（源码级）**。
+     *
+     * ## 为什么只有源码级
+     *
+     * 缺陷形态是：同一请求先为 A 续期（`authRefreshed = true`），随后因名额忙换到 B，
+     * B 的 401 因标志未重置**不再续期** ⇒ 误报 `AUTH`。
+     * 行为级复现需要「续期期间恰好占住 A 的名额」这种精确时序 —— 我构造了 4 版都
+     * 卡在「换号没真的发生」上（池 stub 的取号次序吃掉了唯一一次机会），
+     * **故降级为源码级断言，并在这里如实登记它不是行为守卫**。
+     *
+     * 真正的行为保障来自两条：
+     * ① {@link acquireSlotOrRotate} 的换号分支与既有三条分支（额度 / 401-403 / 其它）
+     *    **逐字同形**（`credential` + `activeAccountId` + `authRefreshed` 三件套一起改）；
+     * ② 上面那条「名额被占 ⇒ 换号成功」的行为用例（M6 变异可证它有牙）。
+     */
+    it('★★ 换号分支必须与既有三条分支同形（credential + accountId + authRefreshed）', () => {
+      /**
+       * ⚠️ **必须剥注释**再断言：这段代码上方就有一大段解释性注释，里面逐字出现
+       * `authRefreshed = false` —— 不剥的话断言会被注释满足（假绿，本仓记过同型）。
+       */
+      const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../src/qoder-adapter.ts'), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^[ \t]*\/\/.*$/gm, '')
+      const at = source.indexOf('if (acquired.kind === \'rotate\') {')
+      expect(at, '未找到换号分支').toBeGreaterThan(-1)
+      const block = source.slice(at, at + 700)
+      expect(block, '缺 authRefreshed 重置 ⇒ 新号的 401 不再续期、误报 AUTH').toMatch(/authRefreshed = false/)
+      expect(block, '换号必须换凭据').toMatch(/credential = acquired\.credential/)
+      expect(block, '换号必须换 accountId（否则 tried 记错号）').toMatch(/activeAccountId = acquired\.accountId/)
+    })
+
+    it('★★★ 名额被占 ⇒ 换下一个账号并成功（issue #117 核心接线）', async () => {
+      vi.stubEnv('DSH_QODER_TRAFFIC_GUARD', '')
+      try {
+        const { pool, marks } = makePoolStub([
+          { id: 'acct-A', token: 'tokA' },
+          { id: 'acct-B', token: 'tokB' },
+        ])
+        // 外部会话占住 acct-A 的名额（uid 与 stub 里 user_id 同形）。
+        const held = await acquireQoderRequest(QODER.id, 'uid-acct-A')
+        try {
+          const seenAuth: string[] = []
+          const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+            seenAuth.push(String((init.headers as Headers)?.get?.('Authorization') ?? ''))
+            return envelopeResponse([textFrame('换号成功'), finishFrame])
+          })
+          const adapter = makeAdapter({
+            trafficGuardEnabled: () => true,
+            accountPool: pool as never,
+            // ⚠️ 必须给 `currentAccountId`：没有它 `activeAccountId` 是 undefined，
+            //    会命中「拿不到账号 id 就不换号」这条**刻意的边界**（无法 `tried`，
+            //    池可能把同一个号再给回来）。
+            currentAccountId: () => 'acct-A',
+            // 首次解析恒给 acct-A ⇒ 它的名额被占 ⇒ 触发换号。
+            resolveCredential: async () => buildQoderCredential(
+              parseQoderTokenPayload({ token: 'tokA', refresh_token: 'r', user_id: 'uid-acct-A' }),
+              { machineId: 'm-1' },
+            ),
+            fetchImpl,
+          })
+          const out = await collect(adapter)
+          expect(JSON.stringify(out), '换号后必须真的产出内容（而不是抛 QUEUE）').toContain('换号成功')
+          expect(seenAuth, '请求必须发往换号后的账号').toHaveLength(1)
+          expect(marks, '名额忙**绝不写冷却**（写冷却会把好号封掉）').toHaveLength(0)
+        } finally {
+          ;(held as Disposable)[Symbol.dispose]()
+        }
+      } finally {
+        vi.unstubAllEnvs()
+      }
+    })
 
     it('额度受限：标记当前账号该模型到 UTC+8 当日 24:00，并切到下一个账号', async () => {
       const { pool, marks, picks } = makePoolStub([

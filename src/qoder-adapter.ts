@@ -2124,6 +2124,15 @@ export class QoderAdapter extends LlmAdapter {
       if (acquired.kind === 'rotate') {
         credential = acquired.credential
         activeAccountId = acquired.accountId
+        /**
+         * ⚠️ **必须重置**（正向审计 P2-1）：既有的三条换号分支
+         * （额度 / 401-403 / 其它非 ok）都写了这一句，本路径漏了。
+         *
+         * 确定性复现：同一请求先撞 401 为 **A** 续期过（`authRefreshed = true`），
+         * 随后因名额忙换到 **B**；B 的 401 因 `authRefreshed` 仍为 true **不再续期**
+         * ⇒ 直接抛 `AUTH` ⇒ 用户看到「凭据无效」，而真因是**换了号没重置这个标志**。
+         */
+        authRefreshed = false
         continue
       }
       using slot = acquired.slot
@@ -2509,9 +2518,26 @@ export class QoderAdapter extends LlmAdapter {
       if (input.emitted) throw error
       // 边界①：没有账号身份 ⇒ 无法 `tried`，不换。
       if (input.activeAccountId === undefined || input.activeAccountId.length === 0) throw error
-      const next = await this.switchAccountOnQuota(
-        input.options, input.tried, input.activeAccountId, 'slot-busy',
-      )
+      /**
+       * ⚠️ **换号过程自己抛错时，必须抛回原来那个「名额忙」错误**（正向审计 P2-2）。
+       *
+       * `switchAccountOnQuota` 内部只隔离了「写冷却标记失败」，**取号本身**
+       * （`getAvailableAccount`，要读盘）抛错时错误会冒出来 ⇒ 用户看到
+       * 裸 `Error: pool read failed`（**没有 code**），而真因是「这个号正忙」。
+       *
+       * 与 `transport` 分支的 P2-8 纪律同向：**诊断信息可以丢，用户可见的
+       * 错误码不能丢** —— 码决定宿主/聚合层怎么处理（本仓记过多次「码丢了 ⇒
+       * 客户端把它整条换成不准的文案」）。
+       */
+      let next: Awaited<ReturnType<QoderAdapter['switchAccountOnQuota']>>
+      try {
+        next = await this.switchAccountOnQuota(
+          input.options, input.tried, input.activeAccountId, 'slot-busy',
+        )
+      } catch {
+        // 取号失败 ⇒ 抛原错误（`QUEUE` 码保住，文案也保住）。
+        throw error
+      }
       // 边界③的另一半：换不到号 ⇒ 抛原错误（「本地排队」是正确结论）。
       if (next === undefined) throw error
       return { kind: 'rotate', credential: next.credential, accountId: next.accountId }
