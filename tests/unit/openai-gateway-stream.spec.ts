@@ -487,3 +487,32 @@ describe('issue #134：流式空名的安全解', () => {
     ])
   })
 })
+
+/**
+ * ★★ 只有 `block-end` 的正文块，流式必须**补发**（正向审计 P2-2）。
+ *
+ * 「只发 `block-end` 不发 delta」在 codearts 链路可达（`llm-adapter` 的
+ * `visible` 回退）。旧实现只把权威值记进 override、流式一帧不发 ⇒
+ * **客户端收到空回答**（而非流式出口是对的，所以这个问题只在流式可见）。
+ */
+describe('issue #134：block-end-only 正文的流式补发', () => {
+  it('★★★ 无 delta、只有 block-end(text) ⇒ 流式补一帧 content', async () => {
+    const out: string[] = []
+    for await (const item of toOpenAiSse(chunks([
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'only-end' } } as never,
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]), 'r', 'm')) out.push(item)
+    expect(out.join(''), '不补发就是空回答').toContain('"content":"only-end"')
+  })
+
+  it('★★★ 已有 delta 的块**不得**再补发（否则客户端重复拼接）', async () => {
+    const out: string[] = []
+    for await (const item of toOpenAiSse(chunks([
+      { type: 'text-delta', index: 0, text: 'hello' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'hello' } } as never,
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]), 'r', 'm')) out.push(item)
+    const joined = out.join('')
+    expect(joined.match(/"content":"hello"/g)?.length, '正文只应出现一次').toBe(1)
+  })
+})

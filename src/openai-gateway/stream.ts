@@ -102,6 +102,16 @@ interface Accumulated {
   contentOverrides: Map<number, string>
   /** 同上，思考块。 */
   reasoningOverrides: Map<number, string>
+  /**
+   * 已经**发出过 delta** 的正文块号。
+   *
+   * 用于 P2-2：某些链路（`llm-adapter` 的 `visible` 回退 ⇒ codearts 可达）会
+   * **只发 `block-end` 不发 delta**。旧实现只把权威值记进 override、流式一帧不发
+   * ⇒ 客户端收到**空回答**。有了这个集合就能在「该块一帧都没发过」时补发正文。
+   */
+  textSentBlocks: Set<number>
+  /** 同上，思考块。 */
+  reasoningSentBlocks: Set<number>
   /** 下一个工具块的出站稠密索引。 */
   nextToolIndex: number
   usage?: TokenUsage
@@ -198,10 +208,12 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
       const queue = (chunk as { qoderQueue?: unknown }).qoderQueue
       if (queue !== undefined) return { delta: {}, notice: queue }
       state.content += chunk.text
+      state.textSentBlocks.add(chunk.index)
       return { delta: { content: chunk.text } }
     }
     case 'reasoning-delta':
       state.reasoning += chunk.text
+      state.reasoningSentBlocks.add(chunk.index)
       return { delta: { reasoning_content: chunk.text } }
     case 'tool-call-delta': {
       let tool = state.tools.get(chunk.index)
@@ -303,10 +315,23 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
       if (block.type === 'text') {
         // 按块号记录（多正文块的形态见 `Accumulated.contentOverrides` 的说明）。
         state.contentOverrides.set(chunk.index, block.text)
+        /**
+         * ★ **该块一帧 delta 都没发过 ⇒ 补发正文**（正向审计 P2-2）。
+         * 「只发 `block-end` 不发 delta」在 codearts 链路可达
+         *（`llm-adapter` 的 `visible` 回退）；不补就是**空回答**。
+         */
+        if (!state.textSentBlocks.has(chunk.index) && block.text.length > 0) {
+          state.textSentBlocks.add(chunk.index)
+          return { delta: { content: block.text } }
+        }
         return undefined
       }
       if (block.type === 'reasoning') {
         state.reasoningOverrides.set(chunk.index, block.text)
+        if (!state.reasoningSentBlocks.has(chunk.index) && block.text.length > 0) {
+          state.reasoningSentBlocks.add(chunk.index)
+          return { delta: { reasoning_content: block.text } }
+        }
         return undefined
       }
       if (block.type !== 'tool-call') return undefined
@@ -402,7 +427,7 @@ export async function* toOpenAiSse(
   model: string,
   suggest?: SuggestionHook,
 ): AsyncIterable<string> {
-  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), contentOverrides: new Map(), reasoningOverrides: new Map(), nextToolIndex: 0 }
+  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), contentOverrides: new Map(), reasoningOverrides: new Map(), textSentBlocks: new Set(), reasoningSentBlocks: new Set(), nextToolIndex: 0 }
   try {
     for await (const chunk of chunks) {
       const event = consumeChunk(state, chunk)
@@ -470,7 +495,7 @@ export async function collectOpenAiCompletion(
   model: string,
   suggest?: SuggestionHook,
 ): Promise<Record<string, unknown>> {
-  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), contentOverrides: new Map(), reasoningOverrides: new Map(), nextToolIndex: 0 }
+  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), contentOverrides: new Map(), reasoningOverrides: new Map(), textSentBlocks: new Set(), reasoningSentBlocks: new Set(), nextToolIndex: 0 }
   try {
     for await (const chunk of chunks) {
       const event = consumeChunk(state, chunk)
