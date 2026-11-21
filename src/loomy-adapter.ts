@@ -26,6 +26,7 @@ import { nextUtc8DayStartMs } from './model-queue.js'
 import { createModelCatalog, isCatalogFresh, isCatalogFreshFor, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
+import { looksLikeUpstreamProviderError } from './upstream-error.js'
 import {
   LOOMY_AUTH_ERROR_CODE,
   isLoomyChatModel,
@@ -413,7 +414,7 @@ const LOOMY_RATE_LIMIT_COOLDOWN_MS = 3_600_000
  * （下一次请求报 `no usable credential; log in first`）。
  * buddy 的既有实现是分开的：只有限流类写标记，认证类只 `continue`。
  */
-export type LoomyFailureClass = 'quota' | 'rate' | 'auth' | 'other'
+export type LoomyFailureClass = 'quota' | 'rate' | 'auth' | 'upstream' | 'other'
 
 /**
  * 判定失败类别（与 {@link RaccoonFailureClass} 同构——raccoon 与 loomy 的额度
@@ -467,6 +468,37 @@ export function classifyLoomyFailure(errorText: string, status: number): LoomyFa
     || (lower.includes('quota') && (lower.includes('exceeded') || lower.includes('exhausted')))
   if (quotaText || status === 402) return 'quota'
   if (status === 429) return 'rate'
+  /**
+   * ★ **上游网关 5xx**（2026-11-21，GitHub issue #130）。
+   *
+   * ## 缺陷本体（报障者实测：单会话 51 次调用里 `llm/retry` 触发 23 次）
+   *
+   * | 上游报文 | 次数 | HTTP |
+   * |---|---|---|
+   * | `<html>…<title>504 Gateway Time-out</title>…openresty/1.15.8.2</html>` | 5 | 504 |
+   * | `该模型服务暂时不可用，请切换其他模型试试` | 18 | 503 |
+   *
+   * 这些原先全落 `other` ⇒ {@link shouldRotateLoomyAccount} 返 false ⇒
+   * **不换号**、直接抛 `SERVER` ⇒ 宿主 `llm-retry` 用**同一个号**退避重试 5 次
+   * （实测 `0.5s → 1.0s → 2.1s → 4.1s → 8.6s`），而该会话 prompt 已达
+   * **24.5 万 tokens** ⇒ 每次全量重发都是这个量级的 input 计费。
+   *
+   * ## 判据与 qoder 共用**同一份实现**
+   *
+   * `looksLikeUpstreamProviderError` 在 `src/upstream-error.ts`（唯一实现）。
+   * qoder 那次的实测规模：1374 会话 / 163 条失败里 504 HTML **74 次** +
+   * First Token Timeout **6 次**。此处**只多一道 `status >= 500` 闸门** ——
+   * 泛化会连 400 参数错一起收进来，白烧整池（报障者亦明确不建议）。
+   *
+   * ⚠️ `upstream` **不写冷却**（见 {@link recordsLoomyRateLimit}：只认
+   * `quota`/`rate`）。网关故障不是「这个号坏了」，写标记会把一次网关抖动
+   * 放大成「整池被封 24h」—— 与 2026-10-06 那次事故同型。
+   * ⚠️ 换号**是否真能绕开 504 未验证**（报障者如实登记了同一保留意见）：
+   * 若多个号共用同一台 openresty，换号只是把同一次失败重打 N 次。但对比现状
+   * （**同一个号**白重试 5 次、每次 24.5 万 tokens）仍是净收益，且至少有可能
+   * 命中不同的上游节点。
+   */
+  if (status >= 500 && looksLikeUpstreamProviderError(errorText)) return 'upstream'
   return 'other'
 }
 

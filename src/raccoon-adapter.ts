@@ -33,6 +33,7 @@ import { AccountPool } from './account-pool.js'
 import { createModelCatalog, isCatalogFresh, isCatalogFreshFor, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
+import { looksLikeUpstreamProviderError } from './upstream-error.js'
 import { isRaccoonExpired, type RaccoonCredential } from './raccoon.js'
 import {
   RACCOON,
@@ -332,7 +333,7 @@ const RACCOON_RATE_LIMIT_COOLDOWN_MS = 3_600_000
  * 认证失败是**账号态**（凭据失效），不是「该模型冷却」；写标记会让池把无辜
  * 账号长期排除，且把网关侧故障放大成全池不可用。
  */
-export type RaccoonFailureClass = 'quota' | 'rate' | 'auth' | 'other'
+export type RaccoonFailureClass = 'quota' | 'rate' | 'auth' | 'upstream' | 'other'
 
 /**
  * 判定失败类别（文案 + 状态码双通道，与 `isRateLimited` 同构）。
@@ -375,6 +376,21 @@ export function classifyRaccoonFailure(errorText: string, status: number): Racco
     || (lower.includes('quota') && (lower.includes('exceeded') || lower.includes('exhausted')))
   if (quotaText || status === 402) return 'quota'
   if (status === 429) return 'rate'
+  /**
+   * ★ **上游网关 5xx**（2026-11-21 随 loomy issue #130 一并同构补齐）。
+   *
+   * loomy 侧有实测证据（单会话 51 次调用里 23 次网关 5xx：504 HTML 5 次 +
+   * 503 中文文案 18 次），raccoon 侧**本机没有 5xx 样本** —— 这一格是为守住
+   * 「`classifyLoomyFailure` 与 `classifyRaccoonFailure` **必须逐格同构**」
+   * 这条仓库红线（`loomy-adapter.spec.ts` 的「与 raccoon 对拍」用例逐条守着）
+   * 而**同步对齐**的，不是 raccoon 的独立发现。如实标注，别把它当成实测结论。
+   *
+   * 判据与 loomy **共用同一份实现** `src/upstream-error.ts`，且同样只多一道
+   * `status >= 500` 闸门（泛化会连 400 参数错一起收进来，白烧整池）。
+   * ⚠️ `upstream` **不写冷却** —— 见 {@link recordsRaccoonRateLimit}（只认
+   * `quota`/`rate`）：网关抖动不是「这个号坏了」。
+   */
+  if (status >= 500 && looksLikeUpstreamProviderError(errorText)) return 'upstream'
   return 'other'
 }
 

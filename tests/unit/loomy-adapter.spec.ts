@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   LoomyAdapter, classifyLoomyFailure, loomyCooldownResetAtMs, parseLoomyRemoteModels,
-  reasoningFromEfforts, recordsLoomyRateLimit,
+  reasoningFromEfforts, recordsLoomyRateLimit, shouldRotateLoomyAccount,
 } from '../../src/loomy-adapter.js'
 import { classifyRaccoonFailure } from '../../src/raccoon-adapter.js'
 import { LOOMY, loomyContextWindow } from '../../src/loomy-product.js'
@@ -730,6 +730,43 @@ describe('classifyLoomyFailure 判据（与 raccoon 逐格同构）', () => {
    * ⚠️ 报文集刻意混合「两家共有的额度形态」与「只在一边被误判的文案」，
    * 且**含状态码维度**（403/401 的优先级只有靠状态码才能验证）。
    */
+  /**
+   * ★★ 上游网关 5xx（2026-11-21，GitHub issue #130）。
+   *
+   * 报障者实测：`loomy` 通道下 503/504 落 `other` ⇒ 不换号、直接抛 `SERVER`
+   * ⇒ 宿主 `llm-retry` 用**同一个号**退避重试 5 次（实测
+   * `0.5s → 1.0s → 2.1s → 4.1s → 8.6s`），而该会话 prompt 已达 **24.5 万 tokens**
+   * ⇒ 每次全量重发都是这个量级的 input 计费。单会话 51 次调用里 `llm/retry`
+   * 触发 **23 次**，其中 **18 次**是 503 的中文文案。
+   *
+   * ⚠️ 中文那一格是**主体形态**，我第一版判据只有英文
+   * （`service unavailable`）⇒ 这条用例当场会红 —— 它是必须的那一格。
+   */
+  it('★★ 网关 5xx ⇒ `upstream`（其中 503 中文文案是报障主体形态）', () => {
+    const gateway = '<html>…<title>504 Gateway Time-out</title>…openresty/1.15.8.2</html>'
+    expect(classifyLoomyFailure(gateway, 504)).toBe('upstream')
+    expect(classifyLoomyFailure('该模型服务暂时不可用，请切换其他模型试试', 503)).toBe('upstream')
+    expect(classifyLoomyFailure('502 Bad Gateway', 502)).toBe('upstream')
+    expect(classifyLoomyFailure('First Token Timeout or Upstream Timeout', 504)).toBe('upstream')
+  })
+
+  it('★★ `upstream` 值得换号，但**绝不写冷却**', () => {
+    const gateway = '<html>504 Gateway Time-out</html>'
+    // 换号：报障者实测「不换号」是缺陷的一半
+    expect(shouldRotateLoomyAccount(gateway, 504)).toBe(true)
+    // 不写冷却：网关抖动不是「这个号坏了」，写了会把一次抖动放大成
+    // 「整池被封 24h」（2026-10-06 事故同型）
+    expect(recordsLoomyRateLimit('upstream')).toBe(false)
+  })
+
+  it('★★ 状态码闸门：**同一句文案**在 4xx 上不得判 upstream（防白烧整池）', () => {
+    // 400 参数错的文案里也可能带 gateway/upstream 字样 —— 泛化会让确定性
+    // 失败变成「可换号」，逐个号重打一遍。
+    expect(classifyLoomyFailure('bad gateway param in body', 400)).toBe('other')
+    expect(classifyLoomyFailure('该模型服务暂时不可用，请切换其他模型试试', 400)).toBe('other')
+    expect(shouldRotateLoomyAccount('bad gateway param in body', 400)).toBe(false)
+  })
+
   it('★★★ 与 raccoon 对拍：同一报文集逐条同结论（同型复发防线）', () => {
     const corpus: Array<[string, number]> = [
       ['insufficient permissions to access this resource', 403],
@@ -745,6 +782,14 @@ describe('classifyLoomyFailure 判据（与 raccoon 逐格同构）', () => {
       ['quota exceeded', 400],
       ['', 429],
       ['param is invalid', 400],
+      // ★ 2026-11-21（issue #130）：网关 5xx 两家**必须同结论**
+      ['<html>…<title>504 Gateway Time-out</title>…openresty/1.15.8.2</html>', 504],
+      ['该模型服务暂时不可用，请切换其他模型试试', 503],
+      ['502 Bad Gateway', 502],
+      ['First Token Timeout or Upstream Timeout', 504],
+      // ⚠️ 反向：同文案但是 4xx ⇒ 两家都必须是 other（状态码闸门）
+      ['该模型服务暂时不可用，请切换其他模型试试', 400],
+      ['bad gateway param in body', 400],
     ]
     const diverged = corpus
       .map(([text, status]) => ({

@@ -233,16 +233,11 @@ function failureCallOf(error: unknown): { code: string; text: string } {
  * ⚠️ 顺序不变：**额度腿优先**（见 `classifyQoderFailure`），
  * 故「504 + billing 文案」仍归 `quota`。
  */
-export function looksLikeUpstreamProviderError(text: string): boolean {
-  if (/provider_error|provider\s+error|upstream\s+(?:provider\s+)?error|error\s+in\s+upstream\s+response/i.test(
-    text,
-  )) return true
-  // 网关 5xx：HTML 错误页（`504 Gateway Time-out` / `502 Bad Gateway`）与
-  // 上游超时（`First Token Timeout or Upstream Timeout`）。
-  return /gateway\s+time-?out|bad\s+gateway|service\s+(?:temporarily\s+)?unavailable|(?:first\s+token|upstream)\s+timeout/i.test(
-    text,
-  )
-}
+// ⚠️ 实现已提到 `src/upstream-error.ts`（2026-11-21，GitHub issue #130）：
+//    loomy / raccoon 面对的是**同一形态**的网关 5xx，判据必须是**一份实现**。
+//    这里保留同名 re-export，既有调用方与测试零改动。
+import { looksLikeUpstreamProviderError } from './upstream-error.js'
+export { looksLikeUpstreamProviderError }
 
 /**
  * Qoder 的失败类别。
