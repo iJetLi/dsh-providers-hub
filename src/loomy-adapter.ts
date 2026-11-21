@@ -1459,15 +1459,22 @@ export class LoomyAdapter extends LlmAdapter {
           failureClass === 'rate' ? 'RATE_LIMIT'
             : failureClass === 'auth' ? 'AUTH'
               /**
-               * ⚠️ **上游故障不是额度问题**（2026-11-21 正向审计 P1）。
+               * ⚠️ **上游故障用 `UPSTREAM` 而不是 `SERVER`**（2026-11-21 真机取证）。
                *
-               * 这个三元链原先只有 rate / auth / 兜底 `QUOTA_EXCEEDED` 三格。
-               * 加了 `upstream` 之后若不加本格，全池 5xx 的终态码会落
-               * `QUOTA_EXCEEDED` —— 用户看到「额度已用尽」这个**假原因**
-               * （与 issue #130「归因要准」的诉求正相反），而该形态在修前**不可达**。
-               * ⇒ 上游故障走 `SERVER`（= 5xx 的通用码，与 `httpErrorCode` 同口径）。
+               * 宿主的 `DEFAULT_RETRYABLE_CODES` 实测为
+               * `[EMPTY_RESPONSE, 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT']`
+               * —— **`SERVER` 在里面**，所以抛 `SERVER` 会被 `llm-retry`
+               * 用同一个号退避重试 5 次（报障者实测 `0.5s → 1.0s → 2.1s → 4.1s → 8.6s`，
+               * 单会话 51 次调用里触发 23 次、prompt 24.5 万 tokens）。
+               *
+               * `UPSTREAM` **不在**该集合里 ⇒ 抛它则宿主**不重试**。
+               * 这一格同时解决三件事：
+               * ① 不再白重试 5 次（每轮从 6 发降到 **1 发**）；
+               * ② 归因属实（不是 `QUOTA_EXCEEDED` 那个「额度已用尽」的假原因）；
+               * ③ **不会**被 `classifyRateLimitFailure` 判成 quota ⇒ 不会在 1 小时
+               *    后被 rate-limit-resume 自动续跑（反向审计指出的连带缺陷）。
                */
-              : failureClass === 'upstream' ? 'SERVER'
+              : failureClass === 'upstream' ? 'UPSTREAM'
                 : 'QUOTA_EXCEEDED',
           { status },
         )

@@ -812,8 +812,10 @@ describe('classifyLoomyFailure 判据（与 raccoon 逐格同构）', () => {
      */
     const source = await import('node:fs').then((fs) =>
       fs.readFileSync(new URL('../../src/loomy-adapter.ts', import.meta.url), 'utf8'))
-    expect(source, 'upstream 必须单独走 SERVER，不能落进 QUOTA_EXCEEDED 兜底')
-      .toContain("failureClass === 'upstream' ? 'SERVER'")
+    expect(source, 'upstream 必须单独走 UPSTREAM（不在宿主可重试集合 ⇒ 不被白重试 5 次）')
+      .toContain("failureClass === 'upstream' ? 'UPSTREAM'")
+    // 反向：绝不能落进 SERVER（它在 DEFAULT_RETRYABLE_CODES 里 ⇒ 白重试 5 次）
+    expect(source, 'upstream 不得走 SERVER').not.toContain("failureClass === 'upstream' ? 'SERVER'")
   })
 
   it('★★ 状态码闸门：**同一句文案**在 4xx 上不得判 upstream（防白烧整池）', () => {

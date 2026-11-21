@@ -1042,8 +1042,9 @@ export class RaccoonAdapter extends LlmAdapter {
           `raccoon: 模型 ${options.model} 所有账号均不可用（${errorDetail(errorText)}）`,
           failureClass === 'rate' ? 'RATE_LIMIT'
             : failureClass === 'auth' ? 'AUTH'
-              // ⚠️ 上游故障不是额度问题（同 loomy，2026-11-21 正向审计 P1）。
-              : failureClass === 'upstream' ? 'SERVER'
+              // ⚠️ 上游故障用 UPSTREAM（不在宿主可重试集合里 ⇒ 不被白重试 5 次；
+              //    也不是假原因 QUOTA_EXCEEDED）。详细理由见 loomy 同位置的注释。
+              : failureClass === 'upstream' ? 'UPSTREAM'
                 : 'QUOTA_EXCEEDED',
           { status },
         )
