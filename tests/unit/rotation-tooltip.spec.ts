@@ -20,6 +20,8 @@
  * | 含「默认」 | 不知道怎么恢复 |
  * | 含「不改」/「不影响」 | 以为它改变了选号策略（v1 废弃命名「优先账号」的坑） |
  */
+import { CREDIT_ORDER_TIER, rotationTierShiftHint } from '../../plugin-src/client/badge-model.js'
+
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -229,5 +231,62 @@ describe('起点两条提示：互斥 + 降档只占一行', () => {
     const block = usageBadgeSource.slice(shiftIdx, shiftIdx + 900)
     expect(block, 'tooltip 必须说明「按档位优先」').toContain('按档位优先')
     expect(block, 'tooltip 必须说明「绕一圈后才再轮到它」').toContain('绕一圈后才再轮到它')
+  })
+})
+
+/**
+ * ★★★ **行为级守卫**（PR #136 合并前审计 P1，本仓红线）。
+ *
+ * ## 为什么这组必须存在
+ *
+ * 上面那 17 条**全是源码文本断言**（`readFileSync` + `toMatch`/`indexOf`），
+ * 审计实测 **6 种「保留字面量但让代码失效」的形态全部 17/17 绿**：
+ * `&& false`、`|| true`、`renderRotation` 顶部 `return null`、条件只留注释、
+ * 删 `title` 留注释关键词、`rotationTierShiftHint` 恒 null。
+ * 这正是 `docs/agent-notes/client-ui.md` 记的那条红线
+ *（「源码文本断言的共同弱点：`if (false)` 短路禁用」）。
+ *
+ * ## 这组为什么能做到行为级
+ *
+ * `rotationTierShiftHint(selectionTier, currentTier)` 本身就是**导出的纯函数**
+ * ⇒ 直接**真调用**它，不经源码文本、不依赖渲染。
+ *（渲染层「互斥」那条仍无行为级守卫 —— 需要真渲染组件，如实登记。）
+ */
+describe('rotationTierShiftHint：真调用（行为级）', () => {
+  it('★★★ 降档（临期→短期）⇒ 只说「已交回队列」', () => {
+    const hint = rotationTierShiftHint('imminent', CREDIT_ORDER_TIER.expiring)
+    expect(hint).not.toBeNull()
+    expect(hint, '降档必须告知「已交回队列」——那是用户最需要知道的事实').toContain('已交回队列')
+    expect(hint, '起点档位已用完的事实也要在').toContain('已用完')
+  })
+
+  it('★★★ **升档（短期→永久）也必须说「已交回队列」**（P2 文案说谎的守卫）', () => {
+    /**
+     * 判据是 `tierStillHeld` 的**精确等值**（`tierNow === tierAtSelection`）：
+     * 档位只要变了（升档也算）就交出首位。
+     * 旧文案写「重新优先消耗它」⇒ 与降档那条互相矛盾（正是本 PR 要消灭的形态）。
+     */
+    /**
+     * ⚠️ **方向别搞反**（我第一版就写错了）：rank 是
+     * `imminent:0 → expiring:1 → permanent:2 → none:3`，
+     * **rank 变小 = 档位变好 = 升档**。
+     * 所以升档是 `permanent → expiring`（用户又充了短期积分），
+     * 而 `expiring → permanent` 的 rank 是**变大**、那是**降档**（第一版因此没测到升档分支）。
+     */
+    const hint = rotationTierShiftHint('permanent', CREDIT_ORDER_TIER.expiring)
+    expect(hint).not.toBeNull()
+    expect(hint, '升档同样交出首位 —— 说「重新优先消耗它」是假话').toContain('已交回队列')
+    expect(hint, '不得再出现「重新优先」').not.toContain('重新优先')
+  })
+
+  it('★★★ 档位没变 ⇒ null（不得凭空冒出一条提示）', () => {
+    expect(rotationTierShiftHint('expiring', CREDIT_ORDER_TIER.expiring)).toBeNull()
+    expect(rotationTierShiftHint('permanent', CREDIT_ORDER_TIER.permanent)).toBeNull()
+  })
+
+  it('★★ 输入非法 ⇒ null（不猜）', () => {
+    expect(rotationTierShiftHint('', CREDIT_ORDER_TIER.expiring)).toBeNull()
+    expect(rotationTierShiftHint('expiring', Number.NaN)).toBeNull()
+    expect(rotationTierShiftHint(undefined, CREDIT_ORDER_TIER.expiring)).toBeNull()
   })
 })
