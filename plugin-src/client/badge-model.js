@@ -939,8 +939,27 @@ export function rotationTierShiftHint(selectionTier, currentTier) {
      */
     return `ℹ️ 起点「${from}」已用完，现剩「${to}」⇒ 已交回队列`;
   }
-  // 升档（用户又充了积分）
-  return `ℹ️ 起点现有「${from}」积分（原为「${to}」）⇒ 重新优先消耗它`;
+  /**
+   * 升档（用户又充了积分）。
+   *
+   * ⚠️⚠️ **文案曾经说谎**（PR #136 合并前审计 P2，2026-11-21）。
+   *
+   * 旧文案写「⇒ **重新优先消耗它**」，而真正的判据是 `tierStillHeld`
+   * （`buddy-balance-rank.ts` / 本文件 `:1390` 两处**逐字同形**）：
+   *
+   * ```js
+   * const tierStillHeld = tierAtSelection !== undefined && tierNow === tierAtSelection
+   * if (!tierStillHeld) { …交出首位… }
+   * ```
+   *
+   * 它是**精确等值**判据 —— 档位只要**变了**（升档也算）就交出首位。
+   * ⇒ 升档后起点**也在队列里**，说「重新优先消耗它」是错的。
+   *
+   * 这条错得隐蔽：它是「升档」这条罕见路径上**唯一可见的文案**，
+   * 而且与降档那条（「已交回队列」）**互相矛盾** —— 恰是本 PR 要消灭的那类矛盾，
+   * 只是换了个方向。
+   */
+  return `ℹ️ 起点现有「${from}」积分（原为「${to}」）⇒ 已交回队列`;
 }
 
 /**
