@@ -130,3 +130,104 @@ describe('不可用原因的说明', () => {
     expect(source).not.toMatch(/'disabled':\s*'该账号已停用/)
   })
 })
+
+/**
+ * ★★★ **两条起点提示必须互斥，且降档只占一行**（2026-11-21 真实缺陷）。
+ *
+ * ## 用户报障（截图实证）
+ *
+ * > 「怎么有两行提示呢？」
+ *
+ * 两条提示**同时渲染**，而且**互相矛盾**：
+ *
+ * | 行 | 文案 | 含义 |
+ * |---|---|---|
+ * | 1 | 「起点是「短期」档：**先烧它的**短期积分」 | 先烧起点自己的 |
+ * | 2 | 「已交回轮换队列：**先按档位轮流消耗其他账号**」 | 先烧别人的 |
+ *
+ * ⇒ 一句让先烧它、另一句让先烧别人，**直接冲突**。
+ *
+ * ## 根因
+ *
+ * 渲染处注释早就写着「与下面的降档提示**互斥渲染**（同时出现会自相矛盾）」
+ * —— **注释写对了，代码没实现**：两处是**独立的 `=== null` 判断**。
+ *
+ * 触发条件（用户截图）：起点选定时的档位是「临期」，现在只剩「短期」
+ * ⇒ `rotationStartHint(expiring)` 与 `rotationTierShiftHint('imminent', expiring)`
+ * **都返回非 null**。
+ *
+ * ## 为什么此前没被发现
+ *
+ * `badge-model.spec.ts` 只**分别**测两个函数的返回值，
+ * **没有一条测「两者同时非 null」**——而那正是渲染层的真实场景。
+ *
+ * ## 用户对「一行」的明确要求
+ *
+ * > 「降档的提示信息也只需要一行就行，不要两行，太占用空间，
+ * >   你可以使用 tooltip 增加更详细说明」
+ */
+describe('起点两条提示：互斥 + 降档只占一行', () => {
+  const CLIENT = join(process.cwd(), 'plugin-src', 'client')
+  const usageBadgeSource = readFileSync(join(CLIENT, 'usage-badge.js'), 'utf8')
+  const badgeModelSource = readFileSync(join(CLIENT, 'badge-model.js'), 'utf8')
+
+  it('★★★ 渲染处必须用 `tierShiftHint !== null` 压制 `startHint`', () => {
+    /**
+     * ⚠️ 判据必须落在**压制条件**上，而不只是「两个变量都存在」。
+     *
+     * 修复前是两处独立的 `=== null`：
+     * ```js
+     * startHint === null ? null : <div>{startHint}</div>
+     * tierShiftHint === null ? null : <div>{tierShiftHint}</div>
+     * ```
+     * ⇒ 那个写法**也能通过**「两个变量都存在」这类宽松断言。
+     */
+    expect(usageBadgeSource, '必须有 `startHint === null || tierShiftHint !== null` 压制条件')
+      .toMatch(/startHint\s*===\s*null\s*\|\|\s*tierShiftHint\s*!==\s*null/)
+  })
+
+  it('★★★ 压制条件必须在 `startHint` 的渲染之前（不是写在别处）', () => {
+    // 取「startHint 的渲染块」：从压制条件到 key: 'tierHint'
+    const guardIdx = usageBadgeSource.indexOf('startHint === null || tierShiftHint !== null')
+    const tierHintIdx = usageBadgeSource.indexOf("key: 'tierHint'", guardIdx)
+    expect(guardIdx, '找不到压制条件').toBeGreaterThan(-1)
+    expect(tierHintIdx, '压制条件必须紧邻 tierHint 渲染').toBeGreaterThan(guardIdx)
+    // 两者之间不得出现别的渲染分支（否则条件可能挂错了块）
+    const between = usageBadgeSource.slice(guardIdx, tierHintIdx)
+    expect(between.length, '压制条件与渲染点之间不该隔着大段代码').toBeLessThan(800)
+  })
+
+  it('★★★ 降档文案必须是**单行**（不得再拼第二段）', () => {
+    /**
+     * 修复前是两段字符串拼接：
+     * ```js
+     * return `ℹ️ 起点的「${from}」积分已用完（现剩「${to}」）⇒ 已交回轮换队列：`
+     *   + `先按档位轮流消耗其他账号，绕一圈后才轮到它`;
+     * ```
+     * ⇒ 面板里折成 2 行。
+     *
+     * ⚠️ **必须定位到 `return` 那一行**（不是注释）：
+     * `badge-model.js` 的注释里也写着「已交回队列」，直接 `indexOf` 会命中注释。
+     */
+    const returnIdx = badgeModelSource.indexOf('已交回队列`;')
+    expect(returnIdx, '找不到降档文案的 return 行').toBeGreaterThan(-1)
+    const lineStart = badgeModelSource.lastIndexOf('\n', returnIdx) + 1
+    const line = badgeModelSource.slice(lineStart, returnIdx + '已交回队列`;'.length)
+
+    // 该行必须是完整的一行（含三个关键事实）
+    expect(line, '必须含「已用完」').toContain('已用完')
+    expect(line, '必须含「现剩」').toContain('现剩')
+    expect(line, '必须含「已交回队列」（否则会被当成 bug）').toContain('已交回队列')
+    // ⚠️ 反向：不得出现「绕一圈后才轮到它」这类长解释（已移进 tooltip）
+    expect(line, '长解释必须移进 tooltip，不得留在行内')
+      .not.toContain('绕一圈后才轮到它')
+  })
+
+  it('★★ 完整规则仍必须在 tooltip 里（不能因为精简文案就丢掉说明）', () => {
+    const shiftIdx = usageBadgeSource.indexOf("key: 'tierShiftHint'")
+    expect(shiftIdx).toBeGreaterThan(-1)
+    const block = usageBadgeSource.slice(shiftIdx, shiftIdx + 900)
+    expect(block, 'tooltip 必须说明「按档位优先」').toContain('按档位优先')
+    expect(block, 'tooltip 必须说明「绕一圈后才再轮到它」').toContain('绕一圈后才再轮到它')
+  })
+})
