@@ -193,6 +193,102 @@ function unwrapEnvelope(raw: unknown): unknown {
   return 'data' in record ? record.data : raw
 }
 
+/**
+ * **脱敏**一段上游报文，绝不回显凭据（本仓红线）。
+ *
+ * 判词来源：`src/qoder-web-usage.ts` 的「Cookie 是能登录官网的会话凭据：
+ * 绝不下发客户端、绝不写日志或错误消息」。这里把同一纪律用在**领取失败的回执**上：
+ * 报文来自上游，理论上不该含我们的凭据，但**「理论上」不能当作判据** ——
+ * 上游若把请求头回显进错误体（真实发生过的形态），我们就会把它带到用户界面上。
+ *
+ * 只做「模式脱敏」，不猜字段语义：宁可多打几个 `***`，也不让凭据漏出去。
+ */
+export function redactBaizhiText(text: string): string {
+  /**
+   * ⚠️ **顺序不能反**（实测踩过）：必须先吃 `Bearer xxx`，再吃 `key=value`。
+   *
+   * 反过来的话 `Authorization: Bearer TOKEN` 会被 key=value 规则先匹配成
+   * `Authorization=***`（`\S+` 只吃掉 `Bearer` 这个词）⇒ **TOKEN 原样留在后面**
+   * —— 我那版用例就是这么红出来的（`'Authorization=*** FAKE_TOKEN…'`）。
+   */
+  return text
+    // ① `Bearer xxx`（先）
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer ***')
+    // ② `Cookie: baizhi_session=xxx; sl-session=yyy`
+    .replace(/(?:baizhi_session|sl-session)=[^;\s]+/gi, 'cookie=***')
+    /**
+     * ③ `key=value` / `key: value` / **JSON 形态** `"key":"value"`（后）。
+     *
+     * ⚠️ **必须容忍键值两侧的引号** —— 我第一版写的是裸 `key\s*[=:]`，
+     * 于是 `{"session_cookie":"FAKE_ABC"}` **原样输出、凭据直接漏到界面上**
+     *（自测探针实跑抓到的，不是理论）。而**上游的错误体就是 JSON** ⇒ 现实可达。
+     *
+     * `["']?` 两侧各一个可选引号，覆盖 `"key":"v"` / `'key': 'v'` / `key=v`。
+     */
+    .replace(/(session_cookie|access_token|refresh_token|api_key|apikey|authorization|cookie|token|secret)["']?\s*[=:]\s*["']?[^"',}\s]+/gi, '$1=***')
+}
+
+/**
+ * 从领取响应里取**允许公开**的失败原因（issue #123 第 3 项）。
+ *
+ * ## 为什么要做
+ *
+ * `claimed:false` 原先只判布尔、**上游整个响应体被丢掉** ⇒ 报障时没人知道
+ * 服务端到底说了什么（「需要图形验证」？账号级风控？IP 限流？），
+ * issue 里「服务端具体拒发条件尚未确认」就是这么来的。
+ *
+ * ## 什么算「允许公开」
+ *
+ * 只认**保守白名单键**：`code` / `error_code` / `reason` / `message` / `msg` / `detail`。
+ * 既不猜别的字段，也不把整个响应体 toString 出去（那会把 `data` 里可能存在的
+ * 账号信息一并带走）。取不到任何一项就返回 `undefined`，由调用方写「原因未知」。
+ *
+ * ⚠️ 结果**先脱敏再截断**（顺序不能反：先截断可能把 `token=abc…` 切成
+ * `token=ab`，脱敏正则就匹配不上了）。
+ *
+ * @param raw - `claimResult.data`（上游原始响应，可能带 `{data: …}` 信封）。
+ * @returns 形如 `code=40012；message=需要完成人机验证` 的单行文本；无可用字段时 `undefined`。
+ */
+export function publicClaimReason(raw: unknown): string | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const record = raw as Record<string, unknown>
+  // 上游信封可能是 `{ data: {...} }`，也可能是直接对象。
+  const inner = record.data !== null && typeof record.data === 'object' && !Array.isArray(record.data)
+    ? record.data as Record<string, unknown>
+    : record
+  const parts: string[] = []
+  for (const key of ['code', 'error_code', 'reason', 'message', 'msg', 'detail']) {
+    const value = inner[key] ?? record[key]
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    /**
+     * ⚠️ **`code: 0` 是成功码，不是失败原因**。
+     * 本仓的领取响应是 `{ code: 0, data: { claimed: false } }` —— 直接把
+     * `code=0` 当原因会写出「上游未发放（code=0）」这种自相矛盾的话。
+     * 数字 0 与字符串 `'0'` 都跳过（上游两种都出现过）。
+     */
+    if (value === 0 || value === '0') continue
+    const text = String(value).trim()
+    if (text.length === 0) continue
+    parts.push(`${key}=${text}`)
+  }
+  if (parts.length === 0) return undefined
+  return redactBaizhiText(parts.join('；')).slice(0, MAX_PUBLIC_REASON_CHARS)
+}
+
+/**
+ * 失败文案里的**官网入口**（issue #123 第 5 项）。
+ *
+ * 报障者的实测：Jet Hub 领取失败后在官网点「每日领积分」会弹**图形验证**，
+ * 人工完成即到账 ⇒ 用户需要的不是「稍后重试」，而是「去哪验证」。
+ * 用 `platformBaseUrl + '/console/'` 拼，避免再写一份主机名字面量（会漂移）。
+ */
+function claimConsoleHint(product: BaizhiProduct): string {
+  return `请到官网 ${product.platformBaseUrl}/console/ 完成验证（如需图形验证）后刷新钱包`
+}
+
+/** 公开原因的最大长度（够看清原因，又不至于把整段 HTML 塞进面板）。 */
+const MAX_PUBLIC_REASON_CHARS = 200
+
 /** 安全读数字。 */
 function readNumber(source: Record<string, unknown> | undefined, key: string): number | undefined {
   if (source === undefined) return undefined
@@ -716,18 +812,28 @@ export async function claimBaizhiDailyCheckin(
       if (after.ok && after.wallet.dailyClaimed) {
         return { kind: 'already-claimed', message: '今天已经领取过每日积分' }
       }
+      /**
+       * ★ **把上游的拒发原因透出来**（issue #123 第 3 项）。
+       *
+       * 原先这里只判 `claimed` 布尔、响应体整个丢掉 ⇒ issue 里那句
+       * 「服务端具体拒发条件尚未确认」正是这么来的。现在按**保守白名单**
+       * （`code`/`reason`/`message`…）取一行，脱敏后截断，取不到就写「原因未知」。
+       */
+      const reason = publicClaimReason(claimResult.data)
+      const reasonText = reason === undefined ? '原因未知' : reason
+      const hint = claimConsoleHint(product)
       if (!after.ok) {
         // 复核本身失败 ⇒ 不能断言「未发放」；把不确定如实说出来，让用户刷新核对。
         return {
           kind: 'failed',
           code: -1,
-          message: `领取结果无法确认（复核钱包失败：${after.error}）—— 请刷新余额核对是否到账`,
+          message: `领取结果无法确认（复核钱包失败：${after.error}）—— 上游回执：${reasonText}；${hint}`,
         }
       }
       return {
         kind: 'failed',
         code: -1,
-        message: '领取接口返回 claimed=false，但钱包仍显示未领取 —— 上游未发放，请稍后重试',
+        message: `领取接口返回 claimed=false，但钱包仍显示未领取 —— 上游未发放（${reasonText}）；${hint}`,
       }
     }
     if (claimed === undefined) {

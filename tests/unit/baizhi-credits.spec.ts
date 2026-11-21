@@ -35,6 +35,8 @@ import {
   fetchBaizhiUsage,
   fetchBaizhiWallet,
   normalizeBaizhiCookie,
+  publicClaimReason,
+  redactBaizhiText,
 } from '../../src/baizhi-credits.js'
 import { BAIZHI } from '../../src/baizhi-product.js'
 
@@ -723,5 +725,123 @@ describe('buildBaizhiBalance：授信/每日的边界', () => {
     const daily = balance.packages[0]
     expect(daily).toMatchObject({ name: '每日积分', remaining: 0, total: 100, used: 0, totalKnown: false })
     expect(daily.expiryNote).toContain('领取状态未知')
+  })
+})
+
+/**
+ * ★★★ issue #123 第 3 项：把上游**拒发原因**透出来（脱敏 + 截断）。
+ *
+ * 报障实测：`claimed=0, alreadyClaimed=1, failed=2`，而 `failed` 的文案只有
+ * 「上游未发放」—— 整个响应体被丢掉，于是「服务端具体拒发条件尚未确认」
+ * 成了 issue 里悬着的一条。这两条纯函数就是为它加的。
+ */
+describe('issue #123：拒发原因的公开与脱敏', () => {
+  it('★★★ 从信封里取保守白名单字段', () => {
+    expect(publicClaimReason({
+      code: 0,
+      data: { claimed: false, code: 40012, message: '需要完成人机验证' },
+    })).toBe('code=40012；message=需要完成人机验证')
+  })
+
+  it('★★★ `code: 0` 是成功码，不得当成失败原因', () => {
+    // 本仓的领取响应就是 `{ code: 0, data: { claimed: false } }` ⇒ 取不到原因。
+    expect(publicClaimReason({ code: 0, data: { claimed: false } })).toBeUndefined()
+    expect(publicClaimReason({ code: '0' })).toBeUndefined()
+  })
+
+  it('★★★ 脱敏：回执里的凭据类字段必须打码（本仓红线）', () => {
+    /**
+     * ⚠️ 这里刻意用**硬编码假凭据**（不引用任何真实值/占位符）：
+     * 断言 `not.toContain(同一批字面量)` 才是有效判据 ——
+     * 若断言的是**别的**字符串，这条用例会恒真（假绿）。
+     */
+    const fakeCookie = 'baizhi_session=FAKE_SESSION_abc123'
+    const fakeBearer = 'Bearer FAKE_TOKEN_xyz.789'
+    const redacted = redactBaizhiText(`Cookie: ${fakeCookie}; Authorization: ${fakeBearer} rest`)
+    expect(redacted).not.toContain('FAKE_SESSION_abc123')
+    expect(redacted).not.toContain('FAKE_TOKEN_xyz.789')
+    expect(redacted).toContain('***')
+  })
+
+  it('★★★ JSON 形态的凭据也必须打码（上游错误体就是 JSON —— 现实可达）', () => {
+    /**
+     * ⚠️ **这是我自测探针抓到的真漏洞**：第一版正则是裸 `key\s*[=:]`，
+     * 而 JSON 里键值两侧都有引号 ⇒ `{"access_token":"FAKE"}` **原样输出**，
+     * 凭据直接漏到用户界面上。上游的**错误体就是 JSON**，所以这不是理论问题。
+     */
+    const cases = [
+      '{"access_token":"FAKE_JSON_1"}',
+      '{ "session_cookie": "FAKE_JSON_2" }',
+      "{'token': 'FAKE_JSON_3'}",
+      '{"code":40012,"message":"需要验证","access_token":"FAKE_JSON_4"}',
+    ]
+    for (const input of cases) {
+      const out = redactBaizhiText(input)
+      expect(out, `JSON 形态漏了：${input}`).not.toMatch(/FAKE_JSON_\d/)
+    }
+  })
+
+  it('★★★ 结果先脱敏**再**截断（反序会把 token 切成半截漏出去）', () => {
+    // 构造一个「token 恰好跨 200 字边界」的报文：若先截断，`token=abc…` 会被切半，
+    // 脱敏正则就匹配不上、半截 token 直接漏到界面。
+    const long = 'x'.repeat(190) + ' token=SECRET_SECRET_SECRET ' + 'y'.repeat(50)
+    const reason = publicClaimReason({ message: long })
+    expect(reason).toBeDefined()
+    expect(reason!.length).toBeLessThanOrEqual(200)
+    expect(reason).not.toContain('SECRET_SECRET')
+  })
+
+  it('★★ 上游没有任何可公开字段 ⇒ 返回 undefined（调用方写「原因未知」）', () => {
+    expect(publicClaimReason(undefined)).toBeUndefined()
+    expect(publicClaimReason(null)).toBeUndefined()
+    expect(publicClaimReason('plain string')).toBeUndefined()
+    expect(publicClaimReason({ data: { claimed: false } })).toBeUndefined()
+  })
+})
+
+/**
+ * ★★★ issue #123 第 3、5 项的**端到端**表现（报障者明确只要求这两项）。
+ *
+ * 背景：2026-11-18 实测 `claimed=0, alreadyClaimed=1, failed=2`，两个失败账号的
+ * 领取请求返回 `claimed=false`、复查钱包仍未领取；随后在官网完成**图形验证**
+ * 即到账 ⇒ 用户需要的不是「稍后重试」，而是①**真因**②**去哪验证**。
+ *
+ * 明确**不做**（报障者第 2 条评论）：不改钱包复核逻辑、不全局排除 baizhi
+ * 自动签到、不做逐账号补领（另开议题）。
+ */
+describe('issue #123：失败文案要带上游原因与官网入口', () => {
+  it('★★★ claimed=false + 钱包未领取 ⇒ 文案含上游 code/message 与官网入口', async () => {
+    const { fetchImpl } = routeFetch([
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
+      { match: BAIZHI.captchaRedeemPath, body: JSON.stringify({ code: 0, data: { token: 'deadbeef:1234567890abcde', success: true } }) },
+      {
+        match: BAIZHI.dailyTemporaryCreditPath,
+        body: JSON.stringify({ code: 0, data: { claimed: false, code: 40012, message: '需要完成人机验证' } }),
+      },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    expect(outcome.kind).toBe('failed')
+    const message = outcome.kind === 'failed' ? outcome.message : ''
+    expect(message, '必须带出上游原因').toContain('40012')
+    expect(message).toContain('需要完成人机验证')
+    expect(message, '必须给出官网入口（issue 第 5 项）').toContain('https://baizhi.cloud/console/')
+    expect(message, '要提示完成验证后刷新').toContain('刷新')
+    expect(message, '仍然保留原语义：不是「已领取」').toContain('未发放')
+  })
+
+  it('★★★ 上游不给任何原因 ⇒ 写「原因未知」，但仍给官网入口', async () => {
+    const { fetchImpl } = routeFetch([
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      { match: BAIZHI.walletBalancePath, body: walletBody({ daily_temporary_credit_claimed: false }), once: true },
+      { match: BAIZHI.captchaChallengePath, body: JSON.stringify({ code: 0, data: { token: 'abc', challenge: { c: 1, s: 32, d: 3 } } }) },
+      { match: BAIZHI.captchaRedeemPath, body: JSON.stringify({ code: 0, data: { token: 'deadbeef:1234567890abcde', success: true } }) },
+      { match: BAIZHI.dailyTemporaryCreditPath, body: JSON.stringify({ code: 0, data: { claimed: false } }) },
+    ])
+    const outcome = await claimBaizhiDailyCheckin({ access_token: 'sk', session_cookie: COOKIE }, BAIZHI, { fetchImpl })
+    const message = outcome.kind === 'failed' ? outcome.message : ''
+    expect(message).toContain('原因未知')
+    expect(message).toContain('https://baizhi.cloud/console/')
   })
 })
