@@ -5244,6 +5244,20 @@ function ProviderPanel({
     } catch (caught) {
       console.error('[jet-hub] load credits failed:', caught);
       if (!mounted.current || creditLoadRef.current !== request) return;
+      /**
+       * ★★★ **`quiet` 模式下失败必须静默**（PR #135 合并前审计 P1-①，两轮审计重叠项）。
+       *
+       * `9effb4be` 的「首帧来自磁盘缓存 ⇒ 2.5 秒后补读一次」调的是
+       * `loadCredits(true, true)`（`force=true, quiet=true`）。而 `force` 会绕过缓存直读上游：
+       * 上游一旦瞬时失败，原来这里会把**每个账号**写成 `{balance: null, error}` ⇒
+       * 用户刚在磁盘缓存里看到的**积分数字被整行顶掉**成「查询失败」。
+       *
+       * 这与用户的原话直接冲突：「期间都是后台静默完成，前端也不必要显示任何信息」。
+       *
+       * ⇒ `quiet` 模式（后台补读）失败只留日志：**已有的值原样保留**，
+       *   下一次正常刷新或重启后自愈。非 `quiet`（用户主动点刷新）仍如实报错。
+       */
+      if (quiet) return;
       // 整批失败（如 provider 不支持、RPC 未注册）：给当前每个账号都留下失败
       // 原因，避免卡片永远停在"读取中"。
       //
