@@ -8122,4 +8122,28 @@ describe('qoder 特例分支的磁盘缓存接线', () => {
     expect(around, '记盘必须被 detailed.balance !== null 包住')
       .toMatch(/detailed\.balance !== null/)
   })
+
+  /**
+   * ★★ **qoder 余额查询失败必须留日志**（2026-11-21）。
+   *
+   * ## 为什么（用户实测发现）
+   *
+   * `qoder` 与 `qodercn` 走**完全相同**的代码路径（同一个 `isQoderFamily`
+   * 分支、同一个 `fetchQoderBalanceDetailed`），而磁盘缓存里 `qodercn` 有数据、
+   * `qoder`（国际版，7 个账号）**一条都没有** ⇒ 国际版查询全部失败。
+   *
+   * 但失败分支此前**完全静默** —— 只把 `error` 塞进响应，服务端日志一个字都没有
+   * ⇒ 无法判断是网络 / 凭据 / 上游报文变形 / 企业版无数字中的哪一种。
+   *
+   * ⚠️ 实测已排除的两条：网络正常（TLS 184ms、HTTP 401 是缺凭据的正常响应）、
+   * 凭据未过期（`expiresAt` 还剩 577 小时）⇒ 真因只能靠这条日志定位。
+   */
+  it('★★ qoder 分支：查询失败必须打 warn 日志（否则真因无从定位）', () => {
+    const branch = qoderBranch()
+
+    expect(branch, '失败分支必须有 logger.warn').toMatch(/ctx\.logger\?\.warn\?\.\(/)
+    expect(branch, 'warn 文案必须说明是余额查询失败')
+      .toContain('余额查询失败')
+    expect(branch, '必须带 detailed.error 作为原因').toContain('detailed.error')
+  })
 })

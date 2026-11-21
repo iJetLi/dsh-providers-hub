@@ -9942,6 +9942,29 @@ function registerJetHubEndpoints(
                 at: Date.now(),
                 value: withQoderAddOnDetail(detailed.balance, addOnDetail),
               })
+            } else {
+              /**
+               * ★ **失败必须留一条日志**（2026-11-21）。
+               *
+               * ## 为什么（用户实测：qoder 国际版 7 个账号的缓存一条都没有）
+               *
+               * 排查时发现：`qoder` 与 `qodercn` **走完全相同的代码路径**
+               * （同一个 `isQoderFamily` 分支、同一个 `fetchQoderBalanceDetailed`），
+               * 而 `qodercn` 有缓存、`qoder` 一条都没有 ⇒ **国际版查询全部失败**。
+               *
+               * 但失败分支此前**完全静默**：只把 `error` 塞进响应，
+               * 服务端日志里一个字都没有 ⇒ 无法从日志判断「是网络 / 凭据 /
+               * 上游报文变形 / 企业版无数字」中的哪一种。
+               *
+               * ⚠️ 实测排除的两条：网络正常（TLS 184ms、HTTP 401 是缺凭据的正常响应）、
+               * 凭据未过期（`expiresAt` 还有 577 小时）⇒ 真因只能靠这条日志定位。
+               *
+               * ⚠️ 只记 `warn` 不记 `error`：单账号失败是**常态**（余额查询本来就可能
+               * 因上游抖动失败），不该把日志级别抬高。
+               */
+              ctx.logger?.warn?.(
+                `[jet-hub] ${product.id} 账号 ${account.id} 余额查询失败：${detailed.error ?? '原因未知'}`,
+              )
             }
             return {
               accountId: account.id,
