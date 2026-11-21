@@ -386,3 +386,104 @@ describe('issue #134：四条判据各自可单独证伪', () => {
     expect((response.choices[0]!.message as never as { tool_calls: Array<{ id: string }> }).tool_calls[0]!.id).toBe('call_real')
   })
 })
+
+/**
+ * ★★★ 两处**我自己引入的回归**（2026-11-21 正向审计，改前是对的）。
+ *
+ * 都是「加了 override 之后，把原来的累加语义打掉了」：
+ * ① 单值 `contentOverride` 在**多正文块**时整段丢内容（Anthropic 族按
+ *    `content_block` index 建块、一块一个 `block-end`，是合法可达形态）；
+ * ② `block-end` 没有 first-close-wins ⇒ 畸形流的第二个权威值会覆盖第一个，
+ *    而非流式已给出的值与客户端手里的值分叉。
+ */
+describe('issue #134 回归：多正文块 / first-close-wins', () => {
+  it('★★★ 多个正文块 ⇒ 非流式必须**拼接全部**，不得只剩最后一块', async () => {
+    const response = await collectOpenAiCompletion(chunks([
+      { type: 'text-delta', index: 0, text: 'A' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'A' } } as never,
+      { type: 'text-delta', index: 1, text: 'B' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: 'B' } } as never,
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]), 'r', 'm')
+    expect(response.choices[0]!.message.content, '单值 override 会让这里变成 "B"').toBe('AB')
+  })
+
+  it('★★★ 逆序收尾同样不得丢内容', async () => {
+    const response = await collectOpenAiCompletion(chunks([
+      { type: 'text-delta', index: 0, text: 'A' },
+      { type: 'text-delta', index: 1, text: 'B' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: 'B' } } as never,
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'A' } } as never,
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]), 'r', 'm')
+    // 按块号升序拼接 ⇒ "AB"（不是按收尾顺序的 "BA"）
+    expect(response.choices[0]!.message.content).toBe('AB')
+  })
+
+  it('★★★ 第二个 `block-end` 不得再覆盖（first-close-wins）', async () => {
+    const response = await collectOpenAiCompletion(chunks([
+      { type: 'tool-call-delta', index: 0, id: 'c1' as never, name: 'X' as never, argumentsDelta: '{"a":1}' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'c1' as never, name: 'X' as never, arguments: '{"a":1}' } } as never,
+      // 畸形：同一块第二次收尾，参数不同
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'c1' as never, name: 'X' as never, arguments: '{"a":999}' } } as never,
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]), 'r', 'm')
+    const args = (response.choices[0]!.message as never as { tool_calls: Array<{ function: { arguments: string } }> })
+      .tool_calls[0]!.function.arguments
+    expect(args, '第二次收尾若覆盖，非流式与客户端手里（{"a":1}）就分叉了').toBe('{"a":1}')
+  })
+})
+
+/**
+ * ★★★ 流式侧空名的**协议安全解**（2026-11-21 正向审计 P1-2）。
+ *
+ * 「名字只在 `block-end` 到达」是正常形态（`protocol-wire.md` 有实测记录）。
+ * 旧实现照发 `tool_calls` 帧但 `function` 里没有 `name` ⇒ 客户端攒出
+ * `name: ''`，那是 **IKLRIK 的会话级损坏形态**（`unknown tool ""` + 坏块
+ * 入会话 + 每轮重放 ⇒ 会话报废）。
+ *
+ * 流式**没法撤回已发帧** ⇒ 唯一安全解是首帧推迟到名字可用（代价：名字晚到的
+ * 调用丧失参数增量流式，首帧一次性带出累积参数）。与 Responses 的
+ * `toolAddedEvent` 同口径。
+ */
+describe('issue #134：流式空名的安全解', () => {
+  function accumulateTools(sse: string): Array<{ id: string; name: string; args: string }> {
+    const tools: Array<{ id: string; name: string; args: string }> = []
+    for (const line of sse.split('\n')) {
+      if (!line.startsWith('data: ') || line.includes('[DONE]')) continue
+      let ev: { choices?: Array<{ delta?: { tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }> }
+      try { ev = JSON.parse(line.slice(6)) } catch { continue }
+      for (const tc of ev.choices?.[0]?.delta?.tool_calls ?? []) {
+        let slot = tools[tc.index ?? 0]
+        if (slot === undefined) { slot = { id: '', name: '', args: '' }; tools[tc.index ?? 0] = slot }
+        if (typeof tc.id === 'string') slot.id = tc.id
+        if (typeof tc.function?.name === 'string' && tc.function.name.length > 0) slot.name = tc.function.name
+        if (typeof tc.function?.arguments === 'string') slot.args += tc.function.arguments
+      }
+    }
+    return tools
+  }
+
+  it('★★★ 名字始终不可用 ⇒ 流式**一帧都不发** tool_calls', async () => {
+    const out: string[] = []
+    for await (const item of toOpenAiSse(chunks([
+      { type: 'tool-call-delta', index: 0, id: 'c1' as never, name: '' as never, argumentsDelta: '{}' },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]), 'r', 'm')) out.push(item)
+    expect(accumulateTools(out.join('')), 'name="" 的帧会让客户端报 unknown tool').toEqual([])
+  })
+
+  it('★★★ 名字晚到 ⇒ 首帧一次性带出全部累积参数（不丢增量）', async () => {
+    const seq: StreamChunk[] = [
+      { type: 'tool-call-delta', index: 0, id: 'c1' as never, name: '' as never, argumentsDelta: '{"a"' },
+      { type: 'tool-call-delta', index: 0, id: 'c1' as never, name: '' as never, argumentsDelta: ':1}' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'c1' as never, name: 'Run' as never, arguments: '{"a":1}' } } as never,
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]
+    const out: string[] = []
+    for await (const item of toOpenAiSse(chunks(seq), 'r', 'm')) out.push(item)
+    expect(accumulateTools(out.join('')), '名字可用后必须把此前累积的参数补上').toEqual([
+      { id: 'c1', name: 'Run', args: '{"a":1}' },
+    ])
+  })
+})

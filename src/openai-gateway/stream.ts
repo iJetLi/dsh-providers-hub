@@ -86,9 +86,22 @@ interface Accumulated {
   content: string
   reasoning: string
   tools: Map<number, ToolState>
-  /** `block-end` 的权威正文/思考（流式不再补帧，只供非流式出口）。 */
-  contentOverride?: string
-  reasoningOverride?: string
+  /**
+   * `block-end` 的权威正文，**按块号**记录（流式不再补帧，只供非流式出口）。
+   *
+   * ## ⚠️ 为什么是 Map 而不是单值（2026-11-21 正向审计 P1-1）
+   *
+   * 我第一版是 `contentOverride?: string` 单值 —— **一个流里出现 ≥2 个 text 块时，
+   * 后一个 `block-end` 会把前一个整段覆盖掉**：实测正序收尾时非流式
+   * `"AB"` → `"B"`、逆序收尾 `"AB"` → `"A"`（流式仍是 `"AB"` ⇒ 两个出口分叉）。
+   *
+   * 而多正文块是**合法且可达**的形态：Anthropic 族（`zcode-anthropic.ts`）按
+   * `content_block` 的 index 建块、**一块一个 `block-end`**。
+   * ⇒ 必须按块号存，出口时按块号升序拼接。
+   */
+  contentOverrides: Map<number, string>
+  /** 同上，思考块。 */
+  reasoningOverrides: Map<number, string>
   /** 下一个工具块的出站稠密索引。 */
   nextToolIndex: number
   usage?: TokenUsage
@@ -221,7 +234,25 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
       if (String(chunk.id).trim().length > 0) tool.id = String(chunk.id)
       if (hasUsableToolName(chunk.name)) tool.name = chunk.name
       tool.arguments += chunk.argumentsDelta
-      tool.sentArguments += chunk.argumentsDelta
+      /**
+       * ★★★ **名字不可用时不得发帧**（2026-11-21 正向审计 P1-2，issue 的 F 未闭合）。
+       *
+       * 「名字只在 `block-end` 到达」是**正常形态**（`docs/agent-notes/protocol-wire.md`
+       * 有实测记录：`responses` 的 `call_late` 用例就是它）。旧实现照发，于是
+       * 客户端攒出 `name: ''` —— 那是 **IKLRIK 记录的会话级损坏形态**
+       * （harness 报 `unknown tool ""`、坏块入会话、每轮重放 ⇒ 会话报废）。
+       *
+       * 非流式出口已经用 `filter(hasUsableToolName)` 剔除，但**流式没法撤回已发帧**
+       * ⇒ 唯一协议安全的做法是**首帧推迟到名字可用**。
+       *
+       * 代价（如实登记）：名字晚到的调用会**丧失参数增量流式** —— 首帧一次性
+       * 带出已累积的参数。这与 Responses 侧的 `toolAddedEvent` 同口径
+       * （它也是在名字可用时才发 `added`）。
+       */
+      if (!hasUsableToolName(tool.name)) return undefined
+      // 首帧把**已累积**的参数一次带出（此前一帧都没发过）；之后发增量。
+      const payload = tool.sentArguments.length === 0 ? tool.arguments : chunk.argumentsDelta
+      tool.sentArguments += payload
       return {
         delta: {
           tool_calls: [{
@@ -229,10 +260,7 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
             index: tool.openAiIndex,
             id: tool.id,
             type: 'function',
-            function: {
-              ...tool.name === undefined ? {} : { name: tool.name },
-              arguments: chunk.argumentsDelta,
-            },
+            function: { name: tool.name, arguments: payload },
           }],
         },
       }
@@ -273,11 +301,12 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
        */
       const block = chunk.block
       if (block.type === 'text') {
-        state.contentOverride = block.text
+        // 按块号记录（多正文块的形态见 `Accumulated.contentOverrides` 的说明）。
+        state.contentOverrides.set(chunk.index, block.text)
         return undefined
       }
       if (block.type === 'reasoning') {
-        state.reasoningOverride = block.text
+        state.reasoningOverrides.set(chunk.index, block.text)
         return undefined
       }
       if (block.type !== 'tool-call') return undefined
@@ -314,6 +343,16 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
           },
         }
       }
+      /**
+       * ⚠️ **first-close-wins**：一个块只允许收尾一次。
+       *
+       * 与 `BlockAssembler` 的 `if (partial.block) return`、`responses.ts` 的
+       * `closed.has(chunk.index)` **同语义**（2026-11-21 正向审计 P2-1）：
+       * 少了这一格，畸形流里第二个 `block-end` 会**再覆盖**权威参数
+       * （实测非流式从 `{"a":1}` 变成 `{"a":999}`，而客户端手里还是 `{"a":1}`
+       * ⇒ 两个出口分叉）；带新 id/name 时整条调用会被替换。
+       */
+      if (tool.closed) return undefined
       if (String(block.id).trim().length > 0) tool.id = String(block.id)
       // ⚠️ 这一格比 delta 那格更危险：`block-end` 一覆盖就再没有帧来修它。
       if (hasUsableToolName(block.name)) tool.name = block.name
@@ -337,8 +376,17 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
               index: tool.openAiIndex,
               id: tool.id,
               type: 'function',
-              // 只补 `arguments`：id/name 客户端已经有了，重发会让部分客户端重复建项。
-              function: { arguments: block.arguments },
+              /**
+               * ⚠️ **必须带上 `name`（若可用）**：名字可能正是**这一刻**才从
+               * `block-end` 拿到（「名字只在 block-end 到达」是正常形态），
+               * 而客户端此前一帧都没收到过 ⇒ 不带 name 它就攒出 `name: ''`
+               * （IKLRIK 会话级损坏）。
+               * （只发过部分参数时 id/name 客户端已有，那时本分支不会进来。）
+               */
+              function: {
+                ...hasUsableToolName(tool.name) ? { name: tool.name } : {},
+                arguments: block.arguments,
+              },
             }],
           },
         }
@@ -354,7 +402,7 @@ export async function* toOpenAiSse(
   model: string,
   suggest?: SuggestionHook,
 ): AsyncIterable<string> {
-  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), nextToolIndex: 0 }
+  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), contentOverrides: new Map(), reasoningOverrides: new Map(), nextToolIndex: 0 }
   try {
     for await (const chunk of chunks) {
       const event = consumeChunk(state, chunk)
@@ -422,7 +470,7 @@ export async function collectOpenAiCompletion(
   model: string,
   suggest?: SuggestionHook,
 ): Promise<Record<string, unknown>> {
-  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), nextToolIndex: 0 }
+  const state: Accumulated = { content: '', reasoning: '', tools: new Map(), contentOverrides: new Map(), reasoningOverrides: new Map(), nextToolIndex: 0 }
   try {
     for await (const chunk of chunks) {
       const event = consumeChunk(state, chunk)
@@ -475,8 +523,16 @@ export async function collectOpenAiCompletion(
         },
       }
     })
-  const finalContent = state.contentOverride ?? state.content
-  const finalReasoning = state.reasoningOverride ?? state.reasoning
+  /**
+   * 按块号升序拼接权威值（**不是**取最后一个 —— 多正文块会整段丢内容）。
+   * 没有任何 override 时才回退到 delta 累积（保持「无 `block-end` 的合成流」可用）。
+   */
+  const joinOverrides = (map: Map<number, string>, fallback: string): string => {
+    if (map.size === 0) return fallback
+    return [...map.entries()].sort(([a], [b]) => a - b).map(([, text]) => text).join('')
+  }
+  const finalContent = joinOverrides(state.contentOverrides, state.content)
+  const finalReasoning = joinOverrides(state.reasoningOverrides, state.reasoning)
   const message: Record<string, unknown> = {
     role: 'assistant',
     content: finalContent || null,
