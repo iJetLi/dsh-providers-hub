@@ -8038,6 +8038,26 @@ function registerJetHubEndpoints(
           )
         }
         await pool.updateAccount(req.accountId, safePatch as never)
+        /**
+         * ★★ **账号级开关也必须广播**（对抗审计 P1-2，真缺陷）。
+         *
+         * `provider.setEnabled` 那边有 `invalidateCatalogCache` + `broadcastCatalogChanged`
+         * 两句，而账号级这条路径**什么都没有** —— 后果：
+         *
+         * ① 用户启用某家的**第一个**账号后，模型选择器**无限期缺席**
+         *    （客户端的 `status=ready` 短路让它不再重查）；
+         * ② 停用某家**最后一个**账号时，客户端那句承诺
+         *    「取消则只停用账号，模型保持现状」（`jet-hub/client/jet-hub.js`）
+         *    变成**假话** —— 下次刷新模型全消失。
+         *
+         * ⚠️ 只广播、**不** `invalidateCatalogCache`：本层拿不到该账号的 provider
+         * （`pool.updateAccount` 只按 id 找条目、不回传 provider），而给池加
+         * `providerOfAccount()` 会引入 `account-pool → model-catalog` 的新依赖方向
+         * （目前池不 import 它）。目录重拉仍由 `hasEnabledLoggedInAccount` 门控
+         * 在下次 `listModels` 时重算驱动；**若该 provider 的目录被「空结果」缓存过，
+         * 要等 20 分钟 TTL** —— 这一格如实登记为未修。
+         */
+        if (safePatch.enabled !== undefined) broadcastCatalogChanged(ctx)
         return { ok: true, value: undefined }
       }
 
