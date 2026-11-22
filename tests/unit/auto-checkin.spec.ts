@@ -197,12 +197,32 @@ describe('ZCode 自动签到（opt-in，默认关）', () => {
     expect(calls).toEqual([])
   })
 
-  it('★ 只放行 zcode：排除表里其余渠道（doubao）不受这个开关影响', async () => {
-    expect(isAutoCheckinExcluded('doubao')).toBe(true)
+  /**
+   * ⚠️⚠️ **2026-11-23 改写**（PR #142 把 `doubao` 移出排除表后，原用例的前提没了）。
+   *
+   * 原用例断言「zcode 开关只放行 zcode、不影响**排除表里其余渠道**（doubao）」——
+   * 但 `doubao` 已不在排除表里，**排除表现在只剩下 zcode 自己**，
+   * 「其余渠道」这个样本消失了 ⇒ 原断言既测不到东西也会红。
+   *
+   * ⇒ 改成直接守卫 PR #142 的**新事实**：
+   * ① 排除表**只剩** zcode（doubao 已移出）；
+   * ② zcode 仍默认关、`setZcodeEnabled(true)` 后才会跑（opt-in 语义没被 #142 带歪）。
+   */
+  it('★ 排除表现在只剩 zcode（doubao 已移出）；zcode 仍是 opt-in', async () => {
+    expect(isAutoCheckinExcluded('dycode' as never), '不存在的渠道不该被排除').toBe(false)
+    expect(isAutoCheckinExcluded('doubao'), 'PR #142：doubao 已移出排除表').toBe(false)
+    expect(isAutoCheckinExcluded('zcode'), 'zcode 仍是排除表里唯一的成员（有代价：阿里云 captcha 设备配额）').toBe(true)
+
+    /**
+     * 行为侧只断言**一轮**：未打开 zcode 开关时，doubao 在链里、zcode 不在。
+     *
+     * ⚠️ 不再断言第二轮 —— `runIfDue()` 有**每轮水位线**（今天跑过就不再跑），
+     * 第二轮 `setZcodeEnabled(true)` 之后 `runIfDue()` 会因水位直接返回（实测 `[]`）。
+     * 「打开 zcode 开关后它才进链」由本文件另一条 `★★ 整轮不记账时…` 覆盖。
+     */
     const { runner, calls } = makeRunner({ providers: ['doubao', 'zcode'] })
-    await runner.setZcodeEnabled(true)
     await runner.runIfDue()
-    expect(calls).toEqual(['zcode'])
+    expect(calls, 'zcode 默认关（opt-in）；doubao 已在默认链里').toEqual(['doubao'])
   })
 
   it('★★ 整轮不记账时，失败的 zcode 仍推进**自己**的水位线 ⇒ 不再拉第二次浏览器', async () => {

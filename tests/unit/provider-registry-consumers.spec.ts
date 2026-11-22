@@ -19,8 +19,20 @@ describe('autoCheckinExcluded：宿主消费取决于 registry', () => {
     const excluded = PROVIDER_REGISTRY
       .filter((d) => d.autoCheckinExcluded === true)
       .map((d) => d.id)
-    // ⚠️ 2026-11-03 加 doubao（签到带 a_bogus 签名需起浏览器 ⇒ 与 zcode 同型排除）。
-    expect(excluded, '当前应只有 zcode + doubao').toEqual(['zcode', 'doubao'])
+    /**
+     * ⚠️⚠️ **2026-11-23 改：doubao 已移出排除表**（PR #142）。
+     *
+     * - 2026-11-03 曾把 doubao 加进来（签到带 `a_bogus` 签名、需起浏览器 ⇒ 与 zcode 同型）；
+     * - 2026-11-23 PR #142 把它移出：判定代价后认为**默认开启更划算**
+     *   （豆包烧的是**本机 headless Chromium**，zcode 烧的是**阿里云 captcha 设备配额
+     *   150 次/小时** —— 后者才是「不该默认开」的理由）。
+     * - PR #143 又补了独立开关 `doubao.autoCheckin`，让用户能单独关掉。
+     *
+     * ⚠️ 本用例此前被 #142 **漏改**（它只改了 `provider-registry.spec.ts` 与
+     * `auto-checkin.spec.ts`）⇒ 全量红一条。这类「改 registry 要同步的 spec 清单」
+     * 正是本文件存在的意义，但它自己也是清单的一部分。
+     */
+    expect(excluded, 'PR #142 后应只剩 zcode').toEqual(['zcode'])
     for (const id of excluded) {
       expect(isAutoCheckinExcluded(id), `${id} 应被排除`).toBe(true)
     }
