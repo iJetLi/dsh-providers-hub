@@ -625,7 +625,23 @@ describe('端到端对拍：**全 provider 表驱动**（15 家，2026-10-08 复
     { id: 'qoder', make: () => new QoderAdapter({ ...NO_CRED, product: QODER } as never) },
     { id: 'qodercn', make: () => new QoderAdapter({ ...NO_CRED, product: QODER_CN } as never) },
     { id: 'lobsterai', make: () => new LobsteraiAdapter({ ...NO_CRED } as never) },
-    { id: 'codearts', make: () => new CodeArtsAdapter({ ...NO_CRED } as never) },
+    {
+      id: 'codearts',
+      /**
+       * ⚠️⚠️ **必须注入 `fetchRemoteModels`**（2026-11-22）：用户要求「直接走远端，
+       * 不用本地兜底列表」⇒ 冷缓存下 `catalogEntries()` 返回 `[]` ⇒
+       * `provider.status` 的 `total=0` ⇒ 设置页会把整个 provider 误显示为「已关闭」。
+       * 这条用例守的正是那个。
+       */
+      make: () => new CodeArtsAdapter({
+        ...NO_CRED,
+        fetchRemoteModels: async () => [
+          { id: 'GLM-5.2', name: 'GLM-5.2' },
+          { id: 'glm-5.3', name: 'glm-5.3' },
+          { id: 'deepseek-v4.1-flash', name: 'deepseek-v4.1-flash' },
+        ],
+      } as never),
+    },
     {
       id: 'accio',
       make: () => new AccioAdapter({
@@ -1068,7 +1084,17 @@ id: 'autoclaw',
      * ⚠️ 这里**改判据而不是跳过断言**：必须仍然是个数组，且 `listModels`（异步、
      * 有网络）**必须非空**（下一行的自检照旧）—— 否则本条会退化成恒真。
      */
-    const ACCOUNT_SCOPED_COLD_EMPTY: ReadonlySet<string> = new Set(['agnescode', 'agnescodeintl'])
+    /**
+     * ⚠️⚠️ **2026-11-22 加入 `codearts`**：用户要求「直接走远端，不用本地兜底列表」，
+     * 而 `syncCatalogEntries()`（`listAllModels` 的同步数据源）在**三级全空**时返回 `[]`
+     * —— 三级是 `remoteModels` / `lastRemoteSnapshot` / `diskCatalogSnapshot`，
+     * **全是真实远端数据**，没有静态表。
+     *
+     * ⇒ 它现在与 `agnescode` 属同一形态：**冷缓存下结构上不可能非空**
+     *（非空只能来自「编一份表」= 红线禁止）。区别只是 codearts 在**跑过一次
+     * `listModels` 或上次进程写过磁盘快照**之后就有值（`diskCatalogSnapshot` 那一级）。
+     */
+    const ACCOUNT_SCOPED_COLD_EMPTY: ReadonlySet<string> = new Set(['agnescode', 'agnescodeintl', 'codearts'])
     if (ACCOUNT_SCOPED_COLD_EMPTY.has(id)) {
       expect(Array.isArray(coldAll), `${id} 的 listAllModels 必须返回数组（不得抛、不得 null）`).toBe(true)
     } else {

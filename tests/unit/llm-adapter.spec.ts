@@ -7,6 +7,7 @@ import {
   CodeArtsAdapter,
   codeartsQuotaExhaustedMessage,
   errorDetail,
+  DEFAULT_MODELS,
   errorDetailForClassify,
   formatResetIn,
   isBenefitNotFoundBody,
@@ -57,7 +58,14 @@ function makeAdapter(overrides: {
     resolveCredential: async () => credential,
     refresh: async () => { await refresh(); credential = validCredential },
     fetchImpl,
-    fetchRemoteModels: overrides.fetchRemoteModels,
+    /**
+     * ⚠️⚠️ **2026-11-22 起默认「远端成功」**：用户要求「直接走远端，不用本地兜底列表」
+     * ⇒ `catalogEntries()` 在 `remoteModels === undefined` 时返回 `[]`（不再回落静态表）。
+     * 不注入远端的用例因此全部拿不到模型 ⇒ 这里默认造一份。
+     * 要测「远端失败」的用例请显式传 `fetchRemoteModels: async () => []`。
+     */
+    fetchRemoteModels: overrides.fetchRemoteModels
+      ?? (async () => DEFAULT_MODELS.map((id) => ({ id, name: id }))),
     ...overrides.catalogComplete !== undefined ? { catalogComplete: overrides.catalogComplete } : {},
     ...overrides.accountPool !== undefined ? { accountPool: overrides.accountPool as never } : {},
   })

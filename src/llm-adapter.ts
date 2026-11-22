@@ -21,6 +21,7 @@ import { broadcastCatalogChanged } from './catalog-broadcast.js'
 import { claimCodeArtsBenefit } from './codearts-credits.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
 import { isCodeArtsBenefitModelKnown, type RemoteModel } from './models.js'
+import { readCatalogCache } from './model-catalog-cache.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { signRequestHuawei } from './sign.js'
 // ⚠️ `detailFieldText`（`detail` 那条腿）**只留一份实现** —— 本仓库 6 份同义的
@@ -1942,6 +1943,32 @@ export class CodeArtsAdapter extends LlmAdapter {
   private remoteModels: RemoteModel[] | undefined
 
   /**
+   * ★★★ **本进程内最后一次成功拉到的目录**（2026-11-22，方案 B）。
+   *
+   * 为什么需要它：用户要求「直接走远端，不用本地兜底列表」⇒
+   * `remoteModels` 在远端还没拉到时是 `undefined`，而 **`syncCatalogEntries()`
+   * 是同步方法**（`listAllModels` 的契约，设置页在渲染路径上调它、不能 await）
+   * ⇒ 若那时返回 `[]`，`provider.status` 的 `total=0` 会让设置页把整个 provider
+   * **误显示为「已关闭」**（`closed = total > 0 && disabled === total`）。
+   *
+   * ⚠️ 它**不是静态表**：内容来自**上一次真实远端读取**，只是把那一份留着给同步路径用。
+   */
+  private lastRemoteSnapshot: RemoteModel[] | undefined
+
+  /**
+   * ★★★ **跨进程快照**（磁盘，方案 B 的第二级）。
+   *
+   * 复用 PR #135 已有的 `src/model-catalog-cache.ts`（`readCatalogCache` 是**同步**的，
+   * 实测读盘 + parse 1~5ms）。重启后第一次打开设置页时 `remoteModels` 还没拉到，
+   * 但磁盘上有**上次进程真实拉到的那份目录** ⇒ 设置页立刻正确，不必等网络。
+   *
+   * ⚠️ 只缓存**首次读盘结果**：`readCatalogCache` 每次调用都是同步 IO，
+   * 放在渲染路径上反复读会让设置页抖（本仓既有教训：`listModels` 的同步 IO 预算）。
+   */
+  private diskCatalogSnapshot: RemoteModel[] | undefined
+  private diskCatalogSnapshotRead = false
+
+  /**
    * AgentCenter 动态窗口表（**独立于目录可见性**）。
    *
    * ⚠️⚠️ **为什么必须与目录解耦**（2026-10-30 四路审计 P3 D6 定案）：
@@ -2267,7 +2294,14 @@ export class CodeArtsAdapter extends LlmAdapter {
    */
   private async catalogEntries(): Promise<readonly CatalogEntry[]> {
     await this.ensureRemoteModels()
-    const source = this.remoteModels ?? DEFAULT_MODELS.map((id) => ({ id, name: id }))
+    /**
+     * ★ **目录只来自远端**（用户 2026-11-22 要求：「直接走远端，不用本地兜底列表」）。
+     *
+     * ⚠️ 代价：远端不可用时（首启 / 未登录 / 网络故障）目录为**空**。
+     * 取舍依据：「显示一份可能过时的列表」比「暂时空着」更坏 —— 前者会让用户
+     * 去打一个必然失败的请求（还带宿主 5 次重试）。
+     */
+    const source = this.remoteModels ?? []
     return source
       .filter((m) => this.isVisibleCatalogEntry(m))
       .map((m) => this.toCatalogEntry(m))
@@ -2314,7 +2348,30 @@ export class CodeArtsAdapter extends LlmAdapter {
    * 缓存，未落地时回退静态兜底表（这正是原实现的语义）。
    */
   private syncCatalogEntries(): readonly CatalogEntry[] {
-    const source = this.remoteModels ?? DEFAULT_MODELS.map((id) => ({ id, name: id }))
+    /**
+     * ★★★ **三级取值，完全不用静态表**（用户 2026-11-22 要求方案 B）。
+     *
+     * 1. `this.remoteModels` —— 本进程已拉到（热路径）；
+     * 2. `this.lastRemoteSnapshot` —— 本进程**上次**拉到的那份（缓存过期但真实）；
+     * 3. `this.diskCatalogSnapshot` —— **上次进程**拉到并落盘的那份（跨重启）。
+     *
+     * ⚠️ 三级全空才返回 `[]` —— 那意味着「这个插件从没成功拉到过目录」，
+     * 此时设置页显示 `total=0` 是**如实**的（不是误报），因为确实不知道有什么模型。
+     *
+     * ⚠️ 本方法**保持同步**（`listAllModels` 契约）：读盘只发生一次、
+     * 结果缓存在 `diskCatalogSnapshot`，之后零 IO。
+     */
+    if (this.diskCatalogSnapshot === undefined && !this.diskCatalogSnapshotRead) {
+      this.diskCatalogSnapshotRead = true
+      const cached = readCatalogCache('codearts')
+      if (cached !== undefined && cached.length > 0) {
+        // `CatalogEntry` 没有 `contextWindow`（那是 `RemoteModel` 的事）——
+        // 本路径只喂 `listAllModels`（id / name）与 `provider.status` 的 `total`，
+        // 窗口在 `codeartsContextWindow()` 里另有静态兜底，不受影响。
+        this.diskCatalogSnapshot = cached.map((entry) => ({ id: entry.id, name: entry.name } as RemoteModel))
+      }
+    }
+    const source = this.remoteModels ?? this.lastRemoteSnapshot ?? this.diskCatalogSnapshot ?? []
     // ⚠️⚠️ **判据与 `catalogEntries()` 共用**（`isVisibleCatalogEntry`）——
     //    原先两条路径**各写一遍** ⇒ 守卫只覆盖异步那条 ⇒ 同步那条（**Jet Hub
     //    模型开关清单**的数据源）零保护（2026-10-30 第二轮审计 P1 N-2 修）。

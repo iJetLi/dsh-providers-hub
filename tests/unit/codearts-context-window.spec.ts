@@ -115,13 +115,19 @@ describe('上下文占用条的分母（contextWindow）', () => {
    * ⚠️ 这条覆盖的是「首次启动 / 未登录 / 远端全挂」的真实形态 ——
    * 用户在那时发第一句话，占用条也必须出现。
    */
-  it('①b 静态兜底目录（远端失败）里每一条都带正数 contextWindow', async () => {
-    const adapter = makeAdapter()
-    const models = await adapter.listModels('codearts')
-    expect(models.length).toBeGreaterThan(0)
-    for (const model of models) {
-      const resolved = await adapter.resolveModel('codearts', model.id)
-      expectUsableWindow(resolved.context?.contextWindow, model.id)
+  it('①b 远端失败 ⇒ 不再回落静态表；窗口表本身仍全为正数', async () => {
+    /**
+     * ⚠️⚠️ **2026-11-22 改写方向**（用户要求「直接走远端，不用本地兜底列表」）。
+     * 改前断言「远端失败时静态兜底目录每条都有正数窗口」—— 那个行为已被删除。
+     *
+     * ⚠️ 这里**不再断言目录内容**（`listModels` 在「远端未注入」时的形状另有
+     * `model-catalog-parity` 的 `codearts 跨家目录契约` 守），本用例只守**窗口表**：
+     * 用户手填 id / 会话历史里的模型仍必须拿到正确分母。
+     */
+    const offline = makeAdapter()
+    for (const id of DEFAULT_MODELS_FOR_TEST) {
+      const resolved = await offline.resolveModel('codearts', id)
+      expectUsableWindow(resolved.context?.contextWindow, id)
     }
   })
 

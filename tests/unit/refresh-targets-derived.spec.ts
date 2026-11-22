@@ -280,7 +280,14 @@ describe('modelAdapters 的键集合守卫（行为断言）', () => {
      *    而本家没有静态表可回落。根治需要宿主提供「目录预热完成」事件 —— 属接口
      *    扩张，不在本 PR 范围。
      */
-    const NO_ACCOUNT_SCOPED_CATALOG = new Set(['agnescode', 'agnescodeintl'])
+    /**
+     * ⚠️⚠️ **2026-11-22 加入 `codearts`**：用户要求「直接走远端，不用本地兜底列表」
+     * ⇒ `syncCatalogEntries()`（`provider.status` 的 `total` 来源）在三级全空时返回 `[]`
+     *（三级 = `remoteModels` / `lastRemoteSnapshot` / `diskCatalogSnapshot`，**全是真实远端数据**）。
+     * ⇒ 冷缓存下 `total = 0` 是**如实**的（确实不知道有什么模型），不是「漏接线」。
+     * 与 `agnescode` 同一形态。
+     */
+    const NO_ACCOUNT_SCOPED_CATALOG = new Set(['agnescode', 'agnescodeintl', 'codearts'])
     const missing = channelIds
       .filter((id) => !NO_ACCOUNT_SCOPED_CATALOG.has(id))
       .filter((id) => (body.result.value.statuses[id]?.models.total ?? 0) === 0)
