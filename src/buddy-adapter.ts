@@ -2916,7 +2916,27 @@ export class BuddyAdapter extends LlmAdapter {
       function: {
         name: tool.name,
         description: tool.description,
-        parameters: tool.parameters,
+        /**
+         * ★★★ **发上游之前必须 sanitize**（issue #138，2026-11-23）。
+         *
+         * 腾讯系（`copilot.tencent.com` / `www.workbuddy.ai`）对 `parameters` 做**严格
+         * JSON Schema 校验**，任一条不合规就把**整个请求** 400 `11129
+         * invalid function call parameters` —— 而且错误里**不带工具名**，
+         * 用户看到的是「换个模型就好了」（宽松模型不校验）这种假象。
+         *
+         * 四类实测形态（issue 作者真机 A/B，同一凭据/模型/SSE 重放）：
+         * 1. 根级 `{type:'object'}` 缺 `properties`（`analyzeImage` 曾踩过）；
+         * 2. 嵌套层残缺：`{}` / 裸 `{description}`（`codegraph` 踩过）；
+         * 3. 根级 `$schema` / `$id`（OpenAI function calling 子集不含这些）；
+         * 4. **`pattern` 含 `\0` 转义**（`apple-mail` 的 `^[^\r\n\0]*$`，就是本次真凶）。
+         *
+         * ⚠️ `\0` 不是合法的正则空字符转义写法，腾讯校验器**直接拒收**；
+         *    而 `\^@`（caret notation，语义完全相同）**通过** ⇒ 改写而不是删字段。
+         *
+         * ⚠️ **必须递归**：违规可能藏在 `properties.*`、`items`、`anyOf`/`oneOf`/`allOf`
+         *    任意一层；只查根级等于没修（历史三次都踩在不同层）。
+         */
+        parameters: sanitizeToolSchema(tool.parameters),
       },
     }))
 
@@ -4980,4 +5000,101 @@ async function readBuddyErrorDetail(response: Response): Promise<string> {
   } catch {
     return ''
   }
+}
+
+/**
+ * ★★★ **腾讯系 `parameters` 的递归 sanitize**（issue #138，2026-11-23）。
+ *
+ * ## 为什么需要它
+ *
+ * `copilot.tencent.com` / `www.workbuddy.ai` 对工具 `parameters` 做**严格 JSON Schema
+ * 校验**：工具表里**任意一个**工具不合规，**整个请求**就 400 `11129`，
+ * 而且响应里**不带工具名** ⇒ 只能靠二分法排查（成本极高）。
+ * 更糟的是校验严格度**随模型变化**（`hy4flash-free` 不校验、`deepseek-v4.1-flash` 严格）
+ * ⇒ 用户会得到「换个模型就好」的假象。
+ *
+ * ## 修的四类（都是真机实测过的形态）
+ *
+ * 1. **根级 / 嵌套 `{type:'object'}` 缺 `properties`** → 补 `{}`；
+ * 2. **裸对象**（无 `type` 也无组合键）→ 补 `type:'object', properties:{}`；
+ * 3. **根级 `$schema` / `$id`** → 剥掉（只是 draft 声明，无语义损失）；
+ * 4. **`pattern` 含 `\0`** → 改写成 `\^@`（语义不变，腾讯接受）。
+ *
+ * ## 判据要点
+ *
+ * - **只加不改**：能补的补（`properties` / `items`），**不删**有语义的字段；
+ * - **不碰无关字段**（`description` / `enum` / `$ref` / `const` / `prefixItems` 一律原样）；
+ * - **结构共享友好**：没变就返回**原对象**（`===` 可判），避免整棵 schema 深拷贝；
+ * - `\0` 判断用**字符串里真有那两个字符**（反斜杠 + `0`），不是 `\u0000`。
+ */
+export function sanitizeToolSchema<T>(node: T): T {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node
+  const src = node as unknown as Record<string, unknown>
+  let out: Record<string, unknown> = src
+
+  // ③ 根级 draft 声明（OpenAI function calling 的 parameters 子集不含这些）。
+  if ('$schema' in out || '$id' in out) {
+    out = { ...out }
+    delete out.$schema
+    delete out.$id
+  }
+
+  const hasComposition = ['enum', 'anyOf', 'oneOf', 'allOf', '$ref', 'const', 'prefixItems']
+    .some((key) => key in out)
+
+  // ② 裸 schema（无 type、也无组合键）→ 自由 object 输入。
+  if (out.type === undefined && !hasComposition) {
+    out = { ...out, type: 'object', properties: {} }
+  }
+
+  // ① `type:'object'` 缺 `properties` → 补空对象（腾讯校验器要求键存在）。
+  if (out.type === 'object' && !('properties' in out)) {
+    out = { ...out, properties: {} }
+  }
+
+  // ④ `type:'array'` 缺 `items` → 补；有则递归。
+  //
+  // ⚠️ **`prefixItems` 存在时不得补 `items`**：那两种声明是**互斥**的
+  //    （`prefixItems` 已经逐位定义了元素类型），补一个 `items` 等于造出
+  //    「既按位置又按统一类型校验」的矛盾 schema —— 比不修更糟。
+  if (out.type === 'array' && !('items' in out) && !('prefixItems' in out)) {
+    out = { ...out, items: { type: 'object', properties: {} } }
+  }
+  if ('items' in out && !Array.isArray(out.items)) {
+    const next = sanitizeToolSchema(out.items)
+    if (next !== out.items) out = { ...out, items: next }
+  }
+
+  // ⑤ `pattern` 里的 `\0`（真凶）：改写成 caret notation，语义完全相同。
+  if (typeof out.pattern === 'string' && out.pattern.includes('\\0')) {
+    out = { ...out, pattern: out.pattern.split('\\0').join('\\^@') }
+  }
+
+  // ⑥ `properties.*` 递归（每个子 schema 都可能独立违规）。
+  if (out.properties !== null && typeof out.properties === 'object' && !Array.isArray(out.properties)) {
+    const props = out.properties as Record<string, unknown>
+    let changed = false
+    const nextProps: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(props)) {
+      const next = sanitizeToolSchema(value)
+      if (next !== value) changed = true
+      nextProps[key] = next
+    }
+    if (changed) out = { ...out, properties: nextProps }
+  }
+
+  // ⑦ 组合键递归（`anyOf` / `oneOf` / `allOf` 的分支也是 schema）。
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const branch = out[key]
+    if (!Array.isArray(branch)) continue
+    let changed = false
+    const nextBranch = branch.map((item) => {
+      const next = sanitizeToolSchema(item)
+      if (next !== item) changed = true
+      return next
+    })
+    if (changed) out = { ...out, [key]: nextBranch }
+  }
+
+  return out as unknown as T
 }

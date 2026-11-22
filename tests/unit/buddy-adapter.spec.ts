@@ -2869,6 +2869,51 @@ describe('BuddyAdapter message serialization', () => {
     expect(payload.messages[0]).toMatchObject({ role: 'system', content: 'You are helpful' })
     expect(payload.tools).toMatchObject([{ type: 'function', function: { name: 'shell' } }])
   })
+
+  /**
+   * ★★★ **接线**：`stream()` 发出去的 `tools` 必须**已经** sanitize 过（issue #138）。
+   *
+   * ⚠️⚠️ 这条用例是必须的：`sanitizeToolSchema` 自己的单测只能证明**函数对**，
+   * 证明不了**它被接线了** —— 实测把 `parameters: sanitizeToolSchema(...)` 改回
+   * `parameters: tool.parameters`（= 缺陷本体），纯函数用例**全绿**。
+   *
+   * 判据打在**真实发出去的请求体**上（`init.body`），而不是源码文本。
+   */
+  it('★★★ issue #138 接线：meta 含 \\0 的 pattern 发上游前必须已改写', async () => {
+    let body: string | undefined
+    const adapter = makeAdapter({
+      fetchImpl: async (_url, init) => {
+        body = init?.body as string
+        return sseResponse('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+      },
+    })
+    await collectChunks(adapter, {
+      model: DEFAULT_MODEL,
+      messages: [{ role: 'user', content: 'hi' }] as never,
+      tools: [{
+        // 真实 MCP 工具形态（issue 里点名的那个）。
+        name: 'mcp__apple-mail__update-saved-draft',
+        description: 'x',
+        parameters: {
+          type: 'object',
+          properties: {
+            subject: { type: 'string', pattern: '^[^\\r\\n\\0]*$' },
+            nested: { type: 'object' },   // 同时测「缺 properties 要补」
+          },
+        },
+      }],
+      signal: new AbortController().signal,
+    } as never)
+    const payload = JSON.parse(body!) as {
+      tools?: Array<{ function: { parameters: { properties: Record<string, { pattern?: string, properties?: unknown }> } } }>
+    }
+    const props = payload.tools![0]!.function.parameters.properties
+    expect(
+      props.subject!.pattern,
+      '`\\0` 会被腾讯校验器拒收（400 11129）⇒ 发上游前必须改写成 `\\^@`',
+    ).toBe('^[^\\r\\n\\^@]*$')
+    expect(props.nested!.properties, '接线也要覆盖「object 缺 properties」').toEqual({})
+  })
 })
 
 /** 收集流中所有 chunk；流抛错时 reject。 */
