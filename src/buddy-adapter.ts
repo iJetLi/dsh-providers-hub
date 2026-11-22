@@ -5075,7 +5075,7 @@ export function sanitizeToolSchema<T>(node: T): T {
    *
    * | 输入 | 原 `\0` | `\^@` | **`\x00`** |
    * |---|---|---|---|
-   * | `a@b.com` | true | **false** ❌ | **true** ✅ |
+   * | `<账号>@example.com` | true | **false** ❌ | **true** ✅ |
    * | `a^b` | true | **false** ❌ | **true** ✅ |
    * | 真 NUL | false | **true** ❌ | **false** ✅ |
    *
