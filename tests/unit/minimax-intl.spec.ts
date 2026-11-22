@@ -402,10 +402,26 @@ describe('★ 积分：三个入口都要按站点选主机', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+    /**
+     * ⚠️ **2026-11-23 改：断言改为「主机 + 路径」，不再比对整条 URL**。
+     *
+     * 原因：issue #141 的修复给余额端点加了 `?page_size=1000`
+     *（不带它时该端点默认只回最近 20 个包 ⇒ 余额少算，见
+     * `fetchMinimaxCreditBalanceDetailed` 的注释）。原用例比的是**无 query 的完整 URL**
+     * ⇒ 修复本身会让它红 —— 那是**用例过窄**，不是回归。
+     *
+     * ⇒ 本用例的**意图**是「两家各打各的主机」（同族串接的核心风险），
+     * 与 query 无关 ⇒ 用 `startsWith` 保留原判据；
+     * 顺手**断言 `page_size` 在里面**（这条腿顺带守 #141 的修复，
+     * 免得将来有人把参数删掉却没人发现）。
+     */
     expect(seen, '国际站表项的余额打到了别的主机').toEqual([
-      'https://agent.minimax.io/minimax-cloud/api/v1/credit/details',
-      'https://agent.minimax.cn/minimax-cloud/api/v1/credit/details',
+      expect.stringMatching(/^https:\/\/agent\.minimax\.io\/minimax-cloud\/api\/v1\/credit\/details(\?|$)/),
+      expect.stringMatching(/^https:\/\/agent\.minimax\.cn\/minimax-cloud\/api\/v1\/credit\/details(\?|$)/),
     ])
+    for (const url of seen) {
+      expect(url, 'issue #141：余额端点必须带 page_size').toContain('page_size=')
+    }
   })
 })
 
