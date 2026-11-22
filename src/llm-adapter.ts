@@ -399,6 +399,24 @@ export const DEFAULT_MODELS: readonly string[] = [
   'GLM-5.2', 'GLM-5.1',
   'glm-5.3', 'glm-5.2-sft-harmony',
   'openpangu-2.0-flash', 'openpangu-2.0-pro',
+  /**
+   * ★ `openpangu-2.1-pro`（2026-11-22 用户报障：IDE 有、插件没有）。
+   *
+   * **这是静态表必然腐坏的又一例**：远端 `/v1/model/builtin` 当天已下发它
+   *（`context_window: 524288`、`ratio_display: 0.07x`），而本表是**手工维护**的
+   * ⇒ 新模型上线后没人加，用户在选择器里就看不到。
+   *
+   * ⚠️ 本表的**根本问题**不是「少了哪一个」，而是「远端明明有、我们却抄一份」。
+   * 真正的修法是让目录走远端（那条端点**确实下发 `context_window`**，
+   * 见下方 `CONTEXT_WINDOWS` 里已作废的注释）—— 那是架构改动，未在本轮做。
+   */
+  'openpangu-2.1-pro',
+  /**
+   * `glm-5.3-flash`：**`CONTEXT_WINDOWS` 里早就有它的窗口（1_048_576），
+   * 但它一直不在本表** ⇒ 窗口白配、用户也选不到。
+   *（同一类漏加，一并补上。）
+   */
+  'glm-5.3-flash',
   'deepseek-v4-flash', 'deepseek-v4.1-flash', 'deepseek-v4.1-flash-1017',
 ]
 
@@ -447,6 +465,10 @@ const CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   ['glm-5.2-sft-harmony', 202_752],
   ['openpangu-2.0-flash', 524_288],
   ['openpangu-2.0-pro', 524_288],
+  // ⚠️ 2026-11-22 补：远端 `/v1/model/builtin` 当天实测 `context_window: 524288`
+  //    （`ratio_display: 0.07x`）。漏这一行会让它走 524_288 的具名兜底 —— 巧合对了，
+  //    但「巧合」不是判据：上游哪天改窗口，这里就会**静默**错误 2 倍。
+  ['openpangu-2.1-pro', 524_288],
   ['deepseek-v4-flash', 1_048_576],
   ['deepseek-v4-pro', 1_048_576],
   ['deepseek-v4.1-flash', 1_048_576],

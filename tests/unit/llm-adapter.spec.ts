@@ -708,18 +708,22 @@ describe('CodeArtsAdapter', () => {
     expect(texts).toEqual(['ok'])
   })
 
-  it('★ glm-5.3-flash 已从兜底表移除（实测 404，不再是可用模型）', async () => {
-    // ⚠️⚠️ 2026-10-27 改写（原用例断言「目录里有 glm-5.3-flash」）。
-    //
-    // 旧事实（2026-09，对齐 deveco-code-rust 90aeb17d）：它是 benefit 免费额度
-    // 模型，后端注册 id 全小写 `glm-5.3-flash`。
-    //
-    // 新事实（真机实测）：不带头回 `InferHub.002002009.404 The model is not
-    // registered` —— 它已不是当前可调用的模型。
-    // ⚠️ 至于「它是否随福利活动下线」的**归因**留给 PR #156（那边把 benefit
-    //    判定整体改为只认远端集合），本用例只锁「兜底表不再列它」这一事实。
+  it('★ glm-5.3-flash 已**加回**兜底表（上游 2026-11-22 重新下发）', async () => {
+    /**
+     * ⚠️⚠️ **这条用例第三次改方向**（每次都是「上游事实变了」，不是我们反复无常）：
+     *
+     * - 2026-09：它是 benefit 免费额度模型，目录里有 ⇒ 断言**有**；
+     * - 2026-10-27：真机实测不带头回 `InferHub.002002009.404 The model is not
+     *   registered` ⇒ 断言**没有**；
+     * - **2026-11-22：上游 `/v1/model/builtin` 当天重新下发它**
+     *   （`enable: true`、`display_enabled: true`、`ratio_display: 0.08x`，
+     *   与 IDE 模型列表截图一致）⇒ 断言**有**。
+     *
+     * ⇒ 这正是「静态兜底表必然腐坏」的教科书案例：**每一次变动都要人来改表 + 改用例**，
+     * 而远端目录本来就带着这些信息（`context_window` / `supports_images` / 倍率）。
+     */
     const models = await makeAdapter().listModels('codearts')
-    expect(models.map((model) => model.id)).not.toContain('glm-5.3-flash')
+    expect(models.map((model) => model.id), '上游重新下发 ⇒ 用户应当能在选择器里看到它').toContain('glm-5.3-flash')
     // 默认模型仍是 GLM-5.2。
     expect(models[0]!.id).toBe('GLM-5.2')
   })

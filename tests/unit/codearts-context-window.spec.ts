@@ -182,16 +182,25 @@ describe('上下文占用条的分母（contextWindow）', () => {
    * `DEFAULT_MODELS` 移除（实测 404）。**用例要守的语义（离线路径取表内值）
    * 一字未变**，只是换了满足条件的样本。
    *
+   * ⚠️⚠️ **2026-11-22 再换一次样本**：`glm-5.3-flash` 被**加回了** `DEFAULT_MODELS` ——
+   * 因为上游 `/v1/model/builtin` 当天**重新下发**了它（`enable: true`、
+   * `display_enabled: true`、`ratio_display: 0.08x`，与 IDE 列表截图一致）
+   * ⇒ 当初那个「实测 404」的前提**已经失效**，它现在是**可用模型**，
+   * 不该再当「目录里没有」的样本。
+   * ⇒ 改用 `deepseek-v4-pro`（`CONTEXT_WINDOWS` 有 1M、`DEFAULT_MODELS` 仍不含它，
+   * 且它的实测结论是 `404 ModelArts.81009 Invalid model` ⇒ 确实下线）。
+   * **用例要守的语义一字未变**。
+   *
    * ⇒ 判据是「离线路径的取值 == 表内值」，且**必须与兜底常量不同**才算有判别力
    * （若两者恰好相等，这条用例会恒真）。
    */
-  it('③c 表里有、静态目录里没有的 id（glm-5.3-flash），离线路径也拿表内值', async () => {
+  it('③c 表里有、静态目录里没有的 id（deepseek-v4-pro），离线路径也拿表内值', async () => {
     // 先自证这条用例有判别力：表内值必须与兜底值**不同**。
-    expect(codeartsContextWindow('glm-5.3-flash')).not.toBe(CODEARTS_FALLBACK_CONTEXT_WINDOW)
-    // 离线：远端拉取失败 ⇒ 目录回落到静态兜底表（里面**没有** glm-5.3-flash）。
+    expect(codeartsContextWindow('deepseek-v4-pro')).not.toBe(CODEARTS_FALLBACK_CONTEXT_WINDOW)
+    // 离线：远端拉取失败 ⇒ 目录回落到静态兜底表（里面**没有** deepseek-v4-pro）。
     const adapter = makeAdapter()
     const listed = await adapter.listModels('codearts')
-    expect(listed.map((m) => m.id)).not.toContain('glm-5.3-flash')
+    expect(listed.map((m) => m.id)).not.toContain('deepseek-v4-pro')
     // 但用户仍可能（通过远端目录 / 手填 / 会话历史）请求它。
     const resolved = await adapter.resolveModel('codearts', 'glm-5.3-flash')
     expect(resolved.context).toEqual({ contextWindow: 1_048_576 })
