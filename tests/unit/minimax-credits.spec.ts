@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   claimMinimaxDailyCheckin,
   fetchMinimaxCreditBalance,
+  fetchMinimaxCreditBalanceDetailed,
   fetchMinimaxSigninStatus,
   minimaxPanelToCheckinStatus,
   parseMinimaxSigninPanel,
@@ -430,5 +431,69 @@ describe('★★ HTTP 非 2xx 不得被当成成功（issue IKMEVG 的第二道�
     const outcome = await claimMinimaxDailyCheckin(CRED, fetcher as never)
     expect(outcome.kind).toBe('failed')
     expect(outcome.message).toBe('invalid timezone_id')
+  })
+})
+
+/**
+ * ★★★ **`credit/details` 必须带 `page_size`**（issue #141，2026-11-23 主理修复）。
+ *
+ * ## 缺陷
+ *
+ * 该端点**默认只返回最近 20 个积分包**，而余额是「可见包 `remaining_amount` 求和」
+ * ⇒ 被挤出窗口的包**从界面上消失**。用户每天签到新增一个包、最老的被挤出 ⇒
+ * 当被挤出包的余额≈新增包金额时，**界面总额彻底不动**
+ *（「签到成功但积分不涨」），且**误差随天数单调扩大**。
+ *
+ * ## 作者给的实测（issue #141，真实账号）
+ *
+ * `minimaxintl`，`total_count = 23`：
+ * 默认 20 条 Σ=**11600.00** vs `?page_size=50` 23 条 Σ=**12781.43**，差 1181.43。
+ */
+describe('fetchMinimaxCreditBalanceDetailed：必须带 page_size', () => {
+  const row = (remaining: number, grantedAt: number) => ({
+    remaining_amount: String(remaining),
+    granted_at_ms: grantedAt,
+    expire_at_ms: grantedAt + 86_400_000,
+  })
+
+  it('★★★ URL 必须带 page_size（否则默认只回 20 条 ⇒ 余额少算）', async () => {
+    const fetcher = vi.fn().mockResolvedValue(json({
+      total_count: 1,
+      details: [row(400, 1_700_000_000_000)],
+      base_resp: { status_code: 0 },
+    }))
+    await fetchMinimaxCreditBalanceDetailed(CRED, fetcher as never)
+    const url = String(fetcher.mock.calls[0]?.[0])
+    expect(url, 'issue #141：不带 page_size 会被截断到 20 条').toContain('page_size=')
+  })
+
+  it('★★★ 拿到全部 23 个包时，余额是**全部**之和（不是前 20 个）', async () => {
+    // 前 20 个各 100 分 = 2000；后 3 个是「被挤出窗口」的那几笔（issue 实测形态）。
+    const details = [
+      ...Array.from({ length: 20 }, (_, i) => row(100, 1_700_000_000_000 + i)),
+      row(400, 1_690_000_000_000),
+      row(400, 1_689_000_000_000),
+      row(381.43, 1_688_000_000_000),
+    ]
+    const fetcher = vi.fn().mockResolvedValue(json({
+      total_count: 23,
+      details,
+      base_resp: { status_code: 0 },
+    }))
+    const out = await fetchMinimaxCreditBalanceDetailed(CRED, fetcher as never)
+    expect(out.balance, '不该是 null').not.toBeNull()
+    // 2000 + 400 + 400 + 381.43 = 3181.43
+    expect(out.balance?.total, '必须把被挤出窗口的 3 笔也算进来').toBeCloseTo(3181.43, 2)
+  })
+
+  it('★★ 反向：只有 20 条时仍如实求和（不得为了「补全」编造金额）', async () => {
+    const details = Array.from({ length: 20 }, (_, i) => row(100, 1_700_000_000_000 + i))
+    const fetcher = vi.fn().mockResolvedValue(json({
+      total_count: 23,   // ← 服务端说共 23 条，但这次只回了 20 条（截断形态）
+      details,
+      base_resp: { status_code: 0 },
+    }))
+    const out = await fetchMinimaxCreditBalanceDetailed(CRED, fetcher as never)
+    expect(out.balance?.total, '缺口不得被编造/按均值外推').toBeCloseTo(2000, 2)
   })
 })
