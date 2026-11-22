@@ -169,6 +169,11 @@ const HOST_STATE = {
   lastAt: 0,
   channels: [],
   dismissed: false,
+  /**
+   * ★ 豆包自动签到开关的生效值（2026-11-22 用户需求）。客户端**不自己算**
+   * registry 默认值，只照这个字段渲染；缺字段时整块不渲染。
+   */
+  doubaoCheckinEnabled: true,
 }
 
 /**
@@ -193,6 +198,11 @@ function makeRpc(options: { failWrites?: string; hangWrites?: boolean } = {}): {
         return { autoCheckin: { ...HOST_STATE, times: (payload as { times?: string[] }).times ?? HOST_STATE.times } }
       }
       return { autoCheckin: HOST_STATE }
+    }
+    // 豆包自动签到开关（2026-11-22）：回 `{ enabled }`，与宿主同形（不是整份状态）。
+    if (method === 'doubao.autoCheckin') {
+      const want = (payload as { enabled?: unknown } | undefined)?.enabled
+      return { enabled: typeof want === 'boolean' ? want : HOST_STATE.doubaoCheckinEnabled }
     }
     return {}
   }
@@ -327,6 +337,34 @@ describe('定时签到面板：关闭即保存（接线层，行为级）', { ti
     const writes = timeWrites(rpc.calls)
     expect(writes.length).toBe(1)
     expect(writes[0]!.times).toEqual(['10:00', '21:00'])
+  })
+
+  it('★ 豆包自动签到开关：关一下 ⇒ 必须发出 doubao.autoCheckin(enabled=false)（2026-11-22）', async () => {
+    page = (await import('../../plugin-src/client/jet-hub.js') as unknown as { JetHubPage: (p: unknown) => unknown }).JetHubPage
+    installDocument()
+    const rpc = makeRpc()
+    await render({ rpcCall: rpc.rpcCall })
+    ;(railAction('设置').props.onClick as () => void)()
+    await render({ rpcCall: rpc.rpcCall })
+    await render({ rpcCall: rpc.rpcCall })
+    // 判据是 aria-label？这里刻意用**可见文字**「豆包自动签到」找那一行 ——
+    // 用户看到的就是这四个字，文案被改走时本用例应当红。
+    const row = findAll((node) => node.type === 'label'
+      && textsIn([node]).includes('豆包自动签到'))[0]
+    expect(row, '设置弹窗里没有「豆包自动签到」这一行 ⇒ 开关没落地').toBeTruthy()
+    // ⚠️ 必须限定在**这一行**里找 checkbox：面板上还有「每天自动签到（两次）」与
+    //    「随机浮动」两个 checkbox，按「第一个 checkbox」取会拿到别人的开关。
+    const input = findAll((node) => node.type === 'input' && node.props?.type === 'checkbox'
+      && subtreeContains(row!, node))[0]
+    expect(input, '「豆包自动签到」这一行里没有开关').toBeTruthy()
+    // 勾选态来自宿主的 `doubaoCheckinEnabled`（HOST_STATE 里是 true）
+    expect(input.props.checked).toBe(true)
+    ;(input.props.onChange as (event: unknown) => void)({ target: { checked: false } })
+    await flush(10)
+    const writes = rpc.calls.filter((call) => call.method === 'doubao.autoCheckin')
+    // 判别力：把 onChange 改成什么都不发（或改回误发 'usage.autoCheckin'）⇒ 这里 0 次
+    expect(writes.length, '★ 点豆包开关后没有发出 doubao.autoCheckin 写请求').toBe(1)
+    expect(writes[0]!.payload).toEqual({ enabled: false })
   })
 
   it('★★ 保存成功路径必须 clearTimeout 掉 15 秒兜底定时器', async () => {

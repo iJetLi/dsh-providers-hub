@@ -109,6 +109,25 @@ export interface AutoCheckinDoc {
    */
   zcodeEnabled?: true
   /**
+   * 豆包参加自动签到的**逐渠道开关**（2026-11-22 用户需求：「面板里面加个豆包
+   * 自动签到的开关」）。**三态**，与上面两格都不同：
+   *
+   * - 缺席 = **跟随 registry**（`autoCheckinExcluded` 说了算）；
+   * - `true` = 用户明确要它进自动链（即使 registry 把它登记成「有代价」）；
+   * - `false` = 用户明确不要它进（即使 registry 默认把它算进来）。
+   *
+   * ## 为什么不照抄 `zcodeEnabled` 的「只写 true、关时删键」
+   *
+   * zcode 那格是 **opt-in**（默认关，只有用户点头才开），因为它的代价是
+   * **设备级** captcha 配额；而豆包的代价只是「每账号每天起一次 headless
+   * Chromium」，默认口径**由 registry 决定**。两格默认方向不同，落盘语义也就不能
+   * 照抄：这里缺席**不是**「关」，而是「没表态」。
+   *
+   * ⚠️ 因此**两个值都要落盘**（`true` / `false`）：删键会让「没表态」与「用户
+   * 特意关掉」在磁盘上同形，面板下次打开就分不出这个开关到底该显示成谁的意思。
+   */
+  doubaoEnabled?: boolean
+  /**
    * 每天**两个**执行时刻（`HH:MM`，UTC+8，升序、去重、恰好两个）。
    *
    * 用户 2026-10-18 要求：「每天几点自动启动…一天两次实现无遗漏」—— 原先的
@@ -291,6 +310,10 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
     // 判据与上一格正好相反，不是笔误。`'true'` / `1` 这些「不是用户点出来的值」
     // 一律按关闭处理 —— 这一格打开会让宿主拉起浏览器，宁可保守。
     ...(record.zcodeEnabled === true ? { zcodeEnabled: true } : {}),
+    // ⚠️ 豆包那格是**三态**（见 `AutoCheckinDoc.doubaoEnabled`）：`true` / `false`
+    // 都落盘（缺席才表示「没表态」），故判据是 `typeof === 'boolean'`。
+    // `'false'` / `0` 这些「不是用户点出来的值」一律丢弃 = 跟随 registry。
+    ...(typeof record.doubaoEnabled === 'boolean' ? { doubaoEnabled: record.doubaoEnabled } : {}),
     times: sanitizeTimes(record.times),
     jitterMinutes: sanitizeJitter(record.jitterMinutes),
     lastDate: typeof record.lastDate === 'string' && DATE_RE.test(record.lastDate) ? record.lastDate : '',
@@ -661,6 +684,7 @@ class FileAutoCheckinStore implements AutoCheckinStore {
       enabled: doc.enabled,
       modelscopeEnabled: doc.modelscopeEnabled,
       zcodeEnabled: doc.zcodeEnabled,
+      doubaoEnabled: doc.doubaoEnabled,
       times: doc.times,
       jitterMinutes: doc.jitterMinutes,
       lastDate: doc.lastDate,
@@ -801,6 +825,19 @@ export function isAutoCheckinOptedIn(
   doc: Pick<AutoCheckinDoc, 'zcodeEnabled'>,
 ): boolean {
   return provider === 'zcode' && doc.zcodeEnabled === true
+}
+
+/**
+ * 豆包这一轮该不该参加自动签到（三态，见 `AutoCheckinDoc.doubaoEnabled`）。
+ *
+ * ⚠️ 缺席 ⇒ 跟随 registry；`true` / `false` ⇒ 用户的明确表态说了算。
+ * ⚠️ 本函数**只认豆包**，但把 `provider === 'doubao'` 的守卫留在调用方
+ *    （`performRun` 的豆包分支）—— 免得将来有人拿它当「任意渠道的通用判据」，
+ *    那会跳过 modelscope / zcode 各自的专用格。
+ */
+export function doubaoCheckinEnabled(doc: Pick<AutoCheckinDoc, 'doubaoEnabled'>): boolean {
+  if (typeof doc.doubaoEnabled === 'boolean') return doc.doubaoEnabled
+  return isAutoCheckinExcluded('doubao') === false
 }
 
 /** 把一轮结果拼成一句中文摘要（给状态灯提示与日志用）。 */
@@ -1006,6 +1043,18 @@ export interface AutoCheckin {
    * 用户点完立刻弹一个 Chromium 窗口比「下个时段再生效」更让人意外。
    */
   setZcodeEnabled(enabled: boolean): Promise<void>
+  /**
+   * 豆包这一轮是否参加自动签到（**三态**，语义见 {@link AutoCheckinDoc.doubaoEnabled}）：
+   * 用户表态优先，缺失则跟随 registry。
+   */
+  doubaoEnabled(): boolean
+  /**
+   * 写豆包的逐渠道开关（面板上那个「豆包自动签到」）。
+   *
+   * ⚠️ 与 `setZcodeEnabled` 一致：**不立刻跑一轮**（改的是「下一轮参不参加」，
+   * 不是「现在就跑」；想立刻领请点面板的「一键领取积分」）。
+   */
+  setDoubaoEnabled(enabled: boolean): Promise<void>
   /** 写开关；**打开时若有时段没跑，立刻跑一轮**（否则用户会以为开关没生效）。 */
   setEnabled(enabled: boolean): Promise<RpcUsageAutoCheckinState>
   /**
@@ -1065,6 +1114,15 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       channels: doc.channels.map((entry) => ({ ...entry })),
       // 面板据它决定要不要渲染那行常驻状态文字
       dismissed: doc.lastAt > 0 && doc.dismissedRunAt === doc.lastAt,
+      /**
+       * ★ 豆包那格开关的**生效值**（2026-11-22 用户需求：「面板里面加个豆包
+       * 自动签到的开关」）。客户端直接拿它渲染勾选态，**不要**自己再算一遍
+       * registry 默认值（那会变成第二份真相源）。
+       *
+       * ⚠️ 宿主是**旧代码**时本字段缺席：客户端必须按「不渲染这个开关」处理，
+       * 不能当成 `false`（那会让用户看到「开关关着」而其实豆包正在自动跑）。
+       */
+      doubaoCheckinEnabled: doubaoCheckinEnabled(doc),
     }
   }
 
@@ -1152,8 +1210,23 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
         unretryable.add(provider)
         continue
       }
+      // ★ 2026-11-22 豆包**逐渠道开关**（用户需求：「面板里面加个豆包自动签到的开关」）：
+      //   与上面两格不同，它是**三态**——`doubaoEnabled` 有值时以用户的表态为准，
+      //   缺席才跟随 registry（见 {@link doubaoCheckinEnabled}）。
+      //   文案沿用魔搭那句「自动签到已关闭」：对用户来说两者都是「我关的」，
+      //   而「需手动签到」只用于 registry 认定的「有代价」渠道。
+      if (provider === 'doubao' && !doubaoCheckinEnabled(doc)) {
+        totals.skipped += 1
+        channels.push({ provider, text: '自动签到已关闭' })
+        unretryable.add(provider)
+        continue
+      }
       const costly = isAutoCheckinExcluded(provider)
-      if (costly && !isAutoCheckinOptedIn(provider, doc)) {
+      // ⚠️ 豆包被 registry 登记成「有代价」时，用户显式点开（`doubaoEnabled === true`）
+      //    也要能放行 —— 否则那个开关在「豆包还没进默认链」的版本上就是个死开关。
+      const optedIn = isAutoCheckinOptedIn(provider, doc)
+        || (provider === 'doubao' && doc.doubaoEnabled === true)
+      if (costly && !optedIn) {
         totals.skipped += 1
         channels.push({ provider, text: '需手动签到' })
         unretryable.add(provider)
@@ -1515,6 +1588,15 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       const next = { ...doc }
       if (enabled) next.zcodeEnabled = true
       else delete next.zcodeEnabled
+      await deps.store.save(next)
+      doc = next
+    },
+    doubaoEnabled: () => doubaoCheckinEnabled(doc),
+    async setDoubaoEnabled(enabled) {
+      // ⚠️ 三态：**两个值都落盘**（见 `AutoCheckinDoc.doubaoEnabled`）——
+      //    删键等于抹掉用户的表态、退回「跟随 registry」，面板下次打开又会显示
+      //    成「没设置过」，与本仓库「设置没生效看起来像保存成功」是同一类坑。
+      const next = { ...doc, doubaoEnabled: enabled }
       await deps.store.save(next)
       doc = next
     },

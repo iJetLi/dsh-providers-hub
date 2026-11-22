@@ -3045,6 +3045,18 @@ export interface RpcUsageAutoCheckinState {
    *（否则用户关过一次就再也看不到新结果了）。
    */
   dismissed: boolean
+  /**
+   * ★ 豆包「自动签到」开关的**生效值**（2026-11-22 用户需求：「面板里面加个
+   * 豆包自动签到的开关」）。
+   *
+   * 语义是**三态**的结果值：`AutoCheckinDoc.doubaoEnabled` 有值时以用户的表态
+   * 为准，缺席则跟随 registry 的 `autoCheckinExcluded`（见 `doubaoCheckinEnabled()`）。
+   * 客户端直接照它渲染勾选态，**不要自己再算一遍默认值**。
+   *
+   * ⚠️ 宿主是**旧代码**时本字段缺席：客户端必须按「不渲染这个开关」处理，
+   * 不能当成 `false` —— 那会让用户看到「开关关着」、而豆包其实在自动跑。
+   */
+  doubaoCheckinEnabled: boolean
 }
 
 /**
