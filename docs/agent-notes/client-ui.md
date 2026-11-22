@@ -3529,13 +3529,28 @@ useRef(initial) { const s = slots[k]; if (!('cur' in s)) s.cur = initial; return
 否则这些渠道直接不可登录。用户 2026-11-23 明确要求**设置分区里不写这条提示**；
 边界记录在本节与 README 即可。
 
-### 设置弹窗尺寸（同批用户要求）
+### 设置弹窗尺寸与边界（同批用户要求）
 
-新增一个分区后「设置」弹窗又出现下拉条 ⇒ 只改 `.dim-jh-settingsModal`：
-`width: min(780px, 100%)`、`max-height: min(940px, calc(100vh - 48px))`。
-**分区间距保持 8/10（用户明确要求）**，也**不动**通用 `.dim-jh-modal`。
-⚠️ `overflow-y: auto` 必须保留：768p 笔记本上仍要能滚到底部「完成」，
-「不出下拉条」是 1080p 及以上的效果，不是把滚动能力删掉。
+新增一个分区后「设置」弹窗又出现下拉条，随后用户又要求再加宽并「加一个明显的框」：
+
+```css
+.dim-jh-settingsModal {
+  width: min(840px, 100%);
+  max-height: min(940px, calc(100vh - 48px));
+  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
+    0 16px 48px rgba(0, 0, 0, 0.38);
+}
+```
+
+- **边框直接复用「档次窗口」的处方**（`.dim-jh-windowModal`，2026-11-20 同一报障）：
+  ① 实边框 `border-l2`；② 内描边半透明白（浅色主题下 `border-l2` 太淡）。
+  ⚠️ 只加在设置弹窗上，**不动通用 `.dim-jh-modal`**（其它弹窗没报障，统一改扩大回归面）。
+- **分区间距保持 8/10**（用户明确要求），也**不动**通用 `.dim-jh-modal`。
+- ⚠️ `overflow-y: auto` 必须保留：768p 笔记本上仍要能滚到底部「完成」，
+  「不出下拉条」是 1080p 及以上的效果，不是把滚动能力删掉。
+- ⚠️ 宽度是**上限**（`min(840px, 100%)`），窄窗口仍会收缩；不要写成固定 `840px`。
 
 ### 守卫与变异（8 条全部有牙）
 

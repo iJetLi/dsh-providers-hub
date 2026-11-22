@@ -7,7 +7,7 @@ Jet Hub 设置里新增一个开关（**默认开**），控制「**+ 新建账�
 | **开**（默认） | 与改动前**逐字节相同**：宿主 / 客户端自动打开授权页 |
 | **关** | **不自动开窗**；授权链接**复制到剪贴板**，并在账号面板里显示同一链接（带「复制链接」按钮），由用户手动粘贴到浏览器打开 |
 
-同批把「设置」弹窗从 **560×上限 760** 抬到 **780×上限 940** —— 内容多了之后又出现下拉条（用户报障），分区间距按要求保持原样（8/10）。
+同批把「设置」弹窗从 **560×上限 760** 抬到 **840×上限 940**，并给它加一个**明显的边界**（直接复用「档次窗口」`.dim-jh-windowModal` 的实边框 + 内描边）—— 内容多了之后又出现下拉条（用户报障），分区间距按要求保持原样（8/10）。
 
 ---
 
@@ -94,13 +94,21 @@ if (!skipClientOpen) { … window.open(forcedLoginUrl) … window.open(loginUrl)
 
 读 / 写失败时显示 `⚠️ 开关状态读取 / 保存失败（宿主可能仍在运行旧代码）。请重试；仍不行请完全退出并重新打开 DSH。`（与 `reasoningDefault` 的旧宿主提示同款），且**不禁用**开关（保留自救路径）。
 
-### 设置弹窗尺寸
+### 设置弹窗尺寸与边界
 
 ```css
-.dim-jh-settingsModal { width: min(780px, 100%); max-height: min(940px, calc(100vh - 48px)); }
+.dim-jh-settingsModal {
+  width: min(840px, 100%);
+  max-height: min(940px, calc(100vh - 48px));
+  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
+    0 16px 48px rgba(0, 0, 0, 0.38);
+}
 ```
 
 - 只改设置弹窗，**不动**通用 `.dim-jh-modal`；**分区间距保持 8/10**（用户要求）。
+- 边框直接复用「档次窗口」（`.dim-jh-windowModal`，2026-11-20 同一报障）的两条处方：① 实边框 `border-l2`（暗色主题下最可靠的窗口边界）；② 内描边半透明白（浅色主题下 `border-l2` 太淡，第二道保险）。
 - 保留 `.dim-jh-modalBody` 的 `overflow-y: auto`：768p 笔记本仍要能滚到底部「完成」——「不出下拉条」是 1080p 及以上的效果，不是把滚动能力删掉。
 
 ---
@@ -117,7 +125,7 @@ if (!skipClientOpen) { … window.open(forcedLoginUrl) … window.open(loginUrl)
 | `plugin-src/client/login-preferences-store.js` | **新增**：客户端唯一状态源（读失败按开、有界重试、慢读回包不倒灌） |
 | `plugin-src/client/jet-hub.js` | 设置分区 + `createAccount` 分流 + 手动链接文案 + 清理点复位 |
 | `plugin-src/client/openai-gateway-panel.js` | `copyToClipboard(value, { silent })` |
-| `plugin-src/client/jet-hub-styles.js` | 780 / 940（间距不动、滚动兜底保留） |
+| `plugin-src/client/jet-hub-styles.js` | 840 / 940 + 实边框与内描边（间距不动、滚动兜底保留） |
 | `README.md` / `docs/agent-notes/client-ui.md` / `AGENTS.md` | 用法说明 + 事故史/两条腿 + 索引从 27 节改为 28 节 |
 | `package.json` | `0.2.1-rc.4` → `0.2.1-rc.5` |
 

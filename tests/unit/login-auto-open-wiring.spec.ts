@@ -204,12 +204,20 @@ describe('客户端：设置分区 + createAccount 分流', () => {
 })
 
 describe('设置弹窗尺寸：用户明确要求「加宽加高、不要下拉条」', () => {
-  it('★ 宽度 780 / 高度上限 940，且保留视口兜底', () => {
+  it('★ 宽度 840 / 高度上限 940，且保留视口兜底', () => {
     const rule = /\.dim-jh-settingsModal\s*\{([^}]*)\}/.exec(stylesSource)
     expect(rule, '找不到 .dim-jh-settingsModal 规则').not.toBeNull()
     const body = rule?.[1] ?? ''
-    expect(body, '宽度必须从 560 抬到 780').toMatch(/width:\s*min\(780px,\s*100%\)/)
+    expect(body, '宽度必须从 560 抬到 840（2026-11-23 用户二次要求）').toMatch(/width:\s*min\(840px,\s*100%\)/)
     expect(body, '高度上限必须从 760 抬到 940').toMatch(/max-height:\s*min\(940px,\s*calc\(100vh - 48px\)\)/)
+  })
+
+  it('★★ 边界参考「档次窗口」：实边框 + 内描边（暗色/浅色主题下都看得见）', () => {
+    const rule = /\.dim-jh-settingsModal\s*\{([^}]*)\}/.exec(stylesSource)
+    const body = rule?.[1] ?? ''
+    expect(body, '缺少实边框 ⇒ 深色主题下与背景几乎同色（用户报障形态）')
+      .toMatch(/border:\s*1px solid var\(--dsw-alias-border-l2/)
+    expect(body, '缺少内描边 ⇒ 浅色主题下边框太淡').toMatch(/inset\s+0\s+0\s+0\s+1px/)
   })
 
   it('★★ 分区间距保持原样（用户要求 8/10，不做紧凑化）', () => {
