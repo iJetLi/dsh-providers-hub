@@ -55,6 +55,10 @@
  * 「复制按钮点了没反应」这类最难自查的失败。
  *
  * @param {string} value 要复制的文本
+ * @param {{ silent?: boolean }} [options] `silent: true` = 自动复制失败时**不弹**
+ *   通用复制面板，直接返回 `false`（调用方自己有链接兜底 UI）。
+ *   ⚠️ 2026-11-23 新增：只给「新建账号时自动打开浏览器」关闭态的自动复制用 ——
+ *   那块面板本身就会显示链接 + 复制按钮，再叠一个全屏复制面板是重复打扰。
  * @returns {Promise<boolean>} 是否写入成功
  */
 // ⚠️ 搜索判据与模型清单**共用同一份实现**（`model-filter.js`）：两处各写一套
@@ -70,7 +74,8 @@ import { isFilterActive, matchesModelQuery } from './model-filter.js';
 // ⚠️ 该模块必须**零 node import**（它同时被 esbuild 打进浏览器 bundle）。
 import { formatGatewayHost, gatewayHttpUrl, isLoopbackHost, isWildcardHost } from '../../src/openai-gateway/config.js';
 
-export async function copyToClipboard(value) {
+export async function copyToClipboard(value, options) {
+  const silent = options?.silent === true;
   // 1) 首选 Clipboard API（安全上下文 / 有权限时）。
   //    ⚠️ 捕获后**必须继续降级**，不能直接 return false —— 见下方 legacyCopy 的说明。
   try {
@@ -86,6 +91,9 @@ export async function copyToClipboard(value) {
   // 3) 兜底：自动复制用不了就把文本摊出来让用户自己 Ctrl+C。
   //    ⚠️ 返回 false（自动复制确实失败，调用方该展开列表/提示），但**同时**弹窗，
   //    保证用户在任何环境下都能拿到文本 —— 「点了没反应」比「丑一点的弹窗」糟得多。
+  //    ⚠️ `silent` 只跳过**这一层**：调用方自己有「链接 + 复制按钮」兜底
+  //    （登录手动模式），再叠一个全屏面板是重复打扰。
+  if (silent) return false;
   showManualCopy(value);
   return false;
 }

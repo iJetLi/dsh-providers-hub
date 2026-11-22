@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { __setLoginAutoOpenForTest } from '../../plugin-src/client/login-preferences-store.js'
 
 /**
  * `ProviderPanel` 的**接线层行为级**守卫（2026-10-25 审计 P1-3 / A3-1 / B3）。
@@ -287,7 +288,12 @@ describe('登录开窗：宿主开过无痕窗时的用户裁决策略', () => {
   async function driveCreateAccount(
     providerName: string,
     confirmAnswer: boolean,
-  ): Promise<{ open: unknown[][]; confirm: unknown[][] }> {
+    createResponse?: Record<string, unknown>,
+  ): Promise<{
+    open: unknown[][]
+    confirm: unknown[][]
+    writes: Array<{ index: number; value: unknown }>
+  }> {
     const open: unknown[][] = []
     const confirmCalls: unknown[][] = []
     const rpcCalls: string[] = []
@@ -298,13 +304,14 @@ describe('登录开窗：宿主开过无痕窗时的用户裁决策略', () => {
           ok: true,
           loginUrl: 'https://auth.huaweicloud.com/authui/login?state=AAA',
           incognitoOpened: true,
+          ...createResponse,
         }
       }
       return { ok: true, order: [], statuses: {} }
     }
     const r = await renderPanel(rpcCall, providerName)
     expect(r.ok, r.ok ? '' : `渲染抛错：${String((r as { error: unknown }).error)}`).toBe(true)
-    if (!r.ok) return { open, confirm: confirmCalls }
+    if (!r.ok) return { open, confirm: confirmCalls, writes: [] }
     // 触发「新建账号」：它的 onClick 是**无参**回调。逐个喂 undefined，
     // 由 `rpcCall('account.create')` 是否被调到来判断探针有没有命中。
     const errors: string[] = []
@@ -323,7 +330,23 @@ describe('登录开窗：宿主开过无痕窗时的用户裁决策略', () => {
       }
     })
     expect(rpcCalls, `探针没触发 account.create ⇒ 本用例无牙（回调抛错：${errors.join(' | ') || '无'}）`).toContain('account.create')
-    return { open, confirm: confirmCalls }
+    return { open, confirm: confirmCalls, writes: r.writes }
+  }
+
+  /**
+   * 把 `navigator.clipboard.writeText` 换成收集器。
+   *
+   * ⚠️ `copyToClipboard` 首选 Clipboard API；Node 22 有全局 `navigator` 但
+   * 没有 `clipboard` ⇒ 不注入就会落到 `legacyCopy`（需要 `document`，本环境没有），
+   * 测出来的只是「复制失败」，断言不了「复制了什么」。
+   */
+  function withClipboard<T>(copied: string[], fn: () => Promise<T>): Promise<T> {
+    vi.stubGlobal('navigator', {
+      clipboard: {
+        writeText: async (value: string) => { copied.push(value) },
+      },
+    })
+    return fn().finally(() => { vi.unstubAllGlobals() })
   }
 
   it('★★ 用户取消 ⇒ 不再开普通窗口（否则静默复用旧 SSO 会话 = 老缺陷复发）', async () => {
@@ -369,6 +392,93 @@ describe('登录开窗：宿主开过无痕窗时的用户裁决策略', () => {
     // 老宿主不返回该字段 ⇒ 必须走回退分支：直接开，且**不问**（升级期不能多一次弹窗）
     expect(loginConfirms(confirmCalls), '宿主没开过无痕窗却弹了确认框 ⇒ 升级期体验倒退').toEqual([])
     expect(open.filter(args => String(args[0] ?? '').includes('authui')).length).toBeGreaterThan(0)
+  })
+
+  /**
+   * ★★★ 「新建账号时自动打开浏览器授权页」关闭态（2026-11-23 用户功能）。
+   *
+   * 判据是**行为级**的：真渲染 `ProviderPanel`、真调 `createAccount`，观察
+   * `window.open` / `window.confirm` / 剪贴板 / state 写入。
+   *
+   * 三个都不能少：
+   * ① 不开窗（含**不弹无痕确认** —— 宿主也不开无痕窗，此时再问用户「要再开一个吗」纯误导）；
+   * ② 链接自动进剪贴板；
+   * ③ 链接写进面板 state（用户要能看见并再复制一次）。
+   */
+  it('★★★ 关闭态：不开窗、不弹无痕确认、自动复制链接并显示在面板里', async () => {
+    __setLoginAutoOpenForTest(false)
+    const copied: string[] = []
+    try {
+      const seen = await withClipboard(copied, () => driveCreateAccount('codearts', true))
+      expect(
+        seen.open.filter(args => String(args[0] ?? '').includes('authui')),
+        '关闭「自动打开浏览器」后仍开了窗口 ⇒ 用户看到的就是「设置根本没用」',
+      ).toEqual([])
+      expect(
+        loginConfirms(seen.confirm),
+        '关闭态下宿主不会开无痕窗，再弹「要再开一个吗」是纯误导',
+      ).toEqual([])
+      expect(copied, '授权链接必须自动进剪贴板（用户此刻唯一动作就是粘贴）').toEqual([
+        'https://auth.huaweicloud.com/authui/login?state=AAA',
+      ])
+      expect(
+        seen.writes.some(w => w.value === 'https://auth.huaweicloud.com/authui/login?state=AAA'),
+        '链接必须写进面板 state（否则用户既没窗口、也看不到可点的链接）',
+      ).toBe(true)
+    } finally {
+      __setLoginAutoOpenForTest(true)
+    }
+  })
+
+  /**
+   * ★★★ MiniMax 的关闭态：**连登出跳转都不许执行**（那本身是一次自动开窗），
+   * 且手动链接必须是 `forcedLoginUrl`（`loginUrl` 会带旧 session）。
+   */
+  it('★★★ 关闭态 + MiniMax：不弹登出确认、不开登出页/授权页，复制的是 forcedLoginUrl', async () => {
+    __setLoginAutoOpenForTest(false)
+    const copied: string[] = []
+    const forced = 'https://account.minimax.cn/unified-login?login_redirect=%2Foauth-authorize'
+    try {
+      const seen = await withClipboard(copied, () => driveCreateAccount('minimax', true, {
+        loginUrl: 'https://account.minimax.cn/oauth-authorize?user_code=CODE',
+        incognitoOpened: false,
+        forcedLoginUrl: forced,
+        logoutUrl: 'https://account.minimax.cn/oauth2/logout',
+      }))
+      expect(
+        seen.open.filter(args => String(args[0] ?? '').includes('minimax')),
+        '关闭后不得开任何 MiniMax 窗口（登出页 / 授权页都算自动开窗）',
+      ).toEqual([])
+      expect(
+        seen.confirm.filter(args => String(args[0] ?? '').includes('退出 MiniMax')),
+        '关闭后不该弹「先退出网页登录」的确认（我们根本没打算开窗）',
+      ).toEqual([])
+      expect(copied).toEqual([forced])
+    } finally {
+      __setLoginAutoOpenForTest(true)
+    }
+  })
+
+  /**
+   * ★★ 反向对照：开关**开着**（默认）时行为必须与改动前逐字节相同。
+   *
+   * 没有这一条，「永远走手动模式」的实现也能让上面两条全绿。
+   */
+  it('★★ 开启态（默认）：照常开窗，且不写手动链接、不碰剪贴板', async () => {
+    __setLoginAutoOpenForTest(true)
+    const copied: string[] = []
+    const seen = await withClipboard(copied, () => driveCreateAccount('codearts', true, {
+      incognitoOpened: false,
+    }))
+    expect(
+      seen.open.filter(args => String(args[0] ?? '').includes('authui')).length,
+      '开关开着却不开窗 ⇒ 把本功能上线前的默认行为改坏了',
+    ).toBeGreaterThan(0)
+    expect(copied, '开关开着时不该偷偷往剪贴板塞东西').toEqual([])
+    expect(
+      seen.writes.some(w => w.value === 'https://auth.huaweicloud.com/authui/login?state=AAA'),
+      '开关开着时不该写入手动链接区块',
+    ).toBe(false)
   })
 })
 

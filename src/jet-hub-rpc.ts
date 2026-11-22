@@ -15,6 +15,8 @@
  *           载体页见 src/zcode-carrier-page.ts 与 src/captcha-carrier-server.ts）/
  *           backup.export / backup.import / backup.status /
  *           nativeSearch.getEnabled / nativeSearch.setEnabled /
+ *           loginPreferences.getEnabled / loginPreferences.setEnabled（新建账号
+ *           时是否自动打开浏览器授权页；关闭后改为复制链接）/
  *           sessionBalance.getEnabled / sessionBalance.setEnabled /
  *           panelEntry.get / panelEntry.set /
  *           resume.getState / resume.setArmed / resume.setEnabled /
@@ -477,6 +479,9 @@ import type {
   RpcReasoningDefaultGetEnabledResponse,
   RpcReasoningDefaultSetEnabledRequest,
   RpcReasoningDefaultSetEnabledResponse,
+  RpcLoginPreferencesGetEnabledResponse,
+  RpcLoginPreferencesSetEnabledRequest,
+  RpcLoginPreferencesSetEnabledResponse,
   RpcSessionBalanceGetEnabledResponse,
   RpcSessionBalanceSetEnabledRequest,
   RpcSessionBalanceSetEnabledResponse,
@@ -516,6 +521,7 @@ import {
   createBadgePreferenceStore,
 } from './badge-preferences.js'
 import { createReasoningPreferenceStore } from './reasoning-preferences.js'
+import { createLoginPreferenceStore } from './login-preferences.js'
 import { createUsageBadge, type BadgeRpcResult } from './usage-badge.js'
 import { createAutoCheckin, createAutoCheckinStore } from './auto-checkin.js'
 
@@ -4620,6 +4626,15 @@ function registerJetHubEndpoints(
    * 唯一的状态就在磁盘上。
    */
   const reasoningPreferences = createReasoningPreferenceStore(ctx)
+
+  /**
+   * 「新建账号时自动打开浏览器授权页」偏好（独立文档 `login-preferences.json`，2026-11-23）。
+   *
+   * ⚠️ 与 `index.ts` 里接线给 `configureAutoOpenBrowserEnabled` 的**不是同一个
+   * 实例**，但都读写**同一个文件**、缓存按路径共享 ⇒ 这里写完盘，宿主闸门
+   * （`login.ts` / raccoon 授权页）下一轮立刻读到新值，**不必重启**。
+   */
+  const loginPreferences = createLoginPreferenceStore(ctx)
 
   /**
    * 「每日首次启动自动签到」（独立文档 `auto-checkin.json`）。
@@ -12584,6 +12599,38 @@ function registerJetHubEndpoints(
         )
         // 回读落盘值（而不是回传入参）：见 `RpcReasoningDefaultSetEnabledResponse` 的注释。
         const value: RpcReasoningDefaultSetEnabledResponse = { enabled: reasoningPreferences.load() }
+        return { ok: true, value }
+      }
+
+      // ── 「新建账号时自动打开浏览器授权页」总开关（2026-11-23）──
+      //
+      // 语义：**开**（默认）= 点「+ 新建账号」后宿主 / 客户端自动打开授权页；
+      // **关** = 不自动开窗，授权链接复制到剪贴板并显示在账号面板里。
+      // 消费方有两处：① 宿主闸门（`src/login.ts` 的 `openBrowser` /
+      // `openIncognitoWindow`、raccoon 授权页）；② 客户端 `createAccount` 的
+      // 手动模式分流（`plugin-src/client/jet-hub.js`）。
+      //
+      // ⚠️ 读的是偏好文档（每次现读），写盘后宿主闸门下一轮立即生效；
+      // 客户端那份由设置页写入后同步更新（同一次 RPC 的回包）。
+      case 'loginPreferences.getEnabled': {
+        const value: RpcLoginPreferencesGetEnabledResponse = { enabled: loginPreferences.load() }
+        return { ok: true, value }
+      }
+
+      case 'loginPreferences.setEnabled': {
+        const req = payload as RpcLoginPreferencesSetEnabledRequest
+        // ⚠️ 与 `gateway.setEnabled` 同约定：**不做默认值猜测** ——
+        // 默认成 true 会静默打开用户特意关闭的开关。
+        if (typeof req.enabled !== 'boolean') {
+          return { ok: false, error: { code: 'bad-request', message: '非空布尔 enabled 必填' } }
+        }
+        await loginPreferences.save(req.enabled)
+        ctx.logger.info(
+          `[jet-hub] ${req.enabled ? '打开' : '关闭'}「新建账号时自动打开浏览器授权页」`
+          + `${req.enabled ? '（恢复自动开窗）' : '（改为复制授权链接）'}`,
+        )
+        // 回读落盘值（而不是回传入参）：见 `RpcLoginPreferencesSetEnabledResponse` 的注释。
+        const value: RpcLoginPreferencesSetEnabledResponse = { enabled: loginPreferences.load() }
         return { ok: true, value }
       }
 

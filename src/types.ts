@@ -2262,6 +2262,31 @@ export interface RpcReasoningDefaultSetEnabledResponse {
   enabled: boolean
 }
 
+/**
+ * RPC: 「新建账号时自动打开浏览器授权页」开关的读取响应（2026-11-23）。
+ *
+ * 开（默认）= 点「+ 新建账号」后宿主 / 客户端自动打开授权页；
+ * 关 = 不自动开窗，把授权链接复制到剪贴板并显示在账号面板里。
+ */
+export interface RpcLoginPreferencesGetEnabledResponse {
+  enabled: boolean
+}
+
+/** RPC: 「新建账号时自动打开浏览器授权页」开关写入请求。 */
+export interface RpcLoginPreferencesSetEnabledRequest {
+  enabled: boolean
+}
+
+/**
+ * RPC: 「新建账号时自动打开浏览器授权页」开关写入响应。
+ *
+ * ⚠️ 回传的是**落盘后重读的值**，不是请求里的值 —— 与 `gateway.setEnabled`
+ * 同取向：客户端一律以后端回传为准，不做乐观更新。
+ */
+export interface RpcLoginPreferencesSetEnabledResponse {
+  enabled: boolean
+}
+
 /** RPC: 「渠道原生搜索」开关的读取响应。 */
 export interface RpcNativeSearchGetEnabledResponse {
   /** `true` = 支持原生搜索的渠道走自己后端的搜索接口；`false` = 全部回官方搜索。 */
