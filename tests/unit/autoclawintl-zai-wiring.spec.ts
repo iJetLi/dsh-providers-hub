@@ -448,3 +448,60 @@ describe('★★ 回调端口优先用注册过的（随机端口会被 Z.ai 拒
     expect(calls).toEqual([...AUTOCLAW_OAUTH_CALLBACK_PORTS, 0])
   })
 })
+
+/**
+ * ★★★ **每个响应都必须 `Connection: close`**（PR #137 修的真实缺陷，2026-11-21）。
+ *
+ * ## 缺陷（用户报障：「打开登录页 → 关掉弹窗 → 再打开」第二次直接失败）
+ *
+ * ```
+ * TypeError: fetch failed
+ *   Caused by: SocketError: other side closed (UND_ERR_SOCKET)
+ * ```
+ *
+ * ## 真因：**固定端口 + keep-alive 连接池**的必然碰撞
+ *
+ * 回环登录服务跑在**注册过的固定端口**（`18432` —— 随机端口会被 Z.ai 以
+ * `Redirect URI not registered` 拒绝）⇒ 第一轮与第二轮是**同一个 origin**，
+ * 而客户端（undici / 浏览器）按 origin 维护 keep-alive 连接池：
+ *
+ * 1. 第一轮 GET 登录页 ⇒ 拿到 `Connection: keep-alive` ⇒ socket 留在池里；
+ * 2. `close()` ⇒ 服务端关 socket，但**客户端池子不知道**；
+ * 3. 第二轮同端口重新起服务 ⇒ 客户端从池里取到那条**死 socket** ⇒ `other side closed`。
+ *
+ * ## 为什么这条守卫必须有
+ *
+ * 修法只有一行 `res.setHeader('Connection', 'close')`，而正向审计实测：
+ * **删掉那一行，全量 15028 条零新增失败** ⇒ 整个修复**没有守卫**。
+ * 那行的作用只有「真实的第二次请求」能验证 —— 所以这里真的去发两次。
+ */
+describe('★★★ 回环登录服务：每个响应必须 Connection: close（PR #137 真实缺陷）', () => {
+  it('★★★ 登录页响应头必须是 close（不是 keep-alive）', async () => {
+    const flow = await startAutoclawSmsLoginFlow({
+      product: AUTOCLAW_INTL, fetchImpl: makeFetcher({ bodies: [] }), deviceId: 'dev-conn', timeoutMs: 5_000,
+    })
+    live.push(flow)
+    const res = await fetch(flow.loginUrl)
+    expect(
+      res.headers.get('connection'),
+      '必须是 close —— 固定端口 + keep-alive 会让第二轮从池里取到死 socket',
+    ).toBe('close')
+    await res.text()
+  })
+
+  it('★★★ 连续两轮都成功（复现用户「关掉再打开」的操作序列）', async () => {
+    for (const round of [1, 2]) {
+      const flow = await startAutoclawSmsLoginFlow({
+        product: AUTOCLAW_INTL, fetchImpl: makeFetcher({ bodies: [] }), deviceId: `dev-twice-${round}`, timeoutMs: 5_000,
+      })
+      live.push(flow)
+      const res = await fetch(flow.loginUrl)
+      expect(res.ok, `第 ${round} 轮 GET 登录页必须成功`).toBe(true)
+      const page = await res.text()
+      expect(page, `第 ${round} 轮页面内容必须正常`).toContain('chat.z.ai')
+      // ⚠️ 关键：**先关掉再起下一轮**（正是用户的操作序列）。
+      await flow.close()
+      live.pop()
+    }
+  })
+})
