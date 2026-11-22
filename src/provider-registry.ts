@@ -1167,12 +1167,15 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //   ⚠️ 为什么不能改 `false`：那会让 `createProviderCredits()` 少一条
     //   ⇒ `credits.claimAll` 对豆包回 `unsupported provider: doubao` ⇒ 签到静默失效。
     credits: { balance: true, dailyCheckin: true },
-    // ⚠️ **签到有代价 ⇒ 不进每日自动链**（2026-11-03，与 zcode captcha 同型）：
-    //    签到要带 `a_bogus` 签名，它由豆包页面上下文的 `bdms.frontierSign` 生成 ⇒
-    //    每次领取都要现场起一棵浏览器进程树（挂豆包 User Data）。默认开启的自动签到
-    //    等于「用户什么都没点、开 DSH 就起浏览器」—— 白耗资源。用户仍可**手动**签到
-    //   （面板点「一键领取积分」，那是有意行为）。
-    autoCheckinExcluded: true,
+    // ✅ **进每日自动链**（2026-11-22 变更，原为排除）：
+    //    签到的 `a_bogus` 签名确实要起一次 headless Chromium（`--headless=new`，
+    //    `src/doubao-signin.ts` 的 spawn 参数），但代价是**每账号每天一次、
+    //    单次几十秒**，与 zcode 那个「按设备烧阿里云 captcha 配额」不同源 ——
+    //    zcode 是拿第三方配额换积分，豆包只是本地起一个临时 profile 的浏览器。
+    //    默认开启的收益（每天自动 +200 额度）大于这点开销，故不再排除。
+    //    ⚠️ 想退出自动链的用户可把该渠道的账号**停用**（停用账号不参与选号与签到），
+    //    或把面板上的渠道开关关掉，无需改代码。
+    autoCheckinExcluded: false,
     // ⚠️ `rateLimit: false` 必须显式写：本渠道当前没有适配器、不写
     //    `modelRateLimits`、也不在 `probeById` 里 ⇒ 「重测 / 重置」点下去恒惰性
     //   （与 magicrew / accio 旧格同因）。将来接推理链路时再翻正。

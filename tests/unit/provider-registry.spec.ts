@@ -416,7 +416,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
 
   it('autoCheckinExcluded 恰好是 zcode', () => {
     const x = PROVIDER_REGISTRY.filter((d) => d.autoCheckinExcluded === true).map((d) => d.id)
-    expect(x).toEqual(['zcode', 'doubao'])
+    expect(x).toEqual(['zcode'])
   })
 
   it('channel === true 的 20 家都有 settingsNamespace 除了 opencode', () => {
