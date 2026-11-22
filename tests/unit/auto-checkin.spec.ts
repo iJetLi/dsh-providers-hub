@@ -9,6 +9,7 @@ import {
   describeRun,
   isAutoCheckinExcluded,
   isAutoCheckinOptedIn,
+  doubaoCheckinEnabled,
   DEFAULT_AUTO_CHECKIN_TIMES,
   isUnsupportedCheckin,
   latestDueSlotKey,
@@ -1691,5 +1692,67 @@ describe('ZCode opt-in 的 sanitize 语义', () => {
     const doc = sanitizeAutoCheckin({ modelscopeEnabled: false, zcodeEnabled: true })
     expect(doc.modelscopeEnabled).toBe(false)
     expect(doc.zcodeEnabled).toBe(true)
+  })
+})
+
+describe('豆包自动签到开关（2026-11-22 用户需求）', () => {
+  it('doubaoCheckinEnabled：缺席跟随 registry，有值以用户表态为准（三态）', () => {
+    // 缺席 ⇒ 与 registry 的默认口径一致（默认口径随另一条改动而变，故这里比着算）
+    expect(doubaoCheckinEnabled({})).toBe(isAutoCheckinExcluded('doubao') === false)
+    expect(doubaoCheckinEnabled({ doubaoEnabled: true })).toBe(true)
+    expect(doubaoCheckinEnabled({ doubaoEnabled: false })).toBe(false)
+  })
+
+  it('用户关掉豆包 ⇒ 一次 claim 都不发，文案是「自动签到已关闭」', async () => {
+    const { runner, calls, store } = makeRunner({
+      providers: ['doubao', 'buddy'],
+      initial: { doubaoEnabled: false },
+    })
+    await runner.runIfDue()
+    // ⚠️ 判据是「没打上游」：豆包签到的代价是起一次浏览器，多余调用比多一条
+    //    状态文字贵得多。
+    expect(calls).toEqual(['buddy'])
+    expect(store.current().channels.find((entry) => entry.provider === 'doubao')?.text)
+      .toBe('自动签到已关闭')
+    // 而且它不该拖住整轮水位线（进 unretryable）
+    expect(store.current().pendingSlot).toBe('')
+  })
+
+  it('用户打开豆包 ⇒ 即使 registry 把它登记成「有代价」也要真的 claim', async () => {
+    const { runner, calls, store } = makeRunner({
+      providers: ['doubao', 'buddy'],
+      initial: { doubaoEnabled: true },
+    })
+    await runner.runIfDue()
+    // 只在 registry 仍把它排除时才有判别力（默认纳入后这条恒真，不算白测：
+    // 它守的是「用户开关不能反过来把默认参加的家挡掉」）。
+    expect(calls).toContain('doubao')
+    expect(store.current().channels.find((entry) => entry.provider === 'doubao')?.text)
+      .not.toBe('需手动签到')
+  })
+
+  it('setDoubaoEnabled 两个方向都落盘（三态：删键等于抹掉用户表态）', async () => {
+    const { runner, store } = makeRunner()
+    expect(runner.doubaoEnabled()).toBe(isAutoCheckinExcluded('doubao') === false)
+    await runner.setDoubaoEnabled(false)
+    expect(store.current().doubaoEnabled).toBe(false)
+    expect(runner.doubaoEnabled()).toBe(false)
+    expect(runner.state().doubaoCheckinEnabled).toBe(false)
+    await runner.setDoubaoEnabled(true)
+    expect(store.current().doubaoEnabled).toBe(true)
+    expect(runner.doubaoEnabled()).toBe(true)
+    expect(runner.state().doubaoCheckinEnabled).toBe(true)
+  })
+
+  it('sanitize：true / false 都保留，脏值一律丢弃（= 跟随 registry）', () => {
+    expect(sanitizeAutoCheckin({ doubaoEnabled: false }).doubaoEnabled).toBe(false)
+    expect(sanitizeAutoCheckin({ doubaoEnabled: true }).doubaoEnabled).toBe(true)
+    expect(Object.hasOwn(sanitizeAutoCheckin({}), 'doubaoEnabled')).toBe(false)
+    for (const raw of ['false', 'true', 0, 1, null]) {
+      expect(Object.hasOwn(sanitizeAutoCheckin({ doubaoEnabled: raw }), 'doubaoEnabled'),
+        `raw=${String(raw)} 不该落键`).toBe(false)
+    }
+    // 往返：落盘后重新读出仍是同一个值（否则开关活不过一次重启）
+    expect(sanitizeAutoCheckin(sanitizeAutoCheckin({ doubaoEnabled: false })).doubaoEnabled).toBe(false)
   })
 })

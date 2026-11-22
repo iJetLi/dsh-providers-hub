@@ -13335,6 +13335,26 @@ function registerJetHubEndpoints(
       }
 
       /**
+       * 豆包的「自动签到」开关（读 / 写，2026-11-22 用户需求：面板里加个开关）。
+       *
+       * ⚠️ `enabled` 省略时**只读**；给出时必须是布尔值。非法值**拒绝**而不是
+       * 静默回落 —— 与 `zcode.autoCheckin` / `modelscope.autoCheckin` 同口径
+       * （回落会让「设置没生效」看起来像「保存成功」）。
+       * ⚠️ 写入**不**立刻跑一轮：改的是「下一轮参不参加」，不是「现在就跑」
+       * （与 `zcode.autoCheckin` 同口径；想立刻领请点面板的「一键领取积分」）。
+       */
+      case 'doubao.autoCheckin': {
+        const enabled = (payload as { enabled?: unknown } | undefined)?.enabled
+        if (enabled !== undefined) {
+          if (typeof enabled !== 'boolean') {
+            return { ok: false, error: { code: 'bad-request', message: '豆包自动签到开关必须为布尔值' } }
+          }
+          await autoCheckin.setDoubaoEnabled(enabled)
+        }
+        return { ok: true, value: { enabled: autoCheckin.doubaoEnabled() } }
+      }
+
+      /**
        * 「每日首次启动自动签到」开关（读 / 写，**全局一个**，不分渠道）。
        *
        * ⚠️ `enabled` 省略时**只读**；给出时必须是布尔值。非法值拒绝而不是静默

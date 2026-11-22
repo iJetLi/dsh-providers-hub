@@ -11727,6 +11727,13 @@ export function JetHubPage({ rpcCall }) {
   const [autoCheckin, setAutoCheckin] = React.useState(null);
   const [autoCheckinError, setAutoCheckinError] = React.useState('');
   const [autoCheckinBusy, setAutoCheckinBusy] = React.useState(false);
+  /**
+   * 豆包自动签到开关正在写（只禁用那一个开关）。
+   *
+   * ⚠️ 与全局 `autoCheckinBusy` 分开：那是「保存整份设置」的闸门，
+   * 连「完成」按钮都会灰掉；一个逐渠道小开关不该让整块设置面板看起来卡住。
+   */
+  const [doubaoCheckinBusy, setDoubaoCheckinBusy] = React.useState(false);
   /** 面板里正在编辑的两个时刻（提交前不写宿主）。 */
   const [timeDraft, setTimeDraft] = React.useState(['09:00', '21:00']);
   /**
@@ -12592,6 +12599,30 @@ export function JetHubPage({ rpcCall }) {
   };
 
   /**
+   * 写豆包的「自动签到」开关（2026-11-22 用户需求）。
+   *
+   * ⚠️ **不做本地乐观更新**：以宿主回显的 `enabled` 为准。否则「写盘失败但界面
+   * 已勾上」会让用户以为设置生效（第二天什么都没签到）。
+   * ⚠️ 宿主只回 `{ enabled }`（不是整份 `autoCheckin`）⇒ 用函数式 setState
+   * 只改那一格，不要整份替换（那会把 `times` 等字段冲成 `undefined`）。
+   */
+  const toggleDoubaoCheckin = async (enabled) => {
+    setDoubaoCheckinBusy(true);
+    setAutoCheckinError('');
+    try {
+      const res = await rpcCall('doubao.autoCheckin', { enabled });
+      const value = typeof res?.enabled === 'boolean' ? res.enabled : null;
+      if (value !== null) {
+        setAutoCheckin((prev) => (prev === null ? prev : { ...prev, doubaoCheckinEnabled: value }));
+      }
+    } catch (error) {
+      setAutoCheckinError(error?.message || '豆包自动签到开关保存失败');
+    } finally {
+      setDoubaoCheckinBusy(false);
+    }
+  };
+
+  /**
    * 保存两个时刻（用户在面板里改过才写）。
    *
    * ⚠️ 非法值由**宿主**拒绝并回 `bad-request`，这里只负责把那条文案显示出来 ——
@@ -13373,6 +13404,27 @@ export function JetHubPage({ rpcCall }) {
           ? '每个时刻会在 ±' + String(jitterMinutes) + ' 分钟内随机偏移（两个时刻挨得近时，幅度会被夹到间隔的一半），'
             + '避免固定时刻被识别为脚本；改完关闭面板自动保存。'
           : '固定时刻执行；改完关闭面板自动保存。'),
+      // ★ 豆包自动签到开关（2026-11-22 用户需求：「面板里面加个豆包自动签到的开关」）。
+      //
+      // ⚠️ 只在宿主给出**生效值**时才渲染（`typeof === 'boolean'`）：旧宿主
+      // （插件已热替换、进程还是旧代码）没有这个字段，渲染出来只会是一个永远
+      // 勾不上/关不掉的假开关；不渲染比渲染错的好排查。
+      // ⚠️ 勾选态**照抄宿主**（三态的结果值已在宿主算好），客户端不重算 registry 默认。
+      typeof a?.doubaoCheckinEnabled === 'boolean'
+        ? React.createElement('div', { className: 'dim-jh-checkinRow' },
+            React.createElement('label', { className: 'dim-jh-checkinToggle' },
+              React.createElement('input', {
+                type: 'checkbox',
+                className: 'dim-jh-switch',
+                checked: a.doubaoCheckinEnabled,
+                // 只在这一个开关的写请求在飞时禁用（不拖累整个面板）
+                disabled: doubaoCheckinBusy,
+                onChange: (event) => void toggleDoubaoCheckin(event.target.checked),
+              }),
+              React.createElement('span', null, '豆包自动签到')),
+            React.createElement('span', { className: 'dim-jh-checkinHint' },
+              '关掉后豆包不参与每天两次的自动签到；仍可在账号卡片上手动点「一键领取积分」。'))
+        : null,
       renderCheckinStatus(a),
       autoCheckinError === ''
         ? null
