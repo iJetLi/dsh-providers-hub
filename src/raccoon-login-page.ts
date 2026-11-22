@@ -58,6 +58,7 @@ import {
 } from './raccoon-oauth.js'
 import { RACCOON, type RaccoonProduct } from './raccoon-product.js'
 import { renderQrSvg } from './raccoon-qr.js'
+import { autoOpenBrowserEnabled as defaultAutoOpenBrowser } from './login-preferences.js'
 
 /** 本地登录页的路径。 */
 export const RACCOON_LOGIN_PAGE_PATHS = {
@@ -186,6 +187,16 @@ export interface RaccoonLoginFlowOptions {
    * （本仓在 officeace 那次已登记过同一条纪律：开窗的行为测试只能放 e2e。）
    */
   openAuthorizePage?: (url: string) => void
+  /**
+   * 「自动打开浏览器」闸门（2026-11-23）。
+   *
+   * 返回 `false` ⇒ 宿主**不**打开 `/authorize` 页，改为把链接交给本地页展示
+   * + 复制（与「新建账号时自动打开浏览器授权页」开关同源）。
+   *
+   * ⚠️ 注入点：单测传 `() => false` 就不必真开窗（本仓纪律：开窗的行为测试
+   * 只能放 e2e）。缺省读宿主偏好（`login-preferences.ts`）。
+   */
+  autoOpenBrowser?: () => boolean
 }
 
 /**
@@ -200,6 +211,7 @@ export async function startRaccoonLoginFlow(
   const product = options.product ?? RACCOON
   const fetcher = options.fetcher ?? fetch
   const openAuthorizePage = options.openAuthorizePage ?? openRaccoonAuthorizePage
+  const autoOpenBrowser = options.autoOpenBrowser ?? defaultAutoOpenBrowser
   const state: FlowState = {
     phone: '',
     authorizeStatus: 'idle',
@@ -235,6 +247,7 @@ export async function startRaccoonLoginFlow(
       settleOk,
       settleErr,
       openAuthorizePage,
+      autoOpenBrowser,
     }).catch(
       (error: unknown) => {
         try {
@@ -319,6 +332,8 @@ interface HandleDeps {
   /** 失败时的落定回调（**必须**有：否则失败会永远悬挂）。 */
   settleErr: (reason: unknown) => void
   openAuthorizePage: (url: string) => void
+  /** 「自动打开浏览器」闸门（缺省读宿主偏好；见 `RaccoonLoginFlowOptions`）。 */
+  autoOpenBrowser: () => boolean
 }
 
 /**
@@ -340,7 +355,10 @@ interface HandleDeps {
  * @param settleErr - 失败时的落定回调（**必须**有：换码失败若不落定，
  *   流程会永远悬挂 ⇒ 前端只会转圈到它自己的 5 分钟上限）。
  * @param openAuthorizePage - 打开授权页的动作（注入点，单测不真开窗）。
- * @returns 这一轮的 `/authorize` URL（失败时为空串）。
+ * @param autoOpenBrowser - 「自动打开浏览器」闸门：返回 `false` 时不打开授权页，
+ *   只把 URL 交回页面（页面显示链接 + 复制按钮）。
+ * @returns 这一轮的结果：`url`（失败时为空串）、`opened`（**本次**是否真的打开了
+ *   浏览器）、`autoOpen`（开关取值 —— 页面据此决定提示文案）。
  */
 async function runAuthorizeRound(
   state: FlowState,
@@ -349,10 +367,15 @@ async function runAuthorizeRound(
   settleOk: (value: RaccoonCredential) => void,
   settleErr: (reason: unknown) => void,
   openAuthorizePage: (url: string) => void,
-): Promise<string> {
+  autoOpenBrowser: () => boolean,
+): Promise<{ url: string; opened: boolean; autoOpen: boolean }> {
+  // 开关只算一次：页面展示与是否开窗必须用**同一个值**，否则会出现
+  // 「宿主说没开、页面说开了」（本仓红线：同一语义不许两套判据）。
+  const autoOpen = autoOpenBrowser() !== false
   // 单飞：已经在飞 ⇒ 复用同一个接收端（**不再**占一个端口）。
   if (state.authorizeReceiver !== undefined && state.authorizeStatus === 'waiting') {
-    return state.authorizeReceiver.authorizeUrl
+    // ⚠️ 本次**没有**新开窗 ⇒ `opened: false`（页面据此说「点下面链接」）。
+    return { url: state.authorizeReceiver.authorizeUrl, opened: false, autoOpen }
   }
   let receiver: RaccoonAuthorizeReceiver
   try {
@@ -362,7 +385,7 @@ async function runAuthorizeRound(
   } catch (error) {
     state.authorizeStatus = 'failed'
     state.authorizeReason = 'bind'
-    return ''
+    return { url: '', opened: false, autoOpen }
   }
   if (receiver.authorizeUrl === '') {
     // 端口没绑上 / 落在页面会拒收的范围外 ⇒ 没有 URL 可给用户。
@@ -374,7 +397,7 @@ async function runAuthorizeRound(
     state.authorizeStatus = 'failed'
     state.authorizeReason = 'bind'
     receiver.cancel()
-    return ''
+    return { url: '', opened: false, autoOpen }
   }
   state.authorizeReceiver = receiver
   state.authorizeStatus = 'waiting'
@@ -438,8 +461,12 @@ async function runAuthorizeRound(
   // ⚠️ **宿主侧**开浏览器，而不是让页面 `window.open`：
   // 页面跳走就**离开了**我们这个本地页 ⇒ 换码成功后页面收不到「成功」，
   // 用户看到的仍是「等待中」。宿主开 ⇒ 本地页始终活着，轮询能拿到终态。
-  openAuthorizePage(receiver.authorizeUrl)
-  return receiver.authorizeUrl
+  //
+  // ★ 2026-11-23：「自动打开浏览器授权页」关闭时**不**在这里开窗 ——
+  //   把 URL 交回页面，由页面显示链接 + 复制按钮（页面自己的 `window.open`
+  //   只在用户点击链接时发生，属用户手势，不算「自动」）。
+  if (autoOpen) openAuthorizePage(receiver.authorizeUrl)
+  return { url: receiver.authorizeUrl, opened: autoOpen, autoOpen }
 }
 
 /** 处理一次本地请求。 */
@@ -529,17 +556,22 @@ async function handleRequest(
   }
 
   if (url.pathname === RACCOON_LOGIN_PAGE_PATHS.authorizeStart) {
-    const authorizeUrl = await runAuthorizeRound(
+    const round = await runAuthorizeRound(
       state,
       product,
       deps.fetcher,
       deps.settleOk,
       deps.settleErr,
       deps.openAuthorizePage,
+      deps.autoOpenBrowser,
     )
     writeJson(response, {
-      ok: authorizeUrl !== '',
-      url: authorizeUrl,
+      ok: round.url !== '',
+      url: round.url,
+      // ★ 页面据此分流：`autoOpen === false` ⇒ 显示「已关闭自动打开，请复制链接」；
+      //   `opened === false`（含单飞复用）⇒ 说「浏览器没自动打开？点下面链接」。
+      opened: round.opened,
+      autoOpen: round.autoOpen,
       status: state.authorizeStatus,
       ...state.authorizeReason !== undefined ? { reason: state.authorizeReason } : {},
     })
@@ -774,7 +806,8 @@ export function renderRaccoonLoginPage(
       <p class="sub">在浏览器里打开商汤小浣熊授权页，完成登录后自动完成</p>
       <button class="primary" id="doAuthorize" type="button">打开授权页</button>
       <p class="sub" id="authorizeLinkBox" style="display:none;">
-        浏览器没自动打开？<a id="authorizeLink" href="#" target="_blank" rel="noreferrer">点此打开授权页</a>
+        <span id="authorizeLinkHint">浏览器没自动打开？</span><a id="authorizeLink" href="#" target="_blank" rel="noreferrer">点此打开授权页</a>
+        <button id="copyAuthorize" type="button" style="margin-left:8px;background:#334155;color:#f8fafc;border:1px solid #475569;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;">复制链接</button>
       </p>
       <button class="primary" id="cancelAuthorize" type="button" style="display:none;background:#4e5969;">取消等待</button>
       <div class="status" id="authorizeStatus">未开始</div>
@@ -889,6 +922,9 @@ export function renderRaccoonLoginPage(
   var authorizeCancelBtn = document.getElementById('cancelAuthorize');
   var authorizeLinkBox = document.getElementById('authorizeLinkBox');
   var authorizeLink = document.getElementById('authorizeLink');
+  var authorizeLinkHint = document.getElementById('authorizeLinkHint');
+  var copyAuthorizeBtn = document.getElementById('copyAuthorize');
+  var authorizeUrlValue = '';
   var authorizePollTimer = null;
   function setAuthorizeStatus(text, tone) {
     authorizeStatus.textContent = text;
@@ -951,11 +987,20 @@ export function renderRaccoonLoginPage(
         setAuthorizeStatus('无法发起浏览器授权：' + authorizeReasonText(data.reason), 'err');
         return;
       }
-      // 兜底链接：宿主开浏览器失败（无桌面环境）时，用户可以自己点。
+      // 兜底链接：宿主开浏览器失败（无桌面环境）或「自动打开浏览器」关闭时，
+      // 用户可以自己点 / 复制到别处打开。
+      authorizeUrlValue = data.url;
       authorizeLink.setAttribute('href', data.url);
+      copyAuthorizeBtn.textContent = '复制链接';
+      if (data.autoOpen === false) {
+        authorizeLinkHint.textContent = '已关闭「自动打开浏览器」，请复制或在浏览器打开：';
+        setAuthorizeStatus('已关闭「自动打开浏览器」—— 请复制或点击下面的链接在浏览器打开');
+      } else {
+        authorizeLinkHint.textContent = '浏览器没自动打开？';
+        setAuthorizeStatus('等待浏览器授权…（完成后自动完成）');
+      }
       authorizeLinkBox.style.display = 'block';
       authorizeCancelBtn.style.display = 'block';
-      setAuthorizeStatus('等待浏览器授权…（完成后自动完成）');
       stopAuthorizePolling();
       authorizePollTimer = setInterval(pollAuthorizeOnce, POLL_INTERVAL_MS);
       pollAuthorizeOnce();
@@ -963,6 +1008,34 @@ export function renderRaccoonLoginPage(
       authorizeBtn.disabled = false;
       setAuthorizeStatus('无法发起浏览器授权：请检查本机网络后重试', 'err');
     });
+  });
+  // ★ 「复制链接」：与 Jet Hub 面板里那个复制按钮同款语义（授权 URL 很长，
+  //   手工框选漏一个字符就会得到「授权失败」的假象）。
+  //   ⚠️ 页面是 127.0.0.1（安全上下文）⇒ navigator.clipboard 可用；
+  //   旧内核退到 execCommand('copy')，两者都失败时明说「请手动选中」。
+  //   ⚠️ 本段在模板字符串里：注释中**不能出现反引号**（会提前终止模板）。
+  function fallbackCopyAuthorize() {
+    var area = document.createElement('textarea');
+    area.value = authorizeUrlValue;
+    document.body.appendChild(area);
+    area.select();
+    area.setSelectionRange(0, authorizeUrlValue.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(area);
+    return ok;
+  }
+  copyAuthorizeBtn.addEventListener('click', function () {
+    if (!authorizeUrlValue) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(authorizeUrlValue).then(function () {
+        copyAuthorizeBtn.textContent = '已复制 ✓';
+      }, function () {
+        copyAuthorizeBtn.textContent = fallbackCopyAuthorize() ? '已复制 ✓' : '复制失败，请手动选中';
+      });
+      return;
+    }
+    copyAuthorizeBtn.textContent = fallbackCopyAuthorize() ? '已复制 ✓' : '复制失败，请手动选中';
   });
   authorizeCancelBtn.addEventListener('click', function () {
     stopAuthorizePolling();

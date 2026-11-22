@@ -3481,3 +3481,97 @@ useRef(initial) { const s = slots[k]; if (!('cur' in s)) s.cur = initial; return
    （`expected 2 to be 1`）。同型先例：本仓 `providers-magicrew` 的
    「红不自动等于红因是被测变异」。
 
+## ⚠️⚠️ 登录授权页「自动打开浏览器」开关：**两条腿**少一条就静默失效（2026-11-23）
+
+用户需求：Jet Hub 设置里一个开关，控制「+ 新建账号」时是否自动打开授权页；
+关闭后改为**复制链接 + 面板里显示链接**（复用弹窗被拦截时那块 UI）。
+
+### 谁在「自动打开浏览器」——必须同时改两条腿
+
+| 腿 | 位置 | 不改的症状 |
+|---|---|---|
+| **客户端** | `jet-hub.js` 的 `createAccount`：`window.open(loginUrl)` / `window.open(forcedLoginUrl)` / MiniMax 的先登出页 | 设置里关了，普通窗口照开 |
+| **宿主** | `login.ts` 的 `openBrowser()`（阻塞式入口 + 四家 oauth 的 `defaultOpenBrowser`） | 阻塞式登录仍偷开窗 |
+| **宿主** | `login.ts` 的 `openIncognitoWindow()`（CodeArts / OfficeAce） | 关了开关仍弹一个**无痕窗**（用户看到的就是「设置没用」） |
+| **宿主** | `raccoon-login-page.ts` 的 `runAuthorizeRound`（本地载体页「浏览器登录」Tab） | 关掉自动开窗，Raccoon 载体页里点一下仍由宿主开浏览器 |
+
+⇒ 判据一律收敛到 `login-preferences.ts` 的 `autoOpenBrowserEnabled()`（宿主）
+与 `login-preferences-store.js` 的 `loginAutoOpenEnabled()`（客户端），**两处都读
+同一份落盘值**（客户端那份来自 RPC，不是浏览器存储 —— Web 端 origin 带随机端口）。
+
+### 缺键方向：**开**
+
+`sanitizeAutoOpenBrowserEnabled(raw) = raw !== false`，与「默认取最强思考档」
+「渠道原生搜索」逐字同构。方向不能反：读失败按「关」= 用户没关过却被静默关掉，
+症状是「新建账号不再跳登录页」，且零报错。
+
+客户端读失败还要**明说**（`dim-jh-settingsInlineFail`：「宿主可能仍在运行旧代码，
+请完全退出并重新打开 DSH」）—— 这正是「改了插件没重启」的那段窗口期。
+
+### 关闭态的实现（复用而不是新做）
+
+- `createAccount` 里**前置一层分母**（`if (!loginAutoOpenEnabled()) { … } else if
+  (res.incognitoOpened === true) { … }`），把原 `if (!skipClientOpen) { … }`
+  整段**字面保留**：`codearts-incognito-login` / `minimax-forced-login` /
+  `login-link-copy` 三条既有守卫都锚着那些字面量；
+- 链接优先 `forcedLoginUrl`（MiniMax「保证需要登录」那条），否则 `loginUrl`；
+- **自动复制**用 `copyToClipboard(url, { silent: true })`：失败时**不弹**通用复制面板
+  （面板里的链接区块本身就是兜底，再叠一层全屏面板是重复打扰）；
+- 文案分流用独立的 `loginManualMode` 布尔（**不要**把 `loginUrlForManual` 改成对象：
+  那会改掉既有守卫的字面锚点）；
+- 清理点与 `setLoginUrlForManual(null)` **成对**（reused / 超时 / 失败 / 成功四处），
+  否则上一次的「手动模式」文案会串到下一次登录。
+
+### 例外：CDP 驱动浏览器的渠道
+
+豆包 / 百智云 / 超级麦吉 / MonkeyCode / Marvis 是插件**自己拉起并接管** Chromium
+去读登录态，没有可交给用户自己打开的授权 URL ⇒ 关掉开关后**必须仍然开**，
+否则这些渠道直接不可登录。用户 2026-11-23 明确要求**设置分区里不写这条提示**；
+边界记录在本节与 README 即可。
+
+### 设置弹窗尺寸与边界（同批用户要求）
+
+新增一个分区后「设置」弹窗又出现下拉条，随后用户又要求再加宽并「加一个明显的框」：
+
+```css
+.dim-jh-settingsModal {
+  width: min(840px, 100%);
+  max-height: min(940px, calc(100vh - 48px));
+  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
+    0 16px 48px rgba(0, 0, 0, 0.38);
+}
+```
+
+- **边框直接复用「档次窗口」的处方**（`.dim-jh-windowModal`，2026-11-20 同一报障）：
+  ① 实边框 `border-l2`；② 内描边半透明白（浅色主题下 `border-l2` 太淡）。
+  ⚠️ 只加在设置弹窗上，**不动通用 `.dim-jh-modal`**（其它弹窗没报障，统一改扩大回归面）。
+- **分区间距保持 8/10**（用户明确要求），也**不动**通用 `.dim-jh-modal`。
+- ⚠️ `overflow-y: auto` 必须保留：768p 笔记本上仍要能滚到底部「完成」，
+  「不出下拉条」是 1080p 及以上的效果，不是把滚动能力删掉。
+- ⚠️ 宽度是**上限**（`min(840px, 100%)`），窄窗口仍会收缩；不要写成固定 `840px`。
+
+### 守卫与变异（8 条全部有牙）
+
+行为级：`login-preferences.spec.ts`（store + 闸门缺省方向）、
+`login-preferences-rpc.spec.ts`（真 handler：非布尔 bad-request / 回读落盘值）、
+`login-preferences-store.spec.ts`（客户端：读失败按开、并发去重、慢读回包不倒灌）、
+`jet-hub-panel-wiring.spec.ts`（真渲染 + 真调 `createAccount`：关闭态不开窗 / 不弹
+无痕确认 / 剪贴板拿到链接；开启态反向对照）、`raccoon-login-page.spec.ts`
+（`opened` / `autoOpen` 三态）。
+
+实测变异（全部精确变红）：默认值翻面 / 客户端手动分支短路 / 去掉自动复制 /
+去掉 RPC 非布尔校验 / Raccoon 忽略闸门 / 尺寸改回旧值 / 客户端读失败按关 /
+宿主 `openBrowser` 去掉闸门。
+
+### 两条过程教训
+
+1. **模板字符串里的注释不能出现反引号**：`raccoon-login-page.ts` 的页面 HTML/JS
+   整段是 TS 模板字符串 —— 在注释里写 `navigator.clipboard` 会把模板**提前闭合**，
+   `tsc` 报的却是 `TS1005: ';' expected`（指向下一个 `function`）。本仓
+   `jet-hub-styles.js` 早有同款警告，本次在 **TS** 文件里又踩了一次。
+2. **「尺寸/样式」也要有守卫**：只抬 `max-height` 而删掉 `overflow` 会让窄屏用户
+   点不到「完成」；只加宽不改内容换行，仍会滚动。故用例同时钉「780/940」
+   与「`overflow-y: auto` 仍在」。
+

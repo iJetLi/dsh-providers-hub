@@ -73,6 +73,7 @@ import { CLINE } from './cline-product.js'
 import { configureDeadModelStore, withDeadModelPruning } from './dead-model-store.js'
 import { configureStrongestReasoningEnabled } from './reasoning-default.js'
 import { createReasoningPreferenceStore } from './reasoning-preferences.js'
+import { configureAutoOpenBrowserEnabled, createLoginPreferenceStore } from './login-preferences.js'
 import type { CodeArtsCredential, BuddyCredential } from './types.js'
 import type { LobsteraiCredential } from './lobsterai.js'
 // 「锁定永久积分」的余额分档需要各家的余额查询函数：分档判据
@@ -1367,6 +1368,19 @@ export function apply(ctx: Context): void {
    */
   const reasoningPreferences = createReasoningPreferenceStore(ctx)
   configureStrongestReasoningEnabled(() => reasoningPreferences.load())
+
+  /**
+   * 「新建账号时自动打开浏览器授权页」开关（2026-11-23）。
+   *
+   * ⚠️ 与上面那条**同一个范式**：偏好是**每次现读**的（回调形式），接在这里
+   * 让宿主闸门（`login.ts` 的 `openBrowser` / `openIncognitoWindow`、
+   * raccoon 授权页）从启动那一刻就拿到正确值。
+   *
+   * ⚠️ 与 `jet-hub-rpc.ts` 里那条不是同一个实例，但读写**同一个文件**、缓存
+   * 按路径共享 ⇒ 设置页写完立刻生效（见 `login-preferences.ts` 的模块头）。
+   */
+  const loginPreferences = createLoginPreferenceStore(ctx)
+  configureAutoOpenBrowserEnabled(() => loginPreferences.load())
 
   // ===== Token 账本持久化（第 2 期 · 日聚合落盘）=====
   //

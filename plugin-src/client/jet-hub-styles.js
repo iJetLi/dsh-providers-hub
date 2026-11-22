@@ -771,8 +771,24 @@ const STYLES = `
    于是列表区开始滚动。这里只改设置弹窗这一处，**不动 .dim-jh-modal 的通用上限**
    —— 其它弹窗（模型中心等）内容本来就少，抬高它们会让空弹窗显得突兀。
    ⚠️ 仍保留滚动能力（overflow 在 .dim-jh-modalBody 上不变）：窗口很矮时
-   （笔记本 768p）必须还能滚，否则底部按钮会被裁掉、用户点不到「完成」。 */
-.dim-jh-settingsModal { max-height: min(760px, calc(100vh - 48px)); }
+   （笔记本 768p）必须还能滚，否则底部按钮会被裁掉、用户点不到「完成」。
+   2026-11-23 第一次：新增「登录授权」分区后又出现下拉条 ⇒ 高度上限 760 → 940。
+   2026-11-23 第二次（用户要求）：宽度 780 → **840**；并给弹窗加一个**明显的边界**，
+   直接参考「档次窗口」（.dim-jh-windowModal）那两条 ——
+   ① 实边框 1px border-l2（暗色主题下最可靠的「窗口边界」）；
+   ② 内描边 inset 半透明白（浅色主题下 border-l2 太淡，第二道保险）。
+   ⚠️ 只加在设置弹窗上，**不动通用 .dim-jh-modal** —— 其它弹窗没报障，
+      统一改会扩大回归面（与 .dim-jh-windowModal 的注释同一取向）。
+   ⚠️ 分区间距**保持 8/10**（用户明确要求，不做紧凑化）。
+   ⚠️ 840 是宽度上限，不是固定宽：窄窗口仍按 min(840px, 100%) 收缩。 */
+.dim-jh-settingsModal {
+  width: min(840px, 100%);
+  max-height: min(940px, calc(100vh - 48px));
+  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
+    0 16px 48px rgba(0, 0, 0, 0.38);
+}
 /* 列表区独立滚动：头部与说明固定，模型多时只滚中间 */
 /* ⚠️ overflow-x: hidden 是**兜底**，不是主修复（主修复见下方 grid 的 minmax）。
    没有它时，任何一行的偶然溢出都会让整个弹窗出现横向滚动条，而横向滚动条会把

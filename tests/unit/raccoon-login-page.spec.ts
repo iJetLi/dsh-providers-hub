@@ -965,4 +965,71 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
     const noHeaders = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.authorizeStatus, {})
     expect(noHeaders).toBe(200)
   })
+
+  /**
+   * ★★ 「新建账号时自动打开浏览器授权页」关闭态（2026-11-23）。
+   *
+   * 判据必须打在**「宿主有没有真的开窗」**上（注入的 spy 被调用与否），
+   * 以及响应里那两个字段 —— 页面靠它们分流文案。只断言「URL 仍返回」不够：
+   * 那在「照旧自动开窗」的实现下也成立。
+   */
+  it('★★ 关闭时：不调用 openAuthorizePage，但仍返回 URL，并回报 opened=false / autoOpen=false', async () => {
+    const opened: string[] = []
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch() as unknown as typeof fetch,
+      openAuthorizePage: (url) => { opened.push(url) },
+      autoOpenBrowser: () => false,
+    })
+    const base = originOf(started.loginUrl)
+    const start = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as {
+      ok: boolean
+      url: string
+      opened: boolean
+      autoOpen: boolean
+    }
+    expect(start.ok).toBe(true)
+    expect(start.url).toContain('/authorize')
+    expect(start.autoOpen, 'autoOpen 必须如实回报 false（页面据此显示复制提示）').toBe(false)
+    expect(start.opened).toBe(false)
+    expect(opened, '关闭「自动打开浏览器」后宿主不得 spawn 浏览器').toEqual([])
+  })
+
+  it('★★ 开启时（缺省）：照旧开窗一次，并回报 opened=true / autoOpen=true', async () => {
+    const opened: string[] = []
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch() as unknown as typeof fetch,
+      openAuthorizePage: (url) => { opened.push(url) },
+    })
+    const base = originOf(started.loginUrl)
+    const start = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as {
+      url: string
+      opened: boolean
+      autoOpen: boolean
+    }
+    expect(start.autoOpen).toBe(true)
+    expect(start.opened).toBe(true)
+    expect(opened.length, '缺省（开）必须与改动前逐字节相同：宿主开窗一次').toBe(1)
+    expect(opened[0]).toBe(start.url)
+  })
+
+  it('★ 二次申请（单飞复用）：URL 相同但 opened=false（本次没有新开窗）', async () => {
+    const opened: string[] = []
+    started = await startRaccoonLoginFlow({
+      fetcher: authorizeFetch() as unknown as typeof fetch,
+      openAuthorizePage: (url) => { opened.push(url) },
+    })
+    const base = originOf(started.loginUrl)
+    const first = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as {
+      url: string
+      opened: boolean
+    }
+    const second = await (await fetchLocal(`${base}${RACCOON_LOGIN_PAGE_PATHS.authorizeStart}`)).json() as {
+      url: string
+      opened: boolean
+    }
+    expect(second.url).toBe(first.url)
+    expect(first.opened).toBe(true)
+    expect(second.opened, '复用时没有新开窗 ⇒ 页面应说「浏览器没自动打开？点下面链接」').toBe(false)
+    expect(opened.length).toBe(1)
+  })
 })

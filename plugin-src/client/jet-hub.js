@@ -74,6 +74,17 @@ import {
   disablingLeavesNoEnabledAccount,
 } from './account-model-link.js';
 import { buildCreateAccountPayload, newAccountAsksChannel } from './new-account.js';
+// ★ 「新建账号时自动打开浏览器授权页」开关（宿主侧引擎见
+//    `src/login-preferences.ts`；RPC 见 `loginPreferences.getEnabled`）。
+//    ⚠️ 状态必须与设置弹窗共用同一份（无 React 的模块级 store），
+//    否则「设置里关了、新建账号仍自动开窗」—— 那种缺陷零报错、只能靠用户发现。
+import {
+  loadLoginAutoOpen,
+  loginAutoOpenEnabled,
+  loginAutoOpenReadFailed,
+  setLoginAutoOpen,
+  subscribeLoginAutoOpen,
+} from './login-preferences-store.js';
 import { MarvisLoginModal } from './marvis-login-modal.js';
 import {
   copyToClipboard,
@@ -4701,6 +4712,15 @@ function ProviderPanel({
   /** 兜底登录链接的复制结果：null=未复制，true=已复制，false=复制失败。 */
   const [loginLinkCopied, setLoginLinkCopied] = React.useState(null);
   /**
+   * 「手动模式」标记：这块链接是**因为设置里关闭了「自动打开浏览器」**才出现的，
+   * 而不是因为弹窗被浏览器拦截。
+   *
+   * ⚠️ 与 `loginUrlForManual` 分成两个 state 是刻意的：链接本身复用既有 UI
+   * （含复制按钮 / 三态文案 / 失败自动全选），只有**标题文案**需要分流。
+   * 合并成对象会改掉既有守卫的字面锚点（`setLoginUrlForManual(loginUrl)`）。
+   */
+  const [loginManualMode, setLoginManualMode] = React.useState(false);
+  /**
    * **手动回调链接**输入框（远程访问 DSH 时回调式登录的唯一出路）。
    *
    * 哪些渠道需要：见 `PROVIDERS_WITH_LOOPBACK_CALLBACK` —— 它们的授权回调都被
@@ -6506,6 +6526,7 @@ function ProviderPanel({
       // 「后端声明复用则空 URL 是正常的」，比反过来假设「空串必是错误」更稳。
       if (res.reused) {
         setLoginUrlForManual(null);
+        setLoginManualMode(false);
         await loadAccounts();
         // 复用提示借用 probeNotice 区块渲染（本面板没有独立的 create 提示位）。
         setProbeNotice({ tone: 'ok', text: '已复用本机已有的账号凭据，未新建账号。', details: [] });
@@ -6576,7 +6597,27 @@ function ProviderPanel({
          * 「窗口不出来」比「多一个窗口」严重得多。
          */
         let skipClientOpen = false;
-        if (res.incognitoOpened === true) {
+        /**
+         * ★★ **「新建账号时自动打开浏览器授权页」关闭时（2026-11-23）**：
+         * 不弹无痕窗确认、不开登出页、不开授权页；改为把链接交给用户。
+         *
+         * - 链接优先用 `forcedLoginUrl`（MiniMax 的「保证需要登录」那条，与自动
+         *   开窗分支同一判据；拿不到就退回 `loginUrl`）；
+         * - **自动复制**到剪贴板（`copyToClipboard` 的 `silent` 选项：失败时不要
+         *   再弹通用复制面板，面板里那块链接区块本身就是兜底）；
+         * - `skipClientOpen = true` ⇒ 下面的原开窗分支整段跳过，但字面形态
+         *   **一个都不改**（`codearts-incognito-login` / `minimax-forced-login` /
+         *   `login-link-copy` 三条既有守卫都锚着它们）。
+         */
+        if (!loginAutoOpenEnabled()) {
+          const manualUrl = typeof res.forcedLoginUrl === 'string' && res.forcedLoginUrl.length > 0
+            ? res.forcedLoginUrl
+            : loginUrl;
+          setLoginUrlForManual(manualUrl);
+          setLoginManualMode(true);
+          setLoginLinkCopied(await copyToClipboard(manualUrl, { silent: true }));
+          skipClientOpen = true;
+        } else if (res.incognitoOpened === true) {
           console.log('[jet-hub] 宿主也以无痕窗口打开过授权页');
           const canConfirm = typeof window !== 'undefined' && typeof window.confirm === 'function';
           const confirmed = canConfirm
@@ -6835,6 +6876,7 @@ function ProviderPanel({
         //   把原因写死会给排障者一个错误的第一个假设。
         if (loginWindow && !loginWindow.closed) loginWindow.close();
         setLoginUrlForManual(null);
+        setLoginManualMode(false);
         setManualCallback(null);
         setError('登录超时或未完成（已等待 5 分钟）：可能是授权未完成、授权被拒，'
           + '或账号条目已被删除。请重新点击「+ 新建账号」再试一次；'
@@ -6857,6 +6899,7 @@ function ProviderPanel({
         if (pollRes?.success === false) {
           if (loginWindow && !loginWindow.closed) loginWindow.close();
           setLoginUrlForManual(null);
+          setLoginManualMode(false);
           setManualCallback(null);
           setError(pollRes.error || '登录失败（宿主未给出原因），请重新点击「+ 新建账号」。');
           setPhase('error');
@@ -6866,6 +6909,7 @@ function ProviderPanel({
         if (!pollRes?.done) return;
         if (loginWindow && !loginWindow.closed) loginWindow.close();
         setLoginUrlForManual(null);
+        setLoginManualMode(false);
         setManualCallback(null);
         await loadAccounts();
         stopPoll();
@@ -7437,7 +7481,22 @@ function ProviderPanel({
             'data-tone': 'warn',
             role: 'alert',
           },
-          React.createElement('div', null, '登录窗口被浏览器拦截，请手动打开下方链接完成登录：'),
+          React.createElement('div', null,
+            loginManualMode
+              // 手动模式（设置里关了「自动打开浏览器」）：文案说清「已复制」，
+              // 复制失败时明确让用户手动选中（复制按钮自己也有三态文案）。
+              ? (loginLinkCopied === false
+                ? '已关闭「自动打开浏览器」：自动复制被浏览器拦截，请手动选中下方链接复制。'
+                : '已关闭「自动打开浏览器」：授权链接已复制到剪贴板，请粘贴到浏览器打开并完成登录。')
+              // 非手动模式（弹窗被浏览器拦截）：保持原文案不变。
+              : '登录窗口被浏览器拦截，请手动打开下方链接完成登录：'),
+          loginManualMode && (provider === 'codearts' || provider === 'officeace')
+            // 这两家的授权页在华为云 SSO 域，普通窗口会**静默复用**已有会话
+            // （「新建账号还是同一个号」的老缺陷）。关闭自动开窗后宿主不再开
+            // 无痕窗 ⇒ 必须由用户自己在无痕窗口里打开。
+            ? React.createElement('div', null,
+              '⚠️ 该渠道建议在浏览器的无痕 / 隐私窗口中打开，否则可能复用上一个账号的登录态。')
+            : null,
           React.createElement('div', {
             className: 'dim-jh-loginLinkRow',
             'data-copy-state': loginLinkCopied === false ? 'failed' : 'idle',
@@ -11724,6 +11783,32 @@ export function JetHubPage({ rpcCall }) {
    *    不能裸写 `setShowSettings(false)` —— 那会把用户改的时刻静默丢弃。
    */
   const [showSettings, setShowSettings] = React.useState(false);
+  /**
+   * 「新建账号时自动打开浏览器授权页」开关（2026-11-23）。
+   *
+   * 状态本体在**模块级 store**（`login-preferences-store.js`）里，与
+   * `ProviderPanel` 的 `createAccount` 共用；这里只镜像一份用于渲染开关。
+   *
+   * ⚠️ 默认值必须是 `true`（开）：读不到宿主时也按开，与宿主侧
+   * `sanitizeAutoOpenBrowserEnabled` 的缺键语义同向（反过来会在一次读取
+   * 抖动后静默关掉「新建账号自动跳登录页」）。
+   */
+  const [loginAutoOpenOn, setLoginAutoOpenOnState] = React.useState(() => loginAutoOpenEnabled());
+  const [loginAutoOpenBusy, setLoginAutoOpenBusy] = React.useState(false);
+  const [loginAutoOpenFailed, setLoginAutoOpenFailedState] = React.useState(
+    () => loginAutoOpenReadFailed(),
+  );
+  // 与模块级 store 共用同一份状态：任何一侧改完，另一侧一起更新。
+  // ⚠️ 挂载时主动读一次（不能只等设置弹窗打开）：`createAccount` 在用户
+  //    从未打开设置的情况下也要拿到正确值。
+  React.useEffect(() => {
+    const unsubscribe = subscribeLoginAutoOpen(() => {
+      setLoginAutoOpenOnState(loginAutoOpenEnabled());
+      setLoginAutoOpenFailedState(loginAutoOpenReadFailed());
+    });
+    if (typeof rpcCall === 'function') void loadLoginAutoOpen(rpcCall);
+    return unsubscribe;
+  }, [rpcCall]);
   const [autoCheckin, setAutoCheckin] = React.useState(null);
   const [autoCheckinError, setAutoCheckinError] = React.useState('');
   const [autoCheckinBusy, setAutoCheckinBusy] = React.useState(false);
@@ -13074,6 +13159,44 @@ export function JetHubPage({ rpcCall }) {
                   });
                 },
               }, '打开供应商开关'))),
+          /**
+           * ①b 登录授权（2026-11-23 用户功能）。
+           *
+           * 开（默认）= 点「+ 新建账号」后自动打开授权页（= 本功能上线前的行为）；
+           * 关 = 不自动开窗，授权链接复制到剪贴板并显示在账号面板里。
+           *
+           * ⚠️ 开关文案按用户 2026-11-23 定稿的 **D 方案**：两态写进同一句
+           *    label（与「思考强度」同款长句写法），不另起一行说明「关会怎样」。
+           * ⚠️ 读 / 写失败时**不禁用**开关：一次抖动不该让用户失去「再切一次」
+           *    这条自救路径（与「渠道原生搜索」同取向）。
+           */
+          React.createElement('div', { className: 'dim-jh-settingsSection' },
+            React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '登录授权'),
+            React.createElement('label', {
+              className: loginAutoOpenFailed
+                ? 'dim-jh-settingsToggleLine dim-jh-settingsToggleLineFailed'
+                : 'dim-jh-settingsToggleLine',
+              title: (loginAutoOpenFailed
+                ? '⚠️ 开关状态读取 / 保存失败（宿主可能仍在运行旧代码）。请重试；仍不行请完全退出并重新打开 DSH。'
+                : '开（默认）：点「+ 新建账号」后自动打开授权页。'
+                  + '关：不自动开窗；授权链接复制到剪贴板，并显示在账号面板里（带「复制链接」按钮）。'),
+            },
+              React.createElement('input', {
+                type: 'checkbox',
+                className: 'dim-jh-switch',
+                checked: loginAutoOpenOn,
+                disabled: loginAutoOpenBusy,
+                onChange: (event) => void toggleLoginAutoOpen(event.target.checked),
+              }),
+              React.createElement('span', { className: 'dim-jh-settingsToggleText' },
+                '新建账号时自动打开浏览器授权页；关闭则把授权链接复制到剪贴板')),
+            loginAutoOpenFailed
+              ? React.createElement('div', { className: 'dim-jh-settingsInlineFail', role: 'alert' },
+                '⚠️ 开关状态读取 / 保存失败（宿主可能仍在运行旧代码）。请重试；仍不行请完全退出并重新打开 DSH。')
+              : null,
+            React.createElement('p', { className: 'dim-jh-settingsNote' },
+              '开（默认）：点「+ 新建账号」后自动打开授权页，与现在的行为一致。'
+              + '关：不自动开窗；授权链接复制到剪贴板，并显示在账号面板里（带「复制链接」按钮）。')),
           // ② 定时签到
           renderCheckinSection(),
           // ②b 限流续跑（解禁后自动继续）
@@ -13304,6 +13427,33 @@ export function JetHubPage({ rpcCall }) {
   }, [rpcCall, loadReasoningDefaultStatus]);
 
   React.useEffect(() => { void loadReasoningDefaultStatus(); }, [loadReasoningDefaultStatus]);
+
+  /**
+   * 「新建账号时自动打开浏览器授权页」开关的写入（2026-11-23）。
+   *
+   * 与 `toggleNativeSearch` / `toggleReasoningDefault` 逐字同构：不做乐观更新，
+   * 以宿主回包为准；失败时回滚到模块 store 的当前值并提示用户。
+   *
+   * ⚠️ 写入必须走模块 store 的 `setLoginAutoOpen`（而不是直接 rpcCall）：
+   *    `ProviderPanel` 的 `createAccount` 读的是同一份模块状态，绕过它会让
+   *    「设置里关了、下一次新建账号仍自动开窗」。
+   */
+  const toggleLoginAutoOpen = React.useCallback(async (nextEnabled) => {
+    if (typeof rpcCall !== 'function') return;
+    setLoginAutoOpenBusy(true);
+    try {
+      await setLoginAutoOpen(rpcCall, nextEnabled);
+      setLoginAutoOpenOnState(loginAutoOpenEnabled());
+      setLoginAutoOpenFailedState(false);
+    } catch (caught) {
+      console.error('[jet-hub] 切换「自动打开浏览器」失败:', caught);
+      // 回滚到宿主/模块的当前值（写入失败时本地值未被改动）。
+      setLoginAutoOpenOnState(loginAutoOpenEnabled());
+      setLoginAutoOpenFailedState(true);
+    } finally {
+      setLoginAutoOpenBusy(false);
+    }
+  }, [rpcCall]);
 
   // ⚠️ 页头原有的「侧栏」开关已**整块删除**（2026-10-24）：「面板入口」改由
   //    **插件详情页**的自有设置卡片（`plugins.bundle.config`）承担，那里是一个
