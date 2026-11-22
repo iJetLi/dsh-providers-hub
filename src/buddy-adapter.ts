@@ -5027,102 +5027,134 @@ async function readBuddyErrorDetail(response: Response): Promise<string> {
  * - **结构共享友好**：没变就返回**原对象**（`===` 可判），避免整棵 schema 深拷贝；
  * - `\0` 判断用**字符串里真有那两个字符**（反斜杠 + `0`），不是 `\u0000`。
  */
-export function sanitizeToolSchema<T>(node: T): T {
+export function sanitizeToolSchema<T>(node: T, isRoot = true): T {
   if (node === null || typeof node !== 'object' || Array.isArray(node)) return node
   const src = node as unknown as Record<string, unknown>
   let out: Record<string, unknown> = src
 
-  // ③ 根级 draft 声明（OpenAI function calling 的 parameters 子集不含这些）。
-  if ('$schema' in out || '$id' in out) {
+  /**
+   * ③ 根级 draft 声明 → 剥掉。
+   *
+   * ⚠️⚠️ **只在根级剥，且 `$id` 要格外小心**（2026-11-23 对抗审计 P1④）：
+   * `$id` 会**改变相对 `$ref` 的解析基准**，嵌套层剥掉它会让 `$ref` 指向别处
+   * ⇒ 那是**改语义**，比不修更糟。根级剥是安全的（parameters 子集不含它，
+   * 且根级 `$ref` 本来就该是绝对/内部引用）。
+   */
+  if (isRoot && ('$schema' in out || '$id' in out)) {
     out = { ...out }
     delete out.$schema
     delete out.$id
   }
 
-  const hasComposition = ['enum', 'anyOf', 'oneOf', 'allOf', '$ref', 'const', 'prefixItems']
-    .some((key) => key in out)
+  /**
+   * ② 裸 schema → 补 `type:'object'`。
+   *
+   * ⚠️⚠️ **不能只要有「对象形状」就补**（2026-11-23 对抗审计 P1④）：
+   * 实测误伤 `{ minimum: 0 }` / `{ format: 'email' }` / `{ not: {...} }` /
+   * `{ items: {...} }` —— 它们带**校验关键字**但没写 `type`（JSON Schema 里
+   * 合法：`minimum` 只对数字生效，`format` 只对字符串生效）。
+   * 强加 `type:'object'` 会让上游按 **object** 校验 ⇒ **合法参数被拒**。
+   *
+   * ⇒ 判据收紧成「**没有任何约束关键字**」（纯描述性的 schema 才补）。
+   */
+  const CONSTRAINT_KEYS = [
+    'type', 'enum', 'anyOf', 'oneOf', 'allOf', '$ref', 'const', 'prefixItems',
+    // 数值
+    'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+    // 字符串
+    'minLength', 'maxLength', 'pattern', 'format',
+    // 数组
+    'items', 'minItems', 'maxItems', 'uniqueItems', 'contains', 'minContains', 'maxContains',
+    // 对象
+    'properties', 'additionalProperties', 'patternProperties', 'required',
+    'minProperties', 'maxProperties', 'dependentRequired', 'dependentSchemas', 'propertyNames',
+    // 组合 / 逻辑
+    'not', 'if', 'then', 'else',
+    // 引用容器
+    '$defs', 'definitions',
+  ]
+  const hasConstraint = CONSTRAINT_KEYS.some((key) => key in out)
 
-  // ② 裸 schema（无 type、也无组合键）→ 自由 object 输入。
-  if (out.type === undefined && !hasComposition) {
+  if (out.type === undefined && !hasConstraint) {
     out = { ...out, type: 'object', properties: {} }
   }
 
   // ① `type:'object'` 缺 `properties` → 补空对象（腾讯校验器要求键存在）。
-  if (out.type === 'object' && !('properties' in out)) {
+  //
+  // ⚠️ `type` 可能是**数组**（`['object','null']`，2026-11-23 审计 P1④）——
+  //    那种形态下 `out.type === 'object'` 判据走不到 ⇒ 显式处理。
+  const typeList = Array.isArray(out.type) ? out.type : [out.type]
+  if (typeList.includes('object') && !('properties' in out)) {
     out = { ...out, properties: {} }
   }
 
-  // ④ `type:'array'` 缺 `items` → 补；有则递归。
-  //
-  // ⚠️ **`prefixItems` 存在时不得补 `items`**：那两种声明是**互斥**的
-  //    （`prefixItems` 已经逐位定义了元素类型），补一个 `items` 等于造出
-  //    「既按位置又按统一类型校验」的矛盾 schema —— 比不修更糟。
-  if (out.type === 'array' && !('items' in out) && !('prefixItems' in out)) {
+  // ④ `type` 含 'array' 且缺 `items`/`prefixItems` → 补 `items`。
+  //    `prefixItems` 存在时**不得**补（两者互斥，见上）。
+  if (typeList.includes('array') && !('items' in out) && !('prefixItems' in out)) {
     out = { ...out, items: { type: 'object', properties: {} } }
   }
-  if ('items' in out && !Array.isArray(out.items)) {
-    const next = sanitizeToolSchema(out.items)
-    if (next !== out.items) out = { ...out, items: next }
+
+  // ⑤ `pattern` 里的 `\0`（真凶）→ `\x00`（语义等价，见下方长注释）。
+  if (typeof out.pattern === 'string' && out.pattern.includes('\\0')) {
+    out = { ...out, pattern: out.pattern.replace(/\\0(?![0-9])/g, '\\x00') }
   }
 
   /**
-   * ⑤ `pattern` 里的 `\0`（真凶）：改写成 **`\x00`**。
+   * ⑥⑦⑧ **递归所有能装子 schema 的位置**（2026-11-23 对抗审计 P1②：原实现只递归
+   * `properties`/`items`/`anyOf`/`oneOf`/`allOf` 共 5 处，**12 处能被打穿**）。
    *
-   * ## ⚠️⚠️ 为什么不是 `\^@`（我第一版就写错了，被正向审计打红）
+   * 实测打穿形态：`$defs` / `definitions` / `additionalProperties` /
+   * `patternProperties` / `not` / `if` / `then` / `else` / `dependentSchemas` /
+   * `contains` / `propertyNames` / 数组形态 `items` / `prefixItems` / `unevaluated*`。
    *
-   * issue 作者真机 A/B 里「`\^@` ⇒ 200」**只证明了上游接受，没证明语义不变**。
-   * 实测（Node 正则，四种输入）：
-   *
-   * | 输入 | 原 `\0` | `\^@` | **`\x00`** |
-   * |---|---|---|---|
-   * | `<账号>@example.com` | true | **false** ❌ | **true** ✅ |
-   * | `a^b` | true | **false** ❌ | **true** ✅ |
-   * | 真 NUL | false | **true** ❌ | **false** ✅ |
-   *
-   * `\^` 是「转义 caret」、`^@` 是终端 caret notation，**两者都不是正则里的 NUL**
-   * ⇒ `\^@` 实际表示「非 `^` 且非 `@`」⇒ **工具参数会被误拒**（含 `@` 的邮箱！
-   * 而元凶工具正是 `apple-mail` 的 subject/to/cc/bcc）。
-   *
-   * ## 为什么 `\x00` 是对的
-   *
-   * `\x00` 与 `\0` 在 ECMAScript 正则里**完全等价**（实测 4/4 一致），
-   * 而 JSON Schema 的 `pattern` 就按 **ECMA-262** 解析 ⇒ 语义零变化。
-   * 上游拒 `\0` 是因为它不是**标准**写法（`\0` 在严格模式下还有八进制歧义），
-   * 而 `\x00` 是标准十六进制转义。
-   *
-   * ⚠️ **`\x00` 上游未实测**（作者只测了 `\^@` 与删掉 `\0`）—— 如实登记。
-   *    若上游连 `\x00` 也拒，退路是**直接删掉 `\0`**（作者 A/B 表里 `^[^\r\n]*$` ⇒ 200
-   *    已实测），代价是 NUL 不再被排除（放宽校验不会误拒合法输入，方向安全）。
-   *    本轮不预置这条回退：一次请求只能发一种 pattern，而 `\x00` 是语义正确的那个。
+   * ⚠️ **最现实的形态**：zod 生成的 schema 常是「根级 `$ref` + `$defs`」——
+   *    原实现会剥掉 `$schema` 却**完全不碰 `$defs`** ⇒ `\0` 原样发给上游 ⇒ 仍旧 400。
    */
-  if (typeof out.pattern === 'string' && out.pattern.includes('\\0')) {
-    out = { ...out, pattern: out.pattern.split('\\0').join('\\x00') }
-  }
+  const recurse = (value: unknown): unknown => sanitizeToolSchema(value, false)
 
-  // ⑥ `properties.*` 递归（每个子 schema 都可能独立违规）。
-  if (out.properties !== null && typeof out.properties === 'object' && !Array.isArray(out.properties)) {
-    const props = out.properties as Record<string, unknown>
-    let changed = false
-    const nextProps: Record<string, unknown> = {}
-    for (const [key, value] of Object.entries(props)) {
-      const next = sanitizeToolSchema(value)
-      if (next !== value) changed = true
-      nextProps[key] = next
+  /** 单值容器：值是 schema。 */
+  for (const key of [
+    'additionalProperties', 'additionalItems', 'not', 'if', 'then', 'else',
+    'contains', 'propertyNames', 'unevaluatedProperties', 'unevaluatedItems',
+  ] as const) {
+    const child = out[key]
+    if (child !== null && typeof child === 'object' && !Array.isArray(child)) {
+      const next = recurse(child)
+      if (next !== child) out = { ...out, [key]: next }
     }
-    if (changed) out = { ...out, properties: nextProps }
   }
 
-  // ⑦ 组合键递归（`anyOf` / `oneOf` / `allOf` 的分支也是 schema）。
-  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
-    const branch = out[key]
-    if (!Array.isArray(branch)) continue
+  /** 字典容器：值是 `{ name: schema }`。 */
+  for (const key of ['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas'] as const) {
+    const bag = out[key]
+    if (bag === null || typeof bag !== 'object' || Array.isArray(bag)) continue
     let changed = false
-    const nextBranch = branch.map((item) => {
-      const next = sanitizeToolSchema(item)
-      if (next !== item) changed = true
-      return next
+    const next: Record<string, unknown> = {}
+    for (const [name, value] of Object.entries(bag as Record<string, unknown>)) {
+      const child = recurse(value)
+      if (child !== value) changed = true
+      next[name] = child
+    }
+    if (changed) out = { ...out, [key]: next }
+  }
+
+  /** 数组容器：值是 schema 数组。 */
+  for (const key of ['anyOf', 'oneOf', 'allOf', 'prefixItems', 'items'] as const) {
+    const list = out[key]
+    if (!Array.isArray(list)) continue
+    let changed = false
+    const next = list.map((item) => {
+      const child = recurse(item)
+      if (child !== item) changed = true
+      return child
     })
-    if (changed) out = { ...out, [key]: nextBranch }
+    if (changed) out = { ...out, [key]: next }
+  }
+
+  /** 单 schema 容器（`items` 的非数组形态）。 */
+  if ('items' in out && out.items !== null && typeof out.items === 'object' && !Array.isArray(out.items)) {
+    const child = recurse(out.items)
+    if (child !== out.items) out = { ...out, items: child }
   }
 
   return out as unknown as T

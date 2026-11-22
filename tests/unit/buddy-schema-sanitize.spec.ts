@@ -69,7 +69,15 @@ describe('sanitizeToolSchema：issue #138 的四类违规', () => {
     expect(props.nested!.properties, 'properties 层要递归补 properties').toEqual({})
     expect(out.anyOf as unknown[], 'anyOf 分支也要递归').toHaveLength(2)
     expect((out.anyOf as Record<string, unknown>[])[0]!.properties, 'anyOf 分支缺 properties 要补').toEqual({})
-    expect((out.anyOf as Record<string, unknown>[])[1], 'anyOf 分支的 $schema 要剥').not.toHaveProperty('$schema')
+    /**
+     * ⚠️ **2026-11-23 改判据**（对抗审计 P1④）：`$schema` / `$id` **只在根级剥**。
+     *
+     * 原因：`$id` 会**改变相对 `$ref` 的解析基准** —— 嵌套层剥掉它会让 `$ref`
+     * 指向别处，那是**改语义**，比不修更糟。`$schema` 虽然影响小，但同属 draft 声明，
+     * 保持「只在根级处理」这一条一致规则更好维护。
+     */
+    expect((out.anyOf as Record<string, unknown>[])[1], '嵌套层刻意**不**剥 $schema（防改 $ref 基准）')
+      .toHaveProperty('$schema')
   })
 
   it('★★ 合规 schema **原对象返回**（`===`）—— 不做无谓深拷贝', () => {
@@ -152,5 +160,81 @@ describe('sanitizeToolSchema：pattern 改写必须语义等价', () => {
     const caret = compile('^[^\\r\\n\\^@]*$')
     expect(caret.test('a@b.com'), '这正是我第一版的错误：含 @ 的邮箱被误拒').toBe(false)
     expect(original.test('a@b.com'), '原 pattern 接受它').toBe(true)
+  })
+})
+
+/**
+ * ★★★ **递归必须覆盖全部容器 + 不得误伤合规 schema**（2026-11-23 对抗审计 P1②/P1④）。
+ *
+ * 对抗审计实测原实现**能被打穿 12 处**（sanitize 后仍含 `\0`）：
+ * `$defs` / `definitions` / `additionalProperties` / `patternProperties` / `not` /
+ * `if` / `then` / `else` / `dependentSchemas` / `contains` / `propertyNames` /
+ * 数组形态 `items` / `prefixItems` / `unevaluated*`。
+ *
+ * **最现实的形态**：zod 生成的 schema 常是「根级 `$ref` + `$defs`」——
+ * 原实现剥了 `$schema` 却**完全不碰 `$defs`** ⇒ `\0` 原样发给上游 ⇒ 仍旧 400。
+ */
+describe('sanitizeToolSchema：递归完备性（12 处容器）', () => {
+  /** 一个含 `\0` 的叶子 schema。 */
+  const dirty = { type: 'string', pattern: '^a\\0b$' }
+  const clean = (s: unknown): string => JSON.stringify(s)
+
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['$defs', { $ref: '#/$defs/x', $defs: { x: dirty } }],
+    ['definitions', { $ref: '#/definitions/x', definitions: { x: dirty } }],
+    ['additionalProperties', { type: 'object', properties: {}, additionalProperties: dirty }],
+    ['patternProperties', { type: 'object', properties: {}, patternProperties: { '^a': dirty } }],
+    ['not', { type: 'object', properties: {}, not: dirty }],
+    ['if', { type: 'object', properties: {}, if: dirty }],
+    ['then', { type: 'object', properties: {}, then: dirty }],
+    ['else', { type: 'object', properties: {}, else: dirty }],
+    ['dependentSchemas', { type: 'object', properties: {}, dependentSchemas: { a: dirty } }],
+    ['contains', { type: 'array', items: {}, contains: dirty }],
+    ['propertyNames', { type: 'object', properties: {}, propertyNames: dirty }],
+    ['unevaluatedProperties', { type: 'object', properties: {}, unevaluatedProperties: dirty }],
+    ['数组形态 items', { type: 'array', items: [dirty] }],
+    ['prefixItems', { type: 'array', prefixItems: [dirty] }],
+  ]
+
+  for (const [label, schema] of cases) {
+    it(`★★★ ${label} 里的 \`\\0\` 必须被递归处理`, () => {
+      const out = sanitizeToolSchema(schema)
+      expect(clean(out), `\`${label}\` 容器没被递归 ⇒ 上游仍会 400`).not.toContain('\\\\0')
+    })
+  }
+})
+
+describe('sanitizeToolSchema：不得误伤合规 schema（审计 P1④）', () => {
+  it('★★★ 带校验关键字但无 `type` 的 schema 不得被强加 `type:"object"`', () => {
+    // `minimum` 只对数字生效、`format` 只对字符串生效 —— JSON Schema 里都合法。
+    for (const schema of [{ minimum: 0 }, { format: 'email' }, { not: { type: 'string' } }]) {
+      const out = sanitizeToolSchema(schema) as Record<string, unknown>
+      expect(out.type, `${JSON.stringify(schema)} 被强加 type 会按 object 校验 ⇒ 合法参数被拒`).toBeUndefined()
+    }
+  })
+
+  it('★★★ 嵌套层不得剥 `$id`（会改相对 `$ref` 的解析基准）', () => {
+    const schema = {
+      type: 'object',
+      properties: { a: { $id: 'sub', type: 'string' } },
+    }
+    const out = sanitizeToolSchema(schema) as { properties: { a: Record<string, unknown> } }
+    expect(out.properties.a.$id, '嵌套 $id 影响 $ref 基准 —— 剥了会改语义').toBe('sub')
+  })
+
+  it('★★★ `type` 是数组（`["object","null"]`）时也要补 `properties`', () => {
+    const out = sanitizeToolSchema({ type: ['object', 'null'] }) as Record<string, unknown>
+    expect(out.properties, '`out.type === "object"` 判据走不到数组形态').toEqual({})
+  })
+
+  it('★★★ 八进制转义 `\\012` 不得被当成 `\\0`+`12` 改写', () => {
+    const out = sanitizeToolSchema({ type: 'string', pattern: '^\\012$' }) as { pattern: string }
+    expect(out.pattern, '`\\012` 是换行的八进制转义 —— 改成 `\\x0012` 语义就变了').toBe('^\\012$')
+  })
+
+  it('★★★ 多处 `\\0` 必须**全部**替换（不止第一个）', () => {
+    const out = sanitizeToolSchema({ type: 'string', pattern: '^\\0a\\0b\\0$' }) as { pattern: string }
+    expect(out.pattern).not.toContain('\\0')
+    expect(out.pattern).toBe('^\\x00a\\x00b\\x00$')
   })
 })
