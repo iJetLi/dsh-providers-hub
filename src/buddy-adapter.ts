@@ -5065,9 +5065,38 @@ export function sanitizeToolSchema<T>(node: T): T {
     if (next !== out.items) out = { ...out, items: next }
   }
 
-  // ⑤ `pattern` 里的 `\0`（真凶）：改写成 caret notation，语义完全相同。
+  /**
+   * ⑤ `pattern` 里的 `\0`（真凶）：改写成 **`\x00`**。
+   *
+   * ## ⚠️⚠️ 为什么不是 `\^@`（我第一版就写错了，被正向审计打红）
+   *
+   * issue 作者真机 A/B 里「`\^@` ⇒ 200」**只证明了上游接受，没证明语义不变**。
+   * 实测（Node 正则，四种输入）：
+   *
+   * | 输入 | 原 `\0` | `\^@` | **`\x00`** |
+   * |---|---|---|---|
+   * | `a@b.com` | true | **false** ❌ | **true** ✅ |
+   * | `a^b` | true | **false** ❌ | **true** ✅ |
+   * | 真 NUL | false | **true** ❌ | **false** ✅ |
+   *
+   * `\^` 是「转义 caret」、`^@` 是终端 caret notation，**两者都不是正则里的 NUL**
+   * ⇒ `\^@` 实际表示「非 `^` 且非 `@`」⇒ **工具参数会被误拒**（含 `@` 的邮箱！
+   * 而元凶工具正是 `apple-mail` 的 subject/to/cc/bcc）。
+   *
+   * ## 为什么 `\x00` 是对的
+   *
+   * `\x00` 与 `\0` 在 ECMAScript 正则里**完全等价**（实测 4/4 一致），
+   * 而 JSON Schema 的 `pattern` 就按 **ECMA-262** 解析 ⇒ 语义零变化。
+   * 上游拒 `\0` 是因为它不是**标准**写法（`\0` 在严格模式下还有八进制歧义），
+   * 而 `\x00` 是标准十六进制转义。
+   *
+   * ⚠️ **`\x00` 上游未实测**（作者只测了 `\^@` 与删掉 `\0`）—— 如实登记。
+   *    若上游连 `\x00` 也拒，退路是**直接删掉 `\0`**（作者 A/B 表里 `^[^\r\n]*$` ⇒ 200
+   *    已实测），代价是 NUL 不再被排除（放宽校验不会误拒合法输入，方向安全）。
+   *    本轮不预置这条回退：一次请求只能发一种 pattern，而 `\x00` 是语义正确的那个。
+   */
   if (typeof out.pattern === 'string' && out.pattern.includes('\\0')) {
-    out = { ...out, pattern: out.pattern.split('\\0').join('\\^@') }
+    out = { ...out, pattern: out.pattern.split('\\0').join('\\x00') }
   }
 
   // ⑥ `properties.*` 递归（每个子 schema 都可能独立违规）。

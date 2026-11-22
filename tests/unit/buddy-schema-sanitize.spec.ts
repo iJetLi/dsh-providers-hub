@@ -16,10 +16,10 @@ import { describe, expect, it } from 'vitest'
 import { sanitizeToolSchema } from '../../src/buddy-adapter.js'
 
 describe('sanitizeToolSchema：issue #138 的四类违规', () => {
-  it('★★★ `pattern` 里的 `\\0` 必须改写成 `\\^@`（本次真凶）', () => {
-    // 真机 A/B：`^[^\r\n\0]*$` ⇒ 400；`^[^\r\n\^@]*$` ⇒ 200（语义相同）。
+  it('★★★ `pattern` 里的 `\\0` 必须改写成 `\\x00`（本次真凶）', () => {
+    // 真机 A/B：`^[^\r\n\0]*$` ⇒ 400；`^[^\r\n\x00]*$` ⇒ 200（语义相同）。
     const out = sanitizeToolSchema({ type: 'string', pattern: '^[^\\r\\n\\0]*$' })
-    expect(out.pattern, '`\\0` 不是合法正则空字符转义，腾讯直接拒收').toBe('^[^\\r\\n\\^@]*$')
+    expect(out.pattern, '`\\0` 不是合法正则空字符转义，腾讯直接拒收').toBe('^[^\\r\\n\\x00]*$')
     expect(out.pattern, '不得留下裸露的 \\0').not.toContain('\\0')
   })
 
@@ -65,7 +65,7 @@ describe('sanitizeToolSchema：issue #138 的四类违规', () => {
       anyOf: [{ type: 'object' }, { $schema: 'x', type: 'string' }],
     })
     const props = out.properties as Record<string, Record<string, unknown>>
-    expect(props.subject!.pattern, 'properties 层要递归到 pattern').toBe('^[^\\^@]*$')
+    expect(props.subject!.pattern, 'properties 层要递归到 pattern').toBe('^[^\\x00]*$')
     expect(props.nested!.properties, 'properties 层要递归补 properties').toEqual({})
     expect(out.anyOf as unknown[], 'anyOf 分支也要递归').toHaveLength(2)
     expect((out.anyOf as Record<string, unknown>[])[0]!.properties, 'anyOf 分支缺 properties 要补').toEqual({})
@@ -92,5 +92,65 @@ describe('sanitizeToolSchema：issue #138 的四类违规', () => {
     expect(sanitizeToolSchema('x')).toBe('x')
     const arr = [1, 2]
     expect(sanitizeToolSchema(arr)).toBe(arr)
+  })
+})
+
+/**
+ * ★★★ **改写后的 pattern 必须与原来「语义等价」**（不只是「上游接受」）。
+ *
+ * ## 这是我第一版踩的坑，值得单独钉住
+ *
+ * 我最初照 issue 作者的 A/B 结论把 `\0` 改成 `\^@`（他真机测过「上游返回 200」），
+ * 而正向审计实测发现**语义变了**：
+ *
+ * | 输入 | 原 `\0` | `\^@` |
+ * |---|---|---|
+ * | `a@b.com` | true | **false**（误拒 `@`）|
+ * | `a^b` | true | **false**（误拒 `^`）|
+ * | 真 NUL | false | **true**（放行 NUL）|
+ *
+ * `\^` 是「转义 caret」、`^@` 是**终端** caret notation，两者都不是正则里的 NUL
+ * ⇒ `\^@` 实际表示「非 `^` 且非 `@`」。而元凶工具正是 `apple-mail` 的
+ * subject/to/cc/bcc —— **含 `@` 的邮箱地址会被自己写的 pattern 拒掉**。
+ *
+ * ⇒ 判据应该是「**改写前后对同一组输入给出同样的匹配结果**」，而不是
+ *   「上游接不接受」（后者只说明语法合法，不说明语义没变）。
+ *
+ * `\x00` 与 `\0` 在 ECMAScript 正则里完全等价（下方用例逐输入验证）。
+ */
+describe('sanitizeToolSchema：pattern 改写必须语义等价', () => {
+  const compile = (pattern: string): RegExp => new RegExp(pattern)
+  const inputs = [
+    'a@b.com',          // ← `\^@` 会把它误拒
+    'hello world',
+    'a^b',              // ← `\^@` 也会误拒
+    '中文 subject',
+    '',                 // 空串
+    '\r', '\n',         // 原 pattern 就排除的
+    String.fromCharCode(0),   // 真 NUL：原 pattern 排除、`\^@` 反而放行
+  ]
+
+  it('★★★ 改写前后对 8 种输入给出**完全一致**的匹配结果', () => {
+    const original = '^[^\\r\\n\\0]*$'
+    const sanitized = sanitizeToolSchema({ type: 'string', pattern: original }).pattern!
+    expect(sanitized, '不得保留 `\\0`（上游拒收）').not.toContain('\\0')
+    expect(sanitized, '必须是 ECMAScript 的 `\\x00`，不是终端 caret notation').toBe('^[^\\r\\n\\x00]*$')
+
+    const before = compile(original)
+    const after = compile(sanitized)
+    for (const input of inputs) {
+      expect(
+        after.test(input),
+        `输入 ${JSON.stringify(input)} 的匹配结果必须不变（否则工具参数会被误拒/误放行）`,
+      ).toBe(before.test(input))
+    }
+  })
+
+  it('★★★ 反向：如果照 issue 作者的 `\\^@` 写，本用例会红（证明判据有牙）', () => {
+    // 直接对照：`\^@` 对 `a@b.com` 给出 false，而原 pattern 给 true ⇒ 语义不同。
+    const original = compile('^[^\\r\\n\\0]*$')
+    const caret = compile('^[^\\r\\n\\^@]*$')
+    expect(caret.test('a@b.com'), '这正是我第一版的错误：含 @ 的邮箱被误拒').toBe(false)
+    expect(original.test('a@b.com'), '原 pattern 接受它').toBe(true)
   })
 })

@@ -2910,8 +2910,8 @@ describe('BuddyAdapter message serialization', () => {
     const props = payload.tools![0]!.function.parameters.properties
     expect(
       props.subject!.pattern,
-      '`\\0` 会被腾讯校验器拒收（400 11129）⇒ 发上游前必须改写成 `\\^@`',
-    ).toBe('^[^\\r\\n\\^@]*$')
+      '`\\0` 会被腾讯校验器拒收（400 11129）⇒ 发上游前必须改写成**语义等价**的 `\\x00`',
+    ).toBe('^[^\\r\\n\\x00]*$')
     expect(props.nested!.properties, '接线也要覆盖「object 缺 properties」').toEqual({})
   })
 })
