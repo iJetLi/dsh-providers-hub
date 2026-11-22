@@ -146,27 +146,64 @@ describe('★ buddy 系四家吃共享读数（命中时不再打上游）', () 
   })
 
   it('★★ 判据零改动：同一个 CreditBalance 得出的到期时刻与「不传 cached」时一致', async () => {
-    // ⚠️ 本任务只换「怎么拿到余额」，**不改**折算判据 —— 逐格对照三份余额。
-    const cases: CreditBalance[] = [
-      balanceWith(FUTURE_AT),
-      exhausted(),
-      // 有余额但**无**到期时间（永久积分）⇒ NEVER（不剔除）
-      { total: 5, packages: [{ name: 'p', unit: 'u', remaining: 5, total: 5, used: 0, active: true, cycleStartTime: '', cycleEndTime: '', expiredTime: '' }] } as unknown as CreditBalance,
-    ]
-    for (const [index, balance] of cases.entries()) {
-      const withoutCache = await buddyExpiry(CODEBUDDY, credential)
-      // ⚠️ 用**桩**返回固定余额（`buddyExpiry` 的 fallback 在无 cached 时不走桩，
-      //    故这里改为「传 cached 且 fallback 恒抛」来隔离出折算判据本身）。
-      const withCache = await buddyExpiry(CODEBUDDY, credential, async () => balance)
-      // 不传 cached 时它会真发请求（单测环境无网络）⇒ 结果是 UNUSABLE；
-      // 故对照的是「同一份余额经共享读数 vs 经 fallback」——两者必须同值。
-      const viaFallback = await buddyExpiry(CODEBUDDY, credential, async () => undefined)
-        .catch(() => 'threw')
-      void withoutCache
-      void viaFallback
-      // ★ 核心断言：cached 路径的返回值 = 该余额本应得出的值
-      const expected = index === 1 ? -1 : (index === 2 ? Number.POSITIVE_INFINITY : FUTURE_AT)
-      expect(withCache, `第 ${index} 份余额`).toBe(expected)
+    /**
+     * ⚠️⚠️ **整个用例期间必须禁网**（2026-11-21 修，全量跑偶发红）。
+     *
+     * ## 症状
+     *
+     * 单跑必绿、**全量**里偶发红在 `第 0 份余额` 那一格：
+     * `expected -1 to be 1795…`。也就是说 `withCache` 得到了 **UNUSABLE**，
+     * 而它本该直接吃桩给的余额。
+     *
+     * ## 真因：不是判据错，是**同一条用例里自己发动了真实请求**
+     *
+     * 下面三行**全是** `await`，而**只有中间那行**走桩：
+     *
+     * | 调用 | `cached` | 实际行为 |
+     * |---|---|---|
+     * | `buddyExpiry(…, credential)` | 不给 | ⇒ **真发 HTTPS** 到上游 |
+     * | `buddyExpiry(…, async () => balance)` | 有 | ⇒ 吃桩（本用例的被测路径）|
+     * | `buddyExpiry(…, async () => undefined)` | 返回 undefined | ⇒ **真发 HTTPS** |
+     *
+     * 前两行的返回值本来就被 `void` 掉了（作者自己也标了「对照不了」），
+     * 但它们**照样打网络**。全量跑时几十个 worker 并跑 + 本机出口抖动 ⇒
+     * 这些请求要么拖到 `testTimeout`，要么把共享的 `balance-cache`
+     * 模块级状态搅乱 ⇒ 被测那一行的结果被带偏。
+     *
+     * ⇒ 与本文件第 283 行同款处方：**`vi.stubGlobal('fetch', 抛错)`**。
+     *    这样那两行「真发请求」的调用会**立刻**失败（这正是它们本来在
+     *    无网单测环境里的结局，只是从「等网络超时」变成「立刻」），
+     *    而被测那一行完全不受影响（它压根不经过 fetch）。
+     *
+     * ⚠️ 这不是「让用例变宽松」：核心断言一字未改，只是把**不确定性**去掉。
+     */
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal('fetch', () => { throw new Error('no-network-in-this-spec') })
+    try {
+      // ⚠️ 本任务只换「怎么拿到余额」，**不改**折算判据 —— 逐格对照三份余额。
+      const cases: CreditBalance[] = [
+        balanceWith(FUTURE_AT),
+        exhausted(),
+        // 有余额但**无**到期时间（永久积分）⇒ NEVER（不剔除）
+        { total: 5, packages: [{ name: 'p', unit: 'u', remaining: 5, total: 5, used: 0, active: true, cycleStartTime: '', cycleEndTime: '', expiredTime: '' }] } as unknown as CreditBalance,
+      ]
+      for (const [index, balance] of cases.entries()) {
+        const withoutCache = await buddyExpiry(CODEBUDDY, credential).catch(() => 'threw')
+        // ⚠️ 用**桩**返回固定余额（`buddyExpiry` 的 fallback 在无 cached 时不走桩，
+        //    故这里改为「传 cached 且 fallback 恒抛」来隔离出折算判据本身）。
+        const withCache = await buddyExpiry(CODEBUDDY, credential, async () => balance)
+        // 不传 cached 时它会真发请求（已禁网 ⇒ 立刻失败）⇒ 结果是 UNUSABLE；
+        // 故对照的是「同一份余额经共享读数 vs 经 fallback」——两者必须同值。
+        const viaFallback = await buddyExpiry(CODEBUDDY, credential, async () => undefined)
+          .catch(() => 'threw')
+        void withoutCache
+        void viaFallback
+        // ★ 核心断言：cached 路径的返回值 = 该余额本应得出的值
+        const expected = index === 1 ? -1 : (index === 2 ? Number.POSITIVE_INFINITY : FUTURE_AT)
+        expect(withCache, `第 ${index} 份余额`).toBe(expected)
+      }
+    } finally {
+      vi.stubGlobal('fetch', originalFetch)
     }
   })
 })

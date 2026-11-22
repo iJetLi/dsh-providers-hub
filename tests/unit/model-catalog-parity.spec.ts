@@ -117,6 +117,25 @@ const NO_CRED = {
   refresh: async () => {},
 }
 
+/**
+ * **恒定拒绝**的 `fetch` 桩 —— 给那些「即使给了凭据也不许打远端」的夹具用。
+ *
+ * ## 为什么需要它（2026-11-21 实测）
+ *
+ * 本文件是**离线对拍**：单测里出现真实 HTTPS 请求，会带来两个必然后果 ——
+ *
+ * 1. **偶发超时**：`magicrewintl` 实测单次 1s 起，网络一抖就撞 5 秒 `testTimeout`
+ *    ⇒ 全量跑红、单跑绿（最典型的「基线失败」形态，也是最难归因的一种）。
+ * 2. **断言变成随机真值**：远端目录一旦真的读到，`listed.length` 就不是静态表
+ *    那 27 条了 —— 用例看着绿，测的却是「今天上游给了什么」。
+ *
+ * ⚠️ 它**不是**「跳过断言」：适配器仍然走完整的 `fetchModels()` 流程，只是远端腿
+ * 必然失败 ⇒ 覆盖的正是生产里「上游挂了 ⇒ 回退静态表」那条 catch 分支。
+ */
+const OFFLINE_FETCH = (async () => {
+  throw new Error('parity-fixture-offline: 本文件是离线对拍，不得打真实网络')
+}) as unknown as typeof fetch
+
 /** 造一个 provider 的骨架（替身池 + 可控目录 + 可控黑名单）。 */
 function makeCatalog(
   entries: readonly CatalogEntry[],
@@ -714,11 +733,22 @@ id: 'autoclaw',
     //    否则它不过本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
     //    ⚠️ `fetchRemoteModels` 不给 ⇒ 走静态兜底表（27 条），那是**可预期**的目录；
     //    本段只对拍跨家契约，不打远端。
+    //
+    //    ⚠️⚠️ **但只「不给 `fetchRemoteModels`」并不能阻止打远端**（2026-11-21 实测）：
+    //    `fetchModels()` 的第 ② 条腿是「`resolveCredential()` 拿得到凭据 ⇒ 真拉」，
+    //    而下面这个夹具**刻意给了凭据**（为了走「有凭据时目录仍可读」那条腿）
+    //    ⇒ 于是每家一次真实 HTTPS GET。症状是 `magicrewintl` 那条用例
+    //    **偶发超时 5 秒**（国内站 228ms、国际站实测 1s 起，网络一抖就 >5s），
+    //    而单跑有时是绿的 —— 典型的「单测串了网络」。
+    //    ⇒ 修法是给一个**恒定拒绝**的 `fetchImpl`：仍然覆盖「有凭据 + 远端失败
+    //      ⇒ 回退静态表」这条真实生产路径（`fetchModels` 的 catch 分支），
+    //      但**零网络、确定性**（27 条、0ms）。
     {
       id: 'magicrew',
       make: () => new MagicrewAdapter({
         ...NO_CRED,
         resolveCredential: async () => ({ jwt: 'J', organizationCode: 'org1' } as never),
+        fetchImpl: OFFLINE_FETCH,
       } as never),
     },
     // ⚠️ **MagiCrew 国际版**（`magicrewintl`，2026-11-01）：`channel: true` ⇒ 必须进本表，
@@ -726,12 +756,15 @@ id: 'autoclaw',
     //    ⚠️ 必须显式传 `product: MAGICREW_INTL` —— 用默认值会拿国内站的
     //    `fallbackModels` 与 host 去构造一个「看起来对、实际是另一站」的适配器
     //    （本段只对拍跨家契约，但 product 传错会让档位/窗口的判据失去意义）。
+    //    ⚠️ `fetchImpl: OFFLINE_FETCH` 的理由与上面 `magicrew` 那条**逐字相同**
+    //    （本家正是那条 5 秒超时的直接受害者）。
     {
       id: 'magicrewintl',
       make: () => new MagicrewAdapter({
         ...NO_CRED,
         product: MAGICREW_INTL,
         resolveCredential: async () => ({ jwt: 'J', organizationCode: 'org1' } as never),
+        fetchImpl: OFFLINE_FETCH,
       } as never),
     },
     // ⚠️ 腾讯 Marvis（2026-11-09）：`channel: true` ⇒ 必须进本表，否则它不过

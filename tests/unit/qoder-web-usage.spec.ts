@@ -90,6 +90,20 @@ describe('splitAddOnQuota', () => {
   it('网页明细：按日合并、按到期排序，守恒等于 sash 余额', () => {
     const parts = splitAddOnQuota(addOn(300), {
       kind: 'web',
+      /**
+       * ⚠️⚠️ **本段所有 `kind: 'web'` 夹具必须显式传 `nowMs`**（2026-11-21 修）。
+       *
+       * `splitAddOnQuota` 对 web 形态的 `nowMs` 是 `detail.nowMs ?? Date.now()`
+       * —— 不传就取**真实当下**，而本文件的夹具日期是**固定**的
+       * `NOW = 2026-11-14`。于是过几天再跑，`NOW + 1 * DAY` 就成了过去时刻
+       * ⇒ 被 `filter(p => p.expiresAtMs > nowMs)` 全数滤掉 ⇒ `items.length === 0`
+       * ⇒ 函数返回 `undefined` ⇒ 用例报 `Cannot read properties of undefined`。
+       *
+       * 症状极具误导性（看着像 `splitAddOnQuota` 坏了），真因是**夹具随日历腐坏**：
+       * 生产语义（只把**未来**到期的包排进分配）是对的，不该为它在实现里兜底。
+       * ⇒ 正确做法是把「现在」钉进夹具，让用例与系统时钟解耦。
+       */
+      nowMs: NOW,
       packages: [
         { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 3 * DAY },
         { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 1 * DAY },
@@ -107,6 +121,8 @@ describe('splitAddOnQuota', () => {
   it('明细合计多于 sash 余额 ⇒ 按先到期先扣削掉最早的', () => {
     const parts = splitAddOnQuota(addOn(150), {
       kind: 'web',
+      // ⚠️ `nowMs` 必须显式钉住（理由见上面第一条用例的长注释：夹具日期是固定的）。
+      nowMs: NOW,
       packages: [
         { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 1 * DAY },
         { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 5 * DAY },
@@ -264,6 +280,8 @@ describe('splitAddOnQuota 的第二轮加固', () => {
   it('★★★ 各包 remaining 之和恒等于 addOn.remaining（逐笔少 1 也要红）', () => {
     const parts = splitAddOnQuota(addOn(377), {
       kind: 'web',
+      // ⚠️ `nowMs` 必须显式钉住（夹具日期固定，理由见上面「按日合并」那条用例）。
+      nowMs: NOW,
       packages: [
         { remaining: 101, total: 101, used: 0, expiresAtMs: NOW + 1 * DAY },
         { remaining: 103, total: 103, used: 0, expiresAtMs: NOW + 2 * DAY },
@@ -283,6 +301,8 @@ describe('splitAddOnQuota 的第二轮加固', () => {
   it('★★ 拆出来的每一包都必须 `totalKnown: false`（浮层不许算假分母）', () => {
     const parts = splitAddOnQuota(addOn(300), {
       kind: 'web',
+      // ⚠️ `nowMs` 必须显式钉住（夹具日期固定，理由见上面「按日合并」那条用例）。
+      nowMs: NOW,
       packages: [
         { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 1 * DAY },
         { remaining: 100, total: 100, used: 0, expiresAtMs: NOW + 2 * DAY },

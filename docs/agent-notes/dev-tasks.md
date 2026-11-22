@@ -960,11 +960,44 @@ node_modules\typescript -> ..\.agents\worktrees\codearts-model-desc\node_modules
 - 判据：`Get-ChildItem <repo>\node_modules -Force | Where-Object { $_.Target -like '*worktrees*' }`
   必须为空。
 
-### ⚠️ 全量单测在本机有**既有偶发失败**，别当成自己造的
+### ✅ 基线失败已清零（2026-11-21）；判断回归仍要看「干净基线对照」
 
-2026-11-17 实测：纯 `origin/master` 工作树跑全量同样是
+> **2026-11-21 起，全量 `npx vitest run` 是 0 失败**（14926 passed / 26 skipped）。
+> 此前长期挂着 6~8 条「基线失败」，现已逐条定性并修掉 —— 逐条清单与本轮
+> 修法见下一节。**但这不改变下面这条方法论**：判断「是不是我造的回归」，
+> 永远应该用**干净基线工作树对照**，而不是看总数颜色。
+
+2026-11-17 实测（历史）：纯 `origin/master` 工作树跑全量同样是
 `magicrew-local-browser`（本机目录存在性）+ `qoder-web-usage`（数值对拍）等
 **环境相关**用例红；并行满载时还会额外牵连 `qiniu-rpc` / `account-probe*` /
 `balance-cache-wiring` / `minimax-intl` / `models-dev-cache` / `session-title`
 （**单独跑就绿**）。判断是否回归的正确做法：同一批文件在
 **干净基线工作树**上跑一遍对比，而不是看总数的颜色。
+
+#### ⚠️⚠️ 2026-11-21 基线清零：8 条失败 = 5 类根因，**只有 1 类是真 bug**
+
+本轮把「每次都得人工过滤」的 6~8 条基线失败一次性定性。**5 类根因里 4 类是
+测试自身腐坏，1 类是真缺陷** —— 这个比例本身就是教训：**基线红里真 bug 是少数，
+但「少数」不等于「零」**，所以不能靠「基线红就无视」的习惯处理。
+
+| # | 用例 | 定性 | 根因（都可复现，不是猜测） |
+|---|---|---|---|
+| 1 | `qoder-web-usage` ×4 | **测试腐坏**（时钟腐坏） | 夹具日期写死 `NOW = 2026-11-14`，而 `splitAddOnQuota` 的 web 形态 `nowMs` 默认取 `Date.now()` ⇒ **过几天再跑，夹具全成了过去时刻** ⇒ 被「只看未来到期」的 filter 滤空 ⇒ 返回 `undefined` ⇒ 报 `Cannot read properties of undefined`。**修法：夹具显式传 `nowMs: NOW`**（生产语义是对的，不该为它兜底）。 |
+| 2 | `balance-disk-cache` ×2 | **测试腐坏**（观测量选错） | 判据读的是**文件顶层 `at`**，而它是 `flushDisk(now = Date.now())` ⇒ **同一毫秒内两次写盘 `at` 相同**。实测连跑 20 轮有 **15 轮**前后相同 ⇒ 反向守卫随机假红。**修法：`vi.spyOn(Date,'now')` 装受控时钟**，推进后才前进。 |
+| 3 | `model-catalog-parity`（`magicrewintl`） | **测试腐坏**（串了真网络） | 夹具给了 `resolveCredential`（假 jwt）⇒ 适配器走「有凭据就真拉」那条腿 ⇒ **真发 HTTPS**（实测国内站 228ms / 国际站 1s+）⇒ 全量满载时撞 5 秒 `testTimeout`。**修法：注入恒定拒绝的 `OFFLINE_FETCH`**（仍覆盖「远端失败 ⇒ 回退静态表」这条真实生产路径）。 |
+| 4 | `raccoon-authorize`（连接数上限） | **测试腐坏**（夹具根本没造出慢连接） | 用 `http.request` + `req.write()` 造「慢连接」，但 `http.request` 一调就把请求头**发完了** ⇒ 服务端收到的是**完整请求**、立刻回 400 并释放连接 ⇒ 第 9 个连接照样 200。实测服务端日志 8 条全是 `url="/auth/callback"`（完整）。**修法：改用裸 `net.connect` 发半截请求头**（永不结束）。⚠️ 改完后 `maxConnections = 8 → 100` 的变异**有牙**（变红），改之前**无牙**。 |
+| 5 | `autoclawintl-zai-wiring`（失败后重试） | **★ 真 bug** | 回环登录服务跑在**固定端口**（`18432`，随机端口会被 Z.ai 以 `Redirect URI not registered` 拒），且响应用 **keep-alive** ⇒ 第一轮的 socket 留在客户端池里，`close()` 后池子不知道 ⇒ **第二轮取到死 socket** ⇒ `other_end closed`。**修法：`res.setHeader('Connection','close')`**（与 `raccoon-authorize` 同一处方）。 |
+
+**五条可复用的判据（都是本轮实测，不是推理）**：
+
+1. **「过一阵就红」先怀疑夹具的日期，不是被测代码** —— `Date.now()` 与写死的
+   `NOW` 混用是最常见的一种；凡是「算未来/过期」的函数，夹具**必须**把 `nowMs` 钉住。
+2. **观测量不能用粗粒度时钟** —— 墙钟毫秒不能当「写没写盘」的证据（15/20 碰撞）。
+   要么受控时钟，要么换成**语义字段**。
+3. **单测里任何 `resolveCredential` 非 `undefined` 都要问一句「会不会真发请求」** ——
+   「有凭据 ⇒ 真拉」是多数适配器的第 ② 条腿，夹具给假凭据就等于开了一扇网络门。
+4. **造「慢连接」不能用 `http.request`** —— 它的 API 自己把请求发完。要真的半截
+   连接只能用裸 `net`；改完**必须做变异验证**（把 `maxConnections` 改大，看会不会红），
+   否则你无法知道旧夹具测的是不是空气。
+5. **固定端口的回环服务必须 `Connection: close`** —— keep-alive + 固定端口 +
+   重启服务 = 死 socket 复用，这是**确定性**失败，不是偶发。

@@ -361,30 +361,44 @@ describe('startRaccoonAuthorizeReceiver：七条规则，跑在真 socket 上', 
 
   it('★★★ 连接数上限是 8（官方接收端同款：慢连接不得占住这个端口）', async () => {
     // ⚠️ 没有它 ⇒ 一个**慢速连接**（不发完整请求头、也不断开）能占住这个
-    //   端口直到 5 分钟整体超时 ⇒ 而这个端口是「等着收凭据」的口子，
-    //   占住它不只是资源问题，还是**可用性**问题（真回调进不来）。
+    //    端口直到 5 分钟整体超时 ⇒ 而这个端口是「等着收凭据」的口子，
+    //    占住它不只是资源问题，还是**可用性**问题（真回调进不来）。
+    //
+    // ⚠️⚠️ **连接必须用裸 `net` socket 造，不能用 `http.request` + `req.write()`**
+    //    （2026-11-21 修，实测打穿原来的夹具）：
+    //
+    //    旧夹具写的是 `http.request(...)` 再 `req.write('GET /auth/callback?code=')`
+    //    —— 但 `http.request` 一调就把请求头**自己发完了**（Node 的 ClientRequest
+    //    会补 `Host` / `Content-Length: 0` 等），所以服务端收到的是一个**完整**请求
+    //    ⇒ 立刻回 400 + `Connection: close` ⇒ **连接随即被释放**。
+    //    实测：8 个"慢连接"里服务端看到的全是 `method=GET url="/auth/callback"`，
+    //    第 9 个连接照样 **200** ⇒ 这条用例的判据**测的是别的东西**（恒红）。
+    //
+    //    ⇒ 真「慢连接」只用 `net.connect` 发半截请求头（永不结束），
+    //      服务端才真的把它挂在 `http.Server` 的未完成请求表里。
     const receiver = await startRaccoonAuthorizeReceiver({ state: STATE, timeoutMs: 60_000 })
+    const sockets: net.Socket[] = []
     try {
-      // 真开 8 个**不结束**的连接（发一半请求头就挂着）。
-      const sockets: Array<{ destroy: () => void }> = []
+      // 真开 8 个**永不完成**的连接（只发到请求头中途就挂着）。
       for (let i = 0; i < 8; i++) {
-        const socket = await new Promise<{ destroy: () => void }>((resolve, reject) => {
-          const req = http.request(
-            { host: '127.0.0.1', port: receiver.port, path: '/auth/callback', method: 'GET' },
-            () => resolve(req),
-          )
-          req.on('error', reject)
-          // 只写一半请求头就结束 ⇒ 服务端那边是「未完成的连接」。
-          req.write('GET /auth/callback?code=')
-          resolve(req)
+        const socket = net.connect(receiver.port, '127.0.0.1')
+        await new Promise<void>((resolve, reject) => {
+          socket.once('connect', () => resolve())
+          socket.once('error', reject)
         })
+        // ⚠️ **不写 `\r\n\r\n`**：请求头永远不结束 ⇒ 服务端永远凑不出一个请求。
+        socket.write('GET /auth/callback HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Partial: ')
+        socket.on('error', () => {})
         sockets.push(socket)
       }
+      // 让服务端把 8 个连接都 accept 进 `maxConnections` 计数（否则第 9 个可能
+      // 抢在计数之前连上，判据变成竞态）。
+      await new Promise((resolve) => setTimeout(resolve, 250))
       // 第 9 个连接应当**拿不到**（连接数上限生效）⇒ 表现为连接被关掉。
       const ninth = await probe(receiver.port, `/auth/callback?code=${encodeURIComponent(CODE)}&state=${STATE}`)
       expect(ninth.status === null || ninth.status === 400).toBe(true)
-      for (const socket of sockets) socket.destroy()
     } finally {
+      for (const socket of sockets) socket.destroy()
       receiver.cancel()
     }
   })
