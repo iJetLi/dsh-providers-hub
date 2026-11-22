@@ -692,8 +692,25 @@ export async function fetchMinimaxCreditBalanceDetailed(
    * 已如实登记，根治要循环分页（`page` 参数**未实测**，猜错会死循环，
    * 故本轮不猜；`total_count` 是可用的自检点，见下方注释）。
    */
-  const url = `${product.apiHost}${MINIMAX_CREDIT_DETAILS_PATH}?page_size=1000`
-  const result = await requestEnvelope(url, credential, { method: 'GET' }, fetcher, product, xff)
+  const bareUrl = `${product.apiHost}${MINIMAX_CREDIT_DETAILS_PATH}`
+  const sizedUrl = `${bareUrl}?page_size=1000`
+  /**
+   * ⚠️⚠️ **带 `page_size` 失败必须回退到不带参数**（2026-11-23 对抗审计 P1-3）。
+   *
+   * 这一点很重要，因为**如果只加参数、不加回退，修复可能比原缺陷更糟**：
+   *
+   * - 作者真机只验证过 `page_size=50`，**`1000` 从未实测**；
+   * - 若上游校验上限并回 **4xx** ⇒ 本函数返回 `{ balance: null, error }`
+   *   ⇒ 折算层判 `UNUSABLE` ⇒ **minimax 从聚合轮换里静默消失**
+   *   —— 用户丢的是「整家渠道」，而不是「少算几百分」。
+   *
+   * ⇒ 先按大窗口取；**失败才退**回裸请求（拿到 20 条 = 旧行为，至少能用）。
+   *    这样最坏情况退化成修复前的样子，不会比修复前更差。
+   */
+  let result = await requestEnvelope(sizedUrl, credential, { method: 'GET' }, fetcher, product, xff)
+  if (!result.ok) {
+    result = await requestEnvelope(bareUrl, credential, { method: 'GET' }, fetcher, product, xff)
+  }
   if (!result.ok) return { balance: null, error: result.message }
   // ⚠️ 余额响应是**平铺**的（`details` / `total_count` 与 `base_resp` 同级，
   // 无 `data`）；`unwrapEnvelopeData` 对这种形状会原样返回顶层。
