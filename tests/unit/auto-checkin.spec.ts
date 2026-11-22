@@ -1776,3 +1776,66 @@ describe('豆包自动签到开关（2026-11-22 用户需求）', () => {
     expect(sanitizeAutoCheckin(sanitizeAutoCheckin({ doubaoEnabled: false })).doubaoEnabled).toBe(false)
   })
 })
+
+/**
+ * ★★★ **「有代价」与「默认进链」必须解耦**（PR #142 的真实缺陷，2026-11-23 主理修复）。
+ *
+ * ## 缺陷
+ *
+ * 原先 `costly = isAutoCheckinExcluded(provider)` —— 一个字段承重两个**方向相反**的语义：
+ * 「默认进不进链」与「失败要不要重试」。PR #142 为了让豆包默认进链把它置 `false`，
+ * 顺手把「失败不重试」也关掉了 ⇒ 一次失败、甚至一次 **`inactive`**
+ *（「今天没活动」这种**正常态**）之后，下一轮又 claim ⇒ 又起 N 个浏览器。
+ * 纯豆包池 30 分钟封顶 ⇒ N=10 时最多 **480 次/天**（同一路径下 zcode 是零请求）。
+ *
+ * ## 用例要守的行为
+ *
+ * 豆包**一次 `inactive`** 之后，**推进一个时段再跑**，**不得**再次 `claim`
+ *（`inactive` 不是失败，但它已经付过一次起浏览器的代价）。
+ *
+ * ⚠️ 必须推进时间：`runIfDue()` 有 30 分钟时段闸门，不推进的话第二轮
+ * 会因时段没到直接返回 ⇒ 用例**恒真**、测不到任何东西（本仓踩过这种假绿）。
+ */
+describe('有代价渠道（豆包）：一次 inactive 后不得在本日重试', () => {
+  it('★★★ 起浏览器跑过一次（inactive）⇒ 推进 31 分钟后仍不再 claim', async () => {
+    let now = NOON_UTC8
+    const calls: string[] = []
+    const { runner } = makeRunner({
+      providers: ['doubao'],
+      now: () => now,
+      claim: async () => {
+        calls.push('doubao')
+        return {
+          ok: true,
+          value: { summary: { claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 1, failed: 0 } },
+        }
+      },
+    })
+    await runner.runIfDue()
+    expect(calls, '第一轮应当真的跑一次').toEqual(['doubao'])
+
+    now += 31 * 60 * 1000   // 推进 31 分钟 ⇒ 跨过一个时段
+    await runner.runIfDue()
+    expect(
+      calls,
+      '豆包一次尝试 = 一棵 headless Chromium（失败地板 30.1s）⇒ 本日不得因子句「今天没活动」再起一次',
+    ).toEqual(['doubao'])
+  })
+
+  it('★★★ 对照：普通渠道（无代价）失败后应当**照常重试**（别把判据改过头）', async () => {
+    let now = NOON_UTC8
+    const calls: string[] = []
+    const { runner } = makeRunner({
+      providers: ['buddy'],
+      now: () => now,
+      claim: async () => {
+        calls.push('buddy')
+        return { ok: false, error: { code: 'bad-request', message: '上游抖动' } }
+      },
+    })
+    await runner.runIfDue()
+    now += 31 * 60 * 1000
+    await runner.runIfDue()
+    expect(calls.length, '普通渠道不该被这条判据连坐').toBeGreaterThan(1)
+  })
+})

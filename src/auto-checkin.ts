@@ -71,6 +71,25 @@ import { descriptorOf } from './provider-registry.js'
 import type { BadgeRpcResult } from './usage-badge.js'
 import type { RpcCreditsClaimAllResponse, RpcUsageAutoCheckinState } from './types.js'
 
+/**
+ * ★★★ **签到「有代价」的渠道**：失败后**不得**在本时段重试。
+ *
+ * 「有代价」= 一次尝试的代价远超一次普通 HTTP：
+ * - `zcode`：起浏览器 + 消耗**阿里云 captcha 设备级配额**（150 次/小时）；
+ * - `doubao`：起 headless Chromium（**本机 CPU/内存**，单次失败地板实测 30.1 秒）。
+ *
+ * ⚠️⚠️ **为什么需要这个独立集合**（PR #142 的真实缺陷，2026-11-23 主理修复）：
+ * 原先「有代价」直接判 `isAutoCheckinExcluded(provider)` —— 一个字段承重两个
+ * **方向相反**的语义（「默认进不进链」 vs 「失败要不要重试」）。
+ * PR #142 为了让豆包默认进链把它置 `false`，顺手把「失败不重试」也关掉了
+ * ⇒ 一次失败、甚至一次 `inactive`（「今天没活动」**正常态**）后，
+ * 下一轮又 claim ⇒ 又起 N 个浏览器（纯豆包池 30 分钟封顶 ⇒ N=10 最多 **480 次/天**）。
+ *
+ * ⇒ 现在：`autoCheckinExcluded` 只回答「默认进不进链」；
+ *   本集合回答「失败要不要重试」。两者**独立**。
+ */
+const COSTLY_CHECKIN_PROVIDERS: ReadonlySet<string> = new Set(['zcode', 'doubao'])
+
 /** 独立文档的文件名（与 state.json / ui-preferences.json 同目录）。 */
 export const AUTO_CHECKIN_FILE = 'auto-checkin.json'
 
@@ -1221,12 +1240,45 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
         unretryable.add(provider)
         continue
       }
-      const costly = isAutoCheckinExcluded(provider)
+      /**
+       * ★★★ **两个判据必须分开**（PR #142 的真实缺陷，2026-11-23 主理修复）。
+       *
+       * ## 原来是一格
+       *
+       * ```ts
+       * const costly = isAutoCheckinExcluded(provider)   // ← 一个字段承重两个语义
+       * ```
+       *
+       * `autoCheckinExcluded` 同时被用来回答两个**方向相反**的问题：
+       * - 「**默认要不要进链**」——排除表说是的渠道要用户 opt-in 才跑；
+       * - 「**失败后要不要重试**」——有代价的渠道失败后不得重试。
+       *
+       * ## 为什么 #142 会把它打坏
+       *
+       * #142 为了让豆包**默认进链**，把 `doubao` 的 `autoCheckinExcluded` 置 `false`。
+       * 于是上面第二个问题也被顺手回答了「不用重试个屁」 —— `costly` **恒为 false**，
+       * 三条失败腿（`throw` / `!result.ok` / `inactive`）**全部失效**。
+       *
+       * 实测后果（对抗审计）：一次失败、甚至一次 **`inactive`**（「今天没活动」这种
+       * **正常态**）之后，下一轮**又 claim** ⇒ 又起 N 个浏览器；
+       * 纯豆包池 30 分钟封顶 ⇒ **N=10 时最多 480 次/天**。
+       * 同一路径下 zcode 是**零请求**（它有 opt-in 拦截）。
+       * 豆包烧的是**本机 CPU/内存**，比 zcode 烧配额更该被限制。
+       *
+       * ## 修法
+       *
+       * 把「有代价」这个事实**独立成判据**：判「该渠道的签到是不是要起浏览器 /
+       * 烧第三方设备配额」，而不是「它在不在排除表里」。
+       * `autoCheckinExcluded` 从此**只**回答「默认进不进链」。
+       */
+      const costly = isAutoCheckinExcluded(provider) || COSTLY_CHECKIN_PROVIDERS.has(provider)
+      /** 「默认不进链」——只剩这一层语义（与上面的 `costly` 刻意分开）。 */
+      const excluded = isAutoCheckinExcluded(provider)
       // ⚠️ 豆包被 registry 登记成「有代价」时，用户显式点开（`doubaoEnabled === true`）
       //    也要能放行 —— 否则那个开关在「豆包还没进默认链」的版本上就是个死开关。
       const optedIn = isAutoCheckinOptedIn(provider, doc)
         || (provider === 'doubao' && doc.doubaoEnabled === true)
-      if (costly && !optedIn) {
+      if (excluded && !optedIn) {
         totals.skipped += 1
         channels.push({ provider, text: '需手动签到' })
         unretryable.add(provider)
