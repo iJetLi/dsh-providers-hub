@@ -21,6 +21,7 @@ import {
   subagentHintOf,
   subagentPayloadOf,
   validateSubagentDraft,
+  isWindowDirty,
 } from '../../plugin-src/client/credit-window-ui.js'
 
 describe('SUBAGENT_MODE_LABELS：五个选项的名称', () => {
@@ -171,5 +172,85 @@ describe('subagentPayloadOf：提交载荷', () => {
   it('★ 无 startMode ⇒ undefined', () => {
     expect(subagentPayloadOf({})).toBeUndefined()
     expect(subagentPayloadOf(null)).toBeUndefined()
+  })
+})
+
+/**
+ * ★★★ **`isWindowDirty`：保存按钮何时可点**（2026-11-24 用户报障）。
+ *
+ * ## 缺陷（报障原文：「保存按钮没法点击呀」）
+ *
+ * 上一版只比窗口天数 ⇒ 用户只改子代理设置时**保存按钮一直是灰的**。
+ *
+ * ⚠️ 这条判据必须覆盖「四组字段各自能触发 dirty」，
+ * 否则只修了「模型」漏了「思考强度」这类回归会静默通过。
+ */
+describe('isWindowDirty：保存按钮的启用判据', () => {
+  const savedBase = { windowDays: 2, imminentDays: 1 }
+  const subBase = { startMode: 'sequence' }
+  const saved = { ...savedBase, subagent: subBase }
+  const equal = { saved, draftWindow: '2', draftImminent: '1', subDraft: { ...subBase } }
+
+  it('★★★ 完全没改动 ⇒ false（按钮灰）', () => {
+    expect(isWindowDirty(equal)).toBe(false)
+  })
+
+  it('★★★ **只改子代理的 startMode ⇒ true**（这正是报障场景）', () => {
+    expect(isWindowDirty({ ...equal, subDraft: { startMode: 'reverse' } })).toBe(true)
+  })
+
+  it('★★★ 只改子代理的 model ⇒ true', () => {
+    expect(isWindowDirty({
+      ...equal,
+      subDraft: { ...subBase, model: 'glm-5.3' },
+    })).toBe(true)
+  })
+
+  it('★★★ 只改子代理的 reasoningEffort ⇒ true', () => {
+    expect(isWindowDirty({
+      ...equal,
+      subDraft: { ...subBase, model: 'glm-5.3', reasoningEffort: 'max' },
+      saved: { ...saved, subagent: { ...subBase, model: 'glm-5.3' } },
+    })).toBe(true)
+  })
+
+  it('★★★ 只改子代理的 fixedPosition ⇒ true', () => {
+    expect(isWindowDirty({
+      ...equal,
+      subDraft: { startMode: 'fixed', fixedPosition: 3 },
+      saved: { ...saved, subagent: { startMode: 'fixed', fixedPosition: 1 } },
+    })).toBe(true)
+  })
+
+  it('★★ 只改窗口天数 ⇒ true', () => {
+    expect(isWindowDirty({ ...equal, draftWindow: '3' })).toBe(true)
+    expect(isWindowDirty({ ...equal, draftImminent: '0' })).toBe(true)
+  })
+
+  it('★★★ 已存值没有 subagent、草稿是默认 follow ⇒ **不算 dirty**（防假脏）', () => {
+    /**
+     * ⚠️ 这是「刚打开就显示可保存」的形态：`saved.subagent` 是 `undefined`，
+     * 而草稿预填成 `follow` ⇒ 不归一化会误判成 dirty。
+     */
+    expect(isWindowDirty({
+      saved: { windowDays: 2, imminentDays: 1 },
+      draftWindow: '2',
+      draftImminent: '1',
+      subDraft: { startMode: 'follow' },
+    })).toBe(false)
+  })
+
+  it('★★ saved 为 null（还没加载）⇒ false', () => {
+    expect(isWindowDirty({ saved: null, draftWindow: '2', draftImminent: '1', subDraft: null })).toBe(false)
+    expect(isWindowDirty({ saved: undefined, draftWindow: '', draftImminent: '', subDraft: null })).toBe(false)
+  })
+
+  it('★★ subDraft 为 null（还没加载）⇒ 只比窗口', () => {
+    expect(isWindowDirty({ saved, draftWindow: '2', draftImminent: '1', subDraft: null })).toBe(false)
+    expect(isWindowDirty({ saved, draftWindow: '5', draftImminent: '1', subDraft: null })).toBe(true)
+  })
+
+  it('★ 草稿窗口字段前后空格不影响判定', () => {
+    expect(isWindowDirty({ ...equal, draftWindow: ' 2 ', draftImminent: ' 1 ' })).toBe(false)
   })
 })

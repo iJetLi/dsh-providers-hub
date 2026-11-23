@@ -1733,6 +1733,20 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-subagentModelRow { display: flex; gap: 7px; align-items: center; }
 .dim-jh-subagentSelectWide { flex: 1; }
 .dim-jh-subagentEffort { flex: 0 0 112px; }
+/*
+ * 「该模型无思考档位」的提示（2026-11-24）。
+ *
+ * ⚠️ 用 warn 色（不是 tertiary 灰）：这是**用户需要知道的信息**
+ *    （他选了模型却没有强度可选，会以为功能坏了）。
+ * ⚠️ 不写回退值：本仓纪律 —— 回退值只允许 baseline 表里那 6 个。
+ */
+.dim-jh-subagentNoEffort {
+  flex: none;
+  font-size: 10px;
+  color: var(--dsw-alias-state-warn-primary);
+  white-space: nowrap;
+  cursor: help;
+}
 
 .dim-jh-windowLabel { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dim-jh-windowDot { width: 8px; height: 8px; flex: none; border-radius: 999px; }

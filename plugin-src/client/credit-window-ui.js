@@ -386,3 +386,58 @@ export function subagentPayloadOf(draft) {
       : {}),
   }
 }
+/**
+ * ★★★ 是否有未保存的改动（2026-11-24 用户报障后抽出成纯函数）。
+ *
+ * ## 缺陷（报障原文：「保存按钮没法点击呀」）
+ *
+ * 上一版这个判断内联在组件里，且只比了窗口天数：
+ *
+ *     String(saved.windowDays) !== draftWindow.trim()
+ *     || String(saved.imminentDays) !== draftImminent.trim()
+ *
+ * 用户只改「子代理设置」（起点策略 / 模型 / 思考强度）时恒 false
+ * 于是保存按钮一直是灰的、点不动。
+ *
+ * 抽成纯函数的原因：内联在组件里就测不到（判据埋在装配层 = 没测试）。
+ *
+ * ## 判据：四组字段分别比
+ *
+ * - 窗口：windowDays / imminentDays（字符串草稿 vs 数字已存值）
+ * - 子代理：startMode / fixedPosition / model / reasoningEffort
+ *
+ * undefined 与「缺省」必须归一化后再比：
+ * saved.subagent.startMode 可能是 undefined，而草稿预填成 follow，
+ * 不归一化会让「刚打开就算 dirty」（假脏）。
+ *
+ * @param input - { saved, draftWindow, draftImminent, subDraft }
+ * @returns 是否有改动
+ */
+export function isWindowDirty(input) {
+  const src = input === null || typeof input !== 'object' ? {} : input
+  const saved = src.saved
+  /** 没加载完一律不算 dirty（否则刚打开就能点保存，会发出空请求）。 */
+  if (saved === null || typeof saved !== 'object') return false
+  const draftWindow = typeof src.draftWindow === 'string' ? src.draftWindow.trim() : ''
+  const draftImminent = typeof src.draftImminent === 'string' ? src.draftImminent.trim() : ''
+  if (String(saved.windowDays) !== draftWindow) return true
+  if (String(saved.imminentDays) !== draftImminent) return true
+  const subDraft = src.subDraft
+  if (subDraft === null || typeof subDraft !== 'object') return false
+  const savedSub = saved.subagent
+  const savedObj = savedSub === null || typeof savedSub !== 'object' ? {} : savedSub
+  /**
+   * ⚠️⚠️ **`startMode` 的 `follow` 与「未配置」必须视为同一件事**
+   *（2026-11-24 实测：不归一化会让「刚打开就显示可保存」）。
+   *
+   * 依据：服务端 `subagentSettingActive()` 明确把
+   * 「`follow` + 无模型」等同于「没配」（见 `subagent-rotation.ts`）。
+   * ⇒ 客户端这条判据必须与它**同口径**，否则两边对「有没有改动」结论不同。
+   */
+  const normMode = (v) => (typeof v === 'string' && v.length > 0 ? v : 'follow')
+  if (normMode(subDraft.startMode) !== normMode(savedObj.startMode)) return true
+  if ((subDraft.fixedPosition ?? 0) !== (savedObj.fixedPosition ?? 0)) return true
+  if ((subDraft.model ?? '') !== (savedObj.model ?? '')) return true
+  if ((subDraft.reasoningEffort ?? '') !== (savedObj.reasoningEffort ?? '')) return true
+  return false
+}

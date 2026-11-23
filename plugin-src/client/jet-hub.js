@@ -279,7 +279,7 @@ const PROVIDERS = Object.freeze(
  * 数据来自 `props.accounts()`（面板已有的逐包读数），
  * 用 `computeCoverage` 按草稿窗口重算 ⇒ 改数字即时刷新。
  */
-import { barPercent, computeCoverage, clampImminent, coverageTotal, describeWindowSource, parseWindowInput, windowRangeLabels, SUBAGENT_MODE_LABELS, defaultEffortOf, subagentHintOf, subagentPayloadOf, validateSubagentDraft } from './credit-window-ui.js'
+import { barPercent, computeCoverage, clampImminent, coverageTotal, describeWindowSource, parseWindowInput, windowRangeLabels, SUBAGENT_MODE_LABELS, defaultEffortOf, subagentHintOf, subagentPayloadOf, validateSubagentDraft, isWindowDirty } from './credit-window-ui.js'
 
 export function CreditWindowModal(props) {
   const { provider, providerLabel, rpcCall, accounts, onClose } = props
@@ -417,10 +417,40 @@ export function CreditWindowModal(props) {
    */
   const previewTotal = coverageTotal(coverage)
 
-  /** 是否有未保存的改动。 */
-  const dirty = saved !== null && (
-    String(saved.windowDays) !== draftWindow.trim() || String(saved.imminentDays) !== draftImminent.trim()
-  )
+  /**
+   * 是否有未保存的改动。
+   *
+   * ⚠️⚠️ **必须把「子代理设置」也算进来**（2026-11-24 用户报障）。
+   *
+   * ## 缺陷
+   *
+   * 上一版只比了窗口天数：
+   *
+   * ```ts
+   * const dirty = String(saved.windowDays) !== draftWindow.trim()
+   *   || String(saved.imminentDays) !== draftImminent.trim()
+   * ```
+   *
+   * ⇒ 用户只改「子代理设置」（起点策略 / 模型 / 思考强度）时，
+   * `dirty` 恒 `false` ⇒ **保存按钮一直是灰的、点不动**。
+   *
+   * 症状：用户在档次窗口里选了「顺序分布」、选了模型，却发现没法保存 ——
+   * 他只会以为「功能坏了」。
+   *
+   * ## 判据
+   *
+   * 子代理草稿与服务端已存值的**四个字段**逐个比：
+   * `startMode` / `fixedPosition` / `model` / `reasoningEffort`。
+   *
+   * ⚠️ 用 `?? ''` 归一化 `undefined` 与「缺省」：
+   * `saved.subagent?.startMode` 可能是 `undefined`，而草稿预填成了 `'follow'`
+   * ⇒ 不归一化会让「刚打开就算 dirty」（假脏）。
+   */
+  /**
+   * ⚠️ 判据抽到 `credit-window-ui.js` 的 `isWindowDirty()` 里 ——
+   * 内联在组件里就**测不到**（本仓教训：判据埋在装配层 = 没测试）。
+   */
+  const dirty = isWindowDirty({ saved, draftWindow, draftImminent, subDraft })
 
   const onSave = async () => {
     if (windowInvalid || imminentInvalid) return
@@ -750,7 +780,31 @@ export function CreditWindowModal(props) {
               (() => {
                 const entry = (Array.isArray(modelList) ? modelList : []).find((m) => m.id === subDraft?.model)
                 const efforts = Array.isArray(entry?.efforts) ? entry.efforts : []
-                if (efforts.length === 0) return null
+                /**
+                 * ⚠️⚠️ **选了模型但没有思考档位时必须给出说明**（2026-11-24 用户报障）。
+                 *
+                 * ## 缺陷
+                 *
+                 * 上一版直接 `return null` —— 强度下拉**静默消失**。
+                 * 用户看到「我选了模型，怎么没有强度可选」，会以为功能坏了。
+                 *
+                 * ## 为什么该模型可能没有档位
+                 *
+                 * 各家的 `efforts` 来自**远端目录**（如 `trae` 的 `reasoningConfig`）。
+                 * 上游没下发 / `support_thinking === false` ⇒ 适配器**不声明** ——
+                 * 这是刻意的（编造档位会让用户选一个服务端不认的值，
+                 * 请求时抛 `UNSUPPORTED_REASONING_EFFORT`）。
+                 *
+                 * ⇒ 这里用一句小字**如实告知**，而不是让控件凭空消失。
+                 */
+                if (efforts.length === 0) {
+                  /** 没选模型（跟随主代理）时不提示 —— 那时本就不该有强度概念。 */
+                  if (subDraft?.model === undefined || subDraft.model.length === 0) return null
+                  return React.createElement('span', {
+                    className: 'dim-jh-subagentNoEffort',
+                    title: '该模型未提供思考档位（上游目录没有下发），选它时无法指定强度',
+                  }, '该模型无思考档位')
+                }
                 return React.createElement('select', {
                   className: 'dim-jh-subagentSelect dim-jh-subagentEffort',
                   disabled: busy,
