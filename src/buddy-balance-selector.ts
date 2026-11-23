@@ -56,7 +56,7 @@ import {
 } from './buddy-balance-rank.js'
 import { resolveCreditWindow } from './credit-window.js'
 import type { ResolvedCreditWindow } from './credit-window.js'
-import type { CreditWindowSetting } from './jet-hub-store.js'
+import type { CreditWindowSetting, RotationStartTier } from './jet-hub-store.js'
 
 /** 余额缓存 TTL（毫秒），与 Loomy 同值。 */
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -831,6 +831,32 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
      * 它**不在候选集里**，只按 `ranked.findIndex(id)` 会静默回落默认第一个号。
      */
     enabledAccountIds?: readonly string[]
+    /**
+     * ★★★ **起点选定那一刻的档位快照**（S6，2026-11-20 加；2026-11-23 补透传）。
+     *
+     * 与 {@link BuddyTierOptions.rotationStartTier} 同义 —— 本字段只是把它从
+     * resolver / 接线层透传到 `selector.select()` 的**通道**，
+     * 判据仍在 `rotateFromPreferred` 一处。
+     *
+     * ## ⚠️⚠️ 这个字段曾经**整条链路断在这里**（真实缺陷）
+     *
+     * `credential-resolver.ts` 一直在传它、`rotateFromPreferred` 一直在读它，
+     * **唯独中间的 `pickBuddyAccount` 没声明也没透传** ⇒
+     * `rotateFromPreferred` 永远拿到 `undefined` ⇒
+     * `tierStillHeld` 恒 `false` ⇒ 永远走「起点已降档 ⇒ 交出首位」分支
+     * ⇒ **「起点烧完临期后自动换人」这个机制从未生效**。
+     *
+     * ⚠️ **`tsc` 为什么没拦住**：调用方用的是展开语法
+     * `...(cond ? {} : { rotationStartTier })`，而 TS 的 excess-property 检查
+     * 只作用于**直接的对象字面量**，展开的对象不受检 ⇒「传了类型上没有的字段」
+     * 不报错、「中间层没声明」也不报错，整条链路无声断掉。
+     *
+     * ⚠️ **既有测试为什么没拦住**：`rotation-s6.spec.ts` 是**直接调用**
+     * `rotateFromPreferred`（自造 options）⇒ 证明了「收到 tier 时行为正确」，
+     * 但证明不了「这一层真的把它送过去了」。
+     * 跨层守卫在 `tests/unit/rotation-start-tier-passthrough.spec.ts`。
+     */
+    rotationStartTier?: RotationStartTier
   },
 ): Promise<
   | {
@@ -880,6 +906,21 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
         // 「起点定位基准」同理：每次迭代都带上（降级会改变 `allowPermanent`，
         // 从而改变「哪些号可用」，起点落点必须跟着重算）。
         ...(options.enabledAccountIds === undefined ? {} : { enabledAccountIds: options.enabledAccountIds }),
+        /**
+         * ★★★ **起点档位快照**（2026-11-23 补，真实缺陷修复）。
+         *
+         * ⚠️⚠️ 没有这一行，「起点烧完临期后自动换人」（S6）**从未生效**：
+         * `rotateFromPreferred` 里 `tierAtSelection` 恒 `undefined`
+         * ⇒ `tierStillHeld` 恒 `false` ⇒ 永远走「交出首位」分支
+         * ⇒ 起点**不享受跨档优先**，退化成「同档内的循环原点」。
+         *
+         * ⚠️ 与 `rotationStartId` **成对**：只传 id 不传档位等于没配 S6。
+         * （`credential-resolver.ts` 那段注释逐字写过这个失效形态，
+         *  但本层当时没接线，所以那句话在本层没人兑现。）
+         *
+         * ⚠️ 同样**每次迭代都带上**（与上面两项同因）。
+         */
+        ...(options.rotationStartTier === undefined ? {} : { rotationStartTier: options.rotationStartTier }),
       },
     )
     if (!picked.ok) {
