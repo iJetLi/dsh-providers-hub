@@ -31,6 +31,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import { AccountPool } from './account-pool.js'
 import { createModelCatalog, isCatalogFresh, isCatalogFreshFor, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
+import { ensureRaccoonSessionConfirmed } from './raccoon-iam-confirm.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
 import { looksLikeUpstreamProviderError } from './upstream-error.js'
@@ -824,6 +825,21 @@ export class RaccoonAdapter extends LlmAdapter {
     if (credential === undefined || credential.access_token.length === 0) {
       throw new LlmError('raccoon: no usable credential; log in first', 'MISSING_CREDENTIAL')
     }
+    /**
+     * ★★★ **IAM 业务会话确认**（issue #147，本入口最关键）。
+     *
+     * 2026-11-14 起扫码登录换回的是 **IAM 令牌**，它不能直接调业务 API ——
+     * 不先打 `POST /api/web/auth/v1/iam/confirm`，`chat/completions` 会回
+     * `400 {"code":200901,"message":"iam_confirm_required"}`，用户看到的是
+     * 「登录成功但**完全没法发消息**」。
+     *
+     * ⚠️ **忽略返回值**：确认失败时下面那次对话请求会拿到 `200901` + `details`，
+     *    那个错误比这里编的准（issue 报告里也是这么建议的）。
+     * ⚠️ 幂等：按 `access_token` 去重 ⇒ 轮换到新号 / 续期后 token 变化会自动重新确认，
+     *    而同一令牌只发一次。
+     * ⚠️ 放在**凭据解析之后**（不是之前）：它需要 `access_token`。
+     */
+    await ensureRaccoonSessionConfirmed(this.product, credential, this.options.fetchImpl ?? fetch)
     /**
      * 当前请求实际使用的账号 id（请求级轮换的记账键）。
      *

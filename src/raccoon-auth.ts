@@ -44,6 +44,7 @@ import {
   refreshRaccoonCredential,
 } from './raccoon-oauth.js'
 import { RACCOON, raccoonSupportsImage, type RaccoonProduct } from './raccoon-product.js'
+import { ensureRaccoonSessionConfirmed } from './raccoon-iam-confirm.js'
 import {
   startRaccoonLoginFlow,
   type StartedRaccoonLoginFlow,
@@ -585,6 +586,9 @@ export class RaccoonAuth extends Service {
     const credential = await this.resolveForFetchModels(pool)
     if (credential === undefined) return []
 
+    // ★ IAM 业务会话确认（issue #147）：不确认 ⇒ model_catalog 回 200901 ⇒
+    //   模型目录恒空 ⇒ 用户选不到模型。忽略返回值（尽力前置）。
+    await ensureRaccoonSessionConfirmed(this.product, credential, this.fetchImpl)
     try {
       const response = await this.fetchImpl(
         `${this.product.apiBase}${this.product.llmApiPrefix}/model_catalog`,

@@ -39,6 +39,7 @@ import {
   type RaccoonCredential,
 } from './raccoon.js'
 import { type RaccoonProduct } from './raccoon-product.js'
+import { ensureRaccoonSessionConfirmed } from './raccoon-iam-confirm.js'
 
 /**
  * 扫码轮询的状态值。
@@ -520,6 +521,9 @@ export async function fetchRaccoonUserInfo(
   credential: RaccoonCredential,
   fetcher: typeof fetch = fetch,
 ): Promise<{ userId?: string; nickname?: string; officeIdentity?: string; phone?: string }> {
+  // ★ IAM 业务会话确认（issue #147）：IAM 令牌直接调 user_info 会回 200901 ⇒
+  //   登录后「补昵称」这一步静默失败，账号卡片永远没有名字。忽略返回值（尽力前置）。
+  await ensureRaccoonSessionConfirmed(product, credential, fetcher)
   try {
     const response = await fetcher(`${product.apiBase}${product.authApiPrefix}/user_info`, {
       method: 'GET',
