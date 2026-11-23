@@ -252,3 +252,58 @@ describe('显示必须与生效同构', () => {
     expect(rpcIdx, 'getRotation: userPicked 必须在前').toBeGreaterThan(-1)
   })
 })
+/**
+ * ★★★ **账号名只在子代理页面显示**（2026-11-24 用户第二次定案）。
+ *
+ * ## 用户原话
+ *
+ * > 「主对话会面不需要显示帐号名，只要原来的位次就行，跟子代理对话页面不同」
+ *
+ * ## 两个页面的语义不同
+ *
+ * | 页面 | 用户关心 | 显示 |
+ * |---|---|---|
+ * | 主代理 | 「我选的起点生效了吗」| `位次 2` |
+ * | 子代理 | 「这个子代理在用哪个号」| `位次 2 · 177****4916` |
+ *
+ * ⚠️ 主代理页面显示账号名反而有害 —— 那里的位次是用户**自己**选的，
+ * 加个名字会让人以为「系统给我换了个号」。
+ */
+describe('账号名只在子代理会话下发', () => {
+  it('★★★ selectedAccountName 必须以 subagentAssign 存在为前提', () => {
+    const code = stripComments(rpcSrc)
+    const idx = code.indexOf('const selectedAccountName =')
+    expect(idx, '找不到 selectedAccountName').toBeGreaterThan(-1)
+    const window = code.slice(idx, idx + 200)
+    expect(
+      window,
+      '★★★ 必须同时判 `selectedId === null` **与**「不是子代理」（否则主代理也显示名字）',
+    ).toMatch(/selectedId === null \|\| !isSubagentSessionForBadge/)
+  })
+
+  it('★★★ 判据来自 subagentAssign（与选号同源，不另写一套）', () => {
+    /**
+     * ⚠️ 分配表**只登记子代理**（主代理永不登记）——
+     * 这与 resolver 里选号用的判据完全同源。
+     *
+     * ⇒ 不得用 `isSubagentSession()`（那是进程内父子表，
+     *   与持久化的分配表是两个东西，两套判据必然漂移）。
+     */
+    const code = stripComments(rpcSrc)
+    const idx = code.indexOf('const isSubagentSessionForBadge')
+    expect(idx, '★★★ 必须有明确的「是不是子代理」判据').toBeGreaterThan(-1)
+    const window = code.slice(idx, idx + 150)
+    expect(window, '★★★ 判据必须来自分配表').toContain('subagentAssign !== undefined')
+    expect(window, '★★★ 不能用 isSubagentSession（那是另一套状态）').not.toContain('isSubagentSession(')
+  })
+
+  it('★★ 主代理仍能拿到位次（只是不带名字）', () => {
+    /**
+     * ⚠️ 主代理的 `selectedPosition` 计算**完全不受影响** ——
+     * 本次改动只影响 `selectedAccountName` 这一个字段。
+     */
+    const code = stripComments(rpcSrc)
+    const posIdx = code.indexOf('const selectedPosition = selectedId === null')
+    expect(posIdx, '★★ 主代理的位次计算必须保留').toBeGreaterThan(-1)
+  })
+})

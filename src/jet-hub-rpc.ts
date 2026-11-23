@@ -8327,7 +8327,35 @@ function registerJetHubEndpoints(
          * ⚠️ 取不到（账号已被删/停用）⇒ `undefined`（省略该键）⇒
          * 客户端回落成只显示「位次 N」，与改动前逐字相同。
          */
-        const selectedAccountName = selectedId === null
+        /**
+         * ⚠️⚠️ **只在子代理会话下发账号名**（2026-11-24 用户第二次定案）。
+         *
+         * ## 用户原话
+         *
+         * > 「主对话会面不需要显示帐号名，只要原来的位次就行，跟子代理对话页面不同」
+         *
+         * ## 为什么两个页面要区别对待
+         *
+         * | 页面 | 用户关心什么 | 显示 |
+         * |---|---|---|
+         * | **主代理** | 「我选的起点生效了吗」| `位次 2` —— 只反映**用户的选择** |
+         * | **子代理** | 「这个子代理在用哪个号」| `位次 2 · 177****4916` |
+         *
+         * ⚠️ 主代理页面显示账号名反而有害：那里的位次是**用户自己选的**，
+         * 加个名字会让人以为「系统给我换了个号」，而实际上位次就是全部信息。
+         *
+         * ## 判据：`subagentAssign !== undefined`
+         *
+         * 分配表**只登记子代理**（主代理永不登记）——
+         * 这与 `credential-resolver.ts` 里选号用的判据**完全同源**，
+         * 不另写一套（本仓红线：同一语义不得两套判据）。
+         *
+         * ⚠️ 子代理也可能**暂时没有分配记录**（首轮还没登记完）
+         * ⇒ 那时也不下发名字 ⇒ 显示 `位次 N`
+         *（但子代理首轮通常 `selectedPosition` 也是 `null` ⇒ 显示「默认」）。
+         */
+        const isSubagentSessionForBadge = subagentAssign !== undefined
+        const selectedAccountName = selectedId === null || !isSubagentSessionForBadge
           ? undefined
           : (() => {
             const hit = enriched.find((a) => a.id === selectedId)
