@@ -462,14 +462,23 @@ describe('doubao reasoning catalog and stream blocks', () => {
   })
 
   /**
-   * ★★★ **匿名块重复快照不得让正文翻倍**（issue #150 第 3 条，2026-11-23 实测 `你好` → `你好你好`）。
+   * ⚠️⚠️ **已知限制：匿名块（无 `block_id`）的重复快照会让正文翻倍**（issue #150 第 3 条）。
    *
-   * 缺 `block_id` 的块没有 replay 身份，旧代码因此对它**不做去重**（`delta = text` 全量追加）
-   * ⇒ 只要上游把同一份快照发两次，正文就翻倍。
+   * 本用例**不断言「已修好」**，而是把**当前真实行为**钉住，免得将来有人以为它已经修了。
    *
-   * ⚠️ 这里刻意**不带 `block_id`** —— 带上就会走已知块那条去重腿，用例将测不到匿名路径。
+   * ## 为什么没修
+   *
+   * 第一版给匿名块合成过 key（`anon:${kind}`）试图修掉翻倍。**正向审计实测那是倒退**：
+   * 合成 key 每个 kind 只有一个槽 ⇒ 同一次快照里出现**多个匿名块**时，第二个块起会把
+   * 上一块的内容当成自己「历史前缀」⇒ **整段丢弃**；最坏形态（匿名「思考 + 正文」同快照）
+   * ⇒ **只留思考、正文静默消失**。
+   *
+   * ⇔ 翻倍是**可见且可恢复**的；丢内容是**静默**的。⇒ 回退到旧语义。
+   *
+   * 真要修，需要给匿名块一个**跨快照稳定**的身份 —— 而它天生没有
+   *（区分「同一块重发」与「另一个匿名块」需要上游给 id，它不给）。
    */
-  it('does not double the body when an anonymous block snapshot repeats (issue #150)', async () => {
+  it('⚠️ 已知限制：匿名块重复快照仍会翻倍（未修，见 issue #150）', async () => {
     const snapshot = (text: string) => 'event: STREAM_MSG_NOTIFY\ndata: ' + JSON.stringify({
       message: { content: { content_block: [
         { block_type: 10000, content: { text_block: { text } } },
@@ -479,15 +488,31 @@ describe('doubao reasoning catalog and stream blocks', () => {
     const chunks: StreamChunk[] = []
     for await (const chunk of adapterWithResponse(raw).stream(options)) chunks.push(chunk)
     const body = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
-    expect(body, '重复快照不得被当成两次增量').toBe('你好')
+    // ⚠️ 这就是**当前**（也是 master 的）行为：翻倍。改成 `toBe('你好')` 的那天，
+    //    请同时把那条长注释删掉，并在 #150 里标记该条已修。
+    expect(body, '⚠️ 已知限制：匿名块无身份 ⇒ 重复快照会翻倍').toBe('你好你好')
   })
 
   /**
-   * ★★★ **流内业务错误必须保留上游 msg**（issue #150 第 2 条，2026-11-23）。
+   * ★★★ **多个匿名块不得互相吞掉**（这是回退那条修复的**理由**，必须钉住）。
    *
-   * 旧实现只拼数字码 ⇒ 用户看到 `豆包：上游错误 710022004`，而上游 msg
-   *（取证那次是「当前对话人数过多，请稍后再试」）**正是唯一能让他行动的那句话**。
+   * 第一版合成 key（每 kind 一槽）会让**第二个匿名块**把第一块的内容当成自己的前缀
+   * ⇒ 整段丢弃。本用例保证：即使处理方式是「不去重」，**两块的内容都必须完整交付**。
    */
+  it('keeps every anonymous block when several appear in one snapshot (issue #150)', async () => {
+    const raw = 'event: STREAM_MSG_NOTIFY\ndata: ' + JSON.stringify({
+      message: { content: { content_block: [
+        { block_type: 10000, content: { text_block: { text: '第一块' } } },
+        { block_type: 10000, content: { text_block: { text: '第二块' } } },
+      ] } },
+    }) + '\n\nevent: SSE_REPLY_END\ndata: {"end_type":3}\n\n'
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapterWithResponse(raw).stream(options)) chunks.push(chunk)
+    const body = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
+    expect(body, '第二个匿名块不得被当成第一块的重发而丢弃').toContain('第二块')
+    expect(body, '第一块也不得丢').toContain('第一块')
+  })
+
   it('keeps the upstream message on an in-stream business error (issue #150)', async () => {
     const raw = 'event: STREAM_ERROR\ndata: '
       + JSON.stringify({ code: 710022004, msg: '当前对话人数过多，请稍后再试' })

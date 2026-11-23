@@ -410,10 +410,25 @@ class DoubaoTextTracker {
        * 快照若以上次全文为前缀 ⇒ 取真正的新增部分；否则若是快照或旧值是新值的前缀 ⇒ 跳过。
        * ⇒ 快照重复发不会翻倍，而真正的增量仍照常追加。
        */
-      const replayKey = id ?? `anon:${kind}`
+      /**
+       * ⚠️⚠️ **匿名块（无 `block_id`）刻意不做去重**（2026-11-23 三改）。
+       *
+       * 第一版我给它合成过 key（`anon:${kind}`）试图修「重复快照 ⇒ 正文翻倍」。
+       * **正向审计实测：那引入了更严重的缺陷** ——
+       * 合成 key 每个 kind 只有**一个槽**，于是同一次快照里出现**多个匿名块**时，
+       * 第二个块起会把上一块的内容当成自己的「历史前缀」⇒ **整段丢弃**；
+       * 最坏形态是匿名「思考 + 正文」同快照 ⇒ **只留思考、正文静默消失**。
+       *
+       * ⇔ 原缺陷（重复快照 ⇒ `你好` `你好你好`）是**可见且可恢复**的；
+       *    我的修复是**静默丢内容**。⇒ 两害相权，**回退到 master 的旧语义**。
+       *
+       * 真正的修法需要给匿名块一个**跨快照稳定**的身份，而它**天生没有**
+       * （区别「同一块的重发」与「另一个匿名块」需要上游给出 id，而它不给）。
+       * ⇒ 该缺陷**登记为已知限制**，写进 issue #150，不在这一轮强行修。
+       */
       let delta = text
-      {
-        const previous = this.upstreamText.get(replayKey) ?? ''
+      if (id !== undefined) {
+        const previous = this.upstreamText.get(id) ?? ''
         if (text.startsWith(previous)) delta = text.slice(previous.length)
         else if (snapshot || previous.startsWith(text)) continue
       }
@@ -429,9 +444,8 @@ class DoubaoTextTracker {
     //    判成 EMPTY_RESPONSE 会让 stream() 逐账号重发，白烧额度。
     if (kind === 'text') this.hasAnswerText = true
     else this.hasReasoningText = true
-    // ⚠️ 匿名块用与 `pushBlocks` 相同的合成 key 记账，否则上面的去重永远读到空历史。
-    const replayKey = id ?? `anon:${kind}`
-    this.upstreamText.set(replayKey, (this.upstreamText.get(replayKey) ?? '') + text)
+    // ⚠️ 只给**有真 id** 的块记账：匿名块刻意不去重（理由见 `pushBlocks` 那段长注释）。
+    if (id !== undefined) this.upstreamText.set(id, (this.upstreamText.get(id) ?? '') + text)
     const normalizer = kind === 'text' ? this.dsmlFix : this.reasoningFix
     this.emit(kind, normalizer.push(text), out)
   }
@@ -642,8 +656,37 @@ export class DoubaoAdapter extends LlmAdapter {
           continue
         }
         raw = await response.text()
-      } catch {
+      } catch (error) {
         options.signal?.throwIfAborted()
+        /**
+         * ★★★ **超时必须立刻抛，不能 `continue` 换下一个账号**（2026-11-23，
+         * PR #149 正向审计 P1）。
+         *
+         * ## 为什么
+         *
+         * 旧写法把超时也当成「这个账号不行」⇒ `continue` ⇒ 下一个账号**再等满一个超时**。
+         * 实测（把常量临时改成 120ms）：2 个账号 ⇒ **各重发一次**、最后落
+         * `SERVER`「读取上游对话响应失败」⇒ 而 `SERVER` 在宿主 `DEFAULT_RETRYABLE_CODES` 里
+         * ⇒ **宿主再重试 5 次** ⇒ 一次卡住 ≈ **6 × N × 180s** 的等待。
+         *
+         * 超时反映的是**整条上游**的状况（不是某个账号的凭据问题），换号重发没有任何
+         * 机会变好，只会把用户的时间乘上账号数。
+         *
+         * ## 码为什么用 `TIMEOUT`
+         *
+         * 语义精确（`SERVER` 会让人以为是 5xx）。⚠️ 但要说清：**`TIMEOUT` 同样在
+         * 宿主可重试集合里** ⇒ 这不能免掉宿主那次重试，只能免掉**我们自己**的
+         * 逐账号翻倍。真正把总时长压下来的关键是「不 `continue`」。
+         *
+         * ⚠️ 只在**我们自己的**超时（`AbortSignal.timeout` ⇒ `TimeoutError`）上这么判：
+         *    用户点「停止」抛的是 `AbortError`，已被上面的 `throwIfAborted()` 放行。
+         */
+        if (error instanceof Error && error.name === 'TimeoutError') {
+          throw new LlmError(
+            `豆包：等待上游对话响应超时（${Math.round(DOUBAO_CHAT_TIMEOUT_MS / 1000)} 秒无完整响应）`,
+            'TIMEOUT',
+          )
+        }
         // 不透出可能附带 Cookie / URL / 请求正文的底层异常。
         lastError = new LlmError('豆包：读取上游对话响应失败', 'SERVER')
         continue
