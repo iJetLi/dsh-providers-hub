@@ -473,6 +473,24 @@ export class DoubaoAdapter extends LlmAdapter {
         if (models.length === 0) return false
         this.remoteModels = models
         this.remoteModelsLoaded = true
+        /**
+         * ★★★ **必须落盘**（PR #149 遗漏，`catalog-disk-wiring` 的派生式普查当场抓到）。
+         *
+         * 这一条是**派生式**判据：只要某适配器有 `remoteModels` 赋值，就必须调
+         * `rememberForDisk` —— 否则**重启后该家目录不会走缓存**（冷启动那几秒
+         * 会退回兜底表/空目录，而**没有任何报错**）。是「静默变慢 + 短暂显示错目录」
+         * 的经典形态，本仓已经为此写过一次普查。
+         *
+         * ⚠️ 写在**赋值之后**：`rememberForDisk` 要把刚落地的目录写到磁盘，
+         *    早于赋值会写到上一版（`buddy-adapter.ts:2259` 有同一条注释）。
+         *
+         * ⚠️ **只在 `models.length > 0` 之后**才到这里（上面已早退）⇒ 不存在
+         *    「用残缺的目录覆盖上次的好缓存」那种风险（`buddy-adapter` 需要额外判
+         *    `remoteComplete`，本家的判据是「非空即完整」，故不需要）。
+         *
+         * ⚠️ 可选成员（`?.`）：单测替身没有它时零行为变化。
+         */
+        this.catalog.rememberForDisk?.(this.syncCatalogEntries())
         return true
       } catch {
         // 传输错误可能包含请求头或会话标识，不把异常原文写入日志。
