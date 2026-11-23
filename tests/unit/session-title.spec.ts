@@ -354,8 +354,17 @@ describe('codearts：标题请求发 enable_thinking=false', () => {
       'deepseek-v4.1-flash',
       { purpose: undefined, maxTokens: 8192 },
     )
-    // IDE 4/4 请求都是 enable_thinking:true（显式开）——不再「开启即不发」。
-    expect(body.enable_thinking).toBe(true)
+    /**
+     * ★★★ **2026-11-23 改（issue #145）**：普通请求**不再发 `enable_thinking: true`**。
+     *
+     * 作者真机实测它是**削弱开关**而不是开启开关（判据 `reasoning_tokens`）：
+     * `glm-5.3` 用 `true` 是 **37**，而**不发该字段是 239**（比值 0.15）；
+     * `GLM-5.2` 是 470 vs 685。旧的「开启」档因此**削弱**了思考。
+     *
+     * 现在按模型发 `reasoning_effort`（未传档位 ⇒ 取该模型最强档）。
+     */
+    expect(body.enable_thinking, '不再发布尔开关').toBeUndefined()
+    expect(body.reasoning_effort, '按模型发真实档位').toBeDefined()
     expect(body).not.toHaveProperty('thinking')
   })
 })

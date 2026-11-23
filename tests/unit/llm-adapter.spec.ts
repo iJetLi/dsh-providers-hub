@@ -304,11 +304,26 @@ describe('CodeArtsAdapter', () => {
       // `adapter-preferred display order`），客户端直接 `map` 不排序
       //（`dsh-client-ui-model-selection/lib/client.js` 的 `effortChoices`）
       // ⇒ 写成 `['on','off']` 会让「开启」落在横向档位轴的最左。
-      expect({ model, efforts: resolved.reasoning?.efforts.map(e => e.id) }).toEqual({
-        model, efforts: ['off', 'on'],
+      /**
+       * ★★★ **2026-11-23 改（issue #145）**：档位**按模型**声明真实枚举，不再恒两档。
+       *
+       * ⚠️ 但 `off` / `on` **必须仍在**（第 1 项与最后 1 项）：`dsh-llm` 的
+       * `resolveCallWithInfo()` 对显式请求的档位**严格校验**，不在声明里就抛
+       * `UNSUPPORTED_REASONING_EFFORT` —— 那是**整轮对话失败**，不是降级。
+       * 而 `dsh-agent-default-model` 会把 `reasoningEffort` **持久化在 Config 里**
+       * ⇒ 删掉这两个 id 会**打死所有存过它们的用户**。
+       *
+       * ⇒ 判据：`off` 在最左（最弱）、`on` 在最右（最强），中间是该模型的真实枚举。
+       */
+      const ids = resolved.reasoning?.efforts.map(e => e.id) ?? []
+      expect({ model, first: ids[0], last: ids[ids.length - 1] }).toEqual({
+        model, first: 'off', last: 'on',
       })
       // 展示名必须是中文（DSH 直接渲染 name，不本地化）。
-      expect(resolved.reasoning?.efforts.map(e => e.name)).toEqual(['关闭', '开启'])
+      expect(resolved.reasoning?.efforts.map(e => e.name)[0]).toBe('关闭')
+      // ⚠️ 未登记模型（`deepseek-v4-flash` / `openpangu-*`）仍返回旧的「开启」标签
+      //    —— 它们不校验 `reasoning_effort`，我们**不编枚举**；登记过的模型才带「（最强）」。
+      expect(resolved.reasoning?.efforts.map(e => e.name).at(-1)).toMatch(/^开启/)
       // ⚠️ defaultEffort 必须落在 efforts 内，否则 DSH 会抛
       // INVALID_MODEL_REASONING（dsh-llm 的 normalizeModelInfo 校验；
       // ⚠️ 不是 UNSUPPORTED_REASONING_EFFORT —— 那个码指「请求档位不在声明内」，实测确认）。
@@ -330,14 +345,22 @@ describe('CodeArtsAdapter', () => {
    *
    * 本用例把两者**放在一起比较**，故任何一处漏改都会红。
    */
-  it('⚠️ 未知模型的档位顺序必须与已知模型一致（同一事实不许写两份）', async () => {
+  it('⚠️ 未知模型保持两档（不编枚举）；已知模型才有真实档位', async () => {
+    /**
+     * ★★★ **2026-11-23 改（issue #145）**：判据从「两条路径必须一致」改成
+     * 「**未知模型不编枚举**」。
+     *
+     * 原用例守的是「同一事实不许写两份」—— 那时两条路径**确实**是同一个事实（都是两档）。
+     * 现在已知模型按上游真实枚举声明（3/6/7 档），而 `kimi-*` / `openpangu-*` / 手填 id
+     * **不校验 `reasoning_effort`**（非法值静默接受）⇒ 对它们任何枚举都是**推测**。
+     * ⇒ 宁可不给：**未登记模型保持原来的两档**，而不是编一套看起来合理的档位。
+     */
     const known = await makeAdapter().resolveModel('codearts', 'GLM-5.2')
     const unknown = await makeAdapter().resolveModel('codearts', '手填-不存在的模型-id')
-    expect(unknown.reasoning?.efforts.map(e => e.id))
-      .toEqual(known.reasoning?.efforts.map(e => e.id))
-    expect(unknown.reasoning?.efforts.map(e => e.name))
-      .toEqual(known.reasoning?.efforts.map(e => e.name))
-    expect(unknown.reasoning?.defaultEffort).toBe(known.reasoning?.defaultEffort)
+    expect(unknown.reasoning?.efforts.map(e => e.id), '未登记模型不许编枚举').toEqual(['off', 'on'])
+    expect(known.reasoning?.efforts.map(e => e.id), 'GLM-5.2 有上游真实七档')
+      .toEqual(['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'on'])
+    expect(unknown.reasoning?.defaultEffort, '默认档仍必须是声明过的 id').toBe('on')
   })
 
   /**
@@ -389,13 +412,27 @@ describe('CodeArtsAdapter', () => {
      */
     const code = stripCommentsAndKeepStrings(raw)
 
-    // ① 两条「按目录条目产出档位」的路径都必须从同一常量派生（≥2 处）。
+    /**
+     * ★★★ **2026-11-23 改（issue #145）**：档位来源从「一个全局常量」变成
+     * 「**按模型查表**」（`codeartsEffortsFor`）。
+     *
+     * 原判据（两条路径都引用 `CODEARTS_REASONING_EFFORTS`）已经过时：
+     * - **已知模型**（`toCatalogEntry`）现在走 `codeartsEffortsFor(model.id)`；
+     * - **标题请求**（`declaredEfforts`）也必须走**同一个**函数 —— 写成常量会让
+     *   「六档模型上 `max` 被当成不在声明里」⇒ 标题那条腿的档位推理全错；
+     * - **未登记模型**（`unknownModelReasoning`）**仍**用那个常量（保持两档、不编枚举）。
+     *
+     * ⇒ 新判据：**三处各自指向唯一来源**，且不得内联字面量（③ 照旧）。
+     */
     expect(
-      (code.match(/efforts:\s*\[\.\.\.CODEARTS_REASONING_EFFORTS\]/g) ?? []).length,
-      '已知模型与未知模型两条路径都必须引用 CODEARTS_REASONING_EFFORTS',
-    ).toBeGreaterThanOrEqual(2)
-    // ② 标题请求的 declaredEfforts 也必须从该常量派生（允许折行）。
-    expect(code).toMatch(/declaredEfforts:\s*CODEARTS_REASONING_EFFORTS\s*\n?\s*\.map\(/)
+      code.match(/efforts:\s*\[\.\.\.codeartsEffortsFor\(/g) ?? [],
+      '已知模型路径必须走 codeartsEffortsFor（按模型查表）',
+    ).toHaveLength(1)
+    expect(
+      code.match(/efforts:\s*\[\.\.\.CODEARTS_REASONING_EFFORTS\]/g) ?? [],
+      '未登记模型路径仍用那个常量（保持两档、不编枚举）',
+    ).toHaveLength(1)
+    expect(code).toMatch(/declaredEfforts:\s*codeartsEffortsFor\(/)
 
     // ③ 反向：剥掉注释后的**代码**里不得再出现这两档的内联字面量。
     //    覆盖历史/可能的写法：裸串（单/双引号、单行/跨行）、ReasoningEffortId 对象字面量。
@@ -597,7 +634,15 @@ describe('CodeArtsAdapter', () => {
     const body = seen.at(-1)!
 
     // ① IDE 有、插件曾缺的 5 个
-    expect(body.enable_thinking).toBe(true)
+    /**
+     * ★★★ **2026-11-23 改（issue #145）**：出站**不再发 `enable_thinking: true`**。
+     *
+     * 作者实测它是**削弱开关**而不是开启开关（`glm-5.3` 用 `true` 是 37 reasoning_tokens，
+     * 而**不发该字段是 239**，比值 0.15）⇒ 旧的 `on` 档反而削弱思考。
+     * 现在按模型发 `reasoning_effort`（这里 `GLM-5.2` 传 `'on'` ⇒ 映射到最强档 `max`）。
+     */
+    expect(body.enable_thinking, '不再发布尔开关').toBeUndefined()
+    expect(body.reasoning_effort, '最强档以 reasoning_effort 到达上游').toBe('max')
     expect(body.stream_options).toEqual({ include_usage: true })
     expect(body.temperature).toBe(0)
     expect(body.tool_choice).toBe('auto')

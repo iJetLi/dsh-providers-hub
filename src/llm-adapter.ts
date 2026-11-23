@@ -179,6 +179,159 @@ export const CODEARTS_REASONING_EFFORTS: readonly { id: ReturnType<typeof Reason
 export const CODEARTS_DEFAULT_EFFORT = 'on'
 
 /**
+ * ★★★ **每个模型的真实思考档位**（issue #145，2026-11-23）。
+ *
+ * ## 为什么需要它
+ *
+ * 上游 `/api/v2/chat/completions` 的 `reasoning_effort` **按模型校验，且枚举各不相同**。
+ * 取法很巧：发一个故意的非法值，上游会把该模型的合法枚举**原样回显**（不用猜）：
+ *
+ * ```
+ * {"reasoning_effort": "__bogus__"}
+ * → 400 reasoning_effort must be [low, high, max] for glm-5.3
+ * ```
+ *
+ * 作者真机实测（2026-11-22，插件自带签名模块直连上游、绕过本地网关）：
+ *
+ * | 模型 | 上游接受 |
+ * |---|---|
+ * | `glm-5.3` / `glm-5.3-flash` | `low` / `high` / `max` |
+ * | `deepseek-v4.1-flash` / `-1017` | `none` / `low` / `medium` / `high` / `xhigh` / `max` |
+ * | `GLM-5.2` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` |
+ * | `kimi-k3*` / `openpangu-*` | **不校验**（非法值静默接受）⇒ 枚举是推测，**不入本表** |
+ *
+ * ## `shutBy`：「关闭」在该模型上到底怎么写
+ *
+ * ⚠️ **同一句「关闭」在不同模型上要用不同的写法**（作者真机逐模型实测）：
+ *
+ * | 模型 | `enable_thinking:false` | `reasoning_effort:"none"` |
+ * |---|---|---|
+ * | `deepseek-v4.1-flash` | **0**（10/10）| 131~157，**到不了 0** |
+ * | `GLM-5.2` | **0**（10/10）| **0** |
+ * | `glm-5.3` | 43~51（≈ `low`）| **400 报错** |
+ * | `glm-5.3-flash` | 0/43/43（≈ `low`）| **400 报错** |
+ *
+ * ⇒ `cannot_shut` 的模型**上游拒绝关闭思考**，「关闭」最多只能退到**最弱档**。
+ *   这是**如实降级**，不是我们偷懒：硬发 `enable_thinking:false` 在部分模型上
+ *   实测仍会产生 `low` 量级的思考（甚至 0/43 不稳定），假装关掉了反而更差。
+ */
+const CODEARTS_EFFORT_PLAN: ReadonlyMap<string, {
+  readonly efforts: readonly string[]
+  readonly shutBy: 'enable_thinking_false' | 'reasoning_effort_none' | 'cannot_shut'
+}> = new Map([
+  ['glm-5.3', { efforts: ['low', 'high', 'max'], shutBy: 'cannot_shut' }],
+  ['glm-5.3-flash', { efforts: ['low', 'high', 'max'], shutBy: 'cannot_shut' }],
+  ['deepseek-v4.1-flash', {
+    efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], shutBy: 'enable_thinking_false',
+  }],
+  ['deepseek-v4.1-flash-1017', {
+    efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], shutBy: 'enable_thinking_false',
+  }],
+  // ⚠️ 上游这条是**大写 `GLM-5.2`**（`glm-5.3` 是小写）⇒ 查找必须大小写不敏感，
+  //    否则同一个厂商两个模型一个命中一个不命中，且症状只是「档位少了几档」。
+  ['glm-5.2', {
+    efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], shutBy: 'reasoning_effort_none',
+  }],
+])
+
+/** 档位 id → 展示名。 */
+const CODEARTS_EFFORT_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  none: '关闭思考',
+  minimal: '最小',
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '极高',
+  max: '最大',
+})
+
+/**
+ * 该模型的**声明档位表**（强度序：弱 → 强）。
+ *
+ * ## ⚠️⚠️ 必须保留 `off` / `on` 两个旧 id（issue #145 第 1 条注意事项）
+ *
+ * `dsh-agent-default-model` 把 `reasoningEffort` **持久化在 Config 里**、会话 header
+ * 也会存。而 `dsh-llm` 的 `resolveCallWithInfo()` 对**显式请求的档位严格校验**：
+ * 不在声明列表里就抛 `UNSUPPORTED_REASONING_EFFORT` —— 那是**整轮对话直接失败**，
+ * 不是降级。**删掉这两个 id 会打死所有存过它们的用户。**
+ *
+ * ⇒ 保留成**别名**：`off` = 最弱（按 `shutBy` 尽量真关），`on` = 最强（`max`）。
+ *   位置仍是强度序 ⇒ `off` 在最左、`on` 在最右。
+ *
+ * ⚠️ **`on` 落在最右**还有一层作用：`dsh-agent-default-model` 的
+ * `strongestDeclaredEffort` 会取「声明里最强的那一档」⇒ 默认自动落到 `max`。
+ *   这也是为什么本修复**不需要**单独调 `CODEARTS_DEFAULT_EFFORT`。
+ *
+ * ⚠️ **未登记的模型（`kimi-*` / `openpangu-*` / 手填 id）保持原来的两档** ——
+ *   它们**不校验** `reasoning_effort`，任何枚举都是推测；宁可不给，也不编。
+ */
+export function codeartsEffortsFor(
+  modelId: string,
+): readonly { id: ReturnType<typeof ReasoningEffortId>; name: string }[] {
+  const plan = CODEARTS_EFFORT_PLAN.get(modelId.toLowerCase())
+  if (plan === undefined) return CODEARTS_REASONING_EFFORTS
+  const middle = plan.efforts.map((effort) => ({
+    id: ReasoningEffortId(effort),
+    // ⚠️ 不承诺比实际存在的分级更多：`xhigh` 按官方文档映射为 `max`、
+    //    `low`/`medium` 映射为 `high` ⇒ 标签只写名字，不写「比谁强多少」。
+    name: CODEARTS_EFFORT_LABELS[effort] ?? effort,
+  }))
+  return Object.freeze([
+    { id: ReasoningEffortId('off'), name: '关闭' },
+    ...middle,
+    { id: ReasoningEffortId('on'), name: '开启（最强）' },
+  ])
+}
+
+/**
+ * 出站时该模型**实际要发的思考字段**（issue #145 的修法核心）。
+ *
+ * ## 判据（三个分支，**两个字段只发一个，绝不并**）
+ *
+ * | 用户选的 | `shutBy` | 发什么 |
+ * |---|---|---|
+ * | `off` | `enable_thinking_false` | `enable_thinking: false` |
+ * | `off` | `reasoning_effort_none` | `reasoning_effort: 'none'` |
+ * | `off` | `cannot_shut` | `reasoning_effort: <最弱档>`（**如实降级**）|
+ * | 其他档 / `on` | — | `reasoning_effort: <该档>`（`on` ⇒ 最强）|
+ *
+ * ⚠️⚠️ **绝不并发两个字段**：`reasoning_effort: 'max'` + `enable_thinking: true`
+ * 谁赢**上游没定义**，那会让「档位不生效」变成更难查的问题（issue 第 3 条）。
+ *
+ * ⚠️ **不再发 `enable_thinking: true`**：作者实测它是**削弱开关**而不是开启开关 ——
+ * `glm-5.3` 用 `true` 是 **37** reasoning_tokens，而**不发该字段是 239**（比值 0.15）；
+ * `GLM-5.2` 是 470 vs 685。旧的 `on` 档因此**削弱**了思考。
+ */
+export function codeartsThinkingFields(
+  modelId: string,
+  requestedEffort: string | undefined,
+): Record<string, unknown> {
+  const plan = CODEARTS_EFFORT_PLAN.get(modelId.toLowerCase())
+  if (plan === undefined) {
+    // 未登记模型：保持旧行为（布尔开关），因为我们对它的枚举一无所知。
+    return { enable_thinking: !(requestedEffort === 'off') }
+  }
+  const strongest = plan.efforts[plan.efforts.length - 1]!
+  if (requestedEffort !== 'off') {
+    // `on` 是「最强」的别名；其余档位原样透传（上游校验会兜住非法值）。
+    const wire = requestedEffort === undefined || requestedEffort === 'on'
+      ? strongest
+      : requestedEffort
+    return { reasoning_effort: wire }
+  }
+  // 用户明确要「关闭」：按该模型真正能停思考的写法表达。
+  switch (plan.shutBy) {
+    case 'enable_thinking_false':
+      return { enable_thinking: false }
+    case 'reasoning_effort_none':
+      return { reasoning_effort: 'none' }
+    case 'cannot_shut':
+      // ⚠️ 上游拒绝关闭 ⇒ 退到最弱档，**不假装关掉了**。
+      return { reasoning_effort: plan.efforts[0]! }
+  }
+}
+
+/**
  * 「该账号没有 benefit（免费额度）包」的稳定失败码。
  *
  * CodeArts 对**积分制**账户（体验版等，没有 benefit 免费额度包）会以
@@ -2278,7 +2431,12 @@ export class CodeArtsAdapter extends LlmAdapter {
         // 的长注释（Issue IKLIDV）—— 简言之：DSH 把该数组当展示顺序、客户端不排序，
         // 故 `['on','off']` 会让「开启」落在横向轴的最左。
         // ⚠️ `defaultEffort` 仍由 `CODEARTS_DEFAULT_EFFORT` 单独表达，与位置无关。
-        efforts: [...CODEARTS_REASONING_EFFORTS],
+        //
+        // ★ **按模型取真实档位**（issue #145）：上游按模型校验 `reasoning_effort`，
+        //   枚举各不相同（`glm-5.3` 三档 / `deepseek-v4.1-flash` 六档 / `GLM-5.2` 七档）。
+        //   未登记的模型（`kimi-*` / `openpangu-*` / 手填 id）返回**原来的两档** ——
+        //   它们**不校验**该字段，任何枚举都是推测，宁可不给也不编。
+        efforts: [...codeartsEffortsFor(model.id)],
         defaultEffort: ReasoningEffortId(CODEARTS_DEFAULT_EFFORT),
       },
     }
@@ -2568,7 +2726,10 @@ export class CodeArtsAdapter extends LlmAdapter {
       // ⚠️ 与 `resolveModel` 声明的档位**同源**（`CODEARTS_REASONING_EFFORTS`）——
       // 各写一份必然漂移，而漂移的症状是「标题请求挑的关闭档不在声明里」。
       // ⚠️ `thinkingOffEffortOf` 按 **rank** 找关闭档（不按位置），故顺序调整不影响它。
-      declaredEfforts: CODEARTS_REASONING_EFFORTS.map((effort) => String(effort.id)),
+      // ★ 与 `toCatalogEntry` **同源**（issue #145）：按模型取真实档位。
+      // ⚠️ 写成 `CODEARTS_REASONING_EFFORTS` 会让「标题请求」在六档模型上
+      //    把 `max` 当成「不在声明里」⇒ 标题那条腿的档位推理全错。
+      declaredEfforts: codeartsEffortsFor(options.model).map((effort) => String(effort.id)),
       maxTokens: options.maxTokens,
     })
     const body = JSON.stringify({
@@ -2625,10 +2786,42 @@ export class CodeArtsAdapter extends LlmAdapter {
       // 而本仓也没有任何消费者读「加密 reasoning」⇒ 纯冗余出站字段。
       // ⚠️ `prompt_cache_key` **保留**（唯一有意偏离 IDE 的字段，理由见上方长注释）。
       prompt_cache_key: this.sessionId,
-      // 思考开关：按 IDE 的 `enable_thinking`（关档发 false，其余发 true）。
-      // ⚠️ **不发 `thinking:{type:'disabled'}`** —— 与 IDE 对齐后两者只留一份，
-      //    避免「同一语义两个字段」（旧方言仍被服务端接受，但不该再发）。
-      enable_thinking: !(titlePlan.thinkingOff || options.reasoningEffort === 'off'),
+      /**
+       * ★★★ **思考控制：发 `reasoning_effort`，不再发 `enable_thinking: true`**
+       * （issue #145，2026-11-23）。
+       *
+       * ## 改前
+       *
+       * ```ts
+       * enable_thinking: !(titlePlan.thinkingOff || options.reasoningEffort === 'off')
+       * ```
+       *
+       * 这个布尔**从来不是「开启」**，而是**削弱开关** —— 作者真机实测
+       * （判据 `usage.completion_tokens_details.reasoning_tokens`）：
+       *
+       * | 模型 | `enable_thinking: true` | **不发该字段** | 比值 |
+       * |---|---|---|---|
+       * | `glm-5.3` | 37 | **239** | **0.15** |
+       * | `GLM-5.2` | 470 | 685 | 0.69 |
+       * | `deepseek-v4.1-flash` | 58 | 61 | 0.95 |
+       *
+       * ⇒ 旧的 `on` 档**削弱**了思考；而 `reasoning_effort` 这个字符串**全文件
+       *    只出现过 1 次、而且是在注释里** ⇒ 用户选什么上游都收不到强度。
+       *
+       * ## 改后
+       *
+       * 按模型发 `reasoning_effort`（枚举见 `CODEARTS_EFFORT_PLAN`）；
+       * 只有用户**明确要关闭**时才按该模型真正能停思考的写法发
+       *（`shutBy`：`enable_thinking:false` / `reasoning_effort:'none'` / 最弱档）。
+       *
+       * ⚠️⚠️ **两个字段绝不并发** —— `reasoning_effort:'max'` + `enable_thinking:true`
+       * 谁赢**上游没定义**，那会让「档位不生效」变成更难查的问题。
+       * ⚠️ `titlePlan.thinkingOff`（标题请求要关思考）映射成 `off` 走同一条腿。
+       */
+      ...codeartsThinkingFields(
+        options.model,
+        titlePlan.thinkingOff ? 'off' : (options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)),
+      ),
       // IDE 每次请求都带 `stream_options.include_usage`（要 usage 帧）。
       // ⚠️ 本仓的 usage 消费方（token-meter / 占用条）依赖 `assistant/message.usage`，
       //    拿不到 usage 会让分子的唯一来源变空 ⇒ 这不是可选美化项。
