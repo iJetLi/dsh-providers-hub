@@ -55,7 +55,23 @@ function stripComments(source: string): string {
  * 天然不进普查。留这个常量是为了让「将来要豁免」有明确的落点，
  * 且强制填写理由（空理由会被下面的用例断言挡住）。
  */
-const EXEMPT: Record<string, string> = {}
+const EXEMPT: Record<string, string> = {
+  /**
+   * ★★★ **豆包有意不落盘**（2026-11-23，PR #149 对抗审计 P1-1）。
+   *
+   * 它的 `createModelCatalog` 写着 `diskCache: false`，理由是「磁盘的展示条目不含
+   * `modeId`，不能用它声明随后无法路由的档位」—— 而豆包**按 `modeId` 路由**。
+   *
+   * ⚠️ 曾经（`b37eb20f`）为了过这条普查，在赋值后加过一行
+   * `this.catalog.rememberForDisk?.(...)`。审计探针实测那是**运行时空操作**：
+   * `rememberCatalogForDisk` 的写盘腿是 `if (config.diskCache !== false) ...` ⇒
+   * 远端目录成功回 1 条之后 `readCatalogCache('doubao')` 仍是 `undefined`。
+   * ⇒ **普查变绿、症状不变**（重启后照样不走缓存），而且从此对这家失效。
+   *
+   * ⇒ 正确出口是把这家放进豁免表并写明理由（本表存在的意义），**不是**放宽判据。
+   */
+  'doubao-adapter.ts': '有意不落盘：磁盘条目缺 modeId，而豆包按 modeId 路由（diskCache: false）',
+}
 
 describe('适配器落盘接线普查（派生式）', () => {
   const adapters = readdirSync(srcDir).filter((f) => f.endsWith('-adapter.ts'))

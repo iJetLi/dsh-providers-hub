@@ -509,23 +509,27 @@ export class DoubaoAdapter extends LlmAdapter {
         this.remoteModels = models
         this.remoteModelsLoaded = true
         /**
-         * ★★★ **必须落盘**（PR #149 遗漏，`catalog-disk-wiring` 的派生式普查当场抓到）。
+         * ⚠️⚠️ **刻意不落盘**（2026-11-23 二改，PR #149 对抗审计 P1-1 打穿）。
          *
-         * 这一条是**派生式**判据：只要某适配器有 `remoteModels` 赋值，就必须调
-         * `rememberForDisk` —— 否则**重启后该家目录不会走缓存**（冷启动那几秒
-         * 会退回兜底表/空目录，而**没有任何报错**）。是「静默变慢 + 短暂显示错目录」
-         * 的经典形态，本仓已经为此写过一次普查。
+         * 第一版这里加过 `this.catalog.rememberForDisk?.(...)`，理由是
+         * `catalog-disk-wiring.spec.ts` 的派生式普查要求「有 `remoteModels` 赋值就必须落盘」。
+         * **但那是空操作，而且方向错了**：
          *
-         * ⚠️ 写在**赋值之后**：`rememberForDisk` 要把刚落地的目录写到磁盘，
-         *    早于赋值会写到上一版（`buddy-adapter.ts:2259` 有同一条注释）。
+         * - 本适配器在构造函数里写死 `diskCache: false`，而 `rememberCatalogForDisk` 的写盘腿是
+         *   `if (config.diskCache !== false) writeCatalogCache(...)` ⇒ **一次字节都不写**；
+         * - 审计探针实测：远端目录**成功**回 1 条之后，`readCatalogCache('doubao')` 仍是
+         *   `undefined` ⇒ **普查变绿、症状不变**（「重启后不走缓存」照旧）。
          *
-         * ⚠️ **只在 `models.length > 0` 之后**才到这里（上面已早退）⇒ 不存在
-         *    「用残缺的目录覆盖上次的好缓存」那种风险（`buddy-adapter` 需要额外判
-         *    `remoteComplete`，本家的判据是「非空即完整」，故不需要）。
+         * ## 为什么 `diskCache` 本来就是 false（不是漏配）
          *
-         * ⚠️ 可选成员（`?.`）：单测替身没有它时零行为变化。
+         * 磁盘里的展示条目**不含 `modeId`**，而豆包按 `modeId` 路由 ⇒ 拿缓存条目去声明
+         * 档位会声明出**随后无法路由**的档位。⇒ 这家**有意**不读磁盘缓存。
+         *
+         * ## 所以正确的修法是「进豁免表」，不是「加一行调用」
+         *
+         * 普查本身给了这个出口（`EXEMPT` + 写明理由）。加一行**看起来接好了、实际什么都不做**
+         * 的调用，比承认「这家有意不落盘」更糟 —— 后者会让普查从此对这家失效。
          */
-        this.catalog.rememberForDisk?.(this.syncCatalogEntries())
         return true
       } catch {
         // 传输错误可能包含请求头或会话标识，不把异常原文写入日志。
