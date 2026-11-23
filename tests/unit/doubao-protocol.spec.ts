@@ -439,87 +439,36 @@ describe('doubao reasoning catalog and stream blocks', () => {
   })
 
   /**
-   * ★★★ **2026-11-23 改（issue #150 第 4 条）：这条用例原本锁的是缺陷本身。**
+   * ★★★ **reasoning-only 必须判失败，但要用「不可重试」的码**（issue #150 第 4 条，四改）。
    *
-   * 旧断言：`reasoning-only ⇒ rejects EMPTY_RESPONSE`。
+   * ## 三次摇摆的完整记录（值得留）
    *
-   * 但「只返回思考、没有正文」是**上游返回的成功响应**，不是失败。把它判空的实际后果是：
-   * `stream()` 认为这个账号不可用 ⇒ **换下一个账号重发同一份请求**（实测 2 账号 ⇒ 2 次
-   * 完整请求，每次都带着满满的思考正文）⇒ 白烧两倍额度，还可能把账号状态搞脏。
+   * 1. **PR 原版**：判 `EMPTY_RESPONSE` ⇒ 在宿主可重试集合里 + 本循环先 `continue` 换号
+   *    ⇒ 实测 2 账号 = **2 次完整请求**，每次都带着满满的思考正文 ⇒ **白烧额度**。
+   * 2. **我第一版**：把「思考也算内容」⇒ 成功交给宿主。**对抗审计实测这是 P0**：
+   *    宿主对「只有 reasoning 块、没有 text 块」的 assistant 消息判为**无答复**
+   *    ⇒ 用户看到**零输出**、**不报错、不重试**。**比原版更糟**。
+   * 3. **本版（正解）**：**保留「必须有正文」的判据**（不把半个响应当成功），
+   *    但换成 **`INVALID_REQUEST`**（不在可重试集合）⇒ 既不会交付空答复，
+   *    也不会逐账号重发。
    *
-   * ⇒ 判据从「有没有正文」改成「**有没有任何可交付内容**」（思考也算内容），
-   *   所以现在应当是**成功收尾**：有 reasoning 增量、并以 `finish/stop` 结束。
+   * ⚠️ 所以这条用例**继续断言 rejects** —— 它原本防的东西是真的（半个响应不许当成功）。
+   *    变的是**码**和**文案**。
    */
-  it('counts a reasoning-only response as a successful answer (issue #150)', async () => {
-    const chunks: StreamChunk[] = []
-    for await (const chunk of adapterWithResponse(emptyDeclarations('reasoning-only')).stream(options)) {
-      chunks.push(chunk)
-    }
-    // 思考帧必须真的交付出去（旧路径这里一段都不会吐，因为整条被判空）。
-    expect(chunks.some((chunk) => chunk.type === 'reasoning-delta')).toBe(true)
-    // 且必须以正常收尾结束 —— 不是 EMPTY_RESPONSE、也不是任何失败。
-    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
-  })
-
-  /**
-   * ⚠️⚠️ **已知限制：匿名块（无 `block_id`）的重复快照会让正文翻倍**（issue #150 第 3 条）。
-   *
-   * 本用例**不断言「已修好」**，而是把**当前真实行为**钉住，免得将来有人以为它已经修了。
-   *
-   * ## 为什么没修
-   *
-   * 第一版给匿名块合成过 key（`anon:${kind}`）试图修掉翻倍。**正向审计实测那是倒退**：
-   * 合成 key 每个 kind 只有一个槽 ⇒ 同一次快照里出现**多个匿名块**时，第二个块起会把
-   * 上一块的内容当成自己「历史前缀」⇒ **整段丢弃**；最坏形态（匿名「思考 + 正文」同快照）
-   * ⇒ **只留思考、正文静默消失**。
-   *
-   * ⇔ 翻倍是**可见且可恢复**的；丢内容是**静默**的。⇒ 回退到旧语义。
-   *
-   * 真要修，需要给匿名块一个**跨快照稳定**的身份 —— 而它天生没有
-   *（区分「同一块重发」与「另一个匿名块」需要上游给 id，它不给）。
-   */
-  it('⚠️ 已知限制：匿名块重复快照仍会翻倍（未修，见 issue #150）', async () => {
-    const snapshot = (text: string) => 'event: STREAM_MSG_NOTIFY\ndata: ' + JSON.stringify({
-      message: { content: { content_block: [
-        { block_type: 10000, content: { text_block: { text } } },
-      ] } },
-    }) + '\n\n'
-    const raw = snapshot('你好') + snapshot('你好') + 'event: SSE_REPLY_END\ndata: {"end_type":3}\n\n'
-    const chunks: StreamChunk[] = []
-    for await (const chunk of adapterWithResponse(raw).stream(options)) chunks.push(chunk)
-    const body = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
-    // ⚠️ 这就是**当前**（也是 master 的）行为：翻倍。改成 `toBe('你好')` 的那天，
-    //    请同时把那条长注释删掉，并在 #150 里标记该条已修。
-    expect(body, '⚠️ 已知限制：匿名块无身份 ⇒ 重复快照会翻倍').toBe('你好你好')
-  })
-
-  /**
-   * ★★★ **多个匿名块不得互相吞掉**（这是回退那条修复的**理由**，必须钉住）。
-   *
-   * 第一版合成 key（每 kind 一槽）会让**第二个匿名块**把第一块的内容当成自己的前缀
-   * ⇒ 整段丢弃。本用例保证：即使处理方式是「不去重」，**两块的内容都必须完整交付**。
-   */
-  it('keeps every anonymous block when several appear in one snapshot (issue #150)', async () => {
-    const raw = 'event: STREAM_MSG_NOTIFY\ndata: ' + JSON.stringify({
-      message: { content: { content_block: [
-        { block_type: 10000, content: { text_block: { text: '第一块' } } },
-        { block_type: 10000, content: { text_block: { text: '第二块' } } },
-      ] } },
-    }) + '\n\nevent: SSE_REPLY_END\ndata: {"end_type":3}\n\n'
-    const chunks: StreamChunk[] = []
-    for await (const chunk of adapterWithResponse(raw).stream(options)) chunks.push(chunk)
-    const body = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
-    expect(body, '第二个匿名块不得被当成第一块的重发而丢弃').toContain('第二块')
-    expect(body, '第一块也不得丢').toContain('第一块')
-  })
-
-  it('keeps the upstream message on an in-stream business error (issue #150)', async () => {
-    const raw = 'event: STREAM_ERROR\ndata: '
-      + JSON.stringify({ code: 710022004, msg: '当前对话人数过多，请稍后再试' })
-      + '\n\n'
+  it('rejects a reasoning-only response with a non-retryable code (issue #150)', async () => {
     await expect(async () => {
-      for await (const chunk of adapterWithResponse(raw).stream(options)) void chunk
-    }).rejects.toThrow(/当前对话人数过多/)
+      for await (const chunk of adapterWithResponse(emptyDeclarations('reasoning-only')).stream(options)) void chunk
+    }).rejects.toMatchObject({
+      // ⚠️ 关键是**不在** `DEFAULT_RETRYABLE_CODES`（EMPTY_RESPONSE / RATE_LIMIT /
+      //    SERVER / TIMEOUT / TRANSPORT）里 —— 否则宿主会重试，而重发同一份请求不会变好。
+      code: 'INVALID_REQUEST',
+    })
+  })
+
+  it('explains that reasoning-only means no deliverable answer (issue #150)', async () => {
+    await expect(async () => {
+      for await (const chunk of adapterWithResponse(emptyDeclarations('reasoning-only')).stream(options)) void chunk
+    }).rejects.toThrow(/只返回了思考内容/)
   })
 
   it('keeps provider reasoning and answer in distinct finalized DSH blocks', async () => {

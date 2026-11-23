@@ -319,13 +319,28 @@ class DoubaoTextTracker {
   private current: { kind: DoubaoTextKind; id?: string } = { kind: 'text' }
 
   /**
-   * ★★★ 判「这次到底有没有可交付内容」。
+   * ★★★ **判据：必须有正文**（2026-11-23 四改，对抗审计打了 P0）。
    *
-   * ⚠️ 旧判据只看正文 ⇒ **reasoning-only 响应被判空** ⇒ `stream()` 认为这个账号不可用、
-   * 换下一个账号**重发同一份带满思考正文的请求**（实测 2 账号 ⇒ 2 次）。那既白烧额度，
-   * 也可能把账号状态搞脏 —— 而那次响应**其实是成功的**。
+   * ## 我上一版把它改成「思考也算内容」，那是**错的**
+   *
+   * 实测后果：reasoning-only 响应被当作**成功**交给宿主，而宿主对「只有 reasoning 块、
+   * 没有 text 块」的 assistant 消息判为 **无答复** ⇒ 用户看到**零输出**，
+   * 而且**不报错、不重试**。比原来的「判空重发」更糟：后者至少还有错误可看。
+   *
+   * ## 但原来的「判空重发」也是真缺陷
+   *
+   * 它会让 `stream()` 认为这个账号不行、换下一个账号重发（实测 2 账号 ⇒ 2 次带满思考
+   * 正文的请求）⇒ 白烧额度。
+   *
+   * ## 正解（本版）
+   *
+   * **保留「必须有正文」这个判据**（不把半个响应当成功），但把失败码换成
+   * **不可重试**的那一类 ⇒ 既不会交给宿主一个空答复，也不会逐账号重发。
    */
-  get hasAnswer(): boolean { return this.hasAnswerText || this.hasReasoningText }
+  get hasAnswer(): boolean { return this.hasAnswerText }
+
+  /** 是否收到了思考（只用于把错误文案说清楚，不参与「有没有答复」的判定）。 */
+  get hasReasoning(): boolean { return this.hasReasoningText }
 
   push(frame: DoubaoFrame): StreamChunk[] {
     if (frame.event !== 'STREAM_MSG_NOTIFY' && frame.event !== 'FULL_MSG_NOTIFY'
@@ -716,7 +731,24 @@ export class DoubaoAdapter extends LlmAdapter {
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
-      lastError = new LlmError('豆包：上游未返回正文', 'EMPTY_RESPONSE')
+      /**
+       * ★★★ **不抛 `EMPTY_RESPONSE`**（2026-11-23 四改）。
+       *
+       * `EMPTY_RESPONSE` 在宿主 `DEFAULT_RETRYABLE_CODES` 里，而且本循环会先 `continue`
+       * 换下一个账号 ⇒ 一次 reasoning-only 响应能触发 **账号数 × 宿主 5 次** 的重发
+       *（每次都带着满满的思考正文，白烧额度）。
+       *
+       * ⇒ 换 `INVALID_REQUEST`（**不在**可重试集合）。语义上用它是准的：**上游返回的
+       * 形状不可交付**（只有思考、没有正文），重发同一份请求不会变好。
+       *
+       * ⚠️ 文案必须说清「收到了思考但没有正文」，否则用户会以为是账号问题。
+       */
+      lastError = tracker.hasReasoning
+        ? new LlmError(
+          '豆包：上游只返回了思考内容、没有正文，本条不可交付（重发不会变好，请换个问法或稍后再试）',
+          'INVALID_REQUEST',
+        )
+        : new LlmError('豆包：上游未返回正文', 'EMPTY_RESPONSE')
     }
     throw lastError ?? new LlmError('豆包：所有账号均不可用', 'SERVER')
   }
