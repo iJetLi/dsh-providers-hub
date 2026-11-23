@@ -55,6 +55,35 @@ export interface SubagentAssignment {
    * 沿用主代理规则。
    */
   slot: number
+  /**
+   * ★★★ **拉起时算定的账号 id**（2026-11-24 用户要求）。
+   *
+   * ## 为什么需要它（用户原话）
+   *
+   * > 「我是希望『拉起时定死，只有该号不可用才换』，
+   * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
+   *
+   * ⚠️ 这不是性能优化，而是**正确性**：AI 服务商的 prompt cache 按
+   * （账号 + 模型 + 前缀）命中。每发请求重算起点 ⇒ 池子稍有波动就换号
+   * ⇒ 缓存全失效 ⇒ 同一段长上下文被重复计费。
+   *
+   * ## 语义（严格三步）
+   *
+   * | 状态 | 行为 |
+   * |---|---|
+   * | `pinnedAccountId` 有值且**该号仍可用** | **直接用它**，不重算（稳态）|
+   * | 该号**不可用**（停用/封禁/限流/无积分）| 重算一次，并把新号**写回**本字段 |
+   * | `undefined`（老数据 / 首次）| 走 `slot` 现算，然后**写回** |
+   *
+   * ⚠️ 写回是**必须**的：否则「不可用 → 重算」会退化成「每发请求都重算」
+   *（正是本字段要消除的行为）。
+   *
+   * ⚠️ 与 `slot` 的关系：`slot` 仍保留（用于**首次**算起点 + 诊断），
+   * 但稳态下 `pinnedAccountId` 优先。两者不一致时以 pin 为准。
+   */
+  pinnedAccountId?: string
+  /** `pinnedAccountId` 的确定时刻（诊断用，不参与判据）。 */
+  pinSetAt?: number
   /** `subagent/end` 是否已到达（只用于诊断，**不参与**任何判据）。 */
   ended?: boolean
 }
@@ -92,12 +121,26 @@ export function sanitizeSubagentAssignments(raw: unknown): SubagentAssignmentMap
     const at = typeof src.at === 'number' && Number.isFinite(src.at) && src.at >= 0 ? src.at : undefined
     const slot = typeof src.slot === 'number' && Number.isInteger(src.slot) && src.slot >= 0 ? src.slot : undefined
     if (sessionId === undefined || parentSessionId === undefined || at === undefined || slot === undefined) continue
+    /**
+     * ★ **钉住的账号**（2026-11-24）：拉起时算定，之后只要它还可用就不换。
+     *
+     * ⚠️ 与 slot 同纪律：非法值**丢弃**（不给默认值）——
+     * 猜一个账号 id 会让子代理用错号，且无从排查。
+     */
+    const pinnedAccountId = typeof src.pinnedAccountId === 'string' && src.pinnedAccountId.length > 0
+      ? src.pinnedAccountId
+      : undefined
+    const pinSetAt = typeof src.pinSetAt === 'number' && Number.isFinite(src.pinSetAt) && src.pinSetAt >= 0
+      ? src.pinSetAt
+      : undefined
     // ⚠️ 键必须是 sessionId 本身：写错就是「查不到分配」→ 静默回落主代理起点。
     result[sessionId] = {
       sessionId,
       parentSessionId,
       at,
       slot,
+      ...(pinnedAccountId === undefined ? {} : { pinnedAccountId }),
+      ...(pinnedAccountId === undefined || pinSetAt === undefined ? {} : { pinSetAt }),
       ...(src.ended === true ? { ended: true } : {}),
     }
   }
@@ -150,6 +193,16 @@ export function recordSubagentAssignment(
      */
     return {
       ...assignments,
+      /**
+       * ⚠️ **`pinnedAccountId` / `pinSetAt` 必须原样保留**（2026-11-24）。
+       *
+       * resume 是同一个子代理**继续**跑 —— 换账号会让它的 prompt cache
+       * 全失效（用户明确要求「拉起时定死」）。
+       *
+       * ⚠️ `{ ...existing, ended: false }` 天然保留它们，这里显式写出来是
+       * 为了**防止**将来有人改这行时顺手把 pin 清掉（那会静默退化成
+       * 「每次 resume 都重算」）。
+       */
       [sessionId]: { ...existing, ended: false, at: existing.at },
     }
   }
@@ -187,6 +240,41 @@ export function markSubagentEnded(
  * 多个子代理拿到同一个 slot ⇒ 挤在同一个账号上。
  * 取 `max(slot) + 1` 才单调。
  */
+/**
+ * ★★★ **钉住某子代理的账号**（2026-11-24 用户要求）。
+ *
+ * ## 用户原话
+ *
+ * > 「我是希望『拉起时定死，只有该号不可用才换』，
+ * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
+ *
+ * ⚠️ 这是**正确性**要求，不是优化：prompt cache 按
+ *（账号 + 模型 + 前缀）命中，每发请求重算起点 ⇒ 池子一波动就换号
+ * ⇒ 缓存全失效 ⇒ 同一段长上下文被重复计费。
+ *
+ * @param assignments - 分配表
+ * @param sessionId - 子代理会话 id
+ * @param accountId - 要钉住的账号 id
+ * @param now - 钉住时刻
+ * @returns 新分配表；**已钉住同一账号时返回原对象**（避免无谓写盘与广播）
+ */
+export function pinSubagentAccount(
+  assignments: SubagentAssignmentMap,
+  sessionId: string,
+  accountId: string,
+  now: number,
+): SubagentAssignmentMap {
+  const existing = assignments[sessionId]
+  if (existing === undefined) return assignments
+  if (accountId.length === 0) return assignments
+  /** ⚠️ 已经是这个号 ⇒ 返回**原对象**（调用方据此跳过落盘）。 */
+  if (existing.pinnedAccountId === accountId) return assignments
+  return {
+    ...assignments,
+    [sessionId]: { ...existing, pinnedAccountId: accountId, pinSetAt: now },
+  }
+}
+
 export function nextSubagentSlot(assignments: SubagentAssignmentMap): number {
   let max = -1
   for (const entry of Object.values(assignments)) {

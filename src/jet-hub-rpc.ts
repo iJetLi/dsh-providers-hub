@@ -13026,7 +13026,43 @@ function registerJetHubEndpoints(
             ...(windowDays === undefined ? current?.windowDays === undefined ? {} : { windowDays: current.windowDays } : { windowDays }),
             ...(imminentDays === undefined ? current?.imminentDays === undefined ? {} : { imminentDays: current.imminentDays } : { imminentDays }),
           }
-        await pool.setCreditWindow(req.provider, next)
+        /**
+         * ⚠️⚠️ **两个天数都没传时的两种语义必须分开**（2026-11-24 真缺陷）。
+         *
+         * ## 症状（用户原话）
+         *
+         * > 「只要在模型下拉框重新选择模型了，点击保存后，
+         * >   档次窗口中的短期和临期天数就会自动回归默认」
+         *
+         * ## 根因
+         *
+         * 既有契约是「两个天数都不传 ⇒ **恢复默认**（删键）」，
+         * 而「只改子代理设置」的请求**恰好也是**两个天数都不传
+         * ⇒ 被误当成「恢复默认」⇒ 窗口天数被抹掉。
+         *
+         * ⇒ 两种意图必须区分：
+         *
+         * | 请求形状 | 意图 | 动作 |
+         * |---|---|---|
+         * | 只有 `provider` | 恢复默认 | **删键**（走 `setCreditWindow(undefined)`）|
+         * | `provider` + `subagent` | 只改子代理 | **完全不碰窗口天数** |
+         *
+         * ⚠️ 判据是「本次请求**是否带了 `subagent` 键**」，不是「`subagent` 是否为
+         *    `null`」—— 传 `null` 是「清除子代理设置」，那同样是「只改子代理」，
+         *    不该顺带重置窗口天数。
+         *
+         * ⚠️ 不能用「池里当前是否有 subagent」当判据：那是**服务端状态**，
+         *    与用户这次的意图无关（老数据没 subagent 时反而会被误判成恢复默认）。
+         */
+        const hasSubagentKey = req.subagent !== undefined
+        /**
+         * `next !== undefined` ⇒ 本次带了天数 ⇒ 正常合并写入。
+         * `next === undefined` 且没带 subagent ⇒ 真的「恢复默认」⇒ 删键。
+         * `next === undefined` 但带了 subagent ⇒ **只改子代理** ⇒ 跳过。
+         */
+        if (next !== undefined || !hasSubagentKey) {
+          await pool.setCreditWindow(req.provider, next)
+        }
         /**
          * ★★★ **子代理设置**（2026-11-23）。
          *

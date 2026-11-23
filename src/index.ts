@@ -293,7 +293,7 @@ import { createExpiryProbe } from './aggregate-expiry.js'
 //    `credits.balances` 端点与 buddy 系四家的折算共用它（见下面 `balanceCache` 的长注释）。
 import { createBalanceCache, createBalanceRefresher, REFRESH_PERIOD_FALLBACK_MS, type BalanceCacheEntry } from './balance-cache.js'
 // ★ 余额读数的磁盘缓存（SWR 的写盘调度）：三个写盘时机见下方接线处。
-import { forgetSubagentParent, isSubagentSession, rememberSubagentParent } from './subagent-rotation.js'
+import { forgetSubagentParent, isSubagentSession, rememberSubagentParent, subagentParentCount } from './subagent-rotation.js'
 import { BALANCE_DISK_FLUSH_INTERVAL_MS, flushDisk as flushBalanceDisk, primeFromDisk as primeBalanceDiskCache } from './balance-disk-cache.js'
 // ⚠️ 模型目录的后台刷新器（用户 2026-10-18 要求：20 分钟定时更新）。
 //    与余额刷新器**共用同一套骨架**（武装 + 单飞 + 幂等），但**不复用实例** ——
@@ -7313,6 +7313,54 @@ async function fetchBalanceReading(
         const parentId = typeof evt?.parentSessionId === 'string' ? evt.parentSessionId : undefined
         if (childId === undefined || parentId === undefined) return
         rememberSubagentParent(childId, parentId)
+        /**
+         * ★★★ **在这里就改模型**（2026-11-24 第三次修正，前两次都失败）。
+         *
+         * ## 前两次为什么失败（都有实测证据）
+         *
+         * | 时机 | 失败原因 |
+         * |---|---|
+         * | `agent/pre-step` | 本 step 的 `modelSelection` **已定**，`select()` 改的是**下一个** step；而子代理**只有 step 1**（实测）⇒ 永不生效 |
+         * | `agent/created` | 那时 `subagent/start` **还没到** ⇒ 父子里表 `tableSize=0`（实测 6/6）⇒ 判据恒 false |
+         *
+         * ## 为什么 `subagent/start` 可行
+         *
+         * 它**早于子代理发第一个请求**（实测：`subagent/start` → 然后才是 `pre-step`）。
+         * 而 payload 虽无 agent，但 `AgentRegistry.get(id)` 能反查：
+         *
+         * > `get(id: SessionId): Agent | undefined`
+         * > —— `dsh-agent/lib/types/index.d.ts`
+         *
+         * ⚠️ `get()` 返回 `undefined`（agent 还没进 registry）⇒ 静默跳过，
+         * 那一轮用主代理模型，**绝不猜**。
+         */
+        try {
+          const registry = (injected as unknown as { agents?: {
+            get?: (id: string) => {
+              model?: { current?: unknown, select?: unknown }
+            } | undefined
+          } }).agents
+          const childAgent = registry?.get?.(childId)
+          const current = typeof childAgent?.model?.current === 'function'
+            ? (childAgent.model.current as () => { provider?: unknown, model?: unknown } | undefined)()
+            : undefined
+          const provider = typeof current?.provider === 'string' ? current.provider : undefined
+          if (provider !== undefined && typeof childAgent?.model?.select === 'function') {
+            const setting = pool.subagentRotationFor(provider)
+            const model = setting?.model
+            if (model !== undefined && model.length > 0 && current?.model !== model) {
+              const effort = setting?.reasoningEffort
+              ;(childAgent.model.select as (sel: unknown) => void)({
+                provider,
+                model,
+                ...(effort === undefined || effort.length === 0 ? {} : { reasoningEffort: effort }),
+              })
+            }
+          } else {
+          }
+        } catch (error) {
+          /** ⚠️ 换模型失败绝不能让事件监听器抛错（会传染宿主）。 */
+        }
       } catch (error) {
         // ⚠️ 事件监听器抛错会传染宿主，一律吞掉并留诊断日志。
         ctx.logger?.warn?.(`[jet-hub] 记录子代理 ${String(info)} 失败：${String(error)}`)
@@ -7352,59 +7400,44 @@ async function fetchBalanceReading(
      *
      * 主代理会话不在父子表里 ⇒ 这里什么都不做（零回归）。
      */
-    const stopPreStep = injected.on('agent/pre-step', (async (
-      payload: unknown,
-      next: () => Promise<unknown>,
-    ): Promise<unknown> => {
-      try {
-        const evt = payload as {
-          agent?: { id?: unknown; model?: { select?: unknown } }
-          modelSelection?: { provider?: unknown; model?: unknown }
-        }
-        const agent = evt?.agent
-        const sessionId = typeof agent?.id === 'string' ? agent.id : undefined
-        if (sessionId !== undefined && isSubagentSession(sessionId)) {
-          /**
-           * ⚠️ provider 从**当前模型选择**里取（不是从设置里猜）：
-           * 子代理的模型必须与它实际在跑的 provider 一致，否则
-           * `resolveCredential` 的 provider 假设会失效。
-           */
-          const provider = typeof evt?.modelSelection?.provider === 'string'
-            ? evt.modelSelection.provider
-            : undefined
-          if (provider !== undefined) {
-            const setting = pool.subagentRotationFor(provider)
-            const model = setting?.model
-            if (model !== undefined && model.length > 0
-              && typeof agent?.model?.select === 'function') {
-              const current = evt?.modelSelection?.model
-              if (current !== model) {
-                const effort = setting?.reasoningEffort
-                ;(agent.model.select as (sel: unknown) => void)({
-                  provider,
-                  model,
-                  ...(effort === undefined || effort.length === 0 ? {} : { reasoningEffort: effort }),
-                })
-              }
-            }
-          }
-        }
-      } catch (error) {
-        /**
-         * ⚠️⚠️ **绝不能让它抛**：pre-step 是 waterfall，抛错会**中断整个 step**
-         *（用户会看到「这一轮完全没响应」）。换模型是锦上添花的功能，
-         * 任何失败都必须静默降级为「用原来的模型」。
-         */
-        ctx.logger?.warn?.(`[jet-hub] 子代理换模型失败（已忽略，继续用原模型）：${String(error)}`)
-      }
-      return next()
-    }) as never)
+    /**
+     * ★★★ **子代理模型改写：必须在 `agent/created`（不是 `pre-step`）**
+     *（2026-11-24 用户实测打穿 + 宿主契约确证）。
+     *
+     * ## 为什么 `pre-step` 那版永远不生效
+     *
+     * 宿主 `Model.select()` 的契约（`runtime-types.d.ts:46-63`）逐字写着：
+     *
+     * > Replace the **next step's** complete selection.
+     * > This read neither starts a step nor **changes an already-prepared step**.
+     *
+     * ⇒ 在 `pre-step` 里调 `select()` 改的是**下一个** step，
+     *   而本 step 的 `modelSelection` **已经定了**，改不动它。
+     *
+     * 实测（探针 + Token 账本）：6 个子代理**每个只有 `step 1`** ——
+     * 它们跑完一轮就结束，**没有 step 2** ⇒ select 改的那个 step 永不到来
+     * ⇒ Token 账本里 6 条全是主代理的模型，**零条**目标模型。
+     *
+     * ## 为什么 `agent/created` 是对的
+     *
+     * 它在 agent **刚创建、还没跑任何 step** 时触发（`agent/created` 是
+     * `undefined | Promise<undefined>` 的 serial 事件）⇒ 此时 `select()` 改的
+     * 「next step」正是**第一个 step** ⇒ 生效。
+     *
+     * ## ⚠️ 为什么 `subagent/start` 不行
+     *
+     * 那个事件的 payload 只有 `{ id, parentSessionId, runId, provider, local }`
+     * —— **没有 agent 对象** ⇒ 拿不到 `agent.model.select()`。
+     *
+     * ## ⚠️ 只对**子代理**生效
+     *
+     * 靠父子表判（`isSubagentSession`）。主代理不在表里 ⇒ 什么都不做（零回归）。
+     */
+    /** ⚠️ `agent/created` 方案已废弃：那时父子表还是空的（实测 tableSize=0）。模型改在 `subagent/start` 里做。 */
 
     injected.effect(() => () => {
       try { stopStart() } catch { /* 忽略 */ }
-      try { stopEnd() } catch { /* 忽略 */ }
-      try { stopPreStep() } catch { /* 忽略 */ }
-    })
+      try { stopEnd() } catch { /* 忽略 */ }    })
   })
 }
 

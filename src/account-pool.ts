@@ -5,7 +5,7 @@ import type { BuddyProduct } from './product.js'
 import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, sanitizeSubagentRotation, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeCreditWindows, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, PreferredRotationMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
 import type { CreditWindowMap, CreditWindowSetting, RotationStartTier, SubagentRotationSetting } from './jet-hub-store.js'
-import { markSubagentEnded, nextSubagentSlot, recordSubagentAssignment, sanitizeSubagentAssignments } from './subagent-rotation.js'
+import { markSubagentEnded, nextSubagentSlot, pinSubagentAccount, recordSubagentAssignment, sanitizeSubagentAssignments } from './subagent-rotation.js'
 import type { SubagentAssignment, SubagentAssignmentMap } from './subagent-rotation.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
@@ -1440,14 +1440,55 @@ export class AccountPool {
     const validWindow = typeof windowDays === 'number' && Number.isFinite(windowDays) && windowDays >= 0
     const validImminent = typeof imminentDays === 'number' && Number.isFinite(imminentDays) && imminentDays >= 0
     const next: CreditWindowMap = { ...this.creditWindowCache }
+    /**
+     * ⚠️⚠️ **必须保留 `subagent`**（2026-11-24 用户报障，真缺陷）。
+     *
+     * ## 症状（用户原话）
+     *
+     * > 「档次窗口中，只要在模型下拉框重新选择模型了，点击保存后，
+     * >   档次窗口中的短期和临期天数就会自动回归默认」
+     *
+     * ## 根因
+     *
+     * 只改模型时 `credits.window.set` 收到的是**只有 `subagent` 的载荷**
+     * ⇒ 本函数拿到 `setting === undefined`（因为 RPC 在
+     * 「两个天数都没传」时传 `undefined`）⇒ 走下面的 `delete next[provider]`
+     * ⇒ **整条记录被删** ⇒ 窗口天数回到内置默认。
+     *
+     * 更隐蔽的是：删掉之后 `subagent` 也没了，但子代理设置是**同一次请求**
+     * 刚写进去的 —— 两个功能互相踩。
+     *
+     * ## 修法
+     *
+     * 删键前先看**是否还有 `subagent`**：有就只删两个天数、保留 subagent；
+     * 都没有才整条删（避免留下空对象噪音）。
+     */
+    const existingSubagent = next[provider]?.subagent
     if (!validWindow && !validImminent) {
-      // 恢复默认：删键（不留空对象噪音）
-      if (next[provider] === undefined) return
-      delete next[provider]
+      /**
+       * 「恢复默认」语义：删掉两个天数。
+       *
+       * ⚠️ 但**不能**连 `subagent` 一起删 —— 那是另一个功能的设置，
+       * 用户点「恢复默认」针对的是窗口天数。
+       */
+      if (existingSubagent !== undefined) {
+        next[provider] = { subagent: existingSubagent }
+      } else {
+        // 恢复默认：删键（不留空对象噪音）
+        if (next[provider] === undefined) return
+        delete next[provider]
+      }
     } else {
       next[provider] = {
         ...(validWindow ? { windowDays: windowDays as number } : {}),
         ...(validImminent ? { imminentDays: imminentDays as number } : {}),
+        /**
+         * ⚠️ **必须带上 `subagent`**（与上面同一个「整体替换」陷阱）。
+         *
+         * 漏这一行 ⇒ 任何一次「只改窗口天数」的保存都会静默抹掉子代理设置
+         * （用户会看到「我设的子代理模型又变回去了」，且零报错）。
+         */
+        ...(existingSubagent === undefined ? {} : { subagent: existingSubagent }),
       }
     }
     this.creditWindowCache = next
@@ -1545,6 +1586,18 @@ export class AccountPool {
      */
     const slot = existing === undefined ? nextSubagentSlot(current) : existing.slot
     const next = recordSubagentAssignment(current, sessionId, parentSessionId, slot, now)
+    /**
+     * ⚠️⚠️ **同步更新缓存，必须在 `await` 之前**（2026-11-24 实测修正）。
+     *
+     * ## 为什么
+     *
+     * 调用方（`resolveCredential`）在**同一个函数内**紧接着就读
+     * `subagentAssignmentOf()` 算起点。若缓存更新排在 `await queueStoreSave()`
+     * 之后，那次同步读取拿到的是**旧值**（`undefined`）
+     * ⇒ 子代理的第一发请求必然用主代理起点。
+     *
+     * ⇒ 缓存赋值**不依赖任何 await**，落盘才是异步的。
+     */
     this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
     if (this.store.kind !== 'memory') await this.queueStoreSave()
     return slot
@@ -1559,6 +1612,34 @@ export class AccountPool {
     if (next === current) return
     this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
     if (this.store.kind !== 'memory') await this.queueStoreSave()
+  }
+
+  /**
+   * ★★★ **钉住某子代理的账号**（2026-11-24 用户要求：拉起时定死）。
+   *
+   * ## 为什么要钉
+   *
+   * > 「我是希望『拉起时定死，只有该号不可用才换』，
+   * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
+   *
+   * 原理：prompt cache 按（账号 + 模型 + 前缀）命中 ⇒ 换号即缓存全失效。
+   *
+   * ⚠️ **同步更新缓存**（与 `recordSubagentStart` 同纪律）：调用方紧接着
+   * 还要读它，不能等落盘。
+   *
+   * @returns `true` = 有新值（同值返回 `false`，调用方据此跳过重复写盘）
+   */
+  async pinSubagentAccount(provider: string, sessionId: string, accountId: string): Promise<boolean> {
+    this.ensureLoaded()
+    if (provider.length === 0 || sessionId.length === 0 || accountId.length === 0) return false
+    const current = this.subagentAssignmentCache[provider]
+    if (current === undefined) return false
+    const next = pinSubagentAccount(current, sessionId, accountId, Date.now())
+    /** ⚠️ 同值 ⇒ 原对象返回 ⇒ 这里判等跳过落盘（避免每发请求都写一次磁盘）。 */
+    if (next === current) return false
+    this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
+    if (this.store.kind !== 'memory') await this.queueStoreSave()
+    return true
   }
 
   /**

@@ -153,7 +153,14 @@ describe('源码：登记必须被 isSubagentSession 守卫', () => {
 
     const code = stripComments(src)
     const callIdx = code.indexOf('recordSubagentStart?.(')
-    const freeIdx = code.indexOf('if (free !== true && baseRotationStartId !== undefined)')
+    /**
+     * ⚠️ 2026-11-24 三改：Anchor 从「`if (free !== true && baseRotationStartId !== undefined)`」
+     * 改成「`if (free !== true) {`」—— 因为**子代理起点计算**也已脱离
+     * 「主代理必须配起点」这个条件（用户实测打穿：主代理默认起点时子代理全不生效）。
+     *
+     * ⇒ 登记仍必须在**第一个** `if (free !== true` 之前。
+     */
+    const freeIdx = code.indexOf('if (free !== true')
     expect(callIdx, '剥注释后找不到 recordSubagentStart 调用').toBeGreaterThan(-1)
     expect(freeIdx, '剥注释后找不到 free 条件').toBeGreaterThan(-1)
     expect(
