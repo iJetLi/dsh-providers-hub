@@ -137,6 +137,71 @@ export interface CreditWindowSetting {
   windowDays?: number
   /** 「临期窗口」（< 此值算临期）。`undefined` = 回落下一级。 */
   imminentDays?: number
+  /** 子代理专属设置。`undefined` = 全部跟随主代理（与加这个功能之前**逐字节相同**）。 */
+  subagent?: SubagentRotationSetting
+}
+
+/**
+ * ★★★ **子代理起点策略**（2026-11-23）。
+ *
+ * | 值 | 语义 |
+ * |---|---|
+ * | `'follow'` | 与主代理用同一账号（**默认**，= 加本功能之前的行为）|
+ * | `'sequence'` | 在主代理起点**所在档位内**往后错开 |
+ * | `'reverse'` | 在同一档位内往前错开 |
+ * | `'hash'` | 按子代理 sessionId 稳定哈希到同档位内某账号（排除主代理）|
+ * | `'fixed'` | 恒定用 `fixedPosition` 那个账号（**绝对第一**，无视档位）|
+ *
+ * ⚠️⚠️ **前四种都只在「同一档位内」错开**：用户明确要求子代理也必须
+ * 遵守「临期 → 短期 → 永久」这条核心策略（2026-11-23 纠正过我第一版
+ * 把「倒序」理解成跨档位反转的错误）。
+ */
+export const SUBAGENT_START_MODES = ['follow', 'sequence', 'reverse', 'hash', 'fixed'] as const
+
+/** 子代理起点策略（见 {@link SUBAGENT_START_MODES}）。 */
+export type SubagentStartMode = typeof SUBAGENT_START_MODES[number]
+
+/** 判据 {@link SubagentStartMode}（唯一真源，UI 与端点共用）。 */
+export function isSubagentStartMode(value: unknown): value is SubagentStartMode {
+  return typeof value === 'string'
+    && (SUBAGENT_START_MODES as readonly string[]).includes(value)
+}
+
+/**
+ * ★★★ **子代理专属设置**（2026-11-23）。
+ *
+ * ## 为什么挂在 {@link CreditWindowSetting} 里
+ *
+ * 用户的原话是「在档次窗口中增加设置」。它俩都回答同一个问题 ——
+ * 「这一档积分该给谁用」，只是主代理与子代理分开回答。
+ *
+ * ⚠️ **刻意不另开一张顶层表**：那会让 `sanitizeCreditWindows` 的「整条丢弃」
+ * 规则（两字段都空则删键）与子代理设置打架 —— 一个 provider 只配了子代理、
+ * 没配窗口天数时，条目会被整条丢掉。
+ */
+export interface SubagentRotationSetting {
+  /** 起点策略。 */
+  startMode?: SubagentStartMode
+  /**
+   * `startMode === 'fixed'` 时使用的账号位次（1-based，与
+   * `PreferredRotationEntry.position` 同口径）。
+   *
+   * ⚠️ 语义是**绝对第一**（无视档位）：该号还有任何可用积分就一直用它。
+   * 「不可用」的判据与主代理一致 ——
+   * `buddyTierUsable(buddyBalanceTier(a, { allowPermanent }))`：即
+   * 「锁定永久时只剩永久积分」算不可用，**未锁定时只剩永久积分仍可用**。
+   */
+  fixedPosition?: number
+  /**
+   * 子代理使用的模型 id（**本 provider 内**）。
+   *
+   * ⚠️ 只接受该渠道**已启用**的模型（用户 2026-11-23 要求）。
+   * 为什么必须同 provider：`agent.model.select()` 换 provider 会让
+   * `resolveCredential` 的 provider 假设失效（选号 / 计费 / 目录全部错位）。
+   */
+  model?: string
+  /** 子代理的思考强度 id（模型声明的 `efforts` 之一）。`undefined` = 渠道默认最高档。 */
+  reasoningEffort?: string
 }
 
 /**
@@ -916,14 +981,63 @@ export function sanitizeCreditWindows(raw: unknown): CreditWindowMap {
     const source = entry as Record<string, unknown>
     const windowDays = readDays(source.windowDays)
     const imminentDays = readDays(source.imminentDays)
-    // ⚠️ 两个字段都没读到 ⇒ 整条丢弃（空对象会留下永不消费的噪音键）。
-    if (windowDays === undefined && imminentDays === undefined) continue
+    const subagent = sanitizeSubagentRotation(source.subagent)
+    /**
+     * ⚠️ 三者都没读到 ⇒ 整条丢弃（空对象会留下永不消费的噪音键）。
+     *
+     * ⚠️ **`subagent` 必须参与这条判据**：只配了子代理、没配窗口天数的 provider
+     * 若被整条丢掉，用户的子代理设置会**静默消失**（下次读回是默认值）。
+     */
+    if (windowDays === undefined && imminentDays === undefined && subagent === undefined) continue
     result[provider] = {
       ...(windowDays === undefined ? {} : { windowDays }),
       ...(imminentDays === undefined ? {} : { imminentDays }),
+      ...(subagent === undefined ? {} : { subagent }),
     }
   }
   return result
+}
+
+/**
+ * 归一化 {@link SubagentRotationSetting}。
+ *
+ * ## 纪律：宁丢弃，不猜
+ *
+ * 与 {@link sanitizePreferredRotation} 同一取向 —— 脏数据一律**丢字段**而不是
+ * 回落到某个看起来合理的猜测。理由：这些值直接决定「烧哪个号的积分」，
+ * 猜错会**静默消耗用户没打算用的账号**。
+ *
+ * @returns `undefined` = 没有任何有效字段（调用方据此决定是否保留整条）
+ */
+export function sanitizeSubagentRotation(raw: unknown): SubagentRotationSetting | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const source = raw as Record<string, unknown>
+
+  const mode = isSubagentStartMode(source.startMode) ? source.startMode : undefined
+  /** 没有合法模式 ⇒ 整块无意义（其余字段都依附于某个模式）。 */
+  if (mode === undefined) return undefined
+
+  const readPosition = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : undefined
+  const readText = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.length > 0 && value.length <= 200 ? value : undefined
+
+  const fixedPosition = readPosition(source.fixedPosition)
+  /**
+   * ⚠️ `fixed` 模式**必须有位次**，否则它等价于「不指定」—— 那就不是 fixed 了。
+   * 丢掉整个模式（回落 follow）比保留一个无目标的 fixed 更安全。
+   */
+  if (mode === 'fixed' && fixedPosition === undefined) return undefined
+
+  const model = readText(source.model)
+  const reasoningEffort = readText(source.reasoningEffort)
+
+  return {
+    startMode: mode,
+    ...(fixedPosition === undefined ? {} : { fixedPosition }),
+    ...(model === undefined ? {} : { model }),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+  }
 }
 
 /**
