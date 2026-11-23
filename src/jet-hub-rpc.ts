@@ -143,7 +143,9 @@ import { isMinimaxRefreshable, minimaxCredentialExpiresAtMs } from './minimax.js
 import {
   PANEL_ENTRY_VALUES,
   ROTATION_START_TIERS,
+  SUBAGENT_START_MODES,
   isRotationStartTier,
+  isSubagentStartMode,
   sanitizeMinimaxXff,
 } from './jet-hub-store.js'
 // 「限流中断后解禁再继续」的状态出口（控制器在 `rate-limit-resume.ts` 的模块级
@@ -515,6 +517,7 @@ import type {
   CatalogHealth,
 
   ProviderAccountStatus,
+  RpcSubagentRotationSetting,
 } from './types.js'
 import {
   BADGE_PREFERENCES,
@@ -12822,6 +12825,11 @@ function registerJetHubEndpoints(
           imminentDays: resolved.imminentDays,
           source: resolved.source,
           clamped: resolved.clamped,
+          // ★ 子代理设置（没配则省略，保持响应形状与改动前一致）
+          ...(() => {
+            const sub = pool.subagentRotationFor(req.provider)
+            return sub === undefined ? {} : { subagent: sub as unknown as RpcSubagentRotationSetting }
+          })(),
         }
         return { ok: true, value }
       }
@@ -12885,6 +12893,90 @@ function registerJetHubEndpoints(
             ...(imminentDays === undefined ? current?.imminentDays === undefined ? {} : { imminentDays: current.imminentDays } : { imminentDays }),
           }
         await pool.setCreditWindow(req.provider, next)
+        /**
+         * ★★★ **子代理设置**（2026-11-23）。
+         *
+         * ## 语义
+         *
+         * | 传入 | 行为 |
+         * |---|---|
+         * | `undefined`（不传该键）| **不动**（合并语义，与 windowDays 一致）|
+         * | `null` | **清除** |
+         * | 对象 | **严格校验**后写入 |
+         *
+         * ## ⚠️ 非法值一律 `bad-request`，**不静默丢弃**
+         *
+         * 静默丢弃会让用户以为「新设置已生效」（他确实点了保存），
+         * 实际跑的还是旧配置 —— 症状是「我设了顺序分布，怎么还是同一个号」，
+         * 且零报错、无从排查。
+         * ⇒ 宁可拒绝这次写入，让用户看到明确错误（与 `account.setRotation`
+         *   的 `tierAtSelection` 校验同款纪律）。
+         */
+        const rawSub = req.subagent
+        if (rawSub !== undefined) {
+          if (rawSub === null) {
+            await pool.setSubagentRotation(req.provider, undefined)
+          } else {
+            /** ① `startMode` 必须是合法枚举。 */
+            if (!isSubagentStartMode(rawSub.startMode)) {
+              return {
+                ok: false,
+                error: {
+                  code: 'bad-request',
+                  message: `subagent.startMode 必须是 ${SUBAGENT_START_MODES.join(' / ')} 之一`
+                    + `（收到 ${JSON.stringify(rawSub.startMode)}）`,
+                },
+              }
+            }
+            /**
+             * ② `fixed` 模式**必须有合法位次**，且必须在范围内。
+             *
+             * ⚠️ 范围校验用**启用账号数**（与 `account.setRotation` 同口径）：
+             * 否则用户会得到一个「选了永远不生效」的设置。
+             */
+            if (rawSub.startMode === 'fixed') {
+              const pos = rawSub.fixedPosition
+              if (typeof pos !== 'number' || !Number.isInteger(pos) || pos < 1) {
+                return {
+                  ok: false,
+                  error: {
+                    code: 'bad-request',
+                    message: `subagent.fixedPosition 必须是正整数（收到 ${JSON.stringify(pos)}）`,
+                  },
+                }
+              }
+              const enabledCount = (await pool.listAllAccounts())
+                .filter((a) => a.provider === req.provider && a.enabled !== false).length
+              if (pos > enabledCount) {
+                return {
+                  ok: false,
+                  error: {
+                    code: 'bad-request',
+                    message: `subagent.fixedPosition ${pos} 超出范围（共 ${enabledCount} 个启用账号）`,
+                  },
+                }
+              }
+            }
+            /** ③ 模型 / 思考强度：非空字符串时才接受。 */
+            for (const [key, value] of [
+              ['subagent.model', rawSub.model],
+              ['subagent.reasoningEffort', rawSub.reasoningEffort],
+            ] as const) {
+              if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
+                return {
+                  ok: false,
+                  error: { code: 'bad-request', message: `${key} 必须是非空字符串（收到 ${JSON.stringify(value)}）` },
+                }
+              }
+            }
+            await pool.setSubagentRotation(req.provider, {
+              startMode: rawSub.startMode,
+              ...(rawSub.fixedPosition === undefined ? {} : { fixedPosition: rawSub.fixedPosition }),
+              ...(rawSub.model === undefined ? {} : { model: rawSub.model }),
+              ...(rawSub.reasoningEffort === undefined ? {} : { reasoningEffort: rawSub.reasoningEffort }),
+            })
+          }
+        }
         // ⚠️ 与 `credits.permanentLock` 同款：本次写入会改变**选号结果**
         //    （积分落到哪个档位），故广播一次让界面重读状态。
         broadcastCatalogChanged(ctx)
@@ -12898,6 +12990,10 @@ function registerJetHubEndpoints(
           imminentDays: resolved.imminentDays,
           source: resolved.source,
           clamped: resolved.clamped,
+          ...(() => {
+            const sub = pool.subagentRotationFor(req.provider)
+            return sub === undefined ? {} : { subagent: sub as unknown as RpcSubagentRotationSetting }
+          })(),
         }
         return { ok: true, value }
       }

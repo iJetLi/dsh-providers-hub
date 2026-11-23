@@ -2441,6 +2441,32 @@ export interface RpcCreditWindowSetRequest {
   provider: string
   windowDays?: number
   imminentDays?: number
+  /**
+   * ★ 子代理专属设置（2026-11-23）。
+   *
+   * `undefined` = **不动**它（合并语义）；传 `null` = **清除**它。
+   * ⚠️ 与 `windowDays` / `imminentDays` 的「undefined = 不动」一致 ——
+   * 用户在「子代理」那块点保存，不该顺带把窗口天数重置。
+   */
+  subagent?: RpcSubagentRotationSetting | null
+}
+
+/**
+ * ★ 子代理设置的 RPC 形状（2026-11-23）。
+ *
+ * ⚠️ 与 `SubagentRotationSetting` **字段一致但不复用同一个类型**：
+ * RPC 层要能表达「非法值」以便端点做**严格校验**并回 `bad-request`
+ *（用户 2026-11-23 的要求：非法值不得静默丢弃）。
+ */
+export interface RpcSubagentRotationSetting {
+  /** 起点策略：`follow` / `sequence` / `reverse` / `hash` / `fixed`。 */
+  startMode?: string
+  /** `fixed` 模式的账号位次（1-based）。 */
+  fixedPosition?: number
+  /** 子代理模型 id（本 provider 内）。 */
+  model?: string
+  /** 思考强度 id（模型声明的渐之一）。 */
+  reasoningEffort?: string
 }
 
 /**
