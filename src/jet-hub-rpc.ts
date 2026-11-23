@@ -1302,9 +1302,16 @@ export async function collectCreditsStatus<TCredential = BuddyCredential, TProdu
 /**
  * 逐账号执行一键领取（顺序执行，单个账号失败不中断整体）。
  *
- * **包含已停用账号**：签到领取与「是否参与账号池自动选择」无关 —— 停用的
- * 账号同样有当日积分可领，用户点「一键领取」时期望所有账号都尝试一遍。
- * 停用只影响限流切换时的候选集合，不影响这里。
+ * **不判 `enabled`**：传入哪个账号就处理哪个。**过滤层在端点入口**
+ *（`case 'credits.claimAll'` 里那句 `filter((entry) => entry.enabled !== false)`）。
+ * ⚠️ 别把过滤搬到这里：本 case 下 ZCode 分支**自己遍历账号**、不经过本函数，
+ *    过滤放在这里会漏掉它（漏掉的那家正好是「一键领取」每号现产 captcha 的）。
+ *    判据见 `claim-runtime-parity.spec.ts` 的「停用账号不进 claim」。
+ *
+ * **历史注**：本函数此前明确写着「包含已停用账号」，理由是「停用的账号同样有
+ * 当日积分可领」。2026-11-23 主理审计推翻了这条：它让**「停用账号」这个退出动作
+ * 完全不成立**（自动签到走的正是 `credits.claimAll`），豆包这种「每号每天起一次
+ * 浏览器进程树」的渠道因此没有止损办法。现在停用 = 真退出。
  *
  * 与 collectCreditsStatus 同理：凭据解析位于每个账号自己的 try 之内，
  * 异常只让该账号记为 failed。
@@ -9547,7 +9554,38 @@ function registerJetHubEndpoints(
       //   auth 实例，查全局表会让测试无法注入桩、并重开「位置/时序错位」那扇门。
       case 'credits.claimAll': {
         const req = payload as RpcCreditsClaimAllRequest
-        const accounts = await pool.listAccounts(req.provider)
+        /**
+         * ★ **停用账号不参与领取**（2026-11-23，主理审计 P1② 的修法）。
+         *
+         * ## 修的是哪个缺陷
+         *
+         * 此前这里是 `pool.listAccounts(provider)` 原样返回 ⇒ **停用账号照样被领取**。
+         * 后果不是「多领一次积分」，而是**「停用账号」这个退出动作根本不成立**：
+         * 自动签到（`auto-checkin.ts`）走的正是本端点，用户把豆包账号停用、以为
+         * 它不再起浏览器，实际每天两侧照样各起一次 headless Chromium。
+         * 豆包一个账号 30 秒级的浏览器进程树，停用**是用户唯一能立刻止损的动作**，
+         * 它失效就等于没有退出路（#142 的 PR 描述里承诺过这条，实测不成立）。
+         *
+         * ## 为什么改在这里（而不是 `collectClaimResults` 里）
+         *
+         * 本 case 下有**三段**互不复用的遍历：Qoder 同族（`collectClaimResults`）、
+         * ZCode（自己遍历账号 + plan）、表分派（`collectClaimResults`）。把过滤放在
+         * 账号枚举这一处，三段**同时**生效 —— 放进 `collectClaimResults` 只能盖住
+         * 两段，ZCode 那段会漏（本仓反复记录过这种「改一处漏三处」的形态）。
+         *
+         * ## 顺带修掉的
+         *
+         * 下面的 `healExpiredAccounts(accounts)` 也吃这份过滤后的列表 ⇒ 停用账号
+         * 不再被**自动续期**。此前它会为一个用户明确不用的账号去刷新凭据
+         * （发上游请求、可能改写凭据文件），这同样不该发生。
+         *
+         * ⚠️ **`credits.status` / `credits.balances` 刻意不过滤**：那两个是**只读**
+         * 展示（账号卡片要能看见停用账号还剩多少积分），与「发请求去领」不是一回事。
+         * `enabled` 只在这里承重，别顺手复制到只读端点上（那会让停用账号的积分
+         * 从面板上消失，用户反而不知道停用前有多少余额）。
+         */
+        const accounts = (await pool.listAccounts(req.provider))
+          .filter((entry) => entry.enabled !== false)
         // ⚠⚠ **领取前也要按需自愈**（issue IKKHL5，与 `credits.balances` 同一层）。
         //
         // 用户报障的场景里，「积分行报 HTTP 401」旁边**就挂着「一键领取积分」

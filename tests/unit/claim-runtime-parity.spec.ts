@@ -1039,6 +1039,94 @@ describe('★ 不支持签到的渠道：文案必须指明「该产品无此能
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 三·五、停用账号 = 退出签到（主理审计 P1② 的守卫）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ★ 「停用账号」必须是**真退出路**（2026-11-23）。
+ *
+ * ## 守的是什么
+ *
+ * 此前 `credits.claimAll` 直接把 `pool.listAccounts(provider)` 原样交给领取，
+ * **停用账号照样被领**。而**自动签到走的正是这个端点**（`auto-checkin.ts` 的
+ * `claim` 就是 `handleMethod('credits.claimAll', …)`）⇒ 用户停用一个豆包账号、
+ * 以为它不再起浏览器，实际每天两侧照样各起一次 headless Chromium（30 秒级的
+ * 进程树）。#142 的 PR 描述把「停用账号」写成了退出路，实测不成立。
+ *
+ * ## 判据为什么必须是「端点 + 真 pool」
+ *
+ * 过滤层在 `case 'credits.claimAll'` 的**账号枚举**处（那里同时覆盖 ZCode /
+ * Qoder 两个自己遍历账号的分支）。若只读源码断言 `filter(...)` 存在，改回
+ * `listAccounts` 原文、或把它挪进 `collectClaimResults`（漏掉 ZCode 分支）都能
+ * 照样绿 ⇒ 必须真播种一个停用账号、真调端点，断言**领取调用次数**。
+ *
+ * ⚠️ 反向断言（启用账号照领）同样必要：把过滤写成 `filter(e => e.enabled)`
+ *    （`undefined` 当假）会把「没写 enabled 的老账号」一起误杀。
+ */
+describe('★ 停用账号不进 claim（「停用」必须是真退出路）', () => {
+  it('★ 停用账号不出现在 results，claim 只对启用账号调一次', async () => {
+    const claimedIds: string[] = []
+    const { call, pool, credentials } = makeRpc({
+      buddy: {
+        // precheckStatus:false ⇒ 骨架直接跳 claim（本用例只数 claim 次数）
+        precheckStatus: false,
+        claim: async (_credential, entry) => {
+          claimedIds.push(entry.id)
+          return { kind: 'claimed', credit: 100, streakDays: 1, isStreakDay: false }
+        },
+      },
+    })
+    await seed(pool, 'buddy', 'on-1', 'BUDDY_ON_SPEC')
+    await pool.addAccount({
+      id: 'off-1', provider: 'buddy', nickname: '停用号', enabled: false,
+      credentialRef: 'BUDDY_OFF_SPEC', createdAt: 1, refreshable: true,
+    })
+    await credentials.set('BUDDY_ON_SPEC', JSON.stringify({ access_token: 'AT-ON' }))
+    await credentials.set('BUDDY_OFF_SPEC', JSON.stringify({ access_token: 'AT-OFF' }))
+    vi.stubGlobal('fetch', async () => { throw new Error('哨兵表不该发网络请求') })
+
+    const result = await call('credits.claimAll', { provider: 'buddy' })
+
+    expect(result.ok).toBe(true)
+    expect(
+      result.value.results.map((r: { accountId: string }) => r.accountId),
+      '停用账号被领取了 ⇒ 用户「停用」之后仍在被签到（自动签到走的正是本端点）',
+    ).toEqual(['on-1'])
+    expect(claimedIds, 'claim 被停用账号调用了').toEqual(['on-1'])
+    expect(result.value.summary.claimed).toBe(1)
+  })
+
+  it('★ 全部账号停用 ⇒ 一条都不领（不得把「空结果」当成功签到）', async () => {
+    let claimCalls = 0
+    const { call, pool, credentials } = makeRpc({
+      buddy: {
+        precheckStatus: false,
+        claim: async () => {
+          claimCalls++
+          return { kind: 'claimed', credit: 100, streakDays: 1, isStreakDay: false }
+        },
+      },
+    })
+    for (const id of ['off-1', 'off-2']) {
+      await pool.addAccount({
+        id, provider: 'buddy', nickname: id, enabled: false,
+        credentialRef: `${id.toUpperCase()}_SPEC`, createdAt: 1, refreshable: true,
+      })
+      await credentials.set(`${id.toUpperCase()}_SPEC`, JSON.stringify({ access_token: 'AT' }))
+    }
+    vi.stubGlobal('fetch', async () => { throw new Error('哨兵表不该发网络请求') })
+
+    const result = await call('credits.claimAll', { provider: 'buddy' })
+
+    expect(result.ok).toBe(true)
+    expect(result.value.results, '全停用的渠道仍产生了领取记录').toEqual([])
+    expect(claimCalls).toBe(0)
+    // ⚠️ 不能把「一条都没领」写成 claimed>0；也不能写成 failed（那不是失败）。
+    expect(result.value.summary).toMatchObject({ claimed: 0, failed: 0 })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 四、onboarding.* 查表
 // ─────────────────────────────────────────────────────────────────────────────
 

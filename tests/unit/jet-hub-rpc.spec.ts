@@ -520,26 +520,14 @@ describe('credits.status 单账号异常隔离', () => {
 })
 
 describe('credits.claimAll 单账号异常隔离与顺序性', () => {
-  it('停用账号也被领取（一键领取覆盖全部账号）', async () => {
-    const accounts = [
-      makeEntry({ id: 'enabled-1', enabled: true }),
-      makeEntry({ id: 'disabled-1', enabled: false }),
-      makeEntry({ id: 'disabled-2', enabled: false }),
-    ]
-    const deps = makeDeps({
-      claim: async () => ({ kind: 'claimed', credit: 100, streakDays: 1, isStreakDay: false }),
-    })
-
-    const response = await collectClaimResults(accounts, WORKBUDDY, deps)
-
-    // 停用只影响账号池的自动选择与限流切换；积分照领。
-    expect(response.results.map(r => r.accountId)).toEqual(['enabled-1', 'disabled-1', 'disabled-2'])
-    expect(response.results.every(r => r.outcome.kind === 'claimed')).toBe(true)
-    expect(response.summary).toEqual({
-      claimed: 3, totalCredit: 300, alreadyClaimed: 0, inactive: 0, failed: 0, coversToday: 3,
-      totalByUnit: { token: 0, credit: 300 },
-    })
-  })
+  /**
+   * ⚠️ 原用例「停用账号也被领取（一键领取覆盖全部账号）」已**删除**（2026-11-23）：
+   * 它断言的正是被本次修法推翻的旧契约。停用 = 退出签到，过滤层在
+   * `case 'credits.claimAll'` 的账号枚举处（那里同时覆盖 ZCode / Qoder 两段
+   * 自己遍历的分支）。替代守卫是 `claim-runtime-parity.spec.ts` 的
+   * 「停用账号不进 claim」—— 那条用**真 `AccountPool`** 跑端点，比这里的合成
+   * 数组更接近生产；留一条「骨架会领取停用账号」的用例反而会把缺陷写成契约。
+   */
 
   it('非法 credentialRef 的账号记为 failed，其余账号仍被领取', async () => {
     const accounts = [
