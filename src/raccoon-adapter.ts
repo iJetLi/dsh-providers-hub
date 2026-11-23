@@ -968,6 +968,16 @@ export class RaccoonAdapter extends LlmAdapter {
         throw new LlmError('raccoon: credential expired and refresh failed', 'AUTH', { status: response.status })
       }
       credential = refreshed
+      /**
+       * ★★★ **续期换了 token ⇒ 必须对新令牌重新确认**（2026-11-23，正向审计④）。
+       *
+       * 第一版只在 `stream()` 入口确认一次。但**续期会换 `access_token`**
+       *（`refresh_token` 轮换）⇒ 新令牌没确认过 ⇒ 接下来这次重发仍然 `200901`。
+       *
+       * ⚠️ 我的第一版 commit 写「含轮换到新号时的补确认」——**那句话对这个入口不实**，
+       *    审计实测：`iam/confirm` 只对 A 号发过，续期/换号后的 B 号**从未确认**。
+       */
+      await ensureRaccoonSessionConfirmed(this.product, credential, this.options.fetchImpl ?? fetch)
       // ⚠️ **必须跟着重新反查账号 id**（PR !71 审计发现）：`resolveCredential`
       // 是「池优先」的（`src/index.ts` 的 raccoon 分支先 `getAvailableAccount`
       // 再回退单凭据 ref），而 `refresh()` 续期的是**默认单凭据 ref**。
@@ -1043,6 +1053,8 @@ export class RaccoonAdapter extends LlmAdapter {
           if (!next || tried.has(next.entry.id)) break
           tried.add(next.entry.id)
           credential = next.credential
+          // ★ 换成**另一个账号** ⇒ 它的令牌从没确认过（见上一条同因）。
+          await ensureRaccoonSessionConfirmed(this.product, credential, this.options.fetchImpl ?? fetch)
           activeAccountId = next.entry.id
           response = await send()
           if (response.ok) {

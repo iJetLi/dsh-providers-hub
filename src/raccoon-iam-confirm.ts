@@ -49,6 +49,7 @@
  * 4. **只发这一条腿**：不重试、不换号、不改任何既有请求头 —— 它是一次**前置握手**。
  */
 import { isRaccoonIamToken } from './raccoon-authorize.js'
+import { RACCOON_REQUEST_TIMEOUT_MS } from './raccoon.js'
 import type { RaccoonProduct } from './raccoon-product.js'
 import { raccoonHeaders, type RaccoonCredential } from './raccoon.js'
 
@@ -103,6 +104,18 @@ export async function ensureRaccoonSessionConfirmed(
   try {
     const response = await fetcher(url, {
       method: 'POST',
+      /**
+       * ★★★ **必须有超时**（2026-11-23，正向审计④）。
+       *
+       * 第一版没有 `signal` ⇒ 这条**前置握手**能无限挂住：而它挂在
+       * `credits.requestJson` / `auth.fetchModels` / `adapter.stream` 的**前面**
+       * ⇒ 上游卡住时**整条对话**都进不去，且用户点「停止」**不生效**
+       *（`options.signal` 到不了这一层）。
+       *
+       * ⚠️ 用 `RACCOON_REQUEST_TIMEOUT_MS` —— 与 credits 那条腿**同一个常量**
+       *（本仓红线：同义判据不各写一套）。
+       */
+      signal: AbortSignal.timeout(RACCOON_REQUEST_TIMEOUT_MS),
       headers: raccoonHeaders(credential, {
         platform: product.clientPlatform,
         version: product.clientVersion,
@@ -114,7 +127,18 @@ export async function ensureRaccoonSessionConfirmed(
     // 判据与官方一致：HTTP 2xx **且** `body.code === 0`。
     const payload = await response.json() as { code?: unknown } | null
     if (payload === null || typeof payload !== 'object') return false
-    if (typeof payload.code === 'number' && payload.code !== 0) return false
+    /**
+     * ★★★ **判据必须是「明确的成功」**（2026-11-23，正向审计⑤ 打出的 fail-open）。
+     *
+     * 第一版写的是 `typeof code === 'number' && code !== 0` ⇒
+     * **`code` 缺失 / 是字符串 / 是 `null` 时被判成成功并永久记入去重集**
+     *（实测确认）。而官方判据是**明确的** `body.code === 0`
+     * ⇒ 任何「看不出是 0」的响应都**不得**当成已确认。
+     *
+     * ⚠️ 这是 fail-closed：宁可下次再确认一次，也不要让一个没确认成功的令牌
+     *    永久跳过确认（那会让账号一直 `200901`，且**零日志**）。
+     */
+    if (payload.code !== 0) return false
     // ⚠️ **只有成功才记入去重集** —— 失败记进去会让该令牌永久跳过确认。
     confirmedTokens.add(token)
     return true

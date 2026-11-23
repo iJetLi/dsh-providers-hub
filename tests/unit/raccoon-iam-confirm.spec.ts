@@ -20,6 +20,7 @@ import {
 } from '../../src/raccoon-iam-confirm.js'
 import type { RaccoonProduct } from '../../src/raccoon-product.js'
 import { RACCOON_IAM_ISSUER } from '../../src/raccoon-authorize.js'
+import { fetchRaccoonCreditBalance } from '../../src/raccoon-credits.js'
 
 /** 造一枚形态正确的 JWT（只需要 `iss` 与可解析性 —— 判定只看 `iss` 后缀）。 */
 function makeJwt(iss: string): string {
@@ -130,4 +131,51 @@ describe('ensureRaccoonSessionConfirmed（issue #147）', () => {
     expect(await ensureRaccoonSessionConfirmed(product, credential(''), fetcher)).toBe(false)
     expect((fetcher as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0)
   })
+})
+
+/**
+ * ★★★ **接线守卫**（2026-11-23，正向审计⑥ 打出的缺口）。
+ *
+ * 审计实测：**把 4 个入口那 4 处 `await` 全部注释掉，`raccoon*` 19 文件 / 451 条
+ * 全绿** —— 因为新模块的 8 条用例全是**模块级**，没有一条证明「它真的被接线调用了」。
+ *
+ * 这正是本仓反复踩的形态（「纯函数测试全绿、接线断了」）。下面两条从**真实入口**
+ * 出发，断言 `iam/confirm` **确实被发出去**。
+ */
+describe('接线：真实入口必须真的把 iam/confirm 打出去', () => {
+  it('★★★ fetchRaccoonCreditBalance（余额入口）⇒ 先确认、再查余额', async () => {
+    resetRaccoonIamConfirmCacheForTest()
+    const seen: string[] = []
+    const fetcher = vi.fn(async (url: string) => {
+      seen.push(String(url))
+      if (String(url).includes('/iam/confirm')) {
+        return new Response(JSON.stringify({ code: 0 }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({ code: 0, data: { available_points: 6894 } }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+
+    await fetchRaccoonCreditBalance(product, credential(IAM_TOKEN), fetcher).catch(() => undefined)
+
+    // ⚠️ 这条断言是本用例的全部意义：**确认请求真的发出去了**。
+    //    把 `raccoon-credits.ts` 里那行 `await ensureRaccoonSessionConfirmed(...)` 删掉 ⇒ 必红。
+    expect(seen.some((u) => u.includes('/iam/confirm')), '余额入口没有触发 iam/confirm').toBe(true)
+    // 且**先**确认、**后**查余额（顺序错了同样无效）。
+    expect(seen.findIndex((u) => u.includes('/iam/confirm')))
+      .toBeLessThan(seen.findIndex((u) => u.includes('/points/')))
+  })
+
+  /**
+   * ⚠️ **目录入口（`RaccoonAuth.fetchModels`）的接线用例暂缺**（如实登记）。
+   *
+   * `RaccoonAuth` 的构造需要 `Context`（`provide` 那条腿），桩起来成本高于本轮的
+   * 剩余预算。⇒ 目录入口那条 `await ensureRaccoonSessionConfirmed(...)` **仍零守卫** ——
+   * 与审计点出的原始缺口一致，只是覆盖面从 4 条缩到 3 条。
+   *
+   * 补法是照下面这条 credits 用例的形态：桩 `fetchImpl`、断言 `iam/confirm` 先于
+   * `model_catalog` 出现。已记进 issue #147 的后续清单。
+   */
 })
