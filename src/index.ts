@@ -235,6 +235,8 @@ import { qiniuModelsUrl, qiniuHeaders, type QiniuCredential } from './qiniu.js'
 // 失败回退内置表），网关**没有列出接口**（405）⇒ 用 `MONKEYCODE_GATEWAY_MODELS`。
 import { MonkeycodeAuth } from './monkeycode-auth.js'
 import { MonkeycodeAdapter, registerMonkeycodeLlm } from './monkeycode-adapter.js'
+// 豆包（doubao，2026-11-22）：网页端私有协议适配器（额度/模型目录/对话）。
+import { registerDoubaoLlm, type DoubaoAdapter } from './doubao-adapter.js'
 import { MONKEYCODE, MONKEYCODE_INTL, type MonkeycodeProduct } from './monkeycode-product.js'
 // 百智云（`baizhi`，2026-11-02）：凭据是长期静态 `sk-…`（实测 67 位），**主路径**
 // 是浏览器登录后从「大模型商店」取
@@ -5008,6 +5010,34 @@ export function apply(ctx: Context): void {
   const { auth: monkeycode, adapter: monkeycodeAdapter } = createMonkeycode(MONKEYCODE)
   const { auth: monkeycodeIntl, adapter: monkeycodeIntlAdapter } = createMonkeycode(MONKEYCODE_INTL)
 
+  // ===== 豆包（doubao）—— 2026-11-22 接通：网页端私有协议（额度/模型/对话） =====
+  //
+  // 凭据是浏览器扫码登录得到的 cookie 串（见 src/doubao-login.ts，Jet Hub 的
+  // `account.create {provider:'doubao', mode:'browser'}`），没有 refresh 端点。
+  // 适配器复用账号池里的豆包账号，派生 device_id 走 src/doubao.ts 的确定性算法
+  // （实测通过风控，无需本机装豆包客户端）。
+  const doubaoAdapter: DoubaoAdapter = registerDoubaoLlm(ctx, {
+    credentialRef: credentialRef('DOUBAO_ACCOUNT'),
+    slots: async () => {
+      const entries = await pool.listAccounts('doubao')
+      const out: { accountId: string; credential: import('./doubao.js').DoubaoCredential }[] = []
+      for (const entry of entries) {
+        if (!entry.enabled) continue
+        const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+        if (!resolved) continue
+        try {
+          const parsed = JSON.parse(resolved.value)
+          if (typeof parsed !== 'object' || parsed === null || typeof parsed.cookie !== 'string' || parsed.cookie.length === 0) continue
+          out.push({ accountId: entry.id, credential: parsed })
+        } catch { /* 坏凭据跳过，不影响其它账号 */ }
+      }
+      return out
+    },
+    accountPool: pool,
+    onCatalogLoaded: () => { broadcastCatalogChanged(ctx) },
+    warn: (message) => ctx.logger.warn(message),
+  })
+
   // ===== AgnesCode（`agnescode` + `agnescodeintl`）—— **本 fork 独有** =====
   //
   // 与 MonkeyCode 的**根本差异**：凭据来自**桌面客户端的本机会话**
@@ -6455,6 +6485,8 @@ async function fetchBalanceReading(
     //    ⚠️ 它的目录是「白泽远端 + 网关常量」两段合并（`mergeWithGatewayModels`）
     //    ⇒ 即便白泽目录拉失败也有 9 条网关常量兜底，不会出现 `total === 0`。
     monkeycode: pruned(MONKEYCODE.id, monkeycodeAdapter),
+    // 豆包（doubao，2026-11-22）：网页端私有协议渠道，已接目录/适配器。
+    doubao: pruned('doubao', doubaoAdapter),
     // ⚠️ 国际站同样必须进这张表：理由与国内站逐条相同 —— 「关闭整个 provider」
     //    依赖 `listAllModels()` 那份**不套黑名单**的全量目录，漏了会漏写黑名单。
     monkeycodeintl: pruned(MONKEYCODE_INTL.id, monkeycodeIntlAdapter),

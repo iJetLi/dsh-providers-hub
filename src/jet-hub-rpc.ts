@@ -10345,31 +10345,13 @@ function registerJetHubEndpoints(
           }
         }
 
-        // ⚠️⚠️ **豆包（doubao）：没有余额概念 ⇒ 短路成空列表**（2026-11-13 审计返工）。
-        //
-        // 它与上面两个特例**不同因**：不是「形态不匹配」，而是**这个概念不存在**。
-        // 豆包签到给的是「每日额度权益」（`reward_amount: 200`），不是积分包
-        // （`src/doubao-credits.ts:15-16` 逐字写明「无独立余额端点」），故
-        // `fetchDoubaoBalanceDetailed` 只能**无条件**回 `{ balance: null, error: … }`。
-        //
-        // ⚠️ 如果放它进下面的查表分派，会得到一条**假警报链**：
-        //   `collectCreditBalances` 逐账号产出 `{ id, balance: null, error }`
-        //   ⇒ 客户端统计带（`loadGlobalStats`）把 `balance === null` 记成
-        //   `creditsPartial = true` ⇒ **只要池里有一个豆包号，页头「剩余积分」
-        //   就永远挂着「部分渠道读取失败，实际数值可能更高」的 warn 色**
-        //   （假警报与「真就这么少」同形，用户无从分辨）。
-        //
-        // ⚠️ 也不能把 registry 的 `credits.balance` 改 `false` 来躲：那会让
-        //   `createProviderCredits()` 少一条 ⇒ `credits.claimAll` 对豆包回
-        //   `unsupported provider: doubao` ⇒ **一键签到静默失效**（表被两条
-        //   硬不变式绑在 `balance === true` 上，见 `credits-runtime-parity.spec.ts`）。
-        //   ⇒ 正确做法是**这一腿**短路：表里留着（签到要用），余额读数给空。
-        if (req.provider === 'doubao') {
-          return {
-            ok: true,
-            value: { accounts: [] } satisfies RpcCreditsBalancesResponse,
-          }
-        }
+        // ⚠️ 2026-11-22 更正：豆包**现在有真实余额端点**了。
+        // `src/doubao-credits.ts` 的 `fetchDoubaoBalanceDetailed` 已改为真读
+        // `POST /alice/commerce/sale/subscription/quota/summary/`（当时实测 200，
+        // 回「活动赠送额度 total_amount:"1,600"」）。故移除旧的「无余额概念 ⇒ 短路空列表」
+        // 逻辑：让豆包走下面的查表分派，面板能读到真实额度。
+        // 注册表里仍保留 `credits.balance: true`（签到 claimAll 依赖它，两条硬不变式）。
+
 
         // ── 查表分派 ──
         // ⚠️ 表由 `registerJetHubEndpoints` 从 `auths` 现造（**不是**形参，

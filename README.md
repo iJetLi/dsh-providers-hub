@@ -563,10 +563,10 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
   ⚠️ **图片输入未实测**，面板会明确报「暂不支持图片输入」而不是静默丢掉。
   ⚠️ **该渠道不产生限流标记**（也不会被限流探针测出东西），故「重测 / 重置」这组
   按钮对它**整组不渲染** —— 渲染出来只会是点不动的死控件。
-- **`doubao`（豆包 / 字节）**：**只有扫码登录 + 每日签到 + 积分**，**没有模型调用**
-  （`channel: false` —— 没有适配器、也没有模型目录，故它不会出现在对话框的模型
-  选择器里）。点「+ 新建账号」会起一个**可见**的 Chrome 窗口打开豆包，用手机豆包
-  App 扫码后从该会话读 `sessionid` 落池；每日签到与积分查询也走同一个浏览器会话。
+- **`doubao`（豆包 / 字节）**：支持扫码登录、每日签到、额度查询和文本对话。
+  点「+ 新建账号」会打开一个**可见**的浏览器窗口，用手机豆包 App 扫码登录；
+  登录后可以在模型选择器里选豆包渠道。思考档位按模型目录提供，不默认开启；
+  只有上游返回思考正文时，DSH 才会单独显示思考。
   ⚠️ **本机必须有 Chromium 内核浏览器**。候选链（Windows 专属项**只在 Windows 上**参与）：
   `DSH_DOUBAO_BROWSER_PATH` → `C:\Program Files\Google\Chrome\Application\chrome.exe`
   → `%ProgramFiles%\…\chrome.exe` → `%LOCALAPPDATA%\…\chrome.exe` →

@@ -139,6 +139,8 @@ export interface ModelCatalogDeps {
 
 export interface ModelCatalogConfig {
   readonly product: { readonly id: string }
+  /** Disable the display-only disk cache when entries omit request-routing data. */
+  readonly diskCache?: boolean
   /**
    * **目录里没有该 id** 时 `resolveModel` 该报什么模态。
    *
@@ -652,7 +654,7 @@ export function createModelCatalog(
    * ⇒ **真正的落盘判据留给适配器**：见 `rememberCatalogForDisk`。本层只负责
    * 「读盘」与「把 flush 的时机交出去」，**不猜 `complete`**。
    */
-  const diskCached = readCatalogCache(providerId)
+  const diskCached = config.diskCache === false ? undefined : readCatalogCache(providerId)
 
   /**
    * 上次从**远端**（非缓存）拿到的目录。落盘时用它，避免把缓存又写回磁盘。
@@ -670,7 +672,7 @@ export function createModelCatalog(
   function rememberCatalogForDisk(entries: readonly CatalogEntry[]): void {
     freshFromRemote = entries
     // ⚠️ 写盘失败不抛（缓存是纯优化，不能影响功能）。
-    writeCatalogCache(providerId, entries, true)
+    if (config.diskCache !== false) writeCatalogCache(providerId, entries, true)
   }
 
   /**

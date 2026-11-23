@@ -597,6 +597,11 @@ describe('★ index.ts 的 probe 域接线（Task 8 复审补齐：此前零守�
     //    `WRITES_RATE_LIMIT_PROVIDERS` 与 `probeById`（否则标记永远清不掉）。
     // ⚠️ 两站共用同一份实现 ⇒ 漏登记任一站即红。
     ['agnescode-adapter.ts', ['agnescode', 'agnescodeintl']],
+    // ⚠️ 豆包（doubao，2026-11-22）**不写** `modelRateLimits`：本适配器只做
+    // 目录 / 额度 / 文本流式，尚未接请求级换号与冷却 ⇒ registry 里
+    // `rateLimit: false`，与 officeace / astudio 同形。留空是**被验证的声明**
+    // （下面那条「登记为不写标记的确实没有写点」会真跑源码确认）。
+    ['doubao-adapter.ts', []],
   ]
 
   /**

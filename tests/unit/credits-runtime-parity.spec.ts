@@ -681,6 +681,7 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   //    两站是**同一路径、不同 host**（`*.agnes-ai.cn` / `*.agnes-ai.com`）⇒ 单列两条。
   agnescode: '/api/v2/subscription/credits-balance',
   agnescodeintl: '/api/v2/subscription/credits-balance',
+  doubao: '/alice/commerce/sale/subscription/quota/summary/',
 }
 
 /**
@@ -715,6 +716,7 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     //    （那是刻意的降级，不是缺陷）⇒ 超集必须带上它，否则下面那张
     //    「余额请求打到自己端点」的表会对 monkeycode 恒读过。
     session_cookie: 'spec_session=1',
+    cookie: 'sessionid=spec',
     // ⚠️ 腾讯 Marvis（2026-11-09）的余额请求头由 `businessHeaders()` 从凭据派生
     //    （`Ual-Access-Openid` / `Ual-Access-Guid` / `Ual-Access-Login-Type`）⇒
     //    超集必须带上这四个字段，否则请求根本发不出去、本表那条会恒读过。
@@ -729,10 +731,7 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     // 两者都由 `credits-runtime-parity.spec.ts` 的「特例的优先级」单独守。
     // ⚠️ 2026-10-08（Task 11-F）：特例表与判据改由 `tests/helpers/provider-sets.ts`
     // 单一持有（原先本文件里就写了两遍、另有一处在 `provider-runtime-wiring.spec.ts`）。
-    // ⚠️ 2026-11-13 排除 doubao：它在 credits 表里（签到 `claim` 走这张表）但
-    //    **没有余额端点** ⇒ 不该出现在手写端点清单里。余额那一腿由
-    //    `credits.balances` 端点短路成空列表（见 `src/jet-hub-rpc.ts` 的 doubao 分支）。
-    const expected = expectedProviderIdsInCreditsTable().filter((id) => id !== 'doubao').sort()
+    const expected = expectedProviderIdsInCreditsTable().sort()
     expect(
       Object.keys(BALANCE_PATH_OF).sort(),
       '端点清单与 registry 漂移：左侧多出 = 清单里有僵尸项，右侧多出 = registry 里'
@@ -1055,27 +1054,45 @@ describe('provider 边界：拒绝是兜底契约，判据来自 registry', () =
     expect(PROVIDER_REGISTRY.some((d) => d.credits.balance !== true)).toBe(true)
   })
 
-  it('★ doubao 的 credits.balances 短路成空列表（无余额概念，2026-11-13 审计返工）', async () => {
-    // 判据的「咬合点」：给豆包注入一个**哨兵实现**（真回 999）并落一个真账号。
-    // 若短路被删，端点会走查表分派 ⇒ 响应变成 1 条 `{ balance: { total: 999 } }`
-    // ⇒ 客户端统计带把它加进「剩余积分」并可能置 creditsPartial。
-    const sentinel = {
-      fetchBalanceDetailed: async () => ({
-        balance: { total: 999, packages: [], expiredTotal: 0 },
-      }),
-    } as unknown as ProviderCredits
-    const { call, pool, credentials } = makeRpc({ doubao: sentinel })
+  it('maps both Doubao quota sections through credits.balances', async () => {
+    const { call, pool, credentials } = makeRpc()
     await seed(pool, 'doubao', 'doubao-1', 'DOUBAO_ACCOUNT_SPEC')
-    await credentials.set('DOUBAO_ACCOUNT_SPEC', JSON.stringify({ cookie: 'sessionid=abc' }))
-    vi.stubGlobal('fetch', async () => { throw new Error('豆包没有余额端点，不得发任何网络请求') })
+    await credentials.set('DOUBAO_ACCOUNT_SPEC', JSON.stringify({ cookie: 'sessionid=spec' }))
+    const group = (name: string, total: string, used: string) => ({ window_limit_groups: [{
+      feature_group_name: name,
+      window_limits: [{ total_amount: total, used_amount: used, end_time: Date.UTC(2026, 11, 1) }],
+    }] })
+    vi.stubGlobal('fetch', async (input: string) => {
+      expect(new URL(input).pathname).toBe(BALANCE_PATH_OF.doubao)
+      return Response.json({ code: 0, data: {
+        current_subscription: { display: { short_name: '免费体验' } },
+        incentive_quota_section: group('活动赠送额度', '1,600', '200'),
+        window_limit_section: group('订阅额度', '500', '100'),
+      } })
+    })
     const result = await call('credits.balances', { provider: 'doubao' })
     expect(result.ok).toBe(true)
-    expect(
-      result.value,
-      '★ 豆包必须回空列表 —— 它有 `credits.balance: true`（为了进 credits 表让签到 `claim` 可用）'
-      + '但没有余额端点；放它进查表分派会让客户端拿到 `balance: null` 并把「部分渠道读取失败」'
-      + '永久置位（页头剩余积分永远挂 warn 色假警报）',
-    ).toEqual({ accounts: [] })
+    expect(result.value.accounts).toEqual([expect.objectContaining({
+      accountId: 'doubao-1',
+      balance: { total: 1800, expiredTotal: 0, packages: [
+        expect.objectContaining({ name: '活动赠送额度', total: 1600, used: 200, remaining: 1400,
+          description: '免费体验', expiredTime: '2026-12-01T00:00:00.000Z' }),
+        expect.objectContaining({ name: '订阅额度', total: 500, used: 100, remaining: 400 }),
+      ] },
+    })])
+  })
+
+  it('does not expose synthetic session cookies from a quota transport exception', async () => {
+    const cookie = 'sessionid=synthetic-private-cookie'
+    const { call, pool, credentials } = makeRpc()
+    await seed(pool, 'doubao', 'doubao-transport-1', 'DOUBAO_TRANSPORT_SPEC')
+    await credentials.set('DOUBAO_TRANSPORT_SPEC', JSON.stringify({ cookie }))
+    vi.stubGlobal('fetch', async () => { throw new Error('request failed: ' + cookie) })
+    const result = await call('credits.balances', { provider: 'doubao' })
+    expect(result.ok).toBe(true)
+    const account = JSON.stringify(result.value.accounts[0])
+    expect(account).toContain('无法读取上游响应')
+    expect(account).not.toContain(cookie)
   })
 
   it('credits.status 对 registry 里的每个渠道都被接受（未知 id 除外）', async () => {
