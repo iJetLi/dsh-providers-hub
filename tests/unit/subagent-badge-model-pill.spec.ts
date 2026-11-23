@@ -136,6 +136,56 @@ describe('渲染位置：胶囊右侧（模仿宿主主代理页面）', () => {
   })
 })
 
+describe('模型名必须与档次窗口下拉框**一模一样**', () => {
+  const rpc = readFileSync(join(here, '../../src/jet-hub-rpc.ts'), 'utf8')
+
+  it('★★★ 服务端必须下发 modelName（与 m.name 同源）', () => {
+    /**
+     * 用户原话：「模型名字要跟主代理的模型列表一模一样，
+     * 也就是跟档次窗口模型下拉框的一模一样呀」
+     *
+     * ⚠️ 档次窗口下拉框显示的是 `m.name`（如 `Hy4 flash · x0.00→免费 FREE`），
+     * 而会话快照只有 id ⇒ 必须由服务端翻译。
+     */
+    expect(rpc, '★★★ getRotation 必须下发 modelName').toContain('modelName')
+  })
+
+  it('★★★ 名字必须取自 ctx.llm.listModels（与下拉框同一条取数路径）', () => {
+    const idx = rpc.indexOf('let modelDisplayName')
+    expect(idx, '找不到 modelDisplayName 计算').toBeGreaterThan(-1)
+    /**
+     * ⚠️ 块边界必须精确到函数结尾 —— `idx + 900` 会越界到后面的
+     * `credits.window.models`（那里也有 `ctx.llm.listModels`），
+     * 于是删掉 getRotation 里的赋值照样绿（我第一版就这么漏的）。
+     */
+    const blockEnd = rpc.indexOf('return {', idx)
+    expect(blockEnd, '找不到计算块结尾').toBeGreaterThan(idx)
+    const block = rpc.slice(idx, blockEnd)
+
+    expect(block, '★★★ 必须用 listModels（与 credits.window.models 同源）').toContain('ctx.llm.listModels')
+    expect(block, '★★★ 必须取 m.name').toContain('.name')
+    /** ⚠️ **必须真的赋值**给 modelDisplayName（只写不赋 = 不下发）。 */
+    expect(block, '★★★ 必须真的赋值（否则客户端拿不到）').toContain('modelDisplayName = name')
+    /**
+     * ⚠️ 不得自己拼（id + 倍率）—— 那会与宿主 m.name 漂移。
+     */
+    expect(block, '★★★ 不能自己拼名字').not.toMatch(/\$\{modelId\}.*x\d/)
+  })
+
+  it('★★★ 客户端优先用 modelName，取不到才回落 id', () => {
+    expect(
+      badge,
+      '★★★ 必须优先用服务端下发的 modelName',
+    ).toContain('rotationState?.modelName ?? modelInfo.model')
+  })
+
+  it('★★ 服务端取不到名字时必须省略该键（客户端才能回落）', () => {
+    const idx = rpc.indexOf('let modelDisplayName')
+    const block = rpc.slice(idx, idx + 900)
+    expect(block, '★★ 必须用 undefined 表示「没有」，而不是空串').toContain('let modelDisplayName: string | undefined')
+  })
+})
+
 describe('视觉：强度比模型名更暗，且没有下拉（用户逐字要求）', () => {
   it('★★★ 模型名用 label-primary（亮）', () => {
     const idx = styles.indexOf('.dim-jh-badgeModelName {')
@@ -144,20 +194,19 @@ describe('视觉：强度比模型名更暗，且没有下拉（用户逐字要�
     expect(block).toContain('--dsw-alias-label-primary')
   })
 
-  it('★★★ 强度用 label-tertiary（**更暗**）', () => {
+  it('★★★ 强度用 label-tertiary（**更暗**，用户要求回退）', () => {
     /**
-     * ⚠️ 用户原话：「思考强度字体是比模型名要暗一点的」。
-     * `tertiary` 比 `secondary` 更暗 —— 用 secondary 会和胶囊内文字同色、
-     * 与模型名拉不开差距（实测只差一档对比度）。
+     * ⚠️ 判据必须限定在 **`.dim-jh-badgeModelEffort` 块内** ——
+     * 全文搜 `tertiary` 会被别处（胶囊的 `.dim-jh-badgeCount` 等）满足
+     *（我第一版就这么漏的：把 CSS 改成 secondary 后测试照样绿）。
      */
-    const idx = styles.indexOf('.dim-jh-badgeModelEffort {')
-    expect(idx, '找不到强度样式').toBeGreaterThan(-1)
-    const block = styles.slice(idx, idx + 200)
-    /**
-     * ⚠️ 2026-11-24 用户反馈「强度字体小了点 / 看不清」⇒ 从 tertiary 提到 secondary。
-     * 仍比模型名（primary）**暗一档**，满足「强度比模型名暗」的原要求，但可读。
-     */
-    expect(block, '★★★ 强度必须比模型名暗一档（secondary）').toContain('--dsw-alias-label-secondary')
+    const start = styles.indexOf('.dim-jh-badgeModelEffort {')
+    expect(start, '找不到强度样式块').toBeGreaterThan(-1)
+    const end = styles.indexOf('}', start)
+    const block = styles.slice(start, end)
+
+    expect(block, '★★★ 强度必须是 tertiary（用户要求更暗）').toContain('--dsw-alias-label-tertiary')
+    expect(block, '★★★ 不能是 secondary（那是被用户否掉的版本）').not.toContain('--dsw-alias-label-secondary')
     expect(block, '★★★ 不能用 primary（那就和模型名一样亮了）').not.toContain('--dsw-alias-label-primary')
   })
 
@@ -182,16 +231,20 @@ describe('视觉：强度比模型名更暗，且没有下拉（用户逐字要�
 
   it('★★★ 字号必须比胶囊大一号（用户反馈「小了点」）', () => {
     /**
-     * ⚠️ 用户 2026-11-24：「子代理的模型名及强度字体小了点，你再调大点」。
+     * ⚠️ 用户 2026-11-24 三次调整后定案：**14px**。
+     *
+     * 第一次 11px（跟胶囊同字号）⇒ 用户「小了点」；
+     * 第二次 12px ⇒ 用户仍觉得小；
+     * 第三次 **14px**（本次）。
      *
      * 胶囊是「补语」（11px，用户 2026-11-20 明确要求小一号）；
-     * 模型标签是**主信息** ⇒ 取 12px，与宿主主代理页面观感一致。
+     * 模型标签是**主信息** ⇒ 本就该明显大于胶囊。
      */
     const idx = styles.indexOf('.dim-jh-badgeModelPill {')
     expect(idx).toBeGreaterThan(-1)
     const block = styles.slice(idx, idx + 900)
-    expect(block, '★★★ 必须是 12px（不能跟胶囊同为 11px）').toContain('font-size: 12px')
-    expect(block, '★★★ 不能是 11px').not.toContain('font-size: 11px')
+    expect(block, '★★★ 必须是 14px').toContain('font-size: 14px')
+    expect(block, '★★★ 不能回到 11/12px（用户已两次说小）').not.toMatch(/font-size: 1[12]px/)
   })
 
   it('★★ 与胶囊之间留 10px（宿主同间距感）', () => {

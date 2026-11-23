@@ -843,6 +843,7 @@ function UsageBadgeActive(props) {
    * `null` = 还没读到（快照未就绪）⇒ **整块不渲染**（不留空尾巴）。
    */
   const [modelInfo, setModelInfo] = React.useState(null);
+
   /**
    * ★ **「严格手动顺序」是否开启**（2026-11-18 加）。
    *
@@ -1716,7 +1717,15 @@ function UsageBadgeActive(props) {
         : `子代理当前模型：${modelInfo.model}（思考强度 ${modelInfo.effort}）`,
       'aria-hidden': 'true',
     }, [
-      React.createElement('span', { key: 'm', className: 'dim-jh-badgeModelName' }, modelInfo.model),
+      React.createElement(
+        'span',
+        { key: 'm', className: 'dim-jh-badgeModelName' },
+        /**
+         * ⚠️ **优先用服务端下发的 `modelName`**（与档次窗口下拉框同源）；
+         * 取不到才回落 id —— 至少有信息，不空白。
+         */
+        rotationState?.modelName ?? modelInfo.model,
+      ),
       modelInfo.effort === null
         ? null
         : React.createElement('span', { key: 'e', className: 'dim-jh-badgeModelEffort' }, modelInfo.effort),
@@ -2140,6 +2149,23 @@ function UsageBadgeActive(props) {
          */
         selectedAccountName: typeof value?.selectedAccountName === 'string' && value.selectedAccountName.length > 0
           ? value.selectedAccountName
+          : null,
+        /**
+         * ★★★ **当前模型的显示名**（2026-11-24 用户要求）。
+         *
+         * ## 用户原话
+         *
+         * > 「模型名字要跟主代理的模型列表一模一样，
+         * >   也就是跟档次窗口模型下拉框的一模一样呀」
+         *
+         * 服务端 `account.getRotation` 用**同一个取数路径**（`ctx.llm.listModels`）
+         * 取到 `m.name`，与档次窗口下拉框**逐字同源**。
+         *
+         * ⚠️ `null` = 服务端没给（目录里没这个模型 / 目录未就绪）
+         *   ⇒ 胶囊**回落显示 id**（至少有信息，不空白）。
+         */
+        modelName: typeof value?.modelName === 'string' && value.modelName.length > 0
+          ? value.modelName
           : null,
         stale: value?.stale === true,
         locked: value?.locked === true,

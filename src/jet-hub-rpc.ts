@@ -8303,6 +8303,44 @@ function registerJetHubEndpoints(
          */
         const enriched = await enrichAccountIdentity(mine, req.provider)
         /**
+         * ★★★ **当前模型的显示名**（2026-11-24 用户要求）。
+         *
+         * ## 用户原话
+         *
+         * > 「模型名字要跟主代理的模型列表一模一样，
+         * >   也就是跟档次窗口模型下拉框的一模一样呀」
+         *
+         * ## 缺陷
+         *
+         * 会话快照里只有 `model`（**id**，如 `hy4flash-free`），而档次窗口
+         * 下拉框显示的是 `name`（如 `Hy4 flash · x0.00→免费 FREE`）。
+         * ⇒ 胶囊直接显示 id 时，**同一个模型出现两个名字**（用户已实测发现）。
+         *
+         * ## 为什么放本端点
+         *
+         * 胶囊组件**拿不到 `rpcCall`**（props 只有 `readRotation` /
+         * `writeRotation` / `resolveDirectory` 等注入项）⇒ 无法自己调
+         * `credits.window.models`。而本端点**已经**收到 `modelId`
+         * （客户端传的 `currentModel`）⇒ 顺手回 `modelName` 最省。
+         *
+         * ⚠️ 取宿主目录的 `name`（与 `credits.window.models` **同一个取数路径**
+         *   `ctx.llm.listModels`），**不自己拼**（id + 倍率）—— 拼法必然漂移。
+         *
+         * ⚠️ 目录里没有该模型 / 目录未就绪 ⇒ 省略该键 ⇒ 客户端回落显示 id
+         *   （至少有信息，不空白）。
+         */
+        let modelDisplayName: string | undefined
+        if (modelId !== undefined && ctx.llm !== undefined) {
+          try {
+            const list = await ctx.llm.listModels(req.provider)
+            const hit = list.find((m) => m.id === modelId)
+            const name = typeof hit?.name === 'string' ? hit.name.trim() : ''
+            if (name.length > 0) modelDisplayName = name
+          } catch {
+            /* 目录读不到 ⇒ 省略（客户端回落显示 id） */
+          }
+        }
+        /**
          * ★ **选中账号的显示名**（2026-11-24 用户要求「方案 B」）。
          *
          * ## 用户原话
@@ -8367,6 +8405,7 @@ function registerJetHubEndpoints(
           value: {
             selected: selectedId,
             selectedPosition,
+            ...(modelDisplayName === undefined ? {} : { modelName: modelDisplayName }),
             ...(selectedAccountName === undefined ? {} : { selectedAccountName }),
             locked,
             /**

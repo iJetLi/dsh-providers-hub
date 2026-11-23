@@ -2081,7 +2081,7 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-badgeModelPill {
   display: flex; align-items: center; gap: 5px;
   margin-left: 10px;
-  font-size: 12px; line-height: 1.5;
+  font-size: 14px; line-height: 1.5;
   white-space: nowrap;
   flex: none;
 }
@@ -2096,7 +2096,7 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  * 视觉上会和模型名拉不开差距（实测对比度差只有一档）。
  */
 .dim-jh-badgeModelEffort {
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-label-tertiary);
   font-variant-numeric: tabular-nums;
 }
 /* ⚠️ box-sizing 是**显式写出**的，不是修复：button 的 UA 默认样式表本就是
