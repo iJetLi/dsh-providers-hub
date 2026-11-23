@@ -328,3 +328,70 @@ export function subagentSettingActive(setting: SubagentRotationSetting | undefin
   if (setting.startMode === 'follow' && setting.model === undefined) return false
   return true
 }
+
+/**
+ * ★★★ **子代理父子表**（模块级，进程内）。
+ *
+ * ## 为什么单独放在这里而不是 `AccountPool`
+ *
+ * 这张表是「**哪些 sessionId 是子代理**」的唯一真源，与 provider 无关 ——
+ * 一个子代理只会用一个 provider，但事件里**没有 provider 信息**。
+ *
+ * ⇒ `subagent/start` 只记这里；真正的 provider 级分配
+ * （`pool.recordSubagentStart`）等第一次 `resolveCredential` 时才做。
+ *
+ * ## 为什么进程内不落盘
+ *
+ * 它只是「快速判定某 sessionId 是不是子代理」的加速结构。
+ * 落盘的权威是 `pool.subagentAssignments`（带 provider + slot）。
+ * 进程重启后：
+ *
+ * - 已结束的子代理 ⇒ 无需知道；
+ * - **仍在跑的子代理** ⇒ 这张表空了，但 `pool.subagentAssignmentOf()`
+ *   仍能从**落盘的分配表**里查到 ⇒ 起点不受影响；
+ * - 只有「插件重启后才第一次出现的子代理」会走 `subagent/start` 登记。
+ *
+ * ⇒ 进程内表的丢失**不破坏正确性**，只影响「一个刚拉起、还没请求过、
+ * 且插件恰好重启」的极窄窗口（那时也无从知道 provider）。
+ */
+const subagentParents = new Map<string, string>()
+
+/** 记下「某子代理的父会话」（`subagent/start` 时调）。 */
+export function rememberSubagentParent(childId: string, parentId: string): void {
+  if (childId.length === 0 || parentId.length === 0) return
+  subagentParents.set(childId, parentId)
+  /**
+   * ⚠️ 无上限会让长时间运行的进程无限增长。子代理短命，用 FIFO 淘汰
+   *（Map 保持插入序，删最早的即可）。
+   */
+  if (subagentParents.size > SUBAGENT_ASSIGNMENT_MAX) {
+    const oldest = subagentParents.keys().next()
+    if (!oldest.done) subagentParents.delete(oldest.value)
+  }
+}
+
+/** 查「某 sessionId 是不是子代理」。 */
+export function isSubagentSession(sessionId: string): boolean {
+  return subagentParents.has(sessionId)
+}
+
+/** 查某子代理的父会话 id。 */
+export function subagentParentOf(sessionId: string): string | undefined {
+  return subagentParents.get(sessionId)
+}
+
+/** 子代理结束时**不必**从父子表清除（见 {@link isSubagentSession} 的说明），
+ * 但清理能省内存；且若它被 resume，`subagent/start` 会再登记一次。 */
+export function forgetSubagentParent(sessionId: string): void {
+  subagentParents.delete(sessionId)
+}
+
+/** 清空父子表（**仅供单测**）。 */
+export function resetSubagentParentsForTest(): void {
+  subagentParents.clear()
+}
+
+/** 当前父子表大小（诊断 / 单测用）。 */
+export function subagentParentCount(): number {
+  return subagentParents.size
+}

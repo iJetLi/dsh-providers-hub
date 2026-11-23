@@ -120,7 +120,7 @@
 import type { RotationStartTier } from './jet-hub-store.js'
 import type { BuddyNoAccountReason, BuddySelectorLike } from './buddy-balance-selector.js'
 import { pickBuddyAccount } from './buddy-balance-selector.js'
-import { accountIdAtPosition, startIndexOfSlot } from './subagent-rotation.js'
+import { accountIdAtPosition, startIndexOfSlot, subagentParentOf, subagentSettingActive } from './subagent-rotation.js'
 import type { SubagentAssignment } from './subagent-rotation.js'
 import type { SubagentRotationSetting } from './jet-hub-store.js'
 import { sessionBalanceEnabled } from './session-balance.js'
@@ -291,6 +291,22 @@ export interface ResolverPool<TCredential = unknown> {
    * 3. 记录已被淘汰（超过 128 条）。
    */
   subagentAssignmentOf?(provider: string, sessionId: string | undefined): SubagentAssignment | undefined
+  /**
+   * **登记**一个子代理分配（2026-11-23，可选能力）。
+   *
+   * ⚠️ 调用点必须 **fire-and-forget**（`void ... .catch(() => {})`）：
+   * 它是 async（要落盘），而选号路径不能等磁盘写。
+   *
+   * ⚠️ 幂等：resume 时重复调用**保留原 slot**（见 `recordSubagentAssignment`）。
+   *
+   * @returns 实际分配的 slot（`-1` = 参数非法，未记录）
+   */
+  recordSubagentStart?(
+    provider: string,
+    sessionId: string,
+    parentSessionId: string,
+    now: number,
+  ): Promise<number>
   /**
    * ★ **起点选定那一刻的档位**（S6 可选能力；真实 `AccountPool` 已实现）。
    *
@@ -721,6 +737,36 @@ export function createCredentialResolver<TCredential>(
       let subagentPinnedFirst = false
       if (free !== true && baseRotationStartId !== undefined) {
         const setting = deps.pool.subagentRotationFor?.(providerId)
+        /**
+         * ⚠️⚠️ **惰性登记分配**（2026-11-23）。
+         *
+         * ## 为什么不在 `subagent/start` 里登记
+         *
+         * 那个事件**没有 provider 信息**（只有 `id` + `parentSessionId`）——
+         * 而分配表是 provider 级的（同一 sessionId 在多家各有一个 slot 没意义）。
+         *
+         * ⇒ provider 只有到这里才知道，故首次 `resolveCredential` 时登记。
+         *
+         * ## ⚠️ 必须 fire-and-forget
+         *
+         * `recordSubagentStart` 是 async（要落盘）。选号路径**不能等它** ——
+         * 那会把一次磁盘写塞进每一发请求的延迟里。
+         *
+         * ⇒ 本次请求用**同步读到**的 `assignment`（可能为 undefined ⇒ 走主代理逻辑），
+         * 登记在后台完成；下一次请求就能用上新 slot。
+         *
+         * ⚠️ 首次请求因此会用主代理起点（一次）。这是**可接受的**：
+         * 子代理通常有多轮请求，从第二轮起就正确错开了。
+         * 想连第一轮也错开，就得同步读盘 —— 那是拿每一发延迟换一次正确性，不值。
+         */
+        if (setting !== undefined && subagentSettingActive(setting) && sessionId !== undefined) {
+          void deps.pool.recordSubagentStart?.(
+            providerId,
+            sessionId,
+            subagentParentOf(sessionId) ?? sessionId,
+            Date.now(),
+          ).catch(() => { /* 登记失败不影响本次选号 */ })
+        }
         const assignment = deps.pool.subagentAssignmentOf?.(providerId, sessionId)
         if (setting !== undefined && assignment !== undefined
           && setting.startMode !== undefined && setting.startMode !== 'follow') {

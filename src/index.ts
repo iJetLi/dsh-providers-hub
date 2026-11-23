@@ -293,6 +293,7 @@ import { createExpiryProbe } from './aggregate-expiry.js'
 //    `credits.balances` 端点与 buddy 系四家的折算共用它（见下面 `balanceCache` 的长注释）。
 import { createBalanceCache, createBalanceRefresher, REFRESH_PERIOD_FALLBACK_MS, type BalanceCacheEntry } from './balance-cache.js'
 // ★ 余额读数的磁盘缓存（SWR 的写盘调度）：三个写盘时机见下方接线处。
+import { forgetSubagentParent, isSubagentSession, rememberSubagentParent } from './subagent-rotation.js'
 import { BALANCE_DISK_FLUSH_INTERVAL_MS, flushDisk as flushBalanceDisk, primeFromDisk as primeBalanceDiskCache } from './balance-disk-cache.js'
 // ⚠️ 模型目录的后台刷新器（用户 2026-10-18 要求：20 分钟定时更新）。
 //    与余额刷新器**共用同一套骨架**（武装 + 单飞 + 幂等），但**不复用实例** ——
@@ -7266,6 +7267,146 @@ async function fetchBalanceReading(
   // ⚠️ **本 fork 独有**（modelscope）：`ModelscopeAuth extends Service`，
   //    构造时已由 cordis 自动注册为 `ctx.modelscopeAuth`（`super(ctx, `${product.id}Auth`)`），
   //    故这里**不需要**再 provide —— 与 accio 同款（它也没有 provide 行）。
+
+  /**
+   * ★★★ **子代理专属起点与模型的事件接线**（2026-11-23）。
+   *
+   * ## 三个事件各管一件事
+   *
+   * | 事件 | 用途 | 宿主证据 |
+   * |---|---|---|
+   * | `subagent/start` | 记下「这个 sessionId 是子代理 + 父会话 + slot」| `dsh-subagent/lib/index.js:158` |
+   * | `subagent/end` | 标记结束（**保留**记录，供 resume）| 同上 `:166` |
+   * | `agent/pre-step` | 按 sessionId 改写子代理的模型 | `dsh-agent/runtime-types.ts:351` |
+   *
+   * ## 为什么必须用 `ctx.inject(['agents'], …)` 包起来
+   *
+   * `agent/pre-step` 由 `dsh-agent` 提供，`subagent/*` 由 `dsh-subagent` 提供。
+   * 没有这两个服务的 profile（纯 CLI / 精简装配）里，直接 `ctx.on(...)` 会让
+   * 插件**永久 pending**（cordis 的注入语义）。
+   * ⇒ 与既有 `installLoopResume` / `installRateLimitResume` 同款，用 inject 包。
+   *
+   * ⚠️ 只订阅 `agent/pre-step`（不需要 `agents` 的其它能力）——
+   * 事件在 plugin 的 root scope 上声明为可观察，探针已实证能收到
+   *（`subagent/start` payload 带 `parentSessionId` + `id`，实测见提交说明）。
+   */
+  ctx.inject(['agents'], (injected) => {
+    /**
+     * ① `subagent/start`：登记分配。
+     *
+     * ⚠️ **provider 必须从「父会话当前在用哪个 provider」反推不出来** ——
+     * 事件里只有 session id，没有 provider。
+     * 故这里**对全部已注册 provider 各记一条**？不行：那会让同一 sessionId
+     * 在多家都占 slot。
+     *
+     * ⇒ 采用**惰性登记**：`subagent/start` 只把 `(sessionId → parentSessionId)`
+     * 记进**模块级父子表**；真正的 provider 级分配等到第一次
+     * `resolveCredential(provider, sessionId)` 时才登记（那时 provider 已知）。
+     *
+     * 这样 slot 的分配顺序 = 「子代理第一次真正请求的顺序」，与「拉起顺序」一致
+     *（拉起后立刻就会请求）。
+     */
+    const stopStart = injected.on('subagent/start' as never, ((info: unknown) => {
+      try {
+        const evt = info as { id?: unknown; parentSessionId?: unknown }
+        const childId = typeof evt?.id === 'string' ? evt.id : undefined
+        const parentId = typeof evt?.parentSessionId === 'string' ? evt.parentSessionId : undefined
+        if (childId === undefined || parentId === undefined) return
+        rememberSubagentParent(childId, parentId)
+      } catch (error) {
+        // ⚠️ 事件监听器抛错会传染宿主，一律吞掉并留诊断日志。
+        ctx.logger?.warn?.(`[jet-hub] 记录子代理 ${String(info)} 失败：${String(error)}`)
+      }
+    }) as never)
+
+    /** ② `subagent/end`：标记结束（**不清分配**，见 `markSubagentEnded`）。 */
+    const stopEnd = injected.on('subagent/end' as never, ((info: unknown) => {
+      try {
+        const evt = info as { id?: unknown }
+        const childId = typeof evt?.id === 'string' ? evt.id : undefined
+        if (childId === undefined) return
+        forgetSubagentParent(childId)
+        /**
+         * ⚠️ provider 级分配**不在这里清** —— 见 `markSubagentEnded` 的注释：
+         * resume 会复用同一 sessionId，清了会让它排到队尾。
+         * 实际清理交给 `at` 淘汰。
+         */
+      } catch { /* 同上：监听器绝不上抛 */ }
+    }) as never)
+
+    /**
+     * ③ `agent/pre-step`：按 sessionId 改写子代理的**模型**。
+     *
+     * ## ⚠️ 为什么每次 step 都要判一次
+     *
+     * `agent.model.select()` 是**持久**的（官方注释：durable model selection），
+     * 理论上选一次就够。但：
+     *
+     * 1. 用户可能中途手动给子代理换模型 ⇒ 我们的设置要**重新生效**；
+     * 2. 子代理 resume 时是新的一轮 ⇒ 再选一次保证一致。
+     *
+     * ⇒ 每次 pre-step 都判（对相同选择是 no-op，成本可忽略 —— 官方注释：
+     *   「An equal recorded choice is a no-op」）。
+     *
+     * ## ⚠️ 只对**子代理**生效
+     *
+     * 主代理会话不在父子表里 ⇒ 这里什么都不做（零回归）。
+     */
+    const stopPreStep = injected.on('agent/pre-step', (async (
+      payload: unknown,
+      next: () => Promise<unknown>,
+    ): Promise<unknown> => {
+      try {
+        const evt = payload as {
+          agent?: { id?: unknown; model?: { select?: unknown } }
+          modelSelection?: { provider?: unknown; model?: unknown }
+        }
+        const agent = evt?.agent
+        const sessionId = typeof agent?.id === 'string' ? agent.id : undefined
+        if (sessionId !== undefined && isSubagentSession(sessionId)) {
+          /**
+           * ⚠️ provider 从**当前模型选择**里取（不是从设置里猜）：
+           * 子代理的模型必须与它实际在跑的 provider 一致，否则
+           * `resolveCredential` 的 provider 假设会失效。
+           */
+          const provider = typeof evt?.modelSelection?.provider === 'string'
+            ? evt.modelSelection.provider
+            : undefined
+          if (provider !== undefined) {
+            const setting = pool.subagentRotationFor(provider)
+            const model = setting?.model
+            if (model !== undefined && model.length > 0
+              && typeof agent?.model?.select === 'function') {
+              const current = evt?.modelSelection?.model
+              if (current !== model) {
+                const effort = setting?.reasoningEffort
+                ;(agent.model.select as (sel: unknown) => void)({
+                  provider,
+                  model,
+                  ...(effort === undefined || effort.length === 0 ? {} : { reasoningEffort: effort }),
+                })
+              }
+            }
+          }
+        }
+      } catch (error) {
+        /**
+         * ⚠️⚠️ **绝不能让它抛**：pre-step 是 waterfall，抛错会**中断整个 step**
+         *（用户会看到「这一轮完全没响应」）。换模型是锦上添花的功能，
+         * 任何失败都必须静默降级为「用原来的模型」。
+         */
+        ctx.logger?.warn?.(`[jet-hub] 子代理换模型失败（已忽略，继续用原模型）：${String(error)}`)
+      }
+      return next()
+    }) as never)
+
+    injected.effect(() => () => {
+      try { stopStart() } catch { /* 忽略 */ }
+      try { stopEnd() } catch { /* 忽略 */ }
+      try { stopPreStep() } catch { /* 忽略 */ }
+    })
+  })
 }
+
 
 
