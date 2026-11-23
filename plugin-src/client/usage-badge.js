@@ -1623,9 +1623,28 @@ function UsageBadgeActive(props) {
       : React.createElement('span', {
         key: 'pos',
         className: 'dim-jh-badgeCount',
-        title: `当前轮换起点：位次 ${rotationState.selectedPosition}`,
+        /**
+         * ★ **带账号名**（2026-11-24 用户选的「方案 B」）。
+         *
+         * 用户原话：「我想要子代理对话页面，达到跟主代理对话页面一样的效果，
+         * 从页面就能看出这个对话是跟哪个帐号在进行的」
+         *
+         * ⇒ `位次 3 · 陈水广`（有名字时）／`位次 3`（取不到名字时）。
+         *
+         * ⚠️ 名字来自服务端 `selectedAccountName`（那里才跑
+         * `enrichAccountIdentity()` 补全链路），客户端**不自己 find**
+         * —— 本仓红线：同一语义两处实现必然漂移。
+         *
+         * ⚠️ 取不到名字时**只显示位次**（与改动前逐字相同），不显示
+         * 「位次 3 · 未知」之类的噪音。
+         */
+        title: rotationState.selectedAccountName === null || rotationState.selectedAccountName === undefined
+          ? `当前轮换起点：位次 ${rotationState.selectedPosition}`
+          : `当前轮换起点：位次 ${rotationState.selectedPosition} · ${rotationState.selectedAccountName}`,
         'aria-hidden': 'true',
-      }, `位次 ${rotationState.selectedPosition}`),
+      }, rotationState.selectedAccountName === null || rotationState.selectedAccountName === undefined
+        ? `位次 ${rotationState.selectedPosition}`
+        : `位次 ${rotationState.selectedPosition} · ${rotationState.selectedAccountName}`),
     view.accountCount > 0
       ? React.createElement('span', {
         key: 'cnt',
@@ -2027,6 +2046,17 @@ function UsageBadgeActive(props) {
         selected: typeof value?.selected === 'string' ? value.selected : null,
         // ⚠️ 位次才是下拉框的 value（用户 2026-11-10 要求「跟随位次」）
         selectedPosition: typeof value?.selectedPosition === 'number' ? value.selectedPosition : null,
+        /**
+         * ★ **选中账号的显示名**（2026-11-24 方案 B）。
+         *
+         * 服务端只在「取得到名字」时下发；`null` = 取不到 ⇒ 胶囊只显示位次。
+         * ⚠️ 用 `null` 而不是 `undefined` 作内部表示：`undefined` 会与
+         * 「本次 RPC 还没返回」混淆，而胶囊的渲染判据需要区分这两者
+         *（虽然当前两者渲染相同，但将来加 loading 态时不能混）。
+         */
+        selectedAccountName: typeof value?.selectedAccountName === 'string' && value.selectedAccountName.length > 0
+          ? value.selectedAccountName
+          : null,
         stale: value?.stale === true,
         locked: value?.locked === true,
         /**

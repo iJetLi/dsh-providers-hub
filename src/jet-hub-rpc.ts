@@ -8189,7 +8189,51 @@ function registerJetHubEndpoints(
          * ⇒ 两边同口径：只数启用账号。
          */
         const mine = all.filter((a) => a.provider === req.provider && a.enabled !== false)
-        const selectedId = pool.preferredRotationFor(req.provider, req.sessionId) ?? null
+        /**
+         * ★★★ **子代理会话：显示它实际使用的账号位次**
+         *（2026-11-24 用户需求）。
+         *
+         * ## 用户原话
+         *
+         * > 「我想知道，可以做到在打开子代理对话页面时，下面积分胶囊可以做到：
+         * >   子代理被拉起时是哪个帐号拉起的，积分胶囊就显示哪个帐号吗？
+         * >   ……我想要子代理对话页面，达到跟主代理对话页面一样的效果，
+         * >   从页面就能看出这个对话是跟哪个帐号在进行的」
+         *
+         * ## 缺陷
+         *
+         * `preferredRotation` 是**按 sessionId 单独配置**的表 —— 用户只会在
+         * **主代理**会话里选起点，子代理的 sessionId 永远不在那张表里
+         * ⇒ `preferredRotationFor()` 返回 `undefined` ⇒ 胶囊显示「默认」
+         * ⇒ 用户看不出子代理在用哪个号。
+         *
+         * ## 修法
+         *
+         * 子代理的账号是**自动分配**的（`subagentAssignments[provider][sid]`），
+         * 记在 `pinnedAccountId` 里。⇒ 该会话是子代理时，用 pin 的 id 当
+         * 「起点」去算位次。
+         *
+         * ## ⚠️ 三态语义（必须与胶囊的既有渲染对齐）
+         *
+         * | 情况 | `selectedPosition` | 胶囊显示 |
+         * |---|---|---|
+         * | 主代理 + 选了起点 | 位次数字 | 「位次 N」|
+         * | 主代理 + 没选 | `null` | 「默认」|
+         * | **子代理 + 已 pin** | **位次数字** | **「位次 N」** ← 本改动 |
+         * | 子代理 + 未 pin（首轮还没选）| `null` | 「默认」|
+         *
+         * ⚠️ **只读、不写**：主代理那条腿仍走 `preferredRotationFor`，本改动
+         * 不碰 `preferredRotation` 表（否则会把「自动分配」污染成「用户选择」，
+         * 下次主代理打开下拉框会看到一个它没选过的值）。
+         *
+         * ⚠️ **优先级**：子代理的 pin **优先于** `preferredRotationFor`
+         * —— 万一某子代理的 sessionId 恰好也在 `preferredRotation` 里（不可能
+         * 但防御），行为应是「显示它实际用的号」，而不是「用户给它选的起点」。
+         */
+        const subagentPin = pool.subagentAssignmentOf?.(req.provider, req.sessionId)?.pinnedAccountId
+        const selectedId = subagentPin !== undefined
+          ? subagentPin
+          : (pool.preferredRotationFor(req.provider, req.sessionId) ?? null)
         /**
          * ⚠️ **`selectedPosition` 是客户端要用的那个**（下拉框 value = 位次）。
          *
@@ -8241,11 +8285,44 @@ function registerJetHubEndpoints(
          * 而 `selected` 仍按 `id` 比对，故补全不影响选中态。
          */
         const enriched = await enrichAccountIdentity(mine, req.provider)
+        /**
+         * ★ **选中账号的显示名**（2026-11-24 用户要求「方案 B」）。
+         *
+         * ## 用户原话
+         *
+         * > 「我想要子代理对话页面，达到跟主代理对话页面一样的效果，
+         * >   从页面就能看出这个对话是跟哪个帐号在进行的」
+         *
+         * 用户在同一次对话里选了 **B 方案**：胶囊显示 `位次 3 · 陈水广`
+         * 而不是只显示 `位次 3`。
+         *
+         * ## 为什么由服务端下发
+         *
+         * 客户端只拿到 `selected`（accountId），而**账号显示名需要补全**
+         *（codearts 的池内 `nickname` 就是池 id、qoder 系要读网页会话等）——
+         * 补全链路 `enrichAccountIdentity()` 在服务端。
+         *
+         * ⚠️ 客户端**不要**自己从 `accounts` 数组里 find：
+         * 那个数组里的 `nickname` 也已补全，能 find 到 —— 但
+         * 「选中项的名字」是**一个独立事实**，由服务端一次给出，
+         * 免得客户端在两处各写一遍 find（本仓红线：同一语义两处实现必然漂移）。
+         *
+         * ⚠️ 取不到（账号已被删/停用）⇒ `undefined`（省略该键）⇒
+         * 客户端回落成只显示「位次 N」，与改动前逐字相同。
+         */
+        const selectedAccountName = selectedId === null
+          ? undefined
+          : (() => {
+            const hit = enriched.find((a) => a.id === selectedId)
+            const name = typeof hit?.nickname === 'string' ? hit.nickname.trim() : ''
+            return name.length === 0 ? undefined : name
+          })()
         return {
           ok: true,
           value: {
             selected: selectedId,
             selectedPosition,
+            ...(selectedAccountName === undefined ? {} : { selectedAccountName }),
             locked,
             /**
              * ★ **起点选定时的档位快照**（S6，2026-11-20）。
