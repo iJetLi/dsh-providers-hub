@@ -12877,13 +12877,9 @@ function registerJetHubEndpoints(
         if (ctx.llm === undefined) {
           return { ok: false, error: { code: 'bad-request', message: 'llm 服务不可用' } }
         }
-        let list: ReadonlyArray<{
-          id: string
-          name: string
-          reasoning?: { efforts?: ReadonlyArray<{ id: string; name: string }>; defaultEffort?: string }
-        }>
+        let list: ReadonlyArray<{ id: string; name: string }>
         try {
-          list = await ctx.llm.listModels(req.provider) as typeof list
+          list = await ctx.llm.listModels(req.provider)
         } catch (error) {
           return {
             ok: false,
@@ -12900,12 +12896,43 @@ function registerJetHubEndpoints(
         const models: RpcCreditWindowModelEntry[] = []
         for (const m of list) {
           if (disabled[m.id] === true) continue
-          const efforts = (m.reasoning?.efforts ?? []).map((e) => ({ id: e.id, name: e.name }))
+          /**
+           * ⚠️⚠️ **思考档位必须走 `resolveModel()`，不能用 `listModels()`**
+           *（2026-11-24 用户报障：「deepseek 就是有思考强度的呀」）。
+           *
+           * ## 缺陷
+           *
+           * 上一版从 `listModels()` 的返回值取 `m.reasoning?.efforts` ——
+           * 但**骨架的 `toModelInfo()` 根本不输出 `reasoning` 字段**
+           *（它只写 `provider` / `id` / `name` / `inputModalities` /
+           * `description` / `contextWindow` / `badge`）。
+           *
+           * ⇒ 我这边拿到的 `efforts` **恒为空** ⇒ UI 永远显示「该模型无思考档位」。
+           * ⇒ 而**主对话窗口**能正常选 `Extra High`，因为宿主用的是
+           *    `resolveModel()`（它才读 `CatalogEntry.reasoning`）。
+           *
+           * ## 修法
+           *
+           * 对每个已启用的模型调 `resolveModel()` 取 `reasoning`。
+           *
+           * ⚠️ 逐模型查是 N 次调用，但 `resolveModel` 走的是**内存目录**
+           *（`CatalogEntry` 已在适配器里备好），没有网络往返 —— 实测几十个
+           *模型也在毫秒级。
+           *
+           * ⚠️ 单个模型 `resolveModel` 失败**不能拖垮整批**：吞掉并给空 `efforts`
+           *（最坏结果是「该模型没有强度下拉」，而不是整个端点 500）。
+           */
+          let reasoning: { efforts?: ReadonlyArray<{ id: string; name: string }>; defaultEffort?: string } = {}
+          try {
+            const resolved = await ctx.llm.resolveModelInfo(req.provider, m.id)
+            reasoning = (resolved?.reasoning ?? {}) as typeof reasoning
+          } catch { /* 单个失败 ⇒ 当作「无思考档位」 */ }
+          const efforts = (reasoning.efforts ?? []).map((e) => ({ id: e.id, name: e.name }))
           models.push({
             id: m.id,
             name: m.name,
             efforts,
-            ...(m.reasoning?.defaultEffort === undefined ? {} : { defaultEffort: m.reasoning.defaultEffort }),
+            ...(reasoning.defaultEffort === undefined ? {} : { defaultEffort: reasoning.defaultEffort }),
           })
         }
         /**
