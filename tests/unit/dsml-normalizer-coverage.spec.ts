@@ -67,6 +67,7 @@ describe('DSML 归一化接线覆盖（防回归）', () => {
       //    第 9 个正文出口 ⇒ 已同步接入 `createDsmlMarkerNormalizer`（push +
       //    flush），②③ 两条守卫现在覆盖它。
       'codely-adapter.ts',
+      'doubao-adapter.ts',
       'gemini-messages.ts',
       'llm-adapter.ts',
       'lobsterai-adapter.ts',

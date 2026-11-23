@@ -168,7 +168,11 @@ describe('modelAdapters 的键集合守卫（行为断言）', () => {
     //    应可续期」三张守卫一起点燃，在推理与续期落地前那才是真要假桩的地方。
     // ⚠️ 2026-10-22（A6）：codely **已翻 `channel: true`** ⇒ 它由 `channelIds` 覆盖，
     //    不得再留在例外名单里（下面的反向断言会直接变红）。
-    const EXTRA_KEYS = ['aggregate']
+    // ⚠️ doubao（豆包，2026-11-22）：`channel: false` 但必须进 modelAdapters ——
+    // `provider.status` 的「模型数 / 已关闭」读本表 `listAllModels()`，
+    // 缺它则模型选择器拿不到豆包目录。与当年 codely 同族：进表 ≠ 有 auth /
+    // 有推理；保持 channel:false 避免点燃「应有 auth/聚合/续期」三张守卫。
+    const EXTRA_KEYS = ['aggregate', 'doubao']
     const expected = [...channelIds, ...EXTRA_KEYS].sort()
     expect(
       keys,

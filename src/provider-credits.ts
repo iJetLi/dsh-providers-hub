@@ -784,16 +784,7 @@ export function createProviderCredits(
     },
 
     /**
-     * 豆包（Doubao，字节跳动）：**签到端点已真机实测**（2026-11-03），余额无概念。
-     *
-     * ⚠️ 用 `fetchBalanceDetailed` + 显式 `claim` 两个原语（`doubao-credits.ts`）：
-     *    前者**无条件**回 `{ balance: null, error: '豆包无积分余额概念…' }` ——
-     *    这是如实的「没有这个概念」，不是「还没实测」。**正常路径不会调用到它**：
-     *    `credits.balances` 端点在查表分派**之前**就把豆包短路成
-     *    `{ accounts: [] }`（`src/jet-hub-rpc.ts`），故统计带永远拿到空列表、
-     *    不会因为没有余额而把 `creditsPartial` 误置位。保留它只为让本表形状
-     *    统一（`credits.claimAll` 与 `credits.balances` 共用这张表），且万一有
-     *    调用方绕过端点时仍能拿到可读原因而不是抛出。
+     * 豆包：使用账号的扫码登录会话查询额度；签到继续走已有页面会话。
      * ⚠️ 签到侧是**实测**的（`POST DOUBAO_CHECKIN_PATH` 回
      *    `checked_in:true, reward_amount:200, continuous_days:2, idempotent:true`，
      *    2026-11-03 真机 + `docs/agent-notes/providers-doubao.md`）。

@@ -1191,7 +1191,12 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //    让签到入口照常出现（`checkinProviders()` 按 `supportsDailyCheckin` 过滤），
     //    `balance: true` 让豆包进 credits 表（签到的 `claim` 走同一张表；余额那一腿
     //    由端点短路成空列表，见上方 `credits` 那条）。
-    //    将来接推理链路（目录/适配器/auth）时把本行翻 `true` 并补齐派生登记。
+    // ⚠️ 2026-11-22 更正：模型目录/适配器已接通（src/doubao-adapter.ts），
+    //    已进 modelAdapters 表 ⇒ 运行时 noModelLeg 门（channel===false AND
+    //    modelAdapters[provider]===undefined）不成立，模型腿照常读取、对话照常路由。
+    //    这里**刻意保持 false**：豆包凭据是 cookie（无 refresh 端点、无 auth 服务），
+    //    翻 true 会点燃「channel ⇒ 必须有 auth/聚合/续期」三张派生守卫（与 codely 当年
+    //    channel:false 但有目录的形态同型）。签到与余额两条腿独立于 channel。
     channel: false,
   },
 
