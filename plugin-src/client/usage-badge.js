@@ -824,6 +824,26 @@ function UsageBadgeActive(props) {
    */
   const [rotationState, setRotationState] = React.useState(null);
   /**
+   * ★★★ **当前会话实际在用的模型 + 思考强度**（2026-11-24 用户需求）。
+   *
+   * ## 为什么由本插件补
+   *
+   * 宿主**只在主对话页**渲染模型选择器（`conversation.input.model.label`）；
+   * 子代理对话页**宿主不渲染** ⇒ 用户看不出子代理在用哪个模型/哪档强度。
+   * 而该页的胶囊正是**本插件**占的槽位 ⇒ 由本插件补上。
+   *
+   * ## 数据来源（无需新 RPC）
+   *
+   * `resolveDirectory().store.getSnapshot().current` 就是
+   * `ModelSelection { provider, model, reasoningEffort? }` ——
+   * 胶囊里**早就**在读它（原先只用来当限流判据的 `currentModel`）。
+   *
+   * ⚠️ 显示的是**实际在用**的值（不是配置里的）⇒ 「跟随主代理」时也说得对。
+   *
+   * `null` = 还没读到（快照未就绪）⇒ **整块不渲染**（不留空尾巴）。
+   */
+  const [modelInfo, setModelInfo] = React.useState(null);
+  /**
    * ★ **「严格手动顺序」是否开启**（2026-11-18 加）。
    *
    * 影响弹窗列表排序口径：
@@ -1655,6 +1675,54 @@ function UsageBadgeActive(props) {
       : null,
   ]);
 
+  /**
+   * ★★★ **模型 + 思考强度 pill**（2026-11-24 用户需求，方案 2）。
+   *
+   * ## 为什么放在胶囊**外侧右边**而不是胶囊内
+   *
+   * 用户 2026-11-24 明确否掉了「塞进胶囊」的四个方案：
+   *
+   * > 「你的方案里面都太乱了，能不能依照主代理页面一样，这样做一个？」
+   *
+   * 主代理页面的布局是：**胶囊在左、模型在右**（宿主自己渲染）。
+   * ⇒ 子代理页面照抄这个相对位置，视觉一致、且胶囊本体**一个字符都不改**。
+   *
+   * ## ⚠️ 视觉必须模仿宿主（用户逐字要求）
+   *
+   * > 「要注意到思考强度字体是比模型名要暗一点的，要模仿到位，然后是没有下拉的」
+   *
+   * | 元素 | 颜色 | 依据 |
+   * |---|---|---|
+   * | 模型名 | `label-primary`（亮）| 宿主主色 |
+   * | 思考强度 | `label-tertiary`（**更暗**）| 用户明确要求 |
+   * | 下拉箭头 | **不画** | 用户明确要求「没有下拉」——它不是可点的 |
+   *
+   * ## ⚠️ 只在**子代理**页面渲染
+   *
+   * 主代理页由宿主渲染模型选择器，本插件再画一个会**重复两个**。
+   * 判据用 `rotationState.selectedAccountName !== null` —— 那个字段
+   * **只在子代理会话下发**（见 `account.getRotation` 的 `isSubagentSessionForBadge`），
+   * 不另写一套判据（本仓红线：同一语义不得两套）。
+   *
+   * ⚠️ `modelInfo === null`（快照未就绪）⇒ 整块不渲染。
+   */
+  const isSubagentBadge = rotationState !== null && rotationState.selectedAccountName !== null
+  const modelPill = isSubagentBadge && modelInfo !== null
+    ? React.createElement('span', {
+      key: 'model',
+      className: 'dim-jh-badgeModelPill',
+      title: modelInfo.effort === null
+        ? `子代理当前模型：${modelInfo.model}`
+        : `子代理当前模型：${modelInfo.model}（思考强度 ${modelInfo.effort}）`,
+      'aria-hidden': 'true',
+    }, [
+      React.createElement('span', { key: 'm', className: 'dim-jh-badgeModelName' }, modelInfo.model),
+      modelInfo.effort === null
+        ? null
+        : React.createElement('span', { key: 'e', className: 'dim-jh-badgeModelEffort' }, modelInfo.effort),
+    ])
+    : null
+
   return React.createElement('div', { className: 'dim-jh-badge', ref: root }, [
     React.createElement('button', {
       key: 'btn',
@@ -1669,6 +1737,7 @@ function UsageBadgeActive(props) {
       collapsed,
     ]),
     open ? renderPopover() : null,
+    modelPill,
   ]);
 
   /**
@@ -2018,13 +2087,28 @@ function UsageBadgeActive(props) {
       //     这里在 **effect 内**调用它，失败被本函数自己的 try/catch 兜住，
       //     影响面收敛到「拿不到 modelId」⇒ 只是限流判据不生效。
       let currentModel;
+      /** ★ 同时捕获模型与强度（供胶囊右侧的模型 pill 用）。 */
+      let capturedModelInfo = null;
       try {
         const directory = typeof props.resolveDirectory === 'function' ? props.resolveDirectory() : undefined;
         const current = directory?.store?.getSnapshot?.()?.current;
         currentModel = typeof current?.model === 'string' ? current.model : undefined;
+        /**
+         * ⚠️ `reasoningEffort` **可选**（模型不支持思考时宿主不声明）
+         * ⇒ 用 `null` 表示「没有强度」，渲染时据此隐藏那一段。
+         */
+        if (typeof current?.model === 'string' && current.model.length > 0) {
+          capturedModelInfo = {
+            model: current.model,
+            effort: typeof current?.reasoningEffort === 'string' && current.reasoningEffort.length > 0
+              ? current.reasoningEffort
+              : null,
+          };
+        }
       } catch {
         currentModel = undefined;
       }
+      setModelInfo(capturedModelInfo);
       /**
        * ⚠️ **超时兜底（诊断用，且应长期保留）**：
        *

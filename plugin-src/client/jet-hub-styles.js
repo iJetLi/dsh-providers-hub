@@ -2057,6 +2057,48 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    它会连同右侧模型选择器一起溢出。允许收缩后，空间不足时胶囊与选择器一起让位，
    且胶囊内部退化是有序的（先名字出省略号，数字最后才动）。 */
 .dim-jh-badge { position: relative; display: flex; align-items: center; flex: 0 1 auto; min-width: 0; }
+/*
+ * ★★★ 子代理页面的「模型 + 思考强度」pill（2026-11-24 用户需求）。
+ *
+ * ## 为什么需要（本插件自己画）
+ *
+ * 宿主**只在主对话页**渲染模型选择器；子代理对话页宿主不渲染
+ * ⇒ 用户看不出子代理在用哪个模型/哪档强度。
+ *
+ * ## ⚠️ 视觉必须模仿宿主（用户逐字要求）
+ *
+ * 「要注意到思考强度字体是比模型名要暗一点的，要模仿到位，然后是没有下拉的」
+ *
+ * | 元素 | 样式 | 理由 |
+ * |---|---|---|
+ * | 模型名 | label-primary + 11px | 宿主主色 |
+ * | 思考强度 | **label-tertiary（更暗）** | 用户明确要求 |
+ * | 下拉箭头 | **不画** | 用户明确要求；它不可点，画了会误导 |
+ *
+ * ⚠️ 与胶囊之间留 8px：宿主主代理页面就是这个间距感。
+ * ⚠️ 不写回退值：本仓纪律 —— 回退值只允许 baseline 表里那 6 个。
+ */
+.dim-jh-badgeModelPill {
+  display: flex; align-items: center; gap: 5px;
+  margin-left: 10px;
+  font-size: 12px; line-height: 1.5;
+  white-space: nowrap;
+  flex: none;
+}
+/* 模型名：亮色（与宿主的模型选择器同色阶） */
+.dim-jh-badgeModelName {
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+/*
+ * 思考强度：**更暗一档**（用户逐字要求）。
+ * 用 tertiary 而不是 secondary —— secondary 与胶囊内文字同色，
+ * 视觉上会和模型名拉不开差距（实测对比度差只有一档）。
+ */
+.dim-jh-badgeModelEffort {
+  color: var(--dsw-alias-label-secondary);
+  font-variant-numeric: tabular-nums;
+}
 /* ⚠️ box-sizing 是**显式写出**的，不是修复：button 的 UA 默认样式表本就是
    border-box（实测 offsetWidth 与 max-width 相等）。写上它只为在元素类型被改
    （span/div 默认是 content-box）时语义不悄悄漂移 —— 那种情况下 max-width 会从
