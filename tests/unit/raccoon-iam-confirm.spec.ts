@@ -21,6 +21,7 @@ import {
 import type { RaccoonProduct } from '../../src/raccoon-product.js'
 import { RACCOON_IAM_ISSUER } from '../../src/raccoon-authorize.js'
 import { fetchRaccoonCreditBalance } from '../../src/raccoon-credits.js'
+import { fetchRaccoonUserInfo } from '../../src/raccoon-oauth.js'
 
 /** 造一枚形态正确的 JWT（只需要 `iss` 与可解析性 —— 判定只看 `iss` 后缀）。 */
 function makeJwt(iss: string): string {
@@ -229,5 +230,73 @@ describe('iam/confirm 的取消与超时（对抗审计 P1-⑥）', () => {
     const init = calls[0][1] as RequestInit
     expect(init.signal, 'iam/confirm 必须带 signal（否则前置握手无上界）').toBeDefined()
     expect(init.signal).not.toBeNull()
+  })
+})
+
+/**
+ * ★★★ **fail-open 守卫**（对抗审计 P1-1，补于 2026-11-23）。
+ *
+ * 首版判据是 `typeof code === 'number' && code !== 0` ⇒ 审计实测
+ * `{code:"200901"}` / `{}` / `{code:null}` / `{success:false}` **全被判 true
+ * 并写入去重集**（第二次 0 请求）⇒ 一次「200 + 无数字 code」能让该令牌
+ * **进程内永久**跳过确认，而全仓**不识别 200901**（零日志、零自愈）。
+ *
+ * ⇒ 判据必须是**明确的** `body.code === 0`。
+ */
+describe('判据必须 fail-closed（对抗审计 P1-1）', () => {
+  const shapes: Array<[string, unknown]> = [
+    ['code 是字符串 "200901"', { code: '200901' }],
+    ['完全没有 code', {}],
+    ['code 是 null', { code: null }],
+    ['code 是 false', { code: false }],
+    ['success:false 且无 code', { success: false }],
+    ['body 是非 0 数字', { code: 200901 }],
+  ]
+
+  for (const [label, payload] of shapes) {
+    it(`★★★ ${label} ⇒ false，且**不记入去重集**（下次还会再发）`, async () => {
+      resetRaccoonIamConfirmCacheForTest()
+      const fetcher = vi.fn(async () => new Response(JSON.stringify(payload), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+      expect(await ensureRaccoonSessionConfirmed(product, credential(IAM_TOKEN), fetcher)).toBe(false)
+      // ⚠️ 关键的第二半：**不能被记住**。再调一次必须**再发一次**。
+      expect(await ensureRaccoonSessionConfirmed(product, credential(IAM_TOKEN), fetcher)).toBe(false)
+      expect((fetcher as unknown as { mock: { calls: unknown[] } }).mock.calls, '假成功不得入集').toHaveLength(2)
+    })
+  }
+})
+
+/**
+ * ★★★ **user_info 入口的接线守卫**（对抗审计 P2-3 的第四格）。
+ *
+ * 审计实测：删掉 `raccoon-oauth.ts` 里那行 `await ensureRaccoonSessionConfirmed(...)`，
+ * `raccoon*` 全套**仍全绿** ⇒ 那条接线零守卫。
+ *
+ * 症状对应 issue #147 的一行：`user_info` 不确认 ⇒ 登录后**补昵称**这一步静默失败
+ * ⇒ 账号卡片永远没有名字。
+ */
+describe('接线：user_info 入口', () => {
+  it('★★★ fetchRaccoonUserInfo ⇒ 先确认、再 user_info', async () => {
+    resetRaccoonIamConfirmCacheForTest()
+    const seen: string[] = []
+    const fetcher = vi.fn(async (url: string) => {
+      seen.push(String(url))
+      if (String(url).includes('/iam/confirm')) {
+        return new Response(JSON.stringify({ code: 0 }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({ code: 0, data: { nickname: '小明' } }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+
+    await fetchRaccoonUserInfo(product, credential(IAM_TOKEN), fetcher).catch(() => undefined)
+
+    expect(seen.some((u) => u.includes('/iam/confirm')), 'user_info 入口没有触发 iam/confirm').toBe(true)
+    expect(seen.findIndex((u) => u.includes('/iam/confirm')))
+      .toBeLessThan(seen.findIndex((u) => u.includes('/user_info')))
   })
 })
