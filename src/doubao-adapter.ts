@@ -50,7 +50,9 @@ import {
   DOUBAO_BOT_ID,
   DOUBAO_BRIEF_LIST_PATH,
   DOUBAO_CHAT_PATH,
+  DOUBAO_CHAT_TIMEOUT_MS,
   DOUBAO_HTTP_TIMEOUT_MS,
+  doubaoUpstreamReasonOf,
   DOUBAO_WEB_BASE_URL,
   doubaoHeaders,
   doubaoQuery,
@@ -312,9 +314,18 @@ class DoubaoTextTracker {
   private readonly dsmlFix = createDsmlMarkerNormalizer()
   private readonly reasoningFix = createDsmlMarkerNormalizer()
   private hasAnswerText = false
+  /** 只收到思考、没有正文（issue #150 第 4 条：这也算「有内容」，不得判空重发）。 */
+  private hasReasoningText = false
   private current: { kind: DoubaoTextKind; id?: string } = { kind: 'text' }
 
-  get hasAnswer(): boolean { return this.hasAnswerText }
+  /**
+   * ★★★ 判「这次到底有没有可交付内容」。
+   *
+   * ⚠️ 旧判据只看正文 ⇒ **reasoning-only 响应被判空** ⇒ `stream()` 认为这个账号不可用、
+   * 换下一个账号**重发同一份带满思考正文的请求**（实测 2 账号 ⇒ 2 次）。那既白烧额度，
+   * 也可能把账号状态搞脏 —— 而那次响应**其实是成功的**。
+   */
+  get hasAnswer(): boolean { return this.hasAnswerText || this.hasReasoningText }
 
   push(frame: DoubaoFrame): StreamChunk[] {
     if (frame.event !== 'STREAM_MSG_NOTIFY' && frame.event !== 'FULL_MSG_NOTIFY'
@@ -379,13 +390,32 @@ class DoubaoTextTracker {
         if (id !== undefined && previousOwner === undefined) this.current = { kind, id }
         continue
       }
+      /**
+       * ★★★ **匿名块（无 `block_id`）也必须去重**（issue #150 第 3 条）。
+       *
+       * ## 缺陷
+       *
+       * 旧写法对 `id === undefined` 的块**直接 `delta = text`**（全量追加）⇒
+       * 重复快照会**正文翻倍**：实测 `你好` → `你好你好`。
+       *
+       * ## 为什么以前「保持旧语义」
+       *
+       * 注释写的是「匿名 legacy 块没有 replay 身份」。但**没有身份不等于一定是增量**：
+       * `STREAM_MSG_NOTIFY` / `FULL_MSG_NOTIFY` 两个事件本来就是**快照**（
+       * 调用处传 `snapshot === true`），而匿名块同样会在这两个事件里出现。
+       *
+       * ## 修法
+       *
+       * 用**`kind` 作稳定的合成 key**（匿名块在同一 kind 内是顺序累积的，语义等价）：
+       * 快照若以上次全文为前缀 ⇒ 取真正的新增部分；否则若是快照或旧值是新值的前缀 ⇒ 跳过。
+       * ⇒ 快照重复发不会翻倍，而真正的增量仍照常追加。
+       */
+      const replayKey = id ?? `anon:${kind}`
       let delta = text
-      if (id !== undefined) {
-        const previous = this.upstreamText.get(id) ?? ''
+      {
+        const previous = this.upstreamText.get(replayKey) ?? ''
         if (text.startsWith(previous)) delta = text.slice(previous.length)
         else if (snapshot || previous.startsWith(text)) continue
-        // Inline patches can also contain a disjoint incremental fragment.
-        // Anonymous legacy blocks have no replay identity; keep their old append semantics.
       }
       if (delta.length === 0) continue // A replay is not a new declaration.
       this.current = { kind, ...(id === undefined ? {} : { id }) }
@@ -395,8 +425,13 @@ class DoubaoTextTracker {
 
   private append(kind: DoubaoTextKind, text: string, id: string | undefined, out: StreamChunk[]): void {
     if (text.length === 0) return
+    // ⚠️ **reasoning 也算「有内容」**（issue #150 第 4 条）：只返回思考的响应是**成功的**，
+    //    判成 EMPTY_RESPONSE 会让 stream() 逐账号重发，白烧额度。
     if (kind === 'text') this.hasAnswerText = true
-    if (id !== undefined) this.upstreamText.set(id, (this.upstreamText.get(id) ?? '') + text)
+    else this.hasReasoningText = true
+    // ⚠️ 匿名块用与 `pushBlocks` 相同的合成 key 记账，否则上面的去重永远读到空历史。
+    const replayKey = id ?? `anon:${kind}`
+    this.upstreamText.set(replayKey, (this.upstreamText.get(replayKey) ?? '') + text)
     const normalizer = kind === 'text' ? this.dsmlFix : this.reasoningFix
     this.emit(kind, normalizer.push(text), out)
   }
@@ -558,14 +593,48 @@ export class DoubaoAdapter extends LlmAdapter {
       const url = DOUBAO_WEB_BASE_URL + DOUBAO_CHAT_PATH + '?' + doubaoQuery(slot.credential).toString()
       let raw: string
       try {
+        /**
+         * ★★★ **对话请求必须有超时**（issue #150 第 1 条，2026-11-23 实测）。
+         *
+         * 旧写法只在 `options.signal` 存在时才传 signal ⇒ **宿主不传时完全无超时**，
+         * 唯一上界是 undici 默认的 **300 秒**（实测确认）。上游卡住时用户会干等 5 分钟。
+         *
+         * ⚠️ 两个 signal 用 `AbortSignal.any` 合并，而不是二选一：
+         *    宿主的「停止」必须继续有效（`options.signal`），同时我们自己的超时也要在。
+         * ⚠️ 超时值比目录的大：这里是**整段对话**（本家还是读完才吐 chunk），
+         *    目录那 15 秒显然不够。
+         */
+        const chatSignal = options.signal === undefined
+          ? AbortSignal.timeout(DOUBAO_CHAT_TIMEOUT_MS)
+          : AbortSignal.any([options.signal, AbortSignal.timeout(DOUBAO_CHAT_TIMEOUT_MS)])
         const response = await (this.options.fetchImpl ?? fetch)(url, {
           method: 'POST',
           headers: doubaoHeaders(slot.credential.cookie, { 'Content-Type': 'application/json' }),
           body,
-          ...options.signal === undefined ? {} : { signal: options.signal },
+          signal: chatSignal,
         })
         if (!response.ok) {
-          lastError = new LlmError('豆包：上游返回 HTTP ' + response.status, response.status === 401 ? 'AUTH' : 'SERVER', { status: response.status })
+          /**
+           * ★★★ **非 2xx 也必须读 body**（issue #150 第 2 条）。
+           *
+           * 旧写法只看状态码、**上游 body 压根没读** ⇒ 用户和主理都拿不到上游原因。
+           * 现在尽量把上游的 `msg` / `message` 取出来拼进 message（取不到就退回旧文案）。
+           *
+           * ⚠️ 错误码**沿用本仓多家一致的做法**（`accio-adapter.ts:626`、`agnescode`
+           *    `astudio` 都是 401/403 ⇒ `AUTH`）：身体内容带上了，就不必为这一格
+           *    另立新码 —— 而 `429` 单独判 `RATE_LIMIT`（本仓通用，`SERVER` 会白重试）。
+           */
+          const bodyText = await response.text().catch(() => '')
+          const upstreamReason = doubaoUpstreamReasonOf(bodyText)
+          const suffix = upstreamReason.length > 0 ? `：${upstreamReason}` : ''
+          const code = response.status === 429
+            ? 'RATE_LIMIT'
+            : response.status === 401 || response.status === 403 ? 'AUTH' : 'SERVER'
+          lastError = new LlmError(
+            `豆包：上游返回 HTTP ${response.status}${suffix}`,
+            code,
+            { status: response.status },
+          )
           continue
         }
         raw = await response.text()
@@ -581,7 +650,15 @@ export class DoubaoAdapter extends LlmAdapter {
       for (const frame of frames) {
         const streamError = doubaoStreamErrorOf(frame.data)
         if (streamError !== undefined) {
-          throw new LlmError('豆包：上游错误 ' + streamError.code, 'SERVER')
+          /**
+           * ★★★ **上游 msg 必须留着**（issue #150 第 2 条，2026-11-23 实测）。
+           *
+           * 旧写法只拼 `streamError.code` ⇒ 用户看到 `豆包：上游错误 710022004`，
+           * 而取证那次上游 msg 是「当前对话人数过多，请稍后再试」——
+           * **正是唯一能让用户行动的那句话**。数字码对用户毫无意义。
+           */
+          const detail = streamError.message.length > 0 ? `：${streamError.message}` : ''
+          throw new LlmError(`豆包：上游错误 ${streamError.code}${detail}`, 'SERVER')
         }
         for (const chunk of tracker.push(frame)) chunks.push(chunk)
       }

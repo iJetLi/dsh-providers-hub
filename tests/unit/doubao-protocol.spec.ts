@@ -438,10 +438,63 @@ describe('doubao reasoning catalog and stream blocks', () => {
     ])
   })
 
-  it('does not count a reasoning-only response as a successful final answer', async () => {
+  /**
+   * ★★★ **2026-11-23 改（issue #150 第 4 条）：这条用例原本锁的是缺陷本身。**
+   *
+   * 旧断言：`reasoning-only ⇒ rejects EMPTY_RESPONSE`。
+   *
+   * 但「只返回思考、没有正文」是**上游返回的成功响应**，不是失败。把它判空的实际后果是：
+   * `stream()` 认为这个账号不可用 ⇒ **换下一个账号重发同一份请求**（实测 2 账号 ⇒ 2 次
+   * 完整请求，每次都带着满满的思考正文）⇒ 白烧两倍额度，还可能把账号状态搞脏。
+   *
+   * ⇒ 判据从「有没有正文」改成「**有没有任何可交付内容**」（思考也算内容），
+   *   所以现在应当是**成功收尾**：有 reasoning 增量、并以 `finish/stop` 结束。
+   */
+  it('counts a reasoning-only response as a successful answer (issue #150)', async () => {
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapterWithResponse(emptyDeclarations('reasoning-only')).stream(options)) {
+      chunks.push(chunk)
+    }
+    // 思考帧必须真的交付出去（旧路径这里一段都不会吐，因为整条被判空）。
+    expect(chunks.some((chunk) => chunk.type === 'reasoning-delta')).toBe(true)
+    // 且必须以正常收尾结束 —— 不是 EMPTY_RESPONSE、也不是任何失败。
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  /**
+   * ★★★ **匿名块重复快照不得让正文翻倍**（issue #150 第 3 条，2026-11-23 实测 `你好` → `你好你好`）。
+   *
+   * 缺 `block_id` 的块没有 replay 身份，旧代码因此对它**不做去重**（`delta = text` 全量追加）
+   * ⇒ 只要上游把同一份快照发两次，正文就翻倍。
+   *
+   * ⚠️ 这里刻意**不带 `block_id`** —— 带上就会走已知块那条去重腿，用例将测不到匿名路径。
+   */
+  it('does not double the body when an anonymous block snapshot repeats (issue #150)', async () => {
+    const snapshot = (text: string) => 'event: STREAM_MSG_NOTIFY\ndata: ' + JSON.stringify({
+      message: { content: { content_block: [
+        { block_type: 10000, content: { text_block: { text } } },
+      ] } },
+    }) + '\n\n'
+    const raw = snapshot('你好') + snapshot('你好') + 'event: SSE_REPLY_END\ndata: {"end_type":3}\n\n'
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapterWithResponse(raw).stream(options)) chunks.push(chunk)
+    const body = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
+    expect(body, '重复快照不得被当成两次增量').toBe('你好')
+  })
+
+  /**
+   * ★★★ **流内业务错误必须保留上游 msg**（issue #150 第 2 条，2026-11-23）。
+   *
+   * 旧实现只拼数字码 ⇒ 用户看到 `豆包：上游错误 710022004`，而上游 msg
+   *（取证那次是「当前对话人数过多，请稍后再试」）**正是唯一能让他行动的那句话**。
+   */
+  it('keeps the upstream message on an in-stream business error (issue #150)', async () => {
+    const raw = 'event: STREAM_ERROR\ndata: '
+      + JSON.stringify({ code: 710022004, msg: '当前对话人数过多，请稍后再试' })
+      + '\n\n'
     await expect(async () => {
-      for await (const chunk of adapterWithResponse(emptyDeclarations('reasoning-only')).stream(options)) void chunk
-    }).rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
+      for await (const chunk of adapterWithResponse(raw).stream(options)) void chunk
+    }).rejects.toThrow(/当前对话人数过多/)
   })
 
   it('keeps provider reasoning and answer in distinct finalized DSH blocks', async () => {

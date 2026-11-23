@@ -69,6 +69,44 @@ export const DOUBAO_CHROMIUM_VERSION = '147.0.7727.149'
 export const DOUBAO_HTTP_TIMEOUT_MS = 15_000
 
 /**
+ * ★★★ **对话请求的超时**（issue #150 第 1 条，2026-11-23）。
+ *
+ * ⚠️ 与 {@link DOUBAO_HTTP_TIMEOUT_MS}（**目录**请求，15s）刻意分开：
+ * 这里等的是**一整段对话**（本家目前还是「读完才吐 chunk」），15 秒远远不够。
+ *
+ * ⚠️ 取值 180s：介于「目录的 15s」与「undici 默认 300s」之间 —— 旧行为是
+ * **完全无超时**（`signal: null`），唯一上界就是 undici 那 300s，用户会干等 5 分钟。
+ * 比它短一点既能让用户更早拿到「超时」这个明确结论，又不至于误杀正常的长回答。
+ */
+export const DOUBAO_CHAT_TIMEOUT_MS = 180_000
+
+/**
+ * 从上游错误 body 里取出人话原因（`msg` / `message`），取不到就返回空串。
+ *
+ * ⚠️ 这是 issue #150 第 2 条的配套：旧代码在非 2xx 时**压根不读 body**，
+ * 于是用户只看到 `豆包：上游返回 HTTP 500`，而上游其实可能给了
+ * 「当前对话人数过多，请稍后再试」这种人话。
+ *
+ * ⚠️ **只取这两个字段**，绝不把整段 body 拼进 message —— body 可能含
+ * 请求回显（含 Cookie/URL），那就是把脱敏白做了。取不到就退回旧文案。
+ */
+export function doubaoUpstreamReasonOf(bodyText: string): string {
+  if (bodyText.length === 0) return ''
+  let parsed: unknown
+  try { parsed = JSON.parse(bodyText) } catch { return '' }
+  if (typeof parsed !== 'object' || parsed === null) return ''
+  const record = parsed as { msg?: unknown, message?: unknown, error?: { msg?: unknown, message?: unknown } }
+  const candidates = [record.msg, record.message, record.error?.msg, record.error?.message]
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      // 防御：上游 msg 也可能很长，截断避免把整个面板撑爆。
+      return value.trim().slice(0, 200)
+    }
+  }
+  return ''
+}
+
+/**
  * 构造豆包客户端形态的请求头。
  *
  * ⚠️ `Referer` 用 `chrome://doubao-chat/`（桌面端方案）——这是抓包实测值。
