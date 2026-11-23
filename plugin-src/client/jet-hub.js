@@ -279,7 +279,7 @@ const PROVIDERS = Object.freeze(
  * 数据来自 `props.accounts()`（面板已有的逐包读数），
  * 用 `computeCoverage` 按草稿窗口重算 ⇒ 改数字即时刷新。
  */
-import { barPercent, computeCoverage, clampImminent, coverageTotal, describeWindowSource, parseWindowInput, windowRangeLabels } from './credit-window-ui.js'
+import { barPercent, computeCoverage, clampImminent, coverageTotal, describeWindowSource, parseWindowInput, windowRangeLabels, SUBAGENT_MODE_LABELS, defaultEffortOf, subagentHintOf, subagentPayloadOf, validateSubagentDraft } from './credit-window-ui.js'
 
 export function CreditWindowModal(props) {
   const { provider, providerLabel, rpcCall, accounts, onClose } = props
@@ -293,6 +293,23 @@ export function CreditWindowModal(props) {
   /** 草稿值（输入框的原始**字符串**，便于区分「空」与「0」）。 */
   const [draftWindow, setDraftWindow] = React.useState('')
   const [draftImminent, setDraftImminent] = React.useState('')
+  /**
+   * ★ 子代理设置草稿（2026-11-23）。
+   *
+   * ⚠️ `null` = 还没加载 / 无子代理设置 ⇒ 编辑区按默认值（follow）预填。
+   *   `startMode` 用 `'follow'` 而不是 `undefined`：UI 必须有「选中态」，
+   *   而服务端把「follow + 无其它字段」等价于未配置（`subagentSettingActive`）。
+   */
+  const [subDraft, setSubDraft] = React.useState(null)
+  /** 可选模型清单（`credits.window.models` 的结果）。 */
+  const [modelList, setModelList] = React.useState(null)
+  /**
+   * 账号位次列表（"固定帐号"下拉用）。
+   *
+   * ⚠️ 单独拉 `account.getRotation`：`props.accounts` 是 `usage.badge` 的形状，
+   * 没有「位次」这个字段，而位次正是用户选「固定哪个号」的唯一稳定标识。
+   */
+  const [rotationAccounts, setRotationAccounts] = React.useState(null)
 
   // ---- 打开时读一次当前生效值 ----
   React.useEffect(() => {
@@ -320,9 +337,55 @@ export function CreditWindowModal(props) {
         // 预填「当前生效值」而不是留空：用户要看到「现在是多少」才能判断要不要改。
         setDraftWindow(String(res.windowDays))
         setDraftImminent(String(res.imminentDays))
+        /**
+         * ★ 子代理设置（2026-11-23）。
+         *
+         * ⚠️ 没配过 ⇒ 预填 `follow`（而不是留空）：UI 必须有「选中态」，
+         * 而 `follow + 无其它字段` 在服务端等价于「未配置」。
+         */
+        if (alive) {
+          const sub = res?.subagent
+          setSubDraft({
+            startMode: typeof sub?.startMode === 'string' ? sub.startMode : 'follow',
+            fixedPosition: typeof sub?.fixedPosition === 'number' ? sub.fixedPosition : undefined,
+            model: typeof sub?.model === 'string' ? sub.model : undefined,
+            reasoningEffort: typeof sub?.reasoningEffort === 'string' ? sub.reasoningEffort : undefined,
+          })
+        }
       } catch (caught) {
         // `rpcCall` 失败时会抛错（含 `.code`），这里如实转成可读文案。
         if (alive) setLoadError(caught instanceof Error ? caught.message : String(caught))
+      }
+    })()
+    /**
+     * ★ **单独拉模型清单**（2026-11-23）。
+     *
+     * ⚠️ 不放进上面那个 try：模型清单拉失败不该让整个弹窗报「读取失败」——
+     * 窗口天数与子代理起点**仍可编辑**，只是模型下拉为空。
+     */
+    void (async () => {
+      try {
+        const models = await rpcCall('credits.window.models', { provider })
+        if (alive) setModelList(Array.isArray(models?.models) ? models.models : [])
+      } catch {
+        if (alive) setModelList([])
+      }
+    })()
+    /**
+     * ★ **账号位次列表**（"固定帐号"下拉用，2026-11-23）。
+     *
+     * ⚠️ 同样单独 try：拉失败只让下拉为空，不影响窗口天数编辑。
+     */
+    void (async () => {
+      try {
+        /**
+         * ⚠️ 用 `credits.window.accounts` 而不是 `account.getRotation`：
+         * 后者的 `sessionId` 必填，而档次窗口是**跨会话**的 provider 级配置。
+         */
+        const rot = await rpcCall('credits.window.accounts', { provider })
+        if (alive) setRotationAccounts(Array.isArray(rot?.accounts) ? rot.accounts : [])
+      } catch {
+        if (alive) setRotationAccounts([])
       }
     })()
     return () => { alive = false }
@@ -397,7 +460,18 @@ export function CreditWindowModal(props) {
       const imminentChanged = typeof parsedImminent === 'number' && parsedImminent !== saved?.imminentDays
       if (windowChanged) payload.windowDays = parsedWindow
       if (imminentChanged) payload.imminentDays = parsedImminent
-      if (payload.windowDays === undefined && payload.imminentDays === undefined) {
+      /**
+       * ★ **子代理设置**（2026-11-23）。
+       *
+       * ⚠️ 只在校验通过时带上；校验失败**不阻断**窗口天数的保存 ——
+       * 这是刻意的：用户可能只想改窗口天数，而子代理那块填了一半。
+       * ⇒ 校验失败时**保留旧设置**（不传该键 = 合并语义里的「不动」）。
+       */
+      const subInvalid = validateSubagentDraft(subDraft)
+      const subPayload = subInvalid.ok ? subagentPayloadOf(subDraft) : undefined
+      if (subPayload !== undefined) payload.subagent = subPayload
+      if (payload.windowDays === undefined && payload.imminentDays === undefined
+        && payload.subagent === undefined) {
         // 没有任何真正的改动 ⇒ 不发请求（发出去会命中「两个都不传 ⇒ 删键」）。
         onClose()
         return
@@ -584,6 +658,111 @@ export function CreditWindowModal(props) {
                   style: { width: `${barPercent(amount, previewTotal)}%` },
                 })),
             )),
+          ),
+          /*
+           * ★★★ **子代理专属设置**（2026-11-23）。
+           *
+           * ## 布局（用户 2026-11-23 选定的「方案 A」）
+           *
+           * ```
+           * ── 子代理设置 [新] ─────────────
+           * 轮换起点
+           * [跟随主代理][顺序分布][倒序分布][哈希分布][固定帐号]
+           * 提示一行（随选中项变化，≤ 30 字）
+           * 模型
+           * [跟随主代理 ▾]  [思考强度 ▾]      ← 选了具体模型才出现右侧
+           * ```
+           *
+           * ⚠️ 只在「选了固定帐号」时多一行账号下拉 —— 其余模式不需要额外输入。
+           */
+          React.createElement('div', { className: 'dim-jh-subagentSection' },
+            React.createElement('div', { className: 'dim-jh-subagentTitle' },
+              React.createElement('span', null, '子代理设置'),
+              React.createElement('span', { className: 'dim-jh-subagentNew' }, '新')),
+            React.createElement('div', { className: 'dim-jh-subagentLabel' }, '轮换起点'),
+            React.createElement('div', { className: 'dim-jh-subagentSeg' },
+              SUBAGENT_MODE_LABELS.map(([id, label]) => React.createElement('button', {
+                key: id,
+                type: 'button',
+                className: 'dim-jh-subagentSegBtn',
+                'data-on': (subDraft?.startMode ?? 'follow') === id ? 'true' : 'false',
+                disabled: busy,
+                onClick: () => setSubDraft((prev) => ({
+                  startMode: id,
+                  // ⚠️ 切到非 fixed 时**清掉位次**：留着会让用户困惑「怎么自己选了」
+                  ...(id === 'fixed' ? { fixedPosition: prev?.fixedPosition ?? 1 } : {}),
+                  ...(prev?.model === undefined ? {} : { model: prev.model }),
+                  ...(prev?.reasoningEffort === undefined ? {} : { reasoningEffort: prev.reasoningEffort }),
+                })),
+              }, label))),
+            React.createElement('div', { className: 'dim-jh-subagentHint' },
+              subagentHintOf(subDraft?.startMode ?? 'follow')),
+            /*
+             * 「固定帐号」时的账号下拉。
+             *
+             * ⚠️ 选项来自 `account.getRotation` 的 `accounts`（位次 + 昵称），
+             *   与「主代理起点」那个下拉**同一个数据源**（用户看到的位次一致）。
+             */
+            (subDraft?.startMode ?? 'follow') === 'fixed'
+              ? React.createElement('div', { className: 'dim-jh-subagentFixed' },
+                React.createElement('span', { className: 'dim-jh-subagentFixedLabel' }, '固定使用'),
+                React.createElement('select', {
+                  className: 'dim-jh-subagentSelect',
+                  disabled: busy,
+                  value: String(subDraft?.fixedPosition ?? 1),
+                  onChange: (event) => {
+                    const pos = Number(event.target.value)
+                    setSubDraft((prev) => ({ ...prev, fixedPosition: Number.isInteger(pos) ? pos : 1 }))
+                  },
+                }, (Array.isArray(rotationAccounts) ? rotationAccounts : []).map((acct) => React.createElement('option', {
+                  key: acct.position,
+                  value: String(acct.position),
+                }, `位次 ${acct.position} · ${acct.nickname ?? '（无名）'}`))),
+              )
+              : null,
+            /* ---- 模型 + 思考强度 ---- */
+            React.createElement('div', { className: 'dim-jh-subagentLabel' }, '模型'),
+            React.createElement('div', { className: 'dim-jh-subagentModelRow' },
+              React.createElement('select', {
+                className: 'dim-jh-subagentSelect dim-jh-subagentSelectWide',
+                disabled: busy,
+                value: subDraft?.model ?? '',
+                onChange: (event) => {
+                  const model = event.target.value
+                  /*
+                   * ⚠️ 换模型时**重算默认强度**：不同模型的档位集合不同，
+                   * 沿用旧强度会让 DSH 抛 `UNSUPPORTED_REASONING_EFFORT`。
+                   */
+                  const entry = (Array.isArray(modelList) ? modelList : []).find((m) => m.id === model)
+                  setSubDraft((prev) => ({
+                    ...prev,
+                    model: model.length === 0 ? undefined : model,
+                    reasoningEffort: model.length === 0 ? undefined : defaultEffortOf(entry),
+                  }))
+                },
+              },
+              React.createElement('option', { value: '' }, '跟随主代理'),
+              (Array.isArray(modelList) ? modelList : []).map((m) => React.createElement('option', {
+                key: m.id,
+                value: m.id,
+              }, m.name))),
+              /* 思考强度：**只在选了具体模型、且该模型支持思考时**出现。 */
+              (() => {
+                const entry = (Array.isArray(modelList) ? modelList : []).find((m) => m.id === subDraft?.model)
+                const efforts = Array.isArray(entry?.efforts) ? entry.efforts : []
+                if (efforts.length === 0) return null
+                return React.createElement('select', {
+                  className: 'dim-jh-subagentSelect dim-jh-subagentEffort',
+                  disabled: busy,
+                  title: '思考强度（默认取最强档）',
+                  value: subDraft?.reasoningEffort ?? defaultEffortOf(entry) ?? '',
+                  onChange: (event) => setSubDraft((prev) => ({
+                    ...prev,
+                    reasoningEffort: event.target.value.length === 0 ? undefined : event.target.value,
+                  })),
+                }, efforts.map((e) => React.createElement('option', { key: e.id, value: e.id }, e.name)))
+              })(),
+            ),
           ),
           saveError === ''
             ? null

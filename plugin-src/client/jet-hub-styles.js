@@ -784,7 +784,7 @@ const STYLES = `
 .dim-jh-settingsModal {
   width: min(840px, 100%);
   max-height: min(940px, calc(100vh - 48px));
-  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  border: 1px solid var(--dsw-alias-border-l2);
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
     0 16px 48px rgba(0, 0, 0, 0.38);
@@ -1632,7 +1632,7 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-windowModal {
   min-height: 0;
   /* ① 实边框：暗色主题下最可靠的「窗口边界」 */
-  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  border: 1px solid var(--dsw-alias-border-l2);
   /* ② 内描边：浅色主题下的第二道保险（border-l2 在浅色下太淡） */
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
@@ -1648,6 +1648,92 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  *    （用户要求「在红色框里面分别用红色和黄色写明覆盖多少个帐号」= 紧贴输入）。
  */
 .dim-jh-windowField { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+
+/* ===== 子代理设置（2026-11-23）===== */
+/*
+ * 与「分档窗口」同一视觉体系：金色分区标题 + 虚线分隔。
+ * ⚠️ 注释里不写反引号与尖括号：本文件整体是模板字符串，
+ *    反引号会提前闭合字符串（真实构建失败，本仓踩过）。
+ */
+.dim-jh-subagentSection {
+  border-top: 1px dashed var(--dsw-alias-border-l2);
+  margin: 12px 0 10px;
+  padding-top: 10px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.dim-jh-subagentTitle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700;
+  color: #b8860b;
+}
+.dim-jh-subagentNew {
+  padding: 0 5px; border-radius: 4px;
+  font-size: 9px; font-weight: 600;
+  color: var(--dsw-alias-brand-primary, #1677ff);
+  background: rgba(76, 141, 255, 0.16);
+}
+.dim-jh-subagentLabel { font-size: 11px; font-weight: 600; }
+/* 五按钮分段控件：等宽，紧贴一行 */
+.dim-jh-subagentSeg {
+  display: flex;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.dim-jh-subagentSegBtn {
+  flex: 1; min-width: 0;
+  padding: 5px 2px;
+  font: inherit; font-size: 10.5px;
+  border: 0;
+  border-right: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dim-jh-subagentSegBtn:last-child { border-right: 0; }
+.dim-jh-subagentSegBtn[data-on="true"] {
+  background: var(--dsw-alias-brand-primary, #1677ff);
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+  font-weight: 600;
+}
+.dim-jh-subagentSegBtn:disabled { opacity: 0.45; cursor: default; }
+/* 提示：一行，超长省略（用户要求「不要超过一行」） */
+.dim-jh-subagentHint {
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 「固定帐号」的账号选择行 */
+.dim-jh-subagentFixed {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dim-jh-subagentFixedLabel {
+  flex: none; font-size: 10.5px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dim-jh-subagentSelect {
+  flex: 1; min-width: 0;
+  padding: 4px 6px;
+  font: inherit; font-size: 11px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary);
+}
+/* 模型 + 思考强度 同一行 */
+.dim-jh-subagentModelRow { display: flex; gap: 7px; align-items: center; }
+.dim-jh-subagentSelectWide { flex: 1; }
+.dim-jh-subagentEffort { flex: 0 0 112px; }
+
 .dim-jh-windowLabel { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dim-jh-windowDot { width: 8px; height: 8px; flex: none; border-radius: 999px; }
 .dim-jh-windowDot[data-tone="imminent"] { background: var(--dsw-alias-state-error-primary, #d93025); }

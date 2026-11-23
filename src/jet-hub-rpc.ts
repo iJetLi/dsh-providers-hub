@@ -518,6 +518,9 @@ import type {
 
   ProviderAccountStatus,
   RpcSubagentRotationSetting,
+  RpcCreditWindowModelsRequest,
+  RpcCreditWindowModelEntry,
+  RpcCreditWindowModelsResponse,
 } from './types.js'
 import {
   BADGE_PREFERENCES,
@@ -12814,6 +12817,110 @@ function registerJetHubEndpoints(
       // 都通过 `resolveCreditWindow` **每次现读** `pool.creditWindow`，
       // 没有任何缓存 —— 这是本功能的硬承诺，改动消费者时不能破坏它
       //（`tests/unit/credit-window.spec.ts` 有守卫）。
+      /**
+       * ★ RPC: 档次窗口「固定帐号」下拉用的**启用账号位次表**（2026-11-23）。
+       *
+       * ## 为什么不复用 `account.getRotation`
+       *
+       * 那个端点的 `sessionId` 是**必填**的（它回答「本会话的起点是哪位」）。
+       * 而档次窗口的「固定帐号」是**跨会话的 provider 级配置** ——
+       * 它只需要「有哪些号、各自位次是多少」，与当前会话无关。
+       *
+       * ⚠️ 传一个假 sessionId 去骗过必填校验是**错的**：那会让
+       * `preferredRotationFor` 返回一个与该会话无关的值，语义混乱。
+       *
+       * ## 位次口径
+       *
+       * **只数启用账号**（`enabled !== false`），按池序 1-based ——
+       * 与 `account.getRotation` 的 `mine` **逐字同口径**，
+       * 否则用户在两处看到的「位次 3」会指向不同的号。
+       */
+      case 'credits.window.accounts': {
+        const req = payload as { provider?: unknown }
+        if (typeof req?.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        const all = await pool.listAllAccounts()
+        const mine = all.filter((a) => a.provider === req.provider && a.enabled !== false)
+        const value = {
+          accounts: mine.map((a, index) => ({
+            position: index + 1,
+            id: a.id,
+            nickname: a.nickname ?? '',
+          })),
+        }
+        return { ok: true, value }
+      }
+
+      /**
+       * ★ RPC: 档次窗口用的「已启用模型 + 思考强度」清单（2026-11-23）。
+       *
+       * ## 作用
+       *
+       * 给「子代理模型」下拉供数：
+       *
+       * | 需求 | 来源 |
+       * |---|---|
+       * | 只列**已启用**的模型 | `pool.listDisabledModels()` 过滤（与设置页同一个真源）|
+       * | 每个模型的思考档位 | `ctx.llm.listModels()` 的 `reasoning.efforts` |
+       * | 默认档位 | 渠道偏好 `preferHighestEffort` ⇒ 取最强档 |
+       *
+       * ⚠️ **不折叠 `efforts` 为空**的模型：它照样可选（只是不显示强度下拉）。
+       *
+       * ⚠️ 没有任何模型 ⇒ 返回空数组而不是报错（UI 显示「本渠道暂无已启用模型」）。
+       */
+      case 'credits.window.models': {
+        const req = payload as RpcCreditWindowModelsRequest
+        if (typeof req?.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        if (ctx.llm === undefined) {
+          return { ok: false, error: { code: 'bad-request', message: 'llm 服务不可用' } }
+        }
+        let list: ReadonlyArray<{
+          id: string
+          name: string
+          reasoning?: { efforts?: ReadonlyArray<{ id: string; name: string }>; defaultEffort?: string }
+        }>
+        try {
+          list = await ctx.llm.listModels(req.provider) as typeof list
+        } catch (error) {
+          return {
+            ok: false,
+            error: { code: 'bad-request', message: `读取模型列表失败：${error instanceof Error ? error.message : String(error)}` },
+          }
+        }
+        /**
+         * ⚠️ **只保留已启用的**（用户 2026-11-23 要求：「就是设置里面启用的模型才行」）。
+         *
+         * 判据复用 `pool.listDisabledModels()` —— 与设置页的开关**同一真源**，
+         * 不另写一套（本仓红线：同一语义不得两套判据）。
+         */
+        const disabled = pool.listDisabledModels(req.provider)
+        const models: RpcCreditWindowModelEntry[] = []
+        for (const m of list) {
+          if (disabled[m.id] === true) continue
+          const efforts = (m.reasoning?.efforts ?? []).map((e) => ({ id: e.id, name: e.name }))
+          models.push({
+            id: m.id,
+            name: m.name,
+            efforts,
+            ...(m.reasoning?.defaultEffort === undefined ? {} : { defaultEffort: m.reasoning.defaultEffort }),
+          })
+        }
+        /**
+         * ⚠️ **不引入 `preferHighestEffort` 这个新设置**（2026-11-23 简化）。
+         *
+         * 用户要求「默认选择设置里面的默认最高档选择（如果开启）」——
+         * 现成的判据就是模型自己的 `efforts` 数组**最后一项**（强度序，弱→强）。
+         *
+         * 为一个「取数组末项」的动作新增一张持久化设置表，是过度设计
+         * ⇒ 交给 UI 算（见 `credit-window-ui.js` 的 `defaultEffortOf`）。
+         */
+        const value: RpcCreditWindowModelsResponse = { models }
+        return { ok: true, value }
+      }
+
       case 'credits.window.get': {
         const req = payload as RpcCreditWindowGetRequest
         if (typeof req?.provider !== 'string' || req.provider.length === 0) {

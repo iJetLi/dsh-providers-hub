@@ -236,3 +236,153 @@ export function windowRangeLabels(windowDays, imminentDays) {
 export function coverageLabel(count, totalAccounts) {
   return `覆盖 ${count} 个账号`
 }
+
+// ============================================================================
+// 子代理设置（2026-11-23）
+// ============================================================================
+
+/**
+ * ★ 五个起点策略的**按钮标签**（顺序即渲染顺序）。
+ *
+ * ⚠️ 用户 2026-11-23 亲自定的名字，**不要改**：
+ * 「跟随主代理 / 顺序分布 / 倒序分布 / 哈希分布 / 固定帐号」
+ */
+export const SUBAGENT_MODE_LABELS = [
+  ['follow', '跟随主代理'],
+  ['sequence', '顺序分布'],
+  ['reverse', '倒序分布'],
+  ['hash', '哈希分布'],
+  ['fixed', '固定帐号'],
+]
+
+/**
+ * ★★★ 每个策略的**一行提示**（用户要求「长度不要超过一行」）。
+ *
+ * ## ⚠️ 刻意**不写具体位次**
+ *
+ * 用户 2026-11-23 明确指出：
+ *
+ * > 「提示文字不用写实时的位次选择，因为一个 providers 可能会有多个会话，
+ * >   你无法以哪一个会话为准当主代理。说明原理就行。」
+ *
+ * ⇒ 只讲**语义**，不写「子代理1→位次4」这类具体数字。
+ *
+ * ## ⚠️ 每条都必须强调「仍先烧临期」
+ *
+ * 用户 2026-11-23 纠正过我第一版的错误：
+ *
+ * > 「子代理在分配帐号起点时，肯定也要像主代理一样，遵守档次优先的原则呀」
+ *
+ * ⇒ 提示里头必须让用户看到「档次优先不变」，否则他会以为子代理会乱烧。
+ *
+ * ⚠️ 实测（510px / 10px 字体）**30 字符以内不折行**，故每条都 ≤ 30 字。
+ */
+export const SUBAGENT_MODE_HINTS = {
+  follow: '与主代理同账号起步，档位规则不变（仍先烧临期）',
+  sequence: '子代理在主代理同档位内往后错开，仍先烧临期',
+  reverse: '子代理在主代理同档位内往前错开，仍先烧临期',
+  hash: '按会话 ID 稳定分配同档位账号，仍先烧临期',
+  fixed: '该号绝对优先（无视档位），积分为空或锁定不可用才切换',
+}
+
+/**
+ * 取某模式的提示文本。
+ *
+ * @param mode - 策略 id
+ * @returns 提示文本；未知模式返回 `follow` 的提示（**不返回空串**：
+ *   空白提示会让用户以为界面坏了）
+ */
+export function subagentHintOf(mode) {
+  const hit = SUBAGENT_MODE_HINTS[mode]
+  return hit === undefined ? SUBAGENT_MODE_HINTS.follow : hit
+}
+
+/**
+ * ★★★ 选某模型时，思考强度的**默认值**。
+ *
+ * ## 用户的明确要求（2026-11-23）
+ *
+ * > 「选择了列表中的模型后，右侧出现一个下拉框选择思考强度，
+ * >   思考强度默认选择跟随设置里面的默认最高档选择（如果开启）」
+ *
+ * ## 判据
+ *
+ * | 情况 | 默认值 |
+ * |---|---|
+ * | 模型**不支持**思考（`efforts` 空）| `undefined`（UI **不渲染**强度下拉）|
+ * | 模型有 `defaultEffort` 且**在档位内** | 用它 |
+ * | 否则 | **`efforts` 的最后一项**（强度序：弱 → 强）|
+ *
+ * ⚠️ 「最后一项 = 最强」的依据：本仓统一约定 `efforts` 数组按
+ * **强弱排序**（弱在前），见 `REASONING_EFFORT_RANK`。
+ *
+ * ⚠️ `defaultEffort` 可能**不在** `efforts` 里（上游给了不一致的值）——
+ * 那种情况必须回落，否则 DSH 会抛 `UNSUPPORTED_REASONING_EFFORT`。
+ *
+ * @param entry - 模型条目（含 `efforts` 与可选 `defaultEffort`）
+ * @returns 默认强度 id；不支持思考时 `undefined`
+ */
+export function defaultEffortOf(entry) {
+  if (entry === null || typeof entry !== 'object') return undefined
+  const efforts = Array.isArray(entry.efforts) ? entry.efforts : []
+  if (efforts.length === 0) return undefined
+  const declared = typeof entry.defaultEffort === 'string' ? entry.defaultEffort : ''
+  if (declared.length > 0 && efforts.some((e) => e !== null && typeof e === 'object' && e.id === declared)) {
+    return declared
+  }
+  const last = efforts[efforts.length - 1]
+  return last !== null && typeof last === 'object' && typeof last.id === 'string' ? last.id : undefined
+}
+
+/**
+ * 校验「子代理设置」草稿是否可保存。
+ *
+ * ## 为什么需要它
+ *
+ * 服务端对非法值一律回 `bad-request`（不静默丢弃）。若 UI 不先挡，
+ * 用户会看到一条 RPC 错误，而不是「哪个字段填错了」。
+ *
+ * @param draft - 草稿（`{ startMode, fixedPosition, model, reasoningEffort }`）
+ * @returns `{ ok: true }` 或 `{ ok: false, message }`
+ */
+export function validateSubagentDraft(draft) {
+  if (draft === null || typeof draft !== 'object') {
+    return { ok: false, message: '设置为空' }
+  }
+  const mode = draft.startMode
+  const known = SUBAGENT_MODE_LABELS.some(([id]) => id === mode)
+  if (!known) return { ok: false, message: '请选择一个起点策略' }
+  if (mode === 'fixed') {
+    /**
+     * ⚠️ `fixed` 必须有位次：没有位次的 fixed 等价于「不指定」，
+     * 服务端也会拒绝（见 `sanitizeSubagentRotation`）。
+     */
+    const pos = draft.fixedPosition
+    if (typeof pos !== 'number' || !Number.isInteger(pos) || pos < 1) {
+      return { ok: false, message: '「固定帐号」必须选一个账号' }
+    }
+  }
+  return { ok: true }
+}
+
+/**
+ * 把草稿整理成 RPC 载荷（`undefined` 字段一律省略，避免污染合并语义）。
+ *
+ * ⚠️ `startMode === 'fixed'` 之外的模式**不带 `fixedPosition`** ——
+ * 留着会让下次切回 fixed 时用到上次的位次（用户会困惑「怎么自己选了」）。
+ */
+export function subagentPayloadOf(draft) {
+  if (draft === null || typeof draft !== 'object') return undefined
+  const mode = draft.startMode
+  if (mode === undefined) return undefined
+  return {
+    startMode: mode,
+    ...(mode === 'fixed' && typeof draft.fixedPosition === 'number'
+      ? { fixedPosition: draft.fixedPosition }
+      : {}),
+    ...(typeof draft.model === 'string' && draft.model.length > 0 ? { model: draft.model } : {}),
+    ...(typeof draft.reasoningEffort === 'string' && draft.reasoningEffort.length > 0
+      ? { reasoningEffort: draft.reasoningEffort }
+      : {}),
+  }
+}
