@@ -3739,7 +3739,37 @@ export class CodeArtsAdapter extends LlmAdapter {
               // 该模型只按 benefit 通道注册：交给 stream() 补上该头重试
               throw new LlmError(`codearts: ${message}`, MODEL_NOT_REGISTERED_CODE, { status: 200 })
             }
-            throw new LlmError(`codearts: ${message}`, 'INVALID_REQUEST', { status: 200 })
+            /**
+             * ★★★ **`error_code` 必须进 message**（2026-11-23 真机报障定位）。
+             *
+             * ## 症状
+             *
+             * 用户在 `deepseek-v4.1-flash-1017` 上看到：
+             * ```
+             * 处理失败 · INVALID_REQUEST
+             * codearts: The request param is invalid, Please check it
+             * ```
+             * —— 这句是上游的 **`error_msg`**，而 `error_code`（真正能定位的那个）
+             * 被**丢掉了** ⇒ 我连真机复现都没法定位（e2e 直连上游用裸请求
+             * 测 `-1017` + tools + `\0` + 50 工具 + `max_tokens 65536`
+             * **全部 200**，说明模型本身没问题，问题在这个分支吞掉的信息里）。
+             *
+             * ## 为什么这算缺陷
+             *
+             * 与 AGENTS.md 那条「`AUTH` 码会连 message 一起吞掉」是**反方向**的同一类：
+             * 那时是**码吞文案**，这里是**文案吞码**。两者都让用户拿到「无法行动」的错误。
+             * CodeArts 的 `error_code` 是**唯一**能区分「参数不合法 / 排队 / 额度 /
+             * 模型未注册」的东西（本函数上面那串判据全靠它），把它丢掉等于
+             * 把排障入口一起丢掉。
+             *
+             * ⚠️ 码值放在**括号里**而不是替换文案：保留上游原文（用户/搜索友好），
+             *    同时带上机器可读的那一段。`error_msg` 缺失时退化成只给码（原有行为）。
+             */
+            throw new LlmError(
+              `codearts: ${message}（error_code=${data.error_code}）`,
+              'INVALID_REQUEST',
+              { status: 200 },
+            )
           }
           const choice = data.choices?.[0]
           const delta = choice?.delta
