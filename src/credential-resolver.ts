@@ -735,69 +735,44 @@ export function createCredentialResolver<TCredential>(
        */
       let rotationStartId = baseRotationStartId
       let subagentPinnedFirst = false
+      /**
+       * ⚠️⚠️ **子代理分配登记必须先于一切条件**（2026-11-23 实测修正）。
+       *
+       * ## 缺陷（我上一版把登记塞进了 `if (free !== true && baseRotationStartId !== undefined)`）
+       *
+       * 那导致两个**静默失效**：
+       *
+       * | 场景 | 后果 |
+       * |---|---|
+       * | 子代理用**免费模型**（`free === true`）| **永不登记** ⇒ 之后切到付费模型也没记录 |
+       * | 主代理**没配起点**（`baseRotationStartId === undefined`）| **永不登记** ⇒ 配了子代理策略也不生效 |
+       *
+       * 两者都不报错，症状是「设了没反应」。
+       *
+       * ## 为什么登记要独立
+       *
+       * 「这个 sessionId 是子代理」是**会话属性**，与「本次用免费还是付费模型」
+       * 和「主代理有没有配起点」**无关**。把前者绑在后两者上，就是
+       * 本仓反复记录的「同一语义被不该管它的条件限制住」。
+       *
+       * ⇒ 只要「确实是子代理」+「该 provider 配了子代理设置」就登记，
+       * 无论模型是否免费、主代理是否有起点。
+       */
+      if (sessionId !== undefined) {
+        const settingForRegister = deps.pool.subagentRotationFor?.(providerId)
+        if (settingForRegister !== undefined
+          && subagentSettingActive(settingForRegister)
+          && isSubagentSession(sessionId)) {
+          void deps.pool.recordSubagentStart?.(
+            providerId,
+            sessionId,
+            subagentParentOf(sessionId) ?? sessionId,
+            Date.now(),
+          ).catch(() => { /* 登记失败不影响本次选号 */ })
+        }
+      }
       if (free !== true && baseRotationStartId !== undefined) {
         const setting = deps.pool.subagentRotationFor?.(providerId)
-        /**
-         * ⚠️⚠️ **惰性登记分配**（2026-11-23）。
-         *
-         * ## 为什么不在 `subagent/start` 里登记
-         *
-         * 那个事件**没有 provider 信息**（只有 `id` + `parentSessionId`）——
-         * 而分配表是 provider 级的（同一 sessionId 在多家各有一个 slot 没意义）。
-         *
-         * ⇒ provider 只有到这里才知道，故首次 `resolveCredential` 时登记。
-         *
-         * ## ⚠️ 必须 fire-and-forget
-         *
-         * `recordSubagentStart` 是 async（要落盘）。选号路径**不能等它** ——
-         * 那会把一次磁盘写塞进每一发请求的延迟里。
-         *
-         * ⇒ 本次请求用**同步读到**的 `assignment`（可能为 undefined ⇒ 走主代理逻辑），
-         * 登记在后台完成；下一次请求就能用上新 slot。
-         *
-         * ⚠️ 首次请求因此会用主代理起点（一次）。这是**可接受的**：
-         * 子代理通常有多轮请求，从第二轮起就正确错开了。
-         * 想连第一轮也错开，就得同步读盘 —— 那是拿每一发延迟换一次正确性，不值。
-         */
-        if (setting !== undefined && subagentSettingActive(setting) && sessionId !== undefined) {
-          /**
-           * ⚠️⚠️ **必须先用 `isSubagentSession()` 确认「它确实是子代理」**
-           *（2026-11-23 本机实测打穿的真实缺陷）。
-           *
-           * ## 缺陷形态（实测数据）
-           *
-           * 上一版漏了这道判据，于是**任何会话**只要该 provider 配了子代理设置
-           * 就会被登记进分配表。实测 `state.json` 里出现了：
-           *
-           * ```json
-           * "session-b6fa9bbd-...": {
-           *   "sessionId":       "session-b6fa9bbd-...",
-           *   "parentSessionId": "session-b6fa9bbd-...",   // ← 自己当自己的父
-           *   "slot": 0
-           * }
-           * ```
-           *
-           * **主代理把自己登记成了「第 0 号子代理」** ⇒ 它的轮换起点会被
-           * 子代理策略覆盖（`slot=0` 的 sequence 会把它挪到「主起点往后一格」）
-           * ⇒ 用户明明没配子代理，主代理却开始错开消耗。
-           *
-           * ## 判据来源
-           *
-           * `isSubagentSession()` 查的是**父子表**，而父子表只由
-           * `subagent/start` 事件写入（宿主只在真的拉起子代理时发）。
-           *
-           * ⇒ 「父子表里有」= 「宿主确认为子代理」，这是**唯一可靠**的判据。
-           * 不能靠「分配表里没有就当作子代理」（那正是本缺陷）。
-           */
-          if (isSubagentSession(sessionId)) {
-            void deps.pool.recordSubagentStart?.(
-              providerId,
-              sessionId,
-              subagentParentOf(sessionId) ?? sessionId,
-              Date.now(),
-            ).catch(() => { /* 登记失败不影响本次选号 */ })
-          }
-        }
         const assignment = deps.pool.subagentAssignmentOf?.(providerId, sessionId)
         if (setting !== undefined && assignment !== undefined
           && setting.startMode !== undefined && setting.startMode !== 'follow') {
