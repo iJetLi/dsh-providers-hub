@@ -8230,7 +8230,24 @@ function registerJetHubEndpoints(
          * —— 万一某子代理的 sessionId 恰好也在 `preferredRotation` 里（不可能
          * 但防御），行为应是「显示它实际用的号」，而不是「用户给它选的起点」。
          */
-        const subagentPin = pool.subagentAssignmentOf?.(req.provider, req.sessionId)?.pinnedAccountId
+        /**
+         * ★★★ **三级优先级，与 `credential-resolver.ts` 逐字同构**
+         *（2026-11-24 用户定 B 方案）。
+         *
+         * | 级 | 来源 | 含义 |
+         * |---|---|---|
+         * | ① | `userPickedAccountId` | **用户手动选的** |
+         * | ② | `pinnedAccountId` | 系统拉起时固定/重算的 |
+         * | ③ | `preferredRotationFor` | 主代理那条腿（子代理恒 undefined）|
+         *
+         * ⚠️ 顺序**必须与 resolver 一致**，否则会出现「弹窗显示位次 3、
+         * 实际用位次 5」这种自相矛盾的界面 —— 用户会以为保存失败了。
+         *
+         * ⚠️ 主代理没有分配记录 ⇒ 前两级都是 `undefined` ⇒ 走 `preferredRotationFor`
+         *   （与改动前逐字相同，零回归）。
+         */
+        const subagentAssign = pool.subagentAssignmentOf?.(req.provider, req.sessionId)
+        const subagentPin = subagentAssign?.userPickedAccountId ?? subagentAssign?.pinnedAccountId
         const selectedId = subagentPin !== undefined
           ? subagentPin
           : (pool.preferredRotationFor(req.provider, req.sessionId) ?? null)
@@ -8449,16 +8466,67 @@ function registerJetHubEndpoints(
             typeof req.position === 'number' ? req.position : null,
             tierAtSelection,
           )
+          /**
+           * ★★★ **子代理场景：把用户选择记进分配表**（2026-11-24 用户定 B 方案）。
+           *
+           * ## 为什么光写 `preferredRotation` 不够
+           *
+           * 子代理的账号选择有**三级优先级**（见 `credential-resolver.ts`）：
+           * `userPickedAccountId` > `pinnedAccountId` > `slot` 现算。
+           *
+           * 用户在本页面选起点时，`preferredRotation[provider][sid]` 会被写入 ——
+           * 但 resolver **在 pin 命中时根本不看它**（pin 优先）⇒ 用户的选择
+           * **静默无效**，弹窗还会立刻变回 pin 的位次（看起来像保存失败）。
+           *
+           * ⇒ 必须额外写 `userPickedAccountId`（最高优先级）。
+           *
+           * ## ⚠️ 位次 → 账号 id 的换算口径必须与 resolver 一致
+           *
+           * 用 **全量启用账号**（`enabled !== false`，池序 1-based），
+           * 与 `account.getRotation` 的 `mine`、resolver 的 `enabledIds`
+           * **逐字同口径** —— 否则用户选「位次 3」，实际生效的是另一个号。
+           *
+           * ## ⚠️ 非子代理（主代理）不写
+           *
+           * 主代理没有分配记录，`setUserPickedAccount` 会因
+           * `assignments[sessionId] === undefined` 而原样返回 ⇒ 无副作用。
+           */
+          if (typeof req.position === 'number') {
+            const allForPick = await pool.listAllAccounts()
+            const pickId = allForPick
+              .filter((a) => a.provider === req.provider && a.enabled !== false)
+              [req.position - 1]?.id
+            if (pickId !== undefined) {
+              await pool.setUserPickedAccount?.(req.provider, req.sessionId, pickId)
+            }
+          } else {
+            /**
+             * `position === null` ⇒ 用户点了「恢复默认」⇒ **清除**手动选择
+             * （回落到 pin 的语义）。
+             *
+             * ⚠️ 传 `undefined` 而不是 `''`：与 `setUserPickedAccount` 的
+             * 「清除」语义对齐（它自己也会把空串归一成清）。
+             */
+            await pool.setUserPickedAccount?.(req.provider, req.sessionId, undefined)
+          }
         } catch (error) {
           return {
             ok: false,
             error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) },
           }
         }
+        /**
+         * ⚠️ 返回值里的 `selected` 必须反映**实际生效**的那个号。
+         *
+         * 子代理场景下用户刚写的 `userPickedAccountId` 优先级最高
+         * ⇒ 回传它（而不是 `preferredRotationFor`），否则弹窗会显示
+         * 「你选了位次 3，但选中态还是位次 5」这种自相矛盾的界面。
+         */
+        const userPickedNow = pool.subagentAssignmentOf?.(req.provider, req.sessionId)?.userPickedAccountId
         return {
           ok: true,
           value: {
-            selected: pool.preferredRotationFor(req.provider, req.sessionId) ?? null,
+            selected: userPickedNow ?? (pool.preferredRotationFor(req.provider, req.sessionId) ?? null),
             /** ⚠️ 回传落盘后的档位（客户端据此确认新规则已生效）。 */
             tierAtSelection: pool.rotationStartTierFor(req.provider, req.sessionId) ?? null,
           },

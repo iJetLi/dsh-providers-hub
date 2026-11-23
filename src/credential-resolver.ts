@@ -325,6 +325,20 @@ export interface ResolverPool<TCredential = unknown> {
    */
   pinSubagentAccount?(provider: string, sessionId: string, accountId: string): Promise<boolean>
   /**
+   * ★★★ **记录用户手动选的账号**（2026-11-24，可选能力）。
+   *
+   * ## 用户原话
+   *
+   * > 「用户手动重选的话是按照用户的意愿来，
+   * >   其他情况就是使用拉起时固定的那个，
+   * >   可以避免系统乱换号，避免缓存命中低」
+   *
+   * ⇒ 优先级：`userPickedAccountId` > `pinnedAccountId` > `slot` 现算。
+   *
+   * ⚠️ 传 `undefined` = 清除手动选择（回落到 pin）。
+   */
+  setUserPickedAccount?(provider: string, sessionId: string, accountId: string | undefined): Promise<boolean>
+  /**
    * ★ **起点选定那一刻的档位**（S6 可选能力；真实 `AccountPool` 已实现）。
    *
    * 用于判断「起点那一档是否已烧完」：不同则交出首位（见 `rotateFromPreferred`）。
@@ -767,9 +781,23 @@ export function createCredentialResolver<TCredential>(
            * pin 的号**仍在 `candidates` 里** ⇒ 可用（免费模型不查积分/档位）。
            * ⚠️ 不在 ⇒ 已停用 / 封禁 / 限流 ⇒ **重算**（下面的逻辑）并重钉。
            */
+          /**
+           * ★★★ **优先级：用户手动选 > 系统 pin > 策略现算**
+           *（2026-11-24 用户定 B 方案，与付费路径**逐字同构**）。
+           *
+           * ⚠️ 两处必须同步改 —— 本仓反复记录过「同一语义两处实现必然漂移」。
+           * 免费路径的「可用」判据只有一条：**在 `candidates` 里**
+           *（免费不查积分/档位）。
+           */
+          const userPicked = subAssignment?.userPickedAccountId
+          const userPickedUsable = userPicked !== undefined && candidates.some((c) => c.id === userPicked)
           const pinned = subAssignment?.pinnedAccountId
           const pinnedUsable = pinned !== undefined && candidates.some((c) => c.id === pinned)
-          if (pinnedUsable) freeStartId = pinned
+          // ① 用户手动选且可用 ⇒ 用它
+          if (userPickedUsable) freeStartId = userPicked
+          // ② 否则用系统 pin
+          else if (pinnedUsable) freeStartId = pinned
+          // ③ 都没有现算
           else if (subSetting !== undefined && subAssignment !== undefined
             && subSetting.startMode !== undefined && subSetting.startMode !== 'follow') {
             /**
@@ -960,8 +988,40 @@ export function createCredentialResolver<TCredential>(
          *
          * ⚠️ 任一条不满足 ⇒ 落到下面的现算逻辑，并在选中后**重钉**。
          */
+        /**
+         * ★★★ **账号优先级：用户手动选 > 系统 pin > 策略现算**
+         *（2026-11-24 用户定 B 方案）。
+         *
+         * ## 用户原话
+         *
+         * > 「用户手动重选的话是按照用户的意愿来，其他情况就是使用拉起时固定的那个，
+         * >   可以避免系统乱换号，避免缓存命中低」
+         *
+         * ## 三级判据
+         *
+         * | 级 | 字段 | 含义 | 生效条件 |
+         * |---|---|---|---|
+         * | ① | `userPickedAccountId` | 用户在该子代理页面手动选的 | 该号**可用** |
+         * | ② | `pinnedAccountId` | 系统拉起时固定/重算的 | 该号可用 |
+         * | ③ | `slot` 现算 | 首次（两者都无）| — |
+         *
+         * ## ⚠️ 「可用」在两处都要判
+         *
+         * - 在 `candidates` 里（enabled / 未封禁 / 未限流）；
+         * - 付费路径还要 `buddyTierUsable`（有积分）—— 这一条交给
+         *   `rotateFromPreferred` 的 `anchor` 循环判（本函数还没取余额）。
+         *
+         * ⇒ 用户选的号**暂时**不可用时，自动回落到 pin / 现算，
+         *   但 **`userPickedAccountId` 保留不清** —— 等它恢复可用会**自动切回**
+         *  （符合「按用户意愿」：用户改主意的唯一入口是再选一次）。
+         */
+        const userPickedId = assignment?.userPickedAccountId
         const pinnedId = assignment?.pinnedAccountId
-        if (pinnedId !== undefined) {
+        if (userPickedId !== undefined
+          && candidates.some((c) => c.id === userPickedId)) {
+          /** ① 用户手动选且仍可用 ⇒ 用它（最高优先级）。 */
+          rotationStartId = userPickedId
+        } else if (pinnedId !== undefined) {
           const pinnedCandidate = candidates.find((c) => c.id === pinnedId)
           if (pinnedCandidate !== undefined) {
             /**

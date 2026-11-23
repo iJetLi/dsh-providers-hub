@@ -84,6 +84,40 @@ export interface SubagentAssignment {
   pinnedAccountId?: string
   /** `pinnedAccountId` 的确定时刻（诊断用，不参与判据）。 */
   pinSetAt?: number
+  /**
+   * ★★★ **用户在该子代理对话页面手动选的账号**（2026-11-24 用户定 B 方案）。
+   *
+   * ## 用户原话
+   *
+   * > 「用户手动重选的话是按照用户的意愿来，
+   * >   其他情况就是使用拉起时固定的那个，
+   * >   可以避免系统乱换号，避免缓存命中低」
+   *
+   * ## 优先级（严格三级）
+   *
+   * | 级别 | 来源 | 何时生效 |
+   * |---|---|---|
+   * | ① | **`userPickedAccountId`** | 用户手动选过 **且该号可用** |
+   * | ② | `pinnedAccountId` | 无手动选择（或手动选的号已不可用）|
+   * | ③ | `slot` 现算 | 首次（两者都没有）|
+   *
+   * ## ⚠️ 为什么两个字段要分开存
+   *
+   * `pinnedAccountId` 是**系统**的自动分配（要「稳住」，避免乱换号）；
+   * `userPickedAccountId` 是**用户意图**（要「服从」，否则用户会以为功能坏了）。
+   *
+   * ⇒ 不能合成一个字段：
+   * - 合成后 pin 的「同值跳过写盘」优化会失效（用户改动与系统改动混在一起）；
+   * - 且 `pin` 失效重算时**无法区分**「这是系统挑的还是用户挑的」，
+   *   会导致「用户选的号不可用 ⇒ 系统重挑后把用户选择覆盖掉」，
+   *   而正确语义是「用户选择**保留**，只是暂时跳过」——
+   *   等它恢复可用，应**自动切回**用户选的号。
+   *
+   * ⚠️ 手动选择**不因 pin 重算而清除**：用户改主意的唯一入口是再次手动选。
+   */
+  userPickedAccountId?: string
+  /** `userPickedAccountId` 的设定时刻（诊断用）。 */
+  userPickedAt?: number
   /** `subagent/end` 是否已到达（只用于诊断，**不参与**任何判据）。 */
   ended?: boolean
 }
@@ -133,6 +167,13 @@ export function sanitizeSubagentAssignments(raw: unknown): SubagentAssignmentMap
     const pinSetAt = typeof src.pinSetAt === 'number' && Number.isFinite(src.pinSetAt) && src.pinSetAt >= 0
       ? src.pinSetAt
       : undefined
+    /** ★ 用户手动选的账号（与 pin 同纪律：非法值丢弃，不猜）。 */
+    const userPickedAccountId = typeof src.userPickedAccountId === 'string' && src.userPickedAccountId.length > 0
+      ? src.userPickedAccountId
+      : undefined
+    const userPickedAt = typeof src.userPickedAt === 'number' && Number.isFinite(src.userPickedAt) && src.userPickedAt >= 0
+      ? src.userPickedAt
+      : undefined
     // ⚠️ 键必须是 sessionId 本身：写错就是「查不到分配」→ 静默回落主代理起点。
     result[sessionId] = {
       sessionId,
@@ -141,6 +182,8 @@ export function sanitizeSubagentAssignments(raw: unknown): SubagentAssignmentMap
       slot,
       ...(pinnedAccountId === undefined ? {} : { pinnedAccountId }),
       ...(pinnedAccountId === undefined || pinSetAt === undefined ? {} : { pinSetAt }),
+      ...(userPickedAccountId === undefined ? {} : { userPickedAccountId }),
+      ...(userPickedAccountId === undefined || userPickedAt === undefined ? {} : { userPickedAt }),
       ...(src.ended === true ? { ended: true } : {}),
     }
   }
@@ -274,6 +317,53 @@ export function pinSubagentAccount(
     [sessionId]: { ...existing, pinnedAccountId: accountId, pinSetAt: now },
   }
 }
+
+/**
+ * ★★★ **记录用户手动选的账号**（2026-11-24 用户定 B 方案）。
+ *
+ * ## 用户原话
+ *
+ * > 「用户手动重选的话是按照用户的意愿来，其他情况就是使用拉起时固定的那个，
+ * >   可以避免系统乱换号，避免缓存命中低」
+ *
+ * ## 与其他字段的关系
+ *
+ * | 字段 | 谁写 | 优先级 |
+ * |---|---|---|
+ * | `userPickedAccountId` | **用户**（子代理页面手动选）| **最高** |
+ * | `pinnedAccountId` | 系统（拉起/重算时自动）| 中 |
+ * | `slot` | 系统（首次分配）| 低 |
+ *
+ * ⚠️ **不覆盖 `pinnedAccountId`**：pin 是「系统视角的稳定值」，
+ * 用户选择是「另一层意图」。两者分开存，才能在「用户选的号暂时不可用」时
+ * 回落到 pin（而不是丢失两个信息）。
+ *
+ * ⚠️ 传 `undefined`/`''` ⇒ **清除**用户选择（回落到 pin 的语义）。
+ *
+ * @returns 新分配表；值未变时返回**原对象**（调用方据此跳过写盘）
+ */
+export function setUserPickedAccount(
+  assignments: SubagentAssignmentMap,
+  sessionId: string,
+  accountId: string | undefined,
+  now: number,
+): SubagentAssignmentMap {
+  const existing = assignments[sessionId]
+  if (existing === undefined) return assignments
+  const next = typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined
+  /** ⚠️ 同值 ⇒ 原对象（避免每发请求都写盘）。 */
+  if (existing.userPickedAccountId === next) return assignments
+  const base = { ...existing }
+  if (next === undefined) {
+    delete base.userPickedAccountId
+    delete base.userPickedAt
+  } else {
+    base.userPickedAccountId = next
+    base.userPickedAt = now
+  }
+  return { ...assignments, [sessionId]: base }
+}
+
 
 export function nextSubagentSlot(assignments: SubagentAssignmentMap): number {
   let max = -1
