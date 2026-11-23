@@ -9577,9 +9577,20 @@ function registerJetHubEndpoints(
          * 将来若真需要「某些场景跳过停用账号」，**另加显式开关**，不要复用 `enabled`：
          * 同一字段承重两个相反语义，改一边必然踩到另一边。
          *
-         * ⚠️ 另一个连带点：`healExpiredAccounts(accounts)` 也吃**本份列表** ——
-         * 任何在这里加过滤的动作会**同时**让停用账号不再被自动续期。
-         * 那是行为变更，必须显式声明，不能顺手带上。
+         * ## ⚠️⚠️ 想在这里加过滤时，还有一条**成文铁律**会挡住你
+         *
+         * `healExpiredAccounts(accounts)` 也吃**本份列表** —— 而续期**不得**按 `enabled` 过滤：
+         * 那是**两次真实缺陷**的教训，已是本仓库的成文约定，三处引用同一句：
+         * - `docs/adding-a-new-provider.md:137`「续期不得按 `enabled` 过滤；也**不得**按 `refreshable` 过滤」
+         * - `src/types.ts:1023`
+         * - `src/usage-badge.ts:133`
+         *
+         * ⇒ 在这里加过滤会**顺带**让停用账号停止续期 = 违反铁律（凭据会烂）。
+         *   而且 `credits.balances` 那条腿传的是 `allAccounts`（不过滤）⇒
+         *   同一个 `healExpiredAccounts` 会**两套判据**，比不加过滤更糟。
+         *
+         * 2026-11-23 对抗审计实测：PR #146 原意「顺带修掉续期」正是踩到这一条
+         * （它的 `heal(allAccounts)` 与 `balances:9887` 的调用口径不一致）。
          */
         const accounts = await pool.listAccounts(req.provider)
         // ⚠⚠ **领取前也要按需自愈**（issue IKKHL5，与 `credits.balances` 同一层）。
