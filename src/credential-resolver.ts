@@ -120,7 +120,7 @@
 import type { RotationStartTier } from './jet-hub-store.js'
 import type { BuddyNoAccountReason, BuddySelectorLike } from './buddy-balance-selector.js'
 import { pickBuddyAccount } from './buddy-balance-selector.js'
-import { accountIdAtPosition, startIndexOfSlot, subagentParentOf, subagentSettingActive } from './subagent-rotation.js'
+import { accountIdAtPosition, isSubagentSession, startIndexOfSlot, subagentParentOf, subagentSettingActive } from './subagent-rotation.js'
 import type { SubagentAssignment } from './subagent-rotation.js'
 import type { SubagentRotationSetting } from './jet-hub-store.js'
 import { sessionBalanceEnabled } from './session-balance.js'
@@ -760,12 +760,43 @@ export function createCredentialResolver<TCredential>(
          * 想连第一轮也错开，就得同步读盘 —— 那是拿每一发延迟换一次正确性，不值。
          */
         if (setting !== undefined && subagentSettingActive(setting) && sessionId !== undefined) {
-          void deps.pool.recordSubagentStart?.(
-            providerId,
-            sessionId,
-            subagentParentOf(sessionId) ?? sessionId,
-            Date.now(),
-          ).catch(() => { /* 登记失败不影响本次选号 */ })
+          /**
+           * ⚠️⚠️ **必须先用 `isSubagentSession()` 确认「它确实是子代理」**
+           *（2026-11-23 本机实测打穿的真实缺陷）。
+           *
+           * ## 缺陷形态（实测数据）
+           *
+           * 上一版漏了这道判据，于是**任何会话**只要该 provider 配了子代理设置
+           * 就会被登记进分配表。实测 `state.json` 里出现了：
+           *
+           * ```json
+           * "session-b6fa9bbd-...": {
+           *   "sessionId":       "session-b6fa9bbd-...",
+           *   "parentSessionId": "session-b6fa9bbd-...",   // ← 自己当自己的父
+           *   "slot": 0
+           * }
+           * ```
+           *
+           * **主代理把自己登记成了「第 0 号子代理」** ⇒ 它的轮换起点会被
+           * 子代理策略覆盖（`slot=0` 的 sequence 会把它挪到「主起点往后一格」）
+           * ⇒ 用户明明没配子代理，主代理却开始错开消耗。
+           *
+           * ## 判据来源
+           *
+           * `isSubagentSession()` 查的是**父子表**，而父子表只由
+           * `subagent/start` 事件写入（宿主只在真的拉起子代理时发）。
+           *
+           * ⇒ 「父子表里有」= 「宿主确认为子代理」，这是**唯一可靠**的判据。
+           * 不能靠「分配表里没有就当作子代理」（那正是本缺陷）。
+           */
+          if (isSubagentSession(sessionId)) {
+            void deps.pool.recordSubagentStart?.(
+              providerId,
+              sessionId,
+              subagentParentOf(sessionId) ?? sessionId,
+              Date.now(),
+            ).catch(() => { /* 登记失败不影响本次选号 */ })
+          }
         }
         const assignment = deps.pool.subagentAssignmentOf?.(providerId, sessionId)
         if (setting !== undefined && assignment !== undefined
