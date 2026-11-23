@@ -179,3 +179,55 @@ describe('接线：真实入口必须真的把 iam/confirm 打出去', () => {
    * `model_catalog` 出现。已记进 issue #147 的后续清单。
    */
 })
+
+/**
+ * ★★★ **对抗审计 P1-⑥ 的两条守卫**（2026-11-23 五改）。
+ *
+ * 审计实测：第一版的 `iam/confirm` **没有 `signal`** ⇒ 前置握手能挂死整条对话，
+ * 且用户点「停止」**取消不了它**（那个 signal 不是 `stream()` 的 `options.signal`）。
+ */
+describe('iam/confirm 的取消与超时（对抗审计 P1-⑥）', () => {
+  it('★★★ 调用方 abort ⇒ **向上抛 AbortError**（不能静默吞掉继续发对话）', async () => {
+    resetRaccoonIamConfirmCacheForTest()
+    const controller = new AbortController()
+    const fetcher = vi.fn(async () => {
+      controller.abort()
+      const error = new Error('aborted')
+      error.name = 'AbortError'
+      throw error
+    }) as unknown as typeof fetch
+
+    await expect(
+      ensureRaccoonSessionConfirmed(product, credential(IAM_TOKEN), fetcher, controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('★★★ 没有外部 signal 时**仍有超时**（上游卡住不会永久 pending）', async () => {
+    resetRaccoonIamConfirmCacheForTest()
+    // 一个永不 settle 的 fetch —— 只有在 signal 真的生效时才会结束。
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      const signal = init?.signal
+      return await new Promise<Response>((_resolve, reject) => {
+        if (signal === undefined || signal === null) {
+          // 没有 signal ⇒ 这条用例会超时失败，正是我们要守的缺陷。
+          return
+        }
+        signal.addEventListener('abort', () => {
+          const error = new Error('timeout')
+          error.name = 'TimeoutError'
+          reject(error)
+        })
+      })
+    }) as unknown as typeof fetch
+
+    // `RACCOON_REQUEST_TIMEOUT_MS` 是 60s ⇒ 用例只能在「signal 存在」这一点上断言，
+    // 不真的等 60 秒。⇒ 直接检查 fetcher 收到的 init 里有 signal。
+    void ensureRaccoonSessionConfirmed(product, credential(IAM_TOKEN), fetcher).catch(() => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const calls = (fetcher as unknown as { mock: { calls: unknown[][] } }).mock.calls
+    expect(calls.length).toBe(1)
+    const init = calls[0][1] as RequestInit
+    expect(init.signal, 'iam/confirm 必须带 signal（否则前置握手无上界）').toBeDefined()
+    expect(init.signal).not.toBeNull()
+  })
+})

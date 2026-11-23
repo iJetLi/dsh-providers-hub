@@ -79,6 +79,16 @@ export async function ensureRaccoonSessionConfirmed(
   product: RaccoonProduct,
   credential: RaccoonCredential,
   fetcher: typeof fetch,
+  /**
+   * ★★★ **调用方的取消信号**（2026-11-23 五改，对抗审计 P1-⑥）。
+   *
+   * 第一版只用了 `AbortSignal.timeout(...)` ⇒ 实测 `iam/confirm` 的 signal
+   * **不是** `stream()` 的 `options.signal` ⇒ 用户点「停止」**取消不了这条握手**，
+   * 而它挂在对话请求**前面** ⇒ 停止键在最需要它的场景里失效。
+   *
+   * ⚠️ 与超时**合并**（`AbortSignal.any`）而不是二选一：两者都要生效。
+   */
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const token = credential.access_token
   if (typeof token !== 'string' || token.length === 0) return false
@@ -115,7 +125,9 @@ export async function ensureRaccoonSessionConfirmed(
        * ⚠️ 用 `RACCOON_REQUEST_TIMEOUT_MS` —— 与 credits 那条腿**同一个常量**
        *（本仓红线：同义判据不各写一套）。
        */
-      signal: AbortSignal.timeout(RACCOON_REQUEST_TIMEOUT_MS),
+      signal: signal === undefined
+        ? AbortSignal.timeout(RACCOON_REQUEST_TIMEOUT_MS)
+        : AbortSignal.any([signal, AbortSignal.timeout(RACCOON_REQUEST_TIMEOUT_MS)]),
       headers: raccoonHeaders(credential, {
         platform: product.clientPlatform,
         version: product.clientVersion,
@@ -142,8 +154,18 @@ export async function ensureRaccoonSessionConfirmed(
     // ⚠️ **只有成功才记入去重集** —— 失败记进去会让该令牌永久跳过确认。
     confirmedTokens.add(token)
     return true
-  } catch {
-    // ⚠️ 传输错误可能是 HTTPS 检查代理或瞬时故障；**不抛**、不记入、下次再试。
+  } catch (error) {
+    /**
+     * ⚠️ **用户取消必须向上抛**（2026-11-23 五改）：否则 `stream()` 会在「用户已经点了停止」
+     * 之后继续往下走，直至发出真正的对话请求 —— 那正是「停止按钮无效」的观感来源。
+     *
+     * 超时（`TimeoutError`）仍按「确认失败」处理（返回 `false`，让业务请求自己报 200901）：
+     * 握手挂住时用户还有机会看到业务侧的错，而**用户主动取消**是他明确表达的意思。
+     */
+    if (error instanceof Error && error.name === 'AbortError' && signal?.aborted === true) {
+      throw error
+    }
+    // ⚠️ 其余传输错误（HTTPS 检查代理 / 瞬时故障）**不抛**、不记入、下次再试。
     return false
   }
 }
