@@ -1,7 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { RACCOON, RACCOON_TEXT_ONLY_MODELS, raccoonSupportsImageWith } from '../../src/raccoon-product.js'
+import { resetRaccoonIamConfirmCacheForTest } from '../../src/raccoon-iam-confirm.js'
 import { RACCOON_MAX_OUTPUT_TOKENS, RaccoonAdapter, clampRaccoonMaxTokens, classifyRaccoonFailure, registerRaccoonLlm } from '../../src/raccoon-adapter.js'
 import type { RaccoonRemoteModel } from '../../src/raccoon-adapter.js'
 import type { RaccoonCredential } from '../../src/raccoon.js'
@@ -1173,5 +1174,100 @@ describe('★ max_tokens 收敛到上游上限（issue IKS1L5）', () => {
     }
     expect(clampRaccoonMaxTokens(65_536)).toBe(65_536)
     expect(clampRaccoonMaxTokens(999_999)).toBe(65_536)
+  })
+})
+
+/**
+ * ★★★ **IAM 业务会话确认的两条接线守卫**（issue #147，补于 2026-11-24）。
+ *
+ * 对抗审计实测：删掉这两处的 `await ensureRaccoonSessionConfirmed(...)`，
+ * `raccoon*` 全套**仍全绿** ⇒ 续期腿与换号腿的补确认**零守卫**。
+ *
+ * ⚠️ **必须用真 IAM 令牌**：本文件既有的 `CRED` 是 `access_token: 'tok'`
+ * （迁移前的假令牌形态），它会被 `isRaccoonIamToken` 判成非 IAM ⇒ **一次确认都不发**。
+ * 审计原话：「把测试凭据换成形态真实的 IAM 令牌 ⇒ 8 条既有用例全红
+ * ⇒ 证明整个 adapter 套件锁定的是迁移前令牌，无法表达现在唯一真实的账号形态」。
+ *
+ * ⇒ 这两条守卫自己造 IAM 令牌（`iss` 以 `/iam` 结尾），否则测不到任何东西。
+ */
+describe('★ IAM 业务会话确认的接线（issue #147）', () => {
+  const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  const makeIamToken = (sub: string) => `${b64({ alg: 'none' })}.${b64({
+    iss: `${new URL(RACCOON.apiBase).host}/iam`, sub,
+  })}.sig`
+  const TOKEN_A = makeIamToken('A')
+  const TOKEN_B = makeIamToken('B')
+
+  /**
+   * ⚠️ **每条用例前必须清空去重集**：`ensureRaccoonSessionConfirmed` 是**进程内**去重，
+   * 上一条用例确认过的 `TOKEN_A` 会让下一条**一次请求都不发** ⇒ 用例之间会串台
+   *（第一版第 2 条就是这么红的：`confirmIndex = -1`）。
+   */
+  beforeEach(() => { resetRaccoonIamConfirmCacheForTest() })
+
+  /** 把 `url` 分类成 `confirm` / `chat`，并给出对应响应。 */
+  function routedFetcher(opts: { chatFirst: () => Response, chatNext: () => Response }) {
+    const seen: string[] = []
+    let chatCalls = 0
+    const fetcher = vi.fn(async (input: unknown) => {
+      const url = String(input)
+      seen.push(url)
+      if (url.includes('/iam/confirm')) {
+        return new Response(JSON.stringify({ code: 0 }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      chatCalls += 1
+      return chatCalls === 1 ? opts.chatFirst() : opts.chatNext()
+    })
+    return { fetcher: fetcher as unknown as typeof fetch, seen }
+  }
+
+  it('★★★ 401 续期换了 token ⇒ **对新令牌重新确认**（否则重发仍 200901）', async () => {
+    let resolveCalls = 0
+    const { fetcher, seen } = routedFetcher({
+      chatFirst: () => new Response('{}', { status: 401 }),
+      chatNext: () => sseResponse([JSON.stringify({ choices: [{ index: 0, delta: { content: 'ok' } }] })]),
+    })
+    const adapter = new RaccoonAdapter({
+      credentialRef: 'RACCOON_ACCESS_TOKEN' as never,
+      // 第一次给 A；续期后给 B —— 模拟 refresh_token 轮换。
+      resolveCredential: async () => {
+        resolveCalls += 1
+        return resolveCalls === 1
+          ? { access_token: TOKEN_A, refresh_token: 'r' }
+          : { access_token: TOKEN_B, refresh_token: 'r' }
+      },
+      refresh: async () => undefined,
+      fetchRemoteModels: async () => [],
+      fetchImpl: fetcher,
+    })
+    services.push(adapter as unknown as { [Symbol.dispose]?: () => void })
+    await collect(adapter, {})
+
+    const confirms = seen.filter((u) => u.includes('/iam/confirm'))
+    // ⚠️ A 与 B **各一次**。只断言「至少一次」会让「续期腿没补确认」蒙过去。
+    expect(confirms.length, '续期换了 token 必须对 B 再确认一次').toBe(2)
+  })
+
+  it('★★★ 对话入口**第一件事就是确认**（不能等业务请求失败后再补）', async () => {
+    const { fetcher, seen } = routedFetcher({
+      chatFirst: () => sseResponse([JSON.stringify({ choices: [{ index: 0, delta: { content: 'ok' } }] })]),
+      chatNext: () => sseResponse([]),
+    })
+    const adapter = new RaccoonAdapter({
+      credentialRef: 'RACCOON_ACCESS_TOKEN' as never,
+      resolveCredential: async () => ({ access_token: TOKEN_A, refresh_token: 'r' }),
+      refresh: async () => undefined,
+      fetchRemoteModels: async () => [],
+      fetchImpl: fetcher,
+    })
+    services.push(adapter as unknown as { [Symbol.dispose]?: () => void })
+    await collect(adapter, {})
+
+    const confirmIndex = seen.findIndex((u) => u.includes('/iam/confirm'))
+    const chatIndex = seen.findIndex((u) => u.includes('/chat/completions'))
+    expect(confirmIndex, '对话入口必须先确认').toBeGreaterThanOrEqual(0)
+    expect(confirmIndex).toBeLessThan(chatIndex)
   })
 })

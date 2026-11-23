@@ -540,29 +540,29 @@ describe('repairAccountNicknames 老账号回填', () => {
   it('把 ScreenName 昵称改成脱敏手机号，并把手机号写回凭据', async () => {
     const { ctx, credentials } = makeContext()
     await credentials.set('TRAE_ACCOUNT_AAAA1111', JSON.stringify(makeCredential()))
-    const fetcher = (async () => userInfoResponse('130******00')) as unknown as typeof fetch
+    const fetcher = (async () => userInfoResponse('138******00')) as unknown as typeof fetch
     const service = newService(ctx, { fetcher })
     const pool = makePool([accountEntry({ nickname: '用户26815487395' })])
 
     const repaired = await service.repairAccountNicknames(pool as never)
 
     expect(repaired).toEqual(['trae-1'])
-    expect(pool.updateAccount).toHaveBeenCalledWith('trae-1', { nickname: '130******00' })
+    expect(pool.updateAccount).toHaveBeenCalledWith('trae-1', { nickname: '138******00' })
     // 手机号必须写回**凭据**：账号条目会随账号操作整体重写，凭据里存一份才稳。
-    expect(JSON.parse(credentials.raw('TRAE_ACCOUNT_AAAA1111')!).phone).toBe('130******00')
+    expect(JSON.parse(credentials.raw('TRAE_ACCOUNT_AAAA1111')!).phone).toBe('138******00')
   })
 
   it('凭据已有手机号时不再发 GetUserInfo 请求（幂等，不重复补）', async () => {
     const { ctx, credentials } = makeContext()
     await credentials.set(
       'TRAE_ACCOUNT_AAAA1111',
-      JSON.stringify(makeCredential({ phone: '130******00' })),
+      JSON.stringify(makeCredential({ phone: '138******00' })),
     )
     let calls = 0
-    const fetcher = (async () => { calls++; return userInfoResponse('130******00') }) as unknown as typeof fetch
+    const fetcher = (async () => { calls++; return userInfoResponse('138******00') }) as unknown as typeof fetch
     const service = newService(ctx, { fetcher })
     // 昵称已是手机号 → 不应触发任何写入。
-    const pool = makePool([accountEntry({ nickname: '130******00' })])
+    const pool = makePool([accountEntry({ nickname: '138******00' })])
 
     const repaired = await service.repairAccountNicknames(pool as never)
 
@@ -593,7 +593,7 @@ describe('repairAccountNicknames 老账号回填', () => {
     const fetcher = (async (url: string | URL) => {
       // 第一个账号的请求失败，第二个成功。
       if (String(url).includes('GetUserInfo') && !failedOnce) { failedOnce = true; throw new Error('boom') }
-      return userInfoResponse('130******33')
+      return userInfoResponse('138******00')
     }) as unknown as typeof fetch
     const service = newService(ctx, { fetcher })
     const pool = makePool([
