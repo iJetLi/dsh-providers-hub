@@ -120,6 +120,9 @@
 import type { RotationStartTier } from './jet-hub-store.js'
 import type { BuddyNoAccountReason, BuddySelectorLike } from './buddy-balance-selector.js'
 import { pickBuddyAccount } from './buddy-balance-selector.js'
+import { accountIdAtPosition, startIndexOfSlot } from './subagent-rotation.js'
+import type { SubagentAssignment } from './subagent-rotation.js'
+import type { SubagentRotationSetting } from './jet-hub-store.js'
 import { sessionBalanceEnabled } from './session-balance.js'
 import { isPolicyBlockedAccount } from './account-pool.js'
 import type {
@@ -146,6 +149,62 @@ import type { LoomyTierOptions } from './loomy-balance-rank.js'
  * （`model-catalog.ts` 的未知模态名单 5 → 10 → 12）。
  * ⇒ 名单的权威是调用点本身，不是本注释。
  */
+/**
+ * ★★★ **取「主代理起点所在档位」的账号 id 列表**（2026-11-23）。
+ *
+ * ## 为什么需要它
+ *
+ * 用户明确要求子代理也遵守档次优先：
+ *
+ * > 「子代理在分配帐号起点时，肯定也要像主代理一样，遵守档次优先的原则呀」
+ *
+ * ⇒ 「顺序 / 倒序 / 哈希」**只在同一档位内**错开，绝不跨档位
+ *（跨档位反转会让子代理先烧短期，而临期还没烧完）。
+ *
+ * ## 为什么用「余额分档」而不是「已算好的 ranked」
+ *
+ * 调用点此时**还没取余额**（`pickBuddyAccount` 内部才取）。档位判据需要
+ * 余额读数，故这里只能读 `pool` 侧的**缓存**读数：
+ *
+ * - 有缓存读数 ⇒ 按 `buddyBalanceTier` 分组（与选号同源）；
+ * - **无缓存读数 ⇒ 退化为「全部启用账号」**（此时档位未知，宁可全部参与，
+ *   让 `rotateFromPreferred` 后续按真实档位收窄）。
+ *
+ * ⚠️ 退化是**安全的**：`rotateFromPreferred` 内部会按档位重新分组，
+ * 起点落在哪一档由它决定；我们这里只是尽量给出一个「同档位」的候选集。
+ * 若给了跨档位的集合，起点的档位归属由 `rotateFromPreferred` 自己判断 ——
+ * 最坏情况是「起点落在更靠前的档位」，那仍是**该档位内**的合法错开。
+ *
+ * @param enabledIds - 该 provider 全部启用账号 id（池序）
+ * @param mainStartId - 主代理当前实际用的账号 id
+ * @param pool - 用于读余额缓存
+ * @param provider - provider id
+ * @returns 与主代理起点同档位的账号 id 列表（按 `enabledIds` 顺序）；
+ *   无法判断时返回 `enabledIds` 原样
+ */
+function sameTierAsMainStart(
+  enabledIds: readonly string[],
+  mainStartId: string,
+  pool: ResolverPool & {
+    cachedBalanceTierOf?(provider: string, accountId: string): number | undefined
+  },
+  provider: string,
+): readonly string[] {
+  /**
+   * ⚠️ pool 可能**没有**这个可选能力（单测替身）⇒ 直接返回全量，
+   * 行为退化为「全池错开」—— 仍然可用，只是分布可能跨档。
+   */
+  if (typeof pool.cachedBalanceTierOf !== 'function') return enabledIds
+  const mainTier = pool.cachedBalanceTierOf(provider, mainStartId)
+  if (mainTier === undefined) return enabledIds
+  const same = enabledIds.filter((id) => pool.cachedBalanceTierOf!(provider, id) === mainTier)
+  /**
+   * ⚠️ 过滤后若不含主代理起点（余额缓存刚失效），退回全量 ——
+   * 否则 `startIndexOfSlot` 会因「找不到基准」返回 undefined。
+   */
+  return same.includes(mainStartId) ? same : enabledIds
+}
+
 export interface ResolverPool<TCredential = unknown> {
   /** 列出该 provider 的**全部**账号（含已停用）。 */
   listAccountsByProvider(provider: string): ReadonlyArray<{
@@ -216,6 +275,22 @@ export interface ResolverPool<TCredential = unknown> {
    * 大量单测用结构化替身池，它们不认识本方法）。
    */
   preferredRotationFor?(provider: string, sessionId: string | undefined): string | undefined
+  /**
+   * ★★★ **子代理专属设置**（2026-11-23，可选能力）。
+   *
+   * @returns `undefined` = 该 provider 没配子代理设置 ⇒ 走主代理逻辑
+   *   （与加本功能之前**逐字节相同**，这是唯一的回归面）。
+   */
+  subagentRotationFor?(provider: string): SubagentRotationSetting | undefined
+  /**
+   * ★★★ **取某子代理的分配记录**（2026-11-23，可选能力）。
+   *
+   * ⚠️ 返回 `undefined` 有三种含义，调用方**一视同仁**地回落主代理：
+   * 1. 该 sessionId 不是子代理（主代理会话）；
+   * 2. 子代理的 `subagent/start` 没收到（插件晚于它启动）；
+   * 3. 记录已被淘汰（超过 128 条）。
+   */
+  subagentAssignmentOf?(provider: string, sessionId: string | undefined): SubagentAssignment | undefined
   /**
    * ★ **起点选定那一刻的档位**（S6 可选能力；真实 `AccountPool` 已实现）。
    *
@@ -608,9 +683,100 @@ export function createCredentialResolver<TCredential>(
        * 3. **未实现 `preferredRotationFor`（单测替身）⇒ `undefined`** ⇒
        *    行为与改动前**逐字节相同**（本功能的唯一回归面）。
        */
-      const rotationStartId = free === true
+      const baseRotationStartId = free === true
         ? undefined
         : deps.pool.preferredRotationFor?.(providerId, sessionId)
+      /**
+       * ★★★ **子代理专属起点**（2026-11-23）。
+       *
+       * ## 它修的是什么
+       *
+       * 现状下所有子代理与主代理**共用同一个起点** ⇒ 多个子代理挤同一个账号，
+       * 把它的积分耗尽，而其它账号闲置到过期。
+       *
+       * ## 判据链（顺序不能反）
+       *
+       * | 步骤 | 判据 | 不满足时 |
+       * |---|---|---|
+       * | ① 免费模型 | `free === true` | 跳过（免费路径不烧积分，插起点收益为零）|
+       * | ② 该会话是子代理 | 分配表里有该 `sessionId` | 走主代理逻辑（**唯一回归面**）|
+       * | ③ 该 provider 配了子代理设置 | `subagentRotationFor()` 非空 | 同上 |
+       * | ④ 算出起点 | 见下 | 回落主代理起点 |
+       *
+       * ## ⚠️⚠️ 起点只在**主代理起点所在档位内**错开
+       *
+       * 用户明确要求子代理也必须遵守「临期 → 短期 → 永久」（2026-11-23）：
+       *
+       * > 「子代理在分配帐号起点时，肯定也要像主代理一样，遵守档次优先的原则呀」
+       *
+       * ⇒ `rotateFromPreferred` 内部始终先按档位分组，故只要起点落在同档位内，
+       * 子代理的第一枪**必然是临期**。跨档位反转（我第一版的错误）会让它先烧短期。
+       *
+       * ## ⚠️ `fixed` 模式是**绝对第一**
+       *
+       * 它**不走档位序列** —— 直接返回指定位次的账号，由
+       * `pickBuddyAccount` 的 `pinnedFirst` 保证「无视档位、恒排第一」。
+       */
+      let rotationStartId = baseRotationStartId
+      let subagentPinnedFirst = false
+      if (free !== true && baseRotationStartId !== undefined) {
+        const setting = deps.pool.subagentRotationFor?.(providerId)
+        const assignment = deps.pool.subagentAssignmentOf?.(providerId, sessionId)
+        if (setting !== undefined && assignment !== undefined
+          && setting.startMode !== undefined && setting.startMode !== 'follow') {
+          /**
+           * ⚠️ **必须在「全量启用账号」上取位次**（`fixed` 用）。
+           * 与主代理同口径：位次是池序而非「当前候选序」，
+           * 否则用户拖一下顺序、或某号被限流时，位次会指向别的号。
+           */
+          const enabledIds = deps.pool
+            .listAccountsByProvider(providerId)
+            .filter(a => a.enabled)
+            .map(a => a.id)
+
+          if (setting.startMode === 'fixed') {
+            const fixedId = accountIdAtPosition(enabledIds, setting.fixedPosition)
+            /**
+             * ⚠️ 位次越界 ⇒ **回落主代理起点**（不静默取最后一个）：
+             * 用户的设置写着「位次 5」，实际只剩 3 个号时悄悄用第 3 个，
+             * 会让用户以为「固定」失效了。
+             */
+            if (fixedId !== undefined) {
+              rotationStartId = fixedId
+              /**
+               * ★ **绝对第一**：`pickBuddyAccount` 会把它强行放到首位，
+               * 无视档位 —— 因为用户明确要求「该号临期和短期都烧，
+               * 烧没了才切帐号」。
+               */
+              subagentPinnedFirst = true
+            }
+          } else {
+            /**
+             * 非 fixed：在主代理起点**所在档位**里错开。
+             *
+             * ⚠️ 档位序列用 `tierOfGroup` 口径（恒解锁）构造 —— 与后端
+             * `tierRankOf` 逐字节同构。这里简化为「按主代理起点的当前档位
+             * 过滤候选」，具体分组由 `rotateFromPreferred` 内部完成；
+             * 我们只需给出一个**同档位**的起点账号。
+             */
+            const sameTierIds = sameTierAsMainStart(
+              enabledIds,
+              baseRotationStartId,
+              deps.pool,
+              providerId,
+            )
+            const derived = startIndexOfSlot(
+              sameTierIds,
+              baseRotationStartId,
+              setting.startMode,
+              assignment.slot,
+              assignment.sessionId,
+            )
+            if (derived !== undefined) rotationStartId = derived
+          }
+        }
+      }
+
       /**
        * 「轮换起点的定位基准」：**全量启用账号**的 id 列表（池序、不过滤封禁/限流）。
        *
@@ -655,6 +821,7 @@ export function createCredentialResolver<TCredential>(
         ...(rotationStartId === undefined ? {} : { rotationStartId }),
         ...(rotationStartTier === undefined ? {} : { rotationStartTier }),
         ...(enabledAccountIds === undefined ? {} : { enabledAccountIds }),
+        ...(subagentPinnedFirst ? { pinnedFirst: true } : {}),
       })
       if (picked.kind === 'account') {
         if (plan.reportPickedAccount !== false) report(picked.account.id)

@@ -2,9 +2,11 @@ import { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { BuddyCredential } from './buddy.js'
 import type { BuddyProduct } from './product.js'
-import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeCreditWindows, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
+import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, sanitizeSubagentRotation, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeCreditWindows, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, PreferredRotationMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
-import type { CreditWindowMap, CreditWindowSetting, RotationStartTier } from './jet-hub-store.js'
+import type { CreditWindowMap, CreditWindowSetting, RotationStartTier, SubagentRotationSetting } from './jet-hub-store.js'
+import { markSubagentEnded, nextSubagentSlot, recordSubagentAssignment, sanitizeSubagentAssignments } from './subagent-rotation.js'
+import type { SubagentAssignment, SubagentAssignmentMap } from './subagent-rotation.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
@@ -38,6 +40,28 @@ declare module '@deepseek-ai/cordis' {
  * 没有黑名单；共享同一个冻结集合可以避免每次调用都分配一个新 Set。
  */
 const EMPTY_MODEL_SET: ReadonlySet<string> = new Set<string>()
+
+/**
+ * 归一化「子代理分配表」（provider → sessionId → 分配）。
+ *
+ * ⚠️ 抽成包装函数而不是在 `subagent-rotation.ts` 里再写一个 —— 避免
+ * 「同一语义两套实现」。子级 `sanitizeSubagentAssignments` 管**单个 provider**
+ * 的表，这里只负责逐 provider 展开。
+ *
+ * ⚠️ provider id 为空、或归一化后为空的条目直接丢弃
+ *（否则会留下永远查不到的噪音键）。
+ */
+function sanitizeSubagentAssignmentMapOf(raw: unknown): Record<string, SubagentAssignmentMap> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const result: Record<string, SubagentAssignmentMap> = {}
+  for (const [provider, table] of Object.entries(raw as Record<string, unknown>)) {
+    if (provider.length === 0) continue
+    const clean = sanitizeSubagentAssignments(table)
+    if (Object.keys(clean).length === 0) continue
+    result[provider] = clean
+  }
+  return result
+}
 
 /**
  * 判定「某 provider 的启用账号是否**全部**因目标模型处于限流期」。
@@ -478,6 +502,14 @@ export class AccountPool {
    * 消费者（`resolveCreditWindow`）每次都问本表，不允许把值存进构造期字段。
    */
   private creditWindowCache: CreditWindowMap = {}
+
+  /**
+   * 子代理分配表（provider → sessionId → 分配）。
+   *
+   * ⚠️ **必须持久化**：插件重启后收不到已发过的 `subagent/start`，
+   * 若不落盘，正在跑的子代理会退化成「用主代理起点」。
+   */
+  private subagentAssignmentCache: Record<string, SubagentAssignmentMap> = {}
   private preferredRotationCache: PreferredRotationMap = {}
   /**
    * 「面板入口」的进程内副本：Jet Hub 的唯一入口位置（两个取值互斥）。
@@ -638,6 +670,13 @@ export class AccountPool {
       // 过一遍 sanitize：老契约后端可能绕过 schema 直接给出原始文档。
       this.strictManualOrderCache = sanitizeStrictManualOrder(state.strictManualOrder)
       this.creditWindowCache = sanitizeCreditWindows(state.creditWindows)
+    /**
+     * 子代理分配表（读写两侧都 sanitize，与 creditWindows 同纪律）。
+     *
+     * ⚠️ 老文档没有该键 ⇒ 空表 ⇒ 所有子代理走主代理起点
+     *（= 与加本功能之前逐字节相同，这是唯一回归面）。
+     */
+    this.subagentAssignmentCache = sanitizeSubagentAssignmentMapOf(state.subagentAssignments)
           this.preferredRotationCache = sanitizePreferredRotation(state.preferredRotation)
     }
     this.loadLocks(state)
@@ -753,6 +792,7 @@ export class AccountPool {
          * 且没有任何日志或提示指向真正的原因。
          */
         creditWindows: this.creditWindowCache,
+      subagentAssignments: this.subagentAssignmentCache,
             preferredRotation: this.preferredRotationCache,
         // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同一个整体替换陷阱）：
         //    漏键会让用户改过的面板入口在**任何**一次账号/黑名单/网关/顺序写入时
@@ -1417,6 +1457,108 @@ export class AccountPool {
       return
     }
     await this.queueStoreSave()
+  }
+
+  /**
+   * ★★★ **取某 provider 的子代理设置**（2026-11-23）。
+   *
+   * ⚠️ 每次现读，不缓存（与 `preferredRotationFor` 同款）：用户随时可能在面板上改。
+   *
+   * @returns `undefined` = 没配子代理设置 ⇒ 调用方走主代理逻辑（与加本功能之前逐字节相同）
+   */
+  subagentRotationFor(provider: string): SubagentRotationSetting | undefined {
+    this.ensureLoaded()
+    if (provider.length === 0) return undefined
+    return this.creditWindowCache[provider]?.subagent
+  }
+
+  /**
+   * 写子代理设置（`undefined` = 清除）。
+   *
+   * ⚠️ **合并语义**：只传 `subagent` 时**不动** `windowDays` / `imminentDays`。
+   * 这是刻意的 —— 用户在「子代理」那块点保存，不该顺带把窗口天数重置。
+   */
+  async setSubagentRotation(
+    provider: string,
+    setting: SubagentRotationSetting | undefined,
+  ): Promise<void> {
+    this.ensureLoaded()
+    if (provider.length === 0) return
+    const next: CreditWindowMap = { ...this.creditWindowCache }
+    const current = next[provider]
+    const clean = sanitizeSubagentRotation(setting)
+    if (clean === undefined) {
+      if (current === undefined || current.subagent === undefined) return
+      const rest: CreditWindowSetting = {
+        ...(current.windowDays === undefined ? {} : { windowDays: current.windowDays }),
+        ...(current.imminentDays === undefined ? {} : { imminentDays: current.imminentDays }),
+      }
+      /**
+       * ⚠️ 去掉 subagent 后若**只剩空对象**，整条删键
+       *（否则会留下一个永不消费的噪音 provider 键）。
+       */
+      if (rest.windowDays === undefined && rest.imminentDays === undefined) delete next[provider]
+      else next[provider] = rest
+    } else {
+      next[provider] = { ...(current ?? {}), subagent: clean }
+    }
+    this.creditWindowCache = next
+    this.loaded = true
+    if (this.store.kind === 'memory') {
+      this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，子代理设置仅本次会话有效')
+      return
+    }
+    await this.queueStoreSave()
+  }
+
+  /** 取某 provider 的子代理分配表（**只读快照**）。 */
+  subagentAssignmentsFor(provider: string): Readonly<SubagentAssignmentMap> {
+    this.ensureLoaded()
+    return this.subagentAssignmentCache[provider] ?? {}
+  }
+
+  /** 取单个子代理的分配（热路径：每次 `resolveCredential` 都会问）。 */
+  subagentAssignmentOf(provider: string, sessionId: string | undefined): SubagentAssignment | undefined {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    this.ensureLoaded()
+    return this.subagentAssignmentCache[provider]?.[sessionId]
+  }
+
+  /**
+   * 记录一个子代理分配（`subagent/start` 时调）。
+   *
+   * @returns 实际分配的 slot（幂等：已存在则返回原 slot）
+   */
+  async recordSubagentStart(
+    provider: string,
+    sessionId: string,
+    parentSessionId: string,
+    now: number,
+  ): Promise<number> {
+    this.ensureLoaded()
+    if (provider.length === 0 || sessionId.length === 0) return -1
+    const current = this.subagentAssignmentCache[provider] ?? {}
+    const existing = current[sessionId]
+    /**
+     * ⚠️ 幂等：resume 会重复发 `subagent/start`，此时**保留原 slot**
+     *（否则同一个子代理会越跑越往后挪，浪费已分配的账号）。
+     */
+    const slot = existing === undefined ? nextSubagentSlot(current) : existing.slot
+    const next = recordSubagentAssignment(current, sessionId, parentSessionId, slot, now)
+    this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
+    if (this.store.kind !== 'memory') await this.queueStoreSave()
+    return slot
+  }
+
+  /** 标记子代理结束（`subagent/end` 时调）。**不清除记录**（见 `markSubagentEnded` 的注释）。 */
+  async recordSubagentEnd(provider: string, sessionId: string): Promise<void> {
+    this.ensureLoaded()
+    const current = this.subagentAssignmentCache[provider]
+    if (current === undefined) return
+    const next = markSubagentEnded(current, sessionId)
+    if (next === current) return
+    this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
+    if (this.store.kind !== 'memory') await this.queueStoreSave()
   }
 
   /**

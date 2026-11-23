@@ -627,6 +627,17 @@ export interface JetHubState {
    */
   creditWindows?: CreditWindowMap
   /**
+   * ★ 子代理分配表：provider → sessionId → 分配记录（2026-11-23）。
+   *
+   * ⚠️ **必须持久化**：插件重启后收不到已发过的 `subagent/start` 事件，
+   * 若不落盘，正在跑的子代理会退化成「用主代理起点」——
+   * 用户会看到「子代理突然开始烧主代理的号」。
+   *
+   * ⚠️ 与 `preferredRotation` 分开存：那张表是**用户显式选择**
+   *（会话级、可长期保留），这张是**运行时分配**（子代理级、高频、有淘汰上限）。
+   */
+  subagentAssignments?: Record<string, Record<string, unknown>>
+  /**
    * 「面板入口」：Jet Hub 的**唯一**入口位置（{@link PanelEntry}）。
    *
    * 两个取值**严格互斥**，任一时刻只有一个入口存在：
@@ -1694,6 +1705,7 @@ class SettingsStore implements JetHubStore {
         sessionBalanceEnabled?: unknown
         strictManualOrder?: unknown
         creditWindows?: unknown
+        subagentAssignments?: unknown
         preferredRotation?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
@@ -2162,6 +2174,7 @@ class FileStore implements JetHubStore {
         sessionBalanceEnabled?: unknown
         strictManualOrder?: unknown
         creditWindows?: unknown
+        subagentAssignments?: unknown
         preferredRotation?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
