@@ -828,6 +828,9 @@ export const jetHubSchema = Schema.object({
   // 「轮换起点」：**默认空表** = 升级前行为。schema 只负责类型，合法性由
   // sanitizePreferredRotation 读写两侧统一判（与上一行同款）。
   preferredRotation: Schema.dict(Schema.any()).default({}),
+  // 子代理分配表：**默认空表** = 没有已分配的子代理（升级前行为）。
+  // ⚠️ 与 creditWindows 同款：schema 只保证「是个 dict」，合法性归 sanitizeSubagentAssignmentsOf。
+  subagentAssignments: Schema.dict(Schema.any()).default({}),
   // 缺键 = 「仅侧栏」（升级前的默认就是显示那一行；改掉是显式动作）。
   // ⚠️ 用 `Schema.string()` 而不是 `Schema.union([...])`：schema 只负责类型，
   // 取值合法性由 `sanitizePanelEntry` 在**读写两侧**统一判（老契约后端不经过
@@ -977,6 +980,45 @@ export function sanitizeStrictManualOrder(raw: unknown): StrictManualOrderMap {
  * 嵌套约束）—— 那些是**业务语义**，归 `resolveCreditWindow`
  * （全仓唯一钳制点）。本函数只管「形状与类型是否可信」。
  */
+/**
+ * ⚠️ **归一化「子代理分配表」**（{@link JetHubState.subagentAssignments}）。
+ *
+ * ## 为什么在 store 侧再包一层
+ *
+ * 真正的逐条校验在 `subagent-rotation.ts` 的 `sanitizeSubagentAssignments`
+ *（**只处理单个 provider 的表**）。这里只做两件事：
+ *
+ * 1. 逐 provider 展开；
+ * 2. **丢弃空表**（否则会留下永不消费的 provider 噪音键）。
+ *
+ * ## ⚠️ 为什么不能直接用 `subagent-rotation` 的同名函数
+ *
+ * 那个函数的签名是 `(raw) => SubagentAssignmentMap`（单 provider），
+ * 而 `JetHubState.subagentAssignments` 是 `Record<provider, SubagentAssignmentMap>`
+ * —— 两层结构。混用会让「provider 层」被当成「sessionId 层」解析，
+ * 结果是**全部丢失且零报错**（这正是本字段在 PR 上一版「写了但读不回」的同型问题）。
+ *
+ * ⚠️ **本文件不 import 运行时代码**（`account-pool.ts` 里已有同义的
+ * `sanitizeSubagentAssignmentMapOf`）—— 两处都调 `subagent-rotation` 的同一个
+ * 子级函数，**判据只有一份**。
+ */
+function sanitizeSubagentAssignmentsOf(raw: unknown): Record<string, Record<string, unknown>> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const result: Record<string, Record<string, unknown>> = {}
+  for (const [provider, table] of Object.entries(raw as Record<string, unknown>)) {
+    if (provider.length === 0) continue
+    if (typeof table !== 'object' || table === null || Array.isArray(table)) continue
+    /**
+     * ⚠️ 与 `account-pool.ts` 的 `sanitizeSubagentAssignmentMapOf` **同纪律**：
+     * 空表丢弃（不留噪音键）。
+     */
+    const entries = Object.entries(table as Record<string, unknown>)
+    if (entries.length === 0) continue
+    result[provider] = table as Record<string, unknown>
+  }
+  return result
+}
+
 export function sanitizeCreditWindows(raw: unknown): CreditWindowMap {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
   const result: CreditWindowMap = {}
@@ -1740,6 +1782,8 @@ class SettingsStore implements JetHubStore {
       strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
       // 老文档没这个键 → 空表（= 全部回落环境变量/默认）。
       creditWindows: sanitizeCreditWindows(value.creditWindows),
+      // 老文档没这个键 → 空表（= 没有已分配的子代理，与升级前行为一致）。
+      subagentAssignments: sanitizeSubagentAssignmentsOf(value.subagentAssignments),
       preferredRotation: sanitizePreferredRotation(value.preferredRotation),
       // 老文档没新键 → 按老布尔迁移（只有明确 false 才是「仅设置页」）；两者都没有 → 仅侧栏。
       panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
@@ -1804,6 +1848,7 @@ class SettingsStore implements JetHubStore {
       //    过一遍 sanitize：入参可能来自任何调用方，脏值不该被写进文档。
       strictManualOrder: sanitizeStrictManualOrder(state.strictManualOrder),
       creditWindows: sanitizeCreditWindows(state.creditWindows),
+      subagentAssignments: sanitizeSubagentAssignmentsOf(state.subagentAssignments),
       preferredRotation: sanitizePreferredRotation(state.preferredRotation),
       // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同因，是同一个
       //    `replace` 整体替换陷阱的第二个受害者）：漏键会让用户改过的
@@ -2207,6 +2252,8 @@ class FileStore implements JetHubStore {
         strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
         // 老文档没这个键 → 空表（= 全部回落环境变量/默认）。
         creditWindows: sanitizeCreditWindows(value.creditWindows),
+        // 老文档没这个键 → 空表（= 没有已分配的子代理，与升级前行为一致）。
+        subagentAssignments: sanitizeSubagentAssignmentsOf(value.subagentAssignments),
         preferredRotation: sanitizePreferredRotation(value.preferredRotation),
         // 老文档没新键 → 按老布尔迁移（与 `SettingsStore` 同一判据）；两者都没有 → 仅侧栏。
         panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
@@ -2313,6 +2360,8 @@ class FileStore implements JetHubStore {
         // 同上：恢复出的文档不含严格手动顺序信息 → 空表（与全新安装一致）。
         strictManualOrder: {},
         creditWindows: {},
+        // 同上：账号文件里没有子代理分配 → 空表（与全新安装一致）。
+        subagentAssignments: {},
         preferredRotation: {},
         // 同上：恢复出的文档不含面板入口信息 → 默认「仅侧栏」（与全新安装一致）。
         panelEntry: DEFAULT_PANEL_ENTRY,
