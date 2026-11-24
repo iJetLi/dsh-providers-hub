@@ -1912,6 +1912,8 @@ export const ZCODE_FAST_EMPTY_MS = 3_000
  */
 export function isZcodeConcurrencyLimited(status: number, body: string): boolean {
   if (looksLikeZcodeHtmlPage(body)) return false
+  // ★ 风控短路（issue #85）：3012 正文里的 `3009` 不是并发限流。
+  if (hasZcodeUnusualActivity(body)) return false
   if (status !== 429) {
     // 少数情况下上游用 200/403 包裹限流体，故正文命中同样认。
     if (!body.includes(ZCODE_CONCURRENCY_CODE)) return false
@@ -1940,6 +1942,34 @@ export function isZcodeConcurrencyLimited(status: number, body: string): boolean
  */
 export function isZcodeQuotaExhausted(status: number, body: string): boolean {
   if (looksLikeZcodeHtmlPage(body)) return false
+  /**
+   * ★★★ **风控（3012）必须短路这三条判据**（issue #85，2026-11-24）。
+   *
+   * ## 缺陷
+   *
+   * `3012` 的响应正文里**完全可能**出现 `1005` / `3009` / `3007`：
+   *
+   * - 领取路径的真实 plan_id 就是 `zcode-v3-start-plan-trust-1005`；
+   * - `logid` 常含数字串；
+   * - 上游的 `detail` 字段也可能带这些数字。
+   *
+   * 于是三条判据会命中，而它们各自驱动一条**有害**的动作：
+   *
+   * | 判据 | 命中后做什么 | 危害 |
+   * |---|---|---|
+   * | 额度 | `switchAccountOnQuota` 换号 | **把池里可用号逐个撞一遍并各写一条「到次日 0 点」的限流标记**（实测 2026-11-13 三个号全被烧）|
+   * | 并发 | 退避后 `continue` | **对风控请求重发** |
+   * | captcha | 补产 captcha 后重发 | 白烧阿里云「同设备每小时 150 次」的设备级配额 |
+   *
+   * 而本仓笔记与代码注释都已确立：**「对 405 重试不只是无用，是有害的」**
+   * （见本文件「405 恒不可重试」那段）。这三条判据正好绕过了那句话。
+   *
+   * ## 修法
+   *
+   * 与既有的 `looksLikeZcodeHtmlPage` 短路**同轴**：风控一律先返回 `false`。
+   * 顺序：**HTML 边缘页 → 风控 → 各自的真实判据**。
+   */
+  if (hasZcodeUnusualActivity(body)) return false
   if (isZcodeConcurrencyLimited(status, body)) return false
   if (body.includes('1113') || body.includes('余额不足')) return true
   if (body.includes('1005')) return true
@@ -1968,6 +1998,9 @@ export function isZcodeCaptchaRejected(status: number, body: string): boolean {
   // 还是边缘页 —— 白烧一次浏览器验证（阿里云「同设备每小时 150 次」的
   // 设备级配额），且把一次明确的网络故障变成一次慢吞吞的内部重试。
   if (looksLikeZcodeHtmlPage(body)) return false
+  // ★ 风控短路（issue #85）：3012 正文里的 `3007` 不是 captcha 校验失败 ——
+  //   否则会补产 captcha 并重发，白烧设备级配额。
+  if (hasZcodeUnusualActivity(body)) return false
   return body.includes('3007') || /captcha\s+verify\s+failed/i.test(body)
 }
 
@@ -2183,21 +2216,19 @@ export function describeUpstreamError(
    * 会报「额度用尽——请等待额度重置或更换账号」，而 msg 明说等一下就能过，
    * **建议全错**。故：正文含并发文案 ⇒ 一律按并发报（无论 code 是 3009 还是 1005）。
    */
-  if (code === 3009 || trimmed.includes('3009') || isZcodeConcurrencyLimited(status, trimmed)) {
-    return (
-      `上游并发限流（model concurrency limit exceeded）——` +
-      `已按退避重试仍未通过，请稍后重试。原始响应：${suffix}`
-    )
-  }
-  if (code === 1005 || trimmed.includes('1005')) {
-    return (
-      `额度用尽（1005 exceed quota limit）——` +
-      `该账号在这个模型上的免费额度已用完，请等待额度重置或更换账号。原始响应：${suffix}`
-    )
-  }
-  if (code === 3007 || trimmed.includes('3007')) {
-    return `阿里云 captcha 校验失败（3007）。请重试；若持续失败，检查浏览器是否可用。`
-  }
+  /**
+   * ★★★ **风控文案必须排在 `3009` / `1005` / `3007` 三条之前**（issue #85，2026-11-24）。
+   *
+   * 旧顺序是「`3009` → `1005` → `3007` → 风控」⇒ 一个 3012 会被说成
+   * 「并发限流」/「额度用尽」/「captcha 校验失败」，**三条建议全是错的**：
+   * 用户照文案去「等额度」「重试」，而风控的正确动作是**换身份块/换账号**。
+   *
+   * 而且 `1005` 那条还会建议「换账号」—— 实测三个号就是被这个循环烧掉的
+   *（见 {@link isZcodeQuotaExhausted} 新增的注释）。
+   *
+   * ⚠ 与归类轴（{@link httpErrorCodeForZcode}）和三条 `is*` 判据**同轴**：
+   *    风控一律先于业务码。
+   */
   if (hasZcodeUnusualActivity(trimmed)) {
     /**
      * ★ 文案走**共用实现**（Gitee issue IKJOQB）—— 判据与措辞都只在
@@ -2212,6 +2243,21 @@ export function describeUpstreamError(
      *   `13012` / `plan-3012-trust` 一并命中。
      */
     return formatZcodeUnusualActivityMessage({ diagnostic, rawResponse: suffix })
+  }
+  if (code === 3009 || trimmed.includes('3009') || isZcodeConcurrencyLimited(status, trimmed)) {
+    return (
+      `上游并发限流（model concurrency limit exceeded）——` +
+      `已按退避重试仍未通过，请稍后重试。原始响应：${suffix}`
+    )
+  }
+  if (code === 1005 || trimmed.includes('1005')) {
+    return (
+      `额度用尽（1005 exceed quota limit）——` +
+      `该账号在这个模型上的免费额度已用完，请等待额度重置或更换账号。原始响应：${suffix}`
+    )
+  }
+  if (code === 3007 || trimmed.includes('3007')) {
+    return `阿里云 captcha 校验失败（3007）。请重试；若持续失败，检查浏览器是否可用。`
   }
   if (code === 1002 || status === 401) {
     // ⚠ 必须指向 Jet Hub 而不是官方客户端：凭据只有插件自己会写
@@ -2330,9 +2376,18 @@ export function httpErrorCodeForZcode(status: number, body: string): string {
   // 🔴 并发文案**先于**额度码判定：上游曾把并发限流装进 1005 码下发
   // （429 + {"code":1005,"msg":"user concurrency limit exceeded"}，2026-10-06），
   // 按码先判会让一个「等一下就能过」的瞬态错误被报成不可重试的「额度用尽」。
+  /**
+   * ★★★ **风控必须排在两条裸子串判据之前**（issue #85）。
+   *
+   * 旧顺序是「并发 → `3007` → 风控」⇒ 3012 正文里带 `3009` / `3007` 时会被归成
+   * `RATE_LIMIT`，而它在宿主 `DEFAULT_RETRYABLE_CODES` 里 ⇒ **harness 白退避重试 5 次**。
+   *
+   * 本条与本文件「405 恒不可重试」那句注释同轴：风控是**确定性拒绝**，
+   * 任何「等一下再试」的分类都是错的。
+   */
+  if (hasZcodeUnusualActivity(trimmed)) return 'PERMISSION'
   if (isZcodeConcurrencyLimited(status, trimmed)) return 'RATE_LIMIT'
   if (trimmed.includes('3007')) return 'RATE_LIMIT'
-  if (hasZcodeUnusualActivity(trimmed)) return 'PERMISSION'
   if (trimmed.includes('1113') || trimmed.includes('余额不足') || trimmed.includes('1005')) {
     return 'QUOTA_EXCEEDED'
   }
