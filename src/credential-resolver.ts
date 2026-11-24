@@ -122,6 +122,7 @@
 
 import type { RotationStartTier } from './jet-hub-store.js'
 import type { BuddyCandidateAccount, BuddyNoAccountReason, BuddySelectorLike } from './buddy-balance-selector.js'
+import { BUDDY_BALANCE_TIER } from './buddy-balance-rank.js'
 import { pickBuddyAccount } from './buddy-balance-selector.js'
 import { accountIdAtPosition, isSubagentSession, startIndexOfSlot, subagentParentOf, subagentSettingActive } from './subagent-rotation.js'
 import type { SubagentAssignment } from './subagent-rotation.js'
@@ -224,6 +225,49 @@ function sameTierAsMainStart(
    * 否则 `startIndexOfSlot` 会因「找不到基准」返回 undefined。
    */
   return same.includes(mainStartId) ? same : enabledIds
+}
+
+
+/**
+ * ★★★ **无锚点时，取「档位最优」的账号作锚**（2026-11-24，PR #153 双审 P1①）。
+ *
+ * ## 缺陷
+ *
+ * 上一版：`tierAnchorId === undefined` ⇒ `sameTierIds = enabledIds`（**全池**）。
+ *
+ * 而 `tierAnchorId === undefined` 正是**生产默认**：主代理「默认不指定起点」时
+ * `mainSessionStartId` 是 `undefined`，子代理自己的 `baseRotationStartId` 也是
+ * `undefined`。
+ *
+ * ⇒ 档位过滤一次都没生效 ⇒ `startIndexOfSlot` 在全池上错开 ⇒
+ *   池 `[临期A, 临期B, 永久P]` 时**第二个子代理必然拿到 `P`**（先烧永久积分）。
+ *   双审两侧独立实测：`child1=RB`、**`child2=RP`** —— 与上游原报障**逐字节相同**。
+ *
+ * ## 修法
+ *
+ * 无锚点时**不要**用「全池第一个」当锚，而是**按 `cachedTierOf` 找档位最优
+ *（`imminent:0` → `expiring:1` → `permanent:2`，**数值越小越优先**）的那个账号**，
+ * 再用它调 {@link sameTierAsMainStart} ⇒ 子代理只在**临期档内**错开。
+ *
+ * ⚠️ `selector` 缺席 / 无 `cachedTierOf`（单测替身、非 buddy 家）⇒ 返回 `undefined`
+ *    ⇒ 调用方退回全池（**无法判断档位时的既有降级**，保持不变）。
+ * ⚠️ 跳过 `none`（3）：那是「无余额 / 查询失败 / 锁定态只剩永久」——
+ *    拿它当锚会把子代理导向无余额的号。
+ */
+function bestTierAnchorId(
+  enabledIds: readonly string[],
+  selector: BuddySelectorLike | undefined,
+  allowPermanent: boolean,
+): string | undefined {
+  if (selector === undefined || typeof selector.cachedTierOf !== 'function') return undefined
+  const asCandidate = (id: string) => ({ id } as BuddyCandidateAccount)
+  let best: { id: string; tier: number } | undefined
+  for (const id of enabledIds) {
+    const tier = selector.cachedTierOf(asCandidate(id), allowPermanent)
+    if (tier === undefined || tier >= BUDDY_BALANCE_TIER.none) continue
+    if (best === undefined || tier < best.tier) best = { id, tier }
+  }
+  return best?.id
 }
 
 
@@ -1342,13 +1386,27 @@ export function createCredentialResolver<TCredential>(
              *    ⚠️ 这是**已知降级**，比「忽略档位」好，但不如「主代理配了起点」的情形。
              */
             const tierAnchorId = mainSessionStartId ?? baseRotationStartId
-            const sameTierIds = tierAnchorId === undefined
+            /** ⚠️ 余额缓存在 `plan.selector` 里；它可能是 Loomy（无 cachedTierOf）⇒ 内部降级。 */
+            const tierSelector = 'cachedTierOf' in (plan.selector as object)
+              ? (plan.selector as BuddySelectorLike)
+              : undefined
+            /**
+             * ★★★ **无锚点时也必须做档位过滤**（2026-11-24，双审 P1①）。
+             *
+             * 上一版在这里 `? enabledIds`（全池）—— 而「无锚点」恰是**生产默认**
+             *（主代理不指定起点）⇒ 档位过滤一次都没生效 ⇒
+             * 池 `[临期A, 临期B, 永久P]` 时**第二个子代理拿到永久号、先烧永久积分**。
+             *
+             * 修法：无锚点时用 {@link bestTierAnchorId} 找「档位最优（临期）」的号作锚。
+             * ⚠️ 找不到（无 `cachedTierOf` / 全 `none`）才退回全池 —— 那是既有降级。
+             */
+            const effectiveTierAnchorId = tierAnchorId ?? bestTierAnchorId(enabledIds, tierSelector, allowPermanent)
+            const sameTierIds = effectiveTierAnchorId === undefined
               ? enabledIds
               : sameTierAsMainStart(
                 enabledIds,
-                tierAnchorId,
-                /** ⚠️ 余额缓存在 `plan.selector` 里；它可能是 Loomy（无 cachedTierOf）⇒ 内部降级。 */
-                'cachedTierOf' in (plan.selector as object) ? (plan.selector as BuddySelectorLike) : undefined,
+                effectiveTierAnchorId,
+                tierSelector,
                 allowPermanent,
               )
             /**
