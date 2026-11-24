@@ -1,5 +1,6 @@
 
 
+
 /**
  * `resolveCredential` 的**共享编排** —— 每个 provider 每轮请求「选哪个账号、取哪份凭据」。
  *
@@ -1265,20 +1266,55 @@ export function createCredentialResolver<TCredential>(
             /**
              * 非 fixed：在主代理起点**所在档位**里错开。
              *
-             * ⚠️ **主代理没配起点时**（`baseRotationStartId === undefined`）：
-             * 它的实际起点就是「档次排序的第一个可用账号」⇒ 用 `undefined`
-             * 让 `sameTierAsMainStart` 退回全部启用账号（档位未知），
-             * 再让 `startIndexOfSlot` 以「第 0 项」为基准错开。
+             * ⚠️⚠️ **闸门读的必须是「主代理的起点」，不是「子代理自己的」**
+             * （2026-11-24 第四轮对抗审计 P1，**真缺陷**）。
+             *
+             * ## 原缺陷（上游原话）
+             *
+             * > 「**临期优先对子代理失效**：池 `[临期, 临期, 永久]` 时，`child-2`
+             * >   会拿到**永久号、先烧永久积分**。」
+             *
+             * 根因就在这一行：上一版写的是
+             *
+             * ```ts
+             * const sameTierIds = baseRotationStartId === undefined
+             *   ? enabledIds                                            // ← 全量账号
+             *   : sameTierAsMainStart(enabledIds, baseRotationStartId, …)
+             * ```
+             *
+             * 而 `baseRotationStartId = preferredRotationFor(provider, sessionId)`，
+             * **`sessionId` 是子代理自己的** —— 用户不可能给一个还没存在的子代理
+             * 设过起点 ⇒ **生产路径恒 `undefined`** ⇒ 恒走 `enabledIds` 分支
+             * ⇒ **档位过滤一次都没生效过** ⇒ 子代理可以先烧永久积分。
+             *
+             * ⚠️ 这与用户明确要求的「档次优先：临期 → 短期 → 永久」**直接冲突**。
+             *
+             * ## 修法：档位基准改用 `mainSessionStartId`
+             *
+             * `mainSessionStartId` 才是「主代理当前用的那个号」——
+             * 只有它所在的档位才是子代理该错开的档位。
+             *
+             * | 情况 | `mainSessionStartId` | 档位序列 |
+             * |---|---|---|
+             * | 主代理配了起点 | 有值 | **主代理起点所在档位的账号** ← 修好后的行为 |
+             * | 主代理没配起点 | `undefined` | 全量账号（档位未知，见下）|
+             *
+             * ⚠️ **主代理没配起点时为什么仍退全量**：它的实际起点是
+             *    「档次排序的第一个可用账号」，而那需要余额（本函数还没取）
+             *    ⇒ 拿不到档位。此时退化为「全池错开」—— 仍然可用，
+             *    只是分布可能跨档（而不是「全部挤在主代理那个号上」）。
+             *    ⚠️ 这是**已知降级**，比「忽略档位」好，但不如「主代理配了起点」的情形。
              */
-            const sameTierIds = baseRotationStartId === undefined
+            const tierAnchorId = mainSessionStartId ?? baseRotationStartId
+            const sameTierIds = tierAnchorId === undefined
               ? enabledIds
               : sameTierAsMainStart(
-              enabledIds,
-              baseRotationStartId,
-              /** ⚠️ 余额缓存在 `plan.selector` 里；它可能是 Loomy（无 cachedTierOf）⇒ 内部降级。 */
-              'cachedTierOf' in (plan.selector as object) ? (plan.selector as BuddySelectorLike) : undefined,
-              allowPermanent,
-            )
+                enabledIds,
+                tierAnchorId,
+                /** ⚠️ 余额缓存在 `plan.selector` 里；它可能是 Loomy（无 cachedTierOf）⇒ 内部降级。 */
+                'cachedTierOf' in (plan.selector as object) ? (plan.selector as BuddySelectorLike) : undefined,
+                allowPermanent,
+              )
             /**
              * ★★★ **基准 = 主代理当前实际用的账号**（2026-11-24，上游审计 ④ 的修复）。
              *
