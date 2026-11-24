@@ -309,27 +309,6 @@ import {
   fetchCompensationStatus,
 } from './buddy-compensation.js'
 import { collectBuddyGrowth } from './buddy-growth.js'
-/**
- * ⚠️ **`collectBuddyGrowth` 已搬到 `src/buddy-growth.ts`**（2026-10-08 Task 4），
- * 并在此**原样再导出**以保持既有调用点与用例的 import 路径不变。
- *
- * 搬家的理由（不是洁癖）：它是 `credits.afterClaim` 的实现，而 `afterClaim`
- * 由 `src/provider-credits.ts` 的能力表提供。留在本文件会让那张表必须 import
- * 本文件 ⇒ `provider-credits.ts ⇄ jet-hub-rpc.ts` **循环 import**（本文件已经
- * import 前者）。搬到 `buddy-growth.ts` 后依赖是单向的：
- * `jet-hub-rpc.ts` → `provider-credits.ts` → `buddy-growth.ts`。
- *
- * ⚠️ **本再导出是过渡形态**，不是接口：新代码应直接从 `buddy-growth.js` 取。
- * 它由 `tests/unit/buddy-growth.spec.ts` 的 import 覆盖（唯一的生产消费者是
- * `src/provider-credits.ts`，它**直接从 `buddy-growth.js` 取**，不经过本文件）。
- *
- * ⚠️ **2026-10-08 修正（Task 4 复审 Finding 1）**：本 import 原先还捎带了一个
- * 成长引擎的**死 import**（本文件零调用），本条注释一度把它写成「本文件与成长
- * 引擎的接缝」—— 那会让「谁调用成长引擎」这个问题在本文件里得到一个**假答案**。
- * 现已删除该名字，并改正本注释：本文件**不持有**任何成长引擎入口，成长任务的
- * 唯一生产入口是 `provider-credits.ts` 的 `afterClaim`（由 `credits.claimAll`
- * 消费）。别再回到这里找。
- */
 export { collectBuddyGrowth }
 
 /**
