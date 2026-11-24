@@ -562,6 +562,46 @@ export interface BuddyTierOptions {
    * （找不到就原样，不报错）。
    */
   enabledAccountIds?: readonly string[]
+  /**
+   * ★★★ **把 `rotationStartId` 当作「绝对第一」**（2026-11-23）。
+   *
+   * ## 它解决什么问题
+   *
+   * 用户要求「子代理固定帐号」语义是：该号**还有任何可用积分就一直用它** ——
+   * 烧完临期继续烧短期，烧完短期继续烧永久（未锁定时），「烧没了才切帐号」。
+   *
+   * 而 `rotationStartId` 的既有语义是 S5/S6 的「起点绝对第一**直到它那一档烧完**」
+   * —— 烧完临期、落到短期档时就**交出首位**（S6）。那不满足用户的要求。
+   *
+   * ## 判据
+   *
+   * `pinnedFirst === true` 时**跳过** `tierStillHeld` 检查：
+   * 只要 `rotationStartId` 那个账号**可用**（`buddyTierUsable` 为真），
+   * 就恒排第一，**无视**它的档位怎么变。
+   *
+   * ## ⚠️ 「不可用」的准确含义
+   *
+   * 与主代理**完全同源**：
+   *
+   * ```ts
+   * buddyTierUsable(buddyBalanceTier(account, { allowPermanent }))
+   * ```
+   *
+   * | 场景 | `allowPermanent` | 判定 |
+   * |---|---|---|
+   * | 锁定永久 + 只剩永久积分 | `false` | **不可用** ⇒ 切帐号 |
+   * | 未锁定 + 只剩永久积分 | `true` | **可用** ⇒ 继续用它烧永久 |
+   * | 临期/短期任一 > 0 | 两者 | **可用** |
+   * | 完全无积分 | 两者 | **不可用** ⇒ 切帐号 |
+   *
+   * 这正是用户 2026-11-23 确认的口径：
+   * > 「未锁定永久的帐号就在用它的永久积分」
+   *
+   * ⚠️ `pinnedFirst` 只在 `rotationStartId` 已给且**该号确实可用**时生效；
+   * 不可用时退回既有 S5/S6 逻辑（继续按档位找下一个）——
+   * 那就是用户说的「烧没了才切帐号」。
+   */
+  pinnedFirst?: boolean
 }
 
 /**
@@ -740,6 +780,25 @@ export function rotateFromPreferred<T extends BuddyAccountBalance>(
    */
   const tierStillHeld = tierAtSelection !== undefined && tierNow === tierAtSelection
 
+  /**
+   * ★★★ **`pinnedFirst`：无视档位变化的「绝对第一」**（2026-11-23）。
+   *
+   * 用户要求「子代理固定帐号」在这条路径上：
+   * > 「让它绝对第一，除非它不可用了……如果开了锁定永久，
+   * >   则它临期和短期都烧，烧没了才切帐号」
+   *
+   * ⇒ 与 S6 的差别只有一格：**不检查「档位是否变了」**。
+   * 只要起点号仍**可用**就恒排第一（烧完临期继续烧短期、再烧永久）。
+   *
+   * ⚠️ 「可用」判据**完全复用** `buddyTierUsable(buddyBalanceTier(...))`，
+   * 不另写一份 —— 否则「锁定永久时只剩永久算不算可用」这条会两处漂移
+   *（本仓红线：同一语义不得两套判据）。
+   *
+   * ⚠️ 不可用时**不在这里抛错**：`anchor` 已经是「从起点往后第一个可用」，
+   * 走既有的 S5 分支即可（那就是用户说的「烧没了才切帐号」）。
+   */
+  const pinnedHeld = options.pinnedFirst === true
+
   // 按档分组（保持组内原序）
   const byRank = new Map<number, T[]>()
   for (const account of ranked) {
@@ -777,9 +836,12 @@ export function rotateFromPreferred<T extends BuddyAccountBalance>(
     return [...byPool.slice(startAt), ...byPool.slice(0, startAt)]
   })()
 
-  if (!tierStillHeld) {
+  if (!tierStillHeld && !pinnedHeld) {
     /**
      * 起点已降档 ⇒ 交出首位。
+     *
+     * ⚠️ `pinnedHeld` 时**不进本分支**：那是「固定帐号」语义，
+     * 要求无视档位变化恒排第一（见 `pinnedHeld` 的注释）。
      *
      * ⚠️ 排序必须**稳定**（`Array.prototype.sort` 在 ES2019+ 稳定），
      * 且比较器只比档位、不掺下标 —— 这样同档内保持 `rotatedByPoolOrder`

@@ -220,6 +220,10 @@ describe('老契约后端（SettingsStore）', () => {
       // 分档窗口同理：缺省即空表（= 全部回落环境变量/默认）
       creditWindows: {},
       preferredRotation: {},
+      // 子代理分配表同理：缺省即空表（= 没有已分配的子代理）
+      subagentAssignments: {},
+      // 子代理分配表同理：缺省即空表（= 没有已分配的子代理）
+      subagentAssignments: {},
       // save 未携带面板入口 → 写出「仅侧栏」（缺省），读回同值。
       panelEntry: 'sidebar',
       // save 未携带顺序 → 写出空数组（未自定义），读回同值。
@@ -395,6 +399,8 @@ describe('文件后端（FileStore）', () => {
       // 分档窗口同理：缺省即空表（= 全部回落环境变量/默认）
       creditWindows: {},
       preferredRotation: {},
+      // 子代理分配表同理：缺省即空表（= 没有已分配的子代理）
+      subagentAssignments: {},
       // 面板入口缺省「仅侧栏」—— 与升级前行为一致
       panelEntry: 'sidebar',
       // 顺序缺省空数组（未自定义）—— 与升级前行为一致
@@ -923,6 +929,8 @@ describe('文件后端（FileStore）', () => {
       // 分档窗口同理：缺省即空表（= 全部回落环境变量/默认）
       creditWindows: {},
       preferredRotation: {},
+      // 子代理分配表同理：缺省即空表（= 没有已分配的子代理）
+      subagentAssignments: {},
       // 面板入口同理：写盘时缺省即「仅侧栏」，读回同值。
       panelEntry: 'sidebar',
       // 顺序缺省空数组（未自定义）：读回同值。

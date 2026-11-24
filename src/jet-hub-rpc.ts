@@ -143,7 +143,9 @@ import { isMinimaxRefreshable, minimaxCredentialExpiresAtMs } from './minimax.js
 import {
   PANEL_ENTRY_VALUES,
   ROTATION_START_TIERS,
+  SUBAGENT_START_MODES,
   isRotationStartTier,
+  isSubagentStartMode,
   sanitizeMinimaxXff,
 } from './jet-hub-store.js'
 // 「限流中断后解禁再继续」的状态出口（控制器在 `rate-limit-resume.ts` 的模块级
@@ -307,27 +309,6 @@ import {
   fetchCompensationStatus,
 } from './buddy-compensation.js'
 import { collectBuddyGrowth } from './buddy-growth.js'
-/**
- * ⚠️ **`collectBuddyGrowth` 已搬到 `src/buddy-growth.ts`**（2026-10-08 Task 4），
- * 并在此**原样再导出**以保持既有调用点与用例的 import 路径不变。
- *
- * 搬家的理由（不是洁癖）：它是 `credits.afterClaim` 的实现，而 `afterClaim`
- * 由 `src/provider-credits.ts` 的能力表提供。留在本文件会让那张表必须 import
- * 本文件 ⇒ `provider-credits.ts ⇄ jet-hub-rpc.ts` **循环 import**（本文件已经
- * import 前者）。搬到 `buddy-growth.ts` 后依赖是单向的：
- * `jet-hub-rpc.ts` → `provider-credits.ts` → `buddy-growth.ts`。
- *
- * ⚠️ **本再导出是过渡形态**，不是接口：新代码应直接从 `buddy-growth.js` 取。
- * 它由 `tests/unit/buddy-growth.spec.ts` 的 import 覆盖（唯一的生产消费者是
- * `src/provider-credits.ts`，它**直接从 `buddy-growth.js` 取**，不经过本文件）。
- *
- * ⚠️ **2026-10-08 修正（Task 4 复审 Finding 1）**：本 import 原先还捎带了一个
- * 成长引擎的**死 import**（本文件零调用），本条注释一度把它写成「本文件与成长
- * 引擎的接缝」—— 那会让「谁调用成长引擎」这个问题在本文件里得到一个**假答案**。
- * 现已删除该名字，并改正本注释：本文件**不持有**任何成长引擎入口，成长任务的
- * 唯一生产入口是 `provider-credits.ts` 的 `afterClaim`（由 `credits.claimAll`
- * 消费）。别再回到这里找。
- */
 export { collectBuddyGrowth }
 
 /**
@@ -515,6 +496,10 @@ import type {
   CatalogHealth,
 
   ProviderAccountStatus,
+  RpcSubagentRotationSetting,
+  RpcCreditWindowModelsRequest,
+  RpcCreditWindowModelEntry,
+  RpcCreditWindowModelsResponse,
 } from './types.js'
 import {
   BADGE_PREFERENCES,
@@ -8183,7 +8168,68 @@ function registerJetHubEndpoints(
          * ⇒ 两边同口径：只数启用账号。
          */
         const mine = all.filter((a) => a.provider === req.provider && a.enabled !== false)
-        const selectedId = pool.preferredRotationFor(req.provider, req.sessionId) ?? null
+        /**
+         * ★★★ **子代理会话：显示它实际使用的账号位次**
+         *（2026-11-24 用户需求）。
+         *
+         * ## 用户原话
+         *
+         * > 「我想知道，可以做到在打开子代理对话页面时，下面积分胶囊可以做到：
+         * >   子代理被拉起时是哪个帐号拉起的，积分胶囊就显示哪个帐号吗？
+         * >   ……我想要子代理对话页面，达到跟主代理对话页面一样的效果，
+         * >   从页面就能看出这个对话是跟哪个帐号在进行的」
+         *
+         * ## 缺陷
+         *
+         * `preferredRotation` 是**按 sessionId 单独配置**的表 —— 用户只会在
+         * **主代理**会话里选起点，子代理的 sessionId 永远不在那张表里
+         * ⇒ `preferredRotationFor()` 返回 `undefined` ⇒ 胶囊显示「默认」
+         * ⇒ 用户看不出子代理在用哪个号。
+         *
+         * ## 修法
+         *
+         * 子代理的账号是**自动分配**的（`subagentAssignments[provider][sid]`），
+         * 记在 `pinnedAccountId` 里。⇒ 该会话是子代理时，用 pin 的 id 当
+         * 「起点」去算位次。
+         *
+         * ## ⚠️ 三态语义（必须与胶囊的既有渲染对齐）
+         *
+         * | 情况 | `selectedPosition` | 胶囊显示 |
+         * |---|---|---|
+         * | 主代理 + 选了起点 | 位次数字 | 「位次 N」|
+         * | 主代理 + 没选 | `null` | 「默认」|
+         * | **子代理 + 已 pin** | **位次数字** | **「位次 N」** ← 本改动 |
+         * | 子代理 + 未 pin（首轮还没选）| `null` | 「默认」|
+         *
+         * ⚠️ **只读、不写**：主代理那条腿仍走 `preferredRotationFor`，本改动
+         * 不碰 `preferredRotation` 表（否则会把「自动分配」污染成「用户选择」，
+         * 下次主代理打开下拉框会看到一个它没选过的值）。
+         *
+         * ⚠️ **优先级**：子代理的 pin **优先于** `preferredRotationFor`
+         * —— 万一某子代理的 sessionId 恰好也在 `preferredRotation` 里（不可能
+         * 但防御），行为应是「显示它实际用的号」，而不是「用户给它选的起点」。
+         */
+        /**
+         * ★★★ **三级优先级，与 `credential-resolver.ts` 逐字同构**
+         *（2026-11-24 用户定 B 方案）。
+         *
+         * | 级 | 来源 | 含义 |
+         * |---|---|---|
+         * | ① | `userPickedAccountId` | **用户手动选的** |
+         * | ② | `pinnedAccountId` | 系统拉起时固定/重算的 |
+         * | ③ | `preferredRotationFor` | 主代理那条腿（子代理恒 undefined）|
+         *
+         * ⚠️ 顺序**必须与 resolver 一致**，否则会出现「弹窗显示位次 3、
+         * 实际用位次 5」这种自相矛盾的界面 —— 用户会以为保存失败了。
+         *
+         * ⚠️ 主代理没有分配记录 ⇒ 前两级都是 `undefined` ⇒ 走 `preferredRotationFor`
+         *   （与改动前逐字相同，零回归）。
+         */
+        const subagentAssign = pool.subagentAssignmentOf?.(req.provider, req.sessionId)
+        const subagentPin = subagentAssign?.userPickedAccountId ?? subagentAssign?.pinnedAccountId
+        const selectedId = subagentPin !== undefined
+          ? subagentPin
+          : (pool.preferredRotationFor(req.provider, req.sessionId) ?? null)
         /**
          * ⚠️ **`selectedPosition` 是客户端要用的那个**（下拉框 value = 位次）。
          *
@@ -8235,11 +8281,111 @@ function registerJetHubEndpoints(
          * 而 `selected` 仍按 `id` 比对，故补全不影响选中态。
          */
         const enriched = await enrichAccountIdentity(mine, req.provider)
+        /**
+         * ★★★ **当前模型的显示名**（2026-11-24 用户要求）。
+         *
+         * ## 用户原话
+         *
+         * > 「模型名字要跟主代理的模型列表一模一样，
+         * >   也就是跟档次窗口模型下拉框的一模一样呀」
+         *
+         * ## 缺陷
+         *
+         * 会话快照里只有 `model`（**id**，如 `hy4flash-free`），而档次窗口
+         * 下拉框显示的是 `name`（如 `Hy4 flash · x0.00→免费 FREE`）。
+         * ⇒ 胶囊直接显示 id 时，**同一个模型出现两个名字**（用户已实测发现）。
+         *
+         * ## 为什么放本端点
+         *
+         * 胶囊组件**拿不到 `rpcCall`**（props 只有 `readRotation` /
+         * `writeRotation` / `resolveDirectory` 等注入项）⇒ 无法自己调
+         * `credits.window.models`。而本端点**已经**收到 `modelId`
+         * （客户端传的 `currentModel`）⇒ 顺手回 `modelName` 最省。
+         *
+         * ⚠️ 取宿主目录的 `name`（与 `credits.window.models` **同一个取数路径**
+         *   `ctx.llm.listModels`），**不自己拼**（id + 倍率）—— 拼法必然漂移。
+         *
+         * ⚠️ 目录里没有该模型 / 目录未就绪 ⇒ 省略该键 ⇒ 客户端回落显示 id
+         *   （至少有信息，不空白）。
+         */
+        let modelDisplayName: string | undefined
+        if (modelId !== undefined && ctx.llm !== undefined) {
+          try {
+            const list = await ctx.llm.listModels(req.provider)
+            const hit = list.find((m) => m.id === modelId)
+            const name = typeof hit?.name === 'string' ? hit.name.trim() : ''
+            if (name.length > 0) modelDisplayName = name
+          } catch {
+            /* 目录读不到 ⇒ 省略（客户端回落显示 id） */
+          }
+        }
+        /**
+         * ★ **选中账号的显示名**（2026-11-24 用户要求「方案 B」）。
+         *
+         * ## 用户原话
+         *
+         * > 「我想要子代理对话页面，达到跟主代理对话页面一样的效果，
+         * >   从页面就能看出这个对话是跟哪个帐号在进行的」
+         *
+         * 用户在同一次对话里选了 **B 方案**：胶囊显示 `位次 3 · 陈水广`
+         * 而不是只显示 `位次 3`。
+         *
+         * ## 为什么由服务端下发
+         *
+         * 客户端只拿到 `selected`（accountId），而**账号显示名需要补全**
+         *（codearts 的池内 `nickname` 就是池 id、qoder 系要读网页会话等）——
+         * 补全链路 `enrichAccountIdentity()` 在服务端。
+         *
+         * ⚠️ 客户端**不要**自己从 `accounts` 数组里 find：
+         * 那个数组里的 `nickname` 也已补全，能 find 到 —— 但
+         * 「选中项的名字」是**一个独立事实**，由服务端一次给出，
+         * 免得客户端在两处各写一遍 find（本仓红线：同一语义两处实现必然漂移）。
+         *
+         * ⚠️ 取不到（账号已被删/停用）⇒ `undefined`（省略该键）⇒
+         * 客户端回落成只显示「位次 N」，与改动前逐字相同。
+         */
+        /**
+         * ⚠️⚠️ **只在子代理会话下发账号名**（2026-11-24 用户第二次定案）。
+         *
+         * ## 用户原话
+         *
+         * > 「主对话会面不需要显示帐号名，只要原来的位次就行，跟子代理对话页面不同」
+         *
+         * ## 为什么两个页面要区别对待
+         *
+         * | 页面 | 用户关心什么 | 显示 |
+         * |---|---|---|
+         * | **主代理** | 「我选的起点生效了吗」| `位次 2` —— 只反映**用户的选择** |
+         * | **子代理** | 「这个子代理在用哪个号」| `位次 2 · 177****4916` |
+         *
+         * ⚠️ 主代理页面显示账号名反而有害：那里的位次是**用户自己选的**，
+         * 加个名字会让人以为「系统给我换了个号」，而实际上位次就是全部信息。
+         *
+         * ## 判据：`subagentAssign !== undefined`
+         *
+         * 分配表**只登记子代理**（主代理永不登记）——
+         * 这与 `credential-resolver.ts` 里选号用的判据**完全同源**，
+         * 不另写一套（本仓红线：同一语义不得两套判据）。
+         *
+         * ⚠️ 子代理也可能**暂时没有分配记录**（首轮还没登记完）
+         * ⇒ 那时也不下发名字 ⇒ 显示 `位次 N`
+         *（但子代理首轮通常 `selectedPosition` 也是 `null` ⇒ 显示「默认」）。
+         */
+        const isSubagentSessionForBadge = subagentAssign !== undefined
+        const selectedAccountName = selectedId === null || !isSubagentSessionForBadge
+          ? undefined
+          : (() => {
+            const hit = enriched.find((a) => a.id === selectedId)
+            const name = typeof hit?.nickname === 'string' ? hit.nickname.trim() : ''
+            return name.length === 0 ? undefined : name
+          })()
         return {
           ok: true,
           value: {
             selected: selectedId,
             selectedPosition,
+            ...(modelDisplayName === undefined ? {} : { modelName: modelDisplayName }),
+            ...(selectedAccountName === undefined ? {} : { selectedAccountName }),
             locked,
             /**
              * ★ **起点选定时的档位快照**（S6，2026-11-20）。
@@ -8366,16 +8512,67 @@ function registerJetHubEndpoints(
             typeof req.position === 'number' ? req.position : null,
             tierAtSelection,
           )
+          /**
+           * ★★★ **子代理场景：把用户选择记进分配表**（2026-11-24 用户定 B 方案）。
+           *
+           * ## 为什么光写 `preferredRotation` 不够
+           *
+           * 子代理的账号选择有**三级优先级**（见 `credential-resolver.ts`）：
+           * `userPickedAccountId` > `pinnedAccountId` > `slot` 现算。
+           *
+           * 用户在本页面选起点时，`preferredRotation[provider][sid]` 会被写入 ——
+           * 但 resolver **在 pin 命中时根本不看它**（pin 优先）⇒ 用户的选择
+           * **静默无效**，弹窗还会立刻变回 pin 的位次（看起来像保存失败）。
+           *
+           * ⇒ 必须额外写 `userPickedAccountId`（最高优先级）。
+           *
+           * ## ⚠️ 位次 → 账号 id 的换算口径必须与 resolver 一致
+           *
+           * 用 **全量启用账号**（`enabled !== false`，池序 1-based），
+           * 与 `account.getRotation` 的 `mine`、resolver 的 `enabledIds`
+           * **逐字同口径** —— 否则用户选「位次 3」，实际生效的是另一个号。
+           *
+           * ## ⚠️ 非子代理（主代理）不写
+           *
+           * 主代理没有分配记录，`setUserPickedAccount` 会因
+           * `assignments[sessionId] === undefined` 而原样返回 ⇒ 无副作用。
+           */
+          if (typeof req.position === 'number') {
+            const allForPick = await pool.listAllAccounts()
+            const pickId = allForPick
+              .filter((a) => a.provider === req.provider && a.enabled !== false)
+              [req.position - 1]?.id
+            if (pickId !== undefined) {
+              await pool.setUserPickedAccount?.(req.provider, req.sessionId, pickId)
+            }
+          } else {
+            /**
+             * `position === null` ⇒ 用户点了「恢复默认」⇒ **清除**手动选择
+             * （回落到 pin 的语义）。
+             *
+             * ⚠️ 传 `undefined` 而不是 `''`：与 `setUserPickedAccount` 的
+             * 「清除」语义对齐（它自己也会把空串归一成清）。
+             */
+            await pool.setUserPickedAccount?.(req.provider, req.sessionId, undefined)
+          }
         } catch (error) {
           return {
             ok: false,
             error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) },
           }
         }
+        /**
+         * ⚠️ 返回值里的 `selected` 必须反映**实际生效**的那个号。
+         *
+         * 子代理场景下用户刚写的 `userPickedAccountId` 优先级最高
+         * ⇒ 回传它（而不是 `preferredRotationFor`），否则弹窗会显示
+         * 「你选了位次 3，但选中态还是位次 5」这种自相矛盾的界面。
+         */
+        const userPickedNow = pool.subagentAssignmentOf?.(req.provider, req.sessionId)?.userPickedAccountId
         return {
           ok: true,
           value: {
-            selected: pool.preferredRotationFor(req.provider, req.sessionId) ?? null,
+            selected: userPickedNow ?? (pool.preferredRotationFor(req.provider, req.sessionId) ?? null),
             /** ⚠️ 回传落盘后的档位（客户端据此确认新规则已生效）。 */
             tierAtSelection: pool.rotationStartTierFor(req.provider, req.sessionId) ?? null,
           },
@@ -12793,6 +12990,137 @@ function registerJetHubEndpoints(
       // 都通过 `resolveCreditWindow` **每次现读** `pool.creditWindow`，
       // 没有任何缓存 —— 这是本功能的硬承诺，改动消费者时不能破坏它
       //（`tests/unit/credit-window.spec.ts` 有守卫）。
+      /**
+       * ★ RPC: 档次窗口「固定帐号」下拉用的**启用账号位次表**（2026-11-23）。
+       *
+       * ## 为什么不复用 `account.getRotation`
+       *
+       * 那个端点的 `sessionId` 是**必填**的（它回答「本会话的起点是哪位」）。
+       * 而档次窗口的「固定帐号」是**跨会话的 provider 级配置** ——
+       * 它只需要「有哪些号、各自位次是多少」，与当前会话无关。
+       *
+       * ⚠️ 传一个假 sessionId 去骗过必填校验是**错的**：那会让
+       * `preferredRotationFor` 返回一个与该会话无关的值，语义混乱。
+       *
+       * ## 位次口径
+       *
+       * **只数启用账号**（`enabled !== false`），按池序 1-based ——
+       * 与 `account.getRotation` 的 `mine` **逐字同口径**，
+       * 否则用户在两处看到的「位次 3」会指向不同的号。
+       */
+      case 'credits.window.accounts': {
+        const req = payload as { provider?: unknown }
+        if (typeof req?.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        const all = await pool.listAllAccounts()
+        const mine = all.filter((a) => a.provider === req.provider && a.enabled !== false)
+        const value = {
+          accounts: mine.map((a, index) => ({
+            position: index + 1,
+            id: a.id,
+            nickname: a.nickname ?? '',
+          })),
+        }
+        return { ok: true, value }
+      }
+
+      /**
+       * ★ RPC: 档次窗口用的「已启用模型 + 思考强度」清单（2026-11-23）。
+       *
+       * ## 作用
+       *
+       * 给「子代理模型」下拉供数：
+       *
+       * | 需求 | 来源 |
+       * |---|---|
+       * | 只列**已启用**的模型 | `pool.listDisabledModels()` 过滤（与设置页同一个真源）|
+       * | 每个模型的思考档位 | `ctx.llm.listModels()` 的 `reasoning.efforts` |
+       * | 默认档位 | 渠道偏好 `preferHighestEffort` ⇒ 取最强档 |
+       *
+       * ⚠️ **不折叠 `efforts` 为空**的模型：它照样可选（只是不显示强度下拉）。
+       *
+       * ⚠️ 没有任何模型 ⇒ 返回空数组而不是报错（UI 显示「本渠道暂无已启用模型」）。
+       */
+      case 'credits.window.models': {
+        const req = payload as RpcCreditWindowModelsRequest
+        if (typeof req?.provider !== 'string' || req.provider.length === 0) {
+          return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+        }
+        if (ctx.llm === undefined) {
+          return { ok: false, error: { code: 'bad-request', message: 'llm 服务不可用' } }
+        }
+        let list: ReadonlyArray<{ id: string; name: string }>
+        try {
+          list = await ctx.llm.listModels(req.provider)
+        } catch (error) {
+          return {
+            ok: false,
+            error: { code: 'bad-request', message: `读取模型列表失败：${error instanceof Error ? error.message : String(error)}` },
+          }
+        }
+        /**
+         * ⚠️ **只保留已启用的**（用户 2026-11-23 要求：「就是设置里面启用的模型才行」）。
+         *
+         * 判据复用 `pool.listDisabledModels()` —— 与设置页的开关**同一真源**，
+         * 不另写一套（本仓红线：同一语义不得两套判据）。
+         */
+        const disabled = pool.listDisabledModels(req.provider)
+        const models: RpcCreditWindowModelEntry[] = []
+        for (const m of list) {
+          if (disabled[m.id] === true) continue
+          /**
+           * ⚠️⚠️ **思考档位必须走 `resolveModel()`，不能用 `listModels()`**
+           *（2026-11-24 用户报障：「deepseek 就是有思考强度的呀」）。
+           *
+           * ## 缺陷
+           *
+           * 上一版从 `listModels()` 的返回值取 `m.reasoning?.efforts` ——
+           * 但**骨架的 `toModelInfo()` 根本不输出 `reasoning` 字段**
+           *（它只写 `provider` / `id` / `name` / `inputModalities` /
+           * `description` / `contextWindow` / `badge`）。
+           *
+           * ⇒ 我这边拿到的 `efforts` **恒为空** ⇒ UI 永远显示「该模型无思考档位」。
+           * ⇒ 而**主对话窗口**能正常选 `Extra High`，因为宿主用的是
+           *    `resolveModel()`（它才读 `CatalogEntry.reasoning`）。
+           *
+           * ## 修法
+           *
+           * 对每个已启用的模型调 `resolveModel()` 取 `reasoning`。
+           *
+           * ⚠️ 逐模型查是 N 次调用，但 `resolveModel` 走的是**内存目录**
+           *（`CatalogEntry` 已在适配器里备好），没有网络往返 —— 实测几十个
+           *模型也在毫秒级。
+           *
+           * ⚠️ 单个模型 `resolveModel` 失败**不能拖垮整批**：吞掉并给空 `efforts`
+           *（最坏结果是「该模型没有强度下拉」，而不是整个端点 500）。
+           */
+          let reasoning: { efforts?: ReadonlyArray<{ id: string; name: string }>; defaultEffort?: string } = {}
+          try {
+            const resolved = await ctx.llm.resolveModelInfo(req.provider, m.id)
+            reasoning = (resolved?.reasoning ?? {}) as typeof reasoning
+          } catch { /* 单个失败 ⇒ 当作「无思考档位」 */ }
+          const efforts = (reasoning.efforts ?? []).map((e) => ({ id: e.id, name: e.name }))
+          models.push({
+            id: m.id,
+            name: m.name,
+            efforts,
+            ...(reasoning.defaultEffort === undefined ? {} : { defaultEffort: reasoning.defaultEffort }),
+          })
+        }
+        /**
+         * ⚠️ **不引入 `preferHighestEffort` 这个新设置**（2026-11-23 简化）。
+         *
+         * 用户要求「默认选择设置里面的默认最高档选择（如果开启）」——
+         * 现成的判据就是模型自己的 `efforts` 数组**最后一项**（强度序，弱→强）。
+         *
+         * 为一个「取数组末项」的动作新增一张持久化设置表，是过度设计
+         * ⇒ 交给 UI 算（见 `credit-window-ui.js` 的 `defaultEffortOf`）。
+         */
+        const value: RpcCreditWindowModelsResponse = { models }
+        return { ok: true, value }
+      }
+
       case 'credits.window.get': {
         const req = payload as RpcCreditWindowGetRequest
         if (typeof req?.provider !== 'string' || req.provider.length === 0) {
@@ -12804,6 +13132,11 @@ function registerJetHubEndpoints(
           imminentDays: resolved.imminentDays,
           source: resolved.source,
           clamped: resolved.clamped,
+          // ★ 子代理设置（没配则省略，保持响应形状与改动前一致）
+          ...(() => {
+            const sub = pool.subagentRotationFor(req.provider)
+            return sub === undefined ? {} : { subagent: sub as unknown as RpcSubagentRotationSetting }
+          })(),
         }
         return { ok: true, value }
       }
@@ -12866,7 +13199,127 @@ function registerJetHubEndpoints(
             ...(windowDays === undefined ? current?.windowDays === undefined ? {} : { windowDays: current.windowDays } : { windowDays }),
             ...(imminentDays === undefined ? current?.imminentDays === undefined ? {} : { imminentDays: current.imminentDays } : { imminentDays }),
           }
-        await pool.setCreditWindow(req.provider, next)
+        /**
+         * ⚠️⚠️ **两个天数都没传时的两种语义必须分开**（2026-11-24 真缺陷）。
+         *
+         * ## 症状（用户原话）
+         *
+         * > 「只要在模型下拉框重新选择模型了，点击保存后，
+         * >   档次窗口中的短期和临期天数就会自动回归默认」
+         *
+         * ## 根因
+         *
+         * 既有契约是「两个天数都不传 ⇒ **恢复默认**（删键）」，
+         * 而「只改子代理设置」的请求**恰好也是**两个天数都不传
+         * ⇒ 被误当成「恢复默认」⇒ 窗口天数被抹掉。
+         *
+         * ⇒ 两种意图必须区分：
+         *
+         * | 请求形状 | 意图 | 动作 |
+         * |---|---|---|
+         * | 只有 `provider` | 恢复默认 | **删键**（走 `setCreditWindow(undefined)`）|
+         * | `provider` + `subagent` | 只改子代理 | **完全不碰窗口天数** |
+         *
+         * ⚠️ 判据是「本次请求**是否带了 `subagent` 键**」，不是「`subagent` 是否为
+         *    `null`」—— 传 `null` 是「清除子代理设置」，那同样是「只改子代理」，
+         *    不该顺带重置窗口天数。
+         *
+         * ⚠️ 不能用「池里当前是否有 subagent」当判据：那是**服务端状态**，
+         *    与用户这次的意图无关（老数据没 subagent 时反而会被误判成恢复默认）。
+         */
+        const hasSubagentKey = req.subagent !== undefined
+        /**
+         * `next !== undefined` ⇒ 本次带了天数 ⇒ 正常合并写入。
+         * `next === undefined` 且没带 subagent ⇒ 真的「恢复默认」⇒ 删键。
+         * `next === undefined` 但带了 subagent ⇒ **只改子代理** ⇒ 跳过。
+         */
+        if (next !== undefined || !hasSubagentKey) {
+          await pool.setCreditWindow(req.provider, next)
+        }
+        /**
+         * ★★★ **子代理设置**（2026-11-23）。
+         *
+         * ## 语义
+         *
+         * | 传入 | 行为 |
+         * |---|---|
+         * | `undefined`（不传该键）| **不动**（合并语义，与 windowDays 一致）|
+         * | `null` | **清除** |
+         * | 对象 | **严格校验**后写入 |
+         *
+         * ## ⚠️ 非法值一律 `bad-request`，**不静默丢弃**
+         *
+         * 静默丢弃会让用户以为「新设置已生效」（他确实点了保存），
+         * 实际跑的还是旧配置 —— 症状是「我设了顺序分布，怎么还是同一个号」，
+         * 且零报错、无从排查。
+         * ⇒ 宁可拒绝这次写入，让用户看到明确错误（与 `account.setRotation`
+         *   的 `tierAtSelection` 校验同款纪律）。
+         */
+        const rawSub = req.subagent
+        if (rawSub !== undefined) {
+          if (rawSub === null) {
+            await pool.setSubagentRotation(req.provider, undefined)
+          } else {
+            /** ① `startMode` 必须是合法枚举。 */
+            if (!isSubagentStartMode(rawSub.startMode)) {
+              return {
+                ok: false,
+                error: {
+                  code: 'bad-request',
+                  message: `subagent.startMode 必须是 ${SUBAGENT_START_MODES.join(' / ')} 之一`
+                    + `（收到 ${JSON.stringify(rawSub.startMode)}）`,
+                },
+              }
+            }
+            /**
+             * ② `fixed` 模式**必须有合法位次**，且必须在范围内。
+             *
+             * ⚠️ 范围校验用**启用账号数**（与 `account.setRotation` 同口径）：
+             * 否则用户会得到一个「选了永远不生效」的设置。
+             */
+            if (rawSub.startMode === 'fixed') {
+              const pos = rawSub.fixedPosition
+              if (typeof pos !== 'number' || !Number.isInteger(pos) || pos < 1) {
+                return {
+                  ok: false,
+                  error: {
+                    code: 'bad-request',
+                    message: `subagent.fixedPosition 必须是正整数（收到 ${JSON.stringify(pos)}）`,
+                  },
+                }
+              }
+              const enabledCount = (await pool.listAllAccounts())
+                .filter((a) => a.provider === req.provider && a.enabled !== false).length
+              if (pos > enabledCount) {
+                return {
+                  ok: false,
+                  error: {
+                    code: 'bad-request',
+                    message: `subagent.fixedPosition ${pos} 超出范围（共 ${enabledCount} 个启用账号）`,
+                  },
+                }
+              }
+            }
+            /** ③ 模型 / 思考强度：非空字符串时才接受。 */
+            for (const [key, value] of [
+              ['subagent.model', rawSub.model],
+              ['subagent.reasoningEffort', rawSub.reasoningEffort],
+            ] as const) {
+              if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
+                return {
+                  ok: false,
+                  error: { code: 'bad-request', message: `${key} 必须是非空字符串（收到 ${JSON.stringify(value)}）` },
+                }
+              }
+            }
+            await pool.setSubagentRotation(req.provider, {
+              startMode: rawSub.startMode,
+              ...(rawSub.fixedPosition === undefined ? {} : { fixedPosition: rawSub.fixedPosition }),
+              ...(rawSub.model === undefined ? {} : { model: rawSub.model }),
+              ...(rawSub.reasoningEffort === undefined ? {} : { reasoningEffort: rawSub.reasoningEffort }),
+            })
+          }
+        }
         // ⚠️ 与 `credits.permanentLock` 同款：本次写入会改变**选号结果**
         //    （积分落到哪个档位），故广播一次让界面重读状态。
         broadcastCatalogChanged(ctx)
@@ -12880,6 +13333,10 @@ function registerJetHubEndpoints(
           imminentDays: resolved.imminentDays,
           source: resolved.source,
           clamped: resolved.clamped,
+          ...(() => {
+            const sub = pool.subagentRotationFor(req.provider)
+            return sub === undefined ? {} : { subagent: sub as unknown as RpcSubagentRotationSetting }
+          })(),
         }
         return { ok: true, value }
       }

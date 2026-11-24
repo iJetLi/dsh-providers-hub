@@ -236,3 +236,208 @@ export function windowRangeLabels(windowDays, imminentDays) {
 export function coverageLabel(count, totalAccounts) {
   return `覆盖 ${count} 个账号`
 }
+
+// ============================================================================
+// 子代理设置（2026-11-23）
+// ============================================================================
+
+/**
+ * ★ 五个起点策略的**按钮标签**（顺序即渲染顺序）。
+ *
+ * ⚠️ 用户 2026-11-23 亲自定的名字，**不要改**：
+ * 「跟随主代理 / 顺序分布 / 倒序分布 / 哈希分布 / 固定帐号」
+ */
+export const SUBAGENT_MODE_LABELS = [
+  ['follow', '跟随主代理'],
+  ['sequence', '顺序分布'],
+  ['reverse', '倒序分布'],
+  ['hash', '哈希分布'],
+  ['fixed', '固定帐号'],
+]
+
+/**
+ * ★★★ 每个策略的**一行提示**（用户要求「长度不要超过一行」）。
+ *
+ * ## ⚠️ 刻意**不写具体位次**
+ *
+ * 用户 2026-11-23 明确指出：
+ *
+ * > 「提示文字不用写实时的位次选择，因为一个 providers 可能会有多个会话，
+ * >   你无法以哪一个会话为准当主代理。说明原理就行。」
+ *
+ * ⇒ 只讲**语义**，不写「子代理1→位次4」这类具体数字。
+ *
+ * ## ⚠️ 每条都必须强调「仍先烧临期」
+ *
+ * 用户 2026-11-23 纠正过我第一版的错误：
+ *
+ * > 「子代理在分配帐号起点时，肯定也要像主代理一样，遵守档次优先的原则呀」
+ *
+ * ⇒ 提示里头必须让用户看到「档次优先不变」，否则他会以为子代理会乱烧。
+ *
+ * ⚠️ 实测（510px / 10px 字体）**30 字符以内不折行**，故每条都 ≤ 30 字。
+ */
+export const SUBAGENT_MODE_HINTS = {
+  follow: '与主代理同账号起步，档位规则不变（仍先烧临期）',
+  sequence: '子代理在主代理同档位内往后错开，仍先烧临期',
+  reverse: '子代理在主代理同档位内往前错开，仍先烧临期',
+  hash: '按会话 ID 稳定分配同档位账号，仍先烧临期',
+  fixed: '该号绝对优先（无视档位），积分为空或锁定不可用才切换',
+}
+
+/**
+ * 取某模式的提示文本。
+ *
+ * @param mode - 策略 id
+ * @returns 提示文本；未知模式返回 `follow` 的提示（**不返回空串**：
+ *   空白提示会让用户以为界面坏了）
+ */
+export function subagentHintOf(mode) {
+  const hit = SUBAGENT_MODE_HINTS[mode]
+  return hit === undefined ? SUBAGENT_MODE_HINTS.follow : hit
+}
+
+/**
+ * ★★★ 选某模型时，思考强度的**默认值**。
+ *
+ * ## 用户的明确要求（2026-11-23）
+ *
+ * > 「选择了列表中的模型后，右侧出现一个下拉框选择思考强度，
+ * >   思考强度默认选择跟随设置里面的默认最高档选择（如果开启）」
+ *
+ * ## 判据
+ *
+ * | 情况 | 默认值 |
+ * |---|---|
+ * | 模型**不支持**思考（`efforts` 空）| `undefined`（UI **不渲染**强度下拉）|
+ * | 模型有 `defaultEffort` 且**在档位内** | 用它 |
+ * | 否则 | **`efforts` 的最后一项**（强度序：弱 → 强）|
+ *
+ * ⚠️ 「最后一项 = 最强」的依据：本仓统一约定 `efforts` 数组按
+ * **强弱排序**（弱在前），见 `REASONING_EFFORT_RANK`。
+ *
+ * ⚠️ `defaultEffort` 可能**不在** `efforts` 里（上游给了不一致的值）——
+ * 那种情况必须回落，否则 DSH 会抛 `UNSUPPORTED_REASONING_EFFORT`。
+ *
+ * @param entry - 模型条目（含 `efforts` 与可选 `defaultEffort`）
+ * @returns 默认强度 id；不支持思考时 `undefined`
+ */
+export function defaultEffortOf(entry) {
+  if (entry === null || typeof entry !== 'object') return undefined
+  const efforts = Array.isArray(entry.efforts) ? entry.efforts : []
+  if (efforts.length === 0) return undefined
+  const declared = typeof entry.defaultEffort === 'string' ? entry.defaultEffort : ''
+  if (declared.length > 0 && efforts.some((e) => e !== null && typeof e === 'object' && e.id === declared)) {
+    return declared
+  }
+  const last = efforts[efforts.length - 1]
+  return last !== null && typeof last === 'object' && typeof last.id === 'string' ? last.id : undefined
+}
+
+/**
+ * 校验「子代理设置」草稿是否可保存。
+ *
+ * ## 为什么需要它
+ *
+ * 服务端对非法值一律回 `bad-request`（不静默丢弃）。若 UI 不先挡，
+ * 用户会看到一条 RPC 错误，而不是「哪个字段填错了」。
+ *
+ * @param draft - 草稿（`{ startMode, fixedPosition, model, reasoningEffort }`）
+ * @returns `{ ok: true }` 或 `{ ok: false, message }`
+ */
+export function validateSubagentDraft(draft) {
+  if (draft === null || typeof draft !== 'object') {
+    return { ok: false, message: '设置为空' }
+  }
+  const mode = draft.startMode
+  const known = SUBAGENT_MODE_LABELS.some(([id]) => id === mode)
+  if (!known) return { ok: false, message: '请选择一个起点策略' }
+  if (mode === 'fixed') {
+    /**
+     * ⚠️ `fixed` 必须有位次：没有位次的 fixed 等价于「不指定」，
+     * 服务端也会拒绝（见 `sanitizeSubagentRotation`）。
+     */
+    const pos = draft.fixedPosition
+    if (typeof pos !== 'number' || !Number.isInteger(pos) || pos < 1) {
+      return { ok: false, message: '「固定帐号」必须选一个账号' }
+    }
+  }
+  return { ok: true }
+}
+
+/**
+ * 把草稿整理成 RPC 载荷（`undefined` 字段一律省略，避免污染合并语义）。
+ *
+ * ⚠️ `startMode === 'fixed'` 之外的模式**不带 `fixedPosition`** ——
+ * 留着会让下次切回 fixed 时用到上次的位次（用户会困惑「怎么自己选了」）。
+ */
+export function subagentPayloadOf(draft) {
+  if (draft === null || typeof draft !== 'object') return undefined
+  const mode = draft.startMode
+  if (mode === undefined) return undefined
+  return {
+    startMode: mode,
+    ...(mode === 'fixed' && typeof draft.fixedPosition === 'number'
+      ? { fixedPosition: draft.fixedPosition }
+      : {}),
+    ...(typeof draft.model === 'string' && draft.model.length > 0 ? { model: draft.model } : {}),
+    ...(typeof draft.reasoningEffort === 'string' && draft.reasoningEffort.length > 0
+      ? { reasoningEffort: draft.reasoningEffort }
+      : {}),
+  }
+}
+/**
+ * ★★★ 是否有未保存的改动（2026-11-24 用户报障后抽出成纯函数）。
+ *
+ * ## 缺陷（报障原文：「保存按钮没法点击呀」）
+ *
+ * 上一版这个判断内联在组件里，且只比了窗口天数：
+ *
+ *     String(saved.windowDays) !== draftWindow.trim()
+ *     || String(saved.imminentDays) !== draftImminent.trim()
+ *
+ * 用户只改「子代理设置」（起点策略 / 模型 / 思考强度）时恒 false
+ * 于是保存按钮一直是灰的、点不动。
+ *
+ * 抽成纯函数的原因：内联在组件里就测不到（判据埋在装配层 = 没测试）。
+ *
+ * ## 判据：四组字段分别比
+ *
+ * - 窗口：windowDays / imminentDays（字符串草稿 vs 数字已存值）
+ * - 子代理：startMode / fixedPosition / model / reasoningEffort
+ *
+ * undefined 与「缺省」必须归一化后再比：
+ * saved.subagent.startMode 可能是 undefined，而草稿预填成 follow，
+ * 不归一化会让「刚打开就算 dirty」（假脏）。
+ *
+ * @param input - { saved, draftWindow, draftImminent, subDraft }
+ * @returns 是否有改动
+ */
+export function isWindowDirty(input) {
+  const src = input === null || typeof input !== 'object' ? {} : input
+  const saved = src.saved
+  /** 没加载完一律不算 dirty（否则刚打开就能点保存，会发出空请求）。 */
+  if (saved === null || typeof saved !== 'object') return false
+  const draftWindow = typeof src.draftWindow === 'string' ? src.draftWindow.trim() : ''
+  const draftImminent = typeof src.draftImminent === 'string' ? src.draftImminent.trim() : ''
+  if (String(saved.windowDays) !== draftWindow) return true
+  if (String(saved.imminentDays) !== draftImminent) return true
+  const subDraft = src.subDraft
+  if (subDraft === null || typeof subDraft !== 'object') return false
+  const savedSub = saved.subagent
+  const savedObj = savedSub === null || typeof savedSub !== 'object' ? {} : savedSub
+  /**
+   * ⚠️⚠️ **`startMode` 的 `follow` 与「未配置」必须视为同一件事**
+   *（2026-11-24 实测：不归一化会让「刚打开就显示可保存」）。
+   *
+   * 依据：服务端 `subagentSettingActive()` 明确把
+   * 「`follow` + 无模型」等同于「没配」（见 `subagent-rotation.ts`）。
+   * ⇒ 客户端这条判据必须与它**同口径**，否则两边对「有没有改动」结论不同。
+   */
+  const normMode = (v) => (typeof v === 'string' && v.length > 0 ? v : 'follow')
+  if (normMode(subDraft.startMode) !== normMode(savedObj.startMode)) return true
+  if ((subDraft.fixedPosition ?? 0) !== (savedObj.fixedPosition ?? 0)) return true
+  if ((subDraft.model ?? '') !== (savedObj.model ?? '')) return true
+  if ((subDraft.reasoningEffort ?? '') !== (savedObj.reasoningEffort ?? '')) return true
+  return false
+}

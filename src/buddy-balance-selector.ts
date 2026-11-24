@@ -462,6 +462,45 @@ export class BuddyBalanceSelector<
    * `BUDDY_BALANCE_ERROR_CACHE_TTL_MS`）：把一次抖动缓存满 60 秒，会让
    * 「查不到」伪装成「额度用尽」整整一分钟。
    */
+  /**
+   * ★★★ **从缓存读某账号当前的档位**（2026-11-24，上游审计 P1-3 的修复）。
+   *
+   * ## 为什么要它
+   *
+   * `credential-resolver.ts` 的 `sameTierAsMainStart()` 需要「主代理起点在哪个档」
+   * 才能把子代理的错开限制在**同一档位内**（用户要求「档次优先不变」）。
+   *
+   * ⚠️ **上游审计实测：全仓零实现** ⇒ 那个函数恒走 `typeof !== 'function'` 的
+   * 降级分支 ⇒ 退化为「全量账号」⇒ 子代理可能**先烧永久积分**（违背档次优先）。
+   *
+   * ## ⚠️ 只读缓存，绝不发起网络请求
+   *
+   * 选号路径**不能**因为查档位而多打一次上游（那会把每一发请求的延迟翻倍）。
+   * 缓存没有 / 已过期 ⇒ 返回 `undefined`，由调用方降级（它已支持）。
+   *
+   * ⚠️ 「过期」的判据与 `balanceOf` 的**长 TTL** 一致（成功 60s / 失败 5s）：
+   * 缓存里的原料本身是好的，只是可能旧了 —— 但「档位」这种粗粒度判断
+   * 60 秒内变化极小，且 `splitBuddyCreditsByExpiry` 会用**当前时刻**重算，
+   * 所以旧原料也能给出正确的「相对档位」。
+   *
+   * @returns 0=临期 / 1=短期 / 2=永久 / 3=不可用；无缓存或读失败 ⇒ `undefined`
+   */
+  cachedTierOf(account: BuddyCandidateAccount, allowPermanent: boolean): number | undefined {
+    try {
+      const cached = this.cache.get(account.id)
+      if (cached === undefined) return undefined
+      const now = this.deps.now?.() ?? Date.now()
+      /**
+       * ⚠️ 用 `classify()` 而不是自己重算：那是**同一条**分档实现，
+       * 两处各写一份必然漂移（本仓红线）。
+       */
+      const entry = this.classify(account.id, cached.source, now)
+      return buddyBalanceTier(entry, { allowPermanent })
+    } catch {
+      return undefined
+    }
+  }
+
   async balanceOf(account: BuddyCandidateAccount): Promise<BuddyAccountBalanceEntry> {
     const now = this.deps.now?.() ?? Date.now()
     const cached = this.cache.get(account.id)
@@ -759,6 +798,20 @@ export interface BuddySelectorLike {
     candidates: readonly BuddyCandidateAccount[],
     options?: BuddyTierOptions,
   ): Promise<BuddySelectionResult>
+  /**
+   * ★★★ **从缓存读某账号当前档位**（2026-11-24，可选能力）。
+   *
+   * 供 `credential-resolver` 的 `sameTierAsMainStart()` 用 —— 它要把子代理的
+   * 错开**限制在主代理起点所在的同一档位内**（用户要求「档次优先不变」）。
+   *
+   * ⚠️ **可选**：单测替身不实现 ⇒ `sameTierAsMainStart` 退化为「全量账号」
+   *（它已支持该降级）。**真实 `BuddyBalanceSelector` 必实现**。
+   *
+   * ⚠️ **只读缓存**，绝不发起网络请求（选号路径不能多打一次上游）。
+   *
+   * @returns 0=临期 / 1=短期 / 2=永久 / 3=不可用；无缓存 ⇒ `undefined`
+   */
+  cachedTierOf?(account: BuddyCandidateAccount, allowPermanent: boolean): number | undefined
 }
 
 /**
@@ -857,6 +910,25 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
      * 跨层守卫在 `tests/unit/rotation-start-tier-passthrough.spec.ts`。
      */
     rotationStartTier?: RotationStartTier
+    /**
+     * ★★★ **起点绝对第一（无视档位变化）**（2026-11-24）。
+     *
+     * 与 `BuddyTierOptions.pinnedFirst` 同义 —— 本字段只是把它从 resolver
+     * 透传到 `selector.select()` 的**通道**，判据仍在 `rotateFromPreferred` 一处。
+     *
+     * ## ⚠️⚠️ **这个字段曾经整条链路断在这里**（真实缺陷，上游审计实测）
+     *
+     * `credential-resolver.ts` 一直在传、`rotateFromPreferred` 一直在读，
+     * **唯独中间的 `pickBuddyAccount` 没声明也没透传** ⇒
+     * `rotateFromPreferred` 永远拿到 `undefined` ⇒ `pinnedHeld` 恒 `false`
+     * ⇒ 子代理的「固定帐号 / 拉起时定死」**完全不生效**，
+     * 且**零报错**（展开语法 `...(cond ? { pinnedFirst } : {})` 绕过了
+     * TS 的 excess-property 检查）。
+     *
+     * ⚠️ 与 #148 的 `rotationStartTier` 被静默丢弃是**同型缺陷**（同一个函数、
+     * 同一种失败方式）—— 那次也是靠端到端用例才发现的。
+     */
+    pinnedFirst?: boolean
   },
 ): Promise<
   | {
@@ -921,6 +993,12 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
          * ⚠️ 同样**每次迭代都带上**（与上面两项同因）。
          */
         ...(options.rotationStartTier === undefined ? {} : { rotationStartTier: options.rotationStartTier }),
+        /**
+         * ⚠️ **必须与 `rotationStartTier` 成对**：子代理传 `pinnedFirst` 是因为
+         * 它**不传**档位快照（那快照属于主代理的起点）—— 只用 `pinnedFirst`
+         * 才能让「不传快照 ⇒ tierStillHeld=false ⇒ 交出首位」那个坑不生效。
+         */
+        ...(options.pinnedFirst === true ? { pinnedFirst: true } : {}),
       },
     )
     if (!picked.ok) {

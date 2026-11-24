@@ -784,7 +784,7 @@ const STYLES = `
 .dim-jh-settingsModal {
   width: min(840px, 100%);
   max-height: min(940px, calc(100vh - 48px));
-  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  border: 1px solid var(--dsw-alias-border-l2);
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
     0 16px 48px rgba(0, 0, 0, 0.38);
@@ -1632,7 +1632,7 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
 .dim-jh-windowModal {
   min-height: 0;
   /* ① 实边框：暗色主题下最可靠的「窗口边界」 */
-  border: 1px solid var(--dsw-alias-border-l2, #3a3d45);
+  border: 1px solid var(--dsw-alias-border-l2);
   /* ② 内描边：浅色主题下的第二道保险（border-l2 在浅色下太淡） */
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary, #fff) 8%, transparent),
@@ -1648,6 +1648,106 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
  *    （用户要求「在红色框里面分别用红色和黄色写明覆盖多少个帐号」= 紧贴输入）。
  */
 .dim-jh-windowField { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+
+/* ===== 子代理设置（2026-11-23）===== */
+/*
+ * 与「分档窗口」同一视觉体系：金色分区标题 + 虚线分隔。
+ * ⚠️ 注释里不写反引号与尖括号：本文件整体是模板字符串，
+ *    反引号会提前闭合字符串（真实构建失败，本仓踩过）。
+ */
+.dim-jh-subagentSection {
+  border-top: 1px dashed var(--dsw-alias-border-l2);
+  margin: 12px 0 10px;
+  padding-top: 10px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.dim-jh-subagentTitle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700;
+  color: #b8860b;
+}
+.dim-jh-subagentNew {
+  padding: 0 5px; border-radius: 4px;
+  font-size: 9px; font-weight: 600;
+  color: var(--dsw-alias-brand-primary, #1677ff);
+  background: rgba(76, 141, 255, 0.16);
+}
+.dim-jh-subagentLabel { font-size: 11px; font-weight: 600; }
+/* 五按钮分段控件：等宽，紧贴一行 */
+.dim-jh-subagentSeg {
+  display: flex;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.dim-jh-subagentSegBtn {
+  flex: 1; min-width: 0;
+  padding: 5px 2px;
+  font: inherit; font-size: 10.5px;
+  border: 0;
+  border-right: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dim-jh-subagentSegBtn:last-child { border-right: 0; }
+.dim-jh-subagentSegBtn[data-on="true"] {
+  background: var(--dsw-alias-brand-primary, #1677ff);
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+  font-weight: 600;
+}
+.dim-jh-subagentSegBtn:disabled { opacity: 0.45; cursor: default; }
+/* 提示：一行，超长省略（用户要求「不要超过一行」） */
+.dim-jh-subagentHint {
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 「固定帐号」的账号选择行 */
+.dim-jh-subagentFixed {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dim-jh-subagentFixedLabel {
+  flex: none; font-size: 10.5px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dim-jh-subagentSelect {
+  flex: 1; min-width: 0;
+  padding: 4px 6px;
+  font: inherit; font-size: 11px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary);
+}
+/* 模型 + 思考强度 同一行 */
+.dim-jh-subagentModelRow { display: flex; gap: 7px; align-items: center; }
+.dim-jh-subagentSelectWide { flex: 1; }
+.dim-jh-subagentEffort { flex: 0 0 112px; }
+/*
+ * 「该模型无思考档位」的提示（2026-11-24）。
+ *
+ * ⚠️ 用 warn 色（不是 tertiary 灰）：这是**用户需要知道的信息**
+ *    （他选了模型却没有强度可选，会以为功能坏了）。
+ * ⚠️ 不写回退值：本仓纪律 —— 回退值只允许 baseline 表里那 6 个。
+ */
+.dim-jh-subagentNoEffort {
+  flex: none;
+  font-size: 10px;
+  color: var(--dsw-alias-state-warn-primary);
+  white-space: nowrap;
+  cursor: help;
+}
+
 .dim-jh-windowLabel { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dim-jh-windowDot { width: 8px; height: 8px; flex: none; border-radius: 999px; }
 .dim-jh-windowDot[data-tone="imminent"] { background: var(--dsw-alias-state-error-primary, #d93025); }
@@ -1957,6 +2057,48 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
    它会连同右侧模型选择器一起溢出。允许收缩后，空间不足时胶囊与选择器一起让位，
    且胶囊内部退化是有序的（先名字出省略号，数字最后才动）。 */
 .dim-jh-badge { position: relative; display: flex; align-items: center; flex: 0 1 auto; min-width: 0; }
+/*
+ * ★★★ 子代理页面的「模型 + 思考强度」pill（2026-11-24 用户需求）。
+ *
+ * ## 为什么需要（本插件自己画）
+ *
+ * 宿主**只在主对话页**渲染模型选择器；子代理对话页宿主不渲染
+ * ⇒ 用户看不出子代理在用哪个模型/哪档强度。
+ *
+ * ## ⚠️ 视觉必须模仿宿主（用户逐字要求）
+ *
+ * 「要注意到思考强度字体是比模型名要暗一点的，要模仿到位，然后是没有下拉的」
+ *
+ * | 元素 | 样式 | 理由 |
+ * |---|---|---|
+ * | 模型名 | label-primary + 11px | 宿主主色 |
+ * | 思考强度 | **label-tertiary（更暗）** | 用户明确要求 |
+ * | 下拉箭头 | **不画** | 用户明确要求；它不可点，画了会误导 |
+ *
+ * ⚠️ 与胶囊之间留 8px：宿主主代理页面就是这个间距感。
+ * ⚠️ 不写回退值：本仓纪律 —— 回退值只允许 baseline 表里那 6 个。
+ */
+.dim-jh-badgeModelPill {
+  display: flex; align-items: center; gap: 5px;
+  margin-left: 10px;
+  font-size: 14px; line-height: 1.5;
+  white-space: nowrap;
+  flex: none;
+}
+/* 模型名：亮色（与宿主的模型选择器同色阶） */
+.dim-jh-badgeModelName {
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+/*
+ * 思考强度：**更暗一档**（用户逐字要求）。
+ * 用 tertiary 而不是 secondary —— secondary 与胶囊内文字同色，
+ * 视觉上会和模型名拉不开差距（实测对比度差只有一档）。
+ */
+.dim-jh-badgeModelEffort {
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
 /* ⚠️ box-sizing 是**显式写出**的，不是修复：button 的 UA 默认样式表本就是
    border-box（实测 offsetWidth 与 max-width 相等）。写上它只为在元素类型被改
    （span/div 默认是 content-box）时语义不悄悄漂移 —— 那种情况下 max-width 会从
