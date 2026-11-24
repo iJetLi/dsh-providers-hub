@@ -2401,6 +2401,81 @@ export function apply(ctx: Context): void {
     }
 
   /**
+   * ★★★ **子代理专属起点与模型的事件接线**（2026-11-23）。
+   *
+   * ## 三个事件各管一件事
+   *
+   * | 事件 | 用途 | 宿主证据 |
+   * |---|---|---|
+   * | `subagent/start` | 记下「这个 sessionId 是子代理 + 父会话 + slot」| `dsh-subagent/lib/index.js:158` |
+   * | `subagent/end` | 标记结束（**保留**记录，供 resume）| 同上 `:166` |
+   * | `agent/pre-step` | 按 sessionId 改写子代理的模型 | `dsh-agent/runtime-types.ts:351` |
+   *
+   * ## 为什么必须用 `ctx.inject(['agents'], …)` 包起来
+   *
+   * `agent/pre-step` 由 `dsh-agent` 提供，`subagent/*` 由 `dsh-subagent` 提供。
+   * 没有这两个服务的 profile（纯 CLI / 精简装配）里，直接 `ctx.on(...)` 会让
+   * 插件**永久 pending**（cordis 的注入语义）。
+   * ⇒ 与既有 `installLoopResume` / `installRateLimitResume` 同款，用 inject 包。
+   *
+   * ⚠️ 只订阅 `agent/pre-step`（不需要 `agents` 的其它能力）——
+   * 事件在 plugin 的 root scope 上声明为可观察，探针已实证能收到
+   *（`subagent/start` payload 带 `parentSessionId` + `id`，实测见提交说明）。
+   */
+  /**
+   * ★★★ **按 sessionId 查父会话 id —— 读宿主会话头**（2026-11-24）。
+   *
+   * ## 这是上游第 3 轮审计建议的**路 1**（原话）
+   *
+   * > 「这个功能现在卡在一个根本障碍上：**插件拿不到「谁是子代理、父是谁」**。
+   * >   三条可能的路，按可行性排：
+   * >   **1. 从宿主会话头读**：`header.parentSession`（`dsh-session` types:76）
+   * >      是**真的有**的……这比 `subagent/start` payload 靠谱得多。」
+   *
+   * ## 为什么它比事件可靠（实测结论）
+   *
+   * | 来源 | 性质 | 失效窗口 |
+   * |---|---|---|
+   * | `subagent/start` 事件 | **瞬时** | 插件晚挂载 / 重启期间的事件**永远收不到** |
+   * | **`session.header.parentSession`** | **持久** | 无 |
+   *
+   * ⚠️ 两者**当前都有值且一致**（P0 探针：payload 的 `parentSessionId` 与
+   *    `session.header.parentSession` 是同一个 id）。⇒ 优先用会话头。
+   *
+   * ## 读取路径（实测确认）
+   *
+   * ```
+   * agents.get(sessionId)?.session?.header?.parentSession
+   * ```
+   *
+   * ⚠️ **必须走 `header` 这一层**：`session.parentSession` 直接读是 `undefined`
+   *    （探针实测，`session` 上只有 `header` / `log` / `deriveMessages` 等）。
+   *
+   * ⚠️ 任何一步拿不到 ⇒ `undefined`（**绝不猜**）。
+   *    主代理没有 `parentSession` ⇒ 自然返回 `undefined` ⇒ 下游判「不是子代理」。
+   */
+  const resolveSubagentParent = (sessionId: string): string | undefined => {
+    try {
+      const registry = (ctx as unknown as {
+        agents?: { get?: (id: string) => unknown }
+      }).agents
+      const agent = registry?.get?.(sessionId)
+      if (agent === undefined || agent === null) return undefined
+      const session = (agent as { session?: unknown }).session
+      if (session === undefined || session === null) return undefined
+      const header = (session as { header?: unknown }).header
+      if (header === undefined || header === null) return undefined
+      const parent = (header as { parentSession?: unknown }).parentSession
+      if (typeof parent !== 'string' || parent.length === 0) return undefined
+      return parent
+    } catch {
+      /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
+      return undefined
+    }
+  }
+
+
+  /**
    * Loomy 的「锁定永久积分 + 无可用账号」报错文案（issue IKMCOO 缺陷 2/3）。
    *
    * ⚠️ **与 buddy 那份分开**（不是漏抽）：Loomy 的口径是「**今日赠送额度**」
@@ -2470,7 +2545,7 @@ export function apply(ctx: Context): void {
     credentialRef: credentialRef(BUDDY_CREDENTIAL_REF),
     resolveCredential: createCredentialResolver<BuddyCredential>(
       // ⚠️ 依赖在**每次 apply() 时**构造一次，闭包捕获的是同一批引用。
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(CODEBUDDY.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(CODEBUDDY.id, id) } },
       {
         product: CODEBUDDY,
         // 优先按「快到期积分」分档选号（锁定永久积分时也走这条，见上）。
@@ -2526,7 +2601,7 @@ export function apply(ctx: Context): void {
     // 选号策略与 CodeBuddy 同款，但用的是**WorkBuddy 自己的锁状态与余额缓存**
     // （两站积分构成不同：实测国际版是「Bonus Pack 14 天 + Free Plan 长期」）。
     resolveCredential: createCredentialResolver<BuddyCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(WORKBUDDY.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(WORKBUDDY.id, id) } },
       {
         product: WORKBUDDY,
         readCredential: resolveBuddyCredentialByRef,
@@ -2622,7 +2697,7 @@ export function apply(ctx: Context): void {
     // 与 buddy 系同一套编排：候选先按「enabled + 模型未受限」筛，
     // 分档只在这批候选内部进行 —— 不能因为某个号积分多就绕开限流标记。
     resolveCredential: createCredentialResolver<LobsteraiCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(LOBSTERAI.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(LOBSTERAI.id, id) } },
       {
         product: LOBSTERAI,
         // ⚠️ 必须传 LobsterAI 自己的解析器：buddy 系那份对它的凭据结构会解析出
@@ -2813,6 +2888,8 @@ export function apply(ctx: Context): void {
     resolveCredential: createCredentialResolver<QoderCredential>(
       {
         pool,
+        /** ⚠️ 路 1：按 sessionId 读宿主会话头的 parentSession（见 resolveSubagentParent）。 */
+        subagentParentForSession: resolveSubagentParent,
         // ⚠️ 这里**必须**处理 `undefined`：没有账号条目可标记时要**清空**，否则
         // 留着过期的 id 会让额度标记落在无辜账号上（见 `activeQoderAccountId`）。
         reportAccount: (id) => {
@@ -2916,6 +2993,8 @@ export function apply(ctx: Context): void {
     resolveCredential: createCredentialResolver<QoderCredential>(
       {
         pool,
+        /** ⚠️ 路 1：按 sessionId 读宿主会话头的 parentSession（见 resolveSubagentParent）。 */
+        subagentParentForSession: resolveSubagentParent,
         // 同国际版：`undefined` 是「清空标记」的有意义事件。
         reportAccount: (id) => {
           activeQoderAccountId.set(QODER_CN.id, id)
@@ -3026,7 +3105,7 @@ export function apply(ctx: Context): void {
     // 与 buddy 系同一套编排：候选先按「enabled + 模型未受限」筛，
     // 分档只在这批候选内部进行 —— 不能因为某个号积分多就绕开限流标记。
     resolveCredential: createCredentialResolver<TraeCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(TRAE.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(TRAE.id, id) } },
       {
         product: TRAE,
         // ⚠️ 必须传 TRAE 自己的解析器（buddy 系那份对它的凭据结构会解析出
@@ -3091,6 +3170,8 @@ export function apply(ctx: Context): void {
     resolveCredential: createCredentialResolver<ClineCredential>(
       {
         pool,
+        /** ⚠️ 路 1：按 sessionId 读宿主会话头的 parentSession（见 resolveSubagentParent）。 */
+        subagentParentForSession: resolveSubagentParent,
         // 记录实际选中的池账号（空串 = 回退到单凭据 ref 模式，见适配器注释）。
         // ⚠️ 取不到号时**必须**置空串，否则旧 id 会让「请求记录」的账号列串味。
         reportAccount: (id) => {
@@ -3268,7 +3349,7 @@ export function apply(ctx: Context): void {
      * 两个行为变更。设计边界是**抽象编排，不抽象协议**。
      */
     resolveCredential: createCredentialResolver<LoomyCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(LOOMY.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(LOOMY.id, id) } },
       {
         product: LOOMY,
         // 复用上面的解析器而不是再写一遍 JSON.parse：两处各写一遍时，
@@ -3372,7 +3453,7 @@ export function apply(ctx: Context): void {
     // 会静默查不到账号（本插件在 workbuddy 上踩过同类坑）。
     // ⚠️ `modelId` 透传：否则模型级限流标记被忽略（详见 buddy 处说明）。
     resolveCredential: createCredentialResolver<RaccoonCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(RACCOON.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(RACCOON.id, id) } },
       {
         product: RACCOON,
         // ⚠️ raccoon 的兜底是**裸 `JSON.parse`**（历史形态，本 Task 逐字保留）。
@@ -3529,7 +3610,7 @@ export function apply(ctx: Context): void {
     // ⚠️ 只从 minimax 自己的账号池取账号，回退到自己的单凭据 ref，
     // 保证不会串用其它 provider 的凭据。
     resolveCredential: createCredentialResolver<MinimaxCredential>(
-      { pool, reportAccount: (id) => {
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => {
           if (id !== undefined) lastPickedMinimaxAccount = id
           if (id !== undefined) reportLedgerAccount(MINIMAX.id, id)
         } },
@@ -3655,7 +3736,7 @@ export function apply(ctx: Context): void {
     // ⚠️ provider 实参必须是 MINIMAX_INTL：写死 MINIMAX 会让国际站永远查不到
     // 自己的账号（本插件在 workbuddy 上踩过同类坑）。
     resolveCredential: createCredentialResolver<MinimaxCredential>(
-      { pool, reportAccount: (id) => {
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => {
           if (id !== undefined) lastPickedMinimaxIntlAccount = id
           if (id !== undefined) reportLedgerAccount(MINIMAX_INTL.id, id)
         } },
@@ -3754,7 +3835,7 @@ export function apply(ctx: Context): void {
     // ⚠️ provider 实参用 GEMINI 而非字面量（同 minimax 的既有约定：
     // 写死字面量在改名/多产品场景下会静默查不到账号）。
     resolveCredential: createCredentialResolver<GeminiCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(GEMINI.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(GEMINI.id, id) } },
       {
         product: GEMINI,
         // ⚠️ 与 raccoon / minimax 同款：兜底是**裸 `JSON.parse`**（历史形态，
@@ -3922,7 +4003,7 @@ export function apply(ctx: Context): void {
   const autoclaw = new AutoclawAuth(ctx)
   const autoclawAdapter = registerAutoclawLlm(ctx, {
     resolveCredential: createCredentialResolver<AutoclawCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(AUTOCLAW.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(AUTOCLAW.id, id) } },
       {
         product: AUTOCLAW,
         // ⚠️ 2026-10-21：改用上面共用的 `resolveAutoclawCredentialByRef`
@@ -4110,7 +4191,7 @@ export function apply(ctx: Context): void {
   const autoclawIntl = new AutoclawAuth(ctx, { product: AUTOCLAW_INTL })
   const autoclawIntlAdapter = registerAutoclawLlm(ctx, {
     resolveCredential: createCredentialResolver<AutoclawCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(AUTOCLAW_INTL.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(AUTOCLAW_INTL.id, id) } },
       {
         product: AUTOCLAW_INTL,
         // ⚠️ 与国内版共用同一个解析器（两站凭据形状逐字相同）。
@@ -4191,7 +4272,7 @@ export function apply(ctx: Context): void {
     // 写死字面量在改名 / 多产品场景下会静默查不到账号）。
     // ⚠️ `modelId` 透传：否则模型级限流标记被忽略（见 buddy 处说明）。
     resolveCredential: createCredentialResolver<AccioCredential>(
-      { pool, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(ACCIO.id, id) } },
+      { pool, subagentParentForSession: resolveSubagentParent, reportAccount: (id) => { if (id !== undefined) reportLedgerAccount(ACCIO.id, id) } },
       {
         product: ACCIO,
         // ⚠️ 与 raccoon / minimax / gemini 同款：兜底是**裸 `JSON.parse`**（历史形态，
@@ -4435,7 +4516,7 @@ export function apply(ctx: Context): void {
     }),
   })
   const magicrewResolver = createCredentialResolver<MagicrewCredential>(
-    { pool: pool as never },
+    { pool: pool as never, subagentParentForSession: resolveSubagentParent },
     {
       product: MAGICREW,
       // 按 ref 读 ⇒ 池里的 `MAGICREW_ACCOUNT_*` 与手工塞的默认 ref 都能读。
@@ -4584,7 +4665,7 @@ export function apply(ctx: Context): void {
     }),
   })
   const magicrewIntlResolver = createCredentialResolver<MagicrewCredential>(
-    { pool: pool as never },
+    { pool: pool as never, subagentParentForSession: resolveSubagentParent },
     {
       product: MAGICREW_INTL,
       readCredential: (refName) => magicrewIntlAuth.currentCredential(refName),
@@ -4689,6 +4770,8 @@ export function apply(ctx: Context): void {
   const astudioCredentialPlan = createCredentialResolver<AstudioCredential>(
     {
       pool,
+      /** ⚠️ 路 1：按 sessionId 读宿主会话头的 parentSession（见 resolveSubagentParent）。 */
+      subagentParentForSession: resolveSubagentParent,
       reportAccount: (id) => {
         if (id !== undefined) reportLedgerAccount(ASTUDIO.id, id)
       },
@@ -5209,6 +5292,8 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   resolveCredential: createCredentialResolver<ZcodeCredential>(
     {
       pool,
+      /** ⚠️ 路 1：按 sessionId 读宿主会话头的 parentSession（见 resolveSubagentParent）。 */
+      subagentParentForSession: resolveSubagentParent,
       /**
        * ⚠️ `undefined` 是**有意义的事件**：账号池里没有条目时要**清空**记录，
        * 留着旧 id 会误伤一个无辜账号（见 `activeZcodeAccountId` 的说明）。
@@ -7267,29 +7352,6 @@ async function fetchBalanceReading(
   // ⚠️ **本 fork 独有**（modelscope）：`ModelscopeAuth extends Service`，
   //    构造时已由 cordis 自动注册为 `ctx.modelscopeAuth`（`super(ctx, `${product.id}Auth`)`），
   //    故这里**不需要**再 provide —— 与 accio 同款（它也没有 provide 行）。
-
-  /**
-   * ★★★ **子代理专属起点与模型的事件接线**（2026-11-23）。
-   *
-   * ## 三个事件各管一件事
-   *
-   * | 事件 | 用途 | 宿主证据 |
-   * |---|---|---|
-   * | `subagent/start` | 记下「这个 sessionId 是子代理 + 父会话 + slot」| `dsh-subagent/lib/index.js:158` |
-   * | `subagent/end` | 标记结束（**保留**记录，供 resume）| 同上 `:166` |
-   * | `agent/pre-step` | 按 sessionId 改写子代理的模型 | `dsh-agent/runtime-types.ts:351` |
-   *
-   * ## 为什么必须用 `ctx.inject(['agents'], …)` 包起来
-   *
-   * `agent/pre-step` 由 `dsh-agent` 提供，`subagent/*` 由 `dsh-subagent` 提供。
-   * 没有这两个服务的 profile（纯 CLI / 精简装配）里，直接 `ctx.on(...)` 会让
-   * 插件**永久 pending**（cordis 的注入语义）。
-   * ⇒ 与既有 `installLoopResume` / `installRateLimitResume` 同款，用 inject 包。
-   *
-   * ⚠️ 只订阅 `agent/pre-step`（不需要 `agents` 的其它能力）——
-   * 事件在 plugin 的 root scope 上声明为可观察，探针已实证能收到
-   *（`subagent/start` payload 带 `parentSessionId` + `id`，实测见提交说明）。
-   */
   ctx.inject(['agents'], (injected) => {
     /**
      * ① `subagent/start`：登记分配。

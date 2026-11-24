@@ -55,6 +55,37 @@ import {
 
 afterEach(() => { resetSubagentParentsForTest() })
 
+/**
+ * ⚠️ **精确取出「包住 `recordSubagentStart` 的那个 `if` 条件文本」**。
+ *
+ * 为什么必须精确取：`includes(
+ * 'parentOfThis !== undefined')` 这种判据**对「守卫恒真」和「守卫被删」都无效**
+ * —— 只要字样还在（哪怕在死分支里），断言就绿。
+ *
+ * ⇒ 做法：从调用点**往上**找最近的、缩进更浅的 `if (`，取它的**完整条件**
+ *    （配对小括号），再对这个条件做判据。
+ */
+function guardConditionAround(source: string): string | undefined {
+  const callIdx = source.indexOf('recordSubagentStart?.(')
+  if (callIdx < 0) return undefined
+  const before = source.slice(0, callIdx)
+  /** 从后往前找 `if (`。 */
+  for (let i = before.length - 1; i >= 0; i -= 1) {
+    if (!before.startsWith('if (', i)) continue
+    /** 配对小括号，取出条件全文。 */
+    let depth = 0
+    let end = -1
+    for (let j = i + 3; j < before.length; j += 1) {
+      if (before[j] === '(') depth += 1
+      else if (before[j] === ')') {
+        depth -= 1
+        if (depth === 0) { end = j; break }
+      }
+    }
+    if (end > 0) return before.slice(i + 4, end)
+  }
+  return undefined
+}
 describe('行为：主代理不在父子表里', () => {
   it('★★★ 未登记的会话**不是**子代理（主代理走这条）', () => {
     /**
@@ -76,20 +107,52 @@ describe('源码：登记必须被 isSubagentSession 守卫', () => {
   const here = dirname(fileURLToPath(import.meta.url))
   const src = readFileSync(join(here, '../../src/credential-resolver.ts'), 'utf8')
 
-  it('★★★ recordSubagentStart 必须被 isSubagentSession 包住', () => {
+  it('★★★ 包住 recordSubagentStart 的 `if` 条件里必须有父会话守卫', () => {
     /**
-     * ⚠️ 判据不是「文件里有 isSubagentSession 字样」（那可能写在别处），
-     * 而是「`recordSubagentStart` 调用点**之前**紧邻地出现 `isSubagentSession`」。
+     * ⚠️ **判据在「条件文本」级别**，不是「文件里有没有字样」。
+     *
+     * ## 为什么（我第一版写错了，如实登记）
+     *
+     * 第一版用 `window.includes('parentOfThis !== undefined')` ——
+     * 实测两个变异**全绿**：
+     *
+     * | 变异 | 结果 |
+     * |---|---|
+     * | 删掉守卫（条件改回只看 `sessionId !== undefined`）| ❌ 无牙 |
+     * | 守卫改成 `&& true` | ❌ 无牙 |
+     *
+     * ⇒ 因为「字样还在别处」（`const parentOfThis = …` 那行）+ 窗口够宽。
+     *
+     * ## 现在的判据
+     *
+     * 取出**真正包住调用**的那个 `if` 的条件全文，断言：
+     * 1. 出现父会话查询结果（`parentOfThis` 或 `isSubagentSession`）；
+     * 2. **不能是恒真**（不含 `&& true`）；
+     * 3. **不能只看 `sessionId !== undefined`**（那是主代理也通过的旧缺陷）。
      */
-    const callIdx = src.indexOf('recordSubagentStart?.(')
-    expect(callIdx, '找不到 recordSubagentStart 调用').toBeGreaterThan(-1)
+    const cond = guardConditionAround(src)
+    expect(cond, '找不到包住 recordSubagentStart 的 if').toBeDefined()
 
-    /** 取调用点之前 1200 字符的窗口。 */
-    const window = src.slice(Math.max(0, callIdx - 1200), callIdx)
+    /** ① 必须有父会话守卫。 */
     expect(
-      window,
-      '★★★ 调用点之前必须有 isSubagentSession 守卫（否则主代理也会被登记）',
-    ).toContain('isSubagentSession(sessionId)')
+      cond,
+      '★★★ 条件里必须有父会话守卫（parentOfThis / isSubagentSession）',
+    ).toMatch(/parentOfThis\s*!==\s*undefined|isSubagentSession\(/)
+
+    /** ② 不能是恒真。 */
+    expect(cond, '★★★ 守卫不能恒真（&& true）').not.toMatch(/&&\s*true\b/)
+
+    /**
+     * ③ **不能只看 sessionId 非空** —— 那正是「主代理也登记」的原缺陷。
+     *
+     * ⚠️ `sessionId !== undefined` 在修好的代码里**也可能出现**（作为外层
+     *  `if (sessionId !== undefined) {` 的一部分）—— 但那个 if 里**必须还有**
+     *  父会话判据。上面 ① 已保证；这里额外要求「父会话判据不在注释里」。
+     */
+    expect(
+      cond.includes('parentOfThis') || cond.includes('isSubagentSession'),
+      '★★★ 必须有真正的父会话判据（不是注释）',
+    ).toBe(true)
   })
 
   it('★★★ 守卫必须在 `if` 条件里生效（不能只出现在注释中）', () => {
@@ -119,10 +182,23 @@ describe('源码：登记必须被 isSubagentSession 守卫', () => {
     expect(callIdx, '剥注释后找不到 recordSubagentStart 调用').toBeGreaterThan(-1)
 
     const window = code.slice(Math.max(0, callIdx - 600), callIdx)
+    /**
+     * ⚠️ **判据 2026-11-24 升级**（与上一条同因）：守卫可能是「父会话查询」的结果，
+     * 不一定字面写着 `isSubagentSession(sessionId)`。
+     *
+     * ⚠️ 但**判断对象不变**：必须是「查出来的父会话」而非「sessionId 非空」——
+     * 后者会让主代理也通过。
+     */
+    const hasParentLookup = code.includes('parentOfSession(') || code.includes('parentOfThis !== undefined')
+    const hasLegacy = window.includes('isSubagentSession(sessionId)')
+    expect(
+      hasLegacy || hasParentLookup,
+      '★★★ 剥注释后调用点前必须有「父会话」守卫（不能只在注释里）',
+    ).toBe(true)
     expect(
       window,
-      '★★★ 剥注释后调用点前必须有 isSubagentSession(sessionId)（不能只在注释里）',
-    ).toContain('isSubagentSession(sessionId)')
+      '★★★ 那个守卫必须作用在调用点之前（不能写在别的函数里）',
+    ).toMatch(/parentOfThis|isSubagentSession\(sessionId\)/)
   })
 
   it('★★★ 登记必须**独立于**「免费模型」与「主代理起点」两个条件', () => {

@@ -389,6 +389,34 @@ export interface CredentialResolverDeps<TCredential = unknown> {
    *   它要**清空**「本次实际使用的账号」标记（留着旧 id 会误伤无辜账号）。
    */
   readonly reportAccount?: (accountId: string | undefined) => void
+  /**
+   * ★★★ **查「某会话的父会话 id」**（2026-11-24 上游第 3 轮审计建议的路 1）。
+   *
+   * ## 为什么需要（上游原话）
+   *
+   * > 「这个功能现在卡在一个根本障碍上：**插件拿不到「谁是子代理、父是谁」**。
+   * >   三条可能的路，按可行性排：
+   * >   **1. 从宿主会话头读**：`header.parentSession`（`dsh-session` types:76）
+   * >      是**真的有**的 —— 如果能在 `agent/created` 或 pre-step 时读到
+   * >      **当前会话的 header**，父 id 就有来源了。
+   * >      这比 `subagent/start` payload 靠谱得多。」
+   *
+   * ## 为什么它比事件更可靠
+   *
+   * | 来源 | 性质 |
+   * |---|---|
+   * | `subagent/start` 事件 | **瞬时**：插件晚挂载 / 重启期间的事件永远收不到 |
+   * | **`session.header.parentSession`** | **持久**：落在会话头里，任何时候读都有 |
+   *
+   * ⚠️ 实测（我的 P0 探针）：两者**当前都有值**且一致。但事件那条腿有
+   *    「错过就永久丢」的窗口，而会话头没有。⇒ **优先用本依赖**，事件表只作兜底。
+   *
+   * ⚠️ **可选**：单测替身不实现 ⇒ 退回既有的事件表（`subagentParentOf`），
+   *    行为不变。
+   *
+   * @returns 父会话 id；`undefined` = 本会话**不是子代理**（或查不到）
+   */
+  readonly subagentParentForSession?: (sessionId: string) => string | undefined
 }
 
 /**
@@ -681,6 +709,34 @@ export function createCredentialResolver<TCredential>(
      */
     const tried = new Set<string>()
     const plan = config.balance
+    /**
+     * ★★★ **父会话 id：会话头优先，事件表兜底**（2026-11-24 上游建议的路 1）。
+     *
+     * ## 为什么换源
+     *
+     * 上一版只用 `subagentParentOf(sessionId)` —— 那是**进程内父子表**，
+     * 由 `subagent/start` 事件填。它有两个窗口：
+     * 1. **插件晚挂载**：子代理在插件加载前就拉起了 ⇒ 事件没收到；
+     * 2. **插件重启**：表是进程内的，重启即清空。
+     *
+     * 而 `session.header.parentSession` 落在**会话头**（持久）里，
+     * 任何时候读都有 ⇒ 无窗口。
+     *
+     * ⚠️ 两个来源**当前都有值且一致**（我的 P0 探针实测），但只有后者可靠。
+     * ⇒ 会话头优先；事件表保留作兜底（单测替身 / 宿主版本差异时仍可用）。
+     */
+    const parentOfSession = (sid: string | undefined): string | undefined => {
+      if (sid === undefined || sid.length === 0) return undefined
+      try {
+        const fromHeader = deps.subagentParentForSession?.(sid)
+        if (typeof fromHeader === 'string' && fromHeader.length > 0) return fromHeader
+      } catch { /* 依赖实现异常绝不影响选号 */ }
+      /** 兜底：进程内事件表。 */
+      try { return subagentParentOf(sid) } catch { return undefined }
+    }
+    /** ⚠️ 「是不是子代理」= 能查到父会话（两个来源的并集）。 */
+    const isSubagentById = (sid: string | undefined): boolean =>
+      sid !== undefined && parentOfSession(sid) !== undefined
 
     if (plan?.kind === 'buddy') {
       // ⚠️ `isFreeModel` **先于**候选构造求值：与旧闭包「在 options 字面量里
@@ -715,13 +771,15 @@ export function createCredentialResolver<TCredential>(
        */
       if (sessionId !== undefined) {
         const settingForRegister = deps.pool.subagentRotationFor?.(providerId)
+        const parentOfThis = parentOfSession(sessionId)
         if (settingForRegister !== undefined
           && subagentSettingActive(settingForRegister)
-          && isSubagentSession(sessionId)) {
+          && parentOfThis !== undefined) {
           void deps.pool.recordSubagentStart?.(
             providerId,
             sessionId,
-            subagentParentOf(sessionId) ?? sessionId,
+            /** ⚠️ 父会话 id 已由 `parentOfSession` 保证有值（会话头优先）。 */
+            parentOfThis,
             Date.now(),
           ).catch(() => { /* 登记失败不影响本次选号 */ })
         }
@@ -813,10 +871,30 @@ export function createCredentialResolver<TCredential>(
           const userPickedUsable = userPicked !== undefined && candidates.some((c) => c.id === userPicked)
           const pinned = subAssignment?.pinnedAccountId
           const pinnedUsable = pinned !== undefined && candidates.some((c) => c.id === pinned)
+          /**
+           * ⚠️⚠️ **`fixed` 模式必须跳过 ②（系统 pin）**
+           *（2026-11-24 上游三轮审计 ⑤：「免费路径还让 `pin` 盖住 `fixed`」）。
+           *
+           * ## 缺陷
+           *
+           * 若该子代理**早先落下了 pin**（比如之前用 `sequence`，用户后来改成 `fixed`），
+           * ② 会命中 ⇒ ③ 的 `fixed` 分支**永远走不到** ⇒ **用户改位次无效**，
+           * 且界面显示的是新位次（`getRotation` 现算）⇒ **界面与实效不一致**。
+           *
+           * ## 判据
+           *
+           * | 级 | 来源 | `fixed` 模式下 |
+           * |---|---|---|
+           * | ① | `userPickedAccountId` | **仍生效**（用户手选 > 位次，与付费路径一致）|
+           * | ② | `pinnedAccountId` | **跳过**（那是旧策略的结果，不该拖住新位次）|
+           * | ③ | 策略现算（`fixed` 用它）| **必须走到** |
+           */
+          const freeMode = subSetting?.startMode
+          const freeSkipsPin = freeMode === 'fixed'
           // ① 用户手动选且可用 ⇒ 用它
           if (userPickedUsable) freeStartId = userPicked
-          // ② 否则用系统 pin
-          else if (pinnedUsable) freeStartId = pinned
+          // ② 否则用系统 pin（`fixed` 模式跳过）
+          else if (pinnedUsable && !freeSkipsPin) freeStartId = pinned
           // ③ 都没有现算
           else if (subSetting !== undefined && subAssignment !== undefined
             && subSetting.startMode !== undefined && subSetting.startMode !== 'follow') {
@@ -872,7 +950,22 @@ export function createCredentialResolver<TCredential>(
              * `pinSubagentAccount` 内部**先同步更新缓存**（同 `recordSubagentStart`），
              * 故下一发请求立刻就能读到。
              */
-            if (sessionId !== undefined) {
+            /**
+             * ⚠️⚠️ **必须加 `fixed` 守卫，与付费路径逐字同构**
+             *（2026-11-24 上游三轮审计 ⑤：免费路径写 pin 时没有 fixed 守卫）。
+             *
+             * ## 为什么 `fixed` 不能钉
+             *
+             * `fixed` 模式的起点是**用户显式指定的位次**，每次都由 `accountIdAtPosition`
+             * 现算 ⇒ 结果恒定。钉住它有两个害处：
+             * 1. **把「策略结果」写成「系统事实」**——用户之后改位次，pin 会拖住旧号；
+             * 2. 与付费路径**行为不一致**（那边 `pinMode !== 'fixed'` 早已有守卫）。
+             *
+             * ⚠️ 付费路径的守卫在 `picked.kind === 'account'` 之后（`pinMode !== 'fixed'`）。
+             *   两处必须逐字同构 —— 本仓反复记录过「同一语义两处实现必然漂移」。
+             */
+            const freePinMode = deps.pool.subagentRotationFor?.(providerId)?.startMode
+            if (sessionId !== undefined && freePinMode !== 'fixed') {
               void deps.pool.pinSubagentAccount?.(providerId, sessionId, candidate.id)
                 .catch(() => { /* 钉住失败不影响本次选号 */ })
             }
@@ -1037,8 +1130,16 @@ export function createCredentialResolver<TCredential>(
          * 实测它在单测/重启后是空的，只靠它会让 `mainSessionStartId` 恒 `undefined`
          *（上游指出的「主代理起点从未被读」依然存在）。
          */
-        const mainSessionId = assignment?.parentSessionId
-          ?? (sessionId === undefined ? undefined : subagentParentOf(sessionId))
+        /**
+         * ⚠️ 三个来源，优先级从高到低：
+         * 1. **分配记录里的 `parentSessionId`**（落盘事实，最可靠）；
+         * 2. **会话头的 `header.parentSession`**（路 1，持久但需要 registry）；
+         * 3. 进程内事件表（兜底）。
+         *
+         * ⚠️ 2 是 2026-11-24 按上游建议补的 —— 它覆盖「分配记录还没建立」的
+         *    首轮窗口，而 1 覆盖「会话头读不到」的宿主版本差异。两者互补。
+         */
+        const mainSessionId = assignment?.parentSessionId ?? parentOfSession(sessionId)
         const mainSessionStartId = mainSessionId === undefined
           ? undefined
           : deps.pool.preferredRotationFor?.(providerId, mainSessionId)
