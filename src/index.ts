@@ -2458,9 +2458,36 @@ export function apply(ctx: Context): void {
    */
   const resolveSubagentParent = (sessionId: string): string | undefined => {
     try {
-      const registry = (ctx as unknown as {
-        agents?: { get?: (id: string) => unknown }
-      }).agents
+      /**
+       * ★★★ **必须 `ctx.get('agents')`，不能 `ctx.agents`**（2026-11-24，对抗审计 P0）。
+       *
+       * ## 缺陷
+       *
+       * `agents` **不在本插件的静态 `inject` 里**（`inject = ['credentials',
+       * 'commands', 'llm']`，见本文件 `:370`）。cordis 4.1 对**未注入的服务**
+       * 走属性访问时会抛 `cannot get property "agents" without inject`，
+       * 而下面那个 `catch` 把它吞成 `undefined` ⇒ **父 id 恒 `undefined`**
+       * ⇒ `isSubagentSession` 恒 `false` ⇒ **分配表恒 `{}`** ⇒ 子代理起点 / pin /
+       * 用户手选 / badge 全部静默失效（**与第三轮同一个症状**）。
+       *
+       * ## 为什么用了 `as unknown as { agents?: ... }` 还是不行
+       *
+       * 类型断言只骗 TypeScript，**运行时 cordis 的 Proxy 照样抛**。
+       * 审计用宿主那份 cordis 逐字复刻验证：as-implemented = `undefined`
+       *（JSON 里那个键直接消失），而 `ctx.get('agents')` = `'parent-9'` ✅
+       *
+       * ## 本文件早有同一条教训
+       *
+       * `:4438` 那段注释（读图桥接）写着：「必须**惰性** `ctx.get('attachments')`，
+       * 不能写 `ctx.attachments` —— 后者会抛 `cannot get property … without inject`
+       * 并**打断整个 `apply()`**」。DSH 自家插件对非注入服务**一律用 `.get()`**。
+       *
+       * ⚠️ `.get()` 在没有该服务的 profile（headless/CLI）上返回 `undefined`
+       *    ⇒ 走下面的早退分支 ⇒ 下游判「不是子代理」⇒ **行为与本轮之前一致**（不猜）。
+       */
+      const registry = ctx.get('agents') as
+        | { get?: (id: string) => unknown }
+        | undefined
       const agent = registry?.get?.(sessionId)
       if (agent === undefined || agent === null) return undefined
       const session = (agent as { session?: unknown }).session
@@ -7556,7 +7583,8 @@ async function fetchBalanceReading(
 
     injected.effect(() => () => {
       try { stopStart() } catch { /* 忽略 */ }
-      try { stopEnd() } catch { /* 忽略 */ }    })
+      try { stopEnd() } catch { /* 忽略 */ }
+    })
   })
 }
 
