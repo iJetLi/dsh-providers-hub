@@ -1191,17 +1191,43 @@ export function createCredentialResolver<TCredential>(
         const userPickedId = assignment?.userPickedAccountId
         const pinnedId = assignment?.pinnedAccountId
         /**
-         * ★★★ **`startDecidedByPin`**：pin / userPicked 命中 ⇒ **跳过策略现算**
-         *（2026-11-24，上游审计 ⑤：上一版 `sequence` 等模式会无条件覆盖 pin）。
+         * ★★★ **两条独立标记**（2026-11-24 第四轮审计后的修正）。
          *
-         * ⚠️ 唯一例外是 `fixed`（用户手选位次，比自动 pin 更具体）。
+         * | 标记 | 含义 |
+         * |---|---|
+         * | `startDecidedByPin` | pin / userPicked 命中 ⇒ **跳过策略现算** |
+         * | `startDecidedByUser` | **用户手选**命中 ⇒ 即使 `fixed` 也不覆盖 |
+         *
+         * ## ⚠️ 为什么必须分开（上游第 4 轮「`fixed` 两路径分叉」）
+         *
+         * 免费路径的语义是：**用户手选 > 位次**（`fixed` 也遵从用户手选）。
+         * 而付费路径上一版写的是：
+         *
+         * ```ts
+         * const strategyShouldApply = startDecidedByPin !== true
+         *   || setting?.startMode === 'fixed'      // ← 让 fixed 覆盖 userPicked
+         * ```
+         *
+         * ⇒ **两条路径对同一件事判断相反**（免费遵从、付费覆盖）。
+         * 这正是本仓反复记录的「同一语义两处实现必然漂移」。
+         *
+         * ## 统一后的语义（与免费路径逐字同构）
+         *
+         * | 级 | 来源 | `fixed` 模式下 |
+         * |---|---|---|
+         * | ① | `userPickedAccountId` | **仍生效**（用户手选最具体）|
+         * | ② | `pinnedAccountId` | **跳过**（旧策略的结果，不该拖住新位次）|
+         * | ③ | 策略现算（`fixed` 用它）| **必须走到** |
          */
         let startDecidedByPin = false
+        /** ⚠️ 只有**用户手选**才算「用户明确意愿」，pin 是系统算的不算。 */
+        let startDecidedByUser = false
         if (userPickedId !== undefined
           && candidates.some((c) => c.id === userPickedId)) {
-          /** ① 用户手动选且仍可用 ⇒ 用它（最高优先级）。 */
+          /** ① 用户手动选且仍可用 ⇒ 用它（最高优先级，**连 `fixed` 都不覆盖**）。 */
           rotationStartId = userPickedId
           startDecidedByPin = true
+          startDecidedByUser = true
           startOwnedBySubagent = true
         } else if (pinnedId !== undefined) {
           const pinnedCandidate = candidates.find((c) => c.id === pinnedId)
@@ -1224,15 +1250,25 @@ export function createCredentialResolver<TCredential>(
           }
         }
         /**
-         * ⚠️⚠️ **`startDecidedByPin` 守卫是本次修复的核心**（上游审计 ⑤）。
+         * ⚠️⚠️ **策略现算的进入判据**（2026-11-24 第四轮审计后统一）。
          *
-         * 上一版这里**无条件进入** ⇒ slot 现算把 pin / userPicked 覆盖掉
-         * ⇒「设了不生效，而界面显示已生效」。
+         * ```ts
+         * strategyShouldApply =
+         *   startDecidedByUser !== true                          // 用户手选优先，恒不覆盖
+         *   && (startDecidedByPin !== true || startMode === 'fixed')  // fixed 可覆盖系统 pin
+         * ```
          *
-         * ⚠️ **`fixed` 是例外**：用户手选的位次比自动 pin 更具体 ⇒ 仍进入。
+         * | `fixed`? | 用户手选? | 系统 pin? | 策略现算 | 结果 |
+         * |---|---|---|---|---|
+         * | 否 | 有 | — | ❌ 跳过 | **用用户手选** |
+         * | 否 | 无 | 有 | ❌ 跳过 | **用 pin** |
+         * | 否 | 无 | 无 | ✅ 进入 | 按 slot 错开 |
+         * | **是** | **有** | — | ❌ **跳过** | **用用户手选** ← 与免费路径一致 |
+         * | **是** | 无 | 有 | ✅ 进入 | 用位次（pin 是旧结果）|
+         * | **是** | 无 | 无 | ✅ 进入 | 用位次 |
          */
-        const strategyShouldApply = startDecidedByPin !== true
-          || setting?.startMode === 'fixed'
+        const strategyShouldApply = startDecidedByUser !== true
+          && (startDecidedByPin !== true || setting?.startMode === 'fixed')
         if (strategyShouldApply
           && setting !== undefined && assignment !== undefined
           && setting.startMode !== undefined && setting.startMode !== 'follow') {

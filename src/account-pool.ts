@@ -1628,7 +1628,43 @@ export class AccountPool {
      * ⇒ 缓存赋值**不依赖任何 await**，落盘才是异步的。
      */
     this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
-    if (this.store.kind !== 'memory') await this.queueStoreSave()
+    /**
+     * ★★★ **只在「分配真的变了」时才落盘**（2026-11-24 第四轮审计「性能」）。
+     *
+     * ## 原缺陷（上游原话）
+     *
+     * > 「**每请求重复登记一次 ⇒ 每请求写一次 `state.json`**」
+     *
+     * `resolveCredential` 是**每一发请求**都跑的，而它在开头的登记块里
+     * **无条件**调 `recordSubagentStart` —— 即使这个子代理早已登记过，
+     * 上一版照样 `await queueStoreSave()` ⇒ **每发请求写一次盘**。
+     *
+     * ## ⚠️ 判据**不能**用 `next !== current`（我第一版就这么写，实测无效）
+     *
+     * `recordSubagentAssignment` 的实现是
+     * `return { ...assignments, [sessionId]: {...} }` —— **永远返回新对象**
+     * ⇒ 引用比较恒 `true` ⇒ 等于没加守卫（实测 mtime 照样每次都变）。
+     *
+     * ## 正确判据：**该条目是否已存在且内容等价**
+     *
+     * | 情况 | 该落盘? |
+     * |---|---|
+     * | 该 sessionId **没登记过** | ✅ 要（新分配）|
+     * | 已登记，且 `parentSessionId` / `slot` / `ended` 都没变 | ❌ **不要** |
+     * | 已登记，但 `ended` 需要复位（resume）| ✅ 要 |
+     *
+     * ⚠️ `at` **不参与比较**：`recordSubagentAssignment` 对已存在记录
+     *    **刻意保留原 `at`**（淘汰按它排序，resume 刷新会让长期子代理永不淘汰）
+     *    ⇒ 它本来就不会变。
+     */
+    const nextEntry = next[sessionId]
+    const changed = existing === undefined
+      || nextEntry === undefined
+      || nextEntry.parentSessionId !== existing.parentSessionId
+      || nextEntry.slot !== existing.slot
+      || (nextEntry.ended === true) !== (existing.ended === true)
+    this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
+    if (changed && this.store.kind !== 'memory') await this.queueStoreSave()
     return slot
   }
 

@@ -8542,9 +8542,39 @@ function registerJetHubEndpoints(
             const pickId = allForPick
               .filter((a) => a.provider === req.provider && a.enabled !== false)
               [req.position - 1]?.id
-            if (pickId !== undefined) {
-              await pool.setUserPickedAccount?.(req.provider, req.sessionId, pickId)
+            /**
+             * ⚠️⚠️ **位次越界必须报错，不能静默跳过**（2026-11-24 第四轮审计）。
+             *
+             * ## 原缺陷
+             *
+             * 上一版写的是 `if (pickId !== undefined) { …写… }` —— `pickId` 越界时
+             * **什么都不做、还回 `ok: true`**。
+             *
+             * ## 为什么这很糟
+             *
+             * 用户选了「位次 5」而池里只剩 3 个号时：
+             * 1. `preferredRotation` 已被写入（上面那段）；
+             * 2. `userPickedAccountId` **没写** ⇒ 子代理仍用旧 pin；
+             * 3. 界面回 `selected: preferredRotationFor(…)` ⇒ **显示新位次**。
+             *
+             * ⇒ **界面说生效了、实际没生效**，且零报错 —— 与「set 了不生效」
+             *    那类缺陷同形（本 PR 已修过两次同一形态）。
+             *
+             * ⚠️ 宁可拒绝这次写入，让用户看到「位次超出范围」，
+             *    也不接受一个「只写了一半」的部分成功。
+             */
+            if (pickId === undefined) {
+              const enabledCount = allForPick
+                .filter((a) => a.provider === req.provider && a.enabled !== false).length
+              return {
+                ok: false,
+                error: {
+                  code: 'bad-request',
+                  message: `位次 ${req.position} 超出范围（当前 ${enabledCount} 个启用账号）`,
+                },
+              }
             }
+            await pool.setUserPickedAccount?.(req.provider, req.sessionId, pickId)
           } else {
             /**
              * `position === null` ⇒ 用户点了「恢复默认」⇒ **清除**手动选择
