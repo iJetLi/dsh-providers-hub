@@ -13330,7 +13330,34 @@ function registerJetHubEndpoints(
                 }
               }
             }
-            /** ③ 模型 / 思考强度：非空字符串时才接受。 */
+            /**
+             * ③ 模型 / 思考强度：**必须真实存在**（2026-11-24 第二轮审计 P1-5）。
+             *
+             * ## 原缺陷（上游原话）
+             *
+             * > 「**模型 id 零校验**即落盘并 `select()`。」
+             *
+             * 上一版只判「非空字符串」—— 用户（或老版本客户端）传一个
+             * **不存在的模型 id** 时：
+             * 1. 设置照常落盘；
+             * 2. `subagent/start` 时 `agent.model.select({ model: '不存在的' })` 被拒；
+             * 3. 而那个 `catch` 把它吞成静默 ⇒ **子代理一直用主代理模型**，
+             *    用户以为「我设了」。
+             *
+             * ⇒ **零报错 + 界面显示已生效**，与「设了不生效」那类缺陷同形
+             *（本 PR 已修过三次同一形态）。
+             *
+             * ## 校验口径必须与 `credits.window.models` **逐字同源**
+             *
+             * | 判据 | 来源 |
+             * |---|---|
+             * | 模型存在 | `ctx.llm.listModels(provider)` |
+             * | 模型**已启用** | `pool.listDisabledModels(provider)[id] !== true` |
+             * | 思考档位存在 | `ctx.llm.resolveModelInfo(provider, id).reasoning.efforts` |
+             *
+             * ⚠️ 前两条与 `credits.window.models` **同一个取数路径**（那是下拉框的真源）
+             *    —— 否则「下拉框里能选、保存后被拒」或反之。
+             */
             for (const [key, value] of [
               ['subagent.model', rawSub.model],
               ['subagent.reasoningEffort', rawSub.reasoningEffort],
@@ -13340,6 +13367,57 @@ function registerJetHubEndpoints(
                   ok: false,
                   error: { code: 'bad-request', message: `${key} 必须是非空字符串（收到 ${JSON.stringify(value)}）` },
                 }
+              }
+            }
+            /**
+             * ⚠️ **模型存在性 + 已启用**（只在校验通过「非空字符串」之后做，
+             * 且 `llm` 不可用或目录读不到时**跳过** —— 宁可接受一个可能过期的
+             * id，也不要让整个设置在离线环境完全无法保存）。
+             */
+            if (rawSub.model !== undefined && ctx.llm !== undefined) {
+              let enabledIds: readonly string[] | undefined
+              try {
+                const all = await ctx.llm.listModels(req.provider)
+                const disabledForProvider = pool.listDisabledModels(req.provider)
+                enabledIds = all
+                  .filter((m) => disabledForProvider[m.id] !== true)
+                  .map((m) => m.id)
+              } catch {
+                /** ⚠️ 目录读不到（离线 / 适配器未就绪）⇒ 跳过存在性校验，不拦保存。 */
+                enabledIds = undefined
+              }
+              if (enabledIds !== undefined && !enabledIds.includes(rawSub.model)) {
+                return {
+                  ok: false,
+                  error: {
+                    code: 'bad-request',
+                    message: `subagent.model「${rawSub.model}」不在该渠道已启用的模型中`
+                      + `（可选 ${enabledIds.length} 个；请在设置里启用该模型后重试）`,
+                  },
+                }
+              }
+              /**
+               * ⚠️ **思考档位必须属于该模型**（若该模型声明了档位）。
+               *
+               * ⚠️ 模型**没声明档位**时 `efforts` 为空 —— 那种情况下
+               * 用户配的 `reasoningEffort` 本来就不会被用（`select()` 会忽略），
+               * 所以**只在模型确实有档位时**校验。
+               */
+              if (rawSub.reasoningEffort !== undefined && enabledIds !== undefined) {
+                try {
+                  const resolved = await ctx.llm.resolveModelInfo(req.provider, rawSub.model)
+                  const efforts = (resolved?.reasoning?.efforts ?? []).map((e) => String(e.id))
+                  if (efforts.length > 0 && !efforts.includes(rawSub.reasoningEffort)) {
+                    return {
+                      ok: false,
+                      error: {
+                        code: 'bad-request',
+                        message: `subagent.reasoningEffort「${rawSub.reasoningEffort}」`
+                          + `不是模型「${rawSub.model}」的合法档位（可选 ${efforts.join(' / ')}）`,
+                      },
+                    }
+                  }
+                } catch { /* 单个模型解析失败 ⇒ 跳过档位校验（不拦保存） */ }
               }
             }
             await pool.setSubagentRotation(req.provider, {
