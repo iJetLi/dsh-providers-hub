@@ -1552,6 +1552,35 @@ export class AccountPool {
     await this.queueStoreSave()
   }
 
+  /**
+   * ★★★ **按 sessionId 反查它属于哪个 provider**（2026-11-24）。
+   *
+   * ## 为什么需要
+   *
+   * `subagent/end` 事件的 payload **只有 `id`**（子代理会话 id），
+   * **没有 provider** —— 而 `recordSubagentEnd(provider, sessionId)` 需要它。
+   *
+   * 分配表的结构是「provider → sessionId → 记录」⇒ 反查要遍历 provider 键。
+   *
+   * ## ⚠️ 为什么允许遍历
+   *
+   * provider 数量是**个位数**（本机 10 家左右），而分配表每个 provider 至多
+   * 128 条 ⇒ 最坏 1280 次键查找，且只在 `subagent/end` 时跑一次
+   * （子代理结束时），不在热路径上。
+   *
+   * @returns 找到的 provider 列表（**理论上 1 个**，但同一 sessionId
+   *   在多家各有一条记录时会是多个 —— 那种情况全部标记，不漏）
+   */
+  providersOfSubagentSession(sessionId: string): string[] {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return []
+    this.ensureLoaded()
+    const hits: string[] = []
+    for (const [provider, table] of Object.entries(this.subagentAssignmentCache)) {
+      if (table[sessionId] !== undefined) hits.push(provider)
+    }
+    return hits
+  }
+
   /** 取某 provider 的子代理分配表（**只读快照**）。 */
   subagentAssignmentsFor(provider: string): Readonly<SubagentAssignmentMap> {
     this.ensureLoaded()

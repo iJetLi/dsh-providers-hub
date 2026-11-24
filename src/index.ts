@@ -7379,6 +7379,31 @@ async function fetchBalanceReading(
          * resume 会复用同一 sessionId，清了会让它排到队尾。
          * 实际清理交给 `at` 淘汰。
          */
+        /**
+         * ★★★ **标记分配为「已结束」**（2026-11-24 修复缺失的调用）。
+         *
+         * ## 缺陷
+         *
+         * 上一版这里**只有注释、没有调用** —— `recordSubagentEnd()` 定义了
+         * 却零调用点（死代码），实测 `state.json` 里 `ended` 永远是 `false`。
+         * 这正是本仓反复记录的「注释承诺了、代码没实现」形态。
+         *
+         * ## ⚠️ 为什么必须反查 provider
+         *
+         * `subagent/end` 的 payload **只有 `id`**，没有 provider；
+         * 而 `recordSubagentEnd(provider, sessionId)` 需要它。
+         *
+         * ⚠️ 反查可能返回**多个**（同一 sessionId 在多家各一条记录）⇒
+         * 全部标记，绝不只标第一个（漏标会让那条记录永远显示「未结束」）。
+         *
+         * ⚠️ **fire-and-forget**：这是事件监听器，不能让它等磁盘写；
+         * 而且失败绝不能上抛（会传染宿主）。
+         */
+        for (const providerIdOfChild of pool.providersOfSubagentSession(childId)) {
+          void pool.recordSubagentEnd(providerIdOfChild, childId).catch(() => {
+            /* 标记失败不影响任何功能（ended 只用于诊断） */
+          })
+        }
       } catch { /* 同上：监听器绝不上抛 */ }
     }) as never)
 
