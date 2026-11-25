@@ -276,6 +276,42 @@ export interface ResolverPool<TCredential = unknown> {
     tierAtSelection?: RotationStartTier,
   ): Promise<void>
   /**
+   * ★★★ **某会话「实际在用」的账号 id**（2026-11-25，可选能力）。
+   *
+   * 用户原话：「子代理轮换起点策略的参考对象，是主代理**实际在使用的帐号**，
+   * 而不是下拉框选择的」。
+   *
+   * ⚠️ 未实现 / 返回 `undefined`（会话没发过请求 / 插件刚重启）
+   * ⇒ 消费方回落 `preferredRotationFor`（下拉框位次）。
+   */
+  activeAccountOf?(provider: string, sessionId: string | undefined): string | undefined
+  /**
+   * ★★★ **记某会话「实际在用」的账号**（2026-11-25，可选能力）。
+   *
+   * ⚠️ 由本模块的**统一回报出口**（`report`）自动调用 —— 不需要各 provider 接线。
+   * 实测 24 处 `createCredentialResolver` 里有 7 处没有 `reportAccount`，
+   * 让它们各自配必然继续漏。
+   */
+  setActiveAccount?(
+    provider: string,
+    sessionId: string | undefined,
+    accountId: string | undefined,
+  ): void
+  /**
+   * ★★★ **无档位 provider 的子代理起点位次**（2026-11-25，可选能力）。
+   *
+   * ACCIO / ASTUDIO / MAGICREW 这类纯 key 池没有档位，而 `setPreferredRotation`
+   * 会因「无档位」拒绝写入 ⇒ 起点每发重算 ⇒ 永远不稳定。
+   * ⇒ 走这条**独立通道**（不进 `sanitizePreferredRotation`，不污染主代理语义）。
+   */
+  setSubagentStartPosition?(
+    provider: string,
+    sessionId: string,
+    position: number,
+  ): Promise<void> | void
+  /** 读回 {@link setSubagentStartPosition} 写下的位次（1-based）。 */
+  subagentStartPositionOf?(provider: string, sessionId: string | undefined): number | undefined
+  /**
    * ★★★ **子代理专属设置**（2026-11-23，可选能力）。
    *
    * @returns `undefined` = 该 provider 没配子代理设置 ⇒ 走主代理逻辑
@@ -677,9 +713,19 @@ export function createCredentialResolver<TCredential>(
      * 的适配器精确取「本笔实际账号」），也保留 `deps.reportAccount` 的既有
      * 进程级副作用（账本 / activeZcodeAccountId 兼容）。
      */
+    /**
+     * ## ★★★ 2026-11-25：这里**同时**记「本会话实际在用账号」
+     *
+     * 用户在私有分支上的诊断原话：「子代理相关设置为什么没有生效：只有 UI，
+     * 没有共同抽象层」。实测 24 处 `createCredentialResolver` 调用点里
+     * **7 处没有 `reportAccount`**（ACCIO / MAGICREW / ASTUDIO 等）
+     * ⇒ 记在**唯一出口**，24 个 provider 一次全覆盖。
+     */
     const report = (accountId: string | undefined): void => {
       if (selection !== undefined) selection.accountId = accountId
       deps.reportAccount?.(accountId)
+      /** ⚠️ `sessionId === undefined` 不记：目录/网关流量不占 key。 */
+      if (sessionId !== undefined) deps.pool.setActiveAccount?.(providerId, sessionId, accountId)
     }
     /**
      * 分档编排排除掉的账号（**只有 buddy 协议会填**）—— 池兜底据此跳过它们，
@@ -716,6 +762,109 @@ export function createCredentialResolver<TCredential>(
     /** ⚠️ 「是不是子代理」= 能查到父会话（两个来源的并集）。 */
     const isSubagentById = (sid: string | undefined): boolean =>
       sid !== undefined && parentOfSession(sid) !== undefined
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * ★★★ **子代理首次拉起：算一次起点**（2026-11-25 重构）
+     * ═══════════════════════════════════════════════════════════════════════
+     *
+     * ## 用户定案
+     *
+     * > 「除了需要子代理轮换起点策略之外，其他点子代理跟主代理都一样的行为」
+     * > 「这个位次就相当于用户在主代理手动选择下拉框一样」
+     *
+     * ## ⚠️⚠️ 为什么必须在 `plan.kind` 分支**之前**
+     *
+     * 本块的旧位置在 `if (plan?.kind === 'buddy') { … }` **里面** —— 而
+     * ACCIO / ASTUDIO / MAGICREW / loomy 走的是 `else` / `else if (loomy)`
+     * ⇒ **子代理设置对它们从未生效**（用户实测：「只有 UI，没有共同抽象层」）。
+     *
+     * ⇒ 提到所有分支之前，档位只作为**可选增强**：
+     *
+     * | 有无档位 | 写哪里 | 之后怎么切号 |
+     * |---|---|---|
+     * | 有（buddy 系）| `setPreferredRotation(位次, 档位)` | `rotateFromPreferred` 的 `tierStillHeld` |
+     * | 无（纯 key 池）| `setSubagentStartPosition(位次)` | 按 slot 轮询（无档位概念）|
+     *
+     * ## 零回归（四条闸门，缺一不可）
+     *
+     * - 主代理：`hasAssignment === false` ⇒ 跳过
+     * - 没配 `startMode` ⇒ 跳过
+     * - 已有条目 ⇒ 跳过（只在**首次**算，保住 prompt cache 命中率）
+     * - 替身没实现写入方法 ⇒ 跳过
+     */
+    if (shouldDecideSubagentStartOnFirstUse({
+      sessionId,
+      setting: deps.pool.subagentRotationFor?.(providerId),
+      hasAssignment: sessionId !== undefined
+        && deps.pool.subagentAssignmentOf?.(providerId, sessionId) !== undefined,
+      hasPreferredRotation: sessionId !== undefined
+        && deps.pool.preferredRotationFor?.(providerId, sessionId) !== undefined,
+    })) {
+      const firstParent = parentOfSession(sessionId as string)
+      const firstCandidates = candidatesOf(deps.pool, providerId, modelId)
+      /**
+       * ⚠️ 位次换算必须与 `AccountPool.preferredRotationFor` 同口径
+       * （那里是 `readAccounts().filter(enabled)[position - 1]`）。
+       */
+      const firstEnabledIds = deps.pool
+        .listAccountsByProvider(providerId)
+        .filter((a) => a.enabled)
+        .map((a) => a.id)
+      /**
+       * ★ **档位选择器**：只有 buddy 系才有 `cachedTierOf`。
+       * ⚠️ 用 `'cachedTierOf' in ...` 而不是判 `plan.kind` ——
+       * 这样新 provider 只要实现了该方法就自动获得档位能力。
+       */
+      const firstTierSelector = plan !== undefined
+        && 'cachedTierOf' in (plan.selector as object)
+        ? (plan.selector as TierProbe)
+        : undefined
+      const firstDecision = decideSubagentStart({
+        providerId,
+        sessionId,
+        candidateIds: firstCandidates.map((c) => c.id),
+        allowPermanent: !deps.pool.permanentLocked(providerId),
+        pool: deps.pool as never,
+        selector: firstTierSelector === undefined
+          ? undefined
+          : (firstTierSelector as BuddySelectorLike),
+        /**
+         * ★★★ **参照对象 = 主代理「实际在用」的账号**（用户 2026-11-25 定案）。
+         *
+         * 三级回落（`??` 的先后就是优先级）：
+         *
+         * | 级 | 来源 | 何时有效 |
+         * |---|---|---|
+         * | ① | `activeAccountOf(父会话)` | 父会话发过请求（绝大多数）|
+         * | ② | `preferredRotationFor(父会话)` | 插件刚重启 / 父会话还没发过请求 |
+         * | ③ | 无 | 主代理也没配起点 ⇒ 按档位挑锚点 |
+         */
+        ...(firstParent === undefined
+          ? {}
+          : {
+            mainSessionStartId:
+              deps.pool.activeAccountOf?.(providerId, firstParent)
+              ?? deps.pool.preferredRotationFor?.(providerId, firstParent),
+          }),
+      })
+      const firstTarget = firstDecision.startId
+      if (firstTarget !== undefined) {
+        const firstPosition = positionOfAccount(firstEnabledIds, firstTarget)
+        const firstTier = await probeRotationStartTier(firstTierSelector, firstTarget)
+        if (firstPosition !== undefined) {
+          try {
+            if (firstTier !== undefined) {
+              /** **有档位**：与主代理同一个落盘条目。 */
+              await deps.pool.setPreferredRotation?.(providerId, sessionId as string, firstPosition, firstTier)
+            } else {
+              /** **无档位**：走独立通道（纯 key 池）。 */
+              await deps.pool.setSubagentStartPosition?.(providerId, sessionId as string, firstPosition)
+            }
+          } catch { /* ⚠️ 写失败不影响本次选号（退回按策略现算） */ }
+        }
+      }
+    }
 
     if (plan?.kind === 'buddy') {
       // ⚠️ `isFreeModel` **先于**候选构造求值：与旧闭包「在 options 字面量里
@@ -960,91 +1109,6 @@ export function createCredentialResolver<TCredential>(
 
       // ② 余额分档编排（共享实现 `pickBuddyAccount`，**不要**在本文件再手写一份）。
       const allowPermanent = !deps.pool.permanentLocked(providerId)
-      /**
-       * ★★★ **子代理首次拉起：算一次起点并写成 `preferredRotation`**
-       *（2026-11-25 重构，用户定案）。
-       *
-       * ## 用户原话（本次重构的全部依据）
-       *
-       * > 「除了需要子代理轮换起点策略之外，其他点子代理跟主代理都一样的行为」
-       * >
-       * > 「这个位次就相当于用户在主代理手动选择下拉框一样」
-       *
-       * ## 做什么
-       *
-       * ```
-       * 首次（preferredRotation 无该 sessionId）
-       *   → 按 startMode 算出目标账号
-       *   → 取其档位（selector 缓存，零成本）
-       *   → 写 preferredRotation[子代理sessionId]
-       *   ↓
-       * 之后：preferredRotationFor 直接读到它 ⇒ 与主代理同一条代码
-       * ```
-       *
-       * ## ⚠️ 为什么必须在 `baseRotationStartId` **之前**算
-       *
-       * 下一行就要读 `preferredRotationFor(sessionId)` ——
-       * 写完再读，才能拿到刚算出的起点。
-       *
-       * ## ⚠️ 零回归
-       *
-       * - 主代理：`hasAssignment === false` ⇒ 整块跳过
-       * - 没配 `startMode`：跳过
-       * - 已有条目：跳过（只在首次算）
-       * - 替身没实现 `setPreferredRotation`：跳过 ⇒ 退回旧行为
-       */
-      if (free !== true && shouldDecideSubagentStartOnFirstUse({
-        sessionId,
-        setting: deps.pool.subagentRotationFor?.(providerId),
-        hasAssignment: sessionId !== undefined
-          && deps.pool.subagentAssignmentOf?.(providerId, sessionId) !== undefined,
-        hasPreferredRotation: sessionId !== undefined
-          && deps.pool.preferredRotationFor?.(providerId, sessionId) !== undefined,
-      })) {
-        const firstSetting = deps.pool.subagentRotationFor?.(providerId)
-        const firstParent = parentOfSession(sessionId as string)
-        /** ⚠️ 候选 = 当前模型可用的号（与主代理选号同口径）。 */
-        const firstCandidates = candidatesOf(deps.pool, providerId, modelId)
-        /**
-         * ⚠️ 只读池的**启用账号池序**用于「位次换算」——
-         * 必须与 `AccountPool.preferredRotationFor` 同口径
-         * （那里是 `readAccounts().filter(enabled)[position - 1]`）。
-         */
-        const firstEnabledIds = deps.pool
-          .listAccountsByProvider(providerId)
-          .filter((a) => a.enabled)
-          .map((a) => a.id)
-        const firstDecision = decideSubagentStart({
-          providerId,
-          sessionId,
-          candidateIds: firstCandidates.map((c) => c.id),
-          allowPermanent: !deps.pool.permanentLocked(providerId),
-          pool: deps.pool as never,
-          selector: 'cachedTierOf' in (plan.selector as object)
-            ? (plan.selector as BuddySelectorLike)
-            : undefined,
-          ...(firstParent === undefined ? {} : { mainSessionStartId: deps.pool.preferredRotationFor?.(providerId, firstParent) }),
-        })
-        const firstTarget = firstDecision.startId
-        if (firstTarget !== undefined) {
-          const firstPosition = positionOfAccount(firstEnabledIds, firstTarget)
-          /**
-           * ⚠️ **没有档位就不写**：`setPreferredRotation` 会拒绝（`sanitizePreferredRotation`
-           * 丢弃无档位条目 ⇒ RPC 回 ok 但设置没生效，那种静默失败最难排查）。
-           */
-          const firstTier = await probeRotationStartTier(
-            'cachedTierOf' in (plan.selector as object)
-              ? (plan.selector as TierProbe)
-              : undefined,
-            firstTarget,
-          )
-          if (firstPosition !== undefined && firstTier !== undefined) {
-            try {
-              await deps.pool.setPreferredRotation?.(providerId, sessionId as string, firstPosition, firstTier)
-            } catch { /* ⚠️ 写失败不影响本次选号（退回按策略现算） */ }
-          }
-        }
-      }
       /**
        * 「轮换起点」：本会话指定的起始账号（用户 2026-11-10 需求）。
        *
