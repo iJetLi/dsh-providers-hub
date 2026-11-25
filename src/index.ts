@@ -6049,6 +6049,17 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
       // 锁定判定要**逐账号**看余额 ⇒ 取全部启用账号（与未锁定取号同一份清单）。
       accounts: () => enabledOfficeAceAccounts()
         .map((entry) => ({ id: entry.id, credentialRef: entry.credentialRef })),
+      /**
+       * ★★★ **子代理起点分配**（2026-11-25）。
+       *
+       * 本家**自建选号** ⇒ 用户给子代理配的起点策略原先对它**静默无效、零报错**
+       *（与 `codearts` 同形态）。注入池读能力后 `officeace-lock.ts`
+       * 才能调共享的 `decideSubagentStart` 算起点。
+       *
+       * ⚠️ `pool` 天然满足 `SubagentStartPoolLike`（4 个方法全有），
+       *    故直接传它，**不包一层适配**（那会是同一语义的第二份实现）。
+       */
+      subagentPool: pool,
       resolveUnlocked: resolveOfficeAceCredential,
       readCredential: (ref) => officeaceAuth.readCredential(ref, ctx.credentials as never),
       readStoredCredential: () => officeaceAuth.readStoredCredential(),

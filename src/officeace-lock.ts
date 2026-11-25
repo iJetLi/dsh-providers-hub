@@ -71,6 +71,20 @@ import {
 } from './buddy-balance-rank.js'
 import type { OfficeAceCredential, OfficeAceSubscriptionSummary } from './officeace-auth.js'
 
+/**
+ * ★★★ **子代理起点分配**（2026-11-25）。
+ *
+ * 本家是**自建选号**的 provider（不走 `createCredentialResolver`）⇒ 用户在面板
+ * 里给子代理配的起点策略原先对它**静默无效、零报错**（与 `codearts` 同形态）。
+ *
+ * ⚠️ 判据**全部**在共享纯函数模块里（与 resolver 同一份实现），
+ * 本文件**一行判据都不写** —— 手抄一份会让同一语义两套实现必然漂移。
+ */
+import { OFFICEACE } from './officeace-product.js'
+import { decideSubagentStart } from './subagent-start.js'
+import type { SubagentStartPoolLike } from './subagent-start.js'
+
+
 /** 池内一个候选账号的最小形状（结构类型，便于单测注入替身）。 */
 export interface OfficeAceAccountRef {
   readonly id: string
@@ -136,6 +150,15 @@ export interface OfficeAceLockDeps {
    * 并**钳制到 `windowMs` 以内**（两个窗口是嵌套关系，见 `buddy-balance-rank.ts`）。
    */
   readonly imminentWindowMs?: () => number
+  /**
+   * ★★★ **子代理起点分配的池读能力**（2026-11-25，可选）。
+   *
+   * 本家**自建选号** ⇒ 用户给子代理配的起点策略原先对它**完全无效且零报错**。
+   *
+   * ⚠️ **必须可选**：单测替身与嵌入方不实现它 ⇒ 缺失时走既有路径
+   *（`decideSubagentStart` 内部全是可选链 ⇒ 恒判「没配」⇒ 选号逐字节不变）。
+   */
+  readonly subagentPool?: SubagentStartPoolLike
 }
 
 /**
@@ -318,12 +341,21 @@ export function createOfficeAceCredentialProvider(
     return verdict
   }
 
-  return async (): Promise<OfficeAceCredential | undefined> => {
-    // ① 未锁定 ⇒ 逐字走旧路径（零行为变化）。
+  /**
+   * @param sessionId 当前请求的会话 id（**可选**；2026-11-25 起由适配器透传）。
+   *
+   * ⚠️ 只用于**子代理起点分配**，不参与凭据解析本身。
+   * ⚠️ `undefined`（网关流量 / 单测 / 旧嵌入方）⇒ 选号与改动前**逐字节相同**。
+   */
+  const resolveCredential = async (
+    sessionId?: string,
+  ): Promise<OfficeAceCredential | undefined> => {
+    // ① 未锁定 ⇒ 走旧路径（零行为变化）。
     if (!deps.permanentLocked()) return deps.resolveUnlocked()
 
     // ② 锁定 ⇒ 逐个候选账号判定「还有没有会近期作废的额度」。
-    const accounts = deps.accounts()
+    //    ⚠️ 子代理场景只改**遍历顺序**（起点排第一），见 orderAccountsForSubagent。
+    const accounts = orderAccountsForSubagent(deps.accounts(), sessionId)
     const errors: string[] = []
     for (const account of accounts) {
       const credential = await deps.readCredential(account.credentialRef)
@@ -354,6 +386,63 @@ export function createOfficeAceCredentialProvider(
       windowMs(),
     )
   }
+
+  /**
+   * ★★★ **子代理起点分配：只决定「遍历顺序」**（2026-11-25）。
+   *
+   * ## 为什么不是「只选一个」
+   *
+   * codearts 那类 provider 有「一次选一个号」的环节，故起点是**选中项**；
+   * 而本家在锁定态是**逐个试**（下面的 for 里撞到「有临期额度」的就返回）
+   * ⇒ 起点在这里的正确语义是**把那个号排到最前面**，其余顺序不变。
+   *
+   * | `decidedBy` | 语义 |
+   * |---|---|
+   * | `user-pick` / `pin` / `strategy` / `fixed-position` | 起点排第一（其余按原序跟在后面）|
+   *
+   * ⚠️ 未配置 / `follow` / 无 sessionId ⇒ `startId === undefined`
+   *    ⇒ **原样返回**（不复制、不排序）⇒ 零行为变化。
+   */
+  const orderAccountsForSubagent = (
+    accounts: readonly OfficeAceAccountRef[],
+    sessionId: string | undefined,
+  ): readonly OfficeAceAccountRef[] => {
+    const pool = deps.subagentPool
+    if (pool === undefined) return accounts
+    if (accounts.length <= 1) return accounts
+    try {
+      const decision = decideSubagentStart({
+        providerId: OFFICEACE.id,
+        sessionId,
+        candidateIds: accounts.map((a) => a.id),
+        /**
+         * ⚠️ 本家无「积分为 0 就不可用」这道门（额度判据在 `classify` 里），
+         *    故恒 `true` —— 「允许烧永久积分」对它是无意义的概念。
+         */
+        allowPermanent: true,
+        pool,
+      })
+      if (decision.startId === undefined) return accounts
+      const head = accounts.find((a) => a.id === decision.startId)
+      /**
+       * ⚠️ 起点可能**不在候选里**（策略现算用全量启用账号取位次）⇒
+       *    那样就原样返回，**不要**硬插一个不存在的账号。
+       */
+      if (head === undefined) return accounts
+      return [head, ...accounts.filter((a) => a.id !== head.id)]
+    } catch {
+      /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
+      return accounts
+    }
+  }
+
+  /**
+   * ⚠️ **直接返回、不包一层 setter**：适配器契约已改为
+   * `credentialProvider?: (sessionId?: string) => Promise<...>`
+   *（见 `officeace-adapter.ts` 的同名选项）⇒ 会话 id 按请求透传，
+   * 无需可变状态（可变状态会让并发请求互相覆盖）。
+   */
+  return resolveCredential
 }
 
 /**
