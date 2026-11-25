@@ -333,6 +333,21 @@ let u = JSON.parse(E)                           // { 场景: [模型…] }
 **其余 14 个模型不受影响**（`dfmodel` 的 `price_factor/is_free/original_price_factor`
 与 `mmodel` 的改名都已是最新值）。
 
+### HungerG app-only 路由（2026-11-25 实测）
+
+- 同一批本机已登录账号的真实目录对照：`client_type=5/cli/agent/assistant` 两站都不返回
+  `hmodel`；`10/app/app/app` 在 Qoder Global 与 CN 的 `app` 场景都返回真实 `hmodel` / HungerG，
+  `is_free=true`、`price_factor=0`，且 `minimal_version.cli=9999.9999.9999`。
+- `QoderProduct.clientMetadata` 继续保持 CLI 默认，常规模型与联网搜索不改身份；新增
+  `appClientMetadata` 仅供二次目录探测，且只有 CLI 目录缺失、app 目录实际返回的 HungerG
+  才带 `requiresAppIdentity`；该模型推理用 `session_type=app`。app 查询失败/无资格时只保留 CLI
+  目录或静态兜底，不会使整个 Qoder provider 下线。成功日志记录两条目录的 count 与 ID 集。
+- 真实目录 fixture 只保留模型字段，已移除账号/凭据数据；没有永久静态 free fallback。
+  活动免费资格以远端 `is_free` 为准；官方限时活动至 2026-11-30，Teams/Enterprise 不适用。
+- `/sash` 仍通过 `sashClientType='10'` 独立处理，不能与 `/algo` CLI/app metadata 合并。
+
+官方规则：[Qoder](https://docs.qoder.com/zh/events/hungerg-free) / [Qoder CN](https://docs.qoder.cn/events/hungerg-free)。
+
 ### ⚠️⚠️ `is_reasoning=false` 不是「不支持思考」—— 两条信号相互独立（2026-10-20 用户追问）
 
 用户追问：「实测 CN 的 DeepSeek-Flash 支持思考、也有档位，为什么列表里

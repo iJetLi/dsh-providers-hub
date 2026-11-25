@@ -76,6 +76,8 @@ export interface QoderFallbackModel {
   supportsThinking?: boolean
   /** 是否免费额度模型（远端 `is_free`）。 */
   isFree?: boolean
+  /** 仅当远端 app 目录有、CLI 目录没有时标记；普通模型仍沿用 CLI gateway identity。 */
+  requiresAppIdentity?: boolean
   /**
    * 计费倍率（目录 `price_factor`）。
    *
@@ -266,6 +268,14 @@ export interface QoderModelPromotion {
   ruleId?: string
 }
 
+/** COSY metadata passed into the QoderContext signer. */
+export interface QoderClientMetadata {
+  client_type: string
+  business_product: string
+  business_type: string
+  scene: string
+}
+
 /**
  * Qoder 产品配置。
  *
@@ -336,23 +346,22 @@ export interface QoderProduct {
    * 仅作记录 —— 本插件只支持 prod，**不要**拿它当 prod 的 client id。
    */
   testClientId: string
-  /** 请求体 `metadata.context` 的客户端标识（源码 `Fp()` 的 CLI 默认值）。 */
-  clientMetadata: {
-    client_type: string
-    business_product: string
-    business_type: string
-    scene: string
-  }
+  /** 默认 CLI gateway identity：常规模型与联网搜索继续使用，不随 app-only 模型改变。 */
+  clientMetadata: QoderClientMetadata
+  /**
+   * 官方桌面 app identity，只供 app-only 模型目录探测及被 `requiresAppIdentity` 标记的模型推理。
+   * 真实 Qoder CN/Global 目录对照为 `10/app/app/app`。
+   */
+  appClientMetadata?: QoderClientMetadata
+  /** app-only 模型的推理 session_type；普通模型仍用 WASM 默认的 `qodercli`。 */
+  appSessionType?: string
   /**
    * `/sash/` 端点（用量、活动）的 `Cosy-ClientType` 头取值。
    *
    * ⚠️ **与 `clientMetadata.client_type` 不是同一个身份，不要合并**：
    *
-   * - `clientMetadata.client_type`（`'5'` + `business_product:'cli'`）对应源码
-   *   `Fp()` 的 **CLI** 默认值，用于**推理请求体**的加密信封 `metadata`；
-   * - 本值（`'10'`）对应官方**桌面客户端**身份 —— 源码里是一个冻结常量
-   *   `Mh = Object.freeze({ clientType: 10, businessProduct: 'app', sessionType: 'app' })`，
-   *   官方拿它请求 `/sash/api/v1/me/campaigns`。
+   * - `clientMetadata` 用于 `/algo` 的 COSY 网关身份与加密推理；
+   * - 本值（`'10'`）对应官方桌面客户端的 `/sash` 身份。
    *
    * 服务端按这个头进入活动下发分支（真实缺陷，2026-09-25 定位）：
    *
@@ -575,6 +584,13 @@ export const QODER: QoderProduct = {
     business_type: 'agent',
     scene: 'assistant',
   },
+  appClientMetadata: {
+    client_type: '10',
+    business_product: 'app',
+    business_type: 'app',
+    scene: 'app',
+  },
+  appSessionType: 'app',
   // 官方桌面客户端身份（源码常量 `Mh.clientType`）。仅用于 `/sash/` 端点。
   sashClientType: '10',
   userAgentPrefix: 'qoder',
@@ -742,18 +758,21 @@ export const QODER_CN: QoderProduct = {
   // E2：CN 的 `authClientIds.test` 与 `prod` **同一个值**，因此不存在国际版
   // `J_a` / `G_a` 被读反的那类风险。字段仍保留以免改动 `QoderProduct` 形状。
   testClientId: '732aef47-9cf2-46a2-95fe-4cebb5d0d1fa',
-  // 沿用国际版的 **CLI** 身份（源码 `Fp()` 默认值）。
-  // ⚠️ CN 桌面端自己用的是 `Fh`（clientType 10 / businessProduct 'app' /
-  // sessionType 'app' / scene 'app'）。插件走 CLI 身份在国际版实测可用；
-  // CN 是否接受由 e2e 对话探针验证 —— 若被拒，改这一组值，
-  // 但**不要**顺手把下面 `sashClientType` 一起改（那是两个不同身份，
-  // 见 `QoderProduct.sashClientType` 的注释）。
+  // 默认 CLI identity 保持不变；只有真实目录标记为 app-only 的 HungerG
+  // 才会通过 appClientMetadata/sessionType 走桌面 app 请求。`/sash` 仍独立。
   clientMetadata: {
     client_type: '5',
     business_product: 'cli',
     business_type: 'agent',
     scene: 'assistant',
   },
+  appClientMetadata: {
+    client_type: '10',
+    business_product: 'app',
+    business_type: 'app',
+    scene: 'app',
+  },
+  appSessionType: 'app',
   // E10：CN asar 里同样是 `Fh = Object.freeze({ clientType: 10, … })`。
   sashClientType: '10',
   // E11：CN asar 的 sash 请求头 UA 恒为 `"Qoder"`，与国际版一致。

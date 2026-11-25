@@ -18,14 +18,18 @@ describe('Qoder 产品配置', () => {
     expect(QODER.testClientId).toBe('e93fe488-5778-4c35-a6fc-0f54ed7b3139')
   })
 
-  it('client metadata 取 CLI 默认值', () => {
-    // 依据：设计文档 §2.2 Fp()
-    expect(QODER.clientMetadata).toEqual({
-      client_type: '5',
-      business_product: 'cli',
-      business_type: 'agent',
-      scene: 'assistant',
-    })
+  it('CLI 默认身份保留，app-only 模型有独立桌面身份', () => {
+    const cli = { client_type: '5', business_product: 'cli', business_type: 'agent', scene: 'assistant' }
+    const desktop = { client_type: '10', business_product: 'app', business_type: 'app', scene: 'app' }
+    expect(QODER.clientMetadata).toEqual(cli)
+    expect(QODER_CN.clientMetadata).toEqual(cli)
+    expect(QODER.appClientMetadata).toEqual(desktop)
+    expect(QODER_CN.appClientMetadata).toEqual(desktop)
+    expect(QODER.appSessionType).toBe('app')
+    expect(QODER_CN.appSessionType).toBe('app')
+    // `/sash` 仍独立使用桌面身份 client type 10。
+    expect(QODER.sashClientType).toBe('10')
+    expect(QODER_CN.sashClientType).toBe('10')
   })
 
   it('默认凭据 ref 与其它 provider 隔离', () => {

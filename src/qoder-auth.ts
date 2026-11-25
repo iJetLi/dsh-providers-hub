@@ -28,7 +28,7 @@ import {
   type QoderCredential,
 } from './qoder.js'
 import { QODER, type QoderFallbackModel, type QoderProduct } from './qoder-product.js'
-import { fetchQoderRemoteModels } from './qoder-catalog.js'
+import { fetchQoderRemoteModels, mergeQoderAppOnlyModels } from './qoder-catalog.js'
 import {
   runQoderLoginFlow,
   startQoderLoginFlow,
@@ -621,9 +621,65 @@ export class QoderAuth extends Service {
       // 恒失败、列表退用内置兜底表（看上去像「倍率从不更新」）。
       // 代理按**账号**取：池里可能同时有国际版（需要）与中国版（不需要）。
       const modelFetcher = this.fetcherForAccountOrUndefined(accountId)
-      return await fetchQoderRemoteModels(credential, this.product, {
-        ...modelFetcher === undefined ? {} : { fetcher: modelFetcher },
-      })
+      const fetchOptions = modelFetcher === undefined ? {} : { fetcher: modelFetcher }
+
+      // 第一腿保留已验证的 CLI 目录与旧兜底语义。
+      let cliModels: QoderFallbackModel[] = []
+      let cliError: unknown
+      try {
+        cliModels = await fetchQoderRemoteModels(credential, this.product, fetchOptions)
+      } catch (error) {
+        cliError = error
+      }
+
+      // 第二腿只探测桌面 app 目录，不改 search / 常规模型的 client metadata。
+      // 空 app 目录是账号资格结果（例如 Teams/Enterprise），不算 transport 错误。
+      let appModels: QoderFallbackModel[] = []
+      let appError: unknown
+      if (this.product.appClientMetadata !== undefined) {
+        try {
+          appModels = await fetchQoderRemoteModels(credential, this.product, {
+            ...fetchOptions,
+            metadata: this.product.appClientMetadata,
+            allowEmpty: true,
+          })
+        } catch (error) {
+          appError = error
+        }
+      }
+
+      const appHungerG = mergeQoderAppOnlyModels(cliModels, appModels)
+        .filter((model) => model.requiresAppIdentity)
+      const baseModels = cliModels.length > 0
+        ? cliModels
+        : (appHungerG.length > 0 ? this.product.fallbackModels : [])
+      const models = mergeQoderAppOnlyModels(baseModels, appModels)
+      const cliIdsForLog = cliModels.map((model) => model.id).sort()
+      const appIdsForLog = appModels.map((model) => model.id).sort()
+      const appOnlyIdsForLog = models.filter((model) => model.requiresAppIdentity).map((model) => model.id)
+      this.ctx.logger?.info?.(
+        `[${this.product.id}] 模型目录 CLI=${cliModels.length} [${cliIdsForLog.join(',')}]; `
+        + `app=${appModels.length} [${appIdsForLog.join(',')}]; app-only=[${appOnlyIdsForLog.join(',')}]`,
+      )
+
+      if (cliError !== undefined && models.length > 0) {
+        this.ctx.logger?.warn?.(
+          `[${this.product.id}] CLI 模型目录不可用，app-only HungerG 仍保留，常规模型使用静态兜底表：`
+          + (cliError instanceof Error ? cliError.message : String(cliError)),
+        )
+      }
+      if (appError !== undefined) {
+        // Missing app entitlement/network must not hide or error out the normal CLI catalog.
+        this.ctx.logger?.warn?.(
+          `[${this.product.id}] app-only catalog probe failed; CLI models remain independent: `
+          + (appError instanceof Error ? appError.message : String(appError)),
+        )
+      }
+      if (models.length === 0) {
+        if (cliError !== undefined) throw cliError
+        if (appError !== undefined) throw appError
+      }
+      return models
     } catch (error) {
       this.ctx.logger?.warn?.(
         `[${this.product.id}] 远端模型目录读取失败，模型列表将退用内置兜底表：`

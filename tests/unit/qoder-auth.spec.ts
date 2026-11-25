@@ -285,7 +285,7 @@ describe('QoderAuth.fetchModels（远端模型目录）', () => {
     { machineId: 'm-1' },
   ))
 
-  /** 一段真机形状的 `chat` 场景响应（dfmodel 已免费、mmodel 已改名）。 */
+  /** Standard models from the real CLI `/model/list` shape. */
   const remoteBody = {
     chat: [
       {
@@ -301,8 +301,27 @@ describe('QoderAuth.fetchModels（远端模型目录）', () => {
       },
     ],
   }
-  const okResponse = (): Response =>
-    new Response(JSON.stringify(remoteBody), { status: 200, headers: { 'content-type': 'application/json' } })
+  /** Sanitized app-only model payload captured live from Qoder CN/Global on 2026-11-25. */
+  const remoteAppBody = {
+    assistant: [{
+      key: 'hmodel', status: 'idle', format: 'openai', source: 'system', enable: true,
+      display_name: 'HungerG', is_vl: true, is_reasoning: true, price_factor: 0,
+      original_price_factor: 0, max_input_tokens: 1_000_000, is_free: true, is_lite_plan: true, tags: ['free'],
+      context_config: { '1M': { token_count: 1_000_000 }, '200K': { token_count: 200_000, is_default: true }, '400K': { token_count: 400_000 } },
+      thinking_config: { disabled: {}, enabled: { efforts: { high: {}, max: { is_default: true }, low: {} }, is_default: true } },
+      minimal_version: { cli: '9999.9999.9999', qoder_work: '9999.9999.9999', mobile: '9999.9999.9999', jb_plugin: '9999.9999.9999', cloud_agents: '9999.9999.9999', qoder_wake: '9999.9999.9999' },
+    }],
+    app: [{
+      key: 'hmodel', status: 'idle', format: 'openai', source: 'system', enable: true,
+      display_name: 'HungerG', is_vl: true, is_reasoning: true, price_factor: 0,
+      original_price_factor: 0, max_input_tokens: 1_000_000, is_free: true, is_lite_plan: true, tags: ['free'],
+      context_config: { '1M': { token_count: 1_000_000 }, '200K': { token_count: 200_000, is_default: true }, '400K': { token_count: 400_000 } },
+      thinking_config: { disabled: {}, enabled: { efforts: { high: {}, max: { is_default: true }, low: {} }, is_default: true } },
+      minimal_version: { cli: '9999.9999.9999', qoder_work: '9999.9999.9999', mobile: '9999.9999.9999', jb_plugin: '9999.9999.9999', cloud_agents: '9999.9999.9999', qoder_wake: '9999.9999.9999' },
+    }],
+  }
+  const okResponse = (body: unknown = remoteBody): Response =>
+    new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
 
   /** 假的账号池；只实现本路径用到的读方法。 */
   function fakePool(credential: unknown): { pool: never; reads: ReturnType<typeof vi.fn>; writes: ReturnType<typeof vi.fn> } {
@@ -317,21 +336,45 @@ describe('QoderAuth.fetchModels（远端模型目录）', () => {
     }
   }
 
-  it('用池里可用账号的凭据拉远端目录（WASM 签名 → GET → 解析）', async () => {
+  it('默认先取 CLI 目录，再以隔离 app tuple 探测 HungerG；池保持只读', async () => {
     const { ctx } = makeCtx()
-    const fetcher = vi.fn(async () => okResponse()) as unknown as typeof fetch
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const identity = new Headers(init?.headers).get('cosy-clienttype')
+      return identity === '10' ? okResponse(remoteAppBody) : okResponse()
+    }) as unknown as typeof fetch
     const auth = newService(ctx, fetcher)
     const { pool, writes } = fakePool(JSON.parse(credWithUid) as unknown)
     const models = await auth.fetchModels(pool)
-    expect(models.map((m) => m.id)).toEqual(['dfmodel', 'mmodel'])
+    expect(models.map((m) => m.id)).toEqual(['dfmodel', 'mmodel', 'hmodel'])
     expect(models[0]?.priceFactor).toBe(0)
     expect(models[0]?.isFree).toBe(true)
     expect(models[1]?.name).toBe('MiniMax-M3.1-Flash')
-    const [url, init] = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!
-    expect(url).toContain('/api/v2/model/list?Encode=1')
-    expect(String((init.headers as Record<string, string>).Authorization)).toMatch(/^Bearer COSY\./)
+    expect(models[2]).toMatchObject({ name: 'HungerG', isFree: true, priceFactor: 0, requiresAppIdentity: true })
+    const calls = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.[0]).toContain('/api/v2/model/list?Encode=1')
+    expect(new Headers(calls[0]?.[1].headers).get('cosy-clienttype')).toBe('5')
+    expect(new Headers(calls[1]?.[1].headers).get('cosy-clienttype')).toBe('10')
+    expect(new Headers(calls[0]?.[1].headers).get('cosy-version')).toBe('1.1.79')
     // ⚠️ 池必须**只读**：这条路径不得写任何账号字段（否则会污染额度/限流账）。
     expect(writes).not.toHaveBeenCalled()
+  })
+
+  it('app 目录探测失败时，CLI 标准模型仍可用', async () => {
+    const { ctx } = makeCtx()
+    const warn = vi.fn()
+    ;(ctx as unknown as { logger: unknown }).logger = { warn, info: vi.fn(), error: vi.fn() }
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const identity = new Headers(init?.headers).get('cosy-clienttype')
+      return identity === '10'
+        ? new Response(JSON.stringify({ code: '101', message: 'Signature invalid' }), { status: 403 })
+        : okResponse()
+    }) as unknown as typeof fetch
+    const auth = newService(ctx, fetcher)
+    const models = await auth.fetchModels(fakePool(JSON.parse(credWithUid) as unknown).pool)
+    expect(models.map((m) => m.id)).toEqual(['dfmodel', 'mmodel'])
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain('app-only catalog probe failed')
   })
 
   it('池里没有可用账号 ⇒ 回退本实例默认 ref 的凭据', async () => {
@@ -362,8 +405,8 @@ describe('QoderAuth.fetchModels（远端模型目录）', () => {
     )) as unknown as typeof fetch
     const auth = newService(ctx, fetcher)
     expect(await auth.fetchModels()).toEqual([])
-    expect(warn).toHaveBeenCalledTimes(1)
-    expect(String(warn.mock.calls[0]?.[0])).toContain('Login expired')
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(warn.mock.calls.map(call => String(call[0])).join('\n')).toContain('Login expired')
   })
 
   it('⚠️ 池**读失败**（reject）⇒ 返回空数组、不抛穿（失败不升级成 provider 报错）', async () => {
