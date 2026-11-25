@@ -495,8 +495,48 @@ async function handleRequest(
     response.end(JSON.stringify({ ok: false, message: '请求来源不是本机登录页' }))
     return
   }
+  /**
+   * ★★★ **`same-site` 也必须放行**（GitHub issue #159）。
+   *
+   * ## 缺陷
+   *
+   * 原判据只允许 `same-origin` / `none`，把 **`same-site` 拒了**。
+   *
+   * 而 **Jet Hub 的 Web GUI（`127.0.0.1:3080`）里点「添加账号」**，浏览器打开
+   * `127.0.0.1:<随机端口>/raccoon/login` ⇒ 两个 URL **同 host、不同 port**
+   * ⇒ 浏览器按 Fetch Metadata 规范标 **`same-site`**（不是 `same-origin`，那要求
+   * scheme+host+**port** 全同）。
+   *
+   * 真实报障请求头（issue #159）：
+   *
+   * ```
+   * Host: 127.0.0.1:39631
+   * Referer: http://127.0.0.1:3080/
+   * Sec-Fetch-Site: same-site      ← 被拒
+   * ```
+   *
+   * ⇒ **任何人在 Web GUI 里点「添加账号」都会 403**，而且报错文案是
+   *   「请求来源不是本机登录页」—— 用户完全看不懂为什么。
+   *
+   * ## 为什么放行 `same-site` 是**安全**的
+   *
+   * 这道闸门防的是 **DNS rebinding**：攻击者把 `evil.example` 解析到 `127.0.0.1`。
+   * 那种情况下：
+   *
+   * - 浏览器请求的 **`Host` 是 `evil.example:<port>`** ⇒ **上面那条 `Host` 校验
+   *   （必须严格等于 `127.0.0.1:<port>`）已经把它拒掉了**；
+   * - 且 `Sec-Fetch-Site` 会是 **`cross-site`**（不同 site），仍然被本条拒绝。
+   *
+   * 而 **`same-site` 能从 `127.0.0.1` 发起，就意味着请求来自 `127.0.0.1` 上的
+   * 另一个端口** —— 那已经要求攻击者能在**本机**起服务（此时防线早已不存在）。
+   * 换言之：**`Host` 校验是本闸门的主判据，`Sec-Fetch-Site` 只是纵深防御的一层**，
+   * 放行 `same-site` 不降低对 `cross-site` 的拦截。
+   *
+   * ⚠️ 仍**不放行** `cross-site` / `same-origin` 以外的任何其它值。
+   */
   const fetchSite = request.headers['sec-fetch-site']
-  if (typeof fetchSite === 'string' && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+  const sameSiteAllowed = fetchSite === 'same-origin' || fetchSite === 'same-site' || fetchSite === 'none'
+  if (typeof fetchSite === 'string' && !sameSiteAllowed) {
     response.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' })
     response.end(JSON.stringify({ ok: false, message: '请求来源不是本机登录页' }))
     return

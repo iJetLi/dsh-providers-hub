@@ -942,7 +942,31 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
     })
     const base = originOf(started.loginUrl)
     const port = Number(new URL(base).port)
-    for (const site of ['cross-site', 'same-site']) {
+    /**
+     * ⚠️ **`same-site` 从拒绝列表里移除了**（GitHub issue #159 修正本用例的假设）。
+     *
+     * 原用例把 `same-site` 与 `cross-site` 一起判为恶意，**这个假设是错的**：
+     *
+     * Jet Hub 的 Web GUI 在 **`127.0.0.1:3080`**，它点「添加账号」打开
+     * `127.0.0.1:<随机端口>/raccoon/login` ⇒ 两个 URL **同 host、不同 port**
+     * ⇒ 浏览器按规范标 **`same-site`**。真实报障请求头：
+     *
+     * ```
+     * Host: 127.0.0.1:39631
+     * Referer: http://127.0.0.1:3080/
+     * Sec-Fetch-Site: same-site      ← 原实现拒了 ⇒ 任何 Web GUI 用户都 403
+     * ```
+     *
+     * **`same-site` 的真实恶意面 = 「攻击者已在 `127.0.0.1` 上起了另一个端口的服务」**
+     * —— 那已经意味着本机沦陷，防线早已不存在。而挡 DNS rebinding 靠的是**上面那条
+     * `Host` 校验**（`evil.example` → `127.0.0.1` 时 `Host` 是 `evil.example:<port>`）：
+     *
+     * - `evil.example` 页面打 `http://127.0.0.1:<port>` ⇒ `Host` 是 `127.0.0.1:<port>`
+     *   但 `Sec-Fetch-Site` 是 **`cross-site`** ⇒ 由本条拒绝 ✅
+     * - `evil.example` 直接请求 `http://evil.example:<port>`（rebinding）⇒
+     *   **`Host` 是 `evil.example:<port>`** ⇒ 由 `Host` 校验拒绝 ✅
+     */
+    for (const site of ['cross-site']) {
       const rejected = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.authorizeStart, { 'Sec-Fetch-Site': site })
       expect(rejected, site).toBe(403)
     }
@@ -952,6 +976,17 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
     // 页面自己发的 fetch（`same-origin`）也必须放行。
     const viaPage = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.authorizeStatus, { 'Sec-Fetch-Site': 'same-origin' })
     expect(viaPage).toBe(200)
+    /**
+     * ★★★ **`same-site` 必须放行**（issue #159 的本体）。
+     *
+     * 这是 **Jet Hub Web GUI（`:3080`）跨端口打开登录页**的真实形态 ——
+     * 带真实报障请求里的 `Referer`。原实现 403，导致任何 Web GUI 用户都加不了账号。
+     */
+    const viaWebGui = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.login, {
+      'Sec-Fetch-Site': 'same-site',
+      Referer: 'http://127.0.0.1:3080/',
+    })
+    expect(viaWebGui, 'issue #159：Web GUI 跨端口打开必须放行').toBe(200)
   })
 
   it('★ 来源闸门**不**误伤不带 `Sec-Fetch-*` 的客户端（非浏览器与测试替身）', async () => {
@@ -1031,5 +1066,73 @@ describe('浏览器登录（官方那条链）的整条流程', () => {
     expect(first.opened).toBe(true)
     expect(second.opened, '复用时没有新开窗 ⇒ 页面应说「浏览器没自动打开？点下面链接」').toBe(false)
     expect(opened.length).toBe(1)
+  })
+})
+
+/**
+ * ★★★ **`Sec-Fetch-Site: same-site` 必须放行**（GitHub issue #159）。
+ *
+ * ## 缺陷
+ *
+ * 原闸门只允许 `same-origin` / `none`，把 **`same-site` 拒了**。
+ *
+ * 而 **Jet Hub 的 Web GUI（`127.0.0.1:3080`）里点「添加账号」**，浏览器打开
+ * `127.0.0.1:<随机端口>/raccoon/login` —— 两个 URL **同 host、不同 port**
+ * ⇒ 浏览器按 Fetch Metadata 规范标 **`same-site`**（`same-origin` 要求
+ * scheme+host+**port** 全同）。
+ *
+ * 真实报障请求头：
+ *
+ * ```
+ * Host: 127.0.0.1:39631
+ * Referer: http://127.0.0.1:3080/
+ * Sec-Fetch-Site: same-site      ← 被拒 ⇒ 403「请求来源不是本机登录页」
+ * ```
+ *
+ * ⇒ **任何人在 Web GUI 里点「添加账号」都会 403**。
+ *
+ * ## 为什么放行 `same-site` 安全
+ *
+ * 这道闸门防 **DNS rebinding**（`evil.example` → `127.0.0.1`）。那种情况下
+ * **`Host` 是 `evil.example:<port>`** ⇒ **上面那条 `Host` 校验已经拒掉**；
+ * 且 `Sec-Fetch-Site` 会是 `cross-site`，仍被本条拒绝。
+ *
+ * ⇒ **`Host` 是本闸门的主判据**，放行 `same-site` 不降低对 `cross-site` 的拦截。
+ */
+describe('本机回环来源闸门（issue #159）', () => {
+  it('★★★ Sec-Fetch-Site: same-site（Web GUI 跨端口）⇒ 必须放行', async () => {
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const port = Number(new URL(started.loginUrl).port)
+    const status = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.login, {
+      host: `127.0.0.1:${port}`,
+      'sec-fetch-site': 'same-site',
+      // 真实报障请求里就有这个 Referer（Web GUI 的 3080 端口）
+      referer: 'http://127.0.0.1:3080/',
+    })
+    expect(status, 'issue #159：Web GUI(3080) 跨端口打开必须放行，不能 403').toBe(200)
+  })
+
+  it('★★ cross-site ⇒ 仍必须 403（DNS rebinding 防线不得降低）', async () => {
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const port = Number(new URL(started.loginUrl).port)
+    const status = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.login, {
+      host: `127.0.0.1:${port}`,
+      'sec-fetch-site': 'cross-site',
+    })
+    expect(status, 'cross-site 必须拒（DNS rebinding 防线）').toBe(403)
+  })
+
+  it('★★ Host 不是 127.0.0.1:<port> ⇒ 仍必须 403', async () => {
+    const fetcher = iamFetch(async () => jsonResponse({ code: 'OK', data: { status: 'pending' } }))
+    started = await startRaccoonLoginFlow({ fetcher: fetcher as unknown as typeof fetch })
+    const port = Number(new URL(started.loginUrl).port)
+    // 复刻 DNS rebinding：Host 是攻击者域名，但连接指向 127.0.0.1
+    const status = await probeLocalStatus(port, RACCOON_LOGIN_PAGE_PATHS.login, {
+      host: `evil.example:${port}`,
+      'sec-fetch-site': 'same-site',
+    })
+    expect(status, 'Host 校验是主判据，必须拒').toBe(403)
   })
 })
