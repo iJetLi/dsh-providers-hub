@@ -154,121 +154,24 @@ import type { LoomyTierOptions } from './loomy-balance-rank.js'
  * ⇒ 名单的权威是调用点本身，不是本注释。
  */
 /**
- * ★★★ **取「主代理起点所在档位」的账号 id 列表**（2026-11-23）。
+ * ⚠️⚠️ **这两个函数已提取到 `src/subagent-start.ts`**（2026-11-25）。
  *
- * ## 为什么需要它
+ * ## 为什么提取
  *
- * 用户明确要求子代理也遵守档次优先：
+ * 子代理起点分配的判据原先**内联在本文件**，而本仓有一类 provider
+ *（codearts / officeace / …）**自建选号**、不走本文件的
+ * `createCredentialResolver` ⇒ 它们想支持子代理只能**手抄一份**，
+ * 而同一语义两套实现必然漂移（本套逻辑上游已改 6 轮审计）。
  *
- * > 「子代理在分配帐号起点时，肯定也要像主代理一样，遵守档次优先的原则呀」
+ * ## 为什么就地 import 而不是复制
  *
- * ⇒ 「顺序 / 倒序 / 哈希」**只在同一档位内**错开，绝不跨档位
- *（跨档位反转会让子代理先烧短期，而临期还没烧完）。
+ * 本文件与 `subagent-start.ts` 必须给出**逐字节相同**的结果。
+ * 守卫在 `tests/unit/subagent-start-extraction.spec.ts`（8 条，
+ * 提取过程中实际抓到 6 处语义漂移）。
  *
- * ## 为什么用「余额分档」而不是「已算好的 ranked」
- *
- * 调用点此时**还没取余额**（`pickBuddyAccount` 内部才取）。档位判据需要
- * 余额读数，故这里只能读 `pool` 侧的**缓存**读数：
- *
- * - 有缓存读数 ⇒ 按 `buddyBalanceTier` 分组（与选号同源）；
- * - **无缓存读数 ⇒ 退化为「全部启用账号」**（此时档位未知，宁可全部参与，
- *   让 `rotateFromPreferred` 后续按真实档位收窄）。
- *
- * ⚠️ 退化是**安全的**：`rotateFromPreferred` 内部会按档位重新分组，
- * 起点落在哪一档由它决定；我们这里只是尽量给出一个「同档位」的候选集。
- * 若给了跨档位的集合，起点的档位归属由 `rotateFromPreferred` 自己判断 ——
- * 最坏情况是「起点落在更靠前的档位」，那仍是**该档位内**的合法错开。
- *
- * @param enabledIds - 该 provider 全部启用账号 id（池序）
- * @param mainStartId - 主代理当前实际用的账号 id
- * @param pool - 用于读余额缓存
- * @param provider - provider id
- * @returns 与主代理起点同档位的账号 id 列表（按 `enabledIds` 顺序）；
- *   无法判断时返回 `enabledIds` 原样
+ * ⚠️ **不要把它们搬回来**：那会让三类 provider 再次各有一份实现。
  */
-function sameTierAsMainStart(
-  enabledIds: readonly string[],
-  mainStartId: string,
-  /**
-   * ★ **从 selector 的余额缓存读档位**（2026-11-24，上游审计 P1-3 修复）。
-   *
-   * 原缺陷：上一版收 `pool.cachedBalanceTierOf`，而那个方法**全仓零实现**
-   * ⇒ 恒降级为「全量账号」⇒ 子代理可能先烧永久积分。
-   *
-   * 余额缓存在 `BuddyBalanceSelector` 里，池没有余额数据。
-   *
-   * ⚠️ 可选参数：单测替身不实现 `cachedTierOf` ⇒ 退化，行为不变。
-   */
-  selector: BuddySelectorLike | undefined,
-  allowPermanent: boolean,
-): readonly string[] {
-  /**
-   * ⚠️ pool 可能**没有**这个可选能力（单测替身）⇒ 直接返回全量，
-   * 行为退化为「全池错开」—— 仍然可用，只是分布可能跨档。
-   */
-  /**
-   * ⚠️ **两层降级**：
-   * 1. `selector` 缺席 / 未实现 `cachedTierOf`（单测替身）；
-   * 2. 主代理起点**没有余额缓存**（冷启动 / 刚过 TTL）。
-   *
-   * 两者都 ⇒ 全量账号（宁可跨档错开，也不要子代理全挤主代理那个号）。
-   */
-  if (selector === undefined || typeof selector.cachedTierOf !== 'function') return enabledIds
-  const asCandidate = (id: string) => ({ id } as BuddyCandidateAccount)
-  const mainTier = selector.cachedTierOf(asCandidate(mainStartId), allowPermanent)
-  if (mainTier === undefined) return enabledIds
-  const same = enabledIds.filter(
-    (id) => selector.cachedTierOf!(asCandidate(id), allowPermanent) === mainTier,
-  )
-  /**
-   * ⚠️ 过滤后若不含主代理起点（余额缓存刚失效），退回全量 ——
-   * 否则 `startIndexOfSlot` 会因「找不到基准」返回 undefined。
-   */
-  return same.includes(mainStartId) ? same : enabledIds
-}
-
-
-/**
- * ★★★ **无锚点时，取「档位最优」的账号作锚**（2026-11-24，PR #153 双审 P1①）。
- *
- * ## 缺陷
- *
- * 上一版：`tierAnchorId === undefined` ⇒ `sameTierIds = enabledIds`（**全池**）。
- *
- * 而 `tierAnchorId === undefined` 正是**生产默认**：主代理「默认不指定起点」时
- * `mainSessionStartId` 是 `undefined`，子代理自己的 `baseRotationStartId` 也是
- * `undefined`。
- *
- * ⇒ 档位过滤一次都没生效 ⇒ `startIndexOfSlot` 在全池上错开 ⇒
- *   池 `[临期A, 临期B, 永久P]` 时**第二个子代理必然拿到 `P`**（先烧永久积分）。
- *   双审两侧独立实测：`child1=RB`、**`child2=RP`** —— 与上游原报障**逐字节相同**。
- *
- * ## 修法
- *
- * 无锚点时**不要**用「全池第一个」当锚，而是**按 `cachedTierOf` 找档位最优
- *（`imminent:0` → `expiring:1` → `permanent:2`，**数值越小越优先**）的那个账号**，
- * 再用它调 {@link sameTierAsMainStart} ⇒ 子代理只在**临期档内**错开。
- *
- * ⚠️ `selector` 缺席 / 无 `cachedTierOf`（单测替身、非 buddy 家）⇒ 返回 `undefined`
- *    ⇒ 调用方退回全池（**无法判断档位时的既有降级**，保持不变）。
- * ⚠️ 跳过 `none`（3）：那是「无余额 / 查询失败 / 锁定态只剩永久」——
- *    拿它当锚会把子代理导向无余额的号。
- */
-function bestTierAnchorId(
-  enabledIds: readonly string[],
-  selector: BuddySelectorLike | undefined,
-  allowPermanent: boolean,
-): string | undefined {
-  if (selector === undefined || typeof selector.cachedTierOf !== 'function') return undefined
-  const asCandidate = (id: string) => ({ id } as BuddyCandidateAccount)
-  let best: { id: string; tier: number } | undefined
-  for (const id of enabledIds) {
-    const tier = selector.cachedTierOf(asCandidate(id), allowPermanent)
-    if (tier === undefined || tier >= BUDDY_BALANCE_TIER.none) continue
-    if (best === undefined || tier < best.tier) best = { id, tier }
-  }
-  return best?.id
-}
+import { bestTierAnchorId, sameTierAsMainStart } from './subagent-start.js'
 
 
 export interface ResolverPool<TCredential = unknown> {
