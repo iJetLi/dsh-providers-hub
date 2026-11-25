@@ -101,6 +101,19 @@
  * 不需要签名。但它是**该账号在本地 IDE 里打开过**才有的产物：纯插件用户
  * （没装 IDE / 没在 IDE 登录过该账号）恒为空 —— 那正是「未开通」那类账号。
  * 故线上路径走本模块（签名远端），本地缓存只用于排查对账。
+ *
+ * ## 2026-11-24 HungerG：目录请求必须使用桌面网关身份
+ *
+ * Qoder 按 `Cosy-Clienttype` 裁剪 `/model/list`。公开的 live CN 网关对照记录：
+ * CLI 身份 `5` 不返回 app-only 模型；桌面网关身份 `qoderapp` + `Cosy-Version 1.1.71`
+ * 返回的 `chat` / `app` 目录包含 `hmodel`（展示名 HungerG）与 `fast`。
+ * `QODER_CATALOG_SCENES` 已合并 `chat` 与 `app`；切换客户端身份后，现有解析器会原样
+ * 透传未知模型 key 和远端 `is_free` / `price_factor`，无需静态枚举 HungerG。
+ *
+ * 活动免费资格是限时且账号类型受限；不要在兜底表永久写入 `isFree: true`。
+ * 官方活动说明：https://docs.qoder.com/zh/events/hungerg-free 与
+ * https://docs.qoder.cn/events/hungerg-free；身份对照参考：
+ * https://github.com/divingyu/pi-provider-qoder-cn/blob/main/src/cosy.ts#L13-L26。
  */
 
 import type { QoderCredential } from './qoder.js'

@@ -333,6 +333,21 @@ let u = JSON.parse(E)                           // { 场景: [模型…] }
 **其余 14 个模型不受影响**（`dfmodel` 的 `price_factor/is_free/original_price_factor`
 与 `mmodel` 的改名都已是最新值）。
 
+### HungerG（2026-11-24）：使用 app 网关身份并保持免费状态动态
+
+- HungerG 是匿名活动模型，官方活动说明限时至 2026-11-30，并限定个人账号；团队版/企业版
+  不适用，模型目录应由上游按账号资格裁剪。活动期调用不消耗 Credits，即使余额为 0。
+- live CN 网关身份对照（公开 Qoder provider 记录）：`Cosy-Clienttype: 5` 的 CLI 身份看不到
+  app 组；`qoderapp` + `Cosy-Version: 1.1.71` 返回 `hmodel`（display_name `HungerG`）及 `fast`。
+  因而插件列表缺项的根因是 `/algo` 目录与推理请求沿用 CLI 身份，而不是解析器要求静态 ID。
+- 国际版与 CN 的 `QoderProduct.clientMetadata` 均使用 `qoderapp` / `app` 网关身份；
+  `COSY_VERSION=1.1.79` 保持不变（高于 app 目录门槛），`sashClientType='10'` 仍是独立 `/sash` 身份。
+- 不将 HungerG 写进永久兜底表：列表、免费属性、倍率与资格都以远端目录为准，活动结束或
+  上游撤下后由下一次目录刷新自然移除。
+
+官方规则：[Qoder](https://docs.qoder.com/zh/events/hungerg-free) /
+[Qoder CN](https://docs.qoder.cn/events/hungerg-free)；身份对照：[Qoder gateway identity](https://github.com/divingyu/pi-provider-qoder-cn/blob/main/src/cosy.ts#L13-L26)。
+
 ### ⚠️⚠️ `is_reasoning=false` 不是「不支持思考」—— 两条信号相互独立（2026-10-20 用户追问）
 
 用户追问：「实测 CN 的 DeepSeek-Flash 支持思考、也有档位，为什么列表里

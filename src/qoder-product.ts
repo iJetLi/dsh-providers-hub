@@ -336,7 +336,14 @@ export interface QoderProduct {
    * 仅作记录 —— 本插件只支持 prod，**不要**拿它当 prod 的 client id。
    */
   testClientId: string
-  /** 请求体 `metadata.context` 的客户端标识（源码 `Fp()` 的 CLI 默认值）。 */
+  /**
+   * `/algo` 网关的 COSY 客户端身份（模型目录与加密推理共用）。
+   *
+   * 模型目录按 `Cosy-Clienttype` 裁剪；CLI `5` 身份看不到桌面端 `app` 组中的
+   * HungerG。Qoder 的桌面网关身份是 `qoderapp` / `app`。
+   *
+   * ⚠️ `/sash/` 的 `sashClientType` 是独立身份，不随此值改变。
+   */
   clientMetadata: {
     client_type: string
     business_product: string
@@ -348,11 +355,8 @@ export interface QoderProduct {
    *
    * ⚠️ **与 `clientMetadata.client_type` 不是同一个身份，不要合并**：
    *
-   * - `clientMetadata.client_type`（`'5'` + `business_product:'cli'`）对应源码
-   *   `Fp()` 的 **CLI** 默认值，用于**推理请求体**的加密信封 `metadata`；
-   * - 本值（`'10'`）对应官方**桌面客户端**身份 —— 源码里是一个冻结常量
-   *   `Mh = Object.freeze({ clientType: 10, businessProduct: 'app', sessionType: 'app' })`，
-   *   官方拿它请求 `/sash/api/v1/me/campaigns`。
+   * - `clientMetadata` 用于 `/algo` 的 COSY 网关身份与加密推理；
+   * - 本值（`'10'`）对应官方桌面客户端的 `/sash` 身份。
    *
    * 服务端按这个头进入活动下发分支（真实缺陷，2026-09-25 定位）：
    *
@@ -570,8 +574,8 @@ export const QODER: QoderProduct = {
   clientId: 'e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb',
   testClientId: 'e93fe488-5778-4c35-a6fc-0f54ed7b3139',
   clientMetadata: {
-    client_type: '5',
-    business_product: 'cli',
+    client_type: 'qoderapp',
+    business_product: 'app',
     business_type: 'agent',
     scene: 'assistant',
   },
@@ -742,15 +746,12 @@ export const QODER_CN: QoderProduct = {
   // E2：CN 的 `authClientIds.test` 与 `prod` **同一个值**，因此不存在国际版
   // `J_a` / `G_a` 被读反的那类风险。字段仍保留以免改动 `QoderProduct` 形状。
   testClientId: '732aef47-9cf2-46a2-95fe-4cebb5d0d1fa',
-  // 沿用国际版的 **CLI** 身份（源码 `Fp()` 默认值）。
-  // ⚠️ CN 桌面端自己用的是 `Fh`（clientType 10 / businessProduct 'app' /
-  // sessionType 'app' / scene 'app'）。插件走 CLI 身份在国际版实测可用；
-  // CN 是否接受由 e2e 对话探针验证 —— 若被拒，改这一组值，
-  // 但**不要**顺手把下面 `sashClientType` 一起改（那是两个不同身份，
-  // 见 `QoderProduct.sashClientType` 的注释）。
+  // `/algo` 模型目录按 COSY 客户端身份裁剪；Qoder 桌面身份 `qoderapp`
+  // 才会返回 `app` 组中的活动模型。两站共用同一身份；下面的
+  // `sashClientType` 是独立 `/sash` 身份，不应随之修改。
   clientMetadata: {
-    client_type: '5',
-    business_product: 'cli',
+    client_type: 'qoderapp',
+    business_product: 'app',
     business_type: 'agent',
     scene: 'assistant',
   },

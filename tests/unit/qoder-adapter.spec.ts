@@ -324,6 +324,30 @@ describe('QoderAdapter 模型目录', () => {
       expect(all.find((m) => m.id === 'fast')?.isFree).toBeUndefined()
     })
 
+    it('HungerG 从 app 目录显示为免费，并使用 qoderapp 身份发出推理请求', async () => {
+      const remoteHungerG = {
+        id: 'hmodel', name: 'HungerG', contextWindow: 1_000_000,
+        supportsImage: true, supportsThinking: true, isFree: true, priceFactor: 0,
+        efforts: ['low', 'medium', 'high', 'max'], defaultEffort: 'high',
+      }
+      const fetchImpl = vi.fn(async () => envelopeResponse([textFrame('HungerG OK'), finishFrame])) as unknown as typeof fetch
+      const adapter = makeAdapter({
+        fetchRemoteModels: async () => [remoteHungerG],
+        fetchImpl,
+      })
+
+      const models = await adapter.listModels('qoder')
+      expect(models.some((model) => model.id === 'hmodel' && model.name.includes('HungerG'))).toBe(true)
+      await expect(adapter.isFreeModel('hmodel')).resolves.toBe(true)
+      const chunks = await collect(adapter, 'hmodel')
+      expect(chunks.some((chunk) => chunk.type === 'text-delta')).toBe(true)
+
+      const [, init] = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]! as [string, RequestInit]
+      const headers = new Headers(init.headers)
+      expect(headers.get('cosy-clienttype')).toBe('qoderapp')
+      expect(headers.get('x-model-key')).toBe('hmodel')
+    })
+
     it('20 分钟 TTL：第二次读命中缓存，不再打上游', async () => {
       const fetchRemoteModels = vi.fn(async () => [remoteFast])
       const adapter = makeAdapter({ fetchRemoteModels })

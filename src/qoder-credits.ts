@@ -343,8 +343,8 @@ export function isQoderNotActivated(
  * ⚠️ **两个头都必需，缺一都会让服务端不下发「可领取」的活动**：
  *
  * 1. `Cosy-ClientType` = `sashClientType`（`'10'` = 桌面 app 身份）。
- *    用 `clientMetadata.client_type`（`'5'` = CLI）时 `/sash/api/v1/me/campaigns`
- *    恒返回 `campaigns:[]`。
+ *    旧 CLI 身份 `clientMetadata.client_type='5'` 实测让 `/sash/api/v1/me/campaigns`
+ *    恒返回 `campaigns:[]`；当前 `/algo` 身份 `qoderapp` 也不可复用到此端点。
  * 2. `Cosy-MachineToken` + `Cosy-MachineType`（**必须成对**，见
  *    `qoder-machine.ts`）。只用 `'10'` 时服务端只回一条 `VIEW_DETAILS`，
  *    **没有** `CLAIM_BENEFIT/CLAIMABLE` → 插件误判「今天已领」。

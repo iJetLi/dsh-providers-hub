@@ -99,6 +99,22 @@ const REMOTE_LMODEL = {
   },
 }
 
+/** Minimal app-group entry for the public HungerG model (upstream key `hmodel`). */
+const REMOTE_HUNGERG = {
+  key: 'hmodel',
+  enable: true,
+  display_name: 'HungerG',
+  is_vl: true,
+  is_reasoning: true,
+  price_factor: 0,
+  is_free: true,
+  context_config: { '1M': { token_count: 1000000 } },
+  thinking_config: {
+    disabled: {},
+    enabled: { efforts: { low: {}, medium: {}, high: { is_default: true }, max: {} } },
+  },
+}
+
 describe('parseQoderRemoteModels', () => {
   it('把远端条目转成兜底表同形（价格/免费/上下文按档位表最大档）', () => {
     const models = parseQoderRemoteModels({ chat: [REMOTE_DFMODEL, REMOTE_MMODEL] })
@@ -275,12 +291,12 @@ describe('parseQoderRemoteModelsForScenes（chat ∪ app）', () => {
     expect(QODER_CATALOG_SCENES).toEqual(['chat', 'app'])
   })
 
-  it('app 独有的 QoDuck 会被并进来，且排在 chat 的模型之后', () => {
+  it('app 独有的 QoDuck 与 HungerG 都会并进来，保留远端 model key 与免费标记', () => {
     const models = parseQoderRemoteModelsForScenes({
       chat: [REMOTE_DFMODEL],
-      app: [REMOTE_DFMODEL, REMOTE_LMODEL],
+      app: [REMOTE_DFMODEL, REMOTE_LMODEL, REMOTE_HUNGERG],
     })
-    expect(models?.map((m) => m.id)).toEqual(['dfmodel', 'lmodel'])
+    expect(models?.map((m) => m.id)).toEqual(['dfmodel', 'lmodel', 'hmodel'])
     const duck = models![1]!
     expect(duck.name).toBe('QoDuck')
     // 窗口取档位表**最大**档，而不是 `max_input_tokens: 180000`（见 parseContextWindow）。
@@ -290,6 +306,11 @@ describe('parseQoderRemoteModelsForScenes（chat ∪ app）', () => {
     expect(duck.efforts).toEqual(['xhigh', 'high', 'low'])
     expect(duck.defaultEffort).toBe('high')
     expect(duck.isFree).toBe(true)
+    const hungerG = models![2]!
+    expect(hungerG.name).toBe('HungerG')
+    expect(hungerG.contextWindow).toBe(1_000_000)
+    expect(hungerG.isFree).toBe(true)
+    expect(hungerG.priceFactor).toBe(0)
   })
 
   it('⚠️ 同 id 两边都有 ⇒ 取 chat 那条（顺序即优先级），且不产生重复 id', () => {
@@ -441,11 +462,11 @@ describe('解析层：审计补记的七格', () => {
 describe('fetchQoderRemoteModels', () => {
   it('走 WASM 签名（COSY）+ `/api/v2/model/list?Encode=1`，明文响应也能解析', async () => {
     const fetchImpl = vi.fn(async () => new Response(
-      JSON.stringify({ chat: [REMOTE_DFMODEL, REMOTE_MMODEL] }),
+      JSON.stringify({ chat: [REMOTE_DFMODEL, REMOTE_MMODEL], app: [REMOTE_HUNGERG] }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     ))
     const models = await fetchQoderRemoteModels(cred, QODER, { fetcher: fetchImpl as never })
-    expect(models.map((m) => m.id)).toEqual(['dfmodel', 'mmodel'])
+    expect(models.map((m) => m.id)).toEqual(['dfmodel', 'mmodel', 'hmodel'])
 
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toContain(QODER_MODEL_LIST_PATH)
@@ -453,13 +474,18 @@ describe('fetchQoderRemoteModels', () => {
     // ⚠️ 必须是 WASM 生成的 COSY 签名，不是普通 Bearer <token>（后者会被拒）。
     const headers = init.headers as Record<string, string>
     expect(String(headers.Authorization)).toMatch(/^Bearer COSY\./)
+    const gatewayClientType = Object.entries(headers).find(([key]) => key.toLowerCase() === 'cosy-clienttype')?.[1]
+    expect(gatewayClientType).toBe('qoderapp')
   })
 
   it('CN 走它自己的 host（两站共用同一实现，差异只在产品配置）', async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ chat: [REMOTE_MMODEL] }), { status: 200 }))
     await fetchQoderRemoteModels(cred, QODER_CN, { fetcher: fetchImpl as never })
-    const [url] = fetchImpl.mock.calls[0] as unknown as [string]
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
     expect(url.startsWith(QODER_CN.encryptedInferBase)).toBe(true)
+    const headers = init.headers as Record<string, string>
+    const gatewayClientType = Object.entries(headers).find(([key]) => key.toLowerCase() === 'cosy-clienttype')?.[1]
+    expect(gatewayClientType).toBe('qoderapp')
   })
 
   it('非 2xx 抛错并**带上响应体片段**（401/403 分不开 token 过期与签名无效）', async () => {

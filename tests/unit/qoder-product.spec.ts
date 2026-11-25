@@ -18,14 +18,18 @@ describe('Qoder 产品配置', () => {
     expect(QODER.testClientId).toBe('e93fe488-5778-4c35-a6fc-0f54ed7b3139')
   })
 
-  it('client metadata 取 CLI 默认值', () => {
-    // 依据：设计文档 §2.2 Fp()
-    expect(QODER.clientMetadata).toEqual({
-      client_type: '5',
-      business_product: 'cli',
+  it('两站的 /algo 网关使用 Qoder 桌面身份（可见 app-only 模型）', () => {
+    const desktopGatewayIdentity = {
+      client_type: 'qoderapp',
+      business_product: 'app',
       business_type: 'agent',
       scene: 'assistant',
-    })
+    }
+    expect(QODER.clientMetadata).toEqual(desktopGatewayIdentity)
+    expect(QODER_CN.clientMetadata).toEqual(desktopGatewayIdentity)
+    // `/sash` 仍单独用 client type 10；不能被 `/algo` 身份覆盖。
+    expect(QODER.sashClientType).toBe('10')
+    expect(QODER_CN.sashClientType).toBe('10')
   })
 
   it('默认凭据 ref 与其它 provider 隔离', () => {
