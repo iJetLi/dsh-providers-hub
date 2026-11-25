@@ -218,6 +218,113 @@ describe('A1/A2：选号出口**自动**记实际在用账号', () => {
   })
 })
 
+describe('A0（审计 P0-1）：主代理**零回归**', () => {
+  /**
+   * ## 上游审计原话（2026-11-26）
+   *
+   * > 「`decideSubagentStart()` 丢了原实现的 **`assignment !== undefined` 闸门**
+   * >   ⇒ **主代理会话只要配了任何子代理策略，自己就被改号**」
+   * >
+   * > 「**没有『主代理零回归』用例**（这正是 P0-1 一路通过的原因）」
+   *
+   * ## 本组守什么
+   *
+   * | # | 断言 |
+   * |---|---|
+   * | A0-1 | 配了任意 `startMode` 后，主代理**仍用它自己的起点** |
+   * | A0-2 | 主代理**不得**被写 `preferredRotation` / 起点位次 |
+   */
+  const POOL = ['acct1', 'acct2', 'acct3']
+  const MAIN = 'main-session'
+
+  /** 跑一发**主代理**请求（无分配记录 ⇒ 不是子代理）。 */
+  async function runMain(subagentMode?: string) {
+    const writes: Array<{ api: string, args: unknown[] }> = []
+    const selector = {
+      select: async (
+        cands: Array<{ id: string, credentialRef: string }>,
+        opts?: { rotationStartId?: string },
+      ) => {
+        const want = opts?.rotationStartId
+        const hit = want === undefined ? cands[0] : (cands.find((x) => x.id === want) ?? cands[0])
+        return { ok: true as const, account: hit, balance: {} }
+      },
+      cachedTierOf: () => 0,
+    }
+    const pool = {
+      listAccountsByProvider: () => POOL.map((id) => ({ id, credentialRef: `R-${id}`, enabled: true })),
+      permanentLocked: () => false,
+      strictManualOrder: () => false,
+      getAvailableAccount: async () => ({ entry: { id: 'acct1' }, credential: 'c' }),
+      /** ⚠️ **主代理没有分配记录** —— P0-1 的关键。 */
+      subagentAssignmentOf: () => undefined,
+      /** ⚠️ 但配了子代理策略。 */
+      subagentRotationFor: () => (subagentMode === undefined ? undefined : { startMode: subagentMode }),
+      /** ⚠️ 主代理自己的轮换起点 = acct1。 */
+      preferredRotationFor: (_p: string, sid: string) => (sid === MAIN ? 'acct1' : undefined),
+      activeAccountOf: () => undefined,
+      setActiveAccount: () => {},
+      setPreferredRotation: async (...args: unknown[]) => { writes.push({ api: 'setPreferredRotation', args }) },
+      setSubagentStartPosition: (...args: unknown[]) => { writes.push({ api: 'setSubagentStartPosition', args }) },
+      subagentParentForSession: () => undefined,
+    }
+    const resolver = createCredentialResolver(
+      { pool, subagentParentForSession: () => undefined } as never,
+      {
+        product: { id: 'probe', displayName: 'Probe' },
+        readCredential: async (ref: string) => ref,
+        fallback: { kind: 'ref', refName: 'R-FB' },
+        balance: {
+          kind: 'buddy',
+          selector: selector as never,
+          lockedError: () => new Error('locked'),
+          isFreeModel: () => false,
+          reportPickedAccount: true,
+        } as never,
+      },
+    )
+    const picked = await resolver('m', MAIN)
+    return { picked, writes }
+  }
+
+  it('★★★ 配了任意 startMode ⇒ 主代理**仍用它自己的起点**（不被子代理策略改号）', async () => {
+    /**
+     * ## 审计的原始症状
+     *
+     * | provider | 实测（修前）|
+     * |---|---|
+     * | codearts | `acct1 → acct2` |
+     * | officeace（锁定态）| `R1 → R2` |
+     *
+     * ⇒ 主代理「一配子代理策略就改号」是**修 bug 引入更坏的 bug**。
+     */
+    const baseline = await runMain(undefined)
+    expect(baseline.picked, '基线：主代理用自己的起点 acct1').toBe('R-acct1')
+
+    for (const mode of ['sequence', 'reverse', 'hash', 'follow', 'fixed']) {
+      const r = await runMain(mode)
+      expect(
+        r.picked,
+        `★★★ 配了 ${mode} 后主代理**必须仍用 acct1**（实际 ${String(r.picked)}）`,
+      ).toBe(baseline.picked)
+    }
+  })
+
+  it('★★★ 主代理**不得**被写起点（preferredRotation / 位次）', async () => {
+    /**
+     * ## 审计原话
+     *
+     * > 「新函数用 `assignment?.slot ?? 0` ⇒ **主代理按 slot 0 现算**」
+     *
+     * ⇒ 主代理既不该被算起点，也不该被写。
+     */
+    for (const mode of ['sequence', 'reverse', 'hash', 'fixed']) {
+      const r = await runMain(mode)
+      expect(r.writes, `★★★ 配了 ${mode} 后主代理不得被写任何起点`).toEqual([])
+    }
+  })
+})
+
 describe('A3/A4：子代理参照的三级回落', () => {
   /**
    * 跑「子代理首次」那一发。
