@@ -333,20 +333,20 @@ let u = JSON.parse(E)                           // { 场景: [模型…] }
 **其余 14 个模型不受影响**（`dfmodel` 的 `price_factor/is_free/original_price_factor`
 与 `mmodel` 的改名都已是最新值）。
 
-### HungerG（2026-11-24）：使用 app 网关身份并保持免费状态动态
+### HungerG app-only 路由（2026-11-25 实测）
 
-- HungerG 是匿名活动模型，官方活动说明限时至 2026-11-30，并限定个人账号；团队版/企业版
-  不适用，模型目录应由上游按账号资格裁剪。活动期调用不消耗 Credits，即使余额为 0。
-- live CN 网关身份对照（公开 Qoder provider 记录）：`Cosy-Clienttype: 5` 的 CLI 身份看不到
-  app 组；`qoderapp` + `Cosy-Version: 1.1.71` 返回 `hmodel`（display_name `HungerG`）及 `fast`。
-  因而插件列表缺项的根因是 `/algo` 目录与推理请求沿用 CLI 身份，而不是解析器要求静态 ID。
-- 国际版与 CN 的 `QoderProduct.clientMetadata` 均使用 `qoderapp` / `app` 网关身份；
-  `COSY_VERSION=1.1.79` 保持不变（高于 app 目录门槛），`sashClientType='10'` 仍是独立 `/sash` 身份。
-- 不将 HungerG 写进永久兜底表：列表、免费属性、倍率与资格都以远端目录为准，活动结束或
-  上游撤下后由下一次目录刷新自然移除。
+- 同一批本机已登录账号的真实目录对照：`client_type=5/cli/agent/assistant` 两站都不返回
+  `hmodel`；`10/app/app/app` 在 Qoder Global 与 CN 的 `app` 场景都返回真实 `hmodel` / HungerG，
+  `is_free=true`、`price_factor=0`，且 `minimal_version.cli=9999.9999.9999`。
+- `QoderProduct.clientMetadata` 继续保持 CLI 默认，常规模型与联网搜索不改身份；新增
+  `appClientMetadata` 仅供二次目录探测，且只有 CLI 目录缺失、app 目录实际返回的 HungerG
+  才带 `requiresAppIdentity`；该模型推理用 `session_type=app`。app 查询失败/无资格时只保留 CLI
+  目录或静态兜底，不会使整个 Qoder provider 下线。成功日志记录两条目录的 count 与 ID 集。
+- 真实目录 fixture 只保留模型字段，已移除账号/凭据数据；没有永久静态 free fallback。
+  活动免费资格以远端 `is_free` 为准；官方限时活动至 2026-11-30，Teams/Enterprise 不适用。
+- `/sash` 仍通过 `sashClientType='10'` 独立处理，不能与 `/algo` CLI/app metadata 合并。
 
-官方规则：[Qoder](https://docs.qoder.com/zh/events/hungerg-free) /
-[Qoder CN](https://docs.qoder.cn/events/hungerg-free)；身份对照：[Qoder gateway identity](https://github.com/divingyu/pi-provider-qoder-cn/blob/main/src/cosy.ts#L13-L26)。
+官方规则：[Qoder](https://docs.qoder.com/zh/events/hungerg-free) / [Qoder CN](https://docs.qoder.cn/events/hungerg-free)。
 
 ### ⚠️⚠️ `is_reasoning=false` 不是「不支持思考」—— 两条信号相互独立（2026-10-20 用户追问）
 

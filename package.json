@@ -64,6 +64,7 @@
     "test:e2e:qodercn": "cross-env DSH_QODERCN_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/qodercn-probe.e2e.spec.ts",
     "test:e2e:qodercn-credits": "cross-env DSH_QODERCN_E2E=1 DSH_QODERCN_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/qodercn-credits-probe.e2e.spec.ts",
     "test:e2e:qodercn-chat": "cross-env DSH_QODERCN_CHAT_E2E=1 DSH_QODERCN_CHAT_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/qodercn-chat-probe.e2e.spec.ts",
+    "test:e2e:qoder-hungerg": "cross-env DSH_QODER_HUNGERG_E2E=1 DSH_QODER_HUNGERG_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/qoder-hungerg.e2e.spec.ts",
     "test:e2e:trae": "cross-env DSH_TRAE_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/trae-probe.e2e.spec.ts",
     "test:e2e:trae-claim": "cross-env DSH_TRAE_E2E=1 DSH_TRAE_CLAIM_E2E_CONFIRM=yes vitest run --config vitest.e2e.config.ts tests/e2e/trae-claim-probe.e2e.spec.ts",
     "test:e2e:trae-channels": "cross-env DSH_TRAE_E2E=1 vitest run --config vitest.e2e.config.ts tests/e2e/trae-channels-probe.e2e.spec.ts",

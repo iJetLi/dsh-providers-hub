@@ -102,18 +102,19 @@
  * （没装 IDE / 没在 IDE 登录过该账号）恒为空 —— 那正是「未开通」那类账号。
  * 故线上路径走本模块（签名远端），本地缓存只用于排查对账。
  *
- * ## 2026-11-24 HungerG：目录请求必须使用桌面网关身份
+ * ## 2026-11-25 HungerG：桌面身份只用于 app-only 模型
  *
- * Qoder 按 `Cosy-Clienttype` 裁剪 `/model/list`。公开的 live CN 网关对照记录：
- * CLI 身份 `5` 不返回 app-only 模型；桌面网关身份 `qoderapp` + `Cosy-Version 1.1.71`
- * 返回的 `chat` / `app` 目录包含 `hmodel`（展示名 HungerG）与 `fast`。
- * `QODER_CATALOG_SCENES` 已合并 `chat` 与 `app`；切换客户端身份后，现有解析器会原样
- * 透传未知模型 key 和远端 `is_free` / `price_factor`，无需静态枚举 HungerG。
+ * 用本机账号对两站 `/api/v2/model/list?Encode=1` 做了真实只读对照（COSY-Version 1.1.79）：
+ * CLI `5/cli/agent/assistant` 没有 `hmodel`；桌面 `10/app/app/app` 的 `app` 场景
+ * 返回 `hmodel` / `HungerG`，且 `is_free=true`、`price_factor=0`，`minimal_version.cli`
+ * 设为 `9999.9999.9999`。团队/企业或未获活动资格的账号返回空/不含该条目。
  *
- * 活动免费资格是限时且账号类型受限；不要在兜底表永久写入 `isFree: true`。
+ * 因此 `QoderAuth.fetchModels` 保留 CLI 目录为主，只额外探测 app 目录并并入唯一的
+ * 远端 HungerG；失败/空结果不影响 CLI 目录，且仅 app-only 标记的 hmodel 在推理时
+ * 使用 app metadata 与 `session_type=app`。普通模型和联网搜索继续使用 CLI 身份。
+ * 目录落地日志记录 CLI/app 数量及 model-key 集合；不把限时 free 写入静态兜底表。
  * 官方活动说明：https://docs.qoder.com/zh/events/hungerg-free 与
- * https://docs.qoder.cn/events/hungerg-free；身份对照参考：
- * https://github.com/divingyu/pi-provider-qoder-cn/blob/main/src/cosy.ts#L13-L26。
+ * https://docs.qoder.cn/events/hungerg-free。
  */
 
 import type { QoderCredential } from './qoder.js'
@@ -630,6 +631,27 @@ export interface QoderRemoteCatalogOptions {
   fetcher?: typeof fetch
   /** 单次请求预算（毫秒）；缺省 {@link QODER_CATALOG_TIMEOUT_MS}。 */
   timeoutMs?: number
+  /** 覆盖当前目录请求身份；缺省保持产品的 CLI identity。 */
+  metadata?: QoderProduct['clientMetadata']
+  /** app-only 二级目录的空响应属于不符合资格，允许返回空数组。 */
+  allowEmpty?: boolean
+}
+
+/**
+ * 把桌面 app 目录中 CLI 缺失的 HungerG 单独并入；其余 app-only 模型不扩展。
+ * 只有追加项标记 `requiresAppIdentity`，免费标记与倍率仍直接来自上游响应。
+ */
+export function mergeQoderAppOnlyModels(
+  cliModels: readonly QoderFallbackModel[],
+  appModels: readonly QoderFallbackModel[],
+): QoderFallbackModel[] {
+  const cliIds = new Set(cliModels.map((model) => model.id))
+  const cliNames = new Set(cliModels.map((model) => model.name.trim().toLowerCase()))
+  const appOnlyHungerG = appModels
+    .filter((model) => model.name.trim().toLowerCase() === 'hungerg')
+    .filter((model) => !cliIds.has(model.id) && !cliNames.has(model.name.trim().toLowerCase()))
+    .map((model) => ({ ...model, requiresAppIdentity: true }))
+  return [...cliModels, ...appOnlyHungerG]
 }
 
 /**
@@ -662,7 +684,7 @@ export async function fetchQoderRemoteModels(
     client = await QoderEncryptedInfer.create({
       user: { uid, securityOauthToken: credential.security_oauth_token ?? credential.access_token },
       machineId: credential.machine_id,
-      metadata: { ...product.clientMetadata },
+      metadata: { ...(options.metadata ?? product.clientMetadata) },
       host: product.encryptedInferBase,
     })
     const request = client.prepareRequest(
@@ -692,7 +714,7 @@ export async function fetchQoderRemoteModels(
         `模型目录响应形状非法（无 ${QODER_CATALOG_SCENES.join(' / ')} 场景数组）`,
       )
     }
-    if (models.length === 0) throw new Error('模型目录响应为空')
+    if (models.length === 0 && !options.allowEmpty) throw new Error('模型目录响应为空')
     return models
   } catch (error) {
     // wasm trap（裸 `unreachable`）在 glue 层已被改写，这里再兜一次，

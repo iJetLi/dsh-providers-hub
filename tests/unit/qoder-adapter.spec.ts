@@ -15,6 +15,7 @@ import {
   qoderQueueDelayMs,
   recordsQoderRateLimit,
   shouldRotateQoderAccount,
+  shouldFallbackQoderAppIdentity,
 } from '../../src/qoder-adapter.js'
 import { acquireQoderRequest } from '../../src/qoder-traffic-guard.js'
 import { QODER, QODER_CN } from '../../src/qoder-product.js'
@@ -101,6 +102,16 @@ async function collectWith(
   }
   return out
 }
+
+describe('Qoder app identity fallback classifier', () => {
+  it('only accepts explicit identity/model rejection and excludes quota/queue', () => {
+    expect(shouldFallbackQoderAppIdentity(403, 'Signature invalid (101)')).toBe(true)
+    expect(shouldFallbackQoderAppIdentity(400, 'Unsupported model hmodel')).toBe(true)
+    expect(shouldFallbackQoderAppIdentity(403, 'credit quota exceeded')).toBe(false)
+    expect(shouldFallbackQoderAppIdentity(403, 'model_queued 10605')).toBe(false)
+    expect(shouldFallbackQoderAppIdentity(500, 'Signature invalid')).toBe(false)
+  })
+})
 
 describe('QoderAdapter 模型目录', () => {
   it('远端不可用时回退兜底表（静态快照，不再是唯一来源）', async () => {
@@ -324,28 +335,57 @@ describe('QoderAdapter 模型目录', () => {
       expect(all.find((m) => m.id === 'fast')?.isFree).toBeUndefined()
     })
 
-    it('HungerG 从 app 目录显示为免费，并使用 qoderapp 身份发出推理请求', async () => {
+    it('app-only HungerG uses app tuple/session, while ordinary model and search identities stay CLI', async () => {
       const remoteHungerG = {
-        id: 'hmodel', name: 'HungerG', contextWindow: 1_000_000,
+        id: 'hmodel', name: 'HungerG', contextWindow: 1_000_000, requiresAppIdentity: true,
         supportsImage: true, supportsThinking: true, isFree: true, priceFactor: 0,
-        efforts: ['low', 'medium', 'high', 'max'], defaultEffort: 'high',
+        efforts: ['high', 'max', 'low'], defaultEffort: 'max',
       }
-      const fetchImpl = vi.fn(async () => envelopeResponse([textFrame('HungerG OK'), finishFrame])) as unknown as typeof fetch
+      const fetchImpl = vi.fn(async () => envelopeResponse([textFrame('OK'), finishFrame])) as unknown as typeof fetch
       const adapter = makeAdapter({
-        fetchRemoteModels: async () => [remoteHungerG],
+        fetchRemoteModels: async () => [remoteFast, remoteHungerG],
         fetchImpl,
       })
 
       const models = await adapter.listModels('qoder')
       expect(models.some((model) => model.id === 'hmodel' && model.name.includes('HungerG'))).toBe(true)
+      expect(models.some((model) => model.id === 'fast')).toBe(true)
       await expect(adapter.isFreeModel('hmodel')).resolves.toBe(true)
+      const hungerChunks = await collect(adapter, 'hmodel')
+      expect(hungerChunks.some((chunk) => chunk.type === 'text-delta')).toBe(true)
+      const fastChunks = await collect(adapter, 'fast')
+      expect(fastChunks.some((chunk) => chunk.type === 'text-delta')).toBe(true)
+
+      const calls = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls as [string, RequestInit][]
+      expect(calls).toHaveLength(2)
+      expect(new Headers(calls[0]![1].headers).get('cosy-clienttype')).toBe('10')
+      expect(new Headers(calls[0]![1].headers).get('x-model-key')).toBe('hmodel')
+      expect(new Headers(calls[1]![1].headers).get('cosy-clienttype')).toBe('5')
+
+      // Search uses the unchanged product CLI identity even after app-only generation.
+      const searchAdapter = makeAdapter({ fetchImpl })
+      await expect(searchAdapter.searchOnce('qoder model', cred, new AbortController().signal)).rejects.toThrow()
+      const searchCall = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1)! as [string, RequestInit]
+      expect(new Headers(searchCall[1].headers).get('cosy-clienttype')).toBe('5')
+    })
+
+    it('app 身份显式签名拒绝时仅对 HungerG 回退 CLI 一次', async () => {
+      const remoteHungerG = {
+        id: 'hmodel', name: 'HungerG', contextWindow: 1_000_000, requiresAppIdentity: true,
+        supportsImage: true, supportsThinking: true, isFree: true, priceFactor: 0,
+        efforts: ['high', 'max', 'low'], defaultEffort: 'max',
+      }
+      const fetchImpl = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ code: '101', message: 'Signature invalid: client identity' }), { status: 403 }))
+        .mockResolvedValueOnce(envelopeResponse([textFrame('fallback ok'), finishFrame])) as unknown as typeof fetch
+      const adapter = makeAdapter({ fetchRemoteModels: async () => [remoteHungerG], fetchImpl })
+      await adapter.listModels('qoder')
       const chunks = await collect(adapter, 'hmodel')
       expect(chunks.some((chunk) => chunk.type === 'text-delta')).toBe(true)
-
-      const [, init] = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]! as [string, RequestInit]
-      const headers = new Headers(init.headers)
-      expect(headers.get('cosy-clienttype')).toBe('qoderapp')
-      expect(headers.get('x-model-key')).toBe('hmodel')
+      const calls = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      expect(calls).toHaveLength(2)
+      expect(new Headers((calls[0]![1] as RequestInit).headers).get('cosy-clienttype')).toBe('10')
+      expect(new Headers((calls[1]![1] as RequestInit).headers).get('cosy-clienttype')).toBe('5')
     })
 
     it('20 分钟 TTL：第二次读命中缓存，不再打上游', async () => {

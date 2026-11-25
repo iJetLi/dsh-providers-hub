@@ -383,6 +383,16 @@ export function transportErrorDetail(error: unknown): string {
  * @param code - `LlmError.code`（拿不到时传 `''`）。
  * @param text - 上游原文 / 错误 message（供文案腿使用；无则传 `''`）。
  */
+/**
+ * Permit one CLI-identity retry only for an app-only model's explicit routing/signature rejection.
+ * Queue and billing responses must stay on their existing wait/account-switch paths.
+ */
+export function shouldFallbackQoderAppIdentity(status: number, body: string): boolean {
+  if (status !== 400 && status !== 403) return false
+  if (/10605|model_queued|credit|quota|billing/i.test(body)) return false
+  return /signature\s+(?:invalid|mismatch)|invalid\s+signature|client[_ -]?(?:type|identity)|session[_ -]?type|business[_ -]?(?:product|type)|unsupported\s+model|model[_ -]?not[_ -]?found/i.test(body)
+}
+
 export function classifyQoderFailure(code: string, text: string): QoderFailureClass {
   // ① 额度：码值（含 `QUOTA` 别名）+ 文案兜底，判据只留一份（`isQuotaExceededError`
   //    的等价形态，但这里按「码 + 文本」两参形式表达，供无 `Error` 对象的场合复用）。
@@ -1868,6 +1878,14 @@ export class QoderAdapter extends LlmAdapter {
     const tools = buildQoderTools(options.tools)
 
     const fallback = this.catalogModel(options.model)
+    // App identity is a narrow lane for remotely discovered app-only models; the CLI
+    // default continues to serve every standard model and the independent web-search path.
+    const appOnlyModel = fallback?.requiresAppIdentity === true
+    let requestMetadata = appOnlyModel
+      ? (this.product.appClientMetadata ?? this.product.clientMetadata)
+      : this.product.clientMetadata
+    let requestSessionType = appOnlyModel ? this.product.appSessionType : undefined
+    let appIdentityCliFallbackUsed = false
 
     /**
      * 会话自动命名（`purpose: 'session-title'`）的思考与预算决策（issue IKKVDH）。
@@ -1903,11 +1921,12 @@ export class QoderAdapter extends LlmAdapter {
             securityOauthToken: c.security_oauth_token ?? c.access_token,
           },
           machineId: c.machine_id,
-          metadata: { ...this.product.clientMetadata },
+          metadata: { ...requestMetadata },
           host: this.product.encryptedInferBase,
         })
         return client.prepareInfer({
           modelKey: options.model,
+          ...(requestSessionType === undefined ? {} : { sessionType: requestSessionType }),
           userText,
           ...(systemText !== undefined ? { systemText } : {}),
           isReasoning: fallback?.supportsThinking ?? false,
@@ -2245,6 +2264,19 @@ export class QoderAdapter extends LlmAdapter {
         activeAccountId = switched.accountId
         authRefreshed = false // 新账号可再续期一次
         continue
+      }
+
+      if (!response.ok && appOnlyModel && !appIdentityCliFallbackUsed) {
+        const appIdentityErrorBody = await response.clone().text().catch(() => '')
+        if (shouldFallbackQoderAppIdentity(response.status, appIdentityErrorBody)) {
+          // One app→CLI retry is limited to this single app-only model; no request
+          // for standard models/search is ever rewritten or retried on another identity.
+          appIdentityCliFallbackUsed = true
+          this.options.warn?.(`[${this.product.id}] app identity rejected for hmodel; retrying once with CLI identity`)
+          requestMetadata = this.product.clientMetadata
+          requestSessionType = undefined
+          continue
+        }
       }
 
       const errorText = response.ok ? '' : await response.text().catch(() => '')

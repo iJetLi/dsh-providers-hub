@@ -195,7 +195,7 @@ describe('Qoder 活动列表解析', () => {
    * 要拿到 `CLAIM_BENEFIT/CLAIMABLE` 还必须带 `Cosy-MachineToken` +
    * `Cosy-MachineType`（见下方 machine 头用例与 `src/qoder-machine.ts`）。
    *
-   * 本用例锁死 `/sash` 的独立值，防止与 `/algo` 的 `qoderapp` 身份合并。
+   * 本用例锁死 `/sash` 的独立值，防止与 `/algo` CLI/app 模型路由身份合并。
    */
   it('活动端点必须带桌面 app 身份（Cosy-ClientType=10）—— 回归锁', async () => {
     const fetcher = vi.fn(async () => json(CAMPAIGNS_BODY))
