@@ -1634,6 +1634,39 @@ describe('连登链（claimStreakExtras：补签/兑换/抽奖/首Buddy/礼包/�
     expect(calls.some((c) => c.url === `${EP}/activity/growth/lottery/draw`)).toBe(false)
     expect(calls.some((c) => c.url === `${WB}/billing/meter/claim-gift`)).toBe(false)
   })
+
+  /** ★★★ 缺陷二守卫（GitHub issue #156）：第 6 步 400 不得记为成功。 */
+  it('★★★ 保连胜失败必须如实标 ok:false（第 6 步 400 不得记为成功）', async () => {
+    const routes = streakRoutes().map((route) =>
+      route.match === `${EP}/v2/chat/completions`
+        ? { match: route.match, method: 'POST' as const, status: 400,
+            body: { code: 11102, msg: 'model [deepseek-v4.1-flash] service info not found' } }
+        : route)
+    const { fetcher } = routingFetcher(routes)
+    const report = await claimStreakExtras(CRED, PRODUCT, fetcher)
+    const keep = report.rows.find((r) => r.taskCode === '(保连胜)')
+    expect(keep, '第 6 步没有产出 (保连胜) 行').toBeDefined()
+    expect(keep?.ok, '保连胜失败却被记成成功（issue #156 缺陷二）').toBe(false)
+    expect(keep?.message).toContain('service info not found')
+    expect(report.expired, '400 模型错不该被判成凭据失效').toBe(false)
+    expect(report.credit).toBe(100 + 300 + 1500)
+    expect(report.claimedCount).toBe(3)
+    expect(report.ok).toBe(true)
+  })
+
+  /** ★★★ 修法「保留 markExpired」的那条腿也必须有牙。 */
+  it('★★★ 保连胜 401 时必须把账号标成凭据失效（expired 传播）', async () => {
+    const routes = streakRoutes().map((route) =>
+      route.match === `${EP}/v2/chat/completions`
+        ? { match: route.match, method: 'POST' as const, status: 401, text: 'Unauthorized' }
+        : route)
+    const { fetcher } = routingFetcher(routes)
+    const report = await claimStreakExtras(CRED, PRODUCT, fetcher)
+    expect(report.expired, '401 必须传播成凭据失效').toBe(true)
+    const keep = report.rows.find((r) => r.taskCode === '(保连胜)')
+    expect(keep?.ok).toBe(false)
+    expect(keep?.message).toContain('凭据已失效')
+  })
 })
 
 describe('collectBuddyGrowth 合并连登链结果', () => {
@@ -1808,7 +1841,7 @@ describe('生产口径锁定（2026-11-01 审计补）', () => {
  * 虚拟路由别名**）」，且另有 5 处用它 —— 唯独这里写死别名。本用例锁住它。
  */
 describe('保连胜的模型名（issue #156）', () => {
-  it('★★★ keepStreakActive 的请求体 model 必须是 fast-model', async () => {
+  it('★★★ keepStreakActive 的请求体 model 必须是真实模型 id（不是别名）', async () => {
     const { fetcher, calls } = recordingFetcher([{ body: {} }])
     await keepStreakActive(CRED, PRODUCT, fetcher)
     expect(calls.length, '没有发出请求').toBeGreaterThan(0)
