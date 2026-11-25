@@ -1779,3 +1779,45 @@ describe('生产口径锁定（2026-11-01 审计补）', () => {
     expect(calls.length).toBe(1)
   })
 })
+
+/**
+ * ★★★ **保连胜的模型名必须是 `fast-model`，不能是 `default-model`**
+ *（GitHub issue #156，2026-11-25）。
+ *
+ * ## 缺陷
+ *
+ * `keepStreakActive` 内部写死了 `model: 'default-model'` —— 那是 **workbuddy
+ *（国际版）的虚拟路由别名**（`canonical-models.ts` 归类的「服务端抽象路由别名」）。
+ *
+ * **中国版 buddy（`copilot.tencent.com`）没有这个模型**：
+ *
+ * ```
+ * 400  {"code":11102,"msg":"model [default-model] service info not found"}
+ * ```
+ *
+ * ⇒ 保连胜**每轮必失败**，从接入生产以来**一次都没发出去过**。
+ *
+ * ## 为什么久未被发现
+ *
+ * `claimStreakExtras` 的失败分支**也写 `ok: true`** ⇒ 面板看起来是成功的（本文件
+ * 末尾那条用例守第二半）。
+ *
+ * ## 本用例
+ *
+ * 同文件 `:110` 的 `FAST_MODEL` 注释自己写着「**真实**模型 id（**非 `default-model`
+ * 虚拟路由别名**）」，且另有 5 处用它 —— 唯独这里写死别名。本用例锁住它。
+ */
+describe('保连胜的模型名（issue #156）', () => {
+  it('★★★ keepStreakActive 的请求体 model 必须是 fast-model', async () => {
+    const { fetcher, calls } = recordingFetcher([{ body: {} }])
+    await keepStreakActive(CRED, PRODUCT, fetcher)
+    expect(calls.length, '没有发出请求').toBeGreaterThan(0)
+    const body = JSON.parse(String(calls[0].init?.body)) as { model?: string }
+    // ⚠️ 两个方向都断言：**必须是** fast-model、**不得是** default-model。
+    // ⚠️ 断言的是 `DEFAULT_CHAT_MODEL`（`:107` 的「真实模型 id」），**不是** `fast-model`
+    //    —— 后者与 `default-model` 同为服务端抽象路由（见 `canonical-models.ts`）。
+    expect(body.model, '中国版 buddy 没有 default-model（issue #156）').toBe('deepseek-v4.1-flash')
+    expect(body.model).not.toBe('default-model')
+    expect(body.model).not.toBe('fast-model')
+  })
+})
