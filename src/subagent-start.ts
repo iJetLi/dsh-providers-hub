@@ -459,20 +459,34 @@ export function sameTierAsMainStart(
   const asCandidate = (id: string) => ({ id } as BuddyCandidateAccount)
   const startTier = selector.cachedTierOf!(asCandidate(mainStartId), allowPermanent)
   /**
-   * ⚠️⚠️ **两种情形都必须返回全池**（原实现逐字如此，第二条我第一版漏了）：
+   * ★★★ **只有 `undefined` 才返回全池**（2026-11-26 上游审计 P1 修复）。
    *
-   * | `startTier` | 含义 | 原实现 |
+   * ## 缺陷（我上一版多加了 `none` 早退）
+   *
+   * ```ts
+   * if (startTier === undefined || startTier === BUDDY_BALANCE_TIER.none) return enabledIds
+   * //                               ↑ 多出来的，`master` 的原始实现没有它
+   * ```
+   *
+   * 而注释当时写「原实现逐字如此」—— **与 `origin/master` 的源码相反**。
+   *
+   * ## 后果（穷举实测：54 个组合里 **18 个**复现）
+   *
+   * 主代理起点那个号**零余额 / 查询失败**（`none`）时：
+   *
+   * | 实现 | `sameTierIds` | 结果 |
    * |---|---|---|
-   * | `undefined` | 该号**没有余额缓存**（冷启动 / 刚过 TTL）| 返回 `enabledIds` |
-   * | `none`（3）| 无余额 / 查询失败 / 锁定态只剩永久 | 返回 `enabledIds` |
+   * | 有 `none` 早退 | **全池**（含永久号）| 子代理可选中永久号 ⇒ **先烧永久积分** |
+   * | 只有 `undefined` | 只含同样 `none` 的号 | 下游找不到可用锚点 ⇒ 回落 `bestTierAnchorId`（临期）|
    *
-   * ⚠️ 只判 `none` 会让 `undefined` 走到下面的 filter：那时
-   * `cachedTierOf(id) === undefined` 只对同样无缓存的号成立 ⇒ 返回一个
-   * **极小的子集**（可能只有锚点自己）⇒ 子代理几乎无法错开。
+   * ⇒ 这正是前 6 轮（`b8521557` / `d17dfa4d`）刚修好的「先烧永久积分」，
+   *    被我这次重构**又引回来了**。
    *
-   * ⇒ 这是「提取时漏掉一个回落分支」的实例，被 T2 用例抓到。
+   * ⚠️ `undefined`（无余额缓存，冷启动 / 刚过 TTL）仍然返回全池：
+   *    那一刻**无法判断任何号的档位**，返回空子集会让子代理几乎无法错开
+   *    （那正是 T2 用例抓到的形态）。
    */
-  if (startTier === undefined || startTier === BUDDY_BALANCE_TIER.none) return enabledIds
+  if (startTier === undefined) return enabledIds
   const same = enabledIds.filter((id) =>
     selector.cachedTierOf!(asCandidate(id), allowPermanent) === startTier)
   /**

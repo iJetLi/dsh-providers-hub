@@ -6021,8 +6021,40 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
    * 2. **只读目录探测**（`/v2/models` + 倍率）—— 它们不扣积分，**绝不能被锁定
    *    牵连**（否则面板报「读取模型列表失败」、供应商关不掉、分组消失）。
    */
-  const resolveOfficeAceCredential = async () => {
-    const available = await pool.getAvailableAccount(OFFICEACE.id, '')
+  /**
+   * ★★★ **officeace 未锁定态的取凭据**（2026-11-26 上游审计 P1-c 修复）。
+   *
+   * ## 修前
+   *
+   * ```ts
+   * const resolveOfficeAceCredential = async () => { … pool.getAvailableAccount(OFFICEACE.id, '') … }
+   * ```
+   *
+   * 不接 `sessionId` ⇒ **未锁定态（默认配置）下子代理起点策略完全无效、零报错**。
+   * 而锁定态那条腿（`orderAccountsForSubagent`）是接了的 ⇒ 两条腿行为分叉。
+   *
+   * ## 修后
+   *
+   * 按 `sessionId` 查出「本会话的起点」传给 `getAvailableAccount` 的
+   * `rotationStartId`（池本来就支持那个参数）。
+   *
+   * ⚠️ **起点来源与 `credential-resolver` 同一条判据**（本仓红线：同一语义不得两套）：
+   *    `activeAccountOf`（主代理实际在用）优先，缺失回落 `preferredRotationFor`。
+   *    ⚠️ 但这里是**子代理自己**的 sessionId —— 子代理首次算出的起点写在
+   *       `preferredRotation[子代理sessionId]`（`credential-resolver` 的首次块负责），
+   *       故直接读 `preferredRotationFor(sessionId)` 就是「拉起时定死的那个号」。
+   */
+  const resolveOfficeAceCredential = async (sessionId?: string) => {
+    /** ⚠️ `undefined` ⇒ 与改动前逐字节相同（不传 `rotationStartId`）。 */
+    const rotationStartId = sessionId === undefined || sessionId.length === 0
+      ? undefined
+      : pool.preferredRotationFor(OFFICEACE.id, sessionId)
+    const available = await pool.getAvailableAccount(
+      OFFICEACE.id,
+      '',
+      undefined,
+      rotationStartId,
+    )
     const ref = available?.entry?.credentialRef
       ?? enabledOfficeAceAccounts()[0]?.credentialRef
     if (ref === undefined) return officeaceAuth.readStoredCredential()

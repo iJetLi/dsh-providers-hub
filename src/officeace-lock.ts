@@ -128,7 +128,23 @@ export interface OfficeAceLockDeps {
    *    「池为空则读兼容文件」两个语义，复刻必然漂移。锁定是新增行为，
    *    解锁态必须**一个字节都不变**。
    */
-  readonly resolveUnlocked: () => Promise<OfficeAceCredential | undefined>
+  /**
+   * ★ 未锁定态的取凭据路径（2026-11-26 起接收 `sessionId`）。
+   *
+   * ## 为什么现在要传 `sessionId`
+   *
+   * 上游审计 P1-c：「officeace 的接线只挂在 `permanentLocked()` 分支，
+   * **默认未锁定态第一条早退走 `resolveUnlocked`（不接 `sessionId`）**
+   * ⇒ 策略仍完全无效、零报错。」
+   *
+   * ⇒ 装配方据它算出「本会话的起点」，再传给 `getAvailableAccount` 的
+   *   `rotationStartId` 参数（池那边本来就支持，见 `AccountPool.getAvailableAccount`）。
+   *
+   * ⚠️ **`undefined` 时必须与改动前逐字节相同**：装配方不传起点 ⇒
+   *    `getAvailableAccount` 走默认路径。
+   * ⚠️ 参数可选，是为了让**旧调用点**（单测替身、旧嵌入方）继续编译且行为不变。
+   */
+  readonly resolveUnlocked: (sessionId?: string) => Promise<OfficeAceCredential | undefined>
   /** 按 ref 读凭据（生产 = `officeaceAuth.readCredential(ref, ctx.credentials)`）。 */
   readonly readCredential: (ref: string) => Promise<OfficeAceCredential | undefined>
   /** 兼容路径：池里没有任何账号时读本机那份单凭据。 */
@@ -350,8 +366,29 @@ export function createOfficeAceCredentialProvider(
   const resolveCredential = async (
     sessionId?: string,
   ): Promise<OfficeAceCredential | undefined> => {
-    // ① 未锁定 ⇒ 走旧路径（零行为变化）。
-    if (!deps.permanentLocked()) return deps.resolveUnlocked()
+    // ① 未锁定 ⇒ 旧路径 + **子代理起点旋转**（2026-11-26 上游审计 P1-c 修复）。
+    /**
+     * ## 缺陷（审计原话）
+     *
+     * > 「`officeace` 的接线只挂在 `permanentLocked()` 分支。
+     * >   **默认未锁定态第一条早退走 `resolveUnlocked`（不接 `sessionId`）**
+     * >   ⇒ 策略仍完全无效、零报错。」
+     *
+     * 而我上一版把 `registerSubagentStartIfNeeded` 接在了
+     * `orderAccountsForSubagent`（锁定态才走的函数）里 ⇒ 默认配置下
+     * **登记与起点都不生效**。
+     *
+     * ## 修法
+     *
+     * 未锁定态调 `resolveUnlocked(sessionId)` —— 由装配方
+     * （`index.ts` 的 `resolveOfficeAceCredential`）把它转成
+     * `getAvailableAccount(provider, model, undefined, rotationStartId)`。
+     *
+     * ⚠️ **`sessionId === undefined` 时逐字节不变**（网关流量 / 单测 / 旧嵌入方）：
+     * 装配方拿不到起点就不传 `rotationStartId`，`getAvailableAccount` 的行为与
+     * 改动前完全相同。
+     */
+    if (!deps.permanentLocked()) return deps.resolveUnlocked(sessionId)
 
     // ② 锁定 ⇒ 逐个候选账号判定「还有没有会近期作废的额度」。
     //    ⚠️ 子代理场景只改**遍历顺序**（起点排第一），见 orderAccountsForSubagent。

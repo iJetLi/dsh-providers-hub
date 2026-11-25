@@ -46,7 +46,7 @@ import {
   rotationStartTierOfRank,
   shouldDecideSubagentStartOnFirstUse,
 } from '../../src/subagent-first-start.js'
-import { decideSubagentStart } from '../../src/subagent-start.js'
+import { decideSubagentStart, sameTierAsMainStart } from '../../src/subagent-start.js'
 
 /** 池序（位次 1-4）。 */
 const POOL = ['acc-1', 'acc-2', 'acc-3', 'acc-4']
@@ -181,6 +181,86 @@ describe('T1：positionOfAccount 的换算', () => {
 
   it('★★★ 不在池里 ⇒ undefined（**不写**，避免「永远不生效」的位次）', () => {
     expect(positionOfAccount(POOL, 'acc-9')).toBeUndefined()
+  })
+})
+
+describe('审计 P1：主起点零余额时不得把子代理导向永久号', () => {
+  /**
+   * ## 审计原话（2026-11-26）
+   *
+   * > 「旧码只兜 undefined，新码多了一个 none 档早退。」
+   * > 「主起点是零余额/查询失败号时，子代理由临期号变永久号 —— RI1 → RP。」
+   *
+   * ## 为什么 none 早退会导致它
+   *
+   * | 实现 | sameTierIds | 结果 |
+   * |---|---|---|
+   * | 有 none 早退 | **全池**（含永久号）| 子代理可选中永久号 ⇒ **先烧永久** |
+   * | 只有 undefined | 只含同样 none 的号 | 下游找不到可用锚点 ⇒ 回落 bestTierAnchorId（临期）|
+   */
+  const T = { imminent: 0, expiring: 1, permanent: 2, none: 3 }
+
+  const mkPool = (slot: number, mode: string) => ({
+    listAccountsByProvider: () => [
+      { id: 'zero', credentialRef: 'R-zero', enabled: true },
+      { id: 'imm1', credentialRef: 'R-imm1', enabled: true },
+      { id: 'imm2', credentialRef: 'R-imm2', enabled: true },
+      { id: 'perm', credentialRef: 'R-perm', enabled: true },
+    ],
+    permanentLocked: () => false,
+    subagentAssignmentOf: () => ({
+      sessionId: 'child-1', parentSessionId: 'p-1', at: 0, slot,
+    }),
+    subagentRotationFor: () => ({ startMode: mode }),
+  })
+
+  /** 档位表：主起点零余额、两个临期、一个永久。 */
+  const TIER: Record<string, number> = { zero: T.none, imm1: T.imminent, imm2: T.imminent, perm: T.permanent }
+  const selector = { cachedTierOf: (a: { id: string }) => TIER[a.id] }
+
+  for (const mode of ['sequence', 'reverse', 'hash']) {
+    for (const slot of [0, 1, 2]) {
+      it('★★★ ' + mode + ' slot' + slot + '：主起点零余额 ⇒ **不得**选中永久号', () => {
+        const d = decideSubagentStart({
+          providerId: 'probe',
+          sessionId: 'child-1',
+          candidateIds: ['zero', 'imm1', 'imm2', 'perm'],
+          allowPermanent: true,
+          pool: mkPool(slot, mode) as never,
+          selector: selector as never,
+          mainSessionStartId: 'zero',
+        })
+        expect(
+          d.startId,
+          '★★★ ' + mode + ' slot' + slot + ' 选中了 ' + String(d.startId) + '；池里有临期号时不得选永久号',
+        ).not.toBe('perm')
+      })
+    }
+  }
+
+  it('★★★ sameTierAsMainStart 主起点为 none 时**不得**返回含永久号的全池', () => {
+    /**
+     * ⚠️ 最直接的守卫：直接测 helper 返回值。
+     * 有 none 早退 ⇒ 返回 4 个（含 perm）；只有 undefined 早退 ⇒ 只含同样 none 的号。
+     */
+    const ids = ['zero', 'imm1', 'imm2', 'perm']
+    const same = sameTierAsMainStart(ids, 'zero', selector as never, true)
+    expect(
+      same,
+      '★★★ 主起点零余额时 sameTierIds 不得含永久号（有 none 早退 ⇒ 全池 ⇒ 先烧永久）',
+    ).not.toContain('perm')
+  })
+
+  it('★★ sameTierAsMainStart 主起点**无缓存**（undefined）⇒ 仍返回全池（既有降级）', () => {
+    /**
+     * ⚠️ **反向对照**：undefined（冷启动 / 刚过 TTL）时必须返回全池 ——
+     * 那一刻无法判断任何号的档位，返回空子集会让子代理几乎无法错开。
+     * ⇒ 修 none 时不得顺手把 undefined 也改了。
+     */
+    const ids = ['nocache', 'imm1', 'perm']
+    const tierNoCache: Record<string, number | undefined> = { nocache: undefined, imm1: 0, perm: 2 }
+    const sel = { cachedTierOf: (a: { id: string }) => tierNoCache[a.id] }
+    expect(sameTierAsMainStart(ids, 'nocache', sel as never, true)).toEqual(ids)
   })
 })
 
