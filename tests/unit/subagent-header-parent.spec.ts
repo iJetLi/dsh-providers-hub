@@ -81,7 +81,6 @@ function makeEnv(options: {
     /** ⚠️ 分配记录初始为空（模拟「首轮请求」）—— 这正是路 1 要覆盖的窗口。 */
     subagentAssignmentOf: () => undefined,
     recordSubagentStart: async (provider, sid, parent) => { recorded.push({ provider, sid, parent }); return 0 },
-    pinSubagentAccount: async () => false,
   }
 
   const resolver = createCredentialResolver(

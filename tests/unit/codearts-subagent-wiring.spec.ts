@@ -132,21 +132,6 @@ describe('★★★ codearts 接线：必须调共享的 decideSubagentStart', (
       /getAvailableAccount<CodeArtsCredential>\(\s*'codearts',\s*'',\s*undefined,\s*rotationStartId,?\s*\)/,
     )
   })
-
-  /**
-   * ## G4 pin 回写必须有（`fixed` 模式除外）
-   *
-   * 用户原话：「拉起时定死，只有该号不可用才换」——
-   * 不回写 pin ⇒ 每次请求重算 ⇒ 池一波动就换号 ⇒ prompt cache 全失效。
-   */
-  it('★★ G4 必须按 shouldPin 回写 pin', () => {
-    const block = codeartsResolverBlock()
-    expect(block, '没有 pin 回写 ⇒ 每次请求重算起点、缓存失效').toMatch(
-      /subagentStart\.shouldPin/,
-    )
-    expect(block).toMatch(/pinSubagentAccount\(\s*'codearts'/)
-  })
-
   /**
    * ## G5 主代理起点必须从**父会话**读
    *

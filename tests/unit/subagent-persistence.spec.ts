@@ -78,8 +78,6 @@ function stateWithAssignments() {
           parentSessionId: 'main-1',
           at: now,
           slot: 3,
-          pinnedAccountId: 'acct-p',
-          pinSetAt: now,
         },
       },
     },
@@ -98,11 +96,17 @@ describe('持久化：subagentAssignments 必须真写真读', () => {
       expect(loaded?.subagentAssignments, '★★★ 必须读得回（上一版这里是 undefined）').toBeDefined()
       expect(loaded.subagentAssignments.probe, '必须有 provider 键').toBeDefined()
       expect(loaded.subagentAssignments.probe['child-1'], '必须有 session 条目').toBeDefined()
-      expect(
-        loaded.subagentAssignments.probe['child-1'].pinnedAccountId,
-        '★★★ pin 必须存活（否则重启后子代理会烧主代理的号）',
-      ).toBe('acct-p')
+      /**
+       * ⚠️ **2026-11-25 重构后不再有 `pinnedAccountId`**：
+       * 子代理的起点改存 `preferredRotation`（与主代理同一个地方）。
+       * ⇒ 本用例只验「分配记录本身能持久化」——`slot` + `parentSessionId` 是
+       *    下次算起点唯一的输入，它们丢了就会「重启后子代理用错号」。
+       */
       expect(loaded.subagentAssignments.probe['child-1'].slot, 'slot 必须存活').toBe(3)
+      expect(
+        loaded.subagentAssignments.probe['child-1'].parentSessionId,
+        '★★★ 父会话 id 必须存活（下次算起点要靠它查主代理起点）',
+      ).toBe('main-1')
     } finally {
       restore()
     }

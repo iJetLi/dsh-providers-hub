@@ -5,7 +5,7 @@ import type { BuddyProduct } from './product.js'
 import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, sanitizeSubagentRotation, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeCreditWindows, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, PreferredRotationMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
 import type { CreditWindowMap, CreditWindowSetting, RotationStartTier, SubagentRotationSetting } from './jet-hub-store.js'
-import { markSubagentEnded, nextSubagentSlot, pinSubagentAccount, recordSubagentAssignment, sanitizeSubagentAssignments, setUserPickedAccount } from './subagent-rotation.js'
+import { markSubagentEnded, nextSubagentSlot, recordSubagentAssignment, sanitizeSubagentAssignments, } from './subagent-rotation.js'
 import type { SubagentAssignment, SubagentAssignmentMap } from './subagent-rotation.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
@@ -1678,62 +1678,6 @@ export class AccountPool {
     this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
     if (this.store.kind !== 'memory') await this.queueStoreSave()
   }
-
-  /**
-   * ★★★ **钉住某子代理的账号**（2026-11-24 用户要求：拉起时定死）。
-   *
-   * ## 为什么要钉
-   *
-   * > 「我是希望『拉起时定死，只有该号不可用才换』，
-   * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
-   *
-   * 原理：prompt cache 按（账号 + 模型 + 前缀）命中 ⇒ 换号即缓存全失效。
-   *
-   * ⚠️ **同步更新缓存**（与 `recordSubagentStart` 同纪律）：调用方紧接着
-   * 还要读它，不能等落盘。
-   *
-   * @returns `true` = 有新值（同值返回 `false`，调用方据此跳过重复写盘）
-   */
-  async pinSubagentAccount(provider: string, sessionId: string, accountId: string): Promise<boolean> {
-    this.ensureLoaded()
-    if (provider.length === 0 || sessionId.length === 0 || accountId.length === 0) return false
-    const current = this.subagentAssignmentCache[provider]
-    if (current === undefined) return false
-    const next = pinSubagentAccount(current, sessionId, accountId, Date.now())
-    /** ⚠️ 同值 ⇒ 原对象返回 ⇒ 这里判等跳过落盘（避免每发请求都写一次磁盘）。 */
-    if (next === current) return false
-    this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
-    if (this.store.kind !== 'memory') await this.queueStoreSave()
-    return true
-  }
-
-  /**
-   * ★★★ **记录用户手动选的账号**（2026-11-24 用户定 B 方案）。
-   *
-   * 语义：用户在该子代理对话页面手动选起点时，写这个字段；
-   * 它的优先级**高于** `pinnedAccountId`（见 `credential-resolver.ts`）。
-   *
-   * ⚠️ 主代理没有分配记录 ⇒ `setUserPickedAccount` 原样返回 ⇒ 无副作用。
-   *
-   * ⚠️ **同步更新缓存**（与 `pinSubagentAccount` 同纪律）：调用方紧接着
-   * 还要读它（回传 `selected`），不能等落盘。
-   *
-   * @param accountId - `undefined` = 清除手动选择（回落到 pin）
-   * @returns `true` = 有新值（同值返回 `false`，调用方据此跳过重复写盘）
-   */
-  async setUserPickedAccount(provider: string, sessionId: string, accountId: string | undefined): Promise<boolean> {
-    this.ensureLoaded()
-    if (provider.length === 0 || sessionId.length === 0) return false
-    const current = this.subagentAssignmentCache[provider]
-    if (current === undefined) return false
-    const next = setUserPickedAccount(current, sessionId, accountId, Date.now())
-    /** ⚠️ 同值 ⇒ 原对象返回 ⇒ 跳过落盘。 */
-    if (next === current) return false
-    this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
-    if (this.store.kind !== 'memory') await this.queueStoreSave()
-    return true
-  }
-
   /**
    * ★ **轮换起点选定那一刻的档位**（S6，2026-11-20）。
    *

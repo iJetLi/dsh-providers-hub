@@ -118,7 +118,6 @@ function makeEnv() {
         ? { sessionId: CHILD, parentSessionId: PARENT, at: now, slot: 0 }
         : undefined),
     recordSubagentStart: async (provider, sid, parent) => { recorded.push({ provider, sid, parent }); return 0 },
-    pinSubagentAccount: async () => false,
   }
 
   const resolver = createCredentialResolver(

@@ -1559,8 +1559,6 @@ export function apply(ctx: Context): void {
        * ⚠️ `void` 掉：pin 是**尽力而为**的副作用，失败不该影响本次请求。
        */
       if (available !== null && subagentStart.shouldPin && sessionId !== undefined) {
-        void pool.pinSubagentAccount('codearts', sessionId, available.entry.id)
-          .catch(() => { /* 落盘失败不影响本次选号 */ })
       }
       return available?.credential
     },

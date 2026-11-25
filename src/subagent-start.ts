@@ -269,45 +269,20 @@ export function decideSubagentStart(options: {
 
   let startId: string | undefined
   let decidedBy: SubagentStartDecision['decidedBy'] = 'none'
-  let startDecidedByPin = false
-  let startDecidedByUser = false
   let pinnedFirst = false
 
-  // ── ① 用户手选（最高优先级，连 `fixed` 都不覆盖）──
-  const userPickedId = assignment?.userPickedAccountId
-  if (userPickedId !== undefined && candidateSet.has(userPickedId)) {
-    startId = userPickedId
-    decidedBy = 'user-pick'
-    startDecidedByPin = true
-    startDecidedByUser = true
-    /**
-     * ★★★ **用户手选 ⇒ 绝对第一**（2026-11-25 修复时补上）。
-     *
-     * 用户在本页面明确指定了某个号 —— 那是最强的意愿表达，
-     * 必须无视档位变化恒排第一（与 `fixed` 同语义）。
-     *
-     * ⚠️ 但**不设 `pinnedFirst` 也会「烧完不切」** —— 不对：
-     *    `pinnedFirst` 只是跳过**档位检查**，而 `buddy-balance-rank` 里
-     *    `anchor` 的循环仍会排除「完全无积分」的号 ⇒ 真烧光仍会切。
-     */
-    pinnedFirst = true
-  } else if (mode !== 'fixed') {
-    // ── ② 系统 pin（**`fixed` 模式必须跳过**，理由见模块头）──
-    const pinnedId = assignment?.pinnedAccountId
-    if (pinnedId !== undefined && candidateSet.has(pinnedId)) {
-      startId = pinnedId
-      decidedBy = 'pin'
-      startDecidedByPin = true
-      /**
-       * ⚠️ **`pinnedFirst` 不设**：pin 只是「起点」，
-       * 档位规则仍然生效（否则会去烧永久积分）。
-       */
-    }
-  }
-
+  /**
+   * ⚠️ **不再有 pin / userPicked 分支**（2026-11-25 重构）。
+   *
+   * 用户手选现在**直接写 `preferredRotation`**（与主代理同一个入口），
+   * 而「首次算出的起点」也写在同一个地方 ⇒ 本函数**只负责首次计算**，
+   * 不参与「后续请求该用哪个号」的判断。
+   *
+   * ⇒ 这里直接从策略现算开始。
+   */
   // ── ③ 策略现算 ──
-  const strategyShouldApply = startDecidedByUser !== true
-    && (startDecidedByPin !== true || mode === 'fixed')
+  /** ⚠️ 没有 pin/userPicked 分支了 ⇒ 策略**总是**参与（2026-11-25 重构）。 */
+  const strategyShouldApply = true
 
   if (strategyShouldApply && mode === 'fixed') {
     /**

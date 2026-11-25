@@ -143,28 +143,6 @@ describe('★★★ 子代理起点提取：与 credential-resolver 原实现逐
     expect(decision.pinnedFirst).toBe(true) // 绝对第一
     expect(decision.shouldPin).toBe(false) // fixed 不 pin
   })
-
-  /**
-   * ## T4 用户手选**连 `fixed` 都不覆盖**
-   *
-   * 原实现两条路径统一后的语义（免费路径遵从、付费路径曾相反 ⇒ 已统一）。
-   */
-  it('★★★ T4 用户手选优先于 fixed', () => {
-    const decision = decideSubagentStart({
-      providerId: 'p',
-      sessionId: 'child-1',
-      candidateIds: ['a', 'b', 'c'],
-      allowPermanent: true,
-      pool: makePool({
-        setting: { startMode: 'fixed', fixedPosition: 3 },
-        assignment: { slot: 1, sessionId: 'child-1', userPickedAccountId: 'a' },
-        enabled: ['a', 'b', 'c'],
-      }),
-    })
-    expect(decision.decidedBy).toBe('user-pick')
-    expect(decision.startId).toBe('a')
-  })
-
   /**
    * ## T5 `sequence` 模式：主代理起点必须**在档位内**错开
    *
