@@ -230,6 +230,10 @@ describe('A3/A4：子代理参照的三级回落', () => {
     preferredRotation?: string
     /** ⚠️ 有档位 / 无档位二选一（决定走哪条写入通道）。 */
     withTier: boolean
+    /** ⚠️ 免费模型 ⇒ 应**跳过**算起点（2026-11-26 补的守卫）。 */
+    isFreeModel?: boolean
+    /** ⚠️ `buddy`（有档位 + 可判免费）/ `loomy`（无档位）。默认 `loomy`。 */
+    balanceKind?: 'buddy' | 'loomy'
   }) {
     const calls: Array<Record<string, unknown>> = []
     /** ⚠️ **可变表**：模拟真实的 `preferredRotation`（写入即生效）。 */
@@ -280,9 +284,13 @@ describe('A3/A4：子代理参照的三级回落', () => {
         readCredential: async (ref: string) => ref,
         fallback: { kind: 'ref', refName: 'R_FALLBACK' },
         balance: {
-          kind: 'loomy',
+          /**
+           * ⚠️ `buddy` 才有 `isFreeModel`（免费模型判据）；
+           * `loomy` 无档位、无免费概念。
+           */
+          kind: options.balanceKind ?? 'loomy',
           selector: options.withTier ? tieredSelector() : plainSelector(),
-          isFreeModel: () => false,
+          isFreeModel: () => options.isFreeModel === true,
           lockedError: () => new Error('locked'),
         } as never,
       },
@@ -339,6 +347,35 @@ describe('A3/A4：子代理参照的三级回落', () => {
     /** ⚠️ 插件刚重启 / 父会话没发过请求 ⇒ 必须回落，否则子代理失去参照。 */
     const { resolver } = runFirstStart({ preferredRotation: 'acc-2', withTier: true })
     expect(await resolver('m', 'child-1'), '★★★ 回落：按 acc-2 错开 ⇒ acc-1').toBe('R1')
+  })
+
+  it('★★★ **免费模型 ⇒ 跳过**（不写起点）', async () => {
+    /**
+     * ## 这条守的是 2026-11-26 实测发现的缺陷
+     *
+     * 重构把首次块提到 `plan.kind` 分支之前时，**丢掉了 `free !== true` 条件**
+     * ⇒ 探针实测免费模型也写了起点（`position=3`）。
+     *
+     * ## 为什么必须跳过
+     *
+     * | 问题 | 说明 |
+     * |---|---|
+     * | 违反设计 | 免费模型不消耗积分，插起点改变不了任何行为 |
+     * | 占用条目 | `PREFERRED_ROTATION_MAX_SESSIONS` 有上限，白占 |
+     * | 副作用 | 免费→付费切换时，起点已被「免费期」定下，与用户预期不符 |
+     */
+    const { resolver, calls } = runFirstStart({
+      activeAccount: 'acc-2',
+      withTier: true,
+      isFreeModel: true,
+      /**
+       * ⚠️ **必须用 `buddy` 形态**：`free` 只有该形态才有意义
+       * （无档位 provider 没有「免费模型」概念，`firstFree` 恒 false）。
+       */
+      balanceKind: 'buddy',
+    })
+    await resolver('m', 'child-1')
+    expect(calls, '★★★ 免费模型不得写任何起点').toEqual([])
   })
 
   it('★★★ 无档位 provider ⇒ 写 `setSubagentStartPosition`（不写 `setPreferredRotation`）', async () => {

@@ -793,7 +793,18 @@ export function createCredentialResolver<TCredential>(
      * - 已有条目 ⇒ 跳过（只在**首次**算，保住 prompt cache 命中率）
      * - 替身没实现写入方法 ⇒ 跳过
      */
-    if (shouldDecideSubagentStartOnFirstUse({
+
+    /**
+     * ⚠️ **自己求值「是否免费模型」**，不依赖 buddy 分支内的 `free`。
+     *
+     * 约束见下方首次块的注释：免费模型不写起点，而无档位 provider 的
+     * `plan` 是 `undefined`（没有 `isFreeModel`）⇒ 视为「非免费」照常算。
+     *
+     * ⚠️ 类型窄化：`isFreeModel` 只有 `kind === 'buddy'` 的 plan 上才有。
+     */
+    const firstFree = plan?.kind === 'buddy' ? await plan.isFreeModel(modelId) : false
+
+    if (firstFree !== true && shouldDecideSubagentStartOnFirstUse({
       sessionId,
       setting: deps.pool.subagentRotationFor?.(providerId),
       hasAssignment: sessionId !== undefined
@@ -873,6 +884,7 @@ export function createCredentialResolver<TCredential>(
       // ⚠️ 字段现为**必填**（`NO_FREE_MODEL` 是「本家无免费模型」的显式表态），
       //    故不再需要 `=== undefined` 兜底 —— 那种兜底正是 Qoder 漏接三周的遮掩。
       const free = await plan.isFreeModel(modelId)
+
       const candidates = candidatesOf(deps.pool, providerId, modelId)
 
       /**
