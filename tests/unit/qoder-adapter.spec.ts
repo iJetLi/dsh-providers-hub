@@ -388,6 +388,61 @@ describe('QoderAdapter 模型目录', () => {
       expect(new Headers((calls[1]![1] as RequestInit).headers).get('cosy-clienttype')).toBe('5')
     })
 
+    /**
+     * ★★★ **闸门是唯一防线**（2026-11-26 双审一致点名的唯一 P1）。
+     *
+     * `appIdentityCliFallbackUsed` 这个一次性闸门，是防止「app 身份被 403 拒 ⇒
+     * 回退 CLI ⇒ CLI 也被拒 ⇒ 再回退」这种**无限重发**的唯一屏障。
+     *
+     * ## 为什么上一条用例锁不住它
+     *
+     * 上一条 mock 是 `403 → 200`：**第二次就成功了**，所以哪怕删掉闸门，
+     * 调用次数也还是 2 次 ⇒ **用例照样绿**。对抗审计实测：删掉闸门后，
+     * 持续 403 的场景会**一路重发到第 7 发**，而当时**没有任何用例变红**。
+     *
+     * ## 本条判据
+     *
+     * 让**每一次**都回 403 签名拒绝 ⇒ 闸门在 ⇒ 最多 **2 次**（app 一次 + CLI 一次）；
+     * 闸门没了 ⇒ 次数会远超 2。⚠️ 断言用 `<= 2` 而不是 `=== 2`：CLI 那次之后
+     * 无论是否再进重试，都说明闸门已失效。
+     */
+    it('★★★ app 身份持续被拒时不得无限重发（一次性闸门必须有牙）', async () => {
+      const remoteHungerG = {
+        id: 'hmodel', name: 'HungerG', contextWindow: 1_000_000, requiresAppIdentity: true,
+        supportsImage: true, supportsThinking: true, isFree: true, priceFactor: 0,
+        efforts: ['high', 'max', 'low'], defaultEffort: 'max',
+      }
+      // 每一次都是 403「签名/身份被拒」——正是 fallback 判据命中的那类错误。
+      const urls: string[] = []
+      const fetchImpl = vi.fn(async (url: string) => {
+        urls.push(String(url))
+        return new Response(
+          JSON.stringify({ code: '101', message: 'Signature invalid: client identity' }),
+          { status: 403 },
+        )
+      }) as unknown as typeof fetch
+      const adapter = makeAdapter({ fetchRemoteModels: async () => [remoteHungerG], fetchImpl })
+      await adapter.listModels('qoder')
+      // 推理必然失败（一路 403），但**失败次数**才是本用例的被测对象。
+      await collect(adapter, 'hmodel').catch(() => undefined)
+      const calls = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      /**
+       * ⚠️ 上界是 **3 而不是 2** —— 实测数出来的三段（打印过 URL，三条完全相同）：
+       *
+       * 1. app 身份 → 403 ⇒ 闸门置位、回退 CLI；
+       * 2. CLI 身份 → 403；
+       * 3. **一次凭据续期重试**（403 也会触发 `authRefreshed` 那条既有腿）→ 403。
+       *
+       * 第 3 段是**既有行为**（与本次改动无关），所以上界取 3。
+       * 真正被测的是「闸门在不在」：**删掉闸门会打到第 7 发**（对抗审计实测），
+       * 所以 `<= 3` 足以把两者分开，而 `<= 2` 会把既有行为误判成缺陷。
+       */
+      expect(
+        calls.length,
+        'app 身份持续被拒时必须靠一次性闸门停下（有闸门=3，删掉闸门实测=7）',
+      ).toBeLessThanOrEqual(3)
+    })
+
     it('20 分钟 TTL：第二次读命中缓存，不再打上游', async () => {
       const fetchRemoteModels = vi.fn(async () => [remoteFast])
       const adapter = makeAdapter({ fetchRemoteModels })
