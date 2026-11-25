@@ -1716,6 +1716,55 @@ describe('collectBuddyGrowth 合并连登链结果', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('★★★ 连登链失败行必须计入 failed（顶行不得仍绿，issue #156 后续一格）', async () => {
+    // 与上一条同构，只把保连胜的 chat/completions 改成 400。
+    // 旧代码 `failed: expired ? 0 : report.failed` **完全忽略 extras 的 ok:false**
+    // ⇒ 逐项红、顶行绿（客户端 tone 只看 failed）。
+    const { fetcher } = routingFetcher([
+      { match: `${EP}/v2/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      { match: `${EP}/activity/growth/tasks`, method: 'GET', body: EMPTY_TASKS },
+      {
+        match: `${EP}/activity/growth/streak`, method: 'GET',
+        body: {
+          code: 0,
+          data: {
+            streak: { days: 9 },
+            makeup_cards: { balance: 0, max: 2 },
+            redemption_status: {
+              tier_7d_status: 'claimable',
+              tiers: [{ tier: '7d', days: 7, credit: 100, energy: 10, cards: 1, chances: 0 }],
+            },
+          },
+        },
+      },
+      { match: `${EP}/activity/growth/heatmap`, method: 'GET', body: { code: 0, data: { today: { date: '2026-11-05' }, cells: [] } } },
+      { match: `${EP}/activity/growth/redeem`, method: 'POST', body: { code: 0, data: {} } },
+      { match: `${EP}/activity/growth/lottery/summary`, method: 'GET', body: { code: 0, data: { chances: 0, module: { enabled: true } } } },
+      { match: `${EP}/activity/growth/buddy/agreement`, method: 'POST', body: { code: 0, data: {} } },
+      { match: `${EP}/activity/growth/buddy/first`, method: 'POST', body: { code: 0, data: { reward_credit: 300 } } },
+      { match: `${WB}/billing/meter/check-gift-claimed`, method: 'POST', body: { code: 0, data: { active: false, claimed: true, credit_num: 0 } } },
+      {
+        match: `${EP}/v2/chat/completions`, method: 'POST', status: 400,
+        body: { code: 11102, msg: 'model [deepseek-v4.1-flash] service info not found' },
+      },
+    ])
+    const stub = vi.stubGlobal('fetch', fetcher)
+    try {
+      const outcome = await collectBuddyGrowth(
+        CRED, PRODUCT,
+        { id: 'acct-9', nickname: '连登号', credentialRef: 'buddy:ref' } as never,
+        undefined, undefined,
+      )
+      const keep = (outcome.tasks ?? []).find((t) => t.taskCode === '(保连胜)')
+      expect(keep?.ok, '保连胜失败应如实标 false').toBe(false)
+      // ★ 本用例的核心：失败行必须进 failed（旧代码这里是 0）
+      expect(outcome.failed, '连登链失败行必须计入 failed（否则顶行仍绿）').toBeGreaterThanOrEqual(1)
+      expect(outcome.claimedCredit).toBe(100 + 300)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 

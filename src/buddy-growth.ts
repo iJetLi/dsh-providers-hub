@@ -4375,6 +4375,28 @@ export async function collectBuddyGrowth(
     extraRows.push({ taskCode: '(连登链)', ok: true, message: extras.notes.join('；') })
   }
   const allResults = [...report.results, ...extraRows]
+  /**
+   * ★★★ **连登链的失败行必须计入 `failed`**（issue #156 后续一格）。
+   *
+   * ## 缺陷
+   *
+   * 旧代码只汇总任务阶段的失败（`report.failed`），**完全忽略 `extras.rows` 里的
+   * `ok: false`**：
+   *
+   * 实测（保连胜 400 场景）：
+   * `{"accountOk":true,"failed":0,"claimedCount":3,"claimedCredit":1900, tasks(保连胜)=false}`
+   *
+   * ⇒ **逐项是红的，顶行还是绿的**（客户端 `tone` 只看 `failed`，见 `jet-hub.js`）。
+   *
+   * 这与本文件的既有不变式**矛盾**：`:3488` 的注释写着
+   *「`ok:false` → failed 计数、提示染黄」—— 同一个文件里**两套同义判据**。
+   *
+   * ## 修法
+   *
+   * `failed: report.failed + extrasFailed`（`expired` 时仍归 0 —— 僵尸账号
+   * 「无需再管」，不把整条提示染成失败，那是既有语义）。
+   */
+  const extrasFailed = extraRows.filter((row) => !row.ok).length
   const extraCredit = extras.credit
   const extraClaimed = extras.claimedCount
   return {
@@ -4383,7 +4405,7 @@ export async function collectBuddyGrowth(
     ok: report.ok || expired,
     completed: report.completed,
     clientOnly: report.clientOnly,
-    failed: expired ? 0 : report.failed,
+    failed: expired ? 0 : report.failed + extrasFailed,
     claimedCount: report.claimedCount + extraClaimed,
     claimedCredit: report.claimedCredit + extraCredit,
     timedOut: report.timedOut,
