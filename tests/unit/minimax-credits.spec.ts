@@ -474,7 +474,20 @@ describe('fetchMinimaxCreditBalanceDetailed：必须带 page_size', () => {
     expect(url, 'issue #141：必须带 page_size').toContain('page_size=')
     const size = Number(/[?&]page_size=(\d+)/.exec(url)?.[1])
     expect(Number.isFinite(size), 'page_size 必须是数字').toBe(true)
-    expect(size, 'page_size 必须远大于上游默认窗口 20（取 1000 ⇒ 约 2.7 年）').toBeGreaterThanOrEqual(1000)
+    /**
+     * ⚠️ **区间断言，不是「≥1000」**（GitHub issue #162）。
+     *
+     * 原来这里是 `toBeGreaterThanOrEqual(1000)` —— 等于把「必须用 1000」写进了测试，
+     * 而 **1000 在这条端点上会被 400 拒**（实测），且 `1000` 从未被真机验证过。
+     *
+     * 改判据的理由：
+     * - **下界 50**：作者真机唯一验证过的档位（23/24 条全量），低于它没有余量保证；
+     * - **上界 100**：实测仍 200 的安全档位，`120` 之后是悬崖。
+     *
+     * ⚠️ 这个断言**两个方向都有牙**：改回 1000 会红（上界），改成 20 也会红（下界）。
+     */
+    expect(size, 'issue #162：page_size 必须在 [50, 100] —— 1000 会被 400 拒').toBeGreaterThanOrEqual(50)
+    expect(size, 'issue #162：page_size 上界 100（120 之后是悬崖）').toBeLessThanOrEqual(100)
   })
 
   it('★★★ 拿到全部 23 个包时，余额是**全部**之和（不是前 20 个）', async () => {
