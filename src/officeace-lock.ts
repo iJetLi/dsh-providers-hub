@@ -81,7 +81,7 @@ import type { OfficeAceCredential, OfficeAceSubscriptionSummary } from './office
  * 本文件**一行判据都不写** —— 手抄一份会让同一语义两套实现必然漂移。
  */
 import { OFFICEACE } from './officeace-product.js'
-import { decideSubagentStart } from './subagent-start.js'
+import { decideSubagentStart, registerSubagentStartIfNeeded } from './subagent-start.js'
 import type { SubagentStartPoolLike } from './subagent-start.js'
 
 
@@ -409,6 +409,41 @@ export function createOfficeAceCredentialProvider(
   ): readonly OfficeAceAccountRef[] => {
     const pool = deps.subagentPool
     if (pool === undefined) return accounts
+    /**
+     * ★★★ **登记必须放在 `length <= 1` 早退之前**（2026-11-25 修 Bug 1）。
+     *
+     * ## 为什么不能放到后面
+     *
+     * 若只有 1 个账号时早退、不登记，那么「先用 1 个号跑一阵 → 用户加号」
+     * 之后，分配表是空的 ⇒ `slot` 兜底 0 ⇒ **所有子代理仍撞同一个号**。
+     *
+     * ⇒ 登记是「记录这个子代理的存在」，与「够不够错开」**无关**。
+     *
+     * ## 缺陷本体
+     *
+     * 本家原先**完全没有登记调用** ⇒ `decideSubagentStart` 读到的
+     * `assignment` 恒 `undefined` ⇒ `slot` 恒 0 ⇒ 用户报的
+     * 「子代理设置里面的帐号分布方式不成功」。
+     *
+     * ⚠️ 判据走共享的 `registerSubagentStartIfNeeded` —— 与
+     *    `credential-resolver` / `codearts` **同一份实现**。
+     *
+     * ⚠️ **父会话 id 的来源**：本模块拿不到 `index.ts` 的 `resolveSubagentParent`
+     *    （那是该文件的局部闭包）⇒ 只从**已落盘的分配记录**取（本家首次登记时
+     *    记录还不存在 ⇒ 这一次不登记，等 `credential-resolver` 那条腿或
+     *    后续请求补上）。
+     *    ⚠️ 这是**已知的首次请求缺口**，与 buddy 系「首轮用主代理起点」同型，
+     *       已如实登记在本注释里。
+     */
+    try {
+      registerSubagentStartIfNeeded({
+        pool: pool as never,
+        providerId: OFFICEACE.id,
+        sessionId,
+        parentSessionId: pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId)?.parentSessionId,
+        setting: pool.subagentRotationFor?.(OFFICEACE.id),
+      })
+    } catch { /* 登记失败不影响选号 */ }
     if (accounts.length <= 1) return accounts
     try {
       const decision = decideSubagentStart({

@@ -171,7 +171,7 @@ import type { LoomyTierOptions } from './loomy-balance-rank.js'
  *
  * ⚠️ **不要把它们搬回来**：那会让三类 provider 再次各有一份实现。
  */
-import { bestTierAnchorId, sameTierAsMainStart } from './subagent-start.js'
+import { bestTierAnchorId, registerSubagentStartIfNeeded, sameTierAsMainStart } from './subagent-start.js'
 
 
 export interface ResolverPool<TCredential = unknown> {
@@ -717,21 +717,36 @@ export function createCredentialResolver<TCredential>(
        *（见 `account-pool.ts` 的实现）。这里 `void` 掉是安全的
        *（落盘失败不影响本次选号）。
        */
-      if (sessionId !== undefined) {
-        const settingForRegister = deps.pool.subagentRotationFor?.(providerId)
-        const parentOfThis = parentOfSession(sessionId)
-        if (settingForRegister !== undefined
-          && subagentSettingActive(settingForRegister)
-          && parentOfThis !== undefined) {
-          void deps.pool.recordSubagentStart?.(
-            providerId,
-            sessionId,
-            /** ⚠️ 父会话 id 已由 `parentOfSession` 保证有值（会话头优先）。 */
-            parentOfThis,
-            Date.now(),
-          ).catch(() => { /* 登记失败不影响本次选号 */ })
-        }
-      }
+      /**
+       * ⚠️⚠️ **必须走共享的 `registerSubagentStartIfNeeded`**（2026-11-25 统一）。
+       *
+       * ## 原实现是**内联判据**，与 `subagent-start.ts` 的
+       * `shouldRegisterSubagentStart` **不等价**：
+       *
+       * | 判据 | 条件 |
+       * |---|---|
+       * | 此处（旧内联）| `setting !== undefined && subagentSettingActive(setting) && parent !== undefined` |
+       * | 共享函数 | `setting !== undefined && startMode 已声明 && sessionId 非空 && parent 非空` |
+       *
+       * 差异在 **`follow` + 配置了 `model`** 这一格：`subagentSettingActive` 判 `true`
+       * （因为 model 有值），而 `startModeOf` 仍返回 `'follow'` ⇒ 两边**都算「要登记」**，
+       * 结果相同。但**判据文本不同** ⇒ 将来改一边就会漂移。
+       *
+       * ## 为什么现在必须统一
+       *
+       * Bug 1 的根因正是「**自建选号的 provider 完全没接登记**」
+       * （codearts / officeace）。若三处各写一份判据，将来必然再漏一处 ——
+       * 本仓红线「同一语义不得两套实现」。
+       *
+       * ⇒ 三处（buddy 系 / codearts / officeace）**全部**走本函数。
+       */
+      registerSubagentStartIfNeeded({
+        pool: deps.pool as never,
+        providerId,
+        sessionId,
+        parentSessionId: sessionId === undefined ? undefined : parentOfSession(sessionId),
+        setting: deps.pool.subagentRotationFor?.(providerId),
+      })
 
       // ① 免费模型（消耗 0 积分）不受「锁定永久积分」约束：锁定要保护的是
       //    「别把永久积分烧掉」，而免费模型既不扣临时也不扣永久积分，却被那道门

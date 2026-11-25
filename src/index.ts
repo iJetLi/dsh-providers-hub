@@ -66,7 +66,7 @@ import { BuddyBalanceSelector } from './buddy-balance-selector.js'
 import type { BuddyNoAccountReason } from './buddy-balance-selector.js'
 import type { LoomyNoAccountReason } from './loomy-balance-selector.js'
 import { createCredentialResolver, NO_FREE_MODEL } from './credential-resolver.js'
-import { decideSubagentStart } from './subagent-start.js'
+import { decideSubagentStart, registerSubagentStartIfNeeded } from './subagent-start.js'
 import { LOBSTERAI } from './lobsterai-product.js'
 import { QODER, QODER_CN } from './qoder-product.js'
 import { TRAE } from './trae-product.js'
@@ -1485,6 +1485,39 @@ export function apply(ctx: Context): void {
        * 未配置子代理 / `startMode` 缺失 / `follow` ⇒ `decideSubagentStart`
        * 返回 `startId === undefined` ⇒ 保持上面的既有行为**逐字节不变**。
        */
+      /**
+       * ★★★ **必须「先登记、再算起点」**（2026-11-25 修 Bug 1，用户报障
+       * 「子代理设置里面的帐号分布方式不成功」）。
+       *
+       * ## 根因
+       *
+       * `decideSubagentStart` 读 `assignment.slot` 算错开位次，而那张表
+       * **只有 `recordSubagentStart` 会写**。本家原先**完全没有登记调用**：
+       *
+       * | provider | 选起点 | 登记分配 |
+       * |---|---|---|
+       * | buddy 系 | ✅ | ✅ |
+       * | **codearts（本处）** | ✅ | ❌ **原先没有** |
+       * | **officeace** | ✅ | ❌ **原先没有** |
+       *
+       * ⇒ `assignment` 恒 `undefined` ⇒ `slot` 兜底 `0`
+       * ⇒ **所有子代理同一个起点** ⇒ 用户看到「分布方式没生效」。
+       *
+       * ⚠️ **顺序不能反**：`recordSubagentStart` 内部先同步更新缓存
+       * （见 `account-pool.ts`），故登记后**紧接着**的 `decideSubagentStart`
+       * 就能读到新 slot。反过来的话本次请求仍读到旧值（`undefined`）。
+       *
+       * ⚠️ 判据走共享的 `registerSubagentStartIfNeeded` —— 与
+       *    `credential-resolver` **同一份实现**（本仓红线：同一语义不得两套）。
+       */
+      registerSubagentStartIfNeeded({
+        pool,
+        providerId: 'codearts',
+        sessionId,
+        parentSessionId: pool.subagentAssignmentOf?.('codearts', sessionId)?.parentSessionId
+          ?? (sessionId === undefined ? undefined : resolveSubagentParent(sessionId)),
+        setting: pool.subagentRotationFor?.('codearts'),
+      })
       const subagentStart = decideSubagentStart({
         providerId: 'codearts',
         sessionId,

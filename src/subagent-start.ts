@@ -59,6 +59,22 @@ export interface SubagentStartPoolLike {
   subagentAssignmentOf?(provider: string, sessionId: string | undefined): SubagentAssignment | undefined
   preferredRotationFor?(provider: string, sessionId: string): string | undefined
   listAccountsByProvider(provider: string): ReadonlyArray<{ id: string; enabled: boolean }>
+  /**
+   * ⚠️ **登记起点分配**（2026-11-25 加，修 Bug 1）。
+   *
+   * `decideSubagentStart` 靠 `subagentAssignmentOf` 拿 `slot` 算错开位次，
+   * 而那张表只有本方法会写。**自建选号的 provider（codearts / officeace）
+   * 原先完全没有调它** ⇒ 分配表恒空 ⇒ `slot` 恒 0 ⇒ 全撞号。
+   *
+   * ⚠️ 可选：单测替身不实现时 `registerSubagentStartIfNeeded` 静默跳过
+   *    （行为与改动前一致）。
+   */
+  recordSubagentStart?(
+    provider: string,
+    sessionId: string,
+    parentSessionId: string,
+    now: number,
+  ): Promise<number>
 }
 
 /** 起点分配的结果。 */
@@ -128,6 +144,83 @@ function startModeOf(setting: SubagentRotationSetting | undefined): SubagentStar
 }
 
 /**
+ * ★★★ **登记子代理起点分配 —— 自建选号 provider 的共享入口**
+ * （2026-11-25 修 Bug 1）。
+ *
+ * ## 这个函数修的是什么（用户原话）
+ *
+ * > 「子代理设置里面的帐号分布方式不成功」
+ *
+ * ## 根因
+ *
+ * `decideSubagentStart` 读 `assignment.slot` 来算错开位次，而 `assignment`
+ * 来自 `subagentAssignmentOf(provider, sessionId)` —— 那张表**只有
+ * `recordSubagentStart` 会写**。
+ *
+ * | provider | 选起点 | **登记分配** | 后果 |
+ * |---|---|---|---|
+ * | buddy 系（`credential-resolver`）| ✅ | ✅ | 正常 |
+ * | **codearts**（`index.ts`）| ✅ | ❌ **原先没有** | slot 恒 0 ⇒ 全撞号 |
+ * | **officeace**（`officeace-lock.ts`）| ✅ | ❌ **原先没有** | 同上 |
+ *
+ * ⇒ 三个 provider 对同一件事只做了三分之二 —— 本仓反复记录的
+ *   「同一语义多处实现必然漂移」。
+ *
+ * ## 为什么必须抽成这里（而不是各 provider 手抄）
+ *
+ * `credential-resolver.ts:720-734` 的判据曾经**绑在「免费模型 / 主代理有起点」
+ * 两个额外条件里**（上游 `cde3201c` 修的真缺陷：两条静默失效）。
+ * 手抄必然重现 ⇒ 这里与那边用**同一个** `shouldRegisterSubagentStart`。
+ *
+ * ## ⚠️ 为什么是 fire-and-forget
+ *
+ * `recordSubagentStart` 内部**先同步更新缓存**、再异步落盘（见 `account-pool.ts`）
+ * ⇒ `void` 掉是安全的，且**本次请求就能读到新 slot**（本函数紧接着要算起点）。
+ *
+ * @param options.pool        池（必须实现 `recordSubagentStart`）
+ * @param options.providerId  provider id
+ * @param options.sessionId   子代理自己的会话 id
+ * @param options.parentSessionId 父会话 id（`undefined` ⇒ 不登记，宁缺不猜）
+ * @param options.setting     子代理设置（`undefined` ⇒ 没配 ⇒ 不登记）
+ * @returns 是否**发起了**登记（`false` = 条件不满足，调用方可据此诊断）
+ */
+export function registerSubagentStartIfNeeded(options: {
+  pool: {
+    recordSubagentStart?(
+      provider: string,
+      sessionId: string,
+      parentSessionId: string,
+      now: number,
+    ): Promise<number>
+  }
+  providerId: string
+  sessionId: string | undefined
+  parentSessionId: string | undefined
+  setting: SubagentRotationSetting | undefined
+  /** 注入时钟（单测可固定）。 */
+  now?: () => number
+}): boolean {
+  if (!shouldRegisterSubagentStart(options.setting, options.sessionId, options.parentSessionId)) {
+    return false
+  }
+  /** ⚠️ `shouldRegisterSubagentStart` 已保证这两个非空，但 TS 收窄不了 ⇒ 断言。 */
+  const sessionId = options.sessionId as string
+  const parentSessionId = options.parentSessionId as string
+  try {
+    void options.pool.recordSubagentStart?.(
+      options.providerId,
+      sessionId,
+      parentSessionId,
+      options.now?.() ?? Date.now(),
+    ).catch(() => { /* 登记失败不影响本次选号 */ })
+    return true
+  } catch {
+    /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
+    return false
+  }
+}
+
+/**
  * ★★★ **算子代理的起点**（本模块的唯一入口）。
  *
  * @param options.providerId  provider id（池读取用）
@@ -187,6 +280,17 @@ export function decideSubagentStart(options: {
     decidedBy = 'user-pick'
     startDecidedByPin = true
     startDecidedByUser = true
+    /**
+     * ★★★ **用户手选 ⇒ 绝对第一**（2026-11-25 修复时补上）。
+     *
+     * 用户在本页面明确指定了某个号 —— 那是最强的意愿表达，
+     * 必须无视档位变化恒排第一（与 `fixed` 同语义）。
+     *
+     * ⚠️ 但**不设 `pinnedFirst` 也会「烧完不切」** —— 不对：
+     *    `pinnedFirst` 只是跳过**档位检查**，而 `buddy-balance-rank` 里
+     *    `anchor` 的循环仍会排除「完全无积分」的号 ⇒ 真烧光仍会切。
+     */
+    pinnedFirst = true
   } else if (mode !== 'fixed') {
     // ── ② 系统 pin（**`fixed` 模式必须跳过**，理由见模块头）──
     const pinnedId = assignment?.pinnedAccountId
@@ -278,8 +382,46 @@ export function decideSubagentStart(options: {
 
   return {
     ...(startId === undefined ? {} : { startId }),
-    /** 起点归属子代理 ⇒ 恒排第一（无视档位变化，保 prompt cache）。 */
-    pinnedFirst: pinnedFirst || startId !== undefined,
+    /**
+     * ★★★ **`pinnedFirst` 只在两种情况下为真**（2026-11-25 修复，用户报障）。
+     *
+     * ## 原缺陷
+     *
+     * ```ts
+     * pinnedFirst: pinnedFirst || startId !== undefined,   // ← 恒真
+     * ```
+     *
+     * `startId !== undefined` 在**任何**策略下都成立（①user-pick / ②pin /
+     * ③strategy 现算 / `fixed` 位次都会给它赋值）⇒ **只要配了子代理就恒 `true`**。
+     *
+     * 而 `buddy-balance-rank.ts` 的 `pinnedHeld` 一旦为真就**短路 S6**：
+     *
+     * ```ts
+     * if (!tierStillHeld && !pinnedHeld) { /* 交出首位 *\/ }
+     * ```
+     *
+     * ⇒ 起点**永远占第一**，不看档位变化 ⇒ 用户报的：
+     * **「选定了帐号使用积分消耗完临期后不会自动切换号」**。
+     *
+     * ⚠️ 这也推翻了本文件 L197-200 的注释意图：
+     *    「`pinnedFirst` 不设：pin 只是起点，档位规则仍然生效
+     *      （否则会去烧永久积分）」—— 那个意图被 `|| startId !== undefined` 抹掉了。
+     *
+     * ## 正确语义
+     *
+     * | 起点来源 | `pinnedFirst` | 理由 |
+     * |---|---|---|
+     * | `follow`（无起点）| `false` | 就是主代理行为 |
+     * | `sequence` / `reverse` / `hash` | **`false`** | 只是「错开起点」，**档位规则必须生效** |
+     * | 系统 `pin`（非 fixed）| **`false`** | pin 是「拉起时定死起点」，不是「无视档位」|
+     * | **`fixed`** | **`true`** | 用户明确要求「该号临期和短期都烧，烧没了才切」|
+     * | **用户手选** | **`true`** | 用户最强意愿，必须绝对第一 |
+     *
+     * ⚠️ **`fixed` / 手选时仍保留可用性兜底**：`pinnedFirst` 只是「跳过档位检查」，
+     *    `buddy-balance-rank` 里 `anchor` 的循环仍会排除「完全无积分」的号
+     *    ⇒ 真的烧光了还是会切（这正是用户要的）。
+     */
+    pinnedFirst,
     ownedBySubagent: startId !== undefined,
     /** ⚠️ `fixed` 不 pin：位次是用户设的，pin 会让下次位次变更失效。 */
     shouldPin: mode !== 'fixed',
