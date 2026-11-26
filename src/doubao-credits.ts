@@ -111,14 +111,15 @@ export async function fetchDoubaoBalanceDetailed(
   }
 }
 
-// ── 签到：薄壳，转发给 CDP 页面会话驱动 ──
+// ── 签到：薄壳，转发给纯 HTTP 腿 ──
 
 /**
  * 执行豆包每日签到领取。
  *
- * 真正的 CDP 页面会话驱动在 `src/doubao-signin.ts` 的 `claimDoubaoDailyViaPage`
- * （起豆包内核 + 挂其 User Data，在页面里用 `bdms.frontierSign` 签名再领取）。
- * 本函数是它的薄壳：把凭据原文转过去。
+ * 真正的实现在 `src/doubao-signin.ts` 的 `claimDoubaoDailyViaHttp`：
+ * `a_bogus` 由 `node:vm` 沙箱跑官方 `bdms` SDK 生成，然后直接 POST
+ * `/alice/ug/campaign/landing/checkin`（**不起浏览器**）。本函数是它的薄壳：
+ * 把凭据原文转过去，并只把 `ClaimOutcome` 往上传（`signerError` 只进日志）。
  *
  * ⚠️ 凭据必须带 `cookie`（登录会话）；没有它 ⇒ `inactive`（不发请求）。
  */
@@ -128,6 +129,7 @@ export async function claimDoubaoDailyCheckin(
   if (typeof credential?.cookie !== 'string' || credential.cookie.length === 0) {
     return { kind: 'inactive', message: '没有可用的豆包登录会话（请先在账号卡上完成登录）' }
   }
-  const { claimDoubaoDailyViaPage } = await import('./doubao-signin.js')
-  return claimDoubaoDailyViaPage(JSON.stringify(credential))
+  const { claimDoubaoDailyViaHttp } = await import('./doubao-signin.js')
+  const { outcome } = await claimDoubaoDailyViaHttp(JSON.stringify(credential))
+  return outcome
 }
