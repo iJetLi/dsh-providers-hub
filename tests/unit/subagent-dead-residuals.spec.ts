@@ -30,7 +30,7 @@
  * 这与上游说的「守卫要打在行为上」不矛盾：**这里要守的正是「符号不该存在」**。
  */
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -42,6 +42,32 @@ function readStripped(name: string): string {
   return readFileSync(join(SRC, name), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/(^|[^:])\/\/.*$/gm, '$1')
+}
+/**
+ * ★★★ **递归列出 `src/` 下所有 .ts 文件**（2026-11-27 正向审计修）。
+ *
+ * ## 为什么要改这一条
+ *
+ * 原实现只扫 **4 个硬编码文件名**（`credential-resolver` / `index` / `account-pool`
+ * / `officeace-lock`）。审计实测：往 **`jet-hub-rpc.ts`** 里注入一句真的
+ * `pool.pinSubagentAccount?.(...)` ⇒ **守卫 5 条全绿**。
+ *
+ * ⇒ 那条「不得复活」的守卫**只挡得住「在原处加回来」**，挡不住「在别处加回来」——
+ *   而后者才是真实复发的形态（`34b2137f` 那两处之一就在别的文件里）。
+ */
+function readStrippedRaw(fullPath: string): string {
+  return readFileSync(fullPath, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+}
+function allSrcFiles(dir: string = SRC): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...allSrcFiles(full))
+    else if (entry.isFile() && entry.name.endsWith('.ts')) out.push(full)
+  }
+  return out
 }
 
 /**
@@ -67,12 +93,17 @@ const REMOVED = [
 describe('★★★ 死残留：已删除的符号不得复活', () => {
   for (const item of REMOVED) {
     it(`★★★ ${item.name} 在 src/ 里不得有非注释出现`, () => {
-      const files = ['credential-resolver.ts', 'index.ts', 'account-pool.ts', 'officeace-lock.ts']
+      /**
+       * ⚠️⚠️ **必须扫全 `src/`**（2026-11-27 正向审计修的假绿）。
+       *
+       * 原实现只扫 4 个硬编码文件 ⇒ 往 `jet-hub-rpc.ts` 注入真调用时**全绿**。
+       * 判据仍是「词边界计数」（`\b` 防 `XxxYyy` 误命中），但现在覆盖整棵树。
+       */
       const hits: string[] = []
-      for (const f of files) {
-        const code = readStripped(f)
+      for (const full of allSrcFiles()) {
+        const code = readStrippedRaw(full)
         const n = (code.match(new RegExp('\\b' + item.name + '\\b', 'g')) ?? []).length
-        if (n > 0) hits.push(`${f}×${n}`)
+        if (n > 0) hits.push(`${full.slice(SRC.length + 1)}×${n}`)
       }
       expect(
         hits,
@@ -121,10 +152,23 @@ describe('★★★ 死残留：已删除的符号不得复活', () => {
       'activeAccountOf',
       'setActiveAccount',
     ]
+    /**
+     * ⚠️⚠️ **必须断言「作为方法定义存在」，不能用 `includes` 子串**（2026-11-27 正向审计修）。
+     *
+     * 原实现是 `expect(pool.includes(m)).toBe(true)` —— 审计实测：
+     * 把 `setActiveAccount` 改名成 `setActiveAccountZZZ` 后，
+     * `pool.includes('setActiveAccount')` **仍为 true**（子串），**守卫全绿**。
+     *
+     * ⇒ 反向对照的意义是「证明读取与正则没坏」，用子串连「名字还在不在」都测不出来。
+     */
+    const stripped = pool
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1')
     for (const m of ALIVE) {
+      const asMethod = new RegExp('^\\s*(?:async\\s+)?' + m + '\\s*[(<]', 'm').test(stripped)
       expect(
-        pool.includes(m),
-        `★★ ${m} 应当仍在 AccountPool 上（若不在了，说明本文件的判据已失效）`,
+        asMethod,
+        `★★ ${m} 应当仍作为 AccountPool 的方法存在（若不在，说明本文件的判据已失效）`,
       ).toBe(true)
     }
   })
