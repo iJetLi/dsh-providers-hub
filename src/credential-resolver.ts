@@ -154,121 +154,30 @@ import type { LoomyTierOptions } from './loomy-balance-rank.js'
  * ⇒ 名单的权威是调用点本身，不是本注释。
  */
 /**
- * ★★★ **取「主代理起点所在档位」的账号 id 列表**（2026-11-23）。
+ * ⚠️⚠️ **这两个函数已提取到 `src/subagent-start.ts`**（2026-11-25）。
  *
- * ## 为什么需要它
+ * ## 为什么提取
  *
- * 用户明确要求子代理也遵守档次优先：
+ * 子代理起点分配的判据原先**内联在本文件**，而本仓有一类 provider
+ *（codearts / officeace / …）**自建选号**、不走本文件的
+ * `createCredentialResolver` ⇒ 它们想支持子代理只能**手抄一份**，
+ * 而同一语义两套实现必然漂移（本套逻辑上游已改 6 轮审计）。
  *
- * > 「子代理在分配帐号起点时，肯定也要像主代理一样，遵守档次优先的原则呀」
+ * ## 为什么就地 import 而不是复制
  *
- * ⇒ 「顺序 / 倒序 / 哈希」**只在同一档位内**错开，绝不跨档位
- *（跨档位反转会让子代理先烧短期，而临期还没烧完）。
+ * 本文件与 `subagent-start.ts` 必须给出**逐字节相同**的结果。
+ * 守卫在 `tests/unit/subagent-start-extraction.spec.ts`（8 条，
+ * 提取过程中实际抓到 6 处语义漂移）。
  *
- * ## 为什么用「余额分档」而不是「已算好的 ranked」
- *
- * 调用点此时**还没取余额**（`pickBuddyAccount` 内部才取）。档位判据需要
- * 余额读数，故这里只能读 `pool` 侧的**缓存**读数：
- *
- * - 有缓存读数 ⇒ 按 `buddyBalanceTier` 分组（与选号同源）；
- * - **无缓存读数 ⇒ 退化为「全部启用账号」**（此时档位未知，宁可全部参与，
- *   让 `rotateFromPreferred` 后续按真实档位收窄）。
- *
- * ⚠️ 退化是**安全的**：`rotateFromPreferred` 内部会按档位重新分组，
- * 起点落在哪一档由它决定；我们这里只是尽量给出一个「同档位」的候选集。
- * 若给了跨档位的集合，起点的档位归属由 `rotateFromPreferred` 自己判断 ——
- * 最坏情况是「起点落在更靠前的档位」，那仍是**该档位内**的合法错开。
- *
- * @param enabledIds - 该 provider 全部启用账号 id（池序）
- * @param mainStartId - 主代理当前实际用的账号 id
- * @param pool - 用于读余额缓存
- * @param provider - provider id
- * @returns 与主代理起点同档位的账号 id 列表（按 `enabledIds` 顺序）；
- *   无法判断时返回 `enabledIds` 原样
+ * ⚠️ **不要把它们搬回来**：那会让三类 provider 再次各有一份实现。
  */
-function sameTierAsMainStart(
-  enabledIds: readonly string[],
-  mainStartId: string,
-  /**
-   * ★ **从 selector 的余额缓存读档位**（2026-11-24，上游审计 P1-3 修复）。
-   *
-   * 原缺陷：上一版收 `pool.cachedBalanceTierOf`，而那个方法**全仓零实现**
-   * ⇒ 恒降级为「全量账号」⇒ 子代理可能先烧永久积分。
-   *
-   * 余额缓存在 `BuddyBalanceSelector` 里，池没有余额数据。
-   *
-   * ⚠️ 可选参数：单测替身不实现 `cachedTierOf` ⇒ 退化，行为不变。
-   */
-  selector: BuddySelectorLike | undefined,
-  allowPermanent: boolean,
-): readonly string[] {
-  /**
-   * ⚠️ pool 可能**没有**这个可选能力（单测替身）⇒ 直接返回全量，
-   * 行为退化为「全池错开」—— 仍然可用，只是分布可能跨档。
-   */
-  /**
-   * ⚠️ **两层降级**：
-   * 1. `selector` 缺席 / 未实现 `cachedTierOf`（单测替身）；
-   * 2. 主代理起点**没有余额缓存**（冷启动 / 刚过 TTL）。
-   *
-   * 两者都 ⇒ 全量账号（宁可跨档错开，也不要子代理全挤主代理那个号）。
-   */
-  if (selector === undefined || typeof selector.cachedTierOf !== 'function') return enabledIds
-  const asCandidate = (id: string) => ({ id } as BuddyCandidateAccount)
-  const mainTier = selector.cachedTierOf(asCandidate(mainStartId), allowPermanent)
-  if (mainTier === undefined) return enabledIds
-  const same = enabledIds.filter(
-    (id) => selector.cachedTierOf!(asCandidate(id), allowPermanent) === mainTier,
-  )
-  /**
-   * ⚠️ 过滤后若不含主代理起点（余额缓存刚失效），退回全量 ——
-   * 否则 `startIndexOfSlot` 会因「找不到基准」返回 undefined。
-   */
-  return same.includes(mainStartId) ? same : enabledIds
-}
-
-
-/**
- * ★★★ **无锚点时，取「档位最优」的账号作锚**（2026-11-24，PR #153 双审 P1①）。
- *
- * ## 缺陷
- *
- * 上一版：`tierAnchorId === undefined` ⇒ `sameTierIds = enabledIds`（**全池**）。
- *
- * 而 `tierAnchorId === undefined` 正是**生产默认**：主代理「默认不指定起点」时
- * `mainSessionStartId` 是 `undefined`，子代理自己的 `baseRotationStartId` 也是
- * `undefined`。
- *
- * ⇒ 档位过滤一次都没生效 ⇒ `startIndexOfSlot` 在全池上错开 ⇒
- *   池 `[临期A, 临期B, 永久P]` 时**第二个子代理必然拿到 `P`**（先烧永久积分）。
- *   双审两侧独立实测：`child1=RB`、**`child2=RP`** —— 与上游原报障**逐字节相同**。
- *
- * ## 修法
- *
- * 无锚点时**不要**用「全池第一个」当锚，而是**按 `cachedTierOf` 找档位最优
- *（`imminent:0` → `expiring:1` → `permanent:2`，**数值越小越优先**）的那个账号**，
- * 再用它调 {@link sameTierAsMainStart} ⇒ 子代理只在**临期档内**错开。
- *
- * ⚠️ `selector` 缺席 / 无 `cachedTierOf`（单测替身、非 buddy 家）⇒ 返回 `undefined`
- *    ⇒ 调用方退回全池（**无法判断档位时的既有降级**，保持不变）。
- * ⚠️ 跳过 `none`（3）：那是「无余额 / 查询失败 / 锁定态只剩永久」——
- *    拿它当锚会把子代理导向无余额的号。
- */
-function bestTierAnchorId(
-  enabledIds: readonly string[],
-  selector: BuddySelectorLike | undefined,
-  allowPermanent: boolean,
-): string | undefined {
-  if (selector === undefined || typeof selector.cachedTierOf !== 'function') return undefined
-  const asCandidate = (id: string) => ({ id } as BuddyCandidateAccount)
-  let best: { id: string; tier: number } | undefined
-  for (const id of enabledIds) {
-    const tier = selector.cachedTierOf(asCandidate(id), allowPermanent)
-    if (tier === undefined || tier >= BUDDY_BALANCE_TIER.none) continue
-    if (best === undefined || tier < best.tier) best = { id, tier }
-  }
-  return best?.id
-}
+import { bestTierAnchorId, decideSubagentStart, registerSubagentStartIfNeeded, sameTierAsMainStart } from './subagent-start.js'
+import {
+  positionOfAccount,
+  probeRotationStartTier,
+  shouldDecideSubagentStartOnFirstUse,
+  type TierProbe,
+} from './subagent-first-start.js'
 
 
 export interface ResolverPool<TCredential = unknown> {
@@ -341,6 +250,67 @@ export interface ResolverPool<TCredential = unknown> {
    * 大量单测用结构化替身池，它们不认识本方法）。
    */
   preferredRotationFor?(provider: string, sessionId: string | undefined): string | undefined
+  /**
+   * ★★★ **写「轮换起点」**（2026-11-25 重构后子代理也要用）。
+   *
+   * ## 为什么子代理需要它
+   *
+   * 用户定案：子代理的「首次起点」= **用户手选下拉框那一步**，只是把
+   * 「用户选位次」换成「策略算位次」。写进 `preferredRotation` 之后，
+   * 子代理就与主代理**走完全相同的代码**，不需要任何子代理标记。
+   *
+   * ## ⚠️ 契约与 `AccountPool.setPreferredRotation` 逐字相同
+   *
+   * - `position === null` ⇒ **删除**该会话的条目（恢复默认）；
+   * - `position` 非空时 **`tierAtSelection` 必填** ——
+   *   没有档位的条目会被 `sanitizePreferredRotation` 丢弃，等于白写
+   *   （池那边已在源头 `return`，这里不要重复兜底）。
+   *
+   * ⚠️ **未实现时**（单测替身）⇒ 不写 ⇒ 子代理退回「每发按策略现算」
+   *    ⇒ 行为仍可用，只是丢掉「首次定死」的缓存收益。
+   */
+  setPreferredRotation?(
+    provider: string,
+    sessionId: string,
+    position: number | null,
+    tierAtSelection?: RotationStartTier,
+  ): Promise<void>
+  /**
+   * ★★★ **某会话「实际在用」的账号 id**（2026-11-25，可选能力）。
+   *
+   * 用户原话：「子代理轮换起点策略的参考对象，是主代理**实际在使用的帐号**，
+   * 而不是下拉框选择的」。
+   *
+   * ⚠️ 未实现 / 返回 `undefined`（会话没发过请求 / 插件刚重启）
+   * ⇒ 消费方回落 `preferredRotationFor`（下拉框位次）。
+   */
+  activeAccountOf?(provider: string, sessionId: string | undefined): string | undefined
+  /**
+   * ★★★ **记某会话「实际在用」的账号**（2026-11-25，可选能力）。
+   *
+   * ⚠️ 由本模块的**统一回报出口**（`report`）自动调用 —— 不需要各 provider 接线。
+   * 实测 24 处 `createCredentialResolver` 里有 7 处没有 `reportAccount`，
+   * 让它们各自配必然继续漏。
+   */
+  setActiveAccount?(
+    provider: string,
+    sessionId: string | undefined,
+    accountId: string | undefined,
+  ): void
+  /**
+   * ★★★ **无档位 provider 的子代理起点位次**（2026-11-25，可选能力）。
+   *
+   * ACCIO / ASTUDIO / MAGICREW 这类纯 key 池没有档位，而 `setPreferredRotation`
+   * 会因「无档位」拒绝写入 ⇒ 起点每发重算 ⇒ 永远不稳定。
+   * ⇒ 走这条**独立通道**（不进 `sanitizePreferredRotation`，不污染主代理语义）。
+   */
+  setSubagentStartPosition?(
+    provider: string,
+    sessionId: string,
+    position: number,
+  ): Promise<void> | void
+  /** 读回 {@link setSubagentStartPosition} 写下的位次（1-based）。 */
+  subagentStartPositionOf?(provider: string, sessionId: string | undefined): number | undefined
   /**
    * ★★★ **子代理专属设置**（2026-11-23，可选能力）。
    *
@@ -743,9 +713,19 @@ export function createCredentialResolver<TCredential>(
      * 的适配器精确取「本笔实际账号」），也保留 `deps.reportAccount` 的既有
      * 进程级副作用（账本 / activeZcodeAccountId 兼容）。
      */
+    /**
+     * ## ★★★ 2026-11-25：这里**同时**记「本会话实际在用账号」
+     *
+     * 用户在私有分支上的诊断原话：「子代理相关设置为什么没有生效：只有 UI，
+     * 没有共同抽象层」。实测 24 处 `createCredentialResolver` 调用点里
+     * **7 处没有 `reportAccount`**（ACCIO / MAGICREW / ASTUDIO 等）
+     * ⇒ 记在**唯一出口**，24 个 provider 一次全覆盖。
+     */
     const report = (accountId: string | undefined): void => {
       if (selection !== undefined) selection.accountId = accountId
       deps.reportAccount?.(accountId)
+      /** ⚠️ `sessionId === undefined` 不记：目录/网关流量不占 key。 */
+      if (sessionId !== undefined) deps.pool.setActiveAccount?.(providerId, sessionId, accountId)
     }
     /**
      * 分档编排排除掉的账号（**只有 buddy 协议会填**）—— 池兜底据此跳过它们，
@@ -783,6 +763,120 @@ export function createCredentialResolver<TCredential>(
     const isSubagentById = (sid: string | undefined): boolean =>
       sid !== undefined && parentOfSession(sid) !== undefined
 
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * ★★★ **子代理首次拉起：算一次起点**（2026-11-25 重构）
+     * ═══════════════════════════════════════════════════════════════════════
+     *
+     * ## 用户定案
+     *
+     * > 「除了需要子代理轮换起点策略之外，其他点子代理跟主代理都一样的行为」
+     * > 「这个位次就相当于用户在主代理手动选择下拉框一样」
+     *
+     * ## ⚠️⚠️ 为什么必须在 `plan.kind` 分支**之前**
+     *
+     * 本块的旧位置在 `if (plan?.kind === 'buddy') { … }` **里面** —— 而
+     * ACCIO / ASTUDIO / MAGICREW / loomy 走的是 `else` / `else if (loomy)`
+     * ⇒ **子代理设置对它们从未生效**（用户实测：「只有 UI，没有共同抽象层」）。
+     *
+     * ⇒ 提到所有分支之前，档位只作为**可选增强**：
+     *
+     * | 有无档位 | 写哪里 | 之后怎么切号 |
+     * |---|---|---|
+     * | 有（buddy 系）| `setPreferredRotation(位次, 档位)` | `rotateFromPreferred` 的 `tierStillHeld` |
+     * | 无（纯 key 池）| `setSubagentStartPosition(位次)` | 按 slot 轮询（无档位概念）|
+     *
+     * ## 零回归（四条闸门，缺一不可）
+     *
+     * - 主代理：`hasAssignment === false` ⇒ 跳过
+     * - 没配 `startMode` ⇒ 跳过
+     * - 已有条目 ⇒ 跳过（只在**首次**算，保住 prompt cache 命中率）
+     * - 替身没实现写入方法 ⇒ 跳过
+     */
+
+    /**
+     * ⚠️ **自己求值「是否免费模型」**，不依赖 buddy 分支内的 `free`。
+     *
+     * 约束见下方首次块的注释：免费模型不写起点，而无档位 provider 的
+     * `plan` 是 `undefined`（没有 `isFreeModel`）⇒ 视为「非免费」照常算。
+     *
+     * ⚠️ 类型窄化：`isFreeModel` 只有 `kind === 'buddy'` 的 plan 上才有。
+     */
+    const firstFree = plan?.kind === 'buddy' ? await plan.isFreeModel(modelId) : false
+
+    if (firstFree !== true && shouldDecideSubagentStartOnFirstUse({
+      sessionId,
+      setting: deps.pool.subagentRotationFor?.(providerId),
+      hasAssignment: sessionId !== undefined
+        && deps.pool.subagentAssignmentOf?.(providerId, sessionId) !== undefined,
+      hasPreferredRotation: sessionId !== undefined
+        && deps.pool.preferredRotationFor?.(providerId, sessionId) !== undefined,
+    })) {
+      const firstParent = parentOfSession(sessionId as string)
+      const firstCandidates = candidatesOf(deps.pool, providerId, modelId)
+      /**
+       * ⚠️ 位次换算必须与 `AccountPool.preferredRotationFor` 同口径
+       * （那里是 `readAccounts().filter(enabled)[position - 1]`）。
+       */
+      const firstEnabledIds = deps.pool
+        .listAccountsByProvider(providerId)
+        .filter((a) => a.enabled)
+        .map((a) => a.id)
+      /**
+       * ★ **档位选择器**：只有 buddy 系才有 `cachedTierOf`。
+       * ⚠️ 用 `'cachedTierOf' in ...` 而不是判 `plan.kind` ——
+       * 这样新 provider 只要实现了该方法就自动获得档位能力。
+       */
+      const firstTierSelector = plan !== undefined
+        && 'cachedTierOf' in (plan.selector as object)
+        ? (plan.selector as TierProbe)
+        : undefined
+      const firstDecision = decideSubagentStart({
+        providerId,
+        sessionId,
+        candidateIds: firstCandidates.map((c) => c.id),
+        allowPermanent: !deps.pool.permanentLocked(providerId),
+        pool: deps.pool as never,
+        selector: firstTierSelector === undefined
+          ? undefined
+          : (firstTierSelector as BuddySelectorLike),
+        /**
+         * ★★★ **参照对象 = 主代理「实际在用」的账号**（用户 2026-11-25 定案）。
+         *
+         * 三级回落（`??` 的先后就是优先级）：
+         *
+         * | 级 | 来源 | 何时有效 |
+         * |---|---|---|
+         * | ① | `activeAccountOf(父会话)` | 父会话发过请求（绝大多数）|
+         * | ② | `preferredRotationFor(父会话)` | 插件刚重启 / 父会话还没发过请求 |
+         * | ③ | 无 | 主代理也没配起点 ⇒ 按档位挑锚点 |
+         */
+        ...(firstParent === undefined
+          ? {}
+          : {
+            mainSessionStartId:
+              deps.pool.activeAccountOf?.(providerId, firstParent)
+              ?? deps.pool.preferredRotationFor?.(providerId, firstParent),
+          }),
+      })
+      const firstTarget = firstDecision.startId
+      if (firstTarget !== undefined) {
+        const firstPosition = positionOfAccount(firstEnabledIds, firstTarget)
+        const firstTier = await probeRotationStartTier(firstTierSelector, firstTarget)
+        if (firstPosition !== undefined) {
+          try {
+            if (firstTier !== undefined) {
+              /** **有档位**：与主代理同一个落盘条目。 */
+              await deps.pool.setPreferredRotation?.(providerId, sessionId as string, firstPosition, firstTier)
+            } else {
+              /** **无档位**：走独立通道（纯 key 池）。 */
+              await deps.pool.setSubagentStartPosition?.(providerId, sessionId as string, firstPosition)
+            }
+          } catch { /* ⚠️ 写失败不影响本次选号（退回按策略现算） */ }
+        }
+      }
+    }
+
     if (plan?.kind === 'buddy') {
       // ⚠️ `isFreeModel` **先于**候选构造求值：与旧闭包「在 options 字面量里
       //    await」的时序一致（它可能触发远端目录拉取，放到候选之后会把
@@ -790,6 +884,7 @@ export function createCredentialResolver<TCredential>(
       // ⚠️ 字段现为**必填**（`NO_FREE_MODEL` 是「本家无免费模型」的显式表态），
       //    故不再需要 `=== undefined` 兜底 —— 那种兜底正是 Qoder 漏接三周的遮掩。
       const free = await plan.isFreeModel(modelId)
+
       const candidates = candidatesOf(deps.pool, providerId, modelId)
 
       /**
@@ -814,21 +909,36 @@ export function createCredentialResolver<TCredential>(
        *（见 `account-pool.ts` 的实现）。这里 `void` 掉是安全的
        *（落盘失败不影响本次选号）。
        */
-      if (sessionId !== undefined) {
-        const settingForRegister = deps.pool.subagentRotationFor?.(providerId)
-        const parentOfThis = parentOfSession(sessionId)
-        if (settingForRegister !== undefined
-          && subagentSettingActive(settingForRegister)
-          && parentOfThis !== undefined) {
-          void deps.pool.recordSubagentStart?.(
-            providerId,
-            sessionId,
-            /** ⚠️ 父会话 id 已由 `parentOfSession` 保证有值（会话头优先）。 */
-            parentOfThis,
-            Date.now(),
-          ).catch(() => { /* 登记失败不影响本次选号 */ })
-        }
-      }
+      /**
+       * ⚠️⚠️ **必须走共享的 `registerSubagentStartIfNeeded`**（2026-11-25 统一）。
+       *
+       * ## 原实现是**内联判据**，与 `subagent-start.ts` 的
+       * `shouldRegisterSubagentStart` **不等价**：
+       *
+       * | 判据 | 条件 |
+       * |---|---|
+       * | 此处（旧内联）| `setting !== undefined && subagentSettingActive(setting) && parent !== undefined` |
+       * | 共享函数 | `setting !== undefined && startMode 已声明 && sessionId 非空 && parent 非空` |
+       *
+       * 差异在 **`follow` + 配置了 `model`** 这一格：`subagentSettingActive` 判 `true`
+       * （因为 model 有值），而 `startModeOf` 仍返回 `'follow'` ⇒ 两边**都算「要登记」**，
+       * 结果相同。但**判据文本不同** ⇒ 将来改一边就会漂移。
+       *
+       * ## 为什么现在必须统一
+       *
+       * Bug 1 的根因正是「**自建选号的 provider 完全没接登记**」
+       * （codearts / officeace）。若三处各写一份判据，将来必然再漏一处 ——
+       * 本仓红线「同一语义不得两套实现」。
+       *
+       * ⇒ 三处（buddy 系 / codearts / officeace）**全部**走本函数。
+       */
+      registerSubagentStartIfNeeded({
+        pool: deps.pool as never,
+        providerId,
+        sessionId,
+        parentSessionId: sessionId === undefined ? undefined : parentOfSession(sessionId),
+        setting: deps.pool.subagentRotationFor?.(providerId),
+      })
 
       // ① 免费模型（消耗 0 积分）不受「锁定永久积分」约束：锁定要保护的是
       //    「别把永久积分烧掉」，而免费模型既不扣临时也不扣永久积分，却被那道门
@@ -889,96 +999,51 @@ export function createCredentialResolver<TCredential>(
           const subSetting = deps.pool.subagentRotationFor?.(providerId)
           const subAssignment = deps.pool.subagentAssignmentOf?.(providerId, sessionId)
           /**
-           * ★★★ **优先用钉住的账号**（2026-11-24 用户要求：拉起时定死）。
+           * ★★★ **免费路径的子代理起点：走共享的 `decideSubagentStart`**
+           *（2026-11-26 上游审计第二轮「第二份内联实现仍在」修复）。
            *
-           * ## 为什么（用户原话）
+           * ## 缺陷（审计原话）
            *
-           * > 「我是希望『拉起时定死，只有该号不可用才换』，
-           * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
+           * > 「免费腿：第二份内联实现仍在 …… **同一设置下付费给 `acc-1`、
+           * >   免费给 `acc-2`**（**已分叉**）」
            *
-           * ⇒ prompt cache 按（账号 + 模型 + 前缀）命中。
-           *   每发请求重算起点 ⇒ 池子一波动就换号 ⇒ 缓存全失效。
+           * ## 修前的内联实现与共享函数的差异
            *
-           * ## 判据（免费路径）
-           *
-           * pin 的号**仍在 `candidates` 里** ⇒ 可用（免费模型不查积分/档位）。
-           * ⚠️ 不在 ⇒ 已停用 / 封禁 / 限流 ⇒ **重算**（下面的逻辑）并重钉。
-           */
-          /**
-           * ★★★ **优先级：用户手动选 > 系统 pin > 策略现算**
-           *（2026-11-24 用户定 B 方案，与付费路径**逐字同构**）。
-           *
-           * ⚠️ 两处必须同步改 —— 本仓反复记录过「同一语义两处实现必然漂移」。
-           * 免费路径的「可用」判据只有一条：**在 `candidates` 里**
-           *（免费不查积分/档位）。
-           */
-          const userPicked = subAssignment?.userPickedAccountId
-          const userPickedUsable = userPicked !== undefined && candidates.some((c) => c.id === userPicked)
-          const pinned = subAssignment?.pinnedAccountId
-          const pinnedUsable = pinned !== undefined && candidates.some((c) => c.id === pinned)
-          /**
-           * ⚠️⚠️ **`fixed` 模式必须跳过 ②（系统 pin）**
-           *（2026-11-24 上游三轮审计 ⑤：「免费路径还让 `pin` 盖住 `fixed`」）。
-           *
-           * ## 缺陷
-           *
-           * 若该子代理**早先落下了 pin**（比如之前用 `sequence`，用户后来改成 `fixed`），
-           * ② 会命中 ⇒ ③ 的 `fixed` 分支**永远走不到** ⇒ **用户改位次无效**，
-           * 且界面显示的是新位次（`getRotation` 现算）⇒ **界面与实效不一致**。
-           *
-           * ## 判据
-           *
-           * | 级 | 来源 | `fixed` 模式下 |
+           * | 项 | 内联版 | 共享函数 |
            * |---|---|---|
-           * | ① | `userPickedAccountId` | **仍生效**（用户手选 > 位次，与付费路径一致）|
-           * | ② | `pinnedAccountId` | **跳过**（那是旧策略的结果，不该拖住新位次）|
-           * | ③ | 策略现算（`fixed` 用它）| **必须走到** |
+           * | `follow` | 条件里直接排除（= 无起点）| **真跟随主代理**（2026-11-26 修）|
+           * | 主代理参照 | 只读自己的 `preferredRotation` | **`activeAccountOf` 优先** |
+           * | `fixed` | 单独分支 | 同一分支内 |
+           *
+           * ⇒ 同一份设置，付费腿和免费腿给出**不同的号**。
+           *
+           * ## 免费路径唯一保留的差异
+           *
+           * `selector: undefined` —— 免费请求**不消耗积分**，档位过滤对它无意义
+           *（`candidates` 已经是「启用 + 未限流」的候选）。
            */
-          const freeMode = subSetting?.startMode
-          const freeSkipsPin = freeMode === 'fixed'
-          // ① 用户手动选且可用 ⇒ 用它
-          if (userPickedUsable) freeStartId = userPicked
-          // ② 否则用系统 pin（`fixed` 模式跳过）
-          else if (pinnedUsable && !freeSkipsPin) freeStartId = pinned
-          // ③ 都没有现算
-          else if (subSetting !== undefined && subAssignment !== undefined
-            && subSetting.startMode !== undefined && subSetting.startMode !== 'follow') {
+          const freeDecision = decideSubagentStart({
+            providerId,
+            sessionId,
+            candidateIds: candidates.map((c) => c.id),
+            allowPermanent: true,
+            pool: deps.pool as never,
+            /** ⚠️ 免费路径**不查档位**（不消耗积分）。 */
+            selector: undefined,
             /**
-             * ⚠️ 候选 id 序列用作「档位序列」—— 免费路径没有档位概念，
-             * 而 `startIndexOfSlot` 只做索引算术，喂什么序列就在什么序列里挪。
+             * ⚠️ 参照对象与付费腿**同一条判据**：
+             * `activeAccountOf`（主代理实际在用）优先，缺失回落 `preferredRotationFor`。
              */
-            const candidateIds = candidates.map((c) => c.id)
-            /**
-             * ⚠️ 基准 = 主代理起点（若它在候选里）否则候选第一个。
-             * 与付费路径的 `effectiveMainStart` 同款兜底。
-             */
-            const baseId = freeStartId !== undefined && candidateIds.includes(freeStartId)
-              ? freeStartId
-              : candidateIds[0]
-            if (baseId !== undefined) {
-              if (subSetting.startMode === 'fixed') {
-                /**
-                 * `fixed`：直接用指定位次（1-based，在**全量启用账号**上算，
-                 * 与付费路径同口径 —— 否则用户填的位次会指向别的号）。
-                 */
-                const enabledIds = deps.pool
-                  .listAccountsByProvider(providerId)
-                  .filter((a) => a.enabled)
-                  .map((a) => a.id)
-                const fixedId = accountIdAtPosition(enabledIds, subSetting.fixedPosition)
-                if (fixedId !== undefined) freeStartId = fixedId
-              } else {
-                const derived = startIndexOfSlot(
-                  candidateIds,
-                  baseId,
-                  subSetting.startMode,
-                  subAssignment.slot,
-                  subAssignment.sessionId,
-                )
-                if (derived !== undefined) freeStartId = derived
-              }
-            }
-          }
+            ...(parentOfSession(sessionId) === undefined
+              ? {}
+              : {
+                mainSessionStartId:
+                  deps.pool.activeAccountOf?.(providerId, parentOfSession(sessionId) as string)
+                  ?? deps.pool.preferredRotationFor?.(providerId, parentOfSession(sessionId) as string),
+              }),
+            ...(freeStartId === undefined ? {} : { baseRotationStartId: freeStartId }),
+          })
+          if (freeDecision.startId !== undefined) freeStartId = freeDecision.startId
         }
         const freeCandidates = rotateFreeCandidates(candidates, freeStartId)
         for (const candidate of freeCandidates) {
@@ -1027,7 +1092,7 @@ export function createCredentialResolver<TCredential>(
       /**
        * 「轮换起点」：本会话指定的起始账号（用户 2026-11-10 需求）。
        *
-       * ⚠️ 三条判据：
+       * ⚠️ 三条judge：
        * 1. **免费模型不参与** —— 免费路径（上面 ①）压根不看档位/顺序，只挑第一个
        *    凭据可读的号；在那里插起点会改变它的既有语义，且收益为零（不消耗积分）；
        * 2. **与 `strictManualOrder` 无关** —— 严格模式下**同样生效**
@@ -1070,9 +1135,6 @@ export function createCredentialResolver<TCredential>(
        * `pickBuddyAccount` 的 `pinnedFirst` 保证「无视档位、恒排第一」。
        */
       let rotationStartId = baseRotationStartId
-      let subagentPinnedFirst = false
-      /** ⚠️ 标记「起点是子代理算出来的」⇒ 后续必须带上 enabledAccountIds。 */
-      let subagentDerivedStart = false
       /**
        * ★★★ **起点是否由子代理逻辑决定**（2026-11-24，档位快照配套的判据）。
        *
@@ -1085,7 +1147,6 @@ export function createCredentialResolver<TCredential>(
        * ⚠️ 不能复用另外两个标记：实测 pin 命中时**两者都是 false**
        * ⇒ 档位快照仍按主会话 id 读 ⇒ 上游指出的「账号 B + A 的档位」错配。
        */
-      let startOwnedBySubagent = false
       /**
        * ⚠️⚠️ **子代理分配登记必须先于一切条件**（2026-11-23 实测修正）。
        *
@@ -1139,465 +1200,36 @@ export function createCredentialResolver<TCredential>(
        * 我们允许「基准缺失时从档位第一个开始」。
        * ⇒ 这里显式用 `effectiveMainStart` 兜底。
        */
-      if (free !== true) {
-        const setting = deps.pool.subagentRotationFor?.(providerId)
-        /**
-         * ★★★ **主代理会话的用户起点**（2026-11-24，上游审计 ④）。
-         *
-         * 子代理的「错开基准」应当是**主代理当前用的账号**，而主代理起点存在
-         * `preferredRotation[provider][主代理 sessionId]` —— 子代理的 sessionId 是
-         * **另一个**，上一版只查了子代理自己那条 ⇒ 主代理起点**从未被读**。
-         *
-         * ⚠️ `subagentParentOf` 是**进程内父子表**，可能为空（插件晚于子代理启动）
-         * ⇒ 那时 `undefined`，由调用处降级。
-         *
-         * ⚠️ 只读，**不写** `preferredRotation`。
-         */
-        /**
-         * ⚠️⚠️ **父会话 id 有两个来源，必须都试**（2026-11-24，用例实测打回）。
-         *
-         * | 来源 | 可靠性 | 说明 |
-         * |---|---|---|
-         * | `assignment.parentSessionId` | **高** | **落盘**的分配记录里就有 |
-         * | `subagentParentOf(sessionId)` | 低 | 进程内父子表，重启后为空 |
-         * |
-         * 我第一版只用了后者 ⇒ 实测 `mainSessionStartId` 恒 `undefined`
-         *（进程内表在单测/重启后是空的）⇒ 上游指出的「主代理起点从未被读」**依然存在**。
-         *
-         * ⇒ 优先用**分配记录**里的（它本来就是落盘事实），再退回父子表。
-         */
-        const assignment = deps.pool.subagentAssignmentOf?.(providerId, sessionId)
-        /**
-         * ★★★ **主代理会话 id 与它的起点**（2026-11-24，上游审计 ④）。
-         *
-         * ⚠️ **必须放在 `assignment` 之后**：优先从**落盘的分配记录**取父会话，
-         * 那才是跨重启可靠的事实。进程内父子表（`subagentParentOf`）只是兜底 ——
-         * 实测它在单测/重启后是空的，只靠它会让 `mainSessionStartId` 恒 `undefined`
-         *（上游指出的「主代理起点从未被读」依然存在）。
-         */
-        /**
-         * ⚠️ 三个来源，优先级从高到低：
-         * 1. **分配记录里的 `parentSessionId`**（落盘事实，最可靠）；
-         * 2. **会话头的 `header.parentSession`**（路 1，持久但需要 registry）；
-         * 3. 进程内事件表（兜底）。
-         *
-         * ⚠️ 2 是 2026-11-24 按上游建议补的 —— 它覆盖「分配记录还没建立」的
-         *    首轮窗口，而 1 覆盖「会话头读不到」的宿主版本差异。两者互补。
-         */
-        const mainSessionId = assignment?.parentSessionId ?? parentOfSession(sessionId)
-        const mainSessionStartId = mainSessionId === undefined
-          ? undefined
-          : deps.pool.preferredRotationFor?.(providerId, mainSessionId)
-        /**
-         * ★★★ **优先用钉住的账号**（2026-11-24 用户要求：拉起时定死）。
-         *
-         * ## 判据（付费路径）
-         *
-         * pin 的号必须同时在**两处**才算可用：
-         *
-         * | 判据 | 缺了会怎样 |
-         * |---|---|
-         * | 在 `candidates` 里（enabled / 未封禁 / 未限流）| 会用一个已停用的号 |
-         * | `buddyTierUsable` 为真（有积分 / 未锁永久）| 会用一个空号，白挨 401 |
-         *
-         * ⚠️ 两条都满足 ⇒ **直接用 pin，跳过 `slot` 现算**
-         *   （这才是「定死」的含义，也是缓存能命中的前提）。
-         *
-         * ⚠️ 任一条不满足 ⇒ 落到下面的现算逻辑，并在选中后**重钉**。
-         */
-        /**
-         * ★★★ **账号优先级：用户手动选 > 系统 pin > 策略现算**
-         *（2026-11-24 用户定 B 方案）。
-         *
-         * ## 用户原话
-         *
-         * > 「用户手动重选的话是按照用户的意愿来，其他情况就是使用拉起时固定的那个，
-         * >   可以避免系统乱换号，避免缓存命中低」
-         *
-         * ## 三级判据
-         *
-         * | 级 | 字段 | 含义 | 生效条件 |
-         * |---|---|---|---|
-         * | ① | `userPickedAccountId` | 用户在该子代理页面手动选的 | 该号**可用** |
-         * | ② | `pinnedAccountId` | 系统拉起时固定/重算的 | 该号可用 |
-         * | ③ | `slot` 现算 | 首次（两者都无）| — |
-         *
-         * ## ⚠️ 「可用」在两处都要判
-         *
-         * - 在 `candidates` 里（enabled / 未封禁 / 未限流）；
-         * - 付费路径还要 `buddyTierUsable`（有积分）—— 这一条交给
-         *   `rotateFromPreferred` 的 `anchor` 循环判（本函数还没取余额）。
-         *
-         * ⇒ 用户选的号**暂时**不可用时，自动回落到 pin / 现算，
-         *   但 **`userPickedAccountId` 保留不清** —— 等它恢复可用会**自动切回**
-         *  （符合「按用户意愿」：用户改主意的唯一入口是再选一次）。
-         */
-        const userPickedId = assignment?.userPickedAccountId
-        const pinnedId = assignment?.pinnedAccountId
-        /**
-         * ★★★ **两条独立标记**（2026-11-24 第四轮审计后的修正）。
-         *
-         * | 标记 | 含义 |
-         * |---|---|
-         * | `startDecidedByPin` | pin / userPicked 命中 ⇒ **跳过策略现算** |
-         * | `startDecidedByUser` | **用户手选**命中 ⇒ 即使 `fixed` 也不覆盖 |
-         *
-         * ## ⚠️ 为什么必须分开（上游第 4 轮「`fixed` 两路径分叉」）
-         *
-         * 免费路径的语义是：**用户手选 > 位次**（`fixed` 也遵从用户手选）。
-         * 而付费路径上一版写的是：
-         *
-         * ```ts
-         * const strategyShouldApply = startDecidedByPin !== true
-         *   || setting?.startMode === 'fixed'      // ← 让 fixed 覆盖 userPicked
-         * ```
-         *
-         * ⇒ **两条路径对同一件事判断相反**（免费遵从、付费覆盖）。
-         * 这正是本仓反复记录的「同一语义两处实现必然漂移」。
-         *
-         * ## 统一后的语义（与免费路径逐字同构）
-         *
-         * | 级 | 来源 | `fixed` 模式下 |
-         * |---|---|---|
-         * | ① | `userPickedAccountId` | **仍生效**（用户手选最具体）|
-         * | ② | `pinnedAccountId` | **跳过**（旧策略的结果，不该拖住新位次）|
-         * | ③ | 策略现算（`fixed` 用它）| **必须走到** |
-         */
-        let startDecidedByPin = false
-        /** ⚠️ 只有**用户手选**才算「用户明确意愿」，pin 是系统算的不算。 */
-        let startDecidedByUser = false
-        if (userPickedId !== undefined
-          && candidates.some((c) => c.id === userPickedId)) {
-          /** ① 用户手动选且仍可用 ⇒ 用它（最高优先级，**连 `fixed` 都不覆盖**）。 */
-          rotationStartId = userPickedId
-          startDecidedByPin = true
-          startDecidedByUser = true
-          startOwnedBySubagent = true
-        } else if (pinnedId !== undefined) {
-          const pinnedCandidate = candidates.find((c) => c.id === pinnedId)
-          if (pinnedCandidate !== undefined) {
-            /**
-             * ⚠️ 积分判据在这里**算不了**（本函数还没取余额，那是
-             * `pickBuddyAccount` 内部的事）⇒ 只能交给下游：
-             * 把 pin 当起点传给 `rotateFromPreferred`，
-             * 由它的 `anchor` 循环判「可用」，不可用就自动向后找。
-             *
-             * ⇒ 语义正好是用户要的「只有该号不可用才换」。
-             */
-            rotationStartId = pinnedId
-            startDecidedByPin = true
-            startOwnedBySubagent = true
-            /**
-             * ⚠️ `pinnedFirst` **不设**：那是「固定帐号」模式的绝对第一语义。
-             * 这里 pin 只是「起点」，档位规则仍然生效（否则会去烧永久积分）。
-             */
-          }
-        }
-        /**
-         * ⚠️⚠️ **策略现算的进入判据**（2026-11-24 第四轮审计后统一）。
-         *
-         * ```ts
-         * strategyShouldApply =
-         *   startDecidedByUser !== true                          // 用户手选优先，恒不覆盖
-         *   && (startDecidedByPin !== true || startMode === 'fixed')  // fixed 可覆盖系统 pin
-         * ```
-         *
-         * | `fixed`? | 用户手选? | 系统 pin? | 策略现算 | 结果 |
-         * |---|---|---|---|---|
-         * | 否 | 有 | — | ❌ 跳过 | **用用户手选** |
-         * | 否 | 无 | 有 | ❌ 跳过 | **用 pin** |
-         * | 否 | 无 | 无 | ✅ 进入 | 按 slot 错开 |
-         * | **是** | **有** | — | ❌ **跳过** | **用用户手选** ← 与免费路径一致 |
-         * | **是** | 无 | 有 | ✅ 进入 | 用位次（pin 是旧结果）|
-         * | **是** | 无 | 无 | ✅ 进入 | 用位次 |
-         */
-        const strategyShouldApply = startDecidedByUser !== true
-          && (startDecidedByPin !== true || setting?.startMode === 'fixed')
-        if (strategyShouldApply
-          && setting !== undefined && assignment !== undefined
-          && setting.startMode !== undefined && setting.startMode !== 'follow') {
-          /**
-           * ⚠️ **必须在「全量启用账号」上取位次**（`fixed` 用）。
-           * 与主代理同口径：位次是池序而非「当前候选序」，
-           * 否则用户拖一下顺序、或某号被限流时，位次会指向别的号。
-           */
-          const enabledIds = deps.pool
-            .listAccountsByProvider(providerId)
-            .filter(a => a.enabled)
-            .map(a => a.id)
-
-          if (setting.startMode === 'fixed') {
-            const fixedId = accountIdAtPosition(enabledIds, setting.fixedPosition)
-            /**
-             * ⚠️ 位次越界 ⇒ **回落主代理起点**（不静默取最后一个）：
-             * 用户的设置写着「位次 5」，实际只剩 3 个号时悄悄用第 3 个，
-             * 会让用户以为「固定」失效了。
-             */
-            if (fixedId !== undefined) {
-              rotationStartId = fixedId
-              /**
-               * ★ **绝对第一**：`pickBuddyAccount` 会把它强行放到首位，
-               * 无视档位 —— 因为用户明确要求「该号临期和短期都烧，
-               * 烧没了才切帐号」。
-               */
-              subagentPinnedFirst = true
-            }
-          } else {
-            /**
-             * 非 fixed：在主代理起点**所在档位**里错开。
-             *
-             * ⚠️⚠️ **闸门读的必须是「主代理的起点」，不是「子代理自己的」**
-             * （2026-11-24 第四轮对抗审计 P1，**真缺陷**）。
-             *
-             * ## 原缺陷（上游原话）
-             *
-             * > 「**临期优先对子代理失效**：池 `[临期, 临期, 永久]` 时，`child-2`
-             * >   会拿到**永久号、先烧永久积分**。」
-             *
-             * 根因就在这一行：上一版写的是
-             *
-             * ```ts
-             * const sameTierIds = baseRotationStartId === undefined
-             *   ? enabledIds                                            // ← 全量账号
-             *   : sameTierAsMainStart(enabledIds, baseRotationStartId, …)
-             * ```
-             *
-             * 而 `baseRotationStartId = preferredRotationFor(provider, sessionId)`，
-             * **`sessionId` 是子代理自己的** —— 用户不可能给一个还没存在的子代理
-             * 设过起点 ⇒ **生产路径恒 `undefined`** ⇒ 恒走 `enabledIds` 分支
-             * ⇒ **档位过滤一次都没生效过** ⇒ 子代理可以先烧永久积分。
-             *
-             * ⚠️ 这与用户明确要求的「档次优先：临期 → 短期 → 永久」**直接冲突**。
-             *
-             * ## 修法：档位基准改用 `mainSessionStartId`
-             *
-             * `mainSessionStartId` 才是「主代理当前用的那个号」——
-             * 只有它所在的档位才是子代理该错开的档位。
-             *
-             * | 情况 | `mainSessionStartId` | 档位序列 |
-             * |---|---|---|
-             * | 主代理配了起点 | 有值 | **主代理起点所在档位的账号** ← 修好后的行为 |
-             * | 主代理没配起点 | `undefined` | 全量账号（档位未知，见下）|
-             *
-             * ⚠️ **主代理没配起点时为什么仍退全量**：它的实际起点是
-             *    「档次排序的第一个可用账号」，而那需要余额（本函数还没取）
-             *    ⇒ 拿不到档位。此时退化为「全池错开」—— 仍然可用，
-             *    只是分布可能跨档（而不是「全部挤在主代理那个号上」）。
-             *    ⚠️ 这是**已知降级**，比「忽略档位」好，但不如「主代理配了起点」的情形。
-             */
-            const tierAnchorId = mainSessionStartId ?? baseRotationStartId
-            /** ⚠️ 余额缓存在 `plan.selector` 里；它可能是 Loomy（无 cachedTierOf）⇒ 内部降级。 */
-            const tierSelector = 'cachedTierOf' in (plan.selector as object)
-              ? (plan.selector as BuddySelectorLike)
-              : undefined
-            /**
-             * ★★★ **无锚点时也必须做档位过滤**（2026-11-24，双审 P1①）。
-             *
-             * 上一版在这里 `? enabledIds`（全池）—— 而「无锚点」恰是**生产默认**
-             *（主代理不指定起点）⇒ 档位过滤一次都没生效 ⇒
-             * 池 `[临期A, 临期B, 永久P]` 时**第二个子代理拿到永久号、先烧永久积分**。
-             *
-             * 修法：无锚点时用 {@link bestTierAnchorId} 找「档位最优（临期）」的号作锚。
-             * ⚠️ 找不到（无 `cachedTierOf` / 全 `none`）才退回全池 —— 那是既有降级。
-             */
-            const effectiveTierAnchorId = tierAnchorId ?? bestTierAnchorId(enabledIds, tierSelector, allowPermanent)
-            const sameTierIds = effectiveTierAnchorId === undefined
-              ? enabledIds
-              : sameTierAsMainStart(
-                enabledIds,
-                effectiveTierAnchorId,
-                tierSelector,
-                allowPermanent,
-              )
-            /**
-             * ★★★ **基准 = 主代理当前实际用的账号**（2026-11-24，上游审计 ④ 的修复）。
-             *
-             * ## 原缺陷（上游原话）
-             *
-             * > 基准读的是**子代理自己**的 `preferredRotation` —— **主代理起点从未被读**
-             * >（主代理起点设 a3 与不配起点，结果**逐字节相同**）。
-             *
-             * 上一版兜底取 `sameTierIds[0]`（全量账号的**第一个**）——
-             * 既没读主代理起点，也会让 `sequence` 第一枪**正好撞主代理正在用的号**。
-             *
-             * ## 修法：三级兜底，优先级从高到低
-             *
-             * | 顺序 | 来源 | 说明 |
-             * |---|---|---|
-             * | ① | `baseRotationStartId` | 用户给**本会话**（子代理自己）设的起点 |
-             * | ② | **`mainSessionStartId`** | **主代理会话**的用户起点 ← 本次新增 |
-             * | ③ | `sameTierIds[0]` | 都拿不到才用序列第一个（最后的降级）|
-             *
-             * ⚠️ ② 是关键：主代理的起点存在 `preferredRotation[provider][主代理 sessionId]`，
-             *   而子代理的 sessionId 是**另一个** —— 上一版**只查了子代理自己那条**。
-             *
-             * ⚠️ `mainSessionStartId` 可能不在本档位（比如它在永久档、本档是临期）
-             *   ⇒ 那时用 `sameTierIds[0]`，因为「主代理在临期档的等效起点」就是临期首位。
-             */
-            const effectiveMainStart = (() => {
-              /**
-               * 主代理起点优先于子代理自己的起点（2026-11-24，用例实测修正）。
-               *
-               * 为什么这个顺序：用户 2026-11-23 的需求是「从主代理的起点开始错开」——
-               * 子代理自己那条是系统分配的结果，拿它当基准会自我循环。
-               *
-               * 实测：我第一版把 baseRotationStartId 放第一级 ⇒ 它恒命中
-               * （preferredRotationFor 对任何 sessionId 都返回同一个值）
-               * ⇒ mainSessionStartId 永远走不到 ⇒ 上游指出的缺陷依然存在。
-               *
-               * 顺序：① mainSessionStartId（主代理）② baseRotationStartId ③ sameTierIds[0]
-               */
-              if (mainSessionStartId !== undefined && sameTierIds.includes(mainSessionStartId)) {
-                return mainSessionStartId
-              }
-              if (baseRotationStartId !== undefined && sameTierIds.includes(baseRotationStartId)) {
-                return baseRotationStartId
-              }
-              return sameTierIds[0]
-            })()
-            if (effectiveMainStart !== undefined) {
-              const derived = startIndexOfSlot(
-                sameTierIds,
-                effectiveMainStart,
-                setting.startMode,
-                assignment.slot,
-                assignment.sessionId,
-              )
-              if (derived !== undefined) {
-                rotationStartId = derived
-                /**
-                 * ⚠️⚠️ **必须带上 `enabledAccountIds`**（2026-11-24 实测）。
-                 *
-                 * `rotateFromPreferred` 需要它来算「起点在池里的位次」；
-                 * 不给的话，起点账号若被限流/封禁滤掉，它会「找不到就原样」
-                 * ⇒ **静默回落第一个号** ⇒ 子代理起点形同没配。
-                 *
-                 * ⚠️ 主代理那条腿在下面用 `rotationStartId === undefined` 判断
-                 * 要不要算 `enabledAccountIds`；子代理这条必须**自己保证**
-                 * `rotationStartId` 非空后仍拿到它 —— 故这里直接置一个标记。
-                 */
-                subagentDerivedStart = true
-              }
-            }
-          }
-        }
-      }
-
       /**
-       * 「轮换起点的定位基准」：**全量启用账号**的 id 列表（池序、不过滤封禁/限流）。
-       *
-       * ⚠️ 存在的理由（PR #59 正向审计 P1-a）：起点账号被**账号级封禁**或被
-       * **目标模型限流**时，`candidatesOf` 已把它滤掉 ⇒ 它不在 `ranked` 里 ⇒
-       * `rotateFromPreferred` 会「找不到就原样」，于是**静默回落默认第一个号**
-       * —— 恰是用户选起点想避开的那个。
-       *
-       * 拿这份**未过滤**的列表，`rotateFromPreferred` 才能算出起点的池位次，
-       * 再从候选里取「位次 ≥ 起点」的第一个（用户明确要求的「循环到下一个可用」）。
-       *
-       * ⚠️ 只在配了起点时才算：无起点时既不查池也不过滤，行为与改动前逐字节相同。
-       */
-      const enabledAccountIds = rotationStartId === undefined && !subagentDerivedStart
-        ? undefined
-        : deps.pool
-            .listAccountsByProvider(providerId)
-            .filter(a => a.enabled)
-            .map(a => a.id)
-      /**
-       * ★ **起点选定时的档位快照**（S6，2026-11-20）。
+       * ★ **起点选定那一刻的档位快照**（S6，2026-11-20）。
        *
        * `undefined` 的两种来源都回落 S5（起点绝对第一）：
        * 1. 没配起点；
-       * 2. **老数据**（升级前选的起点，`state.json` 里没有该字段）。
+       * 2. 老数据（升级前选的起点，`state.json` 里没有该字段）。
        *
        * ⚠️ 与 `rotationStartId` **成对读取**：只传 id 不传档位 ⇒ 永远走 S5
-       * ⇒ 本功能对老数据「静默不生效」且**不会有任何报错**
-       *（用户只会觉得「我明明重选过起点，怎么还是先烧自己的短期」）。
-       * ⇒ 两者必须一起读、一起传。
-       */
-      /**
-       * ★★★ **子代理：不传档位快照 + 强制 `pinnedFirst`**
-       *（2026-11-24，上游审计「账号 B + A 的档位」错配的修复）。
+       * ⇒ 本功能对老数据「静默不生效」且**不会有任何报错**。
        *
-       * ## 上游指出的缺陷
-       *
-       * > 起点被本 PR 改写之后，**档位快照仍按主会话 id 读**
-       * > ⇒ 主代理会出现「**账号 B + A 的档位**」。
-       *
-       * ⚠️ 这会污染 S6：「起点烧完临期自动换人」会在**错误的账号上**判断。
-       *
-       * ## ⚠️ 为什么「传 undefined」是错的（我第一版就这么写，被用例打回）
-       *
-       * `rotateFromPreferred` 的判据：
-       *
-       * ```ts
-       * const tierStillHeld = tierAtSelection !== undefined && tierNow === tierAtSelection
-       * if (!tierStillHeld && !pinnedHeld) → 交出首位
-       * ```
-       *
-       * ⇒ `tierAtSelection === undefined` 时 **`tierStillHeld = false`**
-       * ⇒ **走「交出首位」**（源码注释逐字写着「**不回落 S5**」）。
-       *
-       * ⇒ 实测：子代理传 undefined 后，pin 的号**没能排第一**。
-       *
-       * ## 正确语义：子代理的起点是「系统分配」，不是「用户选择」
-       *
-       * | | 主代理 | 子代理 |
-       * |---|---|---|
-       * | 起点来源 | **用户手选** | **系统分配** |
-       * | 正确语义 | S6：起点那档烧完就交棒 | **起点绝对第一，不看档位变化** |
-       *
-       * ⇒ 子代理应当：
-       * 1. **不传** `rotationStartTier`（那快照属于主代理的起点，配不上）；
-       * 2. **传 `pinnedFirst: true`** —— 语义正是「无视档位变化恒排第一」，
-       *    即用户 2026-11-24 说的「拉起时定死，只有该号不可用才换」。
-       *
-       * ⚠️ `pinnedFirst` 只在 `buddyTierUsable` 为真时生效 ⇒「该号无积分 /
-       *    锁定永久且只剩永久」时**仍会切走**，符合用户要求。
-       *
-       * ⚠️ **主代理那条腿逐字节不变**：`subagentOwnsStart === false` 时
-       *    仍按 `sessionId` 读快照、且不传 `pinnedFirst`。
-       */
-      const subagentOwnsStart = startOwnedBySubagent
-        || subagentPinnedFirst
-        || subagentDerivedStart
-      /**
-       * ⚠️⚠️ **注意：这里**不做**「子代理就不传」的特殊处理**（2026-11-24，
-       * 变异验证实测确认它**是等价冗余**）。
-       *
-       * ## 为什么不做
-       *
-       * 我第一版让子代理「不传档位快照」——理由听起来成立（那快照属于**主代理的**
-       * 起点账号，配不上子代理的账号）。但 `rotateFromPreferred` 的判据是：
-       *
-       * ```ts
-       * if (!tierStillHeld && !pinnedHeld) → 交出首位
-       * ```
-       *
-       * 而子代理**恒传 `pinnedFirst: true`** ⇒ `pinnedHeld === true` ⇒ 那个分支
-       * **永不进入** ⇒ `tierAtSelection` 的唯一读取点被短路。
-       *
-       * ⇒ 实测：把这一半变异掉（恢复成「照常传」），**全部端到端用例仍绿** ——
-       *    它是**等价冗余**。
-       *
-       * ⚠️ 按本仓纪律（**同一语义不得两套判据**）**删掉冗余那一半**，
-       * 只留 `pinnedFirst` —— 那是唯一真正起作用的判据。
-       *
-       * ⚠️ 也因此**不需要**再去「把档位快照配对到子代理的账号」——
-       * 那个值在子代理路径上根本不参与任何判断（上游指出的「账号 B + A 的档位」
-       * 错配**在子代理路径上不会造成后果**，因为该值被 `pinnedHeld` 短路了）。
-       *
-       * ## 主代理那条腿
-       *
-       * 逐字节不变：仍按 `sessionId` 读快照，且 `pinnedFirst` 不传。
+       * ⚠️⚠️ **子代理现在也走这条腿**（2026-11-25 重构）：
+       * 首次拉起时已把「起点 + 档位」写进 `preferredRotation[子代理sessionId]`
+       * ⇒ `preferredRotationFor` / `rotationStartTierFor` 都能查到
+       * ⇒ **不需要任何子代理专属分支**。
        */
       const rotationStartTier = rotationStartId === undefined
         ? undefined
         : deps.pool.rotationStartTierFor?.(providerId, sessionId)
       /**
-       * ⚠️ 子代理起点**恒排第一**（无视档位变化）——
-       * 这补上了「不传快照 ⇒ `tierStillHeld=false` ⇒ 交出首位」那个坑。
+       * ⚠️ **必须带上 `enabledAccountIds`**：`rotateFromPreferred` 要用它算
+       * 「起点在池里的位次」；不给的话，起点账号若被限流/封禁滤掉，
+       * 它会「找不到就原样」⇒ **静默回落第一个号** ⇒ 起点形同没配。
        */
-      const pinStartFirst = subagentPinnedFirst || subagentOwnsStart
+      const enabledAccountIds = rotationStartId === undefined
+        ? undefined
+        : deps.pool
+            .listAccountsByProvider(providerId)
+            .filter(a => a.enabled)
+            .map(a => a.id)
+
       const picked = await pickBuddyAccount<TCredential>(plan.selector, candidates, {
         allowPermanent,
         resolveCredential: config.readCredential,
@@ -1608,7 +1240,6 @@ export function createCredentialResolver<TCredential>(
         ...(rotationStartId === undefined ? {} : { rotationStartId }),
         ...(rotationStartTier === undefined ? {} : { rotationStartTier }),
         ...(enabledAccountIds === undefined ? {} : { enabledAccountIds }),
-        ...(pinStartFirst ? { pinnedFirst: true } : {}),
       })
       if (picked.kind === 'account') {
         if (plan.reportPickedAccount !== false) report(picked.account.id)

@@ -113,7 +113,6 @@ function makeEnv(options: {
     subagentAssignmentOf: (_p, sid) => assignmentOf(sid),
     /** 无此调用（避免误发请求）。 */
     recordSubagentStart: async () => 0,
-    pinSubagentAccount: async () => false,
   }
 
   const resolver = createCredentialResolver<string>(
@@ -136,22 +135,6 @@ function makeEnv(options: {
 }
 
 describe('端到端：pin / userPicked 必须真的决定起点', () => {
-  it('★★★ pin=a3 ⇒ 实际用 a3（不被 slot 现算覆盖）', async () => {
-    /**
-     * ⚠️ 这条正是上游实测失败的那一格：「`pin=a3` 实际用 a2」。
-     *
-     * `startMode: 'sequence'` + `slot=0` 单靠策略会落到 a2
-     *（主代理起点 a1 往后一位）—— 若 pin 被覆盖，就会返回 R2。
-     */
-    const env = makeEnv({ pin: 'acc-3', startMode: 'sequence' })
-    expect(await env('m', CHILD_SESSION)).toBe('R3')
-  })
-
-  it('★★★ userPicked 优先于 pin', async () => {
-    const env = makeEnv({ pin: 'acc-3', userPicked: 'acc-2', startMode: 'sequence' })
-    expect(await env('m', CHILD_SESSION)).toBe('R2')
-  })
-
   it('★★ 无 pin ⇒ 未登记 ⇒ 策略不生效（首轮用主代理起点 a1）', async () => {
     /**
      * ⚠️ **这是真实语义，不是缺陷**（我第一版断言「应错开到 R2」，错了）。
@@ -167,16 +150,6 @@ describe('端到端：pin / userPicked 必须真的决定起点', () => {
     const env = makeEnv({ startMode: 'sequence' })
     expect(await env('m', CHILD_SESSION)).toBe('R1')
   })
-
-  it('★★★ pin 的号不可用（不在候选）⇒ 回落到策略现算', async () => {
-    /**
-     * 「只有该号不可用才换」的语义 —— 用一个**不在账号池里**的 id
-     * 模拟「该号已被删除/停用」。
-     */
-    const env = makeEnv({ pin: 'acc-gone', startMode: 'sequence' })
-    expect(await env('m', CHILD_SESSION)).toBe('R2')
-  })
-
   it('★★★ 主代理会话（无分配记录）⇒ 用它自己的起点 a1，不受子代理逻辑影响', async () => {
     /**
      * ⚠️ **纯回归面**：主代理必须与加本功能之前逐字节相同。
@@ -255,7 +228,6 @@ describe('端到端：同档位内错开（cachedTierOf 必须真的被调用）
       subagentRotationFor: () => ({ startMode: 'reverse' }),
       subagentAssignmentOf: (_p, sid) => (sid === CHILD_SESSION ? assignment : undefined),
       recordSubagentStart: async () => 0,
-      pinSubagentAccount: async () => false,
     }
     const resolver = createCredentialResolver(
       { pool },
@@ -312,19 +284,6 @@ describe('端到端：同档位内错开（cachedTierOf 必须真的被调用）
 
     /** 临期号不受锁定影响（两种都该是 0）。 */
     expect(selector.cachedTierOf({ id: 'acc-imm1' }, false), '临期号锁定下仍是 0 档').toBe(0)
-  })
-
-  it('★★★ reverse 在**临期档内**往前错开 ⇒ acc-imm2，绝不跨到永久号', async () => {
-    /**
-     * 临期档 = [acc-imm1, acc-imm2]，主起点 acc-imm1（index 0）
-     * ⇒ reverse slot=0 = index -1 ⇒ 绕回 ⇒ **acc-imm2**。
-     *
-     * ⚠️ 若 `cachedTierOf` 失效（退化为全量 [imm1, imm2, perm]），
-     * reverse 会落到 **acc-perm**（RP）—— 那正是本用例要抓的。
-     */
-    const { resolver, warm } = makeTierEnv()
-    await warm()
-    expect(await resolver('m', CHILD_SESSION), '★★★ 必须档内错开，不能跨到永久号').toBe('RI2')
   })
 })
 
@@ -404,7 +363,6 @@ describe('端到端：档位快照不能与子代理起点账号错配', () => {
       subagentRotationFor: () => ({ startMode: 'sequence' }),
       subagentAssignmentOf: (_p, sid) => (options.isChild && sid === CHILD_SESSION ? assignment : undefined),
       recordSubagentStart: async () => 0,
-      pinSubagentAccount: async () => false,
     }
     return createCredentialResolver(
       { pool },
@@ -429,18 +387,6 @@ describe('端到端：档位快照不能与子代理起点账号错配', () => {
      */
     const resolver = makeSnapshotEnv({ isChild: false })
     expect(await resolver('m', PARENT_SESSION), '主代理走 S6，起点第一').toBe('RA')
-  })
-
-  it('★★★ 子代理：**不传**档位快照 ⇒ 走 S5 ⇒ pin 的 acc-b 绝对第一', async () => {
-    /**
-     * ⚠️ 若子代理传了 `imminent` 快照（= 上游指出的错配）：
-     * pin 的 acc-b 是**永久档**，快照说 immight ⇒ 判「已降档」⇒ 交出首位
-     * ⇒ 选 acc-a（RA）—— **错**。
-     *
-     * 正确：不传快照 ⇒ S5 ⇒ pin 的号绝对第一 ⇒ acc-b（RB）。
-     */
-    const resolver = makeSnapshotEnv({ isChild: true })
-    expect(await resolver('m', CHILD_SESSION), '★★★ 子代理必须走 S5（pin 的号第一）').toBe('RB')
   })
 })
 
@@ -510,7 +456,6 @@ describe('端到端：子代理以**主代理起点**为错开基准', () => {
       subagentRotationFor: () => ({ startMode: 'sequence' }),
       subagentAssignmentOf: (_p, sid) => (sid === CHILD_SESSION ? assignment : undefined),
       recordSubagentStart: async () => 0,
-      pinSubagentAccount: async () => false,
     }
     return createCredentialResolver(
       { pool },
@@ -536,102 +481,5 @@ describe('端到端：子代理以**主代理起点**为错开基准', () => {
     const resolver = makeBaseEnv()
     const got = await resolver('m', CHILD_SESSION)
     expect(got, '★★★ 必须从主代理起点 acc-3 往后错开（绕回 R1），不是从子代理自己的 acc-1 出发（R2）').toBe('R1')
-  })
-})
-
-/**
- * ★★★ **免费路径的行为级守卫**（2026-11-24 上游三轮审计 ⑤）。
- *
- * ## 上游指出的两条
- *
- * > 「**免费路径还让 `pin` 盖住 `fixed`**，且写 `pin` 时**没有 `fixed` 守卫**」
- *
- * ⇒ 免费模型（`hy4flash-free` 这类）走的是 `credential-resolver.ts` 里
- * **另一个分支**（`if (free)` 那段，独立实现）⇒ 两条腿必须**逐字同构**，
- * 否则「同一语义两处实现必然漂移」。
- *
- * | 判据 | 付费路径 | 免费路径（修前）|
- * |---|---|---|
- * | `fixed` 模式跳过 pin | ✅ `strategyShouldApply` | ❌ **没跳过** |
- * | 写 pin 时跳过 fixed | ✅ `pinMode !== 'fixed'` | ❌ **没守卫** |
- */
-describe('端到端：免费路径与付费路径逐字同构', () => {
-  function makeFreeEnv(options: { startMode: string; pinnedAccountId?: string; fixedPosition?: number }) {
-    const now = Date.now()
-    const entries = [
-      { id: 'acc-1', credentialRef: 'R1', enabled: true },
-      { id: 'acc-2', credentialRef: 'R2', enabled: true },
-      { id: 'acc-3', credentialRef: 'R3', enabled: true },
-    ]
-    const assignment = {
-      sessionId: CHILD_SESSION, parentSessionId: PARENT_SESSION, at: now, slot: 0,
-      ...(options.pinnedAccountId === undefined ? {} : { pinnedAccountId: options.pinnedAccountId }),
-    }
-    const pool = {
-      listAccountsByProvider: () => entries,
-      permanentLocked: () => false,
-      strictManualOrder: () => false,
-      getAvailableAccount: async () => null,
-      preferredRotationFor: () => 'acc-1',
-      subagentRotationFor: () => ({
-        startMode: options.startMode,
-        ...(options.fixedPosition === undefined ? {} : { fixedPosition: options.fixedPosition }),
-      }),
-      subagentAssignmentOf: (_p, sid) => (sid === CHILD_SESSION ? assignment : undefined),
-      recordSubagentStart: async () => 0,
-      /** ⚠️ 记录 pin 写入，供断言「fixed 模式不该钉」。 */
-      pinSubagentAccount: async (_p, _s, acct) => { pinnedWrites.push(acct); return true },
-    }
-    const pinnedWrites = []
-    const resolver = createCredentialResolver(
-      { pool },
-      {
-        product: { id: PROVIDER, displayName: 'Probe' },
-        readCredential: async (ref) => ref,
-        fallback: { kind: 'ref', refName: 'R_FALLBACK' },
-        balance: {
-          kind: 'buddy',
-          selector: undefined,
-          lockedError: () => new Error('locked'),
-          /** ★ 免费模型 ⇒ 走免费分支（不进 pickBuddyAccount）。 */
-          isFreeModel: async () => true,
-          reportPickedAccount: true,
-        },
-      },
-    )
-    return { resolver, pinnedWrites }
-  }
-
-  it('★★★ fixed 模式：**不被旧 pin 盖住**，必须按位次现算', async () => {
-    /**
-     * 上游缺陷：「免费路径还让 pin 盖住 fixed」。
-     *
-     * 场景：子代理早先落下了 pin=acc-2，用户后来把模式改成 `fixed` + 位次 3。
-     * - 修前：② `pinnedUsable` 命中 ⇒ 用 acc-2（**用户改位次无效**）
-     * - 修后：`fixed` 跳过 ② ⇒ ③ 按位次 3 ⇒ **acc-3**
-     */
-    const { resolver } = makeFreeEnv({ startMode: 'fixed', pinnedAccountId: 'acc-2', fixedPosition: 3 })
-    expect(await resolver('m', CHILD_SESSION), '★★★ 必须按 UNSAFE 位次 3 现算，不能被旧 pin 拖住').toBe('R3')
-  })
-
-  it('★★★ fixed 模式：**不写 pin**（与付费路径的 pinMode 守卫同构）', async () => {
-    /**
-     * 上游缺陷：「写 pin 时没有 fixed 守卫」。
-     *
-     * `fixed` 的结果恒定（每次现算），钉住它会把「策略结果」写成「系统事实」，
-     * 用户之后改位次会被旧 pin 拖住。
-     */
-    const { resolver, pinnedWrites } = makeFreeEnv({ startMode: 'fixed', fixedPosition: 2 })
-    await resolver('m', CHILD_SESSION)
-    expect(pinnedWrites, '★★★ fixed 模式不该写 pin').toEqual([])
-  })
-
-  it('★★ sequence 模式：**要写 pin**（非 fixed 才有意义）', async () => {
-    /**
-     * 反向对照：证明守卫不是「一律不写」。
-     */
-    const { resolver, pinnedWrites } = makeFreeEnv({ startMode: 'sequence' })
-    await resolver('m', CHILD_SESSION)
-    expect(pinnedWrites.length, '★★ sequence 必须钉住（缓存命中）').toBe(1)
   })
 })

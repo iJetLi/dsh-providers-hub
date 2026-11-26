@@ -66,6 +66,7 @@ import { BuddyBalanceSelector } from './buddy-balance-selector.js'
 import type { BuddyNoAccountReason } from './buddy-balance-selector.js'
 import type { LoomyNoAccountReason } from './loomy-balance-selector.js'
 import { createCredentialResolver, NO_FREE_MODEL } from './credential-resolver.js'
+import { decideSubagentStart, registerSubagentStartIfNeeded } from './subagent-start.js'
 import { LOBSTERAI } from './lobsterai-product.js'
 import { QODER, QODER_CN } from './qoder-product.js'
 import { TRAE } from './trae-product.js'
@@ -1451,9 +1452,129 @@ export function apply(ctx: Context): void {
       // codearts 原先**完全不认起点** —— 面板渲染下拉框、`account.setRotation`
       // 落盘与回读都成功，但选号层从不读它，功能**静默失效且零报错**
       //（适配器签名少一个参数，tsc 因函数参数逆变也不报）。
-      const rotationStartId = sessionId === undefined
+      /**
+       * ⚠️ **必须是 `let`**：子代理起点会覆盖它（下面）。
+       */
+      let rotationStartId = sessionId === undefined
         ? undefined
         : pool.preferredRotationFor('codearts', sessionId)
+      /**
+       * ★★★ **子代理起点分配**（2026-11-25）。
+       *
+       * ## 为什么必须加在这里
+       *
+       * 本家**自建选号**（不走 `createCredentialResolver`）⇒ 子代理那套
+       * 「用户手选 / 系统 pin / 位次 / 档位内错开」判据原本**完全拿不到**：
+       * 用户在面板里给子代理设了策略，对 codearts **静默无效、零报错**
+       *（与 `officeace` 同一形态的漏接线）。
+       *
+       * ## 为什么调共享函数而不是手写
+       *
+       * 判据全在 `src/subagent-start.ts`（与 `credential-resolver` **同一份实现**）。
+       * 手写一份会让同一语义两套实现必然漂移 —— 本套逻辑上游已改 **6 轮审计**。
+       *
+       * ## ⚠️ **本家没有余额分档 selector**
+       *
+       * codearts **不做积分分档**（无 `buddyBalanceTier` 概念）⇒ 不传 `selector`
+       * ⇒ `decideSubagentStart` 内 `bestTierAnchorId` / `sameTierAsMainStart`
+       * 两层降级为「全池」⇒ **错开变成纯索引错开**（这正是本家应有的语义：
+       * 没有档位可分，只需要不撞同一个号）。
+       *
+       * ## ⚠️ 零回归
+       *
+       * 未配置子代理 / `startMode` 缺失 / `follow` ⇒ `decideSubagentStart`
+       * 返回 `startId === undefined` ⇒ 保持上面的既有行为**逐字节不变**。
+       */
+      /**
+       * ★★★ **必须「先登记、再算起点」**（2026-11-25 修 Bug 1，用户报障
+       * 「子代理设置里面的帐号分布方式不成功」）。
+       *
+       * ## 根因
+       *
+       * `decideSubagentStart` 读 `assignment.slot` 算错开位次，而那张表
+       * **只有 `recordSubagentStart` 会写**。本家原先**完全没有登记调用**：
+       *
+       * | provider | 选起点 | 登记分配 |
+       * |---|---|---|
+       * | buddy 系 | ✅ | ✅ |
+       * | **codearts（本处）** | ✅ | ❌ **原先没有** |
+       * | **officeace** | ✅ | ❌ **原先没有** |
+       *
+       * ⇒ `assignment` 恒 `undefined` ⇒ `slot` 兜底 `0`
+       * ⇒ **所有子代理同一个起点** ⇒ 用户看到「分布方式没生效」。
+       *
+       * ⚠️ **顺序不能反**：`recordSubagentStart` 内部先同步更新缓存
+       * （见 `account-pool.ts`），故登记后**紧接着**的 `decideSubagentStart`
+       * 就能读到新 slot。反过来的话本次请求仍读到旧值（`undefined`）。
+       *
+       * ⚠️ 判据走共享的 `registerSubagentStartIfNeeded` —— 与
+       *    `credential-resolver` **同一份实现**（本仓红线：同一语义不得两套）。
+       */
+      registerSubagentStartIfNeeded({
+        pool,
+        providerId: 'codearts',
+        sessionId,
+        parentSessionId: pool.subagentAssignmentOf?.('codearts', sessionId)?.parentSessionId
+          ?? (sessionId === undefined ? undefined : resolveSubagentParent(sessionId)),
+        setting: pool.subagentRotationFor?.('codearts'),
+      })
+      /**
+       * ★★★ **必须先确认「本会话是子代理」，再算起点**
+       *（2026-11-26 上游审计 P0-1 修复）。
+       *
+       * ## 缺陷（审计原话）
+       *
+       * > 「`subagent-start.ts:150  if (!options.hasAssignment) return false`
+       * >   **但它只覆盖 `resolver` 那条腿**。而 codearts 走的是**另一条腿**：
+       * >   `index.ts:1521  const subagentStart = decideSubagentStart({ ... })  // ← 没有 hasAssignment`」
+       *
+       * ## 实测（我复现了）
+       *
+       * | 主代理配置 | 实测（修前）|
+       * |---|---|
+       * | `sequence` | `acc1 → acc2` ❌ |
+       * | `reverse` | `acc1 → acc3` ❌ |
+       * | `hash` | `acc1 → acc3` ❌ |
+       *
+       * ⇒ **主代理一配子代理策略就被改号** —— 修 bug 引入更坏的 bug。
+       *
+       * ## 判据与 `credential-resolver` **同源**（本仓红线：同一语义不得两套）
+       *
+       * `credential-resolver` 用 `shouldDecideSubagentStartOnFirstUse`（含 `hasAssignment`）。
+       * 这里**不能直接复用那个函数** —— 它管的是「首次写起点」，而 codearts 这条腿
+       * 是「每次请求算起点」（它没有 `preferredRotation` 落盘）。
+       * ⇒ 只取它**同样的一条判据**：`subagentAssignmentOf !== undefined`。
+       *
+       * ⚠️ 主代理**永不登记**分配表 ⇒ 这条闸门对主代理恒 `false` ⇒ 零回归。
+       */
+      const codeartsIsSubagent = sessionId !== undefined
+        && sessionId.length > 0
+        && pool.subagentAssignmentOf?.('codearts', sessionId) !== undefined
+      if (codeartsIsSubagent) {
+        const subagentStart = decideSubagentStart({
+        providerId: 'codearts',
+        sessionId,
+        candidateIds: pool.listAccountsByProvider('codearts')
+          .filter((a) => a.enabled)
+          .map((a) => a.id),
+        // ⚠️ codearts 无余额分档 ⇒ 「永久积分」这个概念对它不存在，恒 true。
+        allowPermanent: true,
+        pool,
+        /**
+         * ⚠️ **主代理起点必须从「父会话」读**（不是子代理自己的）：
+         * 子代理的 sessionId 不可能被用户设过起点 ⇒ 恒 undefined
+         * ⇒ 档位/错开基准整块失效（上游第四轮审计 P1 原话：
+         * 「临期优先对子代理失效，child-2 拿到永久号」）。
+         */
+        ...(subagentMainStartIdOf('codearts', sessionId) === undefined
+          ? {}
+          : { mainSessionStartId: subagentMainStartIdOf('codearts', sessionId) }),
+        ...(rotationStartId === undefined ? {} : { baseRotationStartId: rotationStartId }),
+      })
+        if (subagentStart.startId !== undefined) {
+          rotationStartId = subagentStart.startId
+        }
+      }
       // WARN modelId 恒传空串：codearts 刻意不做模型级限流（见
       // ratelimit-misreport-behavior.spec.ts 的「已知例外」一节）。PR #59 顺手
       // 写成 modelId ?? '' 会让它开始按模型过滤 —— 症状是「限流标记把账号
@@ -1464,6 +1585,45 @@ export function apply(ctx: Context): void {
         undefined,
         rotationStartId,
       )
+      /**
+       * ★★★ **记下「本会话实际在用哪个号」**（2026-11-26 上游审计第二轮第 5 条修复）。
+       *
+       * ## 缺陷（审计原话）
+       *
+       * > 「**新方向「起点参照 = 主代理实际在用账号」—— 只对 buddy 有效**」
+       * >
+       * > | 检查 | 结果 |
+       * > |---|---|
+       * > | `setActiveAccount` 调用点 | **全仓只有 `resolver:728` 一处** |
+       * > | codearts / officeace | **自建选号 ⇒ 从不写 `activeAccount`**（实测 `undefined`）|
+       * > | ⇒ 对原报障两家 | **零作用**（仍参照下拉框）|
+       *
+       * ⇒ 用户实际报障的两家（codearts / officeace）恰恰**吃不到**这个新方向。
+       *
+       * ## 为什么必须在这里写
+       *
+       * `getAvailableAccount` 是**本家唯一的选号出口**（它内部走池的候选筛选 +
+       * 旋转起点）⇒ 在这里写 = 覆盖本家全部选号路径，且与
+       * `credential-resolver` 的 `report()` 出口**语义一致**（都是「本次真正选中的号」）。
+       *
+       * ⚠️ `sessionId === undefined`（目录 / 网关流量）不写 —— 与 `report()` 同判据。
+       * ⚠️ `available === null` 时写 `undefined`（清空）—— 否则过期 id 会让
+       *    子代理参照一个**早已不用的号**（与 `report(undefined)` 同语义）。
+       */
+      if (sessionId !== undefined) {
+        pool.setActiveAccount('codearts', sessionId, available?.entry?.id)
+      }
+      /**
+       * ⚠️ **这里原来有一段「选完回写 pin」的空 if 块，已删除**（2026-11-26）。
+       *
+       * 历史：它调 `pool.pinSubagentAccount(...)`，而该方法在
+       * `34b2137f` 的重构中**已被删除**（子代理起点改存 `preferredRotation`）。
+       * ⇒ 只剩一个 `if (…) { }` 空壳，`subagentStart` 已移入上面的闸门块
+       *   ⇒ 编译报 `Cannot find name 'subagentStart'`。
+       *
+       * ⚠️ 不要再加回来：`AccountPool` 已无此方法，写了就是**静默 no-op**
+       *（上游审计第二轮「残留一项没清」点名的正是它）。
+       */
       return available?.credential
     },
     // 续期按**账号池里的具体账号**走：`refreshAccountCredential` 读写的是
@@ -2497,6 +2657,48 @@ export function apply(ctx: Context): void {
       const parent = (header as { parentSession?: unknown }).parentSession
       if (typeof parent !== 'string' || parent.length === 0) return undefined
       return parent
+    } catch {
+      /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
+      return undefined
+    }
+  }
+
+  /**
+   * ★★★ **读「主代理当前起点」**（子代理错开的基准，2026-11-25）。
+   *
+   * ## 为什么必须单独一个函数
+   *
+   * 子代理的错开基准应当是**主代理正在用的那个号**，
+   * 而它存在 `preferredRotation[provider][主代理 sessionId]`。
+   * 子代理自己的 `sessionId` 是**另一个** —— 直接拿它去查恒 `undefined`
+   * （用户不可能给一个还没存在的子代理设过起点）。
+   *
+   * ⚠️ 上游第四轮审计 P1 的原话就是这个缺陷：
+   *   「临期优先对子代理失效：池 `[临期, 临期, 永久]` 时 `child-2`
+   *     会拿到永久号、先烧永久积分」。
+   *
+   * ## 父会话 id 的两个来源（优先级从高到低）
+   *
+   * | 来源 | 可靠性 |
+   * |---|---|
+   * | 分配记录里的 `parentSessionId`（落盘事实）| **高** |
+   * | `resolveSubagentParent`（会话头 / 进程内表）| 低 —— 重启后可能为空 |
+   *
+   * ⚠️ 两个都要试：只靠会话头会在「分配记录还没建立」的首轮窗口失效，
+   *    只靠分配记录会在「读不到会话头」的宿主版本差异下失效（两者互补）。
+   *
+   * @returns 主代理起点账号 id；拿不到 ⇒ `undefined`（调用方按「无锚点」降级）
+   */
+  const subagentMainStartIdOf = (
+    providerId: string,
+    sessionId: string | undefined,
+  ): string | undefined => {
+    if (sessionId === undefined || sessionId.length === 0) return undefined
+    try {
+      const assignmentParent = pool.subagentAssignmentOf?.(providerId, sessionId)?.parentSessionId
+      const mainSessionId = assignmentParent ?? resolveSubagentParent(sessionId)
+      if (mainSessionId === undefined || mainSessionId.length === 0) return undefined
+      return pool.preferredRotationFor?.(providerId, mainSessionId)
     } catch {
       /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
       return undefined
@@ -5883,8 +6085,50 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
    * 2. **只读目录探测**（`/v2/models` + 倍率）—— 它们不扣积分，**绝不能被锁定
    *    牵连**（否则面板报「读取模型列表失败」、供应商关不掉、分组消失）。
    */
-  const resolveOfficeAceCredential = async () => {
-    const available = await pool.getAvailableAccount(OFFICEACE.id, '')
+  /**
+   * ★★★ **officeace 未锁定态的取凭据**（2026-11-26 上游审计 P1-c 修复）。
+   *
+   * ## 修前
+   *
+   * ```ts
+   * const resolveOfficeAceCredential = async () => { … pool.getAvailableAccount(OFFICEACE.id, '') … }
+   * ```
+   *
+   * 不接 `sessionId` ⇒ **未锁定态（默认配置）下子代理起点策略完全无效、零报错**。
+   * 而锁定态那条腿（`orderAccountsForSubagent`）是接了的 ⇒ 两条腿行为分叉。
+   *
+   * ## 修后
+   *
+   * 按 `sessionId` 查出「本会话的起点」传给 `getAvailableAccount` 的
+   * `rotationStartId`（池本来就支持那个参数）。
+   *
+   * ⚠️ **起点来源与 `credential-resolver` 同一条判据**（本仓红线：同一语义不得两套）：
+   *    `activeAccountOf`（主代理实际在用）优先，缺失回落 `preferredRotationFor`。
+   *    ⚠️ 但这里是**子代理自己**的 sessionId —— 子代理首次算出的起点写在
+   *       `preferredRotation[子代理sessionId]`（`credential-resolver` 的首次块负责），
+   *       故直接读 `preferredRotationFor(sessionId)` 就是「拉起时定死的那个号」。
+   */
+  const resolveOfficeAceCredential = async (sessionId?: string) => {
+    /** ⚠️ `undefined` ⇒ 与改动前逐字节相同（不传 `rotationStartId`）。 */
+    const rotationStartId = sessionId === undefined || sessionId.length === 0
+      ? undefined
+      : pool.preferredRotationFor(OFFICEACE.id, sessionId)
+    const available = await pool.getAvailableAccount(
+      OFFICEACE.id,
+      '',
+      undefined,
+      rotationStartId,
+    )
+    /**
+     * ★ **记下「本会话实际在用哪个号」**（2026-11-26 上游审计第二轮第 5 条）。
+     *
+     * ⚠️ 与 codearts 那条腿**同一判据**（`sessionId === undefined` 不写、
+     *    `available === null` 写 `undefined` 清空）。
+     * ⚠️ 未锁定态也要写 —— 那才是**默认配置**（用户根本没开锁定）。
+     */
+    if (sessionId !== undefined && sessionId.length > 0) {
+      pool.setActiveAccount(OFFICEACE.id, sessionId, available?.entry?.id)
+    }
     const ref = available?.entry?.credentialRef
       ?? enabledOfficeAceAccounts()[0]?.credentialRef
     if (ref === undefined) return officeaceAuth.readStoredCredential()
@@ -5942,9 +6186,30 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
       // 锁定判定要**逐账号**看余额 ⇒ 取全部启用账号（与未锁定取号同一份清单）。
       accounts: () => enabledOfficeAceAccounts()
         .map((entry) => ({ id: entry.id, credentialRef: entry.credentialRef })),
+      /**
+       * ★★★ **子代理起点分配**（2026-11-25）。
+       *
+       * 本家**自建选号** ⇒ 用户给子代理配的起点策略原先对它**静默无效、零报错**
+       *（与 `codearts` 同形态）。注入池读能力后 `officeace-lock.ts`
+       * 才能调共享的 `decideSubagentStart` 算起点。
+       *
+       * ⚠️ `pool` 天然满足 `SubagentStartPoolLike`（4 个方法全有），
+       *    故直接传它，**不包一层适配**（那会是同一语义的第二份实现）。
+       */
+      subagentPool: pool,
       resolveUnlocked: resolveOfficeAceCredential,
       readCredential: (ref) => officeaceAuth.readCredential(ref, ctx.credentials as never),
       readStoredCredential: () => officeaceAuth.readStoredCredential(),
+      /**
+       * ★★★ **锁定态也要记「实际在用账号」**（2026-11-26 上游审计第二轮第 5 条）。
+       *
+       * ⚠️ 未锁定态由 `resolveOfficeAceCredential` 自己写（那是默认配置的主路径）。
+       * ⚠️ 这里补的是**锁定态**那条腿 —— 它逐个 `classify` 后返回，不经过
+       *    `getAvailableAccount`，所以必须由本回调上报。
+       */
+      reportActiveAccount: (sessionId, accountId) => {
+        pool.setActiveAccount(OFFICEACE.id, sessionId, accountId)
+      },
       // ⚠️ **必须带 ref**（云侧 V11 直读；缺了会回落果办客户端的全局单 cookie
       //    ⇒ 多账号判成同一份余额 ⇒ 按错误的余额决定「能不能烧永久积分」）。
       summaryOf: async (credential, ref) => {

@@ -67,16 +67,6 @@ describe('markSubagentEnded：标记已结束', () => {
     const before = seed()
     expect(markSubagentEnded(before, 'nope')).toBe(before)
   })
-
-  it('★★ 保留 pinnedAccountId / userPickedAccountId', () => {
-    const withPin: SubagentAssignmentMap = {
-      ...seed(),
-      'child-1': { ...seed()['child-1']!, pinnedAccountId: 'acct-P', userPickedAccountId: 'acct-U' },
-    }
-    const out = markSubagentEnded(withPin, 'child-1')
-    expect(out['child-1']!.pinnedAccountId).toBe('acct-P')
-    expect(out['child-1']!.userPickedAccountId).toBe('acct-U')
-  })
 })
 
 // ============================================================================

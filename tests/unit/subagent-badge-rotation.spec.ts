@@ -49,31 +49,6 @@ function rotationBody(): string {
 }
 
 describe('子代理会话必须显示实际使用的账号位次', () => {
-  it('★★★ selectedId 必须优先取子代理的 pinnedAccountId', () => {
-    const body = rotationBody()
-    expect(
-      body,
-      '★★★ 必须读 pinnedAccountId（否则子代理恒显示「默认」）',
-    ).toContain('subagentAssignmentOf')
-    expect(body).toContain('pinnedAccountId')
-  })
-
-  it('★★★ pin 优先于 preferredRotationFor（三态判据）', () => {
-    /**
-     * 判据：`selectedId` 的赋值必须写成
-     * `pin !== undefined ? pin : (preferredRotationFor(...) ?? null)`。
-     *
-     * ⚠️ 顺序不能反：若先走 `preferredRotationFor`，子代理场景拿到的
-     * `undefined` 会短路掉 pin 的判断（虽然 `??` 能兜，但语义不对 ——
-     * 「用户给它选的起点」不该盖过「它实际在用的号」）。
-     */
-    const body = rotationBody()
-    expect(
-      body,
-      '★★★ 必须是「pin 优先，否则退回 preferredRotationFor」',
-    ).toMatch(/const selectedId = subagentPin !== undefined\s*\n\s*\?\s*subagentPin\s*\n\s*:\s*\(pool\.preferredRotationFor/)
-  })
-
   it('★★★ 只读不写：不能把 pin 写进 preferredRotation', () => {
     /**
      * ⚠️ 若把「自动分配的号」写进 `preferredRotation` 表，

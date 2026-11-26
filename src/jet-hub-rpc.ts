@@ -8296,11 +8296,13 @@ function registerJetHubEndpoints(
          * ⚠️ 主代理没有分配记录 ⇒ 前两级都是 `undefined` ⇒ 走 `preferredRotationFor`
          *   （与改动前逐字相同，零回归）。
          */
-        const subagentAssign = pool.subagentAssignmentOf?.(req.provider, req.sessionId)
-        const subagentPin = subagentAssign?.userPickedAccountId ?? subagentAssign?.pinnedAccountId
-        const selectedId = subagentPin !== undefined
-          ? subagentPin
-          : (pool.preferredRotationFor(req.provider, req.sessionId) ?? null)
+        /**
+         * ⚠️ **不再有 pin / userPicked 两级**（2026-11-25 重构）。
+         *
+         * 子代理的起点（含用户手选）统一存在 `preferredRotation` ——
+         * 与主代理**同一个地方** ⇒ 这里只需读它一处。
+         */
+        const selectedId = pool.preferredRotationFor(req.provider, req.sessionId) ?? null
         /**
          * ⚠️ **`selectedPosition` 是客户端要用的那个**（下拉框 value = 位次）。
          *
@@ -8442,7 +8444,14 @@ function registerJetHubEndpoints(
          * ⇒ 那时也不下发名字 ⇒ 显示 `位次 N`
          *（但子代理首轮通常 `selectedPosition` 也是 `null` ⇒ 显示「默认」）。
          */
-        const isSubagentSessionForBadge = subagentAssign !== undefined
+        /**
+         * ⚠️ **判据直接查分配表**（2026-11-25 重构后 `subagentAssign` 变量已删）。
+         *
+         * 分配表**只登记子代理** ⇒ 查得到就是子代理。
+         * 主代理没有记录 ⇒ `undefined` ⇒ 不下发账号名（只显示位次）。
+         */
+        const isSubagentSessionForBadge =
+          pool.subagentAssignmentOf?.(req.provider, req.sessionId) !== undefined
         const selectedAccountName = selectedId === null || !isSubagentSessionForBadge
           ? undefined
           : (() => {
@@ -8608,54 +8617,6 @@ function registerJetHubEndpoints(
            * 主代理没有分配记录，`setUserPickedAccount` 会因
            * `assignments[sessionId] === undefined` 而原样返回 ⇒ 无副作用。
            */
-          if (typeof req.position === 'number') {
-            const allForPick = await pool.listAllAccounts()
-            const pickId = allForPick
-              .filter((a) => a.provider === req.provider && a.enabled !== false)
-              [req.position - 1]?.id
-            /**
-             * ⚠️⚠️ **位次越界必须报错，不能静默跳过**（2026-11-24 第四轮审计）。
-             *
-             * ## 原缺陷
-             *
-             * 上一版写的是 `if (pickId !== undefined) { …写… }` —— `pickId` 越界时
-             * **什么都不做、还回 `ok: true`**。
-             *
-             * ## 为什么这很糟
-             *
-             * 用户选了「位次 5」而池里只剩 3 个号时：
-             * 1. `preferredRotation` 已被写入（上面那段）；
-             * 2. `userPickedAccountId` **没写** ⇒ 子代理仍用旧 pin；
-             * 3. 界面回 `selected: preferredRotationFor(…)` ⇒ **显示新位次**。
-             *
-             * ⇒ **界面说生效了、实际没生效**，且零报错 —— 与「set 了不生效」
-             *    那类缺陷同形（本 PR 已修过两次同一形态）。
-             *
-             * ⚠️ 宁可拒绝这次写入，让用户看到「位次超出范围」，
-             *    也不接受一个「只写了一半」的部分成功。
-             */
-            if (pickId === undefined) {
-              const enabledCount = allForPick
-                .filter((a) => a.provider === req.provider && a.enabled !== false).length
-              return {
-                ok: false,
-                error: {
-                  code: 'bad-request',
-                  message: `位次 ${req.position} 超出范围（当前 ${enabledCount} 个启用账号）`,
-                },
-              }
-            }
-            await pool.setUserPickedAccount?.(req.provider, req.sessionId, pickId)
-          } else {
-            /**
-             * `position === null` ⇒ 用户点了「恢复默认」⇒ **清除**手动选择
-             * （回落到 pin 的语义）。
-             *
-             * ⚠️ 传 `undefined` 而不是 `''`：与 `setUserPickedAccount` 的
-             * 「清除」语义对齐（它自己也会把空串归一成清）。
-             */
-            await pool.setUserPickedAccount?.(req.provider, req.sessionId, undefined)
-          }
         } catch (error) {
           return {
             ok: false,
@@ -8663,17 +8624,16 @@ function registerJetHubEndpoints(
           }
         }
         /**
-         * ⚠️ 返回值里的 `selected` 必须反映**实际生效**的那个号。
+         * ⚠️ **返回值直接读 `preferredRotationFor`**（2026-11-25 重构）。
          *
-         * 子代理场景下用户刚写的 `userPickedAccountId` 优先级最高
-         * ⇒ 回传它（而不是 `preferredRotationFor`），否则弹窗会显示
-         * 「你选了位次 3，但选中态还是位次 5」这种自相矛盾的界面。
+         * 子代理的起点（含「用户手选」）现在**统一存在这里** ——
+         * 与主代理同一个地方 ⇒ 不再有 `userPickedAccountId` 这一级
+         * ⇒ 回传的 `selected` 就是**实际生效**的那个号。
          */
-        const userPickedNow = pool.subagentAssignmentOf?.(req.provider, req.sessionId)?.userPickedAccountId
         return {
           ok: true,
           value: {
-            selected: userPickedNow ?? (pool.preferredRotationFor(req.provider, req.sessionId) ?? null),
+            selected: pool.preferredRotationFor(req.provider, req.sessionId) ?? null,
             /** ⚠️ 回传落盘后的档位（客户端据此确认新规则已生效）。 */
             tierAtSelection: pool.rotationStartTierFor(req.provider, req.sessionId) ?? null,
           },

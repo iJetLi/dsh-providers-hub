@@ -71,6 +71,20 @@ import {
 } from './buddy-balance-rank.js'
 import type { OfficeAceCredential, OfficeAceSubscriptionSummary } from './officeace-auth.js'
 
+/**
+ * ★★★ **子代理起点分配**（2026-11-25）。
+ *
+ * 本家是**自建选号**的 provider（不走 `createCredentialResolver`）⇒ 用户在面板
+ * 里给子代理配的起点策略原先对它**静默无效、零报错**（与 `codearts` 同形态）。
+ *
+ * ⚠️ 判据**全部**在共享纯函数模块里（与 resolver 同一份实现），
+ * 本文件**一行判据都不写** —— 手抄一份会让同一语义两套实现必然漂移。
+ */
+import { OFFICEACE } from './officeace-product.js'
+import { decideSubagentStart, registerSubagentStartIfNeeded } from './subagent-start.js'
+import type { SubagentStartPoolLike } from './subagent-start.js'
+
+
 /** 池内一个候选账号的最小形状（结构类型，便于单测注入替身）。 */
 export interface OfficeAceAccountRef {
   readonly id: string
@@ -114,11 +128,48 @@ export interface OfficeAceLockDeps {
    *    「池为空则读兼容文件」两个语义，复刻必然漂移。锁定是新增行为，
    *    解锁态必须**一个字节都不变**。
    */
-  readonly resolveUnlocked: () => Promise<OfficeAceCredential | undefined>
+  /**
+   * ★ 未锁定态的取凭据路径（2026-11-26 起接收 `sessionId`）。
+   *
+   * ## 为什么现在要传 `sessionId`
+   *
+   * 上游审计 P1-c：「officeace 的接线只挂在 `permanentLocked()` 分支，
+   * **默认未锁定态第一条早退走 `resolveUnlocked`（不接 `sessionId`）**
+   * ⇒ 策略仍完全无效、零报错。」
+   *
+   * ⇒ 装配方据它算出「本会话的起点」，再传给 `getAvailableAccount` 的
+   *   `rotationStartId` 参数（池那边本来就支持，见 `AccountPool.getAvailableAccount`）。
+   *
+   * ⚠️ **`undefined` 时必须与改动前逐字节相同**：装配方不传起点 ⇒
+   *    `getAvailableAccount` 走默认路径。
+   * ⚠️ 参数可选，是为了让**旧调用点**（单测替身、旧嵌入方）继续编译且行为不变。
+   */
+  readonly resolveUnlocked: (sessionId?: string) => Promise<OfficeAceCredential | undefined>
   /** 按 ref 读凭据（生产 = `officeaceAuth.readCredential(ref, ctx.credentials)`）。 */
   readonly readCredential: (ref: string) => Promise<OfficeAceCredential | undefined>
   /** 兼容路径：池里没有任何账号时读本机那份单凭据。 */
   readonly readStoredCredential: () => OfficeAceCredential | undefined
+  /**
+   * ★★★ **记下「本会话实际在用哪个号」**（2026-11-26 上游审计第二轮第 5 条）。
+   *
+   * ## 缺陷（审计原话）
+   *
+   * > 「`setActiveAccount` 调用点 **全仓只有 `resolver:728` 一处**；
+   * >   codearts / officeace **自建选号 ⇒ 从不写 `activeAccount`**（实测 `undefined`）
+   * >   ⇒ 对原报障两家**零作用**（仍参照下拉框）。」
+   *
+   * ⇒ 用户实际报障的两家恰恰吃不到「原点参照 = 主代理实际在用账号」这个新方向。
+   *
+   * ## 为什么是回调而不是直接传 pool
+   *
+   * 本模块对池只声明了**结构化最小接口**（`subagentPool`），直接传整个 `AccountPool`
+   * 会把「本模块需要什么」这个信息淹没 —— 也违背本模块既有的注入风格。
+   *
+   * ⚠️ **可选**：不注入时行为与改动前逐字节相同（单测替身 / 旧嵌入方）。
+   * ⚠️ `accountId === undefined` ⇒ **清空**（本次没选中任何号），
+   *    否则过期 id 会让子代理参照一个早已不用的号。
+   */
+  readonly reportActiveAccount?: (sessionId: string, accountId: string | undefined) => void
   /**
    * 读某个账号的订阅分桶。
    *
@@ -136,6 +187,15 @@ export interface OfficeAceLockDeps {
    * 并**钳制到 `windowMs` 以内**（两个窗口是嵌套关系，见 `buddy-balance-rank.ts`）。
    */
   readonly imminentWindowMs?: () => number
+  /**
+   * ★★★ **子代理起点分配的池读能力**（2026-11-25，可选）。
+   *
+   * 本家**自建选号** ⇒ 用户给子代理配的起点策略原先对它**完全无效且零报错**。
+   *
+   * ⚠️ **必须可选**：单测替身与嵌入方不实现它 ⇒ 缺失时走既有路径
+   *（`decideSubagentStart` 内部全是可选链 ⇒ 恒判「没配」⇒ 选号逐字节不变）。
+   */
+  readonly subagentPool?: SubagentStartPoolLike
 }
 
 /**
@@ -318,12 +378,42 @@ export function createOfficeAceCredentialProvider(
     return verdict
   }
 
-  return async (): Promise<OfficeAceCredential | undefined> => {
-    // ① 未锁定 ⇒ 逐字走旧路径（零行为变化）。
-    if (!deps.permanentLocked()) return deps.resolveUnlocked()
+  /**
+   * @param sessionId 当前请求的会话 id（**可选**；2026-11-25 起由适配器透传）。
+   *
+   * ⚠️ 只用于**子代理起点分配**，不参与凭据解析本身。
+   * ⚠️ `undefined`（网关流量 / 单测 / 旧嵌入方）⇒ 选号与改动前**逐字节相同**。
+   */
+  const resolveCredential = async (
+    sessionId?: string,
+  ): Promise<OfficeAceCredential | undefined> => {
+    // ① 未锁定 ⇒ 旧路径 + **子代理起点旋转**（2026-11-26 上游审计 P1-c 修复）。
+    /**
+     * ## 缺陷（审计原话）
+     *
+     * > 「`officeace` 的接线只挂在 `permanentLocked()` 分支。
+     * >   **默认未锁定态第一条早退走 `resolveUnlocked`（不接 `sessionId`）**
+     * >   ⇒ 策略仍完全无效、零报错。」
+     *
+     * 而我上一版把 `registerSubagentStartIfNeeded` 接在了
+     * `orderAccountsForSubagent`（锁定态才走的函数）里 ⇒ 默认配置下
+     * **登记与起点都不生效**。
+     *
+     * ## 修法
+     *
+     * 未锁定态调 `resolveUnlocked(sessionId)` —— 由装配方
+     * （`index.ts` 的 `resolveOfficeAceCredential`）把它转成
+     * `getAvailableAccount(provider, model, undefined, rotationStartId)`。
+     *
+     * ⚠️ **`sessionId === undefined` 时逐字节不变**（网关流量 / 单测 / 旧嵌入方）：
+     * 装配方拿不到起点就不传 `rotationStartId`，`getAvailableAccount` 的行为与
+     * 改动前完全相同。
+     */
+    if (!deps.permanentLocked()) return deps.resolveUnlocked(sessionId)
 
     // ② 锁定 ⇒ 逐个候选账号判定「还有没有会近期作废的额度」。
-    const accounts = deps.accounts()
+    //    ⚠️ 子代理场景只改**遍历顺序**（起点排第一），见 orderAccountsForSubagent。
+    const accounts = orderAccountsForSubagent(deps.accounts(), sessionId)
     const errors: string[] = []
     for (const account of accounts) {
       const credential = await deps.readCredential(account.credentialRef)
@@ -333,7 +423,14 @@ export function createOfficeAceCredentialProvider(
         continue
       }
       const verdict = await classify(account.credentialRef, credential)
-      if (verdict.kind === 'credential') return verdict.credential
+      if (verdict.kind === 'credential') {
+        /**
+         * ★ **记下实际选中的号**（2026-11-26 上游审计第二轮第 5 条）。
+         * ⚠️ 必须是**真正返回凭据的那个**账号，不是循环的第一个。
+         */
+        if (sessionId !== undefined) deps.reportActiveAccount?.(sessionId, account.id)
+        return verdict.credential
+      }
       if (verdict.kind === 'unknown') errors.push(`${account.id}: ${verdict.errors.join('；')}`)
     }
 
@@ -354,6 +451,121 @@ export function createOfficeAceCredentialProvider(
       windowMs(),
     )
   }
+
+  /**
+   * ★★★ **子代理起点分配：只决定「遍历顺序」**（2026-11-25）。
+   *
+   * ## 为什么不是「只选一个」
+   *
+   * codearts 那类 provider 有「一次选一个号」的环节，故起点是**选中项**；
+   * 而本家在锁定态是**逐个试**（下面的 for 里撞到「有临期额度」的就返回）
+   * ⇒ 起点在这里的正确语义是**把那个号排到最前面**，其余顺序不变。
+   *
+   * | `decidedBy` | 语义 |
+   * |---|---|
+   * | `user-pick` / `pin` / `strategy` / `fixed-position` | 起点排第一（其余按原序跟在后面）|
+   *
+   * ⚠️ 未配置 / `follow` / 无 sessionId ⇒ `startId === undefined`
+   *    ⇒ **原样返回**（不复制、不排序）⇒ 零行为变化。
+   */
+  const orderAccountsForSubagent = (
+    accounts: readonly OfficeAceAccountRef[],
+    sessionId: string | undefined,
+  ): readonly OfficeAceAccountRef[] => {
+    const pool = deps.subagentPool
+    if (pool === undefined) return accounts
+    /**
+     * ★★★ **登记必须放在 `length <= 1` 早退之前**（2026-11-25 修 Bug 1）。
+     *
+     * ## 为什么不能放到后面
+     *
+     * 若只有 1 个账号时早退、不登记，那么「先用 1 个号跑一阵 → 用户加号」
+     * 之后，分配表是空的 ⇒ `slot` 兜底 0 ⇒ **所有子代理仍撞同一个号**。
+     *
+     * ⇒ 登记是「记录这个子代理的存在」，与「够不够错开」**无关**。
+     *
+     * ## 缺陷本体
+     *
+     * 本家原先**完全没有登记调用** ⇒ `decideSubagentStart` 读到的
+     * `assignment` 恒 `undefined` ⇒ `slot` 恒 0 ⇒ 用户报的
+     * 「子代理设置里面的帐号分布方式不成功」。
+     *
+     * ⚠️ 判据走共享的 `registerSubagentStartIfNeeded` —— 与
+     *    `credential-resolver` / `codearts` **同一份实现**。
+     *
+     * ⚠️ **父会话 id 的来源**：本模块拿不到 `index.ts` 的 `resolveSubagentParent`
+     *    （那是该文件的局部闭包）⇒ 只从**已落盘的分配记录**取（本家首次登记时
+     *    记录还不存在 ⇒ 这一次不登记，等 `credential-resolver` 那条腿或
+     *    后续请求补上）。
+     *    ⚠️ 这是**已知的首次请求缺口**，与 buddy 系「首轮用主代理起点」同型，
+     *       已如实登记在本注释里。
+     */
+    try {
+      registerSubagentStartIfNeeded({
+        pool: pool as never,
+        providerId: OFFICEACE.id,
+        sessionId,
+        parentSessionId: pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId)?.parentSessionId,
+        setting: pool.subagentRotationFor?.(OFFICEACE.id),
+      })
+    } catch { /* 登记失败不影响选号 */ }
+    if (accounts.length <= 1) return accounts
+    /**
+     * ★★★ **必须在算起点前挡住主代理**（2026-11-26 上游审计 P0-1 修复）。
+     *
+     * ## 缺陷（审计原话）
+     *
+     * > 「`decideSubagentStart` 内部的早退是
+     * >   `if (sessionId === undefined || sessionId.length === 0) return …`。
+     * >   **主代理和子代理都有 `sessionId`** ⇒ **这条早退挡不住主代理**。」
+     *
+     * ⇒ 主代理只要配了子代理策略，自己就被改号。
+     * ⚠️ `credential-resolver` 那条腿有 `shouldDecideSubagentStartOnFirstUse`
+     *    （内含 `hasAssignment` 闸门），而**这一条腿没有** ⇒ 三条腿判据分叉。
+     *
+     * ## 判据与 `credential-resolver` **同源**
+     *
+     * ⚠️ 本模块拿不到 `preferredRotationFor`（那是 `AccountPool` 的方法，
+     *    而这里只声明了结构化的 `subagentPool`）⇒ 只查 `subagentAssignmentOf`。
+     *    对「主代理」这一格已经够：主代理**永不登记**分配表。
+     */
+    const isSubagentHere = sessionId !== undefined
+      && sessionId.length > 0
+      && pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId) !== undefined
+    if (!isSubagentHere) return accounts
+    try {
+      const decision = decideSubagentStart({
+        providerId: OFFICEACE.id,
+        sessionId,
+        candidateIds: accounts.map((a) => a.id),
+        /**
+         * ⚠️ 本家无「积分为 0 就不可用」这道门（额度判据在 `classify` 里），
+         *    故恒 `true` —— 「允许烧永久积分」对它是无意义的概念。
+         */
+        allowPermanent: true,
+        pool,
+      })
+      if (decision.startId === undefined) return accounts
+      const head = accounts.find((a) => a.id === decision.startId)
+      /**
+       * ⚠️ 起点可能**不在候选里**（策略现算用全量启用账号取位次）⇒
+       *    那样就原样返回，**不要**硬插一个不存在的账号。
+       */
+      if (head === undefined) return accounts
+      return [head, ...accounts.filter((a) => a.id !== head.id)]
+    } catch {
+      /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
+      return accounts
+    }
+  }
+
+  /**
+   * ⚠️ **直接返回、不包一层 setter**：适配器契约已改为
+   * `credentialProvider?: (sessionId?: string) => Promise<...>`
+   *（见 `officeace-adapter.ts` 的同名选项）⇒ 会话 id 按请求透传，
+   * 无需可变状态（可变状态会让并发请求互相覆盖）。
+   */
+  return resolveCredential
 }
 
 /**

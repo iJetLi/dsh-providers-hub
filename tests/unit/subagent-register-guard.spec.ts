@@ -52,6 +52,7 @@ import {
   rememberSubagentParent,
   resetSubagentParentsForTest,
 } from '../../src/subagent-rotation.js'
+import { registerSubagentStartIfNeeded } from '../../src/subagent-start.js'
 
 afterEach(() => { resetSubagentParentsForTest() })
 
@@ -107,176 +108,103 @@ describe('源码：登记必须被 isSubagentSession 守卫', () => {
   const here = dirname(fileURLToPath(import.meta.url))
   const src = readFileSync(join(here, '../../src/credential-resolver.ts'), 'utf8')
 
-  it('★★★ 包住 recordSubagentStart 的 `if` 条件里必须有父会话守卫', () => {
+  /**
+   * ⚠️⚠️ **2026-11-25 判据迁移**：登记的守卫已从「`credential-resolver` 里的内联 `if`」
+   * 抽到共享函数 `registerSubagentStartIfNeeded`（`subagent-start.ts`）——
+   * 因为 Bug 1 的根因是「**自建选号的 provider 完全没接登记**」
+   * （codearts / officeace），三处各写一份判据必然再漏一处。
+   *
+   * ⇒ 下面四条断言从「检查内联 `if` 的文本」改成
+   *    「**行为级**验证共享函数的判据」—— 意图完全保留，且比源码文本更硬：
+   *
+   * | 原断言意图 | 现在的守法人 |
+   * |---|---|
+   * | 必须有父会话守卫 | 父会话 `undefined` ⇒ 不登记（行为）|
+   * | 守卫不能在注释里 | 行为级，天然免疫 |
+   * | 独立于「免费模型 / 主代理起点」| 函数签名里**没有**这两个参数（结构证明）|
+   * | 不能是 `if (false)` / `if (true)` | `setting` 缺失 ⇒ 不登记（行为）|
+   */
+  it('★★★ 必须有父会话守卫（父会话未知 ⇒ 不登记）', () => {
     /**
-     * ⚠️ **判据在「条件文本」级别**，不是「文件里有没有字样」。
-     *
-     * ## 为什么（我第一版写错了，如实登记）
-     *
-     * 第一版用 `window.includes('parentOfThis !== undefined')` ——
-     * 实测两个变异**全绿**：
-     *
-     * | 变异 | 结果 |
-     * |---|---|
-     * | 删掉守卫（条件改回只看 `sessionId !== undefined`）| ❌ 无牙 |
-     * | 守卫改成 `&& true` | ❌ 无牙 |
-     *
-     * ⇒ 因为「字样还在别处」（`const parentOfThis = …` 那行）+ 窗口够宽。
-     *
-     * ## 现在的判据
-     *
-     * 取出**真正包住调用**的那个 `if` 的条件全文，断言：
-     * 1. 出现父会话查询结果（`parentOfThis` 或 `isSubagentSession`）；
-     * 2. **不能是恒真**（不含 `&& true`）；
-     * 3. **不能只看 `sessionId !== undefined`**（那是主代理也通过的旧缺陷）。
+     * ⚠️ 等价于原断言的「`parentOfThis !== undefined` 必须在条件里」——
+     * 但用**行为**验证：父会话 `undefined` 时**一次都不能调** `recordSubagentStart`。
      */
-    const cond = guardConditionAround(src)
-    expect(cond, '找不到包住 recordSubagentStart 的 if').toBeDefined()
-
-    /** ① 必须有父会话守卫。 */
-    expect(
-      cond,
-      '★★★ 条件里必须有父会话守卫（parentOfThis / isSubagentSession）',
-    ).toMatch(/parentOfThis\s*!==\s*undefined|isSubagentSession\(/)
-
-    /** ② 不能是恒真。 */
-    expect(cond, '★★★ 守卫不能恒真（&& true）').not.toMatch(/&&\s*true\b/)
-
-    /**
-     * ③ **不能只看 sessionId 非空** —— 那正是「主代理也登记」的原缺陷。
-     *
-     * ⚠️ `sessionId !== undefined` 在修好的代码里**也可能出现**（作为外层
-     *  `if (sessionId !== undefined) {` 的一部分）—— 但那个 if 里**必须还有**
-     *  父会话判据。上面 ① 已保证；这里额外要求「父会话判据不在注释里」。
-     */
-    expect(
-      cond.includes('parentOfThis') || cond.includes('isSubagentSession'),
-      '★★★ 必须有真正的父会话判据（不是注释）',
-    ).toBe(true)
+    const calls: unknown[] = []
+    const registered = registerSubagentStartIfNeeded({
+      pool: { recordSubagentStart: async () => { calls.push(1); return 0 } },
+      providerId: 'probe',
+      sessionId: 'child-1',
+      parentSessionId: undefined,
+      setting: { startMode: 'sequence' },
+    })
+    expect(registered, '★★★ 父会话未知必须返回 false').toBe(false)
+    expect(calls.length, '★★★ 父会话未知**一次都不能调**（否则主代理也会被登记）').toBe(0)
   })
 
-  it('★★★ 守卫必须在 `if` 条件里生效（不能只出现在注释中）', () => {
-    /**
-     * ⚠️ 上一版把判据写在**注释**里（「先确认它确实是子代理」），
-     * 但代码没实现 —— 这正是本仓库反复记录的「注释写对了、代码没实现」形态。
-     *
-     * ⚠️ 2026-11-23 二次修订：守卫已从「单独的 `if (isSubagentSession(...))`」
-     * 重构成**复合条件**（还要同时判 `setting !== undefined` /
-     * `subagentSettingActive(setting)`）—— 因为登记必须**独立于**
-     * 「免费模型」与「主代理起点」。
-     *
-     * ⇒ 判据：剥注释后，`recordSubagentStart` 调用点**之前 600 字符**内
-     *   必须出现 `isSubagentSession(sessionId)`。
-     *
-     * ⚠️ 窗口取 600 是因为复合条件跨 4 行；取太小会漏掉。
-     * ⚠️ 必须剥注释：本文件的注释里大量引用 `isSubagentSession` 字样。
-     */
-    const stripComments = (text: string): string =>
-      text
-        .split('\n')
-        .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
-        .join('\n')
-
-    const code = stripComments(src)
-    const callIdx = code.indexOf('recordSubagentStart?.(')
-    expect(callIdx, '剥注释后找不到 recordSubagentStart 调用').toBeGreaterThan(-1)
-
-    const window = code.slice(Math.max(0, callIdx - 600), callIdx)
-    /**
-     * ⚠️ **判据 2026-11-24 升级**（与上一条同因）：守卫可能是「父会话查询」的结果，
-     * 不一定字面写着 `isSubagentSession(sessionId)`。
-     *
-     * ⚠️ 但**判断对象不变**：必须是「查出来的父会话」而非「sessionId 非空」——
-     * 后者会让主代理也通过。
-     */
-    const hasParentLookup = code.includes('parentOfSession(') || code.includes('parentOfThis !== undefined')
-    const hasLegacy = window.includes('isSubagentSession(sessionId)')
-    expect(
-      hasLegacy || hasParentLookup,
-      '★★★ 剥注释后调用点前必须有「父会话」守卫（不能只在注释里）',
-    ).toBe(true)
-    expect(
-      window,
-      '★★★ 那个守卫必须作用在调用点之前（不能写在别的函数里）',
-    ).toMatch(/parentOfThis|isSubagentSession\(sessionId\)/)
+  it('★★★ setting 缺失 ⇒ 不登记（等价于「守卫不能是 if (true)」）', () => {
+    const calls: unknown[] = []
+    const registered = registerSubagentStartIfNeeded({
+      pool: { recordSubagentStart: async () => { calls.push(1); return 0 } },
+      providerId: 'probe',
+      sessionId: 'child-1',
+      parentSessionId: 'parent-1',
+      setting: undefined,
+    })
+    expect(registered).toBe(false)
+    expect(calls.length, '★★★ 没配子代理 ⇒ 不登记').toBe(0)
   })
 
-  it('★★★ 登记必须**独立于**「免费模型」与「主代理起点」两个条件', () => {
+  it('★★★ 登记必须**独立于**「免费模型」与「主代理起点」（结构证明）', () => {
     /**
-     * ## 这是 2026-11-23 本机实测发现的第二个缺陷
+     * ## 原缺陷（2026-11-23 本机实测）
      *
-     * 第一版把登记塞进了 `if (free !== true && baseRotationStartId !== undefined)`，
-     * 导致两个**静默失效**：
+     * 第一版把登记塞进 `if (free !== true && baseRotationStartId !== undefined)`，
+     * 两个**静默失效**：子代理用免费模型 / 主代理没配起点 ⇒ 永不登记。
      *
-     * | 场景 | 后果 |
-     * |---|---|
-     * | 子代理用免费模型 | 永不登记（之后切付费也没记录）|
-     * | 主代理没配起点 | 永不登记（配了子代理策略也不生效）|
+     * ## 现判据（比源码文本更硬）
      *
-     * ## 判据（⚠️ 必须剥注释，否则会命中说明文字里的示例）
+     * `registerSubagentStartIfNeeded` 的**入参类型**里没有 `free` /
+     * `baseRotationStartId` 这类字段 ⇒ **结构上不可能**被那两个条件绑住。
      *
-     * 我第一版用 `src.indexOf('if (free !== true')` —— 那**命中了注释里
-     * 引用的示例代码**（本文件的注释正是在讲这个缺陷），于是得出
-     * 「登记在 free 之后」的错误结论。
-     *
-     * ⇒ 必须先剥掉注释行，再比**真实代码**里的先后顺序。
+     * ⚠️ 这是「用类型证明」而不是「在源码里找字符串」—— 前者对
+     *    `if (false)` 之类短路天然免疫。
      */
-    const stripComments = (text: string): string =>
-      text
-        .split('\n')
-        .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
-        .join('\n')
-
-    const code = stripComments(src)
-    const callIdx = code.indexOf('recordSubagentStart?.(')
-    /**
-     * ⚠️ 2026-11-24 三改：Anchor 从「`if (free !== true && baseRotationStartId !== undefined)`」
-     * 改成「`if (free !== true) {`」—— 因为**子代理起点计算**也已脱离
-     * 「主代理必须配起点」这个条件（用户实测打穿：主代理默认起点时子代理全不生效）。
-     *
-     * ⇒ 登记仍必须在**第一个** `if (free !== true` 之前。
-     */
-    const freeIdx = code.indexOf('if (free !== true')
-    expect(callIdx, '剥注释后找不到 recordSubagentStart 调用').toBeGreaterThan(-1)
-    expect(freeIdx, '剥注释后找不到 free 条件').toBeGreaterThan(-1)
-    expect(
-      callIdx,
-      '★★★ 登记必须在「free 条件」**之前**（否则免费模型永不登记）',
-    ).toBeLessThan(freeIdx)
+    const src = readFileSync(join(here, '../../src/subagent-start.ts'), 'utf8')
+    const fnStart = src.indexOf('export function registerSubagentStartIfNeeded(')
+    expect(fnStart, '找不到 registerSubagentStartIfNeeded').toBeGreaterThan(-1)
+    /** 取到函数体结束（配对花括号）。 */
+    const open = src.indexOf('{', src.indexOf('): boolean', fnStart))
+    let depth = 0
+    let end = open
+    for (let i = open; i < src.length; i += 1) {
+      if (src[i] === '{') depth += 1
+      else if (src[i] === '}') { depth -= 1; if (depth === 0) { end = i; break } }
+    }
+    const decl = src.slice(fnStart, open)
+    const body = src.slice(open, end + 1)
+    /** ① 签名里**不得**出现 free / baseRotationStartId。 */
+    expect(decl, '★★★ 签名不得收 free（否则会重演免费模型永不登记）').not.toMatch(/\bfree\b/)
+    expect(decl, '★★★ 签名不得收 baseRotationStartId（否则会重演主代理没起点就不登记）')
+      .not.toMatch(/baseRotationStartId/)
+    /** ② 函数体里也不得读这两个语义。 */
+    expect(body).not.toMatch(/\bfree\b/)
+    expect(body).not.toMatch(/baseRotationStartId/)
   })
 
-  it('★★★ 登记所在的 `if` 必须是 `sessionId !== undefined`（不能是别的条件）', () => {
+  it('★★★ 登记必须真的调用 recordSubagentStart（不能是 if (false) 空转）', () => {
     /**
-     * ## 为什么需要这条（我第一版漏了）
-     *
-     * 上一条只比**位置**（`callIdx < freeIdx`），于是把登记块的判断写成
-     * `if (false)` / `if (true)` 时**照样全绿** —— 位置没变，但语义已坏：
-     *
-     * | 变异 | 后果 | 上一条能抓吗 |
-     * |---|---|---|
-     * | `if (false)` | 永不登记 | ❌ 不能（位置没变）|
-     * | `if (true)` | 无条件进块（但内部还有守卫，等价）| ❌ 不能 |
-     *
-     * ⇒ 必须直接断言「那个 `if` 的条件文本就是 `sessionId !== undefined`」。
+     * ⚠️ 等价于原断言「那个 `if` 不能是 `if (false)`」——
+     * 但用**行为**验证：条件齐全时必须真的调一次。
      */
-    const stripComments = (text: string): string =>
-      text
-        .split('\n')
-        .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
-        .join('\n')
-
-    const code = stripComments(src)
-    const callIdx = code.indexOf('recordSubagentStart?.(')
-    expect(callIdx).toBeGreaterThan(-1)
-
-    /** 取调用点之前 400 字符，找最近的那个 `if (`。 */
-    const before = code.slice(Math.max(0, callIdx - 400), callIdx)
-    const matches = [...before.matchAll(/if\s*\(([^)]*)\)\s*\{/g)]
-    expect(matches.length, '调用点前必须有一个 if 块').toBeGreaterThan(0)
-    const lastCond = matches[matches.length - 1][1].trim()
-    expect(
-      lastCond,
-      '★★★ 最近的外层 if 条件必须是 `sessionId !== undefined`（不能是 false/true 之类）',
-    ).toBe('sessionId !== undefined')
+    const calls: unknown[] = []
+    const registered = registerSubagentStartIfNeeded({
+      pool: { recordSubagentStart: async () => { calls.push(1); return 0 } },
+      providerId: 'probe',
+      sessionId: 'child-1',
+      parentSessionId: 'parent-1',
+      setting: { startMode: 'sequence' },
+    })
+    expect(registered, '★★★ 条件齐全必须返回 true').toBe(true)
+    expect(calls.length, '★★★ 必须真的调用一次（防止 if (false) 空转）').toBe(1)
   })
 })

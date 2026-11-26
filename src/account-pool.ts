@@ -5,7 +5,7 @@ import type { BuddyProduct } from './product.js'
 import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, sanitizeSubagentRotation, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredRotation, sanitizeProviderClosed, sanitizeCreditWindows, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
 import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, PreferredRotationMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
 import type { CreditWindowMap, CreditWindowSetting, RotationStartTier, SubagentRotationSetting } from './jet-hub-store.js'
-import { markSubagentEnded, nextSubagentSlot, pinSubagentAccount, recordSubagentAssignment, sanitizeSubagentAssignments, setUserPickedAccount } from './subagent-rotation.js'
+import { markSubagentEnded, nextSubagentSlot, recordSubagentAssignment, sanitizeSubagentAssignments, } from './subagent-rotation.js'
 import type { SubagentAssignment, SubagentAssignmentMap } from './subagent-rotation.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
@@ -512,6 +512,48 @@ export class AccountPool {
   private subagentAssignmentCache: Record<string, SubagentAssignmentMap> = {}
   private preferredRotationCache: PreferredRotationMap = {}
   /**
+   * ★★★ **每个会话「实际在用」的账号 id**（2026-11-25 新增，**纯内存、不落盘**）。
+   *
+   * ## 它解决什么（用户原话）
+   *
+   * > 「子代理轮换起点策略的参考对象，是主代理**实际在使用的帐号**，
+   * >   而不是下拉框选择的，这样可以统一默认状态跟用户选择的，
+   * >   都是实际当时在使用的帐号」
+   *
+   * ⇒ 主代理下拉框选位次 5，但位次 5 的号临期烧完、实际已切到位次 6 ——
+   *   子代理的起点策略必须参照**位次 6**，不是下拉框的位次 5。
+   *
+   * ## ⚠️ 为什么必须按**会话**分组（`provider → sessionId → accountId`）
+   *
+   * 同时有多个主代理会话时，各自用的号不同。若只记 `provider → accountId`
+   * （Qoder 的 `activeQoderAccountId` 就是那种形态），子代理会参照
+   * **最后一个发过请求的会话**的账号，而不是**它自己父会话**的账号
+   * ⇒ 多会话并发时串味。
+   *
+   * ## ⚠️ 为什么不落盘
+   *
+   * 这是**瞬时运行态**：插件重启后「当前在用哪个号」已经无从得知
+   * （下一个请求会重新选）。落盘一份过期值反而会让子代理参照错号。
+   * ⇒ 重启后表为空，消费方按 `preferredRotationFor`（下拉框位次）回落
+   *   —— 与用户确认过的降级路径一致。
+   */
+  private activeAccountCache: Record<string, Record<string, string>> = {}
+  /**
+   * ★★★ **无档位 provider 的子代理起点位次**（2026-11-25，**纯内存**）。
+   *
+   * ## 为什么不能复用 `preferredRotationCache`
+   *
+   * `preferredRotationCache` 的条目**必须带档位**（`sanitizePreferredRotation`
+   * 会丢弃无档位条目），而 ACCIO / ASTUDIO / MAGICREW 这类纯 key 池**没有档位**。
+   * 硬塞进去只有两种结局：被 sanitize 丢掉（等于没写），或让主代理的
+   * `tierStillHeld` 判据拿到脏数据。
+   *
+   * ⇒ 子代理在无档位 provider 上用这张独立表：**只记位次，不记档位**。
+   *
+   * ⚠️ 纯内存：重启后丢失 ⇒ 下次请求重新按策略算一次（可接受，
+   * 与 `activeAccountCache` 同一取向）。
+   */
+  private subagentStartPositionCache: Record<string, Record<string, number>> = {}  /**
    * 「面板入口」的进程内副本：Jet Hub 的唯一入口位置（两个取值互斥）。
    *
    * 缺键语义是 `'sidebar'`「仅侧栏」（与 {@link nativeWebSearchCache} 同一方向）：
@@ -1678,62 +1720,6 @@ export class AccountPool {
     this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
     if (this.store.kind !== 'memory') await this.queueStoreSave()
   }
-
-  /**
-   * ★★★ **钉住某子代理的账号**（2026-11-24 用户要求：拉起时定死）。
-   *
-   * ## 为什么要钉
-   *
-   * > 「我是希望『拉起时定死，只有该号不可用才换』，
-   * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
-   *
-   * 原理：prompt cache 按（账号 + 模型 + 前缀）命中 ⇒ 换号即缓存全失效。
-   *
-   * ⚠️ **同步更新缓存**（与 `recordSubagentStart` 同纪律）：调用方紧接着
-   * 还要读它，不能等落盘。
-   *
-   * @returns `true` = 有新值（同值返回 `false`，调用方据此跳过重复写盘）
-   */
-  async pinSubagentAccount(provider: string, sessionId: string, accountId: string): Promise<boolean> {
-    this.ensureLoaded()
-    if (provider.length === 0 || sessionId.length === 0 || accountId.length === 0) return false
-    const current = this.subagentAssignmentCache[provider]
-    if (current === undefined) return false
-    const next = pinSubagentAccount(current, sessionId, accountId, Date.now())
-    /** ⚠️ 同值 ⇒ 原对象返回 ⇒ 这里判等跳过落盘（避免每发请求都写一次磁盘）。 */
-    if (next === current) return false
-    this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
-    if (this.store.kind !== 'memory') await this.queueStoreSave()
-    return true
-  }
-
-  /**
-   * ★★★ **记录用户手动选的账号**（2026-11-24 用户定 B 方案）。
-   *
-   * 语义：用户在该子代理对话页面手动选起点时，写这个字段；
-   * 它的优先级**高于** `pinnedAccountId`（见 `credential-resolver.ts`）。
-   *
-   * ⚠️ 主代理没有分配记录 ⇒ `setUserPickedAccount` 原样返回 ⇒ 无副作用。
-   *
-   * ⚠️ **同步更新缓存**（与 `pinSubagentAccount` 同纪律）：调用方紧接着
-   * 还要读它（回传 `selected`），不能等落盘。
-   *
-   * @param accountId - `undefined` = 清除手动选择（回落到 pin）
-   * @returns `true` = 有新值（同值返回 `false`，调用方据此跳过重复写盘）
-   */
-  async setUserPickedAccount(provider: string, sessionId: string, accountId: string | undefined): Promise<boolean> {
-    this.ensureLoaded()
-    if (provider.length === 0 || sessionId.length === 0) return false
-    const current = this.subagentAssignmentCache[provider]
-    if (current === undefined) return false
-    const next = setUserPickedAccount(current, sessionId, accountId, Date.now())
-    /** ⚠️ 同值 ⇒ 原对象返回 ⇒ 跳过落盘。 */
-    if (next === current) return false
-    this.subagentAssignmentCache = { ...this.subagentAssignmentCache, [provider]: next }
-    if (this.store.kind !== 'memory') await this.queueStoreSave()
-    return true
-  }
-
   /**
    * ★ **轮换起点选定那一刻的档位**（S6，2026-11-20）。
    *
@@ -1866,6 +1852,92 @@ export class AccountPool {
       return
     }
     await this.queueStoreSave()
+  }
+
+  /**
+   * ★★★ **读某会话「实际在用」的账号 id**（2026-11-25，纯内存）。
+   *
+   * ## 它解决什么
+   *
+   * 子代理的起点策略要参照「主代理**实际在用**的号」，不是「下拉框选的位次」：
+   * 下拉框选位次 5，但位次 5 的临期烧完后主代理已切到位次 6 ⇒
+   * 子代理必须参照**位次 6**。
+   *
+   * ## ⚠️ 三条语义
+   *
+   * | 情况 | 返回 |
+   * |---|---|
+   * | 该会话发过请求 | 当时选中的账号 id |
+   * | 该会话**没发过**／插件刚重启 | `undefined`（消费方回落 `preferredRotationFor`）|
+   * | `sessionId` 为空 | `undefined`（空串会让「默认」与「某会话」撞成同一个键）|
+   *
+   * ⚠️ **每次现读，不缓存**（与 `preferredRotationFor` 同款）：值随每个请求变化。
+   */
+  activeAccountOf(provider: string, sessionId: string | undefined): string | undefined {
+    if (provider.length === 0) return undefined
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    return this.activeAccountCache[provider]?.[sessionId]
+  }
+
+  /**
+   * ★★★ **记某会话「实际在用」的账号 id**（2026-11-25，纯内存，**不落盘**）。
+   *
+   * ⚠️ **由 `credential-resolver` 在每次选号成功后自动调用** ——
+   * 不是由各 provider 各自配置（那样 24 处调用点必然会漏，实测已有 7 处没有
+   * `reportAccount`）。这是「子代理设置对**全部** provider 生效」的基础设施。
+   *
+   * @param accountId - `undefined` = 清空该会话的记录（本次没选中任何号）。
+   *   ⚠️ 不清空会让过期 id 一直留着，子代理参照一个**早已不用的号**。
+   */
+  setActiveAccount(provider: string, sessionId: string | undefined, accountId: string | undefined): void {
+    if (provider.length === 0) return
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return
+    const current = this.activeAccountCache[provider]
+    if (accountId === undefined) {
+      if (current === undefined || current[sessionId] === undefined) return
+      const nextSessions = { ...current }
+      delete nextSessions[sessionId]
+      if (Object.keys(nextSessions).length === 0) {
+        const nextAll = { ...this.activeAccountCache }
+        delete nextAll[provider]
+        this.activeAccountCache = nextAll
+      } else {
+        this.activeAccountCache = { ...this.activeAccountCache, [provider]: nextSessions }
+      }
+      return
+    }
+    if (accountId.length === 0) return
+    /** ⚠️ 同值 ⇒ 返回（避免每发请求都重建对象）。 */
+    if (current?.[sessionId] === accountId) return
+    this.activeAccountCache = {
+      ...this.activeAccountCache,
+      [provider]: { ...(current ?? {}), [sessionId]: accountId },
+    }
+  }
+
+  /**
+   * ★★★ **写无档位 provider 的子代理起点位次**（2026-11-25，纯内存）。
+   *
+   * 见 {@link subagentStartPositionCache} 的注释 —— 与
+   * `setPreferredRotation` 的差别只有一条：**不要求档位**。
+   */
+  setSubagentStartPosition(provider: string, sessionId: string, position: number): void {
+    if (provider.length === 0 || sessionId.length === 0) return
+    if (!Number.isInteger(position) || position < 1) return
+    const current = this.subagentStartPositionCache[provider]
+    /** ⚠️ 同值 ⇒ 返回（避免每发请求都重建对象）。 */
+    if (current?.[sessionId] === position) return
+    this.subagentStartPositionCache = {
+      ...this.subagentStartPositionCache,
+      [provider]: { ...(current ?? {}), [sessionId]: position },
+    }
+  }
+
+  /** 读回 {@link setSubagentStartPosition} 写下的位次（1-based）。 */
+  subagentStartPositionOf(provider: string, sessionId: string | undefined): number | undefined {
+    if (provider.length === 0) return undefined
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    return this.subagentStartPositionCache[provider]?.[sessionId]
   }
   /**
    * 「面板入口」的当前取值：Jet Hub 的唯一入口位置。

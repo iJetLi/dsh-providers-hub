@@ -55,69 +55,6 @@ export interface SubagentAssignment {
    * 沿用主代理规则。
    */
   slot: number
-  /**
-   * ★★★ **拉起时算定的账号 id**（2026-11-24 用户要求）。
-   *
-   * ## 为什么需要它（用户原话）
-   *
-   * > 「我是希望『拉起时定死，只有该号不可用才换』，
-   * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
-   *
-   * ⚠️ 这不是性能优化，而是**正确性**：AI 服务商的 prompt cache 按
-   * （账号 + 模型 + 前缀）命中。每发请求重算起点 ⇒ 池子稍有波动就换号
-   * ⇒ 缓存全失效 ⇒ 同一段长上下文被重复计费。
-   *
-   * ## 语义（严格三步）
-   *
-   * | 状态 | 行为 |
-   * |---|---|
-   * | `pinnedAccountId` 有值且**该号仍可用** | **直接用它**，不重算（稳态）|
-   * | 该号**不可用**（停用/封禁/限流/无积分）| 重算一次，并把新号**写回**本字段 |
-   * | `undefined`（老数据 / 首次）| 走 `slot` 现算，然后**写回** |
-   *
-   * ⚠️ 写回是**必须**的：否则「不可用 → 重算」会退化成「每发请求都重算」
-   *（正是本字段要消除的行为）。
-   *
-   * ⚠️ 与 `slot` 的关系：`slot` 仍保留（用于**首次**算起点 + 诊断），
-   * 但稳态下 `pinnedAccountId` 优先。两者不一致时以 pin 为准。
-   */
-  pinnedAccountId?: string
-  /** `pinnedAccountId` 的确定时刻（诊断用，不参与判据）。 */
-  pinSetAt?: number
-  /**
-   * ★★★ **用户在该子代理对话页面手动选的账号**（2026-11-24 用户定 B 方案）。
-   *
-   * ## 用户原话
-   *
-   * > 「用户手动重选的话是按照用户的意愿来，
-   * >   其他情况就是使用拉起时固定的那个，
-   * >   可以避免系统乱换号，避免缓存命中低」
-   *
-   * ## 优先级（严格三级）
-   *
-   * | 级别 | 来源 | 何时生效 |
-   * |---|---|---|
-   * | ① | **`userPickedAccountId`** | 用户手动选过 **且该号可用** |
-   * | ② | `pinnedAccountId` | 无手动选择（或手动选的号已不可用）|
-   * | ③ | `slot` 现算 | 首次（两者都没有）|
-   *
-   * ## ⚠️ 为什么两个字段要分开存
-   *
-   * `pinnedAccountId` 是**系统**的自动分配（要「稳住」，避免乱换号）；
-   * `userPickedAccountId` 是**用户意图**（要「服从」，否则用户会以为功能坏了）。
-   *
-   * ⇒ 不能合成一个字段：
-   * - 合成后 pin 的「同值跳过写盘」优化会失效（用户改动与系统改动混在一起）；
-   * - 且 `pin` 失效重算时**无法区分**「这是系统挑的还是用户挑的」，
-   *   会导致「用户选的号不可用 ⇒ 系统重挑后把用户选择覆盖掉」，
-   *   而正确语义是「用户选择**保留**，只是暂时跳过」——
-   *   等它恢复可用，应**自动切回**用户选的号。
-   *
-   * ⚠️ 手动选择**不因 pin 重算而清除**：用户改主意的唯一入口是再次手动选。
-   */
-  userPickedAccountId?: string
-  /** `userPickedAccountId` 的设定时刻（诊断用）。 */
-  userPickedAt?: number
   /** `subagent/end` 是否已到达（只用于诊断，**不参与**任何判据）。 */
   ended?: boolean
 }
@@ -161,29 +98,15 @@ export function sanitizeSubagentAssignments(raw: unknown): SubagentAssignmentMap
      * ⚠️ 与 slot 同纪律：非法值**丢弃**（不给默认值）——
      * 猜一个账号 id 会让子代理用错号，且无从排查。
      */
-    const pinnedAccountId = typeof src.pinnedAccountId === 'string' && src.pinnedAccountId.length > 0
-      ? src.pinnedAccountId
-      : undefined
-    const pinSetAt = typeof src.pinSetAt === 'number' && Number.isFinite(src.pinSetAt) && src.pinSetAt >= 0
-      ? src.pinSetAt
-      : undefined
+    /* ⚠️ pin 字段已删（2026-11-25 重构：起点改存 preferredRotation）。 */
     /** ★ 用户手动选的账号（与 pin 同纪律：非法值丢弃，不猜）。 */
-    const userPickedAccountId = typeof src.userPickedAccountId === 'string' && src.userPickedAccountId.length > 0
-      ? src.userPickedAccountId
-      : undefined
-    const userPickedAt = typeof src.userPickedAt === 'number' && Number.isFinite(src.userPickedAt) && src.userPickedAt >= 0
-      ? src.userPickedAt
-      : undefined
+    /* ⚠️ userPicked 字段已删（2026-11-25：手选直接写 preferredRotation）。 */
     // ⚠️ 键必须是 sessionId 本身：写错就是「查不到分配」→ 静默回落主代理起点。
     result[sessionId] = {
       sessionId,
       parentSessionId,
       at,
       slot,
-      ...(pinnedAccountId === undefined ? {} : { pinnedAccountId }),
-      ...(pinnedAccountId === undefined || pinSetAt === undefined ? {} : { pinSetAt }),
-      ...(userPickedAccountId === undefined ? {} : { userPickedAccountId }),
-      ...(userPickedAccountId === undefined || userPickedAt === undefined ? {} : { userPickedAt }),
       ...(src.ended === true ? { ended: true } : {}),
     }
   }
@@ -275,96 +198,6 @@ export function markSubagentEnded(
   if (existing === undefined) return assignments
   return { ...assignments, [sessionId]: { ...existing, ended: true } }
 }
-
-/**
- * 取下一个 slot 序号（= 当前最大 slot + 1）。
- *
- * ⚠️ **不能**用 `Object.keys().length`：淘汰会删旧记录，导致序号回退 ⇒
- * 多个子代理拿到同一个 slot ⇒ 挤在同一个账号上。
- * 取 `max(slot) + 1` 才单调。
- */
-/**
- * ★★★ **钉住某子代理的账号**（2026-11-24 用户要求）。
- *
- * ## 用户原话
- *
- * > 「我是希望『拉起时定死，只有该号不可用才换』，
- * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
- *
- * ⚠️ 这是**正确性**要求，不是优化：prompt cache 按
- *（账号 + 模型 + 前缀）命中，每发请求重算起点 ⇒ 池子一波动就换号
- * ⇒ 缓存全失效 ⇒ 同一段长上下文被重复计费。
- *
- * @param assignments - 分配表
- * @param sessionId - 子代理会话 id
- * @param accountId - 要钉住的账号 id
- * @param now - 钉住时刻
- * @returns 新分配表；**已钉住同一账号时返回原对象**（避免无谓写盘与广播）
- */
-export function pinSubagentAccount(
-  assignments: SubagentAssignmentMap,
-  sessionId: string,
-  accountId: string,
-  now: number,
-): SubagentAssignmentMap {
-  const existing = assignments[sessionId]
-  if (existing === undefined) return assignments
-  if (accountId.length === 0) return assignments
-  /** ⚠️ 已经是这个号 ⇒ 返回**原对象**（调用方据此跳过落盘）。 */
-  if (existing.pinnedAccountId === accountId) return assignments
-  return {
-    ...assignments,
-    [sessionId]: { ...existing, pinnedAccountId: accountId, pinSetAt: now },
-  }
-}
-
-/**
- * ★★★ **记录用户手动选的账号**（2026-11-24 用户定 B 方案）。
- *
- * ## 用户原话
- *
- * > 「用户手动重选的话是按照用户的意愿来，其他情况就是使用拉起时固定的那个，
- * >   可以避免系统乱换号，避免缓存命中低」
- *
- * ## 与其他字段的关系
- *
- * | 字段 | 谁写 | 优先级 |
- * |---|---|---|
- * | `userPickedAccountId` | **用户**（子代理页面手动选）| **最高** |
- * | `pinnedAccountId` | 系统（拉起/重算时自动）| 中 |
- * | `slot` | 系统（首次分配）| 低 |
- *
- * ⚠️ **不覆盖 `pinnedAccountId`**：pin 是「系统视角的稳定值」，
- * 用户选择是「另一层意图」。两者分开存，才能在「用户选的号暂时不可用」时
- * 回落到 pin（而不是丢失两个信息）。
- *
- * ⚠️ 传 `undefined`/`''` ⇒ **清除**用户选择（回落到 pin 的语义）。
- *
- * @returns 新分配表；值未变时返回**原对象**（调用方据此跳过写盘）
- */
-export function setUserPickedAccount(
-  assignments: SubagentAssignmentMap,
-  sessionId: string,
-  accountId: string | undefined,
-  now: number,
-): SubagentAssignmentMap {
-  const existing = assignments[sessionId]
-  if (existing === undefined) return assignments
-  const next = typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined
-  /** ⚠️ 同值 ⇒ 原对象（避免每发请求都写盘）。 */
-  if (existing.userPickedAccountId === next) return assignments
-  const base = { ...existing }
-  if (next === undefined) {
-    delete base.userPickedAccountId
-    delete base.userPickedAt
-  } else {
-    base.userPickedAccountId = next
-    base.userPickedAt = now
-  }
-  return { ...assignments, [sessionId]: base }
-}
-
-
 export function nextSubagentSlot(assignments: SubagentAssignmentMap): number {
   let max = -1
   for (const entry of Object.values(assignments)) {
