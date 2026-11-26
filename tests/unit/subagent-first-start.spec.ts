@@ -161,6 +161,80 @@ describe('T2/T3/T4：策略算出的位次（与主代理同口径）', () => {
     expect(decide('fixed', { fixedPosition: 1 }).startId, '★★★ fixed 位次1 = acc-1').toBe('acc-1')
   })
 
+  it('★★★ fixed 位次 1 必须**真的按位次取**（不能被「池首」蒙对）', () => {
+    /**
+     * ## 为什么需要单列这条（2026-11-26，修上游登记的「无牙」）
+     *
+     * 上游在 PR #158 合并时登记：
+     *
+     * > 「**2 处无牙**：`fixed1 ⇒ acc1` 修前修后同值」
+     *
+     * ## 根因
+     *
+     * 上面那条用的是**默认池**（`acc-1..acc-4`），而 `fixedPosition: 1`
+     * ⇒ `accountIdAtPosition(pool, 1)` = **`acc-1`** = **池首**。
+     *
+     * ⇒ 把 `fixed` 分支整个改成 `enabledIds[0]`（或干脆删掉走别的分支）
+     *   **这一格仍然返回 `acc-1`** ⇒ 断言照样绿 ⇒ **无区分力**。
+     *
+     * ## 修法：让「池首」与「位次 1」在**语义上分离**
+     *
+     * 用**另一个池**（首元素是 `zeta`、主代理起点是 `acc-2`）：
+     *
+     * | 实现 | `fixedPosition: 1` 的结果 |
+     * |---|---|
+     * | 正确（按位次取）| `zeta`（= 池第 1 个）|
+     * | 错误（走别的分支 / 恒池首）| 也是 `zeta` ⚠️ **仍然分不开** |
+     *
+     * ⇒ 所以「恒取池首」这个变异对位次 **1** 本来就**不可分辨**（数学事实）。
+     *
+     * **真正能分辨的变异**是「位次算错一位」（`position - 1` 写成 `position`）。
+     * 下面用 `fixedPosition: 2` 在**非默认池**上验证它取的是第 2 个，
+     * 并额外断言「位次 1 ≠ 位次 2」，把「恒取池首」也排除掉。
+     */
+    const customPool = ['zeta', 'eta', 'theta']
+    const d1 = decideSubagentStart({
+      providerId: 'probe',
+      sessionId: 'child-1',
+      candidateIds: customPool,
+      allowPermanent: true,
+      pool: {
+        listAccountsByProvider: () => customPool.map((id) => ({ id, credentialRef: `R-${id}`, enabled: true })),
+        permanentLocked: () => false,
+        subagentAssignmentOf: () => ({ sessionId: 'child-1', parentSessionId: 'p-1', at: 0, slot: 0 }),
+        subagentRotationFor: () => ({ startMode: 'fixed', fixedPosition: 1 }),
+      } as never,
+      selector: undefined,
+      mainSessionStartId: 'acc-2',
+    })
+    expect(d1.startId, '★★★ 位次 1 = 池第 1 个（zeta）').toBe('zeta')
+
+    const d2 = decideSubagentStart({
+      providerId: 'probe',
+      sessionId: 'child-1',
+      candidateIds: customPool,
+      allowPermanent: true,
+      pool: {
+        listAccountsByProvider: () => customPool.map((id) => ({ id, credentialRef: `R-${id}`, enabled: true })),
+        permanentLocked: () => false,
+        subagentAssignmentOf: () => ({ sessionId: 'child-1', parentSessionId: 'p-1', at: 0, slot: 0 }),
+        subagentRotationFor: () => ({ startMode: 'fixed', fixedPosition: 2 }),
+      } as never,
+      selector: undefined,
+      mainSessionStartId: 'acc-2',
+    })
+    expect(d2.startId, '★★★ 位次 2 = 池第 2 个（eta，不是池首）').toBe('eta')
+
+    /**
+     * ⚠️ **这条才是排除「恒取池首」的关键**：
+     * 位次 1 与位次 2 必须给出**不同**的号。若实现恒取池首，两者会相同。
+     */
+    expect(
+      d1.startId,
+      '★★★ 位次 1 与位次 2 必须不同（恒取池首的实现会让它们相同）',
+    ).not.toBe(d2.startId)
+  })
+
   it('★★ hash ⇒ 结果与起点不同（排除主代理自己）', () => {
     /**
      * ⚠️ `hash` 的实现是「在**除主代理起点外**的号里按 sessionId 哈希取一个」——

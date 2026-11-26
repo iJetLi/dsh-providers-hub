@@ -70,12 +70,87 @@ describe('★★★ officeace 接线：用共享函数决定「遍历顺序」',
       '起点若写成「只返回那一个」⇒ 破坏「逐个试」的既有语义（其余号不再被尝试）',
     ).toMatch(/return \[head,\s*\.\.\.accounts\.filter\(/)
   })
+  it('★★★ O2c 起点 = oa2 时首位必须是 oa3（唯一可分辨的构造）', async () => {
+    /**
+     * ## 为什么起点选 oa2
+     *
+     * 池 `[oa1, oa2, oa3]`、`sequence` slot=0：
+     *
+     * | 主代理起点 | `(idx+1)%3` | 首位 | 与池首相同？ |
+     * |---|---|---|---|
+     * | oa1（池首）| `(0+1)%3 = 1` | **oa2** | ❌ 不同 ✅ |
+     * | **oa2** | `(1+1)%3 = 2` | **oa3** | ❌ 不同 ✅ |
+     * | oa3 | `(2+1)%3 = 0` | oa1 | **相同** ⚠️ 分不开 |
+     *
+     * ⇒ 起点取 **oa2** 时首位是 `oa3`，**与池首（oa1）不同** ⇒ 能证明「顺序真的被改过」。
+     * ⚠️ 而且若不注入 `mainStartIdOf`，`effectiveMainStart` 退化成池首 oa1
+     *    ⇒ 首位会是 `oa2` ⇒ **两者不同，可分辨**。
+     */
+    const { createOfficeAceCredentialProvider } = await import('../../src/officeace-lock.js')
 
-  /**
-   * ## O3 deps 必须有 `subagentPool`（且是**可选**的）
-   *
-   * ⚠️ 必选会让所有既有嵌入方与单测**编译不过**（破坏向后兼容）。
-   */
+    const POOL = [
+      { id: 'oa1', credentialRef: 'R-oa1' },
+      { id: 'oa2', credentialRef: 'R-oa2' },
+      { id: 'oa3', credentialRef: 'R-oa3' },
+    ]
+    const visits: string[] = []
+
+    const mkProvider = (withMainStart: boolean) => createOfficeAceCredentialProvider({
+      permanentLocked: () => true,
+      accounts: () => POOL,
+      resolveUnlocked: async () => undefined,
+      readCredential: async (ref: string) => {
+        visits.push(ref)
+        /** ⚠️ **全部成功** ⇒ 循环在**第一个号**就返回 ⇒ 首位 = 遍历顺序首位。 */
+        return { basicAuthorization: 'x' } as never
+      },
+      readStoredCredential: () => undefined,
+      summaryOf: async () => ({
+        ok: true as const,
+        /**
+         * ⚠️ **必须有「近期到期」的桶**：
+         *
+         * 我踩过的三层：
+         * | 版本 | 被卡在哪 |
+         * |---|---|
+         * | `{}` | `creditGroups is not iterable` |
+         * | `creditGroups: [{remaining:100}]`（无到期日）| 归入 permanent ⇒ 锁定态判「没有可用账号」 |
+         * | 正解 | **给一个 1 天后到期的桶** ⇒ 落在 imminent ⇒ 可用 |
+         */
+        summary: {
+          creditGroups: [
+            { remaining: 100, expired: false, expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+          ],
+        } as never,
+      }),
+      subagentPool: {
+        subagentAssignmentOf: (_p: string, sid: string) =>
+          (sid === 'child-1' ? { parentSessionId: 'main-1' } : undefined),
+        subagentRotationFor: () => ({ startMode: 'sequence' }),
+        listAccountsByProvider: () => POOL.map((a) => ({ id: a.id, enabled: true })),
+        permanentLocked: () => true,
+      },
+      ...(withMainStart ? { mainStartIdOf: (_sid: string) => 'oa2' } : {}),
+    } as never)
+
+    visits.length = 0
+    await mkProvider(true)('child-1')
+    const withStart = visits[0]
+    console.log('  [O2c] 注入 mainStartIdOf=oa2 ⇒ 首位:', withStart)
+
+    visits.length = 0
+    await mkProvider(false)('child-1')
+    const withoutStart = visits[0]
+    console.log('  [O2c] 不注入（退化成池首 oa1）⇒ 首位:', withoutStart)
+
+    expect(withStart, '★★★ 注入 oa2 起点 ⇒ sequence 首位必须是 oa3').toBe('R-oa3')
+    expect(withoutStart, '★★ 不注入 ⇒ 退化池首 oa1 ⇒ 首位 oa2').toBe('R-oa2')
+    expect(
+      withStart,
+      '★★★ 两者必须不同（否则 P1-D 的修复不可观测）',
+    ).not.toBe(withoutStart)
+  })
+
   it('★★★ O3 deps.subagentPool 必须是可选的', () => {
     const code = readStripped('src/officeace-lock.ts')
     expect(code, 'subagentPool 必须声明为可选（否则破坏既有嵌入方）').toMatch(
