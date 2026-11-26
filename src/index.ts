@@ -701,19 +701,6 @@ async function autoclawSelfHeal(
  * 域守卫从硬编码清单 + {@link PROBE_EXEMPT} 派生锁死（漏挂会让它**点名**变红）。
  */
 /**
- * 探测路径的槽（AgnesCode）。
- *
- * ⚠️ 与其它 provider 的差别：本家的凭据不是「一个 key」，而是
- * `{access_token, bff_base, …}` —— 而且 `bff_base` 决定请求**发去哪**
- * （每账号下发）。故必须：
- *   1. 解析一次（解析不出来就抛错，让「重测」显示**原因**而不是笼统的
- *      「目录为空」）；
- *   2. 用 `trustAgnescodeBffBase` 再钉一次域名边界 —— 探测路径的凭据来自
- *      面板输入，可能被手改；把 `Authorization` 发到任意域名是凭据外泄。
- *
- * 抛错会被 `listModels` 的调用方（probe）接住并展示，不会静默。
- */
-/**
  * ★★★ **子代理的「主代理起点」解析**（2026-11-26 从 `apply()` 内抽到模块级）。
  *
  * ## 为什么抽出来
