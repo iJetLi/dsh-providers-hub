@@ -681,7 +681,7 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   //    两站是**同一路径、不同 host**（`*.agnes-ai.cn` / `*.agnes-ai.com`）⇒ 单列两条。
   agnescode: '/api/v2/subscription/credits-balance',
   agnescodeintl: '/api/v2/subscription/credits-balance',
-  doubao: '/alice/commerce/sale/subscription/quota/summary/',
+  doubao: '/alice/commerce/sale/subscription/overview/',
 }
 
 /**
@@ -894,10 +894,9 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    余额 ⇒ 只填 Key 的账号会走 401 降级路径，不会被当成「零余额」。
     // ⚠️ 2026-11-09 并入 marvis（腾讯 Marvis，钱包 `/v3/marvis_get_wallet`）⇒ 23 → 24。
     // ⚠️ 2026-11-13 并入 doubao（豆包，`credits.balance: true` 且不在特例表）⇒ 24 → 25。
-    //    ⚠️ 它**有** `balance: true` 但**没有**余额端点 —— 那不是矛盾：`balance`
-    //    在这里的语义是「进 credits 表」（签到 `claim` 走同一张表），余额那一腿
-    //    由 `credits.balances` 端点短路成空列表（`src/jet-hub-rpc.ts` 的 doubao 分支）。
-    //    上面「手写端点清单」那条已把 doubao 排除（它没有端点路径可写）。
+    //    ⚠️ 2026-11-26 更正：豆包**有**余额端点，旧的「短路成空列表」已删除 ⇒
+    //    它现在与其余渠道同形（额度面板同款 `POST .../overview/`），故也进了上面
+    //    「手写端点清单」那条。
     //    ⚠️ 2026-11-19 并入 agnescode + agnescodeintl（AgnesCode 两站，
     //    `credits.balance: true`、不在特例表）⇒ 25 → 27。余额走账号级
     //    `{apiRoot}/api/v2/subscription/credits-balance`（**不在 `/v1` 下**、
@@ -1054,34 +1053,6 @@ describe('provider 边界：拒绝是兜底契约，判据来自 registry', () =
     expect(PROVIDER_REGISTRY.some((d) => d.credits.balance !== true)).toBe(true)
   })
 
-  it('maps both Doubao quota sections through credits.balances', async () => {
-    const { call, pool, credentials } = makeRpc()
-    await seed(pool, 'doubao', 'doubao-1', 'DOUBAO_ACCOUNT_SPEC')
-    await credentials.set('DOUBAO_ACCOUNT_SPEC', JSON.stringify({ cookie: 'sessionid=spec' }))
-    const group = (name: string, total: string, used: string) => ({ window_limit_groups: [{
-      feature_group_name: name,
-      window_limits: [{ total_amount: total, used_amount: used, end_time: Date.UTC(2026, 11, 1) }],
-    }] })
-    vi.stubGlobal('fetch', async (input: string) => {
-      expect(new URL(input).pathname).toBe(BALANCE_PATH_OF.doubao)
-      return Response.json({ code: 0, data: {
-        current_subscription: { display: { short_name: '免费体验' } },
-        incentive_quota_section: group('活动赠送额度', '1,600', '200'),
-        window_limit_section: group('订阅额度', '500', '100'),
-      } })
-    })
-    const result = await call('credits.balances', { provider: 'doubao' })
-    expect(result.ok).toBe(true)
-    expect(result.value.accounts).toEqual([expect.objectContaining({
-      accountId: 'doubao-1',
-      balance: { total: 1800, expiredTotal: 0, packages: [
-        expect.objectContaining({ name: '活动赠送额度', total: 1600, used: 200, remaining: 1400,
-          description: '免费体验', expiredTime: '2026-12-01T00:00:00.000Z' }),
-        expect.objectContaining({ name: '订阅额度', total: 500, used: 100, remaining: 400 }),
-      ] },
-    })])
-  })
-
   it('does not expose synthetic session cookies from a quota transport exception', async () => {
     const cookie = 'sessionid=synthetic-private-cookie'
     const { call, pool, credentials } = makeRpc()
@@ -1091,8 +1062,53 @@ describe('provider 边界：拒绝是兜底契约，判据来自 registry', () =
     const result = await call('credits.balances', { provider: 'doubao' })
     expect(result.ok).toBe(true)
     const account = JSON.stringify(result.value.accounts[0])
-    expect(account).toContain('无法读取上游响应')
+    expect(account).toContain('额度查询请求失败')
     expect(account).not.toContain(cookie)
+  })
+
+  it('★ 豆包额度走 credits.balances 后：到期时刻拿不到就必须标 expiryUnknown（IKTLMX 红线）', async () => {
+    const cookie = 'sessionid=parity-doubao-quota'
+    const { call, pool, credentials } = makeRpc()
+    await seed(pool, 'doubao', 'doubao-quota-parity-1', 'DOUBAO_QUOTA_PARITY_SPEC')
+    await credentials.set('DOUBAO_QUOTA_PARITY_SPEC', JSON.stringify({ cookie }))
+    /**
+     * 刻意喂**带 `top_items[].end_time` 的真实形态**：响应里确实有到期时刻，但它不带
+     * 分类归属（只有 `display_name` / 金额 / `end_time`），套到「套餐」「赠送」两个
+     * summary 头上就是编造。⇒ 映射层**只能**标「到期未知」。
+     *
+     * ⚠️ 这条是 IKTLMX 红线的 parity 守卫：空 `expiredTime` 会被展示层读成 `permanent`
+     *    ⇒ 面板写「永久 4,003」，用户就不会去抢救临期额度。删掉任何一侧（映射层不标
+     *    `expiryUnknown`、或这里断了断言）都应立刻变红。
+     */
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        quota_balance_overview: {
+          total_remaining_amount: '4,003',
+          summaries: [
+            { category: 1, title: '套餐', remaining_amount: '2,142' },
+            { category: 3, title: '赠送', remaining_amount: '1,861' },
+          ],
+          top_items: [
+            {
+              display_name: '豆包工作体验套餐', total_amount: '2,500', used_amount: '358',
+              end_time: 1_797_937_149_723, time_type: 2,
+            },
+          ],
+          has_more: false,
+        },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+
+    const result = await call('credits.balances', { provider: 'doubao' })
+    expect(result.ok).toBe(true)
+    const packages = result.value.accounts[0]?.balance?.packages ?? []
+    expect(packages.length).toBe(2)
+    for (const pkg of packages) {
+      // 拿不到逐笔到期 ⇒ 不许填空然后被读成「永久」
+      expect(pkg.expiredTime).toBe('')
+      expect(pkg.expiryUnknown).toBe(true)
+    }
   })
 
   it('credits.status 对 registry 里的每个渠道都被接受（未知 id 除外）', async () => {

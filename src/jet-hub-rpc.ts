@@ -10611,11 +10611,17 @@ function registerJetHubEndpoints(
           }
         }
 
-        // ⚠️ 2026-11-22 更正：豆包**现在有真实余额端点**了。
-        // `src/doubao-credits.ts` 的 `fetchDoubaoBalanceDetailed` 已改为真读
-        // `POST /alice/commerce/sale/subscription/quota/summary/`（当时实测 200，
-        // 回「活动赠送额度 total_amount:"1,600"」）。故移除旧的「无余额概念 ⇒ 短路空列表」
-        // 逻辑：让豆包走下面的查表分派，面板能读到真实额度。
+        // ⚠️ 2026-11-26 更正：豆包走**额度面板同款接口**，`quota/summary` 那条只是误判。
+        //
+        // 历史两层错误，都已作废：
+        //   1. 2026-11-13 认定「豆包没有余额概念」⇒ 错，面板上有额度；
+        //   2. 2026-11-22 认定 `quota/summary` 能读余额（实测 200，但登录态下 `data` 全空）
+        //      ⇒ 也错，那个端点拿不到读数。
+        //
+        // 真相（抓面板原生请求核对）：余额在
+        //   `POST /alice/commerce/sale/subscription/overview/`（body `{"product_line":"membership"}`）
+        // 的 `data.quota_balance_overview` 里。故 `src/doubao-credits.ts` 的
+        // `fetchDoubaoBalanceDetailed` 改打这条，下面的查表分派直接把真数字带回面板。
         // 注册表里仍保留 `credits.balance: true`（签到 claimAll 依赖它，两条硬不变式）。
 
 
