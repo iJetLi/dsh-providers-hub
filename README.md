@@ -563,35 +563,23 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
   ⚠️ **图片输入未实测**，面板会明确报「暂不支持图片输入」而不是静默丢掉。
   ⚠️ **该渠道不产生限流标记**（也不会被限流探针测出东西），故「重测 / 重置」这组
   按钮对它**整组不渲染** —— 渲染出来只会是点不动的死控件。
-- **`doubao`（豆包 / 字节）**：支持扫码登录、每日签到、额度查询和文本对话。
-  点「+ 新建账号」会打开一个**可见**的浏览器窗口，用手机豆包 App 扫码登录；
-  登录后可以在模型选择器里选豆包渠道。思考档位按模型目录提供，不默认开启；
-  只有上游返回思考正文时，DSH 才会单独显示思考。
-  ⚠️ **本机必须有 Chromium 内核浏览器**。候选链（Windows 专属项**只在 Windows 上**参与）：
-  `DSH_DOUBAO_BROWSER_PATH` → `C:\Program Files\Google\Chrome\Application\chrome.exe`
-  → `%ProgramFiles%\…\chrome.exe` → `%LOCALAPPDATA%\…\chrome.exe` →
-  `D:\Program File\Doubao\app\Doubao.exe`（豆包客户端内核）→ **跨平台自动探测**
-  （macOS 的 `/Applications` 与 `~/Applications` 下的 `.app` 包；Linux 的 `/usr/bin`、
-  `/opt` 与 snap/flatpak 的 `exports/bin/`；Windows 的 scoop / Edge / Chromium）。
-  ⚠️ 只有**绝对路径**才算命中 —— 相对路径交给 `existsSync` 会以当前工作目录为准。
-  ⚠️ 找不到时提示会**分平台**说人话、回显 `DSH_DOUBAO_BROWSER_PATH` 的当前值、
-  并逐条列出试过的路径（复用 `browserNotFoundMessage`，与其余五家一致）。
-  ✅ **2026-11-13 修（Gitee issue IKV5HC）**：修复前候选链**全是 Windows 路径**
-  （`C:\Program Files\…\chrome.exe`、`D:\Program File\Doubao\…`），于是 macOS /
-  Linux 上**必然**报「豆包登录需要本机有 Chromium 内核浏览器…未找到可执行文件」，
-  而用户的 Mac 上 Chrome 装得好好的。登录与签到**两个**函数都已接上跨平台探测
-  （只修一个会变成「扫码能进、签到照样报错」）。
+- **`doubao`（豆包 / 字节）**：粘一次浏览器 Cookie 即可登录；每日签到、额度查询与文本对话
+  全部走纯 HTTP，**不需要本机浏览器**。
+  登录：在已登录 `www.doubao.com` 的浏览器里复制整段 Cookie 头（`Cookie:` 前缀可有可无，
+  整条「复制为 cURL」也认），粘进面板的「粘贴 Cookie」框。`sessionid` 必填；重复粘同一账号
+  会按 sessionid 刷新原卡，不会挤成两张。
+  ⚠️ 扫码登录已移除：passport 在扫码成功那一刻要求页面 SDK 现场算 `sign` / `qs` / `a_bogus`
+  （绑定当次 query），纯 HTTP 复刻不出来。
+  签到：`a_bogus` 由**随包内置**的官方 bdms SDK 在 `node:vm` 沙箱里生成
+  （`src/assets/doubao-bdms-sdk.<hash>.js`，装载前逐字节校验 sha256，运行时零下载），
+  所以容器 / 无桌面服务器也能签到。
+  ⚠️ 签到**不进每日自动链**（`autoCheckinExcluded: true`）：每天一次的动作由用户手点
+  「一键领取积分」，免得自动跑失败时用户只看到"没到账"看不到原因。
+  额度：读 `POST /alice/commerce/sale/subscription/overview/`（面板同款接口），
+  金额是带千分位的字符串（`"4,003"`）、到期时间是毫秒；分类总额只在
+  「总额 − 已用 == 剩余」算术自洽时采用，否则明确标 `totalKnown: false`，不编分母。
   ⚠️ 设备身份由 `accountKey`（= `sessionid`）**确定性派生**出 19 位数字设备号
   ⇒ 多账号各自独立，不共享「每设备每天一次」的签到配额。
-  ⚠️ 自动点击页面上的「登录」按钮优先派发**受信任鼠标事件**
-  （CDP `Input.dispatchMouseEvent` 的 `mousePressed` + `mouseReleased`，
-  Chromium 会自行派生 `pointerdown` / `mousedown` / …）；以下三种情形退回
-  **合成事件序列**（`pointerdown → mousedown → pointerup → mouseup → click`）：
-  按钮拿不到可点盒子（`0×0`）、**被浮层盖住或在视口外**（`document.elementFromPoint`
-  命中的不是按钮 —— 受信任点击打在坐标上，会落到浮层上，按钮一个事件都收不到）、
-  按钮压根找不到。合成事件直接 `dispatchEvent` 到元素本身，能绕过遮挡。
-  ⚠️ 为什么不能只发 `click()`：豆包的处理器挂在 `pointerdown` / `mousedown` 上，
-  而 `HTMLElement.click()` **只发 `click`**，自动点击会静默失效、用户得手动点。
 
 ### 限流中断后自动继续
 

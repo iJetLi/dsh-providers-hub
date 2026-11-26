@@ -6322,8 +6322,8 @@ function registerJetHubEndpoints(
          * | `'qr'`（**缺省**） | 宿主调 passport 接口取码 → 面板内画二维码 → 轮询扫码状态 | **不需要** |
          * | `'cookie'`（2026-11-26） | 用户粘贴浏览器里的 `Cookie` 头 → 解析 `sessionid` → 落库 | **不需要** |
          *
-         * ⚠️ 2026-11-25 起**浏览器腿已删除**：容器 / NAS 上根本没有 Chromium，而这
-         *    正是本项目最常见的部署形态（用户明确要求「NAS 上不装 Chromium」）。
+         * ⚠️ 2026-11-25 起**浏览器腿已删除**：这条实现需要运行环境里有可驱动的
+         *    Chromium，容器 / 无桌面服务器上不可用（不特指某一种部署形态）。
          *
          * ⚠️ 为什么后来加了 `'cookie'`：豆包扫码在**扫码后**强制要求 SDK 现场算的
          *    `sign` / `qs` / `a_bogus`（三者绑定当次请求的 query，纯 HTTP 造不出来），
@@ -6389,8 +6389,19 @@ function registerJetHubEndpoints(
             }
           }
           const credential = { cookie, accountKey: sessionid }
-          // 探活要发一次带 `a_bogus` 的只读请求，而签名器随后的 PR 才引入；
-          // 本 PR 只做归一化与入库，不阻塞用户（探活失败一律按放行处理）。
+          // 探活 = 一次只读的签到状态请求（带 `a_bogus`，由 node:vm 沙箱签），
+          // 只为识别「cookie 已过期」。网络/签名不稳一律放行，不拦用户建号。
+          const { probeDoubaoSession } = await import('./doubao-signin.js')
+          const probe = await probeDoubaoSession(JSON.stringify(credential), { log })
+          if (probe.sessionOk === false) {
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: `豆包认为这份 cookie 已失效（${probe.code ?? '?'} ${probe.message ?? ''}）。请重新登录 www.doubao.com 后再复制一份新的 Cookie。`,
+              },
+            }
+          }
           await pool.addAccount({
             id,
             provider: 'doubao',
@@ -6427,7 +6438,7 @@ function registerJetHubEndpoints(
               },
             }
           }
-          log('[doubao-cookie] 已导入 cookie（sessionid 判重）；本站未做探活，登录态以首次取数为准')
+          log(`[doubao-cookie] 已导入 cookie（sessionid 判重）${probe.sessionOk === true ? '，探活通过' : '，未探活成功（按放行处理）'}`)
           return { ok: true, value: { accountId: id, loginUrl: '' } }
         }
 

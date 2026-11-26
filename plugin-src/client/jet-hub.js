@@ -7199,12 +7199,11 @@ function ProviderPanel({
       if (!mounted.current) return;
       setDoubaoCookie(null);
       await loadAccounts();
-      // ⚠️ 不得写「签到可以正常用了」（2026-11-26 双审 P2）：
-      //    豆包**签到**在 `doubao-signin.ts` 里仍是 CDP 浏览器驱动（spawn Chromium），
-      //    而本 PR 的目标场景恰恰是「没有浏览器的 NAS / 容器」——
-      //    在那里这句文案是**假的**。本 PR 解决的只有「登录」。
-      //    签到脱离浏览器是 #164 的事，合入前不得承诺。
-      setProbeNotice({ tone: 'ok', text: '已导入豆包账号（登录态可用）。余额与对话走纯 HTTP；每日签到在 #164 合入前仍需本机 Chromium。', details: [] });
+      // ⚠️ 文案要与代码一致（2026-11-26 双审 P2 的反面例）：签到腿已经是纯 HTTP
+      //    （bdms SDK 随包内置、沙箱签名），所以这里可以如实承诺「全部走纯 HTTP」。
+      //    反过来，如果哪天签到腿退回浏览器，这句必须同步改回去 —— 用户看到
+      //    「签到没问题」却在无桌面环境里永久失败，比不写更糟。
+      setProbeNotice({ tone: 'ok', text: '已用 cookie 导入豆包账号；余额、对话与每日签到全部走纯 HTTP。', details: [] });
     } catch (caught) {
       if (!mounted.current) return;
       const message = caught && caught.message ? caught.message : 'cookie 导入失败';

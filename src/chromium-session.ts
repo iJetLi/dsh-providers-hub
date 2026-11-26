@@ -823,10 +823,13 @@ export function browserCandidates(
 /**
  * 浏览器探测的**入参**（与 {@link browserCandidates} 逐字段同义）。
  *
- * ⚠️ 抽成具名类型只为一件事：让「兜底到跨平台探测」的那一层（豆包的
- * `doubaoLoginBrowserExecutable` / `doubaoSigninBrowserExecutable`）能**原样透传**
- * 这份入参，而不是各自抄一遍形状 —— 抄一份就会漂移出第二个口径
- * （本仓「一文件两套同义判据」的教训，见 `docs/agent-notes/misc.md`）。
+ * ⚠️ 抽成具名类型只为一件事：让「兜底到跨平台探测」的那几家（百智云 / 超级麦吉 /
+ * Marvis / MonkeyCode / zcode）能**原样透传**这份入参，而不是各自抄一遍形状 ——
+ * 抄一份就会漂移出第二个口径（本仓「一文件两套同义判据」的教训，见
+ * `docs/agent-notes/misc.md`）。
+ *
+ * ⚠️ 豆包已于 2026-11-25 **整条腿撤出**（登录走粘 cookie、签到走纯 HTTP，见
+ * `doubao-cookie.ts` / `doubao-signin.ts`），不再是本文件的调用方。
  */
 export interface BrowserLookup {
   platform?: NodeJS.Platform

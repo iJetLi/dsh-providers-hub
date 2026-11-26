@@ -59,6 +59,9 @@ scripts/*
 #    不入库 ⇒ 别人 clone 后 `npm run build:all` 会因找不到该脚本直接失败
 #    （`scripts/*` 只挡新增文件，已入库的不受影响，所以必须显式加进来）。
 !scripts/sync-bootstrap-lib.mjs
+# 豆包 bdms SDK 的**升级**脚本：运行时不再下载（见 `src/doubao-bdms.ts`），所以「上游换版」
+# 唯一入口就是它 —— 不入库 ⇒ 下一个人只能手抓，钉扎的 sha256 就成了没人敢动的常量。
+!scripts/fetch-doubao-bdms-sdk.mjs
 !scripts/templates/
 !scripts/templates/install-bootstrap.ps1
 .minimax-forensics/
