@@ -13,6 +13,9 @@ const packageRoot = resolve(scriptDir, '..')
 /** 源 → 目标（相对 packageRoot）。 */
 const ASSETS = [
   ['src/qoder-auth-wasm.wasm', 'lib/qoder-auth-wasm.wasm'],
+  // 豆包 bdms SDK（a_bogus 签名用）：**随包内置**，运行时零下载。
+  // 见 src/doubao-bdms.ts 的安全口径与 sha256 钉扎。
+  ['src/assets/doubao-bdms-sdk.173db50026.js', 'lib/assets/doubao-bdms-sdk.173db50026.js'],
 ]
 
 for (const [from, to] of ASSETS) {

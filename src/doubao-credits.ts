@@ -116,20 +116,21 @@ export async function fetchDoubaoBalanceDetailed(
 /**
  * 执行豆包每日签到领取。
  *
- * 真正的实现在 `src/doubao-signin.ts` 的 `claimDoubaoDailyViaHttp`：
- * `a_bogus` 由 `node:vm` 沙箱跑官方 `bdms` SDK 生成，然后直接 POST
- * `/alice/ug/campaign/landing/checkin`（**不起浏览器**）。本函数是它的薄壳：
- * 把凭据原文转过去，并只把 `ClaimOutcome` 往上传（`signerError` 只进日志）。
+ * 真正的实现是 `src/doubao-signin.ts` 的 `claimDoubaoDaily`：用 `doubao-bdms.ts`
+ * 在 Node 沙箱里产 `a_bogus` 后直连签到接口（**全程无浏览器、无兜底**）。
+ * 本函数是它的薄壳：把凭据原文与可选注入点转过去，**`ClaimOutcome` 原样上抛**
+ * （`failed` 不许被吞成 `inactive`，否则面板会把"签名坏了"显示成"今天没活动"）。
  *
  * ⚠️ 凭据必须带 `cookie`（登录会话）；没有它 ⇒ `inactive`（不发请求）。
+ * ⚠️ `options.sign` 只给单测注入用（生产路径不传 ⇒ 走沙箱签名）。
  */
 export async function claimDoubaoDailyCheckin(
   credential: DoubaoCredential,
+  options: { sign?: () => Promise<string>, log?: (message: string) => void } = {},
 ): Promise<ClaimOutcome> {
   if (typeof credential?.cookie !== 'string' || credential.cookie.length === 0) {
     return { kind: 'inactive', message: '没有可用的豆包登录会话（请先在账号卡上完成登录）' }
   }
-  const { claimDoubaoDailyViaHttp } = await import('./doubao-signin.js')
-  const { outcome } = await claimDoubaoDailyViaHttp(JSON.stringify(credential))
-  return outcome
+  const { claimDoubaoDaily } = await import('./doubao-signin.js')
+  return claimDoubaoDaily(JSON.stringify(credential), options)
 }

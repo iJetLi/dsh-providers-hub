@@ -1163,6 +1163,11 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //   余额那一条走 `src/doubao-credits.ts` 的 `fetchDoubaoBalanceDetailed`，
     //   本 PR 未改动它（读数口径的修正见后续 PR）。
     credits: { balance: true, dailyCheckin: true },
+    // ⚠️ 刻意**不**写 `autoCheckinExcluded`（2026-11-26 复核）：零浏览器之后签到就是
+    //    一条 POST，进不进自动链应由**面板那格「豆包自动签到」**（`doubaoCheckinEnabled()`）
+    //    回答 —— 省略 = `false` ⇒ 默认参与、开关默认勾上，与其余渠道一致；
+    //    用户想要「只在手点时签」就把那格开关关掉（显式 doc 字段优先于默认）。
+    //    别在这里补 `true`：那会把面板开关的默认值改成关，等于替用户做了决定。
     // ⚠️ `rateLimit: false` 必须显式写：本渠道当前没有适配器、不写
     //    `modelRateLimits`、也不在 `probeById` 里 ⇒ 「重测 / 重置」点下去恒惰性
     //   （与 magicrew / accio 旧格同因）。将来接推理链路时再翻正。

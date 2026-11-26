@@ -5,8 +5,8 @@
  *
  * 老实现在临时 Chromium 里注入该账号的 cookie、由页面自己的 `window.bdms.frontierSign`
  * 产 `a_bogus`，再带 `credentials:'include'` POST。这条腿要求镜像里有 Chromium
- * （300MB + Xvfb + VNC），而本项目最常见的部署形态恰恰是 NAS / 精简容器 ——
- * **用户明确要求「NAS 上不装 Chromium」**，故浏览器腿已整段删除。
+ * （300MB + Xvfb + VNC），而 hub 在容器 / 无桌面服务器上的部署形态里并没有浏览器
+ * ⇒ 浏览器腿已整段删除，改为「沙箱签名 + 直连」。
  *
  * 页面腿做的事只有三件，HTTP 腿逐一等价替换：
  *
@@ -186,8 +186,8 @@ export async function claimDoubaoDailyViaHttp(
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     /**
-     * ⚠️ 文案要点：**不要**再提「装浏览器」—— 这条腿是唯一的签到路径，用户
-     *    在 NAS 上根本装不了 Chromium（2026-11-25 用户明确要求）。
+     * ⚠️ 文案要点：**不要**再提「装浏览器」—— 这条腿是唯一的签到路径，运行环境里
+     *    本来就没有 Chromium（也不该为一个签到装它）。
      *    说清楚「签名环境出了问题 + 原因」，剩下的交给日志。
      */
     return {
