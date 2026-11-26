@@ -2698,7 +2698,23 @@ export function apply(ctx: Context): void {
       const assignmentParent = pool.subagentAssignmentOf?.(providerId, sessionId)?.parentSessionId
       const mainSessionId = assignmentParent ?? resolveSubagentParent(sessionId)
       if (mainSessionId === undefined || mainSessionId.length === 0) return undefined
-      return pool.preferredRotationFor?.(providerId, mainSessionId)
+      /**
+       * ★★★ **必须先看「实际在用」，再看「下拉框」**（2026-11-26 第四轮审计 P0-A）。
+       *
+       * 这与 `credential-resolver.ts` 的判据**必须同源**（那里是
+       * `activeAccountOf(父会话) ?? preferredRotationFor(父会话)`，见 `:858` / `:1041`）。
+       *
+       * 原来这里只有 `preferredRotationFor` ⇒ **同一语义两套取值**（本仓红线），
+       * 而报障的那一家（codearts）正好落在错的一边：
+       *
+       * - 主代理下拉框 `acc1`、**实际在用 `acc3`**、子代理 `sequence` slot=0；
+       * - 只读下拉框 ⇒ `(0+1)%4 = 1` ⇒ `acc2`（**错**，实测就是这个值）；
+       * - 读实际在用 ⇒ `(2+1)%4 = 3` ⇒ `acc4`（**对**）。
+       *
+       * ⚠️ 顺序不能反：`activeAccountOf` 拿不到（老会话 / 刚启动）时才回落到下拉框。
+       */
+      return pool.activeAccountOf?.(providerId, mainSessionId)
+        ?? pool.preferredRotationFor?.(providerId, mainSessionId)
     } catch {
       /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
       return undefined
@@ -6109,10 +6125,71 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
    *       故直接读 `preferredRotationFor(sessionId)` 就是「拉起时定死的那个号」。
    */
   const resolveOfficeAceCredential = async (sessionId?: string) => {
-    /** ⚠️ `undefined` ⇒ 与改动前逐字节相同（不传 `rotationStartId`）。 */
-    const rotationStartId = sessionId === undefined || sessionId.length === 0
+    /**
+     * ★★★ **officeace 未锁定（= 默认配置）腿的子代理接线**（2026-11-26 第四轮审计 P0-B）。
+     *
+     * ## 缺陷
+     *
+     * 第四版之前这条腿只做两件事：读 `preferredRotationFor` + 写 `setActiveAccount`。
+     * **它从来没有调过 `decideSubagentStart`** ⇒ 用户给 officeace 配的
+     * `fixed` / `sequence` / `reverse` / 手选起点**全部静默无效**（实测 `seq0`、`fixed3`
+     * 都落 `acc1`），而 officeace **正是原报障两家之一**。
+     *
+     * 作者在注释里把它登记为「已知的首次请求缺口，等 `credential-resolver` 那条腿补上」，
+     * 但 **officeace 压根不走 `createCredentialResolver`**（自建选号）⇒ 那不是「首次缺口」，
+     * 是**永久缺口**。
+     *
+     * ## 修法
+     *
+     * 照抄 codearts 腿（`index.ts:1548-1575`）的形态，两处都要：
+     * 1. **先登记分配**（`registerSubagentStartIfNeeded`）—— 否则分配表永远空
+     *    ⇒ `decideSubagentStart` 拿不到 `slot` ⇒ 策略无从谈起；
+     * 2. **再按策略算起点**（`decideSubagentStart`），
+     *    `mainSessionStartId` 取 `activeAccountOf(父) ?? preferredRotationFor(父)`（与 resolver 同源）。
+     *
+     * ⚠️ `sessionId === undefined`（目录 / 网关流量）时**一个分支都不进** ⇒ 与改动前逐字节相同。
+     */
+    let rotationStartId = sessionId === undefined || sessionId.length === 0
       ? undefined
-      : pool.preferredRotationFor(OFFICEACE.id, sessionId)
+      : pool.activeAccountOf?.(OFFICEACE.id, sessionId)
+        ?? pool.preferredRotationFor(OFFICEACE.id, sessionId)
+    if (sessionId !== undefined && sessionId.length > 0) {
+      registerSubagentStartIfNeeded({
+        pool,
+        providerId: OFFICEACE.id,
+        sessionId,
+        // ⚠️ 分配表读不到时用 `resolveSubagentParent` 兜底（与 codearts 腿同策）——
+        //    否则「分配表只能由登记写入、登记又要求 parent 非空」会鸡生蛋。
+        parentSessionId: pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId)?.parentSessionId
+          ?? resolveSubagentParent(sessionId),
+        setting: pool.subagentRotationFor?.(OFFICEACE.id),
+      })
+      const officeAceIsSubagent = pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId) !== undefined
+      if (officeAceIsSubagent) {
+        const mainStartId = (() => {
+          const assignmentParent = pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId)?.parentSessionId
+          const mainSessionId = assignmentParent ?? resolveSubagentParent(sessionId)
+          if (mainSessionId === undefined || mainSessionId.length === 0) return undefined
+          return pool.activeAccountOf?.(OFFICEACE.id, mainSessionId)
+            ?? pool.preferredRotationFor(OFFICEACE.id, mainSessionId)
+        })()
+        const subagentStart = decideSubagentStart({
+          providerId: OFFICEACE.id,
+          sessionId,
+          candidateIds: pool.listAccountsByProvider(OFFICEACE.id)
+            .filter((account) => account.enabled)
+            .map((account) => account.id),
+          // ⚠️ officeace 无余额分档 ⇒ 「永久积分」概念不存在，恒 true（与 codearts 同）。
+          allowPermanent: true,
+          pool,
+          ...(mainStartId === undefined ? {} : { mainSessionStartId: mainStartId }),
+          ...(rotationStartId === undefined ? {} : { baseRotationStartId: rotationStartId }),
+        })
+        if (subagentStart.startId !== undefined) {
+          rotationStartId = subagentStart.startId
+        }
+      }
+    }
     const available = await pool.getAvailableAccount(
       OFFICEACE.id,
       '',
@@ -6155,6 +6232,12 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     //     这里只负责装配：**未锁定态逐字保留原路径**（即上面那份
     //     `resolveOfficeAceCredential`），锁定态**绝不回落池**。
     credentialProvider: createOfficeAceCredentialProvider({
+      // ★★★ 两个回调（2026-11-26 第四轮审计 P0-C / P1-D）：
+      //   - `resolveSubagentParent`：锁定态登记时兜底父会话 id，否则鸡生蛋 ⇒ 整条腿死代码；
+      //   - `mainStartIdOf`：锁定态子代理参照「主代理实际在用」而不是池首。
+      // ⚠️ 都是可选：不传 ⇒ 行为与改动前逐字节相同（单测替身 / 旧嵌入方）。
+      resolveSubagentParent: (sessionId: string) => resolveSubagentParent(sessionId),
+      mainStartIdOf: (sessionId: string) => subagentMainStartIdOf(OFFICEACE.id, sessionId),
       permanentLocked: () => pool.permanentLocked(OFFICEACE.id),
       /**
        * ★ **per-provider 窗口（2026-11-19）**：锁定态的「能不能烧」判据用

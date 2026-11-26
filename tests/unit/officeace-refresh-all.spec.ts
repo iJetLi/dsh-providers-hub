@@ -685,14 +685,29 @@ describe('IKLPTZ 防复发：结构与类型的判据', () => {
     ).toHaveLength(1)
     expect(traversals[0], '唯一那处批量遍历必须在 officeace-auth.ts 里').toMatch(/^officeace-auth\.ts:/)
 
-    // ② 单账号取用：**恰好两处**，都在 index.ts（credentialProvider + refresh 兜底）。
+    /**
+     * ② officeace 账号调用点：**恰好 3 处**，都在 `index.ts`。
+     *
+     * | # | 位置 | 性质 |
+     * |---|---|---|
+     * | 1 | `credentialProvider` | 取凭据 |
+     * | 2 | `refresh` 兜底 | 取凭据 |
+     * | 3 | `resolveOfficeAceCredential` 的子代理接线（2026-11-26 第四轮审计 P0-B）| **枚举候选 id** 给 `decideSubagentStart` |
+     *
+     * ⚠️ 第 3 处**不是**「又一份遍历账号取凭据」—— 它是 `decideSubagentStart` 必需的
+     * `candidateIds`，与 codearts 腿（`index.ts:1555` 同一形态）一致。
+     * 那个函数只读 `a.enabled` / `a.id`，**不取凭据、不发请求**。
+     *
+     * ⇒ 本守卫的语义应表述为「**取凭据**的调用点 2 处 + **枚举候选**的 1 处」，
+     *   而不是「总共 2 处」。再新增仍须停下来确认。
+     */
     const singleLookups = sites.filter((s) => s.includes('arg=OFFICEACE.id'))
     expect(
       singleLookups,
-      '★ 取**单个** officeace 账号的调用点必须恰好 2 处（index.ts 的 credentialProvider 与 refresh 兜底）。'
-      + '新增 ⇒ 停下来确认它是不是又一份遍历；减少 ⇒ 确认没把按需续期打挂。'
+      '★ officeace 账号调用点必须恰好 3 处（2 处取凭据 + 1 处枚举候选给 decideSubagentStart）。'
+      + '再新增 ⇒ 停下来确认它是不是又一份遍历；减少 ⇒ 确认没把按需续期/子代理接线打挂。'
       + `（全集：${JSON.stringify(sites)}）`,
-    ).toHaveLength(2)
+    ).toHaveLength(3)
     for (const site of singleLookups) {
       expect(site, '单账号取用应当都在 index.ts').toMatch(/^index\.ts:/)
     }

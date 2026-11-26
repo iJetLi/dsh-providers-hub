@@ -147,6 +147,31 @@ export interface OfficeAceLockDeps {
   readonly resolveUnlocked: (sessionId?: string) => Promise<OfficeAceCredential | undefined>
   /** 按 ref 读凭据（生产 = `officeaceAuth.readCredential(ref, ctx.credentials)`）。 */
   readonly readCredential: (ref: string) => Promise<OfficeAceCredential | undefined>
+  /**
+   * ★★★ **主代理起点账号**（2026-11-26 第四轮审计 P1-D）。
+   *
+   * 锁定态的 `decideSubagentStart` 之前**没传 `mainSessionStartId`** ⇒
+   * `effectiveMainStart = sameTierIds[0]`（**池首**）⇒ 用户看到「子代理参照池首」，
+   * 而不是「主代理实际在用的那个号」。
+   *
+   * 生产实现传 `index.ts` 的 `subagentMainStartIdOf(OFFICEACE.id, sessionId)`
+   * （它内部自己解析父会话，再取 `activeAccountOf ?? preferredRotationFor`）。
+   * ⚠️ 不传 ⇒ 行为与改动前逐字节相同。
+   */
+  readonly mainStartIdOf?: (sessionId: string) => string | undefined
+  /**
+   * ★★★ **父会话 id 解析器**（2026-11-26 第四轮审计 P0-C）。
+   *
+   * 锁定态的 `registerSubagentStartIfNeeded` 之前**只从分配表取 `parentSessionId`**，
+   * 而分配表又只能由这次登记写入 ⇒ **鸡生蛋**：`isSubagentHere` 恒 `false`
+   * ⇒ `decideSubagentStart` 在锁定态是**死代码**（实测调用一次后分配表仍 `undefined`）。
+   *
+   * ⚠️ 作者在旧注释里把它登记为「已知的首次请求缺口，等 `credential-resolver` 那条腿补上」
+   * —— 但 officeace **不走那条腿** ⇒ 那不是「首次缺口」，是**永久缺口**。
+   *
+   * 生产实现传 `index.ts` 的 `resolveSubagentParent`（同文件对 codearts 腿已用它兜底）。
+   */
+  readonly resolveSubagentParent?: (sessionId: string) => string | undefined
   /** 兼容路径：池里没有任何账号时读本机那份单凭据。 */
   readonly readStoredCredential: () => OfficeAceCredential | undefined
   /**
@@ -493,19 +518,29 @@ export function createOfficeAceCredentialProvider(
      * ⚠️ 判据走共享的 `registerSubagentStartIfNeeded` —— 与
      *    `credential-resolver` / `codearts` **同一份实现**。
      *
-     * ⚠️ **父会话 id 的来源**：本模块拿不到 `index.ts` 的 `resolveSubagentParent`
-     *    （那是该文件的局部闭包）⇒ 只从**已落盘的分配记录**取（本家首次登记时
-     *    记录还不存在 ⇒ 这一次不登记，等 `credential-resolver` 那条腿或
-     *    后续请求补上）。
-     *    ⚠️ 这是**已知的首次请求缺口**，与 buddy 系「首轮用主代理起点」同型，
-     *       已如实登记在本注释里。
+     * ✅ **父会话 id 的来源（2026-11-26 第四轮审计 P0-C 已修）**：
+     *
+     * 本模块确实拿不到 `index.ts` 的 `resolveSubagentParent`（那是该文件的局部闭包），
+     * 所以改为**从 `deps` 注入**（{@link OfficeAceLockDeps.resolveSubagentParent}，可选）。
+     *
+     * ⚠️⚠️ 这段注释此前写的是「只从已落盘的分配记录取 ⇒ 首次那一次不登记，
+     *    等 `credential-resolver` 补上，属**已知的首次请求缺口**」—— **那是错的**：
+     *    officeace **不走 `createCredentialResolver`**（自建选号）⇒ 没有「等它补上」的那一天。
+     *    实测结果：分配表**永远为空** ⇒ `isSubagentHere` 恒 `false` ⇒
+     *    `decideSubagentStart` **整条腿是死代码**（不是「首次缺口」，是**永久缺口**）。
+     *
+     * 现在：`分配表 ?? deps.resolveSubagentParent?.(sessionId)` —— 首次请求就能登记。
+     * 生产由 `index.ts` 传入 `resolveSubagentParent`。
      */
     try {
       registerSubagentStartIfNeeded({
         pool: pool as never,
         providerId: OFFICEACE.id,
         sessionId,
-        parentSessionId: pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId)?.parentSessionId,
+        // ⚠️ 分配表读不到时用注入的解析器兜底 —— 否则「登记要求 parent 非空、
+        //    而 parent 只能由登记写入」就是鸡生蛋（P0-C）。
+        parentSessionId: pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId)?.parentSessionId
+          ?? (sessionId === undefined ? undefined : deps.resolveSubagentParent?.(sessionId)),
         setting: pool.subagentRotationFor?.(OFFICEACE.id),
       })
     } catch { /* 登记失败不影响选号 */ }
@@ -534,10 +569,13 @@ export function createOfficeAceCredentialProvider(
       && pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId) !== undefined
     if (!isSubagentHere) return accounts
     try {
+      // ⚠️ 必须传 `mainSessionStartId`，否则 `effectiveMainStart` 退化成**池首**（P1-D）。
+      const mainStartId = deps.mainStartIdOf?.(sessionId)
       const decision = decideSubagentStart({
         providerId: OFFICEACE.id,
         sessionId,
         candidateIds: accounts.map((a) => a.id),
+        ...(mainStartId === undefined ? {} : { mainSessionStartId: mainStartId }),
         /**
          * ⚠️ 本家无「积分为 0 就不可用」这道门（额度判据在 `classify` 里），
          *    故恒 `true` —— 「允许烧永久积分」对它是无意义的概念。
