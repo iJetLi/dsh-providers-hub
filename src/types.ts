@@ -369,7 +369,23 @@ export interface RpcCreateAccountRequest {
    * ⚠️ 来自客户端自报的 RPC 载荷（无 schema 校验）⇒ 读取侧按字面量白名单判，
    * 未登记的值一律当作缺省路径（**不报错、不静默改变语义**）。
    */
-  mode?: 'local-browser' | 'browser' | 'magpie-import'
+  /**
+   * `'cookie'`（**仅豆包**，2026-11-26）：用户从自己浏览器登录豆包后把
+   * `Cookie` 请求头整段粘进来，宿主解析 `sessionid` 落库。
+   *
+   * ⚠️ 为什么要有这条路：豆包扫码在「扫码后」强制要 SDK 现场算的
+   * `sign/qs/a_bogus`（绑定当次 query，纯 HTTP 造不出来），扫码登录在
+   * 无浏览器环境下必然卡在 `2156 服务繁忙`。粘 cookie 不经过 passport 的
+   * 强校验，是等价且稳定的入口。
+   */
+  mode?: 'local-browser' | 'browser' | 'magpie-import' | 'cookie'
+  /**
+   * 粘贴的豆包 cookie 串（**仅 `mode: 'cookie'`**）。
+   *
+   * 允许整段 `Cookie: a=1; b=2` 头，也允许只给 `sessionid=…`；解析时统一
+   * 归一化。凭据里只存这份 cookie 与由 `sessionid` 派生的设备身份。
+   */
+  cookie?: string
   /**
    * 手机号（**仅 Loomy 需要**）。
    *

@@ -86,6 +86,8 @@ import {
   subscribeLoginAutoOpen,
 } from './login-preferences-store.js';
 import { MarvisLoginModal } from './marvis-login-modal.js';
+// 豆包登录弹窗（本 fork，2026-11-26）：只支持粘贴浏览器 Cookie 导入，不再扫码。
+import { DoubaoCookieModal } from './doubao-cookie-modal.js';
 import {
   copyToClipboard,
   formatModelIdList,
@@ -4900,6 +4902,15 @@ function ProviderPanel({
    *   直接发起登录（见按钮的 `provider === 'zcode'` 分流与弹窗条件的第二道门）。
    */
   const [pendingLogin, setPendingLogin] = React.useState(undefined);
+  /**
+   * 豆包登录弹窗的状态（本 fork，2026-11-26）：`null` 或无：
+   * `{ importing, importError }`（只有 cookie 导入两件事，**没有**二维码了）。
+   *
+   * ⚠️ **独立于 `credentialModal`**：那套状态是「登录方式选择 / 粘贴凭据」的，
+   *    豆包这条腿只有一条路径、也没有方式可选 —— 硬塞进去会让 `credentialModal`
+   *    的语法（`provider` 字段 + 逐分支配对）多出第三种语义。
+   */
+  const [doubaoCookie, setDoubaoCookie] = React.useState(null);
   // 正在进行的限流操作：null | 'one' | 'all'。用于禁用按钮并显示进度。
   const [probeBusy, setProbeBusy] = React.useState(null);
   // 上一次重测/重置的结果文案（成功或失败）。
@@ -6700,35 +6711,22 @@ function ProviderPanel({
       setCredentialModal({ provider, error: '' });
       return;
     }
-    // ⚠️ 豆包（Doubao，2026-11-03）：**扫码登录**——宿主起一个可见浏览器窗口，
-    //    用户用手机豆包 App 扫码；插件轮询 `sessionid` 落库后走 `login.poll`。
-    //    没有 OAuth 授权页、没有手机号密码 ⇒ 与 magicrew 的 `browser` 模式同型，
-    //    但只有一条路，直接发起（不再弹中间选择窗）。
+    /**
+     * ⚠️⚠️ **豆包（Doubao）只支持粘贴 Cookie 导入 —— 不发 RPC，只开弹窗**（2026-11-26）。
+     *
+     * 扫码登录（宿主取码 + 面板轮询）已**整条删除**：豆包 passport 在扫码之后
+     * 强制要求账号 SDK 现场算的 `sign` / `qs` / `a_bogus`（三者强绑定当次 query），
+     * 纯 HTTP 造不出来 ⇒ 恒 `error_code=2156 服务繁忙`，四种请求形态逐一实测全挂。
+     *
+     * ⇒ 把「授权」换成「用户在自己浏览器里登录一次，复制 Cookie 头贴进来」。
+     *    这条路不经过扫码换取环节，也不要求机器上有浏览器。
+     *
+     * ⚠️ 这一格**刻意不调 `account.create`**：真正的建号在 `importDoubaoCookie`
+     *    里发（`mode: 'cookie'`）。用户如果只是点了「+ 新建账号」看一眼就关掉，
+     *    池里不会多出一条永远登录不上的幽灵占位卡。
+     */
     if (provider === 'doubao') {
-      setCreating(true);
-      try {
-        const created = await rpcCall('account.create', { provider: 'doubao', mode: 'browser' });
-        const accountId = created && created.accountId ? created.accountId : '';
-        if (!accountId) {
-          setProbeNotice({ tone: 'err', text: '宿主未返回账号 id，请重试。', details: [] });
-          return;
-        }
-        setProbeNotice({
-          tone: 'ok',
-          text: '浏览器窗口已打开，请用手机豆包 App 扫码登录（完成后自动读取登录态）。',
-          details: [],
-        });
-        startLoginPoll({ accountId, provider: 'doubao' });
-      } catch (caught) {
-        setProbeNotice({
-          tone: 'err',
-          text: caught && caught.message ? caught.message : '豆包登录启动失败',
-          details: [],
-        });
-      } finally {
-        // ⚠️ 闸门无条件释放（`creating` 在登录轮询期间就该恢复 —— 等待由 login.poll 承担）。
-        if (mounted.current) setCreating(false);
-      }
+      setDoubaoCookie({ importing: false, importError: '' });
       return;
     }
 
@@ -7087,7 +7085,15 @@ function ProviderPanel({
       manualSubmitInFlightRef.current = false;
     }
   };
-  const startLoginPoll = ({ accountId, provider, loginWindow = null }) => {
+  /**
+   * @param {object} args
+   * @param {string} args.accountId
+   * @param {string} args.provider
+   * @param {Window|null} [args.loginWindow] 外部登录窗口（终态时关掉它）
+   * @param {(() => void)|null} [args.onSettled] 终态回调（**成功 / 失败 / 超时三条
+   *   出口都会调**）。豆包扫码弹窗靠它收口；其余 provider 不传，行为逐字不变。
+   */
+  const startLoginPoll = ({ accountId, provider, loginWindow = null, onSettled = null }) => {
     // ⚠️ 超时**不用**另起的 `setTimeout`，而是记 deadline 在轮询里判：这样全场只有
     //   一个句柄（pollRef），卸载清理与超时都不会漏掉第二个定时器。
     const deadline = Date.now() + 300000;
@@ -7097,8 +7103,17 @@ function ProviderPanel({
     //   超时时一并展示。
     let lastPollError = null;
     let pollErrorCount = 0;
+    /**
+     * ⚠️ **单飞闸门**（2026-11-26 连接池事故）：下面 `setInterval` 每秒一次、老写法
+     * 没有 in-flight 判断 ⇒ 只要宿主某一次 poll 慢（或被 `await` 挂住），请求就会
+     * 叠加，几拍之后把浏览器同源连接池（~6 条）吃干净，随后换码 / 模型列表全部
+     * 排队到超时，界面表现为「换码中…永不结束 + 查询失败」。
+     * ⇒ 上一拍没回来就不再发新的一拍。
+     */
+    let pollInFlight = false;
     pollRef.current = setInterval(async () => {
       if (!mounted.current) { stopPoll(); return; }
+      if (pollInFlight) return;
       if (Date.now() > deadline) {
         // ⚠️ 超时**必须给用户一句话**（Gitee issue IKLI7J 期望 3）。
         //   原先这里只是关窗 + 停表：用户看到「转圈 5 分钟后悄悄恢复」，
@@ -7119,8 +7134,10 @@ function ProviderPanel({
             : ''));
         setPhase('error');
         stopPoll();
+        if (onSettled) onSettled();
         return;
       }
+      pollInFlight = true;
       try {
         const pollRes = await rpcCall('login.poll', { accountId, provider });
         if (!mounted.current) return;
@@ -7137,6 +7154,7 @@ function ProviderPanel({
           setError(pollRes.error || '登录失败（宿主未给出原因），请重新点击「+ 新建账号」。');
           setPhase('error');
           stopPoll();
+          if (onSettled) onSettled();
           return;
         }
         if (!pollRes?.done) return;
@@ -7146,6 +7164,7 @@ function ProviderPanel({
         setManualCallback(null);
         await loadAccounts();
         stopPoll();
+        if (onSettled) onSettled();
       } catch (caught) {
         // ⚠️ **继续轮询**（宿主可能只是瞬时不可用），但必须留下痕迹：
         //   原先这里是裸 `catch {}`，于是 `login.poll` 自身报错（`ok:false`，
@@ -7153,9 +7172,41 @@ function ProviderPanel({
         //   5 分钟后那句泛化的「登录超时」（独立审计攻击 5d）。
         pollErrorCount += 1;
         lastPollError = caught && caught.message ? caught.message : String(caught);
+      } finally {
+        pollInFlight = false;
       }
     }, 1000);
   };
+
+  /**
+   * 豆包：粘贴 cookie 导入账号（2026-11-26）。
+   *
+   * 为什么只有这条路：扫码在**扫完之后**被 passport 强制要求 SDK 现场算的
+   * `sign/qs/a_bogus`（绑定当次 query），纯 HTTP 造不出来 ⇒ 无浏览器环境永远
+   * 卡在 `2156 服务繁忙`。粘 cookie 不经过那一道，是同一份登录态的另一入口。
+   *
+   * ⚠️ 成功后**必须把弹窗整块收掉**（`setDoubaoCookie(null)`）：宿主侧已按
+   * `sessionid` 判重并落库，弹窗留着只会让用户以为还没完成。
+   * ⚠️ 失败**保留输入框内容**（只写 `importError`）：cookie 串很长，清空了
+   * 用户就得重新去 Network 复制一遍。
+   */
+  const importDoubaoCookie = async (cookieText) => {
+    const text = String(cookieText == null ? '' : cookieText).trim();
+    if (text === '') return;
+    setDoubaoCookie((prev) => (prev ? { ...prev, importing: true, importError: '' } : prev));
+    try {
+      await rpcCall('account.create', { provider: 'doubao', mode: 'cookie', cookie: text });
+      if (!mounted.current) return;
+      setDoubaoCookie(null);
+      await loadAccounts();
+      setProbeNotice({ tone: 'ok', text: '已用 cookie 导入豆包账号，签到可以正常用了。', details: [] });
+    } catch (caught) {
+      if (!mounted.current) return;
+      const message = caught && caught.message ? caught.message : 'cookie 导入失败';
+      setDoubaoCookie((prev) => (prev ? { ...prev, importing: false, importError: message } : prev));
+    }
+  };
+
 
   const toggleAccount = async (accountId, enabled) => {
     try {
@@ -8871,6 +8922,16 @@ function ProviderPanel({
     // 理由见 `credentialModal` 的声明处。
     // ⚠️ 同样必须 `React.createElement` 而非直接调用组件函数：直接调用会把
     // 组件的 hook 算进 ProviderPanel（该文件头记录过 hook #310 事故，整页白屏）。
+    // ⚠️ 豆包登录弹窗（本 fork，2026-11-26）：**独立 state**（`doubaoCookie`），
+    //    不复用 `credentialModal` —— 那条状态机是"选登录方式 / 粘贴凭据"的语法，
+    //    而豆包只有「贴 cookie 导入」一条路、没有可选项。
+    //    组件同样必须走 `React.createElement`（直接调用会把 hook 算进 ProviderPanel）。
+    doubaoCookie ? React.createElement(DoubaoCookieModal, {
+      importing: !!doubaoCookie.importing,
+      importError: doubaoCookie.importError || '',
+      onImportCookie: (text) => void importDoubaoCookie(text),
+      onClose: () => setDoubaoCookie(null),
+    }) : null,
     credentialModal && credentialModal.provider === 'baizhi' ? React.createElement(BaizhiLoginModal, {
       error: credentialModal.error || '',
       busy: creating,

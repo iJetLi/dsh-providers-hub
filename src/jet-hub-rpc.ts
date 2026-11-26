@@ -29,6 +29,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { dedupeMinimaxAccount } from './minimax-dedup.js'
+// 豆包 cookie 导入的文本归一化（2026-11-26，见 src/doubao-cookie.ts 模块头）。
+import { normalizePastedCookie } from './doubao-cookie.js'
 import { codeArtsBenefitModelIds } from './models.js'
 import { openIncognitoWindow, type ManualCallbackSubmitResult } from './login.js'
 import { type ManualTraeCallbackSubmitResult } from './trae-oauth.js'
@@ -3978,17 +3980,6 @@ function registerJetHubEndpoints(
   const magicrewProfileTried = new Set<string>()
 
   /**
-   * ⚠️⚠️ **豆包（Doubao）扫码登录的在途任务**（与 `magicrewBrowserLoginInFlight`
-   * 同型，2026-11-03 接入）：`account.create`（`mode: 'browser'`）起一轮
-   * 「开可见浏览器 → 等用户扫码 → `Storage.getCookies` 读 cookie+设备身份 → 落库」，
-   * `login.poll` 单飞 `await` 它（客户端 1 秒一拍、无闸门，两拍重叠会开两个窗口）。
-   */
-  const doubaoLoginInFlight = new Map<
-    string,
-    Promise<{ done: boolean, success?: boolean, error?: string }>
-  >()
-
-  /**
    * 网页版登录占位条目的**最短保留时长**（收口阈值）。
    *
    * 客户端自己的轮询上限是 5 分钟、宿主侧等待上限 4 分钟（
@@ -6324,24 +6315,82 @@ function registerJetHubEndpoints(
         }
 
         /**
-         * ⚠️⚠️ **豆包（Doubao）扫码登录**（`mode: 'browser'`，2026-11-03 接入）。
+         * ## 豆包（Doubao）登录：**无浏览器两条腿**（2026-11-25 起）
          *
-         * 与 magicrew 的 `mode: 'browser'` 同型三段式：
-         * ① 占位条目（先登记再开窗，`login.poll` 靠它知道「id 存在」）；
-         * ② 后台任务：`DoubaoLoginSession.open()`（可见窗口 + 一次性 profile）→
-         *    `waitForCredential()`（轮询 `sessionid`，最长 4 分钟）→ 落库 → 回填；
-         * ③ 立刻返回 `{ accountId, loginUrl: '' }`。
+         * | mode | 形态 | 需要浏览器 |
+         * |---|---|---|
+         * | `'qr'`（**缺省**） | 宿主调 passport 接口取码 → 面板内画二维码 → 轮询扫码状态 | **不需要** |
+         * | `'cookie'`（2026-11-26） | 用户粘贴浏览器里的 `Cookie` 头 → 解析 `sessionid` → 落库 | **不需要** |
          *
-         * ⚠️ **账号隔离**：每次登录一个全新临时 profile ⇒ 该账号的 cookie 与
-         *    device_id/web_id 都是**本账号自己的**（一次性 profile 天然产出独立
-         *    设备身份，实测见 `doubao-login.ts` 的端到端验证）。
+         * ⚠️ 2026-11-25 起**浏览器腿已删除**：容器 / NAS 上根本没有 Chromium，而这
+         *    正是本项目最常见的部署形态（用户明确要求「NAS 上不装 Chromium」）。
          *
-         * ⚠️ **判重**：cookie 里的 `sessionid` 值即账号指纹 —— 同一账号重复登录
-         *    只刷新既有条目，不造第二张卡。
-         *
-         * ⚠️ 失败收尾走 `failLogin`（不自己 `removeAccount`）。
+         * ⚠️ 为什么后来加了 `'cookie'`：豆包扫码在**扫码后**强制要求 SDK 现场算的
+         *    `sign` / `qs` / `a_bogus`（三者绑定当次请求的 query，纯 HTTP 造不出来），
+         *    无浏览器环境必然卡在 `error_code=2156 服务繁忙`。扫码前一切正常，因此
+         *    症状是「二维码能出、能扫、扫完永远不消失」。粘 cookie 不经过 passport
+         *    的强校验，是同一份登录态的另一条入口。
          */
-        if (provider === 'doubao' && req.mode === 'browser') {
+        /**
+         * 落库（两条腿共用）：按 `sessionid` 判重 → 刷新既有条目或写自己的 ref。
+         *
+         * ⚠️ 判重键是 **`sessionid`**（账号稳定身份），不是整串 cookie：重登会换
+         * `ttwid` / `sid_tt` 等，拿整串判重会「每登一次多一张卡」。
+         */
+        const landDoubaoCredential = async (credential: unknown): Promise<void> => {
+          const fingerprint = doubaoSessionIdOf(credential)
+          if (fingerprint !== undefined) {
+            for (const existing of pool.listAccountsByProvider('doubao')) {
+              if (existing.id === id) continue
+              let existingFingerprint: string | undefined
+              try {
+                const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
+                existingFingerprint = resolved === undefined
+                  ? undefined
+                  : doubaoSessionIdOf(JSON.parse(resolved.value))
+              } catch { existingFingerprint = undefined }
+              if (existingFingerprint !== fingerprint) continue
+              await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
+              await pool.updateAccount(existing.id, { nickname: '豆包账号' })
+              await ctx.credentials.unset(credentialRef(refName)).catch(() => undefined)
+              await pool.removeAccount(id).catch(() => undefined)
+              return
+            }
+          }
+          await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
+          await pool.updateAccount(id, { nickname: '豆包账号' })
+        }
+
+        /**
+         * ★★ **豆包 cookie 导入**（`mode: 'cookie'`，2026-11-26）。
+         *
+         * 用户在自己浏览器登录 www.doubao.com 后，把 `Cookie` 头整段粘进面板；
+         * 这里解析 `sessionid`（账号稳定身份）、探活一次、然后与扫码腿共用
+         * `landDoubaoCredential` 落库（同一 `sessionid` 会刷到既有卡上，不重复建号）。
+         *
+         * 探活是**只读**的（`landing/get`，不发签到）：有效会话回 `code:0`，
+         * 失效会话回 `710012001 登录已过期`。⚠️ 探活**失败但不确定**时放行 ——
+         * 一次网络抖动不该把有效 cookie 拒掉，真失效留到首次签到暴露。
+         */
+        if (provider === 'doubao' && req.mode === 'cookie') {
+          const log = (message: string) => { ctx.logger?.info?.(`[jet-hub] ${message}`) }
+          const cookie = normalizePastedCookie(req.cookie)
+          if (cookie.length === 0) {
+            return {
+              ok: false,
+              error: { code: 'bad-request', message: '没有收到 cookie 内容：请把浏览器里的 Cookie 请求头整段粘贴进来（形如 sessionid=…; ttwid=…）' },
+            }
+          }
+          const sessionid = doubaoSessionIdOf({ cookie })
+          if (sessionid === undefined) {
+            return {
+              ok: false,
+              error: { code: 'bad-request', message: '粘贴的 cookie 里没有 sessionid（豆包靠它识别登录态）。请确认是在已登录 www.doubao.com 的浏览器里复制的 Cookie 头。' },
+            }
+          }
+          const credential = { cookie, accountKey: sessionid }
+          // 探活要发一次带 `a_bogus` 的只读请求，而签名器随后的 PR 才引入；
+          // 本 PR 只做归一化与入库，不阻塞用户（探活失败一律按放行处理）。
           await pool.addAccount({
             id,
             provider: 'doubao',
@@ -6351,98 +6400,28 @@ function registerJetHubEndpoints(
             refreshable: false,
             createdAt: Date.now(),
           })
-          const task = (async (): Promise<{ done: boolean, success?: boolean, error?: string }> => {
-            const { DoubaoLoginSession } = await import('./doubao-login.js')
-            /**
-             * ⚠️⚠️ **`open()` 必须在 `try` 之内**（PR #29 审计返工，2026-11-13）。
-             *
-             * 首版是 `const session = await DoubaoLoginSession.open(…)` 写在 `try`
-             * **外面**。而 `open()` 会抛的**最常见**情形恰恰是「用户机器上没有
-             * Chrome / 豆包客户端」（`doubao-login.ts` 的
-             * `doubaoLoginBrowserExecutable()` 返回 `undefined` ⇒ 直接 throw），
-             * 其次是 CDP 30 秒未就绪。那时的实际后果是**三条同时发生**：
-             *
-             * 1. `failLogin` **不会被调用** ⇒ 占位账号（无凭据）永久留在池里，
-             *    用户看到一张点不开的「豆包账号」卡片；
-             * 2. 外层那条 `void (async () => { … })()` 的 catch 是**空块**（只有一句
-             *    注释）⇒ 把 rejection **静默吞掉** ⇒ 日志零字，无从诊断；
-             * 3. `doubaoLoginInFlight` 已被删 ⇒ `login.poll` 恒回 `{ done: false }`
-             *    ⇒ 客户端转圈满 **5 分钟**（客户端自己的轮询上限）才报超时。
-             *
-             * 合起来正是本仓库登记过的缺陷形态：「登录失败只剩静默转圈 5 分钟」
-             * + 幽灵账号（`docs/agent-notes/protocol-wire.md` 的 Issue IKLI7J）。
-             *
-             * 现在整段罩在一个 `try` 里：任何一步失败（开窗 / 扫码等待 / 落库 /
-             * 回填）都走 `failLogin` 记终态（它自己先判 `loginCredentialLanded`：
-             * **凭据已在 ⇒ 就当成功、不删号**），`finally` 收窗。
-             */
-            // ⚠️ 不能用 `InstanceType<typeof DoubaoLoginSession>` —— 它的构造器是
-            //    **private**（只允许走静态 `open()`），`InstanceType` 的约束会拒绝。
-            let session: Awaited<ReturnType<(typeof DoubaoLoginSession)['open']>> | undefined
-            try {
-              session = await DoubaoLoginSession.open({
-                log: (message) => { ctx.logger?.info?.(`[jet-hub] ${message}`) },
-              })
-              const credential = await session.waitForCredential(240_000)
-              if (credential === undefined) {
-                throw new Error('扫码登录未完成（超时或窗口已关闭）')
-              }
-              // 判重：sessionid 指纹命中既有条目 ⇒ 只刷新它，删掉占位条目。
-              const fingerprint = doubaoSessionIdOf(credential)
-              if (fingerprint !== undefined) {
-                for (const existing of pool.listAccountsByProvider('doubao')) {
-                  if (existing.id === id) continue
-                  let existingFingerprint: string | undefined
-                  try {
-                    const resolved = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
-                    existingFingerprint = resolved === undefined
-                      ? undefined
-                      : doubaoSessionIdOf(JSON.parse(resolved.value))
-                  } catch { existingFingerprint = undefined }
-                  if (existingFingerprint !== fingerprint) continue
-                  await ctx.credentials.set(credentialRef(existing.credentialRef), JSON.stringify(credential))
-                  await pool.updateAccount(existing.id, { nickname: '豆包账号' })
-                  await ctx.credentials.unset(credentialRef(refName)).catch(() => undefined)
-                  await pool.removeAccount(id).catch(() => undefined)
-                  return { done: true, success: true }
-                }
-              }
-              // 新账号：凭据写到自己的 ref。
-              await ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
-              await pool.updateAccount(id, { nickname: '豆包账号' })
-              return { done: true, success: true }
-            } catch (error) {
-              const message = await failLogin(id, error)
-              return message === undefined
-                ? { done: true, success: true }
-                : { done: true, success: false, error: message }
-            } finally {
-              // 无论成败都收窗（杀进程 + 删一次性 profile）。
-              session?.close()
-            }
-          })()
-          doubaoLoginInFlight.set(id, task)
-          void (async () => {
-            // ⚠️ 走到这里说明 `failLogin` **自己**抛了（它已在上面把业务失败收成返回值）：
-            //    记一条 warn 再吞，绝不静默（否则又是「日志零字 + 转圈 5 分钟」）。
-            try { await task } catch (error) {
-              ctx.logger?.warn?.(`[jet-hub] 豆包登录收尾异常（${id}）：${String(error)}`)
-            }
-            doubaoLoginInFlight.delete(id)
-          })()
+          await landDoubaoCredential(credential)
+          log('[doubao-cookie] 已导入 cookie（sessionid 判重）；本站未做探活，登录态以首次取数为准')
           return { ok: true, value: { accountId: id, loginUrl: '' } }
         }
 
         /**
-         * 豆包只有扫码登录（`mode: 'browser'`）一条路 —— 不带 mode 落到这里
-         * ⇒ 明确报错，不静默降级。
+         * 豆包**只有粘 cookie 一条路**（`mode: 'cookie'`，2026-11-26）。
+         *
+         * 原来的「面板内扫码」已于 2026-11-26 整体删除：豆包 passport 在**扫码后**
+         * 强制要求 SDK 现场算的 `sign` / `qs` / `a_bogus`（三者绑定当次请求的
+         * query），纯 HTTP 环境造不出来 ⇒ 必然卡在 `error_code=2156 服务繁忙`。
+         * 四种请求形态逐一实测过，全部 2156；把浏览器原始签名抄过来也不认。
+         *
+         * ⇒ 这里对「不传 mode / `qr` / `browser`」的老客户端**明确报错**，告诉它
+         *   改用 `mode: 'cookie'`，不静默降级、也不假装还在扫码。
          */
         if (provider === 'doubao') {
           return {
             ok: false,
             error: {
               code: 'bad-request',
-              message: '豆包请用「扫码登录」（会打开浏览器窗口，用手机豆包 App 扫码）',
+              message: '豆包只支持粘贴 cookie 登录（`mode: "cookie"`）：扫码登录已移除（扫码后上游强制要求签名，纯 HTTP 无法完成）。请点「+ 新建账号」→ 在弹窗里粘贴浏览器 Cookie。',
             },
           }
         }
@@ -8973,15 +8952,12 @@ function registerJetHubEndpoints(
             return { ok: true, value: { done: false } }
           }
           /**
-           * ⚠️ 豆包扫码登录（2026-11-03）：与 magicrew 同型 —— `await` 在途任务
-           * （单飞），表里没有就回 `{done:false}` 交给客户端 5 分钟表收口。
-           * 豆包占位条目**没有** TTL 收口器：任务结束（成功/失败）时 `failLogin`
-           * 或判重路径会处理它；宿主重启后表空了 ⇒ 浏览器窗口也没了
-           * （进程随宿主树退出）⇒ 用户重新点登录即可，占位条目由用户手删。
+           * 豆包（`mode: 'cookie'`）：导入是一次同步完成的，**不存在**「占位条目
+           * 在、凭据还没到」的在途形态。走到这里说明那张占位卡是异常残留
+           * （宿主重启 / 导入中断）⇒ 回 `{done:false}` 让客户端自己的 5 分钟表
+           * 收口，判据保持"不猜成功也不猜失败"。
            */
           if (entry.provider === 'doubao') {
-            const shared = doubaoLoginInFlight.get(req.accountId)
-            if (shared !== undefined) return { ok: true, value: await shared }
             return { ok: true, value: { done: false } }
           }
           return { ok: true, value: { done: false } }
