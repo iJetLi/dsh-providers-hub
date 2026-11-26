@@ -150,6 +150,27 @@ export interface OfficeAceLockDeps {
   /** 兼容路径：池里没有任何账号时读本机那份单凭据。 */
   readonly readStoredCredential: () => OfficeAceCredential | undefined
   /**
+   * ★★★ **记下「本会话实际在用哪个号」**（2026-11-26 上游审计第二轮第 5 条）。
+   *
+   * ## 缺陷（审计原话）
+   *
+   * > 「`setActiveAccount` 调用点 **全仓只有 `resolver:728` 一处**；
+   * >   codearts / officeace **自建选号 ⇒ 从不写 `activeAccount`**（实测 `undefined`）
+   * >   ⇒ 对原报障两家**零作用**（仍参照下拉框）。」
+   *
+   * ⇒ 用户实际报障的两家恰恰吃不到「原点参照 = 主代理实际在用账号」这个新方向。
+   *
+   * ## 为什么是回调而不是直接传 pool
+   *
+   * 本模块对池只声明了**结构化最小接口**（`subagentPool`），直接传整个 `AccountPool`
+   * 会把「本模块需要什么」这个信息淹没 —— 也违背本模块既有的注入风格。
+   *
+   * ⚠️ **可选**：不注入时行为与改动前逐字节相同（单测替身 / 旧嵌入方）。
+   * ⚠️ `accountId === undefined` ⇒ **清空**（本次没选中任何号），
+   *    否则过期 id 会让子代理参照一个早已不用的号。
+   */
+  readonly reportActiveAccount?: (sessionId: string, accountId: string | undefined) => void
+  /**
    * 读某个账号的订阅分桶。
    *
    * ⚠️ **必须把 `ref` 传下去**（`ref === undefined` 只在兼容路径下出现）：
@@ -402,7 +423,14 @@ export function createOfficeAceCredentialProvider(
         continue
       }
       const verdict = await classify(account.credentialRef, credential)
-      if (verdict.kind === 'credential') return verdict.credential
+      if (verdict.kind === 'credential') {
+        /**
+         * ★ **记下实际选中的号**（2026-11-26 上游审计第二轮第 5 条）。
+         * ⚠️ 必须是**真正返回凭据的那个**账号，不是循环的第一个。
+         */
+        if (sessionId !== undefined) deps.reportActiveAccount?.(sessionId, account.id)
+        return verdict.credential
+      }
       if (verdict.kind === 'unknown') errors.push(`${account.id}: ${verdict.errors.join('；')}`)
     }
 

@@ -21,6 +21,10 @@
  * | A6 | `AccountPool.setActiveAccount` 按**会话**分组（不串味）| 改扁平 ⇒ 红 |
  * | A7 | `AccountPool.setActiveAccount(undefined)` ⇒ 清空该会话 | 不删 ⇒ 红 |
  */
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import { AccountPool } from '../../src/account-pool.js'
@@ -322,6 +326,107 @@ describe('A0（审计 P0-1）：主代理**零回归**', () => {
       const r = await runMain(mode)
       expect(r.writes, `★★★ 配了 ${mode} 后主代理不得被写任何起点`).toEqual([])
     }
+  })
+})
+
+describe('A9（审计第 5 条）：三条选号腿都必须写「实际在用账号」', () => {
+  /**
+   * ## 上游原话（2026-11-26 第二轮）
+   *
+   * > 「`setActiveAccount` 调用点 **全仓只有 `resolver:728` 一处**；
+   * >   codearts / officeace **自建选号 ⇒ 从不写 `activeAccount`**（实测 `undefined`）
+   * >   ⇒ 对原报障两家**零作用**（仍参照下拉框）。」
+   *
+   * ⇒ **用户实际报障的两家恰恰吃不到这个新方向。**
+   *
+   * ## 本组守什么
+   *
+   * 源码级计数：`setActiveAccount` 的**调用**点必须 ≥ 4 处
+   * （resolver / codearts / officeace 未锁定 / officeace 锁定）。
+   *
+   * ⚠️ 为什么用源码计数而不是行为级：那三条腿分属三个模块
+   *    （`credential-resolver` / `index` / `officeace-lock`），
+   *    行为级要各自搭一套完整依赖；而这里要守的是「**有没有接上**」
+   *    这个**结构性事实** —— 少一处就是一个 provider 静默失效。
+   *    ⚠️ 但计数会被「留着调用但 `void` 掉结果」绕过 ⇒ 下面配 A9-2 行为级对照。
+   */
+  /**
+   * ⚠️ **路径必须按「本测试文件」的相对位置拼**，不能用 `new URL(name, SRC_DIR)`。
+   *
+   * 我第一版写成 `new URL(name, new URL('../../src/', import.meta.url))`，
+   * 实测**读到的是别处**（`index.ts` 匹配 0 处，而文件里明明有 3 处）
+   * ⇒ 计数恒为 1 ⇒ 守卫假红。
+   *
+   * ⇒ 用 `fileURLToPath` 显式拼绝对路径，与仓库其它 spec 同款。
+   */
+  const HERE = dirname(fileURLToPath(import.meta.url))
+
+  function readSrc(name: string): string {
+    return readFileSync(join(HERE, '../../src', name), 'utf8')
+  }
+
+  it('★★★ `setActiveAccount` 调用点 ≥ 4 处（三条腿都接上）', () => {
+    const files = ['credential-resolver.ts', 'index.ts', 'officeace-lock.ts']
+    let calls = 0
+    for (const f of files) {
+      const src = readSrc(f)
+      for (const line of src.split('\n')) {
+        /**
+         * ⚠️ 只数**调用**，排除定义与接口声明。
+         *
+         * 调用形态：
+         * - `deps.pool.setActiveAccount?.(…)`（可选链，有 `?.`）
+         * - `pool.setActiveAccount(…)`（直接调用，**没有** `?.`）
+         *
+         * ⇒ 判据只能是 `setActiveAccount` 后面跟 `(` **或** `?.(`，
+         *   **不能**写成 `\??\.` —— 那要求后面必有一个 `.`，
+         *   会让「直接调用」那三处全数漏掉（我第一版就这么错了）。
+         *
+         * 排除：`setActiveAccount(provider: string, …)`（定义），
+         * 它前面不是 `.`，故用 `\.` 前缀即可区分。
+         */
+        if (/\.setActiveAccount\s*(?:\?\.)?\(/.test(line)) calls += 1
+      }
+    }
+    expect(
+      calls,
+      '★★★ 修前只有 1 处（resolver）；codearts 与 officeace 两条腿必须各补一处 '
+        + '（officeace 还要分锁定 / 未锁定）⇒ 至少 4 处',
+    ).toBeGreaterThanOrEqual(4)
+  })
+
+  it('★★★ codearts 腿：写入的是**真正返回凭据的那个号**（不是循环第一个）', () => {
+    /**
+     * ⚠️ 判据：`available?.entry?.id` —— `available` 是 `getAvailableAccount` 的返回值，
+     *    它已经是「池筛选 + 旋转起点」之后**唯一**的选中项。
+     * ⇒ 若写成 `rotationStartId`（起点）或 `enabled[0]`（池首），就是错的。
+     */
+    const src = readSrc('index.ts')
+    expect(
+      src,
+      '★★★ codearts 必须写 `available?.entry?.id`（本次真正选中的号）',
+    ).toMatch(/setActiveAccount\('codearts',\s*sessionId,\s*available\?\.entry\?\.id\)/)
+  })
+
+  it('★★★ officeace 锁定腿：通过 `reportActiveAccount` 上报（不绕过注入）', () => {
+    /**
+     * ⚠️ 锁定态那条腿逐个 `classify` 后返回，**不经过** `getAvailableAccount`
+     * ⇒ 必须由 `reportActiveAccount` 回调上报，不能指望池自己知道。
+     */
+    const src = readSrc('officeace-lock.ts')
+    expect(
+      src,
+      '★★★ 锁定腿必须在「真正返回凭据」那一支上报',
+    ).toMatch(/verdict\.kind === 'credential'[\s\S]{0,400}deps\.reportActiveAccount\?\.\(/)
+  })
+
+  it('★★ officeace 未锁定腿：`resolveOfficeAceCredential` 也要写', () => {
+    /** ⚠️ 未锁定是**默认配置**（用户根本没开锁定）⇒ 这条才是主路径。 */
+    const src = readSrc('index.ts')
+    expect(
+      src,
+      '★★ 未锁定腿必须写 activeAccount（否则默认配置下零作用）',
+    ).toMatch(/setActiveAccount\(OFFICEACE\.id,\s*sessionId,\s*available\?\.entry\?\.id\)/)
   })
 })
 

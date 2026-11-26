@@ -1586,6 +1586,34 @@ export function apply(ctx: Context): void {
         rotationStartId,
       )
       /**
+       * ★★★ **记下「本会话实际在用哪个号」**（2026-11-26 上游审计第二轮第 5 条修复）。
+       *
+       * ## 缺陷（审计原话）
+       *
+       * > 「**新方向「起点参照 = 主代理实际在用账号」—— 只对 buddy 有效**」
+       * >
+       * > | 检查 | 结果 |
+       * > |---|---|
+       * > | `setActiveAccount` 调用点 | **全仓只有 `resolver:728` 一处** |
+       * > | codearts / officeace | **自建选号 ⇒ 从不写 `activeAccount`**（实测 `undefined`）|
+       * > | ⇒ 对原报障两家 | **零作用**（仍参照下拉框）|
+       *
+       * ⇒ 用户实际报障的两家（codearts / officeace）恰恰**吃不到**这个新方向。
+       *
+       * ## 为什么必须在这里写
+       *
+       * `getAvailableAccount` 是**本家唯一的选号出口**（它内部走池的候选筛选 +
+       * 旋转起点）⇒ 在这里写 = 覆盖本家全部选号路径，且与
+       * `credential-resolver` 的 `report()` 出口**语义一致**（都是「本次真正选中的号」）。
+       *
+       * ⚠️ `sessionId === undefined`（目录 / 网关流量）不写 —— 与 `report()` 同判据。
+       * ⚠️ `available === null` 时写 `undefined`（清空）—— 否则过期 id 会让
+       *    子代理参照一个**早已不用的号**（与 `report(undefined)` 同语义）。
+       */
+      if (sessionId !== undefined) {
+        pool.setActiveAccount('codearts', sessionId, available?.entry?.id)
+      }
+      /**
        * ⚠️ **这里原来有一段「选完回写 pin」的空 if 块，已删除**（2026-11-26）。
        *
        * 历史：它调 `pool.pinSubagentAccount(...)`，而该方法在
@@ -6091,6 +6119,16 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
       undefined,
       rotationStartId,
     )
+    /**
+     * ★ **记下「本会话实际在用哪个号」**（2026-11-26 上游审计第二轮第 5 条）。
+     *
+     * ⚠️ 与 codearts 那条腿**同一判据**（`sessionId === undefined` 不写、
+     *    `available === null` 写 `undefined` 清空）。
+     * ⚠️ 未锁定态也要写 —— 那才是**默认配置**（用户根本没开锁定）。
+     */
+    if (sessionId !== undefined && sessionId.length > 0) {
+      pool.setActiveAccount(OFFICEACE.id, sessionId, available?.entry?.id)
+    }
     const ref = available?.entry?.credentialRef
       ?? enabledOfficeAceAccounts()[0]?.credentialRef
     if (ref === undefined) return officeaceAuth.readStoredCredential()
@@ -6162,6 +6200,16 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
       resolveUnlocked: resolveOfficeAceCredential,
       readCredential: (ref) => officeaceAuth.readCredential(ref, ctx.credentials as never),
       readStoredCredential: () => officeaceAuth.readStoredCredential(),
+      /**
+       * ★★★ **锁定态也要记「实际在用账号」**（2026-11-26 上游审计第二轮第 5 条）。
+       *
+       * ⚠️ 未锁定态由 `resolveOfficeAceCredential` 自己写（那是默认配置的主路径）。
+       * ⚠️ 这里补的是**锁定态**那条腿 —— 它逐个 `classify` 后返回，不经过
+       *    `getAvailableAccount`，所以必须由本回调上报。
+       */
+      reportActiveAccount: (sessionId, accountId) => {
+        pool.setActiveAccount(OFFICEACE.id, sessionId, accountId)
+      },
       // ⚠️ **必须带 ref**（云侧 V11 直读；缺了会回落果办客户端的全局单 cookie
       //    ⇒ 多账号判成同一份余额 ⇒ 按错误的余额决定「能不能烧永久积分」）。
       summaryOf: async (credential, ref) => {
