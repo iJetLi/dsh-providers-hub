@@ -1152,30 +1152,17 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     logoClass: 'doubao',
     // ⚠️ `dailyCheckin: true`（2026-11-03 **真机实测接通**）：`POST /alice/ug/campaign/landing/checkin`
     //    返回 `checked_in:true, reward_amount:200, continuous_days:2, idempotent:true`。
-    //    签到带 `a_bogus` 签名（页面 `bdms.frontierSign` 生成）⇒ 走 CDP 页面会话，
-    //    实现在 `src/doubao-signin.ts` 的 `claimDoubaoDailyViaPage`。
+    //    签到带 `a_bogus` 签名（2026-11-25 起在 `node:vm` 沙箱里跑 `bdms` SDK 生成，
+    //    不依赖浏览器），实现在 `src/doubao-signin.ts` 的 `claimDoubaoDailyViaHttp`。
     // ⚠️⚠️ **`balance: true` 的语义是「本渠道进 credits 表」，不是「上游有余额」**
     //   （2026-11-13 审计返工，PR #29 初版把两件事混成一件）：
     //   这张表同时服务 `credits.claimAll`（签到）与 `credits.balances`（余额），
     //   而 `credits-runtime-parity.spec.ts` 有两条硬不变式把「表里有哪些渠道」
     //   绑在 `credits.balance === true` 上（`Object.keys(table) === 余额能力集`）。
     //   豆包的**签到**必须走这张表（`claimDoubaoDailyCheckin`），故这里必须是 `true`。
-    //   ⚠️ 但上游**没有**积分余额概念（签到给的是「每日额度权益」，不是积分包；
-    //   `src/doubao-credits.ts:15-16` 逐字写明「无独立余额端点」）⇒ 余额那一腿
-    //   由 `credits.balances` 端点**短路成空列表**（见 `src/jet-hub-rpc.ts` 的
-    //   doubao 分支），绝不让一个注定为 `null` 的读数冒出去。
-    //   ⚠️ 为什么不能改 `false`：那会让 `createProviderCredits()` 少一条
-    //   ⇒ `credits.claimAll` 对豆包回 `unsupported provider: doubao` ⇒ 签到静默失效。
+    //   余额那一条走 `src/doubao-credits.ts` 的 `fetchDoubaoBalanceDetailed`，
+    //   本 PR 未改动它（读数口径的修正见后续 PR）。
     credits: { balance: true, dailyCheckin: true },
-    // ✅ **进每日自动链**（2026-11-22 变更，原为排除）：
-    //    签到的 `a_bogus` 签名确实要起一次 headless Chromium（`--headless=new`，
-    //    `src/doubao-signin.ts` 的 spawn 参数），但代价是**每账号每天一次、
-    //    单次几十秒**，与 zcode 那个「按设备烧阿里云 captcha 配额」不同源 ——
-    //    zcode 是拿第三方配额换积分，豆包只是本地起一个临时 profile 的浏览器。
-    //    默认开启的收益（每天自动 +200 额度）大于这点开销，故不再排除。
-    //    ⚠️ 想退出自动链的用户可把该渠道的账号**停用**（停用账号不参与选号与签到），
-    //    或把面板上的渠道开关关掉，无需改代码。
-    autoCheckinExcluded: false,
     // ⚠️ `rateLimit: false` 必须显式写：本渠道当前没有适配器、不写
     //    `modelRateLimits`、也不在 `probeById` 里 ⇒ 「重测 / 重置」点下去恒惰性
     //   （与 magicrew / accio 旧格同因）。将来接推理链路时再翻正。
@@ -1189,8 +1176,7 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //    modelAdapters 目录」守卫（报错「关闭 provider 后模型仍可选」），而 doubao 根本
     //    没有目录可关。`credits` 的两个判据都独立于 `channel`：`dailyCheckin: true`
     //    让签到入口照常出现（`checkinProviders()` 按 `supportsDailyCheckin` 过滤），
-    //    `balance: true` 让豆包进 credits 表（签到的 `claim` 走同一张表；余额那一腿
-    //    由端点短路成空列表，见上方 `credits` 那条）。
+    //    `balance: true` 让豆包进 credits 表（签到的 `claim` 走同一张表）。
     // ⚠️ 2026-11-22 更正：模型目录/适配器已接通（src/doubao-adapter.ts），
     //    已进 modelAdapters 表 ⇒ 运行时 noModelLeg 门（channel===false AND
     //    modelAdapters[provider]===undefined）不成立，模型腿照常读取、对话照常路由。

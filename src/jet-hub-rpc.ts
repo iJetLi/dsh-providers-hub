@@ -6389,8 +6389,19 @@ function registerJetHubEndpoints(
             }
           }
           const credential = { cookie, accountKey: sessionid }
-          // 探活要发一次带 `a_bogus` 的只读请求，而签名器随后的 PR 才引入；
-          // 本 PR 只做归一化与入库，不阻塞用户（探活失败一律按放行处理）。
+          // 探活 = 一次只读的签到状态请求（带 `a_bogus`，由 node:vm 沙箱签），
+          // 只为识别「cookie 已过期」。网络/签名不稳一律放行，不拦用户建号。
+          const { probeDoubaoSession } = await import('./doubao-signin.js')
+          const probe = await probeDoubaoSession(JSON.stringify(credential), { log })
+          if (probe.sessionOk === false) {
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: `豆包认为这份 cookie 已失效（${probe.code ?? '?'} ${probe.message ?? ''}）。请重新登录 www.doubao.com 后再复制一份新的 Cookie。`,
+              },
+            }
+          }
           await pool.addAccount({
             id,
             provider: 'doubao',
@@ -6427,7 +6438,7 @@ function registerJetHubEndpoints(
               },
             }
           }
-          log('[doubao-cookie] 已导入 cookie（sessionid 判重）；本站未做探活，登录态以首次取数为准')
+          log(`[doubao-cookie] 已导入 cookie（sessionid 判重）${probe.sessionOk === true ? '，探活通过' : '，未探活成功（按放行处理）'}`)
           return { ok: true, value: { accountId: id, loginUrl: '' } }
         }
 
