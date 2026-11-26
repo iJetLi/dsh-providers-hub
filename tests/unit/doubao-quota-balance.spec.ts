@@ -111,6 +111,58 @@ describe('doubaoBalanceFromOverviewPayload', () => {
     expect(balance.packages[1]).toMatchObject({ remaining: 1861, total: 1861, used: 0, totalKnown: false })
   })
 
+  it('★ 到期时刻拿不到必须标 expiryUnknown —— 不许填空被读成「永久」（IKTLMX）', () => {
+    /**
+     * `top_items[].end_time`（毫秒）在响应里，但 `top_items` **不带分类归属**
+     * （只有 `display_name` / 金额 / `end_time`），套到「套餐」「赠送」头上就是编造。
+     * ⇒ 两个分类包都只能标「到期未知」，而**不是**空 `expiredTime`（后者在展示层
+     *   等于「永久」，正是红线 IKTLMX 要拦的那件事）。
+     */
+    const balance = doubaoBalanceFromOverviewPayload(wireData)
+    for (const pkg of balance.packages) {
+      expect(pkg.expiredTime).toBe('')
+      expect(pkg.expiryUnknown).toBe(true)
+    }
+  })
+
+  it('section 里有一行读不出来 ⇒ 该分类整格不认分母（不再静默丢行凑数）', () => {
+    // 旧实现 `if (!Number.isFinite(t)) continue` 会把这行丢掉、分母缩小后
+    // 反而更容易「凑巧相等」。现在只要有一行不合规就 `complete=false`。
+    const broken = {
+      ...wireData,
+      window_limit_section: {
+        window_limit_groups: [
+          {
+            feature_group: 'doubao_work_trial_quota',
+            window_limits: [
+              { total_amount: '2,142', used_amount: '0' },
+              { total_amount: '不可解析', used_amount: '0' },
+            ],
+          },
+        ],
+      },
+    }
+    const balance = doubaoBalanceFromOverviewPayload(broken)
+    expect(balance.packages[0]).toMatchObject({ totalKnown: false, total: 2142, used: 0 })
+  })
+
+  it('used > total 的行同样视为不可信（分母不采用）', () => {
+    const impossible = {
+      ...wireData,
+      incentive_quota_section: {
+        window_limit_groups: [
+          {
+            feature_group: 'doubao_activity_reward_quota',
+            window_limits: [{ total_amount: '1,950', used_amount: '2,500' }],
+          },
+        ],
+      },
+    }
+    const balance = doubaoBalanceFromOverviewPayload(impossible)
+    expect(balance.packages[1]).toMatchObject({ totalKnown: false })
+  })
+
+
   it('缺 total_remaining_amount 时退回各分类剩余之和', () => {
     const balance = doubaoBalanceFromOverviewPayload({
       quota_balance_overview: {

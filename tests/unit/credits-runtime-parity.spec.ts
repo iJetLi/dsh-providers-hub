@@ -1066,6 +1066,51 @@ describe('provider 边界：拒绝是兜底契约，判据来自 registry', () =
     expect(account).not.toContain(cookie)
   })
 
+  it('★ 豆包额度走 credits.balances 后：到期时刻拿不到就必须标 expiryUnknown（IKTLMX 红线）', async () => {
+    const cookie = 'sessionid=parity-doubao-quota'
+    const { call, pool, credentials } = makeRpc()
+    await seed(pool, 'doubao', 'doubao-quota-parity-1', 'DOUBAO_QUOTA_PARITY_SPEC')
+    await credentials.set('DOUBAO_QUOTA_PARITY_SPEC', JSON.stringify({ cookie }))
+    /**
+     * 刻意喂**带 `top_items[].end_time` 的真实形态**：响应里确实有到期时刻，但它不带
+     * 分类归属（只有 `display_name` / 金额 / `end_time`），套到「套餐」「赠送」两个
+     * summary 头上就是编造。⇒ 映射层**只能**标「到期未知」。
+     *
+     * ⚠️ 这条是 IKTLMX 红线的 parity 守卫：空 `expiredTime` 会被展示层读成 `permanent`
+     *    ⇒ 面板写「永久 4,003」，用户就不会去抢救临期额度。删掉任何一侧（映射层不标
+     *    `expiryUnknown`、或这里断了断言）都应立刻变红。
+     */
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        quota_balance_overview: {
+          total_remaining_amount: '4,003',
+          summaries: [
+            { category: 1, title: '套餐', remaining_amount: '2,142' },
+            { category: 3, title: '赠送', remaining_amount: '1,861' },
+          ],
+          top_items: [
+            {
+              display_name: '豆包工作体验套餐', total_amount: '2,500', used_amount: '358',
+              end_time: 1_797_937_149_723, time_type: 2,
+            },
+          ],
+          has_more: false,
+        },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+
+    const result = await call('credits.balances', { provider: 'doubao' })
+    expect(result.ok).toBe(true)
+    const packages = result.value.accounts[0]?.balance?.packages ?? []
+    expect(packages.length).toBe(2)
+    for (const pkg of packages) {
+      // 拿不到逐笔到期 ⇒ 不许填空然后被读成「永久」
+      expect(pkg.expiredTime).toBe('')
+      expect(pkg.expiryUnknown).toBe(true)
+    }
+  })
+
   it('credits.status 对 registry 里的每个渠道都被接受（未知 id 除外）', async () => {
     const { call } = makeRpc()
     for (const d of PROVIDER_REGISTRY) {

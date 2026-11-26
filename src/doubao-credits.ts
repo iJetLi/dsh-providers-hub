@@ -145,6 +145,14 @@ export function parseDoubaoAmount(value: DoubaoAmount): number {
 interface CategoryTotal {
   total: number
   used: number
+  /**
+   * 该分类的每一行都解析成功、且各自 `0 <= used <= total`。
+   *
+   * `false` = 有一行金额读不出来或自相矛盾 ⇒ **不许拿这个总额当分母**：丢行之后再
+   * 和 `summaries.remaining` 比「总额 − 已用 == 剩余」，很容易凑巧相等（review 指出
+   * 过的和式假阳性）。宁可 `totalKnown = false`。
+   */
+  complete: boolean
 }
 
 /**
@@ -169,12 +177,23 @@ function categoryTotalsOf(
     for (const group of section?.window_limit_groups ?? []) {
       let total = 0
       let used = 0
+      let complete = true
       for (const limit of group?.window_limits ?? []) {
         const t = parseDoubaoAmount(limit?.total_amount)
         const u = parseDoubaoAmount(limit?.used_amount)
-        if (!Number.isFinite(t)) continue
+        /**
+         * ⚠️ 以前这里是 `if (!Number.isFinite(t)) continue` —— **静默丢行**。
+         *    丢一行就等于把分母缩小一点，而分母仍然拿去和 `summaries` 的剩余做
+         *    算术比对，于是「凑巧相等」的假阳性比以前更容易出现（review 指出的正是
+         *    这类和式假阳性）。现在一律标 `complete = false`，该分类退回
+         *    「总额未知」，不编分母。
+         */
+        if (!Number.isFinite(t) || !Number.isFinite(u) || u < 0 || u > t) {
+          complete = false
+          continue
+        }
         total += t
-        if (Number.isFinite(u)) used += u
+        used += u
       }
       if (total <= 0) continue
       const featureGroup = `${group?.feature_group ?? ''} ${group?.feature_group_name ?? ''}`
@@ -183,6 +202,7 @@ function categoryTotalsOf(
       result[bucket] = {
         total: (existing?.total ?? 0) + total,
         used: (existing?.used ?? 0) + used,
+        complete: (existing?.complete ?? true) && complete,
       }
     }
   }
@@ -222,10 +242,11 @@ export function doubaoBalanceFromOverviewPayload(
     const remaining = parseDoubaoAmount(summary?.remaining_amount)
     const safeRemaining = Number.isFinite(remaining) ? remaining : 0
     const bucket = summary?.category === DOUBAO_CATEGORY_GIFT ? totals.gift : totals.membership
-    // 只有算术自洽（总额 - 已用 == 剩余）才认这个分母。
+    // 只有算术自洽（总额 - 已用 == 剩余）**且每一行都读得出来**才认这个分母。
     const totalCandidate = bucket?.total
     const used = bucket?.used ?? 0
     const totalKnown =
+      bucket?.complete === true &&
       typeof totalCandidate === 'number' &&
       Number.isFinite(totalCandidate) &&
       totalCandidate >= safeRemaining &&
@@ -242,8 +263,19 @@ export function doubaoBalanceFromOverviewPayload(
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: '',
-      // ⚠️ `summaries[]` 不带到期时刻 —— 不猜。逐笔到期在 `top_items[].end_time` 里，
-      //    但那份列表被 `has_more` 截断，套到分类头上就是编造。
+      /**
+       * ⚠️⚠️ **这里必须是 `expiryUnknown`，不能是空 `expiredTime`**（review 更正，
+       * 仓库红线 IKTLMX）：
+       *
+       * - `top_items[].end_time`（毫秒）确实在响应里，但**`top_items` 不带分类归属**
+       *   （只有 `display_name` / 金额 / 到期），套到「套餐」「赠送」这两个 summary
+       *   头上就是编造 —— 而 `has_more` 还可能把明细截断；
+       * - 「拿不到逐笔到期」**不等于**「永不到期」。空 `expiredTime` 会被展示层读成
+       *   `permanent` ⇒ 面板写「永久 4,003」，用户就不会去抢救临期额度。
+       * - `expiryUnknown: true` 的语义正是「会过期、但不知道哪天」：分桶行为不变，
+       *   只是把「永久」改口径成「到期未知」。
+       */
+      expiryUnknown: true,
     } satisfies CreditPackage
   })
 
