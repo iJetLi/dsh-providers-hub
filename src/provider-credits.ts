@@ -784,7 +784,17 @@ export function createProviderCredits(
     },
 
     /**
-     * 豆包：使用账号的扫码登录会话查询额度；签到继续走已有页面会话。
+     * 豆包：余额与签到**双双真机接上**（签到 2026-11-03、余额 2026-11-26），整条腿零浏览器。
+     *
+     * ⚠️ 余额走 `fetchDoubaoBalanceDetailed`：额度面板同款接口
+     *    `POST /alice/commerce/sale/subscription/overview/`（body `{"product_line":"membership"}`，
+     *    **零浏览器、零签名**），映射成 `total`（面板「可用额度」）+ 逐分类（套餐 / 赠送，
+     *    金额是带千分位的字符串）。失败时回 `{ balance: null, error }` 并让统计带亮 warn
+     *    色 —— 那是有意的真警报。
+     *
+     *    ⚠️⚠️ 两条历史结论都已作废：2026-11-13「豆包无余额概念」只是没找到端点；
+     *    2026-11-26 白天「commerce 网关校验 `a_bogus` ⇒ 一律 404」是误判 ——
+     *    404 的唯一原因是把 **POST 写成了 GET**（`a_bogus` 删掉照样 200）。
      * ⚠️ 签到侧是**实测**的（`POST DOUBAO_CHECKIN_PATH` 回
      *    `checked_in:true, reward_amount:200, continuous_days:2, idempotent:true`，
      *    2026-11-03 真机 + `docs/agent-notes/providers-doubao.md`）。
@@ -802,7 +812,7 @@ export function createProviderCredits(
       //    `landing/get` 虽存在，但**已签账号也回空活动**（签完当天就没有可领对象
       //    了，2026-11-03 实测）⇒ 据它短路会把「今天已签」误报成「没有活动」
       //    （`src/doubao-signin.ts:214-217` 逐字记着这条）。预检拿不到确定性结论，
-      //    只会白发一次带 `a_bogus` 签名的请求（那要现场起一棵浏览器进程树）。
+      //    只会白发一次带 `a_bogus` 签名的请求（签名走 vm 沙箱，不开任何浏览器）。
       //    与 codely / loomy 同因。
       precheckStatus: false,
     },
