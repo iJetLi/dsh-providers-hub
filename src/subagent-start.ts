@@ -107,7 +107,7 @@ export interface SubagentStartDecision {
    */
   shouldPin: boolean
   /** 决策来源（供诊断 / 日志，不影响选号）。 */
-  decidedBy: 'user-pick' | 'pin' | 'fixed-position' | 'strategy' | 'none'
+  decidedBy: 'user-pick' | 'pin' | 'fixed-position' | 'strategy' | 'follow' | 'none'
 }
 
 /**
@@ -257,8 +257,57 @@ export function decideSubagentStart(options: {
   const setting = pool.subagentRotationFor?.(providerId)
   const mode = startModeOf(setting)
   /** ⚠️ 没配 / 没启用 ⇒ **完全保持主代理行为**（零回归的关键）。 */
-  if (setting === undefined || mode === undefined || mode === 'follow') {
+  if (setting === undefined || mode === undefined) {
     return { pinnedFirst: false, ownedBySubagent: false, shouldPin: false, decidedBy: 'none' }
+  }
+  /**
+   * ★★★ **`follow` = 真的跟随主代理**（2026-11-26 上游审计第二轮 P3 修复）。
+   *
+   * ## 缺陷（审计原话）
+   *
+   * > 「**`follow`** 传 `undefined` ⇒ 实得 `acc-1` ≠ 主代理 `acc-2`（**buddy 同错**）」
+   * >
+   * > 「而且 **T6/S4 把『`follow` ⇒ 无起点』锁成了期望行为** ——
+   * >   变异『改成真跟随』⇒ **红 2 条**。**守卫在保护缺陷。**」
+   *
+   * ## 修前
+   *
+   * ```ts
+   * if (setting === undefined || mode === undefined || mode === 'follow') {
+   *   return { …decidedBy: 'none' }   // ← follow 走这里 ⇒ startId 恒 undefined
+   * }
+   * ```
+   *
+   * ⇒ `follow` 与「没配」走同一条路 ⇒ 子代理用**自己的** sessionId 查
+   *   `preferredRotation`（那是空的）⇒ 落到**池里第一个号**，
+   *   而主代理实际在用第 N 个号 ⇒ **完全没跟随**。
+   *
+   * ## 修后
+   *
+   * `follow` 直接把**主代理的起点**当作自己的起点（`mainSessionStartId`
+   * 由调用方按 `activeAccountOf(父会话) ?? preferredRotationFor(父会话)` 算出）。
+   *
+   * ⚠️ **与 `sequence`/`reverse` 的区别**：那两个会按 `slot` **错开**，
+   *    `follow` **不错开** —— 多个子代理会撞同一个号（这是用户的显式选择）。
+   * ⚠️ 主代理也没有起点时（`mainSessionStartId === undefined`）⇒
+   *    仍返回 `none`（退回池里第一个），与「没配」一致。
+   */
+  if (mode === 'follow') {
+    const followed = options.mainSessionStartId
+    if (followed === undefined) {
+      return { pinnedFirst: false, ownedBySubagent: false, shouldPin: false, decidedBy: 'none' }
+    }
+    /**
+     * ⚠️ `pinnedFirst: false` —— `follow` 只是「起点相同」，档位规则仍然生效
+     *   （否则会在主代理那个号余额降档后仍死抱着它）。
+     */
+    return {
+      startId: followed,
+      pinnedFirst: false,
+      ownedBySubagent: true,
+      shouldPin: false,
+      decidedBy: 'follow',
+    }
   }
 
   const assignment = pool.subagentAssignmentOf?.(providerId, sessionId)

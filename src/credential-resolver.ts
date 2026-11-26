@@ -999,83 +999,51 @@ export function createCredentialResolver<TCredential>(
           const subSetting = deps.pool.subagentRotationFor?.(providerId)
           const subAssignment = deps.pool.subagentAssignmentOf?.(providerId, sessionId)
           /**
-           * ★★★ **优先用钉住的账号**（2026-11-24 用户要求：拉起时定死）。
+           * ★★★ **免费路径的子代理起点：走共享的 `decideSubagentStart`**
+           *（2026-11-26 上游审计第二轮「第二份内联实现仍在」修复）。
            *
-           * ## 为什么（用户原话）
+           * ## 缺陷（审计原话）
            *
-           * > 「我是希望『拉起时定死，只有该号不可用才换』，
-           * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
+           * > 「免费腿：第二份内联实现仍在 …… **同一设置下付费给 `acc-1`、
+           * >   免费给 `acc-2`**（**已分叉**）」
            *
-           * ⇒ prompt cache 按（账号 + 模型 + 前缀）命中。
-           *   每发请求重算起点 ⇒ 池子一波动就换号 ⇒ 缓存全失效。
+           * ## 修前的内联实现与共享函数的差异
            *
-           * ## 判据（免费路径）
+           * | 项 | 内联版 | 共享函数 |
+           * |---|---|---|
+           * | `follow` | 条件里直接排除（= 无起点）| **真跟随主代理**（2026-11-26 修）|
+           * | 主代理参照 | 只读自己的 `preferredRotation` | **`activeAccountOf` 优先** |
+           * | `fixed` | 单独分支 | 同一分支内 |
            *
-           * pin 的号**仍在 `candidates` 里** ⇒ 可用（免费模型不查积分/档位）。
-           * ⚠️ 不在 ⇒ 已停用 / 封禁 / 限流 ⇒ **重算**（下面的逻辑）并重钉。
+           * ⇒ 同一份设置，付费腿和免费腿给出**不同的号**。
+           *
+           * ## 免费路径唯一保留的差异
+           *
+           * `selector: undefined` —— 免费请求**不消耗积分**，档位过滤对它无意义
+           *（`candidates` 已经是「启用 + 未限流」的候选）。
            */
-          /**
-           * ★★★ **优先级：用户手动选 > 系统 pin > 策略现算**
-           *（2026-11-24 用户定 B 方案，与付费路径**逐字同构**）。
-           *
-           * ⚠️ 两处必须同步改 —— 本仓反复记录过「同一语义两处实现必然漂移」。
-           * 免费路径的「可用」判据只有一条：**在 `candidates` 里**
-           *（免费不查积分/档位）。
-           */
-          /**
-           * ⚠️ **免费路径不再有 pin / userPicked**（2026-11-25 重构）。
-           *
-           * 子代理的起点现在存在 `preferredRotation`（与主代理同一个地方）——
-           * 上面 `freeStartId` 已经通过 `preferredRotationFor` 读到了它
-           * ⇒ 这里**不需要**任何子代理专属优先级。
-           */
-          /**
-           * ⚠️ **不再有 pin / userPicked 分支**（2026-11-25 重构）。
-           *
-           * 子代理的起点（含「用户手选」）现在统一存在 `preferredRotation`
-           * （与主代理同一个地方）⇒ 上面的 `freeStartId` 已经通过
-           * `preferredRotationFor` 读到了它 ⇒ 这里**只有策略现算**一条腿。
-           *
-           * ⚠️ `fixed` 模式也在下面这条腿里处理（用 `fixedPosition` 取位次）。
-           */
-          if (subSetting !== undefined && subAssignment !== undefined
-            && subSetting.startMode !== undefined && subSetting.startMode !== 'follow') {
+          const freeDecision = decideSubagentStart({
+            providerId,
+            sessionId,
+            candidateIds: candidates.map((c) => c.id),
+            allowPermanent: true,
+            pool: deps.pool as never,
+            /** ⚠️ 免费路径**不查档位**（不消耗积分）。 */
+            selector: undefined,
             /**
-             * ⚠️ 候选 id 序列用作「档位序列」—— 免费路径没有档位概念，
-             * 而 `startIndexOfSlot` 只做索引算术，喂什么序列就在什么序列里挪。
+             * ⚠️ 参照对象与付费腿**同一条判据**：
+             * `activeAccountOf`（主代理实际在用）优先，缺失回落 `preferredRotationFor`。
              */
-            const candidateIds = candidates.map((c) => c.id)
-            /**
-             * ⚠️ 基准 = 主代理起点（若它在候选里）否则候选第一个。
-             * 与付费路径的 `effectiveMainStart` 同款兜底。
-             */
-            const baseId = freeStartId !== undefined && candidateIds.includes(freeStartId)
-              ? freeStartId
-              : candidateIds[0]
-            if (baseId !== undefined) {
-              if (subSetting.startMode === 'fixed') {
-                /**
-                 * `fixed`：直接用指定位次（1-based，在**全量启用账号**上算，
-                 * 与付费路径同口径 —— 否则用户填的位次会指向别的号）。
-                 */
-                const enabledIds = deps.pool
-                  .listAccountsByProvider(providerId)
-                  .filter((a) => a.enabled)
-                  .map((a) => a.id)
-                const fixedId = accountIdAtPosition(enabledIds, subSetting.fixedPosition)
-                if (fixedId !== undefined) freeStartId = fixedId
-              } else {
-                const derived = startIndexOfSlot(
-                  candidateIds,
-                  baseId,
-                  subSetting.startMode,
-                  subAssignment.slot,
-                  subAssignment.sessionId,
-                )
-                if (derived !== undefined) freeStartId = derived
-              }
-            }
-          }
+            ...(parentOfSession(sessionId) === undefined
+              ? {}
+              : {
+                mainSessionStartId:
+                  deps.pool.activeAccountOf?.(providerId, parentOfSession(sessionId) as string)
+                  ?? deps.pool.preferredRotationFor?.(providerId, parentOfSession(sessionId) as string),
+              }),
+            ...(freeStartId === undefined ? {} : { baseRotationStartId: freeStartId }),
+          })
+          if (freeDecision.startId !== undefined) freeStartId = freeDecision.startId
         }
         const freeCandidates = rotateFreeCandidates(candidates, freeStartId)
         for (const candidate of freeCandidates) {

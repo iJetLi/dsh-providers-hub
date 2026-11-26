@@ -325,6 +325,108 @@ describe('A0（审计 P0-1）：主代理**零回归**', () => {
   })
 })
 
+describe('A8（审计 P3）：付费腿与免费腿必须收敛到同一份判据', () => {
+  /**
+   * ## 上游原话（2026-11-26 第二轮）
+   *
+   * > 「免费腿：第二份内联实现仍在 …… **同一设置下付费给 `acc-1`、
+   * >   免费给 `acc-2`**（**已分叉**）」
+   *
+   * ## 修法
+   *
+   * 免费腿原来有一份**独立的内联实现**（`startIndexOfSlot` 自己拼），
+   * 与 `decideSubagentStart` 不是同一份判据。现在两边共用一个函数，
+   * 唯一差异是 `selector: undefined`（免费不查档位）。
+   *
+   * ## 本组守什么
+   *
+   * 同一份子代理设置，付费腿与免费腿必须给出**同一个号**。
+   * ⚠️ 若谁把免费腿改回内联实现，这里必红。
+   */
+  const POOL4 = ['acc1', 'acc2', 'acc3', 'acc4']
+
+  /** 跑一发（`free` 决定走哪条腿）。
+   * ⚠️ **替身必须真的回写** —— 否则首次块写完读不到，会造出假分叉
+   *    （我第一版探针就这么错了一次）。
+   */
+  async function runLeg(free: boolean, mode: string) {
+    const prefRotation: Record<string, { position: number }> = {}
+    const startPositions: Record<string, number> = {}
+    const selector = {
+      select: async (c: Array<{ id: string, credentialRef: string }>, o?: { rotationStartId?: string }) => {
+        const w = o?.rotationStartId
+        return { ok: true as const, account: w ? (c.find((x) => x.id === w) ?? c[0]) : c[0], balance: {} }
+      },
+      cachedTierOf: () => 0,
+    }
+    const pool = {
+      listAccountsByProvider: () => POOL4.map((id) => ({ id, credentialRef: 'R-' + id, enabled: true })),
+      permanentLocked: () => false,
+      strictManualOrder: () => false,
+      getAvailableAccount: async () => ({ entry: { id: 'acc1' }, credential: 'c' }),
+      subagentAssignmentOf: (_p: string, sid: string) => (sid === 'child-1'
+        ? { sessionId: 'child-1', parentSessionId: 'parent-1', at: 0, slot: 1 }
+        : undefined),
+      subagentRotationFor: () => ({ startMode: mode }),
+      preferredRotationFor: (_p: string, sid: string) => {
+        const own = prefRotation[sid]
+        if (own !== undefined) return POOL4[own.position - 1]
+        return sid === 'parent-1' ? 'acc2' : undefined
+      },
+      subagentStartPositionOf: (_p: string, sid: string) => startPositions[sid],
+      activeAccountOf: () => undefined,
+      setActiveAccount: () => {},
+      setPreferredRotation: async (_p: string, sid: string, position: number) => {
+        /** ⚠️ **真的回写**。 */
+        prefRotation[sid] = { position }
+      },
+      setSubagentStartPosition: (_p: string, sid: string, position: number) => {
+        startPositions[sid] = position
+      },
+      recordSubagentStart: async () => 0,
+      subagentParentForSession: (sid: string) => (sid === 'child-1' ? 'parent-1' : undefined),
+    }
+    const resolver = createCredentialResolver(
+      { pool, subagentParentForSession: (sid: string) => (sid === 'child-1' ? 'parent-1' : undefined) } as never,
+      {
+        product: { id: 'probe', displayName: 'P' },
+        readCredential: async (ref: string) => ref,
+        fallback: { kind: 'ref', refName: 'RF' },
+        balance: {
+          kind: 'buddy',
+          selector: selector as never,
+          lockedError: () => new Error('x'),
+          isFreeModel: () => free,
+          reportPickedAccount: true,
+        } as never,
+      },
+    )
+    return await resolver('m', 'child-1')
+  }
+
+  it('★★★ 五个策略下，付费腿与免费腿给出**同一个号**', async () => {
+    for (const mode of ['sequence', 'reverse', 'hash', 'follow', 'fixed']) {
+      const paid = await runLeg(false, mode)
+      const free = await runLeg(true, mode)
+      expect(
+        free,
+        '★★★ ' + mode + '：免费腿(' + String(free) + ') 必须与付费腿(' + String(paid) + ') 一致',
+      ).toBe(paid)
+    }
+  })
+
+  it('★★★ sequence 的结果必须与手算一致（证明两条腿都不是「恒第一个」）', async () => {
+    /**
+     * 池 `acc1..acc4`，主代理起点 `acc2`（index 1），slot=1：
+     * `sequence` = `(1+1+1)%4 = 3` ⇒ **acc4**（credentialRef `R-acc4`）。
+     * ⚠️ 这个断言的价值：若两条腿都退化成「总是第一个号」，它们**也**会一致，
+     *    但那不是收敛，是**一起失效**。所以必须另有一条锁住「算得对」。
+     */
+    expect(await runLeg(false, 'sequence'), '★ 付费腿 sequence 必须是 acc4').toBe('R-acc4')
+    expect(await runLeg(true, 'sequence'), '★ 免费腿 sequence 必须是 acc4').toBe('R-acc4')
+  })
+})
+
 describe('A3/A4：子代理参照的三级回落', () => {
   /**
    * 跑「子代理首次」那一发。

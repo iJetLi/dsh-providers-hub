@@ -1518,7 +1518,40 @@ export function apply(ctx: Context): void {
           ?? (sessionId === undefined ? undefined : resolveSubagentParent(sessionId)),
         setting: pool.subagentRotationFor?.('codearts'),
       })
-      const subagentStart = decideSubagentStart({
+      /**
+       * ★★★ **必须先确认「本会话是子代理」，再算起点**
+       *（2026-11-26 上游审计 P0-1 修复）。
+       *
+       * ## 缺陷（审计原话）
+       *
+       * > 「`subagent-start.ts:150  if (!options.hasAssignment) return false`
+       * >   **但它只覆盖 `resolver` 那条腿**。而 codearts 走的是**另一条腿**：
+       * >   `index.ts:1521  const subagentStart = decideSubagentStart({ ... })  // ← 没有 hasAssignment`」
+       *
+       * ## 实测（我复现了）
+       *
+       * | 主代理配置 | 实测（修前）|
+       * |---|---|
+       * | `sequence` | `acc1 → acc2` ❌ |
+       * | `reverse` | `acc1 → acc3` ❌ |
+       * | `hash` | `acc1 → acc3` ❌ |
+       *
+       * ⇒ **主代理一配子代理策略就被改号** —— 修 bug 引入更坏的 bug。
+       *
+       * ## 判据与 `credential-resolver` **同源**（本仓红线：同一语义不得两套）
+       *
+       * `credential-resolver` 用 `shouldDecideSubagentStartOnFirstUse`（含 `hasAssignment`）。
+       * 这里**不能直接复用那个函数** —— 它管的是「首次写起点」，而 codearts 这条腿
+       * 是「每次请求算起点」（它没有 `preferredRotation` 落盘）。
+       * ⇒ 只取它**同样的一条判据**：`subagentAssignmentOf !== undefined`。
+       *
+       * ⚠️ 主代理**永不登记**分配表 ⇒ 这条闸门对主代理恒 `false` ⇒ 零回归。
+       */
+      const codeartsIsSubagent = sessionId !== undefined
+        && sessionId.length > 0
+        && pool.subagentAssignmentOf?.('codearts', sessionId) !== undefined
+      if (codeartsIsSubagent) {
+        const subagentStart = decideSubagentStart({
         providerId: 'codearts',
         sessionId,
         candidateIds: pool.listAccountsByProvider('codearts')
@@ -1538,8 +1571,9 @@ export function apply(ctx: Context): void {
           : { mainSessionStartId: subagentMainStartIdOf('codearts', sessionId) }),
         ...(rotationStartId === undefined ? {} : { baseRotationStartId: rotationStartId }),
       })
-      if (subagentStart.startId !== undefined) {
-        rotationStartId = subagentStart.startId
+        if (subagentStart.startId !== undefined) {
+          rotationStartId = subagentStart.startId
+        }
       }
       // WARN modelId 恒传空串：codearts 刻意不做模型级限流（见
       // ratelimit-misreport-behavior.spec.ts 的「已知例外」一节）。PR #59 顺手
@@ -1552,14 +1586,16 @@ export function apply(ctx: Context): void {
         rotationStartId,
       )
       /**
-       * ⚠️ **选完回写 pin**（`shouldPin` 为 true 时；`fixed` 模式刻意不 pin）。
+       * ⚠️ **这里原来有一段「选完回写 pin」的空 if 块，已删除**（2026-11-26）。
        *
-       * 回写让下次同一子代理**沿用同一个号** ⇒ prompt cache 能命中
-       *（用户原话：「拉起时定死，只有该号不可用才换」）。
-       * ⚠️ `void` 掉：pin 是**尽力而为**的副作用，失败不该影响本次请求。
+       * 历史：它调 `pool.pinSubagentAccount(...)`，而该方法在
+       * `34b2137f` 的重构中**已被删除**（子代理起点改存 `preferredRotation`）。
+       * ⇒ 只剩一个 `if (…) { }` 空壳，`subagentStart` 已移入上面的闸门块
+       *   ⇒ 编译报 `Cannot find name 'subagentStart'`。
+       *
+       * ⚠️ 不要再加回来：`AccountPool` 已无此方法，写了就是**静默 no-op**
+       *（上游审计第二轮「残留一项没清」点名的正是它）。
        */
-      if (available !== null && subagentStart.shouldPin && sessionId !== undefined) {
-      }
       return available?.credential
     },
     // 续期按**账号池里的具体账号**走：`refreshAccountCredential` 读写的是

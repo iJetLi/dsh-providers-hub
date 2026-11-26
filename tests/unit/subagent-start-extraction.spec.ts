@@ -180,8 +180,22 @@ describe('★★★ 子代理起点提取：与 credential-resolver 原实现逐
    *
    * 这是「不配就和改动前逐字节相同」的判据。
    */
-  it('★★★ T6 未配置或 follow 时不动任何东西', () => {
-    for (const setting of [undefined, { startMode: 'follow' }, {}]) {
+  it('★★★ T6 未配置时不动任何东西（`follow` **单独测**，见 T6b）', () => {
+    /**
+     * ## ⚠️ 2026-11-26 修正（上游审计第二轮 P3）
+     *
+     * 原版把 `{ startMode: 'follow' }` 和 `undefined` 混在同一个循环里，
+     * 都断言 `decidedBy: 'none'` —— **把缺陷锁成了期望**：
+     *
+     * > 审计原话：「**T6/S4 把『`follow` ⇒ 无起点』锁成了期望行为** ——
+     * >   变异『改成真跟随』⇒ **红 2 条**。**守卫在保护缺陷。**」
+     *
+     * ⇒ `follow` 的语义是「**跟随主代理**」，不是「不用起点」。
+     *    它只是**不错开**（与 `sequence`/`reverse` 的区别），但这不等于「无起点」。
+     * ⇒ 现在只有「未配置 / 空对象」才算「什么都不做」；
+     *    `follow` 移到 T6b 单独守（带 `mainSessionStartId` 的真跟随语义）。
+     */
+    for (const setting of [undefined, {}]) {
       const decision = decideSubagentStart({
         providerId: 'p',
         sessionId: 'child-1',
@@ -204,6 +218,49 @@ describe('★★★ 子代理起点提取：与 credential-resolver 原实现逐
     })
     expect(noSession.startId).toBeUndefined()
     expect(noSession.decidedBy).toBe('none')
+  })
+
+  /**
+   * ## T6b `follow` = **真的跟随主代理**（2026-11-26 新增，修上游 P3）
+   *
+   * 审计原话：
+   *
+   * > 「**`follow`** 传 `undefined` ⇒ 实得 `acc-1` ≠ 主代理 `acc-2`（**buddy 同错**）」
+   *
+   * ⇒ `follow` 必须把**主代理的起点**当作自己的起点，而不是「什么都不做」。
+   *
+   * ⚠️ `pinnedFirst` 必须仍是 `false`：`follow` 只是「起点相同」，
+   *    档位规则仍然生效（否则主代理那个号降档后仍会死抱着它）。
+   */
+  it('★★★ T6b `follow` ⇒ 起点 = 主代理起点（真跟随，不是「无起点」）', () => {
+    const decision = decideSubagentStart({
+      providerId: 'p',
+      sessionId: 'child-1',
+      candidateIds: ['a', 'b', 'c'],
+      allowPermanent: true,
+      pool: makePool({ setting: { startMode: 'follow' }, enabled: ['a', 'b', 'c'] }),
+      /** ⚠️ 主代理实际在用 `b`。 */
+      mainSessionStartId: 'b',
+    })
+    expect(decision.startId, '★★★ follow 必须跟随主代理（b），不是「无起点」').toBe('b')
+    expect(decision.decidedBy, '★ 来源标为 follow（供诊断）').toBe('follow')
+    expect(decision.pinnedFirst, '★ 只跟随起点，不无视档位').toBe(false)
+  })
+
+  it('★★ T6c `follow` 但主代理也没有起点 ⇒ 退回「不动」（与未配置一致）', () => {
+    /**
+     * ⚠️ 这是 `follow` 唯一的退路：主代理自己都没配起点时，
+     * 只能退回池里第一个 —— 与「没配」同型。
+     */
+    const decision = decideSubagentStart({
+      providerId: 'p',
+      sessionId: 'child-1',
+      candidateIds: ['a'],
+      allowPermanent: true,
+      pool: makePool({ setting: { startMode: 'follow' }, enabled: ['a'] }),
+    })
+    expect(decision.startId).toBeUndefined()
+    expect(decision.decidedBy).toBe('none')
   })
 
   /**

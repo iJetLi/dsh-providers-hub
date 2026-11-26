@@ -482,6 +482,29 @@ export function createOfficeAceCredentialProvider(
       })
     } catch { /* 登记失败不影响选号 */ }
     if (accounts.length <= 1) return accounts
+    /**
+     * ★★★ **必须在算起点前挡住主代理**（2026-11-26 上游审计 P0-1 修复）。
+     *
+     * ## 缺陷（审计原话）
+     *
+     * > 「`decideSubagentStart` 内部的早退是
+     * >   `if (sessionId === undefined || sessionId.length === 0) return …`。
+     * >   **主代理和子代理都有 `sessionId`** ⇒ **这条早退挡不住主代理**。」
+     *
+     * ⇒ 主代理只要配了子代理策略，自己就被改号。
+     * ⚠️ `credential-resolver` 那条腿有 `shouldDecideSubagentStartOnFirstUse`
+     *    （内含 `hasAssignment` 闸门），而**这一条腿没有** ⇒ 三条腿判据分叉。
+     *
+     * ## 判据与 `credential-resolver` **同源**
+     *
+     * ⚠️ 本模块拿不到 `preferredRotationFor`（那是 `AccountPool` 的方法，
+     *    而这里只声明了结构化的 `subagentPool`）⇒ 只查 `subagentAssignmentOf`。
+     *    对「主代理」这一格已经够：主代理**永不登记**分配表。
+     */
+    const isSubagentHere = sessionId !== undefined
+      && sessionId.length > 0
+      && pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId) !== undefined
+    if (!isSubagentHere) return accounts
     try {
       const decision = decideSubagentStart({
         providerId: OFFICEACE.id,
