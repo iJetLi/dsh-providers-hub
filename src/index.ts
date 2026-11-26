@@ -713,6 +713,66 @@ async function autoclawSelfHeal(
  *
  * 抛错会被 `listModels` 的调用方（probe）接住并展示，不会静默。
  */
+/**
+ * ★★★ **子代理的「主代理起点」解析**（2026-11-26 从 `apply()` 内抽到模块级）。
+ *
+ * ## 为什么抽出来
+ *
+ * 上游审计第四轮（PR #158）要求给 P0-A 补**行为级守卫**，但原实现是
+ * `apply()` 里的局部闭包 ⇒ **单测拿不到** ⇒ 只能写源码正则，
+ * 而源码正则对 `if (false && …)` 天然免疫（上游实测 116 条全绿）。
+ *
+ * ⇒ 抽出成纯函数（依赖全部**注入**），可被真值驱动地测。
+ *
+ * ## 判据（与 `credential-resolver` **必须同源**）
+ *
+ * | 级 | 来源 | 何时有效 |
+ * |---|---|---|
+ * | ① | `activeAccountOf(父会话)` | 父会话**发过请求**（绝大多数）|
+ * | ② | `preferredRotationFor(父会话)` | 插件刚重启 / 父会话还没发过请求 |
+ *
+ * ⚠️ **顺序不能反**（这是 P0-A 的缺陷本体）：
+ * 原来这里只有 ②，而报障的 codearts 正好落在错的一边 ——
+ *
+ * - 主代理下拉框 `acc1`、**实际在用 `acc3`**、子代理 `sequence` slot=0；
+ * - 只读下拉框 ⇒ `(0+1)%4 = 1` ⇒ `acc2`（**错**，上游实测就是这个值）；
+ * - 读实际在用 ⇒ `(2+1)%4 = 3` ⇒ `acc4`（**对**）。
+ *
+ * `credential-resolver.ts` 那条腿一直是 `activeAccountOf ?? preferredRotationFor`
+ * （见其 `:858` / `:1041`）⇒ 本函数与它**逐字同源**（本仓红线：同一语义不得两套）。
+ *
+ * @returns 主代理起点账号 id；拿不到 ⇒ `undefined`（调用方按「无锚点」降级）
+ */
+export function resolveSubagentMainStartId(
+  pool: {
+    subagentAssignmentOf?: (provider: string, sessionId: string) =>
+      { parentSessionId?: string } | undefined
+    activeAccountOf?: (provider: string, sessionId: string) => string | undefined
+    preferredRotationFor?: (provider: string, sessionId: string) => string | undefined
+  },
+  providerId: string,
+  sessionId: string | undefined,
+  /** 父会话兜底来源（`apply()` 内的 `resolveSubagentParent`）。 */
+  resolveParent: (sessionId: string) => string | undefined,
+): string | undefined {
+  if (sessionId === undefined || sessionId.length === 0) return undefined
+  try {
+    /**
+     * ⚠️ **两个父会话来源都要试**：分配记录（落盘，跨重启可靠）优先，
+     * 会话头（`agents` 注册表）兜底 —— 分配记录还没建立的首轮只能靠后者。
+     */
+    const assignmentParent = pool.subagentAssignmentOf?.(providerId, sessionId)?.parentSessionId
+    const mainSessionId = assignmentParent ?? resolveParent(sessionId)
+    if (mainSessionId === undefined || mainSessionId.length === 0) return undefined
+    /** ★ **实际在用优先**，缺失才回落下拉框（见上方判据表）。 */
+    return pool.activeAccountOf?.(providerId, mainSessionId)
+      ?? pool.preferredRotationFor?.(providerId, mainSessionId)
+  } catch {
+    /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
+    return undefined
+  }
+}
+
 function probeSlotOf(product: AgnescodeProduct, credential: unknown): AgnescodeSlot {
   const text = typeof credential === 'string' ? credential : JSON.stringify(credential ?? {})
   const parsed = parseAgnescodeCredential(text, product)
@@ -2692,34 +2752,9 @@ export function apply(ctx: Context): void {
   const subagentMainStartIdOf = (
     providerId: string,
     sessionId: string | undefined,
-  ): string | undefined => {
-    if (sessionId === undefined || sessionId.length === 0) return undefined
-    try {
-      const assignmentParent = pool.subagentAssignmentOf?.(providerId, sessionId)?.parentSessionId
-      const mainSessionId = assignmentParent ?? resolveSubagentParent(sessionId)
-      if (mainSessionId === undefined || mainSessionId.length === 0) return undefined
-      /**
-       * ★★★ **必须先看「实际在用」，再看「下拉框」**（2026-11-26 第四轮审计 P0-A）。
-       *
-       * 这与 `credential-resolver.ts` 的判据**必须同源**（那里是
-       * `activeAccountOf(父会话) ?? preferredRotationFor(父会话)`，见 `:858` / `:1041`）。
-       *
-       * 原来这里只有 `preferredRotationFor` ⇒ **同一语义两套取值**（本仓红线），
-       * 而报障的那一家（codearts）正好落在错的一边：
-       *
-       * - 主代理下拉框 `acc1`、**实际在用 `acc3`**、子代理 `sequence` slot=0；
-       * - 只读下拉框 ⇒ `(0+1)%4 = 1` ⇒ `acc2`（**错**，实测就是这个值）；
-       * - 读实际在用 ⇒ `(2+1)%4 = 3` ⇒ `acc4`（**对**）。
-       *
-       * ⚠️ 顺序不能反：`activeAccountOf` 拿不到（老会话 / 刚启动）时才回落到下拉框。
-       */
-      return pool.activeAccountOf?.(providerId, mainSessionId)
-        ?? pool.preferredRotationFor?.(providerId, mainSessionId)
-    } catch {
-      /** ⚠️ 任何异常都不能影响选号（这是每发请求都要跑的路径）。 */
-      return undefined
-    }
-  }
+  ): string | undefined =>
+    /** ⚠️ 实现已抽到模块级 `resolveSubagentMainStartId`（可单测，见其注释）。 */
+    resolveSubagentMainStartId(pool, providerId, sessionId, resolveSubagentParent)
 
 
   /**
