@@ -126,11 +126,64 @@ export function proxyFetch(
   } as never) as unknown as Promise<Response>
 }
 
+/**
+ * ★★★ **undici 安装不完整**的识别与可操作文案（2026-11-26，GitHub issue #169）。
+ *
+ * ## 报障（用户截图）
+ *
+ * 「设置代理 → 测试连接」直接报：
+ *
+ * ```
+ * 测试失败：Cannot find module './llhttp/llhttp-wasm.js'
+ * Require stack:
+ * - …\node_modules\.pnpm\undici@8.11.2\node_modules\undici\lib\dispatcher.js
+ * (MODULE_NOT_FOUND)
+ * ```
+ *
+ * ## 根因
+ *
+ * `undici@8.x` 的 `Dispatcher`（`ProxyAgent` / `Agent` / `Pool` 的底座）在**模块加载期**
+ * 就 `require('./llhttp/llhttp-wasm.js')`（8.x 把 C++ 的 llhttp 换成了 wasm 版）。
+ * 那个文件**随包发布**（`undici` 的 `package.json` 没有 `files` 白名单），
+ * 所以缺它只有一个原因：**装坏了**（pnpm 存储/硬链接不完整、安装被中断、
+ * 或手工拷 `node_modules` 时漏了二进制式资源）。
+ *
+ * ⇒ 这**不是**代理地址写错、也不是网络问题 —— 但原来的文案把它当成普通错误原样抛出，
+ *   用户会以为是 Clash 配错了，反复改代理地址也没有用。
+ *
+ * ## 为什么在这里翻译而不是在上层
+ *
+ * `buildProxyDispatcher` 是**全仓所有代理**（gemini / opencode / qoder / minimax …）
+ * 唯一建 Dispatcher 的地方 ⇒ 在这里翻一次，所有渠道的「测试连接」都能得到同一句话。
+ */
+export function undiciInstallBroken(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.message}\n${String((error as { stack?: unknown }).stack ?? '')}` : String(error)
+  if (!/MODULE_NOT_FOUND|Cannot find module/i.test(text)) return false
+  // 只认 undici 自己的内部模块（`llhttp` 是它 8.x 的 wasm 底座）
+  return /undici/.test(text) && /llhttp/i.test(text)
+}
+
+/** 把「undici 装坏了」翻译成用户能照做的文案。 */
+function undiciBrokenMessage(): string {
+  return '代理组件损坏：插件依赖的 undici 安装不完整（缺 ./llhttp/llhttp-wasm.js）。'
+    + '这不是代理地址或 Clash 的问题，改代理也没用。'
+    + '请重装插件以修复依赖：在插件目录执行 `pnpm install --force`（或删掉 node_modules 后重新 `pnpm install`），'
+    + '然后重启 DSH。'
+}
+
 /** 取（或建）该代理地址的 Dispatcher。 */
 export function buildProxyDispatcher(proxy: NormalizedProxy): Dispatcher {
   const existing = cache.get(proxy.url)
   if (existing !== undefined) return existing
-  const created = proxy.kind === 'http' ? buildHttpDispatcher(proxy.url) : buildSocksDispatcher(proxy)
+  let created: Dispatcher
+  try {
+    created = proxy.kind === 'http' ? buildHttpDispatcher(proxy.url) : buildSocksDispatcher(proxy)
+  } catch (error) {
+    // ★ 见 `undiciInstallBroken` 的长注释（issue #169）：把「装坏了」翻译成人话，
+    //   否则用户会以为是代理地址写错，反复改也修不好。
+    if (undiciInstallBroken(error)) throw new Error(undiciBrokenMessage())
+    throw error
+  }
   // 触碰即移到末尾，实现 LRU 的淘汰顺序
   cache.delete(proxy.url)
   cache.set(proxy.url, created)
