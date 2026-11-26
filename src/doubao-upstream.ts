@@ -21,7 +21,8 @@
  * - **鉴权 = cookie**（`sessionid` / `sid_tt` / `ttwid`…），无 `Authorization`。
  * - **设备身份 = 确定性派生**（`doubaoDeviceIdentityOf`）：每账号一套 19 位数字
  *   `device_id` / `web_id` / `tea_uuid`，`fp` 恒为 `verify_<device_id>`。
- * - ⚠️ 这三条腿**不需要** `a_bogus` 签名（签到那条腿需要，走 CDP 页面会话）。
+ * - ⚠️ 这三条腿**不需要** `a_bogus` 签名（签到那条腿需要，在 `node:vm` 沙箱里
+ *   跑内置 SDK 签，**不需要浏览器**）。
  *   实测依据：2026-11-22 用纯 cookie + 客户端请求头，三个端点均 200。
  *
  * ## 请求头是**客户端身份**，不是随便填的

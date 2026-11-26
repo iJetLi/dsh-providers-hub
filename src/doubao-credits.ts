@@ -9,7 +9,9 @@
  *   `{data:{checked_in,checkin_date,continuous_days,idempotent,reward_amount,…},code:0}`。
  * - **鉴权 = cookie**（`sessionid`/`sid_tt`/`ttwid` 等），无 `Authorization`。
  * - **签名 = query 的 `a_bogus`**，由豆包页面上下文的 `window.bdms.frontierSign` 生成
- *   （`bdms` 只在 doubao.com 页面里存在）⇒ **签到必须走 CDP 页面会话**，
+ *   （`bdms` 只在 doubao.com 页面里存在）⇒ **签到必须签名**。
+ *   ⚠️ 2026-11-26 起签名在 `node:vm` 沙箱里跑**随包内置**的官方 SDK（零下载），
+ *   **不再**需要 CDP 页面会话 / 任何浏览器。
  *   纯 Node fetch 产不出合法 `a_bogus`（实测裸 fetch 恒 `710010702 系统错误`）。
  * - **幂等**：`idempotent: true`（重复调用安全，今日已签会回 `checked_in:true`）。
  *
@@ -28,7 +30,8 @@
  *
  * - 本文件：**余额**（真实读 quota）+ **签到薄壳**（把凭据转给 `doubao-signin.ts`）；
  * - `src/doubao-upstream.ts`：额度/模型/对话三条腿的共享协议；
- * - `src/doubao-signin.ts`：真正的 **CDP 页面会话驱动**（起豆包内核 + 挂其 User Data，
+ * - `src/doubao-signin.ts`：**沙箱签名 + 直连 HTTP**（2026-11-26 起零浏览器；
+ *   历史实现曾是 CDP 页面会话驱动，已删除）——（旧描述：起豆包内核 + 挂其 User Data，
  *   在页面里用 `bdms.frontierSign` 签名再领取）。签名逻辑只在那一份，别在这里抄。
  *
  * @module src/doubao-credits.ts

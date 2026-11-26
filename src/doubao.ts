@@ -10,7 +10,8 @@
  *
  * ⚠️ **签名不是 header，是 query 的 `a_bogus`**（与 TRAE 的 `X-Bogus` 不同源）：
  * 它由豆包页面上下文里的 `bdms.frontierSign` 生成（`window.bdms` 只在
- * doubao.com 页面里存在），⇒ **签到必须走 CDP 页面会话**（与 zcode captcha /
+ * doubao.com 页面里存在），⇒ **签到必须签名**（2026-11-26 起在 `node:vm` 沙箱里
+ * 跑随包内置的官方 SDK，零下载、零浏览器；与 zcode captcha /
  * magicrew 浏览器登录同型），纯 Node fetch 产不出合法 `a_bogus`。
  *
  * ## 设备身份

@@ -573,8 +573,11 @@ service.bat install -Mode bootstrap  -BundleDir <产物目录> -Profile prod   :
   签到：`a_bogus` 由**随包内置**的官方 bdms SDK 在 `node:vm` 沙箱里生成
   （`src/assets/doubao-bdms-sdk.<hash>.js`，装载前逐字节校验 sha256，运行时零下载），
   所以容器 / 无桌面服务器也能签到。
-  ⚠️ 签到**不进每日自动链**（`autoCheckinExcluded: true`）：每天一次的动作由用户手点
-  「一键领取积分」，免得自动跑失败时用户只看到"没到账"看不到原因。
+  ⚠️ 签到**进每日自动链**（面板「豆包自动签到」那格，`doubaoCheckinEnabled()` 默认 `true`）。
+  2026-11-26 零浏览器化之后签到就是一条 POST（沙箱签名 + 直连），不再起浏览器进程树
+  ⇒ 自动跑不再有「用户只看到没到账、看不到原因」的代价。想手动控制请在面板关掉那格。
+  ⚠️ `PROVIDER_REGISTRY` 里**刻意不写** `autoCheckinExcluded`（见 `provider-registry.ts:1166` 的注释）——
+  这正是「默认进链」的实现方式，不是漏写。
   额度：读 `POST /alice/commerce/sale/subscription/overview/`（面板同款接口），
   金额是带千分位的字符串（`"4,003"`）、到期时间是毫秒；分类总额只在
   「总额 − 已用 == 剩余」算术自洽时采用，否则明确标 `totalKnown: false`，不编分母。
