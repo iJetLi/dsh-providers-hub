@@ -164,6 +164,50 @@ describe('B：`account.setRotation` 位次越界必须报错（恢复被删的�
     expect(writes, '★★★ 越界时**不得写盘**（早退必须在 setPreferredRotation 之前）').toBe(0)
   })
 
+  /**
+   * ★★★ **非法位次的四个分支各锁一格**（2026-11-26 第五轮审计 B3-B6）。
+   *
+   * 审计实测：此前只测了「超界」和「恰好等于」两种，于是下面这些变异**全绿**：
+   *
+   * | 变异 | 修前 |
+   * |---|---|
+   * | 边界放宽一格（`> n` 而不是 `>= n`）| 绿 |
+   * | 删掉「负位次」那一支 | 绿 |
+   * | 删掉 `Number.isInteger` 那一支 | 绿 |
+   * | `enabledCount` 忽略 `enabled` 标志 | 绿 |
+   *
+   * ⇒ 实现里其实四条都有（`jet-hub-rpc.ts` 的
+   * `typeof req.position !== 'number' || !Number.isInteger(req.position) || req.position < 1`），
+   * 只是**没有任何用例**。没有用例的分支等于可以随时被删掉而无人发现。
+   *
+   * ⚠️ 每个非法值都必须：① `ok:false`；② code 是 `bad-request`（不能是别的错）；
+   *   ③ `setPreferredRotation` **一次都没被调**（早退在写入之前）。
+   */
+  it('★★★ 0 / 负数 / 非整数 / 非数字 ⇒ bad-request 且不写盘（四个分支各一格）', async () => {
+    /**
+     * ⚠️ **不能把 `NaN` 放进这个列表**：本用例走真 RPC（`Request` + `JSON.stringify`），
+     * 而 `JSON.stringify({ position: NaN })` ⇒ `{"position":null}`，而 **`null` 是合法值**
+     * （表示「清除位次」）。我第一版把它列进来，测试报「NaN 必须被拒 ⇒ 实际 ok:true」，
+     * 看起来像代码缺陷，实际是**测具把非法值变成了合法值**。
+     *
+     * ⇒ 要测 NaN 得绕过 JSON（直接调 handler 并塞原始对象），那是另一条腿；
+     *   这里只锁「能通过 JSON 表达」的非法值。
+     */
+    const illegal = [0, -1, 1.5, '2', true] as unknown as number[]
+    for (const position of illegal) {
+      let writes = 0
+      const { handlers } = makeHarness({
+        enabledCount: 3,
+        onSetRotation: () => { writes += 1 },
+      })
+      const res = await callSetRotation(handlers[0]!, position)
+      const error = res.error as { code?: string; message?: string } | undefined
+      expect(res.ok, `position=${String(position)} 必须被拒`).toBe(false)
+      expect(error?.code, `position=${String(position)} 必须是 bad-request`).toBe('bad-request')
+      expect(writes, `position=${String(position)} 不得写盘`).toBe(0)
+    }
+  })
+
   it('★★★ 位次在范围内 ⇒ 正常写入（反向对照，证明上一条不是「一律拒绝」）', async () => {
     /**
      * ⚠️ **没有这条，上面那条的「拒绝」可能是别的原因导致的**（比如 handler 根本没跑）。

@@ -6201,13 +6201,24 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
       })
       const officeAceIsSubagent = pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId) !== undefined
       if (officeAceIsSubagent) {
-        const mainStartId = (() => {
-          const assignmentParent = pool.subagentAssignmentOf?.(OFFICEACE.id, sessionId)?.parentSessionId
-          const mainSessionId = assignmentParent ?? resolveSubagentParent(sessionId)
-          if (mainSessionId === undefined || mainSessionId.length === 0) return undefined
-          return pool.activeAccountOf?.(OFFICEACE.id, mainSessionId)
-            ?? pool.preferredRotationFor(OFFICEACE.id, mainSessionId)
-        })()
+        /**
+         * ★★★ **第三份副本已并入模块级函数**（2026-11-26 第五轮审计 P0）。
+         *
+         * 这里原先是一段**内联 IIFE**，与 `subagentMainStartIdOf`（已抽成
+         * `resolveSubagentMainStartId`）、以及 `credential-resolver` 那条腿
+         * 各自独立实现同一判据 —— **三份实现**，而且是唯一**缺 `try/catch`** 的一份。
+         *
+         * ⇒ 后果（审计实测）：这一份的**顺序反转变异全量零红**（另外两份都有守卫），
+         *   而且选号路径上抛异常会直接打断每发请求的取号 —— 另两份都不会。
+         *
+         * ⇒ 现在统一走 {@link resolveSubagentMainStartId}：判据同源、异常同样被吞。
+         */
+        const mainStartId = resolveSubagentMainStartId(
+          pool,
+          OFFICEACE.id,
+          sessionId,
+          resolveSubagentParent,
+        )
         const subagentStart = decideSubagentStart({
           providerId: OFFICEACE.id,
           sessionId,
