@@ -37,25 +37,51 @@ import { Context } from '@deepseek-ai/cordis'
 import { apply } from '../../src/index.js'
 import { clearProviderRuntimes } from '../../src/provider-runtime.js'
 
+/**
+ * 记录每一次 `resolve(ref)` 的调用顺序（= 凭据读取顺序 = 遍历顺序）。
+ *
+ * ⚠️ **这是观测「遍历顺序首位」的唯一可靠手段**：
+ * officeace 锁定态逐个 `readCredential`，第一个读成功的就返回。
+ * ⇒ 把 `marker` 塞进凭据里，再配合「全部读成功」，就能从返回值的
+ * `marker` 反推**首位是哪个号**。
+ */
+const credentialReads: string[] = []
+
 class FakeCredentials {
   async resolve(ref: string): Promise<{ value: string } | undefined> {
     /**
-     * ⚠️ **officeace 的凭据形状与 codearts 不同**：
-     * 它的 `readCredential` 会把 JSON 解成「Basic 授权 + 会话 cookie」一类结构，
-     * 缺字段就返回 `undefined` ⇒ 锁定态判「凭据读不出来」。
+     * ⚠️ **必须同时满足两家的形状校验**（缺字段就都读不出来）：
      *
-     * ⇒ 同时给出两家的字段（多的字段对另一家是无害的）。
+     * | 家 | 要求的字段 | 校验位置 |
+     * |---|---|---|
+     * | codearts | `access_token` / `refresh_token` | `CODEARTS_ACCOUNT_XXX` 解析 |
+     * | officeace | **`modelAppKey` 非空** | `officeace-auth.ts:725` |
+     *
+     * ⚠️ officeace 那条我漏了两轮：`readCredential` 只在
+     * `typeof parsed.modelAppKey === 'string' && length > 0` 时才返回凭据，
+     * 否则**回落 `readStoredCredential(ref)`**（本机文件）⇒ 单测里恒 `undefined`
+     * ⇒ 锁定态判「凭据读不出来」。**这就是上游说的「跑出来起点是 undefined」的真因之一。**
      */
     const payload = {
       marker: ref,
       // codearts 用
       access_token: `token-${ref}`,
       refresh_token: `refresh-${ref}`,
-      // officeace 用（`basicAuthorization` 是它认的凭据字段名，见 officeace-adapter）
+      // officeace 用（`modelAppKey` 是硬要求，见上方注释）
+      modelAppKey: `appkey-${ref}`,
+      modelAppSecret: `secret-${ref}`,
+      maasBaseUrl: 'https://maas.example.invalid',
+      access: `ak-${ref}`,
+      secret: `sk-${ref}`,
+      securityToken: `sts-${ref}`,
+      projectId: 'proj-1',
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      refreshToken: `rt-${ref}`,
+      dpopPrivateJwk: {},
       basicAuthorization: `Basic ${ref}`,
       sessionCookie: `cookie-${ref}`,
     }
-    console.log('  [FakeCredentials] resolve(' + ref + ')')
+    credentialReads.push(ref)
     return { value: JSON.stringify(payload) }
   }
   async describe() { return { configured: false, writable: true } }
@@ -176,19 +202,33 @@ function spyRotationStart(pool: PoolLike): unknown[] {
  * `resolveSubagentParent`）⇒ 必须在 **`apply()` 之前或之后**装好
  * （`get` 是每次现调，故之后装也生效）。
  */
+/**
+ * 注入 `agents` 注册表，让 `resolveSubagentParent` 能返回给定的父会话。
+ *
+ * ⚠️⚠️ **必须用 `ctx.provide('agents', …)`，绝不能覆盖 `ctx.get`**。
+ *
+ * ## 为什么（我踩了这个坑，症状极具误导性）
+ *
+ * `ctx` 是 **cordis 的 Proxy**。直接 `anyCtx.get = (name) => …` 会让它之后
+ * 解析 `ctx.credentials` 时抛：
+ *
+ * ```
+ * TypeError: (intermediate value)(intermediate value)(intermediate value) is not a function
+ *   at Object.readCredential (src/index.ts:6343)   ← ctx.credentials
+ *   at resolveCredential (src/officeace-lock.ts:444)
+ * ```
+ *
+ * ⇒ 凭据**一次都没读** ⇒ 看起来像「起点算不出来」，实际是**脚手架把 ctx 弄坏了**。
+ *
+ * ⚠️ 这正是上游说「我试过、没补成」可能的另一个成因 —— 他停在「起点 undefined」，
+ *   而真因可能是**观测者自己破坏了被测环境**。
+ */
 function injectAgents(ctx: Context, childId: string, parentId: string): void {
-  const anyCtx = ctx as unknown as Record<string, unknown>
-  const prevGet = anyCtx.get as ((n: string) => unknown) | undefined
-  anyCtx.get = (name: string) => {
-    if (name === 'agents') {
-      return {
-        get: (id: string) => (id === childId
-          ? { session: { header: { parentSession: parentId } } }
-          : undefined),
-      }
-    }
-    return prevGet === undefined ? undefined : prevGet.call(ctx, name)
-  }
+  ctx.provide('agents', {
+    get: (id: string) => (id === childId
+      ? { session: { header: { parentSession: parentId } } }
+      : undefined),
+  } as never)
 }
 
 describe('接线级：真跑 apply() + 真池，观察 codearts 传给选号的起点', () => {
@@ -531,5 +571,129 @@ describe('接线级：真跑 apply() + 真池，观察 codearts 传给选号的�
       assignment,
       '★★★ officeace 未锁定腿的 registerSubagentStartIfNeeded 必须真的执行',
     ).toBeDefined()
+  })
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════
+   * ★★★ **装配层②：`mainStartIdOf` 也必须真的被接上**
+   * ═══════════════════════════════════════════════════════════════════════
+   *
+   * ## 上游原话（PR #173 合并时）
+   *
+   * > 「只删 `mainStartIdOf` 那一行注入 ⇒ **全绿**。」
+   * >
+   * > 「⚠️ **PR 标题里的『装配层变异 3/3 有牙』是虚高的，实为 1/3 无牙。**
+   * >   这不怪你写错代码，是**判据选错了观察点**。」
+   * >
+   * > 「原因：新用例的判据**只靠 `resolveSubagentParent` 就能触发登记**，
+   * >   `registerSubagentStartIfNeeded` **结构上够不到** `mainStartIdOf`，
+   * >   所以「查分配表」这个判据**看不见它**。」
+   *
+   * ## 为什么我上一版看不见它（如实记录）
+   *
+   * 我的判据是「分配表有没有被写入」—— 而写入只证明 `resolveSubagentParent` 接上了，
+   * **完全不经过 `mainStartIdOf`**（它的消费点在 `decideSubagentStart` 里，见
+   * `officeace-lock.ts:573`）。⇒ 判据与观测点**没对上**。
+   *
+   * ## 正确观测点：**凭据读取顺序的首位**
+   *
+   * officeace 锁定态逐个 `readCredential`，第一个成功的就返回：
+   *
+   * ```
+   * const accounts = orderAccountsForSubagent(deps.accounts(), sessionId)  // ← 顺序在这被改
+   * for (const account of accounts) { const c = await deps.readCredential(...) ; if (c) return c }
+   * ```
+   *
+   * ⇒ 「第一个被读的 ref」= **遍历顺序首位** = `decideSubagentStart` 算出的起点。
+   *
+   * ## 上游试过、没补成的原因（我这次能成，靠修掉它）
+   *
+   * > 「我写了一条……用例，跑出来起点是 `undefined`。
+   * >   追下去发现：`if (!isSubagentHere) return accounts` —— 分配表空 ⇒ 整段跳过。
+   * >   **登记是 fire-and-forget，第一次调用时表还空** ⇒ 这是时序问题。」
+   *
+   * ⚠️ 我这次发现「起点 undefined」**还有第二个成因**（上游那轮没走到这步）：
+   *
+   * `officeace-auth.ts:725` 的 `readCredential` 只在
+   * `typeof parsed.modelAppKey === 'string' && length > 0` 时返回凭据，
+   * 否则**回落本机文件** ⇒ 单测里恒 `undefined` ⇒ 判「凭据读不出来」。
+   *
+   * ⇒ **两个成因叠加**才让上游以为「测不出来」。修掉 `modelAppKey` 后，
+   *   **第一拍就能观测到起点**（实测 `R-oa3`），不必等第二拍。
+   */
+  it('★★★ 装配层②：officeace 的 mainStartIdOf 必须真的被接上（观测遍历顺序首位）', async () => {
+    const { ctx, llm } = applyOnce()
+    const pool = realPoolOf(ctx)
+
+    const hit = llm.registered.find((r) => r.ids.includes('officeace'))
+    expect(hit, '必须有 officeace adapter').toBeDefined()
+    const options = hit!.adapter.options as Record<string, unknown>
+    const provider = options.credentialProvider as (sid?: string) => Promise<unknown>
+
+    for (const ref of ['R-oa1', 'R-oa2', 'R-oa3']) {
+      await pool.addAccount({ id: ref, provider: 'officeace', credentialRef: ref, enabled: true })
+    }
+    await pool.setSubagentRotation('officeace', { startMode: 'sequence' })
+    /** ⚠️ **必须锁定态** —— `mainStartIdOf` 只在这条腿被读（`officeace-lock.ts:573`）。 */
+    await pool.setPermanentLocked('officeace', true)
+
+    /**
+     * ★ **主代理「实际在用」= 第 2 个号（`R-oa2`）**。
+     *
+     * 池 `[R-oa1, R-oa2, R-oa3]`、`sequence` slot=0：
+     *
+     * | 实现 | 起点 | 首位 |
+     * |---|---|---|
+     * | `mainStartIdOf` **接上**（读实际在用 `R-oa2`）| `(1+1)%3=2` | **`R-oa3`** |
+     * | 没接上（退化池首 `R-oa1`）| `(0+1)%3=1` | `R-oa2` |
+     *
+     * ⇒ **两者不同，可分辨。**
+     */
+    pool.setActiveAccount('officeace', 'main-1', 'R-oa2')
+
+    injectAgents(ctx, 'child-m', 'main-1')
+
+    /**
+     * ⚠️ **观测点 = 错误文案里的账号顺序**。
+     *
+     * 锁定态在「所有号凭据都读不出来」时抛的文案里，括号内是**逐号 append**：
+     *
+     * ```
+     * OfficeAce：无法确认是否有可用账号。……（R-oa3: 凭据读不出来；R-oa2: …；R-oa1: …）
+     * ```
+     *
+     * ⇒ **括号里的顺序 = `orderAccountsForSubagent` 的输出 = `decideSubagentStart` 算的起点序。**
+     *
+     * ⚠️ 为什么不 spy `readCredential`（我试过两条路，都不通，如实记录）：
+     * 1. `FakeCredentials.resolve` 恒不被调用 —— 真装配下凭据走 `ctx.credentials` 服务链；
+     * 2. 给 `options.readCredential` 装 spy 也没用 —— **工厂闭包捕获的是原值**，
+     *    `apply()` 之后改 `options` 影响不到已建好的闭包。
+     */
+    let message = ''
+    try {
+      await provider('child-m')
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    /**
+     * ⚠️ officeace 的登记是 **fire-and-forget** ⇒ 让出一拍再断言。
+     *    （本判据不依赖登记落表，但让一拍更稳。）
+     */
+    await new Promise<void>((r) => { setTimeout(r, 30) })
+
+    console.log('  [装配层②] 错误文案:', message.slice(0, 110))
+
+    /** ⚠️ **必须抛** —— 不抛说明路径没走到锁定态（前置失效，判据不可信）。 */
+    expect(message, '★★ 锁定态 + 凭据全读不出 ⇒ 必须抛（否则前置没生效）').not.toBe('')
+
+    /** 抽出文案里账号出现的顺序。 */
+    const order = Array.from(message.matchAll(/R-oa[0-9]/g)).map((m) => m[0])
+    console.log('  [装配层②] 遍历顺序:', order.join(' → '))
+
+    expect(
+      order[0],
+      '★★★ mainStartIdOf 接上 ⇒ 遍历首位应是 R-oa3（主代理实际在用 R-oa2 往后错开）。'
+        + '若得 R-oa2 = 没接上（退化成池首 R-oa1）',
+    ).toBe('R-oa3')
   })
 })
