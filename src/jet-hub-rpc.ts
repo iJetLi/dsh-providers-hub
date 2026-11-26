@@ -215,7 +215,7 @@ import {
   type MarvisCredential,
 } from './marvis.js'
 import { isAstudioRefreshable, type AstudioCredential } from './astudio.js'
-import { loginNeedsExternalAction } from './login-failure.js'
+import { loginNeedsExternalAction, markLoginNeedsExternalAction } from './login-failure.js'
 import {
   createAstudioWechatQrCode,
   pollAstudioWechatScan,
@@ -350,7 +350,7 @@ import { pickTestModel,
 import { exportBackup, importBackup } from './backup.js'
 import { handleOpencodeRpc } from './opencode-rpc.js'
 import { handleSyncRpc } from './sync-rpc.js'
-import { geminiFetchForAccount } from './gemini-proxy.js'
+import { GEMINI_LOGIN_NETWORK_FALLBACK, geminiFetchForAccount, geminiNetworkHint, isBareFetchFailure } from './gemini-proxy.js'
 import { qoderFetchForAccount } from './qoder-proxy.js'
 import { minimaxIntlFetchForAccount } from './minimax-proxy.js'
 import { normalizeProxy } from './minimax-proxy.js'
@@ -4026,6 +4026,37 @@ function registerJetHubEndpoints(
    * 与后续轮询读表，必须是**逐字相同**的一句话 —— 两处各写一份必然漂移，
    * 用户会看到「第一次说 A、再点一次说 B」。
    */
+  /**
+   * ★★★ **Gemini 登录失败的可操作包装**（2026-11-26，issue #170）。
+   *
+   * ## 报障
+   *
+   * 面板只显示「登录失败：**fetch failed**。请重新点击「+ 新建账号」。」
+   * —— 两句话**都是死路**：`fetch failed` 不带任何原因（真因在 `error.cause`），
+   * 而 Gemini 登录失败**重试一百次也不会成功**（Google 在墙外、插件进程不读系统代理）。
+   *
+   * ## 修法
+   *
+   * 1. 用 `geminiNetworkHint`（全仓唯一一份判据）把「为什么」和「怎么办」接上 ——
+   *    文案明写「浏览器能授权是因为浏览器读系统代理，插件进程不读」，
+   *    这正是用户最困惑的那一点（浏览器明明成功了）。
+   * 2. 标 `markLoginNeedsExternalAction` ⇒ `loginFailureMessage` 会**去掉**
+   *    「请重新点击「+ 新建账号」」那半句假出路（与 OfficeAce / AStudio 同款）。
+   *
+   * ⚠️ hint 为 `undefined`（不是网络类失败）⇒ **原样返回**，不加任何东西
+   *   —— 「拿不准就别标」是 `login-failure.ts` 的既定纪律。
+   */
+  function geminiLoginFailure(error: unknown): unknown {
+    // ① 先走全仓唯一判据（吃 cause 链的错误码，更有信息量）；
+    // ② 拿不到码、但确实是 `fetch failed` ⇒ 用 Gemini 专属兜底
+    //    （用户报障截图里正是**裸**的 `fetch failed`，不加这条修复会静默空跑）。
+    const hint = geminiNetworkHint(error, false)
+      ?? (isBareFetchFailure(error) ? GEMINI_LOGIN_NETWORK_FALLBACK : undefined)
+    if (hint === undefined) return error
+    const base = error instanceof Error ? error : new Error(String(error))
+    return markLoginNeedsExternalAction(new Error(`${base.message}；${hint}`))
+  }
+
   function loginFailureMessage(reason: unknown): string {
     const text = loginReasonText(reason)
     // ⚠️⚠️ **「请重新点击「+ 新建账号」」只在重试可能有意义时才加**（2026-10-20 用户报障）。
@@ -7534,7 +7565,31 @@ function registerJetHubEndpoints(
             refreshable: false,
             createdAt: Date.now(),
           })
-          if (geminiProxyInput !== '') await pool.setGeminiProxy(id, geminiProxyInput)
+          if (geminiProxyInput !== '') {
+            await pool.setGeminiProxy(id, geminiProxyInput)
+          } else {
+            /**
+             * ★★★ **≥2 个不同代理时也要借一个，并写回**（2026-11-26，issue #170 审计 P4）。
+             *
+             * ## 上面的继承只覆盖「恰好 1 个」
+             *
+             * `inheritedGeminiProxy` 的条件是 `existingGeminiProxies.size === 1`
+             * —— 用户只有**一个**代理时，新号自动继承，这条早就通。
+             *
+             * ⇒ 但**两个以上**不同的代理时 `geminiProxyInput` 是空串 ⇒ 不落池 ⇒
+             *   `geminiProxyForAccount(id)` 恒空。此时我加的登录回落
+             *   （`geminiLoginFetchForAccount`）虽然能借到一个代理**把 token 换回来**，
+             *   但**新账号自己的 `geminiProxy` 仍是空** ⇒ 登录成功后第一条消息走
+             *   `geminiFetchForAccount` 又裸 `fetch` ⇒ **症状从「登录失败」原样搬成
+             *   「发消息失败」**，而后者对用户更难归因。
+             *
+             * ⇒ 归属：**借来的出口必须落到新账号上**。用户之后可在账号卡片上改。
+             *   （0 个代理时 `geminiProxyForAny()` 返回空 ⇒ 这里不写，与改动前一致；
+             *     那种情形唯一的出路是登录失败文案里那句「先给任一账号配代理」。）
+             */
+            const borrowed = pool.geminiProxyForAny()
+            if (borrowed !== '') await pool.setGeminiProxy(id, borrowed)
+          }
 
           let geminiStarted: StartedGeminiLoginFlow
           try {
@@ -7572,7 +7627,9 @@ function registerJetHubEndpoints(
           }).catch((error: unknown) => {
             ctx.logger.warn(`[jet-hub] background ${GEMINI.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：记终态原因（供 login.poll 报给前端）+ 移除占位条目，不留幽灵账号
-            void failLogin(id, error)
+            // ★ 附可操作提示 + 去掉假出路（issue #170）：`fetch failed` 本身零信息量，
+            //   而「重新点新建账号」对墙外失败是死路（Google 在墙外，插件进程不走系统代理）。
+            void failLogin(id, geminiLoginFailure(error))
           })
 
           return { ok: true, value: { accountId: id, loginUrl: geminiStarted.loginUrl } }

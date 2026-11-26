@@ -852,7 +852,25 @@ describe('IKLI7J 接线守卫：两侧必须同改，缺一处就退回静默转
     //    `failLogin(id, error)` 即可把计数配平。
     const code = stripComments(serverSource)
     const warns = code.match(/login failed for \$\{id\}/g) ?? []
-    const failLoginCalls = code.match(/^\s+void failLogin\(id, (?:err|error)\)$/gm) ?? []
+    /**
+     * ⚠️ **精确白名单，不是通配**（2026-11-26，issue #170 新增第三形态）：
+     *
+     * | 形态 | 出处 |
+     * |---|---|
+     * | `failLogin(id, error)` / `(id, err)` | 常规 |
+     * | `failLogin(id, geminiLoginFailure(error))` | Gemini —— 必须**先包装再加终态**，见下 |
+     *
+     * Gemini 那一条是**唯一**需要改写错误的：它要在交给 `failLogin` **之前**
+     * 把 `geminiNetworkHint`（「插件进程不读系统代理，浏览器读」）接上去，
+     * 并标 `markLoginNeedsExternalAction` 去掉「请重新点新建账号」这半句假出路。
+     * ⇒ 直接把 `error` 传进去，用户只会看到零信息量的 `fetch failed`。
+     *
+     * ⚠️ 白名单**逐字枚举**：写成 `\(.*\)` 会让「把 error 换成任意东西」也通过，
+     *    而那条守卫存在的意义正是「不许静默改变收尾语义」。
+     */
+    const failLoginCalls = code.match(
+      /^\s+void failLogin\(id, (?:err|error|geminiLoginFailure\(error\))\)$/gm,
+    ) ?? []
     const accioRecord = code.match(/^\s+recordLoginFailure\(id, error\)$/gm) ?? []
     expect(warns.length, '后台失败告警条数变了？先核对是否新增/删除了 provider 分支')
       .toBeGreaterThanOrEqual(12)

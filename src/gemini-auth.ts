@@ -93,6 +93,17 @@ export interface GeminiAuthOptions {
   product?: GeminiProduct
   /** 服务名覆盖（默认由产品 id 派生为 `geminiAuth`）。 */
   serviceName?: string
+  /**
+   * ★★★ **登录专用**的按账号 fetcher（2026-11-26，issue #170）。
+   *
+   * ⚠️ 与 {@link fetchFor} **必须是两个入口**：
+   * - `fetchFor`（推理 / 续期 / 探测）：`accountId` 是确定的，**不许借别人的出口**；
+   * - `loginFetchFor`（`startLogin`）：新账号**还没落池** ⇒ 自己的代理必然为空
+   *   ⇒ 必须能回落到「本 provider 任一已配代理的账号」，否则必需翻墙的用户**永远登录不上**。
+   *
+   * 不传 ⇒ 回落到 `fetchFor`（与改动前逐字节相同，单测替身不受影响）。
+   */
+  loginFetchFor?: (accountId: string) => typeof fetch
   /** 注入的 fetch（测试用）。 */
   fetchImpl?: typeof fetch
   /**
@@ -157,6 +168,20 @@ export class GeminiAuth extends Service {
     return fetch
   }
 
+  /**
+   * ★ 登录专用的 fetcher（issue #170）。
+   *
+   * ⚠️ **顺序**：`loginFetchFor` → `fetchFor` → `fetch`。
+   * 前者的关键能力是「新账号没配代理时借用同类账号的出口」——
+   * 少了它，必需翻墙的用户在 `startLogin` 阶段必然 `fetch failed`（浏览器却显示授权成功）。
+   */
+  private loginFetcherFor(accountId: string): typeof fetch {
+    if (this.options.fetchImpl !== undefined) return this.options.fetchImpl
+    if (this.options.loginFetchFor !== undefined) return this.options.loginFetchFor(accountId)
+    if (this.options.fetchFor !== undefined) return this.options.fetchFor(accountId)
+    return fetch
+  }
+
   private queueFor(refName: string): SerialQueue {
     let queue = this.refreshQueues.get(refName)
     if (queue === undefined) {
@@ -191,7 +216,7 @@ export class GeminiAuth extends Service {
    */
   async startLogin(options: { accountId?: string } = {}): Promise<StartedGeminiLoginFlow> {
     const started = await startGeminiOAuthFlow({
-      fetcher: this.fetcherFor(options.accountId ?? ''),
+      fetcher: this.loginFetcherFor(options.accountId ?? ''),
       ...this.options.callbackPort === undefined ? {} : { callbackPort: this.options.callbackPort },
       // 身份正常情况下从令牌响应的 `id_token` 解出（零额外请求）；这里的
       // userinfo 只是兜底。**兜底失败必须留日志** —— 2026-10-03 用户报障

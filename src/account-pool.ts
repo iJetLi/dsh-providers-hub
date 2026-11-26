@@ -4069,6 +4069,30 @@ export class AccountPool {
   }
 
   /**
+   * ★★★ **该 provider 任一账号已配的 Gemini 代理**（2026-11-26，issue #170）。
+   *
+   * ## 为什么需要它
+   *
+   * Gemini（Cloud Code Assist）全链路在墙外 ⇒ 没有代理时 `fetch failed`。
+   * 而 `geminiProxyFor(accountId)` **只按 id 查已落池的账号** ——
+   * **登录新账号时那个 id 刚生成、还没落池** ⇒ 恒返回空 ⇒ 恒裸 `fetch`
+   * ⇒ **必需翻墙的用户永远登录不上**（鸡生蛋）。
+   *
+   * ⇒ 这条只给**登录路径**用：新账号还没有「自己的出口」，借用同类账号的出口
+   *   比直接裸连合理得多。**推理 / 探测路径绝不走它** —— 那里 `accountId` 是
+   *   确定的，借别人的出口会让「这个号到底从哪出网」失真。
+   *
+   * @returns 第一个配了 `geminiProxy` 的账号的代理文本；一个都没有 ⇒ `''`
+   */
+  geminiProxyForAny(): string {
+    for (const account of this.readAccounts()) {
+      const raw = asProxyText(account.geminiProxy)
+      if (raw.trim().length > 0) return raw
+    }
+    return ''
+  }
+
+  /**
    * 设置/清除某 **qoder** 账号的出口代理（真实报障 2026-10-21）。
    *
    * ⚠️ **刻意与另外两份分开成三份实现**，理由与字段同款：三者语义不同。

@@ -104,13 +104,22 @@ describe('① fetcher 解析器：按账号取出口', () => {
 describe('② 注入点：每个消费点都必须拿到按账号的 fetcher', () => {
   it('⚠️ GeminiAuth 的四条腿都不许用裸 fetchImpl', () => {
     // ⚠️ 判据是「**没有** fetcher 解析路径的调用点」，故按名字逐条列名：
-    //   登录 startLogin → fetcherFor(options.accountId ?? '')
+    //   登录 startLogin → **loginFetcherFor**(options.accountId ?? '')
     //   批量续期       → refreshCredentialUnderLock(..., entry.id, …)
     //   昵称修复       → fetcherFor(entry.id)
-    expect(authSource).toMatch(/fetcher:\s*this\.fetcherFor\(options\.accountId \?\? ''\)/)
+    //
+    // ⚠️ **登录为什么单独一个入口**（2026-11-26，issue #170）：
+    //   `fetcherFor` 依赖「这个 accountId 已有自己的代理」，而 `startLogin` 传的是
+    //   **刚生成、还没落池**的新 id ⇒ 自己的代理必然为空 ⇒ 裸 fetch ⇒ Google 在墙外
+    //   ⇒ 面板「登录失败：fetch failed」而浏览器能授权。
+    //   `loginFetcherFor` 额外允许「借用本 provider 任一已配代理的账号」。
+    //   **推理 / 续期 / 探测仍走 `fetcherFor`**（不许借出口，否则「从哪出网」失真）。
+    expect(authSource).toMatch(/fetcher:\s*this\.loginFetcherFor\(options\.accountId \?\? ''\)/)
     expect(authSource).toMatch(/fetcher:\s*this\.fetcherFor\(entry\.id\)/)
     expect(authSource).toMatch(/refreshCredentialUnderLock\(entry\.credentialRef, c, entry\.id,/)
     expect(authSource).toMatch(/fetchFor\?:\s*\(accountId: string\)\s*=>\s*typeof fetch/)
+    // ★ 新增的登录专用入口也必须在 options 里（少一行 ⇒ 生产注入不进去、静默退回裸 fetch）
+    expect(authSource).toMatch(/loginFetchFor\?:\s*\(accountId: string\)\s*=>\s*typeof fetch/)
   })
 
   it('⚠️ 推理主路径不再有裸 fetch（issue 建议漏掉的那一处 seam）', () => {

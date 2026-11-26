@@ -36,7 +36,7 @@ import { ZCODE } from './zcode-product.js'
 import { ZCODE_CAPTCHA_FALLBACK, type ZcodeCaptchaConfig } from './zcode-captcha.js'
 import type { CarrierOutcome } from './captcha-carrier.js'
 import { AccountPool, allAccountsRateLimitedForModel } from './account-pool.js'
-import { geminiFetchForAccount, setGeminiProxyPool } from './gemini-proxy.js'
+import { geminiFetchForAccount, geminiLoginFetchForAccount, setGeminiProxyPool } from './gemini-proxy.js'
 import { qoderFetchForAccount, setQoderProxyPool } from './qoder-proxy.js'
 import { qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
 import { foldReasonErrors } from './locked-error-text.js'
@@ -4107,7 +4107,16 @@ export function apply(ctx: Context): void {
   //    （插件卸载路径若将来需要，直接调 `setMinimaxProxyPool(undefined)`）。
   setMinimaxProxyPool(pool)
   setGeminiProxyPool(pool)
-  const gemini = new GeminiAuth(ctx, { fetchFor: geminiFetchForAccount })
+  /**
+   * ⚠️ **两个 fetcher 入口**（issue #170）：
+   * - `fetchFor`（推理 / 续期 / 探测）：按账号自己的出口，**不许借**；
+   * - `loginFetchFor`（`startLogin`）：新账号还没落池 ⇒ 允许回落到本 provider 任一已配代理的账号
+   *   ⇒ 否则必需翻墙的用户永远登录不上（症状：浏览器授权成功、面板一直不出现账号）。
+   */
+  const gemini = new GeminiAuth(ctx, {
+    fetchFor: geminiFetchForAccount,
+    loginFetchFor: geminiLoginFetchForAccount,
+  })
   const geminiSigStore = createGeminiSigStore(ctx)
   // ⚠️ 项目号探测缓存必须**在这里建一次、长期复用** —— 每次 `stream()` 现造
   // 等于没有跨请求缓存，每轮推理都会多打一次 `loadCodeAssist`。
