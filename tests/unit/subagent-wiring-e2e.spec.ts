@@ -60,7 +60,16 @@ class FakeCredentials {
      * ⚠️ officeace 那条我漏了两轮：`readCredential` 只在
      * `typeof parsed.modelAppKey === 'string' && length > 0` 时才返回凭据，
      * 否则**回落 `readStoredCredential(ref)`**（本机文件）⇒ 单测里恒 `undefined`
-     * ⇒ 锁定态判「凭据读不出来」。**这就是上游说的「跑出来起点是 undefined」的真因之一。**
+     * ⇒ 锁定态判「凭据读不出来」。
+     *
+     * ⚠️⚠️ **归因更正（2026-11-27 正向审计）**：上面这段曾写成「这就是上游说
+     * 『起点 undefined』的真因」—— **那是错的**。审计实测：本用例里凭据读不出的
+     * **直接**原因是 `ref` 形如 `R-oa3` **含 `-`** ⇒ `credentialRef()` 抛
+     * `TypeError` 并被 catch 吞掉（`officeace-lock.ts` 的 `classify` 路径），
+     * **根本没走到 `modelAppKey` 那道校验**。
+     *
+     * ⇒ `modelAppKey` 是**真实要求**（生产上确实缺它就回落本机文件），
+     *   但**不是本用例「读不出」的成因**。两件事分开记。
      */
     const payload = {
       marker: ref,
@@ -220,8 +229,15 @@ function spyRotationStart(pool: PoolLike): unknown[] {
  *
  * ⇒ 凭据**一次都没读** ⇒ 看起来像「起点算不出来」，实际是**脚手架把 ctx 弄坏了**。
  *
- * ⚠️ 这正是上游说「我试过、没补成」可能的另一个成因 —— 他停在「起点 undefined」，
- *   而真因可能是**观测者自己破坏了被测环境**。
+ * ⚠️⚠️ **实测更正（2026-11-27 正向审计）**：上面这条**在本用例里没有真正触发过** ——
+ *   凭据读不出的**先**抛原因被「`ref` 含 `-` ⇒ `credentialRef()` 抛 `TypeError`」
+ *   抢先占住了（审计实测：把 `ctx.provide` 换回旧的 `anyCtx.get =` 覆盖，
+ *   这 8 条**仍然全绿**）。
+ *
+ * ⇒ 也就是说：**「覆盖 `ctx.get` 会破坏 `ctx.credentials`」这个机制是真的**（cordis Proxy
+ *   赋值会被拦截），但**它不是本用例失败的原因**，也没有被这条用例覆盖到。
+ *   这里保留 `ctx.provide` 是因为它**语义正确**（用服务注入而不是改 Proxy），
+ *   **不是**因为「换回去会红」。
  */
 function injectAgents(ctx: Context, childId: string, parentId: string): void {
   ctx.provide('agents', {
