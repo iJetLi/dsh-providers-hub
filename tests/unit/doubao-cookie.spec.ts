@@ -48,11 +48,31 @@ describe('★ 豆包 cookie 粘贴归一化', () => {
     expect(normalizePastedCookie('ttwid=t5')).toBe('ttwid=t5')
   })
 
-  it('空串 / 非字符串 / 误贴大块文本 ⇒ 空串或截断，绝不抛', () => {
+  /**
+   * ★★★ **超长必须拒绝，不能截断**（2026-11-26 双审 P2）。
+   *
+   * 旧断言是 `length <= 8192` —— 那是**把缺陷当契约**：截断会静默切出半截
+   * `sessionid`，而调用方只看「返回非空 ⇒ 成功」，于是：
+   *
+   * - RPC 回 `ok:true`、面板弹「已用 cookie 导入豆包账号」；
+   * - 库里存的是被切断的 sessionid（对抗审计探针实测 182/300 字符）；
+   * - 用户重粘完整 cookie 因为 sessionid 不同 ⇒ **不判重** ⇒ **变两张卡**；
+   * - 那半截 cookie 请求必然失败，但界面显示「已登录」。
+   *
+   * ⇒ 超长 = 误贴了整页 HTML/日志，要的是「让用户重新贴」，不是「悄悄用一半」。
+   *   返回空串 ⇒ 调用方走 `ok:false` + 可操作文案 ⇒ **不建号**。
+   */
+  it('★★★ 空串 / 非字符串 ⇒ 空串；误贴大块文本 ⇒ **拒绝**（不得静默截断）', () => {
     expect(normalizePastedCookie('')).toBe('')
     expect(normalizePastedCookie(null)).toBe('')
     expect(normalizePastedCookie(undefined)).toBe('')
     const huge = `sessionid=s6; ${'a=1; '.repeat(2000)}`
-    expect(normalizePastedCookie(huge).length).toBeLessThanOrEqual(8_192)
+    expect(
+      normalizePastedCookie(huge),
+      '超长必须整体拒绝：截断会静默切出半截 sessionid ⇒ 界面报成功但实际不可用、且重粘会多出一张卡',
+    ).toBe('')
+    // 反向对照：刚好在边界内的**正常长度** cookie 必须照常返回（别为了拒绝超长把正常路径也打死）。
+    const normal = 'sessionid=abc123; ttwid=t5; msToken=m9'
+    expect(normalizePastedCookie(normal)).toBe(normal)
   })
 })

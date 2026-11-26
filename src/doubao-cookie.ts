@@ -40,6 +40,22 @@ export function normalizePastedCookie(raw: unknown): string {
     .map((pair) => pair.trim())
     .filter((pair) => pair.length > 0 && pair.indexOf('=') > 0 && !/^(curl|wget)$/i.test(pair))
   const joined = pairs.join('; ')
-  // 正常豆包 cookie 不到 2KB；超长基本是误贴了整页 HTML/日志。
-  return joined.length > 8_192 ? joined.slice(0, 8_192) : joined
+  /**
+   * ## ⚠️ 超长必须**拒绝**，不能截断（2026-11-26 双审 P2）
+   *
+   * 旧实现是 `joined.slice(0, 8192)` —— **静默切出半截 cookie**，而调用方只看
+   * 「返回非空 ⇒ 成功」：
+   *
+   * - RPC 回 `ok: true`、面板弹「已用 cookie 导入豆包账号」；
+   * - 而库里存的是**被切断的 `sessionid`**（对抗审计探针实测 182/300 字符）；
+   * - 之后用户重粘完整 cookie，因为 `sessionid` 不同 ⇒ **不判重** ⇒ **变两张卡**；
+   * - 那半截 cookie 拿去请求必然失败，但界面显示「已登录」。
+   *
+   * ⇒ 超长基本是**误贴了整页 HTML/日志**。这种情况要的是「让用户重新贴」，
+   *   不是「悄悄用一半」。返回空串 ⇒ 调用方走 `ok:false` + 可操作文案 ⇒ 不建号。
+   *
+   * 正常豆包 cookie 不到 2KB（实测），8KB 已是 4 倍余量。
+   */
+  if (joined.length > 8_192) return ''
+  return joined
 }

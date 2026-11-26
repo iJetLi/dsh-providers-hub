@@ -6400,7 +6400,33 @@ function registerJetHubEndpoints(
             refreshable: false,
             createdAt: Date.now(),
           })
-          await landDoubaoCredential(credential)
+          /**
+           * ## ⚠️ **写凭据失败必须撤卡**（2026-11-26 双审 P2，已实测复现）
+           *
+           * 顺序是「先 `pool.addAccount` 建卡、再 `landDoubaoCredential` 写凭据」。
+           * 旧代码**没有兜底**：`landDoubaoCredential` 一旦抛错（磁盘满、凭据库只读、
+           * `credentialRef` 冲突……），卡片已经落库而凭据没有 ⇒ 界面上留一张
+           * **永远点不动的幽灵卡**，且：
+           *
+           * - 旧扫码路径有 `failLogin` 兜底，本分支是新写的、**没有接那条腿**；
+           * - `doubao` 也**不在**统一收口白名单里（那白名单只管别的 provider）。
+           *
+           * ⇒ 这里显式 try/catch，失败就把刚建的卡**撤掉**，并如实回 `ok:false`。
+           *   宁可让用户重贴一次，也不要留一张坏卡 —— 后者用户根本不知道该怎么办。
+           */
+          try {
+            await landDoubaoCredential(credential)
+          } catch (error) {
+            await pool.removeAccount(id).catch(() => undefined)
+            log('[doubao-cookie] 凭据写入失败，已撤回刚建的占位卡片')
+            return {
+              ok: false,
+              error: {
+                code: 'store-failed',
+                message: `cookie 已解析成功，但写入凭据库失败：${error instanceof Error ? error.message : String(error)}。请检查磁盘空间/权限后重试。`,
+              },
+            }
+          }
           log('[doubao-cookie] 已导入 cookie（sessionid 判重）；本站未做探活，登录态以首次取数为准')
           return { ok: true, value: { accountId: id, loginUrl: '' } }
         }
