@@ -1160,8 +1160,9 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //   而 `credits-runtime-parity.spec.ts` 有两条硬不变式把「表里有哪些渠道」
     //   绑在 `credits.balance === true` 上（`Object.keys(table) === 余额能力集`）。
     //   豆包的**签到**必须走这张表（`claimDoubaoDailyCheckin`），故这里必须是 `true`。
-    //   余额那一条走 `src/doubao-credits.ts` 的 `fetchDoubaoBalanceDetailed`，
-    //   本 PR 未改动它（读数口径的修正见后续 PR）。
+    //   余额那一条走 `src/doubao-credits.ts` 的 `fetchDoubaoBalanceDetailed`：
+    //   `POST /alice/commerce/sale/subscription/overview/`，零浏览器零签名，
+    //   面板能读到真实额度（`quota_balance_overview`）。
     credits: { balance: true, dailyCheckin: true },
     // ⚠️ `rateLimit: false` 必须显式写：本渠道当前没有适配器、不写
     //    `modelRateLimits`、也不在 `probeById` 里 ⇒ 「重测 / 重置」点下去恒惰性
