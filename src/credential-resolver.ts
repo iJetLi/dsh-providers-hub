@@ -344,36 +344,6 @@ export interface ResolverPool<TCredential = unknown> {
     now: number,
   ): Promise<number>
   /**
-   * ★★★ **钉住某子代理的账号**（2026-11-24，可选能力）。
-   *
-   * ## 为什么需要（用户原话）
-   *
-   * > 「我是希望『拉起时定死，只有该号不可用才换』，
-   * >   这样可以保证子代理的缓存命中率高，如果频繁换帐号，缓存命中率就低了。」
-   *
-   * ⇒ prompt cache 按（账号 + 模型 + 前缀）命中；每发请求重算起点会让
-   *   池子一波动就换号，缓存全失效、同一段长上下文被重复计费。
-   *
-   * ⚠️ 只在**真的选中了某账号**之后调用（读到坏凭据的号不该被钉）。
-   *
-   * ⚠️ 调用点必须 fire-and-forget：实现内部**先同步更新缓存**、再异步落盘。
-   */
-  pinSubagentAccount?(provider: string, sessionId: string, accountId: string): Promise<boolean>
-  /**
-   * ★★★ **记录用户手动选的账号**（2026-11-24，可选能力）。
-   *
-   * ## 用户原话
-   *
-   * > 「用户手动重选的话是按照用户的意愿来，
-   * >   其他情况就是使用拉起时固定的那个，
-   * >   可以避免系统乱换号，避免缓存命中低」
-   *
-   * ⇒ 优先级：`userPickedAccountId` > `pinnedAccountId` > `slot` 现算。
-   *
-   * ⚠️ 传 `undefined` = 清除手动选择（回落到 pin）。
-   */
-  setUserPickedAccount?(provider: string, sessionId: string, accountId: string | undefined): Promise<boolean>
-  /**
    * ★ **起点选定那一刻的档位**（S6 可选能力；真实 `AccountPool` 已实现）。
    *
    * 用于判断「起点那一档是否已烧完」：不同则交出首位（见 `rotateFromPreferred`）。
@@ -759,9 +729,6 @@ export function createCredentialResolver<TCredential>(
       /** 兜底：进程内事件表。 */
       try { return subagentParentOf(sid) } catch { return undefined }
     }
-    /** ⚠️ 「是不是子代理」= 能查到父会话（两个来源的并集）。 */
-    const isSubagentById = (sid: string | undefined): boolean =>
-      sid !== undefined && parentOfSession(sid) !== undefined
 
     /**
      * ═══════════════════════════════════════════════════════════════════════
@@ -1074,11 +1041,21 @@ export function createCredentialResolver<TCredential>(
              * ⚠️ 付费路径的守卫在 `picked.kind === 'account'` 之后（`pinMode !== 'fixed'`）。
              *   两处必须逐字同构 —— 本仓反复记录过「同一语义两处实现必然漂移」。
              */
-            const freePinMode = deps.pool.subagentRotationFor?.(providerId)?.startMode
-            if (sessionId !== undefined && freePinMode !== 'fixed') {
-              void deps.pool.pinSubagentAccount?.(providerId, sessionId, candidate.id)
-                .catch(() => { /* 钉住失败不影响本次选号 */ })
-            }
+            /**
+             * ⚠️⚠️ **这里原来有一段「钉住本次选中的账号」，已删除**（2026-11-27）。
+             *
+             * 它调 `deps.pool.pinSubagentAccount?.(…)`，而该方法在 `34b2137f`
+             * 的重构中已被删除（子代理起点改存 `preferredRotation`）
+             * ⇒ `AccountPool` 上**没有**它 ⇒ `?.` **永远短路**
+             * ⇒ 这一整段是**静默 no-op**（不是延迟生效，是从来没生效过）。
+             *
+             * ⚠️ 上游在 PR #171 点名过这个残留，当时只清了 `index.ts` 那处；
+             *    本文件里还有**两处**（这里与付费路径），一起清。
+             *
+             * ⚠️ 守卫条件 `freePinMode !== 'fixed'` 也一并删除 —— 它唯一的作用
+             *    就是守那次不存在的调用。留着它会让下一个人以为「钉住还在生效」，
+             *    这正是错误注释/死守卫比没有更糟的形态。
+             */
             return credential
           }
           tried.add(candidate.id)
@@ -1262,11 +1239,17 @@ export function createCredentialResolver<TCredential>(
          * ⚠️ **「固定帐号」模式不钉**：那种模式下用户已经指定了绝对第一的号，
          *   再钉一个「当前命中」会让它在位次变动后与用户意图分叉。
          */
-        const pinMode = deps.pool.subagentRotationFor?.(providerId)?.startMode
-        if (sessionId !== undefined && pinMode !== 'fixed') {
-          void deps.pool.pinSubagentAccount?.(providerId, sessionId, picked.account.id)
-            .catch(() => { /* 钉住失败不影响本次选号 */ })
-        }
+        /**
+         * ⚠️⚠️ **这里原来是「选完回写 pin」，已删除**（2026-11-27）。
+         *
+         * 与免费路径那处**同因**：`deps.pool.pinSubagentAccount?.(…)` 的
+         * `?.` 永远短路（`AccountPool` 在 `34b2137f` 的��构里已删除该方法，
+         * 起点改存 `preferredRotation`）⇒ **静默 no-op**。
+         *
+         * ⚠️ 原注释写着「两处必须逐字同构 —— 本仓反复记录过『同一语义两处实现
+         *    必然漂移』」—— 结果这两处**都是 no-op**。那句话本身没错，
+         *    错在没人验证它们「同构的到底是什么」。
+         */
         return picked.credential
       }
       for (const accountId of picked.tried) tried.add(accountId)
