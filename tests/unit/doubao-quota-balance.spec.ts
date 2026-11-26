@@ -248,4 +248,57 @@ describe('fetchDoubaoBalanceDetailed', () => {
     expect(result.error).toContain('导入 Cookie')
     expect(fetchImpl).not.toHaveBeenCalled()
   })
+  /**
+   * ★★★ **`window_limits[].end_time` 必须被用上**（2026-11-26 双审 P2-1）。
+   *
+   * 之前的版本把这个字段从类型里删了，注释理由是「`top_items` 不带分类归属 ⇒ 拿不到逐笔到期」。
+   * 但 `window_limits[]` **正是** `categoryTotalsOf` 逐行读的那个数组，它就在分类分组下面
+   * ⇒ 归属是有的。master（`6eea0cfa`）原本也用它算 `expiredTime`（`:99`）。
+   *
+   * ⇒ 删掉它 = 把本来拿得到的**真实到期日丢掉**，连带让临期桶退化。
+   *
+   * 判据（三条，覆盖 `packageExpiryOf` 的全部分支）：
+   * 1. 一个不同值 ⇒ 用真实日期、`expiryUnknown: false`；
+   * 2. 多个不同值 ⇒ `expiryUnknown: true`（**不得取最早/最晚** —— 那会把整包标成某一个子项的日期）；
+   * 3. 缺失 ⇒ `expiryUnknown: true`。
+   */
+  it('★★★ 唯一 end_time ⇒ 用真实到期日；多个/缺失 ⇒ expiryUnknown（不得画成「永久」）', () => {
+    const endA = 1_797_937_149_723
+    const make = (limits: Array<Record<string, unknown>>) => ({
+      quota_balance_overview: {
+        total_remaining_amount: '1,000',
+        summaries: [{ category: 1, title: '套餐', remaining_amount: '1,000' }],
+      },
+      window_limit_section: {
+        window_limit_groups: [
+          { feature_group: 'membership', window_limits: limits },
+        ],
+      },
+    })
+
+    // ① 唯一值 ⇒ 真实日期
+    const unique = doubaoBalanceFromOverviewPayload(
+      make([{ total_amount: '1,000', used_amount: '0', end_time: endA }]) as never,
+    )
+    expect(unique.packages[0]?.expiredTime, '唯一 end_time 必须被采用').toBe(new Date(endA).toISOString())
+    expect(unique.packages[0]?.expiryUnknown, '既然拿到了真实日期，就不是「到期未知」').toBe(false)
+
+    // ② 多个不同值 ⇒ 到期未知（不取最早/最晚）
+    const mixed = doubaoBalanceFromOverviewPayload(
+      make([
+        { total_amount: '600', used_amount: '0', end_time: endA },
+        { total_amount: '400', used_amount: '0', end_time: endA + 86_400_000 },
+      ]) as never,
+    )
+    expect(mixed.packages[0]?.expiredTime, '多个不同到期日不得取其中一个冒充整包').toBe('')
+    expect(mixed.packages[0]?.expiryUnknown, 'IKTLMX 红线：到期未知必须显式标记').toBe(true)
+
+    // ③ 缺失 ⇒ 到期未知
+    const absent = doubaoBalanceFromOverviewPayload(
+      make([{ total_amount: '1,000', used_amount: '0' }]) as never,
+    )
+    expect(absent.packages[0]?.expiredTime).toBe('')
+    expect(absent.packages[0]?.expiryUnknown).toBe(true)
+  })
+
 })

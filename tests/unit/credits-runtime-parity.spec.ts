@@ -477,7 +477,8 @@ describe('★ windowDays 由 registry 的 usesExpiryWindow 驱动（不是「是
     //    需要的那组输入。
     //    ⚠️ `codearts` 在这张表里但**不是**本家端点下发到期时间（它靠静态校准）。
     expect(withWindow).toEqual([
-      'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
+      // ⚠️ doubao 2026-11-26 加入：`window_limits[].end_time` 是毫秒时间戳，`packageExpiryOf` 只在「该分类只有一个不同到期日」时用它，否则 `expiryUnknown`（不伪装「永久」）。
+      'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'doubao', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace',
       'qoder', 'qodercn', 'trae', 'workbuddy',
     ])

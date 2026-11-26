@@ -303,7 +303,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     ])
   })
 
-  it('usesExpiryWindow 恰好是 15 家（loomy 不在内，它没有窗口概念；autoclaw 2026-10-17、qoder/qodercn/astudio/minimax/minimaxintl/codearts 2026-10-20、magicrew/magicrewintl 2026-11-01 加入）', () => {
+  it('usesExpiryWindow 恰好是 16 家（loomy 不在内，它没有窗口概念；autoclaw 2026-10-17、qoder/qodercn/astudio/minimax/minimaxintl/codearts 2026-10-20、magicrew/magicrewintl 2026-11-01、doubao 2026-11-26 加入）', () => {
     const win = PROVIDER_REGISTRY.filter((d) => d.usesExpiryWindow === true)
       .map((d) => d.id).sort()
     // ⚠️ autoclaw 2026-10-17 加入：流水每笔发放带 `wallet_expires_at`，未过期批次
@@ -330,7 +330,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     //    **不带**到期时间 ⇒ 「有到期时间」与「没有到期时间」两种包同时存在，
     //    正是三档判据要的那组输入。⚠️ 两站各占一项。
     expect(win).toEqual([
-      'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
+      'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'doubao', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
       'qodercn', 'trae', 'workbuddy',
     ])

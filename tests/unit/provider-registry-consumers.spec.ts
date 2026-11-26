@@ -48,7 +48,7 @@ describe('autoCheckinExcluded：宿主消费取决于 registry', () => {
 })
 
 describe('usesExpiryWindow：永久积分锁定的 windowDays 取决于 registry', () => {
-  it('恰好是 registry 里 usesExpiryWindow === true 的 14 家（officeace 2026-10-12、autoclaw 2026-10-17、qoder/qodercn/astudio/minimax/minimaxintl/codearts 2026-10-20、magicrew/magicrewintl 2026-11-01 加入）', () => {
+  it('恰好是 registry 里 usesExpiryWindow === true 的 15 家（officeace 2026-10-12、autoclaw 2026-10-17、qoder/qodercn/astudio/minimax/minimaxintl/codearts 2026-10-20、magicrew/magicrewintl 2026-11-01、doubao 2026-11-26 加入）', () => {
     const withWindow = PROVIDER_REGISTRY
       .filter((d) => d.usesExpiryWindow === true)
       .map((d) => d.id).sort()
@@ -64,7 +64,7 @@ describe('usesExpiryWindow：永久积分锁定的 windowDays 取决于 registry
     //    「永久积分」（= `total_points` 减批次和的残差）**不带** `deductionEndTime`
     //    ⇒ 三档判据的两种输入同时存在。⚠️ 两站各占一项（账号物理隔离）。
     expect(withWindow).toEqual([
-      'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
+      'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'doubao', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
       'qodercn', 'trae', 'workbuddy',
     ])

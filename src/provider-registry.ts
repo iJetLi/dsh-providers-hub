@@ -1164,6 +1164,33 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //   `POST /alice/commerce/sale/subscription/overview/`，零浏览器零签名，
     //   面板能读到真实额度（`quota_balance_overview`）。
     credits: { balance: true, dailyCheckin: true },
+    /**
+     * ★★★ **这两格缺一不可**（2026-11-26 双审 P1）。
+     *
+     * ## 为什么必须登记
+     *
+     * `src/doubao-credits.ts` 会给拿不到逐笔到期的包置 `expiryUnknown: true`
+     * —— 但**展示层要看 `windowDays` 才会把子量渲染成「到期未知」**
+     * （`credit-expiry.js:1267` 那条分支）。而 `windowDays` 由后端
+     * `credits.balances` 按 `usesExpiryWindow` 决定是否回填（`jet-hub-rpc.ts:10741`）。
+     *
+     * 缺这两格的实际后果（正向审计实测）：`splitCreditsByExpiry` 返回 `null`
+     * ⇒ `showPackageList = false` ⇒ **面板只剩「积分 4003」，连 hover 的资源包都不挂**
+     * ⇒ `expiryUnknown` 这个标记**一次都不会出现在 UI 上**。
+     *
+     * ⇒ 红线「不得把未知说成永久」是满足的（它现在什么都不说），
+     *   但**修复意图（让用户知道「会过期、只是不知道哪天」）完全没达成**。
+     *
+     * ## 为什么是这两格成对
+     *
+     * `permanentLock` 那条派生守卫要求「`usesExpiryWindow` 的家必须有
+     * `creditPackages`（同一份数据）」。缺任一格，另一格就是空转。
+     *
+     * ⚠️ **不开 `permanentLock`**：豆包的积分没有「永久」这一档，
+     *   开了会冒出「锁定永久积分」的 UI。
+     */
+    creditPackages: true,
+    usesExpiryWindow: true,
     // ⚠️ 刻意**不**写 `autoCheckinExcluded`（2026-11-26 复核）：零浏览器之后签到就是
     //    一条 POST，进不进自动链应由**面板那格「豆包自动签到」**（`doubaoCheckinEnabled()`）
     //    回答 —— 省略 = `false` ⇒ 默认参与、开关默认勾上，与其余渠道一致；

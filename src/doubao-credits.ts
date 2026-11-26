@@ -119,6 +119,19 @@ interface DoubaoWindowLimit {
   total_amount?: DoubaoAmount
   used_amount?: DoubaoAmount
   used_percent?: number
+  /**
+   * ★★★ **到期时刻（毫秒）** —— 2026-11-26 双审 P2-1 更正：这个字段**必须在类型里**。
+   *
+   * 之前的版本把它删了，注释理由是「`top_items` 不带分类归属 ⇒ 拿不到逐笔到期」。
+   * 但 `window_limits[]` **正是本文件逐行读的那个数组**（`categoryTotalsOf` 的
+   * `for (const limit of group?.window_limits ?? [])`），它**就在分类分组下面**
+   * ⇒ 分类归属是有的。master（`6eea0cfa`）原本也用它算 `expiredTime`（`:99`）。
+   *
+   * ⇒ 删掉它 = **把本来拿得到的真实到期日丢掉**，连带让临期桶退化。
+   *   现在的策略：**该分类下所有行都给出同一个 `end_time` ⇒ 用它；否则退回
+   *   `expiryUnknown`**（既准确又不撒谎）。
+   */
+  end_time?: number
 }
 
 interface DoubaoWindowLimitGroup {
@@ -161,6 +174,8 @@ export function parseDoubaoAmount(value: DoubaoAmount): number {
 interface CategoryTotal {
   total: number
   used: number
+  /** 该分类下各行 `window_limits[].end_time`（毫秒）的原始集合，供 {@link packageExpiryOf} 判定。 */
+  endTimes: number[]
   /**
    * 该分类的每一行都解析成功、且各自 `0 <= used <= total`。
    *
@@ -194,7 +209,12 @@ function categoryTotalsOf(
       let total = 0
       let used = 0
       let complete = true
+      const endTimes: number[] = []
       for (const limit of group?.window_limits ?? []) {
+        // ⚠️ 只收「有限正数」的毫秒值；缺字段 / 脏值不进集合（否则会被判成「多个不同到期日」）。
+        if (typeof limit?.end_time === 'number' && Number.isFinite(limit.end_time) && limit.end_time > 0) {
+          endTimes.push(limit.end_time)
+        }
         const t = parseDoubaoAmount(limit?.total_amount)
         const u = parseDoubaoAmount(limit?.used_amount)
         /**
@@ -219,6 +239,7 @@ function categoryTotalsOf(
         total: (existing?.total ?? 0) + total,
         used: (existing?.used ?? 0) + used,
         complete: (existing?.complete ?? true) && complete,
+        endTimes: [...(existing?.endTimes ?? []), ...endTimes],
       }
     }
   }
@@ -247,6 +268,33 @@ function summaryNameOf(summary: DoubaoQuotaSummary): string {
  * - `expiredTotal` 恒为 0：`summaries[]` 不区分失效，上游的 `total_remaining_amount`
  *   本身已经把失效额度排除在外。
  */
+/**
+ * ★★★ **从该分类的 `window_limits[].end_time` 判定包级到期**（2026-11-26 双审 P2-1）。
+ *
+ * 三条口径，**都不撒谎**：
+ *
+ * | `endTimes` | 结果 |
+ * |---|---|
+ * | **恰好一个不同的值** | `expiredTime` = 那个时刻的 ISO，`expiryUnknown: false` |
+ * | 多个不同的值 / 空 | `expiredTime: ''`，`expiryUnknown: true`（「会过期但不知道哪天」）|
+ *
+ * ⚠️ 「多个不同值」不能取最早/最晚 —— 那会把整包标成某一个子项的到期日，
+ *    用户看到「还剩 3 天」而其实还有一半额度下个月才到期。宁可说「到期未知」。
+ *
+ * ⚠️ 这也正是 IKTLMX 红线的落点：**空 `expiredTime` 必须配 `expiryUnknown: true`**，
+ *    否则展示层会把「到期未知」渲染成「永久」。
+ */
+function packageExpiryOf(endTimes: readonly number[] | undefined): {
+  expiredTime: string
+  expiryUnknown: boolean
+} {
+  const unique = [...new Set((endTimes ?? []).filter((value) => Number.isFinite(value) && value > 0))]
+  if (unique.length === 1) {
+    return { expiredTime: new Date(unique[0] as number).toISOString(), expiryUnknown: false }
+  }
+  return { expiredTime: '', expiryUnknown: true }
+}
+
 export function doubaoBalanceFromOverviewPayload(
   payload: DoubaoOverviewPayload | null | undefined,
 ): CreditBalance {
@@ -278,20 +326,17 @@ export function doubaoBalanceFromOverviewPayload(
       active: safeRemaining > 0,
       cycleStartTime: '',
       cycleEndTime: '',
-      expiredTime: '',
+      ...packageExpiryOf(bucket?.endTimes),
       /**
-       * ⚠️⚠️ **这里必须是 `expiryUnknown`，不能是空 `expiredTime`**（review 更正，
-       * 仓库红线 IKTLMX）：
+       * ⚠️⚠️ **IKTLMX 红线**（review 更正，2026-11-26）：空 `expiredTime` **必须**配
+       * `expiryUnknown: true`，否则展示层会把它读成「永久」。
        *
-       * - `top_items[].end_time`（毫秒）确实在响应里，但**`top_items` 不带分类归属**
-       *   （只有 `display_name` / 金额 / 到期），套到「套餐」「赠送」这两个 summary
-       *   头上就是编造 —— 而 `has_more` 还可能把明细截断；
-       * - 「拿不到逐笔到期」**不等于**「永不到期」。空 `expiredTime` 会被展示层读成
-       *   `permanent` ⇒ 面板写「永久 4,003」，用户就不会去抢救临期额度。
-       * - `expiryUnknown: true` 的语义正是「会过期、但不知道哪天」：分桶行为不变，
-       *   只是把「永久」改口径成「到期未知」。
+       * 现在的到期口径由 {@link packageExpiryOf} 决定，**不再硬编码**：
+       * - 该分类的 `window_limits[].end_time` 只有**一个**不同值 ⇒ 用真实日期（临期桶能工作）；
+       * - 多个不同值 / 缺失 ⇒ `expiryUnknown: true`（「会过期、但不知道哪天」）。
+       *
+       * ⇒ 展示层看到的永远是「具体日期」或「到期未知」，**永远不会是「永久」**。
        */
-      expiryUnknown: true,
     } satisfies CreditPackage
   })
 
