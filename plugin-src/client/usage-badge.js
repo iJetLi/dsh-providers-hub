@@ -1251,6 +1251,12 @@ function UsageBadgeActive(props) {
       locked: value?.locked,
       windowDays: value?.windowDays,
       imminentDays: value?.imminentDays,
+      /**
+       * ★ **阈值也要传**（2026-11-27 上游审计 D5）。
+       * 不传 ⇒ 「可用积分」把已降档的部分也算进去 ⇒ 徽标数字骗人。
+       */
+      imminentFloor: value?.imminentFloor,
+      expiringFloor: value?.expiringFloor,
     });
     return total === null ? null : formatUnits(total, creditGroup.unit);
   })();
@@ -2370,7 +2376,38 @@ function UsageBadgeActive(props) {
      */
     const split = splitCreditsByExpiry(packages, value?.windowDays, undefined, value?.imminentDays);
     if (split == null) return undefined;
-    return split.expiring;
+    /**
+     * ★★★ **按积分阈值过滤后再返回**（2026-11-27 上游审计 D5）。
+     *
+     * ## 为什么这条必须接
+     *
+     * 调用方 `reasonOf` 用 `expiring === 0` 判「锁定永久积分时不可用」。
+     * 设了阈值后，一个「临期 5 / 短期 0」的号会被 `buddyBalanceTier` 降档到
+     * `permanent` ⇒ 锁定态 **`none`（真的不可用）**。
+     *
+     * | 号 | 阈值 20 时后端 | 不带 floor（错）| 带 floor（对）|
+     * |---|---|---|---|
+     * | 临期 5 / 短期 0 | **none** | `expiring=5>0` ⇒ 认为可用 🚨 | `0` ⇒ 不可用 ✅ |
+     *
+     * ⇒ 不带的话：下拉框把**选号层会跳过的号**显示成可选，
+     *   用户选了它却发现「起点被跳过」—— 与后端分叉。
+     *
+     * ⚠️ **只过滤、不消灭**：这里算的是「**可用于排队的量**」，
+     *   而金额展示走 `expirySplitParts`（那里**不能**过滤，见用户第 6 条定案）。
+     */
+    const imminentFloor = Number.isFinite(value?.imminentFloor) ? value.imminentFloor : 0;
+    const expiringFloor = Number.isFinite(value?.expiringFloor) ? value.expiringFloor : 0;
+    const imminent = Number(split.imminent) || 0
+    const shortTerm = Number(split.shortTerm) || 0
+    /**
+     * ⚠️ 与 `backendOrderTier` **同判**：
+     * `imminent > imminentFloor` 才算临期档、`expiring > expiringFloor` 才算短期档。
+     * 都不成立 ⇒ 返回 0（= 调用方判「无短临积分」）。
+     */
+    const countsImminent = imminent > imminentFloor
+    const countsShortTerm = (Number(split.expiring) || 0) > expiringFloor
+    if (countsImminent || countsShortTerm) return split.expiring;
+    return 0;
   }
 
   /** 不可用原因 → 选项后缀。⚠️ 必须短（下拉框宽度有限）。 */
@@ -2596,6 +2633,15 @@ function UsageBadgeActive(props) {
       return backendOrderTier(
         splitCreditsByExpiry(packages, value?.windowDays, Date.now(), value?.imminentDays),
         value?.locked !== true,
+        /**
+         * ★ **阈值必须传**（2026-11-27 上游审计 D5）。
+         *
+         * 不传 ⇒ 提示按 `> 0` 判档 ⇒ 会告诉用户「起点是永久档」，
+         * 而它实际已被阈值降档成了永久 —— 或反过来（提示短期、实际永久）。
+         * 用户原话要求这个提示是「让用户看见后果」，**说错比不说更糟**。
+         */
+        Number.isFinite(value?.imminentFloor) ? value.imminentFloor : 0,
+        Number.isFinite(value?.expiringFloor) ? value.expiringFloor : 0,
       );
     };
     /**
@@ -2988,6 +3034,17 @@ function UsageBadgeActive(props) {
       locked: value?.locked === true,
       windowDays,
       imminentDays,
+      /**
+       * ★★★ **两个积分阈值必须传**（2026-11-27 上游审计 D5）。
+       *
+       * 不传 ⇒ `orderCreditRows` 的排序 / 分组按 `> 0` 判档 ⇒
+       * 弹窗列表顺序与后端真实选号**分叉**（用户看到第 1 个、请求发给第 3 个）。
+       *
+       * ⚠️ 服务端已在 4 处 usage 载荷回传这两个字段（见 `jet-hub-rpc.ts`），
+       *   故这里 `value?.imminentFloor` 是真的有值 —— 不是死代码。
+       */
+      imminentFloor: value?.imminentFloor,
+      expiringFloor: value?.expiringFloor,
       now: Date.now(),
       rotationState,
     }));

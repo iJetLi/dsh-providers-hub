@@ -783,6 +783,22 @@ export function sumAvailableCredits(accounts, opts) {
   if (opts?.locked !== true) return null;
   const rows = Array.isArray(accounts) ? accounts : [];
   if (rows.length === 0) return null;
+  /**
+   * ★★★ **两个积分阈值**（2026-11-27 上游审计 D5）。
+   *
+   * ## 为什么这里也必须有
+   *
+   * 本函数算的是「**锁定永久积分时实际还能用多少**」= 短期 + 临期。
+   * 设了阈值后，被降档的那部分在锁定态**真的不能用了**
+   *（`backendOrderTier` 判成 `none`）⇒ 若这里仍全额累加，
+   * 徽标会显示「可用 500」，而实际一个号都用不了 —— **数字骗人**。
+   *
+   * | 号 | 阈值 20 时的真实状态 | 不带 floor（错）| 带 floor（对）|
+   * |---|---|---|---|
+   * | 临期 5 / 永久 800 | 降档到 permanent ⇒ 锁定态 **不可用** | 累加 5 🚨 | 累加 0 ✅ |
+   */
+  const imminentFloor = Number.isFinite(opts.imminentFloor) ? opts.imminentFloor : 0;
+  const expiringFloor = Number.isFinite(opts.expiringFloor) ? opts.expiringFloor : 0;
   let total = 0;
   let seen = false;
   for (const row of rows) {
@@ -793,8 +809,16 @@ export function sumAvailableCredits(accounts, opts) {
     if (unit === QUOTA_UNIT) return null;
     const split = splitCreditsByExpiry(packages, opts.windowDays, undefined, opts.imminentDays);
     if (split == null) continue;
+    /**
+     * ⚠️ 与 `buddyBalanceTier` 的 `> floor` **同判**：低于阈值的档不再计入。
+     * ⚠️ **只是「不计入可用」，不是「消灭积分」**（用户第 6 条定案）——
+     *   那些积分仍在 `expirySplitParts` 的金额展示里。
+     */
+    const countsImminent = (split.imminent ?? 0) > imminentFloor;
+    const countsShortTerm = (split.shortTerm ?? 0) > expiringFloor;
     // ⚠️ 只累加「短期 + 临期」：不含长期、不含永久、不含已过期
-    total += (split.shortTerm ?? 0) + (split.imminent ?? 0);
+    if (countsShortTerm) total += split.shortTerm ?? 0;
+    if (countsImminent) total += split.imminent ?? 0;
     seen = true;
   }
   return seen ? total : null;
@@ -1218,6 +1242,17 @@ export function creditOrderOptionsOf(input) {
   };
   if (Number.isFinite(source.windowDays)) options.windowDays = source.windowDays;
   if (Number.isFinite(source.imminentDays)) options.imminentDays = source.imminentDays;
+  /**
+   * ★★★ **两个积分阈值也要透传**（2026-11-27 上游审计 D5）。
+   *
+   * 漏了它们的后果：`orderCreditRows` 的排序 / 分组仍按 `> 0` 判档
+   * ⇒ **弹窗列表顺序与后端真实选号分叉**（用户看到「列表第 1 个」而请求发给第 3 个）。
+   *
+   * ⚠️ 用 `Number.isFinite` 而不是 `!== undefined`：与上面两行**同款**，
+   *   并且挡掉 `NaN`（手改坏的数据不该把整列算成要降档）。
+   */
+  if (Number.isFinite(source.imminentFloor)) options.imminentFloor = source.imminentFloor;
+  if (Number.isFinite(source.expiringFloor)) options.expiringFloor = source.expiringFloor;
   return { ...options, ...rotationOrderOptionsOf(source.rotationState) };
 }
 
@@ -1257,6 +1292,17 @@ export function orderCreditRows(rows, options = {}) {
   const windowDays = Number.isFinite(options.windowDays) ? options.windowDays : undefined;
   const imminentDays = Number.isFinite(options.imminentDays) ? options.imminentDays : undefined;
   const now = Number.isFinite(options.now) ? options.now : Date.now();
+  /**
+   * ★★★ **两个积分阈值**（2026-11-27 上游审计 D5）。
+   *
+   * ⚠️ 缺了它们 ⇒ 弹窗的排序 / 分组都按 `> 0` 判档 ⇒
+   *   **列表顺序与后端真实选号分叉**（用户看到「第 1 个」而请求发给第 3 个）。
+   *   本函数头的注释早已写明「弹窗必须**逐字节反映后端**」—— 这就是它。
+
+   * ⚠️ 缺省 `0`（= 关闭）⇒ 不配阈值时行为**逐字节不变**。
+   */
+  const imminentFloor = Number.isFinite(options.imminentFloor) ? options.imminentFloor : 0;
+  const expiringFloor = Number.isFinite(options.expiringFloor) ? options.expiringFloor : 0;
 
   /** 每行的档位（复刻后端口径）。查不到余额的归 none。 */
   const tierOf = (row) => {
@@ -1266,7 +1312,7 @@ export function orderCreditRows(rows, options = {}) {
     const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
     if (unit === QUOTA_UNIT) return CREDIT_ORDER_TIER.none;
     const split = splitCreditsByExpiry(packages, windowDays, now, imminentDays);
-    return backendOrderTier(split, allowPermanent);
+    return backendOrderTier(split, allowPermanent, imminentFloor, expiringFloor);
   };
 
   /**
@@ -1301,8 +1347,12 @@ export function orderCreditRows(rows, options = {}) {
     const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
     if (unit === QUOTA_UNIT) return CREDIT_ORDER_TIER.none;
     const split = splitCreditsByExpiry(packages, windowDays, now, imminentDays);
-    /** 恒解锁口径：与后端 `tierRankOf` 逐字节同构。 */
-    return backendOrderTier(split, true);
+    /**
+     * 恒解锁口径：与后端 `tierRankOf` 逐字节同构。
+     * ★ **阈值也要传**（2026-11-27 D5）：否则分组按 `> 0` 判，
+     *   而排序已按阈值判 ⇒ 同一个号在「排序」里是 permanent、在「分组」里是 expiring。
+     */
+    return backendOrderTier(split, true, imminentFloor, expiringFloor);
   };
   const enabledAccountIds = Array.isArray(options.enabledAccountIds)
     ? options.enabledAccountIds
