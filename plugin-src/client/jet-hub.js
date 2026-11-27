@@ -766,6 +766,13 @@ export function CreditWindowModal(props) {
             value: draftImminent,
             invalid: imminentInvalid,
             onChange: setDraftImminent,
+            /**
+             * ★ **`floorValue` 必须传**（2026-11-27 上游审计 D2）。
+             * 漏了它 ⇒ `field()` 里 `options.floorValue` 恒 `undefined` ⇒
+             * 输入框**不受控、恒空白、永不进虚线态**（看起来像「没这个功能」）。
+             */
+            floorValue: draftImminentFloor,
+            floorInvalid: parsedImminentFloor === null,
             onFloorChange: setDraftImminentFloor,
             floorAriaLabel: '临期积分下限',
             count: coverage.imminentAccounts,
@@ -988,7 +995,14 @@ export function CreditWindowModal(props) {
            * `dirty` 这个变量原先**全文件只有定义、没有消费方**（死变量），
            * 于是「没改动也能点保存」⇒ 见 `onSave` 里那段缺陷说明。
            */
-          disabled: busy || windowInvalid || imminentInvalid || !dirty,
+          /**
+           * ★ **两个阈值非法也要禁用保存**（2026-11-27 上游审计 D2）。
+           * 漏了它们 ⇒ 用户输 `abc` 仍能点保存 ⇒ 后端拒绝（bad-request）⇒
+           * 用户看到一条「保存失败」却不知道是哪个框的问题。
+           */
+          disabled: busy || windowInvalid || imminentInvalid
+            || parsedImminentFloor === null || parsedExpiringFloor === null
+            || !dirty,
           onClick: () => void onSave(),
         }, busy ? '保存中…' : '保存'),
       ),

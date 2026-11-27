@@ -700,14 +700,43 @@ export class BuddyBalanceSelector<
       return { ok: false, reason: { kind: 'no-candidates' } }
     }
 
+    /**
+     * ★★★ **在入口把两个积分阈值合进 `options`**（2026-11-27 上游审计 D3，**阻断级**）。
+     *
+     * ## 缺陷（审计原话）
+     *
+     * > 「`select()` 的 `options` 来自 `credential-resolver.ts:1210`，里面**不传 floor**
+     * >  ⇒ 结果是**同一次调用里两套判据**：
+     * >  `classify` 判成 `expiring`（**认了阈值**），而 `select()` 排序仍当**临期**，
+     * >  选中**同一个号**（**不认阈值**）⇒ **降档从不发生**。」
+     *
+     * ## 为什么必须在这里合（而不是让各消费点自己补）
+     *
+     * `options` 由**调用方**（`credential-resolver` / 测试 / 未来的新调用方）传入，
+     * 它**拿不到** `readCreditWindow` —— 那是本 selector 的私有依赖。
+     * 若让每个用到 `options` 的地方各补一次，就是「一份语义多处实现」，
+     * 漏掉任何一处都表现为「阈值看得见、不降档」（正是本次缺陷的形态）。
+     *
+     * ⇒ **单一来源**：在这里合一次，下面所有排序 / 判据都用这份 `opts`。
+     *
+     * ⚠️ **调用方显式传了 floor 时以调用方为准**（`??` 而非强制覆盖）：
+     * 测试要能构造「只在这个 selector 上生效」的场景。
+     */
+    const resolvedFloors = this.resolvedWindow()
+    const opts: BuddyTierOptions = {
+      ...options,
+      imminentFloor: options.imminentFloor ?? resolvedFloors.imminentFloor,
+      expiringFloor: options.expiringFloor ?? resolvedFloors.expiringFloor,
+    }
+
     // 并发查余额：账号数通常个位数，并发比串行快得多。
     const balances = await Promise.all(candidates.map((c) => this.balanceOf(c)))
     const byId = new Map(candidates.map((c, i) => [c.id, { account: c, balance: balances[i]! }]))
 
-    const rankedByStrategy = options.strictManualOrder === true
+    const rankedByStrategy = opts.strictManualOrder === true
       // 严格手动顺序：档位只当「可用 / 不可用」判据，先后完全按用户的拖拽序。
-      ? rankBuddyAccountsByManualOrder(balances, options)
-      : rankBuddyAccountsByBalance(balances, options)
+      ? rankBuddyAccountsByManualOrder(balances, opts)
+      : rankBuddyAccountsByBalance(balances, opts)
     /**
      * 「轮换起点」：**唯一旋转点**，必须在两种策略各自排完序之后。
      *
@@ -717,7 +746,7 @@ export class BuddyBalanceSelector<
      * ⚠️ `rotationStartId` 为 `undefined` 时 `rotateFromPreferred` 原样返回
      *    ⇒ 与改动前**逐字节相同**（本功能的唯一回归面）。
      */
-    const ranked = rotateFromPreferred(rankedByStrategy, options)
+    const ranked = rotateFromPreferred(rankedByStrategy, opts)
     const first = ranked[0]
     if (first === undefined) {
       return { ok: false, reason: noAccountReason(balances) }
@@ -725,7 +754,23 @@ export class BuddyBalanceSelector<
 
     // ⚠️ 排序只保证「可用的在前」，**不保证第一个可用** —— 未锁定时 none 档
     // 也参与排序（作为兜底），故只在锁定情况下才把「全部不可用」判成无可用账号。
-    if (options.allowPermanent === false && !buddyTierUsable(buddyBalanceTier(first, options))) {
+    /**
+     * ⚠️⚠️ **这条判据必须带上两个 floor** —— 现在由入口的 `opts` 保证
+     *（2026-11-27：`select()` 开头已把 `resolvedWindow()` 的两个阈值合进 `opts`）。
+     *
+     * ## 不带会怎样（真实分叉，上游审计 D3）
+     *
+     * 用户设「临期 < 20 ⇒ 降级」。某号剩临期 5 / 短期 0 / 永久 800：
+     *
+     * | 位置 | 判据 | 结果 |
+     * |---|---|---|
+     * | `classify` 里的 `entry.tier` | `5 > 20` 假 ⇒ 短期 `0 > 0` 假 ⇒ **permanent** |
+     * | 这一行若不带 floor | `5 > 0` 真 ⇒ **imminent**（可用）⇒ **锁定态被绕过** |
+     *
+     * ⇒ 传 `opts`（已含 floor）即与 `classify` **同源**。
+     * ⚠️ 不要再在这里单独 `resolvedWindow()` 一次 —— 那是「同一次调用里两套判据」的起点。
+     */
+    if (opts.allowPermanent === false && !buddyTierUsable(buddyBalanceTier(first, opts))) {
       // ⚠️⚠️ **降级只能放行「查不到」的账号，不能放行「明确只剩永久积分」的账号**
       //（2026-11-05 三审回归面 P1-1，`631f1c8` 引入的回归）。
       //
@@ -752,6 +797,21 @@ export class BuddyBalanceSelector<
       //   （`exhausted` 不会触发 `pickBuddyAccount` 的降级分支），而不是
       //   `unknown`。用 `buddyBalanceTier` 判而不是硬编码字段名，避免与
       //   `positiveOrZero` 的归一化漂移。
+      /**
+       * ⚠️⚠️ **这里刻意【不】传两个 floor**（2026-11-27）。
+       *
+       * 判据问的是「**余额形态**是否只剩永久积分」—— 那是**客观事实**，
+       * 与用户设的「积分阈值」无关。加了 floor 会变成
+       * 「临期不足阈值 ⇒ 也算只剩永久」⇒ 把「有临期但量少」的号误判成
+       * `exhausted`，而那正是用户**想提前切走**的场景（不是「用尽了」）。
+       *
+       * | 号 | 带 floor（错）| 不带（对）|
+       * |---|---|---|
+       * | 临期 5 / 短期 0 / 永久 800 | `permanent` ⇒ `exhausted` 🚨 | `imminent` ⇒ 不算 exhausted ✅ |
+       *
+       * ⇒ 只在那条**可用性**判据（`:728` 的 `lockTierOptions`）里带 floor，
+       *   **余额形态判据一律不带**。两者语义不同，别为「一致性」统一。
+       */
       const definitive = balances.some(
         (entry) => entry.ok
           && entry.degraded !== true

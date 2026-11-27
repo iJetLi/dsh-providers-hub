@@ -13264,6 +13264,15 @@ function registerJetHubEndpoints(
           imminentDays: resolved.imminentDays,
           source: resolved.source,
           clamped: resolved.clamped,
+          /**
+           * ★★★ **两个积分阈值必须回传**（2026-11-27 上游审计 D2）。
+           *
+           * 不回传的后果（审计实测）：面板回填**恒空** ⇒ 用户看不到自己设过的值；
+           * 更糟的是「清除」判据依赖它 ⇒ **已存的阈值清不掉**
+           *（清空/填 0 都不发 payload ⇒ 后端保持原值 ⇒ 面板空着但仍降级）。
+           */
+          imminentFloor: resolved.imminentFloor,
+          expiringFloor: resolved.expiringFloor,
           // ★ 子代理设置（没配则省略，保持响应形状与改动前一致）
           ...(() => {
             const sub = pool.subagentRotationFor(req.provider)
@@ -13576,6 +13585,9 @@ function registerJetHubEndpoints(
           imminentDays: resolved.imminentDays,
           source: resolved.source,
           clamped: resolved.clamped,
+          /** ★ 阈值回传（与 `credits.window.get` 同源，见那里的注释）。 */
+          imminentFloor: resolved.imminentFloor,
+          expiringFloor: resolved.expiringFloor,
           ...(() => {
             const sub = pool.subagentRotationFor(req.provider)
             return sub === undefined ? {} : { subagent: sub as unknown as RpcSubagentRotationSetting }
