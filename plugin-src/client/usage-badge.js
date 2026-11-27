@@ -2931,10 +2931,29 @@ function UsageBadgeActive(props) {
      *    弹窗这里曾复制过一份（配额判断还写成 `return null` 的整条早退，
      *    与胶囊那份行为不同）⇒ 两处口径必然漂移，已合并。
      */
+    /**
+     * ★★★ **必须带两个积分阈值**（2026-11-27 对抗审计挖出的真缺陷）。
+     *
+     * ## 症状：弹窗数字骗人
+     *
+     * 这里以前只传 `locked` / `windowDays` / `imminentDays`，**漏了 `imminentFloor` /
+     * `expiringFloor`** ⇒ 阈值对「可用积分合计」**不生效**。
+     *
+     * 审计实测（临期 5 / 永久 800 / 阈值 20）：
+     * - 胶囊（`:1265` 那处，**带了**阈值）⇒ **0**
+     * - 弹窗（本处，**漏了**）⇒ **5** ⇒ 渲染「可用 5 积分」
+     *
+     * ⇒ **同一个账号在两个位置显示不同数字**，而弹窗那个是**骗人**的
+     *   （那 5 点按用户配置的阈值**不该算可用**）。
+     *
+     * ⚠️ 这是「**同一语义两处实现必然漂移**」的又一次现形 —— D5 修好了胶囊、漏了弹窗。
+     */
     const availableCreditsTotal = sumAvailableCredits(accounts, {
       locked: value?.locked,
       windowDays: value?.windowDays,
       imminentDays: value?.imminentDays,
+      imminentFloor: value?.imminentFloor,
+      expiringFloor: value?.expiringFloor,
     });
     /**
      * ⚠️⚠️ **本声明必须在 `availableText` 之前**（2026-11-18 真机报障）。

@@ -118,6 +118,21 @@ interface BadgeSnapshot {
    * 再切成「临期 / 短期」两段。缺席时前端退化成三段展示（= 引入三档前的形态）。
    */
   imminentDays?: number
+  /**
+   * ★★★ **临期积分下限**（2026-11-27 正向审计挖出的真缺陷）。
+   *
+   * ## 症状：整条「客户端阈值」链路是**死接线**
+   *
+   * `usage-badge.js` 里多处写着 `imminentFloor: value?.imminentFloor`，
+   * 但**本接口从来不下发这个字段** ⇒ `value?.imminentFloor` **恒 `undefined`**
+   * ⇒ 客户端所有「按阈值降档」的判据**恒按 0 跑**，与服务端选号**分叉**。
+   *
+   * ⚠️ 它靠「对象 spread」逃过了 tsc —— 客户端把不存在的属性读成 `undefined` 是合法的。
+   * ⇒ **类型上缺字段 = 运行时静默失效**，比报错更难查。
+   */
+  imminentFloor?: number
+  /** ★ **纯短期下限**（同上；`expiring - imminent` ≤ 它 ⇒ 按永久排队）。 */
+  expiringFloor?: number
   subscription?: RpcUsageBadgeSubscription
 }
 
@@ -249,6 +264,17 @@ export function createUsageBadge(deps: UsageBadgeDeps): UsageBadge {
       // ⚠️ 与 `windowDays` 成对透传：只带一半会让徽标的临期段恒 0（见字段注释）。
       ...balances.value.imminentDays === undefined ? {} : { imminentDays: balances.value.imminentDays },
       /**
+       * ★★★ **两个积分阈值必须一起透传**（2026-11-27 正向审计）。
+       *
+       * 客户端 `usage-badge.js` 早就写了 `imminentFloor: value?.imminentFloor`，
+       * 但**这里不下发** ⇒ 那一格恒 `undefined` ⇒ 阈值功能在客户端**从未生效**。
+       *
+       * ⚠️ 与 `windowDays`/`imminentDays` **必须成对**：只带一半会让「弹窗降档、
+       *    胶囊不降档」两处显示不同数字（同一语义两套实现的经典漂移）。
+       */
+      ...balances.value.imminentFloor === undefined ? {} : { imminentFloor: balances.value.imminentFloor },
+      ...balances.value.expiringFloor === undefined ? {} : { expiringFloor: balances.value.expiringFloor },
+      /**
        * ⚠️ 2026-11-18：与 windowDays/imminentDays 同批透传（客户端用它决定
        *    是否显示「可用/总」）。
        *
@@ -368,3 +394,36 @@ export function createUsageBadge(deps: UsageBadgeDeps): UsageBadge {
 function isAllFailed(snapshot: BadgeSnapshot): boolean {
   return snapshot.accounts.length > 0 && snapshot.accounts.every((row) => row.error !== undefined)
 }
+
+/**
+ * ★★★ **把 balances 的「窗口 + 阈值」折算成快照字段**（2026-11-27 正向审计，抽成纯函数）。
+ *
+ * ## 为什么要单独抽出来
+ *
+ * 这四格以前是**内联在 `loadSnapshot` 的 spread 里**的，而 `loadSnapshot` 是类内闭包
+ * ⇒ **只能靠源码文本断言守**（本仓已知它会假绿：`if (false)` 包起来仍匹配）。
+ *
+ * 审计实测的原始缺陷：`imminentFloor`/`expiringFloor` **从来没被透传** ⇒
+ * 客户端 `value?.imminentFloor` 恒 `undefined` ⇒ 整条客户端阈值链路是**死接线**。
+ *
+ * 抽成纯函数后就能**行为级**断言「有值就带上、没值就不带」，而不是查源码里有没有那串字。
+ *
+ * ⚠️ **只透传非 `undefined` 的**（不是 `?? 0`）：`0` 是合法值（= 显式关闭），
+ *    而 `undefined` = 「服务端没给」⇒ 两者必须可区分（本仓反复记录的纪律）。
+ */
+export function badgeWindowFieldsOf(
+  balances: {
+    windowDays?: number
+    imminentDays?: number
+    imminentFloor?: number
+    expiringFloor?: number
+  },
+): Pick<BadgeSnapshot, 'windowDays' | 'imminentDays' | 'imminentFloor' | 'expiringFloor'> {
+  return {
+    ...balances.windowDays === undefined ? {} : { windowDays: balances.windowDays },
+    ...balances.imminentDays === undefined ? {} : { imminentDays: balances.imminentDays },
+    ...balances.imminentFloor === undefined ? {} : { imminentFloor: balances.imminentFloor },
+    ...balances.expiringFloor === undefined ? {} : { expiringFloor: balances.expiringFloor },
+  }
+}
+

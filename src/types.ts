@@ -1179,6 +1179,19 @@ export interface RpcCreditsBalanceExtra {
 export interface RpcCreditsBalancesResponse {
   accounts: RpcCreditsBalanceAccount[]
   /**
+   * ★★★ **两个积分阈值**（2026-11-27 正向审计挖出）。
+   *
+   * ⚠️ 这对字段**此前完全不存在** ⇒ `src/usage-badge.ts` 透传时读不到 ⇒
+   * 客户端 `value?.imminentFloor` **恒 `undefined`** ⇒ 整条「按阈值降档」的
+   * 客户端链路是**死接线**（胶囊可用积分、弹窗排序全按 0 跑，与服务端选号分叉）。
+   *
+   * ⚠️ 它靠「对象 spread」逃过 tsc：读不存在的属性得到 `undefined` 是合法 TS。
+   * ⇒ **类型缺字段 = 运行时静默失效**。
+   */
+  imminentFloor?: number
+  /** ★ 纯短期下限（`expiring - imminent` ≤ 它 ⇒ 按永久排队）。 */
+  expiringFloor?: number
+  /**
    * ★★★ **本次读数是否来自磁盘缓存**（2026-11-21，仅供客户端**内部**判断）。
    *
    * ## 为什么需要它
