@@ -1044,7 +1044,7 @@ export function createCredentialResolver<TCredential>(
             /**
              * ⚠️⚠️ **这里原来有一段「钉住本次选中的账号」，已删除**（2026-11-27）。
              *
-             * 它调 `deps.pool.pinSubagentAccount?.(…)`，而该方法在 `34b2137f`
+             * 它调 `deps.pool.pinSubagentAccount?.(…)`，而该方法在 `ff7cf8f9`
              * 的重构中已被删除（子代理起点改存 `preferredRotation`）
              * ⇒ `AccountPool` 上**没有**它 ⇒ `?.` **永远短路**
              * ⇒ 这一整段是**静默 no-op**（不是延迟生效，是从来没生效过）。
@@ -1243,7 +1243,7 @@ export function createCredentialResolver<TCredential>(
          * ⚠️⚠️ **这里原来是「选完回写 pin」，已删除**（2026-11-27）。
          *
          * 与免费路径那处**同因**：`deps.pool.pinSubagentAccount?.(…)` 的
-         * `?.` 永远短路（`AccountPool` 在 `34b2137f` 的��构里已删除该方法，
+         * `?.` 永远短路（`AccountPool` 在 `ff7cf8f9` 的��构里已删除该方法，
          * 起点改存 `preferredRotation`）⇒ **静默 no-op**。
          *
          * ⚠️ 原注释写着「两处必须逐字同构 —— 本仓反复记录过『同一语义两处实现
