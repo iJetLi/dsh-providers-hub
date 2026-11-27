@@ -34,60 +34,21 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
+import { callArgsOf as argsOf } from './_support/source-scanner.js'
+
 const SRC = fileURLToPath(new URL('../../plugin-src/client/jet-hub.js', import.meta.url))
 
 /**
- * 从 `callee(` 起，**跳过字符串 / 模板 / 正则 / 注释**做括号配平，返回实参原文。
+ * ⚠️ **扫描器已抽到 `_support/source-scanner.ts`**（2026-11-28）。
  *
- * ⚠️ 这是对 PR #184 那版「朴素字符计数」的修正：审计实测朴版会被
- *    **字符串里一个未配对的 `(` / `)`** 骗到（切片越界 33,492 字符、或截断到 31 字符）。
+ * 原因：本文件与 `credit-floor-lastmile.spec.ts` 需要**同一份**「跳过字符串/注释的真扫描」。
+ * 两处各写一份必然漂移（本仓红线：同一语义不得两套）—— 而本文件那份
+ * （上游在 `8d451218` 写的）就是**正确的基准实现**，已原样搬过去。
+ *
+ * 它修掉的历史打穿（详见该模块头）：
+ * - 固定字符窗口被「插注释」打穿（余量仅 13 字符）
+ * - 朴素括号计数被「字符串/注释里的未配对括号」打穿（越界到 93,876 字符）
  */
-function argsOf(source: string, callee: string): string[] {
-  const needle = `${callee}(`
-  const out: string[] = []
-  let from = 0
-  for (;;) {
-    const at = source.indexOf(needle, from)
-    if (at < 0) break
-    from = at + needle.length
-    const lineStart = source.lastIndexOf('\n', at) + 1
-    // 行首是注释 ⇒ 跳过（避免命中文档里的 `callee(` 示例）
-    if (/^\s*(\*|\/\/|\/\*)/.test(source.slice(lineStart, at))) continue
-    let depth = 0
-    let i = at + callee.length
-    let quote: string | null = null
-    for (; i < source.length; i += 1) {
-      const ch = source[i]
-      const prev = source[i - 1]
-      if (quote !== null) {
-        if (ch === '\\') { i += 1; continue }
-        if (ch === quote) quote = null
-        continue
-      }
-      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue }
-      // 行注释：跳到行尾
-      if (ch === '/' && source[i + 1] === '/') {
-        const nl = source.indexOf('\n', i)
-        i = nl < 0 ? source.length : nl
-        continue
-      }
-      // 块注释：跳到结束
-      if (ch === '/' && source[i + 1] === '*') {
-        const end = source.indexOf('*/', i + 2)
-        i = end < 0 ? source.length : end + 1
-        continue
-      }
-      if (ch === '(') depth += 1
-      else if (ch === ')') {
-        depth -= 1
-        if (depth === 0) break
-      }
-      void prev
-    }
-    out.push(source.slice(at + callee.length + 1, i))
-  }
-  return out
-}
 
 describe('★★★ computeCoverage 的阈值实参（第 4 处接线）', () => {
   const src = readFileSync(SRC, 'utf8')
