@@ -107,36 +107,45 @@ export function expiringUsableOf(
   const imminent = numOf(split.imminent)
   const expiring = numOf(split.expiring)
   /**
-   * ⚠️⚠️ **判据必须与 `backendOrderTier` 逐字同源**（本仓红线：同一语义不得两套）。
+   * ⚠️⚠️ **判据必须与 `backendOrderTier` / 后端 `buddyBalanceTier` 逐字同源**。
    *
-   * ## 我在这里踩过的两次坑（都记下来）
+   * ## 用户需求（原话）
    *
-   * ### 坑一：用「纯短期」`shortTerm`
+   * > 「临期低于 20 就不再算临期了，归入短期；**短期低于 30 就不算短期了，
+   * >   自动归入长期**」
    *
-   * 理由看起来成立：`expiring = imminent + shortTerm`（临期 ⊂ 短期）
-   * ⇒ `expiring > expiringFloor` 只要有临期就恒真。
-   * **但后端读的是 `balance.expiringBalance`（独立字段）**，
-   * 前端改用 `shortTerm` 就与后端**分叉**（实测红 4 条 parity 用例）。
+   * ## 我在这里踩过的坑（都记下来）
    *
-   * ### 坑二：以为「`expiringFloor` 对含临期的号无效」是缺陷
+   * ### 坑一：用母量 `expiring` 判短期档（**真缺陷**）
    *
-   * **不是。** 实测后端：
+   * `expiring = imminent + shortTerm`（临期 ⊂ 短期）⇒ 只要还有临期，
+   * 母量就被抬高 ⇒ **短期阈值失效**：
    *
-   * | 号 | `imminentFloor` | `expiringFloor` | 后端 |
+   * | 号 | 母量 | 纯短期 | 阈值 30 时正确结果 |
    * |---|---|---|---|
-   * | 临期 0 / 短期 25 | — | 30 | permanent（短期档降级 ✅）|
-   * | 临期 5 / 短期 0 | — | 30 | **imminent**（不受影响，**正确**）|
+   * | 临期 5 / 纯短期 28 | 33 | 28 | 28 < 30 ⇒ **归入长期** |
+   * | 用母量判 | `33 > 30` ✅ | — | 仍算短期 🚨 **与用户要求相反** |
    *
-   * ⇒ 两个阈值**各自管各自的档**。要提升「含临期」的号请用 `imminentFloor`。
+   * ### 坑二：以为「改成 shortTerm 就与后端分叉」
    *
-   * ## 最终判据（与 `backendOrderTier` 逐字相同）
+   * 后端 `BuddyCreditSplit` **没有** `shortTerm` 字段，但它的
+   * `shortTerm = expiring - imminent` —— 与前端 `split.shortTerm` **等价**。
+   * ⇒ 两边都写 `expiring - imminent`，数值与语义**完全一致**。
+   *
+   * ### 坑三：以为「`expiringFloor` 不该影响含临期的号」
+   *
+   * 用户明确要的就是**链式降级**：临期不足 → 归短期；短期不足 → 归长期。
+   * 一个「临期 5 + 纯短期 28」的号**应该**被降进长期档。
+   *
+   * ## 最终判据（与后端逐字相同）
    *
    * - 临期档成立 = `imminent > imminentFloor`
-   * - 短期档成立 = `expiring > expiringFloor`（**母量**，与后端同源）
+   * - 短期档成立 = `(expiring - imminent) > expiringFloor`（**纯短期**）
    * - 任一成立 ⇒ 返回 `expiring`（可用于排队的量）
    */
+  const pureShortTerm = Math.max(0, expiring - imminent)
   const countsImminent = imminent > floorOf(params.imminentFloor)
-  const countsShortTerm = expiring > floorOf(params.expiringFloor)
+  const countsShortTerm = pureShortTerm > floorOf(params.expiringFloor)
   return countsImminent || countsShortTerm ? expiring : 0
 }
 

@@ -882,8 +882,39 @@ export function backendOrderTier(split, allowPermanent, imminentFloor = 0, expir
    *   一个「还有临期」的号本来就在更优先的临期档，`expiringFloor` 不该影响它。
    *   **要提升它请用 `imminentFloor`。**
    */
-  if (positive(split.imminent) > floor(imminentFloor)) return CREDIT_ORDER_TIER.imminent;
-  if (positive(split.expiring) > floor(expiringFloor)) return CREDIT_ORDER_TIER.expiring;
+  /**
+   * ⚠️⚠️ **短期档必须判「纯短期量」，不能判母量 `expiring`**
+   *（2026-11-27 用户需求修正 —— 与后端 `buddyBalanceTier` **逐字同源**）。
+   *
+   * ## 用户原话
+   *
+   * > 「临期低于 20 就不再算临期了，归入短期；**短期低于 30 就不算短期了，
+   * >   自动归入长期**」
+   *
+   * ## 缺陷（实测）
+   *
+   * 前端 `splitCreditsByExpiry` 的 `expiring` 也是**母量**（= `imminent + shortTerm`）。
+   * 用它做判据 ⇒ 只要还有一点临期，母量就被抬高：
+   *
+   * | 号 | 母量 `expiring` | 纯短期 `shortTerm` | 阈值 30 时正确结果 |
+   * |---|---|---|---|
+   * | 临期 5 / 纯短期 28 | **33** | **28** | 28 < 30 ⇒ **归入长期** |
+   * | 用母量判 | `33 > 30` ✅ | — | 仍算短期 🚨 **与用户要求相反** |
+   *
+   * ⇒ 纯短期 = `expiring - imminent`（后端 split **没有** `shortTerm` 字段，
+   *   故后端也用同样的减法，两边**逐字同源**）。
+   *
+   * ## ⚠️ 为什么不用 `split.shortTerm`
+   *
+   * 前端**有** `shortTerm`，但**后端没有**。若前端用 `shortTerm`、后端用
+   * `expiring - imminent`，两者在数值上等价、但**实现不同**
+   * ⇒ 将来任何一边改了 `split` 的形状就会静默漂移。
+   * ⇒ **两边都写 `expiring - imminent`**（同一条式子的两种语言写法）。
+   */
+  const imminent = positive(split.imminent);
+  const pureShortTerm = Math.max(0, positive(split.expiring) - imminent);
+  if (imminent > floor(imminentFloor)) return CREDIT_ORDER_TIER.imminent;
+  if (pureShortTerm > floor(expiringFloor)) return CREDIT_ORDER_TIER.expiring;
   // ⚠️ 锁定门必须在永久判定之前（与后端 buddyBalanceTier 同序）
   if (allowPermanent === false) return CREDIT_ORDER_TIER.none;
   // ⚠️ longTerm 并入 permanent：后端 ≥15 天一律算 permanent

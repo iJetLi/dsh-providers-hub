@@ -932,8 +932,48 @@ export function buddyBalanceTier(
    */
   const imminentFloor = positiveOrZero(options.imminentFloor)
   const expiringFloor = positiveOrZero(options.expiringFloor)
-  if (positiveOrZero(balance.imminentBalance) > imminentFloor) return BUDDY_BALANCE_TIER.imminent
-  if (positiveOrZero(balance.expiringBalance) > expiringFloor) return BUDDY_BALANCE_TIER.expiring
+  const imminent = positiveOrZero(balance.imminentBalance)
+  const expiring = positiveOrZero(balance.expiringBalance)
+
+  /**
+   * ★★★ **临期档**：剩余不足阈值 ⇒ 降级（不占这一档）。
+   */
+  if (imminent > imminentFloor) return BUDDY_BALANCE_TIER.imminent
+
+  /**
+   * ⚠️⚠️ **短期档必须判「纯短期量」，不能判母量 `expiring`**
+   *（2026-11-27 用户需求修正 —— 这是一个**真缺陷**）。
+   *
+   * ## 用户原话
+   *
+   * > 「临期低于 20 就不再算临期了，归入短期；**短期低于 30 就不算短期了，
+   * >   自动归入长期**」
+   *
+   * ## 缺陷（实测）
+   *
+   * `expiring` 是**母量**（= 临期 + 短期，见 `BuddyCreditSplit.expiring` 的注释）。
+   * 用它做判据 ⇒ 只要还有一点临期，`expiring` 就会被抬高：
+   *
+   * | 号 | 母量 `expiring` | 纯短期 | 阈值 30 时**正确**结果 |
+   * |---|---|---|---|
+   * | 临期 5 / 纯短期 28 | **33** | **28** | 28 < 30 ⇒ **归入长期** |
+   * | 用母量判 | `33 > 30` ✅ | — | 仍算短期 🚨 **与用户要求相反** |
+   *
+   * ⇒ **纯短期 = `expiring - imminent`**（母量减去临期子量）。
+   *
+   * ## ⚠️ 为什么不能直接用 `imminent` 抵消
+   *
+   * 只在「临期判据已经失败」之后才走到这里 ⇒ 此时该号的临期要么是 0、
+   * 要么已不足 `imminentFloor`。两种情况下 `expiring - imminent` 都是
+   * **真正可用的短期量**，正是用户要判的东西。
+   *
+   * ⚠️ 若改成 `shortTerm > expiringFloor` 而**后端 split 没暴露 shortTerm**，
+   *   就得改 `BuddyCreditSplit` 的形状 —— 那是更大的改动面。
+   *   `expiring - imminent` 与它**等价**（`shortTerm = expiring - imminent`）。
+   */
+  const pureShortTerm = Math.max(0, expiring - imminent)
+  if (pureShortTerm > expiringFloor) return BUDDY_BALANCE_TIER.expiring
+
   if (options.allowPermanent === false) return BUDDY_BALANCE_TIER.none
   if (positiveOrZero(balance.permanentBalance) > 0) return BUDDY_BALANCE_TIER.permanent
   return BUDDY_BALANCE_TIER.none

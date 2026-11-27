@@ -55,35 +55,32 @@ function pkg(remaining: number, days: number) {
 const W = { windowDays: 15, imminentDays: 5 }
 
 describe('★★★ (D5-4) `expiringUsableOf`：锁定态的「可用短临积分」', () => {
-  it('★★★ 只配 `imminentFloor` ⇒ 「临期 5」仍算可用（降到短期档，实测口径）', () => {
+  it('★★★ 链式降级：临期 5 + 纯短期 28，阈值 20/30 ⇒ **归入长期**（0）', () => {
     /**
-     * ⚠️⚠️ **这条与我最初的直觉相反**，但**实测后端就是这个行为**：
+     * ## 用户原话（这是需求的**核心场景**）
      *
-     * | 阈值 | 后端 `buddyBalanceTier` | 本函数 |
-     * |---|---|---|
-     * | 不配 | `imminent(0)` | 5 |
-     * | `imminentFloor: 20` | **`expiring(1)`** | **5（仍可用）** |
-     * | `imminentFloor: 20` + `expiringFloor: 20` | `permanent(2)` | **0** |
+     * > 「临期低于 20 就不再算临期了，归入短期；
+     * >   **短期低于 30 就不算短期了，自动归入长期**」
      *
-     * ⇒ 原因：`imminentFloor` 只挡「临期档」；短期档判据是
-     *   `expiring > expiringFloor`，而 `expiring = 5 > 0` 仍成立。
-     *   **要让它真的不可用，必须两个阈值都配**（或锁定永久后它自然落 none）。
+     * 一个「临期 5 + 纯短期 28」的号：
+     * - 临期 5 ≤ 20 ⇒ 不算临期
+     * - 纯短期 28 ≤ 30 ⇒ **也不算短期** ⇒ 归入长期
      *
-     * ⚠️ 我第一版直接期望 0 —— 那是**没实测**的猜测，与后端分叉。
+     * ⇒ 锁定态下它**没有任何可用于排队的短临积分** ⇒ 返回 **0**。
+     *
+     * ⚠️⚠️ **这正是我先前实现错的地方**：用母量 `expiring`（= 5+28 = 33）
+     *   判短期档 ⇒ `33 > 30` 成立 ⇒ 误判「仍可用」= **与用户要求相反**。
      */
-    const packages = [pkg(5, 2), pkg(800, 400)]
+    const packages = [pkg(5, 2), pkg(28, 8), pkg(800, 400)]
     expect(
-      expiringUsableOf(packages, W, NOW),
-      '★ 不配阈值 ⇒ 5',
-    ).toBe(5)
+      expiringUsableOf(packages, { ...W, imminentFloor: 20, expiringFloor: 30 }, NOW),
+      '★★★ 两档都不足阈值 ⇒ 返回 0（归入长期）',
+    ).toBe(0)
+    /** 反向对照：只配临期阈值时短期仍可用。 */
     expect(
       expiringUsableOf(packages, { ...W, imminentFloor: 20 }, NOW),
-      '★★ 只配 imminentFloor ⇒ 降到短期档 ⇒ 仍可用（5）',
-    ).toBe(5)
-    expect(
-      expiringUsableOf(packages, { ...W, imminentFloor: 20, expiringFloor: 20 }, NOW),
-      '★★★ 两个阈值都配 ⇒ 真的不可用（0）',
-    ).toBe(0)
+      '★★ 只配临期阈值 ⇒ 纯短期 28 仍算短期 ⇒ 可用',
+    ).toBe(33)
   })
 
   it('★★★ 充足额度不受影响（反向对照）', () => {
@@ -192,56 +189,62 @@ describe('★★★ (D5-4) `expiringUsableOf`：锁定态的「可用短临积�
 })
 
 describe('★★★ (D5-5) `startTierOf`：起点档位提示', () => {
-  it('★★★ 阈值 20 时「临期 5」的号 ⇒ 降档到 **`expiring`**（实测后端口径）', () => {
+  it('★★★ 链式降级（档位）：临期 5 + 纯短期 28，阈值 20/30 ⇒ **permanent**', () => {
     /**
-     * 这个值决定提示文案。说错档位比不说更糟 —— 用户会以为自己选对了。
+     * 与上一条同源（`startTierOf` 走 `backendOrderTier`）：
+     * 两档都不足阈值 ⇒ 提示必须说「**永久档**」。
      *
-     * ⚠️⚠️ **输入「临期 5 / 永久 800」时的真值（实测 `lib/buddy-balance-rank.js`）**：
-     *
-     * | 阈值 | 后端结果 |
-     * |---|---|
-     * | 不配 | `imminent(0)` |
-     * | `imminentFloor: 20` | **`expiring(1)`** ← 降到短期档（不是 permanent！）|
-     * | `imminentFloor: 20` + `expiringFloor: 20` | `permanent(2)` |
-     *
-     * ⇒ 原因：`imminentFloor` 只挡住「临期档」，短期档判据是
-     *   `expiring > expiringFloor`，而这里 `expiring = imminent = 5 > 0`
-     *   ⇒ **仍落短期档**。要再降一档必须同时配 `expiringFloor`。
-     *
-     * ⚠️ 我第一版期望 `permanent` —— 那是**没实测**的猜测。
+     * ⚠️ 说错档位比不说更糟 —— 用户会以为自己选对了。
      */
-    const packages = [pkg(5, 2), pkg(800, 400)]
+    const packages = [pkg(5, 2), pkg(28, 8), pkg(800, 400)]
     expect(
       startTierOf(packages, W, true, NOW),
       '★ 不配阈值 ⇒ imminent',
     ).toBe(CREDIT_ORDER_TIER.imminent)
     expect(
       startTierOf(packages, { ...W, imminentFloor: 20 }, true, NOW),
-      '★★★ imminentFloor 20 ⇒ 降到 **expiring**（与后端实测同值）',
+      '★★ 只配临期阈值 ⇒ 降到 **expiring**',
     ).toBe(CREDIT_ORDER_TIER.expiring)
     expect(
-      startTierOf(packages, { ...W, imminentFloor: 20, expiringFloor: 20 }, true, NOW),
-      '★★★ 两个阈值都配 ⇒ 再降一档到 permanent',
+      startTierOf(packages, { ...W, imminentFloor: 20, expiringFloor: 30 }, true, NOW),
+      '★★★ 两档都不足 ⇒ **permanent**（纯短期 28 ≤ 30）',
     ).toBe(CREDIT_ORDER_TIER.permanent)
   })
 
-  it('★★★ 锁定永久 + 两个阈值都配 ⇒ `none`（提示「不可用」）', () => {
+  it('★★★ 反向对照：纯短期 35 > 阈值 30 ⇒ 仍算短期', () => {
     /**
-     * ⚠️ **必须同时配两个阈值**：只配 `imminentFloor` 时该号落到短期档，
-     * 而「锁定永久」允许烧短期 ⇒ 仍可用（`expiring`）。
-     *
-     * 实测后端：
-     * - `imminentFloor: 20` + 锁定 ⇒ `expiring`（可用）
-     * - `imminentFloor: 20` + `expiringFloor: 20` + 锁定 ⇒ **`none`**
+     * ⚠️ **没有这条，上一条的「permanent」可能只是「一律降级」导致的**。
      */
-    const packages = [pkg(5, 2)]
+    const packages = [pkg(5, 2), pkg(35, 8), pkg(800, 400)]
+    expect(
+      startTierOf(packages, { ...W, imminentFloor: 20, expiringFloor: 30 }, true, NOW),
+      '★★ 纯短期 35 > 30 ⇒ 仍在短期档',
+    ).toBe(CREDIT_ORDER_TIER.expiring)
+  })
+
+  it('★★★ 锁定永久 + 临期不足阈值 ⇒ `none`（提示「不可用」）', () => {
+    /**
+     * 号「临期 5、纯短期 0、**永久 800**」+ `imminentFloor: 20`：
+     * - 临期 5 ≤ 20 ⇒ 不算临期
+     * - 纯短期 = `expiring(5) - imminent(5)` = **0** ≤ `expiringFloor(0)` ⇒ 不算短期
+     * ⇒ 落到 `permanent` 档。
+     *
+     * | 锁定 | 结果 |
+     * |---|---|
+     * | **否** | `permanent(2)`（可用，积分不浪费）|
+     * | **是** | **`none(3)`**（不去烧永久）|
+     *
+     * ⚠️ **必须带一个永久包**：我第一版只放了「临期 5」，`split.permanent = 0`
+     *   ⇒ 连 permanent 档都不成立 ⇒ 两种锁定态都返回 `none`，用例分不开。
+     */
+    const packages = [pkg(5, 2), pkg(800, 400)]
+    expect(
+      startTierOf(packages, { ...W, imminentFloor: 20 }, true, NOW),
+      '★★ 不锁定 ⇒ 落到 permanent 档',
+    ).toBe(CREDIT_ORDER_TIER.permanent)
     expect(
       startTierOf(packages, { ...W, imminentFloor: 20 }, false, NOW),
-      '★ 只配临期阈值 ⇒ 落到短期档 ⇒ 锁定态仍可用',
-    ).toBe(CREDIT_ORDER_TIER.expiring)
-    expect(
-      startTierOf(packages, { ...W, imminentFloor: 20, expiringFloor: 20 }, false, NOW),
-      '★★★ 两个阈值都配 + 锁定 ⇒ none（不去烧永久）',
+      '★★★ 锁定 + 临期不足 ⇒ none（不去烧永久）',
     ).toBe(CREDIT_ORDER_TIER.none)
   })
 
