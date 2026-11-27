@@ -103,6 +103,24 @@ export interface AccioUserInfo {
    *   —— 而那个 `auth` 正是 `POST /api/auth/userinfo` 的返回 ⇒ **证明该端点确实下发它**。
    *
    * ⇒ `null` = 个人空间（本项目实测如此）；有值 = 团队空间，**必须**在请求里带上 `teamId`。
+   *
+   * ## ⚠️⚠️ **实测更正（2026-11-27，issue #177 作者用团队账号实读）**
+   *
+   * 上面那句「有值 = 团队空间」是**官方 schema 的描述，不是实测结果**。实测是：
+   *
+   * > 「网页版团队空间下 `activeTeam` **仍是 `null`**」
+   * > 「插件侧 `phoenix-gw/api/auth/userinfo` 基线 / `+x-team-id` / `+sgcookie+region`
+   * >  三种请求形态，**三个响应逐字相同，全是 `null`**」
+   * > 「字段清单里没有 space / tenantId / orgId / spaceType / teams / teamId」
+   *
+   * ⇒ **`activeTeam` 是「账号快照字段」，团队账号下也可能是 `null`。**
+   *   **本仓解析它不会拿到 `teamId`** —— 保留解析只为「上游哪天真的下发了」时不丢信息，
+   *   **不要**指望它解决团队额度问题。
+   *
+   * **团队额度的真实形态**（同一条实测）：网页版（`www.accio-ai.com/gateway` + **cookie 会话**）
+   * 在团队空间下**直接**返回 `TEAM/8000`，而插件走的
+   * `phoenix-gw.alibaba.com` + **query token** 恒返回 `FREE/520` ——
+   * ⇒ 这是**链路差异**，不是「切空间」差异。**改请求头解决不了。**
    */
   activeTeam?: { teamId: string, teamName?: string, role?: string } | null
 }
