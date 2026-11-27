@@ -1,34 +1,33 @@
 /**
- * ★★★ **「最后一米」接线守卫**（2026-11-27 上游审计登记）
+ * ★★★ **「最后一米」接线守卫**（2026-11-27，PR #183 审结后重写）
  *
- * ## 缺口（上游原话）
+ * ## 这一版修的是上一版的两个真实弱点（上游两审实测）
  *
- * > 「**最后一米零守卫**：`usage-badge` 把阈值传进 `sumAvailableCredits` /
- * >  `orderCreditRows` 的两处**全删仍 15570 全绿**」
- *
- * ## 为什么这是「最后一米」
- *
- * 整条链路的守卫分布：
- *
- * | 层 | 守卫 | 状态 |
+ * | 弱点 | 实测症状 | 本版修法 |
  * |---|---|---|
- * | 后端判档 `buddyBalanceTier` | `credit-floor-chain-backend.spec.ts` | ✅ 上游补的 |
- * | 客户端判档 `backendOrderTier` | `credit-floor-parity.spec.ts` | ✅ |
- * | 覆盖数 `computeCoverage` | `credit-floor-wiring.spec.ts` | ✅ |
- * | **`usage-badge` 把阈值喂给那两个函数** | **本文件** | ✅ **本次补** |
+ * | **锚定脆弱** | `site2` 的 600 字符窗口**只剩 13 字符余量**，插一行注释就假红 | **不再用固定窗口**，改为按**调用括号配对**截取实参 |
+ * | **结构性漏掉第三处** | `sumAvailableCredits` 有 **2 个**调用点（胶囊 + 弹窗），旧守卫只配了 `value?.accounts` 那处 | **遍历全部调用点**，逐处断言 |
  *
- * ⇒ 前几层全绿**不代表**这份数据真的传到了消费点 ——
- *   删掉 `usage-badge.js` 里那两行 `imminentFloor: value?.imminentFloor`，
- *   整条链路就断在最后一米，而**没有任何用例变红**。
+ * ## ⚠️ 强度如实登记（上游原话）
  *
- * ## ⚠️ 为什么只能做源码守卫
+ * > 「PR 补的那 4 条守卫是源码文本，**0 条真跑**……把
+ * >  `imminentFloor: value?.imminentFloor` **原地注释掉**……**仍 4 passed**」
+ *
+ * ⇒ 源码文本**挡不住 `if (false)` 死分支**。
+ *
+ * ⚠️ **本文件刻意不假装能挡住**。真正的保护来自：
+ * - `tests/unit/usage-badge-floor-passthrough.spec.ts`（上游补的**行为级**：
+ *   调真函数看返回值，加 `if(false)` 会红）；
+ * - 本文件负责的是**另一个维度**：**「调用点有没有漏」**
+ *（上游那 4 条也无法发现「第三处漏接线」）。
+ *
+ * ⇒ 两者**互补**，不是替代。本文件的价值是**穷举调用点**，
+ *   而这恰恰是行为级用例做不到的（它只测被它调用的那一处）。
+ *
+ * ## 为什么只能做源码断言
  *
  * `usage-badge.js` 顶部 `import * as React` ⇒ 单测 import 不进来
  *（react 是 esbuild external，本仓 `node_modules` 没有）。
- *
- * ⚠️ 这比行为级弱（挡不住 `if(false)`），但**这是该文件的固有局限** ——
- * 要彻底消灭它，需要把整个 `renderCredits` 做成可注入的纯渲染函数（成本远超收益）。
- * 如实登记。
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -41,81 +40,137 @@ const SRC = join(HERE, '../../plugin-src/client')
 const usageBadge = readFileSync(join(SRC, 'usage-badge.js'), 'utf8')
 
 /**
- * 取某个调用点**实参列表里**是否出现某字段（不跨越调用边界）。
+ * ★ **按括号配对截取「某函数调用」的完整实参**（不再用固定字符窗口）。
  *
- * ⚠️ 不能用「文件里出现过 `imminentFloor`」这种宽松判据 —— 那样
- *   `creditRowTierOf` 那条腿就会把 `sumAvailableCredits` 那条腿的空缺遮住
- *（本仓反复记录过「两处实现互为掩护」）。
+ * ⚠️ 上一版用 `slice(at, at + 600)` ⇒ 上游实测：
+ *   `site2` 的 `expiringFloor` 落在**第 573 字符**，余量仅 **13 字符**
+ *   ⇒ 任何人插一行注释就**假红**。
+ *
+ * 本函数从调用名的 `(` 开始，数括号深度直到配对结束 ⇒ **与内容长度无关**。
+ *
+ * @returns 实参文本（不含最外层括号）；找不到 ⇒ `''`
  */
-function argsOf(source: string, callSignature: string, maxLen = 600): string {
-  const at = source.indexOf(callSignature)
-  if (at < 0) return ''
-  return source.slice(at, at + maxLen)
+function callArgsOf(source: string, callee: string): string[] {
+  const results: string[] = []
+  /** ⚠️ 必须用 `callee(` 匹配，避免命中注释里的 `callee()` 说明。 */
+  const needle = callee + '('
+  let from = 0
+  for (;;) {
+    const at = source.indexOf(needle, from)
+    if (at < 0) break
+    /**
+     * ⚠️ 跳过**注释里**的出现：往前找最近的 `//` / `*` 行首特征，
+     * 若该行是注释行就跳过 —— 否则会被文档说明误导（本仓反复踩过）。
+     */
+    const lineStart = source.lastIndexOf('\n', at) + 1
+    const linePrefix = source.slice(lineStart, at)
+    if (/^\s*(\*|\/\/|\/\*)/.test(linePrefix)) {
+      from = at + needle.length
+      continue
+    }
+    /** 从 `(` 起数括号配对。 */
+    let depth = 0
+    let i = at + callee.length
+    const begin = i + 1
+    for (; i < source.length; i += 1) {
+      const ch = source[i]
+      if (ch === '(') depth += 1
+      else if (ch === ')') {
+        depth -= 1
+        if (depth === 0) break
+      }
+    }
+    results.push(source.slice(begin, i))
+    from = i + 1
+  }
+  return results
 }
 
-describe('★★★ 最后一米：`usage-badge` 必须把阈值传进两个消费点', () => {
-  it('★★★ `sumAvailableCredits` 的实参必须带两个阈值', () => {
-    const args = argsOf(usageBadge, 'sumAvailableCredits(value?.accounts, {')
-    expect(args, '★★ 必须找到该调用点（形态变了就更新本守卫）').not.toBe('')
-    expect(
-      args,
-      '★★★ 漏传 `imminentFloor` ⇒ 徽标「可用积分」把已降档的部分也算进去 ⇒ **数字骗人**',
-    ).toContain('imminentFloor:')
-    expect(
-      args,
-      '★★★ 漏传 `expiringFloor` ⇒ 同上',
-    ).toContain('expiringFloor:')
-  })
+/** 去掉 `//` 与 `/* *\/` 注释，避免「注释里的字段」被当成真接线。 */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+}
 
-  it('★★★ `creditOrderOptionsOf` 的实参必须带两个阈值', () => {
-    const args = argsOf(usageBadge, 'orderCreditRows(accounts, creditOrderOptionsOf({')
-    expect(args, '★★ 必须找到该调用点').not.toBe('')
-    expect(
-      args,
-      '★★★ 漏传 ⇒ 弹窗排序 / 分组按 `> 0` 判档 ⇒ **与后端选号分叉**',
-    ).toContain('imminentFloor:')
-    expect(args, '★★★ 同上').toContain('expiringFloor:')
-  })
+describe('★★★ 最后一米：`sumAvailableCredits` 的**每一个**调用点都必须带两个阈值', () => {
+  const calls = callArgsOf(usageBadge, 'sumAvailableCredits')
 
-  it('★★ 两处都必须**真的从 `value` 取**（不能写死 0）', () => {
+  it('★★ 必须先确认「调用点数量」—— 数量变了则本守卫需同步更新', () => {
     /**
-     * ⚠️ 防「传了个常量 0」—— 那语法上满足「传了」，但功能等于关闭。
+     * ⚠️⚠️ **这是本文件最重要的断言**。
      *
-     * ⚠️ 锚点必须用**完整调用签名**：我第一版用 `'orderCreditOptionsOf({'`，
-     *   而文件里 `:2996` 的**注释**也含 `creditOrderOptionsOf()` ⇒
-     *   `indexOf` 命中注释 ⇒ 截到空串 ⇒ 假红。
-     *   ⇒ 用 `'orderCreditRows(accounts, creditOrderOptionsOf({'`（只在真调用处出现）。
+     * 上一版只锚定 `sumAvailableCredits(value?.accounts,{` ⇒
+     * **弹窗那处（实参是 `accounts`）被结构性排除**，于是：
+     *
+     * | 位置 | 可用积分（临期 5 / 阈值 20）|
+     * |---|---|
+     * | 胶囊 | **0** ✅ |
+     * | **弹窗** | **5** 🚨 渲染「可用 5 积分」数字骗人 |
+     *
+     * ⇒ 用 `toEqual(2)` 把「新增/删除调用点」也变成必须显式确认的事件。
      */
-    for (const sig of [
-      'sumAvailableCredits(value?.accounts, {',
-      'orderCreditRows(accounts, creditOrderOptionsOf({',
-    ]) {
-      const args = argsOf(usageBadge, sig)
-      expect(args, `★★ 必须找到调用点 ${sig}`).not.toBe('')
-      expect(args, `★★ ${sig} 必须从 value 取阈值`).toMatch(
-        /imminentFloor: value\?\.imminentFloor/,
-      )
-    }
+    expect(
+      calls.length,
+      '★★★ sumAvailableCredits 的调用点数变了：新增一处必须同步补阈值（否则那处静默失效）',
+    ).toBe(2)
+  })
+
+  it('★★★ 两处都必须带 `imminentFloor` 与 `expiringFloor`', () => {
+    calls.forEach((args, i) => {
+      const code = stripComments(args)
+      expect(
+        code,
+        `★★★ 第 ${i + 1} 处调用缺 imminentFloor ⇒ 该处「可用积分」把已降档的部分也算进去`,
+      ).toContain('imminentFloor:')
+      expect(
+        code,
+        `★★★ 第 ${i + 1} 处调用缺 expiringFloor`,
+      ).toContain('expiringFloor:')
+    })
+  })
+
+  it('★★★ 两处都必须**真的从 `value` 取**（防写死 0 = 语法满足但功能关闭）', () => {
+    calls.forEach((args, i) => {
+      expect(
+        stripComments(args),
+        `★★★ 第 ${i + 1} 处必须从 value 取阈值（写死 0 等于关闭功能）`,
+      ).toMatch(/imminentFloor:\s*value\?\.imminentFloor/)
+    })
+  })
+})
+
+describe('★★★ 最后一米：`creditOrderOptionsOf` 的**每一个**调用点', () => {
+  const calls = callArgsOf(usageBadge, 'creditOrderOptionsOf')
+
+  it('★★ 必须先确认调用点数量', () => {
+    expect(calls.length, '★★ creditOrderOptionsOf 调用点数变了：请同步补阈值').toBe(1)
+  })
+
+  it('★★★ 必须带两个阈值，且从 `value` 取', () => {
+    const code = stripComments(calls[0] ?? '')
+    expect(code, '★★★ 漏传 ⇒ 弹窗排序 / 分组按 `> 0` 判档 ⇒ 与后端选号分叉').toContain('imminentFloor:')
+    expect(code, '★★★ 同上').toContain('expiringFloor:')
+    expect(code, '★★★ 必须从 value 取').toMatch(/imminentFloor:\s*value\?\.imminentFloor/)
   })
 })
 
 describe('★★★ 反向：不得出现「只传一个」的半接线形态', () => {
-  it('★★ 两处调用的 `imminentFloor` 与 `expiringFloor` 必须成对出现', () => {
+  it('★★ 每处调用的两个阈值必须成对', () => {
     /**
      * ⚠️ 与 `credit-window-rpc-contract.spec.ts` 的「两个天数必须成对回传」**同型**：
-     * 只给一半会让一半按新口径、一半按旧口径 ⇒ 面板自相矛盾。
+     * 只给一半会让一半按新口径、一半按旧口径 ⇒ 界面自相矛盾。
      */
-    for (const [label, sig] of [
-      ['sumAvailableCredits', 'sumAvailableCredits(value?.accounts, {'],
-      ['creditOrderOptionsOf', 'orderCreditRows(accounts, creditOrderOptionsOf({'],
-    ]) {
-      const args = argsOf(usageBadge, sig)
-      const hasImminent = args.includes('imminentFloor:')
-      const hasExpiring = args.includes('expiringFloor:')
+    const all = [
+      ...callArgsOf(usageBadge, 'sumAvailableCredits'),
+      ...callArgsOf(usageBadge, 'creditOrderOptionsOf'),
+    ]
+    all.forEach((args, i) => {
+      const code = stripComments(args)
+      const hasImminent = code.includes('imminentFloor:')
+      const hasExpiring = code.includes('expiringFloor:')
       expect(
         hasImminent,
-        `★★ ${label}：两个阈值必须成对（当前 imminentFloor=${hasImminent} expiringFloor=${hasExpiring}）`,
+        `★★ 第 ${i + 1} 处：两个阈值必须成对（imminentFloor=${hasImminent} expiringFloor=${hasExpiring}）`,
       ).toBe(hasExpiring)
-    }
+    })
   })
 })
