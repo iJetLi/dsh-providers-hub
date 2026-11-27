@@ -8308,15 +8308,29 @@ function registerJetHubEndpoints(
          */
         const mine = all.filter((a) => a.provider === req.provider && a.enabled !== false)
         /**
-         * ⚠️⚠️ **这里曾堆了三段互相矛盾的 JSDoc，已合并为一段**（2026-11-27）。
+         * ⚠️⚠️ **这里曾堆了三段互相矛盾的 JSDoc，已重写为下面这一段**（2026-11-27）。
+         *
+         * ⚠️ 是「重写」不是「合并成一个块」—— 上面 `mine` 那段 JSDoc 仍在（它讲的是
+         * 「两边同口径只数启用账号」，与本段无关），本段替换的是**原先堆在这里的三段**。
          *
          * | 段 | 曾声称 | 实际 |
          * |---|---|---|
          * | 1 | 「子代理的账号记在 `pinnedAccountId` 里，用 pin 的 id 当起点」| ❌ 该机制已删 |
          * | 2 | 「三级优先级：`userPickedAccountId` > `pinnedAccountId` > `preferredRotationFor`」| ❌ 前两级已删 |
-         * | 3 | 「统一存在 `preferredRotation`」| ✅ **正确** |
+         * | 3 | 「统一存在 `preferredRotation`」| ◐ **仅「有档位的付费腿」成立**（见下）|
          *
-         * 前两段是 `ff7cf8f9`（「子代理起点统一为 preferredRotation —— 净删 1800 行」）
+         * ⚠️ **第 3 段那句话也是过度概括**（2026-11-27 正向审计实测）：真正落到
+         * `preferredRotation` 的**只有「有档位的付费腿」**。其余三处各有去路 ——
+         *
+         * | 情形 | 实际存哪 |
+         * |---|---|
+         * | 无档位 provider | `setSubagentStartPosition`（**生产零读者**）|
+         * | codearts / officeace | **逐请求现算**，不落盘 |
+         * | buddy 免费腿 | **不落盘**（`:774`）|
+         *
+         * ⇒ 引用这句话时要带这个限定，别当成「所有 provider 都统一了」。
+         *
+         * 前两段是 `ff7cf8f9`（「子代理起点统一为 preferredRotation —— 净删 1422 行」）
          * **之前**的形态。`AccountPool` 上已无 `pinSubagentAccount` /
          * `setUserPickedAccount`（`subagent-dead-residuals.spec.ts` 有守卫盯着）。
          *
@@ -8634,7 +8648,7 @@ function registerJetHubEndpoints(
            *
            * ## 为什么删
            *
-           * 它描述的是 `ff7cf8f9`（「子代理起点统一为 preferredRotation —— 净删 1800 行」）
+           * 它描述的是 `ff7cf8f9`（「子代理起点统一为 preferredRotation —— 净删 1422 行」）
            * **之前**的三级优先级：
            *
            * ```
@@ -8649,7 +8663,7 @@ function registerJetHubEndpoints(
            *
            * ## 为什么必须删（不是「留着无害」）
            *
-           * 紧邻的 `:8694` 注释写着正确的话：
+           * 紧邻的那段注释（**不写行号** —— 它会随改动漂移，写死反而变成新的债）写着正确的话：
            *
            * > 「子代理的起点（含「用户手选」）现在**统一存在这里** ——
            * >   与主代理同一个地方 ⇒ 不再有 `userPickedAccountId` 这一级」
