@@ -853,6 +853,17 @@ export function backendOrderTier(split, allowPermanent, imminentFloor = 0, expir
   /**
    * ⚠️⚠️ **短期档用母量 `expiring`，与后端 `buddyBalanceTier` 逐字同源**。
    *
+   * ## 🚫 **本节结论已被下方的「纯短期」修正取代（PR #181，2026-11-27 同日）**
+   *
+   * ⚠️ 读到这里请**直接跳到下面** `pureShortTerm = Math.max(0, expiring - imminent)` 那段 ——
+   *   那才是**现在生效**的判据。
+   *
+   * ⇒ 为什么会出现两段相反的说明：本节记的是「**改成 `shortTerm` 会前后端分叉**」这个结论
+   *   （仍然成立，见下），但**不是**「永远不该改」；
+   *   后来 `#181` 把**后端也一起改**成 `expiring - imminent` ⇒ 两边**同时**换口径，分叉就不存在了。
+   *
+   * ⚠️ **留给后人的判据**：想要两边一致，必须**同时**改 —— 只改前端一定分叉（本节就是那个实测）。
+   *
    * ## 我曾试图改成 `shortTerm`（2026-11-27），**已回退**
    *
    * 动机是「`expiring = imminent + shortTerm` ⇒ 只要有临期，`expiringFloor` 恒真」。
