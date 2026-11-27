@@ -134,6 +134,8 @@ const AUTH_SERVICE: Readonly<Record<string, string>> = {
   //    同型）：它负责「用凭据自己的值重算 `expiresAt`」这条对账。
   agnescode: 'agnescodeAuth',
   agnescodeintl: 'agnescodeintlAuth',
+  today: 'todayAuth',
+  todayintl: 'todayintlAuth',
 }
 
 /**
@@ -377,7 +379,8 @@ describe('★ registerJetHubRpc 的命名对象接线（真跑 apply + account.r
     //    （三审 F🟢-5：本处原只写到 25，而断言已是 27 —— 注释漏了一步就会让
     //     下一个加 provider 的人以为“上次是 25”而把数字写回 25。）
     // ⚠️ 2026-11-19 加 agnescode + agnescodeintl（AgnesCode 两站）：28 → 30。
-    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(30)
+    // ⚠️ 加 today + todayintl（Today 两站）：30 → 32。
+    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(32)
     // 另一方向（原断言的**全部**证明力都在这条上，单独留着免得它随上面那条一起消失）：
     // 表里的每个键都必须是 registry 里真实存在的 provider id（防拼写错误造成的僵尸项）。
     for (const id of Object.keys(AUTH_SERVICE)) {

@@ -334,6 +334,8 @@ export const WRITES_RATE_LIMIT_PROVIDERS: readonly string[] = Object.freeze([
   // ⚠️ 国际站：与国内站是**同一个适配器类的两个实例** ⇒ 同样会写。漏登记 =
   //    国际站的冷却永不解除（与 `monkeycodeintl` / `minimaxintl` 同型同因）。
   'agnescodeintl',
+  'today',
+  'todayintl',
   ])
 
 /** **期望**注册进 `probeById` 的 provider id（会写标记 − {@link PROBE_EXEMPT}）。 */

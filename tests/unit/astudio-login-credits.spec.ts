@@ -780,6 +780,8 @@ describe('AStudio Provider Credits & Jet Hub RPC 接线验证', () => {
       //    实测就是这两处红：本文件 + `jet-hub-rpc-signature.spec.ts`）。
       agnescode: blank(),
       agnescodeintl: blank(),
+      today: blank(),
+      todayintl: blank(),
       astudio: astudioAuth,
     }
 

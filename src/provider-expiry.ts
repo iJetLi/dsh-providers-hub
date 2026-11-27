@@ -82,11 +82,14 @@ import {
   baizhiExpiry,
   // ⚠️ AgnesCode（国内站 / 国际站共用，本 fork 独有，2026-11-19 新增）
   agnescodeExpiry,
+  todayExpiry,
 } from './aggregate-expiry.js'
 // ⚠️ AgnesCode（2026-11-19）：两站共用同一个折算原语，但**必须各传各的 product**
 //（账号池不互通、域名族不同）。
 import { AGNESCODE, AGNESCODE_INTL } from './agnescode-product.js'
 import type { AgnescodeCredential } from './agnescode.js'
+import { TODAY, TODAY_INTL } from './today-product.js'
+import type { TodayCredential } from './today.js'
 // ⚠️ Qoder（国际版 / 中国版，2026-10-20 新增）：与 minimax 同款 —— 两站共用
 //    同一套 `src/qoder*.ts` 实现，差异全在 `src/qoder-product.ts` 的
 //    `QODER` / `QODER_CN` 常量（域名 / client_id / 模型表）。
@@ -328,6 +331,24 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
       credentialExpiry: (c, context) => agnescodeExpiry(
         c as AgnescodeCredential,
         AGNESCODE_INTL,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
+    today: {
+      credentialExpiry: (c, context) => todayExpiry(
+        c as TodayCredential,
+        TODAY,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
+    todayintl: {
+      credentialExpiry: (c, context) => todayExpiry(
+        c as TodayCredential,
+        TODAY_INTL,
         context?.cachedBalance === undefined
           ? undefined
           : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,

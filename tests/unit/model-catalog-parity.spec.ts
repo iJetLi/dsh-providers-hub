@@ -82,6 +82,9 @@ import { BAIZHI } from '../../src/baizhi-product.js'
 import { AgnescodeAdapter } from '../../src/agnescode-adapter.js'
 import { AGNESCODE, AGNESCODE_INTL } from '../../src/agnescode-product.js'
 import { parseAgnescodeCredential } from '../../src/agnescode.js'
+import { TodayAdapter } from '../../src/today-adapter.js'
+import { TODAY, TODAY_INTL } from '../../src/today-product.js'
+import { parseTodayCredential } from '../../src/today.js'
 // ⚠️ **本 fork 独有**（qiniu/七牛云，2026-10-29）。
 import { QiniuAdapter } from '../../src/qiniu-adapter.js'
 import { CodelyAdapter } from '../../src/codely-adapter.js'
@@ -911,6 +914,45 @@ id: 'autoclaw',
         } as never),
       }
     }),
+    ...['today', 'todayintl'].map((id) => {
+      const product = id === 'todayintl' ? TODAY_INTL : TODAY
+      return {
+        id,
+        make: () => new TodayAdapter({
+          product,
+          slots: async () => [{
+            accountId: product.id,
+            credential: parseTodayCredential(
+              JSON.stringify({
+                cookie_raw: '__Secure-better-auth.session_token=spec.sig',
+                realm: product.realm,
+              }),
+              product,
+            )!,
+          }],
+          fetchImpl: (async (url: string | URL | Request) => {
+            const u = String(url)
+            if (u.includes('/api/token')) {
+              return new Response(JSON.stringify({ token: 'spec-jwt' }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+              })
+            }
+            return new Response(JSON.stringify({
+              data: {
+                status: {
+                  modelOptions: {
+                    options: [
+                      { id: 'model.deepseek-v4.1-flash', display: { title: 'DeepSeek V4.1 Flash' } },
+                    ],
+                  },
+                },
+              },
+            }), { status: 200, headers: { 'content-type': 'application/json' } })
+          }) as unknown as typeof fetch,
+        } as never),
+      }
+    }),
   ]
 
   /**
@@ -1010,7 +1052,8 @@ id: 'autoclaw',
     // ⚠️ 2026-11-02 并入 baizhi（百智云，`channel: true`）⇒ 27 → 28。
     // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis，`channel: true`）⇒ 28 → 29。
     // ⚠️ 2026-11-19 加 agnescode + agnescodeintl（AgnesCode 两站）⇒ 29 → 31。
-    expect(CASES).toHaveLength(31)
+    // ⚠️ 加 today + todayintl（Today 两站）⇒ 31 → 33。
+    expect(CASES).toHaveLength(33)
   })
 
   it('★★ `catalog` 具备 `refresh` 的家，适配器上必须**存在** `refresh` 成员（转发接线）', () => {

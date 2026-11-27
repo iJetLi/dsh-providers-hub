@@ -70,10 +70,10 @@ it('共 24 条（23 个真渠道 + aggregate；codely 2026-10-22 已翻 channel:
     //    ⚠️ 声明位置刻意在 **magicrew 之前**（不是紧邻 aggregate）：上面那条
     //    「magicrewintl 必须紧邻 aggregate、magicrew 紧邻它」是硬断言
     //（`ia - ii === 1` / `ii - im === 1`），插在两者之间会把它们挤开 ⇒ 直接红。
-    expect(PROVIDER_REGISTRY).toHaveLength(33)
+    expect(PROVIDER_REGISTRY).toHaveLength(35)
     // ⚠️ 2026-10-22（A6）：codely **已翻 `channel: true`** —— 它的推理 / 目录 / 余额 / 签到 / 续期全部已接线，
     //    而 `channel` 在生产代码里**零个读取点** ⇒ 原来那个 `false` 只是为了让守卫不变红而选的，它同时把 codely 挡在聚合目录之外。现在真实接线已完成，翻正。
-    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(31)
+    expect(PROVIDER_REGISTRY.filter((d) => d.channel).length).toBe(33)
     expect(
       PROVIDER_REGISTRY.find((d) => d.id === 'codely')?.channel,
       'codely 已接线完成，必须是 channel: true（否则它的模型永不进聚合目录）',
@@ -177,6 +177,7 @@ describe('★★ 同族两站必须成对同构（国内站 / 国际站）', () 
     ['minimax', 'minimaxintl'],
     ['autoclaw', 'autoclawintl'],
     ['qoder', 'qodercn'],
+    ['today', 'todayintl'],
   ]
 
   /**
@@ -332,7 +333,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     expect(win).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'doubao', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
-      'qodercn', 'trae', 'workbuddy',
+      'qodercn', 'today', 'todayintl', 'trae', 'workbuddy',
     ])
   })
 

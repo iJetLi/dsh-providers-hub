@@ -1384,6 +1384,8 @@ export class AggregateAdapter extends LlmAdapter {
     //    该陷阱（只改本数组、忘了那张表 ⇒ 候选层被静默剔掉）已复发 7 次。
     'agnescode',
     'agnescodeintl',
+    'today',
+    'todayintl',
     // officeace（2026-10-12）：华为 MaaS 云端直连渠道，`channel: true`
     // ⇒ 必须进聚合目录，否则它的模型**永不进聚合、静默不可见**。
     // ⚠️ 本数组**只是第一道门**（模型层归并）。真正决定「在不在候选表里」的是

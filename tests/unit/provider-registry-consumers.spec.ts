@@ -66,7 +66,7 @@ describe('usesExpiryWindow：永久积分锁定的 windowDays 取决于 registry
     expect(withWindow).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'doubao', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
-      'qodercn', 'trae', 'workbuddy',
+      'qodercn', 'today', 'todayintl', 'trae', 'workbuddy',
     ])
   })
 

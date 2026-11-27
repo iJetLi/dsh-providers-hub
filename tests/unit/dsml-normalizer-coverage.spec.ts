@@ -73,6 +73,7 @@ describe('DSML 归一化接线覆盖（防回归）', () => {
       'lobsterai-adapter.ts',
       'minimax-messages.ts',
       'openai-compat.ts',
+      'today-adapter.ts',
       'trae-adapter.ts',
       'zcode-anthropic.ts',
     ])

@@ -131,6 +131,7 @@ const STYLES = `
    ⚠️ 本文件的样式整体是一个模板字符串 —— 注释里不能出现反引号（会提前终止）。 */
 .dim-jh-providerIcon.magicrew { background: transparent; }
 .dim-jh-providerIcon.doubao { background: transparent; }
+.dim-jh-providerIcon.today { background: white; }
 /* 聚合 provider：内联 SVG（三渠道汇聚），白底容器中显示清晰。
    ⚠️ 加这一条是必要的 —— 上面每家的 logoClass 都各自声明了背景，
       没有兜底规则，缺了会让聚合的图标容器**没有背景**（与其它行不一致）。 */

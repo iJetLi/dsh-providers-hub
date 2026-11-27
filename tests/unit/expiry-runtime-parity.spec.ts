@@ -109,7 +109,7 @@ const EXPECTED_WIRED = [
   'accio', 'agnescode', 'agnescodeintl', 'astudio', 'autoclaw', 'autoclawintl', 'baizhi', 'buddy', 'codearts',
   'lobsterai', 'loomy', 'magicrew', 'magicrewintl', 'marvis', 'minimax', 'minimaxintl',
   'modelscope', 'monkeycode', 'monkeycodeintl', 'officeace', 'qoder', 'qodercn',
-  'trae', 'workbuddy', 'zcode',
+  'today', 'todayintl', 'trae', 'workbuddy', 'zcode',
 ]
 
 class FakeCredentials {

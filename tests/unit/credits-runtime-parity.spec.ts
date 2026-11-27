@@ -480,7 +480,7 @@ describe('★ windowDays 由 registry 的 usesExpiryWindow 驱动（不是「是
       // ⚠️ doubao 2026-11-26 加入：`window_limits[].end_time` 是毫秒时间戳，`packageExpiryOf` 只在「该分类只有一个不同到期日」时用它，否则 `expiryUnknown`（不伪装「永久」）。
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'doubao', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace',
-      'qoder', 'qodercn', 'trae', 'workbuddy',
+      'qoder', 'qodercn', 'today', 'todayintl', 'trae', 'workbuddy',
     ])
   })
 })
@@ -682,6 +682,8 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   //    两站是**同一路径、不同 host**（`*.agnes-ai.cn` / `*.agnes-ai.com`）⇒ 单列两条。
   agnescode: '/api/v2/subscription/credits-balance',
   agnescodeintl: '/api/v2/subscription/credits-balance',
+  today: '/api/token',
+  todayintl: '/api/token',
   doubao: '/alice/commerce/sale/subscription/overview/',
 }
 
@@ -718,6 +720,7 @@ describe('★★ 逐家余额都走自己的上游端点（源码文本断言的
     //    「余额请求打到自己端点」的表会对 monkeycode 恒读过。
     session_cookie: 'spec_session=1',
     cookie: 'sessionid=spec',
+    cookie_raw: '__Secure-better-auth.session_token=spec.sig',
     // ⚠️ 腾讯 Marvis（2026-11-09）的余额请求头由 `businessHeaders()` 从凭据派生
     //    （`Ual-Access-Openid` / `Ual-Access-Guid` / `Ual-Access-Login-Type`）⇒
     //    超集必须带上这四个字段，否则请求根本发不出去、本表那条会恒读过。
@@ -902,7 +905,7 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    `credits.balance: true`、不在特例表）⇒ 25 → 27。余额走账号级
     //    `{apiRoot}/api/v2/subscription/credits-balance`（**不在 `/v1` 下**、
     //    信封 `code` 是字符串 `"000000"`），两站同一路径、不同 host。
-    expect(expected.length).toBe(27)
+    expect(expected.length).toBe(29)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
     //    都是 `createProviderCredits({ loomy, raccoon, zcode })`。deps 只应影响**实现**，

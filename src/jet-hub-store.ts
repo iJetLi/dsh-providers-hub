@@ -2032,6 +2032,8 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   //    `${provider.toUpperCase()}_ACCOUNT_${suffix}` 逐字对上。
   ['AGNESCODE', 'agnescode'],
   ['AGNESCODEINTL', 'agnescodeintl'],
+  ['TODAY', 'today'],
+  ['TODAYINTL', 'todayintl'],
   // ⚠️ 百智云（`BAIZHI_ACCOUNT_*`，2026-11-02）：与 MONKEYCODE 系列**无前缀关系**，
   //    但同样必须登记 —— 漏了它，`state.json` 里的账号列表损坏/缺失时，
   //    从凭据 ref 反推 provider 会失败 ⇒ 账号在重启后**静默消失**。

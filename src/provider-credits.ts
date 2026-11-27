@@ -92,6 +92,8 @@ import { fetchAccioBalanceDetailed } from './accio-credits.js'
 // ⚠️ AgnesCode（2026-11-19）：订阅积分池（两个标量桶，无逐笔日期）。
 import { fetchAgnescodeBalanceDetailed } from './agnescode-credits.js'
 import { AGNESCODE, AGNESCODE_INTL } from './agnescode-product.js'
+import { fetchTodayBalanceDetailed } from './today-credits.js'
+import { TODAY, TODAY_INTL } from './today-product.js'
 import { fetchAstudioBalanceDetailed, claimDaily } from './astudio-credits.js'
 // ⚠️ **本 fork 独有**（豆包，2026-10-29）：签到/余额原语（端点待实测，如实 inactive）。
 import { claimDoubaoDailyCheckin, fetchDoubaoBalanceDetailed } from './doubao-credits.js'
@@ -1357,6 +1359,14 @@ export function createProviderCredits(
     agnescodeintl: {
       fetchBalanceDetailed: async (credential) =>
         fetchAgnescodeBalanceDetailed(AGNESCODE_INTL, credential),
+    },
+    today: {
+      fetchBalanceDetailed: async (credential) =>
+        fetchTodayBalanceDetailed(TODAY, credential),
+    },
+    todayintl: {
+      fetchBalanceDetailed: async (credential) =>
+        fetchTodayBalanceDetailed(TODAY_INTL, credential),
     },
   }
 }

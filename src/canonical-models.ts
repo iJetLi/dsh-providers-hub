@@ -221,6 +221,11 @@ const AUTOCLAW_CANONICAL_OVERRIDES: Readonly<Record<string, string>> = Object.fr
   'zaicoding_glm-5.3': 'glm-5-3',
 })
 
+/** Today 两站共用的规范键补丁（将 `minimax-m31-flash` 归并到 `minimax-m3-1-flash`）。 */
+const TODAY_CANONICAL_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
+  'minimax-m31-flash': 'minimax-m3-1-flash',
+})
+
 /**
  * 显式映射补丁：`provider → realId → 规范键`。
  *
@@ -424,6 +429,8 @@ export const CANONICAL_OVERRIDES: Readonly<Record<string, Readonly<Record<string
       'deepseek-ai/DeepSeek-V4.1-Flash-1017': 'deepseek-v4-1-flash',
       'deepseek-ai/DeepSeek-V4-Pro-0813': 'deepseek-v4-pro',
     }),
+    today: TODAY_CANONICAL_OVERRIDES,
+    todayintl: TODAY_CANONICAL_OVERRIDES,
   })
 
 /**
@@ -549,6 +556,7 @@ const CANONICAL_NAMES: Readonly<Record<string, string>> = Object.freeze({
   'minimax-m3': 'MiniMax-M3',
   'minimax-m2-7': 'MiniMax-M2.7',
   'minimax-m2-7-highspeed': 'MiniMax-M2.7-highspeed',
+  'minimax-m3-1-flash': 'MiniMax-M3.1-Flash',
   'minimax-m3-1-flash-preview': 'MiniMax-M3.1-Flash-Preview',
   'qwen3-8-max': 'Qwen3.8-Max',
   'qwen3-8-flash': 'Qwen3.8-Flash',

@@ -63,6 +63,9 @@ import { fetchMarvisBalanceDetailed } from './marvis-credits.js'
 import { fetchAgnescodeBalanceDetailed } from './agnescode-credits.js'
 import { AGNESCODE, type AgnescodeProduct } from './agnescode-product.js'
 import type { AgnescodeCredential } from './agnescode.js'
+import { fetchTodayBalanceDetailed } from './today-credits.js'
+import type { TodayProduct } from './today-product.js'
+import type { TodayCredential } from './today.js'
 import { MARVIS } from './marvis-product.js'
 import type { MarvisCredential } from './marvis.js'
 // ⚠️ AutoClaw（智谱）：钱包余额折算（2026-10-17 审计 P0 修复新增）。
@@ -281,6 +284,8 @@ export const WIRED_EXPIRY_PROVIDERS: readonly string[] = Object.freeze([
   //    ⚠️ 两站各一：账池不互通、域名不同（`*.agnes-ai.cn` / `*.agnes-ai.com`）。
   'agnescode',
   'agnescodeintl',
+  'today',
+  'todayintl',
   // ⚠️ **Qoder**（中国版 / 国际版，2026-10-20，用户要求补齐三档分档 + 永久锁）。
   //    折算原语见 `qoderExpiry`（两站共用，只换 product）。
   //
@@ -1529,6 +1534,21 @@ export async function agnescodeExpiry(
     async () => {
       const result = await fetchAgnescodeBalanceDetailed(product, credential)
       // ⚠️ 与 modelscope 同口径：`balance: null`（查不到）⇒ UNUSABLE。
+      return result.balance
+    },
+  ))
+}
+
+/** Today（`today` / `todayintl`）临期折算：带 `resetAt` 返回重置时刻，缺失有余额返回 `NEVER`，无余额/失效返回 `UNUSABLE`。 */
+export async function todayExpiry(
+  credential: TodayCredential,
+  product: TodayProduct,
+  cached?: () => Promise<CreditBalance | null | undefined>,
+): Promise<number> {
+  return sharedPackageExpiry(() => fetchBalanceWithCache(
+    cached,
+    async () => {
+      const result = await fetchTodayBalanceDetailed(product, credential)
       return result.balance
     },
   ))
