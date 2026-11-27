@@ -714,8 +714,25 @@ export function parseTodayModelsFromPricingStatus(status: Record<string, unknown
       optionId,
       id: shortId,
       name: title,
-      contextWindow: known?.contextWindow ?? 131_072,
-      maxTokens: known?.maxTokens ?? 8_192,
+      /**
+       * ⚠️⚠️ **未知模型不得虚构 `contextWindow` / `maxTokens`**（2026-11-27 正向审计）。
+       *
+       * 这里原本是 `?? 131_072` / `?? 8_192` —— **凭空编两个数**，而 PR 自述写的是
+       * 「未知模型不虚构 `contextWindow`」⇒ **自述与实现相反**。
+       *
+       * ## 为什么「编一个数」比「不声明」更糟（本仓成文纪律）
+       *
+       * - `contextWindow` 编大了（如 1,048,576）⇒ **自动压缩在 90 万 token 才触发**，
+       *   而在那之前上游早就 `CONTEXT_WINDOW_EXCEEDED` ⇒ 用户看到的是「莫名报错」；
+       * - `maxTokens` 编小了（如 8,192）⇒ **长回答被静默截断**；
+       * - 两者都会被当成**真实能力**传给宿主，宿主据此做压缩/预算决策 ⇒
+       *   **错的分母比没有分母更难查**（本仓 `providers-baizhi.md` 记过同型事故）。
+       *
+       * ⇒ 未知就是 `undefined`：宿主会退化成「不显示占用条 / 用默认预算」，
+       *   那至少是**诚实的降级**，而不是一个假数字。
+       */
+      contextWindow: known?.contextWindow,
+      maxTokens: known?.maxTokens,
     })
   }
   return out

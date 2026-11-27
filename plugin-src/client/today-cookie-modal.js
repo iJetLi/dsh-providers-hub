@@ -147,7 +147,9 @@ export function TodayCookieModal({
             type: 'email',
             className: 'dim-jh-input',
             value: email,
-            placeholder: 'your@email.com',
+            // ⚠️ 不要写成 `<local>@<domain>` 形态 —— `repo-pii-guard` 会把任何邮箱形态
+            //    判成真实账号（本仓没有「纯示例邮箱」这一说，2026-11-27 实测被拦）。
+            placeholder: '请输入邮箱地址',
             autoFocus: true,
             style: { flex: 1 },
             onChange: (e) => {
