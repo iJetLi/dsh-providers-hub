@@ -1297,3 +1297,70 @@ if (currentAccountId) {
    ⇒ 每条「已补守卫」都必须当场跑一次变异确认，别信自己的直觉。
 2. ⚠️ ⚠️ **同型多格要逐行对拍，不能只查一处**：`:1451` 那格与 `:1323`/`:1393`
    是同型三格，两家审计都只看到了「没传第 3 参」，**「没加首号」是复核时读代码发现的**。
+
+## 团队空间额度：**本仓刻意不支持**（issue #177，2026-11-27）
+
+### 一句话
+
+**accIO 的团队额度只存在于「网页会话 cookie」那条链路上，而本仓是无头进程、只有 OAuth token。**
+
+### 报障形态
+
+用户处于官方客户端的**团队空间**（「团队订阅 0 / 8000 积分」），Jet Hub 面板只看到
+**520**（个人空间三桶），**也用不了那 8000** —— 不是报错、不是 0、不是禁用，
+而是**查到并消耗了另一个空间**。
+
+### 证据链（三条独立来源，全部实测）
+
+| 来源 | 事实 |
+|---|---|
+| 报障者用**团队账号**实读网页版 | `GET https://www.accio-ai.com/gateway/subscription/current?teamId=<id>` ⇒ `{"type":"TEAM","total":8000,"currentPlanId":"603","planName":"至尊版",…}` |
+| 同上，**去掉 cookie** 再试 | ① `Authorization: Bearer <token>` ⇒ **401 `{"message":"login required"}`**；② `?accessToken=<token>`（更贴近本仓形态）⇒ **同样 401** |
+| **同一枚 token** 打本仓现在用的端点 | `phoenix-gw/api/entitlement/currentSubscription` ⇒ **200 `FREE/520`** |
+
+⇒ **token 是有效的**（否则不会一个 401、一个 200）。**是 `/gateway/*` 这套链路只认网页会话 cookie。**
+
+### ⚠️⚠️ 两条**已被证伪**的错路 —— 不要再试
+
+1. **`x-team-id` 请求头**：官方客户端确实注入它（`app.asar` 偏移 75632621 的 `yo()`，
+   值来自 `po()` = 当前 teamId），**但加它无效** —— 报障者实测
+   「加 `x-team-id: 13139002` ⇒ 响应**逐字不变**（仍 FREE/520）」。
+   **空间是服务端会话态**（`POST /space/switch`，`app.asar` 里 `/space/switch` 4 处、
+   `/space/teams` 3 处、`/space/current` 6 处），**不是请求头能切的**。
+2. **`userinfo.activeTeam`**：官方 schema 里有 `{teamId, teamName, role} | null`，
+   **但团队账号下实测仍是 `null`**；且 `phoenix-gw` 的 `userinfo` 在
+   基线 / `+x-team-id` / `+sgcookie+region` **三种形态下响应逐字相同、全是 `null`**。
+   字段清单里**没有** space / tenantId / orgId / spaceType / teams / teamId。
+   ⇒ 本仓保留了 `activeTeam` 的解析（上游哪天真下发就不丢信息），但**不要指望它**。
+
+### 唯一可能的出路（未做，成本需另评估）
+
+官方**桌面客户端**走 `localhost:4097` 本机网关 + **Basic Auth**，那套会话来自客户端登录态。
+要支持团队额度就得**复用本机 Accio 客户端的会话** ——
+这与本仓「纯 OAuth、无浏览器依赖」的架构**分叉**，需要单独决策，**不是顺手能加的**。
+
+### ✅ 同一批里**真正修好**的那条：`x-package-region`
+
+与团队额度**无关**，但**实测有效**（报障者真机确认「目录从 16 条 → **30 条**，
+含 GPT 6 Luna / GPT 5.6 Luna / Claude / Gemini」）。
+
+值的归一化按官方 `app.asar` 内的 `aa()`：
+
+```js
+function aa(e){ let t=e?.trim().toLowerCase()
+  return t==='cn'||t?.endsWith(':cn') ? 'CN'
+       : t==='global'||t?.endsWith(':global') ? 'GLOBAL' : 'unknown' }
+```
+
+白名单 **`CN` | `GLOBAL`**；`getPackageRegionState()` **在每个出站请求上都调用**；
+只有 `unresolved`（磁盘 `appInstall.jsonl` 无值）才**不下发**该头。
+
+⚠️ **第一版只对 `global` 发、`cn` 不发 —— 那是错的**（漏了国内站）。
+⚠️ 三处都要带：只读端点（`callAccioEndpoint`）/ 推理（`accio-adapter`）/ 目录（`accio-auth` 的 `fetchModels`）。
+
+### 方法论
+
+这条线的三次纠错全是**报障者的实测推翻我的推测**：
+`x-team-id` 无效 → `activeTeam` 恒 null → `cn` 也要发 `x-package-region`（第三条是我从他
+「16→30 条」的验证 + 本机 `app.asar` 取证里发现的）。
+⇒ **逆向出来的「官方注入这个头」不等于「带上就有用」；查空间这类会话态，先问链路再问参数。**

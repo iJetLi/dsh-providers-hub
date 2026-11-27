@@ -643,6 +643,44 @@ function makeAccioPackage(
  * 反之，**查到了就是查到了**：桶全为 0 时如实返回 `total: 0`（那才是「额度已用光」），
  * 与上面三条 `null` 严格区分。
  */
+/**
+ * ★★★ **团队额度（team space）本仓刻意不支持 —— 这是查证过的结论，不是 TODO**（issue #177，2026-11-27）
+ *
+ * ## 一句话
+ *
+ * **accIO 的团队额度只存在于「网页会话 cookie」那条链路上，而本仓是无头进程、只有 OAuth token。**
+ *
+ * ## 证据链（三条独立来源，全部实测）
+ *
+ * | 来源 | 事实 |
+ * |---|---|
+ * | 报障者用**团队账号**实读 | 网页版 `GET /gateway/subscription/current?teamId=<id>` ⇒ `{"type":"TEAM","total":8000,…}` |
+ * | 同上，去掉 cookie 再试 | ① `Authorization: Bearer <token>` ⇒ **401 `login required`**；② `?accessToken=<token>` ⇒ **401 `login required`** |
+ * | 同一枚 token 打本仓现在用的端点 | `phoenix-gw/api/entitlement/currentSubscription` ⇒ **200 `FREE/520`** |
+ *
+ * ⇒ **token 是有效的**（否则第二条会是 401 而不是 200）。**是 `/gateway/*` 这套链路只认 cookie。**
+ *
+ * ## ⚠️⚠️ 两条**已被证伪**的错路 —— 不要再试
+ *
+ * 1. **`x-team-id` 请求头**：官方客户端确实注入它（`app.asar` 偏移 75632621 的 `yo()`），
+ *    但报障者实测「加 `x-team-id: <teamId>` ⇒ 响应**逐字不变**（仍 FREE/520）」。
+ *    **空间是服务端会话态**（`POST /space/switch`），不是请求头。
+ * 2. **`userinfo.activeTeam`**：官方 schema 里有 `{teamId,teamName,role}|null`，
+ *    但**团队账号下实测仍是 `null`**；且 `phoenix-gw` 的 `userinfo` 在
+ *    基线 / `+x-team-id` / `+sgcookie+region` **三种形态下响应逐字相同、全是 null**。
+ *    字段清单里**没有** space / tenantId / orgId / spaceType / teams / teamId。
+ *
+ * ## 唯一可能的出路（未做，成本需另评估）
+ *
+ * 官方**桌面客户端**走 `localhost:4097` 本机网关 + **Basic Auth**，那套会话来自客户端登录态。
+ * 要支持团队额度就得**复用本机 Accio 客户端的会话** ——
+ * 这与本仓「纯 OAuth、无浏览器依赖」的架构**分叉**，需要单独决策，不是顺手能加的。
+ *
+ * ## 仍然**有效**的那条修复
+ *
+ * `x-package-region`（见 `accioHeaders`）：报障者真机确认「目录从 16 条 → **30 条**，
+ * 含 GPT 6 Luna / GPT 5.6 Luna / Claude / Gemini」。**那条是会改 wire 的，与本函数无关。**
+ */
 export async function fetchAccioBalanceDetailed(
   credential: AccioCredential,
   options: AccioCreditsOptions = {},
