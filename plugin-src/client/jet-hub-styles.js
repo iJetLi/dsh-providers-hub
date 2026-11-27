@@ -1748,16 +1748,36 @@ col.dim-jh-ledgerColAccount { width: 12.68%; }
   cursor: help;
 }
 
-.dim-jh-windowLabel { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+/* ★★★ 2026-11-27：flex-wrap 从 nowrap 改成 **wrap**（用户定稿第 5 条）。
+ * 原因：这一行现在多了「剩余< [阈值] 积分」三段，窄屏（400px）下放不下。
+ * 定稿要求：**徽标降第二行，输入框不压缩**。
+ * ⚠️ 不能改成「压缩输入框」—— 52px 已是「36500」的下限（内容区 38px），
+ *   再压会把数字截断成「3650」，用户看不出自己设的是什么。 */
+.dim-jh-windowLabel { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dim-jh-windowDot { width: 8px; height: 8px; flex: none; border-radius: 999px; }
 .dim-jh-windowDot[data-tone="imminent"] { background: var(--dsw-alias-state-error-primary, #d93025); }
 .dim-jh-windowDot[data-tone="short"] { background: var(--dsw-alias-state-warn-primary, #b45309); }
 .dim-jh-windowDot[data-tone="permanent"] { background: var(--dsw-alias-state-success-primary, #15803d); }
-.dim-jh-windowInput { width: 92px; flex: none; box-sizing: border-box; padding: 4px 6px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+/* ★★★ 2026-11-27：92px → 52px（窗口框与新增的阈值框**统一**宽度）。
+ * 实测依据（浏览器量过，见 PR 说明）：
+ *   「36500」在 12px 字号下文本宽 **33px**，52px 框内容区 **38px** ⇒ 余 5px ✅
+ *   text-align 改 center：短数字（1 / 20）居中比右对齐更整齐。
+ * ⚠️ 不要为「看起来更宽」改回 92px —— 那一行还要容下「剩余< [20] 积分 覆盖 N 个账号」，
+ *   实测整行自然宽 371px，弹窗内容区 520px；92px 两个框会把徽标挤到第二行。 */
+.dim-jh-windowInput { width: 52px; flex: none; box-sizing: border-box; padding: 4px 6px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
 .dim-jh-windowInput:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
 .dim-jh-windowInput[aria-invalid="true"] { border-color: var(--dsw-alias-state-error-primary, #d93025); }
+/* ★ 阈值**关闭态**（空串）：虚线边框 + 灰字。
+ * ⚠️ 不用「实线 + 空白」—— 那会被读成「正在加载」或「读取失败」。 */
+.dim-jh-windowInputOff { border-style: dashed; color: var(--dsw-alias-label-tertiary); }
+.dim-jh-windowInputOff::placeholder { color: var(--dsw-alias-label-tertiary); opacity: .55; }
 .dim-jh-windowUnit { flex: none; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
-.dim-jh-windowCover { flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; line-height: 1.7; white-space: nowrap; }
+/* ★★★ 2026-11-27：覆盖徽标**紧跟阈值**，不再靠右。
+ * 定稿实测：margin-left 用 auto 会把它推到整行最右（v4），
+ * 而用户要求「紧跟阈值」（v5）⇒ 固定 4px。
+ * ⚠️ 不要为了「对齐好看」改回 auto —— 那样徽标会离它描述的阈值很远，
+ *   用户会以为是「整行总数」而不是「这一档的覆盖数」。 */
+.dim-jh-windowCover { flex: none; display: inline-flex; align-items: center; gap: 3px; margin-left: 4px; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; line-height: 1.7; white-space: nowrap; }
 .dim-jh-windowCover b { font-weight: 700; font-variant-numeric: tabular-nums; }
 .dim-jh-windowCover[data-tone="imminent"] { color: var(--dsw-alias-state-error-primary, #d93025); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 12%, transparent); border: .5px solid color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 25%, transparent); }
 .dim-jh-windowCover[data-tone="short"] { color: var(--dsw-alias-state-warn-primary, #b45309); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #b45309) 12%, transparent); border: .5px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, #b45309) 25%, transparent); }

@@ -502,6 +502,18 @@ export interface BuddyTierOptions {
   /** 是否允许消耗永久积分。默认 `true`（解锁）。 */
   allowPermanent?: boolean
   /**
+   * ★★★ **临期档的积分下限**（2026-11-27 用户需求）。
+   *
+   * 临期剩余 **≤ 该值** ⇒ 不再算临期 ⇒ 降级按「短期」排队。
+   *
+   * ⚠️ **`undefined` / 0 = 关闭** ⇒ `> 0` 与加这个功能之前**逐字节相同**（零回归）。
+   * ⚠️ 这是用户的原话场景：一个号只剩 1 点临期时若还算「临期号」，
+   *   系统会把它临期烧光**再吃部分短期**才切走 ⇒ 那个号的短期被污染。
+   */
+  imminentFloor?: number
+  /** ★★★ **短期档的积分下限**（同上）。短期剩余 **≤ 该值** ⇒ 降级按「永久」排队。 */
+  expiringFloor?: number
+  /**
    * ⚠️ **当前实现不读它**（2026-11-01 四审登记）。保留只为调用形态稳定。
    *
    * 档位**只**取决于入参里**已经分好桶**的 `expiringBalance` / `permanentBalance` ——
@@ -902,9 +914,26 @@ export function buddyBalanceTier(
    * ⚠️ 两个「会作废」的档**必须在 `allowPermanent === false` 之前判**：
    * 临期与短期都在 15 天内 ⇒ 锁定时**仍可烧**。这保证「锁定永久积分」的
    * 可用性判据与引入临期档**之前逐字节相同**（那是最不能回归的一格）。
+   *
+   * ★★★ **积分下限（2026-11-27 用户需求）**：
+   *
+   * 判据从 `> 0` 变成 `> floor`（`floor` 缺省 0）。用户要的是「低于 20 就不再算临期，
+   * 归入短期」—— 即剩余**不足**该值时不占用这一档，**提前切走**，
+   * 免得系统把它临期烧光**再吃部分短期**（那会污染下一档）。
+   *
+   * ⚠️⚠️ **`>` 不是 `>=`**：`floor` 缺省 0 时 `remaining > 0` 正是改动前语义
+   * （零回归）。写成 `>=` 会让「剩余恰好 0」也算该档，与现状分叉。
+   *
+   * ⚠️ **降级不浪费**：这里只决定「按哪一档排队」，不改「烧包顺序」——
+   *   轮到这个号时它那点临期照样先烧（用户第 6 条定案）。
+   *
+   * ⚠️ **锁定永久时降级到 `none` 而不是 `permanent`**：两条 floor 判据都在
+   *   `allowPermanent === false` 之前 ⇒ 临期低 → 短期低 → **none**（不去烧永久）。
    */
-  if (positiveOrZero(balance.imminentBalance) > 0) return BUDDY_BALANCE_TIER.imminent
-  if (positiveOrZero(balance.expiringBalance) > 0) return BUDDY_BALANCE_TIER.expiring
+  const imminentFloor = positiveOrZero(options.imminentFloor)
+  const expiringFloor = positiveOrZero(options.expiringFloor)
+  if (positiveOrZero(balance.imminentBalance) > imminentFloor) return BUDDY_BALANCE_TIER.imminent
+  if (positiveOrZero(balance.expiringBalance) > expiringFloor) return BUDDY_BALANCE_TIER.expiring
   if (options.allowPermanent === false) return BUDDY_BALANCE_TIER.none
   if (positiveOrZero(balance.permanentBalance) > 0) return BUDDY_BALANCE_TIER.permanent
   return BUDDY_BALANCE_TIER.none

@@ -74,6 +74,18 @@ export interface ResolvedCreditWindow {
    * 静默改写用户输入是本仓库明令禁止的形态（用户会以为保存失败或行为异常）。
    */
   readonly clamped: boolean
+  /**
+   * ★★★ **临期档的积分下限**（2026-11-27 用户需求）。
+   *
+   * 临期剩余 **≤ 该值** ⇒ 不算临期 ⇒ 降级按「短期」排队。
+   *
+   * ⚠️ **恒为数字**（`undefined` 已归一成 `0`）：调用方（`buddyBalanceTier`）
+   * 直接用它做 `> floor` 判据即可，不必每处再判 `undefined`。
+   * ⚠️ `0` = 关闭 ⇒ `> 0` 与加这个功能之前**逐字节相同**（零回归）。
+   */
+  readonly imminentFloor: number
+  /** ★★★ **短期档的积分下限**（同上）。`0` = 关闭。 */
+  readonly expiringFloor: number
 }
 
 /**
@@ -100,8 +112,25 @@ export const MAX_CREDIT_WINDOW_DAYS = 36_500
 export type CreditWindowReader = (provider: string) => CreditWindowSetting | undefined
 
 /**
- * 把「可能不完整的 pool」安全包成 {@link CreditWindowReader}。
+ * ★★★ **积分下限的归一化**（2026-11-27 用户需求）。
  *
+ * 规则：只接受**有限非负数**，其余一律 `0`（= 关闭）。
+ *
+ * ⚠️ 为什么归 `0` 而不是 `undefined`：`ResolvedCreditWindow` 的两个 floor
+ *   声明为**恒数字**，调用方（`buddyBalanceTier`）直接做 `> floor` 即可 ——
+ *   若允许 `undefined`，每个消费点都得再判一次，必然有人漏。
+ *
+ * ⚠️ 方向保守：非法值归 0 = 关闭 = **不降级** ⇒ 最坏只是功能没生效，
+ *   绝不会因为一个手改坏的 `NaN` 把整个号池降级成「没可用账号」。
+ */
+function toFloor(value: unknown): number {
+  if (typeof value !== 'number') return 0
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return value
+}
+
+/**
+ * 把「可能不完整的 pool」安全包成 {@link CreditWindowReader}。
  * ## ⚠️ 为什么需要它（真实回归，2026-11-19）
  *
  * `AccountPool.creditWindow` 是**新加的方法**。三类调用方可能拿不到它：
@@ -178,6 +207,19 @@ export function resolveCreditWindow(
   const setting = provider.length > 0 ? readSetting(provider) : undefined
   const setWindow = setting?.windowDays
   const setImminent = setting?.imminentDays
+  /**
+   * ★ 积分下限（2026-11-27）。
+   *
+   * ⚠️ 与窗口天数**不同**：窗口有「setting → env → default」三级回落，
+   *   而下限**没有环境变量与默认值** —— 没设就是 `0`（关闭）。
+   *   ⇒ 不需要 `fromSetting*` 判据，也不参与 `source` 判定
+   *   （「来源」问的是「窗口天数从哪来」，下限不改变这个答案）。
+   *
+   * ⚠️ 非法值（`NaN` / 负数 / 非数字）一律归 `0`：与 `sanitizeCreditWindows`
+   *   同纪律，且方向保守（最坏结果只是阈值不生效，不会误降级）。
+   */
+  const imminentFloor = toFloor(setting?.imminentFloor)
+  const expiringFloor = toFloor(setting?.expiringFloor)
 
   // ---- 第一级：本渠道设置 ----
   const fromSettingWindow = typeof setWindow === 'number' && Number.isFinite(setWindow) && setWindow >= 0
@@ -217,11 +259,21 @@ export function resolveCreditWindow(
     source = 'default'
   }
 
-  return { windowDays, imminentDays, source, clamped }
+  return { windowDays, imminentDays, source, clamped, imminentFloor, expiringFloor }
 }
 
 /** 单个 provider 的设置是否为空（用于「恢复默认」判据）。 */
 export function isEmptyCreditWindowSetting(setting: CreditWindowSetting | undefined): boolean {
   if (setting === undefined) return true
-  return setting.windowDays === undefined && setting.imminentDays === undefined
+  /**
+   * ⚠️ **两个阈值必须参与判据**（2026-11-27）。
+   *
+   * 只看窗口天数的话，「只配了阈值、窗口天数用默认」这种合法配置
+   * 会被判成「空」⇒ 「恢复默认」按钮会把它误当无操作，
+   * 或更糟：某个「空就清掉整条」的分支会**静默删掉用户的阈值**。
+   */
+  return setting.windowDays === undefined
+    && setting.imminentDays === undefined
+    && setting.imminentFloor === undefined
+    && setting.expiringFloor === undefined
 }

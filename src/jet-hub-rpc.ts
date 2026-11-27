@@ -13286,6 +13286,14 @@ function registerJetHubEndpoints(
 
         const windowRaw = req.windowDays
         const imminentRaw = req.imminentDays
+        /**
+         * ★★★ **积分阈值**（2026-11-27 用户需求）。
+         *
+         * ⚠️ 与窗口天数**共用同一个校验器**（都是「非负有限数字」）——
+         * 两条独立的校验必然漂移，且这里没有「阈值有别的合法域」可言。
+         */
+        const imminentFloorRaw = req.imminentFloor
+        const expiringFloorRaw = req.expiringFloor
         const bad = (name: string, raw: unknown): string | null =>
           (raw === undefined || raw === null)
             ? null
@@ -13294,12 +13302,32 @@ function registerJetHubEndpoints(
               : null)
         const badWindow = bad('windowDays', windowRaw)
         const badImminent = bad('imminentDays', imminentRaw)
-        const badField = badWindow ?? badImminent
+        const badImminentFloor = bad('imminentFloor', imminentFloorRaw)
+        const badExpiringFloor = bad('expiringFloor', expiringFloorRaw)
+        const badField = badWindow ?? badImminent ?? badImminentFloor ?? badExpiringFloor
         if (badField !== null) {
           return { ok: false, error: { code: 'bad-request', message: badField } }
         }
         const windowDays = windowRaw === undefined || windowRaw === null ? undefined : (windowRaw as number)
         const imminentDays = imminentRaw === undefined || imminentRaw === null ? undefined : (imminentRaw as number)
+        /**
+         * ⚠️ **阈值 `0` 与「不传」在语义上不同**：
+         *
+         * | 传入 | 含义 |
+         * |---|---|
+         * | `undefined` / `null` | **不动**（合并语义，与 windowDays 一致）|
+         * | **`0`** | **关掉阈值**（用户主动清除）|
+         * | `> 0` | 设该下限 |
+         *
+         * ⇒ `0` 必须能真正写进去，**不能**被归一成 `undefined`（那会让用户
+         *   **永远关不掉已设的阈值** —— 面板空着、实际还在降级）。
+         */
+        const imminentFloor = imminentFloorRaw === undefined || imminentFloorRaw === null
+          ? undefined
+          : (imminentFloorRaw as number)
+        const expiringFloor = expiringFloorRaw === undefined || expiringFloorRaw === null
+          ? undefined
+          : (expiringFloorRaw as number)
         /**
          * 合并语义：只传一个字段时另一个**保持原值**（不是清空）。
          * 两个都不传 ⇒ 整条删键（恢复默认）。
@@ -13325,12 +13353,28 @@ function registerJetHubEndpoints(
           return { ok: false, error: { code: 'internal', message: '账号池不支持按渠道读取分档窗口，无法安全执行「只改一个字段」的部分更新（另一个字段会被覆盖）。请升级宿主后重试。' } }
         }
         const current = safeCreditWindowReader(pool)(req.provider)
-        const next = windowDays === undefined && imminentDays === undefined
-          ? undefined
-          : {
+        /**
+         * ★★★ **两个阈值也参与「是否有窗口改动」的判据**（2026-11-27）。
+         *
+         * ⚠️ 若不参与：「只改阈值」的请求会被判成 `next === undefined`
+         *   ⇒ 与「恢复默认」同形 ⇒ **阈值被静默丢弃**（而且窗口天数被删键）。
+         *   这正是 2026-11-24 那个「只改子代理设置，窗口天数回归默认」缺陷的
+         *   同一形态 —— 新增字段时必须回头看这条判据。
+         */
+        const hasAnyWindowField = windowDays !== undefined || imminentDays !== undefined
+          || imminentFloor !== undefined || expiringFloor !== undefined
+        const next = hasAnyWindowField
+          ? {
             ...(windowDays === undefined ? current?.windowDays === undefined ? {} : { windowDays: current.windowDays } : { windowDays }),
             ...(imminentDays === undefined ? current?.imminentDays === undefined ? {} : { imminentDays: current.imminentDays } : { imminentDays }),
+            /**
+             * ⚠️ 阈值的合并语义与天数**逐字同构**：不传 ⇒ 保持原值。
+             * ⚠️ 但**没有 `=== 0 就省略`** 那层：`0` 是合法的「关掉」，必须写进去。
+             */
+            ...(imminentFloor === undefined ? current?.imminentFloor === undefined ? {} : { imminentFloor: current.imminentFloor } : { imminentFloor }),
+            ...(expiringFloor === undefined ? current?.expiringFloor === undefined ? {} : { expiringFloor: current.expiringFloor } : { expiringFloor }),
           }
+          : undefined
         /**
          * ⚠️⚠️ **两个天数都没传时的两种语义必须分开**（2026-11-24 真缺陷）。
          *

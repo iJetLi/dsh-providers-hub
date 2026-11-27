@@ -137,6 +137,33 @@ export interface CreditWindowSetting {
   windowDays?: number
   /** 「临期窗口」（< 此值算临期）。`undefined` = 回落下一级。 */
   imminentDays?: number
+  /**
+   * ★★★ **临期档的积分下限**（2026-11-27 用户需求）。
+   *
+   * ## 用户原话
+   *
+   * > 「临期积分低于 20 就不再算临期了，归入短期……让一个帐号**提前切换**，
+   * >   防止它的短期积分被使用。」
+   *
+   * ## 语义
+   *
+   * 临期剩余 **≤ 该值** ⇒ 不再算临期 ⇒ **降级**按「短期」排队。
+   *
+   * ⚠️ **只改排队顺序，不浪费剩余积分**：轮到这个号时它那点临期照样先烧
+   *   （用户的第 6 条定案）。
+   * ⚠️ **`undefined` / 0 = 关闭** ⇒ 与加这个功能之前**逐字节相同**（零回归）。
+   * ⚠️ 与 `imminentDays` 是**并列 AND**：`距过期 < N 天` **且** `剩余 ≥ 阈值` 才算临期。
+   */
+  imminentFloor?: number
+  /**
+   * ★★★ **短期档的积分下限**（同上）。
+   *
+   * 短期剩余 **≤ 该值** ⇒ 不再算短期 ⇒ **降级**按「永久」排队。
+   *
+   * ⚠️ **锁定永久积分时**：降级链是 临期(低) → 短期(低) → **`none`**
+   *   （不去烧永久）—— 这是「锁定」的应有之义，见 `buddyBalanceTier` 的注释。
+   */
+  expiringFloor?: number
   /** 子代理专属设置。`undefined` = 全部跟随主代理（与加这个功能之前**逐字节相同**）。 */
   subagent?: SubagentRotationSetting
 }
@@ -1034,17 +1061,35 @@ export function sanitizeCreditWindows(raw: unknown): CreditWindowMap {
     const source = entry as Record<string, unknown>
     const windowDays = readDays(source.windowDays)
     const imminentDays = readDays(source.imminentDays)
+    /**
+     * ★ 积分阈值（2026-11-27）。与窗口天数**同一套 sanitize**（只接受有限非负数）。
+     *
+     * ⚠️ 阈值 `0` 与 `undefined` 在**选号语义上等价**（都是「关闭」，见
+     * `buddyBalanceTier` 的 `> floor` 判据）—— 但**存储上不合并**：
+     * 用户输 `0` 就当 `0` 存，读回来仍是 `0`，面板显示的是他输的值。
+     * 若这里把 0 归一成 undefined，用户会看到「我输的 0 变成空白」。
+     */
+    const imminentFloor = readDays(source.imminentFloor)
+    const expiringFloor = readDays(source.expiringFloor)
     const subagent = sanitizeSubagentRotation(source.subagent)
     /**
-     * ⚠️ 三者都没读到 ⇒ 整条丢弃（空对象会留下永不消费的噪音键）。
+     * ⚠️ 全都没读到 ⇒ 整条丢弃（空对象会留下永不消费的噪音键）。
      *
      * ⚠️ **`subagent` 必须参与这条判据**：只配了子代理、没配窗口天数的 provider
      * 若被整条丢掉，用户的子代理设置会**静默消失**（下次读回是默认值）。
+     * ⚠️ **两个阈值也必须参与**：只配了阈值、没配窗口天数的 provider
+     * （合法的用法 —— 用默认窗口 + 自定义下限）若被丢掉，阈值会静默失效。
      */
-    if (windowDays === undefined && imminentDays === undefined && subagent === undefined) continue
+    if (
+      windowDays === undefined && imminentDays === undefined
+      && imminentFloor === undefined && expiringFloor === undefined
+      && subagent === undefined
+    ) continue
     result[provider] = {
       ...(windowDays === undefined ? {} : { windowDays }),
       ...(imminentDays === undefined ? {} : { imminentDays }),
+      ...(imminentFloor === undefined ? {} : { imminentFloor }),
+      ...(expiringFloor === undefined ? {} : { expiringFloor }),
       ...(subagent === undefined ? {} : { subagent }),
     }
   }

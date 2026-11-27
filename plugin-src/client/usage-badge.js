@@ -2240,8 +2240,17 @@ function UsageBadgeActive(props) {
     if (unit === QUOTA_UNIT) return undefined;
     const split = splitCreditsByExpiry(packages, value?.windowDays, Date.now(), value?.imminentDays);
     if (split === null || split === undefined) return undefined;
-    // ⚠️ 恒解锁口径（与后端 `tierRankOf` / 客户端 `tierOfGroup` 同源）
-    const tier = backendOrderTier(split, true);
+    /**
+     * ★★★ **积分下限必须传**（2026-11-27 用户需求）。
+     *
+     * ⚠️ 本仓红线：**同一语义不得两套**。后端 `buddyBalanceTier` 已按
+     * `> floor` 判档，这里若还用 `> 0`，面板显示的档位与实际选号会分叉
+     * —— 正是历史上「界面说临期、实际烧永久」的形态。
+     *
+     * ⚠️ `value?.imminentFloor` / `value?.expiringFloor` 未下发时缺省 0 = 关闭
+     * ⇒ 老后端（没有该字段）行为**逐字节不变**。
+     */
+    const tier = backendOrderTier(split, true, value?.imminentFloor, value?.expiringFloor);
     if (tier === CREDIT_ORDER_TIER.imminent) return 'imminent';
     if (tier === CREDIT_ORDER_TIER.expiring) return 'expiring';
     if (tier === CREDIT_ORDER_TIER.permanent) return 'permanent';

@@ -495,7 +495,20 @@ export class BuddyBalanceSelector<
        * 两处各写一份必然漂移（本仓红线）。
        */
       const entry = this.classify(account.id, cached.source, now)
-      return buddyBalanceTier(entry, { allowPermanent })
+      /**
+       * ★ **积分下限也要传**（2026-11-27）。
+       *
+       * ⚠️ 这条腿**必须与 `classify` 内的那次同源**：`cachedTierOf` 是
+       * 「缓存命中时的快速档位」，它与 `balanceOf` 给出的 `entry.tier`
+       * **必须一致** —— 否则子代理档位过滤与主代理选号会分叉
+       *（正是历史上「界面说临期、实际烧永久」的形态）。
+       */
+      const resolved = this.resolvedWindow()
+      return buddyBalanceTier(entry, {
+        allowPermanent,
+        imminentFloor: resolved.imminentFloor,
+        expiringFloor: resolved.expiringFloor,
+      })
     } catch {
       return undefined
     }
@@ -546,6 +559,12 @@ export class BuddyBalanceSelector<
     if (source.ok !== true) return failedEntry(id, source.error)
     const windowMs = this.windowMs()
     const imminentMs = this.imminentWindowMs(windowMs)
+    /**
+     * ⚠️ **必须在 `splitBuddyCreditsByExpiry` 之后、`buddyBalanceTier` 之前**取：
+     * 两个 floor 与窗口天数**同一次解析**（`resolvedWindow()` 内部会读两次 env，
+     * 分开取会让「毫秒版」与「天数版」可能落在不同的一次解析上）。
+     */
+    const resolved = this.resolvedWindow()
     const split = splitBuddyCreditsByExpiry(source.balance, now, windowMs, imminentMs)
     if (split === undefined) return failedEntry(id, '余额响应无法解析出积分池')
     const entry: BuddyAccountBalanceEntry = {
@@ -563,7 +582,20 @@ export class BuddyBalanceSelector<
       // ⚠️ 透传「降级」：总额可信、明细不可达 ⇒ 下游不得据此断言 exhausted。
       ...(source.balance.degraded === true ? { degraded: true } : {}),
     }
-    entry.tier = buddyBalanceTier(entry, { now, windowMs })
+    entry.tier = buddyBalanceTier(entry, {
+      now,
+      windowMs,
+      /**
+       * ★★★ **积分下限**（2026-11-27 用户需求）。
+       *
+       * ⚠️ **与窗口天数同源**（都来自 `resolvedWindow()`，每次现读）：
+       * 用户在弹窗里改阈值后必须**立刻**改变分档，不得缓存。
+       * ⚠️ 未注入 `readCreditWindow`（单测替身 / 旧装配层）时 `resolvedWindow()`
+       * 回落默认 ⇒ 两个 floor 都是 `0`（关闭）⇒ 行为与改动前**逐字节一致**。
+       */
+      imminentFloor: resolved.imminentFloor,
+      expiringFloor: resolved.expiringFloor,
+    })
     return entry
   }
 

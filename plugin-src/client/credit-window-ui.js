@@ -16,6 +16,14 @@
 import { splitCreditsByExpiry } from './credit-expiry.js'
 
 /**
+ * ★ **输入上限**（100 年 / 36500 积分）。
+ *
+ * ⚠️ 窗口天数与积分阈值**共用同一个上限**（后端 `MAX_CREDIT_WINDOW_DAYS`
+ * 也是 36500）⇒ 抽成常量，避免「两处各写一个 36_500 然后漂移」。
+ */
+export const MAX_CREDIT_WINDOW_DAYS = 36_500
+
+/**
  * 解析输入框文本为天数。
  *
  * ## 判据
@@ -42,7 +50,7 @@ export function parseWindowInput(raw) {
   const value = Number(text)
   if (!Number.isFinite(value)) return null
   // 上界：100 年。超过它一定是手误（且会让「永久」档失去意义）。
-  if (value > 36_500) return null
+  if (value > MAX_CREDIT_WINDOW_DAYS) return null
   return value
 }
 
@@ -86,8 +94,17 @@ export function clampImminent(imminent, windowDays) {
  * @param windowDays - 短期窗口
  * @param imminentDays - 临期窗口
  * @param now - 当前时刻（测试注入）
+ * @param imminentFloor - ★ 临期积分下限（2026-11-27）。`undefined` / 0 = 关闭。
+ * @param expiringFloor - ★ 短期积分下限（同上）。`undefined` / 0 = 关闭。
  */
-export function computeCoverage(accounts, windowDays, imminentDays, now) {
+export function computeCoverage(
+  accounts,
+  windowDays,
+  imminentDays,
+  now,
+  imminentFloor = 0,
+  expiringFloor = 0,
+) {
   const empty = {
     imminentAccounts: 0,
     shortTermAccounts: 0,
@@ -99,6 +116,13 @@ export function computeCoverage(accounts, windowDays, imminentDays, now) {
     permanentAmount: 0,
   }
   if (!Array.isArray(accounts)) return empty
+  /**
+   * ⚠️ 与后端 `positiveOrZero(options.imminentFloor)` 同款：非法值归 0 = 关闭。
+   * 方向保守 —— 最坏只是阈值不生效，不会误降级。
+   */
+  const floorOf = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0)
+  const iFloor = floorOf(imminentFloor)
+  const eFloor = floorOf(expiringFloor)
   const out = { ...empty, totalAccounts: accounts.length }
   for (const account of accounts) {
     const packages = account?.packages
@@ -135,13 +159,39 @@ export function computeCoverage(accounts, windowDays, imminentDays, now) {
     const permanent = (Number(split.permanent) || 0) + (Number(split.longTerm) || 0)
     // ⚠️ `expired` 是已作废的包，不参与任何档（它在 split 里是独立字段）
     const expired = Number(split.expired) || 0
+    /**
+     * ★★★ **积分下限**（2026-11-27 用户需求）：低于阈值就不算这一档。
+     *
+     * ## 为什么要在这里也判（不是只改后端）
+     *
+     * 用户明确要求「**改阈值立刻看到覆盖数变化**」。若这里还用 `> 0`，
+     * 面板会显示「这档有 5 个号」而实际选号只认 2 个 —— **覆盖数会骗人**。
+     *
+     * ## �� 与后端 `buddyBalanceTier` 逐格同判
+     *
+     * | 后端 | 这里 |
+     * |---|---|
+     * | `imminentBalance > imminentFloor` | `imminent > iFloor` |
+     * | `expiringBalance > expiringFloor` | `shortTerm > eFloor` |
+     *
+     * ⚠️ **`>` 不是 `>=`**：与后端同款，`floor = 0` 时 `> 0` 正是改动前语义。
+     * ⚠️ **只是「不算这一档」，金额照样累加**（用户第 6 条定案：不浪费剩余积分，
+     *   只改排队顺序）⇒ 下面 `out.*Amount` 用原始值，不受 floor 影响。
+     */
+    const countsImminent = imminent > iFloor
+    const countsShortTerm = shortTerm > eFloor
     // ⚠️ 金额按档累加（同一账号的两档互不重叠，故金额可以直接相加）
     out.imminentAmount += imminent
     out.shortTermAmount += shortTerm
     out.permanentAmount += permanent
-    // ⚠️ 账号数按「该档有积分」计（可重叠，见函数头注释）
-    if (imminent > 0) out.imminentAccounts += 1
-    if (shortTerm > 0) out.shortTermAccounts += 1
+    /**
+     * ⚠️ 账号数按「该档有效」计（可重叠，见函数头注释）。
+     *
+     * ★ 这里的 `countsImminent` / `countsShortTerm` 就是**阈值生效点**：
+     *   临期不足阈值的号不再计入「临期覆盖」，落到它实际会被排的那一档。
+     */
+    if (countsImminent) out.imminentAccounts += 1
+    if (countsShortTerm) out.shortTermAccounts += 1
     if (permanent > 0) out.permanentAccounts += 1
     // ⚠️ 「无可用积分」判据要含 `expired`：只有作废包的账号确实没有可用积分
     if (imminent <= 0 && shortTerm <= 0 && permanent <= 0 && expired <= 0) {
@@ -149,6 +199,50 @@ export function computeCoverage(accounts, windowDays, imminentDays, now) {
     }
   }
   return out
+}
+
+/**
+ * ★★★ **积分阈值的输入解析**（2026-11-27 用户需求）。
+ *
+ * ## 与 `parseWindowInput` 为什么分开
+ *
+ * | 项 | 窗口天数 | 积分阈值 |
+ * |---|---|---|
+ * | 允许 `0` | ❌（0 天窗口无意义）| ✅（`0` = 关闭）|
+ * | 上限 | `MAX_CREDIT_WINDOW_DAYS`（36500）| 同 |
+ * | 空值 | 回落已存值 | 回落已存值 |
+ *
+ * ⇒ 混用会把「阈值 0」判成非法 ⇒ 回落成已存值 ⇒ **用户永远关不掉已设的阈值**
+ *   （这是那种「保存了但没生效」的经典形态）。
+ *
+ * @returns
+ * - `undefined` = 空（用户没填）⇒ 调用方回落已存值或 0
+ * - `null` = 非法（如 `-5` / `abc`）⇒ 调用方回落已存值（不静默改写用户输入）
+ * - `number` = 合法值（含 `0`）
+ */
+export function parseFloorInput(text) {
+  if (typeof text !== 'string') return undefined
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return undefined
+  /** ⚠️ 只认纯数字（不允许小数点 / 负号 / 科学计数法）—— 积分是整数。 */
+  if (!/^[0-9]+$/.test(trimmed)) return null
+  const value = Number(trimmed)
+  if (!Number.isFinite(value)) return null
+  if (value > MAX_CREDIT_WINDOW_DAYS) return null
+  return value
+}
+
+/**
+ * ★ **阈值的生效值**：解析结果 → 回落到已存值。
+ *
+ * @param parsed - `parseFloorInput` 的结果
+ * @param saved - 已存值（可能是 `undefined`）
+ * @returns 恒为数字（`0` = 关闭）
+ */
+export function resolveFloor(parsed, saved) {
+  if (typeof parsed === 'number') return parsed
+  if (typeof saved === 'number' && Number.isFinite(saved) && saved > 0) return saved
+  return 0
 }
 
 /**
@@ -422,6 +516,24 @@ export function isWindowDirty(input) {
   const draftImminent = typeof src.draftImminent === 'string' ? src.draftImminent.trim() : ''
   if (String(saved.windowDays) !== draftWindow) return true
   if (String(saved.imminentDays) !== draftImminent) return true
+  /**
+   * ★★★ **两个积分阈值也要参与 dirty 判据**（2026-11-27）。
+   *
+   * ⚠️ 漏了它们的症状：用户只改阈值 ⇒ 面板判「没改动」⇒ **保存按钮不亮**
+   *   ⇒ 阈值静默改不掉（而且没有任何报错）。这是最容易漏的一格，
+   *   因为窗口天数的 dirty 判据看起来很「完整」。
+   *
+   * ⚠️ **归一化规则**：`undefined` / `''` / `0` 三者对用户是**同一件事**
+   *（都是「关闭」）⇒ 先归一成 `''` 再比，否则「保存后从 0 变 undefined」
+   * 会被判成 dirty（假脏，保存按钮永远亮着）。
+   */
+  const normFloor = (v) => {
+    if (typeof v === 'string') return v.trim()
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return String(v)
+    return ''
+  }
+  if (normFloor(saved.imminentFloor) !== normFloor(src.draftImminentFloor)) return true
+  if (normFloor(saved.expiringFloor) !== normFloor(src.draftExpiringFloor)) return true
   const subDraft = src.subDraft
   if (subDraft === null || typeof subDraft !== 'object') return false
   const savedSub = saved.subagent

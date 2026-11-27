@@ -807,12 +807,27 @@ export function backendOrderTierIsUsable(tier) {
 /**
  * 后端口径的档位判定（导出**仅为单测**能直接断言「锁定门在永久判定之前」这一格 ——
  * 该不变式无法通过排序结果观察到：把锁定门挪到永久判定之后，排序结果恰好相同）。
+ *
+ * ★★★ **积分下限**（2026-11-27 用户需求，与后端 `buddyBalanceTier` 同源）：
+ *
+ * 判据从 `> 0` 变成 `> floor`。用户要的是「临期低于 20 就不再算临期，
+ * 归入短期…… 让一个帐号**提前切换**，防止它的短期积分被使用」。
+ *
+ * ⚠️⚠️ **`>` 不是 `>=`**：`floor` 缺省 0 时 `remaining > 0` 正是改动前语义
+ *（零回归）。写成 `>=` 会让「剩余恰好 0」也算该档，与现状分叉。
+ * ⚠️ **两个 floor 都是可选参数**（缺省 0）：不传的调用点行为**逐字节不变** ——
+ *   本文件另有 20+ 处调用 `backendOrderTier(split, true/false)`，加必填参数
+ *   会一次性打穿它们。
+ * ⚠️ **锁定永久时降级到 `none`**：两条 floor 判据都在锁定门之前 ⇒
+ *   临期低 → 短期低 → **none**（不去烧永久），与后端同序。
  */
-export function backendOrderTier(split, allowPermanent) {
+export function backendOrderTier(split, allowPermanent, imminentFloor = 0, expiringFloor = 0) {
   if (split == null) return CREDIT_ORDER_TIER.none;
   const positive = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
-  if (positive(split.imminent) > 0) return CREDIT_ORDER_TIER.imminent;
-  if (positive(split.expiring) > 0) return CREDIT_ORDER_TIER.expiring;
+  /** ⚠️ 与后端 `positiveOrZero(options.imminentFloor)` 同款：非法值归 0 = 关闭。 */
+  const floor = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  if (positive(split.imminent) > floor(imminentFloor)) return CREDIT_ORDER_TIER.imminent;
+  if (positive(split.expiring) > floor(expiringFloor)) return CREDIT_ORDER_TIER.expiring;
   // ⚠️ 锁定门必须在永久判定之前（与后端 buddyBalanceTier 同序）
   if (allowPermanent === false) return CREDIT_ORDER_TIER.none;
   // ⚠️ longTerm 并入 permanent：后端 ≥15 天一律算 permanent
