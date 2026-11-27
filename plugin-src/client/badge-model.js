@@ -783,6 +783,22 @@ export function sumAvailableCredits(accounts, opts) {
   if (opts?.locked !== true) return null;
   const rows = Array.isArray(accounts) ? accounts : [];
   if (rows.length === 0) return null;
+  /**
+   * ★★★ **两个积分阈值**（2026-11-27 上游审计 D5）。
+   *
+   * ## 为什么这里也必须有
+   *
+   * 本函数算的是「**锁定永久积分时实际还能用多少**」= 短期 + 临期。
+   * 设了阈值后，被降档的那部分在锁定态**真的不能用了**
+   *（`backendOrderTier` 判成 `none`）⇒ 若这里仍全额累加，
+   * 徽标会显示「可用 500」，而实际一个号都用不了 —— **数字骗人**。
+   *
+   * | 号 | 阈值 20 时的真实状态 | 不带 floor（错）| 带 floor（对）|
+   * |---|---|---|---|
+   * | 临期 5 / 永久 800 | 降档到 permanent ⇒ 锁定态 **不可用** | 累加 5 🚨 | 累加 0 ✅ |
+   */
+  const imminentFloor = Number.isFinite(opts.imminentFloor) ? opts.imminentFloor : 0;
+  const expiringFloor = Number.isFinite(opts.expiringFloor) ? opts.expiringFloor : 0;
   let total = 0;
   let seen = false;
   for (const row of rows) {
@@ -793,8 +809,16 @@ export function sumAvailableCredits(accounts, opts) {
     if (unit === QUOTA_UNIT) return null;
     const split = splitCreditsByExpiry(packages, opts.windowDays, undefined, opts.imminentDays);
     if (split == null) continue;
+    /**
+     * ⚠️ 与 `buddyBalanceTier` 的 `> floor` **同判**：低于阈值的档不再计入。
+     * ⚠️ **只是「不计入可用」，不是「消灭积分」**（用户第 6 条定案）——
+     *   那些积分仍在 `expirySplitParts` 的金额展示里。
+     */
+    const countsImminent = (split.imminent ?? 0) > imminentFloor;
+    const countsShortTerm = (split.shortTerm ?? 0) > expiringFloor;
     // ⚠️ 只累加「短期 + 临期」：不含长期、不含永久、不含已过期
-    total += (split.shortTerm ?? 0) + (split.imminent ?? 0);
+    if (countsShortTerm) total += split.shortTerm ?? 0;
+    if (countsImminent) total += split.imminent ?? 0;
     seen = true;
   }
   return seen ? total : null;
@@ -826,8 +850,71 @@ export function backendOrderTier(split, allowPermanent, imminentFloor = 0, expir
   const positive = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
   /** ⚠️ 与后端 `positiveOrZero(options.imminentFloor)` 同款：非法值归 0 = 关闭。 */
   const floor = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
-  if (positive(split.imminent) > floor(imminentFloor)) return CREDIT_ORDER_TIER.imminent;
-  if (positive(split.expiring) > floor(expiringFloor)) return CREDIT_ORDER_TIER.expiring;
+  /**
+   * ⚠️⚠️ **短期档用母量 `expiring`，与后端 `buddyBalanceTier` 逐字同源**。
+   *
+   * ## 我曾试图改成 `shortTerm`（2026-11-27），**已回退**
+   *
+   * 动机是「`expiring = imminent + shortTerm` ⇒ 只要有临期，`expiringFloor` 恒真」。
+   *
+   * ⚠️ 但实测（`credit-floor-parity.spec.ts` 同一批输入喂两个函数）立刻红 4 条：
+   *
+   * ```
+   * 只有短期      ：后端给 expiring(1)，客户端改后给 none(3)
+   * 临期 2 + 阈值20：后端给 expiring(1)，客户端改后给 permanent(2)
+   * ```
+   *
+   * ⇒ **后端读的是 `balance.expiringBalance`（一个独立字段），不是前端这种派生和**。
+   *   前端若改用 `shortTerm`，两边就**分叉** —— 违背本仓红线
+   *   「同一语义不得两套」。
+   *
+   * ## 那「`expiringFloor` 对含临期的号无效」是缺陷吗
+   *
+   * **不是。** 实测后端 `lib/buddy-balance-rank.js`：
+   *
+   * | 号 | `imminentFloor` | `expiringFloor` | 后端结果 |
+   * |---|---|---|---|
+   * | 临期 0 / 短期 25 | — | 30 | **permanent**（短期档降级 ✅）|
+   * | 临期 5 / 短期 0 | — | 30 | **imminent**（不受影响，**正确**）|
+   * | 临期 5 / 短期 0 | 20 | — | permanent（由 `imminentFloor` 管）|
+   *
+   * ⇒ **两个阈值各自管各自的档**：`expiringFloor` 只管短期档。
+   *   一个「还有临期」的号本来就在更优先的临期档，`expiringFloor` 不该影响它。
+   *   **要提升它请用 `imminentFloor`。**
+   */
+  /**
+   * ⚠️⚠️ **短期档必须判「纯短期量」，不能判母量 `expiring`**
+   *（2026-11-27 用户需求修正 —— 与后端 `buddyBalanceTier` **逐字同源**）。
+   *
+   * ## 用户原话
+   *
+   * > 「临期低于 20 就不再算临期了，归入短期；**短期低于 30 就不算短期了，
+   * >   自动归入长期**」
+   *
+   * ## 缺陷（实测）
+   *
+   * 前端 `splitCreditsByExpiry` 的 `expiring` 也是**母量**（= `imminent + shortTerm`）。
+   * 用它做判据 ⇒ 只要还有一点临期，母量就被抬高：
+   *
+   * | 号 | 母量 `expiring` | 纯短期 `shortTerm` | 阈值 30 时正确结果 |
+   * |---|---|---|---|
+   * | 临期 5 / 纯短期 28 | **33** | **28** | 28 < 30 ⇒ **归入长期** |
+   * | 用母量判 | `33 > 30` ✅ | — | 仍算短期 🚨 **与用户要求相反** |
+   *
+   * ⇒ 纯短期 = `expiring - imminent`（后端 split **没有** `shortTerm` 字段，
+   *   故后端也用同样的减法，两边**逐字同源**）。
+   *
+   * ## ⚠️ 为什么不用 `split.shortTerm`
+   *
+   * 前端**有** `shortTerm`，但**后端没有**。若前端用 `shortTerm`、后端用
+   * `expiring - imminent`，两者在数值上等价、但**实现不同**
+   * ⇒ 将来任何一边改了 `split` 的形状就会静默漂移。
+   * ⇒ **两边都写 `expiring - imminent`**（同一条式子的两种语言写法）。
+   */
+  const imminent = positive(split.imminent);
+  const pureShortTerm = Math.max(0, positive(split.expiring) - imminent);
+  if (imminent > floor(imminentFloor)) return CREDIT_ORDER_TIER.imminent;
+  if (pureShortTerm > floor(expiringFloor)) return CREDIT_ORDER_TIER.expiring;
   // ⚠️ 锁定门必须在永久判定之前（与后端 buddyBalanceTier 同序）
   if (allowPermanent === false) return CREDIT_ORDER_TIER.none;
   // ⚠️ longTerm 并入 permanent：后端 ≥15 天一律算 permanent
@@ -1218,6 +1305,17 @@ export function creditOrderOptionsOf(input) {
   };
   if (Number.isFinite(source.windowDays)) options.windowDays = source.windowDays;
   if (Number.isFinite(source.imminentDays)) options.imminentDays = source.imminentDays;
+  /**
+   * ★★★ **两个积分阈值也要透传**（2026-11-27 上游审计 D5）。
+   *
+   * 漏了它们的后果：`orderCreditRows` 的排序 / 分组仍按 `> 0` 判档
+   * ⇒ **弹窗列表顺序与后端真实选号分叉**（用户看到「列表第 1 个」而请求发给第 3 个）。
+   *
+   * ⚠️ 用 `Number.isFinite` 而不是 `!== undefined`：与上面两行**同款**，
+   *   并且挡掉 `NaN`（手改坏的数据不该把整列算成要降档）。
+   */
+  if (Number.isFinite(source.imminentFloor)) options.imminentFloor = source.imminentFloor;
+  if (Number.isFinite(source.expiringFloor)) options.expiringFloor = source.expiringFloor;
   return { ...options, ...rotationOrderOptionsOf(source.rotationState) };
 }
 
@@ -1257,6 +1355,17 @@ export function orderCreditRows(rows, options = {}) {
   const windowDays = Number.isFinite(options.windowDays) ? options.windowDays : undefined;
   const imminentDays = Number.isFinite(options.imminentDays) ? options.imminentDays : undefined;
   const now = Number.isFinite(options.now) ? options.now : Date.now();
+  /**
+   * ★★★ **两个积分阈值**（2026-11-27 上游审计 D5）。
+   *
+   * ⚠️ 缺了它们 ⇒ 弹窗的排序 / 分组都按 `> 0` 判档 ⇒
+   *   **列表顺序与后端真实选号分叉**（用户看到「第 1 个」而请求发给第 3 个）。
+   *   本函数头的注释早已写明「弹窗必须**逐字节反映后端**」—— 这就是它。
+
+   * ⚠️ 缺省 `0`（= 关闭）⇒ 不配阈值时行为**逐字节不变**。
+   */
+  const imminentFloor = Number.isFinite(options.imminentFloor) ? options.imminentFloor : 0;
+  const expiringFloor = Number.isFinite(options.expiringFloor) ? options.expiringFloor : 0;
 
   /** 每行的档位（复刻后端口径）。查不到余额的归 none。 */
   const tierOf = (row) => {
@@ -1266,7 +1375,7 @@ export function orderCreditRows(rows, options = {}) {
     const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
     if (unit === QUOTA_UNIT) return CREDIT_ORDER_TIER.none;
     const split = splitCreditsByExpiry(packages, windowDays, now, imminentDays);
-    return backendOrderTier(split, allowPermanent);
+    return backendOrderTier(split, allowPermanent, imminentFloor, expiringFloor);
   };
 
   /**
@@ -1301,8 +1410,12 @@ export function orderCreditRows(rows, options = {}) {
     const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
     if (unit === QUOTA_UNIT) return CREDIT_ORDER_TIER.none;
     const split = splitCreditsByExpiry(packages, windowDays, now, imminentDays);
-    /** 恒解锁口径：与后端 `tierRankOf` 逐字节同构。 */
-    return backendOrderTier(split, true);
+    /**
+     * 恒解锁口径：与后端 `tierRankOf` 逐字节同构。
+     * ★ **阈值也要传**（2026-11-27 D5）：否则分组按 `> 0` 判，
+     *   而排序已按阈值判 ⇒ 同一个号在「排序」里是 permanent、在「分组」里是 expiring。
+     */
+    return backendOrderTier(split, true, imminentFloor, expiringFloor);
   };
   const enabledAccountIds = Array.isArray(options.enabledAccountIds)
     ? options.enabledAccountIds

@@ -9575,7 +9575,20 @@ function registerJetHubEndpoints(
               // ★ per-provider 窗口（2026-11-19）：走 resolveCreditWindow 唯一取值点。
               // ⚠️ 必须与选号路径同源，否则「面板说临期、选号当短期」。
               const w = resolveCreditWindow(provider, safeCreditWindowReader(pool))
-              return { windowDays: w.windowDays, imminentDays: w.imminentDays }
+              /**
+               * ★★★ **两个积分阈值必须一起回传**（2026-11-27 上游审计 D2/D5）。
+               *
+               * ⚠️ 不回传的后果：客户端拿不到 ⇒ 回落 0 ⇒ **所有客户端档位判据
+               *   都退化成「阈值关闭」** ⇒ 面板显示与实际选号分叉。
+               * ⚠️ 与上面两个天数**必须成对**（同一条理由：只给一半会让
+               *   前端一半按旧口径、一半按新口径）。
+               */
+              return {
+                windowDays: w.windowDays,
+                imminentDays: w.imminentDays,
+                imminentFloor: w.imminentFloor,
+                expiringFloor: w.expiringFloor,
+              }
             })()
             : {}),
         })
@@ -10547,7 +10560,20 @@ function registerJetHubEndpoints(
               // ★ per-provider 窗口（2026-11-19）：与选号路径同源（resolveCreditWindow）。
               ...(() => {
                 const w = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
-                return { windowDays: w.windowDays, imminentDays: w.imminentDays }
+                /**
+               * ★★★ **两个积分阈值必须一起回传**（2026-11-27 上游审计 D2/D5）。
+               *
+               * ⚠️ 不回传的后果：客户端拿不到 ⇒ 回落 0 ⇒ **所有客户端档位判据
+               *   都退化成「阈值关闭」** ⇒ 面板显示与实际选号分叉。
+               * ⚠️ 与上面两个天数**必须成对**（同一条理由：只给一半会让
+               *   前端一半按旧口径、一半按新口径）。
+               */
+              return {
+                windowDays: w.windowDays,
+                imminentDays: w.imminentDays,
+                imminentFloor: w.imminentFloor,
+                expiringFloor: w.expiringFloor,
+              }
               })(),
             } satisfies RpcCreditsBalancesResponse,
           }
@@ -10649,7 +10675,20 @@ function registerJetHubEndpoints(
               // ★ per-provider 窗口（2026-11-19）：与选号路径同源。
               ...(() => {
                 const w = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
-                return { windowDays: w.windowDays, imminentDays: w.imminentDays }
+                /**
+               * ★★★ **两个积分阈值必须一起回传**（2026-11-27 上游审计 D2/D5）。
+               *
+               * ⚠️ 不回传的后果：客户端拿不到 ⇒ 回落 0 ⇒ **所有客户端档位判据
+               *   都退化成「阈值关闭」** ⇒ 面板显示与实际选号分叉。
+               * ⚠️ 与上面两个天数**必须成对**（同一条理由：只给一半会让
+               *   前端一半按旧口径、一半按新口径）。
+               */
+              return {
+                windowDays: w.windowDays,
+                imminentDays: w.imminentDays,
+                imminentFloor: w.imminentFloor,
+                expiringFloor: w.expiringFloor,
+              }
               })(),
             } satisfies RpcCreditsBalancesResponse,
           }
@@ -10808,7 +10847,20 @@ function registerJetHubEndpoints(
             // ★ per-provider 窗口（2026-11-19）：与选号路径同源。
             ...(() => {
               const w = resolveCreditWindow(req.provider, safeCreditWindowReader(pool))
-              return { windowDays: w.windowDays, imminentDays: w.imminentDays }
+              /**
+               * ★★★ **两个积分阈值必须一起回传**（2026-11-27 上游审计 D2/D5）。
+               *
+               * ⚠️ 不回传的后果：客户端拿不到 ⇒ 回落 0 ⇒ **所有客户端档位判据
+               *   都退化成「阈值关闭」** ⇒ 面板显示与实际选号分叉。
+               * ⚠️ 与上面两个天数**必须成对**（同一条理由：只给一半会让
+               *   前端一半按旧口径、一半按新口径）。
+               */
+              return {
+                windowDays: w.windowDays,
+                imminentDays: w.imminentDays,
+                imminentFloor: w.imminentFloor,
+                expiringFloor: w.expiringFloor,
+              }
             })(),
           }
           : {

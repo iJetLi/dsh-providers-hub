@@ -31,6 +31,15 @@ import { createPortal } from 'react-dom';
 
 import { supportsCreditBalance, supportsDailyCheckin, checkinProviders } from './credits-capabilities.js';
 import { AGGREGATE_PROVIDER_ID, AUTO_PROVIDER_ID, resolveBadgeProvider } from './badge-model.js';
+/**
+ * ★ 2026-11-27：徽标 / 下拉框的两处档位计算搬到独立纯函数模块。
+ *
+ * ⚠️ 动机**只有一个**：本文件 `import * as React` ⇒ 单测 import 不进来
+ *（react 是 esbuild external，本仓 `node_modules` 没有）
+ * ⇒ 那两处此前只能做**源码正则守卫**（挡不住 `if (false)`）。
+ * 抽成纯函数后能写真值断言。**不改变任何运行时语义。**
+ */
+import { expiringUsableOf, startTierOf } from './credit-floor-pure.js';
 import {
   badgeView,
   creditSectionLabel,
@@ -43,9 +52,9 @@ import {
   rotationStartHint,
   rotationTierShiftHint,
   creditOrderOptionsOf,
-  backendOrderTier,
-  CREDIT_ORDER_TIER,
   sumAvailableCredits,
+  /** ⚠️ 仍需它：`tierAtSelectionOf` 把数值档位映射成 `'imminent' | 'expiring' | …`。 */
+  CREDIT_ORDER_TIER,
   autoBadgeName,
   BADGE_PREFERENCES,
   BADGE_PREFERENCE_LABELS,
@@ -67,6 +76,12 @@ import {
   formatMonthDay,
   formatExpirySplitLine,
   formatPoolSplitLine,
+  /**
+   * ⚠️ **仍需它**：`expirySplitParts`（金额展示）要按到期时间分段。
+   *
+   * ⚠️⚠️ 那里**刻意不用阈值过滤** —— 用户第 6 条定案：「降级只改排队顺序，
+   * 不改烧包顺序」⇒ 剩余积分照样要显示出来。
+   */
   splitCreditsByExpiry,
   exclusivePoolRemainingOf,
   isExclusivePool,
@@ -1251,6 +1266,12 @@ function UsageBadgeActive(props) {
       locked: value?.locked,
       windowDays: value?.windowDays,
       imminentDays: value?.imminentDays,
+      /**
+       * ★ **阈值也要传**（2026-11-27 上游审计 D5）。
+       * 不传 ⇒ 「可用积分」把已降档的部分也算进去 ⇒ 徽标数字骗人。
+       */
+      imminentFloor: value?.imminentFloor,
+      expiringFloor: value?.expiringFloor,
     });
     return total === null ? null : formatUnits(total, creditGroup.unit);
   })();
@@ -2234,23 +2255,20 @@ function UsageBadgeActive(props) {
     const row = (Array.isArray(value?.accounts) ? value.accounts : [])
       .find((r) => r?.accountId === accountId || r?.id === accountId);
     const packages = row?.balance?.packages;
-    if (!Array.isArray(packages)) return undefined;
-    const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
-    // ⚠️ 配额类渠道（百分比）没有「档位」概念 —— 与 tierOfGroup 同判据。
-    if (unit === QUOTA_UNIT) return undefined;
-    const split = splitCreditsByExpiry(packages, value?.windowDays, Date.now(), value?.imminentDays);
-    if (split === null || split === undefined) return undefined;
     /**
-     * ★★★ **积分下限必须传**（2026-11-27 用户需求）。
+     * ★ 2026-11-27：档位计算改走 `credit-floor-pure.js` 的 `startTierOf`。
      *
-     * ⚠️ 本仓红线：**同一语义不得两套**。后端 `buddyBalanceTier` 已按
-     * `> floor` 判档，这里若还用 `> 0`，面板显示的档位与实际选号会分叉
-     * —— 正是历史上「界面说临期、实际烧永久」的形态。
+     * ⚠️⚠️ **这里曾是一个真实崩溃点**（我搬走 `backendOrderTier` /
+     * `splitCreditsByExpiry` / `CREDIT_ORDER_TIER` 的 import 时漏改了本函数）：
      *
-     * ⚠️ `value?.imminentFloor` / `value?.expiringFloor` 未下发时缺省 0 = 关闭
-     * ⇒ 老后端（没有该字段）行为**逐字节不变**。
+     * `credits-capabilities.spec.ts` 的静态检查当场抓到
+     * `TS2304: Cannot find name 'splitCreditsByExpiry'` ×5 ——
+     * 那些会在**桌面版运行时抛 `ReferenceError` 并崩掉整个设置页**。
+     *
+     * ⇒ 凡「搬走一个 import」都必须全仓搜该符号的**所有**使用点。
      */
-    const tier = backendOrderTier(split, true, value?.imminentFloor, value?.expiringFloor);
+    const tier = startTierOf(packages, value ?? {}, true, Date.now());
+    if (tier === null) return undefined;
     if (tier === CREDIT_ORDER_TIER.imminent) return 'imminent';
     if (tier === CREDIT_ORDER_TIER.expiring) return 'expiring';
     if (tier === CREDIT_ORDER_TIER.permanent) return 'permanent';
@@ -2367,10 +2385,14 @@ function UsageBadgeActive(props) {
      * `no-expiring` 判据）⇒ 未锁定时这条路径**根本不执行**，所以前几轮测试没碰到。
      *
      * ⇒ 现在：传对参数 + 带上 `windowDays` + 用 `== null` 兜底。
+     *
+     * ## ★ 2026-11-27：计算搬到 `credit-floor-pure.js`
+     *
+     * 那个文件里的 `expiringUsableOf` 是**纯函数**（可被 vitest 直接测），
+     * 而本文件 `import * as React` ⇒ 之前只能做源码正则守卫
+     *（挡不住 `if (false)`）。**搬运不改变任何语义**，本处只保留「找 row」那一步。
      */
-    const split = splitCreditsByExpiry(packages, value?.windowDays, undefined, value?.imminentDays);
-    if (split == null) return undefined;
-    return split.expiring;
+    return expiringUsableOf(packages, value ?? {}, undefined);
   }
 
   /** 不可用原因 → 选项后缀。⚠️ 必须短（下拉框宽度有限）。 */
@@ -2590,13 +2612,14 @@ function UsageBadgeActive(props) {
       const row = (Array.isArray(value?.accounts) ? value.accounts : [])
         .find((r) => r?.accountId === accountId || r?.id === accountId);
       const packages = row?.balance?.packages;
-      if (!Array.isArray(packages)) return null;
-      const unit = packages.find((pkg) => pkg && pkg.unit)?.unit;
-      if (unit === QUOTA_UNIT) return null;
-      return backendOrderTier(
-        splitCreditsByExpiry(packages, value?.windowDays, Date.now(), value?.imminentDays),
-        value?.locked !== true,
-      );
+      /**
+       * ★ 2026-11-27：档位计算搬到 `credit-floor-pure.js` 的 `startTierOf`（**纯函数**）。
+       *
+       * 那里能写行为级用例；本文件 `import * as React` ⇒ 之前只能做源码正则守卫。
+       * **搬运不改变任何语义**：`splitCreditsByExpiry` + `backendOrderTier` 逐字不变，
+       * 只是入参从闭包捕获的 `value` 改成显式传入。
+       */
+      return startTierOf(packages, value ?? {}, value?.locked !== true, Date.now());
     };
     /**
      * ★★ **起点档位提示**（用户 2026-11-18 要求：「这种选择跟默认的不在同一个
@@ -2988,6 +3011,17 @@ function UsageBadgeActive(props) {
       locked: value?.locked === true,
       windowDays,
       imminentDays,
+      /**
+       * ★★★ **两个积分阈值必须传**（2026-11-27 上游审计 D5）。
+       *
+       * 不传 ⇒ `orderCreditRows` 的排序 / 分组按 `> 0` 判档 ⇒
+       * 弹窗列表顺序与后端真实选号**分叉**（用户看到第 1 个、请求发给第 3 个）。
+       *
+       * ⚠️ 服务端已在 4 处 usage 载荷回传这两个字段（见 `jet-hub-rpc.ts`），
+       *   故这里 `value?.imminentFloor` 是真的有值 —— 不是死代码。
+       */
+      imminentFloor: value?.imminentFloor,
+      expiringFloor: value?.expiringFloor,
       now: Date.now(),
       rotationState,
     }));

@@ -216,9 +216,39 @@ describe('成对回传守卫（源码级，局限已登记）', () => {
   it('★★ 4 处窗口回传点全部 `windowDays` + `imminentDays` 成对', async () => {
     const source = await import('node:fs').then((fs) =>
       fs.readFileSync(new URL('../../src/jet-hub-rpc.ts', import.meta.url), 'utf8'))
-    const paired = source.match(/return \{ windowDays: w\.windowDays, imminentDays: w\.imminentDays \}/g) ?? []
+    /**
+     * ⚠️⚠️ **判据必须与「单行 / 多行」无关**（2026-11-27 修）。
+     *
+     * 原判据硬编码了单行形态 `/return \{ windowDays: …, imminentDays: … \}/`。
+     * 2026-11-27 加积分阈值时把这 4 处改成了多行（每字段一行 + 注释）
+     * ⇒ 该正则从 `4` 变成 `0` ⇒ **守卫假红**。
+     *
+     * ⚠️ 这是「源码文本断言」的经典脆弱点：
+     *    **断言的形态比断言的语义更容易变**。
+     * ⇒ 改为「同一窗口对象里同时出现两个字段」（允许中间夹注释与换行）。
+     */
+    const paired = source.match(
+      /return \{[\s\S]{0,700}?windowDays: w\.windowDays,[\s\S]{0,700}?imminentDays: w\.imminentDays,/g,
+    ) ?? []
     expect(paired.length, '成对回传点数量变了：要么新增了回传（请一并改成成对），要么有处被改成了单字段').toBe(4)
     // 反向：不得出现「只给 windowDays」的回传形态
-    expect(source).not.toMatch(/return \{ windowDays: w\.windowDays \}/)
+    expect(source).not.toMatch(/return \{\s*windowDays: w\.windowDays,?\s*\}/)
+  })
+
+  it('★★★ 4 处回传点也必须带上两个积分阈值（2026-11-27）', async () => {
+    /**
+     * ⚠️ 与上一条是**同一条不变式的延伸**：窗口相关字段现在有**四个**，
+     * 漏任何一个都会让面板与实际选号分叉。
+     *
+     * - 漏 `windowDays` / `imminentDays` ⇒ 分档段算错（原守卫）
+     * - 漏 `imminentFloor` / `expiringFloor` ⇒ **客户端恒取 0**
+     *   ⇒ 整个「积分阈值」功能在界面上形同不存在
+     */
+    const source = await import('node:fs').then((fs) =>
+      fs.readFileSync(new URL('../../src/jet-hub-rpc.ts', import.meta.url), 'utf8'))
+    const withImminentFloor = source.match(/imminentFloor: w\.imminentFloor,/g) ?? []
+    expect(withImminentFloor.length, '★★★ 4 处 usage 载荷都必须带 imminentFloor').toBe(4)
+    const withExpiringFloor = source.match(/expiringFloor: w\.expiringFloor,/g) ?? []
+    expect(withExpiringFloor.length, '★★★ 同样必须带 expiringFloor').toBe(4)
   })
 })

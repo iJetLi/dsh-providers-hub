@@ -74,17 +74,33 @@ describe('splitCreditsByExpiry 的返回契约（本修法的前提）', () => {
   })
 })
 
-describe('usage-badge 的 expiringOf 源码契约', () => {
+/**
+ * ★★★ **2026-11-27：`expiringOf` 的实现搬进了 `credit-floor-pure.js`**
+ *
+ * 原因：`usage-badge.js` `import * as React` ⇒ 单测 import 不进来
+ * ⇒ 这里原先只能做**源码正则契约**。
+ *
+ * 搬走后：
+ * - 原契约守的语义（**四参都要传**、**必须挡 null**）现在由纯函数承担；
+ * - 本组改为**指向新模块的契约**，并保留「不得漏传窗口 / 不得只判 undefined」
+ *   这两条不变式 —— 它们仍是真实的崩溃/错值来源。
+ *
+ * ⚠️ 纯函数那边的**行为级**守卫在 `credit-floor-pure.spec.ts`（真值断言）。
+ */
+describe('credit-floor-pure 的 `expiringUsableOf` 源码契约（原 expiringOf）', () => {
+  const pureSrc = readFileSync(
+    new URL('../../plugin-src/client/credit-floor-pure.js', import.meta.url),
+    'utf8',
+  )
+
   it('★ 不得再传 `{ packages }` 这种错误形态', () => {
     // 变异：把它改回 splitCreditsByExpiry({ packages }) ⇒ 本条红
-    expect(source).not.toMatch(/splitCreditsByExpiry\(\s*\{\s*packages\s*\}\s*\)/)
+    expect(pureSrc).not.toMatch(/splitCreditsByExpiry\(\s*\{\s*packages\s*\}\s*\)/)
   })
 
   it('★ 必须把 windowDays 传进去', () => {
     // 变异：改回 splitCreditsByExpiry(packages) ⇒ 本条红（漏传窗口 ⇒ 恒 null）
-    // ⚠️ 2026-11-17 三档后调用形态变成四参（第 4 参是临期子窗口），
-    //    故正则只锚定**前两参**，不写死右括号位置 —— 否则加参数会假红。
-    expect(source).toMatch(/splitCreditsByExpiry\(\s*packages\s*,\s*value\?\.windowDays\s*,/)
+    expect(pureSrc).toMatch(/splitCreditsByExpiry\(\s*packages\s*,\s*params\.windowDays\s*,/)
   })
 
   /**
@@ -95,19 +111,26 @@ describe('usage-badge 的 expiringOf 源码契约', () => {
    * 症状是「徽标上永远看不到临期」，而设置页那张卡片却有 —— 两处不一致。
    */
   it('★★ 必须把 imminentDays 也传进去（漏传 ⇒ 临期段恒 0）', () => {
-    expect(source).toMatch(/splitCreditsByExpiry\(\s*packages\s*,\s*value\?\.windowDays\s*,[^)]*value\?\.imminentDays/)
+    expect(pureSrc).toMatch(
+      /splitCreditsByExpiry\(\s*packages\s*,\s*params\.windowDays\s*,[^)]*params\.imminentDays/,
+    )
   })
 
   it('★ 判据必须挡 null（`== null` 或等价写法）', () => {
     // ⚠️ 这条守的是「只写 === undefined」那个漏判。
-    const guarded = /split\s*==\s*null/.test(source)
-      || /split\s*!==\s*null\s*&&/.test(source)
-      || /if\s*\(\s*!split\s*\)/.test(source)
+    const guarded = /split\s*==\s*null/.test(pureSrc)
+      || /split\s*!==\s*null\s*&&/.test(pureSrc)
+      || /if\s*\(\s*!split\s*\)/.test(pureSrc)
     expect(guarded).toBe(true)
   })
 
   it('★ 不得出现「只判 undefined」的写法', () => {
     // 正是这个写法让 null 漏过去
-    expect(source).not.toMatch(/if\s*\(\s*split\s*===\s*undefined\s*\)/)
+    expect(pureSrc).not.toMatch(/if\s*\(\s*split\s*===\s*undefined\s*\)/)
+  })
+
+  it('★★★ `usage-badge.js` 必须**调用**它（不能自己留一份旧实现）', () => {
+    expect(source, '★★★ 必须调用 expiringUsableOf')
+      .toMatch(/return expiringUsableOf\(packages, value \?\? \{\}, undefined\)/)
   })
 })
