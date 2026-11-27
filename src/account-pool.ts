@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import { parseCredentialJson } from './credential-json.js'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { BuddyCredential } from './buddy.js'
 import type { BuddyProduct } from './product.js'
@@ -2705,7 +2706,7 @@ export class AccountPool {
       try {
         const resolved = await this.ctx.credentials.resolve(credentialRef(entry.credentialRef))
         if (resolved === undefined) continue
-        const parsed = JSON.parse(resolved.value) as { domain?: unknown }
+        const parsed = parseCredentialJson(resolved.value) as { domain?: unknown }
         domain = typeof parsed.domain === 'string' ? parsed.domain : ''
       } catch {
         // 凭据缺失或损坏：留给「凭据未配置」的正常报错路径处理，这里不删
@@ -3071,7 +3072,7 @@ export class AccountPool {
     try {
       const resolved = await this.ctx.credentials.resolve(credentialRef(refName))
       if (!resolved) return undefined
-      const parsed = JSON.parse(resolved.value) as unknown
+      const parsed = parseCredentialJson(resolved.value) as unknown
       return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : undefined
     } catch {
       return undefined
@@ -3583,7 +3584,7 @@ export class AccountPool {
         continue
       }
       try {
-        const credential = JSON.parse(resolved.value) as TCredential
+        const credential = parseCredentialJson(resolved.value) as TCredential
         if (failures.length > 0) {
           this.ctx.logger?.warn?.(
             `[jet-hub] ${failures.length} 个 ${provider} 账号不可用，已跳过：${failures.join('; ')}`,

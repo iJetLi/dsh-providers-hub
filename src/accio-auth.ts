@@ -36,6 +36,7 @@
  */
 
 import { createServer } from 'node:http'
+import { parseCredentialJson } from './credential-json.js'
 // ★ issue #177：登录后补一次身份（拿 activeTeam.teamId 供 `x-team-id`）
 import { fetchAccioUserInfo } from './accio-credits.js'
 import { Service, type Context } from '@deepseek-ai/cordis'
@@ -137,7 +138,7 @@ export function normalizeAccioRegion(raw: unknown): AccioRegion {
  */
 function parseCredential(value: string): AccioCredential | undefined {
   try {
-    const parsed = JSON.parse(value) as AccioCredential
+    const parsed = parseCredentialJson(value) as AccioCredential
     return typeof parsed === 'object' && parsed !== null && typeof parsed.access_token === 'string'
       ? parsed
       : undefined
