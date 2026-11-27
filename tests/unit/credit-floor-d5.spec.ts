@@ -130,38 +130,63 @@ describe('★★★ (D5-2/3) orderCreditRows：排序与分组都必须接阈值
   })
 })
 
-describe('★★★ (D5-4/5) usage-badge 两处位置守卫', () => {
+describe('★★★ (D5-4/5) usage-badge 两处：现已升级为**行为级**', () => {
   /**
-   * ⚠️ `usage-badge.js` 里 `import * as React` ⇒ **import 不进单测**（react 是
-   * esbuild external）。故那两处只能做**源码位置守卫**：
-   * 断言「`backendOrderTier(...)` / `splitCreditsByExpiry(...)` 附近出现了 floor」。
+   * ⚠️ 2026-11-27：这两处原先是**源码位置守卫**（因为 `usage-badge.js`
+   * `import * as React` ⇒ 单测 import 不进来）。
    *
-   * ⚠️ 这比纯函数守卫弱（挡不住 `if(false)`），但那两处的**行为**无法在单测里跑 ——
-   * 如实登记这个局限。服务端 4 处回传有行为守卫（`credit-floor-rpc.spec.ts`），
-   * 整条链路**不会静默失效**。
+   * 现已搬进 `credit-floor-pure.js`（纯函数）⇒ **行为级守卫在
+   * `credit-floor-pure.spec.ts` 里**（真值断言，能挡 `if(false)`）。
+   *
+   * ⇒ 本组保留两条**接线守卫**：确认 `usage-badge.js` 真的**调用**了新模块，
+   *   而不是把旧实现留着自己算（那会让新模块形同虚设）。
    */
   const src = readFileSync(join(SRC, 'usage-badge.js'), 'utf8')
 
-  it('★★★ `creditRowTierOf` 必须传两个阈值给 backendOrderTier', () => {
-    /** 起点档位提示：说错比不说更糟。 */
-    expect(
-      src,
-      '★★★ creditRowTierOf 的 backendOrderTier 必须带 floor（否则提示说错档位）',
-    ).toMatch(/value\?\.locked !== true,\s*\n\s*\/\*\*[\s\S]{0,600}?Number\.isFinite\(value\?\.imminentFloor\)/)
+  it('★★★ `creditRowTierOf` 必须调用抽出的 `startTierOf`（不能自己算）', () => {
+    expect(src, '★★★ 必须调用 startTierOf（否则行为级守卫只管新模块、管不到实际渲染）')
+      .toMatch(/return startTierOf\(packages, value \?\? \{\}, value\?\.locked !== true, Date\.now\(\)\)/)
   })
 
-  it('★★★ `expiringOf` 必须按阈值过滤（否则「不可用」判据错）', () => {
-    expect(
-      src,
-      '★★★ expiringOf 必须按 floor 过滤后才返回（否则显示可选、实际被跳过）',
-    ).toMatch(/const countsImminent = imminent > imminentFloor/)
+  it('★★★ `expiringOf` 必须调用抽出的 `expiringUsableOf`（不能自己算）', () => {
+    expect(src, '★★★ 必须调用 expiringUsableOf')
+      .toMatch(/return expiringUsableOf\(packages, value \?\? \{\}, undefined\)/)
   })
 
-  it('★★★ `creditOrderOptionsOf` 的调用点必须传两个阈值', () => {
-    expect(
-      src,
-      '★★★ 不传 ⇒ 弹窗排序 / 分组仍按 >0 判档',
-    ).toMatch(/imminentFloor: value\?\.imminentFloor,[\s\S]{0,80}expiringFloor: value\?\.expiringFloor,/)
+  it('★★ 那两个闭包内不得再有内联计算（搬走后不许留两份实现）', () => {
+    /**
+     * ⚠️ **不能简单断言「文件里没有 `splitCreditsByExpiry`」** ——
+     * `expirySplitParts`（金额展示）**仍然需要它**，且那里**刻意不用阈值过滤**
+     *（用户第 6 条定案：降级只改排队顺序，不改烧包顺序）。
+     *
+     * ⇒ 精确判据：**在 `expiringOf` / `creditRowTierOf` 两个函数的函数体内**，
+     *   不得再出现 `splitCreditsByExpiry` / `backendOrderTier` 调用。
+     */
+    /**
+     * ⚠️ **取「函数体」要精确**：上一版从函数名往后截 900 字符，
+     * 把**紧邻的 `reasonOf` 注释里提到的 `splitCreditsByExpiry`** 也算进来了 ⇒ 假红。
+     *
+     * ⇒ 改为「从函数名到**它自己的 `return` 行**」—— 这两个函数都是
+     *   「找 row → 调纯函数 → return」的一段式，`return` 就是函数体末尾。
+     */
+    const bodyOf = (name: string): string => {
+      const start = src.indexOf(name)
+      if (start < 0) return ''
+      const retAt = src.indexOf('return ', start)
+      if (retAt < 0) return ''
+      /** 取到该 return 语句结束（行尾分号）。 */
+      const end = src.indexOf(';', retAt)
+      return src.slice(start, end < 0 ? retAt + 200 : end + 1)
+    }
+    for (const fn of ['function expiringOf', 'const creditRowTierOf = ']) {
+      const body = bodyOf(fn)
+      expect(body, `★★ ${fn} 必须已改为调用纯函数`).not.toBe('')
+      expect(
+        body.includes('splitCreditsByExpiry(') || body.includes('backendOrderTier('),
+        `★★ ${fn} 内仍有内联计算 ⇒ 会与 credit-floor-pure.js 形成两份实现。\n`
+          + `实际函数体：${body.slice(0, 200)}`,
+      ).toBe(false)
+    }
   })
 })
 

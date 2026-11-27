@@ -850,6 +850,38 @@ export function backendOrderTier(split, allowPermanent, imminentFloor = 0, expir
   const positive = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
   /** ⚠️ 与后端 `positiveOrZero(options.imminentFloor)` 同款：非法值归 0 = 关闭。 */
   const floor = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  /**
+   * ⚠️⚠️ **短期档用母量 `expiring`，与后端 `buddyBalanceTier` 逐字同源**。
+   *
+   * ## 我曾试图改成 `shortTerm`（2026-11-27），**已回退**
+   *
+   * 动机是「`expiring = imminent + shortTerm` ⇒ 只要有临期，`expiringFloor` 恒真」。
+   *
+   * ⚠️ 但实测（`credit-floor-parity.spec.ts` 同一批输入喂两个函数）立刻红 4 条：
+   *
+   * ```
+   * 只有短期      ：后端给 expiring(1)，客户端改后给 none(3)
+   * 临期 2 + 阈值20：后端给 expiring(1)，客户端改后给 permanent(2)
+   * ```
+   *
+   * ⇒ **后端读的是 `balance.expiringBalance`（一个独立字段），不是前端这种派生和**。
+   *   前端若改用 `shortTerm`，两边就**分叉** —— 违背本仓红线
+   *   「同一语义不得两套」。
+   *
+   * ## 那「`expiringFloor` 对含临期的号无效」是缺陷吗
+   *
+   * **不是。** 实测后端 `lib/buddy-balance-rank.js`：
+   *
+   * | 号 | `imminentFloor` | `expiringFloor` | 后端结果 |
+   * |---|---|---|---|
+   * | 临期 0 / 短期 25 | — | 30 | **permanent**（短期档降级 ✅）|
+   * | 临期 5 / 短期 0 | — | 30 | **imminent**（不受影响，**正确**）|
+   * | 临期 5 / 短期 0 | 20 | — | permanent（由 `imminentFloor` 管）|
+   *
+   * ⇒ **两个阈值各自管各自的档**：`expiringFloor` 只管短期档。
+   *   一个「还有临期」的号本来就在更优先的临期档，`expiringFloor` 不该影响它。
+   *   **要提升它请用 `imminentFloor`。**
+   */
   if (positive(split.imminent) > floor(imminentFloor)) return CREDIT_ORDER_TIER.imminent;
   if (positive(split.expiring) > floor(expiringFloor)) return CREDIT_ORDER_TIER.expiring;
   // ⚠️ 锁定门必须在永久判定之前（与后端 buddyBalanceTier 同序）
