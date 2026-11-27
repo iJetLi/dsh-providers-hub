@@ -36,6 +36,8 @@
  */
 
 import { createServer } from 'node:http'
+// ★ issue #177：登录后补一次身份（拿 activeTeam.teamId 供 `x-team-id`）
+import { fetchAccioUserInfo } from './accio-credits.js'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
@@ -685,6 +687,43 @@ export class AccioAuth extends Service {
       region: params.region,
       ...token.sgcookie === undefined ? {} : { sgcookie: token.sgcookie },
     }
+    /**
+     * ★★★ **落盘之前补一次 `userinfo`**（issue #177，2026-11-27）。
+     *
+     * ## 为什么要补
+     *
+     * 兑换响应**不含任何身份字段**（本文件 `fillAccountEntry` 的注释早就写了这点，
+     * 并留了「`userinfo` 落地后可在登录成功后补一次」的 TODO —— 那个模块后来存在了，
+     * 但这一步一直没接 ⇒ `fetchAccioUserInfo` 在本仓**零调用**）。
+     *
+     * 后果：`credential.teamId` 永远为空 ⇒ 所有请求都不带 `x-team-id` ⇒
+     * **团队空间的账号永远只看到/使用个人空间额度**（用户实测：团队 8000，插件 520）。
+     *
+     * ## 三样一起拿，都写进**凭据**（不是只写池）
+     *
+     * - `activeTeam.teamId` ⇒ 请求头 `x-team-id`（团队额度/模型/推理全依赖它）；
+     * - `routeRegion` ⇒ 请求头 `x-accio-route-region`（官方同样注入）；
+     * - `userName` ⇒ 账号卡片真实昵称（`fillAccountEntry` 读 `credential.nickname`）。
+     *
+     * ⚠️ **失败绝不影响登录**：凭据本身已可用，为一次身份补全让用户「登录失败」是更糟的交换。
+     * ⚠️ 个人空间 `activeTeam` 为 `null` ⇒ 不写 `teamId` ⇒ 行为与改动前**逐字节相同**。
+     */
+    try {
+      const info = await fetchAccioUserInfo(credential, {
+        ...this.options.fetcher === undefined ? {} : { fetcher: this.options.fetcher },
+      })
+      if (info !== undefined) {
+        if (typeof info.activeTeam?.teamId === 'string' && info.activeTeam.teamId !== '') {
+          credential.teamId = info.activeTeam.teamId
+          if (info.activeTeam.teamName !== undefined) credential.teamName = info.activeTeam.teamName
+        }
+        if (info.routeRegion !== '') credential.routeRegion = info.routeRegion
+        if (info.userName !== '') credential.nickname = info.userName
+      }
+    } catch (error) {
+      // ⚠️ 只记日志：身份补全失败不能变成「登录失败」。
+      this.warn(`登录后补 userinfo 失败（不影响登录，但团队额度可能用不上）：${String(error)}`)
+    }
     await this.persistLogin(credential, params.refName)
     // 回填占位条目。⚠️ 失败**只记日志**：凭据已经写好了，因写索引失败而抛错
     // 会让用户看到「登录失败」（而事实相反，只能重新登录一次）。
@@ -975,7 +1014,33 @@ export class AccioAuth extends Service {
     try {
       const response = await this.fetchImpl(`${ACCIO.gatewayBaseUrl}${ACCIO_CATALOG_PATH}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          /**
+           * ★★★ **目录也要带团队身份**（issue #177）。
+           *
+           * 官方对「除 `publicCatalog` 外的所有出站请求」都注入 `x-team-id` ——
+           * 目录（`/api/llm/config/v2`）也在其中。团队空间可用的模型集可能与个人不同，
+           * 不带就永远按个人空间下发。
+           *
+           * ⚠️ 空值不发（与 `accioHeaders` 的同名判据一致）。
+           */
+          ...typeof credential.teamId === 'string' && credential.teamId.trim() !== ''
+            ? { 'x-team-id': credential.teamId.trim() }
+            : {},
+          ...typeof credential.routeRegion === 'string' && credential.routeRegion.trim() !== ''
+            ? { 'x-accio-route-region': credential.routeRegion.trim() }
+            : {},
+          /**
+           * ★★★ **目录可见性的关键头**（issue #177 作者实测）：
+           * 国际站带 `x-package-region: GLOBAL` ⇒ **30 个模型含 9 个 GPT**；
+           * 不带 ⇒ 16 条、**无 GPT/Claude/Gemini**。
+           * ⚠️ 只对 `global`（`cn` 未实测）。
+           */
+          ...credential.region === 'global' ? { 'x-package-region': 'GLOBAL' } : {},
+          ...credential.region === 'cn' ? { 'x-package-region': 'CN' } : {},
+        },
         body: JSON.stringify({ token: credential.access_token }),
         signal: AbortSignal.timeout(ACCIO_REQUEST_TIMEOUT_MS),
       })

@@ -610,7 +610,22 @@ describe('★ 两步式登录：先返回 loginUrl，不阻塞等授权', () => 
       expect(callback.status).toBe(200)
       await started.result
 
-      expect(fetcher).toHaveBeenCalledTimes(1)
+      /**
+       * ★★★ **两次，且必须是「兑换 + 补身份」**（issue #177，2026-11-27）。
+       *
+       * 改前只有 token 兑换（要 1 次）。现在登录后会多打一次 `POST /api/auth/userinfo`
+       * —— 为的是拿 `activeTeam.teamId`（团队空间必需）与真实昵称。
+       *
+       * ⚠️ **只把 1 改成 2 是弱断言**（任何多出来的请求都能过）⇒ 这里同时断言
+       * 两次请求的**端点与顺序**，这样「把 userinfo 换成别的请求」也会红。
+       */
+      expect(
+        fetcher,
+        '两次：① token 兑换 ② 登录后补 userinfo（团队身份来源，issue #177）',
+      ).toHaveBeenCalledTimes(2)
+      const calledUrls = fetcher.mock.calls.map((call) => String((call as unknown[])[0]))
+      expect(calledUrls[0], '第一次必须是 token 兑换').toContain('/api/oauth/token')
+      expect(calledUrls[1], '第二次必须是 userinfo（团队身份）').toContain('/api/auth/userinfo')
       const stored = JSON.parse((await credentials.resolve('ACCIO_ACCOUNT_1'))!.value) as Record<string, string>
       expect(stored.refresh_token).toBe('new-refresh')
       expect(pool.accounts[0]).toMatchObject({ id: 'accio-1', refreshable: true })

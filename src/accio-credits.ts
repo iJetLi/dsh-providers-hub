@@ -87,6 +87,24 @@ export interface AccioUserInfo {
   userLevel: string
   /** 脱敏手机号（实测 `+86 186****6665`）。未绑定手机时上游为 `null`。 */
   maskedMobile: string
+  /**
+   * ★★★ **当前所在空间的团队**（issue #177，2026-11-27）。
+   *
+   * ## 这个字段一直就在响应里，只是本仓从来没解析过
+   *
+   * 用户报告「团队订阅 0 / 8000 积分，插件只看到 520」——根因是他**处于团队空间**，
+   * 而本仓所有 accio 请求都**不带 `x-team-id`** ⇒ 上游按「默认/个人空间」返回额度。
+   *
+   * 证据链（issue #177 作者逆向 `app.asar` + 本机实测）：
+   * - 官方客户端 `yo()` 统一注入 `x-team-id`（值来自 `po()` = 当前 teamId）与
+   *   `x-accio-route-region`（来自 `go()`），并由 `addRequestInterceptor` 合并进**所有**出站请求；
+   * - 官方 `activeTeam: {teamId, teamName, role} | null`；
+   * - ⚠️ **本机 `%APPDATA%\Accio\remembered-accounts.json` 的 `auth` 对象里就有 `activeTeam`**
+   *   —— 而那个 `auth` 正是 `POST /api/auth/userinfo` 的返回 ⇒ **证明该端点确实下发它**。
+   *
+   * ⇒ `null` = 个人空间（本项目实测如此）；有值 = 团队空间，**必须**在请求里带上 `teamId`。
+   */
+  activeTeam?: { teamId: string, teamName?: string, role?: string } | null
 }
 
 /** 一类积分桶（`flattenAccioCredits` 的一行）。 */
@@ -182,6 +200,36 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
+/**
+ * ★★★ **读 `activeTeam`**（issue #177，2026-11-27）。
+ *
+ * ## 三态，别压成两态
+ *
+ * | 响应 | 含义 | 返回 |
+ * |---|---|---|
+ * | 字段缺失 / `null` | **个人空间**（本项目实测这台机器就是如此）| `null` |
+ * | `{teamId: "..."}` | **团队空间** ⇒ 所有请求必须带 `x-team-id` | `{teamId, …}` |
+ * | 有对象但 `teamId` 不是非空串 | **畸形** | `null`（**降级到个人空间**，不编造 id）|
+ *
+ * ⚠️ **`teamId` 必须是非空字符串**才算团队：把 `''` 当成团队会把 `x-team-id: `
+ * 发出去（空头值），比不发更糟 —— 上游可能据此判「无效团队」而不是回落到个人。
+ *
+ * ⚠️ 另外两个字段（`teamName` / `role`）只为**展示**，缺了不影响请求。
+ */
+function readAccioActiveTeam(source: Record<string, unknown>): AccioUserInfo['activeTeam'] {
+  const raw = source.activeTeam
+  if (typeof raw !== 'object' || raw === null) return null
+  const record = raw as Record<string, unknown>
+  const teamId = typeof record.teamId === 'string' ? record.teamId.trim() : ''
+  if (teamId === '') return null
+  const teamName = typeof record.teamName === 'string' && record.teamName !== '' ? record.teamName : undefined
+  const role = typeof record.role === 'string' && record.role !== '' ? record.role : undefined
+  return {
+    teamId,
+    ...(teamName === undefined ? {} : { teamName }),
+    ...(role === undefined ? {} : { role }),
+  }
+}
 /** 读成字符串；非字符串返回空串。 */
 function readString(source: Record<string, unknown>, key: string): string {
   const value = source[key]
@@ -299,6 +347,33 @@ async function callAccioEndpoint(options: {
   const token = accioAccessToken(options.credential)
   const base = `${ACCIO.gatewayBaseUrl}${options.path}`
   const headers: Record<string, string> = { Accept: 'application/json' }
+  /**
+   * ★★★ **团队身份**（issue #177，2026-11-27）。
+   *
+   * ⚠️ 这**不违反**本文件上方「只读端点不把推理端那些头顺手带过来」的纪律 ——
+   *    那条纪律针对的是 `utdid` / `version` / `appKey` / `sgcookie`（实测不需要）。
+   *    `x-team-id` 不同：**官方对「除 publicCatalog 外的所有出站请求」都注入它**，
+   *    带着它才是「对齐官方」，不带才是「少发」。
+   *
+   * 证据：issue #177 作者逆向 `app.asar`（偏移 75632621 的 `yo()` + 75663647 的
+   * `addRequestInterceptor`），并在本机 `%APPDATA%\Accio
+emembered-accounts.json`
+   * 的 `auth.activeTeam` 里找到同一份数据。
+   *
+   * ⚠️ 无值 ⇒ **不发这个头**（与官方拦截器「空值即删」的语义一致）；
+   *    个人空间账号的行为因此与改动前**逐字节相同**。
+   */
+  const teamId = typeof options.credential.teamId === 'string' ? options.credential.teamId.trim() : ''
+  if (teamId !== '') headers['x-team-id'] = teamId
+  const routeRegion = typeof options.credential.routeRegion === 'string' ? options.credential.routeRegion.trim() : ''
+  if (routeRegion !== '') headers['x-accio-route-region'] = routeRegion
+  /**
+   * ★ `x-package-region: GLOBAL`（issue #177 实测有效：国际站模型可见性）。
+   * 与团队额度无关（那是服务端会话状态），但**这一条真能多出 9 个 GPT**。
+   */
+  // ★ 两个站都发（`cn` => `CN`）：官方 `aa()` 的归一化白名单就是 `CN|GLOBAL`。
+  if (options.credential.region === 'global') headers['x-package-region'] = 'GLOBAL'
+  else if (options.credential.region === 'cn') headers['x-package-region'] = 'CN'
 
   let url = base
   let body: string | undefined
@@ -421,6 +496,12 @@ export async function fetchAccioUserInfo(
     userId: readString(data, 'userId'),
     userName: readString(data, 'userName'),
     routeRegion: readString(data, 'routeRegion'),
+    /**
+     * ★ **必须解析**（issue #177）：少了它，团队空间的账号永远只看到个人额度。
+     * ⚠️ 形状按官方 `activeTeam: {teamId, teamName, role} | null`；
+     *    `null` 是**合法值**（个人空间），不能被当成「解析失败」。
+     */
+    activeTeam: readAccioActiveTeam(data),
     userLevel: readString(data, 'userLevel'),
     maskedMobile: readString(data, 'maskedMobile'),
   }

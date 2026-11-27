@@ -2072,6 +2072,20 @@ export class AccioAdapter extends LlmAdapter {
     const headers = accioHeaders({
       utdid: this.utdid,
       ...credential.sgcookie === undefined ? {} : { sgcookie: credential.sgcookie },
+      /**
+       * ★★★ **推理也必须带团队身份**（issue #177）。
+       *
+       * 只修额度查询是不够的：那样会变成「面板看到 8000，但一推理还是烧个人额度」——
+       * 比现在更难排查（数字对了、行为还是错的）。
+       */
+      ...credential.teamId === undefined ? {} : { teamId: credential.teamId },
+      ...credential.routeRegion === undefined ? {} : { routeRegion: credential.routeRegion },
+      /**
+       * ★ **`x-package-region: GLOBAL`**（issue #177 作者实测有效）：
+       * 国际站带上后 **30 个可见模型含 9 个 GPT**；不带给 16 条、无 GPT。
+       * ⚠️ 只对 `global` 生效（`accioHeaders` 内部判断，`cn` 未实测不发）。
+       */
+      region: credential.region,
     })
     try {
       const response = await this.fetchImpl(url, {

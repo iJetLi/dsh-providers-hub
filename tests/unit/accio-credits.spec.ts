@@ -20,6 +20,10 @@ describe('⚠️ 三个端点的传参方式各不相同（用错即 405/400）'
     const info = await fetchAccioUserInfo(cred, { fetcher: fetcher as unknown as typeof fetch })
     expect(info).toEqual({
       userId: 'u1', userName: 'U', routeRegion: 'CN', userLevel: 'freeMember', maskedMobile: '',
+      // ★ issue #177：新增解析 `activeTeam`。本 fixture 的响应里**没有**该字段
+      //   ⇒ 必须解析成 `null`（个人空间），而**不是** undefined —— 后者会让
+      //   「字段缺失」与「解析失败」同形，团队账号就永远拿不到 teamId。
+      activeTeam: null,
     })
 
     // ⚠️ 必须钉住 method **与** token 位置：只断言「发出去了」是空转的
