@@ -281,7 +281,7 @@ const PROVIDERS = Object.freeze(
  * 数据来自 `props.accounts()`（面板已有的逐包读数），
  * 用 `computeCoverage` 按草稿窗口重算 ⇒ 改数字即时刷新。
  */
-import { barPercent, computeCoverage, clampImminent, coverageTotal, describeWindowSource, parseWindowInput, windowRangeLabels, SUBAGENT_MODE_LABELS, defaultEffortOf, subagentHintOf, subagentPayloadOf, validateSubagentDraft, isWindowDirty } from './credit-window-ui.js'
+import { barPercent, computeCoverage, clampImminent, coverageTotal, describeWindowSource, parseWindowInput, windowRangeLabels, SUBAGENT_MODE_LABELS, defaultEffortOf, subagentHintOf, subagentPayloadOf, validateSubagentDraft, isWindowDirty, parseFloorInput, resolveFloor } from './credit-window-ui.js'
 
 export function CreditWindowModal(props) {
   const { provider, providerLabel, rpcCall, accounts, onClose } = props
@@ -295,6 +295,17 @@ export function CreditWindowModal(props) {
   /** 草稿值（输入框的原始**字符串**，便于区分「空」与「0」）。 */
   const [draftWindow, setDraftWindow] = React.useState('')
   const [draftImminent, setDraftImminent] = React.useState('')
+  /**
+   * ★★★ **两个积分阈值的草稿**（2026-11-27 用户需求）。
+   *
+   * 临期剩余 ≤ `imminentFloor` ⇒ 不算临期（降级按短期排队）；
+   * 短期剩余 ≤ `expiringFloor` ⇒ 降级按永久排队。
+   *
+   * ⚠️ 用字符串草稿（与 `draftWindow` 同款）：用户清空输入框时是 `''`
+   * 而不是 `0`，两者语义不同（`''` = 关闭 / 未填，`0` = 显式填了 0）。
+   */
+  const [draftImminentFloor, setDraftImminentFloor] = React.useState('')
+  const [draftExpiringFloor, setDraftExpiringFloor] = React.useState('')
   /**
    * ★ 子代理设置草稿（2026-11-23）。
    *
@@ -339,6 +350,12 @@ export function CreditWindowModal(props) {
         // 预填「当前生效值」而不是留空：用户要看到「现在是多少」才能判断要不要改。
         setDraftWindow(String(res.windowDays))
         setDraftImminent(String(res.imminentDays))
+        /**
+         * ⚠️ 阈值也回填：`undefined` / `0` 一律填**空白**（用户视角都是「关闭」）。
+         * ⚠️ 不能填 `'0'` —— 那会让本来「没设」的显示成「设了 0」，用户会以为配置过。
+         */
+        setDraftImminentFloor(res.imminentFloor ? String(res.imminentFloor) : '')
+        setDraftExpiringFloor(res.expiringFloor ? String(res.expiringFloor) : '')
         /**
          * ★ 子代理设置（2026-11-23）。
          *
@@ -397,6 +414,15 @@ export function CreditWindowModal(props) {
   const parsedWindow = parseWindowInput(draftWindow)
   const parsedImminent = parseWindowInput(draftImminent)
   /**
+   * ★ **两个阈值的解析结果**（2026-11-27）。
+   *
+   * ⚠️ 与窗口天数用**不同的解析器**：窗口是「天」（有下限与上限），
+   * 阈值是「积分」（允许 0、上限 36500）。混用会把「阈值 0」
+   * 当成「非法输入」而回落成已存值，用户永远关不掉已设的阈值。
+   */
+  const parsedImminentFloor = parseFloorInput(draftImminentFloor)
+  const parsedExpiringFloor = parseFloorInput(draftExpiringFloor)
+  /**
    * 生效的草稿值：非法/为空时**回落到当前生效值**（而不是 0），
    * 这样预览始终可算、且不会因为用户清空输入框就「闪成 0 天」。
    */
@@ -408,7 +434,30 @@ export function CreditWindowModal(props) {
   const imminentInvalid = parsedImminent === null
 
   // ---- 实时预览（纯前端重算） ----
-  const coverage = computeCoverage(accounts(), effectiveWindow, effectiveImminent, Date.now())
+  /**
+   * ★★★ **两个阈值的生效值**（2026-11-27 用户需求）。
+   *
+   * ⚠️ 与窗口天数**同款回落**：草稿非法/为空时用**已存值**，
+   * 而不是回落 0 —— 否则用户删到一半（清空输入框）预览会突然把该档
+   * 全算进来，看起来像「改动没生效」。
+   *
+   * ⚠️ 用同一个 `parseFloorInput`（纯函数、可单测），不要在这里内联正则：
+   * 两处同义判据必然漂移，且内联的跑不进单测。
+   */
+  const effectiveImminentFloor = resolveFloor(parsedImminentFloor, saved?.imminentFloor)
+  const effectiveExpiringFloor = resolveFloor(parsedExpiringFloor, saved?.expiringFloor)
+  /**
+   * ★ **覆盖数必须接阈值**（用户明确要求「改阈值立刻看到覆盖数变化」）。
+   * ⚠️ 后端也是 `> floor` 判档 —— 两边不同源的话覆盖数会**骗人**。
+   */
+  const coverage = computeCoverage(
+    accounts(),
+    effectiveWindow,
+    effectiveImminent,
+    Date.now(),
+    effectiveImminentFloor,
+    effectiveExpiringFloor,
+  )
   const ranges = windowRangeLabels(effectiveWindow, effectiveImminent)
   /**
    * 三档总额（进度条分母）与每档宽度百分比。
@@ -452,7 +501,18 @@ export function CreditWindowModal(props) {
    * ⚠️ 判据抽到 `credit-window-ui.js` 的 `isWindowDirty()` 里 ——
    * 内联在组件里就**测不到**（本仓教训：判据埋在装配层 = 没测试）。
    */
-  const dirty = isWindowDirty({ saved, draftWindow, draftImminent, subDraft })
+  const dirty = isWindowDirty({
+    saved,
+    draftWindow,
+    draftImminent,
+    subDraft,
+    /**
+     * ★ 两个阈值也要参与（2026-11-27）。
+     * ⚠️ 漏了它们的症状：用户只改阈值 ⇒ 保存按钮不亮 ⇒ **阈值静默改不掉**。
+     */
+    draftImminentFloor,
+    draftExpiringFloor,
+  })
 
   const onSave = async () => {
     if (windowInvalid || imminentInvalid) return
@@ -493,6 +553,35 @@ export function CreditWindowModal(props) {
       if (windowChanged) payload.windowDays = parsedWindow
       if (imminentChanged) payload.imminentDays = parsedImminent
       /**
+       * ★★★ **两个积分阈值**（2026-11-27 用户需求）。
+       *
+       * ## 与窗口天数**不同的两处语义**
+       *
+       * | 项 | 窗口天数 | 阈值 |
+       * |---|---|---|
+       * | `0` | 合法（关掉该档）| 合法（= 关闭阈值）|
+       * | 清空输入框 | **不传**（保持原值）| **传 `0`**（= 关掉阈值）|
+       *
+       * ⚠️⚠️ **清空必须传 `0`，不能「不传」**：用户把已设的阈值删掉，
+       *   意图是**关掉它**。若「不传 ⇒ 后端保持原值」，那个阈值会**永远关不掉**
+       *   —— 面板上明明空着，实际还在降级。这正是「保存了但没生效」的形态。
+       *
+       * ⚠️ 而窗口天数的清空是「不传」：因为 0 天窗口无意义，
+       *   用户清空更可能是「我想用默认」。**两者刻意不同，别为「一致性」合并。**
+       *
+       * ⚠️ 非法输入（`parsed === null`）⇒ **不传**（保留原值），
+       *   且 `saveDisabled` 会拦住保存（用户看得到「请输入 0-36500 的整数」）。
+       */
+      const normFloorForCompare = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0)
+      if (parsedImminentFloor !== null
+        && normFloorForCompare(parsedImminentFloor) !== normFloorForCompare(saved?.imminentFloor)) {
+        payload.imminentFloor = normFloorForCompare(parsedImminentFloor)
+      }
+      if (parsedExpiringFloor !== null
+        && normFloorForCompare(parsedExpiringFloor) !== normFloorForCompare(saved?.expiringFloor)) {
+        payload.expiringFloor = normFloorForCompare(parsedExpiringFloor)
+      }
+      /**
        * ★ **子代理设置**（2026-11-23）。
        *
        * ⚠️ 只在校验通过时带上；校验失败**不阻断**窗口天数的保存 ——
@@ -503,7 +592,8 @@ export function CreditWindowModal(props) {
       const subPayload = subInvalid.ok ? subagentPayloadOf(subDraft) : undefined
       if (subPayload !== undefined) payload.subagent = subPayload
       if (payload.windowDays === undefined && payload.imminentDays === undefined
-        && payload.subagent === undefined) {
+        && payload.subagent === undefined
+        && payload.imminentFloor === undefined && payload.expiringFloor === undefined) {
         // 没有任何真正的改动 ⇒ 不发请求（发出去会命中「两个都不传 ⇒ 删键」）。
         onClose()
         return
@@ -517,6 +607,8 @@ export function CreditWindowModal(props) {
       // 回填**服务端生效值**（可能被钳制过）—— 让用户看见实际结果
       setDraftWindow(String(res.windowDays))
       setDraftImminent(String(res.imminentDays))
+      setDraftImminentFloor(res.imminentFloor ? String(res.imminentFloor) : '')
+      setDraftExpiringFloor(res.expiringFloor ? String(res.expiringFloor) : '')
       /**
        * ★ **保存成功 ⇒ 自动关闭弹窗**（用户 2026-11-20 要求）。
        *
@@ -560,6 +652,8 @@ export function CreditWindowModal(props) {
       setSaved(res)
       setDraftWindow(String(res.windowDays))
       setDraftImminent(String(res.imminentDays))
+      setDraftImminentFloor(res.imminentFloor ? String(res.imminentFloor) : '')
+      setDraftExpiringFloor(res.expiringFloor ? String(res.expiringFloor) : '')
     } catch (caught) {
       setSaveError(caught instanceof Error ? caught.message : String(caught))
     } finally {
@@ -587,6 +681,44 @@ export function CreditWindowModal(props) {
         'aria-invalid': options.invalid ? 'true' : undefined,
       }),
       React.createElement('span', { className: 'dim-jh-windowUnit' }, '天'),
+      /**
+       * ★★★ **积分阈值输入**（2026-11-27 用户需求）。
+       *
+       * ## 用户原话
+       *
+       * > 「临期和短期窗口右侧，加上低于指定积分就算另一档位」
+       *
+       * ## 三条定稿排版（用户逐条确认过，别改）
+       *
+       * 1. **与窗口期同一行** —— `.dim-jh-windowLabel` 是 flex，本 span 直接跟在「天」后面；
+       * 2. **两个输入框都 52px** —— 共用 `.dim-jh-windowInput` 类（`text-align: center`）；
+       * 3. **覆盖徽标紧跟阈值** —— 下面的 `.dim-jh-windowCover` 是 `margin-left: 4px`
+       *   （**不是** `auto`，否则会被推到最右）。
+       *
+       * ## ⚠️ 关闭态用 `placeholder="0"` + 虚线框
+       *
+       * 空串 = 关闭（不降级）。虚线边框让用户一眼看出「这个没启用」——
+       * 实线 + 空白会被读成「正在加载」或「读取失败」。
+       *
+       * ⚠️ `maxLength=5`：上限 36500 是 5 位数，多一位必然是手误。
+       */
+      React.createElement('span', { className: 'dim-jh-windowUnit' }, '剩余<'),
+      React.createElement('input', {
+        type: 'number',
+        className: options.floorValue === ''
+          ? 'dim-jh-windowInput dim-jh-windowInputOff'
+          : 'dim-jh-windowInput',
+        min: 0,
+        step: 1,
+        maxLength: 5,
+        value: options.floorValue,
+        placeholder: '0',
+        onChange: (event) => options.onFloorChange(event.target.value),
+        'aria-label': options.floorAriaLabel,
+        'aria-invalid': options.floorInvalid ? 'true' : undefined,
+        title: '低于该积分就不算这一档（提前切换到下一档）。留空 = 不启用',
+      }),
+      React.createElement('span', { className: 'dim-jh-windowUnit' }, '积分'),
       React.createElement('span', {
         className: 'dim-jh-windowCover',
         'data-tone': options.tone,
@@ -634,8 +766,19 @@ export function CreditWindowModal(props) {
             value: draftImminent,
             invalid: imminentInvalid,
             onChange: setDraftImminent,
+            /**
+             * ★ **`floorValue` 必须传**（2026-11-27 上游审计 D2）。
+             * 漏了它 ⇒ `field()` 里 `options.floorValue` 恒 `undefined` ⇒
+             * 输入框**不受控、恒空白、永不进虚线态**（看起来像「没这个功能」）。
+             */
+            floorValue: draftImminentFloor,
+            floorInvalid: parsedImminentFloor === null,
+            onFloorChange: setDraftImminentFloor,
+            floorAriaLabel: '临期积分下限',
             count: coverage.imminentAccounts,
-            hint: `距过期 < ${effectiveImminent} 天 → 算「临期」。来源：${describeWindowSource(saved?.source, saved?.windowDays, saved?.imminentDays)}`,
+            hint: `距过期 < ${effectiveImminent} 天`
+              + (effectiveImminentFloor > 0 ? ` 且 剩余 ≥ ${effectiveImminentFloor} 积分` : '')
+              + ` → 算「临期」。来源：${describeWindowSource(saved?.source, saved?.windowDays, saved?.imminentDays)}`,
           }),
           field({
             tone: 'short',
@@ -644,16 +787,26 @@ export function CreditWindowModal(props) {
             value: draftWindow,
             invalid: windowInvalid,
             onChange: setDraftWindow,
+            /** ★ 短期档的积分下限（2026-11-27）。 */
+            floorValue: draftExpiringFloor,
+            floorInvalid: parsedExpiringFloor === null,
+            onFloorChange: setDraftExpiringFloor,
+            floorAriaLabel: '短期积分下限',
             count: coverage.shortTermAccounts,
-            hint: `距过期 ≤ ${effectiveWindow} 天 → 算「短期」（含上面的临期）。来源：${describeWindowSource(saved?.source, saved?.windowDays, saved?.imminentDays)}`,
+            hint: `距过期 ≤ ${effectiveWindow} 天`
+              + (effectiveExpiringFloor > 0 ? ` 且 剩余 ≥ ${effectiveExpiringFloor} 积分` : '')
+              + ` → 算「短期」（含上面的临期）。来源：${describeWindowSource(saved?.source, saved?.windowDays, saved?.imminentDays)}`,
             warn: clamped
               ? `⚠️ 临期窗口不能大于短期窗口，已按 ${effectiveWindow} 天计算`
               : '⚠️ 临期窗口必须 ≤ 短期窗口',
           }),
-          (windowInvalid || imminentInvalid)
+          (windowInvalid || imminentInvalid || parsedImminentFloor === null || parsedExpiringFloor === null)
             ? React.createElement('p', { className: 'dim-jh-modalHint dim-jh-windowInvalid' },
               windowInvalid ? '短期窗口' : '', windowInvalid && imminentInvalid ? ' 与 ' : '', imminentInvalid ? '临期窗口' : '',
-              ' 必须是 0 ~ 36500 之间的整数')
+              windowInvalid || imminentInvalid ? ' 必须是 0 ~ 36500 之间的整数' : '',
+              (parsedImminentFloor === null || parsedExpiringFloor === null)
+                ? `${windowInvalid || imminentInvalid ? '；' : ''}积分下限必须是 0 ~ 36500 之间的整数`
+                : '')
             : null,
 
           // ---- 实时预览 ----
@@ -842,7 +995,14 @@ export function CreditWindowModal(props) {
            * `dirty` 这个变量原先**全文件只有定义、没有消费方**（死变量），
            * 于是「没改动也能点保存」⇒ 见 `onSave` 里那段缺陷说明。
            */
-          disabled: busy || windowInvalid || imminentInvalid || !dirty,
+          /**
+           * ★ **两个阈值非法也要禁用保存**（2026-11-27 上游审计 D2）。
+           * 漏了它们 ⇒ 用户输 `abc` 仍能点保存 ⇒ 后端拒绝（bad-request）⇒
+           * 用户看到一条「保存失败」却不知道是哪个框的问题。
+           */
+          disabled: busy || windowInvalid || imminentInvalid
+            || parsedImminentFloor === null || parsedExpiringFloor === null
+            || !dirty,
           onClick: () => void onSave(),
         }, busy ? '保存中…' : '保存'),
       ),

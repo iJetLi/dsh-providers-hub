@@ -1479,8 +1479,33 @@ export class AccountPool {
     if (provider.length === 0) return
     const windowDays = setting?.windowDays
     const imminentDays = setting?.imminentDays
-    const validWindow = typeof windowDays === 'number' && Number.isFinite(windowDays) && windowDays >= 0
-    const validImminent = typeof imminentDays === 'number' && Number.isFinite(imminentDays) && imminentDays >= 0
+    /**
+     * ★★★ **两个积分阈值**（2026-11-27 用户需求）。
+     *
+     * ⚠️⚠️ **`0` 是合法值**（= 关掉阈值），与 `windowDays` 的 0 语义一致。
+     * 它**不能**被归一成 `undefined` —— 那会让用户**永远关不掉**已设的阈值。
+     */
+    const imminentFloor = setting?.imminentFloor
+    const expiringFloor = setting?.expiringFloor
+    const isNonNeg = (v: unknown): v is number =>
+      typeof v === 'number' && Number.isFinite(v) && v >= 0
+    const validWindow = isNonNeg(windowDays)
+    const validImminent = isNonNeg(imminentDays)
+    const validImminentFloor = isNonNeg(imminentFloor)
+    const validExpiringFloor = isNonNeg(expiringFloor)
+    /**
+     * ⚠️ **本次载荷是否提到任何一个字段**。
+     *
+     * 这就是「恢复默认」与「只配了一部分」的分界线：
+     * 四个字段**全部缺席** ⇒ 恢复默认（删键）；
+     * 任一在场 ⇒ 合并写入（缺席的字段从 `existing` 继承）。
+     *
+     * ⚠️⚠️ **两个阈值必须参与这条判据**（2026-11-27 上游审计 D1）：
+     * 漏了它们 ⇒ `setCreditWindow({ imminentFloor: 20 })` 会被判成
+     * 「恢复默认」⇒ **整条删键** ⇒ 阈值**根本存不进去**。
+     */
+    const anyFieldPresent = validWindow || validImminent
+      || validImminentFloor || validExpiringFloor
     const next: CreditWindowMap = { ...this.creditWindowCache }
     /**
      * ⚠️⚠️ **必须保留 `subagent`**（2026-11-24 用户报障，真缺陷）。
@@ -1497,21 +1522,23 @@ export class AccountPool {
      * 「两个天数都没传」时传 `undefined`）⇒ 走下面的 `delete next[provider]`
      * ⇒ **整条记录被删** ⇒ 窗口天数回到内置默认。
      *
-     * 更隐蔽的是：删掉之后 `subagent` 也没了，但子代理设置是**同一次请求**
-     * 刚写进去的 —— 两个功能互相踩。
-     *
-     * ## 修法
-     *
-     * 删键前先看**是否还有 `subagent`**：有就只删两个天数、保留 subagent；
-     * 都没有才整条删（避免留下空对象噪音）。
+     * ⚠️ 同样适用于两个阈值 —— 只改子代理设置时不能把阈值一起抹掉。
+     */
+    /**
+     * ⚠️ **必须在 `next` 拷贝之后读**（`subagent-creditwindow-preserve.spec.ts` 有守卫）：
+     * 在拷贝之前读会拿到旧表引用，后续 `next[provider] = …` 替换后读到的是过期值。
      */
     const existingSubagent = next[provider]?.subagent
-    if (!validWindow && !validImminent) {
+    /**
+     * 同上：本次写入要「继承」的**已有窗口设置**（缺席字段从这里取）。
+     */
+    const existing = next[provider]
+    if (!anyFieldPresent) {
       /**
-       * 「恢复默认」语义：删掉两个天数。
+       * 「恢复默认」语义：删掉窗口相关的四个字段。
        *
        * ⚠️ 但**不能**连 `subagent` 一起删 —— 那是另一个功能的设置，
-       * 用户点「恢复默认」针对的是窗口天数。
+       * 用户点「恢复默认」针对的是窗口天数与阈值。
        */
       if (existingSubagent !== undefined) {
         next[provider] = { subagent: existingSubagent }
@@ -1521,9 +1548,25 @@ export class AccountPool {
         delete next[provider]
       }
     } else {
+      /**
+       * ⚠️ **缺席的字段从 `existing` 继承**（合并语义）。
+       *
+       * | 本次载荷 | 结果 |
+       * |---|---|
+       * | 只给 `imminentFloor` | 保留原有窗口天数 / 另一阈值 / 子代理 |
+       * | 给 `imminentFloor: 0` | **写入 0**（= 关掉阈值，不是「不动」）|
+       * | 给 `windowDays: 7` + `imminentFloor: 20` | 两者都写 |
+       *
+       * ⚠️ 继承时也要判「原值是否合法」：手改坏 `state.json` 写进 `-1`
+       * 不该继续传播。
+       */
+      const keep = <K extends keyof CreditWindowSetting>(key: K, ok: boolean, next_: CreditWindowSetting[K]) =>
+        ok ? { [key]: next_ } : (isNonNeg(existing?.[key]) ? { [key]: existing![key] } : {})
       next[provider] = {
-        ...(validWindow ? { windowDays: windowDays as number } : {}),
-        ...(validImminent ? { imminentDays: imminentDays as number } : {}),
+        ...keep('windowDays', validWindow, windowDays),
+        ...keep('imminentDays', validImminent, imminentDays),
+        ...keep('imminentFloor', validImminentFloor, imminentFloor),
+        ...keep('expiringFloor', validExpiringFloor, expiringFloor),
         /**
          * ⚠️ **必须带上 `subagent`**（与上面同一个「整体替换」陷阱）。
          *
@@ -1572,16 +1615,32 @@ export class AccountPool {
     const clean = sanitizeSubagentRotation(setting)
     if (clean === undefined) {
       if (current === undefined || current.subagent === undefined) return
+      /**
+       * ★★★ **清除子代理时，窗口相关的四个字段必须原样保留**（2026-11-27）。
+       *
+       * ⚠️⚠️ **两个阈值也必须在这里**（上游审计 D1）：
+       * 漏了它们 ⇒ 用户「清除子代理设置」会**静默抹掉积分阈值**
+       * （面板上阈值还在显示，但实际已失效 —— 下次选号不降级）。
+       * 与本文件另一处「改窗口天数抹掉子代理」是**同一个整体替换陷阱**。
+       */
       const rest: CreditWindowSetting = {
         ...(current.windowDays === undefined ? {} : { windowDays: current.windowDays }),
         ...(current.imminentDays === undefined ? {} : { imminentDays: current.imminentDays }),
+        ...(current.imminentFloor === undefined ? {} : { imminentFloor: current.imminentFloor }),
+        ...(current.expiringFloor === undefined ? {} : { expiringFloor: current.expiringFloor }),
       }
       /**
        * ⚠️ 去掉 subagent 后若**只剩空对象**，整条删键
        *（否则会留下一个永不消费的噪音 provider 键）。
+       *
+       * ⚠️ **四个字段全缺席才算空** —— 只配了阈值的 provider 不能在这里被删掉。
        */
-      if (rest.windowDays === undefined && rest.imminentDays === undefined) delete next[provider]
-      else next[provider] = rest
+      if (rest.windowDays === undefined && rest.imminentDays === undefined
+        && rest.imminentFloor === undefined && rest.expiringFloor === undefined) {
+        delete next[provider]
+      } else {
+        next[provider] = rest
+      }
     } else {
       next[provider] = { ...(current ?? {}), subagent: clean }
     }
