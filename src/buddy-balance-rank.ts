@@ -736,7 +736,29 @@ export function rotateFromPreferred<T extends BuddyAccountBalance>(
   const startAccount = ranked[anchor]!
   const anchorTier = buddyBalanceTier(startAccount, options)
   /** 分档边界用未锁定口径（`none` 档在锁定态可能是「只剩永久」，会混淆分组）。 */
-  const tierRankOf = (account: T): number => buddyBalanceTier(account, { allowPermanent: true })
+  /**
+   * ★★★★ **分档口径必须带上积分阈值**（2026-11-27 对抗审计 P1，阻断级）。
+   *
+   * ## 原来的 bug：同一个函数里两套判据
+   *
+   * 上面 `anchorTier = buddyBalanceTier(startAccount, options)` **认** `imminentFloor` /
+   * `expiringFloor`，而这一行只传 `{ allowPermanent: true }` ⇒ **floor 盲**。
+   *
+   * 后果：`rotateFromPreferred` 的所有重排（`:740` / `:782` / `:817` / `:863`）都用**错误的档位**
+   * ⇒ **配了轮换起点（`rotationStartId`）时，积分阈值完全失效**。
+   * 实测（审计原文）：`floor=20` 仍选**临期只剩 5** 的号。
+   *
+   * ⚠️ 而「配了轮换起点」是常见配置 ⇒ 这个缺陷会让**阈值功能在那些用户身上等于没做**。
+   *
+   * ⚠️ `allowPermanent: true` **必须保留** —— 注释写明「分档边界用**未锁定**口径」，
+   *    否则 `none` 档在锁定态会被认成「只剩永久」，分组边界会错。
+   *    ⇒ 只补 floor，不动这一格。
+   */
+  const tierRankOf = (account: T): number => buddyBalanceTier(account, {
+    allowPermanent: true,
+    ...options.imminentFloor === undefined ? {} : { imminentFloor: options.imminentFloor },
+    ...options.expiringFloor === undefined ? {} : { expiringFloor: options.expiringFloor },
+  })
   const anchorRank = tierRankOf(startAccount)
 
   /**
