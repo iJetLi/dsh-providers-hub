@@ -8308,8 +8308,23 @@ function registerJetHubEndpoints(
          */
         const mine = all.filter((a) => a.provider === req.provider && a.enabled !== false)
         /**
-         * ★★★ **子代理会话：显示它实际使用的账号位次**
-         *（2026-11-24 用户需求）。
+         * ⚠️⚠️ **这里曾堆了三段互相矛盾的 JSDoc，已合并为一段**（2026-11-27）。
+         *
+         * | 段 | 曾声称 | 实际 |
+         * |---|---|---|
+         * | 1 | 「子代理的账号记在 `pinnedAccountId` 里，用 pin 的 id 当起点」| ❌ 该机制已删 |
+         * | 2 | 「三级优先级：`userPickedAccountId` > `pinnedAccountId` > `preferredRotationFor`」| ❌ 前两级已删 |
+         * | 3 | 「统一存在 `preferredRotation`」| ✅ **正确** |
+         *
+         * 前两段是 `ff7cf8f9`（「子代理起点统一为 preferredRotation —— 净删 1800 行」）
+         * **之前**的形态。`AccountPool` 上已无 `pinSubagentAccount` /
+         * `setUserPickedAccount`（`subagent-dead-residuals.spec.ts` 有守卫盯着）。
+         *
+         * ⇒ 三段叠罗汉正是「同一语义多套说法」的温床：读代码的人无法判断哪份可信。
+         *   **过时注释比没有注释更糟。**
+         */
+        /**
+         * ★★★ **子代理起点只读 `preferredRotation` 一处**（2026-11-25 重构后）。
          *
          * ## 用户原话
          *
@@ -8318,57 +8333,10 @@ function registerJetHubEndpoints(
          * >   ……我想要子代理对话页面，达到跟主代理对话页面一样的效果，
          * >   从页面就能看出这个对话是跟哪个帐号在进行的」
          *
-         * ## 缺陷
+         * ## 实现
          *
-         * `preferredRotation` 是**按 sessionId 单独配置**的表 —— 用户只会在
-         * **主代理**会话里选起点，子代理的 sessionId 永远不在那张表里
-         * ⇒ `preferredRotationFor()` 返回 `undefined` ⇒ 胶囊显示「默认」
-         * ⇒ 用户看不出子代理在用哪个号。
-         *
-         * ## 修法
-         *
-         * 子代理的账号是**自动分配**的（`subagentAssignments[provider][sid]`），
-         * 记在 `pinnedAccountId` 里。⇒ 该会话是子代理时，用 pin 的 id 当
-         * 「起点」去算位次。
-         *
-         * ## ⚠️ 三态语义（必须与胶囊的既有渲染对齐）
-         *
-         * | 情况 | `selectedPosition` | 胶囊显示 |
-         * |---|---|---|
-         * | 主代理 + 选了起点 | 位次数字 | 「位次 N」|
-         * | 主代理 + 没选 | `null` | 「默认」|
-         * | **子代理 + 已 pin** | **位次数字** | **「位次 N」** ← 本改动 |
-         * | 子代理 + 未 pin（首轮还没选）| `null` | 「默认」|
-         *
-         * ⚠️ **只读、不写**：主代理那条腿仍走 `preferredRotationFor`，本改动
-         * 不碰 `preferredRotation` 表（否则会把「自动分配」污染成「用户选择」，
-         * 下次主代理打开下拉框会看到一个它没选过的值）。
-         *
-         * ⚠️ **优先级**：子代理的 pin **优先于** `preferredRotationFor`
-         * —— 万一某子代理的 sessionId 恰好也在 `preferredRotation` 里（不可能
-         * 但防御），行为应是「显示它实际用的号」，而不是「用户给它选的起点」。
-         */
-        /**
-         * ★★★ **三级优先级，与 `credential-resolver.ts` 逐字同构**
-         *（2026-11-24 用户定 B 方案）。
-         *
-         * | 级 | 来源 | 含义 |
-         * |---|---|---|
-         * | ① | `userPickedAccountId` | **用户手动选的** |
-         * | ② | `pinnedAccountId` | 系统拉起时固定/重算的 |
-         * | ③ | `preferredRotationFor` | 主代理那条腿（子代理恒 undefined）|
-         *
-         * ⚠️ 顺序**必须与 resolver 一致**，否则会出现「弹窗显示位次 3、
-         * 实际用位次 5」这种自相矛盾的界面 —— 用户会以为保存失败了。
-         *
-         * ⚠️ 主代理没有分配记录 ⇒ 前两级都是 `undefined` ⇒ 走 `preferredRotationFor`
-         *   （与改动前逐字相同，零回归）。
-         */
-        /**
-         * ⚠️ **不再有 pin / userPicked 两级**（2026-11-25 重构）。
-         *
-         * 子代理的起点（含用户手选）统一存在 `preferredRotation` ——
-         * 与主代理**同一个地方** ⇒ 这里只需读它一处。
+         * 子代理的起点（含「用户手选」）**统一存在 `preferredRotation`** ——
+         * 与主代理**同一个地方** ⇒ 读它一处即可，没有第二级、第三级。
          */
         const selectedId = pool.preferredRotationFor(req.provider, req.sessionId) ?? null
         /**
@@ -8661,29 +8629,34 @@ function registerJetHubEndpoints(
             tierAtSelection,
           )
           /**
-           * ★★★ **子代理场景：把用户选择记进分配表**（2026-11-24 用户定 B 方案）。
+           * ⚠️⚠️ **这里原来有一整段「必须额外写 `userPickedAccountId`」的 JSDoc，
+           * 已删除**（2026-11-27）。
            *
-           * ## 为什么光写 `preferredRotation` 不够
+           * ## 为什么删
            *
-           * 子代理的账号选择有**三级优先级**（见 `credential-resolver.ts`）：
-           * `userPickedAccountId` > `pinnedAccountId` > `slot` 现算。
+           * 它描述的是 `ff7cf8f9`（「子代理起点统一为 preferredRotation —— 净删 1800 行」）
+           * **之前**的三级优先级：
            *
-           * 用户在本页面选起点时，`preferredRotation[provider][sid]` 会被写入 ——
-           * 但 resolver **在 pin 命中时根本不看它**（pin 优先）⇒ 用户的选择
-           * **静默无效**，弹窗还会立刻变回 pin 的位次（看起来像保存失败）。
+           * ```
+           * userPickedAccountId > pinnedAccountId > slot 现算
+           * ```
            *
-           * ⇒ 必须额外写 `userPickedAccountId`（最高优先级）。
+           * 而重构之后：
            *
-           * ## ⚠️ 位次 → 账号 id 的换算口径必须与 resolver 一致
+           * - `AccountPool` 上**没有** `setUserPickedAccount` / `pinSubagentAccount`；
+           * - 用户手选**直接写 `preferredRotation`**（就是上面那个 `setPreferredRotation`）；
+           * - ⇒ 那段「必须额外写 `userPickedAccountId`」的论证**指向一个不存在的动作**。
            *
-           * 用 **全量启用账号**（`enabled !== false`，池序 1-based），
-           * 与 `account.getRotation` 的 `mine`、resolver 的 `enabledIds`
-           * **逐字同口径** —— 否则用户选「位次 3」，实际生效的是另一个号。
+           * ## 为什么必须删（不是「留着无害」）
            *
-           * ## ⚠️ 非子代理（主代理）不写
+           * 紧邻的 `:8694` 注释写着正确的话：
            *
-           * 主代理没有分配记录，`setUserPickedAccount` 会因
-           * `assignments[sessionId] === undefined` 而原样返回 ⇒ 无副作用。
+           * > 「子代理的起点（含「用户手选」）现在**统一存在这里** ——
+           * >   与主代理同一个地方 ⇒ 不再有 `userPickedAccountId` 这一级」
+           *
+           * ⇒ 两段**自相矛盾**的注释挨在一起。这正是本仓反复记录的
+           *   「同一语义两套说法」的温床：读代码的人无法判断哪份是对的。
+           *   **过时注释比没有注释更糟。**
            */
         } catch (error) {
           return {

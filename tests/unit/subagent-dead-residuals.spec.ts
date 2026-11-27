@@ -3,7 +3,7 @@
  *
  * ## 为什么要有这个文件
  *
- * `AccountPool` 在 `34b2137f` 的重构里删掉了 `pinSubagentAccount` /
+ * `AccountPool` 在 `ff7cf8f9` 的重构里删掉了 `pinSubagentAccount` /
  * `setUserPickedAccount`（子代理起点改存 `preferredRotation`），但
  * `credential-resolver.ts` 的**接口声明和调用点没跟着删**：
  *
@@ -53,7 +53,7 @@ function readStripped(name: string): string {
  * `pool.pinSubagentAccount?.(...)` ⇒ **守卫 5 条全绿**。
  *
  * ⇒ 那条「不得复活」的守卫**只挡得住「在原处加回来」**，挡不住「在别处加回来」——
- *   而后者才是真实复发的形态（`34b2137f` 那两处之一就在别的文件里）。
+ *   而后者才是真实复发的形态（`ff7cf8f9` 那两处之一就在别的文件里）。
  */
 function readStrippedRaw(fullPath: string): string {
   return readFileSync(fullPath, 'utf8')
@@ -78,7 +78,7 @@ function allSrcFiles(dir: string = SRC): string[] {
 const REMOVED = [
   {
     name: 'pinSubagentAccount',
-    why: 'AccountPool 在 34b2137f 已删（起点改存 preferredRotation）⇒ `?.()` 永远短路 = 静默 no-op',
+    why: 'AccountPool 在 ff7cf8f9 已删（起点改存 preferredRotation）⇒ `?.()` 永远短路 = 静默 no-op',
   },
   {
     name: 'setUserPickedAccount',

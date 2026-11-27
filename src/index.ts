@@ -1681,7 +1681,7 @@ export function apply(ctx: Context): void {
        * ⚠️ **这里原来有一段「选完回写 pin」的空 if 块，已删除**（2026-11-26）。
        *
        * 历史：它调 `pool.pinSubagentAccount(...)`，而该方法在
-       * `34b2137f` 的重构中**已被删除**（子代理起点改存 `preferredRotation`）。
+       * `ff7cf8f9` 的重构中**已被删除**（子代理起点改存 `preferredRotation`）。
        * ⇒ 只剩一个 `if (…) { }` 空壳，`subagentStart` 已移入上面的闸门块
        *   ⇒ 编译报 `Cannot find name 'subagentStart'`。
        *
