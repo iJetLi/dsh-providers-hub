@@ -3226,10 +3226,11 @@ function registerJetHubEndpoints(
     //    漏登记的症状与国内站逐字相同：积分行报「未登录」而上游其实只需一次
     //    refresh，且**日志零字**（issue IKKHL5 的形态）。
     'magicrewintl',
-    // Today（国内版 / 国际版）：凭据为 Cookie + 按需换取的 JWT，支持 refreshAccountCredential
-    // 重取 JWT 并校验会话/套餐状态，故加入按需自愈集合。
-    'today',
-    'todayintl',
+    // Today（国内版 / 国际版）不进自愈集合（PR #185 审结补正）：
+    // 浏览器 session cookie 凭据无 OAuth refresh 端点，短寿命 API JWT 仅在请求期
+    // 内存按需换取，refreshAccountCredential 只做零网络的对账，不发 HTTP 亦不写池。
+    // 与 doubao / agnescode 同型：余额能读不等于凭据能续 ⇒ 显式豁免于
+    // credits-balance-self-heal.spec.ts。
     // ⚠️ **本 fork 独有**（modelscope，2026-10-17 改判）**仍刻意不在本表里**：
     //    ⚠️ 原注释写「它是 `balance: false`（魔搭没有额度 API）⇒ 积分端点压根不会
     //    为它走这条链」——**那条已被证伪**：魔搭**有**魔粒余额端点

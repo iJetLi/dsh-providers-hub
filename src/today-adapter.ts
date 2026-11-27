@@ -6,6 +6,7 @@
  * @module src/today-adapter.ts
  */
 
+import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   LlmAdapter,
@@ -22,7 +23,7 @@ import { buildDsmlSystemPrompt, type DsmlToolSpec } from './dsml.js'
 import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { createModelCatalog, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
 import { collectImages, serializeMessages } from './openai-compat.js'
-import { createDsmlMarkerNormalizer, resolveEmptyResponseReason } from './sse.js'
+import { createDsmlMarkerNormalizer, fixDsmlMarkers, resolveEmptyResponseReason } from './sse.js'
 import { reportLedgerAccount } from './token-ledger.js'
 import {
   TODAY,
@@ -35,20 +36,86 @@ import {
   TodayUpstreamError,
   ensureTodayModelOption,
   fetchTodayPricingStatus,
+  parseTodayCredential,
   parseTodayModelsFromPricingStatus,
   pollTodayReply,
+  registerTodayCacheCleaner,
   sendTodayMessage,
   todayCredentialFingerprint,
   type TodayCredential,
+  type TodayPollResult,
+  type TodaySentMessage,
 } from './today.js'
 
 const CATALOG_TTL_MS = 300_000
 const WARM_THROTTLE_MS = 60_000
+const THREAD_SESSION_TTL_MS = 30 * 60_000
+const MAX_THREAD_CACHE_ENTRIES = 128
+
+interface ThreadSessionEntry {
+  readonly threadId: string
+  readonly assistantIds: ReadonlySet<string>
+  readonly updatedAtMs: number
+}
+
+const threadSessionCache = new Map<string, ThreadSessionEntry>()
+registerTodayCacheCleaner(() => {
+  threadSessionCache.clear()
+})
+
+/** 导出供单测显式清理多轮会话 `threadId` 缓存。 */
+export function clearTodayThreadCache(): void {
+  threadSessionCache.clear()
+}
+
+function pruneThreadSessionCache(now = Date.now()): void {
+  for (const [k, v] of threadSessionCache) {
+    if (now - v.updatedAtMs >= THREAD_SESSION_TTL_MS) {
+      threadSessionCache.delete(k)
+    }
+  }
+  while (threadSessionCache.size >= MAX_THREAD_CACHE_ENTRIES) {
+    const oldestKey = threadSessionCache.keys().next().value
+    if (oldestKey === undefined) break
+    threadSessionCache.delete(oldestKey)
+  }
+}
 
 /** 单槽（账号 id + 解析后的 Today 凭据）。 */
 export interface TodaySlot {
   readonly accountId: string
   readonly credential: TodayCredential
+}
+
+/**
+ * 生产接线与单测共享的 Today 选号过滤器：
+ * 跳过已停用账号、跳过仍在 `modelId` 冷却期内的账号、并校验 Cookie 凭据与站点 `realm`。
+ */
+export async function selectUsableTodaySlots(
+  entries: readonly {
+    id: string
+    enabled: boolean
+    credentialRef: string
+    modelRateLimits?: Record<string, number>
+  }[],
+  resolveRaw: (refName: string) => Promise<string | undefined>,
+  product: TodayProduct,
+  modelId?: string,
+  nowMs = Date.now(),
+): Promise<readonly TodaySlot[]> {
+  const usable = await Promise.all(entries.map(async (entry): Promise<TodaySlot | undefined> => {
+    if (!entry.enabled) return undefined
+    if (modelId !== undefined && modelId.length > 0) {
+      const resetAt = entry.modelRateLimits?.[modelId]
+      if (typeof resetAt === 'number' && resetAt > nowMs) return undefined
+    }
+    const raw = await resolveRaw(entry.credentialRef)
+    if (raw === undefined) return undefined
+    const parsed = parseTodayCredential(raw, product.realm)
+    if (parsed === undefined) return undefined
+    return { accountId: entry.id, credential: parsed }
+  }))
+  return usable.filter((slot): slot is TodaySlot => slot !== undefined)
 }
 
 export interface TodayAdapterOptions {
@@ -105,13 +172,58 @@ function contentToPlainText(content: unknown): string {
   return parts.join('\n')
 }
 
-/**
- * 将 DSH 会话消息与可选工具定义拼装成 Today 单轮文本提示词。
- *
- * Today 上游 `/v1/messages` 无 system role 与原生 tool role，需按分段标签线性拼接；
- * 当请求携带 `tools` 时，将工具 schema 通过 DSML system 提示注入给模型。
- */
-export function buildTodayPrompt(options: Pick<GenerateOptions, 'messages' | 'system' | 'tools'>): string {
+interface PreparedTurn {
+  readonly roleKey: 'user' | 'assistant' | 'tool'
+  readonly label: string
+  readonly text: string
+}
+
+interface PreparedTodayConversation {
+  readonly systems: readonly string[]
+  readonly turns: readonly PreparedTurn[]
+  readonly fullPrompt: string
+  readonly lastAssistantIdx: number
+  readonly prefixTurns: readonly PreparedTurn[]
+  readonly incrementalPrompt: string
+}
+
+function computeThreadSessionKey(
+  productId: string,
+  accountId: string,
+  systems: readonly string[],
+  turns: readonly PreparedTurn[],
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify({ productId, accountId, systems, turns }), 'utf8')
+    .digest('hex')
+}
+
+function lookupThreadSession(key: string): ThreadSessionEntry | undefined {
+  const entry = threadSessionCache.get(key)
+  if (entry === undefined) return undefined
+  if (Date.now() - entry.updatedAtMs >= THREAD_SESSION_TTL_MS) {
+    threadSessionCache.delete(key)
+    return undefined
+  }
+  return entry
+}
+
+function rememberThreadSession(
+  key: string,
+  threadId: string,
+  prevAssistantIds: ReadonlySet<string> | undefined,
+  newAssistantId: string | undefined,
+): void {
+  const now = Date.now()
+  pruneThreadSessionCache(now)
+  const assistantIds = new Set<string>(prevAssistantIds ?? [])
+  if (newAssistantId !== undefined && newAssistantId.length > 0) {
+    assistantIds.add(newAssistantId)
+  }
+  threadSessionCache.set(key, { threadId, assistantIds, updatedAtMs: now })
+}
+
+function prepareTodayConversation(options: Pick<GenerateOptions, 'messages' | 'system' | 'tools'>): PreparedTodayConversation {
   const serialized = serializeMessages(
     options.messages as readonly { role: string; content: unknown }[],
   )
@@ -131,7 +243,8 @@ export function buildTodayPrompt(options: Pick<GenerateOptions, 'messages' | 'sy
     systems.push(buildDsmlSystemPrompt(dsmlTools))
   }
 
-  const turns: Array<{ label: string; text: string }> = []
+  const turns: PreparedTurn[] = []
+  let lastAssistantIdx = -1
   for (const msg of serialized) {
     const role = typeof msg.role === 'string' ? msg.role.toLowerCase() : 'user'
     let text = contentToPlainText(msg.content)
@@ -149,36 +262,59 @@ export function buildTodayPrompt(options: Pick<GenerateOptions, 'messages' | 'sy
       continue
     }
     if (role === 'assistant') {
-      if (text.trim().length > 0) turns.push({ label: '助手', text })
+      if (text.trim().length > 0) {
+        lastAssistantIdx = turns.length
+        turns.push({ roleKey: 'assistant', label: '助手', text })
+      }
       continue
     }
     if (role === 'tool') {
-      if (text.trim().length > 0) turns.push({ label: '工具结果', text })
+      if (text.trim().length > 0) turns.push({ roleKey: 'tool', label: '工具结果', text })
       continue
     }
     if (text.trim().length > 0) {
-      turns.push({ label: '用户', text })
+      turns.push({ roleKey: 'user', label: '用户', text })
     }
   }
 
+  let fullPrompt: string
   if (turns.length === 0) {
-    return systems.join('\n\n')
+    fullPrompt = systems.join('\n\n')
+  } else {
+    const chunks: string[] = []
+    if (systems.length > 0) {
+      chunks.push(`[系统指令]\n${systems.join('\n\n')}`)
+    }
+    if (turns.length > 1) {
+      const historyLines = turns.slice(0, -1).map((t) => `${t.label}：${t.text}`).join('\n')
+      chunks.push(`[历史对话]\n${historyLines}\n[当前消息]\n${turns[turns.length - 1]!.text}`)
+    } else {
+      chunks.push(turns[0]!.text)
+    }
+    fullPrompt = chunks.join('\n\n').trim()
   }
 
-  const chunks: string[] = []
-  if (systems.length > 0) {
-    chunks.push(`[系统指令]\n${systems.join('\n\n')}`)
-  }
-  if (turns.length > 1) {
-    const historyLines = turns.slice(0, -1).map((t) => `${t.label}：${t.text}`).join('\n')
-    chunks.push(`[历史对话]\n${historyLines}\n[当前消息]\n${turns[turns.length - 1]!.text}`)
-  } else {
-    chunks.push(turns[0]!.text)
-  }
-  return chunks.join('\n\n').trim()
+  const canContinue = lastAssistantIdx >= 0 && lastAssistantIdx < turns.length - 1
+  const prefixTurns = canContinue ? turns.slice(0, lastAssistantIdx + 1) : []
+  const deltaTurns = canContinue ? turns.slice(lastAssistantIdx + 1) : []
+  const incrementalPrompt = deltaTurns.length === 1 && deltaTurns[0]!.roleKey === 'user'
+    ? deltaTurns[0]!.text
+    : deltaTurns.map((t) => `${t.label}：${t.text}`).join('\n').trim()
+
+  return { systems, turns, fullPrompt, lastAssistantIdx, prefixTurns, incrementalPrompt }
 }
 
-type FailureKind = 'auth' | 'rate_limit' | 'quota' | 'server' | 'transport' | 'invalid_request'
+/**
+ * 将 DSH 会话消息与可选工具定义拼装成 Today 单轮文本提示词。
+ *
+ * Today 上游 `/v1/messages` 无 system role 与原生 tool role，需按分段标签线性拼接；
+ * 当请求携带 `tools` 时，将工具 schema 通过 DSML system 提示注入给模型。
+ */
+export function buildTodayPrompt(options: Pick<GenerateOptions, 'messages' | 'system' | 'tools'>): string {
+  return prepareTodayConversation(options).fullPrompt
+}
+
+type FailureKind = 'auth' | 'rate_limit' | 'quota' | 'server' | 'transport' | 'invalid_request' | 'timeout'
 
 function classifyTodayError(error: unknown): { kind: FailureKind; retryAfterMs?: number; status?: number } {
   if (error instanceof TodayUpstreamError) {
@@ -187,9 +323,13 @@ function classifyTodayError(error: unknown): { kind: FailureKind; retryAfterMs?:
     if (s === 401 || s === 403) return { kind: 'auth', status: s }
     if (s === 429) return { kind: 'rate_limit', status: s, ...(retry !== undefined ? { retryAfterMs: retry } : {}) }
     if (s === 402) return { kind: 'quota', status: s, ...(retry !== undefined ? { retryAfterMs: retry } : {}) }
+    if (s === 408 || s === 504) return { kind: 'timeout', status: s }
     if (s === 400 || s === 404 || s === 422) return { kind: 'invalid_request', status: s }
     if (s >= 500) return { kind: 'server', status: s }
     return { kind: 'transport', status: s }
+  }
+  if (error instanceof Error && error.name === 'TimeoutError') {
+    return { kind: 'timeout' }
   }
   return { kind: 'transport' }
 }
@@ -363,8 +503,8 @@ export class TodayAdapter extends LlmAdapter {
       throw new LlmError(`${this.product.id}: 无效的模型 id "${options.model}"`, 'BAD_REQUEST')
     }
 
-    const prompt = buildTodayPrompt(options)
-    if (prompt.length === 0) {
+    const prepared = prepareTodayConversation(options)
+    if (prepared.fullPrompt.length === 0) {
       throw new LlmError(`${this.product.id}: 请求消息内容为空`, 'BAD_REQUEST')
     }
 
@@ -383,7 +523,7 @@ export class TodayAdapter extends LlmAdapter {
 
       let delivered = false
       try {
-        for await (const chunk of this.streamVia(slot, modelEntry, prompt, options.signal)) {
+        for await (const chunk of this.streamVia(slot, modelEntry, prepared, options.signal)) {
           delivered = true
           yield chunk
         }
@@ -395,7 +535,7 @@ export class TodayAdapter extends LlmAdapter {
         const classified = classifyTodayError(error)
         const wrapped = this.toLlmError(error, classified.kind, classified.status, classified.retryAfterMs)
 
-        if (classified.kind === 'invalid_request') {
+        if (classified.kind === 'invalid_request' || classified.kind === 'timeout') {
           throw wrapped
         }
         if (classified.kind === 'auth') {
@@ -430,9 +570,11 @@ export class TodayAdapter extends LlmAdapter {
         ? 'RATE_LIMIT'
         : kind === 'quota'
           ? 'QUOTA_EXCEEDED'
-          : kind === 'invalid_request'
-            ? 'BAD_REQUEST'
-            : 'SERVER'
+          : kind === 'timeout'
+            ? 'TIMEOUT'
+            : kind === 'invalid_request'
+              ? 'BAD_REQUEST'
+              : 'SERVER'
     const suffix = kind === 'auth'
       ? `（Cookie 可能已过期，请在「${this.product.displayName}」面板更新 Cookie）`
       : ''
@@ -445,21 +587,44 @@ export class TodayAdapter extends LlmAdapter {
   private async *streamVia(
     slot: TodaySlot,
     modelEntry: TodayModelEntry,
-    prompt: string,
+    prepared: PreparedTodayConversation,
     signal?: AbortSignal,
   ): AsyncIterable<StreamChunk> {
     const fetcher = this.options.fetchImpl ?? globalThis.fetch
     const reqOpts = { fetcher, ...(signal ? { signal } : {}) }
 
     await ensureTodayModelOption(slot.credential, this.product, modelEntry.optionId, reqOpts)
-    const threadId = await sendTodayMessage(slot.credential, this.product, prompt, reqOpts)
+
+    const prefixKey = prepared.prefixTurns.length > 0 && prepared.incrementalPrompt.length > 0
+      ? computeThreadSessionKey(this.product.id, slot.accountId, prepared.systems, prepared.prefixTurns)
+      : undefined
+    let cachedSession = prefixKey !== undefined ? lookupThreadSession(prefixKey) : undefined
+    let sent: TodaySentMessage
+    if (cachedSession !== undefined) {
+      try {
+        sent = await sendTodayMessage(slot.credential, this.product, prepared.incrementalPrompt, {
+          ...reqOpts,
+          threadId: cachedSession.threadId,
+        })
+      } catch (err) {
+        if (err instanceof TodayUpstreamError && err.status === 404) {
+          if (prefixKey !== undefined) threadSessionCache.delete(prefixKey)
+          cachedSession = undefined
+          sent = await sendTodayMessage(slot.credential, this.product, prepared.fullPrompt, reqOpts)
+        } else {
+          throw err
+        }
+      }
+    } else {
+      sent = await sendTodayMessage(slot.credential, this.product, prepared.fullPrompt, reqOpts)
+    }
 
     // 通过异步队列在轮询过程中实时吐出增量分片
     const queue: string[] = []
     let notify: (() => void) | undefined
     let finished = false
     let pollError: unknown
-    let fullText = ''
+    let pollResult: TodayPollResult | undefined
 
     const wake = () => {
       if (notify !== undefined) {
@@ -469,8 +634,11 @@ export class TodayAdapter extends LlmAdapter {
       }
     }
 
-    const pollTask = pollTodayReply(slot.credential, this.product, threadId, {
+    const pollTask = pollTodayReply(slot.credential, this.product, sent.threadId, {
       ...reqOpts,
+      ...(sent.messageId !== undefined ? { userMessageId: sent.messageId } : {}),
+      clientMessageId: sent.clientMessageId,
+      ...(cachedSession !== undefined ? { excludeAssistantIds: cachedSession.assistantIds } : {}),
       onDelta: (delta) => {
         if (delta.length > 0) {
           queue.push(delta)
@@ -478,8 +646,8 @@ export class TodayAdapter extends LlmAdapter {
         }
       },
     }).then(
-      (text) => {
-        fullText = text
+      (res) => {
+        pollResult = res
         finished = true
         wake()
       },
@@ -492,14 +660,12 @@ export class TodayAdapter extends LlmAdapter {
 
     const dsmlFix = createDsmlMarkerNormalizer()
     let started = false
-    let rawEmittedLen = 0
     let emittedText = ''
     const blockIndex = 0
 
     for (;;) {
       while (queue.length > 0) {
         const delta = queue.shift()!
-        rawEmittedLen += delta.length
         const fixed = dsmlFix.push(delta)
         if (fixed.length === 0) continue
         if (!started) {
@@ -516,32 +682,41 @@ export class TodayAdapter extends LlmAdapter {
     await pollTask
     if (pollError !== undefined) throw pollError
 
-    if (fullText.length > rawEmittedLen) {
-      const rest = fullText.slice(rawEmittedLen)
-      rawEmittedLen = fullText.length
-      const fixed = dsmlFix.push(rest)
-      if (fixed.length > 0) {
+    const result = pollResult ?? { text: '', rewritten: false }
+    if (!result.rewritten) {
+      const tail = dsmlFix.flush()
+      if (tail.length > 0) {
         if (!started) {
           started = true
           yield { type: 'block-start', index: blockIndex, blockType: 'text' }
         }
-        emittedText += fixed
-        yield { type: 'text-delta', index: blockIndex, text: fixed }
+        emittedText += tail
+        yield { type: 'text-delta', index: blockIndex, text: tail }
       }
-    }
-
-    const tail = dsmlFix.flush()
-    if (tail.length > 0) {
-      if (!started) {
+      if (started) {
+        yield { type: 'block-end', index: blockIndex, block: { type: 'text', text: emittedText } }
+      }
+    } else {
+      // 上游发生了非前缀改写：丢弃旧缓冲、绝不再切片追加错串；以终态权威全文收尾
+      dsmlFix.flush()
+      const authoritativeText = fixDsmlMarkers(result.text)
+      if (!started && authoritativeText.length > 0) {
         started = true
         yield { type: 'block-start', index: blockIndex, blockType: 'text' }
+        yield { type: 'text-delta', index: blockIndex, text: authoritativeText }
       }
-      emittedText += tail
-      yield { type: 'text-delta', index: blockIndex, text: tail }
+      if (started) {
+        yield { type: 'block-end', index: blockIndex, block: { type: 'text', text: authoritativeText } }
+      }
     }
 
-    if (started) {
-      yield { type: 'block-end', index: blockIndex, block: { type: 'text', text: emittedText } }
+    if (result.text.length > 0) {
+      const nextTurns: PreparedTurn[] = [
+        ...prepared.turns,
+        { roleKey: 'assistant', label: '助手', text: result.text },
+      ]
+      const nextKey = computeThreadSessionKey(this.product.id, slot.accountId, prepared.systems, nextTurns)
+      rememberThreadSession(nextKey, sent.threadId, cachedSession?.assistantIds, result.messageId)
     }
 
     const reason = resolveEmptyResponseReason({ kind: 'stop' }, started ? 1 : 0)

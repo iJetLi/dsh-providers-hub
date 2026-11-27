@@ -79,14 +79,21 @@ interface CachedModelSelection {
 
 const jwtCache = new Map<string, CachedJwtEntry>()
 const selectedModelCache = new Map<string, CachedModelSelection>()
+const extraCacheCleaners: Array<() => void> = []
 const MODEL_SELECTION_TTL_MS = 10 * 60_000
 const JWT_REFRESH_LEAD_MS = 60_000
 const DEFAULT_HTTP_TIMEOUT_MS = 30_000
+
+/** 注册需要随 `clearTodayRuntimeCaches` 一并清理的附属缓存回调。 */
+export function registerTodayCacheCleaner(fn: () => void): void {
+  extraCacheCleaners.push(fn)
+}
 
 /** 仅供单测清空运行时缓存。 */
 export function clearTodayRuntimeCaches(): void {
   jwtCache.clear()
   selectedModelCache.clear()
+  for (const clean of extraCacheCleaners) clean()
 }
 
 /** 计算凭据稳定指纹，用作 JWT / 模型选择缓存键与去重依据。 */
@@ -128,11 +135,18 @@ export function parseTodayCredential(
   if (normalized.header.length === 0) return undefined
 
   const rawRealm = typeof o.realm === 'string' ? o.realm.trim().toLowerCase() : ''
-  const realm: TodayRealm = rawRealm === 'cn'
-    ? 'cn'
-    : rawRealm === 'global'
-      ? 'global'
-      : normalized.realmHint ?? expectedRealm ?? 'global'
+  if (rawRealm.length > 0 && rawRealm !== 'cn' && rawRealm !== 'global') return undefined
+
+  let realm: TodayRealm
+  if (rawRealm === 'cn' || rawRealm === 'global') {
+    if (expectedRealm !== undefined && rawRealm !== expectedRealm) return undefined
+    realm = rawRealm
+  } else {
+    if (normalized.realmHint !== undefined && expectedRealm !== undefined && normalized.realmHint !== expectedRealm) {
+      return undefined
+    }
+    realm = normalized.realmHint ?? expectedRealm ?? 'global'
+  }
 
   return {
     cookie_raw: normalized.header,
@@ -224,13 +238,25 @@ function parseCookieString(raw: string): string {
   if (s.includes(';')) {
     s = s.replace(/\n/g, ' ')
     const pairs: string[] = []
+    const seen = new Map<string, number>()
+    const pushDedup = (pair: string): void => {
+      const eqIdx = pair.indexOf('=')
+      const key = eqIdx > 0 ? pair.slice(0, eqIdx) : pair
+      const prevIdx = seen.get(key)
+      if (prevIdx !== undefined) {
+        pairs[prevIdx] = pair
+      } else {
+        seen.set(key, pairs.length)
+        pairs.push(pair)
+      }
+    }
     for (const rawSeg of s.split(';')) {
       const seg = rawSeg.trim()
       if (seg.length === 0 || isCookieAttribute(seg)) continue
       const eq = seg.indexOf('=')
       if (eq < 0) {
         if (pairs.length === 0) {
-          pairs.push(formatCookiePair(TODAY_SESSION_COOKIE_NAME, removeAllWhitespace(seg)))
+          pushDedup(formatCookiePair(TODAY_SESSION_COOKIE_NAME, removeAllWhitespace(seg)))
         }
         continue
       }
@@ -238,12 +264,12 @@ function parseCookieString(raw: string): string {
       const rhs = seg.slice(eq + 1).trim()
       if (rhs.replace(/=+$/, '').length === 0 || !isCookieName(lhs)) {
         if (lhs.length > 0 && !COOKIE_ATTR_KEYS.has(lhs.toLowerCase())) {
-          pairs.push(formatCookiePair(TODAY_SESSION_COOKIE_NAME, removeAllWhitespace(seg)))
+          pushDedup(formatCookiePair(TODAY_SESSION_COOKIE_NAME, removeAllWhitespace(seg)))
         }
         continue
       }
       if (rhs.length > 0) {
-        pairs.push(formatCookiePair(lhs, rhs))
+        pushDedup(formatCookiePair(lhs, rhs))
       }
     }
     return pairs.join('; ')
@@ -784,13 +810,20 @@ export async function ensureTodayModelOption(
   selectedModelCache.set(cacheKey, { optionId, checkedAtMs: Date.now() })
 }
 
-/** 发送一轮用户消息，返回 `threadId`。 */
+/** `sendTodayMessage` 发送结果锚点（供轮询锁消息与多轮延续使用）。 */
+export interface TodaySentMessage {
+  readonly threadId: string
+  readonly messageId?: string
+  readonly clientMessageId: string
+}
+
+/** 发送一轮用户消息，返回会话与消息锚点。 */
 export async function sendTodayMessage(
   credential: TodayCredential,
   product: TodayProduct,
   text: string,
   options: { fetcher?: typeof fetch; signal?: AbortSignal; threadId?: string } = {},
-): Promise<string> {
+): Promise<TodaySentMessage> {
   const clientMessageId = `msg_${randomBytes(12).toString('hex')}`
   const body: Record<string, unknown> = {
     content: text,
@@ -815,15 +848,27 @@ export async function sendTodayMessage(
   if (threadId.length === 0) {
     throw new TodayUpstreamError(`messages response missing threadId: ${res.text.slice(0, 200)}`, 502)
   }
-  return threadId
+  const rawMsgId = typeof obj.messageId === 'string' && obj.messageId.trim().length > 0
+    ? obj.messageId.trim()
+    : typeof obj.id === 'string' && obj.id.trim().length > 0
+      ? obj.id.trim()
+      : undefined
+  return {
+    threadId,
+    ...(rawMsgId !== undefined ? { messageId: rawMsgId } : {}),
+    clientMessageId,
+  }
 }
 
 interface ConversationMessageItem {
+  readonly id: string
+  readonly clientMessageId: string
   readonly threadId: string
   readonly role: string
   readonly state: string
   readonly isFinal: boolean
   readonly text: string
+  readonly createdAtMs?: number
 }
 
 function extractConversationItems(json: unknown): ConversationMessageItem[] {
@@ -844,12 +889,22 @@ function extractConversationItems(json: unknown): ConversationMessageItem[] {
       const content = (typeof part.content === 'object' && part.content !== null ? part.content : {}) as Record<string, unknown>
       if (typeof content.text === 'string') text += content.text
     }
+    const id = typeof item.id === 'string' && item.id.trim().length > 0
+      ? item.id.trim()
+      : typeof item.messageId === 'string' && item.messageId.trim().length > 0
+        ? item.messageId.trim()
+        : ''
+    const clientMessageId = typeof item.clientMessageId === 'string' ? item.clientMessageId.trim() : ''
+    const createdAtParsed = typeof item.createdAt === 'string' ? Date.parse(item.createdAt) : Number.NaN
     out.push({
+      id,
+      clientMessageId,
       threadId: typeof item.threadId === 'string' ? item.threadId : '',
       role: typeof item.role === 'string' ? item.role : '',
       state: typeof item.state === 'string' ? item.state : '',
       isFinal: item.isFinal === true,
       text,
+      ...(Number.isFinite(createdAtParsed) ? { createdAtMs: createdAtParsed } : {}),
     })
   }
   return out
@@ -870,7 +925,14 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** 轮询 `GET /v1/conversations/messages` 直到助手回复完成，期间增量推送 delta。 */
+/** `pollTodayReply` 返回结果。 */
+export interface TodayPollResult {
+  readonly text: string
+  readonly messageId?: string
+  readonly rewritten: boolean
+}
+
+/** 轮询 `GET /v1/conversations/messages` 直到助手回复完成，按消息 ID 与游标安全推进。 */
 export async function pollTodayReply(
   credential: TodayCredential,
   product: TodayProduct,
@@ -881,28 +943,39 @@ export async function pollTodayReply(
     timeoutMs?: number
     initialIntervalMs?: number
     maxIntervalMs?: number
+    userMessageId?: string
+    clientMessageId?: string
+    excludeAssistantIds?: ReadonlySet<string>
     onDelta?: (delta: string) => void
   } = {},
-): Promise<string> {
+): Promise<TodayPollResult> {
   const timeoutMs = options.timeoutMs ?? product.fetchTimeoutMs
   const deadline = Date.now() + timeoutMs
   let intervalMs = options.initialIntervalMs ?? product.initialPollIntervalMs
   const maxIntervalMs = options.maxIntervalMs ?? product.maxPollIntervalMs
-  let last = ''
+  let lockedMessageId: string | undefined
+  let emitted = ''
+  let rewritten = false
 
   for (;;) {
     if (options.signal?.aborted) {
       throw options.signal.reason ?? new Error('aborted')
     }
     if (Date.now() > deadline) {
-      if (last.length > 0) return last
+      if (emitted.length > 0) {
+        return {
+          text: emitted,
+          ...(lockedMessageId !== undefined ? { messageId: lockedMessageId } : {}),
+          rewritten,
+        }
+      }
       throw new TodayUpstreamError(`today upstream did not answer within ${timeoutMs}ms`, 504)
     }
     const res = await callTodayApi(
       credential,
       product,
       'GET',
-      '/v1/conversations/messages?isMainChat=true&limit=3',
+      '/v1/conversations/messages?isMainChat=true&limit=10',
       undefined,
       options,
     )
@@ -914,15 +987,54 @@ export async function pollTodayReply(
       )
     }
     const items = extractConversationItems(res.json)
+    const userItem = items.find((it) => it.threadId === threadId && it.role === 'user' && (
+      (options.userMessageId !== undefined && options.userMessageId.length > 0 && it.id === options.userMessageId)
+      || (options.clientMessageId !== undefined && options.clientMessageId.length > 0 && it.clientMessageId === options.clientMessageId)
+    ))
+
     for (const item of items) {
       if (item.threadId !== threadId || item.role !== 'assistant') continue
-      if (item.text.length === 0) continue
-      if (options.onDelta && item.text.length > last.length && item.text.startsWith(last)) {
-        options.onDelta(item.text.slice(last.length))
+      if (lockedMessageId !== undefined) {
+        if (item.id !== lockedMessageId) continue
+      } else {
+        if (item.id.length > 0 && options.excludeAssistantIds?.has(item.id)) continue
+        if (userItem?.createdAtMs !== undefined && item.createdAtMs !== undefined && item.createdAtMs < userItem.createdAtMs) {
+          continue
+        }
+        if (item.id.length > 0) {
+          lockedMessageId = item.id
+        }
       }
-      last = item.text
+
+      if (item.state === 'failed' || item.state === 'error' || item.state === 'canceled' || item.state === 'cancelled') {
+        throw new TodayUpstreamError(`today assistant reply failed with state: ${item.state}`, 422)
+      }
+
+      if (item.text.length > 0 && !rewritten) {
+        if (item.text.startsWith(emitted)) {
+          if (item.text.length > emitted.length) {
+            const delta = item.text.slice(emitted.length)
+            emitted = item.text
+            options.onDelta?.(delta)
+          }
+        } else if (emitted.startsWith(item.text)) {
+          // 乱序旧短快照，保持当前游标不变
+        } else {
+          // 非前缀改写：不再向流内增量拼尾，待完成时由块终帧整体校正
+          rewritten = true
+        }
+      }
+
       if (item.state === 'completed' || item.isFinal) {
-        return item.text
+        if (emitted.length > 0 && item.text !== emitted) {
+          rewritten = true
+        }
+        const messageId = lockedMessageId ?? (item.id.length > 0 ? item.id : undefined)
+        return {
+          text: item.text,
+          ...(messageId !== undefined ? { messageId } : {}),
+          rewritten,
+        }
       }
     }
     await sleepAbortable(intervalMs, options.signal)

@@ -224,7 +224,7 @@ describe('credits.balances 的按需自愈（issue IKKHL5 建议 C）', () => {
     //（`loomy-auth.ts` 的 LOOMY_SESSION_TTL_SECONDS）、之后永不变更 ⇒ 14 天后
     // **确定可达**，属必然噪音（AGENTS.md：「重复同一行会把有用信息埋掉」）。
     // 故这里同时锁「不发请求」与「不记 warn」两件事 —— 只锁前者会漏掉噪音。
-    for (const provider of ['loomy', 'zcode', 'opencode']) {
+    for (const provider of ['loomy', 'zcode', 'opencode', 'today', 'todayintl']) {
       const h = setup({ accounts: [expiredEntry({ id: `id-${provider}`, provider })] })
       await h.call('credits.balances', { provider })
 
@@ -766,16 +766,17 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     //    （约 28 天 JWT），协议里没有 refresh 端点 ⇒ 自愈链无事可做。
     ['agnescode', '桌面客户端会话凭据（约 28 天 JWT）、无 refresh 端点 ⇒ 自愈链无事可做'],
     ['agnescodeintl', '与国内站同源：同一套会话格式与端点，无 refresh 端点'],
+    // Today（国内版 / 国际版）：浏览器 session_token Cookie 凭据，无 refresh 端点；
+    // 短寿命 API JWT 仅在请求期内存按需换取、不写池 ⇒ 自愈链无事可做。
+    ['today', '浏览器 Cookie 凭据、上游无 refresh 端点（刷新失败只能重新导入 Cookie）'],
+    ['todayintl', '浏览器 Cookie 凭据、上游无 refresh 端点（与国内站同型，无 refresh 端点）'],
   ])
 
   it('★ Set 里的字面量恰好是 codearts / buddy / workbuddy（多一个少一个都红）', () => {
     const { literals } = selfHealSetParts()
     // ⚠️ 2026-11-01 加 `magicrewintl`（MagiCrew 国际版）：与 `magicrew` 同形 ——
     //    两站共用同一个 `mgw_` key（**2 小时**寿命）与同一个 refresh 端点。
-    // ⚠️ 加 `today` / `todayintl`（Today 两站）：cookie 换取短寿命 JWT，支持按需自愈。
-    expect(literals.slice().sort()).toEqual([
-      'buddy', 'codearts', 'magicrew', 'magicrewintl', 'today', 'todayintl', 'workbuddy',
-    ])
+    expect(literals.slice().sort()).toEqual(['buddy', 'codearts', 'magicrew', 'magicrewintl', 'workbuddy'])
   })
 
   it('★ Set 里的 `.id` 常量恰好是登记的那些家（逐家点名，不写魔数阈值）', () => {
@@ -800,7 +801,7 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     expect([...inSet].sort()).toEqual([
       'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'cline', 'codearts', 'codely',
       'gemini', 'lobsterai', 'magicrew', 'magicrewintl', 'marvis', 'minimax', 'minimaxintl', 'officeace',
-      'qoder', 'qodercn', 'raccoon', 'today', 'todayintl', 'trae', 'workbuddy',
+      'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy',
     ])
     // 反向：两家没有 refresh 端点，必须**静默跳过**而非尝试续期。
     expect(inSet.has('loomy')).toBe(false)
@@ -865,6 +866,10 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
       //    ⚠️ 与 baizhi 同型：**余额能读 ≠ 凭据能续**。
       ['agnescode', '桌面客户端会话凭据（约 28 天 JWT）、上游无 refresh 端点（余额能读 ≠ 凭据能续）'],
       ['agnescodeintl', '与国内站同源：同一套会话格式与端点，无 refresh 端点'],
+      // Today（国内版 / 国际版）：浏览器 session_token Cookie 凭据，无 refresh 端点；
+      // 短寿命 API JWT 仅在请求期内存按需换取、不写池 ⇒ 自愈链无事可做。
+      ['today', '浏览器 Cookie 凭据、上游无 refresh 端点（刷新失败只能重新导入 Cookie）'],
+      ['todayintl', '浏览器 Cookie 凭据、上游无 refresh 端点（与国内站同型，无 refresh 端点）'],
     ])
     const { literals, constants } = selfHealSetParts()
     const inSet = new Set([...literals, ...constants.map((c) => ID_OF[c] ?? c)])
