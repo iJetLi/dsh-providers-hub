@@ -133,6 +133,8 @@ const AUTH_SERVICE_OF: ReadonlyArray<readonly [string, string]> = [
   //    池内 `expiresAt`）⇒ 两站都必须注册 auth 实例（与 monkeycode 同型）。
   ['agnescode', 'agnescodeAuth'],
   ['agnescodeintl', 'agnescodeintlAuth'],
+  ['today', 'todayAuth'],
+  ['todayintl', 'todayintlAuth'],
 ]
 
 /**
@@ -468,7 +470,8 @@ describe('★ index.ts 的能力注册表接线（行为断言，替代源码文
     // 2026-11-02: baizhi 接入后 26 -> 27。
     // 2026-11-09: marvis 接入后 27 -> 28。
     // 2026-11-19: agnescode + agnescodeintl 接入后 28 -> 30（两站各一个 id）。
-    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(30)
+    // today + todayintl 接入后 30 -> 32（两站各一个 id）。
+    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(32)
     expect(
       registeredRuntimeIds().sort(),
       'registry 里有账号的 provider 必须都注册进能力注册表（左侧多出 = 清单里多了僵尸项，' +
@@ -597,6 +600,7 @@ describe('★ index.ts 的 probe 域接线（Task 8 复审补齐：此前零守�
     //    `WRITES_RATE_LIMIT_PROVIDERS` 与 `probeById`（否则标记永远清不掉）。
     // ⚠️ 两站共用同一份实现 ⇒ 漏登记任一站即红。
     ['agnescode-adapter.ts', ['agnescode', 'agnescodeintl']],
+    ['today-adapter.ts', ['today', 'todayintl']],
     // ⚠️ 豆包（doubao，2026-11-22）**不写** `modelRateLimits`：本适配器只做
     // 目录 / 额度 / 文本流式，尚未接请求级换号与冷却 ⇒ registry 里
     // `rateLimit: false`，与 officeace / astudio 同形。留空是**被验证的声明**

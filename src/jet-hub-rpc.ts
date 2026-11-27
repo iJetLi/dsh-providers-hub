@@ -368,6 +368,9 @@ import { BAIZHI } from './baizhi-product.js'
 // 凭据，打码规则散到客户端必然与宿主漂移。
 import { maskBaizhiKey, type BaizhiCredential } from './baizhi.js'
 import { parseBaizhiCredential, handleBaizhiRpc, baizhiSlotNamesOf } from './baizhi-rpc.js'
+import type { TodayAuth } from './today-auth.js'
+import { TODAY, TODAY_INTL } from './today-product.js'
+import { handleTodayRpc } from './today-rpc.js'
 import { clearDeadModels, deadModelIdsFor } from './dead-model-store.js'
 import { OPENCODE } from './opencode-product.js'
 import type {
@@ -2033,6 +2036,8 @@ export interface JetHubAuths {
    *（minimax / monkeycode 都复发过同一形态）。
    */
   readonly agnescodeintl: AgnescodeAuth
+  readonly today: TodayAuth
+  readonly todayintl: TodayAuth
 }
 
 /**
@@ -3221,6 +3226,10 @@ function registerJetHubEndpoints(
     //    漏登记的症状与国内站逐字相同：积分行报「未登录」而上游其实只需一次
     //    refresh，且**日志零字**（issue IKKHL5 的形态）。
     'magicrewintl',
+    // Today（国内版 / 国际版）：凭据为 Cookie + 按需换取的 JWT，支持 refreshAccountCredential
+    // 重取 JWT 并校验会话/套餐状态，故加入按需自愈集合。
+    'today',
+    'todayintl',
     // ⚠️ **本 fork 独有**（modelscope，2026-10-17 改判）**仍刻意不在本表里**：
     //    ⚠️ 原注释写「它是 `balance: false`（魔搭没有额度 API）⇒ 积分端点压根不会
     //    为它走这条链」——**那条已被证伪**：魔搭**有**魔粒余额端点
@@ -5352,6 +5361,14 @@ function registerJetHubEndpoints(
     }
     if (method.startsWith('baizhi.')) {
       const handled = await handleBaizhiRpc(ctx, pool as never, method, payload)
+      if (handled !== undefined) return handled
+    }
+    if (method.startsWith('today.')) {
+      const handled = await handleTodayRpc(ctx, pool as never, method, payload, TODAY)
+      if (handled !== undefined) return handled
+    }
+    if (method.startsWith('todayintl.')) {
+      const handled = await handleTodayRpc(ctx, pool as never, method, payload, TODAY_INTL)
       if (handled !== undefined) return handled
     }
     switch (method) {

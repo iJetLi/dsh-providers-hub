@@ -304,6 +304,9 @@ export const PROVIDERS_WITHOUT_REASONING: readonly string[] = Object.freeze([
   // ⚠️ 将来若上游下发档位，把它从这里删掉并同时给 `resolveModel` 接上。
   'agnescode',
   'agnescodeintl',
+  // Today（国内版 / 国际版）：模型目录来自 /v1/pricing/status，模型条目不声明思考档位。
+  'today',
+  'todayintl',
 ])
 
 /**

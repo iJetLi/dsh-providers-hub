@@ -266,6 +266,8 @@ describe('★★ 接线的**透传**腿（`provider-expiry.ts` 的 `context.cach
     //    ⚠️ 两站各一项：账池不互通、域名族不同；漏了它本表就漏测那两家的透传。
     'agnescode',
     'agnescodeintl',
+    'today',
+    'todayintl',
   ] as const
 
   it('★★ 所有接了 `cachedBalance` 透传的渠道都必须真的透传（本表即清单）', async () => {

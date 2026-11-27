@@ -88,6 +88,7 @@ import {
 import { MarvisLoginModal } from './marvis-login-modal.js';
 // 豆包登录弹窗（本 fork，2026-11-26）：只支持粘贴浏览器 Cookie 导入，不再扫码。
 import { DoubaoCookieModal } from './doubao-cookie-modal.js';
+import { TodayCookieModal } from './today-cookie-modal.js';
 import {
   copyToClipboard,
   formatModelIdList,
@@ -1901,7 +1902,7 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
   onOpenWebSession,
   // ⚠️ **本 fork 独有**（MonkeyCode 两站 / 百智云）：两个「改 Key」+ 一个「登录」。
   // 同为 props 存在性开关（而非 provider 硬判断），见各自按钮处注释。
-  onEditMonkeycodeKey, onEditBaizhiKey, onReadSession }) {
+  onEditMonkeycodeKey, onEditBaizhiKey, onReadSession, onEditTodayCookie }) {
   /**
    * 「这个号还能不能用」的判据全部收在 `account-status.js`（纯函数，有单测）：
    * 那里区分了**逐模型限流**（会自己好）与**账号级封禁**（只能重新登录），
@@ -2179,6 +2180,12 @@ function AccountCard({ account, index, order, provider, onToggle, onDelete, onRe
         disabled: busy,
         onClick: () => onReadSession(account.id),
       }, account.baizhiHasSession ? '重新登录' : '登录') : null,
+      onEditTodayCookie ? React.createElement('button', {
+        className: 'dim-jh-btn',
+        title: '更新该 Today 账号的浏览器 Cookie',
+        disabled: busy,
+        onClick: () => onEditTodayCookie(account.id),
+      }, '更新 Cookie') : null,
       // ⚠️ **只显示垃圾桶图标**（用户 2026-10-26 要求「删除按钮改为图标」）。
       //    ⚠️ 换成图标后有两处**必须**补上，否则是净损失：
       //    ① `title` —— 原按钮文案「删除」自带动作语义，图标不自解释；
@@ -5079,6 +5086,7 @@ function ProviderPanel({
    *    的语法（`provider` 字段 + 逐分支配对）多出第三种语义。
    */
   const [doubaoCookie, setDoubaoCookie] = React.useState(null);
+  const [todayModal, setTodayModal] = React.useState(null);
   // 正在进行的限流操作：null | 'one' | 'all'。用于禁用按钮并显示进度。
   const [probeBusy, setProbeBusy] = React.useState(null);
   // 上一次重测/重置的结果文案（成功或失败）。
@@ -6731,6 +6739,61 @@ function ProviderPanel({
       });
     }
   };
+  const submitTodayCookie = async (rawCookie, targetProvider, editAccountId) => {
+    const cookie = String(rawCookie == null ? '' : rawCookie).trim();
+    if (cookie === '') return;
+    setCreating(true);
+    try {
+      const res = editAccountId
+        ? await rpcCall(`${targetProvider}.setCookie`, { accountId: editAccountId, cookie })
+        : await rpcCall(`${targetProvider}.addAccount`, { cookie });
+      setTodayModal(null);
+      await loadAccounts();
+      await loadCredits(true);
+      setProbeNotice({
+        tone: 'ok',
+        text: editAccountId
+          ? '已更新 Today Cookie。'
+          : res && res.existed
+            ? '该 Today 账号已存在，已更新其 Cookie 凭据。'
+            : '已添加 Today 账号。',
+        details: [],
+      });
+    } catch (caught) {
+      const message = caught && caught.message ? caught.message : '未知错误';
+      setTodayModal((prev) => (prev ? { ...prev, error: message } : prev));
+    } finally {
+      setCreating(false);
+    }
+  };
+  const sendTodayOtp = async (email, targetProvider) => {
+    try {
+      await rpcCall(`${targetProvider}.sendOtp`, { email });
+    } catch (caught) {
+      const message = caught && caught.message ? caught.message : '发送验证码失败';
+      setTodayModal((prev) => (prev ? { ...prev, error: message } : prev));
+      throw caught;
+    }
+  };
+  const verifyTodayOtp = async (email, otp, targetProvider) => {
+    setCreating(true);
+    try {
+      const res = await rpcCall(`${targetProvider}.verifyOtp`, { email, otp });
+      setTodayModal(null);
+      await loadAccounts();
+      await loadCredits(true);
+      setProbeNotice({
+        tone: 'ok',
+        text: res && res.existed ? '该 Today 账号已存在，已刷新其会话 Cookie。' : '已通过邮箱验证码添加 Today 账号。',
+        details: [],
+      });
+    } catch (caught) {
+      const message = caught && caught.message ? caught.message : '邮箱验证码登录失败';
+      setTodayModal((prev) => (prev ? { ...prev, error: message } : prev));
+    } finally {
+      setCreating(false);
+    }
+  };
   const submitMagicrewLocalImport = async (provider, mode = 'local-browser') => {
     if (magicrewInFlightRef.current) return;
     magicrewInFlightRef.current = true;
@@ -6895,6 +6958,14 @@ function ProviderPanel({
      */
     if (provider === 'doubao') {
       setDoubaoCookie({ importing: false, importError: '' });
+      return;
+    }
+    if (provider === 'today') {
+      setTodayModal({ provider: 'today', error: '' });
+      return;
+    }
+    if (provider === 'todayintl') {
+      setTodayModal({ provider: 'todayintl', error: '' });
       return;
     }
 
@@ -8877,6 +8948,13 @@ function ProviderPanel({
                 // 与上面的「编辑 Key」是**两个方向**的凭据：这里只写
                 // `session_cookie`、绝不覆盖手填的 `sk-`。
                 ...provider === 'baizhi' ? { onReadSession: (id) => void startBaizhiSession(id) } : {},
+                ...(provider === 'today' || provider === 'todayintl') ? {
+                  onEditTodayCookie: (id) => setTodayModal({
+                    provider,
+                    accountId: id,
+                    error: '',
+                  })
+                } : {},
                 // 新手任务（仅 Loomy）：一次性 10000 分，每号只能领一次。
                 // 与「一键领取积分」（每日签到）是**不同**的操作，故独立按钮。
                 onClaimOnboarding: canClaimOnboarding
@@ -9103,6 +9181,17 @@ function ProviderPanel({
       importError: doubaoCookie.importError || '',
       onImportCookie: (text) => void importDoubaoCookie(text),
       onClose: () => setDoubaoCookie(null),
+    }) : null,
+    todayModal ? React.createElement(TodayCookieModal, {
+      provider: todayModal.provider,
+      editing: Boolean(todayModal.accountId),
+      busy: creating,
+      error: todayModal.error || '',
+      onSubmitCookie: (text) => void submitTodayCookie(text, todayModal.provider, todayModal.accountId),
+      onSendOtp: (email) => sendTodayOtp(email, todayModal.provider),
+      onVerifyOtp: (email, otp) => void verifyTodayOtp(email, otp, todayModal.provider),
+      onClose: () => setTodayModal(null),
+      onDismissError: () => setTodayModal((prev) => (prev ? { ...prev, error: '' } : prev)),
     }) : null,
     credentialModal && credentialModal.provider === 'baizhi' ? React.createElement(BaizhiLoginModal, {
       error: credentialModal.error || '',
@@ -11344,6 +11433,7 @@ const AGG_WIRED_CHANNEL_IDS = [
   'magicrew', 'magicrewintl',
   'monkeycode', 'monkeycodeintl', 'baizhi', 'marvis',
   'agnescode', 'agnescodeintl',
+  'today', 'todayintl',
 ];
 
 /**

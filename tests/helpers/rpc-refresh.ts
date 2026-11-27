@@ -138,6 +138,8 @@ export const REFRESH_PROVIDERS = [
   // ⚠️ 两站各占一项：账池不互通、凭据 ref 前缀不同（`agnescode:` / `agnescodeintl:`）。
   'agnescode',
   'agnescodeintl',
+  'today',
+  'todayintl',
 ] as const
 
 /**

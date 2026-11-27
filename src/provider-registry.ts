@@ -1272,6 +1272,26 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     credits: { balance: true, dailyCheckin: false },
     channel: true,
   },
+  {
+    id: 'today',
+    label: 'Today (国内版)',
+    displayName: 'Today (国内版)',
+    logoClass: 'today',
+    credits: { balance: true, dailyCheckin: false },
+    creditPackages: true,
+    usesExpiryWindow: true,
+    channel: true,
+  },
+  {
+    id: 'todayintl',
+    label: 'Today (国际版)',
+    displayName: 'Today (国际版)',
+    logoClass: 'today',
+    credits: { balance: true, dailyCheckin: false },
+    creditPackages: true,
+    usesExpiryWindow: true,
+    channel: true,
+  },
 
   {
     // 腾讯 Marvis（2026-11-09 接入）。

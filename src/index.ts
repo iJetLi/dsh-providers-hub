@@ -263,6 +263,10 @@ import { AgnescodeAuth } from './agnescode-auth.js'
 import { AgnescodeAdapter, registerAgnescodeLlm, type AgnescodeSlot } from './agnescode-adapter.js'
 import { AGNESCODE, AGNESCODE_INTL, type AgnescodeProduct } from './agnescode-product.js'
 import { agnescodeSessionExpired, parseAgnescodeCredential, trustAgnescodeBffBase } from './agnescode.js'
+import { TodayAuth } from './today-auth.js'
+import { TodayAdapter, registerTodayLlm, type TodaySlot } from './today-adapter.js'
+import { TODAY, TODAY_INTL, type TodayProduct } from './today-product.js'
+import { parseTodayCredential } from './today.js'
 import type { ZcodeCredential } from './zcode.js'
 import { GEMINI_DEFAULT_PROJECT, GEMINI_SESSION_LANE_SMOKE } from './gemini.js'
 import { createProviderCredits, creditsOf } from './provider-credits.js'
@@ -794,6 +798,13 @@ function probeSlotOf(product: AgnescodeProduct, credential: unknown): AgnescodeS
   return { accountId: product.id, credential: parsed }
 }
 
+function todayProbeSlotOf(product: TodayProduct, credential: unknown): TodaySlot {
+  const text = typeof credential === 'string' ? credential : JSON.stringify(credential ?? {})
+  const parsed = parseTodayCredential(text, product.realm)
+  if (parsed === undefined) throw new Error('凭据不是合法的 Today 会话（缺少 session cookie）')
+  return { accountId: product.id, credential: parsed }
+}
+
 export const probeById: Record<string, NonNullable<ProviderRuntime['probe']>> = {
   // CodeBuddy 系（buddy / workbuddy）→ BuddyAdapter，按各自 product 发请求。
   buddy: {
@@ -946,6 +957,18 @@ export const probeById: Record<string, NonNullable<ProviderRuntime['probe']>> = 
     createProbeAdapter: (ref, credential) => new AgnescodeAdapter({
       product: AGNESCODE_INTL,
       slots: async () => [probeSlotOf(AGNESCODE_INTL, credential)],
+    }),
+  },
+  today: {
+    createProbeAdapter: (_ref, credential) => new TodayAdapter({
+      product: TODAY,
+      slots: async () => [todayProbeSlotOf(TODAY, credential)],
+    }),
+  },
+  todayintl: {
+    createProbeAdapter: (_ref, credential) => new TodayAdapter({
+      product: TODAY_INTL,
+      slots: async () => [todayProbeSlotOf(TODAY_INTL, credential)],
     }),
   },
   // 百智云（`baizhi`）—— 静态 `sk-` Key 直连，无平台登录态、无每日额度。
@@ -5467,6 +5490,38 @@ export function apply(ctx: Context): void {
   const { auth: agnescode, adapter: agnescodeAdapter } = createAgnescode(AGNESCODE)
   const { auth: agnescodeIntl, adapter: agnescodeIntlAdapter } = createAgnescode(AGNESCODE_INTL)
 
+  // ===== Today（`today` 国内版 + `todayintl` 国际版）=====
+  const createToday = (product: TodayProduct) => {
+    const auth = new TodayAuth(ctx, { product })
+    const adapter = registerTodayLlm(ctx, {
+      product,
+      slots: async (modelId?: string) => {
+        const entries = await pool.listAccounts(product.id)
+        const usable = await Promise.all(entries.map(async (entry): Promise<TodaySlot | undefined> => {
+          if (!entry.enabled) return undefined
+          if (modelId !== undefined && modelId.length > 0) {
+            const resetAt = entry.modelRateLimits?.[modelId]
+            if (typeof resetAt === 'number' && resetAt > Date.now()) return undefined
+          }
+          const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+          if (!resolved) return undefined
+          const parsed = parseTodayCredential(resolved.value, product.realm)
+          if (parsed === undefined) return undefined
+          return { accountId: entry.id, credential: parsed }
+        }))
+        return usable.filter((slot): slot is TodaySlot => slot !== undefined)
+      },
+      accountPool: pool,
+      markLimited: async (accountId, modelId, resetAtMs) => {
+        await pool.updateModelRateLimit(accountId, modelId, resetAtMs)
+      },
+      warn: (message) => ctx.logger?.warn?.(`[${product.id}] ${message}`),
+    })
+    return { auth, adapter }
+  }
+  const { auth: today, adapter: todayAdapter } = createToday(TODAY)
+  const { auth: todayIntl, adapter: todayIntlAdapter } = createToday(TODAY_INTL)
+
   // ===== 百智云（`baizhi`）—— 静态 Key 直连，**按量计费** =====
   //
   // 与 MonkeyCode 的关键差别（都是实测结论，不是设计偏好）：
@@ -6091,6 +6146,8 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     // AgnesCode 两站同样要 `stop()`：卸载后不该再有任何在途的凭据读写。
     agnescode.stop()
     agnescodeIntl.stop()
+    today.stop()
+    todayIntl.stop()
     baizhi.stop()
   }, 'jet-hub: multi-account refresh scheduler')
 
@@ -6117,6 +6174,8 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     // AgnesCode 两站同样要 `stop()`：卸载后不该再有任何在途的凭据读写。
     agnescode.stop()
     agnescodeIntl.stop()
+    today.stop()
+    todayIntl.stop()
     baizhi.stop()
   }, 'codearts-auth.scheduler (legacy)')
 
@@ -7015,6 +7074,8 @@ async function fetchBalanceReading(
     //    ⇒「关闭整个 provider」时漏写黑名单 ⇒「显示已关闭、模型仍可选用」。
     agnescode: pruned(AGNESCODE.id, agnescodeAdapter),
     agnescodeintl: pruned(AGNESCODE_INTL.id, agnescodeIntlAdapter),
+    today: pruned(TODAY.id, todayAdapter),
+    todayintl: pruned(TODAY_INTL.id, todayIntlAdapter),
     // ⚠️ 百智云同样必须进这张表：理由与 monkeycode 逐条相同 ——
     //    `provider.status` 的「已关闭」判据读的是 `listAllModels()` 那份
     //    **不套黑名单**的全量目录，表里缺它 ⇒「关闭整个 provider」时漏写
@@ -7548,6 +7609,8 @@ async function fetchBalanceReading(
       //    `unknown provider`）。
       ['agnescode', agnescode],
       ['agnescodeintl', agnescodeIntl],
+      ['today', today],
+      ['todayintl', todayIntl],
     ]
     for (const [id, auth] of registry) {
       const descriptor = descriptorOf(id)
@@ -7769,6 +7832,8 @@ async function fetchBalanceReading(
     //    漏加 ⇒ 客户端 agnescode 面板所有 RPC 报 `unknown provider`。
     agnescode,
     agnescodeintl: agnescodeIntl,
+    today,
+    todayintl: todayIntl,
   }, modelAdapters)
 
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已
