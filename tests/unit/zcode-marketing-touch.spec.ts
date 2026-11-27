@@ -321,23 +321,54 @@ describe('★ 营销投放解析（纯函数，判定打在实测报文的真实
   })
 })
 
-describe('★ 版本门控（实测 2026-11-20：3.18.1 及以下均空，3.18.2 起才有 WEEKEND BUILD 投放）', () => {
+/**
+ * ★★★ **版本门控**（2026-11-27 第三次抬门槛，真机逐版本二分）。
+ *
+ * | `X-ZCode-App-Version` | `deliveries` |
+ * |---|---|
+ * | `3.18.2` / `3.18.3` / `3.19.0` | **0**（= 领不到，与「今天没活动」同形）|
+ * | `4.0` / `4.0.0` / `4.0.1` / `4.1.0` / `5.0.0` | **1** |
+ * | **`4.0.0.10870`**（客户端 PE 版本）| **0** ⚠️ 四段不算合法 semver |
+ *
+ * ⇒ 门槛 = **主版本 >= 4**；且**必须发三段**。
+ */
+describe('★ 版本门控（实测 2026-11-27：3.19.0 仍空，4.0.0 起才有投放）', () => {
   it('凭据里的 3.14.3 被抬到门槛值', () => {
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe('3.18.2')
-    expect(ZCODE_VERSION_GATED_MIN_APP_VERSION).toBe('3.18.2')
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.14.3' })).toBe('4.0.0')
+    expect(ZCODE_VERSION_GATED_MIN_APP_VERSION).toBe('4.0.0')
   })
 
   it('凭据里是更新版本时**不降级**（向前兼容）', () => {
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.18.2' })).toBe('3.18.2')
-    expect(zcodeVersionGatedAppVersion({ app_version: '3.19.0' })).toBe('3.19.0')
+    // ⚠️ 3.18.2 / 3.19.0 **都低于新门槛** ⇒ 必须被抬到 4.0.0（实测这两个拿不到投放）
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.18.2' })).toBe('4.0.0')
+    expect(zcodeVersionGatedAppVersion({ app_version: '3.19.0' })).toBe('4.0.0')
+    // 门槛以上才「不降级」
     expect(zcodeVersionGatedAppVersion({ app_version: '4.0.0' })).toBe('4.0.0')
+    expect(zcodeVersionGatedAppVersion({ app_version: '4.1.0' })).toBe('4.1.0')
   })
 
   it('缺版本/空串 ⇒ 用最低版本（不是空串，那会让服务端按未知版本处理）', () => {
-    expect(zcodeVersionGatedAppVersion({})).toBe('3.18.2')
-    expect(zcodeVersionGatedAppVersion({ app_version: '   ' })).toBe('3.18.2')
+    expect(zcodeVersionGatedAppVersion({})).toBe('4.0.0')
+    expect(zcodeVersionGatedAppVersion({ app_version: '   ' })).toBe('4.0.0')
   })
 
+  it('★★★ 四段版本号（客户端 PE 的 FileVersion）**不得原样发出** —— 实测它拿不到投放', () => {
+    /**
+     * 真机实测（2026-11-27）：
+     * - `4.0.0`   ⇒ `deliveries=1`
+     * - `4.0.0.10870`（客户端 `ZCode.exe` 的 PE `FileVersion`）⇒ **`deliveries=0`**
+     *
+     * ⇒ 上游只认**三段 semver**，四段被判无效（与「版本太低」同形，零报错）。
+     *
+     * ⚠️ 本仓靠 `ZCODE_APP_VERSION_PATTERN`（精确三段）天然挡住：
+     *    格式不合法 ⇒ **回落到门槛**，所以 `4.0.0.10870` 会被发成 `4.0.0`。
+     *    这条用例就是那个保护的守卫 —— 谁把正则放宽成 `\d+(\.\d+)+`，这里立刻红。
+     */
+    expect(zcodeVersionGatedAppVersion({ app_version: '4.0.0.10870' }), '四段必须回落到三段门槛').toBe('4.0.0')
+    expect(zcodeVersionGatedAppVersion({ app_version: '4.1.0.5' })).toBe('4.0.0')
+    // 反向对照：合法三段必须原样保留（不能被这条规则误伤）
+    expect(zcodeVersionGatedAppVersion({ app_version: '4.1.0' })).toBe('4.1.0')
+  })
   it('点分版本比较', () => {
     expect(compareZcodeAppVersion('3.14.3', '3.16.3')).toBe(-1)
     expect(compareZcodeAppVersion('3.16.3', '3.14.3')).toBe(1)
@@ -500,7 +531,7 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
      * ★★ 版本门控的**接线**判据：凭据里写的是 3.14.3，但营销请求必须带门控版
      *（本机实测：带 3.14.3 时服务端回 `deliveries: []` ⇒ 这条不成立就等于没集成）。
      */
-    expect(net.marketingVersions).toEqual(['3.18.2'])
+    expect(net.marketingVersions).toEqual(['4.0.0'])
   })
 
   it('★ 1120 WEEKEND BUILD 也被一键领取真的领到（plan_id 与门控版本都对）', async () => {
@@ -512,8 +543,8 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
     expect(outcomes[0]?.kind).toBe('claimed')
     expect(net.claimPlanIds).toEqual(['zcode-v3-start-plan-wk-1120'])
     // 营销查询与 claim 两个端点都必须带门控版本 3.18.2（同一份常量）
-    expect(net.marketingVersions).toEqual(['3.18.2'])
-    expect(net.claimVersions).toEqual(['3.18.2'])
+    expect(net.marketingVersions).toEqual(['4.0.0'])
+    expect(net.claimVersions).toEqual(['4.0.0'])
   })
 
   it('★★ **claim 也必须带门控版本** —— 真机实测：3.14.3 ⇒ `1004 no permission`，3.16.2 ⇒ `code 0`', async () => {
@@ -540,8 +571,8 @@ describe('★★ 接线：签到真的会去领营销投放里的 plan（防「�
 
     expect(net.claimVersions).toHaveLength(net.claimPlanIds.length)
     expect(net.claimVersions).toEqual([
-      '3.18.2',
-      '3.18.2',
+      '4.0.0',
+      '4.0.0',
     ])
     // 反向对照：凭据里只有 3.14.3 —— 若实现没覆盖，上面两格会变成 '3.14.3'
     expect(CREDENTIAL.app_version).toBe('3.14.3')
@@ -640,7 +671,7 @@ describe('★ 请求层：失败一律降级，且不谎报', () => {
     const throwing = (async () => { throw new Error('network down') }) as unknown as typeof fetch
     expect(await fetchZcodeMarketingPlans(CREDENTIAL, throwing)).toEqual([])
     // 版本对象本身不参与断言，仅确认工具函数不抛
-    expect(zcodeVersionGatedAppVersion(version)).toBe('3.18.2')
+    expect(zcodeVersionGatedAppVersion(version)).toBe('4.0.0')
   })
 
   it('reportZcodeMarketingAction：只有 `{code:0}` 算成功', async () => {
