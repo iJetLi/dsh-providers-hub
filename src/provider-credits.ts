@@ -240,7 +240,7 @@ export interface ProviderCreditsDeps {
  * 「没有额度」而不是「查不到」），故给一个具名占位包，让 UI 至少能显示
  * 「0 / 0」并带上 `result.planName`。
  */
-export function buildZcodeBalance(result: ZcodeBalanceResult): CreditBalance {
+export function buildZcodeBalance(result: ZcodeBalanceResult): CreditBalance | null {
   const packages: CreditPackage[] = result.buckets.map((bucket) => {
     const remaining = bucket.availableUnits ?? bucket.remainingUnits ?? 0
     const total = bucket.totalUnits ?? 0
@@ -262,21 +262,6 @@ export function buildZcodeBalance(result: ZcodeBalanceResult): CreditBalance {
         : (result.expiresAt !== undefined ? new Date(result.expiresAt * 1000).toISOString() : ''),
     }
   })
-  if (packages.length === 0) {
-    packages.push({
-      name: result.planName ?? 'ZCode 免费额度',
-      unit: 'token',
-      remaining: result.remaining,
-      total: result.total,
-      used: Math.max(0, result.total - result.remaining),
-      active: true,
-      cycleStartTime: '',
-      cycleEndTime: '',
-      expiredTime: result.expiresAt !== undefined
-        ? new Date(result.expiresAt * 1000).toISOString()
-        : '',
-    })
-  }
   /**
    * ★★ 「**已领、但还没到生效时刻**」的计划 —— 单独成一个包（2026-10-23 实测）。
    *
@@ -316,6 +301,35 @@ export function buildZcodeBalance(result: ZcodeBalanceResult): CreditBalance {
         : '',
     })
   }
+  /**
+   * ⚠️⚠️ **「上游一个桶都没下发」必须当「查不到」，不能当「额度为 0」**（2026-11-28，Gitee IKYNB9）。
+   *
+   * ## 报障现场
+   *
+   * 用户两个「鸡蛋号」（免费号），**一个本机领取的显示正常、另一个在别的机器领的显示 0**，
+   * 而**两个号在 ZCode 官方客户端里都能正常显示额度并可用**
+   * ⇒ 上游**有**数据，是本插件的口径读不到 ⇒ **不能判成 0**。
+   *
+   * ## 原实现错在哪
+   *
+   * 原来 `packages.length === 0` 时会**造一个 0/0 的包**：
+   *
+   * ```
+   * packages.push({ name: 'ZCode 免费额度', remaining: 0, total: 0, active: true, … })
+   * ```
+   *
+   * ⇒ 用户在界面上看到「ZCode 免费额度 0 / 0」，与「真的用光了」**完全同形**。
+   * 这违反本仓红线「**查不到不得判死**」（同族：zcode 的「证据不足不得判死」
+   * 「查不到不得判死」、baizhi 的「值必须写实」）。
+   *
+   * ## 为什么不能简单当成「已用光」
+   *
+   * 真·用完的形态是 **桶还在、`remaining_units` 为 0**；而这里是 **`balances: []`（零个桶）**
+   * —— 上游根本没下发任何额度信息。两种形态必须分开。
+   *
+   * ⚠️ 若既有桶又有待生效计划（`packages.length > 0`），照常返回 —— 那条路径不变。
+   */
+  if (packages.length === 0) return null
   return {
     // 仍是**全桶汇总**，与 `packages` 逐项之和一致（`fetchZcodeBalance` 就是这么累加的）。
     total: result.remaining,
@@ -863,7 +877,13 @@ export function createProviderCredits(
         if (result.enterprise === true) {
           return fail('企业版账号不下发额度数字，请在 ZCode 内查看')
         }
-        return ok(buildZcodeBalance(result))
+        const built = buildZcodeBalance(result)
+        // ⚠️ `null` = 上游既没下发额度桶、也没有待生效计划 ⇒ 如实说「查不到」，
+        //    绝不显示成 0（见 `buildZcodeBalance` 尾部注释）。
+        if (built === null) {
+          return fail('上游未下发任何额度信息（既无可用额度桶，也无待生效计划）—— 这不等于额度为 0，请在 ZCode 客户端核对')
+        }
+        return ok(built)
       },
     },
 

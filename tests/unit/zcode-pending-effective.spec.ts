@@ -179,10 +179,35 @@ describe('★★ 展示：独立成包，且不污染「现在能用」的额度
     expect(balance.total).toBe(0)
   })
 
-  it('★ 无待生效 ⇒ 包数不变（不凭空多一个包）', () => {
+  /**
+   * ⚠️⚠️ **契约已变（2026-11-28，Gitee IKYNB9）**：
+   * 原来这条断言的是「`buckets: []` ⇒ 造一个 0/0 的『ZCode 免费额度』包」——
+   * **那正是要修掉的缺陷**：上游一个桶都没下发时，界面显示「0 / 0」与「真的用光了」
+   * 完全同形，而报障者两个号在 ZCode 官方客户端里都**能正常显示额度**
+   * ⇒ 说明是本插件读不到，**不能判成 0**（本仓红线「查不到不得判死」）。
+   */
+  it('★★★ 无桶也无待生效 ⇒ 返回 null（查不到，不是 0）', () => {
     const balance = buildZcodeBalance(baseResult([]))
-    expect(balance.packages).toHaveLength(1)
-    expect(balance.packages[0]?.name).toBe('ZCode 免费额度')
+    expect(balance, '★ 上游一个桶都没下发时不得造 0/0 包').toBeNull()
+  })
+
+  it('★★ 有桶且无待生效 ⇒ 包数不变（不凭空多一个包）', () => {
+    const balance = buildZcodeBalance({
+      ...baseResult([]),
+      buckets: [{
+        showName: 'GLM-5.3',
+        unitType: 'token',
+        totalUnits: 100,
+        usedUnits: 0,
+        remainingUnits: 100,
+        availableUnits: 100,
+      }],
+      remaining: 100,
+      total: 100,
+    })
+    expect(balance).not.toBeNull()
+    expect(balance!.packages).toHaveLength(1)
+    expect(balance!.packages[0]?.name).toBe('GLM-5.3')
   })
 
   it('★ 旧凭据/旧调用方**没有** `pendingPlans` 字段 ⇒ 不得抛', () => {
@@ -194,6 +219,8 @@ describe('★★ 展示：独立成包，且不污染「现在能用」的额度
       claimablePlans: [],
     } as unknown as ZcodeBalanceResult
     expect(() => buildZcodeBalance(legacy)).not.toThrow()
-    expect(buildZcodeBalance(legacy).packages).toHaveLength(1)
+    // ⚠️ 契约已变（IKYNB9）：零个桶 = 查不到 ⇒ null（不再造 0/0 包）。
+    // 这条用例的原意是「缺 pendingPlans 字段不得抛」，`not.toThrow` 已覆盖它。
+    expect(buildZcodeBalance(legacy)).toBeNull()
   })
 })

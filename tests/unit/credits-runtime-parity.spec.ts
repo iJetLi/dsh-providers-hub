@@ -958,7 +958,22 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
       ['zcode', 'zcode', 'fetchBalanceFor'],
     ] as const) {
       const sentinel = provider === 'zcode'
-        ? { buckets: [], remaining: 77, total: 77, claimablePlans: [] }
+        // ⚠️ 哨兵必须**装在真实的桶里**：`buckets: []` + `remaining: 77` 本身不自洽
+        // （`remaining` 是从桶累加出来的），而 2026-11-28 起「零个桶」= 查不到 ⇒ 返回 null，
+        // 哨兵就永远拿不到（Gitee IKYNB9 的契约变更）。
+        ? {
+            buckets: [{
+              showName: 'sentinel',
+              unitType: 'token',
+              totalUnits: 77,
+              usedUnits: 0,
+              remainingUnits: 77,
+              availableUnits: 77,
+            }],
+            remaining: 77,
+            total: 77,
+            claimablePlans: [],
+          }
         : { total: 77, packages: [], expiredTotal: 0 }
       const table = createProviderCredits({
         [key]: { [method]: async () => sentinel },
@@ -1003,7 +1018,21 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
       ...emptyAuths(),
       loomy: { fetchCreditBalance: async () => sentinelBalance(4242) },
       raccoon: { fetchCreditBalance: async () => sentinelBalance(4243) },
-      zcode: { fetchBalanceFor: async () => ({ buckets: [], remaining: 4244, total: 4244 }) },
+      // ⚠️ 哨兵必须装在真实桶里（空桶 + remaining 不自洽，且 IKYNB9 起「零桶」= 查不到 ⇒ null）
+      zcode: {
+        fetchBalanceFor: async () => ({
+          buckets: [{
+            showName: 'sentinel',
+            unitType: 'token',
+            totalUnits: 4244,
+            usedUnits: 0,
+            remainingUnits: 4244,
+            availableUnits: 4244,
+          }],
+          remaining: 4244,
+          total: 4244,
+        }),
+      },
     })
     // 上游一律不许被碰到：哨兵说明实例方法已生效，回退到自由函数会真发请求。
     vi.stubGlobal('fetch', async () => {
