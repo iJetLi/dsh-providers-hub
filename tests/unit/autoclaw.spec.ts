@@ -739,9 +739,15 @@ describe('AutoclawAdapter 流式映射与端到端模拟', () => {
   describe('★★ 逐模型遍历：两个入口的模态必须同源（不许只抽样）', () => {
     // ⚠️ **反向自检防恒真**：若兜底表被清空，`it.each` 一条都不跑 ⇒ 整段全绿。
     //   锚定具体模型名，让「少了一个模型」也会红。
-    it('兜底表恰好包含这四个已实测模型', () => {
+    it('兜底表必须包含这六个远端已实测模型（4 个旧 + 2 个 2026-11-28 补的）', () => {
+      /**
+       * 6 个 = 远端 `autoclaw-model-config` 实测的全部 id（GitHub #190, 2026-11-28）：
+       * `zai_auto` / `zai_auto-fast` / `zai_glm-x-preview` /
+       * `zaicoding_glm-5.3` / `zai_glm-5.3-flash` / `zai_glm-5.3-flashx-legal`
+       */
       expect(AUTOCLAW.fallbackModels.map((m) => m.id).sort()).toEqual([
-        'zai_auto', 'zai_auto-fast', 'zai_glm-5.3-flash', 'zaicoding_glm-5.3',
+        'zai_auto', 'zai_auto-fast', 'zai_glm-5.3-flash', 'zai_glm-5.3-flashx-legal',
+        'zai_glm-x-preview', 'zaicoding_glm-5.3',
       ])
     })
 
@@ -1128,11 +1134,23 @@ describe('AutoclawAdapter 流式映射与端到端模拟', () => {
       //   ⚠️ 我曾经据「远端目录没有 flash」误判它不支持图片，用户反馈 IDE
       //   里能发图后才复查出 64×64 测试图太小。这条守卫防止再退化回去。
       const { adapter } = makeMockAdapter()
-      // 反向自检：兜底表非空，否则下面的循环一条都不跑（恒真）。
-      expect(AUTOCLAW.fallbackModels.length).toBe(4)
-      for (const m of AUTOCLAW.fallbackModels) {
-        const resolved = await adapter.resolveModel('autoclaw', m.id)
-        expect(resolved.inputModalities, `${m.id} 应声明支持图片`).toContain('image')
+      /**
+       * ⚠️⚠️ **不能再用「遍历全表」的写法**（2026-11-28，GitHub #190）。
+       *
+       * 原来断言 `fallbackModels.length === 4` 且**全表**都声明支持图片。
+       * 但报障者实测远端有 **6** 个模型，我据此补了 `zai_glm-x-preview` 与
+       * `zai_glm-5.3-flashx-legal` —— 而这两个**没有做过读图实测**
+       * ⇒ 给它们编 `supportsImage: true` 就是**谎称能力**（本仓红线）。
+       *
+       * ⇒ 改成**显式列出那 4 个 2026-10-17 实测过的**，新增模型不纳入本断言。
+       */
+      const IMAGE_VERIFIED_2026_10_17 = ['zai_auto', 'zai_auto-fast', 'zaicoding_glm-5.3', 'zai_glm-5.3-flash']
+      expect(AUTOCLAW.fallbackModels.length).toBeGreaterThanOrEqual(4)
+      for (const id of IMAGE_VERIFIED_2026_10_17) {
+        const m = AUTOCLAW.fallbackModels.find((x) => x.id === id)
+        expect(m, `${id} 必须还在兜底表里`).toBeDefined()
+        const resolved = await adapter.resolveModel('autoclaw', m!.id)
+        expect(resolved.inputModalities, `${m!.id} 应声明支持图片`).toContain('image')
       }
     })
 

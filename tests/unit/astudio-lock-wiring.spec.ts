@@ -380,7 +380,10 @@ describe('★★ AStudio：分档行为（驱动生产判据，不是复述实�
     //    = DeepSeek-V4.1-Flash）。退回去 ⇒ 新模型在面板里**永久消失且零报错**。
     //    详见 `docs/agent-notes/providers-astudio.md` §0.3。
     // 改这里必须同步 `astudio-login-credits.spec.ts` 的期望（那边已改成引用本常量）。
-    expect(ASTUDIO.studioVersion).toBe('3.6.4')
+    // ⚠️ 2026-11-28（GitHub #190）由 3.6.4 抬到 3.7.1：依据是官方安装器遥测
+    // `APP_INSTALL_SUCCESS` 的 `target_version`/`app_version` = 3.7.1
+    // （`actual_version` 3.7.1.255）。这个串会决定服务端下发什么，不能随手改。
+    expect(ASTUDIO.studioVersion).toBe('3.7.1')
   })
 
   /**

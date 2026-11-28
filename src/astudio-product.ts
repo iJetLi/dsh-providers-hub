@@ -318,7 +318,40 @@ export const ASTUDIO: AstudioProduct = {
   apiKeyConfigPath: ASTUDIO_API_KEY_CONFIG_PATH,
   defaultCredentialRef: 'ASTUDIO_ACCESS_TOKEN',
   clientType: '21',
-  studioVersion: '3.6.4',
+  /**
+   * ⚠️⚠️ **2026-11-28 由 `3.6.4` 抬到 `3.7.1`**（GitHub #190）。
+   *
+   * ## 证据（官方安装器自己的遥测，不是猜的）
+   *
+   * 报障者本机残留：
+   * `C:\AStudio\telemetry-install\v1\production\install\0\terminal.json`
+   * 事件 `APP_INSTALL_SUCCESS`：
+   *
+   * | 字段 | 值 |
+   * |---|---|
+   * | `target_version` | **3.7.1** |
+   * | `app_version` | **3.7.1** |
+   * | `actual_version` | **3.7.1.255** |
+   * | `acode_runtime_version` | `1.0.7-rc.21` |
+   * | `source` / `install_type` | `manual_installer` / `fresh` |
+   * | `occurredAt` | `2026-11-26T06:29:04Z` |
+   *
+   * ⇒ **官方客户端当前版本是 `3.7.1`**（完整 `3.7.1.255`），而本仓还是 `3.6.4`
+   * —— 落后一个次版本。上方那张表已经证明**这个串会决定服务端下发什么**
+   * （`3.5.2` ⇒ 7 条、`3.6.4` ⇒ 8 条），所以它不是「随手改的美化值」。
+   *
+   * ## 为什么怀疑它就是 `API_KEY_DISABLED` 的成因
+   *
+   * 上游对旧凭据的回应是
+   * `{"code":"API_KEY_DISABLED","message":"Please upgrade to the latest version of AStudio."}`
+   * —— **字面要求「升级到最新版」**。本仓此前把这个码兜成 `auth` 并劝用户「重新登录」，
+   * 而报障者实测重登**反而更糟**（旧凭据成功 10 次、重登后 135 次 0 成功）。
+   *
+   * ⚠️ **但这不是已证实的因果**：我本地没有该校验凭据，无法端到端复现
+   * 「3.6.4 ⇒ API_KEY_DISABLED / 3.7.1 ⇒ 200」。这一格**只按证据前进了一格**
+   * （把版本串对齐官方），真验要等报障者用新版本重试。
+   */
+  studioVersion: '3.7.1',
   requestTimeoutMs: 30_000,
   chatHeaderTimeoutMs: 60_000,
   // ⚠️ **必须 ≥300s**：长上下文模型的两次 SSE 字节之间实测可静默 >45s，

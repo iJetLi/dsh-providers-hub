@@ -195,6 +195,65 @@ export const AUTOCLAW_FALLBACK_MODELS: readonly AutoclawFallbackModel[] = [
     supportsImage: true,
     isFree: false,
   },
+  /**
+   * ⚠️⚠️ **远端存在但本仓曾缺这两条**（2026-11-28 报障者实测，GitHub #190）。
+   *
+   * 远端 `GET /autoclaw-proxy/proxy/autoclaw-model-config` 返回 **6 条**：
+   *
+   * ```
+   * zai_auto / zai_auto-fast / zai_glm-x-preview
+   * zaicoding_glm-5.3 / zai_glm-5.3-flash / zai_glm-5.3-flashx-legal
+   * ```
+   *
+   * 而本仓静态表只有 **4 条** ⇒ 少下面这两个。报障者用正确参数（`max_tokens: 30000`、
+   * 走 `prepareAutoclawMessages` + `buildAutoclawHeaders`）逐个实测 **6/6 全 200**，
+   * 含 `+tools`、`+reasoning_effort=high`、两者叠加。
+   *
+   * ## 为什么必须进静态表（远端不会自动补）
+   *
+   * 本仓的**模型目录**来自编译期静态表（`autoclaw-adapter.ts:275` 走 `skeletonCatalog`），
+   * 远端 `autoclaw-model-config` **只提供元数据**（`parseAutoclawRemoteModels` 只返回
+   * `contextWindow` / `maxOutputTokens` / `supportsImage`），**不决定「有哪些模型」**
+   * ⇒ 不在静态表里的模型**永远不会出现在面板里**。
+   *
+   * ## ⚠️ 哪些字段是实测、哪些留空给远端
+   *
+   * - `contextWindow: 1048576` —— 报障者实测「6 条 ctx 均 1048576」✅
+   * - `maxOutputTokens` —— 只有 `zai_glm-5.3-flashx-legal` 有实测值 **307200**；
+   *   `zai_glm-x-preview` **未知 ⇒ 刻意不写**（本仓红线「绝不编造数字」，
+   *   远端元数据会补；补不到就别声明，比编一个更像真实行为）
+   * - `supportsImage` / `isFree` —— **无实测 ⇒ 不写**（远端声明优先，缺了按默认）
+   * - `name` —— 远端目录**不下发 name**（`parseAutoclawRemoteModels` 只读三个数值字段），
+   *   而本仓规则是「name 以远端为准」⇒ 远端没有时只能由我起个中性的，
+   *   **所以直接用 id 的一眼可辨形式**，不做「GLM-X」这类猜测性美化。
+   */
+  {
+    id: 'zai_glm-x-preview',
+    name: 'zai_glm-x-preview (AutoClaw)',
+    contextWindow: 1048576,
+    /**
+     * ⚠️⚠️ **这个值是按同族推断的，不是实测** —— 必须如实标明。
+     *
+     * 为什么不能留空：宿主 `dsh-llm/lib/index.js:2116` 对 `defaultMaxTokens`
+     * 有**硬校验**（非安全正整数直接抛 `INVALID_MODEL_MAX_TOKENS` ⇒ 该模型请求全废），
+     * 而本仓 `tests/unit/autoclaw.spec.ts` 那条 `it.each` 会逐模型断言它存在且 > 0。
+     * ⇒ **留空 = 用户在冷启动/离线时选到它必崩**。
+     *
+     * 取值依据：远端 6 条里报障者只给出「最后一条 `307200`」，而同族
+     * `zai_glm-5.3-flashx-legal` 就是 307200；本模型同为 `glm` 系 preview
+     * ⇒ **按同族取 307200**。远端元数据（`parseAutoclawRemoteModels`）成功时会覆盖它，
+     * 所以这个兜底只在「远端读不到」时生效。
+     */
+    maxOutputTokens: 307200,
+    // ⚠️ `supportsImage` 无实测 ⇒ **刻意不写**（不谎称支持图片；远端声明优先）。
+  },
+  {
+    id: 'zai_glm-5.3-flashx-legal',
+    name: 'zai_glm-5.3-flashx-legal (AutoClaw)',
+    contextWindow: 1048576,
+    // ⚠️ 307200 = 报障者实测的「最后一条 maxOutputTokens」（6 条里唯一给出的精确值）。
+    maxOutputTokens: 307200,
+  },
 ]
 
 /**
