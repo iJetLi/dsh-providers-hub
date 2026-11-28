@@ -2118,16 +2118,73 @@ export async function officeaceExpiry(
  * 真正该守的边界是**探测失败**（`!result.ok` ⇒ `UNUSABLE`，已有用例守住），
  * 而不是「探测成功但余额为 0」。
  */
-export async function codeArtsExpiry(credential: CodeArtsCredential): Promise<number> {
-  let result
-  try {
-    result = await fetchCodeArtsAccountInfoDetailed(credential)
-  } catch {
-    return UNUSABLE
+export async function codeArtsExpiry(
+  credential: CodeArtsCredential,
+  cached?: () => Promise<CreditBalance | null | undefined>,
+): Promise<number> {
+  /**
+   * ★★★ **到期时刻必须从已解析的 `packages[]` 折算，且优先吃共享读数**（issue #187）。
+   *
+   * ## 修前的两处缺陷（同一个函数，一处管入口一处管出口）
+   *
+   * 1. **入口**：`return NEVER` —— 函数拿完上游响应就走，`result.info.credit.packages[]`
+   *    **从未被读取**。而那个值早在 `codearts-credits.ts` 四处生成好了
+   *    （顶层 `end_date` → `packageEndMs` → 只赋给基础积分包 `deductionEndTime` → 写进包对象）。
+   *    ⇒ 面板显示到期日、轮换**从不消耗它**；两个账号的基础积分包恒 `used = 0`，
+   *    其他渠道的临期积分被优先烧掉，这两份 500 分**闲置过期**。
+   * 2. **出口**：表项只传 `(c)`，`context.cachedBalance` 被丢掉 ⇒ **每轮探测重打华为云**。
+   *    本文件自己的纪律注释（`context.cachedBalance` 原样透给原语）写着
+   *    「各写一遍必然有一家漏掉 ⇒ 静默多发一次上游请求」—— **CodeArts 就是漏掉的那家**。
+   *
+   * ## ⚠️ 三态必须分清（issue 给的修法只区分了两态，这里补第三态）
+   *
+   * | 观测 | 语义 | 处置 |
+   * |---|---|---|
+   * | `undefined` | 「没有积分指标」（Token 计费账户）| **`NEVER`**（可用、只是无到期概念）|
+   * | `null` | 「查询失败」（含**共享读数说失败**这条结论）| **`UNUSABLE`**（剔除）|
+   * | 有值 | 正常 | 交给 `sharedPackageExpiry` 折算 |
+   *
+   * ⚠️ **`cached()` 返回 `null` 时 `fetchBalanceWithCache` 直接返回 `null` 且不调 fallback** ——
+   *    那是「共享读数说查询失败」的**结论**，此时 `failed` 仍为 `false`。
+   *    只看 `failed` 会把它误判成 `NEVER` ⇒ **一个探测失败的渠道反而以「长期」身份留在候选表里**。
+   *    这就是上面 `noMetric` 与「两者皆否」必须分开的原因。
+   */
+  let failed = false
+  let noMetric = false
+  const balance = await fetchBalanceWithCache(cached, async () => {
+    let result
+    try {
+      result = await fetchCodeArtsAccountInfoDetailed(credential)
+    } catch {
+      failed = true
+      // `null` ⇒ 「查询失败」是结论，不再发起第二次请求。
+      return null
+    }
+    if (!result.ok) {
+      failed = true
+      return null
+    }
+    const credit = result.info?.credit
+    if (credit === undefined) {
+      // ⚠️ Token 计费账户**没有积分指标** ⇒ 可用、无到期概念。
+      //    绝不能把这个 `undefined` 直接喂给 `sharedPackageExpiry`（那边读 `.packages` 会抛）。
+      noMetric = true
+      return null
+    }
+    return credit
+  })
+  if (balance === null) {
+    // `noMetric` ⇒ 查到了但该账号没有积分指标 ⇒ 可用 ⇒ NEVER。
+    // 否则是「查询失败」（自有失败或共享读数说失败）⇒ 剔除。
+    return noMetric ? NEVER : UNUSABLE
   }
-  // 查不到 / 结构异常 ⇒ UNUSABLE（剔除），与「查到了但没有到期概念」严格区分。
-  if (!result.ok) return UNUSABLE
-  return NEVER
+  /**
+   * ⚠️ 走到这里说明**查到了真实余额**（`failed`/`noMetric` 必为 false）。
+   * `sharedPackageExpiry` 对「没有 `remaining > 0` 的有效包」也返回 `UNUSABLE`，
+   * 但那个语义是「余额 0」不是「查不到」⇒ 仍是**可用账号**（还能走 `maas_type: benefit`）⇒ `NEVER`。
+   */
+  const expiry = await sharedPackageExpiry(async () => balance)
+  return expiry === UNUSABLE ? NEVER : expiry
 }
 
 /**

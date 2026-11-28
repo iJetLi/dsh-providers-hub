@@ -268,6 +268,12 @@ describe('★★ 接线的**透传**腿（`provider-expiry.ts` 的 `context.cach
     'agnescodeintl',
     'today',
     'todayintl',
+    // ⚠️ 2026-11-28（issue #187）：`codearts` 的 `provider-expiry.ts` 条目也接了
+    //    `context.cachedBalance` 透传。**这条正是本用例「遍历整张表」那条腿点名报出来的**
+    //    （它报 `expected [ 'codearts' ] to deeply equal []`）—— 即「生产改了、忘了收表」。
+    //    ⚠️ 它与 magicrew 系**不同**：`codeArtsExpiry` 在共享读数说「查询失败」(`null`) 时
+    //    **不**回落自取（那是结论，不是缺席）⇒ 属于正常形态，不进下面那张例外表。
+    'codearts',
   ] as const
 
   it('★★ 所有接了 `cachedBalance` 透传的渠道都必须真的透传（本表即清单）', async () => {

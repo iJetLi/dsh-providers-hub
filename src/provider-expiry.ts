@@ -243,7 +243,14 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
     buddy: buddyFamilyExpiry(CODEBUDDY),
     workbuddy: buddyFamilyExpiry(WORKBUDDY),
     loomy: { credentialExpiry: (c) => loomyExpiry(c as LoomyCredential) },
-    codearts: { credentialExpiry: (c) => codeArtsExpiry(c as CodeArtsCredential) },
+    codearts: {
+      credentialExpiry: (c, context) => codeArtsExpiry(
+        c as CodeArtsCredential,
+        context?.cachedBalance === undefined
+          ? undefined
+          : () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+      ),
+    },
     zcode: { credentialExpiry: (c, context) => zcodeExpiry(c as ZcodeCredential, context) },
     lobsterai: {
       credentialExpiry: (c, context) => lobsteraiExpiry(
