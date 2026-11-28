@@ -1,8 +1,9 @@
 /**
- * Today（`today` / `todayintl`）认证服务：凭据保管、有效性对账与 Cookie/OTP 登录。
+ * Today（`today` / `todayintl`）认证服务：凭据保管与池内元数据对账。
  *
- * Better Auth 的会话 Cookie 没有 OAuth `refresh_token`，因此 `refreshable` 恒为 `false`；
- * `refresh()` 与 `refreshAccountCredential()` 做对账（并在调用 `/api/token` 时缓存 API JWT）。
+ * Better Auth 的会话 Cookie 没有 OAuth `refresh_token` / 上游 refresh 端点，
+ * 因此 `refreshable` 恒为 `false`；`refresh()` 与 `refreshAccountCredential()` 仅校验
+ * 凭据存在性并完成 `AccountPool` 元数据对账（短寿命 API JWT 在请求期内存按需换取）。
  *
  * @module src/today-auth.ts
  */
@@ -14,11 +15,8 @@ import { AccountPool } from './account-pool.js'
 import { syncAccountExpiry, type ExpiryAccessors } from './expiry-sync.js'
 import { TODAY, type TodayProduct } from './today-product.js'
 import {
-  authenticateTodayCookie,
   parseTodayCredential,
-  sendTodayEmailOtp,
   type TodayCredential,
-  verifyTodayEmailOtp,
 } from './today.js'
 
 /** 面板只读登录状态。 */
@@ -47,54 +45,23 @@ declare module '@deepseek-ai/cordis' {
 export interface TodayAuthOptions {
   product?: TodayProduct
   serviceName?: string
-  fetcher?: typeof fetch
 }
 
 /** Today 认证服务。 */
 export class TodayAuth extends Service {
   readonly product: TodayProduct
   readonly credentialRefName: string
-  private readonly fetcher: typeof fetch
-  private active = true
 
   constructor(ctx: Context, options: TodayAuthOptions = {}) {
     const product = options.product ?? TODAY
     super(ctx, options.serviceName ?? `${product.id}Auth`)
     this.product = product
     this.credentialRefName = product.defaultCredentialRef
-    this.fetcher = options.fetcher ?? globalThis.fetch
   }
 
-  async logout(): Promise<void> {
-    this.active = false
-  }
+  async logout(): Promise<void> {}
 
-  stop(): void {
-    this.active = false
-  }
-
-  async authenticateCookie(rawCookie: string): Promise<TodayCredential> {
-    return await authenticateTodayCookie(rawCookie, this.product, this.fetcher)
-  }
-
-  async sendEmailOtp(email: string): Promise<void> {
-    await sendTodayEmailOtp(email, this.product, this.fetcher)
-  }
-
-  async verifyEmailOtp(email: string, otp: string): Promise<TodayCredential> {
-    const cookieHeader = await verifyTodayEmailOtp(email, otp, this.product, this.fetcher)
-    const cred = await authenticateTodayCookie(cookieHeader, this.product, this.fetcher)
-    return {
-      ...cred,
-      ...(cred.email === undefined && email.trim().length > 0 ? { email: email.trim() } : {}),
-    }
-  }
-
-  async saveCredential(credential: TodayCredential, refName = this.credentialRefName): Promise<boolean> {
-    if (!this.active) return false
-    await this.ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
-    return true
-  }
+  stop(): void {}
 
   async status(pool?: AccountPool): Promise<TodayLoginStatus> {
     if (pool === undefined) {

@@ -264,7 +264,7 @@ import { AgnescodeAdapter, registerAgnescodeLlm, type AgnescodeSlot } from './ag
 import { AGNESCODE, AGNESCODE_INTL, type AgnescodeProduct } from './agnescode-product.js'
 import { agnescodeSessionExpired, parseAgnescodeCredential, trustAgnescodeBffBase } from './agnescode.js'
 import { TodayAuth } from './today-auth.js'
-import { TodayAdapter, registerTodayLlm, type TodaySlot } from './today-adapter.js'
+import { TodayAdapter, registerTodayLlm, selectUsableTodaySlots, type TodaySlot } from './today-adapter.js'
 import { TODAY, TODAY_INTL, type TodayProduct } from './today-product.js'
 import { parseTodayCredential } from './today.js'
 import type { ZcodeCredential } from './zcode.js'
@@ -5497,19 +5497,12 @@ export function apply(ctx: Context): void {
       product,
       slots: async (modelId?: string) => {
         const entries = await pool.listAccounts(product.id)
-        const usable = await Promise.all(entries.map(async (entry): Promise<TodaySlot | undefined> => {
-          if (!entry.enabled) return undefined
-          if (modelId !== undefined && modelId.length > 0) {
-            const resetAt = entry.modelRateLimits?.[modelId]
-            if (typeof resetAt === 'number' && resetAt > Date.now()) return undefined
-          }
-          const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
-          if (!resolved) return undefined
-          const parsed = parseTodayCredential(resolved.value, product.realm)
-          if (parsed === undefined) return undefined
-          return { accountId: entry.id, credential: parsed }
-        }))
-        return usable.filter((slot): slot is TodaySlot => slot !== undefined)
+        return await selectUsableTodaySlots(
+          entries,
+          async (refName) => (await ctx.credentials.resolve(credentialRef(refName)))?.value,
+          product,
+          modelId,
+        )
       },
       accountPool: pool,
       markLimited: async (accountId, modelId, resetAtMs) => {

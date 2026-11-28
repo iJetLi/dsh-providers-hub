@@ -919,7 +919,12 @@ id: 'autoclaw',
       return {
         id,
         make: () => new TodayAdapter({
+          ...NO_CRED,
           product,
+          accountPool: {
+            disabledModelsFor: () => new Set<string>(),
+            providerClosedFor: () => false,
+          } as never,
           slots: async () => [{
             accountId: product.id,
             credential: parseTodayCredential(
@@ -927,7 +932,7 @@ id: 'autoclaw',
                 cookie_raw: '__Secure-better-auth.session_token=spec.sig',
                 realm: product.realm,
               }),
-              product,
+              product.realm,
             )!,
           }],
           fetchImpl: (async (url: string | URL | Request) => {
