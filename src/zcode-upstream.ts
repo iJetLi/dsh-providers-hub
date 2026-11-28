@@ -218,7 +218,7 @@ export const ZCODE_VERSION_GATED_MIN_APP_VERSION = '4.0.0'
  * ⚠ 改本常量**必须同改** `zcode-identity.ts` 的 `OFFICIAL_CLI_PREFIX` /
  * `OFFICIAL_STABLE_SECTIONS`，反之亦然 —— 改一处漏一处就是**全量用户 3012**。
  */
-export const ZCODE_INFERENCE_MIN_APP_VERSION = '3.17.1'
+export const ZCODE_INFERENCE_MIN_APP_VERSION = '4.0.0'
 
 /**
  * 合法的客户端版本号形态（`major.minor.patch`，纯数字、**无前导零**）。

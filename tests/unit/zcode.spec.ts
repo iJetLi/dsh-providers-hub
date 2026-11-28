@@ -186,7 +186,7 @@ describe('ZCode 官方身份块（3012 准入）', () => {
     // 实测矩阵里「cliPrefix + stable」是准入必需的最小集合。
     // 此处断言的是**同一量级**（防止有人误删段落导致退回 3012）。
     expect(OFFICIAL_IDENTITY_CHARS).toBeGreaterThan(2300)
-    expect(OFFICIAL_IDENTITY_CHARS).toBeLessThan(3000)
+    expect(OFFICIAL_IDENTITY_CHARS).toBeLessThan(3500)
     expect(OFFICIAL_STABLE_SECTIONS.length).toBeGreaterThanOrEqual(2)
   })
 
@@ -498,7 +498,7 @@ describe('ZCode 请求头与错误映射', () => {
     // 依据（2026-11-05 真机 2×2，Issue #45）：上游把**版本号**与**身份块文本**
     // 当同一代校验，跨代即 `405 + request has been blocked due to unusual
     // activity`。本条锁的是「版本号必须被抬到与身份块同代的门槛」：
-    // 凭据写 3.14.3（旧客户端登录的存量凭据）时，头里必须是 3.17.1 而不是 3.14.3。
+    // 凭据写 3.14.3（旧客户端登录的存量凭据）时，头里必须是 4.0.0 而不是 3.14.3。
     //
     // ⚠ 改这个期望值**必须同改** `src/zcode-identity.ts` 的身份块文本代次 ——
     // 两处不同代就是「全量用户 3012」（见 `zcode-upstream.ts` 的对照表）。
@@ -506,14 +506,14 @@ describe('ZCode 请求头与错误映射', () => {
     // 反面：改回 `credential.app_version ?? ZCODE_APP_VERSION_FALLBACK`
     // 会让本用例变红（凭据写的是 3.14.3）。
     const headers = buildZcodeHeaders({ ...credential, app_version: '3.14.3' })
-    expect(headers['X-ZCode-App-Version']).toBe('3.17.1')
-    expect(headers['User-Agent']).toBe('ZCode/3.17.1')
+    expect(headers['X-ZCode-App-Version']).toBe('4.0.0')
+    expect(headers['User-Agent']).toBe('ZCode/4.0.0')
   })
 
   it('凭据版本比门槛高时用凭据自己的（向前兼容，不把用户降级）', () => {
-    const headers = buildZcodeHeaders({ ...credential, app_version: '3.17.2' })
-    expect(headers['X-ZCode-App-Version']).toBe('3.17.2')
-    expect(headers['User-Agent']).toBe('ZCode/3.17.2')
+    const headers = buildZcodeHeaders({ ...credential, app_version: '4.5.0' })
+    expect(headers['X-ZCode-App-Version']).toBe('4.5.0')
+    expect(headers['User-Agent']).toBe('ZCode/4.5.0')
   })
 
   it('显式 appVersion 覆盖优先于凭据与门槛两者', () => {

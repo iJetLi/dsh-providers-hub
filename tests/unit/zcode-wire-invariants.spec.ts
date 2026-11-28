@@ -118,7 +118,7 @@ describe('★★ system 恒为官方 3 块，调用方 system 走 messages（405
     expect(system).toHaveLength(3)
     // ② 前三块的身份段自检（35 + 2608 + environment），别只数块数。
     expect(system[0]?.text).toHaveLength(35)
-    expect(system[1]?.text).toHaveLength(2608)
+    expect(system[1]?.text).toHaveLength(3039)
     expect(system[2]?.text?.startsWith('# Environment')).toBe(true)
     // ③ caller 绝不能出现在 system 里（放回去 = 405）
     expect(JSON.stringify(system), '调用方 system 又回到 system 数组里了 ⇒ 必然 405+3012')
@@ -238,7 +238,7 @@ describe('★★ 版本号：门控口径与凭据口径各司其职，且脏值
   it('★★ 头里的版本可以被显式覆盖成与 query 一致（同一请求只有一个版本号）', () => {
     const credential = { device_mid: 'mid-A', app_version: '3.14.3' }
     // 默认：门控口径（405 的修法）
-    expect(buildZcodeHeaders(credential)['X-ZCode-App-Version']).toBe('3.17.1')
+    expect(buildZcodeHeaders(credential)['X-ZCode-App-Version']).toBe('4.0.0')
     // 带 query app_version 的站点必须显式传同一个值，否则同请求两个版本号
     const pinned = buildZcodeHeaders(credential, { appVersion: zcodeCredentialAppVersion(credential) })
     expect(pinned['X-ZCode-App-Version']).toBe('3.14.3')
@@ -285,7 +285,7 @@ describe('★★ 诊断行必须渲染 system 块数（下次 405 报障的唯�
     const shape3 = describeZcodeRequestShape(
       [
         { type: 'text', text: 'a'.repeat(42) },
-        { type: 'text', text: 'b'.repeat(2608) },
+        { type: 'text', text: 'b'.repeat(3039) },
         { type: 'text', text: '# Environment' },
       ],
       messages as never,
@@ -348,15 +348,15 @@ describe('★★ 诊断行必须渲染 system 块数（下次 405 报障的唯�
     // 3012 必须仍是「别重试」的 PERMISSION（有冷却惩罚，降级成 SERVER 会白退避重试）
     expect((error as LlmError).code).toBe('PERMISSION')
     const message = String((error as LlmError).message)
-    // 凭据写 3.14.3 ⇒ 实际发出的是门槛版 3.17.1（与身份块同代）
-    expect(message).toContain('版本 3.17.1')
-    expect(message).toContain('身份块 2643 字符(35+2608)')
-    expect(message).toMatch(/身份块 2643 字符\(35\+2608\) · 版本 3\.17\.1 · 日期块/)
+    // 凭据写 3.14.3 ⇒ 实际发出的是门槛版 4.0.0（与身份块同代）
+    expect(message).toContain('版本 4.0.0')
+    expect(message).toContain('身份块 3074 字符(35+3039)')
+    expect(message).toMatch(/身份块 3074 字符\(35\+3039\) · 版本 4\.0\.0 · 日期块/)
   })
 
   it('★ 诊断行的版本与请求头同源（zcodeInferenceAppVersion 是唯一出口）', () => {
     const credential = { device_mid: 'mid-A', app_version: '3.14.3' }
-    expect(zcodeInferenceAppVersion(credential)).toBe('3.17.1')
+    expect(zcodeInferenceAppVersion(credential)).toBe('4.0.0')
     expect(zcodeInferenceAppVersion(credential))
       .toBe(buildZcodeHeaders(credential)['X-ZCode-App-Version'])
   })
