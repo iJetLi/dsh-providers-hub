@@ -451,6 +451,7 @@ export type AstudioErrorKind =
   | 'model-not-found' // 上游没有该模型的路由
   | 'quota'           // 积分/额度耗尽
   | 'permission-denied' // 账号级授权缺失（**不是**凭据失效）
+  | 'client-outdated'  // 上游停用旧版客户端的 Key 形态（**重登无法解决**）
   | 'rate-limit'      // 限流
   | 'context-window'  // 上下文超限
   | 'timeout'         // 空闲超时
@@ -480,6 +481,15 @@ const ASTUDIO_WIRE_CODES: ReadonlyMap<string, AstudioErrorKind> = new Map([
   ['model_not_found', 'model-not-found'],
   ['invalid_api_key', 'auth'],
   ['apikey_not_found', 'auth'],
+  // ⚠️⚠️ **`API_KEY_DISABLED` = 上游已停用旧版客户端的 API Key 形态**（2026-11-28 报障，GitHub #190）：
+  // 原文 `{"code":"API_KEY_DISABLED","message":"Please upgrade to the latest version of AStudio."}`
+  // ⚠️ 它**不能归 `auth`** —— 归了会触发「重取 + 提示重新登录」，而报障者实测
+  // **重登后反而更糟**（旧凭据今天成功 10 次、重登后 135 次 0 成功）。
+  // 上游说得很清楚：要**升级客户端**，不是重登。
+  // ⚠️ 两个大小写都登记：上游这次是**全大写**，而本表其余条目全是小写，
+  // 查找是精确匹配（`astudioOpenAiErrorFields` 不做归一）⇒ 只写一条会漏。
+  ['API_KEY_DISABLED', 'client-outdated'],
+  ['api_key_disabled', 'client-outdated'],
   // ⚠️ **账号级授权缺失，不是凭据失效**（2026-11-17 真机）：
   // `no_valid_authorization` 的原文是 "the account lacks an active order, has insufficient
   // quota, or the order is invalid" —— 凭据本身完全有效，是**订单**没了。
@@ -574,6 +584,13 @@ function describeAstudioError(kind: AstudioErrorKind, status: number, detail: st
       // 文案必须**指路**：本家没有 refresh_token，唯一自救手段是重取；重取也失败
       // 就只能在客户端里重新微信扫码登录。
       return { kind, llmCode: 'AUTH', message: `astudio: 凭据未被上游接受，将重取一次；仍失败请在 AStudio 客户端重新登录${suffix}` }
+    case 'client-outdated':
+      // ⚠️ 归 `PERMISSION_DENIED` 而不是 `AUTH`：① 客户端不替换它（保住上游原文
+      //   「Please upgrade to the latest version of AStudio」这句唯一指路文案）；
+      //   ② `dead-model-store` 的 IGNORED_CODES 收它，不会把模型误记成已下架；
+      //   ③ 不在 `DEFAULT_RETRYABLE_CODES` ⇒ 不白退避。
+      // ⚠️ **绝不能写「重新登录」**：报障者重登后旧的好凭据被换成不可用的新凭据。
+      return { kind, llmCode: 'PERMISSION_DENIED', message: `astudio: 上游已停用旧版 AStudio 客户端的 API Key 形态 —— 必须升级客户端，重新登录无法解决。本插件自称的 studioVersion 写死在 astudio-product.ts 的 product 定义里，跟不上官方就会一直 401；请等待插件升级，或把本句反馈给插件作者${suffix}` }
     case 'model-not-found':
       // `PERMISSION_DENIED`：① 客户端不替换它（保住上面那句真实原因）；
       // ② `dead-model-store` 的 IGNORED_CODES 收它 ⇒ 不会把模型误记成「已下架 30 天」；

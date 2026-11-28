@@ -90,7 +90,19 @@ describe('★ astudio.ts 源码级契约', () => {
   it('⚠️ 线级错误码表必须覆盖 model_not_found / quota / context，否则 502 会被降级成可重试的 SERVER', () => {
     const at = src.search(/const ASTUDIO_WIRE_CODES/)
     expect(at).toBeGreaterThan(-1)
-    const table = src.slice(at, at + 900)
+    /**
+     * ⚠️⚠️ **不能用固定窗口**（原来是 `slice(at, at + 900)`）。
+     *
+     * 2026-11-28 实测：往表里加两条 `API_KEY_DISABLED`（含注释）后，
+     * `insufficient_quota` 被挤出 900 字符窗口 ⇒ **用例变红，而表其实完好**
+     * —— 这是「假红」，和本仓在 zcode bundle 里用 9000 字符窗口搜到 `-1`
+     * 就断言「官方删了那段」是**同一个形状的错**。
+     *
+     * ⇒ 改为**按表的真实边界**取：从声明处到配对的 `])`。
+     */
+    const close = src.indexOf('])', at)
+    expect(close, '表必须有闭合的 ])').toBeGreaterThan(at)
+    const table = src.slice(at, close + 2)
     for (const code of ['model_not_found', 'insufficient_quota', 'context_length_exceeded', 'invalid_api_key']) {
       expect(table).toContain(`['${code}'`)
     }
