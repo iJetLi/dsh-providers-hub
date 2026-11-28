@@ -450,6 +450,38 @@ export type LoomyFailureClass = 'quota' | 'rate' | 'auth' | 'upstream' | 'other'
  * `classifyRaccoonFailure` 是同一张表的两个实现，任一侧单方面改动都会造成
  * 本文件记的这起「同型复发」。回归用例用同一批真实报文喂两个分类器对拍。
  */
+/**
+ * ★★ **把上游响应头里的追踪标识摘出来**（2026-11-28，Gitee IKXQMQ）。
+ *
+ * ## 为什么需要
+ *
+ * 报障者在本插件得到 `loomy: 请求有误，请重试；若多次出现请更新应用版本`，
+ * 而**同一账号在 Loomy 官方 IDE 里正常**。那句话经核实**是上游原话**
+ * （本仓 `errorDetail()` 不截断、完整透传 message）。
+ *
+ * ⇒ 但**响应头一个都没读** ⇒ 上游若把业务码放在头里（很多网关这么做），
+ * 用户和我们都**永远看不到**。这与刚修的 codearts `TM.00000001`
+ * （文案要 logid 却不输出）是**同族缺陷**。
+ *
+ * ## 只取一层，不做猜测
+ *
+ * 只用**通用**的追踪头名（各家网关都用这几个），命中就附、没命中就不附 ——
+ * 不编造字段、不猜业务含义。
+ */
+export function loomyTraceHeadersOf(
+  headers: { get(name: string): string | null } | undefined,
+): string {
+  if (headers === undefined || typeof headers.get !== 'function') return ''
+  const names = ['x-request-id', 'x-trace-id', 'request-id', 'traceparent', 'x-log-id'] as const
+  const parts: string[] = []
+  for (const name of names) {
+    let value: string | null = null
+    try { value = headers.get(name) } catch { value = null }
+    if (typeof value === 'string' && value.trim().length > 0) parts.push(`${name}=${value.trim()}`)
+  }
+  return parts.length === 0 ? '' : ` [${parts.join(' ')}]`
+}
+
 export function classifyLoomyFailure(errorText: string, status: number): LoomyFailureClass {
   // 认证类先判：403 可能只是权限/授权问题，绝不能落到 quota 而被写 24h 冷却。
   if (status === 401 || status === 403) return 'auth'
@@ -1461,11 +1493,16 @@ export class LoomyAdapter extends LlmAdapter {
           failureClass = classifyLoomyFailure(errorText, status)
           await markCurrentAccount()
           if (failureClass === 'other') {
-            throw new LlmError(`loomy: ${errorDetail(errorText)}`, httpErrorCode(status), { status })
+            // ⚠️ 附上游追踪头（IKXQMQ）：此前一个响应头都没读，上游把码放头里就永远看不到。
+            throw new LlmError(
+              `loomy: ${errorDetail(errorText)}${loomyTraceHeadersOf(response.headers)}`,
+              httpErrorCode(status),
+              { status },
+            )
           }
         }
         throw new LlmError(
-          `loomy: 模型 ${options.model} 所有账号均不可用（${errorDetail(errorText)}）`,
+          `loomy: 模型 ${options.model} 所有账号均不可用（${errorDetail(errorText)}）${loomyTraceHeadersOf(response.headers)}`,
           failureClass === 'rate' ? 'RATE_LIMIT'
             : failureClass === 'auth' ? 'AUTH'
               /**
