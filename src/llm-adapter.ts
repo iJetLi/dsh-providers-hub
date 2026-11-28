@@ -1275,13 +1275,40 @@ export function isTenantNotEnabledError(body: string): boolean {
  * 3. **本插件已发官方 IDE UA**（告诉用户「这是上游策略、不是你没配好」，
  *    并给出可执行的下一步：升级插件 / 贴日志）。
  */
-export function codeartsGatewayBusyMessage(model: string): string {
+export function codeartsGatewayBusyMessage(model: string, requestId?: string): string {
+  /**
+   * ⚠️ **文案措辞与 logid 都是 2026-11-28 报障（Gitee IKYLQ2）改的**，两条都要看：
+   *
+   * ## ① logid：文案要求它，而插件以前**从不输出它**
+   *
+   * 原文案写「把本句与 error_code（含 logid）一起反馈」，但抛错处只带 `{ status }`，
+   * 全文件 `grep x-request-id` **零处** ⇒ 用户**永远拿不到** logid，
+   * 这条诉求**无法被满足**（本仓纪律「文案本身就是出路」的反面）。
+   * 上游**确实下发** `x-request-id`（报障者三条探针都有）⇒ 取一行补上。
+   *
+   * ## ② 措辞：「重试也无效」是**过强的断言**
+   *
+   * 报障现场：**同一会话、同一进程、同一账号、同一 UA**，
+   * 82 秒前的标题请求拿到 **200**，之后这一轮撞 `TM.00000001`。
+   * 报障者用真实凭据逐字节复算：官方 UA ⇒ 200，`deepseek-harness/` ⇒ 403，
+   * `node` ⇒ 200 ⇒ **WAF 判据今天仍然只是那个前缀**，插件覆盖**当前有效**。
+   *
+   * ⇒ 所以这一轮**不是**「策略又变了」。可能是 **WAF 侧的瞬时/会话级抖动**
+   * （WAF 会下 `HWWAFSESID` cookie，也可能按 IP + 时间窗命中）。
+   * 原文案用确定口吻说「策略又变了或版本过旧」「重试也无效」，
+   * 在这条现场上**都不成立**，会把用户指向错误的方向。
+   */
+  const reqIdLine = requestId === undefined || requestId.length === 0
+    ? ''
+    : ` 上游 request-id：${requestId}（反馈时请附上）。`
   return (
     `codearts: 上游网关拒绝了本客户端的标识（${CODEARTS_GATEWAY_BUSY_CODE}「网络繁忙」，`
     + '实测是华为 WAF 按 `User-Agent` 首 product token 拒发，不是真的繁忙）。'
-    + '这不是凭据问题，重试也无效 —— 本插件已改为发送官方 CodeArts IDE 的 UA；'
-    + `若你看到这句，说明上游策略又变了或插件版本过旧 ⇒ 请升级插件，`
-    + `并把本句与 error_code（含 logid）一起反馈。（当前模型：${model}）`
+    + '这不是凭据问题 —— 本插件已改为发送官方 CodeArts IDE 的 UA。'
+    + '⚠️ 但这一发也可能只是**网关瞬时抖动**（同一账号/同一 UA 稍早或稍后常常直接成功）'
+    + '⇒ 可手动重试一次。若连续失败，才说明上游策略变了或插件版本过旧 ⇒ 请升级插件。'
+    + reqIdLine
+    + `（当前模型：${model}）`
   )
 }
 
@@ -3364,9 +3391,19 @@ export class CodeArtsAdapter extends LlmAdapter {
              * 403 形态进不了排队 ⇒ 只能在这里给「等一会儿就好」的文案 + 可重试码。
              */
             if (isGatewayBusyError(errorText)) {
-              throw new LlmError(codeartsGatewayBusyMessage(options.model), 'PERMISSION', {
-                status: response.status,
-              })
+              /**
+               * ⚠️ **必须把上游 `x-request-id` 带进文案**（2026-11-28，Gitee IKYLQ2）。
+               * 原文案要求用户反馈 logid，而这里只带 `{ status }` ⇒ 那条诉求永远无法满足。
+               * 上游确实下发该头（报障者三条探针都有，形如 `6a6fe69b68e79c80f382711fbfb344fb`）。
+               */
+              const gatewayRequestId = response.headers.get('x-request-id')
+                ?? response.headers.get('X-Request-Id')
+                ?? undefined
+              throw new LlmError(
+                codeartsGatewayBusyMessage(options.model, gatewayRequestId),
+                'PERMISSION',
+                { status: response.status },
+              )
             }
             if (isConcurrencyLimitError(errorText)) {
               throw new LlmError(codeartsConcurrencyLimitMessage(options.model), 'RATE_LIMIT', {

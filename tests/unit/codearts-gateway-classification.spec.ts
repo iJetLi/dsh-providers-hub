@@ -161,7 +161,15 @@ describe('★ 抛错出口：三条都必须单列专用文案与专用码', () 
     expect(result.error!.code).toBe('PERMISSION')
     expect(result.error!.message).toContain('TM.00000001')
     expect(result.error!.message).toContain('不是凭据问题')
-    expect(result.error!.message).toContain('重试也无效')
+    /**
+     * ⚠️ **2026-11-28（Gitee IKYLQ2）刻意不再断言「重试也无效」**：
+     * 报障现场是「同一会话/同一进程/同一账号/同一 UA，82 秒前 200，这一发 403」
+     * ⇒ 可能是 WAF 瞬时抖动。原文案用确定口吻说「重试也无效」会把用户指向错误方向。
+     * 现在要求：**并列「可能是瞬时抖动、可手动重试」**，且**不得**出现断定式否定。
+     */
+    expect(result.error!.message).toContain('网关瞬时抖动')
+    expect(result.error!.message).toContain('可手动重试一次')
+    expect(result.error!.message, '★ 不得再用确定口吻否定重试').not.toContain('重试也无效')
     // 确定性失败：不续期、也不重发
     expect(result.refreshCalls).toBe(0)
     expect(result.chatCalls).toBe(1)
